@@ -1,24 +1,21 @@
-//! A dead assigned relay must not permanently hide an author.
+//! A dead assigned relay must not hide an author.
 //!
 //! This is the promise the 2026-08 field incident broke: half the shipped
 //! profile pool had died or gone members-only, and a member whose salted
 //! rank-1 relay was one of them showed a bare-npub tile on every peer's phone
 //! — indistinguishable from "this person never set a name". The client-side
-//! half of that promise is the retry ladder: a relay that cannot even be
-//! CONNECTED to must surface as a MISS (which advances the author onto its
-//! rank-2 relay next cycle), never as an error that leaves the author
-//! unattempted at rank 1 forever.
+//! half of that promise: a relay that cannot even be CONNECTED to has not
+//! answered, so the author is asked of its rank-2 relay in the SAME cycle and
+//! resolves there — with nothing recorded against it, because no relay said
+//! it holds nothing.
 //!
 //! Hermetic: the "dead" relay is a loopback port with no listener
 //! (connection refused — the same shape as a host that has left the network),
-//! and the live relays are in-process. The only waiting is the fetch path's
-//! own bounded `PROFILE_AUTHOR_FETCH_TIMEOUT`; there are no sleeps and no
-//! timing races — the dead port refuses instantly and deterministically.
+//! and the live relays are in-process. There are no sleeps and no timing
+//! races — the dead port refuses instantly and deterministically.
 //!
 //! Lives in `tests/` because it drives `fetch_profiles_assigned` end-to-end
-//! over real sockets, like `rate_limited_closed_is_a_miss_not_an_error` does
-//! for the CLOSED shape in the lib tests — but with a second cycle, proving
-//! the miss actually converts into a rank-2 resolution.
+//! over real sockets, like the `CLOSED` shape in the lib tests.
 
 use haven_core::profile::{
     assigned_relay_for_attempt, build_metadata_event, fetch_profiles_assigned, ProfileMetadata,
@@ -44,7 +41,7 @@ fn dead_relay_url() -> String {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn author_on_a_dead_rank1_relay_misses_then_resolves_from_rank2() {
+async fn author_on_a_dead_rank1_relay_resolves_from_rank2_in_the_same_cycle() {
     let _ = haven_core::relay::allow_ws_loopback_for_test();
 
     // A minimum-size pool: one dead relay and two live in-process ones.
@@ -91,30 +88,19 @@ async fn author_on_a_dead_rank1_relay_misses_then_resolves_from_rank2() {
         .await
         .expect("publish to the live rank-2 relay");
 
-    // Cycle 1, attempt 0: the assigned relay refuses the connection. That MUST
-    // be a miss — the outcome that advances the ladder — and never an
-    // unattempted drop, which would pin the author to the dead relay forever.
-    let first = fetch_profiles_assigned(&relay, &[(author, 0)], &salt, &pool, 1_000)
+    // One cycle, attempt 0: the assigned relay refuses the connection, which
+    // is no answer about the author — so the cycle asks the ladder's second
+    // rung itself rather than leaving the name to a later trigger.
+    let fetched = fetch_profiles_assigned(&relay, &[(author, 0)], &salt, &pool, 1_000)
         .await
-        .expect("cycle 1 runs");
-    assert!(first.resolved.is_empty(), "nothing lives on the dead relay");
-    assert_eq!(
-        first.missed,
-        vec![author],
-        "a connection-refused assigned relay must surface as a MISS",
-    );
+        .expect("the cycle runs");
     assert!(
-        first.unattempted.is_empty(),
-        "unattempted would freeze the author at rank 1 forever",
+        fetched.missed.is_empty(),
+        "a connection-refused relay never said it holds nothing",
     );
-
-    // Cycle 2, attempt 1 (what the recorded miss schedules): the ladder's
-    // second rung is the live relay, and the author resolves.
-    let second = fetch_profiles_assigned(&relay, &[(author, 1)], &salt, &pool, 2_000)
-        .await
-        .expect("cycle 2 runs");
-    assert_eq!(second.resolved.len(), 1, "rank 2 must resolve the author");
-    let profile = &second.resolved[0];
+    assert!(fetched.unattempted.is_empty(), "rank 2 answered");
+    assert_eq!(fetched.resolved.len(), 1, "rank 2 must resolve the author");
+    let profile = &fetched.resolved[0];
     assert_eq!(profile.pubkey_hex, author.to_hex());
     assert_eq!(
         profile.metadata.display_name(),

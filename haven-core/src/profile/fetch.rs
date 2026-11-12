@@ -26,6 +26,18 @@
 //! sleeps a CSPRNG-sampled [`PROFILE_INTER_REQ_JITTER_MS`] between consecutive
 //! requests to the same relay.
 //!
+//! # A relay that does not answer is not a miss
+//!
+//! Only a relay's own `EOSE` says "I hold nothing for this author". A failed
+//! connect, a `CLOSED`, or a `REQ` that outlives its timeout says nothing about
+//! the author, so it must not advance that author's retry ladder: a device
+//! that is offline would otherwise walk every unresolved member to the last
+//! backoff rung with no relay ever having said no. Such an author is asked
+//! once more in the same cycle, at the OTHER relay it may be disclosed to
+//! ([`PROFILE_MAX_RELAY_RANK`][crate::profile::assignment::PROFILE_MAX_RELAY_RANK]
+//! bounds the two), and is reported *unattempted* — nothing stamped — when
+//! that one does not answer either.
+//!
 //! # Fail-closed
 //!
 //! An empty request set OR an empty pool returns an empty [`AssignedFetch`] —
@@ -88,10 +100,11 @@ use crate::relay::RelayManager;
 pub struct AssignedFetch {
     /// Authors that resolved to a valid kind-0.
     pub resolved: Vec<CachedProfile>,
-    /// Authors queried whose assigned relay returned nothing.
+    /// Authors a relay ended its answer for (`EOSE`) without a kind-0.
     pub missed: Vec<PublicKey>,
-    /// Authors dropped before any `REQ` (deadline hit, or no relay in rank).
-    /// The caller MUST NOT stamp these as attempted — they retry next tick.
+    /// Authors no relay answered for (deadline hit, no relay in rank, or
+    /// neither of their two relays answered). The caller MUST NOT stamp these
+    /// as attempted — they retry next tick.
     pub unattempted: Vec<PublicKey>,
 }
 
@@ -109,8 +122,7 @@ pub struct AssignedFetch {
 ///
 /// Authors are returned in exactly one of the three [`AssignedFetch`] buckets;
 /// the `missed` / `unattempted` split is load-bearing, because only `missed`
-/// may advance an author's attempt counter (and therefore its disclosure) onto
-/// a second relay.
+/// may advance an author's attempt counter and its backoff.
 ///
 /// # Errors
 ///
@@ -252,9 +264,9 @@ struct RelayBatch {
 struct Cycle {
     /// Authors that produced a usable kind-0.
     resolved: Vec<CachedProfile>,
-    /// Authors whose assigned relay answered with nothing.
+    /// Authors a relay ended its answer for without a kind-0.
     missed: Vec<PublicKey>,
-    /// Every author whose `REQ` completed, in either direction.
+    /// Every author a relay answered for, in either direction.
     settled: HashSet<PublicKey>,
 }
 
@@ -268,45 +280,80 @@ async fn run_cycle(
     deadline: Duration,
 ) -> AssignedFetch {
     let deduped = dedup_requests(requests);
-    let mut batches = group_by_assigned_relay(&deduped, salt, pool);
-    shuffle_batches(&mut batches);
-
     let cycle = Mutex::new(Cycle::default());
-    {
-        // The per-relay drivers are materialized with `Iterator::map` and fed to
-        // `stream::iter` as futures, rather than created inside a
-        // `StreamExt::map` closure. That is load-bearing, not stylistic: a
-        // closure returning a future that borrows its argument gets a
-        // higher-ranked `FnOnce` obligation rustc cannot generalise, so the
-        // resulting cycle future is `Send` only for *some* lifetime. Every
-        // caller that needs `Send` for *any* lifetime — i.e. every
-        // `flutter_rust_bridge` async FFI method — then fails to compile with
-        // "implementation of `FnOnce` is not general enough". Building the
-        // futures eagerly is behaviourally identical (an `async fn` body does
-        // not run until polled) and keeps the same `buffer_unordered`
-        // concurrency cap.
-        let drivers: Vec<_> = batches
-            .iter()
-            .map(|batch| drain_relay_batch(relay, batch, now, &cycle))
-            .collect();
-        let work = stream::iter(drivers)
-            .buffer_unordered(PROFILE_MAX_INFLIGHT_RELAYS)
-            .for_each(|()| std::future::ready(()));
+    let work = async {
+        drain_round(relay, &deduped, salt, pool, now, &cycle).await;
+        let unanswered = other_relay_requests(&deduped, salt, pool, &cycle);
+        drain_round(relay, &unanswered, salt, pool, now, &cycle).await;
+    };
 
-        // Authors not yet settled when the deadline fires stay UNSETTLED, and
-        // so fall out of `partition_outcome` as `unattempted` — never as
-        // `missed`. Stamping a deadline as a miss would advance the retry
-        // ladder onto a second relay for a reason that has nothing to do with
-        // the author.
-        if tokio::time::timeout(deadline, work).await.is_err() {
-            log::debug!("[profile] assigned fetch cycle hit its batch deadline");
-        }
+    // Authors not yet settled when the deadline fires stay UNSETTLED, and so
+    // fall out of `partition_outcome` as `unattempted` — never as `missed`.
+    // Stamping a deadline as a miss would advance the retry ladder for a
+    // reason that has nothing to do with the author.
+    if tokio::time::timeout(deadline, work).await.is_err() {
+        log::debug!("[profile] assigned fetch cycle hit its batch deadline");
     }
 
     partition_outcome(
         &deduped,
         cycle.into_inner().unwrap_or_else(PoisonError::into_inner),
     )
+}
+
+/// Asks each of `requests` of the relay its attempt assigns, across relays at
+/// once and serially within one.
+async fn drain_round(
+    relay: &RelayManager,
+    requests: &[(PublicKey, u8)],
+    salt: &ProfileRelaySalt,
+    pool: &[String],
+    now: i64,
+    cycle: &Mutex<Cycle>,
+) {
+    let mut batches = group_by_assigned_relay(requests, salt, pool);
+    shuffle_batches(&mut batches);
+    // The per-relay drivers are materialized with `Iterator::map` and fed to
+    // `stream::iter` as futures, rather than created inside a `StreamExt::map`
+    // closure. That is load-bearing, not stylistic: a closure returning a
+    // future that borrows its argument gets a higher-ranked `FnOnce`
+    // obligation rustc cannot generalise, so the resulting cycle future is
+    // `Send` only for *some* lifetime. Every caller that needs `Send` for
+    // *any* lifetime — i.e. every `flutter_rust_bridge` async FFI method —
+    // then fails to compile with "implementation of `FnOnce` is not general
+    // enough". Building the futures eagerly is behaviourally identical (an
+    // `async fn` body does not run until polled) and keeps the same
+    // `buffer_unordered` concurrency cap.
+    let drivers: Vec<_> = batches
+        .iter()
+        .map(|batch| drain_relay_batch(relay, batch, now, cycle))
+        .collect();
+    stream::iter(drivers)
+        .buffer_unordered(PROFILE_MAX_INFLIGHT_RELAYS)
+        .for_each(|()| std::future::ready(()))
+        .await;
+}
+
+/// The authors of `requests` no relay has answered for, each at its OTHER
+/// relay: the next attempt, which [`assigned_relay_for_attempt`] wraps over the
+/// ranks an author may be disclosed to. An author with no second relay (a
+/// one-relay pool) is left out.
+fn other_relay_requests(
+    requests: &[(PublicKey, u8)],
+    salt: &ProfileRelaySalt,
+    pool: &[String],
+    cycle: &Mutex<Cycle>,
+) -> Vec<(PublicKey, u8)> {
+    let state = cycle.lock().unwrap_or_else(PoisonError::into_inner);
+    requests
+        .iter()
+        .filter(|(author, _)| !state.settled.contains(author))
+        .map(|(author, attempt)| (*author, attempt.wrapping_add(1)))
+        .filter(|(author, other)| {
+            assigned_relay_for_attempt(salt, author, pool, *other)
+                != assigned_relay_for_attempt(salt, author, pool, other.wrapping_sub(1))
+        })
+        .collect()
 }
 
 /// Requests every author of `batch`, serially, from that batch's one relay.
@@ -326,28 +373,28 @@ async fn drain_relay_batch(
             tokio::time::sleep(inter_req_delay()).await;
         }
 
-        // A relay that answers a `REQ` with a rate-limit `CLOSED` is absorbed
-        // by the SDK: the per-relay stream error is logged and swallowed, and
-        // the fetch resolves `Ok` with whatever arrived first. That surfaces
-        // here as an empty event set — i.e. a MISS, which is what it should
-        // be. An `Err` from `fetch_events`, by contrast, only comes from
-        // pre-`REQ` conditions (URL validation, relay not in the pool), so
-        // nothing was disclosed and nothing may be stamped: leave the author
-        // unsettled and abandon this batch, since the same condition would
-        // recur for every remaining author on the same relay.
-        let Ok(events) = relay
-            .fetch_events(
+        // One `REQ` to the one relay, read off that relay's own stream so its
+        // `EOSE` is seen: the pooled fetch folds a failed connect, a `CLOSED`
+        // and a timeout into the same empty page as "holds nothing".
+        let answer = relay
+            .fetch_events_per_relay_within(
                 build_author_filter(author),
                 &targets,
-                Some(PROFILE_AUTHOR_FETCH_TIMEOUT),
+                PROFILE_AUTHOR_FETCH_TIMEOUT,
             )
             .await
-        else {
-            log::debug!("[profile] assigned relay unusable; leaving its slice unattempted");
-            break;
-        };
+            .unwrap_or_default()
+            .pop();
+        let (events, drained) = answer.map_or((Vec::new(), false), |a| (a.events, a.drained));
 
         let resolved = newest_own_copy(author, &events, now);
+        // Presence needs no `EOSE`; absence does. A relay that did not answer
+        // this author is not asked for the rest of its slice either — the same
+        // condition would recur, each at the cost of a full timeout.
+        if resolved.is_none() && !drained {
+            log::debug!("[profile] assigned relay did not answer; leaving its slice unanswered");
+            break;
+        }
         let mut state = cycle.lock().unwrap_or_else(PoisonError::into_inner);
         state.settled.insert(*author);
         match resolved {
@@ -771,27 +818,49 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn rate_limited_closed_is_a_miss_not_an_error() {
-        // A relay under load answers a REQ with `CLOSED <sub> "rate-limited:
-        // ..."`. The SDK absorbs that into an empty Ok result (the per-relay
-        // stream error is logged and swallowed by the pool's driver task), so
-        // it must land in `missed` — the ordinary "ask the next rung next
-        // time" path — and MUST NOT abort the cycle for the other relays'
-        // slices. Proven against a real socket rather than asserted from the
-        // SDK source, because that absorption is an upstream implementation
-        // detail that a version bump could change.
-        let _ = crate::relay::allow_ws_loopback_for_test();
+    /// An author whose first relay is `first` and whose other relay is
+    /// `other`, under the fixed test salt. The ranking is a salted hash, so
+    /// this is a bounded search, and the caller's assertions re-prove it.
+    fn author_ranked(pool: &[String], first: &str, other: &str) -> Keys {
+        loop {
+            let keys = Keys::generate();
+            let rank =
+                |attempt| assigned_relay_for_attempt(&salt(), &keys.public_key(), pool, attempt);
+            if rank(0).as_deref() == Some(first) && rank(1).as_deref() == Some(other) {
+                return keys;
+            }
+        }
+    }
+
+    /// Starts an in-process relay that answers every `REQ` with a rate-limit
+    /// `CLOSED`, counting the requests it saw.
+    async fn closing_relay() -> (
+        nostr_relay_builder::prelude::LocalRelay,
+        String,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
         let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let server = nostr_relay_builder::prelude::LocalRelay::new(
+        let relay = nostr_relay_builder::prelude::LocalRelay::new(
             nostr_relay_builder::prelude::RelayBuilder::default().query_policy(
                 RateLimitEveryQuery {
                     seen: std::sync::Arc::clone(&seen),
                 },
             ),
         );
-        server.run().await.expect("local relay runs");
-        let url = server.url().await.to_string();
+        relay.run().await.expect("local relay runs");
+        let url = relay.url().await.to_string();
+        (relay, url, seen)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_relay_that_closes_the_req_has_not_answered_and_stamps_nothing() {
+        // `CLOSED <sub> "rate-limited: ..."` is the relay declining to answer,
+        // not the relay saying it holds nothing. Reported as a miss it would
+        // advance the author's backoff on the word of a relay that never
+        // looked. Proven against a real socket, and with the request counted,
+        // so a failed connection cannot stand in for the `CLOSED`.
+        let _ = crate::relay::allow_ws_loopback_for_test();
+        let (_server, url, seen) = closing_relay().await;
 
         let relay = RelayManager::new();
         let author = authors_n(1)[0];
@@ -799,19 +868,106 @@ mod tests {
             .await
             .expect("a rate-limit CLOSED must not surface as an error");
 
-        assert!(
-            seen.load(std::sync::atomic::Ordering::SeqCst) >= 1,
-            "the relay never saw the REQ, so this test proved nothing about CLOSED",
+        assert_eq!(
+            seen.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a one-relay pool has no other relay to ask, and the same one is not asked twice",
         );
         assert!(out.resolved.is_empty());
-        assert_eq!(
-            out.missed,
-            vec![author],
-            "a rate-limit CLOSED is a miss, not an error",
-        );
         assert!(
-            out.unattempted.is_empty(),
-            "the REQ was issued and answered, so the author was attempted",
+            out.missed.is_empty(),
+            "a relay that closed the REQ never said it holds nothing",
+        );
+        assert_eq!(out.unattempted, vec![author]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_author_whose_relay_does_not_answer_resolves_from_its_other_relay() {
+        // The same cycle, not the next trigger: a relay that is down or
+        // shedding load must not cost a member their name until a later miss
+        // walks the ladder — and the third relay must never hear of them.
+        let _ = crate::relay::allow_ws_loopback_for_test();
+        let (_closing, closing_url, closing_seen) = closing_relay().await;
+        let (_holder, holder_url, holder_seen) = counting_relay().await;
+        let (_bystander, bystander_url, bystander_seen) = counting_relay().await;
+        let pool = vec![closing_url.clone(), holder_url.clone(), bystander_url];
+        let keys = author_ranked(&pool, &closing_url, &holder_url);
+
+        let relay = RelayManager::new();
+        seed(
+            &relay,
+            &kind0(&keys, r#"{"name":"Found"}"#, 10),
+            &holder_url,
+        )
+        .await;
+
+        let out = fetch_profiles_assigned(&relay, &[(keys.public_key(), 0)], &salt(), &pool, 100)
+            .await
+            .expect("cycle runs");
+
+        let count =
+            |seen: &std::sync::atomic::AtomicUsize| seen.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            count(&closing_seen),
+            1,
+            "the assigned relay was asked first"
+        );
+        assert_eq!(
+            count(&holder_seen),
+            1,
+            "then the author's other relay, once"
+        );
+        assert_eq!(
+            count(&bystander_seen),
+            0,
+            "an author is disclosed to two relays at most",
+        );
+        assert_eq!(out.resolved.len(), 1);
+        assert_eq!(out.resolved[0].metadata.name(), Some("Found"));
+        assert!(out.missed.is_empty() && out.unattempted.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_relay_that_ends_its_answer_without_a_kind0_is_a_miss_and_the_other_is_not_asked() {
+        // An `EOSE` with nothing is the relay's answer. It advances the ladder
+        // to the other relay on the NEXT attempt, behind the backoff; asking
+        // it in the same cycle would spend the second disclosure on every
+        // author who has simply not published.
+        let _ = crate::relay::allow_ws_loopback_for_test();
+        let (_first, first_url, first_seen) = counting_relay().await;
+        let (_other, other_url, other_seen) = counting_relay().await;
+        let pool = vec![first_url.clone(), other_url.clone()];
+        let author = author_ranked(&pool, &first_url, &other_url).public_key();
+
+        let relay = RelayManager::new();
+        let out = fetch_profiles_assigned(&relay, &[(author, 0)], &salt(), &pool, 100)
+            .await
+            .expect("cycle runs");
+
+        assert_eq!(first_seen.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(other_seen.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(out.missed, vec![author]);
+        assert!(out.resolved.is_empty() && out.unattempted.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_author_neither_relay_answers_for_is_unattempted_not_missed() {
+        // Offline is this shape for every author at once. Counted as misses,
+        // a few triggers without a network would park every unresolved member
+        // on the last backoff rung.
+        let _ = crate::relay::allow_ws_loopback_for_test();
+        let pool = vec![dead_relay_url(), dead_relay_url(), dead_relay_url()];
+        let requests: Vec<(PublicKey, u8)> = authors_n(4).into_iter().map(|a| (a, 0)).collect();
+
+        let relay = RelayManager::new();
+        let out = fetch_profiles_assigned(&relay, &requests, &salt(), &pool, 100)
+            .await
+            .expect("cycle runs");
+
+        assert!(out.resolved.is_empty() && out.missed.is_empty());
+        assert_eq!(
+            out.unattempted,
+            requests.iter().map(|(a, _)| *a).collect::<Vec<_>>(),
         );
     }
 
