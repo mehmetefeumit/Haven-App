@@ -131,11 +131,11 @@ class AppLocalizationsTr extends AppLocalizations {
   String get onboardingCreateIdentityLoading => 'Hazırlanıyor…';
 
   @override
-  String get onboardingFinishingSetup => 'Finishing setup…';
+  String get onboardingFinishingSetup => 'Kurulum tamamlanıyor…';
 
   @override
   String get onboardingFinishSetupError =>
-      'Couldn\'t finish setting up your account. Check your connection and try again.';
+      'Hesabınızın kurulumu tamamlanamadı. Bağlantınızı kontrol edip tekrar deneyin.';
 
   @override
   String get onboardingCreateIdentityImportPrompt =>
@@ -332,41 +332,41 @@ class AppLocalizationsTr extends AppLocalizations {
   String get relaySettingsKindKeyPackage => 'KeyPackage';
 
   @override
-  String get relaySettingsKindRelayList => 'Relay list';
+  String get relaySettingsKindRelayList => 'Aktarıcı listesi';
 
   @override
-  String get relaySettingsKindInboxList => 'Inbox list';
+  String get relaySettingsKindInboxList => 'Gelen Kutusu listesi';
 
   @override
-  String get relaySettingsPresencePublished => 'Published';
+  String get relaySettingsPresencePublished => 'Yayımlandı';
 
   @override
-  String get relaySettingsPresenceMissing => 'Missing';
+  String get relaySettingsPresenceMissing => 'Eksik';
 
   @override
-  String get relaySettingsPresenceOutdated => 'Old version';
+  String get relaySettingsPresenceOutdated => 'Eski sürüm';
 
   @override
-  String get relaySettingsLookupTitle => 'Lookup relays';
+  String get relaySettingsLookupTitle => 'Sorgu aktarıcıları';
 
   @override
   String get relaySettingsLookupSubtitle =>
-      'Public relays where others look you up. Haven keeps a copy of your relay lists here so people can invite you.';
+      'Başkalarının sizi bulmak için baktığı herkese açık aktarıcılar. İnsanların sizi davet edebilmesi için Haven, aktarıcı listelerinizin bir kopyasını burada tutar.';
 
   @override
-  String get relaySettingsRepublish => 'Republish';
+  String get relaySettingsRepublish => 'Yeniden yayımla';
 
   @override
   String get relaySettingsRepublishDone =>
-      'Every relay that answered now has what others need to invite you';
+      'Yanıt veren her aktarıcıda artık başkalarının sizi davet etmek için ihtiyaç duyduğu her şey var';
 
   @override
   String get relaySettingsRepublishIncomplete =>
-      'Some relays still don\'t have what others need to invite you';
+      'Bazı aktarıcılarda başkalarının sizi davet etmek için ihtiyaç duyduğu şeyler hâlâ eksik';
 
   @override
   String get relaySettingsRepublishHeld =>
-      'Nothing is published until you continue past the relay settings notice';
+      'Aktarıcı ayarları bilgilendirmesini geçene kadar hiçbir şey yayımlanmaz';
 
   @override
   String get relaySettingsStatusNotChecked => 'Denetlenmedi';
@@ -681,11 +681,11 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get memberLookupNotFound =>
-      'No Haven account found for this ID yet. If they just set up Haven, try again in a minute.';
+      'Bu kimliğe ait bir Haven hesabı henüz bulunamadı. Bu kişi Haven\'ı az önce kurduysa bir dakika sonra tekrar deneyin.';
 
   @override
   String get memberLookupIncomplete =>
-      'Couldn\'t finish checking this ID. Check your connection and try again.';
+      'Bu kimliğin denetimi tamamlanamadı. Bağlantınızı kontrol edip tekrar deneyin.';
 
   @override
   String get createCircleSomethingWentWrong => 'Bir sorun oluştu';
@@ -1634,28 +1634,29 @@ class AppLocalizationsTr extends AppLocalizations {
   String get qrCodeYourPublicKeyLabel => 'Açık anahtarınız';
 
   @override
-  String get reachabilityChecking => 'Getting ready to receive invitations…';
+  String get reachabilityChecking =>
+      'Davet alabilmeniz için hazırlık yapılıyor…';
 
   @override
-  String get reachabilityReady => 'Ready to be invited';
+  String get reachabilityReady => 'Davet edilmeye hazırsınız';
 
   @override
   String get reachabilityCantCheck =>
-      'Can\'t check right now whether others can invite you';
+      'Başkalarının sizi davet edip edemeyeceği şu anda denetlenemiyor';
 
   @override
-  String get reachabilityNotReady => 'Others can\'t invite you yet';
+  String get reachabilityNotReady => 'Başkaları sizi henüz davet edemiyor';
 
   @override
   String get reachabilityNoRelays =>
-      'Others can\'t invite you until you add a relay';
+      'Bir aktarıcı ekleyene kadar başkaları sizi davet edemez';
 
   @override
-  String get reachabilityOpenRelaySettings => 'Relay settings';
+  String get reachabilityOpenRelaySettings => 'Aktarıcı ayarları';
 
   @override
   String get reachabilityAwaitingReset =>
-      'Others can invite you once you continue past the relay settings notice';
+      'Aktarıcı ayarları bilgilendirmesini geçtiğinizde başkaları sizi davet edebilecek';
 
   @override
   String get qrCodeWhatIsThisTitle => 'Bu nedir?';

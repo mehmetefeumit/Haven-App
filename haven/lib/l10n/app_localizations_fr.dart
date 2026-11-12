@@ -132,11 +132,11 @@ class AppLocalizationsFr extends AppLocalizations {
   String get onboardingCreateIdentityLoading => 'Préparation en cours…';
 
   @override
-  String get onboardingFinishingSetup => 'Finishing setup…';
+  String get onboardingFinishingSetup => 'Finalisation en cours…';
 
   @override
   String get onboardingFinishSetupError =>
-      'Couldn\'t finish setting up your account. Check your connection and try again.';
+      'Impossible de finaliser la configuration de votre compte. Vérifiez votre connexion et réessayez.';
 
   @override
   String get onboardingCreateIdentityImportPrompt => 'Vous avez déjà une clé ?';
@@ -330,48 +330,48 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String relaySettingsKindLine(String kind, String status) {
-    return '$kind: $status';
+    return '$kind : $status';
   }
 
   @override
   String get relaySettingsKindKeyPackage => 'KeyPackage';
 
   @override
-  String get relaySettingsKindRelayList => 'Relay list';
+  String get relaySettingsKindRelayList => 'Liste de relais';
 
   @override
-  String get relaySettingsKindInboxList => 'Inbox list';
+  String get relaySettingsKindInboxList => 'Liste de relais de réception';
 
   @override
-  String get relaySettingsPresencePublished => 'Published';
+  String get relaySettingsPresencePublished => 'à jour';
 
   @override
-  String get relaySettingsPresenceMissing => 'Missing';
+  String get relaySettingsPresenceMissing => 'introuvable';
 
   @override
-  String get relaySettingsPresenceOutdated => 'Old version';
+  String get relaySettingsPresenceOutdated => 'ancienne version';
 
   @override
-  String get relaySettingsLookupTitle => 'Lookup relays';
+  String get relaySettingsLookupTitle => 'Relais de recherche';
 
   @override
   String get relaySettingsLookupSubtitle =>
-      'Public relays where others look you up. Haven keeps a copy of your relay lists here so people can invite you.';
+      'Relais publics sur lesquels les autres vous recherchent. Haven y conserve une copie de vos listes de relais afin que l\'on puisse vous inviter.';
 
   @override
-  String get relaySettingsRepublish => 'Republish';
+  String get relaySettingsRepublish => 'Republier';
 
   @override
   String get relaySettingsRepublishDone =>
-      'Every relay that answered now has what others need to invite you';
+      'Tous les relais qui ont répondu disposent désormais de ce dont les autres ont besoin pour vous inviter';
 
   @override
   String get relaySettingsRepublishIncomplete =>
-      'Some relays still don\'t have what others need to invite you';
+      'Certains relais ne disposent toujours pas de ce dont les autres ont besoin pour vous inviter';
 
   @override
   String get relaySettingsRepublishHeld =>
-      'Nothing is published until you continue past the relay settings notice';
+      'Rien n\'est publié tant que vous n\'avez pas répondu au message sur les paramètres de relais';
 
   @override
   String get relaySettingsStatusNotChecked => 'Non vérifié';
@@ -690,11 +690,11 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get memberLookupNotFound =>
-      'No Haven account found for this ID yet. If they just set up Haven, try again in a minute.';
+      'Aucun compte Haven n\'a encore été trouvé pour cet identifiant. Si cette personne vient de configurer Haven, réessayez dans une minute.';
 
   @override
   String get memberLookupIncomplete =>
-      'Couldn\'t finish checking this ID. Check your connection and try again.';
+      'Impossible de terminer la vérification de cet identifiant. Vérifiez votre connexion et réessayez.';
 
   @override
   String get createCircleSomethingWentWrong => 'Un problème est survenu';
@@ -1667,28 +1667,30 @@ class AppLocalizationsFr extends AppLocalizations {
   String get qrCodeYourPublicKeyLabel => 'Votre clé publique';
 
   @override
-  String get reachabilityChecking => 'Getting ready to receive invitations…';
+  String get reachabilityChecking =>
+      'Préparation de la réception des invitations…';
 
   @override
-  String get reachabilityReady => 'Ready to be invited';
+  String get reachabilityReady => 'Les autres peuvent vous inviter';
 
   @override
   String get reachabilityCantCheck =>
-      'Can\'t check right now whether others can invite you';
+      'Impossible de vérifier pour le moment si les autres peuvent vous inviter';
 
   @override
-  String get reachabilityNotReady => 'Others can\'t invite you yet';
+  String get reachabilityNotReady =>
+      'Les autres ne peuvent pas encore vous inviter';
 
   @override
   String get reachabilityNoRelays =>
-      'Others can\'t invite you until you add a relay';
+      'Les autres ne pourront pas vous inviter tant que vous n\'aurez pas ajouté de relais';
 
   @override
-  String get reachabilityOpenRelaySettings => 'Relay settings';
+  String get reachabilityOpenRelaySettings => 'Paramètres de relais';
 
   @override
   String get reachabilityAwaitingReset =>
-      'Others can invite you once you continue past the relay settings notice';
+      'Les autres pourront vous inviter une fois que vous aurez répondu au message sur les paramètres de relais';
 
   @override
   String get qrCodeWhatIsThisTitle => 'Qu\'est-ce que c\'est ?';

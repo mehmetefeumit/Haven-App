@@ -128,11 +128,11 @@ class AppLocalizationsJa extends AppLocalizations {
   String get onboardingCreateIdentityLoading => '準備しています…';
 
   @override
-  String get onboardingFinishingSetup => 'Finishing setup…';
+  String get onboardingFinishingSetup => '設定を完了しています…';
 
   @override
   String get onboardingFinishSetupError =>
-      'Couldn\'t finish setting up your account. Check your connection and try again.';
+      'アカウントの設定を完了できませんでした。接続を確認して、もう一度お試しください。';
 
   @override
   String get onboardingCreateIdentityImportPrompt => 'すでに鍵をお持ちですか？';
@@ -316,41 +316,40 @@ class AppLocalizationsJa extends AppLocalizations {
   String get relaySettingsKindKeyPackage => 'KeyPackage';
 
   @override
-  String get relaySettingsKindRelayList => 'Relay list';
+  String get relaySettingsKindRelayList => 'リレーのリスト';
 
   @override
-  String get relaySettingsKindInboxList => 'Inbox list';
+  String get relaySettingsKindInboxList => '受信トレイのリスト';
 
   @override
-  String get relaySettingsPresencePublished => 'Published';
+  String get relaySettingsPresencePublished => '公開済み';
 
   @override
-  String get relaySettingsPresenceMissing => 'Missing';
+  String get relaySettingsPresenceMissing => 'なし';
 
   @override
-  String get relaySettingsPresenceOutdated => 'Old version';
+  String get relaySettingsPresenceOutdated => '古いバージョン';
 
   @override
-  String get relaySettingsLookupTitle => 'Lookup relays';
+  String get relaySettingsLookupTitle => '検索用リレー';
 
   @override
   String get relaySettingsLookupSubtitle =>
-      'Public relays where others look you up. Haven keeps a copy of your relay lists here so people can invite you.';
+      'ほかの人があなたを探すときに使う公開リレーです。人々があなたを招待できるよう、Haven はあなたのリレーのリストのコピーをここに置いています。';
 
   @override
-  String get relaySettingsRepublish => 'Republish';
+  String get relaySettingsRepublish => '再公開';
 
   @override
   String get relaySettingsRepublishDone =>
-      'Every relay that answered now has what others need to invite you';
+      '応答したすべてのリレーに、ほかの人があなたを招待するために必要なものがそろいました';
 
   @override
   String get relaySettingsRepublishIncomplete =>
-      'Some relays still don\'t have what others need to invite you';
+      'ほかの人があなたを招待するために必要なものが、まだそろっていないリレーがあります';
 
   @override
-  String get relaySettingsRepublishHeld =>
-      'Nothing is published until you continue past the relay settings notice';
+  String get relaySettingsRepublishHeld => 'リレー設定に関するお知らせを確認して先に進むまで、何も公開されません';
 
   @override
   String get relaySettingsStatusNotChecked => '未確認';
@@ -649,11 +648,11 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get memberLookupNotFound =>
-      'No Haven account found for this ID yet. If they just set up Haven, try again in a minute.';
+      'このIDの Haven アカウントは、まだ見つかりません。相手が Haven を設定したばかりの場合は、少し待ってから、もう一度お試しください。';
 
   @override
   String get memberLookupIncomplete =>
-      'Couldn\'t finish checking this ID. Check your connection and try again.';
+      'このIDを最後まで確認できませんでした。接続を確認して、もう一度お試しください。';
 
   @override
   String get createCircleSomethingWentWrong => '問題が発生しました';
@@ -1565,28 +1564,26 @@ class AppLocalizationsJa extends AppLocalizations {
   String get qrCodeYourPublicKeyLabel => 'あなたの公開鍵';
 
   @override
-  String get reachabilityChecking => 'Getting ready to receive invitations…';
+  String get reachabilityChecking => '招待を受け取る準備をしています…';
 
   @override
-  String get reachabilityReady => 'Ready to be invited';
+  String get reachabilityReady => '招待を受け取れる状態です';
 
   @override
-  String get reachabilityCantCheck =>
-      'Can\'t check right now whether others can invite you';
+  String get reachabilityCantCheck => 'ほかの人があなたを招待できるかどうか、今は確認できません';
 
   @override
-  String get reachabilityNotReady => 'Others can\'t invite you yet';
+  String get reachabilityNotReady => 'ほかの人はまだあなたを招待できません';
 
   @override
-  String get reachabilityNoRelays =>
-      'Others can\'t invite you until you add a relay';
+  String get reachabilityNoRelays => 'リレーを追加するまで、ほかの人はあなたを招待できません';
 
   @override
-  String get reachabilityOpenRelaySettings => 'Relay settings';
+  String get reachabilityOpenRelaySettings => 'リレー設定';
 
   @override
   String get reachabilityAwaitingReset =>
-      'Others can invite you once you continue past the relay settings notice';
+      'リレー設定に関するお知らせを確認して先に進むと、ほかの人があなたを招待できるようになります';
 
   @override
   String get qrCodeWhatIsThisTitle => 'これは何ですか？';
