@@ -1004,9 +1004,9 @@ remains.
   — Security Rule 13 applies to liveness too) and no clock-skew verdict (no relay saw our
   timestamp, so feeding the detector a non-event would dilute its evidence). The two foreground
   sites call `sharingHealthProvider.recordDeferredSend(circleKey)` instead of
-  `recordPublishOutcome`; the FGS has no Riverpod container and persists nothing new — its
-  deferral surfaces at the next foreground open through Unit D's model, which derives the outage
-  from the MISSING publish-ack timestamp.
+  `recordPublishOutcome`; the FGS has no Riverpod container and persists nothing new — a
+  deferral the next foreground does not end surfaces there through Unit D's model, which derives
+  the outage from the MISSING publish-ack timestamp.
 - **Tests** (17 new; 4 mutations, each caught by a named red test):
   `haven/test/services/location_sharing_deferred_send_test.dart` (8 — the ladder confirms on an
   ack, rolls back without one, rolls back when the circle is gone, publishes proposals without
@@ -1510,8 +1510,12 @@ history.)*
   (the Repair legs themselves) have not landed yet. And a peer location arriving re-derived
   nothing: only the 72 s tick did. So the confirmation window is now counted in time the app was
   in front, summed across visits (`SharingHealthNotifier._watchedSince`), and the two silence
-  verdicts wait it out as every named transient cause does (`_stood`). In front throughout, that
-  is the wall-clock rule it replaces, to the second. A cause that began unwatched is shown once
+  verdicts wait it out as every named transient cause does (`_stood`) — counted from one window
+  short of their threshold (`_watchedPast`), because until then the quiet is ordinary and
+  watching it proves nothing about what followed while the app was away. In front throughout,
+  that is the wall-clock rule it replaces, to the second. "In front" is read from the binding
+  when the model is built (`AppForegroundNotifier`), never assumed: a process started in the
+  background is dispatched no pause. A cause that began unwatched is shown once
   it has outlasted one window of watching — re-derived by a one-shot timer at that instant, not at
   the next tick — and from then on at every return until a delivery ends it; a cause that stands
   until the circle changes (disbanded, halted, quarantined, a collision, a leave, a stall, a

@@ -2216,11 +2216,11 @@
   },
   "circleDetailsAttentionTooltip": "Circle details, needs attention",
   "@circleDetailsAttentionTooltip": {
-    "description": "Accessible name (and tooltip) of the Circle details button while the selected circle has a sharing problem or a note about changes. Only on that button; a circle row in the selector list uses circleRowAttentionSemantics. 'Circle details' must match circleDetailsButtonTooltip. The badge itself has no text, so this is its only name."
+    "description": "Accessible name (and tooltip) of a Circle details button while its circle has a sharing problem or a note about changes: the selected circle's details button, and the button on a circle's row in the open selector list. The row itself, and the button beside the closed selector that is about a circle other than the selected one, use circleRowAttentionSemantics. 'Circle details' must match circleDetailsButtonTooltip. The badge itself has no text, so this is its only name."
   },
   "circleRowAttentionSemantics": "{circleName}, needs attention",
   "@circleRowAttentionSemantics": {
-    "description": "Accessible name of a circle row in the circle selector list while that circle has a sharing problem or a note about changes. {circleName} is the row's circle name; the placeholder lets word order follow the language. Not bidi-isolated: this is a semantics label.",
+    "description": "Accessible name of a circle row in the circle selector list while that circle has a sharing problem or a note about changes; also the accessible name (and tooltip) of the button beside the closed selector that marks a circle other than the selected one and opens its details. {circleName} is that circle's name; the placeholder lets word order follow the language. Not bidi-isolated: this is a semantics label.",
     "placeholders": {
       "circleName": { "type": "String" }
     }

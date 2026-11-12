@@ -507,6 +507,9 @@ class _TriggerRow extends StatelessWidget {
         if (circle != null)
           CircleAttentionCue(
             key: WidgetKeys.circleAttentionCue,
+            // Named for its circle: it sits beside the selected one's name
+            // and is never about that one.
+            label: l10n.circleRowAttentionSemantics(circle.displayName),
             onPressed: () => onOpenDetails(circle),
           ),
       ],

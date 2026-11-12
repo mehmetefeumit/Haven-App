@@ -1451,8 +1451,8 @@ void main() {
     // may be sending or receiving at all — so read at the moment it returns
     // they say how long it was gone, not that the circle is broken. And the
     // resume's own publish and reconnect are the repair, already under way.
-    // Both halves are held here: nothing is shown that the return itself is
-    // about to disprove, and nothing that stands is ever left unshown.
+    // Both halves are held here: nothing is shown on the strength of time
+    // nobody watched, and nothing that stands is ever left unshown.
 
     /// The app leaves, [away] passes, and it comes back.
     void leaveAndReturn(_Harness h, Duration away) {
@@ -1523,6 +1523,64 @@ void main() {
         expect(await h.settle(), SharingHealth.receiveSilent(_t0));
       },
     );
+
+    for (final (direction, stamps, threshold, fault) in [
+      (
+        'send',
+        CircleHealthTimestamps(lastPublishAckedAt: _t0),
+        kPublishSilenceThreshold,
+        SharingHealth.publishFailing(_t0),
+      ),
+      (
+        'receive',
+        CircleHealthTimestamps(lastPeerEventAt: _t0),
+        kReceiveSilenceThreshold,
+        SharingHealth.receiveSilent(_t0),
+      ),
+    ]) {
+      test('$direction: watching ordinary quiet before leaving confirms '
+          'nothing on return', () async {
+        // The map is open a little longer than one window after the last
+        // delivery — still ordinary quiet, well inside the threshold — and
+        // the app is then away past it. That watching saw nothing wrong.
+        final h = _Harness()..health.stored = stamps;
+        final inFront =
+            kSharingFaultConfirmationWindow + const Duration(seconds: 2);
+        expect(inFront, lessThan(threshold), reason: 'anti-vacuity');
+        h.advance(inFront);
+        expect(await h.settle(), SharingHealth.healthy, reason: 'premise');
+
+        leaveAndReturn(h, threshold);
+        expect(await h.settle(), SharingHealth.healthy);
+
+        // Only what was watched past ordinary counts: for sending that is
+        // the two seconds over one window, for receiving nothing at all.
+        final ordinary = threshold - kSharingFaultConfirmationWindow;
+        final counted = inFront > ordinary ? inFront - ordinary : Duration.zero;
+        h.advance(kSharingFaultConfirmationWindow - counted);
+        expect(await h.settle(), SharingHealth.healthy);
+        h.advance(second);
+        expect(await h.settle(), fault);
+      });
+
+      test('$direction: what was watched of a silence already past ordinary '
+          'still counts on return', () async {
+        // In front until 68 s short of the threshold: all but 68 s of the
+        // window was watched before the app left.
+        final h = _Harness()
+          ..health.stored = stamps
+          ..advance(threshold - const Duration(seconds: 68));
+        expect(await h.settle(), SharingHealth.healthy, reason: 'premise');
+
+        leaveAndReturn(h, const Duration(hours: 1));
+        expect(await h.settle(), SharingHealth.healthy);
+
+        h.advance(const Duration(seconds: 68));
+        expect(await h.settle(), SharingHealth.healthy);
+        h.advance(second);
+        expect(await h.settle(), fault);
+      });
+    }
 
     test('a cold start watches before it judges', () async {
       // Stamps older than the process: it has watched none of that silence.
@@ -1940,6 +1998,25 @@ void main() {
       binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
       expect(notifier.value, isTrue);
       expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('built under a binding that already reads paused, it is not '
+        'in front until the app comes up', (tester) async {
+      // The binding dispatches only changes: a process started in the
+      // background is never told so, and assuming it was in front would count
+      // that whole time as watched.
+      final binding = WidgetsBinding.instance
+        ..handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      addTearDown(
+        () => binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed),
+      );
+
+      final notifier = AppForegroundNotifier();
+      addTearDown(notifier.dispose);
+      expect(notifier.value, isFalse);
+
+      binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      expect(notifier.value, isTrue);
     });
 
     testWidgets('stops observing on dispose', (tester) async {

@@ -8,7 +8,8 @@
 /// in the info glyph's place, never a second control beside it — and a dot on
 /// its avatar in the selector, which is all of the circle a resting sheet
 /// shows. A circle NOT selected keeps a cue of its own beside the selector,
-/// and one tap on it selects that circle and opens its details.
+/// named for that circle, and one tap on it selects the circle and opens its
+/// details.
 library;
 
 import 'package:flutter/foundation.dart';
@@ -47,6 +48,9 @@ class _Health extends SharingHealthNotifier {
 
   @override
   Future<void> refresh() async {}
+
+  /// Lands [health] as a derivation would.
+  void land(SharingHealth health) => state = health;
 }
 
 Circle _circle(int id, String name) => TestCircleFactory.createCircle(
@@ -139,6 +143,12 @@ void main() {
       .widget<Badge>(find.byKey(WidgetKeys.circleSelectedAttentionDot))
       .isLabelVisible;
 
+  /// The attention glyph inside [button], if it shows one.
+  Finder attentionGlyphIn(Finder button) => find.descendant(
+    of: button,
+    matching: find.byType(CircleAttentionGlyph),
+  );
+
   /// Pulls the sheet up until the header row is on screen.
   Future<void> raiseSheet(WidgetTester tester) async {
     await tester.drag(find.text('Home'), const Offset(0, -400));
@@ -172,7 +182,7 @@ void main() {
       await raiseSheet(tester);
       final details = find.byKey(WidgetKeys.circleDetailsButton);
       expect(details, findsOneWidget);
-      expect(tester.widget(details), isA<CircleAttentionCue>());
+      expect(attentionGlyphIn(details), findsOneWidget);
       expect(
         find.byIcon(LucideIcons.info),
         findsNothing,
@@ -200,7 +210,7 @@ void main() {
 
     await raiseSheet(tester);
     final details = find.byKey(WidgetKeys.circleDetailsButton);
-    expect(tester.widget(details), isNot(isA<CircleAttentionCue>()));
+    expect(attentionGlyphIn(details), findsNothing);
     expect(
       find.descendant(of: details, matching: find.byIcon(LucideIcons.info)),
       findsOneWidget,
@@ -223,9 +233,36 @@ void main() {
     expect(dotShown(tester), isTrue);
     expect(find.byKey(WidgetKeys.circleAttentionCue), findsNothing);
     expect(
-      tester.widget(find.byKey(WidgetKeys.circleDetailsButton)),
-      isA<CircleAttentionCue>(),
+      attentionGlyphIn(find.byKey(WidgetKeys.circleDetailsButton)),
+      findsOneWidget,
     );
+  });
+
+  testWidgets('the details button is one button through a fault: its glyph '
+      'and name change under whatever holds its focus', (tester) async {
+    // Two buttons swapped under one key would drop a screen reader's or a
+    // keyboard's focus at the moment a fault appears or clears.
+    final handle = tester.ensureSemantics();
+    await _pump(tester);
+    await raiseSheet(tester);
+    final details = find.byKey(WidgetKeys.circleDetailsButton);
+    final button = tester.element(details);
+    final container = ProviderScope.containerOf(button);
+    final health = container.read(sharingHealthProvider.notifier) as _Health
+      ..land(SharingHealth.publishFailing(DateTime.utc(2026, 8, 28, 12)));
+    await tester.pumpAndSettle();
+    expect(tester.element(details), same(button));
+    expect(attentionGlyphIn(details), findsOneWidget);
+    expect(
+      tester.getSemantics(details).tooltip,
+      _l10n(tester).circleDetailsAttentionTooltip,
+    );
+
+    health.land(SharingHealth.healthy);
+    await tester.pumpAndSettle();
+    expect(tester.element(details), same(button));
+    expect(attentionGlyphIn(details), findsNothing);
+    handle.dispose();
   });
 
   testWidgets('level notes alone show no cue', (tester) async {
@@ -290,11 +327,16 @@ void main() {
     final cue = find.byKey(WidgetKeys.circleAttentionCue);
     expect(cue, findsOneWidget);
     expect(tester.getRect(cue).bottom, lessThanOrEqualTo(844));
+    // Named for the circle it is about, not the one it sits beside.
+    expect(
+      tester.getSemantics(cue).tooltip,
+      _l10n(tester).circleRowAttentionSemantics('Work'),
+    );
     // The mark is that circle's alone: the selected one carries none.
     expect(dotShown(tester), isFalse);
     expect(
-      tester.widget(find.byKey(WidgetKeys.circleDetailsButton)),
-      isNot(isA<CircleAttentionCue>()),
+      attentionGlyphIn(find.byKey(WidgetKeys.circleDetailsButton)),
+      findsNothing,
     );
 
     await tester.tap(cue);

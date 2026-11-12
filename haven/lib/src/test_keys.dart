@@ -99,8 +99,9 @@ abstract final class WidgetKeys {
   // Circle management
   // ---------------------------------------------------------------------------
 
-  /// Info button in the selected-circle header that opens the
-  /// circle-details bottom sheet. Keyed so tests don't couple to the
+  /// The selected-circle header's details button (the info glyph, or the
+  /// attention glyph in its place) that opens the circle-details bottom
+  /// sheet. Keyed so tests don't couple to the glyph or to the
   /// (user-facing, translatable) "Circle details" tooltip text.
   static const Key circleDetailsButton = Key('circle_details_button');
 

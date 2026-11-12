@@ -916,10 +916,10 @@ Future<void> showCircleDetails(
 }
 
 /// Header showing circle member count and the one button that opens the
-/// circle details sheet: the info glyph, or the attention cue in its place
-/// while the circle needs attention — never both, so the mark sits on the
-/// circle it is about and one control leads to its details. The Leave Circle
-/// action lives inside that sheet.
+/// circle details sheet: it shows the info glyph, or the attention glyph in
+/// its place while the circle needs attention — never both, so the mark sits
+/// on the circle it is about and one control leads to its details. The Leave
+/// Circle action lives inside that sheet.
 class _CircleHeader extends ConsumerWidget {
   const _CircleHeader({required this.circle});
 
@@ -932,7 +932,6 @@ class _CircleHeader extends ConsumerWidget {
     final needsAttention = ref.watch(
       circleNeedsAttentionProvider(sharingCircleKey(circle)),
     );
-    void openDetails() => showCircleDetails(context, ref, circle);
 
     return Padding(
       padding: const EdgeInsets.symmetric(
@@ -949,18 +948,19 @@ class _CircleHeader extends ConsumerWidget {
               ),
             ),
           ),
-          if (needsAttention)
-            CircleAttentionCue(
-              key: WidgetKeys.circleDetailsButton,
-              onPressed: openDetails,
-            )
-          else
-            IconButton(
-              key: WidgetKeys.circleDetailsButton,
-              tooltip: l10n.circleDetailsButtonTooltip,
-              icon: const Icon(LucideIcons.info),
-              onPressed: openDetails,
-            ),
+          // One button whose glyph and name change, not two that swap: a
+          // screen reader's or a keyboard's focus stays on it when a fault
+          // appears or clears.
+          IconButton(
+            key: WidgetKeys.circleDetailsButton,
+            tooltip: needsAttention
+                ? l10n.circleDetailsAttentionTooltip
+                : l10n.circleDetailsButtonTooltip,
+            icon: needsAttention
+                ? const CircleAttentionGlyph()
+                : const Icon(LucideIcons.info),
+            onPressed: () => showCircleDetails(context, ref, circle),
+          ),
         ],
       ),
     );
@@ -1032,7 +1032,7 @@ class _DimmableBox extends StatelessWidget {
     : (minutes: true, count: (secs + 30) ~/ 60);
 
 /// Read-only details view for a circle, presented as a bottom sheet
-/// from the circle header's info button. Owns the destructive
+/// from the circle header's details button. Owns the destructive
 /// Leave Circle action: button sits below the relay list and closes
 /// the sheet on success.
 class _CircleDetailsSheet extends ConsumerStatefulWidget {

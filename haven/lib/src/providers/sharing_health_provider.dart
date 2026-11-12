@@ -34,9 +34,9 @@
 ///   long it was away, not that anything broke — and the resume's own publish
 ///   and reconnect are already under way. So that window is counted in time
 ///   the app was in front ([SharingHealthNotifier] `_watchedSince`), across
-///   visits: a fault that began unwatched is shown once it has outlasted one
-///   window of watching, and at once on every later visit until a delivery
-///   ends it.
+///   visits — for a silence, from where it stops being ordinary: a fault that
+///   began unwatched is shown once it has outlasted one window of watching,
+///   and at once on every later visit until a delivery ends it.
 ///
 /// What the core knows holds the circle — a disband, a halt, a pending change,
 /// a removal not made — is READ from it ([CircleService.circleRecovery]) and
@@ -415,10 +415,20 @@ final sharingHealthForegroundProvider = Provider<ValueListenable<bool>>((ref) {
 /// transition.
 class AppForegroundNotifier extends ValueNotifier<bool>
     with WidgetsBindingObserver {
-  /// Starts observing the app lifecycle, assuming foreground until told
-  /// otherwise (the first callback arrives only when something changes).
-  AppForegroundNotifier() : super(true) {
+  /// Starts observing the app lifecycle from what the binding reads now.
+  ///
+  /// The binding dispatches only changes, so a process started in the
+  /// background (an iOS location relaunch, an Android activity stopped during
+  /// start-up) is never told it is not in front: assuming it was would count
+  /// that whole time as watched. A lifecycle not yet reported reads as in
+  /// front; the first dispatch corrects it.
+  AppForegroundNotifier() : super(_inFront()) {
     WidgetsBinding.instance.addObserver(this);
+  }
+
+  static bool _inFront() {
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    return lifecycle == null || lifecycle == AppLifecycleState.resumed;
   }
 
   @override
@@ -784,6 +794,20 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
     return false;
   }
 
+  /// Whether nothing has been delivered since [delivered] for longer than
+  /// [threshold], and the app watched that silence stop being ordinary.
+  ///
+  /// The window is counted from one window short of the threshold, never from
+  /// the delivery: until then the quiet is ordinary, and watching ordinary
+  /// quiet proves nothing about what followed it while the app was away. In
+  /// front throughout, this is the threshold alone.
+  bool _watchedPast(DateTime delivered, Duration threshold, DateTime now) =>
+      now.difference(delivered) > threshold &&
+      _stood(
+        delivered.add(threshold - kSharingFaultConfirmationWindow),
+        now,
+      );
+
   /// Re-derives the verdict now.
   ///
   /// Safe to call concurrently: a call made while a derivation is in flight
@@ -1101,10 +1125,10 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
     // by a relay for two cadences. Requires a baseline: a circle that has never
     // published successfully has nothing to have stopped. And the silence must
     // have been watched: an ack that only aged while the app was away is
-    // replaced by the resume's own publish, or stands and is shown ([_stood]).
+    // replaced by the resume's own publish, or stands and is shown
+    // ([_watchedPast]).
     if (ackedAt != null &&
-        now.difference(ackedAt) > kPublishSilenceThreshold &&
-        _stood(ackedAt, now)) {
+        _watchedPast(ackedAt, kPublishSilenceThreshold, now)) {
       return SharingHealth.publishFailing(ackedAt);
     }
     return null;
@@ -1142,8 +1166,7 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
     // Watched, as the send side is: while the app was away nothing may have
     // been listening, and what peers published since arrives with the
     // resume's reconnect.
-    if (now.difference(lastPeerAt) > kReceiveSilenceThreshold &&
-        _stood(lastPeerAt, now)) {
+    if (_watchedPast(lastPeerAt, kReceiveSilenceThreshold, now)) {
       return SharingHealth.receiveSilent(lastPeerAt);
     }
     return null;
