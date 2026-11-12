@@ -408,8 +408,10 @@ async fn case_round_trip() -> Case {
     }
     let tag_names: Vec<&str> = payload["tags"]
         .as_array()
-        .map(|tags| tags.iter().filter_map(|t| t[0].as_str()).collect())
-        .unwrap_or_default();
+        .into_iter()
+        .flatten()
+        .filter_map(|t| t[0].as_str())
+        .collect();
     if !tag_names.contains(&"h") || !tag_names.contains(&"expiration") {
         return Err(format!("EVENT line lost its tags (saw {tag_names:?})"));
     }
