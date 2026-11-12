@@ -3,8 +3,9 @@ import java.util.Properties
 
 plugins {
     id("com.android.application")
-    id("kotlin-android")
-    // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
+    // No Kotlin plugin here: with `android.builtInKotlin=false` the Flutter
+    // Gradle Plugin applies it, and an app that applies it itself is warned it
+    // will stop building in a future Flutter.
     id("dev.flutter.flutter-gradle-plugin")
 }
 
@@ -24,13 +25,9 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_17.toString()
-    }
-
     // `BuildConfig.DEBUG` gates every native log call out of release builds
-    // (scripts/ci/check_native_log_allowlist.sh); AGP 8 no longer generates
-    // the class unless asked.
+    // (scripts/ci/check_native_log_allowlist.sh); since AGP 8 the class is
+    // not generated unless asked.
     buildFeatures {
         buildConfig = true
     }
@@ -88,6 +85,12 @@ dependencies {
     // even though it's a dev dependency, causing release builds to fail.
     // compileOnly makes the class available at compile time without shipping it.
     compileOnly(project(":integration_test"))
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
+    }
 }
 
 flutter {
