@@ -179,7 +179,12 @@ class _MeshButtonState extends ConsumerState<MeshButton> {
   /// button, a pause to a screen reader. Their own tap is not told twice.
   void _onPhase(MeshPhase? was, MeshPhase now) {
     final userOff = ref.read(meshUserOffProvider.notifier);
-    if (now != MeshPhase.off) userOff.state = false;
+    if (now != MeshPhase.off) {
+      userOff.state = false;
+      // Untrue once mesh is on: a clock set forward reads as the deadline
+      // passed until the engine is asked, and the engine says otherwise.
+      ref.read(meshStoppedNoticeProvider.notifier).state = false;
+    }
     if (was == null || was == MeshPhase.off) return;
     if (now == MeshPhase.paused) {
       _announce(AppLocalizations.of(context).meshNoticePaused);

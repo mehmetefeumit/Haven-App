@@ -2413,7 +2413,27 @@ marker itself, so that a logout that died after its radio stop cannot be
 followed by a sticky restart. (d) On Android 13 and later without the
 notification permission the service's stopped notice is seen by nobody, so
 "never on with no radio and no notice" rests on the in-app notice alone;
-that notice is built here and stays until dismissed.
+that notice is built here and stays until dismissed. (e) `start` answers
+`unsupported` only for hardware that can never run the mesh: Dart then
+removes the button, the aura and the Settings row for the life of the
+process, so an adapter that is off at that instant, or any passing error,
+is `failed`. (f) `radio_resume` answering false stops nothing: a session
+that opened first has claimed the process, and the engine comes at that
+session's first mesh entry — so every flow that opens a session with mesh
+on must reach one, or mesh reads on in the store with a service running
+and no engine.
+
+Re-reviews (independent, read-only). Of the engine and bridge fixes: all
+three hold, no blocker; found and left, since it predates them and heals at
+the next entry: a turn-on made while another session entry is settling an
+ended engine can have its new deadline deleted by that entry's `mesh_off`,
+and the tap has to be repeated. Of the UI's fixes: all hold, no blocker;
+fixed with it, each with a test: a stopped notice raised by a clock that
+ran ahead of a deadline the engine still held stayed up beside a mesh that
+was on — a notice is now withdrawn whenever mesh is on; and backing out of
+the disclosure took an owed notice away with it — only a flow that ended
+or failed does. Left: two requests for the statistics sheet in one frame
+open two.
 
 ### Proposed CLAUDE.md wording (owner to approve)
 

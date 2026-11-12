@@ -1117,6 +1117,48 @@ void main() {
       expect(_notice, findsOneWidget);
     });
 
+    testWidgets('stays when the way back on is backed out of at the '
+        'disclosure: nothing told the user otherwise', (tester) async {
+      final mesh = MeshHarness()..on();
+      await _pump(tester, mesh, introSeen: false);
+      mesh.mesh.statsAnswer = meshCounts(on: false);
+      mesh.radio.emit(radioStatus(MeshRadioState.stopped));
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.descendant(
+          of: _notice,
+          matching: find.text(_l10n(tester).meshTurnOn),
+        ),
+      );
+      await tester.pumpAndSettle();
+      Navigator.of(tester.element(find.byType(MeshIntroSheet))).pop();
+      await tester.pumpAndSettle();
+
+      expect(_shownOn(tester), isFalse, reason: 'premise');
+      expect(_notice, findsOneWidget);
+    });
+
+    testWidgets('that was no stop — the clock passed a deadline the engine '
+        'still holds — is taken back when the engine says mesh is on', (
+      tester,
+    ) async {
+      final mesh = MeshHarness()..on();
+      mesh.mesh.statsAnswer = meshCounts(onForMs: 60000);
+      await _pump(tester, mesh);
+      await tester.pump(const Duration(minutes: 1));
+      await tester.pump();
+      expect(_notice, findsOneWidget, reason: 'premise');
+
+      // Asked again, the engine has hours left: the clock had run ahead.
+      mesh.mesh.statsAnswer = meshCounts(onForMs: 3600000);
+      mesh.radio.emit(radioStatus(MeshRadioState.running));
+      await tester.pumpAndSettle();
+
+      expect(_shownOn(tester), isTrue, reason: 'premise');
+      expect(_notice, findsNothing);
+    });
+
     testWidgets('is withdrawn by turning mesh on again', (tester) async {
       final mesh = MeshHarness();
       await _pump(tester, mesh);

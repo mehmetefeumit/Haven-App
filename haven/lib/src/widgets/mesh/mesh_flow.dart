@@ -72,11 +72,15 @@ Future<MeshAsked> _asked(
   if (asked.state) return _nothing;
   asked.state = true;
   try {
-    return await transition(container);
+    final ended = await transition(container);
+    // Whatever turned mesh off inside it, its outcome told the user. One
+    // they backed out of told them nothing, and a notice owed stays.
+    if (ended.done || ended.failure != null) {
+      container.read(meshStoppedNoticeProvider.notifier).state = false;
+    }
+    return ended;
   } finally {
     asked.state = false;
-    // Whatever turned mesh off inside it, its outcome told the user.
-    container.read(meshStoppedNoticeProvider.notifier).state = false;
   }
 }
 
