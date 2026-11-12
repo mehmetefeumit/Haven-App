@@ -47,7 +47,9 @@ pub enum CargoStatus {
     /// The rules skip the lines matching cargo's status shape
     /// (`crate::rules::RuleSet::is_cargo_status`): cargo prints the public
     /// pinned git revision of every git dependency and the name of every crate
-    /// before a single test runs, and neither is a Haven identifier.
+    /// before a single test runs, and neither is a Haven identifier. S4 also
+    /// skips a match inside a `Running` line's artifact path
+    /// (`crate::rules::RuleHit::cargo_artifact`).
     Exempt,
 }
 

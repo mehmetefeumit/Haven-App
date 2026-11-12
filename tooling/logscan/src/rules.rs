@@ -200,7 +200,8 @@ const DART_FRAME: &str =
 /// those tails is unbounded, which is a slot an app print can land a value in.
 /// `Doc-tests <32 hex>`, `Running x (target/<coordinate pair>)` and an
 /// `Updating git repository` line naming a `wss://` URL all used to pass for
-/// furniture.
+/// furniture. The one exception is not a line but a span: the artifact path of
+/// a `Running` line in cargo's current layout ([`CARGO_RUN_ARTIFACT`]).
 ///
 /// Every field is bounded for the same reason. The crate name is a cargo crate
 /// name (`[A-Za-z][A-Za-z0-9_-]*`, which no `<key>=<value>` print can occupy),
@@ -224,6 +225,23 @@ const CARGO_STATUS: &str = concat!(
     r"^\s*(?:Compiling|Checking|Downloaded) ",
     r"[A-Za-z][A-Za-z0-9_-]* v\d+\.\d+\.\d+",
     r"(?: \((?:[a-z+]+)?(?:/|https://)[^)\s]*\))?$",
+);
+
+/// The artifact tail of cargo's `Running` line in the build-directory layout
+/// cargo 1.100 made the default: `…/build/<crate>/<16 hex>/out/<binary>-<16 hex>`.
+///
+/// Joined by `/`, the crate, the build hash and the binary read to S4 as one
+/// base64 run (`logscan/1cd934b6cf06db05/out/haven`), so every cargo lane of
+/// CI run 43282199832 went rc 1 on its own `Running` lines. Only an S4 match
+/// lying wholly inside `artifact`, on a line whose two hashes agree, is
+/// furniture: the source path and the target directory before it are free
+/// text and stay scanned, and every other rule still reads the whole line. The
+/// residual is a deliberate print of this exact shape with up to 64 base64
+/// letters in the crate or binary slot.
+const CARGO_RUN_ARTIFACT: &str = concat!(
+    r"^\s*Running (?:unittests )?\S+ \(\S*/build/",
+    r"(?P<artifact>[A-Za-z][A-Za-z0-9_-]{0,63}/(?P<hash>[0-9a-f]{16})/out/",
+    r"[A-Za-z][A-Za-z0-9_]{0,63}-(?P<tail>[0-9a-f]{16}))\)$",
 );
 
 /// The rules a cargo status line is furniture FOR, and no others.
@@ -336,6 +354,9 @@ pub struct RuleHit {
     /// The matched text. Carried ONLY so `--disclose-values` can print it for
     /// local triage; every other output path must ignore it.
     pub matched: String,
+    /// The match is a cargo artifact path ([`CARGO_RUN_ARTIFACT`]): furniture on
+    /// a sink whose `cargo_status` is exempt, a hit everywhere else.
+    pub cargo_artifact: bool,
 }
 
 /// A date as `(year, month, day)`, compared lexicographically.
@@ -348,6 +369,7 @@ pub struct RuleSet {
     ids: Vec<&'static str>,
     set: RegexSet,
     cargo_status: Regex,
+    cargo_run_artifact: Regex,
     dial_failure: Regex,
     dart_frame: Regex,
     sqlcipher_record: Regex,
@@ -402,6 +424,8 @@ impl RuleSet {
             set,
             cargo_status: Regex::new(CARGO_STATUS)
                 .map_err(|e| format!("the cargo status shape does not compile: {e}"))?,
+            cargo_run_artifact: Regex::new(CARGO_RUN_ARTIFACT)
+                .map_err(|e| format!("the cargo artifact shape does not compile: {e}"))?,
             dial_failure: Regex::new(DIAL_FAILURE)
                 .map_err(|e| format!("the dial-failure markers do not compile: {e}"))?,
             dart_frame: Regex::new(DART_FRAME)
@@ -432,6 +456,20 @@ impl RuleSet {
     #[must_use]
     pub fn is_cargo_status(&self, line: &str) -> bool {
         self.cargo_status.is_match(line)
+    }
+
+    /// Whether `span` of `line` lies wholly inside the artifact path of a cargo
+    /// `Running` line whose two build hashes agree ([`CARGO_RUN_ARTIFACT`]).
+    fn is_cargo_artifact(&self, line: &str, span: std::ops::Range<usize>) -> bool {
+        self.cargo_run_artifact.captures(line).is_some_and(|c| {
+            match (c.name("artifact"), c.name("hash"), c.name("tail")) {
+                // The line ends at the artifact, so no match can run past it.
+                (Some(artifact), Some(hash), Some(tail)) => {
+                    hash.as_str() == tail.as_str() && artifact.start() <= span.start
+                }
+                _ => false,
+            }
+        })
     }
 
     /// Whether this HIT is cargo furniture: the right rule ([`CARGO_STATUS_RULES`])
@@ -485,9 +523,14 @@ impl RuleSet {
                 if self.is_allowlisted(id, line, sink_path, tag) {
                     continue;
                 }
+                let cargo_artifact = id == "S4"
+                    && capture
+                        .get(0)
+                        .is_some_and(|m| self.is_cargo_artifact(line, m.range()));
                 hits.push(RuleHit {
                     rule: id,
                     matched: whole.to_owned(),
+                    cargo_artifact,
                 });
                 break;
             }
@@ -1208,6 +1251,65 @@ mod tests {
             assert!(
                 !engine().is_cargo_status(line),
                 "…and therefore must not be inside the exemption: {line:?}"
+            );
+        }
+    }
+
+    /// Cargo 1.100's artifact path is furniture as a SPAN: the S4 match on it is
+    /// tagged, and nothing else on the line is.
+    ///
+    /// The furniture lines are verbatim from CI run 43282199832's `cargo test`
+    /// transcripts. Each trap keeps the artifact path intact and moves a
+    /// payload into a slot around it, or breaks the shape the exemption needs.
+    #[test]
+    fn only_the_artifact_path_of_a_running_line_is_cargo_furniture() {
+        let engine = engine();
+        let artifact_hits = |line: &str| -> Vec<(&'static str, bool)> {
+            engine
+                .evaluate(line, "x.rust-test.log", None)
+                .into_iter()
+                .map(|hit| (hit.rule, hit.cargo_artifact))
+                .collect()
+        };
+        for furniture in [
+            "     Running unittests src/lib.rs (target/debug/build/haven-logscan/237a2bf5f9252714/out/haven_logscan-237a2bf5f9252714)",
+            "     Running tests/cli_contract.rs (target/debug/build/haven-logscan/6509ca87d18f23d4/out/cli_contract-6509ca87d18f23d4)",
+            "     Running tests/host_needles_tie.rs (/home/runner/work/Haven-App/Haven-App/tooling/logscan/target/debug/build/haven-logscan/640f58794d5a65c3/out/host_needles_tie-640f58794d5a65c3)",
+        ] {
+            assert_eq!(
+                artifact_hits(furniture),
+                vec![("S4", true)],
+                "cargo prints {furniture:?}"
+            );
+        }
+        let payload = "q6DHwmDdd0LrxtQ9XmYUMdiNlUvKZPWaUXjZQFT8Vzo";
+        for trap in [
+            // A payload in the target directory joins the run, which then
+            // starts outside the artifact path.
+            format!("     Running tests/x.rs ({payload}/debug/build/haven-logscan/6509ca87d18f23d4/out/cli_contract-6509ca87d18f23d4)"),
+            // ...or sits in the source path, a separate run.
+            format!("     Running {payload}.rs (target/debug/build/haven-logscan/6509ca87d18f23d4/out/cli_contract-6509ca87d18f23d4)"),
+            // ...or follows it, which takes the line out of cargo's shape.
+            format!("     Running tests/x.rs (target/debug/build/haven-logscan/6509ca87d18f23d4/out/cli_contract-6509ca87d18f23d4) {payload}"),
+        ] {
+            assert!(
+                artifact_hits(&trap).contains(&("S4", false)),
+                "a payload beside the artifact path is still S4: {trap:?} gave {:?}",
+                artifact_hits(&trap)
+            );
+        }
+        for off_shape in [
+            // Cargo names one hash twice; two different ones are not its line.
+            "     Running tests/x.rs (target/debug/build/haven-logscan/6509ca87d18f23d4/out/cli_contract-640f58794d5a65c3)",
+            // The same path outside a `Running` line is app output.
+            "haven: artifact=target/debug/build/haven-logscan/6509ca87d18f23d4/out/cli_contract-6509ca87d18f23d4",
+            // A seventeen-hex hash is not cargo's.
+            "     Running tests/x.rs (target/debug/build/haven-logscan/6509ca87d18f23d4a/out/cli_contract-6509ca87d18f23d4a)",
+        ] {
+            assert_eq!(
+                artifact_hits(off_shape),
+                vec![("S4", false)],
+                "{off_shape:?} is not cargo's artifact path"
             );
         }
     }

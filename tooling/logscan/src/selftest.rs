@@ -78,7 +78,7 @@ const FURNITURE_LOGCAT_LINES: u64 = 87;
 /// compact one, carrying the reporter's carriage returns, and the github one a
 /// hosted runner produces instead. The two `flutter test` counts are summed by
 /// the scan, because they are one sink class.
-const FURNITURE_RUST_TEST_LINES: u64 = 141;
+const FURNITURE_RUST_TEST_LINES: u64 = 145;
 const FURNITURE_FLUTTER_LINES: u64 = 117 + 56;
 /// Lines of `format.ios.log` whose OWNED variant must reach the rules: five of
 /// the rendering the lanes capture, three of the `<<Type>>` one, three of the

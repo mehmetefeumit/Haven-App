@@ -1079,11 +1079,12 @@ fn handle_line(
             {
                 // A `Compiling <crate> v<semver>` line carries the public pinned
                 // git revision of a dependency (S2) and a crate name (S6), and
-                // nothing else of ours. Those two rules only, on that shape
-                // only, in a class that says so: every other rule still fires
-                // here, and the needle pass above read every byte of the line.
+                // nothing else of ours; a `Running` line's artifact path reads
+                // as base64 (S4). Those rules only, on those shapes only, in a
+                // class that says so: every other rule still fires here, and
+                // the needle pass above read every byte of the line.
                 if ctx.spec.cargo_status == CargoStatus::Exempt
-                    && ctx.rules.is_cargo_furniture(hit.rule, segment)
+                    && (hit.cargo_artifact || ctx.rules.is_cargo_furniture(hit.rule, segment))
                 {
                     continue;
                 }
@@ -3202,6 +3203,69 @@ mod tests {
         );
     }
 
+    /// The artifact path of a `Running` line is furniture on the cargo
+    /// transcript only: in any other sink the same line is app output, and S4
+    /// reads it as it reads anything else.
+    #[test]
+    fn a_cargo_artifact_path_is_furniture_only_on_a_cargo_transcript() {
+        let dir = Dir::new("cargoartifact");
+        let manifest = manifest(&[]);
+        let body = "     Running tests/cli_contract.rs (target/debug/build/haven-logscan/6509ca87d18f23d4/out/cli_contract-6509ca87d18f23d4)\n";
+
+        let cargo = dir.write("artifact.rust-test.log", body);
+        assert!(
+            run(&manifest, "rust-test", &[cargo]).findings.is_empty(),
+            "a build hash in cargo's artifact path is not a Haven identifier"
+        );
+
+        let drive = dir.write("artifact.drive.log", body);
+        let rules: Vec<String> = run(&manifest, "drive", &[drive])
+            .findings
+            .iter()
+            .filter_map(|f| f.rule.clone())
+            .collect();
+        assert_eq!(
+            rules,
+            vec!["S4".to_owned()],
+            "the exemption belongs to the cargo transcript sink, not to the shape"
+        );
+    }
+
+    /// The artifact path is furniture for S4 alone: an npub or a 64-hex run
+    /// printed into its binary slot, inside the span, is still S3 or S1 on the
+    /// cargo transcript.
+    #[test]
+    fn a_cargo_artifact_path_hides_nothing_from_the_other_rules() {
+        let dir = Dir::new("cargoartifactrules");
+        let manifest = manifest(&[]);
+        let npub = format!(
+            "npub1{}",
+            "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+                .repeat(2)
+                .get(..58)
+                .unwrap_or_default()
+        );
+        let key = format!(
+            "a{}",
+            "0123456789abcdef".repeat(4).get(..63).unwrap_or_default()
+        );
+        for (name, binary, rule) in [("npub", npub, "S3"), ("key", key, "S1")] {
+            let line = format!(
+                "     Running tests/x.rs (target/debug/build/haven-logscan/6509ca87d18f23d4/out/{binary}-6509ca87d18f23d4)\n"
+            );
+            let path = dir.write(&format!("{name}.rust-test.log"), &line);
+            let rules: Vec<String> = run(&manifest, "rust-test", &[path])
+                .findings
+                .iter()
+                .filter_map(|f| f.rule.clone())
+                .collect();
+            assert!(
+                rules.iter().any(|fired| fired == rule),
+                "{rule} must still fire inside the artifact path; fired {rules:?}"
+            );
+        }
+    }
+
     /// The evasions a wider exemption allowed, each now a rule hit again.
     ///
     /// `--rules-only` is the whole net on a unit-test transcript: there is no
@@ -3245,6 +3309,21 @@ mod tests {
                 "buildhash",
                 "     Running unittests src/lib.rs (target/debug/deps/haven_core-78272f4b45ab4866)",
                 None,
+            ),
+            (
+                "buildlayout",
+                "     Running tests/cli_contract.rs (target/debug/build/haven-logscan/6509ca87d18f23d4/out/cli_contract-6509ca87d18f23d4)",
+                None,
+            ),
+            (
+                "buildlayoutprefix",
+                "     Running tests/x.rs (q6DHwmDdd0LrxtQ9XmYUMdiNlUvKZPWaUXjZQFT8Vzo/debug/build/haven-logscan/6509ca87d18f23d4/out/cli_contract-6509ca87d18f23d4)",
+                Some("S4"),
+            ),
+            (
+                "buildlayoutsource",
+                "     Running q6DHwmDdd0LrxtQ9XmYUMdiNlUvKZPWaUXjZQFT8Vzo.rs (target/debug/build/haven-logscan/6509ca87d18f23d4/out/cli_contract-6509ca87d18f23d4)",
+                Some("S4"),
             ),
         ] {
             let path = dir.write(&format!("{name}.rust-test.log"), &format!("{line}\n"));
