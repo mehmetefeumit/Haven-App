@@ -1,11 +1,13 @@
 //! **S28** — member bridging end to end (T-BRIDGE-9,
 //! `docs/BLUETOOTH_MESH_PLAN.md` §5.5).
 //!
-//! Three members of one circle. One is offline and on mesh: no relay takes
-//! its events, and it hears nothing of the circle from one. One is online and
-//! in its radio range. One is far away, with a relay and no mesh. The online
-//! member passes the offline member's update on to the circle's relay behind
-//! its own send, and the far member reads it from there.
+//! Three members of one circle have a part. One is offline and on mesh: no
+//! relay takes its events, and it hears nothing of the circle from one. One
+//! is online and in its radio range. One is far away, with a relay and no
+//! mesh. The online member passes the offline member's update on to the
+//! circle's relay behind its own send, and the far member reads it from
+//! there. A world of more devices puts them all in the circle
+//! (`build_extra_circle`); the others' engines are never told of it.
 //!
 //! * `bridged-to-the-far-member` — first a drive whose caller says its relay
 //!   receive had NOT completed: the relay takes the online member's own
@@ -32,6 +34,20 @@
 //! one member cannot receive in, and one a member is removed from, is not one
 //! a world-wide oracle may grade.
 //!
+//! # Something was waiting to be passed on
+//!
+//! Each send that must pass nothing on is made only after the bridger's
+//! session shows it KEEPS the update to pass on: reading it from the mesh is
+//! not that. A bridger that kept nothing — no longer caught up, or a packet
+//! no longer marked as one a member may pass on — would pass nothing on
+//! whatever its gates did, so an arm that finds nothing kept answers rc 3.
+//!
+//! # One wait may run out
+//!
+//! The arms' own bounded waits — the foreground entries, the bridger's
+//! catching up, the far member's delivery, its view of the relay — share
+//! one [`Allowance`]: after the first that runs out, none is made.
+//!
 //! # What the second arm is not
 //!
 //! With three devices the bridger is also the remover: it knows of the
@@ -53,7 +69,7 @@ use nostr::{Alphabet, Event, EventId, Filter, Kind, SingleLetterTag};
 use crate::clock::WallNow;
 use crate::nemesis::types::{ByteCap, Fault};
 use crate::oracle::vacuity::{Canaries, ExpectationFloor, Observed};
-use crate::oracle::{bounds, Finding, Invariant, ProbeToken, Reach, Recovery, Verdict};
+use crate::oracle::{Finding, Invariant, ProbeToken, Reach, Recovery, Verdict};
 use crate::rig::mesh::turn_on;
 use crate::rig::{
     DeviceTag, LogDrain, MeshPlane, PublishVerdict, RelayPlane, RigError, SimCircle, Step,
@@ -61,7 +77,7 @@ use crate::rig::{
 };
 use crate::scenarios::{
     await_condition, closing_pairs, grade_round, listen, remove_member, round, seal_probe,
-    undelivered_to, Absence, Arm, ArmOutcome, Scenario, ScenarioReport, ScenarioWorld,
+    undelivered_to, Absence, Allowance, Arm, ArmOutcome, Scenario, ScenarioReport, ScenarioWorld,
     WithheldAcks, NO_GATING_ROWS,
 };
 
@@ -69,7 +85,8 @@ const fn arm(label: &'static str) -> Arm {
     Arm {
         label,
         recovery: Recovery::Undisturbed,
-        probe_rounds: 1,
+        // The closing round, and the one wait of the arm that may run out.
+        probe_rounds: 2,
         resubscribes: false,
         absence: Absence::None,
         // A refused send is answered at once: nothing waits out a silence.
@@ -152,32 +169,40 @@ async fn bridged<T: TimelineSink, L: LogDrain>(
     let passed = stage.update(world).await?;
     let mut far = listen(world, &[stage.far])?;
     let received = stage.send(world, true).await?;
-    // Awaited only where it was passed on: nothing else can bring it.
+    // Awaited only where the bridger read it and a relay took its send:
+    // nothing else can bring it, and from there on passing it on is owed.
     let passed_on = passed.read && received.taken;
     let author = world.device(stage.offline)?.pubkey_hex();
-    let bound = bounds::round_trip(Recovery::Undisturbed);
+    let bound = stage.waits.bound();
     let delivered = passed_on
-        && undelivered_to(&mut far, &author, passed.probe, bound)
-            .await
-            .is_none();
+        && stage.waits.ended(
+            undelivered_to(&mut far, &author, passed.probe, bound)
+                .await
+                .is_none(),
+        );
 
     // 1. Mesh on, the bridger caught up, and frames crossed the link.
     canaries.check(stage.ready && stage.plane.carried() > 0);
     // 2. No relay took either of the offline member's own sends.
     canaries.check(held_back.refused && passed.refused);
-    // 3. The bridger read the first update from the mesh, and a relay took
-    //    the send that was to pass nothing on.
-    canaries.check(held_back.read && unreceived.taken);
+    // 3. The bridger read the first update from the mesh and kept it to pass
+    //    on, and a relay took the send that was to pass nothing on.
+    canaries.check(held_back.read && held_back.waiting && unreceived.taken);
     // 4. The bridger read the second update from the mesh…
     canaries.check(passed.read);
     // 5. …and a relay took the send that was to pass it on.
     canaries.check(received.taken);
 
     let mut extra = Vec::new();
-    // Byte for byte, and once a relay: its author's refused frame, and one.
+    // Byte for byte, and in one frame of the bridger's a relay.
     let altered =
         (received.sent.iter()).any(|event| event.id == passed.event.id && *event != passed.event);
-    let again = (world.relays().iter()).any(|plane| plane.ledger().published(&passed.event.id) > 2);
+    let again = (world.relays().iter()).any(|plane| {
+        let frames = plane
+            .ledger()
+            .published_by(Some(stage.bridger), &passed.event.id);
+        frames > 1
+    });
     if stage.at_a_relay(world, &held_back.event.id).await?
         || unreceived.passed_on(&held_back.event.id)
         || received.passed_on(&held_back.event.id)
@@ -226,8 +251,8 @@ async fn removed<T: TimelineSink, L: LogDrain>(
     canaries
         .check(removal == PublishVerdict::Confirmed && after.0 > before.0 && after.1 == before.1);
     // 3. No relay took the offline member's update, sealed after the
-    //    removal, and the bridger read it from the mesh.
-    canaries.check(update.refused && update.read);
+    //    removal; the bridger read it from the mesh and kept it to pass on.
+    canaries.check(update.refused && update.read && update.waiting);
     // 4. A relay took the bridger's send, its receive completed.
     canaries.check(own.taken);
     // 5. The removed member's view of the relay shows that send.
@@ -257,6 +282,7 @@ struct Stage {
     /// receive of the circle completed.
     ready: bool,
     minted: u32,
+    waits: Allowance,
 }
 
 /// One update of the offline member's.
@@ -267,6 +293,8 @@ struct Update {
     refused: bool,
     /// Whether the bridger then read it from the mesh, for the first time.
     read: bool,
+    /// Whether the bridger's session then kept it to pass on.
+    waiting: bool,
 }
 
 /// One send of the bridger's own.
@@ -293,11 +321,12 @@ impl Stage {
         let [bridger, offline, .., far] = *tags.as_slice() else {
             return Err(RigError::ShapeMismatch);
         };
-        let bound = bounds::round_trip(Recovery::Undisturbed);
+        let mut waits = Allowance::new();
         // A device brought to the foreground holds its seals until the
         // NIP-77 pass its entry is owed has ended.
         for &tag in &tags {
-            let _ = world.device(tag)?.entry_pass_ended(bound).await?;
+            let ended = world.device(tag)?.entry_pass_ended(waits.bound()).await?;
+            waits.ended(ended);
         }
         let circle = world.build_extra_circle().await?;
         for online in [bridger, far] {
@@ -305,10 +334,11 @@ impl Stage {
             world.device_mut(online)?.subscribe_circle(spec).await?;
         }
         let session = world.device(bridger)?.session()?;
-        let caught_up = await_condition(bound, || async {
+        let caught_up = await_condition(waits.bound(), || async {
             Ok(session.caught_up_for_test(circle.mls_group_id()))
         })
         .await?;
+        waits.ended(caught_up);
         let cap = ByteCap::new(REFUSES_EVERY_EVENT);
         for plane in world.relays_mut() {
             plane
@@ -329,6 +359,7 @@ impl Stage {
             far,
             ready: caught_up && lit_bridger && lit_offline,
             minted: 0,
+            waits,
         })
     }
 
@@ -365,11 +396,17 @@ impl Stage {
                         if *sender_pubkey == author && probe.carried_by(content)
                 )
             });
+        let waiting = world
+            .device(self.bridger)?
+            .session()?
+            .mesh_bridge_waiting_for_test(group)
+            .contains(&event.id);
         Ok(Update {
             event,
             probe,
             refused: !taken(&publish),
             read,
+            waiting,
         })
     }
 
@@ -444,7 +481,10 @@ impl Stage {
             SingleLetterTag::lowercase(Alphabet::H),
             self.circle.group_id_hex(),
         );
-        let bound = bounds::round_trip(Recovery::Undisturbed);
+        let bound = self.waits.bound();
+        if bound.is_zero() {
+            return Ok(Vec::new());
+        }
         // A view that could not be read shows nothing, and the canary that
         // requires the bridger's own send in it then goes unmet.
         Ok(world

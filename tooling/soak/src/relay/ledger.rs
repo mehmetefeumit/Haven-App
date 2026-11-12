@@ -217,16 +217,29 @@ impl PlaneLog {
     }
 }
 
-/// The judged projection of a client frame, and the event it carries if it
-/// is an `EVENT`. Total: a frame that is not a JSON array is kept verbatim
-/// (an empty text for a binary one), and the judge calls it unknown.
-fn project(payload: Option<&str>) -> (String, Option<(String, u16, Option<String>)>) {
+/// An event's id, kind and first `h`.
+type Indexed = (String, u16, Option<String>);
+
+/// The verbs a client frame is counted under ([`Ledger::client_frames`]), in
+/// slot order; the slot after the last holds every other frame.
+pub const CLIENT_VERBS: [&str; 6] = ["EVENT", "REQ", "CLOSE", "NEG-OPEN", "NEG-MSG", "NEG-CLOSE"];
+
+/// The judged projection of a client frame, the event it carries if it is an
+/// `EVENT`, and its slot among [`CLIENT_VERBS`]. Total: a frame that is not a
+/// JSON array is kept verbatim (an empty text for a binary one), and the
+/// judge calls it unknown.
+fn project(payload: Option<&str>) -> (String, Option<Indexed>, usize) {
+    let other = CLIENT_VERBS.len();
     let Some(text) = payload else {
-        return (String::new(), None);
+        return (String::new(), None, other);
     };
     let Ok(Value::Array(mut frame)) = serde_json::from_str::<Value>(text) else {
-        return (text.to_owned(), None);
+        return (text.to_owned(), None, other);
     };
+    let verb = frame.first().and_then(Value::as_str);
+    let slot = (CLIENT_VERBS.iter())
+        .position(|known| Some(*known) == verb)
+        .unwrap_or(other);
     let mut event = None;
     match frame.first().and_then(Value::as_str) {
         Some("EVENT") => {
@@ -254,7 +267,7 @@ fn project(payload: Option<&str>) -> (String, Option<(String, u16, Option<String
         }
         _ => {}
     }
-    (Value::Array(frame).to_string(), event)
+    (Value::Array(frame).to_string(), event, slot)
 }
 
 /// The id, kind and first `h` of an event object, when it has the first two.
@@ -330,8 +343,13 @@ struct Inner {
     /// socket never carried it" is a different fact from "the plane never
     /// wrote it".
     delivered: HashMap<EventId, HashMap<Option<DeviceTag>, usize>>,
-    /// `EVENT` frames the client sent towards the relay, per event.
-    published: HashMap<EventId, usize>,
+    /// `EVENT` frames the client sent towards the relay, per event and per
+    /// ENDPOINT, every one counted: a frame sent twice on one connection is
+    /// one entry of the plane record and two here.
+    published: HashMap<(Option<DeviceTag>, EventId), usize>,
+    /// Every client data frame, per ENDPOINT and per verb slot, every one
+    /// counted.
+    sent: HashMap<Option<DeviceTag>, [usize; CLIENT_VERBS.len() + 1]>,
     /// Events this plane forged onto a subscription, in injection order.
     injected: Vec<EventId>,
     /// `REQ`s the client sent, per subscription. Counted where they ARRIVE,
@@ -471,10 +489,35 @@ impl Ledger {
         })
     }
 
-    /// How many `EVENT` frames naming `event_id` the client sent.
+    /// How many `EVENT` frames naming `event_id` the client sent, over every
+    /// endpoint.
     #[must_use]
     pub fn published(&self, event_id: &EventId) -> usize {
-        self.with(|inner| inner.published.get(event_id).copied().unwrap_or_default())
+        self.with(|inner| {
+            (inner.published.iter())
+                .filter(|((_, id), _)| id == event_id)
+                .map(|(_, count)| count)
+                .sum()
+        })
+    }
+
+    /// How many `EVENT` frames naming `event_id` crossed `device`'s own
+    /// endpoint (`None`: the canonical one), a resend on one connection
+    /// included.
+    #[must_use]
+    pub fn published_by(&self, device: Option<DeviceTag>, event_id: &EventId) -> usize {
+        self.with(|inner| {
+            let sent = inner.published.get(&(device, *event_id));
+            sent.copied().unwrap_or_default()
+        })
+    }
+
+    /// How many client data frames crossed `device`'s own endpoint (`None`:
+    /// the canonical one) so far, per slot of [`CLIENT_VERBS`] and, last,
+    /// every other frame. Every frame is counted, a repeated one included.
+    #[must_use]
+    pub fn client_frames(&self, device: Option<DeviceTag>) -> [usize; CLIENT_VERBS.len() + 1] {
+        self.with(|inner| inner.sent.get(&device).copied().unwrap_or_default())
     }
 
     /// Every event this plane INJECTED, in injection order.
@@ -496,7 +539,11 @@ impl Ledger {
     /// report through [`Self::tag_of`].
     #[must_use]
     pub fn published_ids(&self) -> Vec<EventId> {
-        self.with(|inner| inner.published.keys().copied().collect())
+        self.with(|inner| {
+            let ids: std::collections::BTreeSet<EventId> =
+                inner.published.keys().map(|(_, id)| *id).collect();
+            ids.into_iter().collect()
+        })
     }
 
     /// How many `REQ`s the client sent for `subscription_id`.
@@ -662,8 +709,11 @@ impl Ledger {
     /// connection `conn`, before anything parses it: `payload` is its text,
     /// `None` for a binary frame.
     pub(crate) fn note_plane_frame(&self, endpoint: EndpointId, conn: u64, payload: Option<&str>) {
-        let (text, event) = project(payload);
-        self.with(|inner| inner.planes.note(endpoint, conn, text, event));
+        let (text, event, slot) = project(payload);
+        self.with(|inner| {
+            inner.sent.entry(endpoint.device()).or_default()[slot] += 1;
+            inner.planes.note(endpoint, conn, text, event);
+        });
     }
 
     /// Everything the plane record holds, first arrival first.
@@ -713,10 +763,10 @@ impl Ledger {
         });
     }
 
-    pub(crate) fn note_published(&self, event_id: EventId) {
+    pub(crate) fn note_published(&self, device: Option<DeviceTag>, event_id: EventId) {
         self.with(|inner| {
             inner.tag(event_id);
-            *inner.published.entry(event_id).or_default() += 1;
+            *inner.published.entry((device, event_id)).or_default() += 1;
         });
     }
 
@@ -914,9 +964,35 @@ mod tests {
     }
 
     #[test]
+    fn a_frame_sent_twice_on_one_connection_is_counted_twice() {
+        let ledger = Ledger::new();
+        let own = EndpointId::Own(DeviceTag::new(1));
+        let event = r#"["EVENT",{"id":"aa","kind":445,"tags":[]}]"#;
+        for _ in 0..2 {
+            ledger.note_plane_frame(own, 7, Some(event));
+            ledger.note_published(own.device(), an_event_id(1));
+        }
+        ledger.note_plane_frame(own, 7, Some(r#"["REQ","s",{"kinds":[445]}]"#));
+        ledger.note_plane_frame(own, 7, Some(r#"["COUNT","c",{}]"#));
+        ledger.note_plane_frame(EndpointId::Canonical, 8, Some(r#"["CLOSE","s"]"#));
+
+        assert_eq!(
+            ledger.plane_record().frames.len(),
+            4,
+            "premise: the plane record keeps a repeated frame once"
+        );
+        assert_eq!(ledger.published_by(own.device(), &an_event_id(1)), 2);
+        assert_eq!(ledger.published_by(None, &an_event_id(1)), 0);
+        assert_eq!(ledger.published(&an_event_id(1)), 2);
+        assert_eq!(ledger.client_frames(own.device()), [2, 1, 0, 0, 0, 0, 1]);
+        assert_eq!(ledger.client_frames(None), [0, 0, 1, 0, 0, 0, 0]);
+        assert_eq!(ledger.client_frames(Some(DeviceTag::new(9))), [0; 7]);
+    }
+
+    #[test]
     fn delivery_and_publication_are_counted_per_direction() {
         let ledger = Ledger::new();
-        ledger.note_published(an_event_id(1));
+        ledger.note_published(None, an_event_id(1));
         ledger.note_delivered(None, an_event_id(1));
         ledger.note_delivered(None, an_event_id(1));
         assert_eq!(ledger.published(&an_event_id(1)), 1);
@@ -972,7 +1048,7 @@ mod tests {
     #[test]
     fn a_handle_is_minted_once_per_event_in_observation_order() {
         let ledger = Ledger::new();
-        ledger.note_published(an_event_id(7));
+        ledger.note_published(None, an_event_id(7));
         ledger.note_delivered(None, an_event_id(8));
         ledger.note_delivered(Some(DeviceTag::new(1)), an_event_id(7));
         assert_eq!(ledger.tag_of(&an_event_id(7)), Some(EventTag::new(0)));
@@ -1044,7 +1120,7 @@ mod tests {
         let ledger = Ledger::new();
         ledger.note_ok(None, an_event_id(1), true, "");
         ledger.note_delivered(Some(DeviceTag::new(0)), an_event_id(1));
-        ledger.note_published(an_event_id(1));
+        ledger.note_published(None, an_event_id(1));
         ledger.note_req(SubscriptionId::new("needle-subscription"), Vec::new());
         ledger.note_closed("rate-limited: needle-text".to_string());
         ledger.note_notice("npub1needleneedle".to_string());

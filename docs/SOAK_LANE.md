@@ -575,25 +575,33 @@ hold.
 ### S27: one script, the mesh off and then on (T-INDEP-1a)
 
 S27's `mesh-off-then-on` grades the Bluetooth mesh's independence promise
-(`docs/BLUETOOTH_MESH_PLAN.md` §9.3): turning the mesh on changes nothing a
-relay sees of a device. One script runs twice in one world — the mesh off,
-then on with every device in radio range of every other — and the two passes
-are compared:
+(`docs/BLUETOOTH_MESH_PLAN.md` §9.3) as far as a relay's own record can show
+it: with the mesh on, a device sends a relay the frames it sends with it off.
+One script runs twice in one world — the mesh off, then on with every device
+in radio range of every other — and the two passes are compared:
 
 * per device, the multiset of the `EVENT` frames it sent a relay, each as
   (plane, kind, tag names, `expiration − created_at`, what the relay answered
-  that device's endpoint), read off the planes' own record;
-* the answer of every seal and every send, in order;
-* a mesh drive (`Publishing::mesh_drive`) asks its transport to send nothing
-  and leaves every circle's cursor and backfill floor where they were;
-* a device reads from the mesh only an update whose send-time check passed.
+  that device's endpoint, how many times it was sent — a frame repeated on
+  one connection is one entry of the plane record and two in this count);
+* per endpoint of every plane, the canonical endpoint included, how many
+  `REQ`, `CLOSE`, `NEG-OPEN`, `NEG-MSG`, `NEG-CLOSE` and other frames it
+  carried — and, on the canonical endpoint, how many `EVENT`s;
+* the answer of every seal and every send, in order.
 
-Any difference is `relay-path-moved`, at rc 1. O7 grades every frame of both
-passes as it does for every arm. Two things differ by design and are counted
-apart: the seal made for the mesh alone (`Publishing::seal_for_mesh`: nothing
-is sealed with the mesh off, no relay is handed it with it on), and the one
-update a device passes on to the relay — any other frame carrying an event
-its sender did not seal is a finding.
+And inside the mesh-on pass: a mesh drive (`Publishing::mesh_drive`) asks its
+transport to send nothing and leaves every circle's cursor and backfill floor
+where they were, and a device reads from the mesh only an update whose
+send-time check passed.
+
+Any difference is `relay-path-moved`, at rc 1, naming the device whose
+endpoint it was or the canonical one. O7 grades every frame of both passes
+as it does for every arm. Two things differ by design and are counted apart:
+the seal made for the mesh alone (`Publishing::seal_for_mesh`: nothing is
+sealed with the mesh off, no relay is handed it with it on), and the one
+update a device passes on to the relay, in one frame a relay — any other
+frame carrying an event its sender did not seal, and a second frame of that
+one, is a finding.
 
 The script: every device seals and sends, each send read by every peer's live
 plane before the mesh carries anything, so the mesh's copy is a duplicate and
@@ -604,24 +612,36 @@ seals for the mesh alone; a device sends a location a whole life after
 sealing it — expired, not sent, and never handed to the mesh; one more send
 passes nothing on.
 
-Its five canaries are the mesh's own doing: frames crossed links, an update
-was read from the mesh before any relay had it, that update was passed on, a
-location was sealed for the mesh alone, and the refusing endpoint refused in
-both passes. Its control puts no device in range of another: rc 3.
+**The windows.** The first mark is taken once every NIP-77 session a device
+opened at its foreground entry is closed on the wire: the entry pass ends in
+the engine before its `NEG-CLOSE` has left, and that frame would otherwise
+fall in the mesh-off pass alone. The two passes share one instant, so every
+frame after the first mark is in exactly one of them, and the last mark is
+taken behind the closing round's settle, so what a device still had to send
+when the script ended is counted.
 
-**What it is not.** Not two runs of a profile: an arm has one world, so the
-passes share its circles, relays and sessions, the mesh-off pass first. The
-comparison is by shape and never by value, so a relay-visible change that
-keeps every frame's shape and answer — a different `created_at`, say — is not
-seen here; `haven-core`'s T-INDEP-1b and the wire lanes hold those.
+Its six canaries: frames crossed links; a peer read the refused update from
+the mesh; that update was passed on; a location was sealed for the mesh
+alone; the refusing endpoint refused in both passes; and no wait of the
+script ran out. Its control puts no device in range of another: rc 3.
+
+**What it does not compare.** The order of a device's frames and when each
+was sent; a connection that is opened and carries no frame; and anything
+about a frame but its shape — another `created_at`, another routing id or
+another filter under the same verb compare equal. `haven-core`'s T-INDEP-1b
+and the wire lanes hold what a frame says. It is not two runs of a profile
+either: an arm has one world, so the passes share its circles, relays and
+sessions, the mesh-off pass first.
 
 ### S28: member bridging end to end (T-BRIDGE-9)
 
 S28 grades the bridge (plan §5.5) over real relays, in a circle built outside
-the world's table. Three members: one offline and on mesh — its own endpoint
-refuses its events and its engine is never told of the circle, so no relay
-takes anything from it or tells it anything; one online and in its radio
-range; one far away, with a relay and no mesh.
+the world's table. Three members have a part: one offline and on mesh — its
+own endpoint refuses its events and its engine is never told of the circle,
+so no relay takes anything from it or tells it anything; one online and in
+its radio range; one far away, with a relay and no mesh. In the nightly's and
+the weekly's worlds the circle has every device of the world in it, four or
+five; the others' engines are never told of it.
 
 * `bridged-to-the-far-member`. First the online member sends in a drive whose
   caller says its relay receive had NOT completed (`received = false`): the
@@ -642,9 +662,12 @@ range; one far away, with a relay and no mesh.
 
 Each arm's five canaries are the premises of what it grades: mesh on, the
 bridger caught up and frames across the link; the offline member's own sends
-refused; the update read from the mesh by the bridger; the bridger's own send
-taken by a relay; and, for the removal, that it stands on the bridger while
-the offline member's epoch has not moved, and that the removed member's view
+refused; the update read from the mesh by the bridger AND kept by its session
+to be passed on (`mesh_bridge_waiting_for_test`) before each send that must
+pass nothing on — a bridger that kept nothing would pass nothing on whatever
+its gates did, so that run is rc 3, never clean; the bridger's own send taken
+by a relay; and, for the removal, that it stands on the bridger while the
+offline member's epoch has not moved, and that the removed member's view
 reaches the relay. The control puts the two mesh members out of range: rc 3.
 
 **What it does not soak.** With three devices the bridger is also the
@@ -654,10 +677,30 @@ drive, and `haven-core`'s T-BRIDGE-10. The bridge's 218-second window, its
 72-second spacing per member and its per-drive bounds are wall-clock terms
 the arms never reach (`mesh_bridge_e2e` holds them).
 
-Both scenarios seed every mesh engine from the run's seed, and neither's
-relay frames depend on it: `tests/oracles.rs` runs each arm twice under one
-seed and once under another and requires the same verdict and the same
-digest of every `EVENT` frame sent.
+### What the three mesh arms cost, and what a seed does
+
+**One wait may run out.** Each arm awaits its foreground entries and every
+delivery it depends on, each wait bounded by a round trip. The first that
+runs out is recorded — a delivery as `probe-not-delivered` — and the arm
+waits for nothing after it (`scenarios::Allowance`); S27 then compares
+nothing, since its premise is gone. So each arm is priced at the closing
+round and one more round trip (`probe_rounds: 2`, 39.75 s), and
+`tests/oracles.rs` holds the price: in a world whose relays deliver no
+location to anybody, each arm reports the undelivered location inside its
+derived bound. A wait that ends in time is not priced, for these arms as for
+every other.
+
+**Every shape a lane runs.** `tests/oracles.rs` runs the three arms in the
+nightly's and the weekly's worlds as well as the PR's.
+
+**Seeds.** Every mesh engine's generator is seeded from the run's seed, and
+`rig/mesh.rs`'s own test shows one seed carry the same frames in the same
+order over fixed packets. Inside a world that is not so: each packet wraps a
+fresh event under a nonce from the OS generator, and an offer's lifetime is
+read from the wall clock. What `tests/oracles.rs` proves of a world is less
+and other: each arm, run twice under one seed and once under another, gives
+the same verdict and the same digest of every `EVENT` frame sent — nothing a
+mesh engine draws reaches a relay.
 
 ### S05's receive-plane kill: swept since MDK v0.10.4 (C9)
 
@@ -809,12 +852,12 @@ and `relay_health()` reports every expected REQ live. It is swept, and it runs
 in the NIGHTLY as the burial arm's control — the same world and every step but
 the cap, so a night that holds it says the live plane serves a commit under
 forgeries at all, which is the premise the burial arm rests on. The priced
-nightly plus its margin is 6 271.25 s of 6 300 (`tests/budget.rs` is the gate;
+nightly plus its margin is 6 310.25 s of 6 360 (`tests/budget.rs` is the gate;
 the budget was raised from 4 800 when S16 `processed-ids-growth` joined, from
 4 860 when R4 returned the burial to the nightly beside the recorded arm and
 S20's two pile-ups, from 5 100 when S26 joined, and from 6 240 when S27 and
 S28 joined, with the deadline, the step cap and the job cap that move with
-it: 115 m, 118, 156; W9p's re-pricing onto
+it: 116 m, 118, 156; W9p's re-pricing onto
 the driver's own waits lowered the run and left the budget, which moves only
 when the run outgrows it).
 Measured 2026-10-26 in `cargo test`, ten runs each, all green: the burial
@@ -1366,7 +1409,7 @@ measures **about a hundred seconds** (104 to 119 s over four runs, 2026-11-11:
 seven worlds built and torn down, the three mesh arms themselves 0 s, 4 s and
 5 s); the budget above is **1 440**. The two are
 not in tension, because a derived bound is only ever PAID when something fails
-to happen. The arms cost ~341 s of bound and the background schedule ~1 016 s —
+to happen. The arms cost ~380 s of bound and the background schedule ~1 016 s —
 five graded probe rounds at the pool's own 123-second reconnect ladder plus the
 teardown sweep — and every one of those seconds is a ceiling on a wait that
 normally returns in milliseconds. Pricing the phase at anything less would be

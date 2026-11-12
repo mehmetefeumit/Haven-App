@@ -24,7 +24,7 @@ mod proxy;
 pub use forge::{mint, mint_dated, past_expiration, Forgery};
 pub use ledger::{
     plane_instant, EndpointId, Ledger, NegFrame, PlaneFrame, PlaneHighWater, PlaneRecord,
-    PLANE_IDS_CAP, PLANE_SHAPES_CAP,
+    CLIENT_VERBS, PLANE_IDS_CAP, PLANE_SHAPES_CAP,
 };
 pub use policies::{oversize_message, NativeClosed, OVERSIZE_PREFIX};
 pub use proxy::NEG_REFUSAL;

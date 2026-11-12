@@ -3639,8 +3639,10 @@ async fn a_relay_refusing_negentropy_forwards_nothing_and_answers_unknown_cmd() 
         ledger.neg_total(NegFrame::Open) == 0 && ledger.neg_total(NegFrame::RelayMessage) == 0,
         "nothing of the session reached the relay"
     );
+    // Ledgered after it is written: the pool can have read it first.
     assert!(
-        ledger.notices() == vec![NEG_REFUSAL.to_string()],
+        reaching(WIRE_BOUND, 1, || ledger.notices().len()).await == 1
+            && ledger.notices() == vec![NEG_REFUSAL.to_string()],
         "the answer is strfry's text with NIP-77 off"
     );
 

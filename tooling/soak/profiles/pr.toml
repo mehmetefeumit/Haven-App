@@ -13,12 +13,12 @@
 # driver walks before them, both priced at the product's own worst-case
 # constants by `tests/budget.rs`. It is a CEILING, not an expectation: a healthy
 # run measures about a hundred seconds, because a bound is only paid when
-# something fails to happen. The six scenarios cost 341.25 s of bound — the
-# two mesh scenarios' three arms 26.75 s each, undisturbed and one probe
-# round — and the background schedule about 1 016 s (one graded round per
-# scheduled probe at the pool's reconnect ladder, plus the teardown sweep), so
-# 1 440 s is the smallest whole minute that holds the priced run, 1 357 s, plus
-# the margin.
+# something fails to happen. The six scenarios cost 380.25 s of bound — the
+# two mesh scenarios' three arms 39.75 s each, undisturbed, the closing round
+# and the one wait of theirs that may run out — and the background schedule
+# about 1 016 s (one graded round per scheduled probe at the pool's reconnect
+# ladder, plus the teardown sweep), so 1 440 s is the smallest whole minute
+# that holds the priced run, 1 396 s, plus the margin.
 #
 # `deadline_secs` is the timeout the lane arms above it — the budget plus twice
 # the margin, as every profile here does — so a hung run is killed with time

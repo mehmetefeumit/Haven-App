@@ -405,8 +405,9 @@ pub enum Finding {
     /// cursor, a relay call from a mesh drive, or an update the mesh carried
     /// that no send-time check had passed.
     RelayPathMoved {
-        /// Whose relay path.
-        device: DeviceTag,
+        /// Whose relay path; `None` for a frame on a plane's canonical
+        /// endpoint, which no device's engine dials.
+        device: Option<DeviceTag>,
     },
     /// A device passed a fellow member's update on to a relay past one of the
     /// bridge's gates: in a drive whose relay receive had not completed, or
@@ -623,8 +624,8 @@ impl Finding {
                 .collect(),
             Self::CommitPending { device }
             | Self::BacklogUnsettled { device }
-            | Self::ResubscribeUnbounded { device }
-            | Self::RelayPathMoved { device } => vec![device.to_string()],
+            | Self::ResubscribeUnbounded { device } => vec![device.to_string()],
+            Self::RelayPathMoved { device } => device.iter().map(ToString::to_string).collect(),
             Self::RosterDiverged { circle }
             | Self::EpochDiverged { circle }
             | Self::BranchDiverged { circle }
@@ -769,7 +770,8 @@ impl fmt::Display for Finding {
                 write!(f, "a health tick re-subscribed for a relay that was down ({device})")
             }
             Self::RelayPathMoved { device } => {
-                write!(f, "the relay path differs with the mesh on ({device})")
+                let endpoint = device.map_or_else(|| "canonical".to_owned(), |d| d.to_string());
+                write!(f, "the relay path differs with the mesh on ({endpoint})")
             }
             Self::BridgedPastItsGate { device, circle } => {
                 write!(f, "an update was passed on to a relay past a gate of the bridge ({device}, {circle})")
@@ -2182,7 +2184,9 @@ mod tests {
             Finding::SilentRelayStalled { device, circle },
             Finding::HeldEventLost { device, circle },
             Finding::ResubscribeUnbounded { device },
-            Finding::RelayPathMoved { device },
+            Finding::RelayPathMoved {
+                device: Some(device),
+            },
             Finding::BridgedPastItsGate { device, circle },
             Finding::SendRefused {
                 device: DeviceTag::new(0),

@@ -147,7 +147,9 @@ fn every_finding() -> Vec<Finding> {
         Finding::SilentRelayStalled { device, circle },
         Finding::HeldEventLost { device, circle },
         Finding::ResubscribeUnbounded { device },
-        Finding::RelayPathMoved { device },
+        Finding::RelayPathMoved {
+            device: Some(device),
+        },
         Finding::BridgedPastItsGate { device, circle },
         Finding::SendRefused {
             device,

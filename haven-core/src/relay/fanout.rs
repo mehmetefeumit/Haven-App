@@ -6034,7 +6034,8 @@ impl<T: FanoutSend> FanoutSend for RelayMappedFanout<T> {
         let mut sent = self.inner.publish_location(event, &routed).await?;
         // Answered under each target's frozen spelling, as a record's answers
         // are: what reads a result by relay knows the circle's relays, never
-        // the address a rig dialled.
+        // the address a rig dialled. Two targets routed to one address are
+        // both answered under the first; no rig routes two to one.
         let dialled: Vec<_> = (routed.iter())
             .map(|relay| nostr::RelayUrl::parse(relay).ok())
             .collect();

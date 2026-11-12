@@ -1263,6 +1263,45 @@ pub(crate) async fn seal_probe<T: TimelineSink, L: LogDrain>(
     })
 }
 
+/// An arm's allowance of bounded waits: any number that end in time, and one
+/// that runs out.
+///
+/// After the one that ran out the arm waits for nothing more, so whatever is
+/// broken its own waits cost it one round trip — the one its
+/// [`Arm::probe_rounds`] prices beside the closing round's. A wait that ends
+/// in time is not priced, for this arm as for every other: a bound is paid
+/// only when something fails to happen.
+pub(crate) struct Allowance {
+    spent: bool,
+}
+
+impl Allowance {
+    pub(crate) const fn new() -> Self {
+        Self { spent: false }
+    }
+
+    /// What the next wait may take: a round trip, and nothing once a wait
+    /// has run out.
+    pub(crate) fn bound(&self) -> Duration {
+        if self.spent {
+            Duration::ZERO
+        } else {
+            bounds::round_trip(Recovery::Undisturbed)
+        }
+    }
+
+    /// Records whether a wait ended in time, and answers the same.
+    pub(crate) const fn ended(&mut self, in_time: bool) -> bool {
+        self.spent |= !in_time;
+        in_time
+    }
+
+    /// Whether every wait so far ended in time.
+    pub(crate) const fn all_ended(&self) -> bool {
+        !self.spent
+    }
+}
+
 /// A listener on each of `peers`' engine buses, opened before a send so that
 /// nothing the send delivers is missed.
 ///

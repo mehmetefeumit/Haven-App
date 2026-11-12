@@ -1845,7 +1845,11 @@ back an idle relay manager.
   No shipped code changed.
   **The plane.** One `MeshEngine` a device — the product's, at its default
   parameters — each generator seeded from the run's seed and the device's
-  ordinal. A scenario says which devices are in radio range; a frame an
+  ordinal: over the same packets one seed carries the same frames in the
+  same order (the plane's own test), but a world's packets are never the same
+  twice — fresh events, nonces from the OS generator, lifetimes read from the
+  wall clock — so a seed does not reproduce what a world's mesh carried. A
+  scenario says which devices are in radio range; a frame an
   engine hands its radio reaches the peer whole and at once; the engines'
   clock is a number the scenario steps, so an emission slot is reached and
   never waited for. Before each engine call the plane applies what the
@@ -1858,24 +1862,33 @@ back an idle relay manager.
   the mesh off, then on with every device in range of every other. Between
   the passes, per device, the multiset of the `EVENT` frames it sent a relay
   — (plane, kind, tag names, `expiration − created_at`, what the relay
-  answered that device's endpoint) — is the same, and so is the answer of
-  every seal and send, in order; a mesh drive asks its transport to send
+  answered that device's endpoint, how many times it was sent) — is the
+  same; so is, per endpoint of every plane and the canonical one included,
+  the number of `REQ`, `CLOSE`, `NEG-OPEN`, `NEG-MSG`, `NEG-CLOSE` and other
+  frames; and so is the answer of every seal and send, in order. The first
+  mark waits for every NIP-77 session a foreground entry opened to be closed
+  on the wire, the passes share one instant, and the last mark is behind the
+  closing settle. A mesh drive asks its transport to send
   nothing and moves no cursor or backfill floor; a device reads from the mesh
   only an update whose send-time check passed; and the rig's plane oracle
   (O7) admits every frame of both passes. Counted apart, as the plan has it:
   the seal for the mesh alone (none with the mesh off, no relay frame with it
-  on) and the one update passed on to the relay — any other frame carrying an
-  event its sender did not seal is a finding. The script: a healthy round in
+  on) and the one update passed on to the relay, in one frame a relay — any
+  other frame carrying an event its sender did not seal, and a second frame
+  of that one, is a finding. The script: a healthy round in
   which every peer reads each send from the relay before the mesh carries
   it; a device whose own endpoint refuses its events, whose update its peers
   then read from the mesh alone and the next sender passes on; a seal for
   the mesh alone; a send made a whole life after its seal (expired, and never
-  handed to the mesh); one more send. Its floor: frames crossed links, an
-  update was read from the mesh, it was passed on, a location was sealed for
-  the mesh alone, and the refusal fell in both passes.
-  **S28, T-BRIDGE-9**, in a circle of three: one offline and on mesh (its
-  endpoint refuses its events, its engine is never told of the circle), one
-  online and in its range, one far away with a relay and no mesh.
+  handed to the mesh); one more send. Its floor: frames crossed links, a
+  peer read the refused update from the mesh, it was passed on, a location
+  was sealed for the mesh alone, the refusal fell in both passes, and no wait
+  of the script ran out.
+  **S28, T-BRIDGE-9**, three members of one circle having a part (a wider
+  world's other devices are in the circle and never told of it): one offline
+  and on mesh (its endpoint refuses its events, its engine is never told of
+  the circle), one online and in its range, one far away with a relay and no
+  mesh.
   `bridged-to-the-far-member`: a drive whose caller says `received = false`
   passes nothing on, then or later; a drive whose receive completed passes
   the next update on once a relay, byte for byte, and the far member's live
@@ -1885,22 +1898,31 @@ back an idle relay manager.
   update from the mesh and sends with its receive completed; nothing of the
   offline member's is at the relay — its store, the bridger's transport, or
   the removed member's own view of it, which does show the bridger's own
-  send. Each arm's floor is the premises of what it grades.
+  send. Each arm's floor is the premises of what it grades, among them that
+  the bridger's session KEPT the update to pass on before each send that
+  must pass nothing on: a run with nothing kept is rc 3, never clean.
   **Lanes.** Both run in the `pr` soak profile, and so in the nightly and
   the weekly: the PR run budget rose from 1 320 s to 1 440 s (deadline
-  25 min) and the nightly's from 6 240 s to 6 300 s (115 min). Each has a
-  control that puts the mesh devices out of range and must answer rc 3, and
-  `tests/oracles.rs` runs each arm twice under one seed and once under
-  another, requiring the same verdict and the same digest of every `EVENT`
+  25 min) and the nightly's from 6 240 s to 6 360 s (116 min). Each arm is
+  priced at its closing round and one more round trip: the first of its
+  bounded waits that runs out is the finding and it waits for nothing after,
+  and `tests/oracles.rs` holds that price in a world whose relays deliver no
+  location. Each scenario has a control that puts the mesh devices out of
+  range and must answer rc 3; the arms are run in the nightly's and the
+  weekly's worlds too; and each arm, run twice under one seed and once under
+  another, must give the same verdict and the same digest of every `EVENT`
   frame sent.
-  **Mutation pass, against the product**, each restored after its run:
+  **Mutation pass, against the product**, each made in a copy of the tree:
 
   | Mutation | Red |
   |---|---|
   | `publish_location` hands off before its send-time checks | S27 `relay-path-moved` |
   | with mesh on, `publish_location` makes no relay send | S27 `relay-path-moved` (S28 rc 3) |
+  | with mesh on, `publish_location` sends its event twice | S27 `relay-path-moved` |
   | `bridge_locations` takes with `received` forced true | S28 first arm, `bridged-past-its-gate` |
-  | `mesh_bridge_check` without `location_may_be_sent` | S28 second arm, `bridged-past-its-gate` |
+  | `bridge_locations` sends each update it passes on twice | S27 `relay-path-moved`; S28 first arm, `bridged-past-its-gate` |
+  | `mesh_bridge_check` without `location_may_be_sent` | S28 second arm, `bridged-past-its-gate`, its floor met: the update was kept |
+  | `mesh_taken_in` keeps nothing to pass on | rc 3 in S27 and S28's second arm; S28's first arm red, its update never delivered |
   | `mesh_drive` sends each event it took in to the circle's relays | S27 `relay-path-moved`, and both S28 arms |
   | `mesh_drive` advances the circle's sync cursor | S27 `relay-path-moved` |
 
@@ -1928,10 +1950,12 @@ back an idle relay manager.
   drive and by T-BRIDGE-10. The bridge's 218 s window, its 72 s spacing and
   its bounds are wall-clock terms the arms do not reach.
 
-Residuals of M2g-2b. The comparison of S27 is by shape: a relay-visible
-change that keeps every frame's shape and answer is not seen there. The
-relay record is kept per connection, so the same frame sent twice on one
-connection is one frame. `CLAUDE.md`'s CI section still calls the PR soak
+Residuals of M2g-2b. S27 compares what a relay's record can show of a
+device, by shape and by count: not the order of its frames, not when each
+was sent, not a connection opened that carries no frame, and nothing a
+frame says beyond its shape — another `created_at`, routing id or filter
+under the same verb compares equal. A wait that ends in time is not priced,
+for these arms as for every other. `CLAUDE.md`'s CI section still calls the PR soak
 profile "four durability scenarios"; it is six, and the file is the owner's.
 
 - **M3c**, the Dart seam to the radio, the turn-on, turn-off and keep-on

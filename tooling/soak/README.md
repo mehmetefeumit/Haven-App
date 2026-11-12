@@ -119,8 +119,11 @@ call the plane applies what the device's session left in its hand-off, by the
 app's own rule (an offer lives as long as its event has left, at most a
 location's life; an expired one empties the slot). The engines' clock is a
 number the scenario steps — an emission slot is reached, never waited for —
-and every engine's generator is seeded from the run's seed, so one seed
-carries the same frames in the same order. S27 and S28 are its two users.
+and every engine's generator is seeded from the run's seed, so over the same
+packets one seed carries the same frames in the same order (the plane's own
+test). A world's packets are never the same twice — fresh events, nonces
+from the OS generator — so a seed does not reproduce what a world's mesh
+carried. S27 and S28 are its two users.
 
 ## Two clocks, one direction
 

@@ -1,22 +1,35 @@
-//! **S27** — the Bluetooth mesh never changes the relay path (T-INDEP-1a,
-//! `docs/BLUETOOTH_MESH_PLAN.md` §9.3).
+//! **S27** — with the Bluetooth mesh on, a device sends a relay what it sends
+//! with it off (T-INDEP-1a, `docs/BLUETOOTH_MESH_PLAN.md` §9.3).
 //!
 //! One script, run twice in one world: with the mesh off, then with it on
-//! and every device in radio range of every other. The promise is a
-//! difference between the two passes that must be empty:
+//! and every device in radio range of every other. What is compared between
+//! the two passes, and must not differ:
 //!
 //! * per device, the multiset of the `EVENT` frames it sent a relay — each as
-//!   (plane, kind, tag names, `expiration − created_at`, the relay's answer);
-//! * the answer of every seal and every send, in order;
-//! * a mesh drive asks its transport to send nothing and moves no cursor;
-//! * a device reads from the mesh only what a send-time check passed;
-//! * and O7, as for every arm, admits every frame of both passes.
+//!   (plane, kind, tag names, `expiration − created_at`, the answer its own
+//!   endpoint was given, how many times it was sent);
+//! * per endpoint of every plane, the canonical one included, how many
+//!   `REQ`, `CLOSE`, `NEG-OPEN`, `NEG-MSG`, `NEG-CLOSE` and other frames it
+//!   carried — and, on the canonical one, how many `EVENT`s;
+//! * the answer of every seal and every send, in order.
+//!
+//! And within the mesh-on pass: a mesh drive asks its transport to send
+//! nothing and moves no cursor or backfill floor; a device reads from the
+//! mesh only what a send-time check passed; and O7, as for every arm, admits
+//! every frame of both passes.
 //!
 //! Two things differ by design, and are counted apart rather than compared:
 //! the seal made for the mesh alone — nothing is sealed with the mesh off,
 //! and no relay is handed it with it on — and the one update a device passes
-//! on to the relay (member bridging). Any other frame carrying an event its
-//! sender did not seal is a finding.
+//! on to the relay (member bridging), once a relay. Any other frame carrying
+//! an event its sender did not seal is a finding.
+//!
+//! # What is not compared
+//!
+//! The order of a device's frames and when each was sent; a connection that
+//! is opened and carries no frame; and anything about a frame but its shape —
+//! another `created_at`, another routing id, another filter under the same
+//! verb all compare equal.
 //!
 //! # The script
 //!
@@ -35,8 +48,20 @@
 //! # One world, two passes
 //!
 //! An arm has one world, so the passes share its circles, relays and
-//! sessions rather than being two runs of a profile. What is compared names
-//! no value of either pass.
+//! sessions rather than being two runs of a profile. The first mark waits
+//! for the wire to be still — a foreground entry's NIP-77 pass ends in the
+//! engine before its closing frame has left. The passes share an instant:
+//! every frame after the first mark is in exactly one of them, and the last
+//! mark is taken behind the closing round's settle, so a frame a device still
+//! had to send is counted.
+//!
+//! # One wait may run out
+//!
+//! Every send a relay took is awaited at every peer. The first wait that
+//! runs out is the finding, and the arm waits for nothing after it
+//! ([`Allowance`]): a relay path that stopped delivering costs one round
+//! trip, and the passes are then not compared, since nothing was read from
+//! the relay before the mesh carried it.
 //!
 //! # The control
 //!
@@ -57,22 +82,24 @@ use sha2::{Digest, Sha256};
 use crate::clock::WallNow;
 use crate::nemesis::types::{ByteCap, Fault};
 use crate::oracle::vacuity::{Canaries, ExpectationFloor, Observed};
-use crate::oracle::{bounds, Finding, Invariant, ProbeToken, Reach, Recovery, Verdict};
-use crate::relay::plane_instant;
+use crate::oracle::{Finding, Invariant, ProbeToken, Reach, Recovery, Verdict};
+use crate::relay::{plane_instant, CLIENT_VERBS};
 use crate::rig::mesh::turn_on;
 use crate::rig::{
     DeviceTag, LogDrain, MeshPlane, PacingClock, RelayPlane, RelayTag, RigError, Step, TimelineSink,
 };
 use crate::scenarios::{
-    closing_pairs, grade_round, listen, round, seal_probe, undelivered_to, Absence, Arm,
-    ArmOutcome, Scenario, ScenarioReport, ScenarioWorld, WithheldAcks, NO_GATING_ROWS,
+    await_condition, closing_pairs, grade_round, listen, round, seal_probe, undelivered_to,
+    Absence, Allowance, Arm, ArmOutcome, Scenario, ScenarioReport, ScenarioWorld, WithheldAcks,
+    NO_GATING_ROWS,
 };
 
 /// The arm this scenario offers.
 pub const ARMS: [Arm; 1] = [Arm {
     label: "mesh-off-then-on",
     recovery: Recovery::Undisturbed,
-    probe_rounds: 1,
+    // The closing round, and the one wait of the script that may run out.
+    probe_rounds: 2,
     resubscribes: false,
     absence: Absence::None,
     // A refused send is answered at once: nothing waits out a silence.
@@ -82,7 +109,7 @@ pub const ARMS: [Arm; 1] = [Arm {
         faults_applied: 2,
         epochs_crossed: 0,
         deliveries_observed: 1,
-        canaries_caught: 5,
+        canaries_caught: 6,
     },
 }];
 
@@ -140,17 +167,23 @@ async fn independence<T: TimelineSink, L: LogDrain>(
         other,
         tags,
     };
+    let mut waits = Allowance::new();
     // A device brought to the foreground holds its seals, and may still move
     // a cursor, until the NIP-77 pass its entry is owed has ended.
     for &tag in &at.tags {
-        let _ = world
-            .device(tag)?
-            .entry_pass_ended(bounds::round_trip(Recovery::Undisturbed))
-            .await?;
+        let ended = world.device(tag)?.entry_pass_ended(waits.bound()).await?;
+        waits.ended(ended);
     }
+    // The pass ends in the engine before its last frame is on the wire: the
+    // first mark waits for every session a device opened to be closed there.
+    let settled = &*world;
+    let closed = await_condition(waits.bound(), || async { Ok(sessions_closed(settled)) }).await?;
+    waits.ended(closed);
     let mut minted = 0_u32;
 
-    let off = Pass::run(world, &at, None, &mut minted).await?;
+    let start = Mark::of(world);
+    let off = Pass::run(world, &at, None, &mut minted, &mut waits).await?;
+    let cut = Mark::of(world);
 
     let mut lit = true;
     for &tag in &at.tags {
@@ -164,20 +197,7 @@ async fn independence<T: TimelineSink, L: LogDrain>(
             }
         }
     }
-    let on = Pass::run(world, &at, Some(&mut plane), &mut minted).await?;
-
-    let mut canaries = Canaries::new();
-    // 1. The mesh was on at every device, and frames crossed its links.
-    canaries.check(lit && plane.carried() > 0);
-    // 2. An update was read from the mesh before any relay had it.
-    canaries.check(on.read_first > 0);
-    // 3. …and passed on to the relay, counted apart from the device's own.
-    let entitled = (at.bridger, on.refused);
-    canaries.check((on.passed_on.iter()).any(|(_, device, id)| (*device, *id) == entitled));
-    // 4. With the mesh on a location was sealed for it alone.
-    canaries.check(on.mesh_only == 1);
-    // 5. The refusing endpoint refused, in both passes.
-    canaries.check(off.refusals > 0 && on.refusals > 0);
+    let on = Pass::run(world, &at, Some(&mut plane), &mut minted, &mut waits).await?;
 
     let pairs = closing_pairs(world, at.bridger);
     let closing = round(
@@ -189,22 +209,46 @@ async fn independence<T: TimelineSink, L: LogDrain>(
         &[],
         &[],
     );
-    let mut graded = grade_round(
-        world,
-        &closing,
-        &[
-            Invariant::Quiescence,
-            Invariant::LocationRoundTrip,
-            Invariant::SendPathLiveness,
-        ],
-    )
-    .await?;
-    graded.extend(off.undelivered.into_iter().chain(on.undelivered));
-    if let Some(device) = moved(&at, &off, &on) {
-        graded.push((
-            Invariant::RelayPlaneContainment,
-            Verdict::Failed(Finding::RelayPathMoved { device }),
-        ));
+    // The settle first, and the last mark behind it: what a device still had
+    // to send when the script ended is in the mesh-on pass, not after it.
+    let mut graded = grade_round(world, &closing, &[Invariant::Quiescence]).await?;
+    let end = Mark::of(world);
+    let sent_off = Sent::between(world, &start, &cut, &off.sealed_by);
+    let sent_on = Sent::between(world, &cut, &end, &on.sealed_by);
+    graded.extend(
+        grade_round(
+            world,
+            &closing,
+            &[Invariant::LocationRoundTrip, Invariant::SendPathLiveness],
+        )
+        .await?,
+    );
+
+    let entitled = (at.bridger, on.refused);
+    let mut canaries = Canaries::new();
+    // 1. The mesh was on at every device, and frames crossed its links.
+    canaries.check(lit && plane.carried() > 0);
+    // 2. A peer read the refused update from the mesh, which no relay had.
+    canaries.check(on.read_refused);
+    // 3. …and it was passed on to the relay, counted apart from the
+    //    device's own.
+    canaries.check((sent_on.passed_on.iter()).any(|sent| (sent.device, sent.id) == entitled));
+    // 4. With the mesh on a location was sealed for it alone.
+    canaries.check(on.mesh_only == 1);
+    // 5. The refusing endpoint refused, in both passes.
+    canaries.check(sent_off.refusals > 0 && sent_on.refusals > 0);
+    // 6. No wait ran out: every send was read from the relay before the
+    //    mesh carried it, which is what makes the passes comparable.
+    canaries.check(waits.all_ended());
+
+    if let Some(undelivered) = off.undelivered.or(on.undelivered) {
+        graded.push(undelivered);
+    } else if waits.all_ended() {
+        let moved = moved(&at, (&off, &sent_off), (&on, &sent_on));
+        graded.extend(moved.map(|finding| {
+            let verdict = Verdict::Failed(finding);
+            (Invariant::RelayPlaneContainment, verdict)
+        }));
     }
 
     world.drain_buses();
@@ -216,39 +260,49 @@ async fn independence<T: TimelineSink, L: LogDrain>(
     })
 }
 
-/// The device whose relay path the mesh moved, if it moved any.
-fn moved(at: &At, off: &Pass, on: &Pass) -> Option<DeviceTag> {
+/// What the mesh moved of a relay path, if it moved anything: the finding
+/// names the device whose path, or no device for a plane's canonical
+/// endpoint.
+fn moved(
+    at: &At,
+    (off, sent_off): (&Pass, &Sent),
+    (on, sent_on): (&Pass, &Sent),
+) -> Option<Finding> {
+    let of = |device| Some(Finding::RelayPathMoved { device });
     // With the mesh off nothing is sealed for it and nothing is passed on.
     if off.mesh_only != 0 {
-        return Some(at.other);
+        return of(Some(at.other));
     }
-    if let Some(&(_, device, _)) = off.passed_on.first() {
-        return Some(device);
+    if let Some(sent) = sent_off.passed_on.first() {
+        return of(Some(sent.device));
     }
     if let Some(device) = on.strayed {
-        return Some(device);
+        return of(Some(device));
     }
-    // The one update the script's sends were entitled to pass on, once a
-    // relay.
+    // The one update the script's sends were entitled to pass on, in one
+    // frame a relay.
     let entitled = (at.bridger, on.refused);
-    for (index, &(plane, device, id)) in on.passed_on.iter().enumerate() {
-        let again = on.passed_on[..index].iter().any(|sent| sent.0 == plane);
-        if (device, id) != entitled || again {
-            return Some(device);
-        }
+    if let Some(sent) = (sent_on.passed_on.iter())
+        .find(|sent| (sent.device, sent.id) != entitled || sent.times != 1)
+    {
+        return of(Some(sent.device));
     }
     if let Some((&(device, _), _)) =
         (off.answers.iter().zip(&on.answers)).find(|(without, with)| without != with)
     {
-        return Some(device);
+        return of(Some(device));
     }
     if off.answers.len() != on.answers.len() {
-        return Some(at.bridger);
+        return of(Some(at.bridger));
     }
-    at.tags
-        .iter()
-        .copied()
-        .find(|device| off.frames.get(device) != on.frames.get(device))
+    if let Some(device) = (at.tags.iter().copied())
+        .find(|device| sent_off.frames.get(device) != sent_on.frames.get(device))
+    {
+        return of(Some(device));
+    }
+    (sent_off.others.iter().zip(&sent_on.others))
+        .find(|(without, with)| without != with)
+        .and_then(|((_, endpoint, _), _)| of(*endpoint))
 }
 
 /// The circle the script runs in, and who does what in it.
@@ -299,8 +353,8 @@ enum Heard {
     Nothing,
 }
 
-/// One `EVENT` frame a device sent a relay, as the two passes compare it:
-/// nothing here names an event, a circle or an instant.
+/// One `EVENT` a device sent a relay, as the two passes compare it: nothing
+/// here names an event, a circle or an instant.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct Frame {
     plane: RelayTag,
@@ -309,6 +363,9 @@ struct Frame {
     /// `expiration − created_at`, for an event that carries one.
     life_secs: Option<i64>,
     heard: Heard,
+    /// How many frames carried it on the device's own endpoint: the plane
+    /// record keeps a frame repeated on one connection once.
+    times: usize,
 }
 
 /// One pass of the script.
@@ -317,21 +374,16 @@ struct Pass {
     answers: Vec<(DeviceTag, Answer)>,
     /// Sends answered as sealed for the mesh alone.
     mesh_only: usize,
-    /// Each device's own `EVENT` frames, sorted.
-    frames: BTreeMap<DeviceTag, Vec<Frame>>,
-    /// Frames carrying an event their sender did not seal: who sent which,
-    /// to which plane.
-    passed_on: Vec<(RelayTag, DeviceTag, EventId)>,
-    /// How many `EVENT` frames a relay refused.
-    refusals: usize,
+    /// Who sealed each event of the pass.
+    sealed_by: Vec<(EventId, DeviceTag)>,
     /// The update step 2's endpoint refused.
     refused: EventId,
-    /// Updates read from the mesh before any relay delivered them.
-    read_first: u64,
+    /// Whether a peer read that update from the mesh, for the first time.
+    read_refused: bool,
     /// A device whose mesh drive sent something, moved a cursor, or read an
     /// update no send-time check had passed.
     strayed: Option<DeviceTag>,
-    /// A send a relay took that a peer's live plane never delivered.
+    /// The first send a relay took that a peer's live plane never delivered.
     undelivered: Option<(Invariant, Verdict)>,
 }
 
@@ -341,13 +393,15 @@ struct Script<'a, T: TimelineSink, L: LogDrain> {
     at: &'a At,
     mesh: Option<&'a mut MeshPlane>,
     minted: &'a mut u32,
+    waits: &'a mut Allowance,
     answers: Vec<(DeviceTag, Answer)>,
     mesh_only: usize,
-    /// Who sealed each event of the pass.
     sealed_by: Vec<(EventId, DeviceTag)>,
     /// Every probe a send-time check passed.
     handed: Vec<ProbeToken>,
-    read_first: u64,
+    /// Step 2's update, once it is sealed.
+    refused: Option<(EventId, ProbeToken)>,
+    read_refused: bool,
     strayed: Option<DeviceTag>,
     undelivered: Option<(Invariant, Verdict)>,
 }
@@ -358,18 +412,20 @@ impl Pass {
         at: &At,
         mesh: Option<&mut MeshPlane>,
         minted: &mut u32,
+        waits: &mut Allowance,
     ) -> Result<Self, RigError> {
-        let since = plane_instant();
         let mut script = Script {
             world,
             at,
             mesh,
             minted,
+            waits,
             answers: Vec::new(),
             mesh_only: 0,
             sealed_by: Vec::new(),
             handed: Vec::new(),
-            read_first: 0,
+            refused: None,
+            read_refused: false,
             strayed: None,
             undelivered: None,
         };
@@ -385,7 +441,7 @@ impl Pass {
         script
             .fault(Fault::RefuseOversize { max_bytes: cap })
             .await?;
-        let refused = script.send(at.quiet, &WallClock).await?;
+        script.refused = script.send(at.quiet, &WallClock).await?;
         script.carry().await?;
         script.send(at.bridger, &WallClock).await?;
         script.fault(Fault::Heal).await?;
@@ -403,15 +459,13 @@ impl Pass {
         // 5. One more send.
         script.send(at.bridger, &WallClock).await?;
 
-        let sent = sent_since(script.world, since, &script.sealed_by);
+        let (refused, _) = script.refused.ok_or(RigError::Core(Step::Publish))?;
         Ok(Self {
             answers: script.answers,
             mesh_only: script.mesh_only,
-            frames: sent.frames,
-            passed_on: sent.passed_on,
-            refusals: sent.refusals,
-            refused: refused.ok_or(RigError::Core(Step::Publish))?,
-            read_first: script.read_first,
+            sealed_by: script.sealed_by,
+            refused,
+            read_refused: script.read_refused,
             strayed: script.strayed,
             undelivered: script.undelivered,
         })
@@ -426,12 +480,13 @@ impl<T: TimelineSink, L: LogDrain> Script<'_, T, L> {
 
     /// `device` seals a location and sends it as the app does, its relay
     /// receive completed; a send a relay took is awaited at every peer's
-    /// live plane. The event's id, when one was sealed.
+    /// live plane, until one such wait has run out. The event and its probe,
+    /// when one was sealed.
     async fn send(
         &mut self,
         device: DeviceTag,
         clock: &dyn FanoutClock,
-    ) -> Result<Option<EventId>, RigError> {
+    ) -> Result<Option<(EventId, ProbeToken)>, RigError> {
         let (probe, at) = (self.mint(), self.at);
         let event = match seal_probe(self.world, device, &at.group, probe, &WallClock).await? {
             Ok(event) => event,
@@ -457,8 +512,9 @@ impl<T: TimelineSink, L: LogDrain> Script<'_, T, L> {
         }
         if answer == Answer::Taken {
             let sender = self.world.device(device)?.pubkey_hex();
-            let bound = bounds::round_trip(Recovery::Undisturbed);
+            let bound = self.waits.bound();
             if let Some(to) = undelivered_to(&mut listeners, &sender, probe, bound).await {
+                self.waits.ended(false);
                 let circle = self.world.circles()[0].tag;
                 self.undelivered.get_or_insert((
                     Invariant::LocationRoundTrip,
@@ -470,7 +526,7 @@ impl<T: TimelineSink, L: LogDrain> Script<'_, T, L> {
                 ));
             }
         }
-        Ok(Some(event.id))
+        Ok(Some((event.id, probe)))
     }
 
     /// `device` seals for the mesh alone, and sends what it sealed. Counted,
@@ -517,6 +573,15 @@ impl<T: TimelineSink, L: LogDrain> Script<'_, T, L> {
         for &device in &self.at.tags {
             let before = cursors(self.world, device)?;
             let driven = plane.drive(self.world, device, WallNow::now()).await?;
+            let carried = |probe: &ProbeToken| {
+                driven.replayed.iter().any(|result| {
+                    matches!(
+                        result,
+                        LocationMessageResult::Location { content, .. }
+                            if probe.carried_by(content)
+                    )
+                })
+            };
             let unsent = driven.replayed.iter().any(|result| match result {
                 LocationMessageResult::Location { content, .. } => {
                     !self.handed.iter().any(|probe| probe.carried_by(content))
@@ -526,10 +591,27 @@ impl<T: TimelineSink, L: LogDrain> Script<'_, T, L> {
             if driven.sent != 0 || unsent || cursors(self.world, device)? != before {
                 self.strayed.get_or_insert(device);
             }
-            self.read_first += driven.from_circles;
+            if driven.from_circles > 0 && self.refused.is_some_and(|(_, probe)| carried(&probe)) {
+                self.read_refused = true;
+            }
         }
         Ok(())
     }
+}
+
+/// Whether every NIP-77 session a device opened on any plane has been closed
+/// on the wire.
+fn sessions_closed<T: TimelineSink, L: LogDrain>(world: &ScenarioWorld<T, L>) -> bool {
+    let slot = |verb| CLIENT_VERBS.iter().position(|known| *known == verb);
+    let (Some(opened), Some(closed)) = (slot("NEG-OPEN"), slot("NEG-CLOSE")) else {
+        return false;
+    };
+    world.all_planes().all(|plane| {
+        world.devices().iter().all(|device| {
+            let carried = plane.ledger().client_frames(Some(device.tag));
+            carried[opened] == carried[closed]
+        })
+    })
 }
 
 /// One circle's persisted cursor and backfill floor.
@@ -556,37 +638,110 @@ fn cursors<T: TimelineSink, L: LogDrain>(
         .collect()
 }
 
-/// What the devices sent the relays.
-struct Sent {
-    /// Each device's own `EVENT` frames, sorted.
-    frames: BTreeMap<DeviceTag, Vec<Frame>>,
-    /// Frames carrying an event another device sealed.
-    passed_on: Vec<(RelayTag, DeviceTag, EventId)>,
-    /// How many frames a relay refused.
-    refusals: usize,
+/// How many frames an endpoint carried, by verb: the slots of
+/// [`CLIENT_VERBS`], then every other frame.
+type ByVerb = [usize; CLIENT_VERBS.len() + 1];
+
+/// An instant between passes: where the plane record stood, and how many
+/// frames every endpoint of every plane had carried.
+struct Mark {
+    at: u64,
+    carried: Vec<(RelayTag, Option<DeviceTag>, ByVerb)>,
 }
 
-/// Every `EVENT` frame a device's own endpoints carried since `since`, on
-/// every plane.
-///
-/// The canonical endpoint is not read: only a sweep and the rig's own reads
-/// dial it, and the script runs neither.
-fn sent_since<T: TimelineSink, L: LogDrain>(
+impl Mark {
+    fn of<T: TimelineSink, L: LogDrain>(world: &ScenarioWorld<T, L>) -> Self {
+        let devices = world.devices().iter().map(|device| Some(device.tag));
+        let endpoints: Vec<Option<DeviceTag>> = std::iter::once(None).chain(devices).collect();
+        let mut carried = Vec::new();
+        for plane in world.all_planes() {
+            for &endpoint in &endpoints {
+                let frames = plane.ledger().client_frames(endpoint);
+                carried.push((plane.tag(), endpoint, frames));
+            }
+        }
+        Self {
+            at: plane_instant(),
+            carried,
+        }
+    }
+}
+
+/// An event its sender did not seal, on one plane.
+struct PassedOn {
+    device: DeviceTag,
+    id: EventId,
+    /// How many frames carried it on that device's endpoint.
+    times: usize,
+}
+
+/// What the devices sent the relays between two marks.
+struct Sent {
+    /// Each device's own `EVENT`s, sorted.
+    frames: BTreeMap<DeviceTag, Vec<Frame>>,
+    /// Frames carrying an event another device sealed.
+    passed_on: Vec<PassedOn>,
+    /// How many `EVENT`s a relay refused.
+    refusals: usize,
+    /// Per endpoint of every plane, the frames that are compared by count
+    /// alone: every verb but `EVENT` on a device's own endpoint, where the
+    /// `EVENT`s are compared one by one; every verb on the canonical one.
+    others: Vec<(RelayTag, Option<DeviceTag>, ByVerb)>,
+}
+
+impl Sent {
+    fn between<T: TimelineSink, L: LogDrain>(
+        world: &ScenarioWorld<T, L>,
+        from: &Mark,
+        to: &Mark,
+        sealed_by: &[(EventId, DeviceTag)],
+    ) -> Self {
+        let (frames, passed_on, refusals) = events_between(world, from.at..to.at, sealed_by);
+        let others = (from.carried.iter().zip(&to.carried))
+            .map(|(&(plane, endpoint, before), &(_, _, after))| {
+                let mut carried = after;
+                for (slot, count) in carried.iter_mut().enumerate() {
+                    let own_event = endpoint.is_some() && CLIENT_VERBS.get(slot) == Some(&"EVENT");
+                    *count = if own_event { 0 } else { *count - before[slot] };
+                }
+                (plane, endpoint, carried)
+            })
+            .collect();
+        Self {
+            frames,
+            passed_on,
+            refusals,
+            others,
+        }
+    }
+}
+
+/// Every `EVENT` a device's own endpoints first carried inside `window`, on
+/// every plane, once an event however many frames carried it: each device's
+/// own, sorted; those another device sealed; and how many a relay refused.
+fn events_between<T: TimelineSink, L: LogDrain>(
     world: &ScenarioWorld<T, L>,
-    since: u64,
+    window: std::ops::Range<u64>,
     sealed_by: &[(EventId, DeviceTag)],
-) -> Sent {
+) -> (BTreeMap<DeviceTag, Vec<Frame>>, Vec<PassedOn>, usize) {
     let mut frames: BTreeMap<DeviceTag, Vec<Frame>> = BTreeMap::new();
     let (mut passed_on, mut refusals) = (Vec::new(), 0);
     for plane in world.all_planes() {
         let ledger = plane.ledger();
+        // The record keeps a frame once a connection: an event sent again
+        // on another is a second entry, and `times` counts every frame.
+        let mut seen = Vec::new();
         for sent in ledger.plane_record().frames {
-            let Some(device) = sent.endpoint.device().filter(|_| sent.at >= since) else {
+            let Some(device) = sent.endpoint.device().filter(|_| window.contains(&sent.at)) else {
                 continue;
             };
             let Some((id, frame)) = projected(&sent.text, plane.tag()) else {
                 continue;
             };
+            if seen.contains(&(device, id)) {
+                continue;
+            }
+            seen.push((device, id));
             // What THIS device's endpoint was answered: an event refused
             // here can be taken on the socket of the device that passes it on.
             let heard = match ledger.answered(Some(device), &id) {
@@ -597,44 +752,43 @@ fn sent_since<T: TimelineSink, L: LogDrain>(
                 }
                 None => Heard::Nothing,
             };
+            let times = ledger.published_by(Some(device), &id);
             let foreign = sealed_by
                 .iter()
                 .any(|(sealed, sealer)| *sealed == id && *sealer != device);
             if foreign {
-                passed_on.push((plane.tag(), device, id));
+                passed_on.push(PassedOn { device, id, times });
             } else {
-                frames
-                    .entry(device)
-                    .or_default()
-                    .push(Frame { heard, ..frame });
+                frames.entry(device).or_default().push(Frame {
+                    heard,
+                    times,
+                    ..frame
+                });
             }
         }
     }
     for sent in frames.values_mut() {
         sent.sort();
     }
-    Sent {
-        frames,
-        passed_on,
-        refusals,
-    }
+    (frames, passed_on, refusals)
 }
 
-/// A digest of every `EVENT` frame every device of `world` has sent a relay.
+/// A digest of every `EVENT` every device of `world` has sent a relay.
 ///
-/// Each frame by the shape the passes compare: what two runs are compared
-/// by. One seed's runs agree on it, and so do two seeds', since nothing a
-/// mesh engine draws reaches a relay.
+/// Each by the shape the passes compare: what two runs are compared by.
+/// Nothing a mesh engine draws reaches a relay, so the runs of any seeds
+/// agree on it.
 #[must_use]
 pub fn sent_digest<T: TimelineSink, L: LogDrain>(world: &ScenarioWorld<T, L>) -> [u8; 32] {
     let mut digest = Sha256::new();
-    for (device, sent) in sent_since(world, 0, &[]).frames {
+    for (device, sent) in events_between(world, 0..u64::MAX, &[]).0 {
         for frame in sent {
             digest.update(device.ordinal().to_be_bytes());
             digest.update(frame.plane.ordinal().to_be_bytes());
             digest.update(frame.kind.to_be_bytes());
             digest.update(frame.life_secs.unwrap_or(-1).to_be_bytes());
             digest.update([frame.heard as u8]);
+            digest.update(frame.times.to_be_bytes());
             for tag in frame.tags {
                 digest.update(tag);
                 digest.update([0]);
@@ -676,6 +830,7 @@ fn projected(text: &str, plane: RelayTag) -> Option<(EventId, Frame)> {
             tags,
             life_secs: expiration.map(|expires| expires - created_at),
             heard: Heard::Nothing,
+            times: 0,
         },
     ))
 }
@@ -723,6 +878,104 @@ mod tests {
         );
     }
 
+    fn id(byte: u8) -> EventId {
+        EventId::from_slice(&[byte; 32]).expect("32 bytes is an event id")
+    }
+
+    /// A pass that answered nothing, with `refused` as its refused update.
+    fn pass(refused: EventId) -> Pass {
+        Pass {
+            answers: Vec::new(),
+            mesh_only: 0,
+            sealed_by: Vec::new(),
+            refused,
+            read_refused: false,
+            strayed: None,
+            undelivered: None,
+        }
+    }
+
+    /// What one device sent one plane: `times` frames of one location, and
+    /// `reqs` `REQ`s on its own endpoint and on the canonical one.
+    fn sent(device: DeviceTag, times: usize, reqs: (usize, usize)) -> Sent {
+        let (_, location) = projected(
+            &frame("EVENT", r#"[["h","aa"],["expiration","1228"]]"#),
+            RelayTag::new(0),
+        )
+        .expect("an EVENT frame");
+        let by_verb = |reqs| {
+            let mut carried = ByVerb::default();
+            carried[1] = reqs;
+            carried
+        };
+        Sent {
+            frames: BTreeMap::from([(device, vec![Frame { times, ..location }])]),
+            passed_on: Vec::new(),
+            refusals: 0,
+            others: vec![
+                (RelayTag::new(0), None, by_verb(reqs.1)),
+                (RelayTag::new(0), Some(device), by_verb(reqs.0)),
+            ],
+        }
+    }
+
+    #[test]
+    fn a_resent_frame_a_further_request_and_a_second_pass_on_each_move_the_path() {
+        let (bridger, quiet, other) = (DeviceTag::new(0), DeviceTag::new(1), DeviceTag::new(2));
+        let at = At {
+            group: GroupId::new(vec![7; 32]),
+            bridger,
+            quiet,
+            other,
+            tags: vec![bridger, quiet, other],
+        };
+        let (off, on) = (pass(id(1)), pass(id(2)));
+        let moved = |sent_off: &Sent, sent_on: &Sent| moved(&at, (&off, sent_off), (&on, sent_on));
+        let same = sent(quiet, 1, (0, 0));
+        assert!(
+            moved(&same, &sent(quiet, 1, (0, 0))).is_none(),
+            "premise: two passes that sent the same are not a finding"
+        );
+        assert!(
+            moved(&same, &sent(quiet, 2, (0, 0)))
+                == Some(Finding::RelayPathMoved {
+                    device: Some(quiet)
+                }),
+            "the same event sent twice, on one connection or two"
+        );
+        assert!(
+            moved(&same, &sent(quiet, 1, (1, 0)))
+                == Some(Finding::RelayPathMoved {
+                    device: Some(quiet)
+                }),
+            "one more REQ on the device's own endpoint"
+        );
+        assert!(
+            moved(&same, &sent(quiet, 1, (0, 1))) == Some(Finding::RelayPathMoved { device: None }),
+            "one more REQ on the canonical endpoint, which no device's engine dials"
+        );
+        let passed_on = |times| {
+            let mut sent = sent(quiet, 1, (0, 0));
+            sent.passed_on.push(PassedOn {
+                device: bridger,
+                id: id(2),
+                times,
+            });
+            sent
+        };
+        assert!(
+            moved(&same, &passed_on(1)).is_none(),
+            "the one update the bridger was entitled to pass on, in one frame"
+        );
+        assert!(
+            moved(&same, &passed_on(2))
+                == Some(Finding::RelayPathMoved {
+                    device: Some(bridger)
+                }),
+            "the same update passed on in a second frame"
+        );
+    }
+
     #[test]
     fn the_arm_refuses_once_a_pass_and_closes_no_socket() {
         let arm = ARMS[0];
@@ -731,9 +984,13 @@ mod tests {
             "the refusing endpoint is armed once a pass, and nothing reconnects"
         );
         assert!(
-            arm.floor.canaries_caught == 5,
-            "frames crossed, an update read from the mesh, one passed on, one sealed for the \
-             mesh alone, and the refusal in both passes"
+            arm.floor.canaries_caught == 6,
+            "frames crossed, the refused update read from the mesh, passed on, one sealed for \
+             the mesh alone, the refusal in both passes, and no wait that ran out"
+        );
+        assert!(
+            arm.probe_rounds == 2,
+            "the closing round, and the one wait of the script that may run out"
         );
     }
 }

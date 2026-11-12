@@ -678,7 +678,7 @@ async fn forward_from_client(
             let faults = *state.read().unwrap_or_else(PoisonError::into_inner);
             match message {
                 ClientMessage::Event(event) => {
-                    ledger.note_published(event.id);
+                    ledger.note_published(device, event.id);
                     if oversize(&event, faults) {
                         // Refused on the way OUT, so the relay never sees it:
                         // a plane that both stored the event and told the

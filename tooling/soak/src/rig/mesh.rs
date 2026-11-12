@@ -10,8 +10,10 @@
 //! process reads: a run does not wait ninety seconds for an emission slot, it
 //! steps to it. Each engine's generator is seeded from the world's seed and
 //! its device's ordinal, and whatever is due at one instant runs in device
-//! order, so one seed carries the same frames in the same order
-//! ([`MeshPlane::trace`]).
+//! order, so over the same packets one seed carries the same frames in the
+//! same order ([`MeshPlane::trace`]). A world's packets are never the same
+//! twice: the session wraps each fresh event under a nonce from the OS
+//! generator, and an offer's lifetime is read from the wall clock.
 //!
 //! # The hand-off
 //!

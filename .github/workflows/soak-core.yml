@@ -29,7 +29,7 @@
 #                priced run fits. It is a ceiling of worst-case product
 #                constants, not an expectation: a healthy pr run measures
 #                about a hundred seconds.
-#   deadline     run-with-deadline.sh 25m / 115m / 300m — above the run budget
+#   deadline     run-with-deadline.sh 25m / 116m / 300m — above the run budget
 #                so a hung run is killed with time left to finalise, and
 #                ATTRIBUTABLE where a bare 124 would not be.
 #   step cap     above the deadline + the 1 min SIGTERM→SIGKILL grace.
@@ -214,8 +214,8 @@ jobs:
     name: e2e_soak_core_nightly
     if: ${{ inputs.profile == 'nightly' }}
     runs-on: ubuntu-latest
-    # Deadline 115m (the profile's `deadline_secs`, L6-tied), drive step cap 118
-    # (budget 115 + 1 kill grace + 0 boot = 116, and C2 fails on budget >= cap);
+    # Deadline 116m (the profile's `deadline_secs`, L6-tied), drive step cap 118
+    # (budget 116 + 1 kill grace + 0 boot = 117, and C2 fails on budget >= cap);
     # job cap 156 is above the step-cap sum (10 + 25 + 118 = 153) so the drive
     # reaps before the job. The four move together: a raise of the profile's
     # budget is a raise of all of them.
@@ -257,7 +257,7 @@ jobs:
       - name: Run the soak (nightly profile)
         id: soak
         timeout-minutes: 118
-        run: bash tooling/e2e/ci/run-with-deadline.sh 115m "soak-core nightly" -- bash tooling/e2e/ci/run-soak-core.sh nightly
+        run: bash tooling/e2e/ci/run-with-deadline.sh 116m "soak-core nightly" -- bash tooling/e2e/ci/run-soak-core.sh nightly
 
       # The pr job's comment says why this step exists and why it is gated on
       # the checkout rather than on the drive.

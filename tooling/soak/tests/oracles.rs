@@ -34,7 +34,7 @@ use haven_core::relay::live_sync::config::{
 use haven_core::relay::GROUP_RESUBSCRIBE_BUFFER_SECS;
 use tokio::time::{Instant, MissedTickBehavior};
 
-use haven_soak::nemesis::types::{Fault, Schedule};
+use haven_soak::nemesis::types::{DropClass, Fault, Schedule};
 use haven_soak::oracle::quiescence::{self, PendingReason, Quiescence, Settled};
 use haven_soak::oracle::undecryptable::{self, Probe, StoredRow};
 use haven_soak::oracle::vacuity::{grade, ExpectationFloor, FloorTerm, Observed};
@@ -2018,38 +2018,131 @@ async fn seeded(scenario: Scenario, label: &str, seed: u64) -> (Rc, Vec<String>,
     (report.rc(), graded, digest)
 }
 
-/// Every generator of the mesh plane is seeded from the run's seed, so one
-/// seed's two runs answer alike; and nothing a mesh engine draws reaches a
-/// relay, so another seed's run sends the same frames.
-async fn reproduced_by_its_seed(scenario: Scenario, label: &str) {
+/// A mesh arm answers alike, and its devices send relays frames of the same
+/// shapes, run after run and whatever seed its mesh engines draw from.
+///
+/// Not a proof that a seed reproduces what the MESH carried: inside a world
+/// every packet wraps a fresh event under a fresh nonce, and this compares
+/// nothing of the mesh. That a seed fixes what the plane carries is the
+/// plane's own unit test, over fixed packets (`rig/mesh.rs`).
+async fn answers_alike_run_to_run(scenario: Scenario, label: &str) {
     let first = seeded(scenario, label, 0x5eed).await;
-    assert!(
-        first.0 == Rc::Clean,
-        "premise: the arm holds under this seed"
-    );
+    assert!(first.0 == Rc::Clean, "premise: the arm holds");
     assert!(
         seeded(scenario, label, 0x5eed).await == first,
-        "the same seed gives the same verdict and the same frames"
+        "a second run gives the same verdict and the same relay frames"
     );
     assert!(
         seeded(scenario, label, 0x0dd).await == first,
-        "another seed gives the same verdict and the same frames"
+        "and so does one whose mesh engines draw from another seed"
     );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn s27_is_reproduced_by_its_seed_and_no_seed_moves_a_relay_frame() {
-    reproduced_by_its_seed(Scenario::MeshIndependence, "mesh-off-then-on").await;
+async fn s27_answers_and_sends_relays_alike_run_to_run_whatever_the_seed() {
+    answers_alike_run_to_run(Scenario::MeshIndependence, "mesh-off-then-on").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn s28_bridging_is_reproduced_by_its_seed_and_no_seed_moves_a_relay_frame() {
-    reproduced_by_its_seed(Scenario::MemberBridging, "bridged-to-the-far-member").await;
+async fn s28_bridging_answers_and_sends_relays_alike_run_to_run_whatever_the_seed() {
+    answers_alike_run_to_run(Scenario::MemberBridging, "bridged-to-the-far-member").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn s28_removal_is_reproduced_by_its_seed_and_no_seed_moves_a_relay_frame() {
-    reproduced_by_its_seed(Scenario::MemberBridging, "removed-member-finds-nothing").await;
+async fn s28_removal_answers_and_sends_relays_alike_run_to_run_whatever_the_seed() {
+    answers_alike_run_to_run(Scenario::MemberBridging, "removed-member-finds-nothing").await;
+}
+
+/// The three mesh arms, each in a world of `profile`'s shape: more devices
+/// than the three that have a part, and more relays than one.
+async fn mesh_arms_hold_in_the_world_of(profile: ProfileName) {
+    let spec = ProfileSpec::embedded(profile).expect("the profile parses");
+    for (scenario, label) in [
+        (Scenario::MeshIndependence, "mesh-off-then-on"),
+        (Scenario::MemberBridging, "bridged-to-the-far-member"),
+        (Scenario::MemberBridging, "removed-member-finds-nothing"),
+    ] {
+        let mut world = build_shaped_world(&spec.world).await;
+        let report = scenario
+            .run(&mut world, arm_of(scenario, label), pr_tick())
+            .await
+            .expect("the scenario runs");
+        assert!(
+            report.holds(),
+            "a mesh arm must hold in every world a lane runs it in: {report}; floor {}",
+            report.floor
+        );
+        world.teardown().await.expect("teardown");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_mesh_arms_hold_in_the_nightly_world() {
+    mesh_arms_hold_in_the_world_of(ProfileName::Nightly).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_mesh_arms_hold_in_the_weekly_world() {
+    mesh_arms_hold_in_the_world_of(ProfileName::Weekly).await;
+}
+
+/// A mesh arm in a world whose relays deliver no location to anybody, so
+/// that every wait the arm makes for one would run out: it reports the
+/// undelivered location, and inside the bound it is priced at — one wait
+/// ran out and no other was made.
+async fn dead_delivery_is_reported_inside_the_arms_price(scenario: Scenario, label: &str) {
+    let mut world = build_shaped_world(&shape_for(label)).await;
+    let devices: Vec<DeviceTag> = world.devices().iter().map(|device| device.tag).collect();
+    for plane in world.relays_mut() {
+        for &device in &devices {
+            plane
+                .apply_for(device, Fault::DropClass(DropClass::Application))
+                .await
+                .expect("the endpoint takes the fault");
+        }
+    }
+
+    let report = scenario
+        .run(&mut world, arm_of(scenario, label), pr_tick())
+        .await
+        .expect("the scenario runs");
+
+    assert!(
+        report.graded.iter().any(|(_, verdict)| matches!(
+            verdict,
+            Verdict::Failed(Finding::ProbeNotDelivered { .. })
+        )) && report.rc() == Rc::ViolationOrLeak,
+        "a relay path that delivers nothing is the finding, by name: {report}"
+    );
+    assert!(
+        report.within_deadline(),
+        "and the arm says so inside its derived bound, never by a deadline kill: {report}"
+    );
+    world.teardown().await.expect("teardown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s27_reports_a_dead_relay_delivery_inside_its_price() {
+    dead_delivery_is_reported_inside_the_arms_price(Scenario::MeshIndependence, "mesh-off-then-on")
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s28_bridging_reports_a_dead_relay_delivery_inside_its_price() {
+    dead_delivery_is_reported_inside_the_arms_price(
+        Scenario::MemberBridging,
+        "bridged-to-the-far-member",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s28_removal_reports_a_dead_relay_delivery_inside_its_price() {
+    dead_delivery_is_reported_inside_the_arms_price(
+        Scenario::MemberBridging,
+        "removed-member-finds-nothing",
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
