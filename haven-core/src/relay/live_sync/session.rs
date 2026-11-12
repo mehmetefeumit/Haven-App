@@ -28,6 +28,7 @@ use zeroize::Zeroizing;
 use crate::circle::{CircleEngineState, CircleManager};
 use crate::relay::circle_handle;
 use crate::relay::cursor::{since_for_stream, SubscribePhase, STREAM_INBOX_1059};
+use crate::relay::fanout::{RESUME_BUDGET_MS, ROW_BUDGET_MS};
 use crate::relay::negentropy;
 use crate::relay::verified::verified_client;
 use crate::relay::RelayManager;
@@ -423,6 +424,10 @@ const BURST_SETTLE_WINDOW: Duration = Duration::from_secs(COMMIT_SETTLE_WINDOW_S
 /// Total bound on a burst's settle, applying to idle follow-on activity only
 /// (see [`BURST_SETTLE_CAP_SECS`]).
 const BURST_SETTLE_CAP: Duration = Duration::from_secs(BURST_SETTLE_CAP_SECS);
+
+/// How long a drive or NIP-77 pass runs before it is said to have outlived
+/// its wake: the wake's whole budget, and one row's more.
+const PASS_OVERRUN: Duration = Duration::from_millis(RESUME_BUDGET_MS + ROW_BUDGET_MS);
 
 /// Awaits `fut` under `dur`, mapping an elapsed deadline to
 /// [`LiveSyncError::Timeout`]. The caller decides whether a timeout is fatal
@@ -2373,9 +2378,11 @@ impl LiveSyncCore {
 
     /// Closes every socket of the publish pool this session's drives ride.
     ///
-    /// Called only where the session cuts its own radio, after the in-flight
-    /// gauge has drained: no drive is under way, and none begins until the
-    /// next foreground. The pool drops its relays, so the next drive registers
+    /// Called only where the session cuts its own radio, after the count of
+    /// relay calls under way has drained, and after the lifecycle has ended:
+    /// no call rides the pool, and a pass still doing its local work begins
+    /// none, since its leash, its mark and its NIP-77 stretch all refuse. The
+    /// pool drops its relays, so the next drive registers
     /// and dials fresh ones: a relay object a `disconnect` found without a
     /// connection task would end its next dial (`RelayManager::shutdown`).
     ///
@@ -2708,11 +2715,16 @@ impl LiveSyncCore {
     ///
     /// Two stages, in this order:
     ///
-    /// 1. **the in-flight publish gauge, with NO cap.** A commit between SEND
-    ///    and OK may never be disconnected (Security Rule 13): the relay may
-    ///    already have stored and served that commit while the drive records
-    ///    the attempt as unanswered. The wait is bounded in practice by the
-    ///    crate's own 10 s per-relay OK wait, never by a clock this method chose.
+    /// 1. **the relay calls under way, with NO cap; then their passes, within
+    ///    the wake.** A commit between SEND and OK may never be disconnected
+    ///    (Security Rule 13): the relay may already have stored and served
+    ///    that commit while the drive records the attempt as unanswered. That
+    ///    wait is bounded by each call's own deadline, never by a clock this
+    ///    method chose. The pass a call belongs to is then waited for too, so
+    ///    a confirm due on an answer just in is made before the pause ends
+    ///    the pass's lifecycle — but for no longer than what is left of the
+    ///    wake ([`EngineProcessor::wait_passes_ended`]): a pass stalled in
+    ///    local work holds no socket, and its retry is the next wake's.
     /// 2. **[`COMMIT_SETTLE_WINDOW_SECS`] after the LAST commit activity**, so
     ///    the convergence traffic a commit provokes lands on an open socket
     ///    instead of on the next re-anchor.
@@ -2730,7 +2742,7 @@ impl LiveSyncCore {
     /// is the common case.
     ///
     /// [`BURST_SETTLE_CAP_SECS`] bounds stage 2 only. It is measured from the
-    /// moment the gauge drained, and it is sized so a commit arriving late still
+    /// moment stage 1 ended, and it is sized so a commit arriving late still
     /// gets its FULL window (`cap >= window + 10`, const-asserted).
     pub async fn settle_before_pause(&self) {
         self.settle_before_pause_with(BURST_SETTLE_WINDOW, BURST_SETTLE_CAP)
@@ -2746,11 +2758,13 @@ impl LiveSyncCore {
     /// `EngineProcessor` stamps commit activity on — so the test drives exactly
     /// the production decision, not a copy of it.
     async fn settle_before_pause_with(&self, window: Duration, cap: Duration) {
-        // Stage 1: uncapped, by design (Rule 13).
+        // Stage 1: the calls uncapped, by design (Rule 13); their passes
+        // within the wake.
         self.processor.wait_publishes_drained().await;
+        self.processor.wait_passes_ended().await;
 
-        // Stage 2: quiesce. `started` is taken AFTER the gauge drained, so the
-        // cap bounds follow-on activity only and never the publish it waited on.
+        // Stage 2: quiesce. `started` is taken AFTER stage 1, so the cap
+        // bounds follow-on activity only and never the publish it waited on.
         let started = tokio::time::Instant::now();
         loop {
             let Some(last) = self.processor.last_commit_activity_at() else {
@@ -2831,10 +2845,13 @@ impl LiveSyncCore {
     /// bounding the next generation's advance and the cursor would move over it.
     /// Suppressing burns the advance and keeps the hold-back.
     ///
-    /// **(c) the in-flight publish gauge.** The authoritative Rule-13 check, at
+    /// **(c) the relay calls under way.** The authoritative Rule-13 check, at
     /// the instant of disconnect: `settle_before_pause` is a separate call, and
     /// the window between its return and this point is exactly where a live
-    /// `SelfRemove` can be ingested and SENT.
+    /// `SelfRemove` can be ingested and SENT. The calls only, never their
+    /// passes: each call is bounded by its own deadline, while a pass's local
+    /// work is not, and this wait holds the lifecycle lock every other entry
+    /// needs. A pass the flip above overtook begins no call after it.
     ///
     /// **(d) `disconnect`, never `shutdown` — and verified.** Terminating leaves
     /// every relay `Terminated` while the pool keeps its registrations, so the
@@ -2872,7 +2889,7 @@ impl LiveSyncCore {
         // The foreground, or the burst, this session was in ends here: what
         // the drain in (b) still ingests is taken in as a burst's is, with no
         // commit made; no drive begins, and the one under way takes no
-        // further relay — (c) waits for it.
+        // further relay — (c) waits for the calls it has out.
         self.processor.leave_foreground();
         // The burst window names the REQs the wait expects an answer from, and
         // (a) below closes every one of them: past this point no endpoint set
@@ -2981,7 +2998,8 @@ impl LiveSyncCore {
         //     pause's `Terminated` and holds it until the next burst adopts it
         //     (see [`Self::terminate_all_relays`]).
         self.terminate_all_relays().await;
-        // And the pool the fanout drives rode: (c) saw the last of them end.
+        // And the pool the fanout drives rode: (c) saw the last of their
+        // calls answered.
         self.close_drive_pool().await;
         // Only NOW may the radio-off watch cut a socket: every step above —
         // and the Rule-13 publish drain in particular — needed the sockets it
@@ -4560,7 +4578,7 @@ async fn run_drive(
             () = processor.drive_requested() => {}
             () = processor.drive_due_again() => {}
         }
-        processor.drive_due().await;
+        Box::pin(drive_once(&processor)).await;
         if processor.take_negentropy_owed() && processor.lifecycle() == Lifecycle::Foreground {
             if let Some(pool) = &pool {
                 let pass = async {
@@ -4611,16 +4629,18 @@ async fn run_drive(
 /// session and `reserve` after it, and only when the pass's spacing allows
 /// ([`negentropy::begin_pass`]).
 ///
-/// The pass is counted on the in-flight gauge, so a pause closes the drive
-/// pool only once it has ended; it is bounded by one connection and one
-/// session's wait, so the pause waits no longer than that for it. A stop does
-/// NOT wait on the gauge: what ends a foreground pass at a stop is the cancel
-/// `select!` around it in [`run_drive`], which drops it where it stands — the
-/// one line between `neg_prepare` and the fetch, where no fence is read. The
-/// fences: before it dials, before it fetches and before each ingest the pass
-/// reads whether the session still serves `serves`
-/// ([`EngineProcessor::still_serves`]), so a pass a pause overtook dials,
-/// fetches and ingests nothing more.
+/// Its relay work — from the dial to the end of the session wait, and only
+/// in the stretch of lifecycle the pass began in — is counted with the
+/// drive's relay calls, so a pause closes the drive pool only once that has
+/// ended; it is bounded by one connection and one session's wait, so the
+/// pause waits no longer than that for it, and never for the reads before
+/// it. A stop does NOT wait on the count: what ends a foreground pass at a
+/// stop is the cancel `select!` around it in [`run_drive`], which drops it
+/// where it stands — the one line between `neg_prepare` and the fetch, where
+/// no fence is read. The fences: before it dials, before it fetches and
+/// before each ingest the pass reads whether the session still serves
+/// `serves` ([`EngineProcessor::still_serves`]), so a pass a pause overtook
+/// dials, fetches and ingests nothing more.
 async fn reconcile_live(
     processor: &Arc<EngineProcessor>,
     active: &RwLock<Option<ActiveSession>>,
@@ -4628,6 +4648,10 @@ async fn reconcile_live(
     reserve: Duration,
     serves: Lifecycle,
 ) {
+    // Before the lifecycle is read: a pause, and the burst opened after it,
+    // both change it.
+    let began = processor.stretch();
+    let _pass = processor.pass_under_way();
     let bound = crate::relay::manager::CONNECTION_TIMEOUT + negentropy::NEG_ROUTE_WAIT;
     let Some(left) = processor.wake_left() else {
         return;
@@ -4635,21 +4659,51 @@ async fn reconcile_live(
     if left < bound + reserve {
         return;
     }
-    let _in_flight = processor.negentropy_in_flight();
     if !processor.still_serves(serves) {
         return;
     }
     let session = processor.session();
-    let routes = negentropy::begin_pass(session, live_routes(active, processor).await).await;
+    let routes = said_if_overrun(
+        async { negentropy::begin_pass(session, live_routes(active, processor).await).await },
+        || log::warn!("[live_sync] reconcile: a pass outlived its wake budget"),
+    )
+    .await;
     if routes.is_empty() {
         return;
     }
+    // Counted only now, and only in the stretch the pass began in: a pass a
+    // pause overtook in the reads above dials nothing, not even in the
+    // burst opened after that pause.
+    let Some(_in_flight) = processor.negentropy_in_flight(serves, began) else {
+        return;
+    };
     let sink = super::supervisor::LiveSink {
         processor,
         serves,
         ends: Instant::now() + bound,
     };
     let _ = tokio::time::timeout(bound, negentropy::run_pass(pool, session, &routes, &sink)).await;
+}
+
+/// One drive of the stored records ([`EngineProcessor::drive_due`]), said
+/// once when it outlives its wake.
+async fn drive_once(processor: &EngineProcessor) {
+    said_if_overrun(Box::pin(processor.drive_due()), || {
+        log::warn!("[live_sync] drive: a pass outlived its wake budget");
+    })
+    .await;
+}
+
+/// `pass`, said once when it outlives [`PASS_OVERRUN`], in fixed words that
+/// name nothing (Security Rule 15): a pass stalled in local work holds no
+/// pause, so nothing else shows it.
+async fn said_if_overrun<F: Future>(pass: F, said: fn()) -> F::Output {
+    tokio::pin!(pass);
+    if let Ok(done) = tokio::time::timeout(PASS_OVERRUN, &mut pass).await {
+        return done;
+    }
+    said();
+    pass.await
 }
 
 /// Every routing the live session lists, with the relays it is listed at:
@@ -9706,6 +9760,221 @@ mod tests {
         assert_eq!(core.pool_subscription_count().await, 0);
 
         let _ = core.stop().await;
+    }
+
+    /// Lists one circle at one relay in the session's model, as a start
+    /// would: what a NIP-77 pass reads its routes from.
+    async fn list_one_route(core: &LiveSyncCore) {
+        keep_rows(core, &[0x3d]);
+        *core.active.write().await = Some(ActiveSession {
+            group_subs: vec![LiveGroupSub {
+                sub_id: SubscriptionId::new("s_group_0"),
+                relays: vec!["wss://relay.example.com".to_owned()],
+                group_ids_hex: HashSet::from(["3d".repeat(32)]),
+            }],
+            inbox_relays: Vec::new(),
+            inbox_sub_id: SubscriptionId::new("s_inbox"),
+        });
+    }
+
+    /// A drive pass stalled in its local work — on the MLS session, before
+    /// any call is marked — holds neither the pause nor the lifecycle lock:
+    /// the pause waits for the relay calls under way, each bounded by its own
+    /// deadline, and this pass has none. Counted for its whole pass, it held
+    /// both for as long as the stall lasted, and with the lock every resume,
+    /// open and claim.
+    #[tokio::test(start_paused = true)]
+    async fn a_drive_pass_stalled_on_the_session_holds_neither_the_pause_nor_the_lifecycle_lock() {
+        let (core, _dir) = build_core();
+        core.processor.for_test().set_background_burst(true);
+        let held = core.circle.session().hold_session_for_test().await;
+        let pass = core.processor.for_test().drive_due();
+        tokio::pin!(pass);
+        assert!(
+            futures::poll!(&mut pass).is_pending(),
+            "premise: the pass waits on the session",
+        );
+        assert_eq!(
+            core.in_flight_publishes(),
+            0,
+            "a pass with no relay call under way was counted as one",
+        );
+        assert!(
+            tokio::time::timeout(RELAY_LIFECYCLE_OP_TIMEOUT * 8, core.pause_subscriptions())
+                .await
+                .is_ok(),
+            "the pause waited on a pass's local work",
+        );
+        assert!(
+            core.lifecycle.try_lock().is_ok(),
+            "the pause left the lifecycle lock held",
+        );
+
+        drop(held);
+        pass.await;
+        assert!(
+            tokio::time::timeout(
+                RELAY_LIFECYCLE_OP_TIMEOUT * 8,
+                core.resume_after_background(Claim::Foreground),
+            )
+            .await
+            .is_ok(),
+            "a resume could not enter after the pass ended",
+        );
+        assert_eq!(core.drive_pool_connected_relays().await, Some(0));
+    }
+
+    /// A NIP-77 pass stalled in its reads before the dial holds no pause, and
+    /// dials nothing once the pause has overtaken it — not even in the burst
+    /// opened after that pause, which serves the lifecycle the pass began
+    /// for, in a stretch it did not begin in. Without the pause, the same pass
+    /// dials its route's relay: the route is real.
+    #[tokio::test(start_paused = true)]
+    async fn a_negentropy_pass_stalled_before_its_dial_holds_no_pause_and_dials_nothing_after_it() {
+        let (control, _control_dir) = build_core();
+        list_one_route(&control).await;
+        control.processor.for_test().set_background_burst(true);
+        let dialled = RelayManager::new();
+        reconcile_live(
+            &control.processor,
+            &control.active,
+            &dialled,
+            Duration::ZERO,
+            Lifecycle::Burst,
+        )
+        .await;
+        assert!(
+            !dialled.get_relay_status().await.is_empty(),
+            "premise: with no pause the pass dials its route's relay",
+        );
+
+        let (core, _dir) = build_core();
+        list_one_route(&core).await;
+        core.processor.for_test().set_background_burst(true);
+        let pool = RelayManager::new();
+        let held = core.circle.session().hold_session_for_test().await;
+        let pass = reconcile_live(
+            &core.processor,
+            &core.active,
+            &pool,
+            Duration::ZERO,
+            Lifecycle::Burst,
+        );
+        tokio::pin!(pass);
+        assert!(
+            futures::poll!(&mut pass).is_pending(),
+            "premise: the pass waits on the session before its dial",
+        );
+        assert_eq!(core.in_flight_publishes(), 0);
+        assert!(
+            tokio::time::timeout(RELAY_LIFECYCLE_OP_TIMEOUT * 8, core.pause_subscriptions())
+                .await
+                .is_ok(),
+            "the pause waited on a NIP-77 pass's reads",
+        );
+        assert!(core.lifecycle.try_lock().is_ok());
+
+        core.processor.for_test().set_background_burst(true);
+        drop(held);
+        pass.await;
+        assert!(
+            pool.get_relay_status().await.is_empty(),
+            "a pass the pause overtook dialled in the burst after it",
+        );
+        assert_eq!(core.in_flight_publishes(), 0);
+    }
+
+    /// A settle waits for the pass a call belongs to only within the wake: a
+    /// pass stalled in its local work holds no socket, so it holds the settle
+    /// no longer than what is left of the wake, and its retry is the next
+    /// wake's.
+    #[tokio::test(start_paused = true)]
+    async fn a_pass_stalled_in_local_work_holds_the_settle_no_longer_than_the_wake() {
+        let (core, _dir) = build_core();
+        core.processor.for_test().set_background_burst(true);
+        let held = core.circle.session().hold_session_for_test().await;
+        let pass = core.processor.for_test().drive_due();
+        tokio::pin!(pass);
+        assert!(futures::poll!(&mut pass).is_pending());
+        let settle = core.settle_before_pause_with(BURST_SETTLE_WINDOW, BURST_SETTLE_CAP);
+        tokio::pin!(settle);
+        assert!(
+            futures::poll!(&mut settle).is_pending(),
+            "the settle did not wait for the pass under way",
+        );
+        tokio::time::advance(Duration::from_millis(RESUME_BUDGET_MS / 2)).await;
+        assert!(futures::poll!(&mut settle).is_pending());
+        tokio::time::advance(Duration::from_millis(RESUME_BUDGET_MS / 2 + 1)).await;
+        assert!(
+            futures::poll!(&mut settle).is_ready(),
+            "a pass stalled in local work held the settle past the wake",
+        );
+        assert!(futures::poll!(&mut pass).is_pending());
+        drop(held);
+        pass.await;
+    }
+
+    /// A drive or NIP-77 pass that outlives its wake is said once each, in
+    /// fixed words that name no circle, relay or key; a pass that ends in time
+    /// says nothing.
+    #[tokio::test(start_paused = true)]
+    async fn a_pass_past_its_wake_is_said_once_and_names_nothing() {
+        let (core, _dir) = build_core();
+        list_one_route(&core).await;
+        core.processor.for_test().set_background_burst(true);
+        let pool = RelayManager::new();
+        let quiet = crate::test_log::capture_log_lines(drive_once(&core.processor)).await;
+        assert!(
+            !quiet.iter().any(|line| line.contains("outlived")),
+            "a pass that ended in time was said to have outlived its wake: {quiet:?}",
+        );
+
+        let lines = crate::test_log::capture_log_lines(async {
+            let held = core.circle.session().hold_session_for_test().await;
+            let drive = drive_once(&core.processor);
+            tokio::pin!(drive);
+            let reconcile = reconcile_live(
+                &core.processor,
+                &core.active,
+                &pool,
+                Duration::ZERO,
+                Lifecycle::Burst,
+            );
+            tokio::pin!(reconcile);
+            assert!(futures::poll!(&mut drive).is_pending());
+            assert!(futures::poll!(&mut reconcile).is_pending());
+            tokio::time::advance(PASS_OVERRUN).await;
+            assert!(futures::poll!(&mut drive).is_pending());
+            assert!(futures::poll!(&mut reconcile).is_pending());
+            // Ended before either wakes, so the NIP-77 pass dials nothing.
+            core.processor.for_test().leave_foreground();
+            drop(held);
+            // Together: the session is handed to its waiters in turn, polled
+            // or not.
+            tokio::join!(drive, reconcile);
+        })
+        .await;
+        for said in [
+            "[live_sync] drive: a pass outlived its wake budget",
+            "[live_sync] reconcile: a pass outlived its wake budget",
+        ] {
+            assert_eq!(
+                lines.iter().filter(|line| *line == said).count(),
+                1,
+                "{said:?} was not said exactly once: {lines:?}",
+            );
+        }
+        for planted in [
+            "3d".repeat(32),
+            "relay.example.com".to_owned(),
+            core.own_pubkey.to_hex(),
+        ] {
+            assert!(
+                !lines.iter().any(|line| line.contains(&planted)),
+                "a captured line names what it must not: {lines:?}",
+            );
+        }
+        assert!(pool.get_relay_status().await.is_empty());
     }
 
     /// A repair armed while paused is DEFERRED, never consumed — and it opens

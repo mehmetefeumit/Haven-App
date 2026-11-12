@@ -638,7 +638,7 @@ of the last send — a `wait_for_ok` timeout is NOT a status transition (F25), s
 that window is reused by any publish inside it (a KP publish 20 s after a location, attempts 2–3 of a
 `publish_event` ladder) and costs at most one bounded attempt; today's `ping(true)` detects the same drop only at
 the next 55 s ping, so this is not a regression. Every use already goes through `try_connect_relay`, which
-reconnects from `Sleeping`/`Terminated` in ≤ 5 s inside the same wake (+0.5 J, ESTIMATED — §2.3 wake model). **Amendments:** (i) all three
+~~reconnects from `Sleeping`/`Terminated`~~ dials in ≤ 5 s inside the same wake (+0.5 J, ESTIMATED — §2.3 wake model). **AMENDED 2026-11-12 (W3): a relay Haven disconnects is never dialled again — `RelayManager::shutdown` and the wedged-socket recovery drop it and the next send registers it fresh, because `nostr-relay-pool` 0.44.3 latches a `disconnect` into the next dial of the same object (`T-POOL-TERMINATE-PERMIT`); only a relay that went `Sleeping` on its own is re-dialled in place.** **Amendments:** (i) all three
 `client.add_relay(` sites (`manager.rs:307`, `:617`, `:1253`) become
 `client.pool().add_relay(url.as_str(), publish_relay_options())` — a bare `Client::add_relay` would OR `PING`
 back (F6) and the pinger reads the flag live (F3); the guard's core check is "no bare `.add_relay(` on the
@@ -719,8 +719,8 @@ auto-commit publish and its 10 s OK wait — before it reaches the marker, so an
 (no further ingest ⇒ no further gauge increments), every downloaded event applied — DRAIN-THEN-CLEAR, because the
 worker resolves the router at PROCESSING time (F30): clearing first would drop every stored event still queued
 from the burst's own replay (a `TimedOut` burst's undrained backlog), burn the generation and re-download the same
-window on every burst; **(c)** await `in_flight_publishes == 0` (the D6 (v) gauge; bounded by the crate's 10 s
-per-relay OK wait) — the authoritative check at the instant of disconnect, because a live SelfRemove can be
+window on every burst; **(c)** await `in_flight_publishes == 0` (the D6 (v) gauge; ~~bounded by the crate's 10 s
+per-relay OK wait~~ **AMENDED 2026-11-12 (W1): it counts each relay call of a drive or NIP-77 pass from before the call can begin to its answer, bounded by that call's own deadline, and never the pass's local work, which has no bound and held this wait — and the lifecycle lock with it — for as long as it stalled**) — the authoritative check at the instant of disconnect, because a live SelfRemove can be
 ingested and SENT in the window between `settle_before_pause` returning and the pause reaching this point;
 **(d)** `client.disconnect().await` → `Terminated`, never `shutdown` (radio off) — only now, so "the pause can
 never cut a commit between SEND and OK" holds by CONSTRUCTION (a disconnect before the marker would cut a commit
@@ -790,8 +790,8 @@ seen", so a Rule-12 intake drop mid-burst reads as `Settled` — accepted (publi
 `settle_before_pause(timeout)` is STRUCTURAL, not time-based: `EngineProcessor` holds an in-flight gauge
 `in_flight_publishes: AtomicUsize`, incremented BEFORE the publisher call in `resolve_publish_work`
 (`process_group_event`) and decremented in a drop guard; `settle_before_pause` first awaits `gauge == 0` with NO
-cap (the gauge is bounded by the crate's own 10 s per-relay OK wait — the engine auto-commit is `send_event_to`
-awaited inline in the serial worker, F29), THEN keeps the sockets open for `COMMIT_SETTLE_WINDOW_SECS` 8 s after the
+cap (~~the gauge is bounded by the crate's own 10 s per-relay OK wait — the engine auto-commit is `send_event_to`
+awaited inline in the serial worker, F29~~ **AMENDED 2026-11-12 (W1): each counted relay call is bounded by its own deadline; the settle then waits for the drive and NIP-77 passes too, for no longer than what is left of the wake**), THEN keeps the sockets open for `COMMIT_SETTLE_WINDOW_SECS` 8 s after the
 last commit activity (`GroupUpdate` or `AutoPublish` — `route_events` has no `EpochChanged` variant), the
 `BURST_SETTLE_CAP_SECS = 18` cap applying to FOLLOW-ON activity only; a quiet burst pays zero. The gauge is
 checked a second time INSIDE `pause_subscriptions`, after the marker ack and before `disconnect` (D6 (i) (c)) —

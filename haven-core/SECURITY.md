@@ -1923,12 +1923,22 @@ Android service's resume claims `false` and only finishes.
   pass that begins — a burst's, a started session's, the foreground's —
   confirms it without calling a relay. A background burst
   opened over a running pass does not wait for it: it meets a pass that can
-  decide nothing a burst must not. The pause counts the drive on the same
-  in-flight count it waits on for any publish and waits for what the pass
-  has out — one call of MDK's relay client, twenty seconds at most, when the
-  pass was sending a record; the rest of a confirm's fold or of a
-  publisher's retries when the flip found it inside one — and only then cuts
-  the radio and closes the drive pool. A stop does not wait: the call under
+  decide nothing a burst must not. Each relay call of a pass — a record's
+  send, counted under the store before it is marked and given back once its
+  calls have answered, a publish of what has no record, a NIP-77 pass's dial
+  and sessions — is counted, before it reads the lifecycle, on the in-flight
+  count the pause waits on; the pause waits for the calls the pass has out —
+  one call of MDK's relay client, twenty seconds at most, when the pass was
+  sending a record — and only then cuts the radio and closes the drive pool.
+  It waits for the calls and never for the pass: the pass's local work
+  around them (a queued change's attempt, a confirm's fold) has no bound of
+  its own, and the pause holds the lifecycle lock every resume, open and
+  claim needs while it waits. A call the flip overtook before its mark is
+  refused there and leaves its record as it was. The settle before a pause
+  waits for the passes too, for no longer than what is left of the wake, so
+  a confirm due on an answer just in is made in its burst; a retry whose
+  local work outlasts the pause is sent by the next burst or the foreground
+  instead. A stop does not wait: the call under
   way is given up and stored as what it is, an attempt that never returned,
   possibly exposed. If the system suspends or kills the process
   instead, the attempt stays stored as begun and the next drive records it

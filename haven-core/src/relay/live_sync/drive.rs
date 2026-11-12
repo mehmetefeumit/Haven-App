@@ -32,8 +32,8 @@ use tokio::sync::watch;
 
 use crate::nostr::mls::types::{FanoutEndpointFailure, TransportMessage};
 use crate::relay::fanout::{
-    interrupted, DriveMode, FanoutClock, FanoutSend, FanoutTargetOutcome, ModeSource, Taken,
-    UnrecordedPublisher, WallClock,
+    interrupted, DriveMode, FanoutClock, FanoutSend, FanoutTargetOutcome, InFlight, ModeSource,
+    Taken, UnrecordedPublisher, WallClock,
 };
 use crate::relay::RelayManager;
 
@@ -113,9 +113,9 @@ impl Lifecycle {
 /// The session's current [`Lifecycle`], shared with what a drive is sent
 /// through.
 ///
-/// `SeqCst` on both sides, with the in-flight gauge: a pause writes this and
-/// then reads the gauge, a drive raises the gauge and then reads this, and
-/// one of the two must see the other.
+/// `SeqCst` on both sides, with the count of relay calls under way
+/// ([`InFlight`]): a pause writes this and then reads the count, a call
+/// counts itself and then reads this, and one of the two must see the other.
 #[derive(Debug)]
 pub(super) struct LifecycleCell {
     state: AtomicU8,
@@ -229,6 +229,9 @@ pub(super) struct Leash<'a> {
     pub(super) lifecycle: &'a LifecycleCell,
     /// The session's cancellation, when a session owns the processor.
     pub(super) halt: Option<watch::Receiver<bool>>,
+    /// What counts the relay calls the pass begins, for the pause; `None`
+    /// for a leash whose pass makes none.
+    in_flight: Option<&'a InFlight>,
     /// The mode the pass began in and [`LifecycleCell::changes`] when the
     /// leash was taken; `None` when it was taken in a lifecycle that drives
     /// nothing.
@@ -245,7 +248,21 @@ impl<'a> Leash<'a> {
         Self {
             lifecycle,
             halt,
+            in_flight: None,
             began,
+        }
+    }
+
+    /// The leash of a drive pass that begins now, each of whose relay calls
+    /// `in_flight` counts from its mark to its answer.
+    pub(super) fn counted(
+        lifecycle: &'a LifecycleCell,
+        in_flight: &'a InFlight,
+        halt: Option<watch::Receiver<bool>>,
+    ) -> Self {
+        Self {
+            in_flight: Some(in_flight),
+            ..Self::over(lifecycle, halt)
         }
     }
 
@@ -268,6 +285,10 @@ impl ModeSource for Leash<'_> {
     fn stands(&self) -> bool {
         self.began
             .is_some_and(|(_, at)| at == self.lifecycle.changes())
+    }
+
+    fn in_flight(&self) -> Option<&InFlight> {
+        self.in_flight
     }
 }
 
@@ -361,6 +382,10 @@ impl UnrecordedPublisher for LeashedPublisher<'_> {
         relays: &'a [String],
     ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         Box::pin(async move {
+            // Counted before the mode is read, as a fanout call is at its
+            // mark: a pause either waits for the publish or finds it never
+            // begun.
+            let _counted = self.leash.in_flight.map(InFlight::count);
             if self.leash.mode() != DriveMode::Full {
                 return false;
             }
@@ -642,6 +667,70 @@ mod tests {
             outbox.handed.load(Ordering::SeqCst),
             1,
             "a pass that outlived the foreground published something that has no record",
+        );
+    }
+
+    /// A publisher that holds each publish until the test lets it answer.
+    #[derive(Default)]
+    struct Unanswered(tokio::sync::Notify);
+
+    impl UnrecordedPublisher for Unanswered {
+        fn publish_unrecorded<'a>(
+            &'a self,
+            _event: &'a Event,
+            _relays: &'a [String],
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+            Box::pin(async move {
+                self.0.notified().await;
+                true
+            })
+        }
+    }
+
+    /// A drive's leash hands its pass's relay calls the count a pause waits
+    /// on, and no other leash does; the publisher of what has no record holds
+    /// a count for the whole of its publish — a pause that lands under it
+    /// still finds it — and one it refuses leaves nothing counted.
+    #[tokio::test]
+    async fn a_counted_leash_counts_an_unrecorded_publish_until_it_answers() {
+        let cell = LifecycleCell::new();
+        cell.set(Lifecycle::Foreground);
+        let in_flight = InFlight::default();
+        let leash = Leash::counted(&cell, &in_flight, None);
+        assert!(leash.in_flight().is_some() && Leash::over(&cell, None).in_flight().is_none());
+        let outbox = Unanswered::default();
+        let publisher = LeashedPublisher {
+            inner: &outbox,
+            leash: &leash,
+        };
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(445), "sealed")
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("a signed event");
+        let relays = ["wss://relay.example.com".to_owned()];
+        {
+            let publish = publisher.publish_unrecorded(&event, &relays);
+            tokio::pin!(publish);
+            assert!(futures::poll!(&mut publish).is_pending());
+            assert_eq!(in_flight.now(), 1, "a publish under way was not counted");
+            cell.set(Lifecycle::Background);
+            assert_eq!(
+                in_flight.now(),
+                1,
+                "a pause found the publish under way ended"
+            );
+            outbox.0.notify_one();
+            assert!(publish.await);
+        }
+        assert_eq!(
+            in_flight.now(),
+            0,
+            "an answered publish left its count behind"
+        );
+        assert!(!publisher.publish_unrecorded(&event, &relays).await);
+        assert_eq!(
+            in_flight.now(),
+            0,
+            "a refused publish left its count behind"
         );
     }
 }
