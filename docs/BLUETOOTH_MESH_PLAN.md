@@ -2863,7 +2863,8 @@ pushed every honest address out between two of its own sightings; the
 engine still held the honest peer's number, its connect met a forgotten
 number, failed and backed off 60 to 90 s, and outgoing links stopped. The
 table now forgets one picked at random among the addresses not being
-dialled — `SecureRandom` unless a test hands a picker in — and gives an
+dialled (and, since the re-review below, not of a link this phone
+dialled) — `SecureRandom` unless a test hands a picker in — and gives an
 address it does not know no number, and the engine no word of it, below
 `MeshRadioConstants.RSSI_FLOOR`; a known address's weak sighting is still
 told. The floor is the engine's `rssi_floor`, −85, held once in Kotlin and
@@ -2871,10 +2872,10 @@ pinned to the engine's default by `check_mesh_radio.sh` check 12 (the
 first `rssi_floor: <integer>,` after `impl Default for Config {`). Were
 the two to differ the higher would decide and nothing would break.
 `aFloodOfAddressesDoesNotPushOutAPeerUnlessItIsPicked`,
-`anAddressBeingDialledIsNeverForgotten`,
+`anAddressBeingDialledOrLinkedIsNeverForgotten`,
 `aWeakAddressNotYetKnownTakesNoPlaceAndIsNeverToldToTheEngine`,
 `aWeakSightingOfAKnownAddressIsToldToTheEngine`, the table's own
-`thePeerTableHoldsSixtyFourAndForgetsOnePickedAmongThoseNotBeingDialled`,
+`thePeerTableHoldsSixtyFourAndForgetsOnePickedAmongThoseNotHeld`,
 and `theTableABuildHasForgetsByNoFixedRule` for the picker a build has —
 whose one in 10^26 is the only chance any test here takes.
 **Two changes the suite let through (low; the code was right).** A
@@ -2952,6 +2953,26 @@ with no engine to read it from); each of its 30 failure sites,
 silenced in turn, fails the self-test. The reviewer's trees, in scratch
 copies with the new guard and this tree's Kotlin, each fail at the check
 its plant belongs to, and the tree with no plant passes.
+
+Re-review of those fixes (independent, read-only, of `a6e3ed8`): nothing
+blocking, high or medium; every fix holds. Two low, both fixed.
+**The table could forget the address of a peer this phone is linked to**,
+which the engine never does: the fix above exempted only an address being
+dialled, and a link coming up ends its dial. A flood then cost each linked
+peer, once forgotten and seen again under a new number, a second dial that
+the engine closes as a duplicate. A link this phone dialled now keeps its
+address, and the table forgets neither it nor one being dialled
+(`anAddressBeingDialledOrLinkedIsNeverForgotten`, which also holds that
+the address is anyone's to forget once the link is down;
+`thePeerTableHoldsSixtyFourAndForgetsOnePickedAmongThoseNotHeld`).
+**The guard's `path` rule failed ordinary code**: a variable named `path`
+assigned at the start of a statement. It now reads `path` and `=` only
+where an attribute's argument starts — after `[`, `(` or `,` — and the
+self-test's passing tree assigns such a variable; the three plants still
+fail. Not changed, and stated: a link dropped for a send that timed out,
+in the pump of its own frame, is told down with no close from the engine,
+so the hold for that frame stands; it gives a peer nothing a valid frame
+does not.
 
 ### Proposed CLAUDE.md wording (owner to approve)
 

@@ -201,7 +201,7 @@ class MeshRadioCoreTest {
     }
 
     @Test
-    fun anAddressBeingDialledIsNeverForgotten() {
+    fun anAddressBeingDialledOrLinkedIsNeverForgotten() {
         val rig = Rig().started()
         rig.core.onSighting(ADDRESS, -40)
         for (n in 1 until MAX_PEERS) rig.core.onSighting(address(n), -40)
@@ -212,10 +212,14 @@ class MeshRadioCoreTest {
         assertTrue(rig.pickedAmong.all { it == MAX_PEERS - 1 }, "the dialled address was offered: ${rig.pickedAmong.distinct()}")
         rig.core.onSighting(ADDRESS, -40)
         assertEquals("sighting(0,-40)", rig.engine.called("sighting").last(), "the address being dialled was forgotten")
-        // Its link comes up bound to it, and then it is anyone's to forget.
+        // Its link comes up bound to it: the engine forgets no linked peer, so its number still means it.
         rig.core.onLinkUp(1, central = true, attMtu = 517, address = ADDRESS)
         assertEquals(listOf("linkUp(1,true,517,0)"), rig.engine.called("linkUp"))
         rig.core.onSighting(address(400), -40)
+        assertEquals(MAX_PEERS - 1, rig.pickedAmong.last(), "the linked address was offered")
+        // Once the link is down it is anyone's to forget.
+        rig.core.onLinkDown(1)
+        rig.core.onSighting(address(401), -40)
         assertEquals(MAX_PEERS, rig.pickedAmong.last())
     }
 

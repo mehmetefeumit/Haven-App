@@ -467,7 +467,7 @@ of the app's build and changes nothing in it.
 | `MeshEngineApi` | the nine calls of §A.6 as an interface; `MeshNative` is its one real implementation |
 | `RadioOutput` | `decode(ByteArray)`: the encoding of §A.5 |
 | `MeshRadioCore` | **the one operation queue**: links, pending connects, in-flight frames, the pump |
-| `PeerTable` | Bluetooth address → `PeerRef`, 64 entries — the engine's own `max_peers` (`eng:264`) — least recently seen evicted. **As built (after the review of M3f):** not the least recently seen. A full table forgets one picked at random (`SecureRandom`; injected in tests) among the addresses not being dialled, and an address not yet known whose sighting is below the engine's `rssi_floor` (−85) gets no number and is not told to the engine; a known address's weak sighting is told. The engine forgets at random "so whoever advertises under many addresses keeps nobody out" (`eng` `make_room`) and ignores an unknown weak peer; a table that forgot its oldest undid both — one advertiser rotating 64 addresses, at any distance, pushed every honest address out between two of its sightings, the engine's connect met a forgotten number, failed and backed off, and outgoing links stopped |
+| `PeerTable` | Bluetooth address → `PeerRef`, 64 entries — the engine's own `max_peers` (`eng:264`) — least recently seen evicted. **As built (after the review of M3f):** not the least recently seen. A full table forgets one picked at random (`SecureRandom`; injected in tests) among the addresses neither being dialled nor of a link this phone dialled (the engine's rule; a link this phone took has no address in the table), and an address not yet known whose sighting is below the engine's `rssi_floor` (−85) gets no number and is not told to the engine; a known address's weak sighting is told. The engine forgets at random "so whoever advertises under many addresses keeps nobody out" (`eng` `make_room`) and ignores an unknown weak peer; a table that forgot its oldest undid both — one advertiser rotating 64 addresses, at any distance, pushed every honest address out between two of its sightings, the engine's connect met a forgotten number, failed and backed off, and outgoing links stopped |
 | `DeadlinePolicy` | from time left: nothing / reminder / stop |
 | `StartPolicy` | at a service start, from (Bluetooth permission held, engine's time left, stored copy): run, resume, or stop with which notice |
 | `PermissionMatrix` | per API level: what to ask, whether it may search |
@@ -926,12 +926,12 @@ guard's. Added: `theEngineInterfaceIsTheNineExportsOfTheFixture` (§A.6),
 `aStopTheUserDidNotMakeIsAStopWithTheNoticeAndIsFinal` (§B.5) and
 `anEngineWhoseTimeIsUpStopsTheServiceWithTheNotice` (T-AUTO-2). After the
 review of M3f: `aFloodOfAddressesDoesNotPushOutAPeerUnlessItIsPicked`,
-`anAddressBeingDialledIsNeverForgotten`,
+`anAddressBeingDialledOrLinkedIsNeverForgotten`,
 `aWeakAddressNotYetKnownTakesNoPlaceAndIsNeverToldToTheEngine`,
 `aWeakSightingOfAKnownAddressIsToldToTheEngine`,
 `aCompletionWhileARefusedFrameWaitsClosesItsLink` and
 `aLinkTheEngineClosesAtOnceHoldsNoLock`; the table's own test is now
-`thePeerTableHoldsSixtyFourAndForgetsOnePickedAmongThoseNotBeingDialled`.
+`thePeerTableHoldsSixtyFourAndForgetsOnePickedAmongThoseNotHeld`.
 The script fails unless the tests that ran are the tests the sources
 declare, by name; it cannot tell a test whose body was emptied.
 
@@ -1472,10 +1472,10 @@ security-reviewer on M3a, M3b and §B.3–B.4 before they land (plan §8.3).
 | Frame flood on a link | credit per link; unsolicited packet closes it | engine (`eng:44-57`) | T-SEC-3, T-SEC-4 [L, exist] |
 | Long write, offset write, write with response | refused; link closed | `GattServerAdapter` (§B.3) | [E] netsim only |
 | Connection flood | 12 new inbound links a minute, burst 4 (`eng:252-253`); at most 4 unlinked connections, 10 s each (§B.4) | engine; `MeshRadioCore` | [L, exists]; `unlinkedConnectionsAreCappedAndTimedOut` [J] |
-| One advertiser under many addresses, pushing the others out of the peer table (found by the review of M3f) | a full table forgets one picked at random among those not being dialled, in the engine and in `PeerTable` alike; an unknown address below the signal floor takes no place in either | engine (`make_room`, `rssi_floor`); `PeerTable` (§B.1) | [L, exists]; `aFloodOfAddressesDoesNotPushOutAPeerUnlessItIsPicked`, `anAddressBeingDialledIsNeverForgotten`, `aWeakAddressNotYetKnownTakesNoPlaceAndIsNeverToldToTheEngine` [J]; the floor's two copies pinned [G] |
+| One advertiser under many addresses, pushing the others out of the peer table (found by the review of M3f) | a full table forgets one picked at random among those neither linked nor being dialled, in the engine and in `PeerTable` alike (the table knows the address of a link this phone dialled; a link it took has none); an unknown address below the signal floor takes no place in either | engine (`make_room`, `rssi_floor`); `PeerTable` (§B.1) | [L, exists]; `aFloodOfAddressesDoesNotPushOutAPeerUnlessItIsPicked`, `anAddressBeingDialledOrLinkedIsNeverForgotten`, `aWeakAddressNotYetKnownTakesNoPlaceAndIsNeverToldToTheEngine` [J]; the floor's two copies pinned [G] |
 | Slot exhaustion, eclipse | random and rotated slots; departed class | engine (`eng:38-42`) | T-SEC-4 [L, exists] |
 | Controller connection slots held by a stranger who never subscribes | **none**: Android has no accept filter for a connectable advertisement | — | residual, stated |
-| **A stranger keeps the phone awake** | **none that keeps R2**: each link coming up and each inbound frame holds the lock up to 10 s, and one valid frame every few seconds — far inside the credit of 120 a minute — is enough. Bounded only by the twelve hours. As built: a link or a frame the engine answers with that link's close in the same pump holds no lock (§B.2), so only a peer the engine admits has this | §G | residual; Q-13; cost [H]; `aLinkTheEngineClosesAtOnceHoldsNoLock` [J] for the narrowing |
+| **A stranger keeps the phone awake** | **none that keeps R2**: each link coming up and each inbound frame holds the lock up to 10 s, and one valid frame every few seconds — far inside the credit of 120 a minute — is enough. Bounded only by the twelve hours. As built: a link or a frame the engine answers with that link's close in the same pump holds no lock (§B.2), so a link the engine refuses at once, or a frame it answers with a close, buys none | §G | residual; Q-13; cost [H]; `aLinkTheEngineClosesAtOnceHoldsNoLock` [J] for the narrowing |
 | **A fault in the mesh ends the relay path's process** (F-14) | every callback inside `MeshThread.run`; every export inside `radio_guarded` | §B.1, §A.6 | `aRadioPortThatThrowsStopsTheRadioAndNothingEscapes` [J]; `every_export_is_one_guarded_call` [L]; guard [G] |
 | Handshake cost | two scalar multiplications a connection, behind the inbound limit | engine | plan §6.7 |
 | Tracking by advertisement | the service UUID alone; no name, data or power | `AdvertiserAdapter` | `theAdvertisementIsTheServiceUuidAlone` [J]; on air [E] netsim |

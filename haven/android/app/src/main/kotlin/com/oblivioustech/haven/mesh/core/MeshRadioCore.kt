@@ -33,7 +33,8 @@ class MeshRadioCore(
     var running = true
         private set
 
-    private class Link {
+    /** [address] is the one this phone dialled; null for a link it took. */
+    private class Link(val address: String?) {
         /** When the frame in flight is given up, or [refused] offered again; null when the link can take a frame. */
         var due: Long? = null
 
@@ -71,7 +72,7 @@ class MeshRadioCore(
     }
 
     fun onSighting(address: String, rssi: Int) = input {
-        if (up) peers.seen(address, rssi, dialing.keys)?.let { engine.sighting(it, rssi) }
+        if (up) peers.seen(address, rssi, ::held)?.let { engine.sighting(it, rssi) }
         null
     }
 
@@ -95,7 +96,7 @@ class MeshRadioCore(
             port.close(link)
             return@input null
         }
-        links[link] = Link()
+        links[link] = Link(address.takeIf { peer != NO_PEER })
         engine.linkUp(link, central, attMtu, peer)
         link
     }
@@ -193,6 +194,9 @@ class MeshRadioCore(
         port.wakeAt(terms.min())
         if (hold) port.holdAwake(minOf(wake + HOLD_MARGIN_MS, HOLD_CAP_MS))
     }
+
+    /** As the engine: the number of a peer being dialled or linked still means it, so its address is kept. */
+    private fun held(address: String) = address in dialing || links.values.any { it.address == address }
 
     /** The links that can take a frame now: only for these does the engine hand one over. */
     private fun ready(): LongArray = links.filterValues { it.due == null }.keys.toLongArray()

@@ -98,8 +98,9 @@
 #      so nothing that ships may sit there.
 #   6. The ways found so far of building one of the two modules from a file
 #      other than the one read above: no file of the crate's hand-written
-#      source writes `path` and an `=` (`#[path = …]`, bare, under `cfg_attr`
-#      or from a macro) or invokes `include!`; and `lib.rs` names `mesh_jni`
+#      source writes `path` and an `=` where an attribute's argument starts
+#      (`#[path = …]`, bare, under `cfg_attr` or from a macro; a variable
+#      named `path` may be assigned) or invokes `include!`; and `lib.rs` names `mesh_jni`
 #      and `mesh_radio` once each, as `mod <name>;` directly under the pinned
 #      attribute lines — `#[cfg(any(target_os = "android", test))]`, and for
 #      `mesh_jni` the allowance — which follow the end of another item.
@@ -230,10 +231,10 @@ readonly -a JVM_TEST_NAMES=(
   theAdvertisementIsTheServiceUuidAlone
   theRadioModesComeFromOneSite
   theEngineInterfaceIsTheNineExportsOfTheFixture
-  thePeerTableHoldsSixtyFourAndForgetsOnePickedAmongThoseNotBeingDialled
+  thePeerTableHoldsSixtyFourAndForgetsOnePickedAmongThoseNotHeld
   aFloodOfAddressesDoesNotPushOutAPeerUnlessItIsPicked
   theTableABuildHasForgetsByNoFixedRule
-  anAddressBeingDialledIsNeverForgotten
+  anAddressBeingDialledOrLinkedIsNeverForgotten
   aWeakAddressNotYetKnownTakesNoPlaceAndIsNeverToldToTheEngine
   aWeakSightingOfAKnownAddressIsToldToTheEngine
   aCompletionWhileARefusedFrameWaitsClosesItsLink
@@ -572,8 +573,8 @@ run_check() {
     rel="${file#"${REPO_ROOT}/"}"
     [[ "${rel}" == "${GENERATED}" ]] && continue
     view="$(code_view "${file}" blank)"
-    if tr -d '[:space:]' <<<"${view}" | grep -qE "${B}path=([^=]|\$)"; then
-      fail "${rel} gives something a path (the word 'path' and an '=', as in #[path = …], bare, under cfg_attr or written by a macro). A module declared in ${SRC} is the file of its name there: under a path attribute the compiler builds another file, and every check here — and the Rust tests that read ${SHIM##*/} — goes on reading the one it left."
+    if tr -d '[:space:]' <<<"${view}" | grep -qE "[[(,]path=([^=]|\$)"; then
+      fail "${rel} gives something a path (the word 'path' and an '=' where an attribute's argument starts, as in #[path = …], bare, under cfg_attr or written by a macro). A module declared in ${SRC} is the file of its name there: under a path attribute the compiler builds another file, and every check here — and the Rust tests that read ${SHIM##*/} — goes on reading the one it left."
     fi
     hits="$(grep -nE "${B}include[[:space:]]*!" <<<"${view}" | cut -d: -f1 | tr '\n' ' ' || true)"
     if [[ -n "${hits}" ]]; then
@@ -729,7 +730,8 @@ fn header(name: &str) -> String {
     format!("pub extern \"system\" fn Java_{name}(")
 }
 fn openers(word: &str, path: &str) -> bool {
-    let path = if word == "//" { "/*" } else { path }; // unsafe
+    let mut path = if word == "//" { "/*" } else { path }; // unsafe
+    path = path.trim();
     word.contains('"') || word == r#"an "unsafe" // word"# || path == "a
         // no_mangle \" extern */" /* nested /* unsafe */ extern */
 }
