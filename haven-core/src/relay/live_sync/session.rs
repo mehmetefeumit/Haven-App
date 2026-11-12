@@ -10523,15 +10523,18 @@ mod tests {
         let message = crate::nostr::mls::SessionManager::event_to_transport_message(&event)
             .expect("a kind-445 event converts");
         let transport = pool.fanout_transport();
-        let taken = transport
-            .take(&url)
-            .await
-            .expect("the relay's gate is free");
+        let sent = transport
+            .publish(
+                &url,
+                &message,
+                transport
+                    .take(&url)
+                    .await
+                    .expect("the relay's gate is free"),
+            )
+            .await;
         assert!(
-            matches!(
-                transport.publish(&url, &message, taken).await,
-                crate::relay::fanout::FanoutTargetOutcome::Accepted
-            ),
+            matches!(sent, crate::relay::fanout::FanoutTargetOutcome::Accepted),
             "and so must a fanout send",
         );
         assert_eq!(core.drive_pool_connected_relays().await, Some(1));
