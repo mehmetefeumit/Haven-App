@@ -91,7 +91,9 @@ you have accepted deviating from. The second half of that rule — *and at least
 one disclosure*, so that no deviation is recorded which the user was never told
 about — was dropped on 2026-08-29 when the surface that carried every
 deviation's disclosure was deleted; 9 of the accepted-deviation invariants then
-carried none. The How It Works page brought that to 6, but the requirement
+carried none, and 10 by the time the How It Works page arrived. That page
+discloses four of them (LOCATION-POOL, RC1, PUB-COALESCE and P6) and so brought
+the count to 6, but the requirement
 itself was NOT restored when it arrived: the owner scoped the page to a
 non-technical overview that does not go stale, and the six still undisclosed
 (no periodic re-key, `INV-E-NO-PERIODIC-REKEY` and `INV-K-M5-SELF-UPDATE-DISABLED`,
@@ -446,21 +448,14 @@ Recorded here rather than papered over:
   key *while locked*. Only a device powered off and not yet unlocked keeps it
   sealed. Owner decision: disclose, or record that this is out of the privacy
   copy's scope.
-* **`LEAVE-GHOST` is declared with no invariant, and the copy currently asserts
-  the bounded form its record forbids.** `privacyEncryptionWhenSomeoneLeaves`
-  tells the user a departing member stops being able to read anything new "once
-  the rest of the circle has caught up, usually within a few minutes, longer for
-  anyone who was offline at the time". The deviation's `forbidden_claim` is
-  exactly that: copy must not state that leaving always re-keys the circle
-  within a bounded time, because the corroboration gate deliberately keeps no
-  admin-side record of a departing member's intent, so the crashed-leaver case
-  needs a manual admin removal that nothing signals is owed. This is the one
-  entry on this page where a registered deviation and a shipped sentence
-  contradict each other; it is held as `ratcheted` under
-  `INV-E-REMOVAL-ADVANCES-EPOCH` rather than filed as an accepted deviation,
-  because filing it would require inventing a disclosure. Owner decision: add
-  the residual to the copy (a 13-locale round), or re-scope the sentence to the
-  converged case.
+* **`LEAVE-GHOST` is declared with no invariant; the copy now discloses it —
+  RESOLVED (2026-11-12).** The Privacy-page sentence that asserted the bounded
+  form its record forbids went with the page on 2026-08-29. The How It Works
+  page's `howItWorksMembership` now states the residual itself: a leave asks the
+  other members to make the key switch, and if nobody does, the leaver stays in
+  the circle until an admin removes them. It states no time bound. It is still
+  held as `ratcheted` under `INV-E-REMOVAL-ADVANCES-EPOCH`, whose tests cover
+  admin removal only; nothing fails when the self-leave path breaks.
 * **`KP-SLOT-WIDTH` was a spec violation and is now fixed — RESOLVED.** A
   pre-fix install published a 32-hex kind-30443 `d`; the Nostr transport binding
   requires exactly one 64-character lowercase hex value decoding to 32 bytes and

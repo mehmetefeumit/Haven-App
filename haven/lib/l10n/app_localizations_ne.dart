@@ -600,11 +600,11 @@ class AppLocalizationsNe extends AppLocalizations {
 
   @override
   String get howItWorksInvitations =>
-      'Haven publishes a public invitation key for you on your relays, so people can invite you even while your phone is offline. Circles are run by admins, who decide who is invited and who is removed. An invitation is sealed in layers of encryption. A relay can see who it is addressed to, but the invitation itself doesn\'t show who sent it or which circle it is for. Someone who is invited shares nothing with the circle until they accept.';
+      'Haven publishes a public invitation key for you on your relays, so people can invite you even while your phone is offline. Circles are run by admins, who decide who is invited and who is removed. An invitation is sealed in layers of encryption. A relay can see who it is addressed to, but the invitation itself doesn\'t show who sent it or which circle it is for. Someone who is invited doesn\'t share their location with the circle until they accept.';
 
   @override
   String get howItWorksMembership =>
-      'When someone is invited or leaves, the circle switches to new keys. A new member can read what the circle shares from the moment they are invited, but nothing from before. Anyone who leaves or is removed can\'t read anything shared after the switch, though they may still be able to tell when the circle is active. Anything that already reached their phone stays there. Members can see each other\'s locations, display names, photos and public keys.';
+      'When someone is invited or removed, the circle switches to new keys. When someone leaves, their phone asks the others to make that switch. If nobody does, they stay in the circle until an admin removes them. A new member can read what the circle shares from the moment they are invited, but nothing from before. After a switch, someone who left or was removed can\'t read anything new, though they may still be able to tell when the circle is active. Anything that already reached their phone stays there. Members can see each other\'s locations, display names, photos and public keys.';
 
   @override
   String get howItWorksSharingHeading => 'Sharing your location';
@@ -615,7 +615,7 @@ class AppLocalizationsNe extends AppLocalizations {
 
   @override
   String get howItWorksSharingUpdate =>
-      'Each update is encrypted on your phone and sent to the circle\'s relays under a brand-new key that is used once and then thrown away. So the update by itself doesn\'t tell a relay who sent it, or which updates came from the same person. It also asks relays to delete it after a few minutes. Relays are expected to do so, but nothing forces them to, and the update stays encrypted either way. Your circle members\' phones pick it up, decrypt it, and show you on their map.';
+      'Each update is encrypted on your phone and sent to the circle\'s relays under a brand-new key that is used once and then thrown away, so the update by itself doesn\'t name who sent it. It also asks relays to delete it after a few minutes. Relays are expected to do so, but nothing forces them to, and the update stays encrypted either way. Your circle members\' phones pick it up, decrypt it, and show you on their map.';
 
   @override
   String get howItWorksMapHeading => 'The map';
@@ -640,11 +640,11 @@ class AppLocalizationsNe extends AppLocalizations {
 
   @override
   String get howItWorksLimitsPatterns =>
-      'Relays can see when updates are sent, roughly how large they are, and which updates belong to the same circle. Someone watching your internet connection, such as your internet provider, may be able to tell that you use Haven. Haven isn\'t designed to hide your activity from someone who can watch many relays at once.';
+      'Relays can see when updates are sent, roughly how large they are, and which updates belong to the same circle. Their timing can also show which circles belong to the same phone, and roughly how many you are in. Someone watching internet traffic, such as an internet provider, may be able to tell that you use Haven and which phones are probably in the same circle. Haven isn\'t designed to hide your activity from someone who can watch many relays at once.';
 
   @override
   String get howItWorksLimitsPeople =>
-      'The people in your circles see where you are, as precisely as your phone reports it, so share only with people you trust. Removing your name or photo later doesn\'t delete copies others already have, and a removed photo stays on the server that stored it. Haven also can\'t protect your information from someone who can unlock and use your phone.';
+      'The people in your circles see where you are, as precisely as your phone reports it, so share only with people you trust. Removing your name or photo later doesn\'t delete copies others already have, and a removed photo stays on the server that stored it. Haven also can\'t protect your information from someone who controls your phone.';
 
   @override
   String get relaySettingsBackendCaption =>

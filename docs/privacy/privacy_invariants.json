@@ -104,7 +104,7 @@
       "id": "LEAVE-GHOST",
       "source": "haven-core/SECURITY.md#bounded-leave-removal-window-under-live-sync-rev-1",
       "summary": "The corroboration gate deliberately keeps NO admin-side record of a departing member's intent, so there is no automatic admin-side backstop. The leave's intent is durable and the Android foreground service and WorkManager carry it on without the app being opened, so a crash no longer matters. Two cases stay unconverged: (1) at LEAVE_BOUND_MS (a day after the press) the leaver ends the leave on its own device whether or not any member committed it, and a last proposal for an epoch the circle has left is never committed; (2) the leaver's device takes no wake before the bound (switched off, or background sharing off with the app never opened again) while its SelfRemove was deferred or lost the order race. In either case no removal commit is produced and a stale roster ghost stays authorized until an admin manually removes it. SECURITY.md labels this 'Precisely-bounded residual (accepted)'.",
-      "forbidden_claim": "Copy must not state that leaving always re-keys the circle within a bounded time. The automatically-unconverged case needs a manual admin removal and there is no admin-visible signal one is owed. NOTE: no user-facing string discloses this. The Privacy-page sentence that ASSERTED the bounded form ('usually within a few minutes') was removed with the page on 2026-08-29, so no shipped copy contradicts this record any more."
+      "forbidden_claim": "Copy must not state that leaving always re-keys the circle within a bounded time. The automatically-unconverged case needs a manual admin removal and there is no admin-visible signal one is owed. The Privacy-page sentence that ASSERTED the bounded form ('usually within a few minutes') was removed with the page on 2026-08-29. Since 2026-11-12 howItWorksMembership discloses the residual in plain words (if nobody makes the switch, the leaver stays in the circle until an admin removes them) and states no time bound."
     },
     {
       "id": "KP-SLOT-WIDTH",
@@ -2486,7 +2486,7 @@
         }
       ],
       "guards": [],
-      "residual": "Scoped to ADMIN removal — both Rust tests exercise that path. The SELF-LEAVE path (which the Privacy-page sentence covered until the page was removed on 2026-08-29) has an accepted unconverged case (deviation LEAVE-GHOST) where the ghost stays authorized until a manual admin removal; that removal is now an affordance an admin actually has (the member row's remove button, shipped 2026-08-15), where before it existed only as a service with no caller. Nothing still fails when the self-leave path breaks, and since 2026-08-29 no copy describes it either way; LEAVE-GHOST stays a registered deviation without an invariant of its own (docs/privacy/README.md, Known gaps). circleMemberRemoveDialogBody makes the forward-secrecy claim in the admin's own words and circleMemberRemoveError makes the rollback one; both are backed by the tests above, but neither is reachable by the claim-language sweep, so this row is what keeps them proven."
+      "residual": "Scoped to ADMIN removal — both Rust tests exercise that path. The SELF-LEAVE path (which the Privacy-page sentence covered until the page was removed on 2026-08-29) has an accepted unconverged case (deviation LEAVE-GHOST) where the ghost stays authorized until a manual admin removal; that removal is now an affordance an admin actually has (the member row's remove button, shipped 2026-08-15), where before it existed only as a service with no caller. Nothing still fails when the self-leave path breaks. Since 2026-11-12 howItWorksMembership describes it as the residual itself: a leave asks the others to make the switch, and if nobody does the leaver stays until an admin removes them, with no time bound claimed; LEAVE-GHOST stays a registered deviation without an invariant of its own (docs/privacy/README.md, Known gaps). circleMemberRemoveDialogBody makes the forward-secrecy claim in the admin's own words and circleMemberRemoveError makes the rollback one; both are backed by the tests above, but neither is reachable by the claim-language sweep, so this row is what keeps them proven."
     },
     {
       "id": "INV-E-REMOVAL-NOT-UNDONE-FOR-WANT-OF-A-RELAY",
@@ -5098,9 +5098,7 @@
       "status": "ratcheted",
       "residual": "UNPROVEN in the tunnel-bypass direction. No test or guard forbids a raw socket, a custom DNS resolver, or a dart:io HttpClient configured with a proxy override. The no-IP-in-payload half is covered by the LocationMessage field tests cited here; the no-bypass half rests on the current dependency set alone.",
       "attributed_arb_keys": [],
-      "assertion_arb_keys": [
-        "howItWorksLimitsAddress"
-      ],
+      "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
       "non_arb_claims": [],
       "symbols": [
@@ -5154,7 +5152,8 @@
       "status": "enforced",
       "assertion_arb_keys": [
         "onboardingValueProp3Summary",
-        "howItWorksIdentityKeys"
+        "howItWorksIdentityKeys",
+        "howItWorksIdentityBackup"
       ],
       "disclosure_arb_keys": [
         "identityAdvancedSecretKeyWarning"
@@ -5606,7 +5605,7 @@
       "title": "Losing the phone loses the identity",
       "statement": "There is no escrow, no server-side backup and no recovery flow: the secret exists only in the device keystore, so the only recovery path is a user-made nsec backup. This becomes false the moment any code path uploads or shares the secret for recovery.",
       "status": "ratcheted",
-      "residual": "Nothing fails if a key-escrow or cloud-backup path is added: the guarantee rests on INV-K-SECRET-KEY-NEVER-LEAVES-DEVICE's log/commit guards, which detect logging and committed secrets but not a deliberate upload. No test asserts the absence of a recovery endpoint. Nor is the fact disclosed: onboarding's warning (onboardingCreateIdentityWarning, 'If you lose this phone or delete the app, your identity is gone') was removed at the owner's direction on 2026-11-04, and the only remaining mention is the backup sentence in the delete-identity confirmation (identityAdvancedDeleteBody), which a user meets only when deleting.",
+      "residual": "Nothing fails if a key-escrow or cloud-backup path is added: the guarantee rests on INV-K-SECRET-KEY-NEVER-LEAVES-DEVICE's log/commit guards, which detect logging and committed secrets but not a deliberate upload. No test asserts the absence of a recovery endpoint. Nor is the fact disclosed: onboarding's warning (onboardingCreateIdentityWarning, 'If you lose this phone or delete the app, your identity is gone') was removed at the owner's direction on 2026-11-04, and the only remaining mention is the backup sentence in the delete-identity confirmation (identityAdvancedDeleteBody), which a user meets only when deleting. Since 2026-11-12 howItWorksIdentityBackup states it on the How It Works page ('Haven keeps no other copy of your secret key').",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [
         "howItWorksIdentityBackup"
