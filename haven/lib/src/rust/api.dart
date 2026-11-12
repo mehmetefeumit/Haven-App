@@ -984,11 +984,12 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   ///
   /// # Stamping
   ///
-  /// Fetched kind-0s are upserted newest-wins and stamped as HITS; authors
-  /// their assigned relay answered nothing for are stamped as MISSES (which
-  /// advances the bounded retry ladder without resetting the staleness clock).
-  /// Authors the cycle never reached — dropped at the batch deadline, or on a
-  /// relay that turned out to be unusable — are stamped **not at all**.
+  /// Fetched kind-0s are upserted newest-wins and stamped as HITS; authors a
+  /// relay answered nothing for, or was reached for and did not answer, are
+  /// stamped as MISSES (which advances the bounded retry ladder without
+  /// resetting the staleness clock). Authors no relay was reached for —
+  /// dropped at the batch deadline, or behind a relay that could not be
+  /// connected to — are stamped **not at all**.
   /// `has_picture` reflects whether CURRENT picture bytes are cached.
   ///
   /// # Errors
@@ -1246,12 +1247,15 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required String giftWrapEventJson,
   });
 
-  /// Whether the own profile has unpublished work, whether the persisted
-  /// backoff permits another attempt, and if not, how long until it does.
+  /// Whether the own profile has unpublished work — a saved edit, or a pool
+  /// relay it has never been sent to — whether the persisted backoff permits
+  /// another attempt, and if not, how long until it does.
   ///
   /// The read a resume trigger consults before calling
-  /// [`Self::sync_my_profile`], so a clean install never dials a relay just
-  /// to discover it had nothing to say.
+  /// [`Self::sync_my_profile`], so an install with nothing saved and its pool
+  /// coverage settled never dials a relay just to discover it had nothing to
+  /// say, and so the identity secret is fetched only for a save
+  /// ([`ProfilePendingStateFfi::save_pending`]).
   ///
   /// # Errors
   ///
@@ -1437,7 +1441,11 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// its own salted relay independently, so a decoy only helps if it
   /// happens to hash to the SAME relay.
   ///
-  /// The one thing this adds over `fetch_member_profiles`: `pubkey` accepts
+  /// An author with no resolved profile is asked regardless of the miss
+  /// backoff: this is one key the user explicitly asked about, not a roster
+  /// sweep.
+  ///
+  /// The other thing this adds over `fetch_member_profiles`: `pubkey` accepts
   /// EITHER hex or bech32 (`npub1…`), via `PublicKey::parse` (the pattern
   /// already used to resolve another user's pubkey in
   /// `relay/manager.rs`). `fetch_member_profiles` itself stays hex-only
@@ -1623,12 +1631,18 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required BigInt nowSecs,
   });
 
-  /// Publishes whatever the own-profile outbox is holding.
+  /// Publishes whatever the own-profile outbox is holding, and re-sends the
+  /// published profile to a pool relay that has never been given it.
   ///
   /// Idempotent and safe to call from any resume/foreground trigger: with
   /// nothing pending it returns [`ProfileSyncOutcomeFfi::NothingPending`],
   /// and with an unusable relay pool [`ProfileSyncOutcomeFfi::PoolUnderflow`],
-  /// in both cases without touching the network OR the supplied secret.
+  /// in both cases without touching the network OR the supplied secret. The
+  /// secret signs a saved edit and nothing else: a caller passes `None`
+  /// unless [`ProfilePendingStateFfi::save_pending`] says one is waiting, so
+  /// a pass that only re-sends what the pool already serves never takes the
+  /// secret out of the platform keystore. A save that lands after a caller
+  /// read `save_pending` is left for the pass its own trigger starts.
   /// Network failure is an OUTCOME, not an error — the save stays queued with
   /// its retry ladder advanced, and only a local fault produces `Err`.
   ///
@@ -1636,9 +1650,7 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   ///
   /// Returns a redacted error string on a malformed secret, a secret that is
   /// not this account's identity, or a local database/signing fault.
-  Future<ProfileSyncResultFfi> syncMyProfile({
-    required List<int> identitySecretBytes,
-  });
+  Future<ProfileSyncResultFfi> syncMyProfile({Uint8List? identitySecretBytes});
 
   /// Who a removal the user asked for named, dropped unmade, that is still
   /// in the circle of `mls_group_id`, as lowercase hex: the members a
@@ -4407,8 +4419,13 @@ class ProfileMetadataFfi {
 /// Three independent facts rather than one enum: how they render is a UI
 /// concern, and collapsing them here would decide it in Rust.
 class ProfilePendingStateFfi {
-  /// A save is not yet served by every pool relay.
+  /// There is work for a sync pass: a save not yet served by every pool
+  /// relay, or a pool relay the published profile was never sent to.
   final bool pending;
+
+  /// A save is waiting to be signed — the only work
+  /// [`CircleManagerFfi::sync_my_profile`] needs the identity secret for.
+  final bool savePending;
 
   /// The persisted retry ladder permits another attempt now.
   final bool retryDue;
@@ -4419,13 +4436,17 @@ class ProfilePendingStateFfi {
 
   const ProfilePendingStateFfi({
     required this.pending,
+    required this.savePending,
     required this.retryDue,
     this.nextRetryInSecs,
   });
 
   @override
   int get hashCode =>
-      pending.hashCode ^ retryDue.hashCode ^ nextRetryInSecs.hashCode;
+      pending.hashCode ^
+      savePending.hashCode ^
+      retryDue.hashCode ^
+      nextRetryInSecs.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -4433,6 +4454,7 @@ class ProfilePendingStateFfi {
       other is ProfilePendingStateFfi &&
           runtimeType == other.runtimeType &&
           pending == other.pending &&
+          savePending == other.savePending &&
           retryDue == other.retryDue &&
           nextRetryInSecs == other.nextRetryInSecs;
 }

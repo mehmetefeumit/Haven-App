@@ -6,6 +6,7 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
@@ -28,6 +29,7 @@ import 'package:haven/src/services/publish_stagger.dart'
 import 'package:haven/src/services/relay_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/utils/bidi_isolate.dart';
+import 'package:haven/src/utils/npub_speech.dart';
 import 'package:haven/src/utils/npub_validator.dart';
 import 'package:haven/src/widgets/circles/missed_invitations_dialog.dart';
 import 'package:haven/src/widgets/circles/selected_members_list.dart';
@@ -1224,6 +1226,65 @@ void main() {
         ),
         isEmpty,
       );
+    });
+
+    testWidgets('N4. a chip is spoken as the person: the name, with the key '
+        'one action away, or else the key in chunks', (tester) async {
+      const unnamedNpub =
+          'npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqspcd5';
+      final handle = tester.ensureSemantics();
+      final container = ProviderContainer(
+        overrides: _overrides(
+          mockCircle: MockCircleService(),
+          profileService: MockProfileService(),
+          directory: aliceDirectory(),
+        ),
+      );
+      addTearDown(container.dispose);
+      await tester.pumpWidget(
+        _buildNavApp(
+          container: container,
+          observer: _PopCountingNavigatorObserver(),
+          memberKeyPackages: [_invitee(aliceNpub), _invitee(unnamedNpub)],
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Open'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('OpenName'));
+      await tester.pumpAndSettle();
+      final said = captureAccessibilityAnnouncements(tester);
+      final l10n = AppLocalizations.of(
+        tester.element(find.byType(NameCirclePage)),
+      );
+      final aliceKey = NpubValidator.shortenForDisplay(aliceNpub);
+      final unnamedKey = NpubValidator.shortenForDisplay(unnamedNpub);
+
+      final named = tester.getSemantics(find.text('Alice Aardvark'));
+      expect(named.label, bidiIsolate('Alice Aardvark'));
+      expect(
+        tester.getSemantics(find.text(unnamedKey)).label,
+        bidiIsolate(chunkNpubForSpeech(unnamedKey)),
+        reason: 'a trimmed key read as one word is noise',
+      );
+
+      // The name keeps the key out of the label, so this is how it is heard.
+      final readKey = named
+          .getSemanticsData()
+          .customSemanticsActionIds!
+          .singleWhere(
+            (id) =>
+                CustomSemanticsAction.getAction(id)!.label ==
+                l10n.memberPickerReadPublicKey,
+          );
+      named.owner!.performAction(
+        named.id,
+        SemanticsAction.customAction,
+        readKey,
+      );
+      await tester.pump();
+      expect(said, [chunkNpubForSpeech(aliceKey)]);
+      handle.dispose();
     });
 
     testWidgets('N2. creating the circle refreshes profiles once, over the '

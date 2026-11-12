@@ -73,7 +73,8 @@ const HRW_SEPARATOR: u8 = 0x1F;
 /// Highest rank an author's kind-0 may ever be requested from.
 ///
 /// The retry ladder walks the HRW ranking, but is hard-capped here so a pubkey
-/// is disclosed to at most this many pool relays for the life of the install.
+/// is disclosed to at most this many relays of one pool (a pool change
+/// re-ranks).
 /// Raising it directly widens per-author disclosure — treat as a privacy
 /// parameter, not a tuning knob.
 pub const PROFILE_MAX_RELAY_RANK: usize = 2;

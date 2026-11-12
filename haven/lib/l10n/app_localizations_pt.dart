@@ -1037,7 +1037,7 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get memberPickerStrangerLookupNote =>
-      'O Haven pediu a um relay o perfil publicado desta pessoa. Esse relay — e um segundo, se o primeiro não respondeu — consegue ver que este dispositivo acabou de perguntar sobre esta chave, mas a consulta não leva assinatura criptográfica, então não fica ligada à sua identidade do Haven. Se o perfil tiver uma foto, o Haven baixa essa foto do servidor que esta pessoa escolheu, e esse servidor consegue ver o endereço de rede deste dispositivo.';
+      'O Haven pediu a um relay — dois, no máximo — o perfil publicado desta pessoa. Cada relay consultado consegue ver que este dispositivo acabou de perguntar sobre esta chave, mas a consulta não leva assinatura criptográfica, então não fica ligada à sua identidade do Haven. Se o perfil tiver uma foto, o Haven baixa essa foto do servidor que esta pessoa escolheu, e esse servidor consegue ver o endereço de rede deste dispositivo.';
 
   @override
   String get memberPickerStrangerLookingUp => 'Consultando o perfil publicado…';

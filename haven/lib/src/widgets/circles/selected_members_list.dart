@@ -2,9 +2,12 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/utils/bidi_isolate.dart';
+import 'package:haven/src/utils/npub_speech.dart';
 import 'package:haven/src/utils/npub_validator.dart';
 
 /// Displays a compact summary of selected members.
@@ -76,37 +79,54 @@ class _CompactMemberChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final shortNpub = NpubValidator.shortenForDisplay(identifier);
 
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: HavenSpacing.sm,
-        vertical: HavenSpacing.xs,
-      ),
-      decoration: BoxDecoration(
-        color: colorScheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(HavenSpacing.xs),
-      ),
-      // No `maxLines`/`overflow` on the identifier: it wraps rather than
-      // clipping, because the trailing characters are what distinguish two
-      // staged members from one another. Forced LTR: a bech32 key laid out
-      // right-to-left is a different string to the eye.
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (name case final name?)
+    // Spoken as on the staged row (`PendingMemberTile`): a trimmed key read
+    // as one word is noise, so it goes in chunks, or behind the action when
+    // a name carries the chip.
+    return Semantics(
+      container: true,
+      excludeSemantics: true,
+      label: bidiIsolate(name ?? chunkNpubForSpeech(shortNpub)),
+      customSemanticsActions: name == null
+          ? null
+          : {
+              CustomSemanticsAction(
+                label: AppLocalizations.of(context).memberPickerReadPublicKey,
+              ): () =>
+                  speakNpub(context, shortNpub),
+            },
+      child: Container(
+        padding: const EdgeInsets.symmetric(
+          horizontal: HavenSpacing.sm,
+          vertical: HavenSpacing.xs,
+        ),
+        decoration: BoxDecoration(
+          color: colorScheme.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(HavenSpacing.xs),
+        ),
+        // No `maxLines`/`overflow` on the identifier: it wraps rather than
+        // clipping, because the trailing characters are what distinguish two
+        // staged members from one another. Forced LTR: a bech32 key laid out
+        // right-to-left is a different string to the eye.
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (name case final name?)
+              Text(
+                name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
             Text(
-              name,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.bodySmall,
+              shortNpub,
+              textDirection: TextDirection.ltr,
+              style: HavenTypography.monoSmall,
             ),
-          Text(
-            NpubValidator.shortenForDisplay(identifier),
-            textDirection: TextDirection.ltr,
-            style: HavenTypography.monoSmall,
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

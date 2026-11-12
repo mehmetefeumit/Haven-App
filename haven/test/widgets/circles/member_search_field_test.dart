@@ -433,4 +433,37 @@ void main() {
       expect(controller.text, 'still mine');
     });
   });
+
+  group('MemberSearchField — a host-owned focus node', () {
+    testWidgets('the host focusing it focuses the field, and the field never '
+        'disposes it', (tester) async {
+      final focusNode = FocusNode();
+      addTearDown(focusNode.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: Scaffold(
+            body: MemberSearchField(
+              focusNode: focusNode,
+              onMemberAdded: (_) {},
+              onQrScanRequested: () {},
+              entryStateFor: (_) => MemberPickState.selectable,
+            ),
+          ),
+        ),
+      );
+      expect(_field(tester).focusNode!.hasPrimaryFocus, isFalse);
+
+      focusNode.requestFocus();
+      await tester.pump();
+
+      expect(_field(tester).focusNode!.hasPrimaryFocus, isTrue);
+      expect(tester.testTextInput.isVisible, isTrue);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      // Still usable: a disposed node throws on any listener change.
+      focusNode.addListener(() {});
+    });
+  });
 }

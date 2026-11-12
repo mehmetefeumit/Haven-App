@@ -2059,6 +2059,36 @@ async fn a_copy_is_not_resent_while_a_relay_that_may_hold_a_newer_one_has_not_an
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_copy_this_device_published_reaches_a_joined_relay_past_one_that_is_down() {
+    // One pool relay out of reach must not keep the profile off every relay
+    // that joined: what this device recorded as its own profile is the publish
+    // it already made, and re-sending it retracts nothing this device knows of.
+    let plane = plane();
+    let (_dir, manager, keys, own_hex) = account();
+    manager
+        .stage_own_profile_edits(&own_hex, &name_edit("Recorded Here"), NOW)
+        .expect("stage");
+    assert!(!sync(&manager, &keys, NOW).await.still_pending);
+    let first = plane.ledger.ids(&own_hex);
+
+    let (_joined, joined_url) = storing_relay().await;
+    joins_the_pool(&manager, &joined_url);
+    joins_the_pool(&manager, &dead_relay_url());
+
+    let report = coverage_pass(&manager, &keys, NOW + 1).await;
+    assert_eq!(report.outcome, ProfileSyncOutcome::Published);
+    assert!(report.still_pending, "the relay that is down is still owed");
+    assert_eq!(served_by(&joined_url, keys.public_key()).await, first);
+    assert_eq!(plane.ledger.ids(&own_hex), first, "nothing new was signed");
+
+    // The relay still owed is retried on the ladder, not on every trigger.
+    let first_rung = PROFILE_SYNC_BACKOFF_SECS[0];
+    let state = |now| manager.profile_pending_state(&own_hex, now).unwrap();
+    assert!(!state(NOW + first_rung).retry_due);
+    assert!(state(NOW + 1 + first_rung).retry_due);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_copy_older_than_this_devices_own_row_is_not_put_on_a_relay_that_lacks_it() {
     // This device knows of a newer own profile than any relay serves — the
     // dated record a deletion keeps. What the relays hold is what it replaced.

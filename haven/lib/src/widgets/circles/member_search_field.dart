@@ -35,6 +35,7 @@ class MemberSearchField extends StatefulWidget {
     required this.entryStateFor,
     this.onQueryChanged,
     this.controller,
+    this.focusNode,
     super.key,
   });
 
@@ -63,6 +64,12 @@ class MemberSearchField extends StatefulWidget {
   /// the field makes its own.
   final TextEditingController? controller;
 
+  /// The field's focus, when the host must return it itself — after staging
+  /// from a row outside the field, which is gone once it is staged. Owned and
+  /// disposed by the host, and never swapped for another; without one the
+  /// field makes its own.
+  final FocusNode? focusNode;
+
   @override
   State<MemberSearchField> createState() => _MemberSearchFieldState();
 }
@@ -70,10 +77,15 @@ class MemberSearchField extends StatefulWidget {
 class _MemberSearchFieldState extends State<MemberSearchField> {
   /// The field's own controller, when the host supplied none.
   TextEditingController? _ownController;
-  final _focusNode = FocusNode();
+
+  /// The field's own focus node, when the host supplied none.
+  FocusNode? _ownFocusNode;
 
   TextEditingController get _controller =>
       widget.controller ?? (_ownController ??= TextEditingController());
+
+  FocusNode get _focusNode =>
+      widget.focusNode ?? (_ownFocusNode ??= FocusNode());
 
   /// The refusal currently shown, or `null` while the helper line is showing.
   String? _errorMessage;
@@ -88,7 +100,7 @@ class _MemberSearchFieldState extends State<MemberSearchField> {
   void dispose() {
     _controller.removeListener(_onTextChanged);
     _ownController?.dispose();
-    _focusNode.dispose();
+    _ownFocusNode?.dispose();
     super.dispose();
   }
 

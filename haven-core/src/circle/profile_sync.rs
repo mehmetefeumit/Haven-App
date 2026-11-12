@@ -13,9 +13,15 @@
 //! relays, a relay the user added, an install whose record a storage reset
 //! took. It reads the own kind-0 back from the whole pool and re-sends the
 //! newest copy any relay serves, byte for byte, to the relays that lack it.
-//! Nothing is signed, so it needs no key. It acts only on a WHOLE read: a
-//! relay that did not answer may hold a newer copy — a blank that retracted
-//! the one in hand — and re-sending the older one would put it back.
+//! Nothing is signed, so it needs no key. A relay that did not answer may
+//! hold a newer copy — a blank that retracted the one in hand — and re-sending
+//! the older one would put it back, so the pass acts on a WHOLE read, with one
+//! exception: the newest copy this device has itself recorded (the dated own
+//! row — its acknowledged publish, or a copy it cached — at the same
+//! `created_at`) is re-sent past a silent relay. That is the profile this
+//! device already holds as current; without it one pool relay that is down
+//! would keep the profile off every relay that joined. An install with no
+//! such record — a storage reset — waits for the whole read.
 //!
 //! A **re-send** runs when a complete signed kind-0 is owed to part of the
 //! pool: the identical event goes only to the relays not known to serve it,
@@ -435,7 +441,8 @@ impl CircleManager {
 
     /// Reads what a coverage pass owes off one whole-pool read of the own
     /// kind-0, caching the newest copy served — or ends the pass: on the retry
-    /// ladder when some relay did not answer, settled when no relay lacks the
+    /// ladder when some relay did not answer and the copy in hand is not the
+    /// one this device had already recorded, settled when no relay lacks the
     /// profile the pool serves.
     fn judge_coverage<'a>(
         &self,
@@ -457,9 +464,17 @@ impl CircleManager {
         let holds = |read: &OwnRelayRead| {
             newest.is_some_and(|e| served_against(own_pk, e, &read.served) == Served::Holds)
         };
+        let whole = reads.len() == pool.len() && reads.iter().all(|r| r.drained || holds(r));
+        // Read before the copy this read served is cached below.
+        let recorded_at = self
+            .storage
+            .get_profile(&own_hex)?
+            .and_then(|row| u64::try_from(row.event_created_at).ok());
         // A relay that did not end its answer may hold a newer copy than the
-        // one in hand — a blank that retracted it.
-        if reads.len() != pool.len() || !reads.iter().all(|r| r.drained || holds(r)) {
+        // one in hand — a blank that retracted it. Only the newest copy this
+        // device had already recorded is re-sent past one.
+        let recorded = newest.is_some_and(|e| recorded_at == Some(e.created_at.as_secs()));
+        if !whole && !recorded {
             self.storage
                 .record_profile_coverage_attempt(&own_hex, version, now)?;
             return self
@@ -474,9 +489,7 @@ impl CircleManager {
         }
         // This device has published since: what the relays serve is the
         // profile it replaced, and is not put on a relay that lacks it.
-        let superseded = self.storage.get_profile(&own_hex)?.is_some_and(|row| {
-            u64::try_from(row.event_created_at).is_ok_and(|at| at > event.created_at.as_secs())
-        });
+        let superseded = recorded_at.is_some_and(|at| at > event.created_at.as_secs());
         let covered: Vec<String> = reads
             .iter()
             .filter(|r| holds(r))

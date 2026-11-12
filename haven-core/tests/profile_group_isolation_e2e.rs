@@ -19,7 +19,7 @@ use std::time::Duration;
 use haven_core::profile::{
     build_metadata_event, fetch_profiles_assigned, AssignedFetch, ProfileMetadata, ProfileRelaySalt,
 };
-use haven_core::relay::{allow_ws_loopback_for_test, RelayManager, RelayStatus};
+use haven_core::relay::{allow_ws_loopback_for_test, RelayManager};
 use nostr::{JsonUtil, Keys, Metadata, PublicKey};
 use nostr_relay_builder::builder::{RelayBuilder, RelayBuilderNip42, RelayBuilderNip42Mode};
 use nostr_relay_builder::{LocalRelay, MockRelay};
@@ -163,18 +163,14 @@ async fn fetch_never_answers_nip42_auth() {
         fetched.resolved.is_empty(),
         "an AUTH-required read must resolve nothing — the fetch path never answers NIP-42 AUTH"
     );
-    // The relay closed the `REQ` instead of answering it, which says nothing
-    // about the author: nothing is stamped against them.
-    assert!(fetched.missed.is_empty());
-    assert_eq!(fetched.unattempted, vec![author.public_key()]);
-    // The socket is up, so the empty result is the relay's refusal and not a
-    // dead connection — on which this test would prove nothing about AUTH.
-    assert!(
-        manager
-            .get_relay_status()
-            .await
-            .iter()
-            .any(|relay| relay.status == RelayStatus::Connected),
-        "the relay was never reached",
+    // The `REQ` was issued and the relay answered it (with an auth-required
+    // refusal the SDK absorbs into an empty result), so the author is a MISS.
+    // Without this the test would pass just as happily on a dead socket and
+    // would prove nothing about AUTH.
+    assert_eq!(
+        fetched.missed,
+        vec![author.public_key()],
+        "the refusal must land as a miss — proof the REQ reached the relay",
     );
+    assert!(fetched.unattempted.is_empty());
 }

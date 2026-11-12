@@ -1331,8 +1331,9 @@ moment of the lookup (not the Haven identity: the GET carries no key and no
 signature). Because the person controls the URL, they can make it unique to
 the one key they handed out and use it as a **tracking pixel**: a hit on it
 tells them that key was just typed, from that address. `memberPickerStrangerLookupNote`
-discloses the download on the typed row. The relay half is unchanged: one
-relay, a second only if the first does not answer.
+discloses the download on the typed row. The relay half: two relays at most —
+the two that key's assignment allows. A key typed again after a relay
+answered without a profile is asked of the other one.
 
 **D3 — Retention: 3 days, and delete on removal.** Reduced from the drafted 7.
 Day-coarse. Purged by **DELETE**, never a display filter. A deliberate removal in

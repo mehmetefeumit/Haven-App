@@ -1037,7 +1037,7 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get memberPickerStrangerLookupNote =>
-      'Haven a demandé à un relais le profil publié par cette personne. Ce relais, ainsi qu\'un second si le premier n\'a pas répondu, peut voir que cet appareil vient de se renseigner sur cette clé, mais la demande ne porte aucune signature : elle n\'est donc pas associée à votre identité Haven. Si le profil comporte une photo, Haven la télécharge depuis le serveur choisi par cette personne, et ce serveur peut voir l\'adresse réseau de cet appareil.';
+      'Haven a demandé à un relais (deux au plus) le profil publié par cette personne. Chaque relais interrogé peut voir que cet appareil vient de se renseigner sur cette clé, mais la demande ne porte aucune signature : elle n\'est donc pas associée à votre identité Haven. Si le profil comporte une photo, Haven la télécharge depuis le serveur choisi par cette personne, et ce serveur peut voir l\'adresse réseau de cet appareil.';
 
   @override
   String get memberPickerStrangerLookingUp => 'Recherche du profil publié…';

@@ -6,6 +6,7 @@ library;
 
 import 'dart:async';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:haven/src/test_keys.dart';
@@ -766,6 +767,44 @@ void main() {
         expect(resolves(profiles), 1);
       },
     );
+
+    testWidgets('CS9. a typed-row tap hands the focus back to the search '
+        'field', (tester) async {
+      await tester.pumpWidget(
+        _buildApp(
+          MockRelayService(keyPackageResult: _makeKeyPackage('hex')),
+          directory: _aliceDirectory(),
+          profileService: cousinProfiles(),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(WidgetKeys.memberSearchInput),
+        _testNpub1,
+      );
+      await tester.pumpAndSettle();
+      FocusNode fieldFocus() => tester
+          .widget<TextField>(find.byKey(WidgetKeys.memberSearchInput))
+          .focusNode!;
+
+      // A mouse press outside a text field takes its focus; a touch does not.
+      final press = await tester.startGesture(
+        tester.getCenter(find.text('Distant Cousin')),
+        kind: PointerDeviceKind.mouse,
+      );
+      addTearDown(press.removePointer);
+      await tester.pump();
+      expect(fieldFocus().hasPrimaryFocus, isFalse, reason: 'anti-vacuity');
+      await press.up();
+      await tester.pumpAndSettle();
+
+      expectStagedPerson('Distant Cousin', _testNpub1);
+      expect(
+        fieldFocus().hasPrimaryFocus,
+        isTrue,
+        reason: 'the tapped row is gone, so focus left there is focus lost',
+      );
+    });
 
     testWidgets('CS8. looking up, naming and fetching the picture of a '
         'staged person logs no key, pubkey or name', (tester) async {

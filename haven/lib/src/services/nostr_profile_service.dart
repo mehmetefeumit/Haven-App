@@ -15,10 +15,12 @@
 ///   White Noise reference app) — see [ProfileService] class doc. They are
 ///   now LOCAL-FIRST: they merge onto the cache and queue the edit, without
 ///   touching a relay or Blossom. `syncOwnProfile` is what actually
-///   publishes, and re-fetches the secret fresh via `withFreshSecret` for
-///   that one FFI call (Security Rule 9) — the local-only methods need no
-///   secret at all, since the pubkey comes from the manager's own
-///   construction keys, never from Dart.
+///   publishes. It fetches the secret, fresh via `withFreshSecret` for that
+///   one FFI call, only when a save is waiting to be signed (Security Rule
+///   9): a pass that re-sends the published profile to a relay that lacks it
+///   signs nothing and reads no secret. The local-only methods need none at
+///   all, since the pubkey comes from the manager's own construction keys,
+///   never from Dart.
 ///
 /// See `docs/PUBLIC_PROFILE_MIGRATION_PLAN.md` (§6.1) for the full design.
 library;
@@ -70,6 +72,18 @@ ProfileSyncResult toProfileSyncResult(ProfileSyncResultFfi ffi) {
     stillPending: ffi.stillPending,
   );
 }
+
+/// Runs [sync] with the identity secret when [savePending], and with `null`
+/// otherwise, so a pass with nothing to sign never takes the secret out of
+/// secure storage (Security Rule 9).
+///
+/// Pure, so the rule is testable without the Rust bridge.
+@visibleForTesting
+Future<T> syncWithSecretOnlyToSign<T>({
+  required bool savePending,
+  required Future<List<int>> Function() secretProvider,
+  required Future<T> Function(Uint8List? secret) sync,
+}) => savePending ? withFreshSecret(secretProvider, sync) : sync(null);
 
 /// Converts [ffi] to the Dart-layer [ProfilePendingState] — see
 /// [toProfileSyncResult] for why this is pulled out and testable.
@@ -245,9 +259,11 @@ class NostrProfileService implements ProfileService {
   Future<ProfileSyncResult> syncOwnProfile() async {
     try {
       final manager = await _circleManagerFactory();
-      final ffi = await withFreshSecret(
-        _identityService.getSecretBytes,
-        (secret) => manager.syncMyProfile(identitySecretBytes: secret),
+      final state = await manager.profilePendingState();
+      final ffi = await syncWithSecretOnlyToSign(
+        savePending: state.savePending,
+        secretProvider: _identityService.getSecretBytes,
+        sync: (secret) => manager.syncMyProfile(identitySecretBytes: secret),
       );
       return toProfileSyncResult(ffi);
     } on Object catch (e) {

@@ -1009,7 +1009,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get memberPickerStrangerLookupNote =>
-      'Haven asked a relay for this person\'s published profile. That relay — and a second one, if the first didn\'t answer — can see this device asked about this key just now, but the request carries no signature, so it isn\'t tied to your Haven identity. If the profile has a photo, Haven downloads it from the server this person chose, which can see this device\'s network address.';
+      'Haven asked a relay — two at most — for this person\'s published profile. A relay it asked can see that this device asked about this key just now, but the request carries no signature, so it isn\'t tied to your Haven identity. If the profile has a photo, Haven downloads it from the server this person chose, which can see this device\'s network address.';
 
   @override
   String get memberPickerStrangerLookingUp => 'Looking up published profile…';

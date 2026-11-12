@@ -191,9 +191,8 @@ class _MemberPickerResultsState extends ConsumerState<MemberPickerResults> {
     }
 
     final results = ref.read(memberDirectoryResultsProvider(widget.query));
-    // A pending/resolved typed-stranger row is itself an offered match — it
-    // must not be announced as "no matches" while it is exactly what answers
-    // the query (D2).
+    // A pending/resolved typed-stranger row is what answers the query — it
+    // must not be announced as "no matches", nor as a count (D2).
     final strangerNpub = publicProfilesEnabled
         ? eligibleStrangerNpub(
             widget.query,
@@ -211,6 +210,22 @@ class _MemberPickerResultsState extends ConsumerState<MemberPickerResults> {
     // a query that matches nobody must not repeat "no matches" per character.
     if (_lastAnnounced != null && listEquals(_lastAnnounced, keys)) return;
     _lastAnnounced = keys;
+
+    // The typed row speaks how its lookup settles; a count spoken on top
+    // would cut that off. `exists` first, so only the row starts a lookup.
+    if (strangerNpub != null) {
+      final lookup = strangerProfileResolveProvider(strangerNpub);
+      if (ref.exists(lookup) && ref.read(lookup).isLoading) {
+        unawaited(
+          SemanticsService.sendAnnouncement(
+            View.of(context),
+            AppLocalizations.of(context).memberPickerStrangerLookingUp,
+            Directionality.of(context),
+          ),
+        );
+      }
+      return;
+    }
 
     // Mirrors the visible branch's fresh-install gate (`build`, below): "No
     // matches" answers a query, and someone who shares no circles yet has

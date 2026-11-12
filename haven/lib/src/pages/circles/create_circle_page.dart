@@ -79,9 +79,14 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage>
   /// can clear it.
   final _searchController = TextEditingController();
 
+  /// The search field's focus, held here so staging from the typed-npub row,
+  /// which then leaves the tree, can hand it back.
+  final _searchFocusNode = FocusNode();
+
   @override
   void dispose() {
     _searchController.dispose();
+    _searchFocusNode.dispose();
     super.dispose();
   }
 
@@ -113,6 +118,7 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage>
                   SliverToBoxAdapter(
                     child: MemberSearchField(
                       controller: _searchController,
+                      focusNode: _searchFocusNode,
                       onMemberAdded: _onMemberAdded,
                       onQrScanRequested: _openQrScanner,
                       onQueryChanged: (query) => setState(() => _query = query),
@@ -219,6 +225,7 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage>
   void _onStrangerSelected(String npub) {
     _onMemberAdded(npub);
     _searchController.clear();
+    _searchFocusNode.requestFocus();
   }
 
   Widget _buildEmptyState() {

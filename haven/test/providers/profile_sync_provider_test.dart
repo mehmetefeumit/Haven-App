@@ -379,6 +379,82 @@ void main() {
       },
     );
 
+    testWidgets(
+      'a queued pass that throws too keeps the one fallback retry',
+      (tester) async {
+        _lifecycle(tester, AppLifecycleState.resumed);
+        final svc = MockProfileService()
+          ..nextPendingState = _dueState
+          ..shouldThrowOnSyncOwnProfile = true;
+        final container = _makeContainer(svc);
+        final notifier = container.read(ownProfileSyncProvider.notifier);
+
+        final gate = Completer<void>();
+        svc.syncOwnProfileGate = gate;
+        unawaited(notifier.sync());
+        unawaited(notifier.sync());
+        await tester.pump();
+        expect(_syncCalls(svc), 1, reason: 'anti-vacuity: the second queued');
+        gate.complete();
+        await tester.pump();
+        expect(_syncCalls(svc), 2, reason: 'anti-vacuity: both passes threw');
+
+        await _elapse(tester, const Duration(seconds: 29));
+        expect(_syncCalls(svc), 2);
+        await _elapse(tester, const Duration(seconds: 1));
+        expect(
+          _syncCalls(svc),
+          3,
+          reason: 'the second failure must not cancel the retry the first '
+              'armed: nothing else retries before the next resume',
+        );
+
+        await _elapse(tester, const Duration(hours: 1));
+        expect(_syncCalls(svc), 3, reason: 'still one fallback per streak');
+        container.dispose();
+      },
+    );
+
+    testWidgets(
+      'a pass that completes ends the streak: its fallback is dropped and a '
+      'later throw arms a fresh one',
+      (tester) async {
+        _lifecycle(tester, AppLifecycleState.resumed);
+        final svc = MockProfileService()
+          ..nextPendingState = _dueState
+          ..shouldThrowOnSyncOwnProfile = true;
+        final container = _makeContainer(svc);
+        final notifier = container.read(ownProfileSyncProvider.notifier);
+
+        await notifier.sync();
+        await _elapse(tester, const Duration(seconds: 10));
+
+        svc
+          ..shouldThrowOnSyncOwnProfile = false
+          ..nextSyncResult = _publishedStillPendingResult;
+        await notifier.sync();
+        await _elapse(tester, const Duration(seconds: 10));
+
+        svc.shouldThrowOnSyncOwnProfile = true;
+        await notifier.sync();
+        expect(_syncCalls(svc), 3);
+
+        await _elapse(tester, const Duration(seconds: 29));
+        expect(
+          _syncCalls(svc),
+          3,
+          reason: "the first failure's fallback, due by now, went with its "
+              'streak',
+        );
+        await _elapse(tester, const Duration(seconds: 1));
+        expect(_syncCalls(svc), 4, reason: 'the fresh fallback fired');
+
+        await _elapse(tester, const Duration(hours: 1));
+        expect(_syncCalls(svc), 4);
+        container.dispose();
+      },
+    );
+
     testWidgets('with an attempt on the ladder waits out the ladder', (
       tester,
     ) async {

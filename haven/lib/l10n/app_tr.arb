@@ -257,7 +257,7 @@
   "memberPickerTierRecent": "Son zamanlarda çevrelerinizdeydi",
   "memberPickerNicknameNote": "Sizin verdiğiniz takma ad, kişinin herkese açık adı değil",
   "memberPickerCollisionCircleLabel": "Çevre: {circleName}",
-  "memberPickerStrangerLookupNote": "Haven, bu kişinin yayımlanmış profilini bir aktarıcıya sordu. O aktarıcı — ilki yanıt vermediyse bir ikincisi de — bu cihazın az önce bu anahtarı sorduğunu görür; ama istek imza taşımadığı için Haven kimliğinize bağlı değildir. Profilde fotoğraf varsa Haven fotoğrafı bu kişinin seçtiği sunucudan indirir; o sunucu bu cihazın ağ adresini görür.",
+  "memberPickerStrangerLookupNote": "Haven, bu kişinin yayımlanmış profilini bir aktarıcıya — en fazla ikisine — sordu. Sorulan her aktarıcı, bu cihazın az önce bu anahtarı sorduğunu görür; ama istek imza taşımadığı için Haven kimliğinize bağlı değildir. Profilde fotoğraf varsa Haven fotoğrafı bu kişinin seçtiği sunucudan indirir; o sunucu bu cihazın ağ adresini görür.",
   "memberPickerStrangerLookingUp": "Yayımlanmış profil aranıyor…",
   "memberPickerStrangerNotFound": "Yayımlanmış bir ad bulunamadı",
   "memberPickerStrangerFoundAnnouncement": "Yayımlanmış ad: {name}",

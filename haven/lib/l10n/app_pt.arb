@@ -257,7 +257,7 @@
   "memberPickerTierRecent": "Recentemente nos seus círculos",
   "memberPickerNicknameNote": "Seu apelido para esta pessoa, não o nome público dela",
   "memberPickerCollisionCircleLabel": "Círculo: {circleName}",
-  "memberPickerStrangerLookupNote": "O Haven pediu a um relay o perfil publicado desta pessoa. Esse relay — e um segundo, se o primeiro não respondeu — consegue ver que este dispositivo acabou de perguntar sobre esta chave, mas a consulta não leva assinatura criptográfica, então não fica ligada à sua identidade do Haven. Se o perfil tiver uma foto, o Haven baixa essa foto do servidor que esta pessoa escolheu, e esse servidor consegue ver o endereço de rede deste dispositivo.",
+  "memberPickerStrangerLookupNote": "O Haven pediu a um relay — dois, no máximo — o perfil publicado desta pessoa. Cada relay consultado consegue ver que este dispositivo acabou de perguntar sobre esta chave, mas a consulta não leva assinatura criptográfica, então não fica ligada à sua identidade do Haven. Se o perfil tiver uma foto, o Haven baixa essa foto do servidor que esta pessoa escolheu, e esse servidor consegue ver o endereço de rede deste dispositivo.",
   "memberPickerStrangerLookingUp": "Consultando o perfil publicado…",
   "memberPickerStrangerNotFound": "Nenhum nome publicado encontrado",
   "memberPickerStrangerFoundAnnouncement": "Nome publicado: {name}",

@@ -162,6 +162,15 @@ class OwnProfileSyncController extends Notifier<void>
   /// before Rust recorded an attempt leaves the ladder due, and nothing else
   /// would retry before the next resume.
   void _armFrom(ProfilePendingState s, {bool afterFailure = false}) {
+    // A queued pass that throws too must not cancel the streak's one fallback:
+    // the flag says it is spent, so nothing below would arm another.
+    if (afterFailure &&
+        _failureRetryArmed &&
+        _timer != null &&
+        s.pending &&
+        s.retryDue) {
+      return;
+    }
     _timer?.cancel();
     _timer = null;
     if (_disposed ||

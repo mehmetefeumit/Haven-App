@@ -27,17 +27,24 @@
 //! sleeps a CSPRNG-sampled [`PROFILE_INTER_REQ_JITTER_MS`] between consecutive
 //! requests to the same relay.
 //!
-//! # A relay that does not answer is not a miss
+//! # A relay that does not answer
 //!
 //! Only a relay's own `EOSE` says "I hold nothing for this author". A failed
 //! connect, a `CLOSED`, or a `REQ` that outlives its timeout says nothing about
-//! the author, so it must not advance that author's retry ladder: a device
-//! that is offline would otherwise walk every unresolved member to the last
-//! backoff rung with no relay ever having said no. Such an author is asked
-//! once more in the same cycle, at the OTHER relay it may be disclosed to
+//! the author, so such an author is asked once more in the same cycle, at the
+//! OTHER relay it may be disclosed to
 //! ([`PROFILE_MAX_RELAY_RANK`][crate::profile::assignment::PROFILE_MAX_RELAY_RANK]
-//! bounds the two), and is reported *unattempted* — nothing stamped — when
-//! that one does not answer either.
+//! bounds the two). When that one does not answer either, what is stamped
+//! turns on what a relay was told:
+//!
+//! - **No relay could be reached** — nothing left the device, so the author is
+//!   *unattempted* and nothing is stamped: a device that is offline would
+//!   otherwise walk every unresolved member to the last backoff rung with no
+//!   relay ever having been asked.
+//! - **A relay was reached and gave no answer** — it has seen the request, so
+//!   the author is *missed* and backs off like any other. Left unstamped, the
+//!   author would be asked again on every trigger, handing a relay that
+//!   declines to answer a count of this device's foregrounds.
 //!
 //! # Fail-closed
 //!
@@ -101,11 +108,12 @@ use crate::relay::RelayManager;
 pub struct AssignedFetch {
     /// Authors that resolved to a valid kind-0.
     pub resolved: Vec<CachedProfile>,
-    /// Authors a relay ended its answer for (`EOSE`) without a kind-0.
+    /// Authors a relay ended its answer for (`EOSE`) without a kind-0, and
+    /// authors a relay was reached for and no relay answered.
     pub missed: Vec<PublicKey>,
-    /// Authors no relay answered for (deadline hit, no relay in rank, or
-    /// neither of their two relays answered). The caller MUST NOT stamp these
-    /// as attempted — they retry next tick.
+    /// Authors no relay was reached for (deadline hit, no relay in rank, or
+    /// no connection). The caller MUST NOT stamp these as attempted — they
+    /// retry next tick.
     pub unattempted: Vec<PublicKey>,
 }
 
@@ -274,6 +282,8 @@ struct Cycle {
     asked: HashSet<String>,
     /// Relays that did not answer a `REQ` this cycle, and are not sent another.
     unanswering: HashSet<String>,
+    /// Authors a relay was reached for and did not answer.
+    declined: HashSet<PublicKey>,
 }
 
 /// Runs one cycle under an injectable `deadline` (tests drive it to zero).
@@ -293,10 +303,10 @@ async fn run_cycle(
         drain_round(relay, &unanswered, salt, pool, now, &cycle).await;
     };
 
-    // Authors not yet settled when the deadline fires stay UNSETTLED, and so
-    // fall out of `partition_outcome` as `unattempted` — never as `missed`.
-    // Stamping a deadline as a miss would advance the retry ladder for a
-    // reason that has nothing to do with the author.
+    // Authors no relay was asked about when the deadline fires fall out of
+    // `partition_outcome` as `unattempted` — never as `missed`. Stamping a
+    // deadline as a miss would advance the retry ladder for a reason that has
+    // nothing to do with the author.
     if tokio::time::timeout(deadline, work).await.is_err() {
         log::debug!("[profile] assigned fetch cycle hit its batch deadline");
     }
@@ -398,7 +408,9 @@ async fn drain_relay_batch(
             .await
             .unwrap_or_default()
             .pop();
-        let (events, drained) = answer.map_or((Vec::new(), false), |a| (a.events, a.drained));
+        let (events, drained, reached) = answer.map_or((Vec::new(), false, false), |a| {
+            (a.events, a.drained, a.responded)
+        });
 
         let resolved = newest_own_copy(author, &events, now);
         // Presence needs no `EOSE`; absence does. A relay that did not answer
@@ -408,6 +420,9 @@ async fn drain_relay_batch(
         if resolved.is_none() && !drained {
             log::debug!("[profile] assigned relay did not answer; leaving its slice unanswered");
             state.unanswering.insert(batch.relay.clone());
+            if reached {
+                state.declined.insert(*author);
+            }
             break;
         }
         state.settled.insert(*author);
@@ -529,18 +544,21 @@ pub(crate) fn newest_own_copy(
 
 /// Splits the cycle's recorded progress into the three caller-facing buckets.
 ///
-/// Anything the cycle did not settle — never scheduled, dropped at the
-/// deadline, or abandoned with its relay — is `unattempted`, in the caller's
-/// original request order.
+/// An author the cycle did not settle is `missed` when a relay was reached for
+/// it, and otherwise — never scheduled, dropped at the deadline, or behind a
+/// relay that could not be reached — `unattempted`, in the caller's original
+/// request order.
 fn partition_outcome(requests: &[(PublicKey, u8)], cycle: Cycle) -> AssignedFetch {
-    let unattempted = requests
+    let (declined, unattempted): (Vec<PublicKey>, Vec<PublicKey>) = requests
         .iter()
         .map(|(author, _)| *author)
         .filter(|author| !cycle.settled.contains(author))
-        .collect();
+        .partition(|author| cycle.declined.contains(author));
+    let mut missed = cycle.missed;
+    missed.extend(declined);
     AssignedFetch {
         resolved: cycle.resolved,
-        missed: cycle.missed,
+        missed,
         unattempted,
     }
 }
@@ -832,6 +850,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_author_a_relay_declined_is_missed_unless_another_relay_settled_it() {
+        let authors = authors_n(3);
+        let requests: Vec<(PublicKey, u8)> = authors.iter().map(|a| (*a, 0)).collect();
+        let mut cycle = Cycle::default();
+        // Declined by its first relay, resolved by its other.
+        cycle.declined.insert(authors[0]);
+        cycle.settled.insert(authors[0]);
+        // Declined, and never answered for.
+        cycle.declined.insert(authors[1]);
+
+        let out = partition_outcome(&requests, cycle);
+        assert_eq!(out.missed, vec![authors[1]]);
+        assert_eq!(out.unattempted, vec![authors[2]]);
+    }
+
     /// An author whose first relay is `first` and whose other relay is
     /// `other`, under the fixed test salt. The ranking is a salted hash, so
     /// this is a bounded search, and the caller's assertions re-prove it.
@@ -867,12 +901,13 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_relay_that_closes_the_req_has_not_answered_and_stamps_nothing() {
+    async fn an_author_only_a_declining_relay_was_asked_about_backs_off() {
         // `CLOSED <sub> "rate-limited: ..."` is the relay declining to answer,
-        // not the relay saying it holds nothing. Reported as a miss it would
-        // advance the author's backoff on the word of a relay that never
-        // looked. Proven against a real socket, and with the request counted,
-        // so a failed connection cannot stand in for the `CLOSED`.
+        // but it has seen the request. Left unstamped, the author would be
+        // asked again on every trigger, and a relay that always declines would
+        // be handed a count of them. Proven against a real socket, and with
+        // the request counted, so a failed connection cannot stand in for the
+        // `CLOSED`.
         let _ = crate::relay::allow_ws_loopback_for_test();
         let (_server, url, seen) = closing_relay().await;
 
@@ -887,12 +922,30 @@ mod tests {
             1,
             "a one-relay pool has no other relay to ask, and the same one is not asked twice",
         );
-        assert!(out.resolved.is_empty());
-        assert!(
-            out.missed.is_empty(),
-            "a relay that closed the REQ never said it holds nothing",
-        );
-        assert_eq!(out.unattempted, vec![author]);
+        assert!(out.resolved.is_empty() && out.unattempted.is_empty());
+        assert_eq!(out.missed, vec![author]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_author_one_relay_declined_and_the_other_is_down_for_backs_off() {
+        // Either order: the relay that could not be reached learned nothing,
+        // the one that declined saw the request.
+        let _ = crate::relay::allow_ws_loopback_for_test();
+        let (_closing, closing_url, closing_seen) = closing_relay().await;
+        let dead_url = dead_relay_url();
+        let pool = vec![closing_url.clone(), dead_url.clone()];
+        let declined_first = author_ranked(&pool, &closing_url, &dead_url).public_key();
+        let declined_second = author_ranked(&pool, &dead_url, &closing_url).public_key();
+
+        for author in [declined_first, declined_second] {
+            let relay = RelayManager::new();
+            let out = fetch_profiles_assigned(&relay, &[(author, 0)], &salt(), &pool, 100)
+                .await
+                .expect("cycle runs");
+            assert_eq!(out.missed, vec![author]);
+            assert!(out.resolved.is_empty() && out.unattempted.is_empty());
+        }
+        assert_eq!(closing_seen.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1058,7 +1111,10 @@ mod tests {
         .expect("cycle runs");
         assert_eq!(out.missed.len(), 2, "the timed relay answered for both");
 
-        let arrivals = arrivals.lock().unwrap_or_else(PoisonError::into_inner);
+        let arrivals = arrivals
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
         assert_eq!(arrivals.len(), 2);
         assert!(
             arrivals[1].duration_since(arrivals[0])
@@ -1091,10 +1147,10 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn an_author_neither_relay_answers_for_is_unattempted_not_missed() {
+    async fn an_author_no_relay_could_be_reached_for_is_unattempted_not_missed() {
         // Offline is this shape for every author at once. Counted as misses,
         // a few triggers without a network would park every unresolved member
-        // on the last backoff rung.
+        // on the last backoff rung, with no relay having been asked anything.
         let _ = crate::relay::allow_ws_loopback_for_test();
         let pool = vec![dead_relay_url(), dead_relay_url(), dead_relay_url()];
         let requests: Vec<(PublicKey, u8)> = authors_n(4).into_iter().map(|a| (a, 0)).collect();

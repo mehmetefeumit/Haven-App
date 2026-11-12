@@ -783,8 +783,8 @@ void main() {
               CustomSemanticsAction.getAction(id)!.label ==
               l10n.memberPickerReadPublicKey,
         );
-        // Only what the action speaks: the lookup's settle and the match
-        // count (once the query has stood still) are announced before it.
+        // Only what the action speaks: the lookup's settle is announced
+        // before it.
         await tester.pump(const Duration(milliseconds: 400));
         announcements.clear();
         tester.binding.pipelineOwner.semanticsOwner!.performAction(
@@ -1066,9 +1066,58 @@ void main() {
       handle.dispose();
     });
 
+    for (final found in [true, false]) {
+      testWidgets(
+        'S27. a typed-stranger row is announced by its lookup — looking up, '
+        'then ${found ? 'the published name' : 'that none was found'} — never '
+        'as a match count or "no matches" (D2)',
+        (tester) async {
+          final gate = Completer<void>();
+          final profileService = MockProfileService()
+            ..resolveTypedStrangerProfileGate = gate;
+          if (found) {
+            profileService.strangerProfiles[_strangerNpub] = const Profile(
+              pubkeyHex: _strangerHex,
+              displayName: 'Distant Cousin',
+            );
+          }
+          await _pumpPicker(
+            tester,
+            directoryService: MockMemberDirectoryService(
+              directory: _threePeople(),
+            ),
+            profileService: profileService,
+          );
+          final announcements = captureAccessibilityAnnouncements(tester);
+          final l10n = _l10n(tester);
+
+          await _type(tester, _strangerNpub);
+          await tester.pump(const Duration(milliseconds: 400));
+          expect(
+            announcements,
+            [l10n.memberPickerStrangerLookingUp],
+            reason: 'a count here is what the settle below would be cut off by',
+          );
+
+          gate.complete();
+          await tester.pumpAndSettle();
+          await tester.pump(const Duration(milliseconds: 400));
+          expect(announcements, [
+            l10n.memberPickerStrangerLookingUp,
+            if (found)
+              l10n.memberPickerStrangerFoundAnnouncement(
+                _isolated('Distant Cousin'),
+              )
+            else
+              l10n.memberPickerStrangerNotFound,
+          ]);
+        },
+      );
+    }
+
     testWidgets(
-      'S27. an offered typed-stranger row is announced as a match, never '
-      'as "no matches" (D2)',
+      'S47. a lookup that settled before the query stood still is announced '
+      'once, as how it settled — no "looking up" after the fact, no count',
       (tester) async {
         await _pumpPicker(
           tester,
@@ -1082,12 +1131,7 @@ void main() {
         await _type(tester, _strangerNpub);
         await tester.pump(const Duration(milliseconds: 400));
 
-        // The lookup settling (nothing resolved here) is spoken on its own;
-        // the count still says one match.
-        expect(announcements, [
-          l10n.memberPickerStrangerNotFound,
-          l10n.memberPickerMatchesAnnouncement(1),
-        ]);
+        expect(announcements, [l10n.memberPickerStrangerNotFound]);
       },
     );
   });
@@ -1991,8 +2035,8 @@ void main() {
               CustomSemanticsAction.getAction(id)!.label ==
               l10n.memberPickerReadPublicKey,
         );
-        // Only what the action speaks: the lookup's settle and the match
-        // count (once the query has stood still) are announced before it.
+        // Only what the action speaks: the lookup's settle is announced
+        // before it.
         await tester.pump(const Duration(milliseconds: 400));
         announcements.clear();
         tester.binding.pipelineOwner.semanticsOwner!.performAction(
@@ -2377,6 +2421,16 @@ void main() {
           tester.element(find.byType(_PickerHost)),
         );
 
+        // A standing, already answered query: an empty one never re-arms the
+        // announcement, and the rename below moves the row, so a re-armed one
+        // would not be de-duplicated away.
+        await _type(tester, 'a');
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(announcements, [
+          _l10n(tester).memberPickerMatchesAnnouncement(3),
+        ]);
+        announcements.clear();
+
         directoryService
           ..loadGate = Completer<void>()
           ..directory = _directory(
@@ -2386,7 +2440,10 @@ void main() {
               _entry(_carolHex, _carolNpub),
             ],
             profiles: const {
-              _aliceHex: Profile(pubkeyHex: _aliceHex, displayName: 'Alicia'),
+              _aliceHex: Profile(
+                pubkeyHex: _aliceHex,
+                displayName: 'Zoe Aardvark',
+              ),
               _bobHex: Profile(pubkeyHex: _bobHex, displayName: 'Bob Badger'),
               _carolHex: Profile(
                 pubkeyHex: _carolHex,
@@ -2411,14 +2468,15 @@ void main() {
 
         directoryService.loadGate!.complete();
         await tester.pumpAndSettle();
+        await tester.pump(const Duration(milliseconds: 400));
 
-        expect(find.text('Alicia'), findsOneWidget);
+        expect(find.text('Zoe Aardvark'), findsOneWidget);
         expect(find.text('Alice Aardvark'), findsNothing);
         expect(announcements, isEmpty);
 
-        await _type(tester, 'alicia');
+        await _type(tester, 'zoe');
         expect(find.byType(MemberCandidateTile), findsOneWidget);
-        expect(find.text('Alicia'), findsOneWidget);
+        expect(find.text('Zoe Aardvark'), findsOneWidget);
       },
     );
   });

@@ -2870,29 +2870,47 @@ genuine event with the same id is admitted normally afterwards.
   same triggers and ladder as a save) reads the own kind-0 from every pool
   relay and offers the newest copy any relay serves, unchanged, to the relays
   that answered without it; each is covered only by a read-back that serves
-  that id. It signs nothing and is handed no key. It publishes nothing for an
-  account no relay serves a profile of. It acts only on a WHOLE read — every
-  relay ended its answer or serves the newest copy — because a relay that did
-  not answer may hold a blank or a rename newer than the copy in hand, and
-  re-sending the older one would put a retracted profile on a relay that
-  never had it; and it does not offer a copy older than the dated own row,
-  for the same reason. Its records are keyed to the version it started from,
-  so a save made meanwhile keeps its own owed event and its own ladder. What
-  remains: with a pool relay permanently unreachable the read is never whole,
-  so each rung (the 6 h one at most, foreground only) asks every pool relay
-  for the own pubkey again and nothing is re-sent; a relay that refuses the
-  served copy as too old stays owed on the ladder, since nothing may re-date
-  it; and a relay that takes the profile and drops it LATER is not noticed —
-  a settled pool is not read again. Disclosure is what a save already makes:
+  that id. It signs nothing and is handed no key, and the app does not read
+  the identity secret out of secure storage for it
+  (`ProfilePendingStateFfi::save_pending`, `syncWithSecretOnlyToSign`). It
+  publishes nothing for an account no relay serves a profile of. A relay that
+  did not answer may hold a blank or a rename newer than the copy in hand, and
+  re-sending the older one would put a retracted profile on a relay that never
+  had it. So the pass acts on a WHOLE read — every relay ended its answer or
+  serves the newest copy — with one exception: the newest copy this device has
+  itself recorded (the dated own row — its acknowledged publish, or a copy an
+  own-profile read cached — at the same `created_at`) is re-sent past a silent
+  relay, which is then owed it on the ladder like any relay a save could not
+  reach. That is the profile this device already holds as current, and without
+  it one pool relay that is down would keep the profile off every relay that
+  joined. It does not offer a copy older than the dated
+  own row. Its records are keyed to the version it started from, so a save
+  made meanwhile keeps its own owed event and its own ladder. What remains:
+  an install with no dated own row (a storage reset, before its first
+  own-profile read) re-sends nothing while a pool relay is unreachable, and
+  each rung (the 6 h one at most, foreground only) asks every pool relay for
+  the own pubkey again; a profile retracted from ANOTHER client, whose blank
+  only a silent pool relay holds, is re-sent to the relays that lack it until
+  that relay answers, when the newer copy replaces it; a relay that refuses
+  the served copy as too old stays owed on the ladder, since nothing may
+  re-date it; a relay that takes the profile and drops it LATER is not
+  noticed — a settled pool is not read again; and a deletion that failed on a
+  build before 2026-11-12 left a row indistinguishable from an upgraded
+  install's, so the profile it failed to remove is re-sent to the relays that
+  joined the pool. Disclosure is what a save already makes:
   one single-author `REQ` for the own pubkey, and the own already-public
   event, to relays of the profile pool only.
-- **A member's relay that does not answer is not a miss.** Only a relay's own
-  `EOSE` says it holds nothing for an author. A failed connect, a `CLOSED`
-  (rate limit, auth-required) or a `REQ` that outlives its bound stamps
-  nothing: the author is asked once more in the same cycle, at the other of
-  its two assigned relays, and left unstamped when that one does not answer
-  either — so a device that is offline does not walk every unresolved member
-  up a backoff with no relay having said no. A relay that did not answer one
+- **A member's relay that does not answer costs one more request, not a
+  miss.** Only a relay's own `EOSE` says it holds nothing for an author. After
+  a failed connect, a `CLOSED` (rate limit, auth-required) or a `REQ` that
+  outlives its bound, the author is asked once more in the same cycle, at the
+  other of its two assigned relays. When that one does not answer either,
+  what is stamped turns on what a relay was told: an author no relay could be
+  reached for is left unstamped — so a device that is offline does not walk
+  every unresolved member up a backoff with no relay having been asked — and
+  an author a relay was reached for backs off as a miss, because unstamped it
+  would be asked again on every trigger and a relay that declines to answer
+  would be handed a count of this device's foregrounds. A relay that did not answer one
   author is not asked for the rest of its slice, nor sent another author's
   second request, in that cycle. A real miss alternates the author between
   its two relays (never a third) behind `30 s → 2 min → 8 min → 30 min`, then
@@ -5683,7 +5701,8 @@ Haven routes kind-0 profile traffic to a curated relay pool
 kind-445 / kind-1059 traffic, and requests each member's kind-0 from the ONE
 pool relay a stable salted rendezvous hash picks, and from that author's
 second-ranked relay only on a miss or when the first did not answer — two at
-most, for the life of the install (`profile::assignment`). A relay therefore sees either the user's encrypted
+most while the pool and the install's salt stand (`profile::assignment`; a
+pool change re-ranks). A relay therefore sees either the user's encrypted
 location traffic or their profile queries — never both. The pool is
 host-disjoint from the account seed, the discovery plane and, since 2026-10-31,
 the location pool (`tests/profile_plane_separation.rs`). The same day four

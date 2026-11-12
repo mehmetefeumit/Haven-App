@@ -1029,7 +1029,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get memberPickerStrangerLookupNote =>
-      'Haven hat ein Relay nach dem veröffentlichten Profil dieser Person gefragt. Dieses Relay – und ein zweites, falls das erste nicht geantwortet hat – kann sehen, dass dieses Gerät gerade eben nach diesem Schlüssel gefragt hat. Die Anfrage trägt aber keine kryptografische Signatur und ist deshalb nicht mit deiner Haven-Identität verknüpft. Wenn das Profil ein Foto hat, lädt Haven dieses Foto von dem Server herunter, den diese Person gewählt hat. Dieser Server kann die Netzwerkadresse dieses Geräts sehen.';
+      'Haven hat ein Relay – höchstens zwei – nach dem veröffentlichten Profil dieser Person gefragt. Jedes gefragte Relay kann sehen, dass dieses Gerät gerade eben nach diesem Schlüssel gefragt hat. Die Anfrage trägt aber keine kryptografische Signatur und ist deshalb nicht mit deiner Haven-Identität verknüpft. Wenn das Profil ein Foto hat, lädt Haven dieses Foto von dem Server herunter, den diese Person gewählt hat. Dieser Server kann die Netzwerkadresse dieses Geräts sehen.';
 
   @override
   String get memberPickerStrangerLookingUp =>

@@ -75,8 +75,12 @@ use crate::profile::{
 /// retry ladder next permits an attempt.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ProfilePendingState {
-    /// A save is not yet served by every pool relay (`local > synced`).
+    /// There is work for a sync pass: a save not yet served by every pool
+    /// relay, or a pool relay the published profile was never sent to.
     pub pending: bool,
+    /// A save is waiting to be signed (`local > synced`). The only work that
+    /// needs the identity key.
+    pub save_pending: bool,
     /// The persisted retry ladder permits another attempt now.
     pub retry_due: bool,
     /// Seconds until the next attempt is due: `Some` only when pending and
@@ -364,17 +368,20 @@ impl CircleStorage {
         let Some((local, synced, next_retry_at)) = row else {
             return Ok(ProfilePendingState {
                 pending: coverage_owed,
+                save_pending: false,
                 retry_due: true,
                 next_retry_in_secs: None,
             });
         };
-        let pending = local > synced || coverage_owed;
+        let save_pending = local > synced;
+        let pending = save_pending || coverage_owed;
         let wait = next_retry_at.saturating_sub(now);
         // A wait longer than the longest rung was dated on a clock since set
         // back; one retry now beats waiting hours for the clock to catch up.
         let retry_due = wait <= 0 || wait > sync_backoff_secs(i64::MAX);
         Ok(ProfilePendingState {
             pending,
+            save_pending,
             retry_due,
             next_retry_in_secs: (pending && !retry_due)
                 .then(|| u32::try_from(wait).ok())
@@ -3300,6 +3307,7 @@ mod tests {
             storage.profile_owing_state(&hex(), 1_000, true).unwrap(),
             ProfilePendingState {
                 pending: true,
+                save_pending: false,
                 retry_due: true,
                 next_retry_in_secs: None,
             },
@@ -3313,6 +3321,7 @@ mod tests {
             storage.profile_owing_state(&hex(), 1_001, true).unwrap(),
             ProfilePendingState {
                 pending: true,
+                save_pending: false,
                 retry_due: false,
                 next_retry_in_secs: Some(u32::try_from(rung - 1).unwrap()),
             },
@@ -3336,6 +3345,29 @@ mod tests {
             .settle_profile_coverage(&hex(), 0, &relays(&["a"]))
             .unwrap();
         assert_eq!(raw(&storage, &hex()), Some((0, 0, 0, 0, 0)));
+    }
+
+    #[test]
+    fn only_a_saved_edit_asks_for_the_identity_key() {
+        let storage = storage();
+        let owing = storage.profile_owing_state(&hex(), 1_000, true).unwrap();
+        assert!(owing.pending && !owing.save_pending);
+
+        storage
+            .record_profile_coverage_attempt(&hex(), 0, 1_000)
+            .unwrap();
+        let owing = storage.profile_owing_state(&hex(), 1_001, true).unwrap();
+        assert!(owing.pending && !owing.save_pending);
+
+        storage
+            .stage_own_profile_edits(&hex(), &name_edit("Alice"), 1_002)
+            .unwrap();
+        for coverage_owed in [false, true] {
+            let saved = storage
+                .profile_owing_state(&hex(), 1_002, coverage_owed)
+                .unwrap();
+            assert!(saved.pending && saved.save_pending);
+        }
     }
 
     #[test]

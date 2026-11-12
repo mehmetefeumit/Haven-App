@@ -1017,7 +1017,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get memberPickerStrangerLookupNote =>
-      'Haven, bu kişinin yayımlanmış profilini bir aktarıcıya sordu. O aktarıcı — ilki yanıt vermediyse bir ikincisi de — bu cihazın az önce bu anahtarı sorduğunu görür; ama istek imza taşımadığı için Haven kimliğinize bağlı değildir. Profilde fotoğraf varsa Haven fotoğrafı bu kişinin seçtiği sunucudan indirir; o sunucu bu cihazın ağ adresini görür.';
+      'Haven, bu kişinin yayımlanmış profilini bir aktarıcıya — en fazla ikisine — sordu. Sorulan her aktarıcı, bu cihazın az önce bu anahtarı sorduğunu görür; ama istek imza taşımadığı için Haven kimliğinize bağlı değildir. Profilde fotoğraf varsa Haven fotoğrafı bu kişinin seçtiği sunucudan indirir; o sunucu bu cihazın ağ adresini görür.';
 
   @override
   String get memberPickerStrangerLookingUp => 'Yayımlanmış profil aranıyor…';

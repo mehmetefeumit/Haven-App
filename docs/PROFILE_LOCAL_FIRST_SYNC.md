@@ -55,10 +55,11 @@ sync_own_profile(own_pk, keys?, clock)
         │      commit_profile_coverage: covered ⊇ pool ⇒ clean; else ladder
         │      (with nothing saved a refused copy is never signed afresh)
         ├─ nothing saved, pool coverage owed ──► COVERAGE PASS (no key, no signing)
-        │      read_own_per_relay over the WHOLE pool; act only on a whole read
-        │      (every relay ended its answer or serves the newest copy), else
-        │      ladder: a silent relay may hold a newer copy — a blank that
-        │      retracted the one in hand
+        │      read_own_per_relay over the WHOLE pool; act on a whole read
+        │      (every relay ended its answer or serves the newest copy), or
+        │      on the copy this device recorded as its own (dated own row,
+        │      same created_at); else ladder: a silent relay may hold a newer
+        │      copy — a blank that retracted the one in hand
         │      no relay serves a profile ⇒ settle, publish nothing
         │      newest copy older than the dated own row ⇒ settle, offer nothing
         │      else offer the IDENTICAL served kind-0 to the relays that

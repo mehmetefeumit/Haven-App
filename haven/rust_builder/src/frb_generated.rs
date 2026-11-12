@@ -4414,7 +4414,7 @@ fn wire__crate__api__CircleManagerFfi_sync_my_profile_impl(
             let api_that = <RustOpaqueMoi<
                 flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>,
             >>::sse_decode(&mut deserializer);
-            let api_identity_secret_bytes = <Vec<u8>>::sse_decode(&mut deserializer);
+            let api_identity_secret_bytes = <Option<Vec<u8>>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, String>(
@@ -12218,10 +12218,12 @@ impl SseDecode for crate::api::ProfilePendingStateFfi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_pending = <bool>::sse_decode(deserializer);
+        let mut var_savePending = <bool>::sse_decode(deserializer);
         let mut var_retryDue = <bool>::sse_decode(deserializer);
         let mut var_nextRetryInSecs = <Option<u32>>::sse_decode(deserializer);
         return crate::api::ProfilePendingStateFfi {
             pending: var_pending,
+            save_pending: var_savePending,
             retry_due: var_retryDue,
             next_retry_in_secs: var_nextRetryInSecs,
         };
@@ -14845,6 +14847,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::ProfilePendingStateFfi {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
             self.pending.into_into_dart().into_dart(),
+            self.save_pending.into_into_dart().into_dart(),
             self.retry_due.into_into_dart().into_dart(),
             self.next_retry_in_secs.into_into_dart().into_dart(),
         ]
@@ -17090,6 +17093,7 @@ impl SseEncode for crate::api::ProfilePendingStateFfi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <bool>::sse_encode(self.pending, serializer);
+        <bool>::sse_encode(self.save_pending, serializer);
         <bool>::sse_encode(self.retry_due, serializer);
         <Option<u32>>::sse_encode(self.next_retry_in_secs, serializer);
     }

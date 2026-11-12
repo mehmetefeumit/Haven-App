@@ -11,6 +11,7 @@ import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -1679,6 +1680,63 @@ void main() {
       expect(
         onStagedRow(NpubValidator.shortenForDisplay(_newMemberNpub)),
         findsOneWidget,
+      );
+    });
+
+    testWidgets('S6. a typed-row tap stages the person and hands the focus '
+        'back to the search field', (tester) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: _overrides(
+            mockRelay: MockRelayService(
+              keyPackageResult: _makeKp(_newMemberHex),
+            ),
+            mockCircle: MockCircleService(),
+            profileService: MockProfileService()
+              ..strangerProfiles[_newMemberNpub] = const Profile(
+                pubkeyHex: _newMemberHex,
+                displayName: 'Distant Cousin',
+              ),
+          ),
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: AddMemberPage(circle: _makeCircle()),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(WidgetKeys.memberSearchInput),
+        _newMemberNpub,
+      );
+      await tester.pumpAndSettle();
+      FocusNode fieldFocus() => tester
+          .widget<TextField>(find.byKey(WidgetKeys.memberSearchInput))
+          .focusNode!;
+
+      // A mouse press outside a text field takes its focus; a touch does not.
+      final press = await tester.startGesture(
+        tester.getCenter(find.text('Distant Cousin')),
+        kind: PointerDeviceKind.mouse,
+      );
+      addTearDown(press.removePointer);
+      await tester.pump();
+      expect(fieldFocus().hasPrimaryFocus, isFalse, reason: 'anti-vacuity');
+      await press.up();
+      await tester.pumpAndSettle();
+
+      expect(
+        find.descendant(
+          of: find.byType(PendingMemberTile),
+          matching: find.text('Distant Cousin'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        fieldFocus().hasPrimaryFocus,
+        isTrue,
+        reason: 'the tapped row is gone, so focus left there is focus lost',
       );
     });
 
