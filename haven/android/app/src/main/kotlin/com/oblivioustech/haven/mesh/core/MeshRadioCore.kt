@@ -9,6 +9,7 @@ import com.oblivioustech.haven.mesh.core.MeshRadioConstants.SEND_RETRIES
 import com.oblivioustech.haven.mesh.core.MeshRadioConstants.SEND_RETRY_MS
 import com.oblivioustech.haven.mesh.core.MeshRadioConstants.SEND_TIMEOUT_MS
 import com.oblivioustech.haven.mesh.core.MeshRadioConstants.UNLINKED_TIMEOUT_MS
+import java.security.SecureRandom
 
 /**
  * The radio's one operation queue: every decision between the platform's
@@ -19,12 +20,14 @@ import com.oblivioustech.haven.mesh.core.MeshRadioConstants.UNLINKED_TIMEOUT_MS
  * taking what the engine has for the radio and asking for the next wake. The
  * engine's timers run nowhere else.
  *
- * [clock] is milliseconds that keep counting while the phone sleeps.
+ * [clock] is milliseconds that keep counting while the phone sleeps. [pick]
+ * is [PeerTable]'s: whom it forgets is not for a stranger to predict.
  */
 class MeshRadioCore(
     private val engine: MeshEngineApi,
     private val port: RadioPort,
     private val clock: () -> Long,
+    pick: (Int) -> Int = SecureRandom()::nextInt,
 ) {
     /** False once the engine is gone, or has answered what is no output: the service stops. */
     var running = true
@@ -40,7 +43,7 @@ class MeshRadioCore(
     }
 
     private var up = false
-    private val peers = PeerTable()
+    private val peers = PeerTable(pick)
     private val scan = ScanPolicy()
     private val deadline = DeadlinePolicy()
     private val links = LinkedHashMap<Long, Link>()
@@ -54,7 +57,7 @@ class MeshRadioCore(
     /** Bluetooth is on and the adapters are up. */
     fun startRadio() = input {
         up = true
-        false
+        null
     }
 
     /**
@@ -64,19 +67,19 @@ class MeshRadioCore(
     fun stopRadio() {
         val left = left()
         down()
-        if (left != null) pump(left, hold = false)
+        if (left != null) pump(left, holdFor = null)
     }
 
     fun onSighting(address: String, rssi: Int) = input {
-        if (up) engine.sighting(peers.seen(address), rssi)
-        false
+        if (up) peers.seen(address, rssi, dialing.keys)?.let { engine.sighting(it, rssi) }
+        null
     }
 
     /** A central connected to the server: not a link until it subscribes. */
     fun onConnected(link: Long) = input {
-        if (!up) return@input false
+        if (!up) return@input null
         if (unlinked.size < MAX_UNLINKED) unlinked[link] = clock() + UNLINKED_TIMEOUT_MS else port.close(link)
-        false
+        null
     }
 
     /**
@@ -84,49 +87,49 @@ class MeshRadioCore(
      * has no peer: a central's address is not the one it advertises under.
      */
     fun onLinkUp(link: Long, central: Boolean, attMtu: Int, address: String?) = input {
-        if (!up) return@input false
+        if (!up) return@input null
         unlinked.remove(link)
         val peer = (if (central) address?.let(dialing::remove) else null) ?: NO_PEER
         if (links.size == MAX_LINKS) {
             if (peer != NO_PEER) engine.connectFailed(peer)
             port.close(link)
-            return@input false
+            return@input null
         }
         links[link] = Link()
         engine.linkUp(link, central, attMtu, peer)
-        true
+        link
     }
 
     fun onLinkDown(link: Long) = input {
         unlinked.remove(link)
         if (links.remove(link) != null) engine.linkDown(link)
-        false
+        null
     }
 
     fun onConnectFailed(address: String) = input {
         dialing.remove(address)?.let(engine::connectFailed)
-        false
+        null
     }
 
     fun onFrame(link: Long, frame: ByteArray) = input {
-        if (link !in links) return@input false
+        if (link !in links) return@input null
         engine.receive(link, frame)
-        true
+        link
     }
 
     /** The platform's completion of the frame it took for [link]. */
     fun onSendDone(link: Long, ok: Boolean) = input {
-        val state = links[link] ?: return@input false
+        val state = links[link] ?: return@input null
         if (ok && state.refused == null) state.due = null else drop(link)
-        false
+        null
     }
 
-    fun onWake() = input { false }
+    fun onWake() = input { null }
 
-    /** [act] answers whether the phone is held awake for what follows: an inbound frame, a link coming up. */
-    private fun input(act: () -> Boolean) {
+    /** [act] answers the link the phone is held awake for: one that came up, or brought a frame. */
+    private fun input(act: () -> Long?) {
         val left = left() ?: return
-        pump(left, hold = act())
+        pump(left, holdFor = act())
     }
 
     /** The engine's time left, or null when the service is to stop. */
@@ -144,7 +147,7 @@ class MeshRadioCore(
         return left
     }
 
-    private fun pump(left: Long, hold: Boolean) {
+    private fun pump(left: Long, holdFor: Long?) {
         if (!up) {
             // No radio: the engine is not driven, and only the deadline wakes the phone.
             port.wakeAt(deadline.reminderIn(left) ?: left)
@@ -156,6 +159,7 @@ class MeshRadioCore(
             port.scan()
             scan.started(now)
         }
+        var hold = holdFor != null
         var budget = PUMP_BUDGET
         while (budget > 0) {
             val polled = engine.poll(ready()) ?: break
@@ -164,6 +168,9 @@ class MeshRadioCore(
                 is RadioOutput.Close -> {
                     links.remove(output.link)
                     port.close(output.link)
+                    // Refused by the engine in the same breath: a link it does not admit, or a
+                    // frame it rejects, buys no wakefulness, however often it is tried.
+                    if (output.link == holdFor) hold = false
                 }
                 is RadioOutput.Connect -> connect(output.peer)
                 null -> {

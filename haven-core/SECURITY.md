@@ -3600,11 +3600,19 @@ export yet, and on no other target does anything call an entry.
   modules: the generated bridge, and `mesh_jni.rs`, where the lint fires on
   `#[no_mangle]`, which every export carries. The allowance covers the whole
   module, so inside it the compiler reports no `unsafe` block and no second
-  exported symbol either; that is why the file is held, line by line, to
-  `use`s and the nine exports, each one forward — by
-  `scripts/ci/check_mesh_radio.sh` and by `every_export_is_one_guarded_call`
-  — and why everything else of the shim is in `mesh_radio.rs`, under the
-  deny. `api.rs` and the test keyring compile under it too. `jni` is the 0.21
+  exported symbol either; that is why the file is held to `use`s and the
+  nine exports, each one forward — by `scripts/ci/check_mesh_radio.sh` and
+  by `every_export_is_one_guarded_call` — and why everything else of the
+  shim is in `mesh_radio.rs`, under the deny. Both of those read the text of
+  the crate's `src/`: they stop ordinary erosion and make a deliberate one
+  conspicuous in review, and are no proof against code written to be hidden
+  from them, nor against a lint level set outside `src/` (a `[lints]` table,
+  `RUSTFLAGS`, a `build.rs`: the crate has neither table nor script, the
+  one `RUSTFLAGS` its Android build passes is a library search path, and
+  nothing pins that). The check no way of writing the source gets past — the built
+  library's exported `Java_*` symbols against the nine of the fixture — is
+  owed by the first unit that builds the radio for Android. `api.rs` and
+  the test keyring compile under the deny too. `jni` is the 0.21
   line `android-native-keyring-store` had already resolved: a direct
   dependency for Android and a dev-dependency for the host's type-check, one
   new edge in `haven/rust_builder/Cargo.lock` and no new package.

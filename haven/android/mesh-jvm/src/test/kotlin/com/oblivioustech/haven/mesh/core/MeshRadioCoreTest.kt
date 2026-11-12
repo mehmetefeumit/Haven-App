@@ -155,6 +155,128 @@ class MeshRadioCoreTest {
         assertEquals(listOf("connect(${address(1)})"), rig.port.called("connect"))
     }
 
+    /**
+     * The engine forgets a peer at random so that one advertiser under many addresses keeps nobody out;
+     * a table that forgot its oldest would undo that. Whom the picker names goes, and nobody else.
+     */
+    @Test
+    fun aFloodOfAddressesDoesNotPushOutAPeerUnlessItIsPicked() {
+        fun flooded(pick: (Int) -> Int): Rig = Rig().started().apply {
+            this.pick = pick
+            core.onSighting(ADDRESS, -40)
+            for (n in 1..300) core.onSighting(address(n), -40)
+            engine.outputs += connectOf(0)
+            core.onWake()
+        }
+        // Never the first seen: a flood of any length leaves it.
+        val kept = flooded { among -> among - 1 }
+        assertEquals(listOf("connect($ADDRESS)"), kept.port.called("connect"))
+        assertTrue(kept.engine.called("connectFailed").isEmpty())
+        assertEquals(List(300 - MAX_PEERS + 1) { MAX_PEERS }, kept.pickedAmong, "not asked once a new address, among all sixty-four")
+        // The first seen, when the pick falls on it.
+        val picked = flooded { 0 }
+        assertTrue(picked.port.called("connect").isEmpty())
+        assertEquals(listOf("connectFailed(0)"), picked.engine.called("connectFailed"))
+
+    }
+
+    /**
+     * The picker a build has, when none is handed in. Sixty-four addresses, then sixty-four more: a rule
+     * that forgets the oldest leaves none of the first, one that forgets the newest forgets one of them.
+     * A random one forgets at least the first it picks, and the chance that it stops there, or forgets
+     * all sixty-four, is 64!/64^64 each — under one in 10^26.
+     */
+    @Test
+    fun theTableABuildHasForgetsByNoFixedRule() {
+        val engine = FakeEngine()
+        val port = RecordingPort()
+        val core = MeshRadioCore(engine, port, { 0L })
+        core.startRadio()
+        for (n in 0 until 2 * MAX_PEERS) core.onSighting(address(n), -40)
+        for (n in 0 until MAX_PEERS) engine.outputs += connectOf(n.toLong())
+        core.onWake()
+        val forgotten = engine.called("connectFailed").size
+        assertEquals(MAX_PEERS, forgotten + port.called("connect").size)
+        assertTrue(forgotten in 2 until MAX_PEERS, "$forgotten of the first sixty-four were forgotten")
+    }
+
+    @Test
+    fun anAddressBeingDialledIsNeverForgotten() {
+        val rig = Rig().started()
+        rig.core.onSighting(ADDRESS, -40)
+        for (n in 1 until MAX_PEERS) rig.core.onSighting(address(n), -40)
+        rig.engine.outputs += connectOf(0)
+        rig.core.onWake()
+        // The picker names the first of those it is offered, which the dialled address would be.
+        for (n in 100..300) rig.core.onSighting(address(n), -40)
+        assertTrue(rig.pickedAmong.all { it == MAX_PEERS - 1 }, "the dialled address was offered: ${rig.pickedAmong.distinct()}")
+        rig.core.onSighting(ADDRESS, -40)
+        assertEquals("sighting(0,-40)", rig.engine.called("sighting").last(), "the address being dialled was forgotten")
+        // Its link comes up bound to it, and then it is anyone's to forget.
+        rig.core.onLinkUp(1, central = true, attMtu = 517, address = ADDRESS)
+        assertEquals(listOf("linkUp(1,true,517,0)"), rig.engine.called("linkUp"))
+        rig.core.onSighting(address(400), -40)
+        assertEquals(MAX_PEERS, rig.pickedAmong.last())
+    }
+
+    /** Far-off advertisers, of which a stranger can make any number, fill no place: the engine would not take them. */
+    @Test
+    fun aWeakAddressNotYetKnownTakesNoPlaceAndIsNeverToldToTheEngine() {
+        val rig = Rig().started()
+        for (n in 0 until 200) rig.core.onSighting(address(n), -86)
+        assertTrue(rig.engine.called("sighting").isEmpty(), "the engine was told of an address below its floor")
+        // No place was taken: sixty-four strong ones fit after them, numbered from nought, and nobody is forgotten.
+        for (n in 200 until 200 + MAX_PEERS) rig.core.onSighting(address(n), -85)
+        assertEquals(List(MAX_PEERS) { "sighting($it,-85)" }, rig.engine.called("sighting"))
+        assertTrue(rig.pickedAmong.isEmpty())
+    }
+
+    @Test
+    fun aWeakSightingOfAKnownAddressIsToldToTheEngine() {
+        val rig = Rig().started()
+        rig.core.onSighting(ADDRESS, -60)
+        rig.core.onSighting(ADDRESS, -100)
+        assertEquals(listOf("sighting(0,-60)", "sighting(0,-100)"), rig.engine.called("sighting"))
+    }
+
+    /** R-1: a completion can only be the frame in flight's. One that comes while a refused frame waits frees nothing. */
+    @Test
+    fun aCompletionWhileARefusedFrameWaitsClosesItsLink() {
+        val rig = linked(links = 2)
+        rig.port.refuses = 1
+        rig.engine.outputs += sendOf(1, frame)
+        rig.engine.outputs += sendOf(1, byteArrayOf(1))
+        rig.core.onWake()
+        rig.core.onSendDone(1, ok = true)
+        assertEquals(listOf("close(1)"), rig.port.called("close"))
+        assertEquals(listOf("linkDown(1)"), rig.engine.called("linkDown"))
+        rig.pass(50)
+        assertEquals(1, rig.port.frames.size, "a frame was sent on the closed link")
+        assertTrue(rig.engine.readies.drop(1).none { 1L in it }, "polled for a link that held a frame: ${rig.engine.readies}")
+    }
+
+    /**
+     * A link the engine does not admit, or whose frame it rejects, is closed in the same pump, and holds no
+     * lock: a peer cannot keep the phone awake by trying again.
+     */
+    @Test
+    fun aLinkTheEngineClosesAtOnceHoldsNoLock() {
+        val refused = Rig().started()
+        refused.engine.outputs += closeOf(1)
+        refused.core.onLinkUp(1, central = false, attMtu = 517, address = null)
+        assertEquals(listOf("close(1)"), refused.port.called("close"))
+        assertTrue(refused.port.called("holdAwake").isEmpty(), "a lock for a link the engine refused")
+
+        val rejected = linked(links = 2)
+        rejected.engine.outputs += closeOf(1)
+        rejected.core.onFrame(1, frame)
+        assertTrue(rejected.port.called("holdAwake").isEmpty(), "a lock for a frame the engine closed its link for")
+        // Another link's close is no reason: the frame's own link stands.
+        rejected.engine.outputs += closeOf(7)
+        rejected.core.onFrame(2, frame)
+        assertEquals(listOf("holdAwake(5250)"), rejected.port.called("holdAwake"))
+    }
+
     @Test
     fun thePumpStopsAtItsBudgetAndComesBack() {
         val rig = linked()
@@ -236,6 +358,16 @@ class MeshRadioCoreTest {
         rig.core.startRadio()
         assertEquals(listOf("leftMs()", "poll()", "wakeInMs()"), rig.engine.calls)
         assertEquals(listOf("scan()", "wakeAt(5000)"), rig.port.calls)
+
+        // A dial that ended in a link is no longer pending: Bluetooth off tells the link down and no connect failed.
+        val dialled = Rig().started()
+        dialled.core.onSighting(ADDRESS, -40)
+        dialled.engine.outputs += connectOf(0)
+        dialled.core.onWake()
+        dialled.core.onLinkUp(1, central = true, attMtu = 517, address = ADDRESS)
+        dialled.fresh()
+        dialled.core.stopRadio()
+        assertEquals(listOf("leftMs()", "linkDown(1)"), dialled.engine.calls)
     }
 
     @Test

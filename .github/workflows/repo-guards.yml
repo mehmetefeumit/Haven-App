@@ -1400,19 +1400,23 @@ jobs:
       # The mesh's radio reaches Rust through JNI exports that decide nothing
       # (docs/BLUETOOTH_MESH_M3_DESIGN.md §A.6). The crate's unsafe_code deny
       # is lifted for the file that holds them, so there the compiler checks
-      # nothing; this guard reads every line of it, as rust_builder's test
-      # every_export_is_one_guarded_call does from the Rust side: one-line
-      # uses and the exports pinned in fixtures/mesh_radio_exports.txt, each
-      # one call that hands its parameters on to mesh_radio.rs. There, under
-      # the deny, each call is one radio entry under the panic guard — an
-      # unwind out of an export would abort the process that also publishes to
-      # relays — and calls nothing of Java's. Nowhere else in the bridge crate
-      # is unsafe, extern or an exporting attribute written, and no module is
-      # built from a file other than the one of its name. The radio's Kotlin
+      # nothing; this guard reads the file's text, as rust_builder's test
+      # every_export_is_one_guarded_call does from the Rust side, and takes
+      # in it only one-line uses and the exports pinned in
+      # fixtures/mesh_radio_exports.txt, each one call that hands its
+      # parameters on to mesh_radio.rs. There, under the deny, each call is
+      # one radio entry under the panic guard — an unwind out of an export
+      # would abort the process that also publishes to relays — and calls
+      # nothing of Java's. In the crate's other .rs files it finds no unsafe,
+      # extern or exporting attribute, no path attribute and no include!, and
+      # lib.rs declares the two modules under their pinned attributes and
+      # names them nowhere else. A reader of text, not the compiler: it stops
+      # careless erosion and makes a deliberate one conspicuous; it does not
+      # read outside src/, nor a lint level set elsewhere. The radio's Kotlin
       # (§B) logs nothing and holds no UUID, names its platform modes in
-      # MeshRadioConstants.kt alone, has no row in the native log allowlist
-      # and keeps its pinned JVM tests; no manifest but the mesh's own names
-      # Bluetooth.
+      # MeshRadioConstants.kt alone, has no row in the native log allowlist,
+      # keeps its pinned JVM tests and takes the engine's signal floor; no
+      # manifest but the mesh's own names Bluetooth.
       - name: Mesh radio
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_mesh_radio.sh
@@ -1427,11 +1431,14 @@ jobs:
       # something else, or makes another's; a call into Java by method or by
       # path, a JNIEnv under a second name, state kept between calls; code
       # under a second cfg(test) or behind the tests the guard stops at; code
-      # behind a comment opener that sits in a string; a use that renames,
-      # globs, spans lines or imports the calls' module from elsewhere; a
-      # module given a path or a body. In the radio's Kotlin: a log call, a
-      # UUID, a mode named in an adapter, an allowlist row, Bluetooth in a
-      # manifest of the flag-off build, and a test gone, renamed or ignored.
+      # behind a comment opener that sits in a string, or after a character
+      # literal; a use that renames, globs, spans lines or imports the calls'
+      # module from elsewhere; a module given a path — by a macro too — a
+      # body, another condition or a second name; an include!. In the radio's
+      # Kotlin: a log call, one under an import alias, a UUID, a mode named in
+      # an adapter, an allowlist row, Bluetooth in a manifest of the flag-off
+      # build, a test gone, renamed or ignored, and a floor that is not the
+      # engine's.
       - name: Mesh radio guard self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_mesh_radio.sh --self-test

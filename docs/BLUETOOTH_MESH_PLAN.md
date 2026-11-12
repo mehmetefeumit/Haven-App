@@ -2682,8 +2682,9 @@ fails any `path = "…"` in the crate's hand-written source, bare or under
 `//` of `"//"` and the `/*` of `"/*"` as comments, so the rest of the line,
 or the lines up to a later `"*/"`, were hidden from every check: one line
 appended to `api.rs` — an allowance, a `no_mangle`, an `extern fn`, an
-`unsafe` block — passed checks 1 and 2. The view is now made as the
-compiler reads the file: a string runs to its closing quote, on whichever
+`unsafe` block — passed checks 1 and 2. The view is now made by a lexer
+that knows strings (it is not the compiler; the review of `de152a2`,
+below, says what it is): a string runs to its closing quote, on whichever
 line that is, with its escapes; a raw string to its own hashes; a
 character literal that holds a quote is one; block comments nest. A string
 begun on the line above and a raw string that holds a quote were not among
@@ -2848,6 +2849,109 @@ with the new guard, each fail, at the check its plant belongs to.
   nothing; `scan()` doing nothing where `PermissionMatrix.canSearch` is
   false; the mesh's own manifest, and the guard's checks of it and of the
   advertiser's source.
+
+Review of M3f (independent, read-only, of `de152a2`): no blocker and no
+high finding. One medium and three low in the Kotlin, each checked against
+the code and the engine; all were as stated. Fixed, each with a test that
+fails without the fix.
+**The peer table undid the engine's defence against one advertiser under
+many addresses (medium).** The engine forgets a peer picked at random among
+those neither linked nor being dialled, and takes in no unknown peer below
+its signal floor. `PeerTable` numbered every sighting and forgot its
+oldest: an advertiser rotating 64 addresses, at any signal strength,
+pushed every honest address out between two of its own sightings; the
+engine still held the honest peer's number, its connect met a forgotten
+number, failed and backed off 60 to 90 s, and outgoing links stopped. The
+table now forgets one picked at random among the addresses not being
+dialled — `SecureRandom` unless a test hands a picker in — and gives an
+address it does not know no number, and the engine no word of it, below
+`MeshRadioConstants.RSSI_FLOOR`; a known address's weak sighting is still
+told. The floor is the engine's `rssi_floor`, −85, held once in Kotlin and
+pinned to the engine's default by `check_mesh_radio.sh` check 12 (the
+first `rssi_floor: <integer>,` after `impl Default for Config {`). Were
+the two to differ the higher would decide and nothing would break.
+`aFloodOfAddressesDoesNotPushOutAPeerUnlessItIsPicked`,
+`anAddressBeingDialledIsNeverForgotten`,
+`aWeakAddressNotYetKnownTakesNoPlaceAndIsNeverToldToTheEngine`,
+`aWeakSightingOfAKnownAddressIsToldToTheEngine`, the table's own
+`thePeerTableHoldsSixtyFourAndForgetsOnePickedAmongThoseNotBeingDialled`,
+and `theTableABuildHasForgetsByNoFixedRule` for the picker a build has —
+whose one in 10^26 is the only chance any test here takes.
+**Two changes the suite let through (low; the code was right).** A
+completion that freed a link still holding a refused frame, dropping the
+frame: `aCompletionWhileARefusedFrameWaitsClosesItsLink`. A dial left
+pending after its link came up, so that Bluetooth off told the engine a
+connect failed for a linked peer: an assertion in
+`bluetoothOffTellsEveryLinkDownAndSendsNothing`.
+**A lock for what the engine refuses (low).** The timed wake lock was
+taken for a link-up or a frame even when the engine answered that input
+with the link's close — no room, its inbound limit, a frame it rejects —
+so a peer never admitted could buy ten seconds of wakefulness a try. No
+lock is taken when the close of the input's own link comes out of the same
+pump (`aLinkTheEngineClosesAtOnceHoldsNoLock`). Owner question Q-13 — a
+peer the engine does admit — stands as it was; no other cap was added.
+A comment that said more than `DeadlinePolicy.reminderIn` does is
+corrected, and the design's §B.2 now lists what the core asks of the
+adapters, with two points the review added: the stop's steps cancel the
+alarm after the radio-down step, which arms one; and one `onLinkUp` a
+connection. 33 JVM tests (26, one renamed, seven added). Mutation pass of
+this round: 17 changes, each failing a named test — one of them, the lock
+kept for a closed link, first as a compile error (a variable never
+reassigned is a warning, and warnings are errors) and then, written so
+that it compiles, as the test; and one, a fixed rule in place of the
+build's picker, stood until the last of the tests above was written.
+
+Review of the guard and the lane (independent, read-only, of `de152a2`):
+the multi-line `use` is closed, no fail-open was found, the workflow's
+shell is sound; five ways past the guard or the lane, one of them older
+than M3f. **First, what the guard is, since each fix invites the next
+plant:** `check_mesh_radio.sh` reads text. It stops ordinary and careless
+erosion and makes a deliberate one conspicuous in review; it is not the
+compiler and is no proof against code written to be hidden from it, by
+someone who could as well edit the guard. It reads the `.rs` files under
+the bridge crate's `src/` and nothing else of the crate — not a file
+outside `src/`, not a lint level set elsewhere (`[lints]`, `RUSTFLAGS`,
+`--cap-lints`, a `build.rs`: today the crate has no `[lints]` table and no
+`build.rs`, and the one `RUSTFLAGS` cargokit passes an Android build is a
+library search path; nothing pins that).
+Its header, its step comment, design §A.6 and `haven-core/SECURITY.md`
+now say that, and no longer that it reads "as the compiler does" or that
+"the files read are the files compiled". **Owed by M3g**, with the first
+build of the radio for Android: the `nm -D` step holds the library's
+exported `Java_*` symbols to exactly the nine of the fixture — a check of
+the artifact, which no way of writing the source gets past.
+Fixed, each with a fixture that fails without the fix:
+a character literal followed by a string that holds a quote
+(`stringify!('x'"'")`) set the lexer one quote out of step, and an
+exported `unsafe fn` then sat in what it took for a comment — a `'` is
+now read as an escape up to its closing quote, as one character between
+two quotes, or as the quote of a lifetime or label;
+`mod mesh_radio;` kept for tests while Android got another module under
+the same name, by a `use … as mesh_radio` or by a macro that writes
+`#[path = $file]` — `lib.rs` is now held to the exact attribute lines
+above each of the two declarations, after the end of another item, with
+neither name anywhere else in the file, and `path` followed by `=` fails
+whatever follows;
+`include!` of a file that is no `.rs` (older than M3f) — banned in the
+crate's hand-written source, `include_str!` and `include_bytes!` not;
+a logger imported under another name (`import android.util.Log as L`),
+or taken as a function reference — the import itself fails, and `Log::`;
+and `run_mesh_jvm_tests.sh` said every test ran while asking only for one
+— it now fails unless the tests that ran are, by name, the functions the
+test sources declare under `@Test`, which an `abstract` test class and a
+test filter both fail. **It cannot tell a test whose body was emptied:**
+that one runs, passes and is counted, and nothing here says otherwise.
+The lane now restores the shared Gradle cache read-only before its build,
+as every lane but the writer does, and
+`check_gradle_build_hardened.sh` lists the script as a build site, so a
+lane that ran it cold fails that guard (15 fixtures there). `.kotlin/` is
+ignored beside `build/`. 129 self-test fixtures in `check_mesh_radio.sh`
+(116, and 13: two for the character literal, four for the modules and
+`include!`, two for the logger, four for the floor and one for a tree
+with no engine to read it from); each of its 30 failure sites,
+silenced in turn, fails the self-test. The reviewer's trees, in scratch
+copies with the new guard and this tree's Kotlin, each fail at the check
+its plant belongs to, and the tree with no plant passes.
 
 ### Proposed CLAUDE.md wording (owner to approve)
 

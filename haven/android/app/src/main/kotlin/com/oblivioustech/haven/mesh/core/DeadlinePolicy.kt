@@ -14,6 +14,6 @@ class DeadlinePolicy {
         else -> DeadlineStep.REMINDER.also { reminded = true }
     }
 
-    /** Milliseconds until the reminder is due; null once [at] has given it. */
+    /** Milliseconds until the reminder is due; null when it is due already — given by [at] or not — or past. */
     fun reminderIn(leftMs: Long): Long? = (leftMs - MeshRadioConstants.REMINDER_MS).takeIf { it > 0 }
 }

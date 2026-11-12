@@ -183,18 +183,38 @@ class PoliciesTest {
     }
 
     @Test
-    fun thePeerTableHoldsSixtyFourAndForgetsTheLeastRecentlySeen() {
-        val table = PeerTable()
-        for (n in 0 until MAX_PEERS) assertEquals(n.toLong(), table.seen(address(n)))
-        // Seen again: the same number, and no longer the oldest.
-        assertEquals(0, table.seen(address(0)))
-        assertEquals(64, table.seen(address(64)))
-        assertNull(table.addressOf(1), "the least recently seen was kept")
-        assertEquals(address(0), table.addressOf(0))
-        assertEquals(address(64), table.addressOf(64))
-        for (n in 2 until MAX_PEERS) assertEquals(address(n), table.addressOf(n.toLong()))
-        // Forgotten and seen again, an address is a new peer: a number is never used twice.
-        assertEquals(65, table.seen(address(1)))
+    fun thePeerTableHoldsSixtyFourAndForgetsOnePickedAmongThoseNotBeingDialled() {
+        val asked = mutableListOf<Int>()
+        var pick = 0
+        val table = PeerTable { among ->
+            asked += among
+            pick
+        }
+        val nobody = emptySet<String>()
+        for (n in 0 until MAX_PEERS) assertEquals(n.toLong(), table.seen(address(n), -40, nobody))
+        // Seen again: the same number, and nobody is forgotten for it.
+        assertEquals(0, table.seen(address(0), -40, nobody))
+        assertTrue(asked.isEmpty())
+
+        // The sixty-fifth takes the place of the one picked: here the third of those first seen.
+        pick = 2
+        assertEquals(64, table.seen(address(64), -40, nobody))
+        assertEquals(listOf(MAX_PEERS), asked)
         assertNull(table.addressOf(2))
+        for (n in (0..64) - 2) assertEquals(address(n), table.addressOf(n.toLong()))
+
+        // One being dialled is not among those picked from: the first of the others goes.
+        pick = 0
+        assertEquals(65, table.seen(address(65), -40, setOf(address(0))))
+        assertEquals(listOf(MAX_PEERS, MAX_PEERS - 1), asked)
+        assertEquals(address(0), table.addressOf(0))
+        assertNull(table.addressOf(1))
+
+        // Forgotten and seen again, an address is a new peer: a number is never used twice.
+        assertEquals(66, table.seen(address(2), -40, nobody))
+        // With every address being dialled, which the engine's one dial at a time rules out, nobody new is taken in.
+        val everyone = (0..200).map(::address).toSet()
+        assertNull(table.seen(address(150), -40, everyone))
+        assertEquals(3, asked.size)
     }
 }

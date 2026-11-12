@@ -314,11 +314,24 @@ poll(ready: LongArray): ByteArray?   wakeInMs(): Long      // −1: none
   call and their tests are in `mesh_radio.rs`, under the deny. The guard
   reads every line of the first file and holds it to exactly that, and the
   Rust gate `every_export_is_one_guarded_call` reads it too. **After the
-  re-review of `bd7ff48`:** the guard strips comments as the compiler does
-  (a `//` or `/*` in a string hides nothing), takes a `use` on one line with
-  no rename and no glob, takes no quote in the file but an export's
-  `"system"`, and fails any `path = "…"` attribute in the crate, so that
-  the file it reads is the file compiled; the seven
+  re-review of `bd7ff48` and the review of `de152a2`:** the guard takes
+  comments out with a lexer of its own that knows strings, raw strings and
+  character literals (a `//` or `/*` in a string hides nothing), takes a
+  `use` on one line with no rename and no glob, takes no quote in the file
+  but an export's `"system"`, fails `path =` and `include!` anywhere in the
+  crate's source, and pins the attribute lines above the two modules'
+  declarations in `lib.rs`, with neither name anywhere else in that file.
+  **What the guard is:** a reader of text, not the compiler. It stops
+  ordinary and careless erosion and makes a deliberate one conspicuous in
+  review; it is no proof against code written to be hidden from it, it
+  reads nothing outside `src/`, and it does not see a lint level set
+  elsewhere (`[lints]`, `RUSTFLAGS`, `--cap-lints`, a `build.rs` — today
+  the crate has no `[lints]` table and no `build.rs`, and the one
+  `RUSTFLAGS` cargokit passes an Android build is a library search path;
+  nothing pins that). The check that no source gets past
+  is on the artifact: **owed by M3g**, the `nm -D` step is to hold the
+  library's exported `Java_*` symbols to exactly the nine of the fixture.
+  The seven
   calls that take no array are run against the engine on the host
   (`the_calls_a_jni_export_forwards_reach_their_entries_each_argument_in_its_place`).
   `receive`, `poll` and every export still need a JVM.
@@ -454,7 +467,7 @@ of the app's build and changes nothing in it.
 | `MeshEngineApi` | the nine calls of §A.6 as an interface; `MeshNative` is its one real implementation |
 | `RadioOutput` | `decode(ByteArray)`: the encoding of §A.5 |
 | `MeshRadioCore` | **the one operation queue**: links, pending connects, in-flight frames, the pump |
-| `PeerTable` | Bluetooth address → `PeerRef`, 64 entries — the engine's own `max_peers` (`eng:264`) — least recently seen evicted |
+| `PeerTable` | Bluetooth address → `PeerRef`, 64 entries — the engine's own `max_peers` (`eng:264`) — least recently seen evicted. **As built (after the review of M3f):** not the least recently seen. A full table forgets one picked at random (`SecureRandom`; injected in tests) among the addresses not being dialled, and an address not yet known whose sighting is below the engine's `rssi_floor` (−85) gets no number and is not told to the engine; a known address's weak sighting is told. The engine forgets at random "so whoever advertises under many addresses keeps nobody out" (`eng` `make_room`) and ignores an unknown weak peer; a table that forgot its oldest undid both — one advertiser rotating 64 addresses, at any distance, pushed every honest address out between two of its sightings, the engine's connect met a forgotten number, failed and backed off, and outgoing links stopped |
 | `DeadlinePolicy` | from time left: nothing / reminder / stop |
 | `StartPolicy` | at a service start, from (Bluetooth permission held, engine's time left, stored copy): run, resume, or stop with which notice |
 | `PermissionMatrix` | per API level: what to ask, whether it may search |
@@ -553,6 +566,34 @@ written or says too little:**
 - While the radio is down, sightings, connections and link-ups that still
   arrive are dropped; the engine is not polled, and the wake asked for is
   the reminder's or the deadline's alone.
+- `MeshRadioCore` takes a fourth argument, the picker `PeerTable` forgets
+  by (§B.1), a `SecureRandom` unless a test hands one in.
+
+**What the core asks of the adapters (for M3g).**
+
+- One thread; every callback and handler message inside `MeshThread.run`;
+  one `MeshThread` a start (a stopped one drops every body).
+- **The stop's steps cancel the alarm after the radio-down step.**
+  `stopRadio()` asks for the deadline's wake even when the service's own
+  stop calls it, so an alarm cancelled first is armed again behind it.
+- One counter of link numbers across both roles, never used twice. An
+  inbound connection is numbered at `onConnected` and keeps its number.
+- **Exactly one `onLinkUp` a connection.** A second for the same number
+  replaces the link's state, and a late completion of the first could then
+  free the second before its own frame completed.
+- `onConnected` only for a central that connected to Haven's server: the
+  core cancels after 10 s whatever it is told of.
+- Every `connect(address)` answered once, by `onLinkUp(central = true, …,
+  address)` or `onConnectFailed(address)`.
+- `send` answers false only when no completion follows; true is followed
+  by exactly one `onSendDone`.
+- `close` of a number the port does not know does nothing: the core closes
+  what it refused at its caps and what the engine closes.
+- `scan()` ends the scan that runs and starts one; where
+  `PermissionMatrix.canSearch` is false it does nothing.
+- `wakeAt` replaces the wake before it; 0 is "post now".
+- At a service start: `startRadio()` with Bluetooth on, else `onWake()`
+  once; after a Keep on, `onWake()`.
 
 The engine's schedule runs here and nowhere else: no entry that holds a
 session runs an engine timer (§A.3), so a slot that fell due waits for
@@ -606,7 +647,12 @@ connection changes nothing for the peer, which sees the disconnect).
   `holdAwake(min(wakeInMs + 250, HOLD_CAP_MS))` (§G). Not for sightings.
   **As built (M3f):** `wakeInMs` there is the engine's own, not the
   earlier of the core's timers; and only for a frame of a link the table
-  holds and a link it admitted.
+  holds and a link it admitted. **After the review of M3f:** and not when
+  the engine's close of that same link came out of the same pump — a link
+  it does not admit, a frame it rejects — so that trying again buys no
+  wakefulness (`aLinkTheEngineClosesAtOnceHoldsNoLock`). This narrows Q-13
+  and does not settle it: a linked peer sending frames the engine takes
+  still holds the phone awake.
 
 ### B.3 Radio
 
@@ -878,7 +924,16 @@ guard's. Added: `theEngineInterfaceIsTheNineExportsOfTheFixture` (§A.6),
 `aLinkTheEngineClosesIsClosedAndALinkLostIsToldDown`,
 `anEngineThatAnswersNoWakeIsGone`,
 `aStopTheUserDidNotMakeIsAStopWithTheNoticeAndIsFinal` (§B.5) and
-`anEngineWhoseTimeIsUpStopsTheServiceWithTheNotice` (T-AUTO-2).
+`anEngineWhoseTimeIsUpStopsTheServiceWithTheNotice` (T-AUTO-2). After the
+review of M3f: `aFloodOfAddressesDoesNotPushOutAPeerUnlessItIsPicked`,
+`anAddressBeingDialledIsNeverForgotten`,
+`aWeakAddressNotYetKnownTakesNoPlaceAndIsNeverToldToTheEngine`,
+`aWeakSightingOfAKnownAddressIsToldToTheEngine`,
+`aCompletionWhileARefusedFrameWaitsClosesItsLink` and
+`aLinkTheEngineClosesAtOnceHoldsNoLock`; the table's own test is now
+`thePeerTableHoldsSixtyFourAndForgetsOnePickedAmongThoseNotBeingDialled`.
+The script fails unless the tests that ran are the tests the sources
+declare, by name; it cannot tell a test whose body was emptied.
 
 | Test | Proves | Mutation it kills |
 |---|---|---|
@@ -1272,7 +1327,7 @@ ui-ux-reviewer before M3e lands (plan §10).
 
 | Lane | Proves | Status |
 |---|---|---|
-| `android-unit.yml` (new; stage 1 of `ci.yml`) — `./gradlew :app:testDebugUnitTest` | every [J] test; and that all Kotlin compiles | feasible **[U]**: cargokit hooks the Rust build to `merge…NativeLibs` only (`haven/rust_builder/cargokit/gradle/plugin.gradle:166-170`), which a unit-test task does not need — read, not run. **As built (M3f):** the lane does not build the app. It runs `scripts/ci/run_mesh_jvm_tests.sh` — `gradle test` in `haven/android/mesh-jvm` — on a JDK 21 with the Gradle distribution the app's wrapper pins, fetched and checked against the pinned SHA-256 (the tree has no `gradlew`). It proves every [J] test and that the pure package compiles with no Android; **not** that any other Kotlin compiles — that is `build-check.yml`'s, from M3g. The script was run where M3f was built; the workflow has never run |
+| `android-unit.yml` (new; stage 1 of `ci.yml`) — `./gradlew :app:testDebugUnitTest` | every [J] test; and that all Kotlin compiles | feasible **[U]**: cargokit hooks the Rust build to `merge…NativeLibs` only (`haven/rust_builder/cargokit/gradle/plugin.gradle:166-170`), which a unit-test task does not need — read, not run. **As built (M3f):** the lane does not build the app. It runs `scripts/ci/run_mesh_jvm_tests.sh` — `gradle test` in `haven/android/mesh-jvm` — on a JDK 21 with the Gradle distribution the app's wrapper pins, fetched and checked against the pinned SHA-256 (the tree has no `gradlew`). It proves every [J] test and that the pure package compiles with no Android; **not** that any other Kotlin compiles — that is `build-check.yml`'s, from M3g. The script was run where M3f was built; the workflow has never run. After the review of `de152a2`: the lane restores the shared Gradle cache read-only before the script, which `check_gradle_build_hardened.sh` now requires of it as of every Gradle build site, and the script fails unless the tests that ran are, by name, the tests the sources declare |
 | `build-check.yml` (exists) + `nm` step | the nine JNI symbols are in the library [C] | feasible |
 | `cross-check.yml` (exists) | `mesh_jni.rs` compiles for Android [C] | feasible |
 | `repo-guards.yml` (exists) + one step | `check_mesh_radio.sh` | feasible; run here too |
@@ -1417,9 +1472,10 @@ security-reviewer on M3a, M3b and §B.3–B.4 before they land (plan §8.3).
 | Frame flood on a link | credit per link; unsolicited packet closes it | engine (`eng:44-57`) | T-SEC-3, T-SEC-4 [L, exist] |
 | Long write, offset write, write with response | refused; link closed | `GattServerAdapter` (§B.3) | [E] netsim only |
 | Connection flood | 12 new inbound links a minute, burst 4 (`eng:252-253`); at most 4 unlinked connections, 10 s each (§B.4) | engine; `MeshRadioCore` | [L, exists]; `unlinkedConnectionsAreCappedAndTimedOut` [J] |
+| One advertiser under many addresses, pushing the others out of the peer table (found by the review of M3f) | a full table forgets one picked at random among those not being dialled, in the engine and in `PeerTable` alike; an unknown address below the signal floor takes no place in either | engine (`make_room`, `rssi_floor`); `PeerTable` (§B.1) | [L, exists]; `aFloodOfAddressesDoesNotPushOutAPeerUnlessItIsPicked`, `anAddressBeingDialledIsNeverForgotten`, `aWeakAddressNotYetKnownTakesNoPlaceAndIsNeverToldToTheEngine` [J]; the floor's two copies pinned [G] |
 | Slot exhaustion, eclipse | random and rotated slots; departed class | engine (`eng:38-42`) | T-SEC-4 [L, exists] |
 | Controller connection slots held by a stranger who never subscribes | **none**: Android has no accept filter for a connectable advertisement | — | residual, stated |
-| **A stranger keeps the phone awake** | **none that keeps R2**: each link coming up and each inbound frame holds the lock up to 10 s, and one valid frame every few seconds — far inside the credit of 120 a minute — is enough. Bounded only by the twelve hours | §G | residual; Q-13; cost [H] |
+| **A stranger keeps the phone awake** | **none that keeps R2**: each link coming up and each inbound frame holds the lock up to 10 s, and one valid frame every few seconds — far inside the credit of 120 a minute — is enough. Bounded only by the twelve hours. As built: a link or a frame the engine answers with that link's close in the same pump holds no lock (§B.2), so only a peer the engine admits has this | §G | residual; Q-13; cost [H]; `aLinkTheEngineClosesAtOnceHoldsNoLock` [J] for the narrowing |
 | **A fault in the mesh ends the relay path's process** (F-14) | every callback inside `MeshThread.run`; every export inside `radio_guarded` | §B.1, §A.6 | `aRadioPortThatThrowsStopsTheRadioAndNothingEscapes` [J]; `every_export_is_one_guarded_call` [L]; guard [G] |
 | Handshake cost | two scalar multiplications a connection, behind the inbound limit | engine | plan §6.7 |
 | Tracking by advertisement | the service UUID alone; no name, data or power | `AdvertiserAdapter` | `theAdvertisementIsTheServiceUuidAlone` [J]; on air [E] netsim |

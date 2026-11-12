@@ -42,6 +42,15 @@ object MeshRadioConstants {
     /** The engine's `max_peers`. */
     const val MAX_PEERS = 64
 
+    /**
+     * The engine's `rssi_floor` (`Config::default`, `haven-core/src/mesh/engine.rs`):
+     * below it the engine takes in no peer it does not know, so such an
+     * address is given no number. Were the two to differ, the higher would
+     * decide and nothing would break: an address numbered here and refused
+     * there costs a place of this table, and one refused here is not dialled.
+     */
+    const val RSSI_FLOOR = -85
+
     /** Connections that have not become links, and how long one may take to. */
     const val MAX_UNLINKED = 4
     const val UNLINKED_TIMEOUT_MS = 10_000L

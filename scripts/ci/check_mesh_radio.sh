@@ -14,8 +14,8 @@
 #     lint fires on `#[no_mangle]`; so INSIDE IT THE COMPILER CHECKS NOTHING
 #     of that kind — not an `unsafe` block, not a second exported symbol. Two
 #     things read the file in its place: this guard, and the Rust test
-#     `every_export_is_one_guarded_call`. The guard reads every line: each is
-#     blank, a comment, a one-line `use`, or part of an export — the file
+#     `every_export_is_one_guarded_call`. The guard takes each of its lines
+#     for blank, a comment, a one-line `use`, or part of an export — the file
 #     holds nothing else, has no quote but an export's `"system"`, and each
 #     export is one call that hands its parameters on.
 #   * `mesh_radio.rs` — what each export forwards to: the conversions, the one
@@ -43,10 +43,24 @@
 #     two modules: the generated bridge, and the exports' file. An allowance
 #     moved to the crate, or to `api.rs`, would compile.
 #
-# Pure-grep gate over Rust with its comments stripped as the compiler strips
-# them: a `//` or `/*` inside a string or character literal is text, on
-# whichever line the literal began, a raw string ends at its own hashes, and
-# block comments nest. Checks:
+# WHAT THIS GUARD IS. A reader of text, not the compiler. It stops ordinary
+# and careless erosion — an `unsafe` block added to `api.rs`, a helper grown
+# in the exports' file, a log line in an adapter — and makes a deliberate one
+# conspicuous in review. It is no proof against someone who sets out to hide
+# code from it, and who could as well edit this file. It reads the Rust files
+# under `haven/rust_builder/src` and nothing else of the crate: not a file
+# outside `src/`, and not a lint level set outside it — a `[lints]` table,
+# `RUSTFLAGS`, `--cap-lints`, a `build.rs`. Today the crate has no `[lints]`
+# table and no `build.rs`, and the one `RUSTFLAGS` its Android build passes
+# is a library search path (cargokit); nothing here pins that. What no text
+# check stands in for is a check of the built library: that its exported
+# `Java_*` symbols are exactly the nine of the fixture (`nm -D`; owed below).
+#
+# How it reads Rust: line by line, with comments taken out by a small lexer
+# of its own — a `//` or `/*` inside a string is text, on whichever line the
+# string began; a raw string ends at its own hashes; a character literal is
+# taken whole and a lifetime or label is not one; block comments nest. That
+# is what the review plants needed, not the language's whole grammar. Checks:
 #   1. Under haven/rust_builder/src, outside `frb_generated.rs` and
 #      `mesh_jni.rs`: no keyword `unsafe`, no keyword `extern` (with an ABI
 #      string or bare), and no `no_mangle`, `export_name` or `link_section`.
@@ -82,17 +96,22 @@
 #      or `thread_local`. Its tests are the one `#[cfg(test)]` directly above
 #      `mod tests {`, and nothing follows them: this check reads no further,
 #      so nothing that ships may sit there.
-#   6. The files read above are the files compiled: no file of the crate's
-#      hand-written source gives anything a `path = "…"` (`#[path]`, bare or
-#      under `cfg_attr`), and `lib.rs` declares `mesh_jni` and `mesh_radio`
-#      each as the one line `mod <name>;`.
+#   6. The ways found so far of building one of the two modules from a file
+#      other than the one read above: no file of the crate's hand-written
+#      source writes `path` and an `=` (`#[path = …]`, bare, under `cfg_attr`
+#      or from a macro) or invokes `include!`; and `lib.rs` names `mesh_jni`
+#      and `mesh_radio` once each, as `mod <name>;` directly under the pinned
+#      attribute lines — `#[cfg(any(target_os = "android", test))]`, and for
+#      `mesh_jni` the allowance — which follow the end of another item.
 #
 # And over the radio's Kotlin — every `.kt` under a `mesh/` directory of
 # `haven/android/app/src`, whatever the source set — with comments stripped
 # the same way:
-#   7. No log call, logger or standard stream (`Log.`, `Timber.`, `println(`,
-#      `print(`, `printStackTrace(`, `System.out`, `System.err`, `Logger`,
-#      `logging`), and no UUID in canonical form there or in the JVM tests.
+#   7. No log call, logger or standard stream (`Log.` or `Log::`, `Timber`
+#      the same, `println(`, `print(`, `printStackTrace(`, `System.out`,
+#      `System.err`, `Logger`, `logging`), no import of `android.util.Log`, a
+#      `timber` package or `java.util.logging` under any name, and no UUID in
+#      canonical form there or in the JVM tests.
 #   8. `MeshRadioConstants.kt` names the Android scan mode, advertise mode,
 #      advertise power and connection priority it holds, and no other file
 #      names one.
@@ -102,7 +121,15 @@
 #      own (`src/mesh/`) names Bluetooth, `connectedDevice` or the mesh.
 #  11. The tests of `haven/android/mesh-jvm/src/test` are JVM_TEST_NAMES, each
 #      `@Test` directly above `fun <name>()`, and none is ignored or assumes
-#      its way out.
+#      its way out. That each of them ran is `run_mesh_jvm_tests.sh`'s to
+#      say; that its body still asserts anything is nobody's but a reviewer's.
+#  12. `MeshRadioConstants.RSSI_FLOOR` is the engine's default `rssi_floor`:
+#      the first `rssi_floor: <integer>,` after the line
+#      `impl Default for Config {` of `haven-core/src/mesh/engine.rs`, against
+#      the line `const val RSSI_FLOOR = <integer>`.
+#
+# The Kotlin is read with the lexer made for Rust: comments and plain strings
+# as above, not Kotlin's string templates or raw strings.
 #
 # That the pure package imports nothing of Android is not checked here: its
 # JVM build has no Android SDK, so the compiler holds it (android-unit.yml).
@@ -130,8 +157,11 @@
 #     receiver not exported, `neverForLocation`), that every adapter callback
 #     runs inside `MeshThread.run`, and what an advertisement may not carry:
 #     with the adapters.
-#   * That the built library exports the symbols (`nm -D`) belongs to
-#     `build-check.yml`, with the first unit that builds the radio for Android.
+#   * That the built library exports the symbols belongs to
+#     `build-check.yml`, with the first unit that builds the radio for
+#     Android: `nm -D` on the library, its `Java_*` symbols exactly the nine
+#     of the fixture — the one check here that no way of writing the source
+#     gets past.
 #
 # Usage:
 #   bash scripts/ci/check_mesh_radio.sh
@@ -163,7 +193,7 @@ readonly -a ENV_MAY_CALL=(
 
 # How many fixtures the self-test runs. Pinned, because a fixture that stops
 # running is the one way a deleted check reports success.
-readonly SELF_TEST_FIXTURES=116
+readonly SELF_TEST_FIXTURES=129
 
 # The Kotlin of the radio (design §B): the app's mesh packages, whatever the
 # source set, and the JVM build of the pure one with its tests.
@@ -172,6 +202,9 @@ readonly CORE="${APP_SRC}/main/kotlin/com/oblivioustech/haven/mesh/core"
 readonly CONSTANTS="${CORE}/MeshRadioConstants.kt"
 readonly JVM_TESTS='haven/android/mesh-jvm/src/test'
 readonly LOG_ALLOWLIST='scripts/ci/native_log_allowlist.txt'
+readonly ENGINE='haven-core/src/mesh/engine.rs'
+# What lib.rs has above each of the two modules' declarations, and nothing more.
+readonly RADIO_CFG='#[cfg(any(target_os = "android", test))]'
 # The platform's radio modes: named in CONSTANTS, used by no other file.
 readonly MODES='(SCAN_MODE|ADVERTISE_MODE|ADVERTISE_TX_POWER|CONNECTION_PRIORITY)_[A-Z]'
 # The JVM tests, by name: design §B.10's and the ones M3f added. Pinned,
@@ -197,7 +230,14 @@ readonly -a JVM_TEST_NAMES=(
   theAdvertisementIsTheServiceUuidAlone
   theRadioModesComeFromOneSite
   theEngineInterfaceIsTheNineExportsOfTheFixture
-  thePeerTableHoldsSixtyFourAndForgetsTheLeastRecentlySeen
+  thePeerTableHoldsSixtyFourAndForgetsOnePickedAmongThoseNotBeingDialled
+  aFloodOfAddressesDoesNotPushOutAPeerUnlessItIsPicked
+  theTableABuildHasForgetsByNoFixedRule
+  anAddressBeingDialledIsNeverForgotten
+  aWeakAddressNotYetKnownTakesNoPlaceAndIsNeverToldToTheEngine
+  aWeakSightingOfAKnownAddressIsToldToTheEngine
+  aCompletionWhileARefusedFrameWaitsClosesItsLink
+  aLinkTheEngineClosesAtOnceHoldsNoLock
   aLinkBeyondTheEnginesEightIsClosed
   aLinkTheEngineClosesIsClosedAndALinkLostIsToldDown
   anEngineThatAnswersNoWakeIsGone
@@ -225,7 +265,7 @@ fail() {
 # hashes; block comments nest. With `blank`, the text of every string literal
 # is dropped too: a keyword in a string is not the keyword.
 code_view() { # <file> [blank]
-  awk -v blank="${2:-}" '
+  LC_ALL=C awk -v blank="${2:-}" -v sq="'" '
     function ident(at) { return at >= 1 && substr(line, at, 1) ~ /[A-Za-z0-9_]/ }
     {
       line = $0; out = ""; i = 1; n = length(line)
@@ -245,8 +285,20 @@ code_view() { # <file> [blank]
         }
         else if (two == "/*") { mode = "block"; depth = 1; i += 2 }
         else if (two == "//") { i = n + 1 }
-        else if (substr(line, i, 3) == "\x27\"\x27") { out = out substr(line, i, 3); i += 3 }
-        else if (substr(line, i, 4) == "\x27\\\"\x27") { out = out substr(line, i, 4); i += 4 }
+        else if (c == sq) {
+          # A character literal — an escape up to its closing quote, or one
+          # character, which is several bytes when it is not ASCII — is taken
+          # whole. Anything else is a lifetime or a label: the quote alone.
+          k = i + 1; len = 1
+          if (substr(line, k, 1) == "\\") {
+            k = index(substr(line, i + 3), sq)
+            if (k) len = k + 3
+          } else if (substr(line, k, 1) != sq) {
+            if (substr(line, k, 1) >= "\200") { while (k <= n && substr(line, k, 1) >= "\200") k++ } else k++
+            if (substr(line, k, 1) == sq) len = k - i + 1
+          }
+          out = out substr(line, i, len); i += len
+        }
         else if (c == "\"") {
           # `r"…"`, `r#"…"#`, and the same after `b` or `c`: no escape inside.
           r = i - 1; fin = "\""
@@ -351,10 +403,10 @@ export_rows() {
 run_check() {
   local file rel view hits shim calls shipped rows pinned names name row forward body first last
   local guards before after entries called alone outside tests want range method may ok
-  local kotlin jvm found
+  local kotlin jvm found floor
 
   [[ -d "${REPO_ROOT}/${SRC}" ]] || { echo "ERROR: ${REPO_ROOT}/${SRC} not found" >&2; exit 2; }
-  for file in "${LIB}" "${SHIM}" "${CALLS}" "${GENERATED}" "${EXPORTS}" "${CONSTANTS}" "${LOG_ALLOWLIST}" "${APP_SRC}/main/AndroidManifest.xml"; do
+  for file in "${LIB}" "${SHIM}" "${CALLS}" "${GENERATED}" "${EXPORTS}" "${CONSTANTS}" "${LOG_ALLOWLIST}" "${APP_SRC}/main/AndroidManifest.xml" "${ENGINE}"; do
     [[ -f "${REPO_ROOT}/${file}" ]] || { echo "ERROR: ${REPO_ROOT}/${file} not found" >&2; exit 2; }
   done
   [[ -d "${REPO_ROOT}/${JVM_TESTS}" ]] || { echo "ERROR: ${REPO_ROOT}/${JVM_TESTS} not found" >&2; exit 2; }
@@ -514,21 +566,33 @@ run_check() {
     fail "${CALLS} names a JavaVM, a reference that outlives a call, or state of its own (line(s) ${hits}). Every call is made by a Java thread and returns: the shim keeps nothing between two."
   fi
 
-  # Check 6: the files read above are the files compiled.
+  # Check 6: what would make the files read above not the files built, as far
+  # as text shows it.
   while IFS= read -r file; do
     rel="${file#"${REPO_ROOT}/"}"
     [[ "${rel}" == "${GENERATED}" ]] && continue
-    view="$(code_view "${file}" blank | tr -d '[:space:]')"
-    if grep -qE "${B}path=[bcr#]*\"" <<<"${view}"; then
-      fail "${rel} gives something a path (a 'path = \"…\"', as in #[path = …] or under cfg_attr). A module declared in ${SRC} is the file of its name there: under a path attribute the compiler builds another file, and every check here — and the Rust tests that read ${SHIM##*/} — goes on reading the one it left."
+    view="$(code_view "${file}" blank)"
+    if tr -d '[:space:]' <<<"${view}" | grep -qE "${B}path=([^=]|\$)"; then
+      fail "${rel} gives something a path (the word 'path' and an '=', as in #[path = …], bare, under cfg_attr or written by a macro). A module declared in ${SRC} is the file of its name there: under a path attribute the compiler builds another file, and every check here — and the Rust tests that read ${SHIM##*/} — goes on reading the one it left."
+    fi
+    hits="$(grep -nE "${B}include[[:space:]]*!" <<<"${view}" | cut -d: -f1 | tr '\n' ' ' || true)"
+    if [[ -n "${hits}" ]]; then
+      fail "${rel} includes a file as source (include!, line(s) ${hits}). What it includes is compiled where it stands and read by no check here, which reads the crate's .rs files; include_str! and include_bytes! take a file as data and are not this."
     fi
   done < <(find "${REPO_ROOT}/${SRC}" -type f -name '*.rs' | LC_ALL=C sort)
-  view="$(code_view "${REPO_ROOT}/${LIB}" | sed -E 's/[[:space:]]+$//')"
-  for name in mesh_jni mesh_radio; do
-    if [[ "$(grep -E "${B}mod[[:space:]]+${name}${E}" <<<"${view}" || true)" != "mod ${name};" ]]; then
-      fail "${LIB} does not declare '${name}' as the one line 'mod ${name};'. Declared with a body, twice, or from a macro, the module compiled is not ${SRC}/${name}.rs, which is the file read here."
-    fi
-  done
+  view="$(code_view "${REPO_ROOT}/${LIB}" | sed -E 's/[[:space:]]+$//; /^$/d')"
+  hits="$(awk -v cfg="${RADIO_CFG}" '
+    { line[NR] = $0 }
+    /(^|[^A-Za-z0-9_])mesh_jni([^A-Za-z0-9_]|$)/ { jni++; j = NR }
+    /(^|[^A-Za-z0-9_])mesh_radio([^A-Za-z0-9_]|$)/ { radio++; r = NR }
+    END {
+      if (jni != 1 || radio != 1) { print "it names mesh_jni " jni + 0 " time(s) and mesh_radio " radio + 0; exit }
+      if (line[j] != "mod mesh_jni;" || line[j - 1] != "#[allow(unsafe_code)]" || line[j - 2] != cfg || line[j - 3] !~ /[;}]$/) { print "above and at mesh_jni: " line[j - 3] " | " line[j - 2] " | " line[j - 1] " | " line[j]; exit }
+      if (line[r] != "mod mesh_radio;" || line[r - 1] != cfg || line[r - 2] !~ /[;}]$/) { print "above and at mesh_radio: " line[r - 2] " | " line[r - 1] " | " line[r]; exit }
+    }' <<<"${view}")"
+  if [[ -n "${hits}" ]]; then
+    fail "${LIB} does not declare the radio's two modules as pinned — '${RADIO_CFG}' and '#[allow(unsafe_code)]' above 'mod mesh_jni;', '${RADIO_CFG}' above 'mod mesh_radio;', each after the end of another item, and neither name anywhere else in the file (${hits}). Under another condition, a body, a second declaration, an import under the same name or a macro, what an Android build compiles as mesh_radio or mesh_jni need not be ${SRC}/<name>.rs, which is the file read here."
+  fi
 
   # Check 7: the radio's Kotlin writes no log line and holds no UUID.
   kotlin="$(find "${REPO_ROOT}/${APP_SRC}" -type f -name '*.kt' -path '*/mesh/*' | LC_ALL=C sort)"
@@ -536,9 +600,9 @@ run_check() {
   while IFS= read -r file; do
     rel="${file#"${REPO_ROOT}/"}"
     view="$(code_view "${file}")"
-    hits="$(grep -nE "${B}(Log|Timber)[[:space:]]*\\.|${B}(println|print|printStackTrace)[[:space:]]*\\(|System[[:space:]]*\\.[[:space:]]*(out|err)${E}|${B}(Logger|logging)${E}" <<<"${view}" | cut -d: -f1 | tr '\n' ' ' || true)"
+    hits="$(grep -nE "${B}(Log|Timber)[[:space:]]*(\\.|::)|${B}(println|print|printStackTrace)[[:space:]]*\\(|System[[:space:]]*\\.[[:space:]]*(out|err)${E}|${B}(Logger|logging)${E}|^[[:space:]]*import[[:space:]]+(android\\.util\\.Log|timber\\.|java\\.util\\.logging)${E}" <<<"${view}" | cut -d: -f1 | tr '\n' ' ' || true)"
     if [[ -n "${hits}" ]]; then
-      fail "${rel} writes a log line, or names a logger or a standard stream (line(s) ${hits}). The radio's Kotlin logs nothing, in any build (Security Rule 15): what it could say is a Bluetooth address, or a throwable that renders one."
+      fail "${rel} writes a log line, names a logger or a standard stream, or imports one — under whatever name (line(s) ${hits}). The radio's Kotlin logs nothing, in any build (Security Rule 15): what it could say is a Bluetooth address, or a throwable that renders one."
     fi
   done <<<"${kotlin}"
   while IFS= read -r file; do
@@ -592,10 +656,22 @@ run_check() {
     fail "a test of ${JVM_TESTS} is ignored, or assumes its way out (${hits} line(s)). A skipped test reports a proof it did not make."
   fi
 
+  # Check 12: the floor under which an unknown address gets no number is the
+  # engine's. Read: the first `rssi_floor: <integer>,` after the line
+  # `impl Default for Config {` of the engine, and `const val RSSI_FLOOR =
+  # <integer>` of the constants, each in the file's code.
+  view="$(code_view "${REPO_ROOT}/${ENGINE}")"
+  floor="$(awk '/^impl Default for Config \{/ { on = 1 } on && match($0, /rssi_floor:[[:space:]]*-?[0-9]+,/) { v = substr($0, RSTART, RLENGTH); gsub(/[^-0-9]/, "", v); print v; exit }' <<<"${view}")"
+  view="$(code_view "${REPO_ROOT}/${CONSTANTS}")"
+  found="$(sed -nE 's/^[[:space:]]*const val RSSI_FLOOR = (-?[0-9]+)[[:space:]]*$/\1/p' <<<"${view}" | tr '\n' ' ')"
+  if [[ -z "${floor}" || "${found}" != "${floor} " ]]; then
+    fail "${CONSTANTS} holds RSSI_FLOOR '${found% }' and the default of ${ENGINE} is rssi_floor '${floor}'. They are one number: below it the engine takes in no peer it does not know, and the radio gives such an address no number. Move both, or neither."
+  fi
+
   if (( FAILED )); then
     exit 1
   fi
-  log "OK: unsafe is written in the generated bridge and the exports' file alone, under the crate's deny; that file is uses and the ${want} pinned exports, each one call into ${CALLS##*/}; each of those is one guarded call of its radio entry, and calls nothing of Java's. The radio's Kotlin logs nothing and holds no UUID, names its modes at one site, and has its ${#JVM_TEST_NAMES[@]} JVM tests; no manifest outside the mesh's own names Bluetooth."
+  log "OK: unsafe is written in the generated bridge and the exports' file alone, under the crate's deny; that file is uses and the ${want} pinned exports, each one call into ${CALLS##*/}; each of those is one guarded call of its radio entry, and calls nothing of Java's. The radio's Kotlin logs nothing and holds no UUID, names its modes at one site, takes the engine's signal floor, and has its ${#JVM_TEST_NAMES[@]} JVM tests; no manifest outside the mesh's own names Bluetooth."
 }
 
 # ---------------------------------------------------------------------------
@@ -656,6 +732,12 @@ fn openers(word: &str, path: &str) -> bool {
     let path = if word == "//" { "/*" } else { path }; // unsafe
     word.contains('"') || word == r#"an "unsafe" // word"# || path == "a
         // no_mangle \" extern */" /* nested /* unsafe */ extern */
+}
+fn quotes<'a>(word: &'a str, byte: u8) -> &'a str {
+    let odd = byte == b'"' || byte == b'\'' || word.contains('\\') || word.contains('\u{2f}') || word.contains('é');
+    'scan: loop {
+        if odd || stringify!('x'"'") == include_str!("api.rs") { break 'scan word; } // " /* unsafe
+    }
 }
 RS
     cat >"${t}/${GENERATED}" <<'RS'
@@ -781,6 +863,9 @@ object MeshRadioConstants {
 
     /** `BluetoothGatt.CONNECTION_PRIORITY_LOW_POWER`. */
     const val CONNECTION_PRIORITY = 2
+
+    // Not const val RSSI_FLOOR = -1
+    const val RSSI_FLOOR = -85
 }
 KT
     cat >"${t}/${CORE%/core}/ScannerAdapter.kt" <<'KT'
@@ -813,6 +898,29 @@ KT
     </application>
 </manifest>
 XML
+    mkdir -p "${t}/${ENGINE%/*}"
+    cat >"${t}/${ENGINE}" <<'RS'
+pub struct Config {
+    pub rssi_floor: i8,
+}
+
+// rssi_floor: -1,
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            max_incoming: 4,
+            rssi_floor: -85,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    fn near() -> super::Config {
+        super::Config { max_incoming: 4, rssi_floor: -40, }
+    }
+}
+RS
     cat >"${t}/${LOG_ALLOWLIST}" <<'TXT'
 # <repo-relative path>|<first line of the call, trimmed>|<why it is safe>|<owner>
 # haven/android/app/src/main/kotlin/com/oblivioustech/haven/mesh/MeshService.kt|a row in a comment is no row|-|-
@@ -902,8 +1010,8 @@ TXT
   _before_tests "${t}/${CALLS}" '#[no_mangle]\npub extern "system" fn Java_com_oblivioustech_haven_mesh_MeshNative_reset(_env: JNIEnv, _this: jni::objects::JObject) {}'
   _case "an export of MeshNative in another file of the crate fails" 1 "${CALLS} writes unsafe" "${t}"
 
-  # Checks 1 and 2 read a file as the compiler does: a comment opener in a
-  # string hides nothing after it.
+  # Checks 1 and 2 read past a string: a comment opener in one hides nothing
+  # after it.
   t="${tmp}/string-slashes"; _tree "${t}"
   printf 'const _Z: &str = "//"; #[allow(unsafe_code)] #[no_mangle] pub extern "C" fn haven_probe() -> u8 { unsafe { *core::ptr::null::<u8>() } }\n' >>"${t}/${SRC}/api.rs"
   _case "the re-review's plant: an exported unsafe fn behind a \"//\" on its line fails check 1" 1 "${SRC}/api.rs writes unsafe" "${t}"
@@ -920,6 +1028,24 @@ TXT
   t="${tmp}/string-raw"; _tree "${t}"
   printf 'const _A: &str = r#"" // "#; #[allow(unsafe_code)] #[no_mangle] pub fn haven_probe() {}\n' >>"${t}/${SRC}/api.rs"
   _case "an allowance behind a // inside a raw string that holds a quote fails" 1 "${SRC}/api.rs names the unsafe_code lint" "${t}"
+
+  cat >"${tmp}/plant.rs" <<'RS'
+const _: &str = stringify!('x'"'");
+const _: &str = " /* ";
+#[allow(unsafe_code)]
+#[no_mangle]
+pub extern "C" fn hidden_export(p: *const u8) -> u8 {
+    unsafe { *p }
+}
+// */
+RS
+  t="${tmp}/char-then-string"; _tree "${t}"
+  cat "${tmp}/plant.rs" >>"${t}/${SRC}/api.rs"
+  _case "the second review's plant: an exported unsafe fn after a character literal that is followed by a string holding a quote fails" 1 "${SRC}/api.rs writes unsafe" "${t}"
+
+  t="${tmp}/char-then-string-lib"; _tree "${t}"
+  cat "${tmp}/plant.rs" >>"${t}/${LIB}"
+  _case "the same plant in lib.rs fails: its allowance is counted" 1 'names unsafe_code otherwise' "${t}"
 
   # Check 2: the lint.
   t="${tmp}/no-deny"; _tree "${t}"
@@ -1206,7 +1332,7 @@ TXT
   sed -i 's/^mod tests {$/mod checks {/' "${t}/${CALLS}"
   _case "a cfg(test) module under another name is read as code that ships" 1 'has a cfg(test) that is not the one' "${t}"
 
-  # Check 6: the files read are the files compiled.
+  # Check 6: a module of the radio built from another file than the one read.
   t="${tmp}/path-exports"; _tree "${t}"
   sed -i 's/^mod mesh_jni;$/#[path = "..\/other_jni.rs"]\nmod mesh_jni;/' "${t}/${LIB}"
   _case "the re-review's plant: the allowed module built from another file fails" 1 "${LIB} gives something a path" "${t}"
@@ -1225,7 +1351,44 @@ TXT
 
   t="${tmp}/calls-inline"; _tree "${t}"
   sed -i 's/^mod mesh_radio;$/mod mesh_radio {\n    pub(crate) fn left_ms() -> i64 {\n        0\n    }\n}/' "${t}/${LIB}"
-  _case "the calls' module declared with a body, beside the file read here, fails" 1 "does not declare 'mesh_radio' as the one line" "${t}"
+  _case "the calls' module declared with a body, beside the file read here, fails" 1 "does not declare the radio's two modules as pinned" "${t}"
+
+  t="${tmp}/calls-two-ways"; _tree "${t}"
+  awk -v cfg='#[cfg(any(target_os = "android", test))]' '
+    { held[NR] = $0 }
+    END {
+      for (i = 1; i <= NR; i++) {
+        if (held[i + 1] == "mod mesh_radio;" && held[i] == cfg) { print "#[cfg(test)]"; continue }
+        print held[i]
+        if (held[i] == "mod mesh_radio;") { print "#[cfg(all(target_os = \"android\", not(test)))]"; print "use api::radio_shim as mesh_radio;" }
+      }
+    }' "${t}/${LIB}" >"${t}/${LIB}.new" && mv "${t}/${LIB}.new" "${t}/${LIB}"
+  _case "the second review's plant: the calls' file compiled for tests only, and another module under its name for Android, fails" 1 "does not declare the radio's two modules as pinned" "${t}"
+
+  t="${tmp}/calls-by-macro"; _tree "${t}"
+  awk -v cfg='#[cfg(any(target_os = "android", test))]' '
+    { held[NR] = $0 }
+    END {
+      for (i = 1; i <= NR; i++) {
+        if (held[i + 1] == "mod mesh_radio;" && held[i] == cfg) { print "#[cfg(test)]"; continue }
+        print held[i]
+        if (held[i] == "mod mesh_radio;") {
+          print "macro_rules! module { ($file:literal, $name:ident) => { #[path = $file] mod $name; } }"
+          print "#[cfg(all(target_os = \"android\", not(test)))]"
+          print "module!(\"radio_shipped.rs\", mesh_radio);"
+        }
+      }
+    }' "${t}/${LIB}" >"${t}/${LIB}.new" && mv "${t}/${LIB}.new" "${t}/${LIB}"
+  _case "the second review's plant: a path a macro writes, with no string after it, fails" 1 "${LIB} gives something a path" "${t}"
+
+  t="${tmp}/calls-third-attribute"; _tree "${t}"
+  sed -i 's/^pub mod api;$/pub mod api;\n#[cfg(not(feature = "radio"))]/' "${t}/${LIB}"
+  _case "one more attribute above the pinned ones of a radio module fails" 1 "does not declare the radio's two modules as pinned" "${t}"
+
+  t="${tmp}/included"; _tree "${t}"
+  printf '#[allow(unsafe_code)]\n#[no_mangle]\npub extern "C" fn included_export(p: *const u8) -> u8 {\n    unsafe { *p }\n}\n' >"${t}/${SRC}/extra.in"
+  printf '\ninclude!("extra.in");\n' >>"${t}/${LIB}"
+  _case "the second review's plant: source included from a file that is no .rs fails" 1 "${LIB} includes a file as source" "${t}"
 
   # Check 7: the radio's Kotlin writes no log line and holds no UUID.
   local adapter="${CORE%/core}/ScannerAdapter.kt"
@@ -1248,6 +1411,15 @@ TXT
 
   # In two halves: whole, it would be a canonical UUID in this tracked file.
   local uuid='4f3c2a10-9b7e-4d1a''-8c55-0e6f7a8b9c0d'
+  t="${tmp}/kotlin-log-alias"; _tree "${t}"
+  sed -i 's/^import com.oblivioustech.haven.mesh.core.MeshRadioConstants$/import android.util.Log as L\nimport com.oblivioustech.haven.mesh.core.MeshRadioConstants/' "${t}/${adapter}"
+  _line "${t}/${adapter}" 'fun mode()' '    fun mode(): Int = MeshRadioConstants.SCAN_MODE.also { L.w("mesh", "from $device") }'
+  _case "the second review's plant: a logger imported under another name fails" 1 "${adapter} writes a log line" "${t}"
+
+  t="${tmp}/kotlin-log-reference"; _tree "${t}"
+  _line "${t}/${adapter}" 'fun mode()' '    fun mode(): Int = MeshRadioConstants.SCAN_MODE.also { listOf("a").forEach(Timber::w) }'
+  _case "a log call taken as a function reference fails" 1 "${adapter} writes a log line" "${t}"
+
   t="${tmp}/kotlin-uuid"; _tree "${t}"
   printf '// The service is %s.\n' "${uuid}" >>"${t}/${adapter}"
   _case "a canonical UUID in the radio's Kotlin fails, in a comment too" 1 "${adapter} holds a UUID" "${t}"
@@ -1305,7 +1477,28 @@ TXT
   sed -i -z 's/    @Test\n    @Ignore\n/    @Ignore\n    @Test\n/' "${t}/${JVM_TESTS}/kotlin/RadioTest.kt"
   _case "an ignored test fails" 1 'is ignored, or assumes its way out' "${t}"
 
+  # Check 12: the floor of the peer table is the engine's.
+  t="${tmp}/floor-here"; _tree "${t}"
+  sed -i 's/^    const val RSSI_FLOOR = -85$/    const val RSSI_FLOOR = -90/' "${t}/${CONSTANTS}"
+  _case "a floor that is not the engine's default fails" 1 "holds RSSI_FLOOR '-90' and the default of ${ENGINE} is rssi_floor '-85'" "${t}"
+
+  t="${tmp}/floor-there"; _tree "${t}"
+  sed -i 's/^            rssi_floor: -85,$/            rssi_floor: -80,/' "${t}/${ENGINE}"
+  _case "the engine's default moved alone fails" 1 "holds RSSI_FLOOR '-85' and the default of ${ENGINE} is rssi_floor '-80'" "${t}"
+
+  t="${tmp}/floor-gone"; _tree "${t}"
+  sed -i '/^    const val RSSI_FLOOR = -85$/d' "${t}/${CONSTANTS}"
+  _case "no floor in the constants fails: the one in a comment is not it" 1 "holds RSSI_FLOOR ''" "${t}"
+
+  t="${tmp}/floor-unread"; _tree "${t}"
+  sed -i 's/^impl Default for Config {$/impl Config {/' "${t}/${ENGINE}"
+  _case "an engine whose default the pin cannot find fails, and is not read from a test's config" 1 "is rssi_floor ''" "${t}"
+
   # Misconfiguration.
+  t="${tmp}/no-engine"; _tree "${t}"
+  rm "${t}/${ENGINE}"
+  _case "a tree with no engine to read the floor from is a misconfiguration" 2 '' "${t}"
+
   t="${tmp}/no-constants"; _tree "${t}"
   rm "${t}/${CONSTANTS}"
   _case "a radio with no file of constants is a misconfiguration" 2 '' "${t}"

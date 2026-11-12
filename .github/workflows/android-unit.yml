@@ -45,6 +45,25 @@ jobs:
           unzip -q "${RUNNER_TEMP}/gradle.zip" -d "${RUNNER_TEMP}/gradle"
           echo "${RUNNER_TEMP}"/gradle/gradle-*/bin >>"${GITHUB_PATH}"
 
-      # Fails unless every test ran: a `test` task that found none is green.
+      # Read-only, as every lane but the one writer (build-check.yml): the
+      # Kotlin Gradle plugin and its compiler are the app's own, so the shared
+      # cache holds most of what this build resolves, and what it removes is
+      # the requests Maven Central rate-limits. Capped and fail-open: a miss or
+      # a slow cache service is a cold build, never a red lane
+      # (check_gradle_build_hardened.sh).
+      - name: Restore Gradle dependency cache
+        uses: actions/cache/restore@v4
+        timeout-minutes: 2
+        continue-on-error: true
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/wrapper
+          key: gradle-deps-${{ runner.os }}-${{ hashFiles('haven/android/**/*.gradle*', 'haven/rust_builder/**/*.gradle*', 'haven/android/gradle/wrapper/gradle-wrapper.properties', 'haven/pubspec.lock') }}
+          restore-keys: |
+            gradle-deps-${{ runner.os }}-
+
+      # Fails unless the tests that ran are the tests the sources declare: a
+      # `test` task that found none, or fewer, is green.
       - name: Run the tests
         run: bash scripts/ci/run_mesh_jvm_tests.sh

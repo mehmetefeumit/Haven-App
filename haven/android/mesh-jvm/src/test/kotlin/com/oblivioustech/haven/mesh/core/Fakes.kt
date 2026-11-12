@@ -137,7 +137,14 @@ class Rig {
     val engine = FakeEngine()
     val port = RecordingPort()
     var now = 0L
-    val core = MeshRadioCore(engine, port) { now }
+
+    /** Whom a full peer table forgets, of [it] candidates in the order they were first seen, and what it was asked. */
+    var pick: (Int) -> Int = { 0 }
+    val pickedAmong = mutableListOf<Int>()
+    val core = MeshRadioCore(engine, port, { now }) { among ->
+        pickedAmong += among
+        pick(among)
+    }
 
     /** With Bluetooth on and the adapters up. */
     fun started(): Rig = apply { core.startRadio() }
