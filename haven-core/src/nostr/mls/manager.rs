@@ -2324,7 +2324,7 @@ impl SessionManager {
             }
             let retired = session.confirm_regenerated_queued_intent(&QueuedIntentRef {
                 group_id: queued.group_id.clone(),
-                intent_id: queued.id.clone(),
+                intent_id: queued.id,
             });
             if let Err(e) = retired {
                 log::warn!(
@@ -3418,7 +3418,10 @@ impl SessionManager {
 
     /// Counts one advance of `group_id` (tests only; nothing in a shipped
     /// build).
-    #[allow(clippy::unused_self)]
+    #[cfg_attr(
+        not(any(test, feature = "test-utils")),
+        allow(clippy::unused_self, clippy::missing_const_for_fn)
+    )]
     fn count_advance(&self, group_id: &GroupId) {
         #[cfg(any(test, feature = "test-utils"))]
         {
@@ -5673,7 +5676,7 @@ impl SessionManager {
                     self.state_input_at
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .entry(group_id.clone())
+                        .entry(group_id)
                         .and_modify(|at| *at = (*at).max(now_ms))
                         .or_insert(now_ms);
                 }
@@ -6353,6 +6356,10 @@ impl SessionManager {
 
     /// Whether this session asks for its removals set aside again on its own
     /// ([`REQUEUE_SET_ASIDE_REMOVALS`], or a test's word for one session).
+    #[cfg_attr(
+        not(any(test, feature = "test-utils")),
+        allow(clippy::unused_self, clippy::missing_const_for_fn)
+    )]
     fn requeues(&self) -> bool {
         #[cfg(any(test, feature = "test-utils"))]
         if self.requeues_for_test.load(Ordering::SeqCst) {
@@ -10550,6 +10557,10 @@ impl SessionManager {
 
     /// Whether the engine is asked for the Welcomes it owes; not while a test
     /// has it refusing ([`StoreFault::SentWelcome`]).
+    #[cfg_attr(
+        not(any(test, feature = "test-utils")),
+        allow(clippy::unused_self, clippy::missing_const_for_fn)
+    )]
     fn engine_answers_welcomes(&self) -> bool {
         #[cfg(any(test, feature = "test-utils"))]
         return self

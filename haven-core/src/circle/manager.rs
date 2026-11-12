@@ -7295,8 +7295,7 @@ mod tests {
                     .ingested()
                     .expect("an authenticated location")
                     .effects
-                    .events
-                    .clone(),
+                    .events,
             );
         }
         let results = tp.alice.persist_and_fold(&batch).await;
@@ -12588,7 +12587,7 @@ mod tests {
                 )
                 .await
                 .expect("create a filler circle");
-            pending_convergence.push(filler.circle.mls_group_id.clone());
+            pending_convergence.push(filler.circle.mls_group_id);
         }
         // Nothing the setup left in the engine's buffers may ride into the
         // fold: the seed has to be exactly what this test names.
