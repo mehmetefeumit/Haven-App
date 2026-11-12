@@ -46,11 +46,20 @@ class OwnProfileSyncController extends Notifier<void>
 
   Timer? _timer;
 
+  /// Whether the current failure streak has had its one fallback retry; reset
+  /// by a pass that completes and by a resume.
+  bool _failureRetryArmed = false;
+
+  /// The wait before the one retry after a pass that threw while the ladder
+  /// still reads due — a throw before Rust recorded an attempt.
+  static const _failureRetryDelay = Duration(seconds: 30);
+
   @override
   void build() {
     _inFlight = false;
     _queued = false;
     _disposed = false;
+    _failureRetryArmed = false;
     WidgetsBinding.instance.addObserver(this);
     ref.onDispose(() {
       _disposed = true;
@@ -64,6 +73,7 @@ class OwnProfileSyncController extends Notifier<void>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (_disposed) return;
     if (state == AppLifecycleState.resumed) {
+      _failureRetryArmed = false;
       // map_shell's resume handler returns on its debounce before its own
       // retry trigger, so without this a brief app switch would cancel the
       // timer and never re-arm it.
@@ -89,11 +99,13 @@ class OwnProfileSyncController extends Notifier<void>
     _inFlight = true;
     try {
       await ref.read(profileServiceProvider).syncOwnProfile();
+      _failureRetryArmed = false;
       if (_disposed) return;
       await _arm();
     } on Object catch (e) {
       // Rule 8: never surface raw text.
       debugPrint('[Profile] sync failed: ${e.runtimeType}');
+      if (!_disposed) await _arm(afterFailure: true);
     } finally {
       _inFlight = false;
       final queued = _queued;
@@ -133,25 +145,39 @@ class OwnProfileSyncController extends Notifier<void>
   }
 
   /// Re-reads the outbox after a pass and arms (or clears) the timer.
-  Future<void> _arm() async {
+  Future<void> _arm({bool afterFailure = false}) async {
     try {
-      _armFrom(await ref.read(profileServiceProvider).pendingSyncState());
+      _armFrom(
+        await ref.read(profileServiceProvider).pendingSyncState(),
+        afterFailure: afterFailure,
+      );
     } on Object catch (e) {
       debugPrint('[Profile] arm: pendingSyncState failed: ${e.runtimeType}');
     }
   }
 
-  /// The one timer: armed only for a pending, not-due save with a known wait,
-  /// and only while resumed; a state still due arms nothing (no tight loop).
-  void _armFrom(ProfilePendingState s) {
+  /// The one timer: armed only for a pending save, and only while resumed.
+  /// A not-due save waits out the ladder; a state still due arms nothing (no
+  /// tight loop), except once per failure streak [afterFailure]: a throw
+  /// before Rust recorded an attempt leaves the ladder due, and nothing else
+  /// would retry before the next resume.
+  void _armFrom(ProfilePendingState s, {bool afterFailure = false}) {
     _timer?.cancel();
     _timer = null;
-    final wait = s.nextRetryInSecs;
     if (_disposed ||
         !s.pending ||
-        s.retryDue ||
-        wait == null ||
         WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
+      return;
+    }
+    final int wait;
+    if (!s.retryDue) {
+      final next = s.nextRetryInSecs;
+      if (next == null) return;
+      wait = next;
+    } else if (afterFailure && !_failureRetryArmed) {
+      _failureRetryArmed = true;
+      wait = _failureRetryDelay.inSeconds;
+    } else {
       return;
     }
     _timer = Timer(Duration(seconds: wait < 1 ? 1 : wait), () {

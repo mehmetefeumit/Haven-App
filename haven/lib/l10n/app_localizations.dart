@@ -1602,11 +1602,29 @@ abstract class AppLocalizations {
   /// **'Circle: {circleName}'**
   String memberPickerCollisionCircleLabel(String circleName);
 
-  /// Shown on the ONE row that appears when the user types or pastes a complete, valid npub for someone not already in the local directory (plan §10 D2), and spoken as the screen-reader label on that row's loading spinner while the lookup is in flight. Appears whether or not anything resolves. Discloses exactly four things and no more: (1) Haven asked ONE public relay (never more — see docs/MEMBER_PICKER_PLAN.md, the design deliberately adds no fan-out of its own — it never pads with decoys, and it issues one request per attempt through the existing per-author relay assignment, whose own ladder is bounded by PROFILE_MAX_RELAY_RANK); (2) that relay can see THIS DEVICE asked about THAT KEY at THAT MOMENT — do not soften this into 'may be able to see' or omit it, it is a real, unavoidable disclosure; (3) the request is NOT tied to the user's Haven identity, because it carries no cryptographic signature and therefore cannot answer a relay's NIP-42 AUTH challenge — translate 'signature' in the cryptographic sense, not a handwritten or email signature; (4) no photo is downloaded at this stage (only the published name, if any, is looked up). Do NOT use a word meaning 'anonymous' or 'anonymously' anywhere in this string — it overclaims: the network address and timing of the request are still visible to the relay, which is exactly what point (2) discloses. Do not add or imply a duration, a retry count, or which relay was asked.
+  /// Shown on the ONE row that appears when the user types or pastes a complete, valid npub for someone not already in the local directory (plan §10 D2). Appears whether or not anything resolves. Discloses exactly four things and no more: (1) Haven asked a public relay for the person's published profile, and asks ONE more only when the first did not answer — never more than two (it never pads with decoys, and both are the two relays the existing per-author relay assignment allows, PROFILE_MAX_RELAY_RANK); (2) a relay that was asked can see THIS DEVICE asked about THAT KEY at THAT MOMENT — do not soften this into 'may be able to see' or omit it, it is a real, unavoidable disclosure; (3) the request is NOT tied to the user's Haven identity, because it carries no cryptographic signature and therefore cannot answer a relay's NIP-42 AUTH challenge — translate 'signature' in the cryptographic sense, not a handwritten or email signature; (4) ONLY IF the published profile names a photo, Haven downloads that photo from the server the PERSON chose (not a server Haven or the user chose), and that server can see this device's network address — translate 'network address' as the device's internet (IP) address, not a street or email address. Do NOT use a word meaning 'anonymous' or 'anonymously' anywhere in this string — it overclaims: the network address and timing of the requests are still visible, which is exactly what points (2) and (4) disclose. Do not add or imply a duration, a retry count, or which relay or server was asked. 'This person' is deliberately not a pronoun: do not introduce a gendered pronoun for them.
   ///
   /// In en, this message translates to:
-  /// **'Haven asked a relay to look up this person\'s published name. That relay can see this device asked about this key just now — but the request carries no signature, so it isn\'t tied to your Haven identity. No photo is downloaded yet.'**
+  /// **'Haven asked a relay for this person\'s published profile. That relay — and a second one, if the first didn\'t answer — can see this device asked about this key just now, but the request carries no signature, so it isn\'t tied to your Haven identity. If the profile has a photo, Haven downloads it from the server this person chose, which can see this device\'s network address.'**
   String get memberPickerStrangerLookupNote;
+
+  /// Shown, and spoken by a screen reader as part of the row's label, on the typed-npub row of the invite picker while the single lookup of that person's published profile is still in flight. A short status, not a sentence about relays — the disclosure is memberPickerStrangerLookupNote, shown beneath it. Ends with an ellipsis character to mark an activity in progress.
+  ///
+  /// In en, this message translates to:
+  /// **'Looking up published profile…'**
+  String get memberPickerStrangerLookingUp;
+
+  /// Shown, and spoken by a screen reader, on the typed-npub row of the invite picker when the lookup finished without a name to show — because the person has published none, or because no relay answered. It must NOT say or imply that the person, the key or the account does not exist, is invalid or is wrong: the key is valid and the person can still be added. It is also announced once on its own when the lookup settles, so it must read as a complete statement.
+  ///
+  /// In en, this message translates to:
+  /// **'No published name found'**
+  String get memberPickerStrangerNotFound;
+
+  /// Announced to screen readers ONCE when the lookup for a typed npub finds a published name. {name} is the name the PERSON chose and published themselves — remote-authored text, not verified by Haven. Translate as a label-and-value construction, exactly like memberPickerMatchesAnnouncement: the noun phrase for a name someone has published, a colon, then the name. Never use a word meaning 'verified', 'confirmed' or 'real name'.
+  ///
+  /// In en, this message translates to:
+  /// **'Published name: {name}'**
+  String memberPickerStrangerFoundAnnouncement(String name);
 
   /// Indicator shown after the visible member chips for the remaining members, e.g. '+2 more'.
   ///

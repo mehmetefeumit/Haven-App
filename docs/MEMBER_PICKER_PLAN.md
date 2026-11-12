@@ -15,14 +15,16 @@ kept without a line number because the file no longer exists — see §11.)
 
 | # | Requirement | New storage | New wire traffic |
 |---|---|---|---|
-| R1 | A typed npub, when offered as a pick, shows username + picture | no | only for a stranger |
+| R1 | A typed npub, when offered as a pick — and every staged npub — shows username + picture | no | only for a stranger: one profile lookup, then their picture (§10 D2, reversed 2026-11-12) |
 | R2 | Local directory of everyone you share a circle with; auto-populates the empty field | no | **none** |
 | ~~R3~~ | ~~Suggestions from your kind-3 follow list~~ | — | **CANCELLED — see §8** |
 | R4 | Locally-known people searchable by npub **and** cached username | no | **none** |
 | R5 | Anyone you shared a circle with in the past **3 days** | **yes** | **none** |
 
-With R3 cancelled, **this feature adds exactly one new outbound request**: the
-optional single-key lookup in R1 (§10 D2). Everything else is local.
+With R3 cancelled, **this feature adds exactly one new kind of outbound
+request**: the optional single-key lookup in R1 (§10 D2), followed — since
+2026-11-12 — by the download of that person's picture from the server they
+chose. Everything else is local.
 
 ### 1.1 An honest framing
 
@@ -1284,13 +1286,53 @@ record. R3 struck from scope.
 
 **D2 — Typed-stranger resolve: BUILD, narrowly.** Auto-resolve fires only on a
 **complete, valid** npub — never on a partial prefix, never for a suggestion row.
-**No picture is downloaded until the person is selected** (a picture URL is an
-HTTP GET to a host the profile's owner chose, from the user's IP). **[R]** The
+~~**No picture is downloaded until the person is selected**~~ (a picture URL is an
+HTTP GET to a host the profile's owner chose, from the user's IP) — **reversed,
+see below.** **[R]** The
 draft overstated its novelty: `_onMemberAdded` already fires `fetchKeyPackage` on
 add, so the pasted key already leaves the device; the real delta is *a different
 plane* and *500 ms earlier*. **[R]** It punctures Check 7 — a singleton
 non-union intent-bearing REQ is what that guard prevents — so the replacement
 confinement is a designed change, not a guard tweak.
+
+**[D2 reversed — owner-directed 2026-11-12] The picture IS downloaded, and the
+name and photo replace the bare key.** Owner direction, verbatim: *"when I am
+creating a circle, and enter the npub of a member I am going to add to the
+search bar, Haven should fetch the profile information on the npub, and always
+display that over JUST the npub. The npub should still be displayed below the
+user's username as a subtext (trim the middle; same as what we do in the circle
+member list), but the username and profile photo should be attempted to be
+fetched."* What ships:
+
+- **The typed-npub row** (still gated exactly as above, plus a directory that
+  read cleanly — a degraded read cannot say "not known locally") shows three
+  distinct, spoken states: looking up; found (the published name over the
+  12/6 npub, §7.1); no published name found. When the lookup returns a profile
+  with no cached picture, the picture is downloaded through
+  `strangerPictureProvider` — a separate provider, so the name is never held
+  back by it, and never for an unresolved or abandoned npub. Surrounding
+  whitespace in the field is ignored; an npub inside longer text still is not
+  looked up.
+- **Staged entries resolve the same way, by npub, whatever staged them** —
+  suggestion tap, typed-row tap, paste button, Done/Enter or QR
+  (`stagedMemberIdentityProvider`): a co-member is answered from the local
+  directory with **no** request; anyone else gets the same single lookup (the
+  typed row's, reused when it is still in flight) and the same picture
+  download. The naming step's confirmation chips show the same name. **There
+  is no inline disclosure note on a staged row**: staging is the user's
+  commitment to invite that person, whose photo would be fetched once they are
+  a member anyway. **Owner-reviewable:** this is a choice made in
+  implementation, not one the owner stated.
+
+**The trade-off, plainly.** Typing, pasting or scanning someone's key — even
+without adding them — now makes this device download their photo from a server
+**they** chose. That server learns this device's network address and the
+moment of the lookup (not the Haven identity: the GET carries no key and no
+signature). Because the person controls the URL, they can make it unique to
+the one key they handed out and use it as a **tracking pixel**: a hit on it
+tells them that key was just typed, from that address. `memberPickerStrangerLookupNote`
+discloses the download on the typed row. The relay half is unchanged: one
+relay, a second only if the first does not answer.
 
 **D3 — Retention: 3 days, and delete on removal.** Reduced from the drafted 7.
 Day-coarse. Purged by **DELETE**, never a display filter. A deliberate removal in

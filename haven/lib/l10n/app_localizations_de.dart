@@ -1029,7 +1029,20 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get memberPickerStrangerLookupNote =>
-      'Haven hat ein Relay nach dem veröffentlichten Namen dieser Person gefragt. Das Relay sieht, dass dieses Gerät gerade eben nach dem Namen zu diesem Schlüssel gefragt hat – die Anfrage trägt aber keine Signatur und ist damit nicht mit deiner Haven-Identität verknüpft. Es wird noch kein Foto heruntergeladen.';
+      'Haven hat ein Relay nach dem veröffentlichten Profil dieser Person gefragt. Dieses Relay – und ein zweites, falls das erste nicht geantwortet hat – kann sehen, dass dieses Gerät gerade eben nach diesem Schlüssel gefragt hat. Die Anfrage trägt aber keine kryptografische Signatur und ist deshalb nicht mit deiner Haven-Identität verknüpft. Wenn das Profil ein Foto hat, lädt Haven dieses Foto von dem Server herunter, den diese Person gewählt hat. Dieser Server kann die Netzwerkadresse dieses Geräts sehen.';
+
+  @override
+  String get memberPickerStrangerLookingUp =>
+      'Veröffentlichtes Profil wird gesucht …';
+
+  @override
+  String get memberPickerStrangerNotFound =>
+      'Kein veröffentlichter Name gefunden';
+
+  @override
+  String memberPickerStrangerFoundAnnouncement(String name) {
+    return 'Veröffentlichter Name: $name';
+  }
 
   @override
   String selectedMembersMore(int count) {

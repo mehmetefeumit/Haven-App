@@ -970,7 +970,18 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get memberPickerStrangerLookupNote =>
-      'Haven は、この人が公開している名前を1つのリレーに問い合わせました。そのリレーには、この端末がたった今この鍵について問い合わせたことが分かります。ただし、この問い合わせには署名が付いていないため、Haven でのあなたの識別情報とは結びつきません。写真はまだダウンロードしていません。';
+      'Haven は、この人が公開しているプロフィールを1つのリレーに問い合わせました。そのリレーと、最初のリレーが応答しなかった場合に問い合わせるもう1つのリレーには、この端末がたった今この鍵について問い合わせたことが分かります。ただし、この問い合わせには電子署名が付いていないため、Haven でのあなたの識別情報とは結びつきません。プロフィールに写真が設定されている場合、Haven はその写真を、この人が選んだサーバーからダウンロードします。そのサーバーには、この端末のネットワークアドレスが分かります。';
+
+  @override
+  String get memberPickerStrangerLookingUp => '公開プロフィールを調べています…';
+
+  @override
+  String get memberPickerStrangerNotFound => '公開されている名前は見つかりませんでした';
+
+  @override
+  String memberPickerStrangerFoundAnnouncement(String name) {
+    return '公開されている名前: $name';
+  }
 
   @override
   String selectedMembersMore(int count) {

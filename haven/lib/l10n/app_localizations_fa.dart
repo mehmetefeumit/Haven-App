@@ -1017,7 +1017,19 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get memberPickerStrangerLookupNote =>
-      'Haven از یک رله خواست که نام عمومی این شخص را جست‌وجو کند. آن رله می‌بیند که این دستگاه همین حالا دربارهٔ این کلید پرسیده است. اما این درخواست هیچ امضایی ندارد، پس به هویتت در Haven گره نمی‌خورد. هنوز هیچ عکسی دانلود نشده است.';
+      'Haven نمایهٔ منتشرشدهٔ این شخص را از یک رله خواست. آن رله می‌تواند ببیند که این دستگاه همین حالا دربارهٔ این کلید پرسیده است. اگر رلهٔ اول پاسخ ندهد، Haven از یک رلهٔ دوم هم می‌پرسد و آن رله هم می‌تواند همین را ببیند. اما این درخواست هیچ امضای دیجیتالی ندارد، پس به هویتت در Haven گره نمی‌خورد. اگر این نمایه عکس داشته باشد، Haven آن را از سروری دانلود می‌کند که خودِ این شخص انتخاب کرده است، و آن سرور می‌تواند آدرس شبکهٔ این دستگاه را ببیند.';
+
+  @override
+  String get memberPickerStrangerLookingUp =>
+      'در حال جست‌وجوی نمایهٔ منتشرشده…';
+
+  @override
+  String get memberPickerStrangerNotFound => 'نام منتشرشده‌ای یافت نشد';
+
+  @override
+  String memberPickerStrangerFoundAnnouncement(String name) {
+    return 'نام منتشرشده: $name';
+  }
 
   @override
   String selectedMembersMore(int count) {

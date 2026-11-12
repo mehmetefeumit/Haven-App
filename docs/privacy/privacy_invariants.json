@@ -6200,7 +6200,7 @@
     {
       "id": "INV-P-PROFILE-LOOKUPS-ARE-ONE-AUTHOR-PER-REQ",
       "title": "Profile lookups ask one relay about one person, bounded at two relays",
-      "statement": "Every kind-0 filter carries exactly one author, no p tag and kind 0 only; each author resolves to its own assigned relay by salted rendezvous hash, and PROFILE_MAX_RELAY_RANK = 2 caps the retry ladder — so a lookup discloses an author to at most two of the eight. This becomes false if authors are batched into one filter, if the rank cap is raised, or if a fetch fans out beyond the assignment.",
+      "statement": "Every kind-0 filter carries exactly one author, no p tag and kind 0 only; each author resolves to its own assigned relay by salted rendezvous hash, and PROFILE_MAX_RELAY_RANK = 2 bounds the relays it may ever be asked of — its second-ranked relay is asked only after the first answered without a profile (the retry ladder, which alternates between the two), or in the same cycle when the first did not answer at all. So a lookup discloses an author to at most two of the eight. Only a relay's own EOSE counts as a miss: a relay that did not answer stamps nothing, is not asked for the rest of its slice, and is not sent another author's second request in that cycle. This becomes false if authors are batched into one filter, if the rank cap is raised, or if a fetch fans out beyond the assignment.",
       "status": "enforced",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
@@ -6241,6 +6241,26 @@
         {
           "file": "haven-core/src/profile/assignment.rs",
           "name": "assignment_is_independent_of_pool_input_order"
+        },
+        {
+          "file": "haven-core/src/profile/assignment.rs",
+          "name": "a_relay_that_missed_is_asked_again"
+        },
+        {
+          "file": "haven-core/src/profile/fetch.rs",
+          "name": "an_author_whose_relay_does_not_answer_resolves_from_its_other_relay"
+        },
+        {
+          "file": "haven-core/src/profile/fetch.rs",
+          "name": "a_relay_that_ends_its_answer_without_a_kind0_is_a_miss_and_the_other_is_not_asked"
+        },
+        {
+          "file": "haven-core/src/profile/fetch.rs",
+          "name": "an_author_neither_relay_answers_for_is_unattempted_not_missed"
+        },
+        {
+          "file": "haven-core/src/profile/fetch.rs",
+          "name": "a_relay_that_did_not_answer_is_not_sent_another_authors_second_request"
         }
       ],
       "guards": [
@@ -6771,6 +6791,181 @@
         }
       ],
       "guards": []
+    },
+    {
+      "id": "INV-P-PUBLISHED-PROFILE-REACHES-A-RELAY-THAT-JOINS-THE-POOL",
+      "title": "A published profile is re-sent, unchanged and unsigned-for, to a pool relay it was never sent to — and only what a whole read of the pool shows to be current.",
+      "statement": "Peers read a profile from the one or two pool relays their own install is assigned, so a pool relay that lacks the kind-0 hides the user from every peer assigned there. 'Every usable pool relay serves it' is true of the pool as it was: profile_sync_state.covered_pool_json records the pool coverage was last settled against, and coverage is owed (profile_coverage_owed) when none is recorded — an upgraded install, or one whose record a storage reset took — or the usable pool has a relay it lacks (a release that swaps pool relays, a relay the user adds). A pool that only shrank owes nothing, an underflowed pool owes nothing, and a retracted profile owes nothing until the next save settles a pool. A coverage pass (sync_own_profile with nothing pending, on the triggers and ladder of a save) reads the own kind-0 from every pool relay and offers the newest copy any relay serves, byte for byte, to the relays that answered without it; a relay is covered only by a read-back serving that id. It signs nothing and is given no key; it publishes nothing for an account no relay serves a profile of; it acts only on a whole read (every relay ended its answer or serves the newest copy), because a relay that did not answer may hold a blank or a rename newer than the copy in hand; it offers no copy older than the dated own row; and its records are keyed to the version it started from, so a save made meanwhile keeps its own owed event and its own ladder. Disclosure is what a save already makes: one single-author REQ for the own pubkey and the own already-public event, to profile-pool relays only. Not covered: a relay that takes the profile and drops it later (a settled pool is not read again); a relay that refuses the served copy as too old, which stays owed since nothing may re-date it; and a pool relay that never answers, which keeps the read from ever being whole. This becomes false if a coverage pass signs, acts on a partial read, or records against a version a save has passed.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "symbols": [
+        {
+          "file": "haven-core/src/circle/profile_sync.rs",
+          "symbol": "sync_own_profile"
+        },
+        {
+          "file": "haven-core/src/circle/profile_sync.rs",
+          "symbol": "judge_coverage"
+        },
+        {
+          "file": "haven-core/src/circle/profile_sync.rs",
+          "symbol": "close_coverage"
+        },
+        {
+          "file": "haven-core/src/circle/storage_profile_sync.rs",
+          "symbol": "profile_coverage_owed"
+        },
+        {
+          "file": "haven-core/src/circle/storage_profile_sync.rs",
+          "symbol": "settle_profile_coverage"
+        },
+        {
+          "file": "haven-core/src/circle/storage_profile_sync.rs",
+          "symbol": "owe_profile_coverage"
+        },
+        {
+          "file": "haven-core/src/profile/outbox.rs",
+          "symbol": "newest_own_event"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "symbol": "sync_my_profile"
+        },
+        {
+          "file": "haven/lib/src/providers/profile_sync_provider.dart",
+          "symbol": "retryIfPending"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/profile_local_first_sync_e2e.rs",
+          "name": "a_relay_that_joins_the_pool_is_sent_the_published_profile_byte_for_byte"
+        },
+        {
+          "file": "haven-core/tests/profile_local_first_sync_e2e.rs",
+          "name": "an_install_with_no_record_adopts_the_copy_the_pool_serves"
+        },
+        {
+          "file": "haven-core/tests/profile_local_first_sync_e2e.rs",
+          "name": "an_account_no_relay_serves_a_profile_of_settles_without_publishing_one"
+        },
+        {
+          "file": "haven-core/tests/profile_local_first_sync_e2e.rs",
+          "name": "a_copy_is_not_resent_while_a_relay_that_may_hold_a_newer_one_has_not_answered"
+        },
+        {
+          "file": "haven-core/tests/profile_local_first_sync_e2e.rs",
+          "name": "a_copy_older_than_this_devices_own_row_is_not_put_on_a_relay_that_lacks_it"
+        },
+        {
+          "file": "haven-core/tests/profile_local_first_sync_e2e.rs",
+          "name": "a_save_made_while_a_coverage_pass_is_on_the_network_keeps_its_own_record_and_ladder"
+        },
+        {
+          "file": "haven-core/tests/profile_local_first_sync_e2e.rs",
+          "name": "a_relay_refusing_the_served_copy_as_too_old_is_never_sent_one_signed_afresh"
+        },
+        {
+          "file": "haven-core/tests/profile_local_first_sync_e2e.rs",
+          "name": "a_coverage_pass_logs_no_relay_url_event_id_or_pubkey"
+        },
+        {
+          "file": "haven-core/src/circle/storage_profile_sync.rs",
+          "name": "coverage_is_owed_until_settled_and_again_when_a_relay_joins_the_pool"
+        },
+        {
+          "file": "haven-core/src/circle/storage_profile_sync.rs",
+          "name": "a_retraction_owes_the_pool_nothing_until_the_next_save_settles_one"
+        },
+        {
+          "file": "haven-core/src/circle/storage_profile_sync.rs",
+          "name": "the_covered_pool_column_reaches_an_existing_database_unset"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "a_sync_with_nothing_to_sign_never_touches_the_identity_secret"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_profile_privacy_boundaries.sh"
+      ]
+    },
+    {
+      "id": "INV-P-A-KEY-THE-USER-ENTERS-IS-LOOKED-UP-ONCE-AND-SAID-SO",
+      "title": "Entering someone's key on an invite screen looks up their published name and photo, once, and the typed row says exactly who learns what.",
+      "statement": "Owner-directed 2026-11-12 (docs/MEMBER_PICKER_PLAN.md §10 D2, reversing 'no picture until the person is selected'). A complete, valid npub typed or pasted into the invite search, or staged by the paste button, Done or a QR scan, is resolved through resolve_stranger_profile: the same single-author REQ a member lookup issues, to the one or two relays that author's assignment allows, with no signer. Whenever the device's own directory can answer it does and nothing is asked: a key already in the local directory is named from it, and a directory read that is degraded, failed or still on its first load asks nothing, because 'not already known locally' cannot be judged from a read that did not complete. A key that resolved with no picture cached then has its picture fetched once (strangerPictureProvider → downloadMemberPictures), from the HTTPS URL its own kind-0 names, through the anti-SSRF filter and re-encode — never as part of the lookup, so the name is not held back, and never for a key that did not resolve or was abandoned before it did. That photo host is chosen by the person, so it learns this device's network address and when it asked, and a person can publish a URL unique to themselves. memberPickerStrangerLookupNote on the typed row discloses both: the relay (and a second one only if the first did not answer) sees this device ask about this key now, unsigned and so not tied to the Haven identity, and a published photo is downloaded from the server the person chose, which sees this device's network address. Opening the picker, and filtering it, still ask nothing. Not covered: a staged row (paste button, Done, QR) shows no note of its own — staging is the user's decision to invite that person, whose photo a roster refresh fetches once they are a member; this is an owner-reviewable choice. This becomes false if the lookup batches authors, fans out past the two assigned relays, downloads a picture for a key that did not resolve, or asks about a key the local directory holds.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "memberPickerStrangerLookupNote"
+      ],
+      "non_arb_claims": [],
+      "doc_anchors": [],
+      "symbols": [
+        {
+          "file": "haven/lib/src/providers/stranger_profile_provider.dart",
+          "symbol": "strangerProfileResolveProvider"
+        },
+        {
+          "file": "haven/lib/src/providers/stranger_profile_provider.dart",
+          "symbol": "strangerPictureProvider"
+        },
+        {
+          "file": "haven/lib/src/providers/stranger_profile_provider.dart",
+          "symbol": "stagedMemberIdentityProvider"
+        },
+        {
+          "file": "haven/lib/src/widgets/circles/member_picker.dart",
+          "symbol": "eligibleStrangerNpub"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "symbol": "resolve_stranger_profile"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven/test/providers/stranger_profile_provider_test.dart",
+          "name": "a co-member is named from the directory with no lookup"
+        },
+        {
+          "file": "haven/test/providers/stranger_profile_provider_test.dart",
+          "name": "a degraded directory read asks nothing"
+        },
+        {
+          "file": "haven/test/providers/stranger_profile_provider_test.dart",
+          "name": "a failed directory read asks nothing"
+        },
+        {
+          "file": "haven/test/providers/stranger_profile_provider_test.dart",
+          "name": "a stranger whose picture is already cached downloads none"
+        },
+        {
+          "file": "haven/test/providers/stranger_profile_provider_test.dart",
+          "name": "a failed lookup logs no identifier"
+        },
+        {
+          "file": "haven/test/widgets/circles/member_picker_test.dart",
+          "name": "O4. an npub abandoned mid-lookup downloads no picture"
+        },
+        {
+          "file": "haven/test/widgets/circles/member_picker_test.dart",
+          "name": "O2. a picture already cached is not downloaded again"
+        },
+        {
+          "file": "haven/test/pages/circles/create_circle_page_test.dart",
+          "name": "CS5. pasting a co-member's npub asks no relay about them"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "a_typed_lookup_asks_again_inside_the_miss_backoff_and_a_refresh_does_not"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_profile_privacy_boundaries.sh"
+      ]
     },
     {
       "id": "INV-P-PROFILE-UI-CLAIMS-LOCAL-TRUTH-ONLY",

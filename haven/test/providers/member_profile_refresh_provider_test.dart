@@ -9,8 +9,12 @@
 /// - refreshRoster swallows service failures (never throws to the caller).
 /// - Concurrent triggers coalesce into one fetch plus at most one follow-up,
 ///   keeping the strictest pending tier.
-/// - refreshAll builds the all-circles union plus the own pubkey (§1.7), and
-///   never widens it to a pending invitation's inviter.
+/// - Names are re-read before the paced picture batch, which only runs for
+///   what the kind-0 step reports as owed, never twice at once, and never
+///   after a logout.
+/// - refreshAll builds the all-circles union plus the own pubkey (§1.7) from
+///   the current circle list, and never widens it to a pending invitation's
+///   inviter.
 library;
 
 import 'dart:async';
@@ -18,16 +22,30 @@ import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/profile_refresh_tiers.dart';
+import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/member_directory_provider.dart';
 import 'package:haven/src/providers/member_profile_provider.dart';
 import 'package:haven/src/providers/member_profile_refresh_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/member_directory_service.dart';
 import 'package:haven/src/services/profile_service.dart';
 
 import '../mocks/mock_circle_service.dart';
 import '../mocks/mock_profile_service.dart';
+
+/// Counts [loadDirectory] calls, so a test can see the directory re-read.
+class _CountingDirectoryService implements MemberDirectoryService {
+  int loads = 0;
+
+  @override
+  Future<MemberDirectory> loadDirectory({required List<Circle> circles}) async {
+    loads++;
+    return MemberDirectory.empty;
+  }
+}
 
 void main() {
   const pubkeyA =
@@ -136,15 +154,15 @@ void main() {
     },
   );
 
-  group('concurrency coalescing', () {
-    /// Drains pending microtasks so fire-and-forget work settles. Deterministic
-    /// — no wall-clock waiting, so these cannot flake under parallel load.
-    Future<void> settle() async {
-      for (var i = 0; i < 8; i++) {
-        await Future<void>.delayed(Duration.zero);
-      }
+  /// Drains pending microtasks so fire-and-forget work settles. Deterministic
+  /// — no wall-clock waiting, so these cannot flake under parallel load.
+  Future<void> settle() async {
+    for (var i = 0; i < 8; i++) {
+      await Future<void>.delayed(Duration.zero);
     }
+  }
 
+  group('concurrency coalescing', () {
     int refreshes(MockProfileService svc) =>
         svc.methodCalls
             .where((c) => c.method == 'refreshMemberProfiles')
@@ -310,6 +328,234 @@ void main() {
     });
   });
 
+  group('names before pictures', () {
+    List<String> calledMethods(MockProfileService svc) => [
+      for (final c in svc.methodCalls)
+        if (c.method == 'refreshMemberProfiles' ||
+            c.method == 'downloadMemberPictures')
+          c.method,
+    ];
+
+    /// Keeps [pubkeyA]'s profile watched, as a mounted tile or marker does,
+    /// so an invalidation re-reads it.
+    Future<void> watchA(ProviderContainer container) async {
+      final sub = container.listen(
+        memberProfileProvider(pubkeyA),
+        (_, _) {},
+        fireImmediately: true,
+      );
+      addTearDown(sub.close);
+      await container.read(memberProfileProvider(pubkeyA).future);
+    }
+
+    void renameA(MockProfileService svc) => svc.memberProfiles[pubkeyA] =
+        const Profile(pubkeyHex: pubkeyA, displayName: 'After');
+
+    test('a name is shown while the picture batch is still running', () async {
+      final pictures = Completer<void>();
+      final svc =
+          MockProfileService(
+              memberProfiles: {
+                pubkeyA: const Profile(
+                  pubkeyHex: pubkeyA,
+                  displayName: 'Before',
+                ),
+              },
+            )
+            ..picturesToDownload = [pubkeyA]
+            ..pictureGate = pictures;
+      final container = makeContainer(svc);
+      addTearDown(container.dispose);
+      await watchA(container);
+      renameA(svc);
+
+      container.read(memberProfileRefreshProvider.notifier).refreshRoster([
+        pubkeyA,
+        pubkeyB,
+      ]);
+      await settle();
+
+      expect(calledMethods(svc), [
+        'refreshMemberProfiles',
+        'downloadMemberPictures',
+      ]);
+      expect(
+        svc.methodCalls
+            .singleWhere((c) => c.method == 'downloadMemberPictures')
+            .args['pubkeyHexes'],
+        [pubkeyA],
+        reason: 'only what the kind-0 step reported as owed',
+      );
+      expect(pictures.isCompleted, isFalse);
+      expect(
+        container.read(memberProfileProvider(pubkeyA)).valueOrNull?.displayName,
+        'After',
+        reason: 'the name must not wait for the paced picture batch',
+      );
+
+      final readsBefore = svc.methodCalls
+          .where((c) => c.method == 'getMemberProfile')
+          .length;
+      pictures.complete();
+      await settle();
+      expect(
+        svc.methodCalls.where((c) => c.method == 'getMemberProfile').length,
+        greaterThan(readsBefore),
+        reason: 'the downloaded picture is re-read once the batch ends',
+      );
+    });
+
+    test('the picker directory reloads with the names, and an unwatched one '
+        'is not loaded', () async {
+      final pictures = Completer<void>();
+      final directory = _CountingDirectoryService();
+      final svc = MockProfileService()
+        ..picturesToDownload = [pubkeyA]
+        ..pictureGate = pictures;
+      final container = ProviderContainer(
+        overrides: [
+          profileServiceProvider.overrideWithValue(svc),
+          circleServiceProvider.overrideWithValue(MockCircleService()),
+          memberDirectoryServiceProvider.overrideWithValue(directory),
+        ],
+      );
+      addTearDown(container.dispose);
+      final notifier = container.read(memberProfileRefreshProvider.notifier)
+        ..refreshRoster([pubkeyA]);
+      await settle();
+      expect(
+        directory.loads,
+        0,
+        reason: 'invalidating must not load a directory nobody shows',
+      );
+      pictures.complete();
+      await settle();
+
+      final sub = container.listen(memberDirectoryProvider, (_, _) {});
+      addTearDown(sub.close);
+      await container.read(memberDirectoryProvider.future);
+      expect(directory.loads, 1);
+
+      final gate = Completer<void>();
+      svc.pictureGate = gate;
+      notifier.refreshRoster([pubkeyA]);
+      await settle();
+      expect(
+        directory.loads,
+        2,
+        reason: 'the directory reloads before the picture batch ends',
+      );
+      gate.complete();
+      await settle();
+    });
+
+    test('a trigger during the picture batch queues, never runs a second '
+        'batch alongside it', () async {
+      final pictures = Completer<void>();
+      final svc = MockProfileService()
+        ..picturesToDownload = [pubkeyA]
+        ..pictureGate = pictures;
+      final container = makeContainer(svc);
+      addTearDown(container.dispose);
+      final notifier = container.read(memberProfileRefreshProvider.notifier)
+        ..refreshRoster([pubkeyA]);
+      await settle();
+      expect(calledMethods(svc), [
+        'refreshMemberProfiles',
+        'downloadMemberPictures',
+      ]);
+
+      notifier.refreshRoster([pubkeyB]);
+      await settle();
+      expect(calledMethods(svc), [
+        'refreshMemberProfiles',
+        'downloadMemberPictures',
+      ]);
+
+      pictures.complete();
+      await settle();
+      expect(calledMethods(svc), [
+        'refreshMemberProfiles',
+        'downloadMemberPictures',
+        'refreshMemberProfiles',
+        'downloadMemberPictures',
+      ]);
+      expect(
+        svc.methodCalls
+            .lastWhere((c) => c.method == 'refreshMemberProfiles')
+            .args['pubkeyHexes'],
+        [pubkeyB],
+      );
+    });
+
+    test('a logout during the kind-0 step downloads no picture', () async {
+      final refresh = Completer<void>();
+      final svc = MockProfileService()
+        ..picturesToDownload = [pubkeyA]
+        ..refreshGate = refresh;
+      final container = makeContainer(svc);
+      addTearDown(container.dispose);
+      container.read(memberProfileRefreshProvider.notifier).refreshRoster([
+        pubkeyA,
+      ]);
+      await settle();
+
+      // What logout does to this provider before the MLS wipe.
+      container.invalidate(memberProfileRefreshProvider);
+      refresh.complete();
+      await settle();
+
+      expect(calledMethods(svc), ['refreshMemberProfiles']);
+    });
+
+    test('no picture batch when nothing is owed', () async {
+      final svc = MockProfileService();
+      final container = makeContainer(svc);
+      addTearDown(container.dispose);
+      container.read(memberProfileRefreshProvider.notifier).refreshRoster([
+        pubkeyA,
+      ]);
+      await settle();
+
+      expect(calledMethods(svc), ['refreshMemberProfiles']);
+    });
+
+    test(
+      'a failed kind-0 step still re-reads what a partial pass cached',
+      () async {
+        final svc =
+            MockProfileService(
+                memberProfiles: {
+                  pubkeyA: const Profile(
+                    pubkeyHex: pubkeyA,
+                    displayName: 'Before',
+                  ),
+                },
+              )
+              ..shouldThrowOnRefreshMemberProfiles = true
+              ..picturesToDownload = [pubkeyA];
+        final container = makeContainer(svc);
+        addTearDown(container.dispose);
+        await watchA(container);
+        renameA(svc);
+
+        container.read(memberProfileRefreshProvider.notifier).refreshRoster([
+          pubkeyA,
+        ]);
+        await settle();
+
+        expect(
+          container
+              .read(memberProfileProvider(pubkeyA))
+              .valueOrNull
+              ?.displayName,
+          'After',
+        );
+        expect(calledMethods(svc), ['refreshMemberProfiles']);
+      },
+    );
+  });
+
   group('refreshAll union (migration plan §1.7)', () {
     const pubkeyC =
         'cccc1234cccc1234cccc1234cccc1234cccc1234cccc1234cccc1234cccc1234';
@@ -370,6 +616,45 @@ void main() {
         );
         final sent = calls.single.args['pubkeyHexes']! as List<String>;
         expect(sent, containsAll(<String>[pubkeyA, pubkeyB]));
+      },
+    );
+
+    test(
+      'reads the circles afresh, never a pre-invalidation snapshot',
+      () async {
+        // A trigger used to hand in the list it had in hand, which could
+        // predate an invalidation (a just-accepted invite) and so drop the new
+        // circle's members from the union.
+        final circles = [
+          TestCircleFactory.createCircle(
+            members: [TestCircleFactory.createMember(pubkey: pubkeyA)],
+          ),
+        ];
+        final svc = MockProfileService();
+        final container = makeUnionContainer(svc, circles);
+        addTearDown(container.dispose);
+        await container.read(circlesProvider.future);
+
+        circles
+          ..clear()
+          ..add(
+            TestCircleFactory.createCircle(
+              members: [TestCircleFactory.createMember(pubkey: pubkeyB)],
+            ),
+          );
+        container.invalidate(circlesProvider);
+        await container
+            .read(memberProfileRefreshProvider.notifier)
+            .refreshAll(maxAge: profileInteractiveMaxAge);
+        await Future<void>.delayed(Duration.zero);
+
+        final sent =
+            svc.methodCalls
+                    .firstWhere((c) => c.method == 'refreshMemberProfiles')
+                    .args['pubkeyHexes']!
+                as List<String>;
+        expect(sent, contains(pubkeyB));
+        expect(sent, isNot(contains(pubkeyA)));
       },
     );
 

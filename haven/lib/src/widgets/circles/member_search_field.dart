@@ -34,6 +34,7 @@ class MemberSearchField extends StatefulWidget {
     required this.onQrScanRequested,
     required this.entryStateFor,
     this.onQueryChanged,
+    this.controller,
     super.key,
   });
 
@@ -55,13 +56,24 @@ class MemberSearchField extends StatefulWidget {
   /// its list in the same frame. Never debounced.
   final void Function(String query)? onQueryChanged;
 
+  /// The field's text, when the host must clear it itself — after staging
+  /// from a row outside the field, which would otherwise leave the staged
+  /// key in the field and "No matches" beneath the person just added. Owned
+  /// and disposed by the host, and never swapped for another; without one
+  /// the field makes its own.
+  final TextEditingController? controller;
+
   @override
   State<MemberSearchField> createState() => _MemberSearchFieldState();
 }
 
 class _MemberSearchFieldState extends State<MemberSearchField> {
-  final _controller = TextEditingController();
+  /// The field's own controller, when the host supplied none.
+  TextEditingController? _ownController;
   final _focusNode = FocusNode();
+
+  TextEditingController get _controller =>
+      widget.controller ?? (_ownController ??= TextEditingController());
 
   /// The refusal currently shown, or `null` while the helper line is showing.
   String? _errorMessage;
@@ -74,9 +86,8 @@ class _MemberSearchFieldState extends State<MemberSearchField> {
 
   @override
   void dispose() {
-    _controller
-      ..removeListener(_onTextChanged)
-      ..dispose();
+    _controller.removeListener(_onTextChanged);
+    _ownController?.dispose();
     _focusNode.dispose();
     super.dispose();
   }

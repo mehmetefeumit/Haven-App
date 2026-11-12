@@ -13,11 +13,14 @@ import 'package:haven/src/providers/member_profile_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/utils/bidi_isolate.dart';
 import 'package:haven/src/utils/member_display.dart';
+import 'package:haven/src/utils/npub_speech.dart';
 import 'package:haven/src/utils/npub_validator.dart';
 import 'package:haven/src/widgets/circles/member_avatar.dart';
 import 'package:haven/src/widgets/circles/member_detail_sheet.dart';
-import 'package:haven/src/widgets/map/member_marker.dart' show kMemberAgePillThreshold;
+import 'package:haven/src/widgets/map/member_marker.dart'
+    show kMemberAgePillThreshold;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Width beyond which the "Admin" chip ellipsizes instead of pushing the
@@ -242,8 +245,8 @@ class CircleMemberTile extends ConsumerWidget {
     // semantics below, so copy stays reachable via TalkBack there too.
     final copyActions = <CustomSemanticsAction, VoidCallback>{
       if (descendantsExcluded && canCopy)
-        CustomSemanticsAction(label: l10n.circleMemberCopyPublicKeyHint):
-            () => _copyNpub(context, l10n),
+        CustomSemanticsAction(label: l10n.circleMemberCopyPublicKeyHint): () =>
+            _copyNpub(context, l10n),
       CustomSemanticsAction(label: l10n.memberDetailSheetTitle): () =>
           showMemberDetailSheet(context, ref, member),
     };
@@ -507,12 +510,17 @@ class CircleMemberTile extends ConsumerWidget {
 
 /// A tile for displaying a pending member being added to a circle.
 ///
-/// Shows validation status (loading, valid, error) while KeyPackage is fetched.
+/// Shows the person — their avatar and resolved name, with the npub always
+/// beneath — and the validation status (loading, valid, error) while their
+/// KeyPackage is fetched. Presentational: the host resolves [pubkeyHex] and
+/// [name].
 class PendingMemberTile extends StatelessWidget {
   /// Creates a [PendingMemberTile].
   const PendingMemberTile({
     required this.npub,
     required this.status,
+    this.pubkeyHex,
+    this.name,
     this.errorMessage,
     this.onRemove,
     this.onRetry,
@@ -524,6 +532,14 @@ class PendingMemberTile extends StatelessWidget {
 
   /// Current validation status.
   final ValidationStatus status;
+
+  /// The member's hex pubkey, once known, for their avatar; `null` shows a
+  /// neutral one.
+  final String? pubkeyHex;
+
+  /// The member's resolved name, or `null` while none is known, in which
+  /// case the npub carries the row.
+  final String? name;
 
   /// Error message if validation failed.
   final String? errorMessage;
@@ -539,14 +555,59 @@ class PendingMemberTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
     final colorScheme = Theme.of(context).colorScheme;
+    final shortNpub = NpubValidator.shortenForDisplay(npub);
+    final name = this.name;
+    final (statusText, statusColor) = _status(l10n, colorScheme);
+
+    // Same rule as every npub Haven shows: no maxLines and no overflow,
+    // because clipping the tail drops the bech32 checksum, and forced LTR.
+    Widget npubLine(TextStyle style) =>
+        Text(shortNpub, textDirection: TextDirection.ltr, style: style);
 
     return ListTile(
-      leading: _buildLeadingIcon(l10n, colorScheme),
-      title: Text(
-        NpubValidator.shortenForDisplay(npub),
-        style: HavenTypography.mono.copyWith(fontSize: 14),
+      // The status is spoken in the identity's label below; the avatar adds
+      // nothing a screen reader needs.
+      leading: ExcludeSemantics(child: _buildLeading(l10n, colorScheme)),
+      title: Semantics(
+        container: true,
+        excludeSemantics: true,
+        label: [
+          bidiIsolate(name ?? chunkNpubForSpeech(shortNpub)),
+          statusText,
+        ].join(', '),
+        customSemanticsActions: name == null
+            ? null
+            : {
+                // A constant label: see `MemberCandidateTile`. The name keeps
+                // the key out of the label, so this is how it is still heard.
+                CustomSemanticsAction(
+                  label: l10n.memberPickerReadPublicKey,
+                ): () =>
+                    speakNpub(context, shortNpub),
+              },
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (name == null)
+              npubLine(HavenTypography.mono.copyWith(fontSize: 14))
+            else ...[
+              Text(name, maxLines: 1, overflow: TextOverflow.ellipsis),
+              npubLine(
+                HavenTypography.monoSmall.copyWith(
+                  color: colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+            Text(
+              statusText,
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: statusColor),
+            ),
+          ],
+        ),
       ),
-      subtitle: _buildSubtitle(context, l10n),
       trailing: _buildTrailing(l10n),
     );
   }
@@ -588,74 +649,96 @@ class PendingMemberTile extends StatelessWidget {
     return null;
   }
 
-  Widget _buildLeadingIcon(AppLocalizations l10n, ColorScheme colorScheme) {
-    return switch (status) {
-      ValidationStatus.validating => Semantics(
-        label: l10n.pendingMemberValidating,
-        child: SizedBox(
-          width: 40,
-          height: 40,
-          child: Center(
-            child: SizedBox(
-              width: 24,
-              height: 24,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                color: colorScheme.primary,
-              ),
-            ),
-          ),
-        ),
+  /// The person's avatar with the validation status on it: a ring while
+  /// validating, otherwise a badge at the bottom-end corner.
+  Widget _buildLeading(AppLocalizations l10n, ColorScheme colorScheme) {
+    final pubkeyHex = this.pubkeyHex;
+    final avatar = pubkeyHex == null
+        ? CircleAvatar(
+            radius: memberAvatarDiameter / 2,
+            backgroundColor: colorScheme.surfaceContainerHighest,
+            foregroundColor: colorScheme.onSurfaceVariant,
+            child: const Icon(LucideIcons.userRound),
+          )
+        : MemberAvatar(pubkey: pubkeyHex, displayName: name);
+    final (icon, color, label) = switch (status) {
+      ValidationStatus.validating => (null, colorScheme.primary, null),
+      ValidationStatus.valid => (
+        LucideIcons.circleCheck,
+        HavenSecurityColors.encrypted,
+        l10n.pendingMemberValid,
       ),
-      ValidationStatus.valid => CircleAvatar(
-        backgroundColor: HavenSecurityColors.encrypted.withValues(alpha: 0.1),
-        child: Icon(
-          LucideIcons.circleCheck,
-          color: HavenSecurityColors.encrypted,
-          semanticLabel: l10n.pendingMemberValid,
-        ),
+      ValidationStatus.invalid => (
+        LucideIcons.triangleAlert,
+        HavenSecurityColors.warning,
+        l10n.pendingMemberWarning,
       ),
-      ValidationStatus.invalid => CircleAvatar(
-        backgroundColor: HavenSecurityColors.warning.withValues(alpha: 0.1),
-        child: Icon(
-          LucideIcons.triangleAlert,
-          color: HavenSecurityColors.warning,
-          semanticLabel: l10n.pendingMemberWarning,
-        ),
-      ),
-      // The subtitle already says the person needs to update.
-      ValidationStatus.needsUpdate => CircleAvatar(
-        backgroundColor: HavenSecurityColors.warning.withValues(alpha: 0.1),
-        child: Icon(
-          LucideIcons.cloudDownload,
-          color: HavenSecurityColors.warning,
-          semanticLabel: l10n.pendingMemberWarning,
-        ),
+      // The status line already says the person needs to update.
+      ValidationStatus.needsUpdate => (
+        LucideIcons.cloudDownload,
+        HavenSecurityColors.warning,
+        l10n.pendingMemberWarning,
       ),
     };
+
+    return SizedBox.square(
+      dimension: memberAvatarDiameter + 8,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          avatar,
+          if (icon == null)
+            SizedBox.square(
+              dimension: memberAvatarDiameter + 6,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: color,
+                semanticsLabel: l10n.pendingMemberValidating,
+              ),
+            )
+          else
+            PositionedDirectional(
+              end: 0,
+              bottom: 0,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: colorScheme.surface,
+                  shape: BoxShape.circle,
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.all(1),
+                  child: Icon(
+                    icon,
+                    size: 16,
+                    color: color,
+                    semanticLabel: label,
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
   }
 
-  Widget? _buildSubtitle(BuildContext context, AppLocalizations l10n) {
-    final textStyle = Theme.of(context).textTheme.bodySmall;
-
+  /// The status line and its colour.
+  (String, Color) _status(AppLocalizations l10n, ColorScheme colorScheme) {
     return switch (status) {
-      ValidationStatus.validating => Text(
+      ValidationStatus.validating => (
         l10n.pendingMemberCheckingAvailability,
-        style: textStyle?.copyWith(
-          color: Theme.of(context).colorScheme.primary,
-        ),
+        colorScheme.primary,
       ),
-      ValidationStatus.valid => Text(
+      ValidationStatus.valid => (
         l10n.pendingMemberReadyToInvite,
-        style: textStyle?.copyWith(color: HavenSecurityColors.encrypted),
+        HavenSecurityColors.encrypted,
       ),
-      ValidationStatus.invalid => Text(
+      ValidationStatus.invalid => (
         errorMessage ?? l10n.createCircleNoAccountFound,
-        style: textStyle?.copyWith(color: HavenSecurityColors.warning),
+        HavenSecurityColors.warning,
       ),
-      ValidationStatus.needsUpdate => Text(
+      ValidationStatus.needsUpdate => (
         errorMessage ?? l10n.pendingMemberNeedsUpdate,
-        style: textStyle?.copyWith(color: HavenSecurityColors.warning),
+        HavenSecurityColors.warning,
       ),
     };
   }

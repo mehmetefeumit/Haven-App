@@ -197,10 +197,7 @@ class PublishedOwnProfile {
 @immutable
 class ProfileSyncResult {
   /// Creates a [ProfileSyncResult].
-  const ProfileSyncResult({
-    required this.outcome,
-    required this.stillPending,
-  });
+  const ProfileSyncResult({required this.outcome, required this.stillPending});
 
   /// What the pass did.
   final ProfileSyncOutcome outcome;
@@ -219,8 +216,7 @@ class ProfileSyncResult {
           stillPending == other.stillPending;
 
   @override
-  int get hashCode =>
-      Object.hash(outcome, stillPending);
+  int get hashCode => Object.hash(outcome, stillPending);
 }
 
 /// Whether the own profile has unpublished work and when the retry ladder
@@ -432,7 +428,8 @@ abstract class ProfileService {
     List<String> pubkeyHexes,
   );
 
-  /// Batch-refreshes profiles for [pubkeyHexes] in a single relay fetch.
+  /// Batch-refreshes the kind-0 profiles for [pubkeyHexes], and returns the
+  /// pubkeys whose current picture is not cached yet.
   ///
   /// Callers should pass the **union** of all known member pubkeys across
   /// every circle — never a clean per-circle roster partition, which
@@ -445,20 +442,28 @@ abstract class ProfileService {
   /// Pick a tier from `constants/profile_refresh_tiers.dart` rather than an
   /// ad-hoc value, so refresh cadence stays reviewable in one place.
   ///
-  /// Returns a map of pubkeyHex to the resolved [Profile] for every
-  /// pubkey with a cache entry after the refresh; a pubkey that was never
-  /// found on any relay is recorded `Unknown` on the Rust side and is
-  /// simply absent from the result — not an error.
+  /// Downloads no picture: names are in the cache when this returns, and the
+  /// returned list is what [downloadMemberPictures] is owed, so a caller can
+  /// show the names before the paced picture batch has finished.
   ///
   /// Always allowed (a read).
   ///
-  /// Throws [ProfileServiceException] on a genuine failure. Implementations
-  /// called from a best-effort background refresh should generally prefer
-  /// to swallow partial per-pubkey failures and return whatever resolved.
-  Future<Map<String, Profile>> refreshMemberProfiles(
+  /// Throws [ProfileServiceException] on a genuine failure.
+  Future<List<String>> refreshMemberProfiles(
     List<String> pubkeyHexes, {
     Duration maxAge = profileInteractiveMaxAge,
   });
+
+  /// Downloads the current profile pictures of [pubkeyHexes] in ONE shuffled,
+  /// paced batch.
+  ///
+  /// Each picture is an HTTPS GET to the host named in that person's own
+  /// kind-0, so the batch runs one at a time, in a random order, with a
+  /// random gap — never a per-member loop from Dart, which would read as
+  /// "these are the people in this user's circles" in one burst.
+  ///
+  /// **Never throws.** A picture that cannot be fetched is simply not cached.
+  Future<void> downloadMemberPictures(List<String> pubkeyHexes);
 
   /// Resolves ONE typed stranger's published profile by [npub] — the member
   /// picker's typed-stranger resolve (plan §10 D2).
@@ -472,10 +477,12 @@ abstract class ProfileService {
   /// per-circle roster partition, this asks about exactly the one key a user
   /// just typed or pasted, and nothing else about their circles.
   ///
-  /// Never downloads a picture: like [getMemberProfile], only bytes already
-  /// cached (if any) are read. A stranger's picture URL is an HTTP GET to a
-  /// host THEY chose, from the user's IP — that must never fire merely
-  /// because their npub was typed.
+  /// Never downloads a picture itself: like [getMemberProfile], only bytes
+  /// already cached (if any) are read, so the name is never held back by a
+  /// picture. The caller downloads a resolved person's picture separately,
+  /// through [downloadMemberPictures] (owner direction 2026-11-12, plan §10
+  /// D2) — an HTTPS GET to a host THEY chose, which sees this device's
+  /// network address.
   ///
   /// Returns `null` when nothing resolved (including an npub that is
   /// syntactically well-formed but fails to decode) so the caller falls back

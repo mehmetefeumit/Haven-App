@@ -10,6 +10,7 @@ import 'package:flutter/semantics.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:haven/l10n/app_localizations.dart';
+import 'package:haven/src/constants/profile_refresh_tiers.dart';
 import 'package:haven/src/pages/circles/qr_scanner_page.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
@@ -26,7 +27,9 @@ import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/bidi_isolate.dart';
 import 'package:haven/src/utils/member_pick_state.dart';
 import 'package:haven/src/utils/npub_validator.dart';
+import 'package:haven/src/utils/profile_refresh_trigger.dart';
 import 'package:haven/src/widgets/circles/member_picker.dart';
+import 'package:haven/src/widgets/circles/staged_member_identities.dart';
 import 'package:haven/src/widgets/widgets.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -60,7 +63,8 @@ class AddMemberPage extends ConsumerStatefulWidget {
   ConsumerState<AddMemberPage> createState() => _AddMemberPageState();
 }
 
-class _AddMemberPageState extends ConsumerState<AddMemberPage> {
+class _AddMemberPageState extends ConsumerState<AddMemberPage>
+    with StagedMemberIdentities {
   /// Selected member npubs.
   final List<String> _selectedMembers = [];
 
@@ -106,6 +110,16 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
   /// text that renders the caret.
   String _query = '';
 
+  /// The search field's text, held here so staging from the typed-npub row
+  /// can clear it.
+  final _searchController = TextEditingController();
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
@@ -149,10 +163,10 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
                 slivers: [
                   SliverToBoxAdapter(
                     child: MemberSearchField(
+                      controller: _searchController,
                       onMemberAdded: _onMemberAdded,
                       onQrScanRequested: _openQrScanner,
-                      onQueryChanged: (query) =>
-                          setState(() => _query = query),
+                      onQueryChanged: (query) => setState(() => _query = query),
                       entryStateFor: _entryStateFor,
                     ),
                   ),
@@ -196,7 +210,7 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
                     circleMemberPubkeysHex: _circleMemberPubkeysHexLower,
                     circleMemberNpubs: _circleMemberNpubs,
                     onSelected: _onCandidateSelected,
-                    onStrangerSelected: _onMemberAdded,
+                    onStrangerSelected: _onStrangerSelected,
                   ),
                   if (showGuidance)
                     SliverFillRemaining(
@@ -265,6 +279,11 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
   void _onCandidateSelected(MemberCandidate candidate) =>
       _onMemberAdded(candidate.npub);
 
+  void _onStrangerSelected(String npub) {
+    _onMemberAdded(npub);
+    _searchController.clear();
+  }
+
   Widget _buildEmptyState() {
     final l10n = AppLocalizations.of(context);
 
@@ -282,7 +301,7 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
     final error = _memberErrors[npub];
     final retryable = _retryable.contains(npub);
 
-    return PendingMemberTile(
+    return StagedMemberTile(
       npub: npub,
       status: status,
       errorMessage: error,
@@ -331,6 +350,7 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
   }
 
   void _onMemberAdded(String npub) {
+    holdStagedIdentity(npub);
     setState(() {
       _selectedMembers.add(npub);
       _stagedNpubs.add(npub);
@@ -340,6 +360,7 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
   }
 
   void _onMemberRemoved(String npub) {
+    releaseStagedIdentity(npub);
     setState(() {
       _selectedMembers.remove(npub);
       _stagedNpubs.remove(npub);
@@ -351,6 +372,7 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
   }
 
   void _clearAll() {
+    releaseAllStagedIdentities();
     setState(() {
       _selectedMembers.clear();
       _stagedNpubs.clear();
@@ -544,6 +566,9 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
       container
         ..invalidate(circlesProvider)
         ..invalidate(memberLocationsProvider);
+      // Made, so the new members join the union a profile refresh asks for —
+      // including while the invite still awaits its relays.
+      triggerProfileRefreshIn(container, maxAge: profileInteractiveMaxAge);
 
       if (result.delivery == ChangeDelivery.awaitingRelays) {
         // Never an error: the commit is staged and sent again until a relay

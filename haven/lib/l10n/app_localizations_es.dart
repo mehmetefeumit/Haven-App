@@ -1045,7 +1045,19 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get memberPickerStrangerLookupNote =>
-      'Haven le ha pedido a un relé el nombre publicado de esta persona. Ese relé puede ver que este dispositivo acaba de preguntar por esta clave, pero la consulta no lleva firma, así que no queda ligada a tu identidad de Haven. Todavía no se ha descargado ninguna foto.';
+      'Haven le ha pedido a un relé el perfil publicado de esta persona. Ese relé, y un segundo relé si el primero no respondió, puede ver que este dispositivo acaba de preguntar por esta clave, pero la consulta no lleva firma, así que no queda ligada a tu identidad de Haven. Si el perfil tiene foto, Haven la descarga del servidor que eligió esta persona, y ese servidor puede ver la dirección de red de este dispositivo.';
+
+  @override
+  String get memberPickerStrangerLookingUp => 'Buscando el perfil publicado…';
+
+  @override
+  String get memberPickerStrangerNotFound =>
+      'No se encontró ningún nombre publicado';
+
+  @override
+  String memberPickerStrangerFoundAnnouncement(String name) {
+    return 'Nombre publicado: $name';
+  }
 
   @override
   String selectedMembersMore(int count) {

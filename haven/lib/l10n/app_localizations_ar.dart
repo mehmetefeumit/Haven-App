@@ -1062,7 +1062,19 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get memberPickerStrangerLookupNote =>
-      'طلب Haven من مُرحِّل أن يبحث عن الاسم العلني لهذا الشخص. ويرى ذلك المُرحِّل أن هذا الجهاز سأل للتو عن هذا المفتاح. لكن هذا الطلب لا يحمل أي توقيع، فهو غير مرتبط بهويتك في Haven. ولم تُنزَّل أي صورة حتى الآن.';
+      'طلب Haven من أحد المُرحِّلات الملف الشخصي الذي نشره هذا الشخص. ويستطيع ذلك المُرحِّل أن يرى أن هذا الجهاز سأل للتو عن هذا المفتاح، وكذلك مُرحِّل ثانٍ يسأله Haven إن لم يُجب الأول. لكن الطلب لا يحمل أي توقيع تشفيري، فهو غير مرتبط بهويتك في Haven. وإن كان في الملف الشخصي صورة، نزّلها Haven من الخادم الذي اختاره هذا الشخص، ويستطيع ذلك الخادم أن يرى عنوان هذا الجهاز على الشبكة.';
+
+  @override
+  String get memberPickerStrangerLookingUp =>
+      'جارٍ البحث عن الملف الشخصي المنشور…';
+
+  @override
+  String get memberPickerStrangerNotFound => 'لم يُعثَر على اسم منشور';
+
+  @override
+  String memberPickerStrangerFoundAnnouncement(String name) {
+    return 'الاسم المنشور: $name';
+  }
 
   @override
   String selectedMembersMore(int count) {

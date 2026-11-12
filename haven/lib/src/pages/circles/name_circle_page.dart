@@ -11,12 +11,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/constants/circle_name_policy.dart';
+import 'package:haven/src/constants/profile_refresh_tiers.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/join_watcher_provider.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/providers/stranger_profile_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/fresh_secret.dart';
 import 'package:haven/src/services/identity_service.dart';
@@ -25,6 +27,7 @@ import 'package:haven/src/services/publish_stagger.dart'
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/bidi_isolate.dart';
+import 'package:haven/src/utils/profile_refresh_trigger.dart';
 import 'package:haven/src/widgets/circles/selected_members_list.dart';
 import 'package:haven/src/widgets/widgets.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -72,6 +75,16 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
     final colorScheme = Theme.of(context).colorScheme;
+    final members = [for (final kp in widget.memberKeyPackages) kp.pubkey];
+    // The last confirmation before the circle exists names each person, not
+    // just their key. CreateCirclePage, still mounted beneath this route,
+    // holds these same identities, so watching them here asks nothing new.
+    final names = <String, String>{
+      for (final npub in members)
+        if (ref.watch(stagedMemberIdentityProvider(npub))?.name
+            case final name?)
+          npub: name,
+    };
 
     // Leaving while the circle is being created would drop the outcome — a
     // created circle and who was not invited — with nowhere left to say it.
@@ -189,9 +202,8 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
                                 ),
                                 const SizedBox(height: HavenSpacing.sm),
                                 SelectedMembersSummary(
-                                  members: widget.memberKeyPackages
-                                      .map((kp) => kp.pubkey)
-                                      .toList(),
+                                  members: members,
+                                  names: names,
                                 ),
                               ],
                             ),
@@ -367,6 +379,8 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
         ..invalidate(locationPublisherProvider)
         ..read(locationPublisherProvider)
         ..invalidate(memberLocationsProvider);
+      // The new circle's members join the union a profile refresh asks for.
+      triggerProfileRefresh(ref, maxAge: profileInteractiveMaxAge);
 
       // Kick off the admin-side burst-poll window so the new joiner's
       // first wire activity (commit / first location) is picked up

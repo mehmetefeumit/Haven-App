@@ -110,8 +110,10 @@ class NostrProfileService implements ProfileService {
     try {
       identity = await _identityService.getIdentity();
     } on Object catch (e) {
-      debugPrint('[Profile] getOwnProfile: identity lookup failed: '
-          '${e.runtimeType}');
+      debugPrint(
+        '[Profile] getOwnProfile: identity lookup failed: '
+        '${e.runtimeType}',
+      );
       throw const ProfileServiceException('Failed to load profile');
     }
     if (identity == null) return null;
@@ -152,8 +154,10 @@ class NostrProfileService implements ProfileService {
     try {
       identity = await _identityService.getIdentity();
     } on Object catch (e) {
-      debugPrint('[Profile] fetchOwnPublishedProfile: identity lookup failed: '
-          '${e.runtimeType}');
+      debugPrint(
+        '[Profile] fetchOwnPublishedProfile: identity lookup failed: '
+        '${e.runtimeType}',
+      );
       throw const ProfileServiceException('Failed to load profile');
     }
     if (identity == null) return const PublishedOwnProfile.unanswered();
@@ -166,8 +170,9 @@ class NostrProfileService implements ProfileService {
       return switch (ffi.relayAnswer) {
         OwnProfileRelayAnswerFfi.unanswered =>
           const PublishedOwnProfile.unanswered(),
-        OwnProfileRelayAnswerFfi.absent =>
-          const PublishedOwnProfile.answered(null),
+        OwnProfileRelayAnswerFfi.absent => const PublishedOwnProfile.answered(
+          null,
+        ),
         OwnProfileRelayAnswerFfi.published => PublishedOwnProfile.answered(
           Profile(
             pubkeyHex: ffi.pubkeyHex,
@@ -227,9 +232,7 @@ class NostrProfileService implements ProfileService {
         // the same stored bytes.
         pictureHash: ref.sha256Hex,
         knownAt: (cached?.isKnown ?? false)
-            ? DateTime.fromMillisecondsSinceEpoch(
-                cached!.fetchedAt * 1000,
-              )
+            ? DateTime.fromMillisecondsSinceEpoch(cached!.fetchedAt * 1000)
             : null,
       );
     } on Object catch (e) {
@@ -264,10 +267,7 @@ class NostrProfileService implements ProfileService {
       // Fails closed (see ProfileService.pendingSyncState doc): never report
       // "clean" on a read failure, but never force an automatic retry loop
       // on a persistent local fault either.
-      return const ProfilePendingState(
-        pending: true,
-        retryDue: false,
-      );
+      return const ProfilePendingState(pending: true, retryDue: false);
     }
   }
 
@@ -355,7 +355,7 @@ class NostrProfileService implements ProfileService {
   }
 
   @override
-  Future<Map<String, Profile>> refreshMemberProfiles(
+  Future<List<String>> refreshMemberProfiles(
     List<String> pubkeyHexes, {
     Duration maxAge = profileInteractiveMaxAge,
   }) async {
@@ -365,6 +365,18 @@ class NostrProfileService implements ProfileService {
         pubkeysHex: pubkeyHexes,
         maxAgeSecs: maxAge.inSeconds,
       );
+      return membersNeedingPictureDownload(ffiList);
+    } on Object catch (e) {
+      debugPrint('[Profile] refreshMemberProfiles: ${e.runtimeType}');
+      throw const ProfileServiceException('Failed to refresh member profiles');
+    }
+  }
+
+  @override
+  Future<void> downloadMemberPictures(List<String> pubkeyHexes) async {
+    if (pubkeyHexes.isEmpty) return;
+    try {
+      final manager = await _circleManagerFactory();
       // ONE batched call, not a per-member loop: looping
       // `download_member_picture` from Dart fired the whole roster
       // back-to-back at whatever Blossom host each member chose — commonly
@@ -373,44 +385,12 @@ class NostrProfileService implements ProfileService {
       // burst. `download_member_pictures` shuffles the order (OS CSPRNG) and
       // downloads strictly one at a time with a randomized delay between
       // requests, bounded by an overall deadline, so there is no burst to
-      // fingerprint. The trade is latency: this call takes noticeably longer
-      // than the old tight loop before `ref.invalidate` fires downstream, so
-      // member photos now populate later. That is accepted — do not
-      // "fix" it by re-parallelizing or trying to stream partial results.
-      final toDownload = membersNeedingPictureDownload(ffiList);
-      if (toDownload.isNotEmpty) {
-        try {
-          await manager.downloadMemberPictures(pubkeysHex: toDownload);
-        } on Object catch (e) {
-          // Best-effort per plan §7.2 — a batch failure must not drop the
-          // whole refresh; individual per-member download failures inside
-          // the batch are already absorbed on the Rust side.
-          debugPrint(
-            '[Profile] refreshMemberProfiles picture batch download '
-            'failed: ${e.runtimeType}',
-          );
-        }
-      }
-      final result = <String, Profile>{};
-      for (final ffi in ffiList) {
-        // Absent from the result, not an error — mirrors the interface doc
-        // ("a pubkey that was never found on any relay ... is simply absent
-        // from the result").
-        if (!ffi.isKnown) continue;
-        // Force the picture lookup regardless of the (possibly now-stale)
-        // `hasPicture` flag above — the batch download above may have just
-        // populated it.
-        result[ffi.pubkeyHex] = await _toProfile(
-          manager,
-          ffi,
-          fullResolution: false,
-          forcePictureLookup: true,
-        );
-      }
-      return result;
+      // fingerprint. Do not "fix" the latency by re-parallelizing.
+      await manager.downloadMemberPictures(pubkeysHex: pubkeyHexes);
     } on Object catch (e) {
-      debugPrint('[Profile] refreshMemberProfiles: ${e.runtimeType}');
-      throw const ProfileServiceException('Failed to refresh member profiles');
+      // Best-effort per plan §7.2: individual per-member failures are
+      // already absorbed on the Rust side.
+      debugPrint('[Profile] downloadMemberPictures: ${e.runtimeType}');
     }
   }
 
@@ -424,12 +404,9 @@ class NostrProfileService implements ProfileService {
       );
       if (ffi == null || !ffi.isKnown) return null;
       // Thumbnail-only, `forcePictureLookup` left at its default `false`:
-      // mirrors getMemberProfile exactly. `refreshMemberProfiles`'s
-      // `forcePictureLookup: true` is part of its BATCHED, paced download
-      // flow (`downloadMemberPictures`) — copying that here would force a
-      // picture download for a stranger the instant their npub resolves,
-      // which is exactly what D2 forbids. No picture-handling code is added
-      // by this method; that restraint IS the implementation.
+      // mirrors getMemberProfile exactly. The picture is downloaded by the
+      // caller AFTER this returns (`strangerPictureProvider`), never here:
+      // waiting on a GET to the person's own server would hold back the name.
       return await _toProfile(manager, ffi, fullResolution: false);
     } on Object catch (e) {
       debugPrint('[Profile] resolveTypedStrangerProfile: ${e.runtimeType}');

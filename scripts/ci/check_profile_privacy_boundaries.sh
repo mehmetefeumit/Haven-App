@@ -1347,8 +1347,12 @@ confine_calls_to_fn "${API_FILE}" 'stage_own_picture_removal' 'remove_my_profile
 #
 # The union is built in exactly one place (`refreshAll`), and the single-key
 # exception is built in exactly one other place
-# (`NostrProfileService.resolveTypedStrangerProfile`, itself gated by three
-# caller-side eligibility checks in `member_picker.dart` before it ever fires).
+# (`NostrProfileService.resolveTypedStrangerProfile`, reached only through
+# `strangerProfileResolveProvider`, which has two gated watchers: the picker's
+# typed-npub row, behind the caller-side eligibility checks in
+# `member_picker.dart`, and `stagedMemberIdentityProvider` for an npub the
+# user staged, behind its directory-first rule — a co-member is answered from
+# the local directory and never asked about).
 # Enforce all three by confining their lower-level, arbitrary-pubkey-list or
 # singleton entry points to their owning files, so a future call site cannot
 # pass `circle.members.map(...)` through any of them, and so a fourth caller
@@ -1380,9 +1384,10 @@ fi
 # INTERFACE, not only implemented: `profile_service.dart`'s abstract
 # signature line contains the same substring but fires no request at all, and
 # `stranger_profile_provider.dart` is the ONE sanctioned Riverpod indirection
-# the picker watches (`strangerProfileResolveProvider`) — a thin, single-npub
-# forward with no roster-shaped parameter to abuse. A fourth file matching
-# this pattern is a real, new call site and must fail.
+# (`strangerProfileResolveProvider`, watched by the picker's typed-npub row
+# and the staged list) — a thin, single-npub forward with no roster-shaped
+# parameter to abuse. A fourth file matching this pattern is a real, new call
+# site and must fail.
 stranger_hits="$(grep -rn 'resolveTypedStrangerProfile(' "${LIB_DIR}" \
   --include='*.dart' 2>/dev/null \
   | grep -v '/services/nostr_profile_service\.dart:' \

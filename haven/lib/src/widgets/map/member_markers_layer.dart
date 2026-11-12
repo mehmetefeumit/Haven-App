@@ -21,6 +21,7 @@ import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/utils/marker_geometry.dart';
 import 'package:haven/src/utils/marker_glide.dart';
+import 'package:haven/src/utils/member_display.dart';
 import 'package:haven/src/utils/reduce_motion.dart';
 import 'package:haven/src/widgets/map/avatar_image_cache.dart';
 import 'package:haven/src/widgets/map/marker_metrics.dart';
@@ -676,11 +677,18 @@ class _AvatarLoaderState extends ConsumerState<_AvatarLoader> {
     }
 
     final p = widget.markerProps;
+    // The fetch-time name is resolved once per location poll; a profile the
+    // refresh resolved since then must not wait for the next one.
+    final profileName = resolveEffectiveMemberName(
+      npubFallback: '',
+      profile: profile,
+    );
+    final name = p.displayName ?? (profileName.isEmpty ? null : profileName);
     return MemberMarker(
       key: WidgetKeys.memberMarker(p.publicKey),
-      initials: p.initials,
+      initials: markerInitials(name, p.publicKey),
       publicKey: p.publicKey,
-      displayName: p.displayName,
+      displayName: name,
       diameter: p.diameter,
       nubLength: p.nubLength,
       angle: p.angle,

@@ -1418,11 +1418,7 @@ class _MapShellState extends ConsumerState<MapShell>
     // kill-and-relaunch loop still costs at most one fetch per tier window.
     _coldStartProfileRefreshTimer = Timer(_coldStartProfileRefreshDelay, () {
       if (!mounted) return;
-      triggerProfileRefresh(
-        ref,
-        maxAge: profileInteractiveMaxAge,
-        circles: ref.read(circlesProvider).valueOrNull,
-      );
+      triggerProfileRefresh(ref, maxAge: profileInteractiveMaxAge);
       // Resume any own-profile publish a prior session left queued — honours
       // the persisted backoff, never dials a relay unconditionally.
       triggerProfileSyncRetry(ref);
@@ -3068,11 +3064,7 @@ class _MapShellState extends ConsumerState<MapShell>
         ..invalidate(keyPackagePublisherProvider)
         ..read(keyPackagePublisherProvider);
       // §6.2: refresh member/own public profiles on app resume.
-      triggerProfileRefresh(
-        ref,
-        maxAge: profileInteractiveMaxAge,
-        circles: ref.read(circlesProvider).valueOrNull,
-      );
+      triggerProfileRefresh(ref, maxAge: profileInteractiveMaxAge);
       // A reseed a cold start found no relay for is retried here, not only on
       // the next launch.
       unawaited(_reseedOwnNameAfterReset());
