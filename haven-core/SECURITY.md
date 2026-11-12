@@ -3380,8 +3380,11 @@ What silences a circle on the relay path empties its slot before the engine
 can emit from it: an epoch change, a commit or proposal of this device's
 recorded, fetched input held unread, a leave asked, sharing stopped
 (`mesh_sharing_stopped`), the circle's end, mesh off
-(`mesh_handoff_e2e::a_circle_that_falls_silent_has_its_slot_emptied`). A send
-the relay path refuses never reaches the hand-off. Guard:
+(`mesh_handoff_e2e::a_circle_that_falls_silent_has_its_slot_emptied`) — also
+when an emission slot fell due before the purge was applied, since applying
+it runs no timer
+(`mesh_ffi_tests::sharing_stopped_after_a_slot_fell_due_unserved_withdraws_every_location_that_waited`).
+A send the relay path refuses never reaches the hand-off. Guard:
 `scripts/ci/check_mesh_seams.sh`.
 
 #### The engine's home, its clock and its deadline
@@ -3398,6 +3401,16 @@ start) — and none is `async`, so it is never held across an `.await`
   its queue of unread packets are never written to disk. They are dropped
   with the engine: at mesh off, at the deadline, at `wipe_all_mls_state`, and
   when the process ends.
+- **Only the radio runs the engine's schedule.** An entry that holds a
+  session is made right after a relay send. Were it to run the engine's
+  timers, an emission, a new `HELLO` or a link decision would fall at an
+  instant a relay saw too, whenever the radio's own timer ran late, and the
+  slot times would no longer be independent of the times the relays see
+  (plan §5.1). So nothing a session's entry calls runs a timer: the engine's
+  `offer` and `purge` name no time, and applying the hand-off is storing and
+  removing. An emission slot that fell due is served by the radio's next
+  entry, with what waits then — a location left meanwhile, and nothing that
+  was withdrawn meanwhile.
 - **Applying the hand-off.** A purge empties its outbox slot. An offer fills
   it until its event expires: the event's `expiration` is a wall-clock
   instant and the engine's clock is not one, so what crosses is the time the
@@ -3422,7 +3435,10 @@ start) — and none is `async`, so it is never held across an `.await`
   and calls `SessionManager::mesh_off`, so every key is deleted. An entry
   that holds no session — the radio's, below — drops the engine at once and
   leaves the keys, and what the engine had passed on, to the next entry that
-  holds one, and the keys failing that to the core's own paths above.
+  holds one, and the keys failing that to the core's own paths above. When
+  the user asks for mesh as the deadline passes and such an entry finds it
+  passed first, the session has taken the ask: an engine starts under the
+  new deadline, and what the one that ended had passed on is counted.
 - **A session that opens while the engine runs** is handed to it
   (`CircleManagerFfi::new`), and so is one that asks for a mesh already on:
   the engine takes that session's hand-off, and what the last one left in the
@@ -3433,15 +3449,27 @@ start) — and none is `async`, so it is never held across an `.await`
   that start together so end with one engine and the session's hand-off in
   it, whichever came first, and a session is never told that mesh is off
   beside an engine the radio just started.
-- **An engine call that panics** leaves no engine to run again.
+- **An engine call that panics** leaves no engine to run again, and none
+  for the radio's service to start: only a session starts another. What that
+  engine had passed on since the last fold is lost.
 
 Residual. With no entry at all the engine sits in memory past its deadline:
 it can do nothing, since only an entry runs it, but it is freed only at the
 next entry or when the process ends. `mesh_resume` restarts an engine for a
 mesh an earlier process left on, under the stored deadline; a restart never
-moves it. The engine runs a slot that fell due before it stores an offer
-applied by the same entry, so a location applied at the entry that serves a
-slot leaves one slot later — or not at all, if its event expires first.
+moves it. A location leaves in the first slot the radio serves after it was
+handed off: with the radio's timer late, later by that much.
+
+Open, for the owner, and not built. Where a phone's power manager suspends
+the processor between the location service's wakes (unverified; vendor
+builds), the radio's own entries fall inside those wakes — its timer's
+handler, frames answered, `HELLO` renewals, link rotation — so emission
+instants can still follow relay sends there. Closing that needs every timer
+that shows on air to run from an alarm of the radio's alone, at the price of
+almost no delivery of this device's own location in that regime. And the
+first slot of an engine is drawn from the instant it starts, which follows a
+relay send when a session's `mesh_resume` starts it: one weak observation a
+process start.
 
 Proof, all in `mesh_ffi_tests`:
 `an_offer_is_applied_for_as_long_as_its_event_has_left_and_a_purge_empties_its_slot`,
@@ -3451,7 +3479,16 @@ Proof, all in `mesh_ffi_tests`:
 `wiping_local_state_leaves_no_engine_key_or_count`,
 `an_engine_call_that_panics_ends_that_engine_and_no_other`,
 `whichever_of_a_session_and_the_radio_asks_first_there_is_one_engine_and_the_session_feeds_it`,
-`a_start_finds_the_engine_or_starts_one_under_one_hold_of_the_lock`.
+`a_start_finds_the_engine_or_starts_one_under_one_hold_of_the_lock`,
+`no_session_entry_runs_the_engines_timers_and_the_radio_serves_the_slot_with_what_was_left`,
+`only_the_radios_entries_call_what_runs_the_engines_timers`,
+`a_session_that_opens_after_a_slot_fell_due_finds_nothing_of_the_last_sessions_sent`,
+`an_ask_the_session_took_starts_an_engine_over_one_a_radio_entry_found_ended`;
+and in `haven-core`,
+`mesh::engine::tests::session_code_runs_no_timer_and_the_radio_layers_next_call_serves_the_slot_with_what_waits`,
+`emissions_fall_where_the_radio_layer_runs_whatever_session_code_does_and_whenever`,
+and
+`mesh_sim::a_phone_whose_radio_wakes_late_emits_only_when_it_wakes_whatever_its_session_does`.
 
 #### The radio's entries, and an engine with no session
 
@@ -3474,9 +3511,12 @@ will export them to the Android service is not built.
   the radio reports — three bytes less, at most one attribute value (512) —
   and never handed in; an MTU below 51 carries no link, and the engine
   answers it with the link's close. A frame longer than 512 bytes closes its
-  link and none of it is handed to the engine. A poll's list of links that
-  can send is cut to the engine's 32 link slots before it is read, on the
-  stack. How many links there are, how fast they come and who is dialled
+  link and none of it is handed to the engine. Of a poll's list of links
+  that can send, the first 32 ids are read (`MAX_LINKS`, the most links a
+  packet's record tracks; the engine has eight), onto the stack: the list is
+  to name only links that are up, or an id that names none takes the place
+  of one that does. How many links there are, how fast they come and who is
+  dialled
   stay the engine's to decide (§6.5 of the plan): the bridge adds no limit
   and lifts none.
 - **Bytes out.** A poll answers at most one thing to do, as `kind ‖ id ‖
@@ -3488,10 +3528,15 @@ will export them to the Android service is not built.
 - **An engine with no session** (`radio_resume`). A process that has opened
   no session — after a reboot, or after the system restarted it — may be
   asked by the radio's service to start an engine on the service's own word
-  for how long mesh stays on. That word buys at most twelve hours, starts
-  nothing when it is zero, moves no deadline of an engine that runs, and
-  starts nothing over an engine that ended until an entry that holds a
-  session has turned that session's mesh off. The engine is keyless whoever
+  for how long mesh stays on. That word buys one engine a process, for at
+  most twelve hours: it starts nothing when it is zero, moves no deadline of
+  an engine that runs, and starts nothing once a session has spoken in the
+  process — opened, with its mesh on or off, or made any entry — nor after
+  mesh was turned off (from the moment the engine is dropped, before the
+  store is told), after an engine ended at its deadline, paid for or not,
+  after the identity was deleted, or after an engine call panicked. The
+  process starts in the one state the service starts an engine from and
+  never returns to it. The engine is keyless whoever
   starts it: with no session it links, carries what other phones emit and
   emits cover in its slots; it seals nothing, so this device's own location
   does not go out; and it opens nothing — what it takes in waits unread, at
@@ -3500,17 +3545,22 @@ will export them to the Android service is not built.
 - **The session overrules the service.** A session that opens adopts the
   running engine and brings its deadline no later than its own. If that
   session's mesh is off, that is now: the engine ends at the open, the
-  radio's next entry is told nothing is left, and no key was stored. So the
-  service's word alone keeps an engine up — relaying, and emitting cover,
-  with the store saying mesh is off — only from a process start until the
-  first session opens in that process.
+  radio's next entry is told nothing is left, no key was stored, and the
+  service's word starts no other. So the service's word alone keeps an
+  engine up — relaying, and emitting cover, with the store saying mesh is
+  off — only from a process start until the first session opens in that
+  process, and with no session at all for twelve hours at most, once.
+  Nothing in Rust bounds it across process restarts: each new process takes
+  the service's word again, so that bound is the service's own stored
+  deadline, which is not built.
 
 Residuals. An entry with no session cannot delete a key or restart the twelve
 hours: at the deadline it drops the engine, and the keys wait for a session
 or for the core's own paths. What a keyless engine carried, and what waited
 unread in it, is lost with the process. "Passed on" is counted only once a
-drive has marked a packet as not this device's, so what a keyless engine
-passed on is counted when a session reads it, or not at all. Where the
+packet is known not to be this device's: a drive marked it so, or it fell
+off the full unread queue unread — which is how a keyless engine nobody
+drains comes to count at all. Where the
 service's word comes from — its own copy of the deadline — is not built, and
 whether a start with no session should exist at all is an open owner question
 (design Q-2): it is one function, `radio_resume`, and its tests.
@@ -3528,6 +3578,7 @@ Proof, all in `mesh_ffi_tests`: the two named above, and
 `the_radio_cannot_keep_an_engine_past_twelve_hours_nor_start_over_one_that_ended`,
 `a_session_that_opens_takes_over_the_engine_the_radio_started`,
 `a_session_whose_mesh_is_off_ends_the_engine_the_radio_started`,
+`once_a_session_has_spoken_the_radio_starts_no_engine`,
 `what_passed_through_with_no_session_is_read_by_the_first_drive`.
 
 #### The mesh ingress

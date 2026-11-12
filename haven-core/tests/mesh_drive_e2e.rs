@@ -1375,8 +1375,8 @@ async fn an_update_crosses_a_stranger_by_radio_and_is_read_after_its_lifetime_wi
     let (from, hop, to) = (phones[0], phones[1], phones[2]);
     world.link(from, hop, Radio::instant(512));
     world.link(hop, to, Radio::instant(512));
-    world.drive(from, |engine, now| {
-        engine.offer(CircleSlot(0), packet.clone(), u64::MAX, now);
+    world.drive(from, |engine, _| {
+        engine.offer(CircleSlot(0), packet.clone(), u64::MAX);
     });
     // Nobody reads for two lifetimes: no app was running.
     world.run_until(2 * life_ms);

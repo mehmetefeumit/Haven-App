@@ -65,11 +65,11 @@ fn before_expiry(event: &Event, before_ms: u64) -> u64 {
 
 /// What the engine's owner does with a hand-off: every purge and every offer
 /// applied, an offer living until its event's own expiration.
-fn drain(engine: &mut MeshEngine<StdRng>, handoff: &Handoff, now_ms: u64) {
+fn drain(engine: &mut MeshEngine<StdRng>, handoff: &Handoff) {
     for (slot, op) in handoff.take() {
         match op {
-            Op::Offer { packet, .. } => engine.offer(slot, packet, u64::MAX, now_ms),
-            Op::Purge => engine.purge(slot, now_ms),
+            Op::Offer { packet, .. } => engine.offer(slot, packet, u64::MAX),
+            Op::Purge => engine.purge(slot),
         }
     }
 }
@@ -124,7 +124,7 @@ async fn a_sealed_location_travels_the_hand_off_and_the_engine_and_comes_back_wh
     let config = Config::default();
     let slot_end = config.emit_period_ms + config.emit_jitter_ms;
     let mut engine = MeshEngine::new(config, StdRng::seed_from_u64(11), 0);
-    drain(&mut engine, &handoff, 0);
+    drain(&mut engine, &handoff);
     assert!(engine.stats().outbox == 1 && handoff.take().is_empty());
     engine.advance(slot_end);
     let emitted: Vec<Packet> = (engine.store().ids())
@@ -369,7 +369,7 @@ async fn a_circle_that_falls_silent_has_its_slot_emptied() {
         // One packet the engine already holds, one still in the hand-off.
         let (_, held) = handed_off(device, &group).await;
         put(&held);
-        drain(&mut engine, &handoff, 0);
+        drain(&mut engine, &handoff);
         let (_, waits) = handed_off(device, &group).await;
         put(&waits);
         assert!(
@@ -399,7 +399,7 @@ async fn a_circle_that_falls_silent_has_its_slot_emptied() {
         // The owner applies what it took: the engine's own copy goes before
         // its next emission.
         for (slot, _) in left {
-            engine.purge(CircleSlot(slot), 0);
+            engine.purge(CircleSlot(slot));
         }
         engine.advance(slot_end);
         assert!(

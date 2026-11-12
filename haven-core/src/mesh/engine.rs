@@ -1,12 +1,22 @@
 //! The mesh engine: one phone's links, inventory flood, emission schedule and
 //! link budget as an owned state machine (plan §3, §5.1, §6, §15).
 //!
-//! The engine holds no key, does no I/O and reads no clock. Every call names
-//! the time on a clock that keeps counting during sleep; time never runs
-//! backwards, and every call, [`MeshEngine::poll_output`] included, first
-//! runs the timers that fell due. What the radio layer must do comes out of
-//! [`MeshEngine::poll_output`]; when to call [`MeshEngine::advance`] next
-//! comes out of [`MeshEngine::next_wake_ms`].
+//! The engine holds no key, does no I/O and reads no clock. Every call the
+//! radio layer makes names the time on a clock that keeps counting during
+//! sleep; time never runs backwards, and each of those calls,
+//! [`MeshEngine::poll_output`] included, first runs the timers that fell due.
+//! What the radio layer must do comes out of [`MeshEngine::poll_output`];
+//! when to call [`MeshEngine::advance`] next comes out of
+//! [`MeshEngine::next_wake_ms`].
+//!
+//! **Session code runs no timer.** What it calls — [`MeshEngine::offer`],
+//! [`MeshEngine::purge`], [`MeshEngine::take_unread`],
+//! [`MeshEngine::mark_read`], [`MeshEngine::stats`] — names no time and
+//! changes no schedule. It calls them right after a relay send; a timer run
+//! there would put an emission, a greeting or a link decision at an instant a
+//! relay saw too, and the slot times would no longer be independent of the
+//! times the relays see (§5.1). An emission slot that fell due is served by
+//! the next call of the radio layer's, with what waits then.
 //!
 //! A link carries the two raw Noise handshake messages, then sealed frames of
 //! exactly its frame size (`frame`). Each side opens with `HELLO`, announces
@@ -638,12 +648,11 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
 
     /// Puts `packet` in the outbox slot `slot`, replacing what waits there.
     /// It is emitted at most once, in an emission slot before `expires_ms`
-    /// on the engine's clock, or not at all.
-    pub fn offer(&mut self, slot: CircleSlot, packet: Packet, expires_ms: u64, now_ms: u64) {
+    /// on the engine's clock, or not at all. Runs no timer: session code's.
+    pub fn offer(&mut self, slot: CircleSlot, packet: Packet, expires_ms: u64) {
         if self.stopped {
             return;
         }
-        self.clock(now_ms);
         let entry = Some((packet, expires_ms));
         if let Some(waiting) = self.outbox.get_mut(&slot) {
             waiting.packet = entry;
@@ -656,17 +665,14 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
                 },
             );
         }
-        self.settle();
     }
 
-    /// Empties and forgets the outbox slot `slot`.
-    pub fn purge(&mut self, slot: CircleSlot, now_ms: u64) {
-        if self.stopped {
-            return;
+    /// Empties and forgets the outbox slot `slot`. Runs no timer: session
+    /// code's.
+    pub fn purge(&mut self, slot: CircleSlot) {
+        if !self.stopped {
+            self.outbox.remove(&slot);
         }
-        self.clock(now_ms);
-        self.outbox.remove(&slot);
-        self.settle();
     }
 
     /// Runs the timers due at `now_ms`.
@@ -2298,7 +2304,7 @@ mod tests {
         let mut mesh = Mesh::new(vec![emitting(), quiet(), quiet()]);
         mesh.link(0, 1);
         mesh.link(1, 2);
-        mesh.nodes[0].offer(CircleSlot(1), packet(1), u64::MAX, 0);
+        mesh.nodes[0].offer(CircleSlot(1), packet(1), u64::MAX);
         mesh.run_to(9999);
         assert_eq!(mesh.nodes[0].stats().held, 0);
         mesh.run_to(19_999);
@@ -2756,7 +2762,7 @@ mod tests {
         let mut mesh = Mesh::new(vec![emitting(), quiet()]);
         mesh.link(0, 1);
         mesh.link(1, 0);
-        mesh.nodes[0].offer(CircleSlot(1), packet(1), u64::MAX, 0);
+        mesh.nodes[0].offer(CircleSlot(1), packet(1), u64::MAX);
         mesh.run_to(15_000);
         assert!(mesh.nodes[1].store().holds(&id(1)));
     }
@@ -2987,8 +2993,7 @@ mod tests {
         let (mut held_back, mut most, mut emitted) = (Vec::new(), 0, 0);
         for second in 0..(2 * LIFE + 4 * TIMEOUT) / 1000 {
             let own = 1_000_000 + second;
-            rig.engine
-                .offer(CircleSlot(1), packet(own), u64::MAX, rig.now);
+            rig.engine.offer(CircleSlot(1), packet(own), u64::MAX);
             let fresh = second * 50..second * 50 + if second == 0 { 40 } else { 3 };
             names.extend(fresh.clone().map(|n| (id(n), n)));
             let entries: Vec<_> = fresh.map(|n| (id(n), 255)).collect();
@@ -3488,16 +3493,16 @@ mod tests {
     fn emissions_are_the_same_in_count_and_time_whatever_the_outbox_holds() {
         let (idle, idle_stats) = emission_times(|_, _| {});
         let (one, one_stats) = emission_times(|engine, at| {
-            engine.offer(CircleSlot(1), packet(at), u64::MAX, at);
+            engine.offer(CircleSlot(1), packet(at), u64::MAX);
         });
         let (ten, ten_stats) = emission_times(|engine, at| {
             for slot in 0..10 {
-                engine.offer(CircleSlot(slot), packet(at + u64::from(slot)), u64::MAX, at);
+                engine.offer(CircleSlot(slot), packet(at + u64::from(slot)), u64::MAX);
             }
         });
         let (held, held_stats) = emission_times(|engine, at| {
-            engine.offer(CircleSlot(1), packet(at), u64::MAX, at);
-            engine.purge(CircleSlot(1), at);
+            engine.offer(CircleSlot(1), packet(at), u64::MAX);
+            engine.purge(CircleSlot(1));
         });
 
         assert!(idle.len() > 60 && idle.len() < 120);
@@ -3519,6 +3524,138 @@ mod tests {
         assert_eq!(ten_stats.outbox, 9);
     }
 
+    /// An engine's two hours when the radio layer runs it late — each time a
+    /// drawn delay after the engine asked to run — and session code calls
+    /// `script` at drawn instants in between, some of them after a slot fell
+    /// due and before the radio layer ran. Answers when it emitted, when the
+    /// radio layer ran it, and when session code called.
+    fn late_emission_times(script: impl Fn(&mut Engine, u64)) -> [Vec<u64>; 3] {
+        let mut engine = engine(Config::default(), 77);
+        let mut rng = StdRng::seed_from_u64(78);
+        // `proptest`'s prelude names another `Rng`.
+        let mut draw = |range: std::ops::Range<u64>| rand::Rng::gen_range(&mut rng, range);
+        let (mut emitted, mut radio, mut session) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut now, mut overdue) = (0, 0);
+        while now < 2 * 60 * MINUTE_MS {
+            let due = engine.next_wake_ms().expect("running");
+            let wake = due + draw(0..90_000);
+            let mut at = now + draw(1..20_000);
+            while at < wake {
+                let before = engine.stats();
+                script(&mut engine, at);
+                let after = engine.stats();
+                assert!(
+                    (after.emitted, after.held, engine.next_wake_ms())
+                        == (before.emitted, before.held, Some(due)),
+                    "session code's call emitted, or moved the schedule",
+                );
+                session.push(at);
+                overdue += usize::from(at > due);
+                at += draw(1..20_000);
+            }
+            let before = engine.stats().emitted;
+            engine.advance(wake);
+            radio.push(wake);
+            if engine.stats().emitted > before {
+                emitted.push(wake);
+            }
+            now = wake;
+        }
+        assert!(
+            overdue > 20,
+            "premise: session code called after a slot fell due"
+        );
+        [emitted, radio, session]
+    }
+
+    /// T-PRIV-4 and §5.1, for a radio layer that runs late: the engine emits
+    /// when the radio layer runs it and at no other time, and the same times
+    /// whatever session code does and whenever it does it — nothing, one
+    /// circle's update, ten, or one offered and withdrawn. No emission falls
+    /// at an instant of session code's, which is the instant of a relay send.
+    #[test]
+    fn emissions_fall_where_the_radio_layer_runs_whatever_session_code_does_and_whenever() {
+        let [idle, radio, session] = late_emission_times(|_, _| {});
+        let [one, ..] = late_emission_times(|engine, at| {
+            engine.offer(CircleSlot(1), packet(at), u64::MAX);
+        });
+        let [ten, ..] = late_emission_times(|engine, at| {
+            for slot in 0..10 {
+                engine.offer(CircleSlot(slot), packet(at + u64::from(slot)), u64::MAX);
+            }
+        });
+        let [held, ..] = late_emission_times(|engine, at| {
+            engine.offer(CircleSlot(1), packet(at), u64::MAX);
+            engine.purge(CircleSlot(1));
+        });
+
+        assert!(idle.len() > 40 && idle == radio);
+        assert!(idle == one && idle == ten && idle == held);
+        assert!(idle.iter().all(|at| !session.contains(at)));
+    }
+
+    /// §5.1: session code runs no timer. Whatever it calls once a slot has
+    /// fallen due — an offer, a purge, a read of what came in, the counts —
+    /// emits nothing and schedules nothing: the slot waits for the radio
+    /// layer's next call, which serves it with what waits then. So a purge
+    /// withdraws what waited (item 2), an offer made late is in time, and
+    /// one whose event had expired never goes out.
+    #[test]
+    fn session_code_runs_no_timer_and_the_radio_layers_next_call_serves_the_slot_with_what_waits() {
+        let schedule = |engine: &Engine| {
+            let stats = engine.stats();
+            (stats.emitted, stats.held, engine.next_wake_ms())
+        };
+        // One packet waits; the slot falls due at ten seconds; session code
+        // calls; the radio layer runs at fifteen.
+        let overdue = |script: &dyn Fn(&mut Engine)| {
+            let mut engine = engine(emitting(), 5);
+            engine.offer(CircleSlot(1), packet(1), u64::MAX);
+            script(&mut engine);
+            engine.mark_read(id(1), false);
+            assert!(
+                engine.take_unread(9).is_empty() && schedule(&engine) == (0, 0, Some(10_000)),
+                "session code's calls ran a timer",
+            );
+            engine.advance(15_000);
+            assert!(
+                schedule(&engine) == (1, 1, Some(25_000)) && engine.stats().outbox == 0,
+                "the radio layer's call did not serve the one slot that fell due",
+            );
+            engine
+        };
+        let own = |engine: &Engine, n| engine.store().is_local(&id(n));
+        let known = |engine: &Engine, n| engine.store().has_record(&id(n));
+
+        assert!(own(&overdue(&|_| {}), 1));
+        assert!(
+            !known(&overdue(&|engine| engine.purge(CircleSlot(1))), 1),
+            "a purged packet went out in the slot that fell due before the purge",
+        );
+        let replaced = overdue(&|engine| engine.offer(CircleSlot(1), packet(2), u64::MAX));
+        assert!(
+            own(&replaced, 2) && !known(&replaced, 1),
+            "the slot was not served with what waited when the radio layer ran",
+        );
+        let again = overdue(&|engine| {
+            engine.purge(CircleSlot(1));
+            engine.offer(CircleSlot(1), packet(3), u64::MAX);
+        });
+        assert!(own(&again, 3) && !known(&again, 1));
+        let expired = overdue(&|engine| engine.offer(CircleSlot(1), packet(4), 12_000));
+        assert!(
+            !known(&expired, 4) && !known(&expired, 1),
+            "an offer whose event expired before its slot was served went out",
+        );
+
+        // Stored when its event had already expired by the engine's clock.
+        let mut engine = engine(emitting(), 5);
+        engine.advance(20_000);
+        engine.offer(CircleSlot(1), packet(5), 5_000);
+        engine.advance(30_000);
+        assert!(!known(&engine, 5) && engine.stats().outbox == 0);
+    }
+
     #[test]
     fn the_slot_period_is_the_generators_draw_between_one_and_two_minutes() {
         let gaps: BTreeSet<u64> = (0..40)
@@ -3537,7 +3674,7 @@ mod tests {
         let mut engine = engine(Config::default(), 3);
         open_incoming(&mut engine, LinkId(1), 0);
         for slot in 0..10 {
-            engine.offer(CircleSlot(slot), packet(u64::from(slot)), u64::MAX, 0);
+            engine.offer(CircleSlot(slot), packet(u64::from(slot)), u64::MAX);
         }
         let hour = 60 * MINUTE_MS;
         engine.advance(hour);
@@ -3557,7 +3694,7 @@ mod tests {
     #[test]
     fn an_emitted_packet_is_a_store_row_with_a_drawn_lifetime_and_never_unread() {
         let mut engine = engine(emitting(), 5);
-        engine.offer(CircleSlot(1), packet(1), u64::MAX, 0);
+        engine.offer(CircleSlot(1), packet(1), u64::MAX);
         engine.advance(10_000);
         engine.advance(20_000);
         let stats = engine.stats();
@@ -3579,18 +3716,18 @@ mod tests {
     fn the_outbox_serves_the_least_recently_served_slot_newest_packet_once() {
         let mut engine = engine(emitting(), 5);
         let own = |engine: &Engine, n: u64| engine.store().is_local(&id(n));
-        engine.offer(CircleSlot(1), packet(1), u64::MAX, 0);
-        engine.offer(CircleSlot(2), packet(2), u64::MAX, 0);
-        engine.offer(CircleSlot(3), packet(3), u64::MAX, 0);
-        engine.offer(CircleSlot(1), packet(11), u64::MAX, 0);
+        engine.offer(CircleSlot(1), packet(1), u64::MAX);
+        engine.offer(CircleSlot(2), packet(2), u64::MAX);
+        engine.offer(CircleSlot(3), packet(3), u64::MAX);
+        engine.offer(CircleSlot(1), packet(11), u64::MAX);
         engine.advance(10_000);
         assert!(own(&engine, 11) && !own(&engine, 1) && !own(&engine, 2));
         engine.advance(20_000);
         assert!(own(&engine, 2) && !own(&engine, 3));
 
         // Slot 3 has never been served: it goes before the two that have.
-        engine.offer(CircleSlot(2), packet(22), u64::MAX, 21_000);
-        engine.offer(CircleSlot(1), packet(12), u64::MAX, 21_000);
+        engine.offer(CircleSlot(2), packet(22), u64::MAX);
+        engine.offer(CircleSlot(1), packet(12), u64::MAX);
         engine.advance(30_000);
         assert!(own(&engine, 3) && !own(&engine, 12) && !own(&engine, 22));
         engine.advance(40_000);
@@ -3615,21 +3752,21 @@ mod tests {
             },
             5,
         );
-        engine.offer(CircleSlot(1), packet(1), 10_000, 0);
-        engine.offer(CircleSlot(2), packet(2), 10_001, 0);
-        engine.offer(CircleSlot(3), packet(3), u64::MAX, 0);
+        engine.offer(CircleSlot(1), packet(1), 10_000);
+        engine.offer(CircleSlot(2), packet(2), 10_001);
+        engine.offer(CircleSlot(3), packet(3), u64::MAX);
         assert_eq!(engine.stats().outbox, 2);
         engine.advance(10_000);
         assert!(engine.store().is_local(&id(2)) && !engine.store().has_record(&id(1)));
         assert_eq!(engine.stats().outbox, 0);
 
-        engine.offer(CircleSlot(1), packet(4), u64::MAX, 11_000);
-        engine.purge(CircleSlot(1), 12_000);
+        engine.offer(CircleSlot(1), packet(4), u64::MAX);
+        engine.purge(CircleSlot(1));
         assert_eq!(engine.stats().outbox, 0);
         engine.advance(20_000);
         assert!(!engine.store().has_record(&id(4)));
         // The purge freed the slot for another circle.
-        engine.offer(CircleSlot(3), packet(3), u64::MAX, 21_000);
+        engine.offer(CircleSlot(3), packet(3), u64::MAX);
         assert_eq!(engine.stats().outbox, 1);
     }
 
@@ -3645,7 +3782,7 @@ mod tests {
             let source = rig.peer(1);
             let neighbour = rig.peer(2);
             if own {
-                rig.engine.offer(CircleSlot(1), packet(1), u64::MAX, 0);
+                rig.engine.offer(CircleSlot(1), packet(1), u64::MAX);
             } else {
                 rig.run(9000);
                 rig.feed(source, &[1], 250);
@@ -4153,8 +4290,7 @@ mod tests {
         rig.run(10_000);
         rig.ask(other, &[id(1)]);
         rig.engine.mark_read(id(1), false);
-        rig.engine
-            .offer(CircleSlot(1), packet(9), u64::MAX, rig.now);
+        rig.engine.offer(CircleSlot(1), packet(9), u64::MAX);
         rig.engine.sighting(PeerRef(4), -50, rig.now);
         // Still owed to the reader: nothing of it may outlive the stop.
         let sealed = rig.seal(other, frame::want(&[id(2), id(3)], size()));
@@ -4189,13 +4325,13 @@ mod tests {
         // Off is off: nothing it is told afterwards starts it again.
         let later = rig.now + 60 * MINUTE_MS;
         rig.engine.advance(later);
-        rig.engine.offer(CircleSlot(1), packet(10), u64::MAX, later);
+        rig.engine.offer(CircleSlot(1), packet(10), u64::MAX);
         rig.engine.sighting(PeerRef(5), -50, later);
         rig.engine
             .link_up(LinkId(9), Role::Peripheral, FRAME, None, later);
         rig.engine.receive(LinkId(9), &[0; 32], later);
         rig.engine.connect_failed(PeerRef(5), later);
-        rig.engine.purge(CircleSlot(1), later);
+        rig.engine.purge(CircleSlot(1));
         rig.engine.link_down(LinkId(9), later);
         rig.engine.advance(later + 60 * MINUTE_MS);
         rig.engine.stop();
@@ -4215,7 +4351,7 @@ mod tests {
         });
         let source = rig.peer(1);
         let other = rig.peer(2);
-        rig.engine.offer(CircleSlot(1), packet(9), u64::MAX, 0);
+        rig.engine.offer(CircleSlot(1), packet(9), u64::MAX);
         rig.feed(source, &[1, 2, 3, 4], 250);
         rig.run(10_000);
         // Three carried packets and the phone's own are sent on.
@@ -4285,7 +4421,7 @@ mod tests {
         mesh.link(0, 1);
         mesh.link(1, 2);
         for n in 0..5u64 {
-            mesh.nodes[0].offer(CircleSlot(1), packet(n), u64::MAX, mesh.now);
+            mesh.nodes[0].offer(CircleSlot(1), packet(n), u64::MAX);
             mesh.run_to((n + 1) * 10_000 + 1);
         }
         mesh.run_to(70_000);
@@ -4426,7 +4562,7 @@ mod tests {
                         rig.pump();
                     }
                     Act::Offer { n } => {
-                        rig.engine.offer(CircleSlot(1), packet(100 + n), u64::MAX, rig.now);
+                        rig.engine.offer(CircleSlot(1), packet(100 + n), u64::MAX);
                     }
                     Act::Run(ms) => rig.run(ms),
                 }
@@ -4525,7 +4661,7 @@ mod tests {
         for peer in 1..=3 {
             rig.engine.sighting(PeerRef(peer), -50, 0);
         }
-        rig.engine.offer(CircleSlot(1), packet(9), u64::MAX, 0);
+        rig.engine.offer(CircleSlot(1), packet(9), u64::MAX);
         // Off the tick's beat, so that only its own deadline wakes for it.
         rig.now = 1234;
         rig.dial(3);

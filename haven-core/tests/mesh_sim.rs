@@ -15,7 +15,7 @@ use haven_core::mesh::engine::{CircleSlot, Config, Stats};
 use haven_core::mesh::frame;
 use haven_core::mesh::packet::{self, EventParts, Format, MeshKey, Packet, PacketId, PACKET_LEN};
 use rand::rngs::StdRng;
-use rand::SeedableRng;
+use rand::{Rng, SeedableRng};
 
 use world::{Fault, Node, Radio, Reader, Seen, World};
 
@@ -72,8 +72,8 @@ fn junk(n: u64) -> Packet {
 }
 
 fn offer(world: &mut World, node: Node, slot: u32, packet: &Packet) {
-    world.drive(node, |engine, now| {
-        engine.offer(CircleSlot(slot), packet.clone(), u64::MAX, now);
+    world.session(node, |engine| {
+        engine.offer(CircleSlot(slot), packet.clone(), u64::MAX);
     });
 }
 
@@ -1751,7 +1751,7 @@ fn emissions_look_the_same_whatever_the_outbox_holds() {
             offer(world, phone, 1, &update(step));
         }
         if step == 9 {
-            world.drive(phone, |engine, now| engine.purge(CircleSlot(1), now));
+            world.session(phone, |engine| engine.purge(CircleSlot(1)));
         }
     });
     let slots = nothing.handed.len();
@@ -1811,6 +1811,68 @@ fn a_phone_that_slept_through_many_slots_emits_one_packet_on_waking() {
         );
         // Ten circles had more waiting than slots passed: still one each.
         assert_eq!(outbox, usize::from(slots).saturating_sub(times.len()));
+    }
+}
+
+/// §5.1, on a phone whose radio layer wakes late: it emits when the radio
+/// layer runs and at no other instant, whatever its session does. The
+/// session leaves an update at the instants its relay sends fall on — many
+/// of them after a slot fell due and before the radio woke — and none of
+/// those calls emits; the emissions fall at the same instants with no
+/// circle, one, or ten, and none at an instant of a send.
+#[test]
+fn a_phone_whose_radio_wakes_late_emits_only_when_it_wakes_whatever_its_session_does() {
+    let run = |circles: u8| {
+        let mut world = World::new();
+        let phone = world.phone(Config::default(), 91, Reader::Keyless);
+        let mut rng = StdRng::seed_from_u64(92);
+        let (mut sends, mut wakes, mut overdue) = (Vec::new(), Vec::new(), 0);
+        // A send every forty to eighty seconds, on an even millisecond; the
+        // radio's alarm up to a minute and a half late, on an odd one.
+        let mut send = 0;
+        world.sleep(phone);
+        while world.now < 2 * 60 * MINUTE {
+            let due = world.engine(phone).next_wake_ms().expect("running");
+            let wake = (due + rng.gen_range(0..90_000)) | 1;
+            send += 2 * rng.gen_range(20_000..40_000);
+            while send < wake {
+                world.run_until(send);
+                let before = world.engine(phone).stats().emitted;
+                for slot in 0..circles {
+                    offer(
+                        &mut world,
+                        phone,
+                        u32::from(slot),
+                        &junk(send + u64::from(slot)),
+                    );
+                }
+                let engine = world.engine(phone);
+                assert!(
+                    engine.stats().emitted == before && engine.next_wake_ms() == Some(due),
+                    "a hand-off emitted, or moved the phone's schedule"
+                );
+                sends.push(send);
+                overdue += usize::from(send > due);
+                send += 2 * rng.gen_range(20_000..40_000);
+            }
+            world.run_until(wake);
+            world.wake(phone);
+            wakes.push(wake);
+            world.sleep(phone);
+        }
+        assert!(overdue > 20, "premise: sends fell after a slot fell due");
+        let emitted: Vec<u64> = world.at(phone).emissions.iter().map(|e| e.at_ms).collect();
+        (emitted, wakes, sends)
+    };
+
+    let (idle, wakes, sends) = run(0);
+    assert!(idle.len() > 40 && idle == wakes, "a wake served no slot");
+    assert!(idle.iter().all(|at| !sends.contains(at)));
+    for circles in [1, 10] {
+        assert!(
+            run(circles).0 == idle,
+            "the emissions fall elsewhere with {circles} circles"
+        );
     }
 }
 

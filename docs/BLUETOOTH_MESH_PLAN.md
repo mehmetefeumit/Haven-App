@@ -396,6 +396,11 @@ circle for good (tracker `T-COMMIT-BEFORE-PROPOSAL`).
    (§6.4), and reaches peers only through §6. There is no "send now" path.
 5. After sleep the engine emits at most one packet on waking, whatever the
    outbox holds.
+6. Only the radio's entries run this schedule. Session code — the hand-off
+   of item 1, a purge of item 2, a read of what came in, the statistics —
+   runs none of the engine's timers: it runs right after a relay send, and
+   an emission there would tie a slot to a time a relay saw. A slot that
+   fell due is served by the radio's next entry, with what waits then.
 
 So a neighbour sees one new opaque packet per slot from every awake phone
 and cannot tell whether it shares, with how many circles, or whether a given
@@ -781,7 +786,7 @@ What wakes the processor for each periodic action:
 |---|---|---|---|---|
 | Advertise, filtered scan | Bluetooth controller | controller | controller | controller |
 | Inbound frame | radio event + timed wake lock held through the engine's next announce tick, with a hard cap | same | process running | Bluetooth wake (~10 s) |
-| Emission slot, announce tick, lifetime expiry | location service's existing wake | allow-while-idle alarm (≥ ~9 min in Doze) and any radio event | process running | only on a Bluetooth wake |
+| Emission slot, announce tick, lifetime expiry | the radio's own timer, the processor kept awake by the location service's wake lock; never the location service's publish (§5.1 item 6) | allow-while-idle alarm (≥ ~9 min in Doze) and any radio event | process running | only on a Bluetooth wake |
 
 - No continuous wake lock is held for the mesh. A lock held while any link is
   up would keep the processor awake whenever another mesh phone is near; that
@@ -2024,8 +2029,9 @@ shipped code, each failing a test.
   link below 48 — an ATT MTU of 51. The radio hands over the MTU, never a
   length.
   **Bytes.** A frame longer than 512 closes its link and none of it is
-  handed to the engine. `ready` is cut to the engine's 32 link slots, into a
-  stack array. A poll answers one output, `kind ‖ id big-endian ‖ bytes`
+  handed to the engine. Of `ready` the first 32 ids are read (`MAX_LINKS`,
+  what a packet's record tracks; the engine has eight links), into a stack
+  array; it is to name only links that are up. A poll answers one output, `kind ‖ id big-endian ‖ bytes`
   (1 send, 2 close, 3 connect), 9 + 512 bytes at most; the cases are written
   once, in `haven/rust_builder/fixtures/mesh_radio_outputs.txt`, which the
   Kotlin test is to read too. The links' number and rate, and who is
@@ -2038,11 +2044,11 @@ shipped code, each failing a test.
   the radio adopts nothing, and leaves its hand-off and its deadline alone.
   **The start with no session** (`radio_resume`; design F-1, **owner
   question Q-2, open**): the service's word for how long mesh stays on, cut
-  to twelve hours, starting nothing over an engine that runs, or that ended
-  and is not paid for. Built because §0.4 item 3 promises mesh after a
-  reboot. It is that one function, one arm of `mesh_take` and the tests
-  under "the start that holds no session": if the owner says no, they go and
-  nothing else changes.
+  to twelve hours and good for one engine a process, while no session has
+  spoken in it (below, "Review of M3a"). Built because §0.4 item 3 promises
+  mesh after a reboot. It is that one function, one arm of `mesh_take` and
+  the tests under "the start that holds no session": if the owner says no,
+  they go and nothing else changes.
   **The session overrules the service.** A session that opens adopts the
   engine and brings its deadline no later than its own — at once, when that
   session's mesh is off.
@@ -2071,21 +2077,67 @@ shipped code, each failing a test.
   panic guard and the parity guard (M3b); the gate's clauses about
   `mesh_jni.rs`; the service and its copy of the deadline (M3g).
 
-Residuals of M3a. A location the session leaves is applied by the radio's
-next entry, and `MeshEngine::offer` runs the clock — so a slot that fell
-due — before it stores the offer: a phone with no link and no sighting,
-which the radio wakes for its slot alone, emits cover at that slot and the
-location one slot later (60 to 120 s), or never if the event expires first.
-The order is the engine's own and holds for a session's entry too; the
-radio's wake makes it the rule for a phone alone. Not changed here.
-The reader the tests decode a poll with is the tests' own; the Kotlin
-reader is held to the same cases by the fixture, once it exists. Nothing
-was type-checked for Android or iOS: no such target is installed here.
+Residuals of M3a. The reader the tests decode a poll with is the tests'
+own; the Kotlin reader is held to the same cases by the fixture, once it
+exists. Nothing was type-checked for Android or iOS: no such target is
+installed here.
 Mutation pass: 35 changes of a line or a few to the shipped code, each
 failing a named test. The first pass left two standing — a link too narrow
 for a frame handed one all the same, and a start that let go of the lock
 and took it again ahead of the point a first seam probed — and the tests
 were changed until both fell.
+
+Review of M3a (independent, read-only): no blocker. Fixed with it, in the
+bridge and — for the second — in `haven-core`:
+**The radio could start an engine after a session had spoken.** `Off` was
+one state for a process no session had opened in, one whose session found
+mesh off, one where mesh was turned off, and one whose ended engine was
+paid for, so the service's remembered word could start twelve keyless hours
+after any of them. The slot now starts `Unclaimed`; every entry that holds
+a session, `mesh_empty`, `mesh_owed` and a poisoned lock leave `Off`; and
+the radio starts an engine from `Unclaimed` alone: once a process, never
+after a session's word, a turn-off (from the moment the engine is dropped),
+a deadline, a wipe or a panic
+(`once_a_session_has_spoken_the_radio_starts_no_engine`). With no session at
+all a keyless engine so runs twelve hours at most, once a process; across
+restarts the bound is the service's stored deadline (M3g).
+**Session code runs no engine timer (R1).** A session's entry ran the
+engine's timers exactly when it had just handed a location off — right
+after a relay send — because `MeshEngine::offer` and `purge` ran the clock.
+With the radio's timer late, emissions, `HELLO` renewals and ticks then fell
+at relay-send instants (§5.1's independence); a purge was applied after the
+overdue slot had taken what it withdrew (§5.1 item 2, the sharing-stopped
+promise); and an offer missed the slot its own entry served. `offer` and
+`purge` now name no time and run nothing, and only the radio's entries run
+the schedule (§5.1 item 6; `haven-core`:
+`session_code_runs_no_timer_and_the_radio_layers_next_call_serves_the_slot_with_what_waits`,
+`emissions_fall_where_the_radio_layer_runs_whatever_session_code_does_and_whenever`,
+`mesh_sim::a_phone_whose_radio_wakes_late_emits_only_when_it_wakes_whatever_its_session_does`;
+bridge:
+`no_session_entry_runs_the_engines_timers_and_the_radio_serves_the_slot_with_what_was_left`,
+`sharing_stopped_after_a_slot_fell_due_unserved_withdraws_every_location_that_waited`,
+`only_the_radios_entries_call_what_runs_the_engines_timers`). A location so
+leaves in the first slot the radio serves after its hand-off.
+**An ask in the deadline's last moments** that a radio entry got ahead of —
+the engine already `Ended` when `mesh_start` reaches it — was answered
+`Off`; it now starts an engine under the new deadline, which carries what
+the ended one is owed
+(`an_ask_the_session_took_starts_an_engine_over_one_a_radio_entry_found_ended`).
+Stated: what `radio_poll`'s `ready` may name; that 32 is `MAX_LINKS`, not the
+engine's eight links; that a keyless engine's "passed on" also counts what
+falls off a full unread queue; that the two source gates read the entries'
+own text and no further, and that the bridge's random-input test reaches the
+handshake and the length checks only.
+**Open, for the owner, not built (R2).** Where a phone's power manager
+suspends the processor between the location service's wakes (unverified;
+vendor builds), the radio's own entries fall inside those wakes — its
+timer's handler, frames answered, `HELLO` renewals, link rotation — so
+emission instants can still follow relay sends there. Closing it needs
+every on-air timer to run from the radio's alarm alone, at the price of
+almost no delivery of this device's own location in that regime. And an
+engine's first slot is drawn from the instant it starts, which follows a
+relay send when a session's `mesh_resume` starts it: one weak observation a
+process start.
 
 ### Proposed CLAUDE.md wording (owner to approve)
 

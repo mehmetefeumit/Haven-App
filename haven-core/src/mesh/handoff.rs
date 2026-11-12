@@ -189,11 +189,11 @@ mod tests {
     fn what_is_taken_drives_a_real_engine() {
         let config = Config::default();
         let slot_end = config.emit_period_ms + config.emit_jitter_ms;
-        let apply = |engine: &mut MeshEngine<StdRng>, handoff: &Handoff, now_ms: u64| {
+        let apply = |engine: &mut MeshEngine<StdRng>, handoff: &Handoff| {
             for (slot, op) in handoff.take() {
                 match op {
-                    Op::Offer { packet, .. } => engine.offer(slot, packet, u64::MAX, now_ms),
-                    Op::Purge => engine.purge(slot, now_ms),
+                    Op::Offer { packet, .. } => engine.offer(slot, packet, u64::MAX),
+                    Op::Purge => engine.purge(slot),
                 }
             }
         };
@@ -201,7 +201,7 @@ mod tests {
         let handoff = Handoff::default();
         let mut engine = MeshEngine::new(config.clone(), StdRng::seed_from_u64(7), 0);
         handoff.offer(CircleSlot(2), packet(1), 1);
-        apply(&mut engine, &handoff, 0);
+        apply(&mut engine, &handoff);
         engine.advance(slot_end);
         assert!(
             engine.stats().emitted == 1 && engine.store().is_local(&packet(1).id()),
@@ -211,7 +211,7 @@ mod tests {
         let mut engine = MeshEngine::new(config, StdRng::seed_from_u64(7), 0);
         handoff.offer(CircleSlot(2), packet(1), 1);
         handoff.purge(CircleSlot(2));
-        apply(&mut engine, &handoff, 0);
+        apply(&mut engine, &handoff);
         engine.advance(slot_end);
         assert!(
             engine.stats().emitted == 1 && !engine.store().holds(&packet(1).id()),

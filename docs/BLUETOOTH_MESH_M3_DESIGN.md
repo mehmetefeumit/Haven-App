@@ -186,6 +186,10 @@ Each is `with_mesh(None, |slot, now_ms| …)` and nothing else, except
 - **The hand-off is applied on every entry** (`api:12919`), so a location
   the session left reaches the outbox at the radio's next poll, with no Dart
   entry in between.
+- **Only these entries run the engine's timers** (R1, after the review of
+  M3a): an entry that holds a session applies the hand-off and runs none —
+  `MeshEngine::offer` and `purge` name no time — so nothing the engine does
+  on air falls at the instant of a relay send (plan §5.1).
 - **No clock crosses**: `mesh_clock_ms` is read inside.
 - A link with `att_mtu` that gives no frame is answered `Output::Close` by
   the engine (`eng:546-548`, `:568-570`): `radio_link_up` passes 0.
@@ -432,6 +436,10 @@ class MeshRadioCore(engine: MeshEngineApi, port: RadioPort, clock: () -> Long) {
     val running: Boolean                     // false once the engine is gone
 }
 ```
+
+The engine's schedule runs here and nowhere else: no entry that holds a
+session runs an engine timer (§A.3), so a slot that fell due waits for
+`onWake` or the next radio event.
 
 Every input ends in `pump()`:
 

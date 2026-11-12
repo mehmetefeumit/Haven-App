@@ -12818,6 +12818,9 @@ struct MeshSlot {
     /// What the engine's passed-on count read when it was last added to the
     /// stored totals.
     folded: u64,
+    /// What the engine that ended before this one had passed on, which no
+    /// stored total has yet.
+    owed: u64,
 }
 
 impl MeshSlot {
@@ -12826,6 +12829,10 @@ impl MeshSlot {
     /// The event's expiration is a wall-clock instant and the engine's clock
     /// is not one, so what crosses is how long the event still has by
     /// `wall_ms`, read once, here.
+    ///
+    /// Runs none of the engine's timers. A session's entry applies this
+    /// right after a relay send: nothing the engine does on air may fall at
+    /// that instant (plan §5.1).
     fn apply(&mut self, now_ms: u64, wall_ms: u64) {
         for (slot, op) in self.handoff.take() {
             let left_ms = match &op {
@@ -12839,11 +12846,11 @@ impl MeshSlot {
             match op {
                 Op::Offer { packet, .. } if left_ms != 0 => {
                     let expires_ms = now_ms.saturating_add(left_ms.min(MESH_OFFER_MAX_MS));
-                    self.engine.offer(slot, packet, expires_ms, now_ms);
+                    self.engine.offer(slot, packet, expires_ms);
                 }
                 // An offer whose event has expired still replaces what
                 // waited: nothing older goes out in its place.
-                Op::Offer { .. } | Op::Purge => self.engine.purge(slot, now_ms),
+                Op::Offer { .. } | Op::Purge => self.engine.purge(slot),
             }
         }
     }
@@ -12852,10 +12859,10 @@ impl MeshSlot {
     /// opened since. A session numbers its slots afresh, so what the last
     /// one left in the outbox would answer to no purge of this one's, and
     /// goes.
-    fn adopt(&mut self, handoff: Arc<Handoff>, now_ms: u64) {
+    fn adopt(&mut self, handoff: Arc<Handoff>) {
         if !Arc::ptr_eq(&self.handoff, &handoff) {
             for slot in 0..Handoff::SLOTS {
-                self.engine.purge(CircleSlot(slot), now_ms);
+                self.engine.purge(CircleSlot(slot));
             }
             self.handoff = handoff;
         }
@@ -12864,13 +12871,20 @@ impl MeshSlot {
     /// What the engine passed on since this was last asked.
     fn unfolded(&mut self) -> u64 {
         let passed_on = self.engine.stats().passed_on;
-        passed_on.saturating_sub(std::mem::replace(&mut self.folded, passed_on))
+        let since = passed_on.saturating_sub(std::mem::replace(&mut self.folded, passed_on));
+        since.saturating_add(std::mem::take(&mut self.owed))
     }
 }
 
 /// What the process holds of the mesh.
 enum MeshHome {
-    /// No engine.
+    /// No engine, and no session has spoken in this process: the one state
+    /// the radio's service starts an engine from.
+    Unclaimed,
+    /// No engine, and a session has spoken — one opened or made an entry,
+    /// mesh was turned off, an engine that ended was paid for — or an engine
+    /// call panicked. Only a session starts an engine from here: what the
+    /// radio's service remembers does not turn mesh back on.
     Off,
     /// Mesh is on.
     On(Box<MeshSlot>),
@@ -12881,7 +12895,7 @@ enum MeshHome {
     Ended(u64),
 }
 
-static MESH: Mutex<MeshHome> = Mutex::new(MeshHome::Off);
+static MESH: Mutex<MeshHome> = Mutex::new(MeshHome::Unclaimed);
 
 #[cfg(test)]
 thread_local! {
@@ -12893,7 +12907,8 @@ fn mesh_home() -> std::sync::MutexGuard<'static, MeshHome> {
     #[cfg(test)]
     MESH_HOLDS.set(MESH_HOLDS.get() + 1);
     MESH.lock().unwrap_or_else(|poisoned| {
-        // An engine call panicked: that engine is not run again.
+        // An engine call panicked: that engine is not run again, and the
+        // radio's service starts no other.
         let mut home = poisoned.into_inner();
         *home = MeshHome::Off;
         MESH.clear_poison();
@@ -12910,11 +12925,17 @@ fn mesh_home() -> std::sync::MutexGuard<'static, MeshHome> {
 /// that finds the deadline passed — by the engine's clock, which no change of
 /// the wall clock moves, or by the session's — drops the engine with every
 /// packet it held, and runs nothing. `None` when no engine runs.
+///
+/// A caller that holds a session has spoken for the process, engine or none:
+/// from here the radio's service starts no engine in it ([`MeshHome::Off`]).
 fn mesh_run<T>(
     home: &mut MeshHome,
     session_left_ms: Option<u64>,
     f: impl FnOnce(&mut MeshSlot, u64) -> T,
 ) -> Option<T> {
+    if session_left_ms.is_some() && matches!(home, MeshHome::Unclaimed) {
+        *home = MeshHome::Off;
+    }
     let MeshHome::On(slot) = home else {
         return None;
     };
@@ -12954,11 +12975,13 @@ fn mesh_owed() -> Option<u64> {
 
 /// Drops the engine with everything it held — packets, records, outbox,
 /// unread queue. Answers what it had passed on that no stored total has yet.
+/// Mesh was turned off, or the identity deleted: the radio's service starts
+/// no engine in this process after it.
 fn mesh_empty() -> u64 {
     match std::mem::replace(&mut *mesh_home(), MeshHome::Off) {
         MeshHome::On(mut slot) => slot.unfolded(),
         MeshHome::Ended(passed_on) => passed_on,
-        MeshHome::Off => 0,
+        MeshHome::Unclaimed | MeshHome::Off => 0,
     }
 }
 
@@ -13008,9 +13031,10 @@ impl Taker {
 /// only ever brings the engine's nearer — unless `confirmed`, when the
 /// session has taken the user's ask and the engine's deadline moves to it
 /// first. The radio adopts nothing: a running engine keeps the hand-off and
-/// the deadline it has. With none running, one is started for a radio, or
-/// for a session that `install`s, when `left_ms` is not zero — and never over
-/// one that ended and is not yet paid for.
+/// the deadline it has. With none running and `left_ms` not zero, one is
+/// started for a session that `install`s, and for the radio only while no
+/// session has spoken in the process ([`MeshHome::Unclaimed`]) — never over
+/// one that ended and is not yet paid for, but for the user's own ask.
 fn mesh_take(taker: Taker) -> MeshStartFfi {
     let mut home = mesh_home();
     let running = match &taker {
@@ -13026,8 +13050,8 @@ fn mesh_take(taker: Taker) -> MeshStartFfi {
                 // taken the ask.
                 slot.until_ms = mesh_clock_ms().saturating_add(*left_ms);
             }
-            mesh_run(&mut home, Some(*left_ms), |slot, now_ms| {
-                slot.adopt(Arc::clone(handoff), now_ms);
+            mesh_run(&mut home, Some(*left_ms), |slot, _| {
+                slot.adopt(Arc::clone(handoff));
             })
         }
         Taker::Radio { .. } => mesh_run(&mut home, None, |_, _| ()),
@@ -13035,19 +13059,38 @@ fn mesh_take(taker: Taker) -> MeshStartFfi {
     if running.is_some() {
         return MeshStartFfi::AlreadyOn;
     }
-    let (handoff, left_ms) = match taker {
-        Taker::Session { install: false, .. } => return MeshStartFfi::Off,
-        Taker::Session {
-            handoff, left_ms, ..
-        } => (handoff, left_ms),
+    let (handoff, left_ms, owed) = match (taker, &*home) {
+        (
+            Taker::Session {
+                install: true,
+                handoff,
+                left_ms,
+                ..
+            },
+            MeshHome::Off,
+        ) => (handoff, left_ms, 0),
+        // The user asked as the old deadline passed, and an entry that held
+        // no session found it passed first. The session has taken the ask:
+        // the engine that ended is paid for by the one that starts.
+        (
+            Taker::Session {
+                install: true,
+                confirmed: true,
+                handoff,
+                left_ms,
+            },
+            MeshHome::Ended(owed),
+        ) => (handoff, left_ms, *owed),
         // The service's word is not the store's: it buys no more than the
-        // user could have asked for.
-        Taker::Radio { left_ms } => (
+        // user could have asked for, and nothing once a session has spoken.
+        (Taker::Radio { left_ms }, MeshHome::Unclaimed) => (
             Arc::default(),
             left_ms.min(haven_core::nostr::mls::MESH_ON_MAX_MS),
+            0,
         ),
+        _ => return MeshStartFfi::Off,
     };
-    if left_ms == 0 || !matches!(*home, MeshHome::Off) {
+    if left_ms == 0 {
         return MeshStartFfi::Off;
     }
     let now_ms = mesh_clock_ms();
@@ -13056,6 +13099,7 @@ fn mesh_take(taker: Taker) -> MeshStartFfi {
         handoff,
         until_ms: now_ms.saturating_add(left_ms),
         folded: 0,
+        owed,
     }));
     MeshStartFfi::Started
 }
@@ -13250,8 +13294,10 @@ pub(crate) const fn radio_frame_len(att_mtu: u16) -> Option<usize> {
 
 /// Starts an engine for a mesh an earlier process left on, with no session:
 /// `left_ms` is the service's word, cut to twelve hours. Starts nothing when
-/// one runs, when `left_ms` is 0, or over an engine that ended and is not yet
-/// paid for. Answers whether an engine runs.
+/// one runs, when `left_ms` is 0, or once a session has spoken in this
+/// process or an engine has run in it: one start a process, and none after
+/// mesh was turned off, ended, or was found off by a session that opened.
+/// Answers whether an engine runs.
 ///
 /// The engine is keyless and so is this start: it carries and emits cover,
 /// and seals and opens nothing until a session adopts it — whose deadline
@@ -13327,8 +13373,12 @@ pub(crate) fn radio_receive(link: u64, frame: &[u8]) {
 /// The next thing for the radio to do, as [`radio_encoded`] writes it, after
 /// the timers that fell due: `None` when there is nothing, or no engine. A
 /// frame comes out only for a link in `ready`, and is spent by this call:
-/// the radio delivers it or closes its link. `ready` beyond the engine's
-/// link slots is cut.
+/// the radio delivers it or closes its link.
+///
+/// `ready` holds only links the radio reported up and has not been told to
+/// close or reported down, each once. Only its first `MAX_LINKS` ids are
+/// read — more than any engine has links — so an id that names no link takes
+/// the place of one that does.
 #[cfg_attr(not(test), expect(dead_code, reason = "the JNI shim calls it"))]
 pub(crate) fn radio_poll(ready: &[u64]) -> Option<Vec<u8>> {
     let mut links = [LinkId(0); MAX_LINKS as usize];
@@ -24543,7 +24593,7 @@ mod mesh_ffi_tests {
         CircleSlot, Config, LinkId, MeshEngine, Output, PeerRef, Role, Stats,
     };
     use haven_core::mesh::handoff::{Handoff, Op};
-    use haven_core::mesh::packet::{cover_packet, Packet};
+    use haven_core::mesh::packet::{cover_packet, Packet, PacketId};
     use haven_core::nostr::mls::types::GroupId;
     use haven_core::nostr::mls::MESH_ON_MAX_MS;
     use nostr::Keys;
@@ -24577,10 +24627,11 @@ mod mesh_ffi_tests {
     struct Bench;
 
     impl Bench {
-        /// The engine's clock at a fixed instant, and no engine.
+        /// The engine's clock at a fixed instant, in a process that has only
+        /// just begun.
         fn new() -> Self {
             install_test_seams();
-            let _ = mesh_empty();
+            process_restarts();
             MESH_CLOCK_OVERRIDE_MS.store(1_000 * HOUR, Ordering::SeqCst);
             Self
         }
@@ -24593,9 +24644,16 @@ mod mesh_ffi_tests {
 
     impl Drop for Bench {
         fn drop(&mut self) {
-            let _ = mesh_empty();
+            process_restarts();
             MESH_CLOCK_OVERRIDE_MS.store(0, Ordering::SeqCst);
         }
+    }
+
+    /// The process ended and another began: no engine, and no session has
+    /// spoken. Not what `mesh_empty` leaves, which is what a session's word
+    /// leaves: after that the radio's service starts nothing.
+    fn process_restarts() {
+        *mesh_home() = MeshHome::Unclaimed;
     }
 
     /// Reads the engine as a radio entry does, holding no session.
@@ -24612,8 +24670,35 @@ mod mesh_ffi_tests {
     fn untouched() -> Option<Stats> {
         match &*mesh_home() {
             MeshHome::On(slot) => Some(slot.engine.stats()),
-            MeshHome::Off | MeshHome::Ended(_) => None,
+            MeshHome::Unclaimed | MeshHome::Off | MeshHome::Ended(_) => None,
         }
+    }
+
+    /// Whether the engine has a record of `packet`: it holds it, or held it.
+    fn engine_knows(packet: &PacketId) -> bool {
+        match &*mesh_home() {
+            MeshHome::On(slot) => slot.engine.store().has_record(packet),
+            MeshHome::Unclaimed | MeshHome::Off | MeshHome::Ended(_) => false,
+        }
+    }
+
+    /// The packets `device`'s session has left for the engine, read and left
+    /// where they were.
+    fn left_for_the_engine(device: &Device) -> Vec<PacketId> {
+        let (handoff, mut left) = (device.session().mesh_handoff(), Vec::new());
+        for (slot, op) in handoff.take() {
+            match op {
+                Op::Offer {
+                    packet,
+                    expires_at_secs,
+                } => {
+                    left.push(packet.id());
+                    handoff.offer(slot, packet, expires_at_secs);
+                }
+                Op::Purge => handoff.purge(slot),
+            }
+        }
+        left
     }
 
     /// What `radio_poll` answered, as a radio reads it; `None` for bytes
@@ -24990,6 +25075,7 @@ mod mesh_ffi_tests {
             handoff: std::sync::Arc::clone(handoff),
             until_ms: u64::MAX,
             folded: 0,
+            owed: 0,
         }
     }
 
@@ -25985,13 +26071,19 @@ mod mesh_ffi_tests {
         );
     }
 
-    /// With no engine — mesh off, or ended by its deadline and not yet paid
-    /// for — every radio entry does nothing: none starts an engine, none
-    /// answers as if one ran, and what an ended engine is owed stays owed.
+    /// With no engine — none yet in this process, mesh off, or ended by its
+    /// deadline and not yet paid for — every radio entry does nothing: none
+    /// starts an engine, none answers as if one ran, none speaks for a
+    /// session, and what an ended engine is owed stays owed.
     #[test]
     fn with_no_engine_every_radio_entry_does_nothing() {
         let _keyring = super::SHARED_KEYRING_TEST_LOCK.blocking_lock();
         let _bench = Bench::new();
+        assert!(
+            !every_radio_entry_finds_an_engine() && matches!(*mesh_home(), MeshHome::Unclaimed),
+            "a radio entry made before any session started an engine, or spoke as a session"
+        );
+        *mesh_home() = MeshHome::Off;
         assert!(
             !every_radio_entry_finds_an_engine() && is_off(),
             "a radio entry made with mesh off started an engine or answered as one"
@@ -26265,7 +26357,10 @@ mod mesh_ffi_tests {
     /// content on links in any state, links and peers under any number, any
     /// MTU, ready lists of any length, in any order. No entry panics, the
     /// engine stays, and everything a poll answers is an output the radio can
-    /// read, no longer than a frame and its header.
+    /// read, no longer than a frame and its header. The frames are random
+    /// bytes, so they reach the handshake and the length checks and never
+    /// open: what a peer that completed a handshake can send is the engine's
+    /// own property test's to cover.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn no_input_a_radio_can_make_panics_an_entry_or_draws_an_output_it_cannot_read() {
         let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
@@ -26414,6 +26509,202 @@ mod mesh_ffi_tests {
         );
     }
 
+    /// No entry that holds a session runs the engine's timers (plan §5.1):
+    /// such an entry is made right after a relay send, and nothing the
+    /// engine does on air may fall there. A slot falls due; the session
+    /// leaves a location and makes every kind of entry it has; nothing is
+    /// emitted. The radio's next entry serves the slot, with that location.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn no_session_entry_runs_the_engines_timers_and_the_radio_serves_the_slot_with_what_was_left(
+    ) {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let bench = Bench::new();
+        let (_relay, url, relays) = relay().await;
+        let device = Device::new("mesh_no_session_timer");
+        let group = device.founds(&url, &[]).await;
+        assert_eq!(mesh_start(&device.circle).await, MeshStartFfi::Started);
+        let mut near = Phone::quiet(1);
+        near.radio_link(true, 517);
+        radio_carry(&mut [&mut near]);
+
+        bench.pass(PAST_A_SLOT);
+        assert_eq!(
+            device.shares(&relays, &group).await,
+            LocationPublishFfi::Accepted
+        );
+        let sent = left_for_the_engine(&device);
+        assert!(sent.len() == 1, "premise: the send left its location");
+        assert!(mesh_stats(&device.circle).await.on);
+        let drive = relays.mesh_drive_driven(&device.circle).await;
+        assert!(drive.replayed.is_empty() && !drive.errored);
+        assert_eq!(mesh_resume(&device.circle).await, MeshStartFfi::AlreadyOn);
+        assert_eq!(mesh_keep_on(&device.circle).await, MeshStartFfi::AlreadyOn);
+        mesh_reset_counts(&device.circle).await;
+        assert!(
+            untouched().is_some_and(|stats| stats.emitted == 0 && stats.held == 0),
+            "an entry that holds a session ran the slot that fell due"
+        );
+        assert!(
+            radio_wake_in_ms() == Some(0),
+            "an entry that holds a session moved the engine's schedule"
+        );
+
+        assert!(polled(&[]).is_none());
+        assert!(
+            untouched().is_some_and(|stats| stats.emitted == 1 && stats.outbox == 0),
+            "the radio's entry did not serve the slot that fell due"
+        );
+        radio_run(&bench, &mut [&mut near], 4 * TICK);
+        assert!(
+            near.engine.store().has_record(&sent[0]),
+            "the slot the radio served did not carry the location the session left"
+        );
+    }
+
+    /// Sharing stopped withdraws every location that waits for the engine,
+    /// even when an emission slot fell due and no entry was made before the
+    /// user stopped (plan §5.1 item 2). Whichever entry comes next — the
+    /// radio's, or one that holds the session — the slot is served with a
+    /// cover packet: no circle's location is ever in the engine, and none
+    /// reaches a linked phone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sharing_stopped_after_a_slot_fell_due_unserved_withdraws_every_location_that_waited() {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let bench = Bench::new();
+        let (_relay, url, relays) = relay().await;
+        let device = Device::new("mesh_overdue_stop");
+        let circles = [
+            device.founds(&url, &[]).await,
+            device.founds(&url, &[]).await,
+        ];
+
+        for radio_first in [true, false] {
+            assert_eq!(mesh_start(&device.circle).await, MeshStartFfi::Started);
+            let mut near = Phone::quiet(1);
+            near.radio_link(true, 517);
+            radio_carry(&mut [&mut near]);
+            for group in &circles {
+                assert_eq!(
+                    device.shares(&relays, group).await,
+                    LocationPublishFfi::Accepted
+                );
+            }
+            let sent = left_for_the_engine(&device);
+            assert!(
+                sent.len() == 2 && polled(&[]).is_none() && waiting() == 2,
+                "premise: each circle's location waits in the engine"
+            );
+
+            bench.pass(PAST_A_SLOT);
+            mesh_sharing_stopped(&device.circle);
+            if !radio_first {
+                assert!(mesh_stats(&device.circle).await.on);
+            }
+            assert!(polled(&[]).is_none());
+            assert!(mesh_stats(&device.circle).await.on);
+            assert!(
+                untouched().is_some_and(|stats| stats.emitted == 1 && stats.outbox == 0),
+                "premise: the slot that fell due was served"
+            );
+            assert!(
+                sent.iter().all(|packet| !engine_knows(packet)),
+                "a location went out in a slot that fell due before sharing was stopped"
+            );
+            radio_run(&bench, &mut [&mut near], 4 * TICK);
+            let got = near.engine.store();
+            assert!(
+                near.engine.stats().accepted == 1
+                    && sent.iter().all(|packet| !got.has_record(packet)),
+                "a location withdrawn when sharing stopped reached a linked phone"
+            );
+            mesh_stop(&device.circle).await;
+        }
+    }
+
+    /// A session that opens after a slot fell due unserved is handed an
+    /// engine with nothing of the last session's in it: what that session
+    /// left waiting, under slot numbers this one does not use, neither waits
+    /// nor goes out when the radio serves that slot.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_session_that_opens_after_a_slot_fell_due_finds_nothing_of_the_last_sessions_sent() {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let bench = Bench::new();
+        let (_relay, url, relays) = relay().await;
+        let device = Device::new("mesh_overdue_reopened");
+        let circles = [
+            device.founds(&url, &[]).await,
+            device.founds(&url, &[]).await,
+        ];
+        assert_eq!(mesh_start(&device.circle).await, MeshStartFfi::Started);
+        for group in &circles {
+            assert_eq!(
+                device.shares(&relays, group).await,
+                LocationPublishFfi::Accepted
+            );
+        }
+        let sent = left_for_the_engine(&device);
+        assert!(
+            sent.len() == 2 && waiting() == 2,
+            "premise: each circle's location waits in the engine"
+        );
+
+        bench.pass(PAST_A_SLOT);
+        let _device = device.reopened();
+        assert!(polled(&[]).is_none());
+        assert!(
+            untouched().is_some_and(|stats| stats.emitted == 1 && stats.outbox == 0),
+            "premise: the radio served the slot that fell due"
+        );
+        assert!(
+            sent.iter().all(|packet| !engine_knows(packet)),
+            "what the closed session left went out in the slot that fell due"
+        );
+    }
+
+    /// The user asks for mesh as its deadline passes, and an entry that
+    /// holds no session — the radio's — finds the deadline passed before the
+    /// ask reaches the engine. The session has taken the ask: an engine
+    /// starts under the new deadline, what the one that ended had passed on
+    /// is counted, and mesh is not turned off. A session that only asks for
+    /// what stands starts nothing over an engine that ended.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_ask_the_session_took_starts_an_engine_over_one_a_radio_entry_found_ended() {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let bench = Bench::new();
+        let device = Device::new("mesh_late_ask_radio");
+        device.session().set_legacy_clock_for_test(wall_ms());
+        assert_eq!(mesh_start(&device.circle).await, MeshStartFfi::Started);
+
+        // Where `mesh_start` stands once the store has taken its deadline,
+        // when a radio entry was made meanwhile.
+        bench.pass(MESH_ON_MAX_MS);
+        assert!(device.session().mesh_on_until(u64::MAX).await);
+        assert!(polled(&[]).is_none());
+        assert!(
+            matches!(*mesh_home(), MeshHome::Ended(0)),
+            "premise: the radio's entry found the deadline passed"
+        );
+        // As if that engine had passed three packets on.
+        *mesh_home() = MeshHome::Ended(3);
+        assert_eq!(mesh_open(device.session(), false), MeshStartFfi::Off);
+        assert!(
+            matches!(*mesh_home(), MeshHome::Ended(3)),
+            "a session that asked for nothing started an engine over one that ended"
+        );
+        assert_eq!(mesh_open(device.session(), true), MeshStartFfi::Started);
+        let stats = mesh_stats(&device.circle).await;
+        assert!(
+            stats.on
+                && stats.on_for_ms == MESH_ON_MAX_MS
+                && device.session().mesh_on_until_for_test() != 0,
+            "an ask made as a radio entry found the deadline passed did not turn mesh on"
+        );
+        assert!(
+            counts(&stats) == [0, 3, 0, 3],
+            "what the engine that ended had passed on was lost to the ask"
+        );
+    }
+
     // ---- the start that holds no session (owner question Q-2) --------------
     //
     // Everything below goes with `radio_resume`: were the radio's service not
@@ -26447,19 +26738,18 @@ mod mesh_ffi_tests {
         assert!(radio_left_ms() == HOUR - PAST_A_SLOT);
     }
 
-    /// The service's word buys no more than twelve hours and cannot be given
-    /// twice: no time at all starts nothing; asked again while the engine
-    /// runs, it moves no deadline; and once the engine ended it starts no
-    /// other until an entry that holds a session has paid for the one that
-    /// ended.
+    /// The service's word buys one engine a process, for no more than twelve
+    /// hours: no time at all starts nothing; asked again while the engine
+    /// runs, it moves no deadline; and once that engine ended it starts no
+    /// other — not while the one that ended is owed, and not after a session
+    /// has paid for it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_radio_cannot_keep_an_engine_past_twelve_hours_nor_start_over_one_that_ended() {
         let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
         let bench = Bench::new();
-        let device = Device::new("mesh_radio_cap");
 
         assert!(
-            !radio_resume(0) && is_off(),
+            !radio_resume(0) && matches!(*mesh_home(), MeshHome::Unclaimed),
             "no time left started an engine"
         );
         assert!(
@@ -26478,10 +26768,14 @@ mod mesh_ffi_tests {
             !radio_resume(HOUR) && matches!(*mesh_home(), MeshHome::Ended(0)),
             "the service started an engine over one that ended and is not paid for"
         );
-        assert!(!mesh_stats(&device.circle).await.on && is_off());
+        let device = Device::new("mesh_radio_cap");
         assert!(
-            radio_resume(HOUR) && radio_left_ms() == HOUR,
-            "an engine that ended and was paid for keeps the service from starting another"
+            !mesh_stats(&device.circle).await.on && is_off(),
+            "premise: a session paid for the engine that ended"
+        );
+        assert!(
+            !radio_resume(HOUR) && is_off(),
+            "the service started a second engine, once the first had ended and was paid for"
         );
     }
 
@@ -26501,6 +26795,7 @@ mod mesh_ffi_tests {
         device.session().set_legacy_clock_for_test(wall);
         assert!(device.session().mesh_on_until(u64::MAX).await);
         let left = device.closed();
+        process_restarts();
 
         assert!(radio_resume(6 * HOUR));
         let mut near = Phone::new(1, TICK);
@@ -26540,11 +26835,12 @@ mod mesh_ffi_tests {
     }
 
     /// Whichever of a session and the radio's service asks first, there is
-    /// one engine and the session feeds it (F-16). The radio first: the
-    /// session is told the engine runs — never that mesh is off beside a
-    /// running engine — and keeps that engine. The session first: the radio
-    /// is told the same, and takes neither the session's hand-off, nor what
-    /// waits in it, nor its deadline.
+    /// one engine and the session feeds it (F-16). The radio first, in a
+    /// process no session has yet opened in: the session is told the engine
+    /// runs — never that mesh is off beside a running engine — and keeps that
+    /// engine. The session first: the radio is told the same, and takes
+    /// neither the session's hand-off, nor what waits in it, nor its
+    /// deadline.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn whichever_of_a_session_and_the_radio_asks_first_there_is_one_engine_and_the_session_feeds_it(
     ) {
@@ -26554,12 +26850,15 @@ mod mesh_ffi_tests {
         let device = Device::new("mesh_radio_both");
         let group = device.founds(&url, &[]).await;
         assert!(device.session().mesh_on_until(u64::MAX).await);
+        let left = device.closed();
+        process_restarts();
 
         assert!(radio_resume(HOUR));
         bench.pass(PAST_A_SLOT);
         assert!(polled(&[]).is_none());
         let emitted = untouched().expect("an engine runs").emitted;
         assert!(emitted >= 1, "premise: the engine's first slot passed");
+        let device = Device::opened(left);
         assert_eq!(mesh_resume(&device.circle).await, MeshStartFfi::AlreadyOn);
         assert!(
             untouched().is_some_and(|stats| stats.emitted == emitted)
@@ -26611,8 +26910,6 @@ mod mesh_ffi_tests {
     async fn a_start_finds_the_engine_or_starts_one_under_one_hold_of_the_lock() {
         let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
         let _bench = Bench::new();
-        let device = Device::new("mesh_radio_one_hold");
-        assert!(device.session().mesh_on_until(u64::MAX).await);
         // How often `start` took the lock, on this thread.
         let holds = |start: &dyn Fn() -> bool| {
             let before = MESH_HOLDS.get();
@@ -26622,8 +26919,15 @@ mod mesh_ffi_tests {
             );
             MESH_HOLDS.get() - before
         };
-        let session = |confirmed| mesh_open(device.session(), confirmed) != MeshStartFfi::Off;
+        assert!(
+            holds(&|| radio_resume(HOUR)) == 1 && holds(&|| radio_resume(HOUR)) == 1,
+            "the radio's start let go of the engine's lock before it started the engine"
+        );
 
+        process_restarts();
+        let device = Device::new("mesh_radio_one_hold");
+        assert!(device.session().mesh_on_until(u64::MAX).await);
+        let session = |confirmed| mesh_open(device.session(), confirmed) != MeshStartFfi::Off;
         assert!(
             holds(&|| session(false)) == 1,
             "a session's start let go of the engine's lock before it started the engine"
@@ -26633,16 +26937,12 @@ mod mesh_ffi_tests {
             "a start the user asked for let go of the lock between moving the deadline and \
              adopting the engine"
         );
-        let _ = mesh_empty();
-        assert!(
-            holds(&|| radio_resume(HOUR)) == 1 && holds(&|| radio_resume(HOUR)) == 1,
-            "the radio's start let go of the engine's lock before it started the engine"
-        );
     }
 
     /// The session overrules the service. An engine the radio's service
     /// started is ended by the first session to open whose mesh is off: the
-    /// radio is told nothing is left, and no key was ever stored for it.
+    /// radio is told nothing is left, no key was ever stored for it, and the
+    /// service's word starts no other.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_session_whose_mesh_is_off_ends_the_engine_the_radio_started() {
         let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
@@ -26651,6 +26951,7 @@ mod mesh_ffi_tests {
         let device = Device::new("mesh_radio_overruled");
         let group = device.founds(&url, &[]).await;
         let left = device.closed();
+        process_restarts();
         assert!(radio_resume(HOUR) && radio_left_ms() == HOUR);
 
         let device = Device::opened(left);
@@ -26665,6 +26966,80 @@ mod mesh_ffi_tests {
                 && device.keys_of(&group) == 0
                 && device.session().mesh_on_until_for_test() == 0,
             "an engine the radio started turned the session's mesh on, or left a key"
+        );
+        assert!(
+            !radio_resume(HOUR) && is_off(),
+            "the service started an engine again after a session's mesh was found off"
+        );
+    }
+
+    /// Once a session has spoken in the process, what the radio's service
+    /// remembers starts no engine in it: not after a session opened with
+    /// mesh off; not after mesh was turned off, nor between the engine's
+    /// going and the store's being told; not after the deadline passed and
+    /// was paid for; not after the identity was deleted; and not after an
+    /// engine call panicked, session or none. While an engine runs the
+    /// service is still told that one does.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn once_a_session_has_spoken_the_radio_starts_no_engine() {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let bench = Bench::new();
+        let refused = || !radio_resume(HOUR) && is_off();
+
+        assert!(radio_resume(HOUR), "premise: no session has spoken");
+        let panicked = std::panic::catch_unwind(|| engine(|_| panic!("an engine call panics")));
+        assert!(
+            panicked.is_err() && refused(),
+            "the service started an engine again after an engine call panicked"
+        );
+
+        process_restarts();
+        let (_relay, url, _relays) = relay().await;
+        let device = Device::new("mesh_radio_latched");
+        let group = device.founds(&url, &[]).await;
+        assert!(
+            refused(),
+            "a session opened with mesh off, and the service started an engine after it"
+        );
+
+        assert_eq!(mesh_start(&device.circle).await, MeshStartFfi::Started);
+        assert!(
+            radio_resume(HOUR),
+            "the service was told no engine runs beside the session's"
+        );
+        // Where `mesh_stop` stands once the engine is gone and the store is
+        // still to be told.
+        device.circle.inner.fold_mesh_counts(0, mesh_empty());
+        assert!(
+            refused(),
+            "the service started an engine while mesh was being turned off"
+        );
+        mesh_stop(&device.circle).await;
+        assert!(
+            refused() && device.keys_of(&group) == 0,
+            "the service started an engine after mesh was turned off"
+        );
+
+        device.session().set_legacy_clock_for_test(wall_ms());
+        assert_eq!(mesh_start(&device.circle).await, MeshStartFfi::Started);
+        bench.pass(MESH_ON_MAX_MS);
+        assert!(
+            !mesh_stats(&device.circle).await.on && is_off(),
+            "premise: the deadline passed and a session paid for the engine"
+        );
+        assert!(
+            refused(),
+            "the service started another twelve hours after mesh ended at its deadline"
+        );
+
+        device.session().set_legacy_clock_for_test(0);
+        assert_eq!(mesh_start(&device.circle).await, MeshStartFfi::Started);
+        let Device { dir, circle, .. } = device;
+        drop(circle);
+        wipe_all_mls_state(dir.as_str()).await.expect("the wipe");
+        assert!(
+            refused(),
+            "the service started an engine after the identity was deleted"
         );
     }
 
@@ -26703,7 +27078,10 @@ mod mesh_ffi_tests {
         carrier.unlink();
         mesh_stop(&alice.circle).await;
 
-        // His phone, with no session of his open, takes it from that phone.
+        // His phone, in a process no session has opened in, takes it from
+        // that phone.
+        drop(alice);
+        process_restarts();
         assert!(radio_resume(HOUR));
         carrier.radio_link(true, 517);
         radio_run(&bench, &mut [&mut carrier], 4 * TICK);
@@ -26820,6 +27198,8 @@ mod mesh_ffi_tests {
     /// `with_mesh` with no session, once, and through nothing else — but the
     /// one that starts an engine, which says so to `mesh_take`, and the two
     /// that touch no engine at all. The list of them is exactly this one.
+    /// This reads the entries' own text and no further: what a function they
+    /// call does is held by the tests that run them.
     #[test]
     fn the_radio_entries_take_no_session() {
         let source = shipped();
@@ -26890,9 +27270,9 @@ mod mesh_ffi_tests {
         );
     }
 
-    /// The mesh's part of the bridge writes no log line and renders no value.
-    #[test]
-    fn the_mesh_entries_log_nothing_and_format_nothing() {
+    /// The mesh's part of the bridge: its section, and its two entries on the
+    /// relay manager.
+    fn mesh_part() -> Vec<&'static str> {
         let source = shipped();
         let start = source
             .find("// ============================ Bluetooth mesh FFI")
@@ -26900,7 +27280,7 @@ mod mesh_ffi_tests {
         let end = source
             .find("// ========================= M3c: Live-Sync Engine FFI")
             .expect("the next section is declared");
-        let mut read = vec![&source[start..end]];
+        let mut part = vec![&source[start..end]];
         for header in [
             // Split, so that no test reading this file for the entries it
             // declares takes these two lines for declarations.
@@ -26909,9 +27289,50 @@ mod mesh_ffi_tests {
         ] {
             let at = source.find(header).expect("the entry is declared");
             let rest = &source[at..];
-            read.push(&rest[..rest.find("\n    }\n").expect("the entry ends")]);
+            part.push(&rest[..rest.find("\n    }\n").expect("the entry ends")]);
         }
-        for text in read {
+        part
+    }
+
+    /// Session code runs none of the engine's timers (plan §5.1): outside
+    /// the radio's entries, the mesh's part of the bridge calls nothing of
+    /// the engine's but what names no time — an offer, a purge, a read of
+    /// what came in, its mark, the counts. This reads the text; that those
+    /// five run no timer is the engine's own test.
+    #[test]
+    fn only_the_radios_entries_call_what_runs_the_engines_timers() {
+        let source = shipped();
+        let mut called = std::collections::BTreeSet::new();
+        for part in mesh_part() {
+            let mut part = part.to_owned();
+            for header in source.lines() {
+                if declares_fn(header) && header.contains("fn radio_") {
+                    part = part.replace(body_of(source, header), "");
+                }
+            }
+            for (at, _) in part.match_indices("engine") {
+                let after = part[at + "engine".len()..].trim_start_matches(')');
+                let Some(call) = after.strip_prefix('.') else {
+                    continue;
+                };
+                let name: String = (call.chars())
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                if call[name.len()..].starts_with('(') {
+                    called.insert(name);
+                }
+            }
+        }
+        assert_eq!(
+            called.into_iter().collect::<Vec<_>>(),
+            ["mark_read", "offer", "purge", "stats", "take_unread"]
+        );
+    }
+
+    /// The mesh's part of the bridge writes no log line and renders no value.
+    #[test]
+    fn the_mesh_entries_log_nothing_and_format_nothing() {
+        for text in mesh_part() {
             for banned in [
                 "log::",
                 "println!",

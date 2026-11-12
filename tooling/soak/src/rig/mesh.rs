@@ -74,11 +74,11 @@ impl Node {
                 } if expires_at_secs.saturating_mul(1_000) > wall_ms => {
                     let left_ms = expires_at_secs.saturating_mul(1_000) - wall_ms;
                     let expires_ms = now_ms.saturating_add(left_ms.min(OFFER_MAX_MS));
-                    self.engine.offer(slot, packet, expires_ms, now_ms);
+                    self.engine.offer(slot, packet, expires_ms);
                 }
                 // An offer whose event has expired still replaces what
                 // waited: nothing older goes out in its place.
-                Op::Offer { .. } | Op::Purge => self.engine.purge(slot, now_ms),
+                Op::Offer { .. } | Op::Purge => self.engine.purge(slot),
             }
         }
     }

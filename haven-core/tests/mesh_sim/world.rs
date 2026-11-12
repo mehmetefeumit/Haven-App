@@ -551,8 +551,14 @@ impl World {
         self.engine(node)
     }
 
-    /// Calls into a phone's engine as its session code would, then carries
-    /// out whatever the engine wants done.
+    /// Calls into a phone's engine as its session code does, asleep or
+    /// awake: nothing of the radio layer's follows the call.
+    pub fn session<T>(&mut self, node: Node, call: impl FnOnce(&mut Engine) -> T) -> T {
+        call(&mut self.phone_mut(node).engine)
+    }
+
+    /// Calls into a phone's engine, then carries out whatever the engine
+    /// wants done, as the radio layer does after a call of its own.
     pub fn drive<T>(&mut self, node: Node, call: impl FnOnce(&mut Engine, u64) -> T) -> T {
         let now = self.now;
         let result = call(&mut self.phone_mut(node).engine, now);
