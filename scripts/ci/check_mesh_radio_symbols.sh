@@ -109,6 +109,7 @@ run_check() {
       fail "${library} does not export exactly the pinned Java_* symbols ('<' pinned and missing, '>' exported and not pinned: ${names_diff}). Kotlin finds a native method by this name at its first call; one that is missing is a crash there, and one that is not pinned is a native entry no guard has read. The pins are ${EXPORTS#"${REPO_ROOT}/"} and the keyring's ${KEYRING}."
     fi
     undefined="$(names --undefined-only "${library}")"
+    [[ -n "${undefined}" ]] || { echo "ERROR: ${library} imports no dynamic symbol — its imports were not read" >&2; exit 2; }
     while IFS= read -r name; do
       [[ "${name}" == __android_log_* ]] || continue
       for old in "${OLD_LIBLOG[@]}"; do
@@ -255,6 +256,10 @@ NM
   : >"${t}/lib/arm64-v8a/${LIBRARY}.defined"
   _case "a library with no dynamic symbol is a misconfiguration, not a set of missing exports" 2 'defines no dynamic symbol' "${t}"
 
+  t="${tmp}/no-imports"; _tree "${t}"
+  : >"${t}/lib/arm64-v8a/${LIBRARY}.undefined"
+  _case "a library that lists no import is a misconfiguration, not one that imports nothing new" 2 'imports no dynamic symbol' "${t}"
+
   t="${tmp}/unpinned"; _tree "${t}"
   sed -i '/^[a-zA-Z]/d' "${t}/haven/rust_builder/fixtures/mesh_radio_exports.txt"
   _case "a fixture that lists no method is a misconfiguration" 2 'lists no method' "${t}"
@@ -270,11 +275,11 @@ NM
     echo "self-test: FAILED" >&2
     return 1
   fi
-  if (( checked != 19 )); then
-    echo "self-test: ran ${checked} fixture(s), expected exactly 19. A fixture was added or removed without moving the pin." >&2
+  if (( checked != 20 )); then
+    echo "self-test: ran ${checked} fixture(s), expected exactly 20. A fixture was added or removed without moving the pin." >&2
     return 1
   fi
-  echo "self-test: OK (${checked}/19 fixtures)"
+  echo "self-test: OK (${checked}/20 fixtures)"
 }
 
 case "${1:-}" in

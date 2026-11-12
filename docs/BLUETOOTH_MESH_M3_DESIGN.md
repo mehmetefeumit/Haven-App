@@ -3631,3 +3631,33 @@ section:
 - **A host that is not Unix** cannot build the crate's tests: `libc` has
   no `dlopen` there. CI's host is Linux.
 
+**Security review of unit 1 (independent, read-only, of `1d82e4c`).** No
+blocker and no high finding: the eleven `unsafe` blocks, the struct and
+the five function types were read against `android/log.h` and
+`liblog/logger_write.cpp` at Android 11 and a current release, and nothing
+reachable from the logger can panic, allocate, lock or come back into
+`liblog`. Four low points, taken:
+
+- **The check is a reading at an instant.** If another library replaces
+  the logger while a second thread is already inside Haven's, `holds` can
+  answer yes once more; the next call answers no. Exact form, not built:
+  `holds` leaves the sentinel's address in an atomic and the logger
+  compares the pointer it was handed — a compare, no read of the line.
+  Owed to the unit that first calls `leverHolds`, if a reading at an
+  instant is not enough there.
+- **The banned words are a list.** Guard and test now also name `Arc`,
+  `Rc`, a map, `LazyLock`, `to_vec` and `from_ptr`; both say they stop the
+  ordinary edit and prove nothing.
+- **A library that lists no import** is a misconfiguration of
+  `check_mesh_radio_symbols.sh`, not a library that imports nothing new.
+- `libc` is a dev-dependency on every host, said so where it was said
+  loosely.
+
+Its recommendation, taken as a rule: **the unit that first calls
+`leverInstall` does not land without an emulator lane** — an API 30+ image
+and one of API 23 to 29 — that shows `install` and `holds` true, a planted
+`BluetoothGatt`-tagged line absent from every buffer under Haven's pid,
+and the library loading below API 30. Until then the call order inside
+`install` and `holds`, the sentinel and the release floor have run
+nowhere.
+

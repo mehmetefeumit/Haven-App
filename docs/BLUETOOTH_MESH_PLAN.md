@@ -3110,7 +3110,7 @@ item 6, that address rotation is the build's; §7.1 carries a note now.
   functions, an ABI and the `cfg!`'s target, of `libc` three names by
   their path, of the bridge `lever_*` alone, its tests last; and no file
   of the crate naming `android_log_sys`, or outside the lever one of the
-  five. 165 self-test fixtures (129, and 36); each of the eight failure
+  five. 166 self-test fixtures (129, and 37); each of the eight failure
   sites of check 13, and those of checks 1, 2 and 6, silenced in turn,
   fails the self-test. It reads text: it cannot see an index that could
   panic, nor that an `unsafe` block's argument is true.
@@ -3118,7 +3118,7 @@ item 6, that address rotation is the build's; §7.1 carries a note now.
   owed: on each ABI's debug APK in `build-check.yml`, the library's
   defined `Java_*` symbols are the fixture's eleven and the keyring's one
   (design N-3), and every undefined `__android_log_*` symbol is one of the
-  six `android/log.h` declares with no `__INTRODUCED_IN`. 19 self-test
+  six `android/log.h` declares with no `__INTRODUCED_IN`. 20 self-test
   fixtures over listings a stand-in for `nm` prints; each of its failure
   sites silenced fails it. Run here against the Flutter engine's own
   library for three ABIs, which the host's `nm` reads: the listing parses

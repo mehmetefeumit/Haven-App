@@ -27900,10 +27900,11 @@ mod mesh_ffi_tests {
 
     /// The lever's logger runs inside the platform's log call, on whichever
     /// thread logs, and an unwind out of it would abort the process. So its
-    /// file, and the decisions it asks this one for, hold no word that
-    /// panics, allocates or locks, and no arithmetic but the wrapping count;
-    /// the one assertion is the struct's layout, checked when it is
-    /// compiled.
+    /// file, and the decisions it asks this one for, hold none of the words
+    /// below — each panics, allocates or locks — and no arithmetic but the
+    /// wrapping count; the one assertion is the struct's layout, checked
+    /// when it is compiled. A list of words, not a proof: it stops the
+    /// ordinary edit.
     #[test]
     fn the_lever_holds_nothing_that_panics_allocates_or_locks() {
         let source = shipped();
@@ -27927,6 +27928,11 @@ mod mesh_ffi_tests {
             "Vec",
             "String",
             "to_owned",
+            "to_vec",
+            "from_ptr",
+            "HashMap",
+            "LazyLock",
+            "Arc<",
             "Mutex",
             "RwLock",
             ".lock(",

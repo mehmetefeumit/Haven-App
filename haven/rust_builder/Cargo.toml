@@ -55,7 +55,8 @@ planes = { package = "haven-local-relay", path = "../../tooling/e2e/local-relay"
 # export against `jni` on a machine with no Android target.
 jni = "0.21"
 # The host half of the log lever (`src/log_lever.rs`; the Android half is
-# below), for the same type-check: `dlopen` and `dlsym`, on a Unix host.
+# below), for the same type-check: `dlopen` and `dlsym`. A host that is not
+# Unix cannot build this crate's tests; CI's test jobs are Linux.
 libc = "0.2"
 
 # MDK's SQLCipher 4.17 source (tracked exception T-LIBSQLITE-PATCH). Only a

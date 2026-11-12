@@ -3672,7 +3672,8 @@ export yet, and on no other target does anything call an entry.
   (`lever_owns`, `lever_line`, `lever_held`, `lever_writes_own`), and its
   two entries run under `radio_guarded` like the others. `libc` is the
   version the lockfile already held: a direct dependency for Android and a
-  dev-dependency for a Unix host's tests, one new edge and no new package.
+  dev-dependency for the host's tests (so a host that is not Unix cannot
+  build the crate's tests), one new edge and no new package.
   Proof, on the host: `the_levers_tags_are_the_scanners`,
   `a_tag_is_havens_when_it_is_an_entry_or_an_entry_and_two_colons`,
   `a_release_build_reads_and_writes_no_line_and_a_debug_build_writes_only_havens`,

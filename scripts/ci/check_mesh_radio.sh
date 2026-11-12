@@ -261,7 +261,7 @@ readonly -a LEVER_STRINGS=(
 
 # How many fixtures the self-test runs. Pinned, because a fixture that stops
 # running is the one way a deleted check reports success.
-readonly SELF_TEST_FIXTURES=165
+readonly SELF_TEST_FIXTURES=166
 
 # The Kotlin of the radio (design §B): the app's mesh packages, whatever the
 # source set, and the JVM build of the pure one with its tests.
@@ -780,9 +780,9 @@ run_check() {
   if (( tests > 0 )); then
     view="$(sed -n "1,$(( tests - 1 ))p" <<<"${view}")"
   fi
-  hits="$(grep -nE "${B}(no_mangle|export_name|link_section|used|thread_local|impl|mod|macro_rules|JNIEnv|Box|Vec|String|Mutex|RwLock)${E}|${B}static[[:space:]]+mut${E}|radio_|${B}log::|unwrap|expect[[:space:]]*\(" <<<"${view}" | cut -d: -f1 | tr '\n' ' ' || true)"
+  hits="$(grep -nE "${B}(no_mangle|export_name|link_section|used|thread_local|impl|mod|macro_rules|JNIEnv|Box|Vec|String|Mutex|RwLock|Arc|Rc|HashMap|BTreeMap|LazyLock|to_vec|from_ptr)${E}|${B}static[[:space:]]+mut${E}|radio_|${B}log::|unwrap|expect[[:space:]]*\(" <<<"${view}" | cut -d: -f1 | tr '\n' ' ' || true)"
   if [[ -n "${hits}" ]]; then
-    fail "${LEVER} names what the lever has no use for (line(s) ${hits}): an attribute that exports or keeps a symbol, static mut or thread_local, an impl, a module or a macro of its own, JNIEnv, a radio entry, the log crate, unwrap or expect, Box, Vec, String, Mutex or RwLock. Its logger runs inside the platform's log call, on whichever thread logs: it must not log, lock, allocate or panic, and the file exports nothing."
+    fail "${LEVER} names what the lever has no use for (line(s) ${hits}): an attribute that exports or keeps a symbol, static mut or thread_local, an impl, a module or a macro of its own, JNIEnv, a radio entry, the log crate, unwrap or expect, Box, Vec, String, Mutex, RwLock, Arc, Rc, a map, LazyLock, to_vec or from_ptr. Its logger runs inside the platform's log call, on whichever thread logs: it must not log, lock, allocate or panic, and the file exports nothing."
   fi
   hits="$(grep -oE "[A-Za-z_][A-Za-z0-9_]*![[:space:]]*[([{]" <<<"${view}" | sed -E 's/!.*$//' | LC_ALL=C sort -u | tr '\n' ' ' || true)"
   if [[ "${hits}" != 'assert cfg matches offset_of ' \
@@ -1873,6 +1873,10 @@ RS
   t="${tmp}/lever-allocates"; _tree "${t}"
   _line "${t}/${LEVER}" 'let mut start = [0; LEVER_TAG_READ];' '    let mut start = [0; LEVER_TAG_READ];\n    let _copy = Box::new(start);'
   _case "an allocation in the lever fails" 1 "${LEVER} names what the lever has no use for" "${t}"
+
+  t="${tmp}/lever-copies"; _tree "${t}"
+  _line "${t}/${LEVER}" 'let mut start = [0; LEVER_TAG_READ];' '    let mut start = [0; LEVER_TAG_READ];\n    let _copy = start.to_vec();'
+  _case "an allocation under a method's name fails too" 1 "${LEVER} names what the lever has no use for" "${t}"
 
   t="${tmp}/lever-locks"; _tree "${t}"
   sed -i 's/^static LINES: AtomicU32 = AtomicU32::new(0);$/static LINES: AtomicU32 = AtomicU32::new(0);\nstatic HELD: std::sync::Mutex<u32> = std::sync::Mutex::new(0);/' "${t}/${LEVER}"
