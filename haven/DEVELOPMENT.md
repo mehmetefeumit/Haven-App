@@ -159,15 +159,25 @@ never tags or commits. Pushing `vX.Y.Z` (or `vX.Y.Z-beta.N` for a pre-release) t
    checks are still running the gate waits for them, but a later push to
    `main` cancels them (`ci.yml` cancels in-progress runs per branch), and the
    gate then fails until `gh run rerun <run id> --failed` passes them.
-2. **Refuses to proceed if the release keystore isn't configured** — a tag must be
-   release-signed, never debug-signed.
+2. Runs the **dependency audit afresh** (`dependency-audit`: `audit.yml` in
+   `full` mode — every lockfile, the upstream-advisory watcher, the
+   acknowledgement ledger). This one is never read from CI's verdict: an
+   advisory published since the merge stops the release. Nothing below runs
+   unless both it and the gate passed.
 3. Builds the **per-ABI release APKs** (`app-arm64-v8a-release.apk`,
-   `…-armeabi-v7a-…`, `…-x86_64-…`). Marketing version comes from the tag
-   (`vX.Y.Z → X.Y.Z`); the base versionCode is the CI run number.
-4. Creates a **GitHub Release** for the tag and attaches the per-ABI APKs +
-   `.sha256` sidecars. Tags containing `-` are flagged pre-release and not marked
-   "Latest".
-5. Publishes to **Zapstore** (`zsp publish`, gated on `ZAPSTORE_SIGN_WITH`) and
+   `…-armeabi-v7a-…`, `…-x86_64-…`), debug-signed: the build job holds no
+   signing secret. Marketing version comes from the tag (`vX.Y.Z → X.Y.Z`);
+   the base versionCode is the CI run number.
+4. Re-signs them with the release key in `android-sign`, a job that builds
+   nothing (`scripts/ci/sign_android_release.sh`), and verifies each APK: one
+   v2/v3 signer whose certificate is the one README publishes, 16 KB native-lib
+   alignment intact. It **refuses to proceed on a tag if the release keystore
+   isn't configured** — a tag must be release-signed, never debug-signed.
+5. Creates a **GitHub Release** for the tag (`android-publish`) and attaches the
+   per-ABI APKs + `.sha256` sidecars; its body lists every advisory the
+   release ships acknowledged, with each expiry. Tags containing `-` are
+   flagged pre-release and not marked "Latest".
+6. Publishes to **Zapstore** (`zsp publish`, gated on `ZAPSTORE_SIGN_WITH`) and
    uploads the iOS IPA to **TestFlight** (see below).
 
 The GitHub Release is the canonical Android channel: the **direct APK download**,
@@ -178,16 +188,27 @@ Pre-reqs before the first tag: set the `ANDROID_KEYSTORE_*` secrets (so the buil
 is release-signed), `STADIA_API_KEY`, the iOS Match/ASC secrets, and (for
 Zapstore) `ZAPSTORE_SIGN_WITH`.
 
+**Locked dependencies.** The release installs exactly the committed lockfiles
+(`flutter pub get --enforce-lockfile`, cargo `--locked`, Fastlane from the
+frozen `haven/ios/Gemfile.lock`), so it ships what `audit.yml` scanned. When a
+new Flutter stable moves the SDK-pinned packages (`flutter_test`,
+`integration_test` and what they pin), `pub get --enforce-lockfile` fails in
+the release and in `flutter-check`; recover with a PR that runs
+`flutter pub get` on the current stable and commits `haven/pubspec.lock`.
+
 **versionCode caveat (`--split-per-abi`).** Flutter overrides versionCode per ABI:
 arm64-v8a = `2000 + run_number`, armeabi-v7a = `1000 + run_number`,
 x86_64 = `4000 + run_number`. Each ABI's lineage stays monotonic because the base
 (run number) only increases — relevant if you ever inspect a built APK's
 versionCode directly.
 
-**Publish the signing fingerprint.** After the first release-signed build, run
-`apksigner verify --print-certs app-arm64-v8a-release.apk` (or
-`keytool -list -v -keystore <release.jks>`) and paste the **SHA-256** into the
-README's "Install (beta)" verification block so users can confirm authenticity.
+**The signing fingerprint.** README's "Signing Certificate SHA-256" block
+publishes the release certificate so users can confirm authenticity, and
+`android-sign` refuses a keystore whose certificate differs from it (a release
+signed by another key cannot update an installed Haven). Before the first
+release-signed build, or with a new keystore, paste its SHA-256 there from
+`keytool -list -v -keystore <release.jks>`; check a built APK with
+`apksigner verify --print-certs app-arm64-v8a-release.apk`.
 
 ### Publishing to Zapstore
 

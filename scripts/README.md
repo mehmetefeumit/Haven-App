@@ -97,9 +97,25 @@ the key at compile time. Runs in CI (`No Committed Secrets` job), inside
 
 **Usage:** `bash scripts/ci/check_no_committed_secrets.sh`
 
-### `ci/setup_android_signing.sh`
+### `ci/sign_android_release.sh`
 
-CI-only. Decodes the Android release keystore from `ANDROID_KEYSTORE_BASE64` and
-writes `haven/android/key.properties` (both gitignored). No-ops if the keystore
-secret is unset (build then falls back to debug signing). Used by
-`.github/workflows/release-build.yml`.
+CI-only, in `release-build.yml`'s `android-sign` job. The build job holds no
+signing secret and leaves its APKs debug-signed, so no package it compiles can
+read the keystore. This script replaces that signature with the release key
+(`ANDROID_KEYSTORE_*` secrets; passwords reach `apksigner`/`keytool` by
+environment name, never in argv) and fails unless every APK then verifies with
+one v2/v3 signer whose certificate is the keystore's and the one README.md
+publishes, and passes `zipalign -c -P 16 4`. The job itself refuses a tag when
+the keystore secret is unset; a manual run without it signs and publishes
+nothing.
+
+**Usage:** `bash scripts/ci/sign_android_release.sh <in-dir> <out-dir>` (CI), or
+`--self-test`.
+
+### `ci/release_ledger_notes.sh`
+
+Prints every advisory acknowledged in `osv-scanner.toml`, with its expiry, for
+the GitHub Release body (`android-publish`). A ledger it cannot read fails the
+release rather than publishing a shorter list.
+
+**Usage:** `bash scripts/ci/release_ledger_notes.sh osv-scanner.toml`

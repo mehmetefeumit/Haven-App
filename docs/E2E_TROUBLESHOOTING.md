@@ -346,7 +346,7 @@ restore is `continue-on-error: true` under a `timeout-minutes`, because an
 optimisation must never redden a lane that would have built cold.
 
 One job is exempt, with its reason on the line above its `runs-on`:
-`release-build.yml`'s `android`, because it signs and ships the artifact and
+`release-build.yml`'s `android`, because it builds the artifact that ships and
 nothing would authenticate the dependencies a restored cache put on disk (no
 `verification-metadata.xml`; the Gradle distribution itself is pinned by
 `distributionSha256Sum`).

@@ -21,10 +21,12 @@ pinned in `scripts/ci/security_tools.env`:
   crate, and an advisory published in a repository reaches no database unless
   GitHub reviews it, so it reads the advisories of every git source's
   repository and its fork parent, and of Flutter and the Dart SDK.
-- **Nightly** (`security-nightly.yml`): `full` on main, and the scanners and
-  the git-pin watcher over the lockfiles the latest published release was
-  built from. Each finding is a `dependency-security` issue, closed only by a
-  run that reached every verdict and no longer reports it.
+- **Nightly** (`security-nightly.yml`): `full` on main; the scanners and the
+  git-pin watcher over the lockfiles the latest published release was built
+  from; and zizmor's online audits of the workflows (an action pinned at a
+  now-vulnerable or impostor commit), which repo-guards' offline run cannot
+  make. Each finding is a `dependency-security` issue, closed only by a run
+  that reached every verdict and no longer reports it.
 - **In real time**: Dependabot alerts, once the owner enables them
   ([Owner actions](#owner-actions-repository-settings)).
 
@@ -62,7 +64,7 @@ section records the ones a reader needs to know about.
   - **94v4**: an external commit whose remove-prior truncated the tree brings
     the removed leaf back (fixed in 0.8.3 / 0.9.2).
   - **p276**: a rejected private message burns a generation of its sender's
-    ratchet, blocking that sender's later messages (fixed in 0.8.3).
+    ratchet, blocking that sender's later messages (fixed in 0.8.3 / 0.9.2).
   - **rrmv**: an out-of-bounds panic on malformed input (fixed in 0.9.0).
 
   None is in the GitHub Advisory Database or RustSec, so cargo-audit,
@@ -116,8 +118,9 @@ section records the ones a reader needs to know about.
 - **The Flutter engine and SDK**: releases build on current stable, the only
   line Flutter patches, and the watcher reads Flutter's and Dart's published
   advisories against it.
-- **Vendored C code**: RustSec rarely files a CVE against code a `-sys` crate
-  bundles (SQLCipher / SQLite above all) until someone reports it there.
+- **Vendored C code**: RustSec files an advisory against C code a `-sys` crate
+  bundles only when someone reports it there (RUSTSEC-2026-0459 is one). A
+  SQLCipher or SQLite CVE nobody files is invisible to every scanner here.
 - **The window before an advisory exists** (a malicious release): narrowed by
   the lockfiles, Dependabot's cooldowns and the retraction gate, not closed.
 - **`subosito/flutter-action`** is pinned by SHA but itself uses
@@ -5839,15 +5842,49 @@ user-relay contamination backfills correctly; the Welcome set does not.
 
 ## Dependency Auditing
 
-Run security audits regularly:
+What runs when, and the acknowledgement ledger's rules, are under
+[Known Vulnerabilities](#known-vulnerabilities). The same gates run locally,
+from the repository root, with the pinned scanners:
 
 ```bash
-# Install cargo-audit
-cargo install cargo-audit
+source scripts/ci/security_tools.env
+# Install cargo-audit and osv-scanner (Go checksum database verifies the latter)
+cargo install cargo-audit --locked --version "=${CARGO_AUDIT_VERSION}"
+GOTOOLCHAIN=auto go install "github.com/google/osv-scanner/v2/cmd/osv-scanner@${OSV_SCANNER_VERSION}"
 
-# Run audit
-cargo audit
+# cargo-audit reads haven-core/.cargo/audit.toml only from haven-core
+(cd haven-core && cargo audit && cargo audit --file ../haven/rust_builder/Cargo.lock)
+bash scripts/ci/check_audit_ignores_live.sh            # every audit.toml ignore still matches
 
-# Check for outdated dependencies
-cargo outdated
+bash scripts/ci/run_osv_gate.sh --unfiltered-json /tmp/osv-unfiltered.json
+bash scripts/ci/check_pub_retractions.sh
+GH_TOKEN="$(gh auth token)" bash scripts/ci/check_upstream_advisories.sh --matches-out /tmp/watcher.tsv
+bash scripts/ci/check_ledger.sh --mode full --osv-json /tmp/osv-unfiltered.json --watcher-matches /tmp/watcher.tsv
 ```
+
+Each script's header gives its exit codes and its `--self-test`, which needs
+no scanner and no network. `audit.yml` audits the tooling crates' lockfiles
+too; `check_audit_ignores_live.sh --lockfile-set` names any it misses.
+
+### Owner actions (repository settings)
+
+These are settings, not commits, and nothing in CI can check them:
+
+1. Enable **Dependabot alerts** and **Dependabot security updates**. Until
+   then nothing raises an advisory between pushes except the nightly scan, and
+   Dependabot opens version-update PRs only.
+2. Enable **private vulnerability reporting**, which the root
+   [`SECURITY.md`](../SECURITY.md) tells reporters to use.
+3. Protect `main` with required status checks, including
+   `Dependency Audit / cargo audit (RustSec advisories)` and
+   `Dependency Audit / Advisory gates (osv-scanner, pub retractions, upstream advisories, ledger)`,
+   next to `Repo Guards`, `Rust Checks`, `Coverage` and `Cross-Platform Compile`.
+4. Actions: default workflow token permissions **read-only**, and **require
+   actions to be pinned to a full-length commit SHA**.
+5. Turn on **immutable releases**, so a published Release's assets cannot be
+   replaced.
+6. Create the **`dependency-security`** label before the first nightly run:
+   `security-nightly.yml` cannot file an issue without it.
+7. Confirm that the fingerprint under README's "Signing Certificate SHA-256" is
+   the real release certificate: `scripts/ci/sign_android_release.sh` refuses
+   to sign with any key whose certificate differs from it.

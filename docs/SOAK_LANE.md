@@ -1434,7 +1434,7 @@ than resolved silently (owner decision Q4).
 
 * **RUSTSEC-2026-0237** — `nostr-relay-builder` is unmaintained
   (informational, `patched = []`, no version to move to). The soak crate embeds
-  it to build the relays it breaks; it is already carried by three of the four
+  it to build the relays it breaks; it is already carried by three of the five
   other audited lockfiles. Measured non-blocking: `cargo audit` returns rc 0 and
   counts it among its allowed warnings. **There is deliberately no `audit.toml`
   ignore** — cargo-audit's ignore list has no expiry field, so an ignore is a
