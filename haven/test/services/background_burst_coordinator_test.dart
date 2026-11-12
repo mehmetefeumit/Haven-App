@@ -403,6 +403,7 @@ void main() {
     bool throwOnShutdown = false,
     Future<BurstStart?> Function(Duration budget)? prepareStartIntoBurst,
     Future<bool> Function()? receiveWithoutSession,
+    void Function()? onStalled,
   }) {
     final log = <String>[];
     final engine = _RecordingEngine(log);
@@ -428,6 +429,7 @@ void main() {
       onOpenOutcome: openOutcomes.add,
       prepareStartIntoBurst: prepareStartIntoBurst ?? (_) async => null,
       receiveWithoutSession: receiveWithoutSession,
+      onStalled: onStalled ?? () {},
       now: now ?? () => DateTime(2026, 9, 7, 12),
     );
     return _Env(
@@ -3043,4 +3045,342 @@ void main() {
       });
     });
   });
+  // -------------------------------------------------------------------------
+  // A burst that never ends.
+  //
+  // None of a burst's links may be bounded (Security Rule 13), and they all
+  // ran on one chain: one link that never returned — an engine call parked
+  // behind a held Rust lock, a seal that never came back — queued every later
+  // tick behind it, and background send and receive ended for the life of the
+  // process. The next tick past the ceiling now runs on a fresh lane.
+  // -------------------------------------------------------------------------
+  group('a burst that never ends does not end bursting', () {
+    /// The stall ceiling of a burst carrying [circles] circles, with the
+    /// neutralised stagger every test here uses.
+    Duration ceiling(int circles) =>
+        burstBound(circles, PublishStagger.none()) + kBurstStallAllowance;
+
+    test('a pause that never returns: the next tick past the ceiling bursts '
+        'on a fresh lane, and the stuck one never shuts the pool', () async {
+      var clock = DateTime(2026, 9, 7, 12);
+      var stalls = 0;
+      final env = build(now: () => clock, onStalled: () => stalls++);
+      final pause = env.engine.pauseGate = Completer<void>();
+      final a = _circle('a', 1);
+
+      unawaited(tick(env, a));
+      await pumpEventQueue();
+      expect(env.engine.pauses, 1, reason: 'anti-vacuity: stuck in its pause');
+
+      clock = clock.add(ceiling(1) + const Duration(seconds: 1));
+      unawaited(tick(env, a));
+      await pumpEventQueue();
+
+      expect(env.engine.opens, 2, reason: 'the next tick opened a burst');
+      expect(env.publisher.published, ['a', 'a']);
+      expect(stalls, 1);
+
+      pause.complete();
+      await pumpEventQueue();
+      expect(
+        env.shutdownCount,
+        1,
+        reason: 'only the live lane shuts the publish pool; the stuck one, '
+            'woken, stops before its drive drain',
+      );
+    });
+
+    test('a burst inside its ceiling is not superseded', () async {
+      var clock = DateTime(2026, 9, 7, 12);
+      var stalls = 0;
+      final env = build(now: () => clock, onStalled: () => stalls++);
+      final pause = env.engine.pauseGate = Completer<void>();
+      final a = _circle('a', 1);
+
+      unawaited(tick(env, a));
+      await pumpEventQueue();
+      clock = clock.add(ceiling(1));
+      final queued = tick(env, a);
+      await pumpEventQueue();
+
+      expect(env.engine.opens, 1, reason: 'exactly at the ceiling is not past');
+      expect(stalls, 0);
+
+      pause.complete();
+      await queued;
+      expect(
+        env.engine.opens,
+        2,
+        reason: 'the tick was queued behind the burst, not dropped',
+      );
+    });
+
+    test('a seal that never returns: the live lane publishes nothing beside '
+        'it, still pauses, and seals after it with a gap', () async {
+      var clock = DateTime(2026, 9, 7, 12);
+      var stalls = 0;
+      final gaps = <List<String>>[];
+      late final _Env env;
+      env = build(
+        now: () => clock,
+        onStalled: () => stalls++,
+        stagger: _GapRecordingStagger(() => gaps.add(List.of(env.log))),
+      );
+      final seal = Completer<void>();
+      env.publisher.duringPublish = () => seal.future;
+      final a = _circle('a', 1);
+      final b = _circle('b', 2);
+
+      unawaited(tick(env, a));
+      unawaited(tick(env, b));
+      await pumpEventQueue();
+      expect(
+        env.publisher.published,
+        hasLength(1),
+        reason: 'anti-vacuity: stuck in its first seal',
+      );
+      final stranded = env.publisher.published.single;
+
+      clock = clock.add(ceiling(2) + const Duration(seconds: 1));
+      unawaited(tick(env, a));
+      unawaited(tick(env, b));
+      await pumpEventQueue();
+
+      expect(env.engine.opens, 2, reason: 'it still opened and received');
+      expect(stalls, 1);
+      expect(
+        env.publisher.published,
+        [stranded],
+        reason: 'a seal beside the stranded one could share its whole-second '
+            'created_at when it returns',
+      );
+      expect(
+        env.publisher.windows,
+        hasLength(1),
+        reason: 'and no GPS window is spent on a pass that seals nothing',
+      );
+      expect(
+        env.engine.isPaused,
+        isTrue,
+        reason: 'and the burst still paused: no REQ stands between bursts '
+            'while the seal is stuck',
+      );
+      expect(env.engine.pauses, 1);
+      expect(env.shutdownCount, 1);
+
+      seal.complete();
+      await pumpEventQueue();
+      expect(
+        env.publisher.published,
+        [stranded],
+        reason: 'the superseded lane seals nothing after the one it was in',
+      );
+      expect(env.engine.pauses, 1, reason: 'nor pauses');
+      expect(env.shutdownCount, 1, reason: 'nor shuts the pool');
+
+      gaps.clear();
+      await Future.wait([tick(env, a), tick(env, b)]);
+      expect(
+        env.publisher.published.skip(1),
+        unorderedEquals(['a', 'b']),
+        reason: 'the tick after the seal returned publishes as usual',
+      );
+      expect(
+        gaps.first.where((l) => l.startsWith('publish:')),
+        [
+          'publish:$stranded',
+        ],
+        reason: 'a stagger gap comes before the first seal after the '
+            'stranded one returned, not only between this burst own seals',
+      );
+      expect(gaps, hasLength(2));
+    });
+
+    test('a lane superseded inside its KeyPackage fold makes no further fold '
+        'step and no pool use when it wakes', () async {
+      var clock = DateTime(2026, 9, 7, 12);
+      final env = build(now: () => clock);
+      final keyPackage = Completer<void>();
+      env.maintenance.duringFold = () => keyPackage.future;
+      final a = _circle('a', 1);
+
+      unawaited(tick(env, a));
+      await pumpEventQueue();
+      expect(env.maintenance.keyPackageAt, hasLength(1));
+      expect(env.maintenance.relayListAt, isEmpty);
+
+      clock = clock.add(ceiling(1) + const Duration(seconds: 1));
+      await tick(env, a);
+      expect(env.engine.opens, 2);
+      expect(env.maintenance.relayListAt, hasLength(1));
+      expect(env.maintenance.leavesAfter, hasLength(1));
+      expect(env.shutdownCount, 1);
+
+      keyPackage.complete();
+      await pumpEventQueue();
+      expect(
+        env.maintenance.relayListAt,
+        hasLength(1),
+        reason: 'a relay-list fold from a lane that no longer owns the burst '
+            'reopens publish sockets no teardown will close',
+      );
+      expect(env.maintenance.leavesAfter, hasLength(1), reason: 'nor a leave');
+      expect(env.engine.settles, 1);
+      expect(env.engine.pauses, 1);
+      expect(env.shutdownCount, 1);
+    });
+
+    test('an idle close behind a stalled burst runs a fresh teardown',
+        () async {
+      var clock = DateTime(2026, 9, 7, 12);
+      final env = build(now: () => clock);
+      final pause = env.engine.pauseGate = Completer<void>();
+
+      unawaited(tick(env, _circle('a', 1)));
+      await pumpEventQueue();
+      clock = clock.add(ceiling(1) + const Duration(seconds: 1));
+      unawaited(env.coordinator.closeIdle());
+      await pumpEventQueue();
+
+      expect(env.engine.settles, 2, reason: 'the close did not wait it out');
+      expect(env.engine.pauses, 2);
+
+      pause.complete();
+      await pumpEventQueue();
+      expect(env.shutdownCount, 1, reason: "the live lane's close only");
+    });
+
+    test('a burst stuck across a resume and a pause is superseded, and never '
+        'pauses the engine when it wakes', () async {
+      var clock = DateTime(2026, 9, 7, 12);
+      var foregrounded = false;
+      final env = build(now: () => clock, foregrounded: () => foregrounded);
+      final settle = env.engine.settleGate = Completer<void>();
+      final a = _circle('a', 1);
+
+      unawaited(tick(env, a));
+      await pumpEventQueue();
+      expect(env.engine.settles, 1, reason: 'anti-vacuity: stuck in settle');
+      env.engine.settleGate = null; // only the first settle hangs
+
+      foregrounded = true; // resumed …
+      foregrounded = false; // … and paused again
+      clock = clock.add(ceiling(1) + const Duration(seconds: 1));
+      await tick(env, a);
+      expect(env.engine.opens, 2);
+      expect(env.engine.pauses, 1);
+      expect(env.shutdownCount, 1);
+
+      settle.complete();
+      await pumpEventQueue();
+      expect(
+        env.engine.pauses,
+        1,
+        reason: 'a pause from the superseded lane would land on the session '
+            'a later burst owns',
+      );
+      expect(env.shutdownCount, 1);
+    });
+
+    test('a burst stuck in its open is reported once, and not superseded',
+        () async {
+      // A replacement's open would queue behind the same engine lifecycle
+      // lock, adding one more call to run when it frees.
+      var clock = DateTime(2026, 9, 7, 12);
+      var stalls = 0;
+      final env = build(now: () => clock, onStalled: () => stalls++);
+      final open = env.engine.openGate = Completer<void>();
+      final a = _circle('a', 1);
+
+      unawaited(tick(env, a));
+      await pumpEventQueue();
+      clock = clock.add(ceiling(1) + const Duration(seconds: 1));
+      unawaited(tick(env, a));
+      await pumpEventQueue();
+      expect(stalls, 1, reason: 'the stall is still evidence');
+      expect(env.engine.opens, 1, reason: 'no second open queued');
+
+      clock = clock.add(ceiling(1));
+      unawaited(env.coordinator.closeIdle());
+      await pumpEventQueue();
+      expect(stalls, 1, reason: 'once per lane, not once per tick');
+      expect(env.engine.opens, 1);
+      expect(env.engine.settles, 0);
+
+      open.complete();
+      await pumpEventQueue();
+      expect(env.publisher.published, isNotEmpty, reason: 'it ran on');
+    });
+
+    test('the stall lines name no circle, key, relay or number', () async {
+      final logs = LogCapture.install();
+      var clock = DateTime(2026, 9, 7, 12);
+      final env = build(now: () => clock);
+      final pause = env.engine.pauseGate = Completer<void>();
+      env.engine.pauseError = StateError(
+        'group 0xdeadbeefcafe at wss://planted.example',
+      );
+      final planted = _circle('Quiet Wanderer', 7);
+
+      unawaited(tick(env, planted));
+      await pumpEventQueue();
+      clock = clock.add(ceiling(1) + const Duration(seconds: 1));
+      unawaited(tick(env, planted));
+      await pumpEventQueue();
+      pause.complete();
+      await pumpEventQueue();
+
+      logs
+        ..assertContains('stalled past its ceiling')
+        ..assertContains('superseded')
+        ..assertContains('belongs to a later burst')
+        ..assertNoNeedles([
+          'Quiet Wanderer',
+          '0xdeadbeefcafe',
+          'deadbeefcafe',
+          'wss://planted.example',
+        ]);
+      final stallLines = logs.lines.whereType<String>().where(
+        (l) =>
+            l.contains('stalled') ||
+            l.contains('superseded') ||
+            l.contains('later burst'),
+      );
+      expect(stallLines, isNotEmpty);
+      for (final line in stallLines) {
+        expect(
+          line,
+          isNot(matches(RegExp(r'\d'))),
+          reason: 'no count, duration or instant: a roster size or an '
+              'absolute time is an identifier here (Rule 15)',
+        );
+      }
+    });
+
+    test('the allowance is the fold and the teardown at their worst', () {
+      expect(
+        kBurstStallAllowance,
+        const Duration(seconds: kLoginPublishSettleSecs) +
+            const Duration(seconds: kCommitLadderSecs) * 3 +
+            const Duration(seconds: kBurstSettleCapSecs) +
+            const Duration(seconds: kRelayLifecycleOpSecs) *
+                kPauseBoundedSteps +
+            const Duration(seconds: kCommitLadderSecs),
+      );
+      expect(kBurstStallAllowance, const Duration(seconds: 314));
+    });
+  });
+}
+
+/// A [PublishStagger] that never waits and reports every gap it is asked for.
+class _GapRecordingStagger extends PublishStagger {
+  _GapRecordingStagger(this.onGap) : super.none();
+
+  final void Function() onGap;
+
+  @override
+  Duration sampleGap({int totalPublishes = 2}) {
+    onGap();
+    return Duration.zero;
+  }
 }
