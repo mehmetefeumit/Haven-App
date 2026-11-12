@@ -457,7 +457,7 @@ regions, verified point-by-point over the swept space.) **Trigger, exactly:** `A
 acquisition AND `J + ρ + σ ≥ 178 s`. **Worst realized gap: 248 s** against the 228 s retention — so the
 user-visible consequence is that a peer's marker is ABSENT for **at most 20 s**, once, before the next publish
 restores it. S+ never breaches at all (worst cold gap 198 s, because the delayed register anchors on the last fix
-and ρ falls out). API 23–30 is in scope because `minSdk = 23` (`haven/android/app/build.gradle.kts:36`). **No AP suspend is
+and ρ falls out). API 24–30 is in scope because `minSdk = flutter.minSdkVersion`, 24 since Flutter 3.50 (`haven/android/app/build.gradle.kts:40`). **No AP suspend is
 involved** — this is P2a's own regime with the plugin lock held, not the P2b stack. **Why it is accepted rather than fixed (reasoning REPLACED 2026-09-04; the
 earlier "every lever pays in S+ duty cycle" was simply wrong and is retracted — an API-level branch costs nothing
 on S+ by construction).** The lever that would close it is a **legacy-only interval ceiling of 147 s**
