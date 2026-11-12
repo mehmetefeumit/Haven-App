@@ -43,6 +43,7 @@ use super::types::{
 };
 use super::url_norm;
 use super::verified::verified_client;
+use crate::circle::MemberKeyPackage;
 use crate::log_alias::{self, bucket, RelayUrl as AliasRelayUrl};
 use crate::nostr::mls::types::{KeyPackageAdmissionRule, TransportMessage};
 
@@ -1441,7 +1442,7 @@ impl RelayManager {
     /// valid candidate is eligible.
     ///
     /// Test-only, as the two no-target fetches below are: an invite always has
-    /// a target, and [`Self::fetch_keypackage_for_invite`] is the one fetch a
+    /// a target, and [`Self::lookup_member_for_invite`] is the one lookup a
     /// shipped build can reach. The tests of author binding, slot supersession
     /// and discovery use these to read selection without a session.
     ///
@@ -1475,26 +1476,65 @@ impl RelayManager {
         self.fetch_keypackage_with_cascade(pubkey, &write).await
     }
 
-    /// Fetches the `KeyPackage` to invite `pubkey` with into the target whose
-    /// admission rule is `admit`
+    /// Looks `pubkey` up to invite them into the target whose admission rule is
+    /// `admit`
     /// ([`SessionManager::key_package_admission_rule`](crate::nostr::mls::SessionManager::key_package_admission_rule)),
-    /// through the discovery cascade over the user's pre-fetched NIP-65
-    /// write-capable relays. The rule is applied to every valid candidate
-    /// BEFORE they are ranked. When no tier holds an admissible one, the best
-    /// valid candidate is returned so the caller's admission check can say
-    /// why, and failing that a pre-migration one.
+    /// and says whether absence was proven.
+    ///
+    /// The inviter sequence of Marmot `transports/nostr.md` "Migration from
+    /// kind 10051": the account's kind 10050 and 10002 from the read-only
+    /// discovery plane, then its `KeyPackage`s from the 10002 write set, then
+    /// from discovery when the write set is empty or holds nothing invitable.
+    /// The rule is applied to every valid candidate BEFORE they are ranked
+    /// ([`Self::pick_keypackage_from_events`]); when nothing is admissible the
+    /// best valid candidate, failing that a pre-migration one, is still
+    /// [`MemberLookup::Found`], so the caller's admission check can say why.
+    ///
+    /// Every REQ goes out on one client of its own, shut down before this
+    /// returns: the shared pool never collects every invitee's relays, and a
+    /// socket it left half-dead cannot answer for a lookup.
     ///
     /// # Errors
     ///
-    /// Returns an error if the pubkey is invalid or any tier's fetch fails.
-    pub async fn fetch_keypackage_for_invite(
-        &self,
+    /// Only for a `pubkey` that does not parse. An unreachable or unfinished
+    /// relay is [`MemberLookup::Incomplete`], never an error.
+    pub async fn lookup_member_for_invite(
+        pubkey: &str,
+        admit: &KeyPackageAdmissionRule,
+    ) -> RelayResult<MemberLookup> {
+        Self::member_lookup(pubkey, Some(admit), None, DEFAULT_TIMEOUT).await
+    }
+
+    /// [`Self::lookup_member_for_invite`] with each REQ bounded by
+    /// `req_timeout`, so a test of a silent relay does not wait out
+    /// [`DEFAULT_TIMEOUT`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::lookup_member_for_invite`].
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn lookup_member_for_invite_within(
+        pubkey: &str,
+        admit: &KeyPackageAdmissionRule,
+        req_timeout: Duration,
+    ) -> RelayResult<MemberLookup> {
+        Self::member_lookup(pubkey, Some(admit), None, req_timeout).await
+    }
+
+    /// [`Self::lookup_member_for_invite`]'s `KeyPackage` step alone, over a
+    /// write set the caller already holds: no relay list is asked for, so the
+    /// found member carries `write_relays` and no other list.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::lookup_member_for_invite`].
+    #[cfg(feature = "test-utils")]
+    pub async fn lookup_key_package_on(
         pubkey: &str,
         write_relays: &[String],
         admit: &KeyPackageAdmissionRule,
-    ) -> RelayResult<Option<Event>> {
-        self.key_package_cascade(pubkey, write_relays, Some(admit))
-            .await
+    ) -> RelayResult<MemberLookup> {
+        Self::member_lookup(pubkey, Some(admit), Some(write_relays), DEFAULT_TIMEOUT).await
     }
 
     /// Runs the `KeyPackage` discovery cascade with no target in mind: every
@@ -1502,49 +1542,119 @@ impl RelayManager {
     ///
     /// # Errors
     ///
-    /// Returns an error if the pubkey is invalid or any tier's fetch fails.
+    /// Returns an error if the pubkey is invalid.
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn fetch_keypackage_with_cascade(
         &self,
         pubkey: &str,
         write_relays: &[String],
     ) -> RelayResult<Option<Event>> {
-        self.key_package_cascade(pubkey, write_relays, None).await
+        Ok(
+            match Self::member_lookup(pubkey, None, Some(write_relays), DEFAULT_TIMEOUT).await? {
+                MemberLookup::Found(member) => Some(member.key_package_event),
+                MemberLookup::NotFound | MemberLookup::Incomplete => None,
+            },
+        )
     }
 
-    /// The cascade: the user's write-capable relays first, then
-    /// [`discovery_relays`][crate::relay::discovery::discovery_relays]. An
-    /// empty set is skipped, and the cascade stops as soon as a package
-    /// `admit` admits is found (`None` admits every valid candidate).
-    ///
-    /// The second tier is judged together with what the first returned: a
-    /// slot's newest event stands for the slot across tiers, so a relay that
-    /// still serves a superseded event cannot revive it.
-    async fn key_package_cascade(
-        &self,
+    /// The lookup on a client of its own, shut down on every path.
+    async fn member_lookup(
         pubkey: &str,
-        write_relays: &[String],
         admit: Option<&KeyPackageAdmissionRule>,
-    ) -> RelayResult<Option<Event>> {
-        let pk = PublicKey::parse(pubkey).map_err(|_| RelayError::InvalidPubkey)?;
-        let mut seen = Vec::new();
-        if !write_relays.is_empty() {
-            // Another account's relays: dialled for this lookup on a client of
-            // its own, so the shared pool never collects every invitee's relays.
-            let lookup = Self::new();
-            let result = lookup.key_package_events_on(&pk, write_relays).await;
-            lookup.shutdown().await;
-            seen = result?;
-            if let Some(PickedKeyPackage::Invitable(event)) =
-                Self::pick_keypackage_from_events(&pk, seen.clone(), admit)
-            {
-                return Ok(Some(event));
-            }
+        write_relays: Option<&[String]>,
+        req_timeout: Duration,
+    ) -> RelayResult<MemberLookup> {
+        let account = PublicKey::parse(pubkey).map_err(|_| RelayError::InvalidPubkey)?;
+        let lookup = Self::new();
+        // Boxed: a lookup holds several relays' answers at once, and every
+        // caller's own future would otherwise carry them.
+        let found =
+            Box::pin(lookup.member_lookup_on(&account, admit, write_relays, req_timeout)).await;
+        lookup.shutdown().await;
+        found
+    }
+
+    /// The lookup's REQs, each through [`Self::fetch_events_per_relay_within`]
+    /// so that every relay's answer says whether it was whole. `write_relays`
+    /// stands in for the relay lists when the caller already holds them.
+    async fn member_lookup_on(
+        &self,
+        account: &PublicKey,
+        admit: Option<&KeyPackageAdmissionRule>,
+        write_relays: Option<&[String]>,
+        req_timeout: Duration,
+    ) -> RelayResult<MemberLookup> {
+        let discovery = discovery_relays();
+        let (inbox_relays, nip65, lists_answered) = if let Some(write) = write_relays {
+            let nip65 = Nip65Relays {
+                read: Vec::new(),
+                write: write.to_vec(),
+            };
+            (Vec::new(), nip65, true)
+        } else {
+            let list = |kind| Filter::new().kind(kind).author(*account).limit(1);
+            let (inbox, nip65) = tokio::join!(
+                self.fetch_events_per_relay_within(
+                    list(Kind::InboxRelays),
+                    &discovery,
+                    req_timeout
+                ),
+                self.fetch_events_per_relay_within(list(Kind::RelayList), &discovery, req_timeout),
+            );
+            let (inbox, nip65) = (inbox?, nip65?);
+            let inbox_relays =
+                Self::newest_authored(all_events(&inbox), account, Kind::InboxRelays, |_| true)
+                    .map_or_else(Vec::new, |list| Self::extract_relay_tag_urls(&list.tags));
+            let lists_answered = nip65.iter().any(|answer| answer.drained);
+            let nip65 =
+                Self::newest_authored(all_events(&nip65), account, Kind::RelayList, |_| true)
+                    .map_or_else(Nip65Relays::default, |list| Nip65Relays {
+                        read: Self::extract_nip65_read_relays(&list.tags),
+                        write: Self::extract_nip65_write_relays(&list.tags),
+                    });
+            (inbox_relays, nip65, lists_answered)
+        };
+
+        // `limit(10)`: well above any reasonable account's published slots.
+        let filter = Filter::new()
+            .kind(Kind::Custom(30443))
+            .author(*account)
+            .limit(10);
+        let (mut seen, mut holders) = if nip65.write.is_empty() {
+            (Vec::new(), None)
+        } else {
+            let answers = self
+                .fetch_events_per_relay_within(filter.clone(), &nip65.write, req_timeout)
+                .await?;
+            (all_events(&answers), Some(answers))
+        };
+        let mut picked = Self::pick_keypackage_from_events(account, seen.clone(), admit);
+        if !matches!(picked, Some(PickedKeyPackage::Invitable(_))) {
+            // The second tier is judged together with what the first returned:
+            // a slot's newest event stands for the slot across tiers, so a
+            // relay that still serves a superseded event cannot revive it.
+            let answers = self
+                .fetch_events_per_relay_within(filter, &discovery, req_timeout)
+                .await?;
+            seen.extend(all_events(&answers));
+            picked = Self::pick_keypackage_from_events(account, seen, admit);
+            holders.get_or_insert(answers);
         }
 
-        // Final fallback: the read-only discovery plane.
-        seen.extend(self.key_package_events_on(&pk, &[]).await?);
-        Ok(Self::pick_keypackage_from_events(&pk, seen, admit).map(PickedKeyPackage::into_event))
+        let Some(picked) = picked else {
+            let holders = holders.unwrap_or_default();
+            return Ok(if absence_proven(lists_answered, &holders) {
+                MemberLookup::NotFound
+            } else {
+                MemberLookup::Incomplete
+            });
+        };
+        Ok(MemberLookup::Found(Box::new(MemberKeyPackage {
+            key_package_event: picked.into_event(),
+            inbox_relays,
+            nip65_relays: nip65.read,
+            nip65_write_relays: nip65.write,
+        })))
     }
 
     /// Fetches a user's key package (kind 30443) from the given relay list,
@@ -2477,6 +2587,49 @@ pub fn foreign_relay_dialable(url: &str) -> bool {
         Some(Host::Ipv6(ip)) => is_public_ip(IpAddr::V6(ip)),
         None => false,
     }
+}
+
+/// What an invite lookup established about one account
+/// ([`RelayManager::lookup_member_for_invite`]).
+///
+/// No `Debug`: `Found` carries the account's relay lists (Security Rule 15).
+pub enum MemberLookup {
+    /// A package of the account's, with the lists its Welcome is routed by.
+    /// It may be one the target cannot admit: the caller's admission check
+    /// says why.
+    Found(Box<MemberKeyPackage>),
+    /// Every relay that holds the account's packages and connected finished
+    /// its answer, and none held one.
+    NotFound,
+    /// Some such relay did not finish, or none did, so absence is unproven:
+    /// the account may well have a package.
+    Incomplete,
+}
+
+/// Whether a lookup that selected no package proved there is none.
+///
+/// `holders` are the relays that hold the account's packages: its 10002 write
+/// set, or the discovery plane when that set is empty (Marmot
+/// `transports/nostr.md`: an absent list and an empty one both leave nothing
+/// else to ask). Fetching from every one of them is not an interop
+/// requirement, so a relay that never connected does not hold the verdict
+/// back; one that connected and did not finish (`CLOSED`, a timeout, the
+/// intake cap) does, and at least one must have finished. Without a 10002
+/// answer (`lists_answered`) the holders themselves are unknown.
+fn absence_proven(lists_answered: bool, holders: &[RelayFetchOutcome]) -> bool {
+    lists_answered
+        && holders.iter().any(|answer| answer.drained)
+        && holders
+            .iter()
+            .all(|answer| answer.drained || !answer.responded)
+}
+
+/// Every event of every relay's answer.
+fn all_events(answers: &[RelayFetchOutcome]) -> Vec<Event> {
+    answers
+        .iter()
+        .flat_map(|answer| answer.events.iter().cloned())
+        .collect()
 }
 
 /// What [`RelayManager::pick_keypackage_from_events`] selected.
@@ -3834,6 +3987,62 @@ mod tests {
             Some(PickedKeyPackage::Inadmissible(_) | PickedKeyPackage::PreMigration(_)) | None => {
                 None
             }
+        }
+    }
+
+    /// "Not found" is a claim about every relay that holds the account's
+    /// packages, so only answers that ended in `EOSE` make it; a relay that
+    /// never connected is no evidence either way, and one that connected and
+    /// stopped short (`CLOSED`, timeout, intake cap) withholds it.
+    #[test]
+    fn absence_is_proven_only_by_finished_answers_from_every_connected_holder() {
+        let answer = |responded: bool, drained: bool| RelayFetchOutcome {
+            relay_url: String::new(),
+            responded,
+            drained,
+            events: Vec::new(),
+        };
+        let finished = answer(true, true);
+        let cut_short = answer(true, false);
+        let unreachable = answer(false, false);
+        let rows: [(&str, bool, Vec<RelayFetchOutcome>, bool); 9] = [
+            ("one holder finished", true, vec![finished.clone()], true),
+            (
+                "every holder finished",
+                true,
+                vec![finished.clone(), finished.clone()],
+                true,
+            ),
+            (
+                "an unreachable holder does not hold the verdict back",
+                true,
+                vec![unreachable.clone(), finished.clone()],
+                true,
+            ),
+            (
+                "a holder that connected and stopped short does",
+                true,
+                vec![finished.clone(), cut_short.clone()],
+                false,
+            ),
+            ("no holder connected", true, vec![unreachable], false),
+            ("every holder stopped short", true, vec![cut_short], false),
+            ("no holder at all", true, Vec::new(), false),
+            (
+                "the 10002 lookup never finished, so the holders are unknown",
+                false,
+                vec![finished.clone()],
+                false,
+            ),
+            (
+                "nor does an unfinished 10002 lookup with every holder finished",
+                false,
+                vec![finished.clone(), finished],
+                false,
+            ),
+        ];
+        for (case, lists_answered, holders, proven) in rows {
+            assert_eq!(absence_proven(lists_answered, &holders), proven, "{case}");
         }
     }
 

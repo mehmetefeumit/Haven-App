@@ -3303,7 +3303,7 @@ pub struct Reinvite {
 /// the relay manager's own invite lookup ([`RelayManager`](super::RelayManager)).
 pub trait ReinviteLookup: Send + Sync {
     /// The invitee `invitee` (hex) as an inviter of `group_id` holds them:
-    /// `None` when no admissible package was found.
+    /// `None` when no package was found, or the lookup could not finish.
     fn member<'a>(
         &'a self,
         circle: &'a CircleManager,
@@ -3328,21 +3328,10 @@ impl ReinviteLookup for super::RelayManager {
                 .key_package_admission_rule(Some(group_id))
                 .await
                 .ok()?;
-            let (inbox, nip65) = tokio::join!(
-                self.fetch_inbox_relays(invitee),
-                self.fetch_nip65_relay_list(invitee),
-            );
-            let nip65 = nip65.unwrap_or_default();
-            let event = self
-                .fetch_keypackage_for_invite(invitee, &nip65.write, &admit)
-                .await
-                .ok()??;
-            Some(MemberKeyPackage {
-                key_package_event: event,
-                inbox_relays: inbox.unwrap_or_default(),
-                nip65_relays: nip65.read,
-                nip65_write_relays: nip65.write,
-            })
+            match Self::lookup_member_for_invite(invitee, &admit).await.ok()? {
+                super::MemberLookup::Found(member) => Some(*member),
+                super::MemberLookup::NotFound | super::MemberLookup::Incomplete => None,
+            }
         })
     }
 }

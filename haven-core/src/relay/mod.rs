@@ -63,8 +63,8 @@ pub use error::{InvalidUrlReason, RelayError, RelayResult};
 #[cfg(feature = "test-utils")]
 pub use manager::NegProbe;
 pub use manager::{
-    allow_ws_loopback_for_test, ws_loopback_allowed_for_test, FanoutTransport, Nip65Relays,
-    RelayManager,
+    allow_ws_loopback_for_test, ws_loopback_allowed_for_test, FanoutTransport, MemberLookup,
+    Nip65Relays, RelayManager,
 };
 pub(crate) use manager::{foreign_relay_dialable, retain_dialable_foreign_relays};
 pub use publishers::{

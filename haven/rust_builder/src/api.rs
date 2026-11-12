@@ -2291,6 +2291,39 @@ impl std::fmt::Debug for MemberKeyPackageFfi {
     }
 }
 
+/// What an invite lookup established about a person
+/// ([`RelayManagerFfi::fetch_member_keypackage`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberLookupVerdictFfi {
+    /// A package of theirs was found (it may still be one the circle cannot
+    /// admit: `check_member_key_package` says).
+    Found,
+    /// Every relay holding their packages that connected answered in full,
+    /// and none held one.
+    NotFound,
+    /// Some such relay did not answer in full: absence is unproven, so the
+    /// lookup is worth retrying.
+    LookupIncomplete,
+}
+
+/// An invite lookup's verdict, and the person it found.
+pub struct MemberLookupFfi {
+    /// What the lookup established.
+    pub verdict: MemberLookupVerdictFfi,
+    /// The person's package and relay lists: `Some` iff `verdict` is `Found`.
+    pub member: Option<MemberKeyPackageFfi>,
+}
+
+impl std::fmt::Debug for MemberLookupFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The verdict says whether a member is present; its lists are not
+        // rendered (Rule 15).
+        f.debug_struct("MemberLookupFfi")
+            .field("verdict", &self.verdict)
+            .finish_non_exhaustive()
+    }
+}
+
 /// What [`RelayManagerFfi::create_circle_driven`] did: the circle, unless
 /// a refusal the UI tells apart stopped the create, and its founding
 /// Welcomes — how many an inbox relay acknowledged during the call, how many
@@ -9068,29 +9101,27 @@ impl RelayManagerFfi {
 
     // ==================== Event Fetching ====================
 
-    /// Fetches a user's `KeyPackage` with their relay lists.
+    /// Looks a person up to invite them: their `KeyPackage` with their relay
+    /// lists, and whether "not found" was proven
+    /// (`RelayManager::lookup_member_for_invite`).
     ///
-    /// Concurrently fetches two replaceable relay-list events:
-    /// - kind 10050 for Welcome delivery (NIP-17 inbox)
-    /// - kind 10002 (NIP-65): its write-capable set for `KeyPackage`
-    ///   discovery, its read-capable set for the Welcome delivery fallback
-    ///
-    /// Then runs the `KeyPackage` discovery cascade for one invite target
-    /// (`RelayManager::fetch_keypackage_for_invite`): the person's NIP-65
-    /// write set, then the read-only discovery relays.
-    ///
-    /// Each relay-list fetch is tolerated independently: a transient failure
-    /// on one list does not abort the whole call. The returned
-    /// `MemberKeyPackageFfi` carries the 10050 list — the one place a Welcome
-    /// goes — and the 10002 read set.
+    /// Their kind 10050 (where a Welcome goes) and kind 10002 come from the
+    /// read-only discovery relays; the `KeyPackage` from the 10002 write set,
+    /// then the discovery relays. The returned `MemberKeyPackageFfi` carries
+    /// the 10050 list and both 10002 sets; an absent 10050 leaves its list
+    /// empty and never changes the verdict.
     ///
     /// The selection is made for one invite target: `circle`'s existing circle
     /// `mls_group_id`, or — `None` — a new circle. MDK's own admission rule for
     /// that target is read once and applied to every candidate BEFORE they are
     /// ranked, so a fresher package the target cannot admit never hides an
     /// older one it can. When nothing is admissible the best valid candidate
-    /// is still returned, so [`CircleManagerFfi::check_member_key_package`]
+    /// is still `Found`, so [`CircleManagerFfi::check_member_key_package`]
     /// can say why the person cannot be invited.
+    ///
+    /// `NotFound` only when every relay holding the person's packages that
+    /// connected said it had sent everything, and at least one did; anything
+    /// less is `LookupIncomplete`, never an error.
     ///
     /// # Arguments
     ///
@@ -9098,16 +9129,16 @@ impl RelayManagerFfi {
     /// * `circle` - The inviter's circle manager
     /// * `mls_group_id` - The circle the person is being added to, if it exists
     ///
-    /// # Returns
+    /// # Errors
     ///
-    /// A `MemberKeyPackageFfi` with the key package, inbox relays,
-    /// and NIP-65 relays, or `None` if no `KeyPackage` was found.
+    /// A pubkey that does not parse, a circle this device does not hold, or a
+    /// package that does not serialize.
     pub async fn fetch_member_keypackage(
         &self,
         pubkey: String,
         circle: &CircleManagerFfi,
         mls_group_id: Option<Vec<u8>>,
-    ) -> Result<Option<MemberKeyPackageFfi>, String> {
+    ) -> Result<MemberLookupFfi, String> {
         let group_id = mls_group_id.map(|id| GroupId::from_slice(&id));
         let admit = circle
             .inner
@@ -9116,43 +9147,33 @@ impl RelayManagerFfi {
             .await
             .map_err(|e| e.to_string())?;
 
-        // Each list is tolerated independently: a transient failure is logged
-        // and treated as empty so the cascade can still fall through to later
-        // tiers rather than aborting the whole operation.
-        let (inbox_result, nip65_result) = tokio::join!(
-            self.inner.fetch_inbox_relays(&pubkey),
-            self.inner.fetch_nip65_relay_list(&pubkey),
-        );
-
-        let inbox_relays = inbox_result.unwrap_or_else(|_| {
-            log::debug!("[fetch_member_keypackage] kind 10050 fetch failed");
-            Vec::new()
-        });
-        let nip65 = nip65_result.unwrap_or_else(|_| {
-            log::debug!("[fetch_member_keypackage] kind 10002 fetch failed");
-            haven_core::relay::Nip65Relays::default()
-        });
-
-        let event = self
-            .inner
-            .fetch_keypackage_for_invite(&pubkey, &nip65.write, &admit)
+        let lookup = CoreRelayManager::lookup_member_for_invite(&pubkey, &admit)
             .await
             .map_err(|e| e.to_string())?;
-
-        match event {
-            Some(e) => {
-                let key_package_json = serde_json::to_string(&e)
+        Ok(match lookup {
+            haven_core::relay::MemberLookup::Found(member) => {
+                let key_package_json = serde_json::to_string(&member.key_package_event)
                     .map_err(|e| format!("Failed to serialize key package event: {e}"))?;
-                Ok(Some(MemberKeyPackageFfi {
-                    author_npub: hex_to_npub(&e.pubkey.to_hex()),
-                    key_package_json,
-                    inbox_relays,
-                    nip65_relays: nip65.read,
-                    nip65_write_relays: nip65.write,
-                }))
+                MemberLookupFfi {
+                    verdict: MemberLookupVerdictFfi::Found,
+                    member: Some(MemberKeyPackageFfi {
+                        author_npub: hex_to_npub(&member.key_package_event.pubkey.to_hex()),
+                        key_package_json,
+                        inbox_relays: member.inbox_relays,
+                        nip65_relays: member.nip65_relays,
+                        nip65_write_relays: member.nip65_write_relays,
+                    }),
+                }
             }
-            None => Ok(None),
-        }
+            haven_core::relay::MemberLookup::NotFound => MemberLookupFfi {
+                verdict: MemberLookupVerdictFfi::NotFound,
+                member: None,
+            },
+            haven_core::relay::MemberLookup::Incomplete => MemberLookupFfi {
+                verdict: MemberLookupVerdictFfi::LookupIncomplete,
+                member: None,
+            },
+        })
     }
 
     /// Fetches a user's NIP-65 relay list (kind 10002).
@@ -16794,13 +16815,97 @@ mod maintenance_real_ffi_tests {
             "and no relay was asked about the person before that was known"
         );
 
-        // Anti-vacuity: with a rule to choose by, this is the plane that is asked.
-        assert!(relay_mgr
+        // Anti-vacuity: with a rule to choose by, this is the plane that is asked,
+        // and it answers in full that it holds nothing.
+        let lookup = relay_mgr
             .fetch_member_keypackage(asked.to_hex(), &circle, None)
             .await
-            .expect("the fetch runs")
-            .is_none());
+            .expect("the fetch runs");
+        assert!(
+            lookup.verdict == super::MemberLookupVerdictFfi::NotFound && lookup.member.is_none()
+        );
         assert!(plane.asked_about(&asked) > 0);
+    }
+
+    /// The verdict crosses the bridge: a person whose only write relay is
+    /// down is `LookupIncomplete`, not "no account" and not an error; a
+    /// published package is `Found` with the member, and only then.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fetch_member_keypackage_tells_an_unfinished_lookup_from_a_found_package() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let dir = DataDir::new("kp_lookup_verdict");
+        let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&Keys::generate()))
+            .expect("the inviter");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        let discovery = haven_core::relay::discovery_relays();
+        let publisher = haven_core::relay::RelayManager::new();
+        let publish = |event: nostr::Event| {
+            let (publisher, discovery) = (&publisher, &discovery);
+            async move {
+                assert!(
+                    publisher
+                        .publish_event(&event, discovery)
+                        .await
+                        .expect("publish to the discovery plane")
+                        .is_success(),
+                    "the discovery plane took the event"
+                );
+            }
+        };
+
+        let stranded = Keys::generate();
+        let write = nostr::Tag::parse(["r", dead_loopback_relay().as_str()]).expect("an r tag");
+        publish(
+            nostr::EventBuilder::new(Kind::RelayList, "")
+                .tags([write])
+                .sign_with_keys(&stranded)
+                .expect("sign the 10002"),
+        )
+        .await;
+        let lookup = relay_mgr
+            .fetch_member_keypackage(stranded.public_key().to_hex(), &circle, None)
+            .await
+            .expect("an unreachable relay is no error");
+        assert!(
+            lookup.verdict == super::MemberLookupVerdictFfi::LookupIncomplete
+                && lookup.member.is_none(),
+            "a write relay that never answered proved nothing: {lookup:?}"
+        );
+
+        let invitee = Keys::generate();
+        let member_dir = DataDir::new("kp_lookup_verdict_member");
+        let package = {
+            let member = CircleManagerFfi::new(member_dir.as_str(), secret_bytes(&invitee))
+                .expect("the invitee");
+            haven_core::relay::maintenance::build_kp_maintenance_events(
+                member.inner.session(),
+                &invitee,
+                &discovery,
+                None,
+                None,
+            )
+            .await
+            .expect("mint a key package")
+            .event
+        };
+        publish(package.clone()).await;
+        let lookup = relay_mgr
+            .fetch_member_keypackage(invitee.public_key().to_hex(), &circle, None)
+            .await
+            .expect("the fetch runs");
+        assert_eq!(lookup.verdict, super::MemberLookupVerdictFfi::Found);
+        let member = lookup.member.expect("a found lookup carries the member");
+        let found: nostr::Event =
+            serde_json::from_str(&member.key_package_json).expect("the package parses");
+        assert_eq!(found.id, package.id);
+        assert_eq!(
+            member.author_npub,
+            hex_to_npub(&invitee.public_key().to_hex())
+        );
+        publisher.shutdown().await;
     }
 
     // ========================================================================
@@ -22393,10 +22498,11 @@ mod log_anonymity_tests {
         DirectoryTierFfi, FfiRelayEvent, FfiRelayEventKind, FfiSyncStatusReason, HavenTargetFilter,
         InMemoryStorage, InvitationFfi, LastKnownLocationFfi, LeavePlanFfi, LeavePlanKindFfi,
         LocationMessage, LocationMessageResultFfi, LocationMessageResultKindFfi, LogAliasClassFfi,
-        MemberKeyPackageFfi, NostrIdentityManager, OwnProfileRelayAnswerFfi, ProfileMetadataFfi,
-        ProfilePictureRefFfi, PublicIdentity, RejoinOfferFfi, RejoinOffersOutcomeFfi,
-        RelayConnectionStatusFfi, RelayEventCheckFfi, RelayGiftWrapFetchFfi, RelayManagerFfi,
-        RelayRejectionFfi, SignedLocationEventFfi, SkipReasonFfi,
+        MemberKeyPackageFfi, MemberLookupFfi, MemberLookupVerdictFfi, NostrIdentityManager,
+        OwnProfileRelayAnswerFfi, ProfileMetadataFfi, ProfilePictureRefFfi, PublicIdentity,
+        RejoinOfferFfi, RejoinOffersOutcomeFfi, RelayConnectionStatusFfi, RelayEventCheckFfi,
+        RelayGiftWrapFetchFfi, RelayManagerFfi, RelayRejectionFfi, SignedLocationEventFfi,
+        SkipReasonFfi,
     };
     use super::{
         ChangeNoticeFfi, EvolutionOutcomeFfi, IngestOutcomeFfi, LeaveOutcomeFfi, LeaveStatusFfi,
@@ -22969,6 +23075,20 @@ mod log_anonymity_tests {
             &format!("{:?}", key_package(1)),
             &format!("{:?}", key_package(5)),
             "MemberKeyPackageFfi",
+        );
+    }
+
+    #[test]
+    fn member_lookup_ffi_debug_redacts_the_member() {
+        let found = |relays| MemberLookupFfi {
+            verdict: MemberLookupVerdictFfi::Found,
+            member: Some(key_package(relays)),
+        };
+        assert_debug_redacted!(found(3), "MemberLookupFfi", NEEDLES);
+        assert_magnitude_invisible(
+            &format!("{:?}", found(1)),
+            &format!("{:?}", found(5)),
+            "MemberLookupFfi",
         );
     }
 

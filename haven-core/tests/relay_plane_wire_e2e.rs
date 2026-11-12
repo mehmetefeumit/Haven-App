@@ -48,7 +48,7 @@ use haven_core::relay::maintenance::build_kp_maintenance_events;
 use haven_core::relay::recording_front::{RecordedFrame, RecordingFront};
 use haven_core::relay::{
     allow_ws_loopback_for_test, build_nip65_relay_list_event, build_relay_list_event,
-    set_discovery_relays_for_test, RelayManager,
+    set_discovery_relays_for_test, MemberLookup, RelayManager,
 };
 use haven_local_relay::planes::frame::Frame;
 use haven_local_relay::planes::judge::{judge, Class, Finding, Judgement, Observed};
@@ -430,19 +430,14 @@ impl Device {
             .key_package_admission_rule(target)
             .await
             .expect("the admission rule");
-        let inbox = self.pool.fetch_inbox_relays(who).await.expect("10050");
-        let nip65 = self.pool.fetch_nip65_relay_list(who).await.expect("10002");
-        let event = self
-            .pool
-            .fetch_keypackage_for_invite(who, &nip65.write, &admit)
+        match RelayManager::lookup_member_for_invite(who, &admit)
             .await
             .expect("the key-package lookup")
-            .expect("a key package is found");
-        MemberKeyPackage {
-            key_package_event: event,
-            inbox_relays: inbox,
-            nip65_relays: nip65.read,
-            nip65_write_relays: nip65.write,
+        {
+            MemberLookup::Found(member) => *member,
+            MemberLookup::NotFound | MemberLookup::Incomplete => {
+                panic!("a key package is found")
+            }
         }
     }
 

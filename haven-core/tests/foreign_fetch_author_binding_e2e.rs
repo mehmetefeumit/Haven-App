@@ -16,7 +16,9 @@ use haven_core::nostr::mls::SessionManager;
 use haven_core::relay::maintenance::{
     build_kp_maintenance_events, build_kp_maintenance_events_reusing,
 };
-use haven_core::relay::{allow_ws_loopback_for_test, set_discovery_relays_for_test, RelayManager};
+use haven_core::relay::{
+    allow_ws_loopback_for_test, set_discovery_relays_for_test, MemberLookup, RelayManager,
+};
 use nostr::{Event, EventBuilder, Filter, Keys, Kind, PublicKey, Tag, Timestamp};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
@@ -639,13 +641,26 @@ impl Inviter {
 /// The id of the package selected for `asked` from the discovery plane: for
 /// the invite target whose rule is `rule`, or with no target in mind.
 async fn selected(asked: &str, rule: Option<&KeyPackageAdmissionRule>) -> Option<nostr::EventId> {
-    let manager = RelayManager::new();
     match rule {
-        Some(rule) => manager.fetch_keypackage_for_invite(asked, &[], rule).await,
-        None => manager.fetch_keypackage_with_cascade(asked, &[]).await,
+        Some(rule) => RelayManager::lookup_member_for_invite(asked, rule)
+            .await
+            .map(found),
+        None => {
+            RelayManager::new()
+                .fetch_keypackage_with_cascade(asked, &[])
+                .await
+        }
     }
     .expect("the fetch runs")
     .map(|event| event.id)
+}
+
+/// The package an invite lookup found, if it found one.
+fn found(lookup: MemberLookup) -> Option<Event> {
+    match lookup {
+        MemberLookup::Found(member) => Some(member.key_package_event),
+        MemberLookup::NotFound | MemberLookup::Incomplete => None,
+    }
 }
 
 /// `foundation/key-packages.md:65-66,72-75`: an incompatible candidate is
@@ -715,11 +730,12 @@ async fn an_unlabelled_package_the_circle_cannot_admit_never_beats_a_labelled_on
     ] {
         relay.answer(&invitee, order);
         for rule in &rules {
-            let picked = RelayManager::new()
-                .fetch_keypackage_for_invite(&invitee.public_key().to_hex(), &[], rule)
-                .await
-                .expect("the fetch runs")
-                .expect("a package is selected");
+            let picked = found(
+                RelayManager::lookup_member_for_invite(&invitee.public_key().to_hex(), rule)
+                    .await
+                    .expect("the fetch runs"),
+            )
+            .expect("a package is selected");
             assert_eq!(picked.id, other_app.id);
         }
     }
@@ -745,11 +761,12 @@ async fn an_admissible_unlabelled_package_beats_a_fresher_admissible_labelled_on
 
     relay.answer(&invitee, vec![other_app, unlabelled.clone()]);
     for rule in &asking.rules().await {
-        let picked = RelayManager::new()
-            .fetch_keypackage_for_invite(&invitee.public_key().to_hex(), &[], rule)
-            .await
-            .expect("the fetch runs")
-            .expect("a package is selected");
+        let picked = found(
+            RelayManager::lookup_member_for_invite(&invitee.public_key().to_hex(), rule)
+                .await
+                .expect("the fetch runs"),
+        )
+        .expect("a package is selected");
         assert_eq!(picked.id, unlabelled.id);
     }
 }
