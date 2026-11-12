@@ -222,6 +222,91 @@ void main() {
         expect(harness.relay.published, hasLength(1));
       },
     );
+
+    /// A handler whose bring-up opens through a counted seam, over a free
+    /// guard.
+    ({
+      BackgroundLocationTaskHandler handler,
+      FakeCircleManager manager,
+      List<int> opens,
+    }) handlerCountingOpens() {
+      final manager = FakeCircleManager(circles: [circleFixture(seed: 1)]);
+      final opens = <int>[];
+      final handler = BackgroundLocationTaskHandler(
+        stagger: PublishStagger.none(),
+      )
+        ..overrideRelayService = FakeNostrRelayService()
+        ..overrideLocationSharingService = FakeLocationSharingService()
+        ..overrideLocationService = FakeLocationService()
+        ..overrideLocationEventService = FakeLocationEventService()
+        ..overrideIsSessionLive = (({required dataDir}) async => false)
+        ..overrideOpenCircleManager = () async {
+          opens.add(opens.length);
+          return manager;
+        };
+      return (handler: handler, manager: manager, opens: opens);
+    }
+
+    test(
+      'a service started while the foreground is in front leaves the session '
+      'to it, and takes it once the foreground lets go',
+      () async {
+        // The Android resume: the UI's handover stopped this service, freed
+        // the guard and restarted it, and the UI's single retry of its own
+        // open is racing this bring-up. A session taken here leaves the
+        // foreground with no circles, no publishing and no receiving.
+        seedPrefs(<String, Object?>{
+          kForegroundActiveAtMsKey: DateTime.now().millisecondsSinceEpoch,
+        });
+        final s = handlerCountingOpens();
+
+        await s.handler.startWithoutBridgeForTest(
+          identityManager: FakeIdentityManager(pubkey: kHarnessPubkeyHex),
+          dataDir: 'test-data-dir',
+        );
+
+        expect(
+          s.opens,
+          isEmpty,
+          reason: 'the foreground owns the session while it is in front',
+        );
+        expect(s.handler.circleManagerForTest, isNull);
+        expect(
+          s.handler.relayServiceForTest,
+          isNotNull,
+          reason: 'only the open is deferred; the rest of bring-up still runs',
+        );
+
+        // The foreground pauses: its handoff writes 0 to the stamp.
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setInt(kForegroundActiveAtMsKey, 0);
+        await tickOf(s.handler, DateTime.now());
+
+        expect(
+          s.opens,
+          hasLength(1),
+          reason: 'the first cycle that owns publishing acquires the session',
+        );
+        expect(s.handler.circleManagerForTest, same(s.manager));
+      },
+    );
+
+    test(
+      'a service started with the foreground away opens the session at once',
+      () async {
+        // A reboot or an Android restart of the service: no foreground is in
+        // front, so nothing is gained by waiting for the first cycle.
+        final s = handlerCountingOpens();
+
+        await s.handler.startWithoutBridgeForTest(
+          identityManager: FakeIdentityManager(pubkey: kHarnessPubkeyHex),
+          dataDir: 'test-data-dir',
+        );
+
+        expect(s.opens, hasLength(1));
+        expect(s.handler.circleManagerForTest, same(s.manager));
+      },
+    );
   });
 
   group('current background-sharing consent', () {
