@@ -204,10 +204,10 @@ class LiveSyncHealBackstop {
   /// from the outcome just recorded.
   ///
   /// The heal's restart is bounded, but its re-anchor is not: it waits on the
-  /// engine's lifecycle lock, which a wedged pause can hold for the life of
-  /// the process. Re-arming only from the heal's completion would then end
-  /// this backstop — the only periodic recovery the live-sync build has — for
-  /// good. So a heal still running at [_deadline] is counted
+  /// engine's lifecycle lock, which a pause holds until its relay calls answer.
+  /// Re-arming only from the heal's completion would make this backstop — the
+  /// only periodic recovery the live-sync build has — as late as the slowest
+  /// such hold, and end it for good if one ever failed to return. So a heal still running at [_deadline] is counted
   /// [LiveSyncHealOutcome.failed] and the next tick is drawn; the deadline
   /// cancels nothing, and while the lock stays held each later heal joins the
   /// re-anchor already queued behind it rather than queueing another.

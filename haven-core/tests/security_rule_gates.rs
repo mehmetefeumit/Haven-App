@@ -854,18 +854,37 @@ struct LiveCalls {
     processor: String,
     session: String,
     supervisor: String,
+    /// Every other file of the live plane, so a route added there is seen.
+    rest: String,
 }
 
 impl LiveCalls {
     /// As shipped.
     fn shipped() -> Self {
         let read = |file: &str| production_source(&repo_root().join(file));
+        let named = ["drive.rs", "processor.rs", "session.rs", "supervisor.rs"];
+        let mut files = Vec::new();
+        sources_under(
+            &repo_root().join("haven-core/src/relay/live_sync"),
+            "rs",
+            &mut files,
+        );
+        files.sort();
+        let rest = files
+            .iter()
+            .filter(|path| {
+                path.parent().and_then(|dir| dir.file_name()) != Some("live_sync".as_ref())
+                    || !named.iter().any(|name| path.ends_with(name))
+            })
+            .map(|path| production_source(path))
+            .collect();
         Self {
             fanout: read("haven-core/src/relay/fanout.rs"),
             drive: read("haven-core/src/relay/live_sync/drive.rs"),
             processor: read("haven-core/src/relay/live_sync/processor.rs"),
             session: read("haven-core/src/relay/live_sync/session.rs"),
             supervisor: read("haven-core/src/relay/live_sync/supervisor.rs"),
+            rest,
         }
     }
 
@@ -955,7 +974,13 @@ fn assert_every_live_relay_call_is_counted_before_it_can_begin(calls: &LiveCalls
             .is_some_and(|(counted, read)| counted < read),
         "a recordless publish of the live plane reads its mode before it is counted",
     );
-    let live = [&calls.processor, &calls.session, &calls.supervisor].map(|file| squash(file));
+    let live = [
+        &calls.processor,
+        &calls.session,
+        &calls.supervisor,
+        &calls.rest,
+    ]
+    .map(|file| squash(file));
     let drive =
         squash(fn_body(&calls.processor, "pub(super) async fn drive_due(").expect("drive_due"));
     assert!(
@@ -975,6 +1000,16 @@ fn assert_every_live_relay_call_is_counted_before_it_can_begin(calls: &LiveCalls
             && live[0].matches("Leash::counted(").count() == 1,
         "the live plane's drive hands its driver a transport or a publisher off its \
          counting leash",
+    );
+    // A location send is not counted: only the bridge's leash wrapper may make one.
+    assert_eq!(
+        live.iter()
+            .chain([&squash(&calls.drive)])
+            .map(|file| file.matches(".publish_location(").count())
+            .sum::<usize>(),
+        1,
+        "the live plane sends a location, which no pause counts, outside the bridge's \
+         leash wrapper",
     );
 
     assert_a_negentropy_pass_is_counted_for_its_relay_work_alone(calls, &live);
@@ -1023,6 +1058,20 @@ fn assert_a_negentropy_pass_is_counted_for_its_relay_work_alone(
         1,
         "the live plane runs a NIP-77 pass other than through reconcile_live",
     );
+}
+
+#[test]
+#[should_panic(expected = "outside the bridge's leash wrapper")]
+fn the_relay_call_cover_refuses_a_live_location_send() {
+    let calls = LiveCalls::shipped();
+    let calls = LiveCalls {
+        rest: format!(
+            "{}\nfn f(p: &P) {{ p.publish_location(e, t); }}",
+            calls.rest
+        ),
+        ..calls
+    };
+    assert_every_live_relay_call_is_counted_before_it_can_begin(&calls);
 }
 
 #[test]
