@@ -158,12 +158,15 @@ never tags or commits. Pushing `vX.Y.Z` (or `vX.Y.Z-beta.N` for a pre-release) t
    the commit a push to `main` ended on (CI runs only each push's tip). If its
    checks are still running the gate waits for them, but a later push to
    `main` cancels them (`ci.yml` cancels in-progress runs per branch), and the
-   gate then fails until `gh run rerun <run id> --failed` passes them.
+   gate then fails until `gh run rerun <run id> --failed` passes them; then
+   re-run the release with **Re-run all jobs** (see step 2).
 2. Runs the **dependency audit afresh** (`dependency-audit`: `audit.yml` in
    `full` mode — every lockfile, the upstream-advisory watcher, the
    acknowledgement ledger). This one is never read from CI's verdict: an
    advisory published since the merge stops the release. Nothing below runs
-   unless both it and the gate passed.
+   unless both it and the gate passed, in the same run attempt: "Re-run failed
+   jobs" would keep a passed audit from an earlier attempt, so every job that
+   needs it refuses one, and a release is re-run with **Re-run all jobs**.
 3. Builds the **per-ABI release APKs** (`app-arm64-v8a-release.apk`,
    `…-armeabi-v7a-…`, `…-x86_64-…`), debug-signed: the build job holds no
    signing secret. Marketing version comes from the tag (`vX.Y.Z → X.Y.Z`);
@@ -186,7 +189,9 @@ per-user; Zapstore's `zsp` pulls the arm64 asset and signs the Nostr events).
 
 Pre-reqs before the first tag: set the `ANDROID_KEYSTORE_*` secrets (so the build
 is release-signed), `STADIA_API_KEY`, the iOS Match/ASC secrets, and (for
-Zapstore) `ZAPSTORE_SIGN_WITH`.
+Zapstore) `ZAPSTORE_SIGN_WITH`. The signing and publishing jobs run in the
+`release` environment (`haven-core/SECURITY.md`, "Owner actions"). A
+`workflow_dispatch` uploads to TestFlight only from `main` or a tag.
 
 **Locked dependencies.** The release installs exactly the committed lockfiles
 (`flutter pub get --enforce-lockfile`, cargo `--locked`, Fastlane from the
@@ -328,8 +333,9 @@ requires a numeric short-version string). To re-build the same version (e.g. aft
 a fix to the pipeline), push a new build number by deleting and re-pushing the tag,
 or just bump to the next patch — TestFlight accepts repeated versions as long as
 the build number differs, which it always does (it's the run number).
-A manual **Run workflow** (workflow_dispatch) on Release Build has no tag, so it
-falls back to `pubspec.yaml`'s `version:` — handy for a throwaway signed test build.
+A manual **Run workflow** (workflow_dispatch) on Release Build from `main` has no
+tag, so it falls back to `pubspec.yaml`'s `version:` — handy for a throwaway
+signed test build. From any other branch the iOS job does not run.
 
 **Export compliance:** the first build lands in App Store Connect as *Missing
 Compliance*. Answer the encryption question there (Haven ships its own

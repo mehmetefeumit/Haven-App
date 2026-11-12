@@ -11,11 +11,20 @@
 # passed on this commit) and `dependency-audit` (audit.yml in full mode, run
 # fresh here on every event, because a verdict recorded at merge cannot see an
 # advisory published since), directly or through another job;
-# scripts/ci/check_ci_verdict.sh holds that. Android signing is a job of its
-# own (android-sign), so the job that compiles third-party code never holds the
-# keystore, and only android-publish can write to the repository. Every action
-# is pinned to a commit SHA, and no job that holds a secret restores a cache:
-# nothing checks what a restore puts on disk (see HAVEN_GRADLE_CACHE-EXEMPT).
+# scripts/ci/check_ci_verdict.sh holds that. "Re-run failed jobs" would keep a
+# passed audit from an earlier attempt, however old, so every job that needs
+# `dependency-audit` directly first checks that the audit ran in this attempt
+# (zapstore needs android-publish, which does): re-run a release with "Re-run
+# all jobs". Android signing is a job of its own (android-sign), so the job
+# that compiles third-party code never holds the keystore, and only
+# android-publish can write to the repository. Every action is pinned to a
+# commit SHA, and no job that holds a secret restores a cache: nothing checks
+# what a restore puts on disk (see HAVEN_GRADLE_CACHE-EXEMPT). The jobs that
+# sign or publish run in the `release` environment. A workflow that names an
+# environment creates it with no protection rules, so this changes nothing
+# until the owner restricts it to main and `v*` tags (haven-core/SECURITY.md
+# "Owner actions"); the iOS job is also limited to main and tags itself, since
+# a dispatch from any branch would otherwise upload that branch to TestFlight.
 #
 # # Why neither job passes HAVEN_LIVE_SYNC
 #
@@ -156,6 +165,15 @@ jobs:
       run:
         working-directory: haven
     steps:
+      # A re-run must audit afresh: see the header.
+      - name: Dependency audit ran in this attempt
+        working-directory: /
+        env:
+          AUDIT_ATTEMPT: ${{ needs.dependency-audit.outputs.attempt }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          [[ "${AUDIT_ATTEMPT}" == "${RUN_ATTEMPT}" ]] || { echo "::error::dependency audit is from attempt ${AUDIT_ATTEMPT}; use Re-run all jobs so the audit is fresh"; exit 1; }
+
       - name: Free disk space
         working-directory: /
         run: |
@@ -257,9 +275,18 @@ jobs:
     name: Android release signing
     needs: [gate, dependency-audit, android]
     runs-on: ubuntu-latest
+    environment: release
     permissions:
       contents: read
     steps:
+      # A re-run must audit afresh: see the header.
+      - name: Dependency audit ran in this attempt
+        env:
+          AUDIT_ATTEMPT: ${{ needs.dependency-audit.outputs.attempt }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          [[ "${AUDIT_ATTEMPT}" == "${RUN_ATTEMPT}" ]] || { echo "::error::dependency audit is from attempt ${AUDIT_ATTEMPT}; use Re-run all jobs so the audit is fresh"; exit 1; }
+
       # A tagged release MUST be release-signed. A debug-signed APK on the public
       # Release would be signed with the universal androiddebugkey (public password
       # "android"), defeating update authentication and trapping early installers
@@ -342,19 +369,30 @@ jobs:
   # canonical Android channel: Obtainium and Zapstore both PULL from it (not from
   # Actions artifacts, which are auth-gated and expire). The de-obfuscation
   # symbols are NOT attached publicly (a separate private artifact) so the
-  # obfuscation map is never handed to attackers. Tag pushes only — a manual
-  # workflow_dispatch has no tag and must not publish a Release.
+  # obfuscation map is never handed to attackers. Tags only: a dispatch on a
+  # branch publishes nothing, but a dispatch on a tag ref is still a tag run,
+  # gated like any other, and would publish that tag's Release again; immutable
+  # releases (an owner setting, haven-core/SECURITY.md) stop it overwriting one.
   android-publish:
     name: Publish GitHub Release
     needs: [gate, dependency-audit, android-sign]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
+    environment: release
     # contents: write lets the built-in GITHUB_TOKEN create the GitHub Release
     # and attach the signed APKs. Least-privilege: only this job gets write, and
     # it holds no other secret.
     permissions:
       contents: write
     steps:
+      # A re-run must audit afresh: see the header.
+      - name: Dependency audit ran in this attempt
+        env:
+          AUDIT_ATTEMPT: ${{ needs.dependency-audit.outputs.attempt }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          [[ "${AUDIT_ATTEMPT}" == "${RUN_ATTEMPT}" ]] || { echo "::error::dependency audit is from attempt ${AUDIT_ATTEMPT}; use Re-run all jobs so the audit is fresh"; exit 1; }
+
       - name: Checkout the ledger
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -402,6 +440,8 @@ jobs:
     # no rust-cache, flutter-action `cache: false`, and the gems installed
     # frozen from the committed Gemfile.lock rather than from bundler-cache.
     needs: [gate, dependency-audit]
+    if: ${{ github.ref == 'refs/heads/main' || github.ref_type == 'tag' }}
+    environment: release
     # Pin macos-15 (GA) rather than macos-latest: macos-latest is mid-migration
     # to macos-26 (started 2026-06-15), so the SDK it provides is ambiguous.
     # macos-15 ships Xcode 26.x (up to 26.3, the newest that runs on macOS 15).
@@ -412,6 +452,15 @@ jobs:
       run:
         working-directory: haven
     steps:
+      # A re-run must audit afresh: see the header.
+      - name: Dependency audit ran in this attempt
+        working-directory: /
+        env:
+          AUDIT_ATTEMPT: ${{ needs.dependency-audit.outputs.attempt }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          [[ "${AUDIT_ATTEMPT}" == "${RUN_ATTEMPT}" ]] || { echo "::error::dependency audit is from attempt ${AUDIT_ATTEMPT}; use Re-run all jobs so the audit is fresh"; exit 1; }
+
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -541,6 +590,7 @@ jobs:
     needs: [android-publish]
     if: ${{ github.ref_type == 'tag' }}
     runs-on: ubuntu-latest
+    environment: release
     env:
       # zsp reads SIGN_WITH directly; also used to gate the steps (a bunker:// URL
       # is preferred over a raw nsec so the key never enters the runner env).

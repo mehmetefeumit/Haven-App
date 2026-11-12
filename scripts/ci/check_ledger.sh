@@ -14,8 +14,9 @@
 #      nothing but such entries: a [[PackageOverrides]] block would silence a
 #      whole package with no rule here applying to it.
 #   2. `effectiveUntil` is after today and at most 90 days out (UTC dates).
-#      Within 14 days it warns, and files `ledger-expiring:<ID>` for the
-#      nightly's issue; on or after it, `ledger-expired:<ID>` and a failure.
+#      Within 14 days it warns, as a GitHub annotation too, and files
+#      `ledger-expiring:<ID>` for the nightly's issue; on or after it,
+#      `ledger-expired:<ID>` and a failure.
 #   3. Every id in haven-core/.cargo/audit.toml's `ignore` has a valid entry:
 #      cargo-audit's ignores cannot expire, so the ledger supplies their end.
 #   4. Every osv-scanner scan in .github/workflows and scripts/ci passes
@@ -56,7 +57,7 @@ readonly WARN_DAYS=14
 
 # How many fixtures the self-test runs. Pinned, because a fixture that stops
 # running is the one way a deleted check reports success.
-readonly SELF_TEST_FIXTURES=22
+readonly SELF_TEST_FIXTURES=23
 
 log() {
   printf '\033[1;34m[check_ledger]\033[0m %s\n' "$*"
@@ -192,6 +193,8 @@ check() {
         broken "${LEDGER_REL}:${line}: ${id} runs ${left} days, past the ${MAX_DAYS}-day limit"; ok=0
       elif (( left <= WARN_DAYS )); then
         printf 'warning: %s expires in %d day(s), on %s\n' "${id}" "${left}" "${until:0:10}"
+        # A GitHub annotation, so the author of a pull request sees it on the run's summary.
+        printf '::warning::%s acknowledgement expires on %s; fix the dependency, or re-decide and re-date the entry in %s\n' "${id}" "${until:0:10}" "${LEDGER_REL}"
         finding "ledger-expiring:${id}" "acknowledgement of ${id} expires on ${until:0:10}"
       fi
     fi
@@ -321,6 +324,7 @@ self_test() {
 
   r="$(_tree soon "${good}$(_entry RUSTSEC-2026-0330 2026-11-26T00:00:00Z)" "${AUD[@]}")"
   _case "an entry expiring within 14 days warns, passes, and files ledger-expiring" 0 "$(printf 'ledger-expiring:RUSTSEC-2026-0330\t')" "${r}" static
+  _case "an entry expiring within 14 days is a GitHub warning annotation" 0 '::warning::RUSTSEC-2026-0330 acknowledgement expires on 2026-11-26' "${r}" static
 
   r="$(_tree mirror "${good}" "${AUD[@]}" RUSTSEC-2026-0097)"
   _case "an audit.toml ignore with no ledger entry fails" 1 'ignores RUSTSEC-2026-0097, which has no valid entry' "${r}" static

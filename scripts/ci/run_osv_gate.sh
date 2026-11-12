@@ -12,7 +12,13 @@
 #
 # It always runs `--offline` against databases it downloads whole: the online
 # mode posts every package name and version (`rust_lib_haven` among them) to
-# osv.dev, and a scan's answer must not depend on a query service. The ledger,
+# osv.dev, and a scan's answer must not depend on a query service. It fetches
+# each ecosystem's database itself, once per run into a cache of its own, and
+# both passes read that one snapshot. osv-scanner that cannot load one
+# ecosystem's database logs it and still exits 1 on the other ecosystems'
+# findings, so a package it never checked would pass: a database-load or
+# extraction error on its stderr, or a reported ecosystem with no database in
+# the cache, is a misconfiguration. The ledger,
 # osv-scanner.toml at the repository root, is the only config: osv-scanner
 # drops an acknowledged advisory with all its aliases until its
 # `effectiveUntil`, and check_ledger.sh holds the ledger's own rules.
@@ -40,9 +46,11 @@
 #       prove every entry still matches something.
 #   bash scripts/ci/run_osv_gate.sh --binary-self-test
 #       the installed osv-scanner against its downloaded database: an expired
-#       acknowledgement stops suppressing, a live one suppresses, and a
-#       git-sourced package is matched (audit.yml; the advisory data is live,
-#       so a withdrawn RUSTSEC-2026-0459 reddens it and must be swapped out).
+#       acknowledgement stops suppressing, a live one suppresses, a
+#       git-sourced package is matched, and a database it cannot load is
+#       caught (audit.yml; the advisory data is live, so a withdrawn
+#       RUSTSEC-2026-0459 or an un-flagged rack 2.0.0 reddens it and must be
+#       swapped out).
 #   bash scripts/ci/run_osv_gate.sh --self-test     # recorded output, no tool
 #
 # SECURITY_FINDINGS_OUT, when set, gets one `osv:<ID>:<pkg>@<ver>\t<summary>`
@@ -52,8 +60,9 @@
 #   0  nothing beyond informational warnings (or a self-test passed)
 #   1  a vulnerable or malicious package (or a self-test failed)
 #   2  misconfiguration: osv-scanner exited other than 0/1, its output is not a
-#      scan report, a committed lockfile contributed nothing or has a name
-#      osv-scanner does not parse, or a missing argument or tool
+#      scan report, an advisory database did not download or load, a
+#      committed lockfile contributed nothing or has a name osv-scanner does
+#      not parse, or a missing argument or tool
 
 set -euo pipefail
 
@@ -61,10 +70,11 @@ REPO_ROOT="${REPO_ROOT_OVERRIDE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && 
 readonly LEDGER_REL='osv-scanner.toml'
 readonly FIXTURES_REL='scripts/ci/fixtures/dependency-security'
 readonly LOCKFILE_NAMES='Cargo.lock pubspec.lock Gemfile.lock'
+readonly OSV_DB_HOST='https://osv-vulnerabilities.storage.googleapis.com'
 
 # How many fixtures the self-test runs. Pinned, because a fixture that stops
 # running is the one way a deleted check reports success.
-readonly SELF_TEST_FIXTURES=10
+readonly SELF_TEST_FIXTURES=15
 
 log() {
   printf '\033[1;34m[run_osv_gate]\033[0m %s\n' "$*"
@@ -91,6 +101,51 @@ lockfiles() { # <absolute root>
       || { echo "ERROR: ${rel} is a lockfile osv-scanner does not recognise by name (it parses ${LOCKFILE_NAMES}). Commit it under its ecosystem's own name, in a directory of its own." >&2; return 2; }
     printf '%s\n' "${rel}"
   done | sort
+}
+
+# The OSV ecosystem whose database a lockfile is checked against.
+ecosystem_of() { # <lockfile path>
+  case "${1##*/}" in
+    Cargo.lock) echo crates.io ;;
+    pubspec.lock) echo Pub ;;
+    Gemfile.lock) echo RubyGems ;;
+  esac
+}
+
+# Downloads each ecosystem's whole database to the layout osv-scanner reads
+# from OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY; osv-scanner's own download has no
+# retry and no timeout.
+fetch_dbs() { # <cache> <ecosystem>...
+  local cache="$1" eco; shift
+  for eco in "$@"; do
+    mkdir -p "${cache}/osv-scalibr/${eco}"
+    curl -fsS --connect-timeout 10 --max-time 60 --retry 3 --retry-all-errors \
+      -o "${cache}/osv-scalibr/${eco}/all.zip" "${OSV_DB_HOST}/${eco}/all.zip" \
+      || { echo "ERROR: could not download the ${eco} advisory database" >&2; return 2; }
+  done
+}
+
+osv_scan() { # <cache> <stderr out> <osv-scanner scan source arguments>...
+  local cache="$1" err="$2"; shift 2
+  OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY="${cache}" osv-scanner scan source --offline "$@" 2>"${err}"
+}
+
+# rc 2 unless osv-scanner checked every package it reported against a
+# database: it exits 0/1 whether or not an ecosystem's database loaded.
+dbs_loaded() { # <stderr> <report.json> <cache>
+  local err="$1" report="$2" cache="$3" ecos eco
+  local -a missing=()
+  if grep -E 'could not load db for|Error during extraction' "${err}" >&2; then
+    echo "ERROR: osv-scanner could not load an advisory database or read a lockfile; the packages it did not check would pass unscanned" >&2
+    return 2
+  fi
+  ecos="$(jq -r '[.results[].packages[].package.ecosystem | sub(":.*"; "")] | unique[]' "${report}")" \
+    || { echo "ERROR: ${report} is not an osv-scanner JSON report" >&2; return 2; }
+  while read -r eco; do
+    [[ -z "${eco}" || -s "${cache}/osv-scalibr/${eco}/all.zip" ]] || missing+=("${eco}")
+  done <<<"${ecos}"
+  (( ${#missing[@]} == 0 )) \
+    || { echo "ERROR: osv-scanner reported ${missing[*]} packages, and no ${missing[*]} advisory database was fetched: a lockfile of an ecosystem this gate does not download" >&2; return 2; }
 }
 
 # evaluate <osv rc> <report.json> <unfiltered.json> <absolute root> <lockfile list file>
@@ -170,14 +225,24 @@ run_check() { # [--unfiltered-json <out>] [<root>]
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
   lockfiles "${root}" >"${tmp}/lockfiles" || return 2
-  osv-scanner scan source --offline --download-offline-databases --config "${REPO_ROOT}/${LEDGER_REL}" \
+  local -a ecos=()
+  mapfile -t ecos < <(while read -r rel; do ecosystem_of "${rel}"; done <"${tmp}/lockfiles" | sort -u)
+  fetch_dbs "${tmp}/db" "${ecos[@]}" || return 2
+  osv_scan "${tmp}/db" "${tmp}/report.err" --config "${REPO_ROOT}/${LEDGER_REL}" \
     --format json --all-packages -r "${root}" >"${tmp}/report.json" || rc=$?
   # An explicit empty config, or osv-scanner would find the ledger itself.
   : >"${tmp}/none.toml"
   local urc=0
-  osv-scanner scan source --offline --download-offline-databases --config "${tmp}/none.toml" \
+  osv_scan "${tmp}/db" "${tmp}/unfiltered.err" --config "${tmp}/none.toml" \
     --format json -r "${root}" >"${tmp}/unfiltered.json" || urc=$?
-  [[ "${urc}" == 0 || "${urc}" == 1 ]] || { echo "ERROR: the unacknowledged osv-scanner pass exited ${urc}" >&2; return 2; }
+  [[ "${urc}" == 0 || "${urc}" == 1 ]] || { cat "${tmp}/unfiltered.err" >&2; echo "ERROR: the unacknowledged osv-scanner pass exited ${urc}" >&2; return 2; }
+  [[ "${rc}" == 0 || "${rc}" == 1 ]] || cat "${tmp}/report.err" >&2
+  # The ledger pass lists every package (--all-packages), so its ecosystems
+  # are every ecosystem scanned.
+  if [[ "${rc}" == 0 || "${rc}" == 1 ]]; then
+    dbs_loaded "${tmp}/report.err" "${tmp}/report.json" "${tmp}/db" || return 2
+    dbs_loaded "${tmp}/unfiltered.err" "${tmp}/report.json" "${tmp}/db" || return 2
+  fi
   [[ -z "${unfiltered}" ]] || cp "${tmp}/unfiltered.json" "${unfiltered}"
   evaluate "${rc}" "${tmp}/report.json" "${tmp}/unfiltered.json" "${root}" "${tmp}/lockfiles"
 }
@@ -191,11 +256,12 @@ binary_self_test() {
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
+  fetch_dbs "${tmp}/db" crates.io RubyGems || return 2
   _scan() { # <effectiveUntil> -> the advisory ids reported for the fixture
     printf '[[IgnoredVulns]]\nid = "RUSTSEC-2026-0459"\neffectiveUntil = %s\nreason = "owner-decision: 2026-11-12. fixture"\n' "$1" >"${tmp}/ledger.toml"
     local rc=0
-    osv-scanner scan source --offline --download-offline-databases --config "${tmp}/ledger.toml" \
-      --format json -L "Cargo.lock:${lock}" >"${tmp}/out.json" 2>"${tmp}/err" || rc=$?
+    osv_scan "${tmp}/db" "${tmp}/err" --config "${tmp}/ledger.toml" \
+      --format json -L "Cargo.lock:${lock}" >"${tmp}/out.json" || rc=$?
     [[ "${rc}" == 0 || "${rc}" == 1 ]] || { cat "${tmp}/err" >&2; echo "ERROR: osv-scanner exited ${rc}" >&2; return 2; }
     jq -r '[.results[].packages[].vulnerabilities[]?.id] | unique | join(" ")' "${tmp}/out.json"
   }
@@ -214,7 +280,34 @@ binary_self_test() {
     printf '  \033[1;31mFAIL\033[0m acknowledgement in effect: still reported [%s]\n' "${live}" >&2
     fails=1
   fi
-  (( fails == 0 )) || { echo "binary self-test: FAILED — the pinned osv-scanner does not honour the ledger as run_osv_gate.sh assumes" >&2; return 1; }
+
+  # rack 2.0.0 has had published advisories since 2019. With its database it
+  # is reported; without it osv-scanner still exits 1 on the crate's finding.
+  mkdir -p "${tmp}/tree" "${tmp}/cargo-only/osv-scalibr"
+  cp "${lock}" "${tmp}/tree/Cargo.lock"
+  printf 'GEM\n  remote: https://rubygems.org/\n  specs:\n    rack (2.0.0)\n\nPLATFORMS\n  ruby\n\nDEPENDENCIES\n  rack\n' >"${tmp}/tree/Gemfile.lock"
+  cp -R "${tmp}/db/osv-scalibr/crates.io" "${tmp}/cargo-only/osv-scalibr/"
+  : >"${tmp}/none.toml"
+  local rc=0 gems
+  osv_scan "${tmp}/db" "${tmp}/err" --config "${tmp}/none.toml" --format json --all-packages -r "${tmp}/tree" >"${tmp}/out.json" || rc=$?
+  gems="$(jq '[.results[].packages[] | select(.package.ecosystem == "RubyGems") | .vulnerabilities[]?] | length' "${tmp}/out.json" 2>/dev/null || echo 0)"
+  if [[ "${rc}" == 1 ]] && (( gems > 0 )) && dbs_loaded "${tmp}/err" "${tmp}/out.json" "${tmp}/db" 2>/dev/null; then
+    printf '  \033[1;32mPASS\033[0m a locked gem is checked against the RubyGems database\n'
+  else
+    printf '  \033[1;31mFAIL\033[0m rack 2.0.0 with its database: rc %s, %s advisories, want rc 1 and at least one\n' "${rc}" "${gems}" >&2
+    fails=1
+  fi
+  rc=0
+  osv_scan "${tmp}/cargo-only" "${tmp}/err" --config "${tmp}/none.toml" --format json --all-packages -r "${tmp}/tree" >"${tmp}/out.json" || rc=$?
+  local drc=0
+  dbs_loaded "${tmp}/err" "${tmp}/out.json" "${tmp}/cargo-only" 2>/dev/null || drc=$?
+  if [[ "${rc}" == 1 && "${drc}" == 2 ]]; then
+    printf '  \033[1;32mPASS\033[0m a database osv-scanner could not load is a misconfiguration, though it exits 1 on the other findings\n'
+  else
+    printf '  \033[1;31mFAIL\033[0m rack 2.0.0 without its database: osv-scanner rc %s (want 1), gate rc %s (want 2)\n' "${rc}" "${drc}" >&2
+    fails=1
+  fi
+  (( fails == 0 )) || { echo "binary self-test: FAILED — the pinned osv-scanner does not behave as run_osv_gate.sh assumes" >&2; return 1; }
   echo "binary self-test: OK ($(osv-scanner --version | head -1))"
 }
 
@@ -301,6 +394,45 @@ self_test() {
   : >"${tmp}/tree/b/build_tool_runner.lock"
   _case "a lockfile osv-scanner cannot recognise by name is a misconfiguration" 2 'build_tool_runner.lock' \
     lockfiles "${tmp}/tree"
+
+  # The whole run, with osv-scanner and curl replaced: the download, the
+  # database-load check and the verdict wired together.
+  mkdir -p "${tmp}/bin" "${tmp}/repo/haven-core" "${tmp}/repo/haven" "${tmp}/repo/tooling/soak"
+  : >"${tmp}/repo/haven-core/Cargo.lock"; : >"${tmp}/repo/haven/pubspec.lock"; : >"${tmp}/repo/tooling/soak/Cargo.lock"
+  cat >"${tmp}/bin/osv-scanner" <<'FAKE'
+#!/usr/bin/env bash
+sed "s|/ROOT|${FAKE_ROOT}|g" "${FAKE_REPORT}"
+pass=unfiltered; [[ " $* " != *' --all-packages '* ]] || pass=ledger
+[[ "${pass}" != "${FAKE_STDERR_PASS:-}" ]] || printf 'could not load db for Pub ecosystem: unable to fetch OSV database\n' >&2
+exit 1
+FAKE
+  cat >"${tmp}/bin/curl" <<'FAKE'
+#!/usr/bin/env bash
+[[ -z "${FAKE_CURL_FAIL:-}" ]] || exit 22
+while (( $# )); do [[ "$1" != -o ]] || { printf 'zip' >"$2"; exit 0; }; shift; done
+exit 2
+FAKE
+  chmod +x "${tmp}/bin/osv-scanner" "${tmp}/bin/curl"
+  _run() { # <report> [<NAME=value> for the fakes]... -> run_check over the fake repository
+    local report="$1"; shift
+    # shellcheck disable=SC2163 # NAME=value pairs, exported as given
+    (( $# == 0 )) || export "$@"
+    PATH="${tmp}/bin:${PATH}" FAKE_ROOT="$(cd "${tmp}/repo" && pwd -P)" FAKE_REPORT="${report}" run_check "${tmp}/repo"
+  }
+  _case "a run whose databases all downloaded and loaded reaches the verdict" 0 'OK: 3 committed lockfile(s) scanned' \
+    _run "${base}"
+
+  _case "a database the ledger pass could not load fails, though osv-scanner exited 1 on the other findings" 2 'could not load db for Pub ecosystem' \
+    _run "${base}" FAKE_STDERR_PASS=ledger
+  _case "a database the unacknowledged pass could not load fails too" 2 'could not load db for Pub ecosystem' \
+    _run "${base}" FAKE_STDERR_PASS=unfiltered
+
+  _with '.results += [{source: {path: "/ROOT/haven/ios/Gemfile.lock"}, packages: [{package: {name: "rack", version: "2.0.0", ecosystem: "RubyGems"}}]}]' >"${tmp}/gem.json"
+  _case "a reported ecosystem with no database fetched is a misconfiguration" 2 'no RubyGems advisory database was fetched' \
+    _run "${tmp}/gem.json"
+
+  _case "a database that does not download is a misconfiguration" 2 'could not download the' \
+    _run "${base}" FAKE_CURL_FAIL=1
 
   if (( fails )); then
     echo "self-test: FAILED" >&2

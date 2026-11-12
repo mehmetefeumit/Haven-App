@@ -11,8 +11,9 @@
 # the source.
 #
 # Watched: every `git+https://github.com/<owner>/<repo>` source in a committed
-# Cargo.lock, and that repository's fork parent — a fork inherits its parent's
-# bugs, not its advisories; plus flutter/flutter and dart-lang/sdk, at the
+# Cargo.lock, and that repository's fork parent and fork root — a fork inherits
+# its ancestors' bugs, not their advisories; a git source anywhere else is a
+# misconfiguration, since nothing would watch it; plus flutter/flutter and dart-lang/sdk, at the
 # current stable Flutter release and its Dart SDK, which is what release-build
 # compiles with. For a Cargo repository, a vulnerability entry counts when its
 # package name equals a package locked from that repository or from a fork of
@@ -24,8 +25,9 @@
 # numerically by release; build metadata is ignored; when the releases are
 # equal and either side is a pre-release, the comparator counts as met, so a
 # pre-release is never let through on a guess. A range, package or version
-# this cannot read is a finding (fail closed). Only published advisories that
-# were never withdrawn count. An advisory the ledger (osv-scanner.toml)
+# this cannot read is a finding (fail closed), and so is an advisory that names
+# no package at all. An answer that is not GitHub's advisory schema is a
+# misconfiguration. Only published advisories that were never withdrawn count. An advisory the ledger (osv-scanner.toml)
 # acknowledges, by GHSA or CVE id, until a date after today, passes; an
 # expired acknowledgement does not.
 #
@@ -50,8 +52,9 @@
 #   0  nothing in range beyond acknowledged advisories (or the self-test passed)
 #   1  an unacknowledged advisory in range, or one that cannot be evaluated
 #      (or the self-test failed)
-#   2  misconfiguration: an API or manifest that did not answer, an unreadable
-#      lockfile or ledger
+#   2  misconfiguration: an API or manifest that did not answer (each GitHub
+#      call is tried three times), an answer that is not the advisory schema, a
+#      git source not on github.com, an unreadable lockfile or ledger
 
 set -euo pipefail
 
@@ -59,10 +62,21 @@ REPO_ROOT="${REPO_ROOT_OVERRIDE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && 
 readonly LEDGER_REL='osv-scanner.toml'
 readonly FLUTTER_RELEASES='https://storage.googleapis.com/flutter_infra_release/releases/releases_linux.json'
 readonly VERSION_RE='^v?([0-9]+(\.[0-9]+)*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+RETRY_DELAY="${RETRY_DELAY_OVERRIDE:-5}"
+# What check() reads of each repository advisory. A field of another type
+# would make a later jq fail, and a failing jq that feeds a loop reads as an
+# advisory with nothing in it.
+readonly ADVISORY_SCHEMA='
+  def opt_str: . == null or type == "string";
+  def advisory: type == "object" and (.ghsa_id | type == "string") and (.state | type == "string")
+  and (.withdrawn_at | opt_str) and (.cve_id | opt_str) and (.summary | opt_str)
+  and (.vulnerabilities | . == null or (type == "array" and all(.[];
+    type == "object" and (.vulnerable_version_range | opt_str)
+    and (.package | . == null or (type == "object" and (.name | opt_str))))));'
 
 # How many fixtures the self-test runs. Pinned, because a fixture that stops
 # running is the one way a deleted check reports success.
-readonly SELF_TEST_FIXTURES=15
+readonly SELF_TEST_FIXTURES=21
 WATCH_SDK=1
 
 log() {
@@ -127,6 +141,17 @@ git_packages() { # <Cargo.lock>...
   ' "$@" | sort -u
 }
 
+# `gh api <args>` into <out>, three tries a minute each: one dropped
+# connection must not fail a release.
+gh_api() { # <out> <gh api arguments>...
+  local out="$1" i; shift
+  for i in 1 2 3; do
+    timeout 60 gh api "$@" >"${out}" && return 0
+    (( i == 3 )) || sleep $(( i * RETRY_DELAY ))
+  done
+  return 1
+}
+
 # "<id>\t<effectiveUntil date>" per ledger entry.
 acknowledged() { # <ledger>
   awk '
@@ -150,6 +175,10 @@ check() { # <matches-out|""> <Cargo.lock>...
 
   local lock
   for lock in "$@"; do [[ -f "${lock}" ]] || { echo "ERROR: ${lock} not found" >&2; return 2; }; done
+  local elsewhere
+  elsewhere="$(grep -h '^source = "git+' "$@" | grep -v '^source = "git+https://github\.com/' | sort -u || true)"
+  [[ -z "${elsewhere}" ]] \
+    || { printf '  %s\n' "${elsewhere}" >&2; echo "ERROR: a git source not on github.com: no upstream advisories are read for it" >&2; return 2; }
   git_packages "$@" >"${tmp}/git"
   [[ -s "${tmp}/git" ]] || { echo "ERROR: no git-sourced GitHub package in $* — the watcher would watch nothing" >&2; return 2; }
 
@@ -158,16 +187,20 @@ check() { # <matches-out|""> <Cargo.lock>...
   while IFS=$'\t' read -r repo pkg ver; do
     printf '%s\t%s\t%s\n' "${repo}" "${pkg}" "${ver}"
   done <"${tmp}/git" >"${tmp}/watch"
+  # A fork of a fork names its parent and, as `source`, the root.
+  cut -f1 "${tmp}/git" | sort -u >"${tmp}/repos"
   while read -r repo; do
-    parent="$(gh api "repos/${repo}" --jq '.parent.full_name // empty')" \
+    gh_api "${tmp}/ancestors" "repos/${repo}" --jq '.parent.full_name // empty, .source.full_name // empty' \
       || { echo "ERROR: GitHub did not answer for repos/${repo}" >&2; return 2; }
-    [[ -z "${parent}" ]] && continue
-    awk -F'\t' -v r="${repo}" -v p="$(tr '[:upper:]' '[:lower:]' <<<"${parent}")" '$1 == r { print p "\t" $2 "\t" $3 }' "${tmp}/git" >>"${tmp}/watch"
-  done < <(cut -f1 "${tmp}/git" | sort -u)
+    while read -r parent; do
+      [[ -n "${parent}" ]] || continue
+      awk -F'\t' -v r="${repo}" -v p="$(tr '[:upper:]' '[:lower:]' <<<"${parent}")" '$1 == r { print p "\t" $2 "\t" $3 }' "${tmp}/git" >>"${tmp}/watch"
+    done <"${tmp}/ancestors"
+  done <"${tmp}/repos"
 
   local flutter='' dart=''
   if (( WATCH_SDK )); then
-    curl -fsS --retry 3 --retry-all-errors "${FLUTTER_RELEASES}" -o "${tmp}/releases.json" \
+    curl -fsS --connect-timeout 10 --max-time 60 --retry 3 --retry-all-errors "${FLUTTER_RELEASES}" -o "${tmp}/releases.json" \
       || { echo "ERROR: Flutter's release manifest did not answer" >&2; return 2; }
     flutter="$(jq -r '.current_release.stable as $h | .releases[] | select(.hash == $h) | .version' "${tmp}/releases.json" 2>/dev/null | head -1)"
     dart="$(jq -r '.current_release.stable as $h | .releases[] | select(.hash == $h) | .dart_sdk_version' "${tmp}/releases.json" 2>/dev/null | head -1)"
@@ -180,16 +213,26 @@ check() { # <matches-out|""> <Cargo.lock>...
 
   local acks bad=0 n=0 rc adv ghsa cve summary vrange vname target tver id until
   acks="$(acknowledged "${ledger}")"
+  # Every jq feeding a loop writes a file first, so its failure stops the run
+  # instead of ending the loop early.
+  cut -f1 "${tmp}/watch" | sort -u >"${tmp}/watched"
   while read -r repo; do
-    gh api --paginate "repos/${repo}/security-advisories?state=published&per_page=100" --jq '.[] | tojson' >"${tmp}/adv" \
+    gh_api "${tmp}/adv" --paginate "repos/${repo}/security-advisories?state=published&per_page=100" --jq '.[] | tojson' \
       || { echo "ERROR: GitHub did not answer for repos/${repo}/security-advisories" >&2; return 2; }
+    jq -se "${ADVISORY_SCHEMA} all(.[]; advisory)" "${tmp}/adv" >/dev/null 2>&1 \
+      || { echo "ERROR: GitHub's answer for repos/${repo}/security-advisories is not the repository-advisory schema" >&2; return 2; }
+    awk -F'\t' -v r="${repo}" '$1 == r' "${tmp}/watch" >"${tmp}/targets"
     while read -r adv; do
       [[ -n "${adv}" ]] || continue
       jq -e '.state == "published" and .withdrawn_at == null' <<<"${adv}" >/dev/null || continue
       n=$(( n + 1 ))
       ghsa="$(jq -r '.ghsa_id' <<<"${adv}")"; cve="$(jq -r '.cve_id // empty' <<<"${adv}")"
-      summary="$(jq -r '.summary | gsub("[\t\n]"; " ")' <<<"${adv}")"
+      summary="$(jq -r '(.summary // "") | gsub("[\t\n]"; " ")' <<<"${adv}")"
       # US-separated: a tab is IFS whitespace, so an empty name would vanish.
+      # An advisory with no vulnerability entry is read as one entry with no
+      # package and no range, which every watched package fails on.
+      jq -r '(.vulnerabilities // []) | (if length == 0 then [{}] else . end)[]
+        | [(.package.name // ""), (.vulnerable_version_range // "")] | join("\u001f")' <<<"${adv}" >"${tmp}/vulns"
       while IFS=$'\037' read -r vname vrange; do
         while IFS=$'\t' read -r _ target tver; do
           if [[ "${target}" == \** ]]; then
@@ -224,10 +267,10 @@ check() { # <matches-out|""> <Cargo.lock>...
           printf '\033[1;31m  %s %s %s is in range %q of %s (%s): %s\033[0m\n' "${ghsa}" "${target}" "${tver}" "${vrange}" "${repo}" "${cve:-no CVE}" "${summary}" >&2
           finding "watcher:${ghsa}:${target}@${tver}" "${repo} ${ghsa}: ${target} ${tver} in ${vrange} (${summary})"
           bad=1
-        done < <(awk -F'\t' -v r="${repo}" '$1 == r' "${tmp}/watch")
-      done < <(jq -r '(.vulnerabilities // [])[] | [(.package.name // ""), (.vulnerable_version_range // "")] | join("\u001f")' <<<"${adv}")
+        done <"${tmp}/targets"
+      done <"${tmp}/vulns"
     done <"${tmp}/adv"
-  done < <(cut -f1 "${tmp}/watch" | sort -u)
+  done <"${tmp}/watched"
 
   if (( bad )); then
     printf '\033[1;31m[check_upstream_advisories] FAIL:\033[0m an upstream advisory above applies to what Haven ships. Move to a release that fixes it; an owner-decided, expiring entry in %s is the only other way past it.\n' "${LEDGER_REL}" >&2
@@ -263,9 +306,12 @@ self_test() {
 shift; path='' expr='.'
 while (( \$# )); do case "\$1" in --paginate) shift ;; --jq) expr="\$2"; shift 2 ;; *) path="\$1"; shift ;; esac; done
 path="\${path%%\\?*}"
+flaky="${tmp}/serve/flaky.\${path//\//__}"
+[[ ! -f "\${flaky}" ]] || { rm "\${flaky}"; echo 'gh: connection reset' >&2; exit 1; }
 case "\${path}" in
   repos/*/*/security-advisories) f="${tmp}/serve/advisories.\$(cut -d/ -f2 <<<"\${path}")__\$(cut -d/ -f3 <<<"\${path}").json" ;;
-  repos/*/*) f="${fx}/repo.\$(cut -d/ -f2 <<<"\${path}")__\$(cut -d/ -f3 <<<"\${path}").json" ;;
+  repos/*/*) f="${tmp}/serve/repo.\$(cut -d/ -f2 <<<"\${path}")__\$(cut -d/ -f3 <<<"\${path}").json"
+    [[ -f "\${f}" ]] || f="${fx}/\${f##*/}" ;;
   *) exit 4 ;;
 esac
 [[ -f "\${f}" ]] || { echo 'gh: Not Found (HTTP 404)' >&2; exit 1; }
@@ -300,7 +346,7 @@ EOF
     local label="$1" want="$2" needle="$3" got=0; shift 3
     checked=$(( checked + 1 ))
     : >"${tmp}/findings"; : >"${tmp}/matches"
-    ( PATH="${tmp}/bin:${PATH}" REPO_ROOT="${tmp}/root" LEDGER_TODAY=2026-11-12 SECURITY_FINDINGS_OUT="${tmp}/findings" "$@" ) >"${tmp}/out" 2>&1 || got=$?
+    ( PATH="${tmp}/bin:${PATH}" REPO_ROOT="${tmp}/root" LEDGER_TODAY=2026-11-12 RETRY_DELAY=0 SECURITY_FINDINGS_OUT="${tmp}/findings" "$@" ) >"${tmp}/out" 2>&1 || got=$?
     if [[ "${got}" -eq "${want}" ]] && { [[ "${needle}" == - ]] || grep -qF -- "${needle}" "${tmp}/out" "${tmp}/findings" "${tmp}/matches"; }; then
       printf '  \033[1;32mPASS\033[0m %s\n' "${label}"
     else
@@ -368,6 +414,36 @@ EOF
   _serve GHSA-8888-9999-cccc; _ledger
   _case "an entry naming no package fails closed" 1 'GHSA-8888-9999-cccc in openmls/openmls names no package' \
     check "${tmp}/matches" "${lock}"
+
+  _serve GHSA-cccc-2222-3333; _ledger
+  _case "an advisory with no vulnerability entry fails closed" 1 'GHSA-cccc-2222-3333 in openmls/openmls names no package' \
+    check "${tmp}/matches" "${lock}"
+
+  _serve GHSA-cccc-3333-4444; _ledger
+  _case "an advisory whose vulnerabilities are null fails closed" 1 'watcher:GHSA-cccc-3333-4444:openmls@0.8.1' \
+    check "${tmp}/matches" "${lock}"
+
+  _serve GHSA-cccc-4444-5555; _ledger
+  _case "an answer that is not the advisory schema is a misconfiguration" 2 'openmls/openmls/security-advisories is not the repository-advisory schema' \
+    check "${tmp}/matches" "${lock}"
+
+  # A fork of a fork: the parent publishes nothing, the root the advisory.
+  _serve GHSA-gc79-23g3-8g52; _ledger
+  jq '.parent.full_name = "middle/openmls"' "${fx}/repo.erskingardner__openmls.json" >"${tmp}/serve/repo.erskingardner__openmls.json"
+  printf '[]\n' >"${tmp}/serve/advisories.middle__openmls.json"
+  _case "the fork root's advisories are watched, not only the parent's" 1 'watcher:GHSA-gc79-23g3-8g52:openmls@0.8.1' \
+    check "${tmp}/matches" "${lock}"
+  rm "${tmp}/serve/repo.erskingardner__openmls.json"
+
+  _serve GHSA-gc79-23g3-8g52; _ledger
+  : >"${tmp}/serve/flaky.repos__openmls__openmls__security-advisories"
+  _case "a GitHub call that fails once is tried again" 1 'watcher:GHSA-gc79-23g3-8g52:openmls@0.8.1' \
+    check "${tmp}/matches" "${lock}"
+
+  _serve; _ledger
+  { cat "${lock}"; printf '\n[[package]]\nname = "mirror"\nversion = "1.0.0"\nsource = "git+https://gitlab.com/example/mirror?rev=1#1"\n'; } >"${tmp}/elsewhere.lock"
+  _case "a git source not on github.com is a misconfiguration" 2 'git+https://gitlab.com/example/mirror' \
+    check "${tmp}/matches" "${tmp}/elsewhere.lock"
 
   _serve; cp "${fx}/advisories.dart-lang__sdk.json" "${tmp}/serve/"; _ledger
   _case "an SDK advisory in range of the current stable Dart fails, whatever package it names" 1 \

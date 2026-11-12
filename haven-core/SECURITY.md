@@ -12,15 +12,22 @@ pinned in `scripts/ci/security_tools.env`:
 - **Every push and pull request** (`ci.yml`, `mode: pr`): cargo-audit (RustSec)
   per `Cargo.lock`; osv-scanner, always `--offline`, over every lockfile
   (RustSec, GitHub-reviewed advisories and OpenSSF malicious packages, git
-  sources matched by name and version; `scripts/ci/run_osv_gate.sh`); and the
-  pub retraction gate (`check_pub_retractions.sh`).
+  sources matched by name and version; `scripts/ci/run_osv_gate.sh`), against
+  databases the gate downloads itself — osv-scanner that cannot load one
+  ecosystem's database still exits on the others' findings, so a database that
+  did not download or load fails the scan; and the pub retraction gate
+  (`check_pub_retractions.sh`).
 - **Every release** (`release-build.yml`'s `dependency-audit`, `mode: full`):
   run fresh at the tag, never replayed from CI's verdict, and every build,
-  signing and publishing job needs it. `full` adds the upstream-advisory
-  watcher (`check_upstream_advisories.sh`): no scanner matches a git-pinned
-  crate, and an advisory published in a repository reaches no database unless
-  GitHub reviews it, so it reads the advisories of every git source's
-  repository and its fork parent, and of Flutter and the Dart SDK.
+  signing and publishing job needs it from the same run attempt: "Re-run
+  failed jobs" would keep a passed audit from an earlier attempt, so those jobs
+  refuse one, and a release is re-run with "Re-run all jobs". `full` adds the
+  upstream-advisory watcher (`check_upstream_advisories.sh`): no scanner
+  matches a git-pinned crate, and an advisory published in a repository reaches
+  no database unless GitHub reviews it, so it reads the advisories of every git
+  source's repository, its fork parent and fork root, and of Flutter and the
+  Dart SDK; a git source not on github.com, an advisory that names no package
+  and an answer off GitHub's schema all fail.
 - **Nightly** (`security-nightly.yml`): `full` on main; the scanners and the
   git-pin watcher over the lockfiles the latest published release was built
   from; and zizmor's online audits of the workflows (an action pinned at a
@@ -5888,3 +5895,15 @@ These are settings, not commits, and nothing in CI can check them:
 7. Confirm that the fingerprint under README's "Signing Certificate SHA-256" is
    the real release certificate: `scripts/ci/sign_android_release.sh` refuses
    to sign with any key whose certificate differs from it.
+8. Protect the **`release` environment**. `release-build.yml`'s signing and
+   publishing jobs (`android-sign`, `android-publish`, `ios`, `zapstore`) name
+   it, and GitHub created it on the first run that did, with no protection
+   rules — so until this step it restricts nothing. Under Settings →
+   Environments → `release`, limit deployment branches and tags to `main` and
+   `v*`, then move the signing and publishing secrets (`ANDROID_KEYSTORE_*`,
+   `ANDROID_KEY_*`, `MATCH_*`, `APPLE_TEAM_ID`, `ASC_*`, `ZAPSTORE_SIGN_WITH`)
+   from the repository's secrets into the environment's. A workflow run on any
+   other ref then cannot read them, whatever its file says.
+9. Add a **tag ruleset** for `refs/tags/v*` that lets only the maintainers
+   create, update or delete a release tag: a tag push is what starts a
+   release.

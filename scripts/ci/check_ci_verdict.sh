@@ -31,7 +31,12 @@
 # both `gate` and `dependency-audit`, directly or through the jobs it needs,
 # and that none overrides a failed need with always(), failure() or
 # cancelled(), so nothing is built, signed, uploaded or published unless both
-# passed.
+# passed. "Re-run failed jobs" keeps a passed audit from an earlier attempt, so
+# every job that needs `dependency-audit` directly must start with the step
+# that fails unless the audit ran in this attempt (a job that needs it only
+# through another job needs one that does). A job-level `if:` must be one line, the form this reads;
+# the iOS job's must hold it to main and tags; and audit.yml's jobs have none,
+# since a skipped job in a called workflow is a success to its caller.
 #
 # Usage:
 #   bash scripts/ci/check_ci_verdict.sh                # pinned list == workflows,
@@ -72,8 +77,20 @@ readonly REQUIRED_JOBS=(
   'Rust Checks / soak tooling (Tier-1 soak rig)'
 )
 readonly RELEASE_YML_REL='.github/workflows/release-build.yml'
+readonly AUDIT_YML_REL='.github/workflows/audit.yml'
 # Every other release-build.yml job must need both of these.
 readonly RELEASE_ROOTS=(gate dependency-audit)
+# The first step of every job that needs dependency-audit directly: these lines
+# exactly, and no other line but FRESH_STEP_ALLOWED's.
+readonly FRESH_STEP=(
+  'name: Dependency audit ran in this attempt'
+  'AUDIT_ATTEMPT: ${{ needs.dependency-audit.outputs.attempt }}'
+  'RUN_ATTEMPT: ${{ github.run_attempt }}'
+  '[[ "${AUDIT_ATTEMPT}" == "${RUN_ATTEMPT}" ]] || { echo "::error::dependency audit is from attempt ${AUDIT_ATTEMPT}; use Re-run all jobs so the audit is fresh"; exit 1; }'
+)
+readonly FRESH_STEP_ALLOWED=('env:' 'run: |' 'working-directory: /')
+# A dispatch from any other branch must not reach TestFlight.
+readonly IOS_IF="\${{ github.ref == 'refs/heads/main' || github.ref_type == 'tag' }}"
 POLL_SECS="${CI_VERDICT_POLL_SECS:-60}"
 # A tag pushed with main can arrive before GitHub has created main's run.
 NO_RUN_GRACE_SECS="${CI_VERDICT_NO_RUN_GRACE_SECS:-300}"
@@ -84,7 +101,7 @@ DEADLINE_SECS="${CI_VERDICT_DEADLINE_SECS:-5400}"
 readonly API_MISS_LIMIT=3
 # How many fixtures the self-test runs. Pinned, because a fixture that stops
 # running is the one way a deleted check reports success.
-readonly SELF_TEST_FIXTURES=24
+readonly SELF_TEST_FIXTURES=30
 
 log() {
   printf '\033[1;34m[check_ci_verdict]\033[0m %s\n' "$*"
@@ -155,7 +172,9 @@ check_pinned() { # <repo root>
 # ---------------------------------------------------------------------------
 
 # "<job>\t<field>\t<value>" for each release-build.yml job: one `job` row,
-# then a `needs` row per need and its `uses`, `with.mode` and `if`.
+# then a `needs` row per need and its `uses`, `with.mode` and `if`, an `ifmulti`
+# row when the `if:` runs past its line, and a `step1` row per line of its
+# first step.
 release_jobs() { # <release-build.yml>
   awk '
     function value(s) { sub(/^[^:]*:[[:space:]]*/, "", s); sub(/[[:space:]]+#.*$/, "", s); gsub(/^["\047]|["\047]$/, "", s); return s }
@@ -166,6 +185,7 @@ release_jobs() { # <release-build.yml>
     /^jobs:/ { j = 1; next }
     j && /^[^[:space:]#]/ { j = 0 }
     !j { next }
+    ifcont && !/^[[:space:]]*(#.*)?$/ { if (/^     /) print job "\tifmulti\t1"; ifcont = 0 }
     /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { job = $1; sub(/:$/, "", job); print job "\tjob\t"; blk = ""; next }
     /^    [A-Za-z0-9_-]+:/ { blk = "" }
     /^    needs:/ { v = value($0); if (v == "") blk = "needs"; else needs(v); next }
@@ -173,15 +193,40 @@ release_jobs() { # <release-build.yml>
     /^    uses:/ { print job "\tuses\t" value($0); next }
     /^    with:[[:space:]]*$/ { blk = "with"; next }
     blk == "with" && /^      mode:/ { print job "\tmode\t" value($0); next }
-    /^    if:/ { print job "\tif\t" value($0); next }
+    /^    if:/ { v = value($0); print job "\tif\t" v; if (v == "" || v ~ /^[>|]/) print job "\tifmulti\t1"; else ifcont = 1; next }
+    /^    steps:[[:space:]]*$/ { blk = "steps"; step = 0; next }
+    blk == "steps" && /^      - / { step++ }
+    blk == "steps" && step == 1 && !/^[[:space:]]*(#.*)?$/ { v = $0; sub(/^[[:space:]]+/, "", v); sub(/^- /, "", v); print job "\tstep1\t" v }
   ' "$1"
 }
 
+# The job keys of a workflow with a job-level `if:`.
+jobs_with_if() { # <workflow>
+  awk '
+    /^jobs:/ { j = 1; next }
+    j && /^[^[:space:]#]/ { j = 0 }
+    j && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { job = $1; sub(/:$/, "", job) }
+    j && /^    if:/ { print job }
+  ' "$1"
+}
+
+# Whether <job>'s first step is exactly the freshness check.
+fresh_first_step() { # <job> <release_jobs rows>
+  local lines line l
+  lines="$(awk -F'\t' -v j="$1" '$1 == j && $2 == "step1" { print $3 }' <<<"$2")"
+  for l in "${FRESH_STEP[@]}"; do grep -qxF -- "${l}" <<<"${lines}" || return 1; done
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    printf '%s\n' "${FRESH_STEP[@]}" "${FRESH_STEP_ALLOWED[@]}" | grep -qxF -- "${line}" || return 1
+  done <<<"${lines}"
+}
+
 check_release_needs() { # <repo root>
-  local yml="$1/${RELEASE_YML_REL}" rows job field value root next queue bad=''
-  local -A needs=() seen=()
+  local yml="$1/${RELEASE_YML_REL}" rows job field value root next queue bad='' n
+  local -A needs=() seen=() fresh=()
   local -a jobs=()
   [[ -f "${yml}" ]] || { echo "ERROR: ${RELEASE_YML_REL} not found" >&2; return 2; }
+  [[ -f "$1/${AUDIT_YML_REL}" ]] || { echo "ERROR: ${AUDIT_YML_REL} not found" >&2; return 2; }
   rows="$(release_jobs "${yml}")"
   _field() { awk -F'\t' -v j="$1" -v f="$2" '$1 == j && $2 == f { print $3 }' <<<"${rows}"; }
   while IFS=$'\t' read -r job field value; do
@@ -197,10 +242,23 @@ check_release_needs() { # <repo root>
     || bad+="  dependency-audit does not call ./.github/workflows/audit.yml"$'\n'
   [[ "$(_field dependency-audit mode)" == full ]] \
     || bad+="  dependency-audit does not run audit.yml with mode: full"$'\n'
+  while read -r n; do
+    [[ -z "${n}" ]] || bad+="  ${AUDIT_YML_REL} job ${n} has an if:, and a skipped called job is a success to its caller"$'\n'
+  done <<<"$(jobs_with_if "$1/${AUDIT_YML_REL}")"
+  [[ "$(_field ios if)" == "${IOS_IF}" ]] \
+    || bad+="  ios does not run only on main and tags (if: ${IOS_IF})"$'\n'
   for job in "${jobs[@]}"; do
+    [[ " ${needs[${job}]} " != *' dependency-audit '* ]] || ! fresh_first_step "${job}" "${rows}" || fresh[${job}]=1
+  done
+  for job in "${jobs[@]}"; do
+    [[ -z "$(_field "${job}" ifmulti)" ]] \
+      || bad+="  ${job}'s if: runs past its line; write it on one line"$'\n'
     [[ " ${RELEASE_ROOTS[*]} " == *" ${job} "* ]] && continue
     [[ "$(_field "${job}" if)" =~ (always|failure|cancelled)\( ]] \
       && bad+="  ${job} overrides its needs with a status function in its if:"$'\n'
+    if [[ " ${needs[${job}]} " == *' dependency-audit '* && -z "${fresh[${job}]:-}" ]]; then
+      bad+="  ${job} needs dependency-audit but does not start with the step that fails on an audit from an earlier attempt"$'\n'
+    fi
     seen=(); queue="${needs[${job}]}"
     while read -r next queue <<<"${queue}" && [[ -n "${next}" ]]; do
       [[ -v "seen[${next}]" ]] && continue
@@ -213,10 +271,10 @@ check_release_needs() { # <repo root>
   done
   if [[ -n "${bad}" ]]; then
     printf '%s' "${bad}" >&2
-    fail 1 "every ${RELEASE_YML_REL} job must need gate and dependency-audit (audit.yml, mode: full), so nothing is built, signed, uploaded or published unless both passed on this run."
+    fail 1 "every ${RELEASE_YML_REL} job must need gate and dependency-audit (audit.yml, mode: full, from this attempt), so nothing is built, signed, uploaded or published unless both passed on this run."
     return
   fi
-  log "OK: all $(( ${#jobs[@]} - ${#RELEASE_ROOTS[@]} )) other ${RELEASE_YML_REL} jobs need gate and a fresh full dependency audit."
+  log "OK: all $(( ${#jobs[@]} - ${#RELEASE_ROOTS[@]} )) other ${RELEASE_YML_REL} jobs need gate and a full dependency audit from this attempt."
 }
 
 # ---------------------------------------------------------------------------
@@ -283,10 +341,10 @@ gate() { # <sha>
       judge "${run_status}" <<<"${jobs}" || rc=$?
       case "${rc}" in
         0) log "OK: all ${#REQUIRED_JOBS[@]} gate jobs passed in ${url}."; return 0 ;;
-        1) fail 1 "ci.yml did not pass its gate jobs on this commit (${url}). Fix it and tag the fixed commit, or, for a job a later push to main cancelled or a flaky one, run 'gh run rerun ${id} --failed' (which cancels any ci.yml run then in progress on main) and re-run this release once it passes."; return ;;
+        1) fail 1 "ci.yml did not pass its gate jobs on this commit (${url}). Fix it and tag the fixed commit, or, for a job a later push to main cancelled or a flaky one, run 'gh run rerun ${id} --failed' (which cancels any ci.yml run then in progress on main) and, once it passes, re-run this release with Re-run all jobs (re-running only the failed jobs keeps the old dependency audit, which the release then refuses)."; return ;;
       esac
       (( SECONDS - started < DEADLINE_SECS )) \
-        || { fail 1 "ci.yml's gate jobs had not finished after ${DEADLINE_SECS} s (${url}). Re-run this release once they pass."; return; }
+        || { fail 1 "ci.yml's gate jobs had not finished after ${DEADLINE_SECS} s (${url}). Once they pass, re-run this release with Re-run all jobs."; return; }
       log "waiting for ci.yml's gate jobs in ${url}"
     else
       (( SECONDS - started < NO_RUN_GRACE_SECS )) \
@@ -434,6 +492,7 @@ self_test() {
   _release() { # <dir>
     mkdir -p "$1/.github/workflows"
     cp "${REPO_ROOT}/${RELEASE_YML_REL}" "$1/${RELEASE_YML_REL}"
+    cp "${REPO_ROOT}/${AUDIT_YML_REL}" "$1/${AUDIT_YML_REL}"
   }
   _release "${tmp}/rel-ok"
   _case "release-build.yml: every job needs the gate and the fresh full audit" 0 check_release_needs "${tmp}/rel-ok"
@@ -460,12 +519,39 @@ self_test() {
   sed -i 's#^    uses: \./\.github/workflows/audit\.yml$#    uses: ./.github/workflows/rust-check.yml#' "${tmp}/rel-other/${RELEASE_YML_REL}"
   _case "a dependency-audit that calls another workflow fails" 1 check_release_needs "${tmp}/rel-other"
 
+  # The freshness step, removed from TestFlight's job, then skipped by an if:.
+  _release "${tmp}/rel-stale"
+  sed -i '/^  ios:/,/^  [a-z]/ { /^      - name: Dependency audit ran in this attempt$/ s/name: Dependency audit ran in this attempt/name: Some other first step/ }' \
+    "${tmp}/rel-stale/${RELEASE_YML_REL}"
+  _case "a job that needs dependency-audit and does not check its attempt fails" 1 check_release_needs "${tmp}/rel-stale"
+
+  _release "${tmp}/rel-stale-if"
+  sed -i '/^  android-publish:/,/^  [a-z]/ { /^      - name: Dependency audit ran in this attempt$/ a\        if: false
+  }' "${tmp}/rel-stale-if/${RELEASE_YML_REL}"
+  _case "an attempt check that an if: can skip fails" 1 check_release_needs "${tmp}/rel-stale-if"
+
+  _release "${tmp}/rel-block"
+  sed -i '/^  zapstore:/,/^  [a-z]/ s/^    if: .*$/    if: >-\n      always()/' "${tmp}/rel-block/${RELEASE_YML_REL}"
+  _case "a release job if: written as a block scalar fails" 1 check_release_needs "${tmp}/rel-block"
+
+  _release "${tmp}/rel-folded"
+  sed -i '/^  zapstore:/,/^  [a-z]/ s/^    if: .*$/    if: github.ref_type == '"'tag'"' ||\n      always()/' "${tmp}/rel-folded/${RELEASE_YML_REL}"
+  _case "a release job if: that runs onto a second line fails" 1 check_release_needs "${tmp}/rel-folded"
+
+  _release "${tmp}/rel-ios-any"
+  sed -i '/^  ios:/,/^  [a-z]/ { /^    if: /d }' "${tmp}/rel-ios-any/${RELEASE_YML_REL}"
+  _case "an iOS job that any branch's dispatch reaches fails" 1 check_release_needs "${tmp}/rel-ios-any"
+
+  _release "${tmp}/rel-audit-if"
+  sed -i 's/^    runs-on: ubuntu-latest$/    if: inputs.mode == '"'pr'"'\n&/' "${tmp}/rel-audit-if/${AUDIT_YML_REL}"
+  _case "an audit.yml job with an if: fails" 1 check_release_needs "${tmp}/rel-audit-if"
+
   if (( checked != SELF_TEST_FIXTURES )); then
     printf '  \033[1;31mFAIL\033[0m ran %d fixtures, expected %d\n' "${checked}" "${SELF_TEST_FIXTURES}" >&2
     fails=1
   fi
   (( fails == 0 )) || { echo "check_ci_verdict.sh --self-test: FAILED" >&2; return 1; }
-  log "OK: self-test passed — each way a gate job can fail, skip, go missing or never finish, a missing or bare run, an API blip and outage, both queries, each way the pinned list can drift, and each way a release job can run without the gate or the fresh audit."
+  log "OK: self-test passed — each way a gate job can fail, skip, go missing or never finish, a missing or bare run, an API blip and outage, both queries, each way the pinned list can drift, and each way a release job can run without the gate or an audit from this attempt."
 }
 
 case "${1:-}" in

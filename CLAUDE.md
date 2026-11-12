@@ -334,10 +334,12 @@ Reusable workflows in `.github/workflows/`; **ci.yml** is the PR/push orchestrat
 - Concurrency groups cancel in-progress runs on new pushes to the same branch
 
 **Dependency security**: `audit.yml` scans every committed lockfile (pinned
-cargo-audit and osv-scanner, always `--offline`; pub retractions) on every push,
-fresh in every release (never replayed) and nightly; those two add the watcher
-for git pins' upstream advisories, which no scanner matches, and nightly the
-latest release's lockfiles. Acknowledge only in `osv-scanner.toml` (reason,
+cargo-audit and osv-scanner, always `--offline`, where an advisory database that
+did not load fails; pub retractions) on every push, fresh in every release
+(never replayed, and refused from an earlier run attempt: re-run a release with
+"Re-run all jobs") and nightly; those two add the watcher for git pins'
+upstream advisories, which no scanner matches, and nightly the latest release's
+lockfiles. Acknowledge only in `osv-scanner.toml` (reason,
 `owner-decision:` date, expiry ≤ 90 days, every `audit.toml` ignore mirrored);
 stale or expired fails. Shipped builds take only the scanned graph (`--locked`,
 `--enforce-lockfile`, frozen `Gemfile.lock`). Residuals: `haven-core/SECURITY.md`.

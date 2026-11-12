@@ -2,7 +2,10 @@
 #
 # osv-scanner reads this file (`--config osv-scanner.toml`, run_osv_gate.sh)
 # and drops an entry's advisory, with all its aliases, until `effectiveUntil`;
-# from that instant the advisory fails the gate again. cargo-audit's ignores in
+# from that instant the advisory fails the gate again. The drop is the whole
+# alias group, in every lockfile and ecosystem (RUSTSEC-2026-0459 also silences
+# CVE-2026-119375, GHSA-72w2-rjgg-q729 and RUSTSEC-2026-0502 wherever they
+# match), so a `reason` names the package and the use it covers. cargo-audit's ignores in
 # haven-core/.cargo/audit.toml cannot expire, so each one is mirrored here and
 # this file supplies its end date. Rules, held by scripts/ci/check_ledger.sh on
 # every push and inside every release:

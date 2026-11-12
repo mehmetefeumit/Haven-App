@@ -110,7 +110,8 @@ readonly RE_MANAGED='^\[dependency-security\] [^ ()]+ \([^ ()]+\)$'
 
 # How many fixtures the self-test runs. Pinned, because a fixture that stops
 # running is the one way a deleted check reports success.
-readonly SELF_TEST_FIXTURES=38
+readonly SELF_TEST_FIXTURES=39
+RETRY_DELAY="${RETRY_DELAY_OVERRIDE:-5}"
 
 # stdout is --latest-release's answer, so everything else goes to stderr.
 log() {
@@ -367,8 +368,15 @@ latest_release() {
   # shellcheck disable=SC2064
   trap "rm -f '${err}'" RETURN
   # /releases/latest is GitHub's latest release: published, never a draft or a
-  # pre-release. It answers 404 when there is none.
-  if tag="$(gh api "repos/${GH_REPO}/releases/latest" --jq '.tag_name' 2>"${err}")"; then
+  # pre-release. It answers 404 when there is none. A read, so a failed call
+  # is asked again, three tries a minute each.
+  local i ok=0
+  for i in 1 2 3; do
+    if tag="$(timeout 60 gh api "repos/${GH_REPO}/releases/latest" --jq '.tag_name' 2>"${err}")"; then ok=1; break; fi
+    ! grep -qF 'HTTP 404' "${err}" || break
+    (( i == 3 )) || sleep $(( i * RETRY_DELAY ))
+  done
+  if (( ok )); then
     [[ "${tag}" =~ ${RE_TAG} ]] || refuse "the latest release's tag is off its shape"
     log "latest release: ${tag}"
     printf '%s\n' "${tag}"
@@ -432,6 +440,9 @@ case "$1 $2" in
   "api repos/o/r/releases/latest")
     case "${STUB_RELEASE}" in
       none) echo 'gh: Not Found (HTTP 404)' >&2; exit 1 ;;
+      flaky:*)
+        [[ -f "${STUB_CALLS}.flaked" ]] || { : >"${STUB_CALLS}.flaked"; echo 'gh: Bad Gateway (HTTP 502)' >&2; exit 1; }
+        printf '%s\n' "${STUB_RELEASE#flaky:}" ;;
       down) echo 'gh: Bad Gateway (HTTP 502)' >&2; exit 1 ;;
       *) printf '%s\n' "${STUB_RELEASE}" ;;
     esac ;;
@@ -455,7 +466,7 @@ STUB
   # fails the next check rather than aborting the self-test under `set -e`.
   _run() {
     local expect="$1" got=0; shift
-    ( export PATH="${bin}:${PATH}" STUB_CALLS="${calls}" STUB_OPEN="${openf}" STUB_BODIES="${tmp}/bodies" \
+    ( export PATH="${bin}:${PATH}" STUB_CALLS="${calls}" STUB_OPEN="${openf}" STUB_BODIES="${tmp}/bodies" RETRY_DELAY_OVERRIDE=0 \
         GITHUB_SERVER_URL=https://github.com GITHUB_REPOSITORY=o/r GITHUB_RUN_ID=42 GH_REPO=o/r
       bash "${self}" "$@" ) >"${tmp}/stdout" 2>"${tmp}/out" || got=$?
     cat "${tmp}/stdout" >>"${tmp}/out"
@@ -614,6 +625,8 @@ STUB
   _check "the latest release's tag is the answer" _release v0.1.13 0 v0.1.13
   _check "no release is an empty answer, not a failure" _release none 0 ''
   _check "GitHub not answering is a refusal, never \"no release\"" _release down 2 ''
+  rm -f "${calls}.flaked"
+  _check "a release lookup that fails once is asked again" _release flaky:v0.1.13 0 v0.1.13
   _check "a tag off its shape is refused" _release 'v1;rm' 2 ''
 
   local repo="${tmp}/repo" dest="${tmp}/dest"

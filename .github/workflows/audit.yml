@@ -38,6 +38,11 @@
 # the upstream-advisory watcher. Every acknowledged advisory is an expiring
 # entry in osv-scanner.toml; check_ledger.sh holds its rules. The scanners'
 # versions are pinned in scripts/ci/security_tools.env.
+#
+# Only `pr` mode restores the installed scanners from a cache: a PR verdict is
+# advisory to the release gate, which calls this workflow in `full` mode and so
+# always installs them fresh. No job has an `if:` (check_ci_verdict.sh holds
+# it): a skipped job in a called workflow counts as success to its caller.
 
 name: Dependency Audit
 
@@ -48,6 +53,13 @@ on:
         description: "pr (every push and pull request) or full (release and nightly: adds the upstream-advisory watcher; a stale ledger entry fails)"
         type: string
         default: pr
+    outputs:
+      # release-build.yml refuses an audit from an earlier attempt: "Re-run
+      # failed jobs" keeps a passed audit, however old. Both jobs must have
+      # run in the same attempt.
+      attempt:
+        description: "The run attempt both audit jobs ran in ('mixed' when they did not run in the same one)"
+        value: ${{ jobs.audit.outputs.attempt == jobs.advisories.outputs.attempt && jobs.advisories.outputs.attempt || 'mixed' }}
 
 permissions:
   contents: read
@@ -56,6 +68,10 @@ jobs:
   audit:
     name: cargo audit (RustSec advisories)
     runs-on: ubuntu-latest
+    # A cold cargo-audit install takes about 3 minutes and the scans seconds.
+    timeout-minutes: 20
+    outputs:
+      attempt: ${{ steps.attempt.outputs.attempt }}
     defaults:
       run:
         working-directory: haven-core
@@ -66,10 +82,35 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install cargo-audit
+      - name: Record the run attempt
+        id: attempt
+        run: echo "attempt=${GITHUB_RUN_ATTEMPT}" >> "${GITHUB_OUTPUT}"
+
+      - name: Scanner pins
+        id: pins
         run: |
           source ../scripts/ci/security_tools.env
-          cargo install cargo-audit --locked --version "=${CARGO_AUDIT_VERSION}"
+          echo "cargo-audit=${CARGO_AUDIT_VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "${HOME}/.security-tools/bin" >> "${GITHUB_PATH}"
+
+      - name: Restore cargo-audit (pr mode)
+        id: tool-cache
+        if: ${{ inputs.mode == 'pr' }}
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.security-tools/bin/cargo-audit
+          key: security-tools-${{ runner.os }}-cargo-audit-${{ steps.pins.outputs.cargo-audit }}-${{ hashFiles('scripts/ci/security_tools.env') }}
+
+      - name: Install cargo-audit
+        if: ${{ steps.tool-cache.outputs.cache-hit != 'true' }}
+        env:
+          CARGO_AUDIT_VERSION: ${{ steps.pins.outputs.cargo-audit }}
+        run: |
+          for i in 1 2 3; do
+            cargo install cargo-audit --locked --version "=${CARGO_AUDIT_VERSION}" --root "${HOME}/.security-tools" && break
+            (( i < 3 )) || exit 1
+            sleep $(( i * 15 ))
+          done
 
       - name: Run cargo audit (haven-core)
         run: cargo audit
@@ -127,10 +168,18 @@ jobs:
   advisories:
     name: Advisory gates (osv-scanner, pub retractions, upstream advisories, ledger)
     runs-on: ubuntu-latest
+    # A cold osv-scanner build takes about 2 minutes and the gates under one.
+    timeout-minutes: 20
+    outputs:
+      attempt: ${{ steps.attempt.outputs.attempt }}
     env:
       MODE: ${{ inputs.mode }}
 
     steps:
+      - name: Record the run attempt
+        id: attempt
+        run: echo "attempt=${GITHUB_RUN_ATTEMPT}" >> "${GITHUB_OUTPUT}"
+
       - name: Checkout
         id: checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -152,20 +201,44 @@ jobs:
           : >"${RUNNER_TEMP}/dependency-findings/findings.tsv"
           echo "SECURITY_FINDINGS_OUT=${RUNNER_TEMP}/dependency-findings/findings.tsv" >>"${GITHUB_ENV}"
 
+      - name: Scanner pins
+        id: pins
+        run: |
+          source scripts/ci/security_tools.env
+          echo "osv-scanner=${OSV_SCANNER_VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "${HOME}/.security-tools/bin" >> "${GITHUB_PATH}"
+
+      - name: Restore osv-scanner (pr mode)
+        id: tool-cache
+        if: ${{ inputs.mode == 'pr' }}
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.security-tools/bin/osv-scanner
+          key: security-tools-${{ runner.os }}-osv-scanner-${{ steps.pins.outputs.osv-scanner }}-${{ hashFiles('scripts/ci/security_tools.env') }}
+
+      # Exactly the Go osv-scanner's go.mod names (`go 1.27.3`), so
+      # GOTOOLCHAIN=auto never fetches a second toolchain; bump it with
+      # OSV_SCANNER_VERSION.
       - name: Set up Go
+        if: ${{ steps.tool-cache.outputs.cache-hit != 'true' }}
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version: stable
+          go-version: 1.27.3
           cache: false
 
       # `go install` verifies the module graph against the Go checksum
-      # database; GOTOOLCHAIN=auto fetches the Go release osv-scanner's go.mod
-      # names when it is newer than the runner's, verified the same way.
+      # database.
       - name: Install osv-scanner
+        if: ${{ steps.tool-cache.outputs.cache-hit != 'true' }}
+        env:
+          OSV_SCANNER_VERSION: ${{ steps.pins.outputs.osv-scanner }}
         run: |
-          source scripts/ci/security_tools.env
-          GOTOOLCHAIN=auto go install "github.com/google/osv-scanner/v2/cmd/osv-scanner@${OSV_SCANNER_VERSION}"
-          echo "$(go env GOPATH)/bin" >> "${GITHUB_PATH}"
+          for i in 1 2 3; do
+            GOBIN="${HOME}/.security-tools/bin" GOTOOLCHAIN=auto \
+              go install "github.com/google/osv-scanner/v2/cmd/osv-scanner@${OSV_SCANNER_VERSION}" && break
+            (( i < 3 )) || exit 1
+            sleep $(( i * 15 ))
+          done
 
       - name: Known-vulnerable or malicious packages (osv-scanner, every lockfile)
         id: osv

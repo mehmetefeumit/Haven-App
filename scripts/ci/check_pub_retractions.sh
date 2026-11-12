@@ -38,7 +38,10 @@ REPO_ROOT="${REPO_ROOT_OVERRIDE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && 
 
 # How many fixtures the self-test runs. Pinned, because a fixture that stops
 # running is the one way a deleted check reports success.
-readonly SELF_TEST_FIXTURES=9
+readonly SELF_TEST_FIXTURES=10
+# Registry requests in flight at once: the locks hold about 200 packages, and
+# one at a time took 35 s.
+readonly FETCH_JOBS=8
 
 log() {
   printf '\033[1;34m[check_pub_retractions]\033[0m %s\n' "$*"
@@ -73,8 +76,14 @@ hosted_packages() { # <pubspec.lock>
   ' "$1"
 }
 
+fetch() { # <registry url> <package> <out>
+  curl -fsS --connect-timeout 10 --max-time 60 --retry 3 --retry-all-errors -H 'Accept: application/vnd.pub.v2+json' \
+    "${1%/}/api/packages/$2" -o "$3" 2>/dev/null || rm -f "$3"
+}
+
 check() { # <pubspec.lock>...
-  local lock name ver url body entry retracted=0 checked=0 tmp
+  local lock name ver url body entry retracted=0 checked=0 tmp n=0 running=0
+  local -A bodies=()
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
@@ -83,14 +92,23 @@ check() { # <pubspec.lock>...
     [[ -f "${lock}" ]] || { echo "ERROR: ${lock} not found" >&2; return 2; }
     hosted_packages "${lock}" >>"${tmp}/rows" || return 2
   done
+  sort -u -o "${tmp}/rows" "${tmp}/rows"
+  # Every package fetched once, FETCH_JOBS at a time; read below in sorted
+  # order, so the output does not depend on which answer came first.
   while IFS=$'\t' read -r name ver url; do
     [[ "${name}" =~ ^[a-z0-9_]+$ ]] || { echo "ERROR: '${name}' is not a pub package name" >&2; return 2; }
     [[ "${url}" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~/-]*)?$ ]] \
       || { echo "ERROR: ${name} is hosted at '${url}', which is not an https registry" >&2; return 2; }
-    body="${tmp}/${name}.json"
-    curl -fsS --retry 3 --retry-all-errors -H 'Accept: application/vnd.pub.v2+json' \
-      "${url%/}/api/packages/${name}" -o "${body}" \
-      || { echo "ERROR: ${url%/}/api/packages/${name} did not answer" >&2; return 2; }
+    [[ -z "${bodies["${url} ${name}"]:-}" ]] || continue
+    n=$(( n + 1 )); bodies["${url} ${name}"]="${tmp}/body.${n}.json"
+    fetch "${url}" "${name}" "${tmp}/body.${n}.json" &
+    running=$(( running + 1 ))
+    (( running < FETCH_JOBS )) || { wait -n; running=$(( running - 1 )); }
+  done <"${tmp}/rows"
+  wait
+  while IFS=$'\t' read -r name ver url; do
+    body="${bodies["${url} ${name}"]}"
+    [[ -f "${body}" ]] || { echo "ERROR: ${url%/}/api/packages/${name} did not answer" >&2; return 2; }
     entry="$(jq -c --arg v "${ver}" '[.versions[]? | select(.version == $v)][0] // empty' "${body}" 2>/dev/null)" \
       || { echo "ERROR: ${url%/}/api/packages/${name} answered something that is not package JSON" >&2; return 2; }
     [[ -n "${entry}" ]] || { echo "ERROR: ${url} lists no ${name} ${ver}, the version the lock pins" >&2; return 2; }
@@ -103,7 +121,7 @@ check() { # <pubspec.lock>...
     if [[ "$(jq -r '.isDiscontinued == true' "${body}")" == true ]]; then
       printf 'warning: %s is discontinued%s\n' "${name}" "$(jq -r 'if .replacedBy then " (replaced by \(.replacedBy))" else "" end' "${body}")"
     fi
-  done < <(sort -u "${tmp}/rows")
+  done <"${tmp}/rows"
   (( checked > 0 )) || { echo "ERROR: no hosted package in $*" >&2; return 2; }
   if (( retracted )); then
     printf '\033[1;31m[check_pub_retractions] FAIL:\033[0m a lock pins a retracted version. Re-resolve it (flutter pub upgrade <package>); a retraction cannot be acknowledged.\n' >&2
@@ -135,7 +153,7 @@ self_test() {
   cat >"${tmp}/bin/curl" <<EOF
 #!/usr/bin/env bash
 out='' url=''
-while (( \$# )); do case "\$1" in -o) out="\$2"; shift 2 ;; -H) shift 2 ;; -*) shift ;; *) url="\$1"; shift ;; esac; done
+while (( \$# )); do case "\$1" in -o) out="\$2"; shift 2 ;; -H|--connect-timeout|--max-time|--retry) shift 2 ;; -*) shift ;; *) url="\$1"; shift ;; esac; done
 printf '%s\n' "\${url}" >>"${tmp}/asked"
 [[ "\${url}" =~ ^https://([^/]+)/api/packages/([a-z0-9_]+)\$ ]] || exit 3
 f="${tmp}/api/\${BASH_REMATCH[1]}/\${BASH_REMATCH[2]}.json"
@@ -194,6 +212,24 @@ EOF
 
   _case "a hosted package on a non-https registry is a misconfiguration" 2 'not an https registry' \
     check "$(_lock plain 's|url: "https://pub.dev"|url: "http://pub.dev"|')"
+
+  # More packages than are fetched at once, the one that does not answer in
+  # the middle: each is asked for once, and the run still fails on it.
+  local i
+  { printf 'packages:\n'
+    for i in p0 p1 p2 p3 p4 no_such_package p5 p6 p7 p8 p9; do
+      [[ "${i}" == no_such_package ]] || cp "${fx}/pub.dev/http.json" "${tmp}/api/pub.dev/${i}.json"
+      printf '  %s:\n    dependency: transitive\n    description:\n      name: %s\n      url: "https://pub.dev"\n    source: hosted\n    version: "1.6.0"\n' "${i}" "${i}"
+    done
+  } >"${tmp}/many.lock"
+  _each_once() {
+    local rc=0
+    check "$@" || rc=$?
+    [[ "$(sort -u "${tmp}/asked" | wc -l)" -eq 11 && "$(wc -l <"${tmp}/asked")" -eq 11 ]] || return 3
+    return "${rc}"
+  }
+  _case "packages fetched in parallel are each asked for once, and one that does not answer still fails the run" 2 \
+    'https://pub.dev/api/packages/no_such_package did not answer' _each_once "${tmp}/many.lock"
 
   if (( fails )); then
     echo "self-test: FAILED" >&2
