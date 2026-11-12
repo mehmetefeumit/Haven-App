@@ -175,6 +175,8 @@ pub struct FaultState {
     /// Whether every `NEG-OPEN` is answered as a relay without NIP-77 answers
     /// it, and never passed on.
     pub refuse_negentropy: bool,
+    /// Whether every NIP-77 answer the relay sends is kept from the client.
+    pub withhold_negentropy: bool,
 }
 
 impl FaultState {
@@ -916,6 +918,9 @@ async fn deliver(
                     return true;
                 }
                 RelayMessage::NegMsg { .. } | RelayMessage::NegErr { .. } => {
+                    if faults.withhold_negentropy {
+                        return true;
+                    }
                     if !write(to_client, frame.bytes()).await {
                         return false;
                     }

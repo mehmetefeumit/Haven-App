@@ -1266,11 +1266,12 @@ pub(crate) async fn seal_probe<T: TimelineSink, L: LogDrain>(
 /// An arm's allowance of bounded waits: any number that end in time, and one
 /// that runs out.
 ///
-/// After the one that ran out the arm waits for nothing more, so whatever is
-/// broken its own waits cost it one round trip — the one its
-/// [`Arm::probe_rounds`] prices beside the closing round's. A wait that ends
-/// in time is not priced, for this arm as for every other: a bound is paid
-/// only when something fails to happen.
+/// After the one that ran out there is no bound to wait with, so the arm
+/// makes no further wait and whatever is broken its own waits cost it one
+/// round trip — the one its [`Arm::probe_rounds`] prices beside the closing
+/// round's. A wait that was not made grades nothing: only the one that ran
+/// out can be a finding. A wait that ends in time is not priced, for this arm
+/// as for every other: a bound is paid only when something fails to happen.
 pub(crate) struct Allowance {
     spent: bool,
 }
@@ -1280,14 +1281,15 @@ impl Allowance {
         Self { spent: false }
     }
 
-    /// What the next wait may take: a round trip, and nothing once a wait
-    /// has run out.
-    pub(crate) fn bound(&self) -> Duration {
-        if self.spent {
-            Duration::ZERO
-        } else {
-            bounds::round_trip(Recovery::Undisturbed)
-        }
+    /// As an arm one of whose setting-up waits has run out.
+    pub(crate) const fn run_out() -> Self {
+        Self { spent: true }
+    }
+
+    /// What the next wait may take: a round trip, and no wait at all once
+    /// one has run out.
+    pub(crate) fn bound(&self) -> Option<Duration> {
+        (!self.spent).then(|| bounds::round_trip(Recovery::Undisturbed))
     }
 
     /// Records whether a wait ended in time, and answers the same.
@@ -1993,5 +1995,22 @@ mod tests {
         assert!(red.ends_with(" missed=2,4"), "{red}");
         let clean = report(0).to_string();
         assert!(!clean.contains("missed"), "{clean}");
+    }
+
+    #[test]
+    fn an_allowance_offers_no_wait_once_one_has_run_out() {
+        use crate::oracle::{bounds, Recovery};
+        let round_trip = Some(bounds::round_trip(Recovery::Undisturbed));
+        let mut waits = super::Allowance::new();
+        assert!(waits.ended(true) && waits.bound() == round_trip && waits.all_ended());
+        assert!(
+            !waits.ended(false) && waits.bound().is_none() && !waits.all_ended(),
+            "a wait that ran out leaves no bound to make another with"
+        );
+        assert!(
+            waits.ended(true) && waits.bound().is_none(),
+            "and nothing that ends in time brings one back"
+        );
+        assert!(super::Allowance::run_out().bound().is_none());
     }
 }

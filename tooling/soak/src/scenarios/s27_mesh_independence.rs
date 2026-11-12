@@ -9,8 +9,8 @@
 //!   (plane, kind, tag names, `expiration − created_at`, the answer its own
 //!   endpoint was given, how many times it was sent);
 //! * per endpoint of every plane, the canonical one included, how many
-//!   `REQ`, `CLOSE`, `NEG-OPEN`, `NEG-MSG`, `NEG-CLOSE` and other frames it
-//!   carried — and, on the canonical one, how many `EVENT`s;
+//!   `REQ`, `CLOSE`, `NEG-OPEN` and other frames it carried — and, on the
+//!   canonical one, how many `EVENT`s;
 //! * the answer of every seal and every send, in order.
 //!
 //! And within the mesh-on pass: a mesh drive asks its transport to send
@@ -29,7 +29,10 @@
 //! The order of a device's frames and when each was sent; a connection that
 //! is opened and carries no frame; and anything about a frame but its shape —
 //! another `created_at`, another routing id, another filter under the same
-//! verb all compare equal.
+//! verb all compare equal. Nor a NIP-77 session's course after its opening:
+//! how many `NEG-MSG`s it takes is the relay's answer, and the pool sends a
+//! `NEG-CLOSE` only for a session it finished, never for one a relay was too
+//! slow for or refused. That a session was opened is compared.
 //!
 //! # The script
 //!
@@ -48,25 +51,33 @@
 //! # One world, two passes
 //!
 //! An arm has one world, so the passes share its circles, relays and
-//! sessions rather than being two runs of a profile. The first mark waits
-//! for the wire to be still — a foreground entry's NIP-77 pass ends in the
-//! engine before its closing frame has left. The passes share an instant:
-//! every frame after the first mark is in exactly one of them, and the last
-//! mark is taken behind the closing round's settle, so a frame a device still
-//! had to send is counted.
+//! sessions rather than being two runs of a profile. The mark before each
+//! pass waits for the wire to be still, as O6 reads its fingerprint: no
+//! endpoint carrying a new frame across [`STABILITY_TICKS`] observations a
+//! tick apart — a foreground entry's NIP-77 pass ends in the engine before
+//! its last frame has left, and however a session ended it sends nothing
+//! more. The passes share an instant: every frame after the first mark is in
+//! exactly one of them, and the last mark is taken behind the closing
+//! round's settle, so a frame a device still had to send is counted.
 //!
 //! # One wait may run out
 //!
-//! Every send a relay took is awaited at every peer. The first wait that
-//! runs out is the finding, and the arm waits for nothing after it
-//! ([`Allowance`]): a relay path that stopped delivering costs one round
-//! trip, and the passes are then not compared, since nothing was read from
-//! the relay before the mesh carried it.
+//! The arm's bounded waits share one [`Allowance`]: after the first that
+//! runs out, none is made, so whatever is broken costs one round trip, and
+//! the passes are then not compared. Which wait it was decides what the run
+//! says. A send a relay took and a peer's live plane never delivered is the
+//! finding, by name. A wait of the setting-up — a foreground entry's pass
+//! that has not ended, a wire that never stood still — is no finding of this
+//! arm's: nothing it grades was observed, so the run is unusable (rc 3), and
+//! a device that is really stuck is still named by the closing round. A wait
+//! that was not made grades nothing.
 //!
-//! # The control
+//! # The controls
 //!
 //! [`out_of_range_control`] runs the arm with no device in range of another:
 //! no frame crosses a link and nothing is read from the mesh — rc 3.
+//! [`late_setup_control`] runs it as after a setting-up wait that ran out:
+//! rc 3, and no delivery named that nobody waited for.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -81,16 +92,18 @@ use sha2::{Digest, Sha256};
 
 use crate::clock::WallNow;
 use crate::nemesis::types::{ByteCap, Fault};
+use crate::oracle::quiescence::STABILITY_TICKS;
 use crate::oracle::vacuity::{Canaries, ExpectationFloor, Observed};
 use crate::oracle::{Finding, Invariant, ProbeToken, Reach, Recovery, Verdict};
 use crate::relay::{plane_instant, CLIENT_VERBS};
 use crate::rig::mesh::turn_on;
 use crate::rig::{
-    DeviceTag, LogDrain, MeshPlane, PacingClock, RelayPlane, RelayTag, RigError, Step, TimelineSink,
+    poll_until, DeviceTag, LogDrain, MeshPlane, PacingClock, RelayPlane, RelayTag, RigError, Step,
+    TimelineSink,
 };
 use crate::scenarios::{
-    await_condition, closing_pairs, grade_round, listen, round, seal_probe, undelivered_to,
-    Absence, Allowance, Arm, ArmOutcome, Scenario, ScenarioReport, ScenarioWorld, WithheldAcks,
+    closing_pairs, grade_round, listen, round, seal_probe, undelivered_to, Absence, Allowance, Arm,
+    ArmOutcome, Scenario, ScenarioReport, ScenarioWorld, WithheldAcks, CONDITION_POLL,
     NO_GATING_ROWS,
 };
 
@@ -130,7 +143,7 @@ pub(crate) async fn run<T: TimelineSink, L: LogDrain>(
     _arm: &Arm,
     tick: Duration,
 ) -> Result<ArmOutcome, RigError> {
-    independence(world, tick, true).await
+    independence(world, tick, true, Allowance::new()).await
 }
 
 /// The arm with no device in radio range of another.
@@ -146,7 +159,24 @@ pub async fn out_of_range_control<T: TimelineSink, L: LogDrain>(
     tick: Duration,
 ) -> Result<ScenarioReport, RigError> {
     let started = tokio::time::Instant::now();
-    let outcome = independence(world, tick, false).await?;
+    let outcome = independence(world, tick, false, Allowance::new()).await?;
+    Ok(Scenario::MeshIndependence.report(world, &ARMS[0], outcome, started))
+}
+
+/// The arm as it runs once a wait of its setting-up has run out.
+///
+/// The control in `tests/oracles.rs` requires rc 3 and no delivery finding:
+/// the arm then waits for nothing, and a wait it did not make grades nothing.
+///
+/// # Errors
+///
+/// As [`run`].
+pub async fn late_setup_control<T: TimelineSink, L: LogDrain>(
+    world: &mut ScenarioWorld<T, L>,
+    tick: Duration,
+) -> Result<ScenarioReport, RigError> {
+    let started = tokio::time::Instant::now();
+    let outcome = independence(world, tick, true, Allowance::run_out()).await?;
     Ok(Scenario::MeshIndependence.report(world, &ARMS[0], outcome, started))
 }
 
@@ -154,6 +184,7 @@ async fn independence<T: TimelineSink, L: LogDrain>(
     world: &mut ScenarioWorld<T, L>,
     tick: Duration,
     in_range: bool,
+    mut waits: Allowance,
 ) -> Result<ArmOutcome, RigError> {
     let tags: Vec<DeviceTag> = world.devices().iter().map(|device| device.tag).collect();
     let [bridger, quiet, .., other] = *tags.as_slice() else {
@@ -167,23 +198,19 @@ async fn independence<T: TimelineSink, L: LogDrain>(
         other,
         tags,
     };
-    let mut waits = Allowance::new();
     // A device brought to the foreground holds its seals, and may still move
     // a cursor, until the NIP-77 pass its entry is owed has ended.
     for &tag in &at.tags {
-        let ended = world.device(tag)?.entry_pass_ended(waits.bound()).await?;
-        waits.ended(ended);
+        if let Some(bound) = waits.bound() {
+            let ended = world.device(tag)?.entry_pass_ended(bound).await?;
+            waits.ended(ended);
+        }
     }
-    // The pass ends in the engine before its last frame is on the wire: the
-    // first mark waits for every session a device opened to be closed there.
-    let settled = &*world;
-    let closed = await_condition(waits.bound(), || async { Ok(sessions_closed(settled)) }).await?;
-    waits.ended(closed);
     let mut minted = 0_u32;
 
-    let start = Mark::of(world);
+    let start = Mark::still(world, tick, &mut waits).await?;
     let off = Pass::run(world, &at, None, &mut minted, &mut waits).await?;
-    let cut = Mark::of(world);
+    let cut = Mark::still(world, tick, &mut waits).await?;
 
     let mut lit = true;
     for &tag in &at.tags {
@@ -224,7 +251,7 @@ async fn independence<T: TimelineSink, L: LogDrain>(
         .await?,
     );
 
-    let entitled = (at.bridger, on.refused);
+    let entitled = on.refused.map(|refused| (at.bridger, refused));
     let mut canaries = Canaries::new();
     // 1. The mesh was on at every device, and frames crossed its links.
     canaries.check(lit && plane.carried() > 0);
@@ -232,12 +259,13 @@ async fn independence<T: TimelineSink, L: LogDrain>(
     canaries.check(on.read_refused);
     // 3. …and it was passed on to the relay, counted apart from the
     //    device's own.
-    canaries.check((sent_on.passed_on.iter()).any(|sent| (sent.device, sent.id) == entitled));
+    canaries.check((sent_on.passed_on.iter()).any(|sent| Some((sent.device, sent.id)) == entitled));
     // 4. With the mesh on a location was sealed for it alone.
     canaries.check(on.mesh_only == 1);
     // 5. The refusing endpoint refused, in both passes.
     canaries.check(sent_off.refusals > 0 && sent_on.refusals > 0);
-    // 6. No wait ran out: every send was read from the relay before the
+    // 6. No wait ran out: the entries' passes had ended, each mark was taken
+    //    on a still wire, and every send was read from the relay before the
     //    mesh carried it, which is what makes the passes comparable.
     canaries.check(waits.all_ended());
 
@@ -281,9 +309,9 @@ fn moved(
     }
     // The one update the script's sends were entitled to pass on, in one
     // frame a relay.
-    let entitled = (at.bridger, on.refused);
+    let entitled = on.refused.map(|refused| (at.bridger, refused));
     if let Some(sent) = (sent_on.passed_on.iter())
-        .find(|sent| (sent.device, sent.id) != entitled || sent.times != 1)
+        .find(|sent| Some((sent.device, sent.id)) != entitled || sent.times != 1)
     {
         return of(Some(sent.device));
     }
@@ -376,14 +404,16 @@ struct Pass {
     mesh_only: usize,
     /// Who sealed each event of the pass.
     sealed_by: Vec<(EventId, DeviceTag)>,
-    /// The update step 2's endpoint refused.
-    refused: EventId,
+    /// The update step 2's endpoint refused, if the device could seal one:
+    /// one inside its entry's pass, never waited for, holds its seals.
+    refused: Option<EventId>,
     /// Whether a peer read that update from the mesh, for the first time.
     read_refused: bool,
     /// A device whose mesh drive sent something, moved a cursor, or read an
     /// update no send-time check had passed.
     strayed: Option<DeviceTag>,
-    /// The first send a relay took that a peer's live plane never delivered.
+    /// The send a relay took that a peer's live plane, waited for, never
+    /// delivered.
     undelivered: Option<(Invariant, Verdict)>,
 }
 
@@ -459,12 +489,11 @@ impl Pass {
         // 5. One more send.
         script.send(at.bridger, &WallClock).await?;
 
-        let (refused, _) = script.refused.ok_or(RigError::Core(Step::Publish))?;
         Ok(Self {
             answers: script.answers,
             mesh_only: script.mesh_only,
             sealed_by: script.sealed_by,
-            refused,
+            refused: script.refused.map(|(refused, _)| refused),
             read_refused: script.read_refused,
             strayed: script.strayed,
             undelivered: script.undelivered,
@@ -480,8 +509,8 @@ impl<T: TimelineSink, L: LogDrain> Script<'_, T, L> {
 
     /// `device` seals a location and sends it as the app does, its relay
     /// receive completed; a send a relay took is awaited at every peer's
-    /// live plane, until one such wait has run out. The event and its probe,
-    /// when one was sealed.
+    /// live plane while the arm may still wait. The event and its probe, when
+    /// one was sealed.
     async fn send(
         &mut self,
         device: DeviceTag,
@@ -510,13 +539,12 @@ impl<T: TimelineSink, L: LogDrain> Script<'_, T, L> {
         if matches!(publish, LocationPublish::Sent(_)) {
             self.handed.push(probe);
         }
-        if answer == Answer::Taken {
+        if let Some(bound) = self.waits.bound().filter(|_| answer == Answer::Taken) {
             let sender = self.world.device(device)?.pubkey_hex();
-            let bound = self.waits.bound();
             if let Some(to) = undelivered_to(&mut listeners, &sender, probe, bound).await {
                 self.waits.ended(false);
                 let circle = self.world.circles()[0].tag;
-                self.undelivered.get_or_insert((
+                self.undelivered = Some((
                     Invariant::LocationRoundTrip,
                     Verdict::Failed(Finding::ProbeNotDelivered {
                         from: device,
@@ -599,21 +627,6 @@ impl<T: TimelineSink, L: LogDrain> Script<'_, T, L> {
     }
 }
 
-/// Whether every NIP-77 session a device opened on any plane has been closed
-/// on the wire.
-fn sessions_closed<T: TimelineSink, L: LogDrain>(world: &ScenarioWorld<T, L>) -> bool {
-    let slot = |verb| CLIENT_VERBS.iter().position(|known| *known == verb);
-    let (Some(opened), Some(closed)) = (slot("NEG-OPEN"), slot("NEG-CLOSE")) else {
-        return false;
-    };
-    world.all_planes().all(|plane| {
-        world.devices().iter().all(|device| {
-            let carried = plane.ledger().client_frames(Some(device.tag));
-            carried[opened] == carried[closed]
-        })
-    })
-}
-
 /// One circle's persisted cursor and backfill floor.
 type Asked = (Option<i64>, Option<i64>);
 
@@ -642,6 +655,24 @@ fn cursors<T: TimelineSink, L: LogDrain>(
 /// [`CLIENT_VERBS`], then every other frame.
 type ByVerb = [usize; CLIENT_VERBS.len() + 1];
 
+/// The verbs that carry a NIP-77 session's course after its opening: the
+/// relay's pace, never the device's choice.
+const SESSION_COURSE: [&str; 2] = ["NEG-MSG", "NEG-CLOSE"];
+
+/// What `endpoint` carried between two counts, as the passes compare it by
+/// count: nothing of a device's own `EVENT`s, which are compared one by one,
+/// and nothing of a session's course.
+fn compared(endpoint: Option<DeviceTag>, before: ByVerb, after: ByVerb) -> ByVerb {
+    let mut carried = after;
+    for (slot, count) in carried.iter_mut().enumerate() {
+        let verb = CLIENT_VERBS.get(slot);
+        let apart = (endpoint.is_some() && verb == Some(&"EVENT"))
+            || verb.is_some_and(|verb| SESSION_COURSE.contains(verb));
+        *count = if apart { 0 } else { *count - before[slot] };
+    }
+    carried
+}
+
 /// An instant between passes: where the plane record stood, and how many
 /// frames every endpoint of every plane had carried.
 struct Mark {
@@ -650,6 +681,33 @@ struct Mark {
 }
 
 impl Mark {
+    /// A mark behind a still wire, while the arm may still wait for one: no
+    /// endpoint carrying a new frame across [`STABILITY_TICKS`] observations
+    /// a tick apart. Every end of a NIP-77 session reaches it, which a count
+    /// of `NEG-CLOSE`s does not: the pool closes only a session it finished.
+    async fn still<T: TimelineSink, L: LogDrain>(
+        world: &ScenarioWorld<T, L>,
+        tick: Duration,
+        waits: &mut Allowance,
+    ) -> Result<Self, RigError> {
+        if let Some(bound) = waits.bound() {
+            let (mut last, mut streak) = (None, 0_u8);
+            let still = poll_until(bound, tick.max(CONDITION_POLL), || {
+                let carried = Self::of(world).carried;
+                streak = if last.as_ref() == Some(&carried) {
+                    streak.saturating_add(1)
+                } else {
+                    1
+                };
+                last = Some(carried);
+                std::future::ready(Ok(streak >= STABILITY_TICKS))
+            })
+            .await?;
+            waits.ended(still.is_some());
+        }
+        Ok(Self::of(world))
+    }
+
     fn of<T: TimelineSink, L: LogDrain>(world: &ScenarioWorld<T, L>) -> Self {
         let devices = world.devices().iter().map(|device| Some(device.tag));
         let endpoints: Vec<Option<DeviceTag>> = std::iter::once(None).chain(devices).collect();
@@ -684,8 +742,7 @@ struct Sent {
     /// How many `EVENT`s a relay refused.
     refusals: usize,
     /// Per endpoint of every plane, the frames that are compared by count
-    /// alone: every verb but `EVENT` on a device's own endpoint, where the
-    /// `EVENT`s are compared one by one; every verb on the canonical one.
+    /// alone ([`compared`]).
     others: Vec<(RelayTag, Option<DeviceTag>, ByVerb)>,
 }
 
@@ -699,12 +756,7 @@ impl Sent {
         let (frames, passed_on, refusals) = events_between(world, from.at..to.at, sealed_by);
         let others = (from.carried.iter().zip(&to.carried))
             .map(|(&(plane, endpoint, before), &(_, _, after))| {
-                let mut carried = after;
-                for (slot, count) in carried.iter_mut().enumerate() {
-                    let own_event = endpoint.is_some() && CLIENT_VERBS.get(slot) == Some(&"EVENT");
-                    *count = if own_event { 0 } else { *count - before[slot] };
-                }
-                (plane, endpoint, carried)
+                (plane, endpoint, compared(endpoint, before, after))
             })
             .collect();
         Self {
@@ -888,7 +940,7 @@ mod tests {
             answers: Vec::new(),
             mesh_only: 0,
             sealed_by: Vec::new(),
-            refused,
+            refused: Some(refused),
             read_refused: false,
             strayed: None,
             undelivered: None,
@@ -973,6 +1025,37 @@ mod tests {
                     device: Some(bridger)
                 }),
             "the same update passed on in a second frame"
+        );
+    }
+
+    #[test]
+    fn a_sessions_opening_is_compared_and_its_course_is_not() {
+        let slot = |verb| {
+            (CLIENT_VERBS.iter())
+                .position(|known| *known == verb)
+                .expect("a verb the ledger counts")
+        };
+        let one_more = |verb| {
+            let mut after = ByVerb::default();
+            after[slot(verb)] = 1;
+            compared(Some(DeviceTag::new(0)), ByVerb::default(), after)
+        };
+        let nothing = ByVerb::default();
+        // A session a relay answered in time takes a NEG-MSG and a NEG-CLOSE
+        // more than one it was too slow for.
+        assert!(one_more("NEG-MSG") == nothing && one_more("NEG-CLOSE") == nothing);
+        assert!(
+            one_more("NEG-OPEN") != nothing && one_more("REQ") != nothing,
+            "what a device chose to ask is compared"
+        );
+        assert!(
+            one_more("EVENT") == nothing
+                && compared(None, nothing, {
+                    let mut after = nothing;
+                    after[slot("EVENT")] = 1;
+                    after
+                }) != nothing,
+            "a device's own EVENTs are compared one by one; the canonical endpoint's by count"
         );
     }
 

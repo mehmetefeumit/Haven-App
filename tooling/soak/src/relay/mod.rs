@@ -547,6 +547,10 @@ async fn apply_inner(
             edit_all(endpoints, |state| state.refuse_negentropy = true);
             Ok(())
         }
+        Fault::WithholdNegentropy => {
+            edit_all(endpoints, |state| state.withhold_negentropy = true);
+            Ok(())
+        }
         // A heal restores BEHAVIOUR, endpoint included. It cannot restore a
         // wiped store: nothing un-forgets, and pretending otherwise would hide
         // the one fault whose damage outlives it.

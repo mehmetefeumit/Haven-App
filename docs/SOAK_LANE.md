@@ -585,8 +585,8 @@ in radio range of every other — and the two passes are compared:
   that device's endpoint, how many times it was sent — a frame repeated on
   one connection is one entry of the plane record and two in this count);
 * per endpoint of every plane, the canonical endpoint included, how many
-  `REQ`, `CLOSE`, `NEG-OPEN`, `NEG-MSG`, `NEG-CLOSE` and other frames it
-  carried — and, on the canonical endpoint, how many `EVENT`s;
+  `REQ`, `CLOSE`, `NEG-OPEN` and other frames it carried — and, on the
+  canonical endpoint, how many `EVENT`s;
 * the answer of every seal and every send, in order.
 
 And inside the mesh-on pass: a mesh drive (`Publishing::mesh_drive`) asks its
@@ -612,24 +612,36 @@ seals for the mesh alone; a device sends a location a whole life after
 sealing it — expired, not sent, and never handed to the mesh; one more send
 passes nothing on.
 
-**The windows.** The first mark is taken once every NIP-77 session a device
-opened at its foreground entry is closed on the wire: the entry pass ends in
-the engine before its `NEG-CLOSE` has left, and that frame would otherwise
-fall in the mesh-off pass alone. The two passes share one instant, so every
-frame after the first mark is in exactly one of them, and the last mark is
-taken behind the closing round's settle, so what a device still had to send
-when the script ended is counted.
+**The windows.** The mark before each pass is taken on a still wire, read as
+O6 reads its fingerprint: no endpoint of any plane carrying a new client
+frame across three observations a tick apart. A foreground entry's NIP-77
+pass ends in the engine before its last frame has left, and stillness is a
+condition every end of a session reaches: one the pool finished has its
+`NEG-CLOSE` written, one a relay was too slow for or refused sends nothing
+more. (A count of `NEG-OPEN`s against `NEG-CLOSE`s is not such a condition:
+`nostr-relay-pool` 0.44.3 closes only a session it finished, which
+`tests/relay_faults.rs` pins.) Stillness seen is an observation and no
+guarantee: a frame a device held back for longer than two ticks would fall
+in the wrong pass and read as a moved path. The two passes share one
+instant, so every frame after the first mark is in exactly one of them, and
+the last mark is taken behind the closing round's settle, so what a device
+still had to send when the script ended is counted.
 
 Its six canaries: frames crossed links; a peer read the refused update from
 the mesh; that update was passed on; a location was sealed for the mesh
-alone; the refusing endpoint refused in both passes; and no wait of the
-script ran out. Its control puts no device in range of another: rc 3.
+alone; the refusing endpoint refused in both passes; and no wait of the arm
+ran out. One control puts no device in range of another, one runs the arm as
+after a setting-up wait that ran out: rc 3 each.
 
 **What it does not compare.** The order of a device's frames and when each
 was sent; a connection that is opened and carries no frame; and anything
 about a frame but its shape — another `created_at`, another routing id or
-another filter under the same verb compare equal. `haven-core`'s T-INDEP-1b
-and the wire lanes hold what a frame says. It is not two runs of a profile
+another filter under the same verb compare equal. Nor a NIP-77 session's
+course after its opening — its `NEG-MSG`s and its `NEG-CLOSE`: how many
+messages a session takes is the relay's answer, and whether it is closed or
+given up is how fast the relay was, so neither is the same from one pass to
+the next for any reason of the mesh's. That a session was opened is compared.
+`haven-core`'s T-INDEP-1b and the wire lanes hold what a frame says. It is not two runs of a profile
 either: an arm has one world, so the passes share its circles, relays and
 sessions, the mesh-off pass first.
 
@@ -660,15 +672,17 @@ five; the others' engines are never told of it.
   the circle's routing id, which does show the online member's own
   post-removal send (`bridged-past-its-gate` otherwise).
 
-Each arm's five canaries are the premises of what it grades: mesh on, the
-bridger caught up and frames across the link; the offline member's own sends
+Each arm's five canaries are the premises of what it grades: every wait of
+the setting-up ended in time — each foreground entry's pass, the bridger's
+catching up — with mesh on and frames across the link; the offline member's own sends
 refused; the update read from the mesh by the bridger AND kept by its session
 to be passed on (`mesh_bridge_waiting_for_test`) before each send that must
 pass nothing on — a bridger that kept nothing would pass nothing on whatever
 its gates did, so that run is rc 3, never clean; the bridger's own send taken
 by a relay; and, for the removal, that it stands on the bridger while the
 offline member's epoch has not moved, and that the removed member's view
-reaches the relay. The control puts the two mesh members out of range: rc 3.
+reaches the relay. One control puts the two mesh members out of range, one
+runs the first arm as after a setting-up wait that ran out: rc 3 each.
 
 **What it does not soak.** With three devices the bridger is also the
 remover, so it knows of the removal from its own commit; a bridger that has
@@ -679,16 +693,29 @@ the arms never reach (`mesh_bridge_e2e` holds them).
 
 ### What the three mesh arms cost, and what a seed does
 
-**One wait may run out.** Each arm awaits its foreground entries and every
-delivery it depends on, each wait bounded by a round trip. The first that
-runs out is recorded — a delivery as `probe-not-delivered` — and the arm
-waits for nothing after it (`scenarios::Allowance`); S27 then compares
-nothing, since its premise is gone. So each arm is priced at the closing
-round and one more round trip (`probe_rounds: 2`, 39.75 s), and
+**One wait may run out.** Each arm's own waits — its foreground entries'
+passes, S27's still wire, S28's bridger catching up, every delivery it
+depends on — are each bounded by a round trip and share one allowance
+(`scenarios::Allowance`): after the first that runs out the arm has no bound
+left to wait with, and makes no further wait. So each arm is priced at the
+closing round and one more round trip (`probe_rounds: 2`, 39.75 s), and
 `tests/oracles.rs` holds the price: in a world whose relays deliver no
 location to anybody, each arm reports the undelivered location inside its
 derived bound. A wait that ends in time is not priced, for these arms as for
 every other.
+
+**Which wait it was decides what the run says.** A wait that was not made
+grades nothing. A delivery that was waited for and never came is
+`probe-not-delivered`, rc 1. A wait of the setting-up that ran out is not a
+finding of these arms': no invariant of theirs is about an entry's pass, and
+nothing they grade was then observed, so the canary that requires every wait
+to have ended goes unmet and the run is rc 3 — while a device that is really
+stuck is still named by the closing round, whose probes and seals are graded
+on their own bounds. S27 compares nothing after any wait ran out. Two
+controls hold this (`late_setup_control`, rc 3 and no delivery named), and
+three tests hold what led to it: after a foreground entry whose NIP-77
+sessions no relay answered inside the pool's negotiation wait
+(`withhold-negentropy`), each arm holds, rc 0.
 
 **Every shape a lane runs.** `tests/oracles.rs` runs the three arms in the
 nightly's and the weekly's worlds as well as the PR's.

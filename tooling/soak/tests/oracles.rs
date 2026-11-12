@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use haven_core::location::LOCATION_MESSAGE_RETENTION_SECS;
 use haven_core::nostr::mls::types::{GroupId, UNRESOLVABLE_INPUT_MAX_AGE_SECS};
-use haven_core::relay::fanout::{FanoutClock as _, WallClock};
+use haven_core::relay::fanout::{FanoutClock as _, LocationSeal, SendHeld, WallClock};
 use haven_core::relay::live_sync::config::{
     BACKOFF_JITTER_FRACTION_BP, BACKOFF_MAX_SECS, BURST_BACKLOG_WAIT_SECS,
     COMMIT_SETTLE_WINDOW_SECS, DELIVERY_SILENCE_RETENTION_MULTIPLE, SUBSCRIBE_CONNECT_WAIT_SECS,
@@ -44,9 +44,9 @@ use haven_soak::oracle::{
 };
 use haven_soak::profiles::{ProfileName, ProfileSpec, WorldShape};
 use haven_soak::rc::Rc;
-use haven_soak::relay::{planes_for, SimRelay};
+use haven_soak::relay::{planes_for, NegFrame, SimRelay};
 use haven_soak::rig::{
-    CapturedLine, Change, DeviceTag, LogDrain, PublishVerdict, RelayPlane, SimWorld,
+    poll_until, CapturedLine, Change, DeviceTag, LogDrain, PublishVerdict, RelayPlane, SimWorld,
 };
 use haven_soak::scenarios::s02_receiver_partition::unwitnessed_control;
 use haven_soak::scenarios::s05_publish_confirm::acked_kill_control;
@@ -1998,6 +1998,32 @@ async fn s28_members_out_of_radio_range_prove_nothing_about_bridging() {
     world.teardown().await.expect("teardown");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s27_after_a_setting_up_wait_ran_out_proves_nothing_and_names_no_delivery() {
+    // The arm then waits for nothing: a send no peer was waited for is not
+    // an undelivered one, which would outrank the unmet floor as rc 1.
+    let mut world = build_shaped_world(&shape_for("mesh-off-then-on")).await;
+
+    let report = s27_mesh_independence::late_setup_control(&mut world, pr_tick())
+        .await
+        .expect("the scenario runs");
+    floor_is_unusable(&report);
+
+    world.teardown().await.expect("teardown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s28_after_a_setting_up_wait_ran_out_proves_nothing_and_names_no_delivery() {
+    let mut world = build_shaped_world(&shape_for("bridged-to-the-far-member")).await;
+
+    let report = s28_member_bridging::late_setup_control(&mut world, pr_tick())
+        .await
+        .expect("the scenario runs");
+    floor_is_unusable(&report);
+
+    world.teardown().await.expect("teardown");
+}
+
 /// One arm run in a world of its own under `seed`: its verdict, and the
 /// digest of every `EVENT` frame its devices sent a relay.
 async fn seeded(scenario: Scenario, label: &str, seed: u64) -> (Rc, Vec<String>, [u8; 32]) {
@@ -2139,6 +2165,97 @@ async fn s28_bridging_reports_a_dead_relay_delivery_inside_its_price() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn s28_removal_reports_a_dead_relay_delivery_inside_its_price() {
     dead_delivery_is_reported_inside_the_arms_price(
+        Scenario::MemberBridging,
+        "removed-member-finds-nothing",
+    )
+    .await;
+}
+
+/// A world whose every device has just come to the foreground on relays that
+/// kept their NIP-77 answers back: each session its entry pass opened was
+/// given up by the pool at its negotiation wait, and none was closed.
+async fn world_after_an_unanswered_entry_pass(label: &str) -> World {
+    let mut world = build_shaped_world(&shape_for(label)).await;
+    let sessions = |world: &World, frame| -> usize {
+        (world.relays().iter())
+            .map(|plane| plane.ledger().neg_total(frame))
+            .sum()
+    };
+    // The pass each start ran must not stand in for the entry's own: the
+    // product's spacing between two passes is let pass, as S20 does.
+    let (spacing, since) = (bounds::negentropy_spacing(), Instant::now());
+    poll_until(spacing + bounds::wall_second_turnover(), TICK, || async {
+        Ok(since.elapsed() >= spacing)
+    })
+    .await
+    .expect("a clock read cannot fail");
+    let before = (
+        sessions(&world, NegFrame::Open),
+        sessions(&world, NegFrame::Close),
+    );
+    for plane in world.relays_mut() {
+        plane
+            .apply(Fault::WithholdNegentropy)
+            .await
+            .expect("the plane takes the fault");
+    }
+    let devices: Vec<DeviceTag> = world.devices().iter().map(|device| device.tag).collect();
+    for &tag in &devices {
+        let device = world.device_mut(tag).expect("a device of the world");
+        device.go_offline().await.expect("the device pauses");
+        device.come_online().await.expect("the device resumes");
+        device.take_in_replay().await.expect("an engine runs");
+    }
+    for plane in world.relays_mut() {
+        plane.apply(Fault::Heal).await.expect("the plane heals");
+    }
+    assert!(
+        sessions(&world, NegFrame::Open) > before.0
+            && sessions(&world, NegFrame::Close) == before.1,
+        "premise: the entries opened sessions, and the pool closed none of them"
+    );
+    world
+}
+
+/// A NIP-77 session the pool gave up is never closed on the wire, and is
+/// nobody's undelivered location: the arm that follows it holds.
+async fn an_unanswered_entry_pass_is_no_finding(scenario: Scenario, label: &str) {
+    let mut world = world_after_an_unanswered_entry_pass(label).await;
+
+    let report = scenario
+        .run(&mut world, arm_of(scenario, label), pr_tick())
+        .await
+        .expect("the scenario runs");
+
+    let graded: Vec<String> = report
+        .graded
+        .iter()
+        .map(|(invariant, verdict)| format!("{} {verdict}", invariant.id()))
+        .collect();
+    assert!(
+        report.holds() && report.rc() == Rc::Clean,
+        "a relay slow to answer a session at a foreground entry changes nothing \
+         the arm grades: {report}; floor {}; {}",
+        report.floor,
+        graded.join("; ")
+    );
+    world.teardown().await.expect("teardown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s27_holds_after_an_entry_pass_no_relay_answered() {
+    an_unanswered_entry_pass_is_no_finding(Scenario::MeshIndependence, "mesh-off-then-on").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s28_bridging_holds_after_an_entry_pass_no_relay_answered() {
+    an_unanswered_entry_pass_is_no_finding(Scenario::MemberBridging, "bridged-to-the-far-member")
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s28_removal_holds_after_an_entry_pass_no_relay_answered() {
+    an_unanswered_entry_pass_is_no_finding(
         Scenario::MemberBridging,
         "removed-member-finds-nothing",
     )
@@ -3042,8 +3159,28 @@ async fn a_commit_left_for_the_next_drive_is_sent_and_confirmed_by_it() {
 
     let resumed = world.resume(admin).await.expect("the driver runs");
 
+    // The commit moved the circle's relays, and the REQs the engine re-issues
+    // for them hold the circle's seals while their stored replay is unread
+    // (Security Rule 10). That hold, and no other, is waited out: a commit
+    // left staged answers as another hold, at once and for ever.
+    let location = ProbeToken::mint(0, 2).as_location();
+    let started = Instant::now();
+    let mut ticker = tokio::time::interval(POLL);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let sealed = loop {
+        let seal = world
+            .seal_fix(admin, &group, &location, &WallClock)
+            .await
+            .expect("the seal is asked for")
+            .seal;
+        let unread = matches!(seal, LocationSeal::Deferred(SendHeld::StoredInput));
+        if !unread || started.elapsed() >= bounds::round_trip(Recovery::Undisturbed) {
+            break seal;
+        }
+        ticker.tick().await;
+    };
     assert!(
-        !resumed.errored && seal(2).await.is_ok(),
+        !resumed.errored && matches!(sealed, LocationSeal::Sealed { .. }),
         "the circle sends again, which only a RESOLVED pending state allows — a \
          drive that left it would leave the group staged for ever"
     );

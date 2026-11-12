@@ -1864,11 +1864,13 @@ back an idle relay manager.
   — (plane, kind, tag names, `expiration − created_at`, what the relay
   answered that device's endpoint, how many times it was sent) — is the
   same; so is, per endpoint of every plane and the canonical one included,
-  the number of `REQ`, `CLOSE`, `NEG-OPEN`, `NEG-MSG`, `NEG-CLOSE` and other
-  frames; and so is the answer of every seal and send, in order. The first
-  mark waits for every NIP-77 session a foreground entry opened to be closed
-  on the wire, the passes share one instant, and the last mark is behind the
-  closing settle. A mesh drive asks its transport to send
+  the number of `REQ`, `CLOSE`, `NEG-OPEN` and other frames; and so is the
+  answer of every seal and send, in order. The mark before each pass waits
+  for a still wire — no endpoint carrying a new frame across three
+  observations a tick apart, which every end of a NIP-77 session reaches;
+  the pool sends a `NEG-CLOSE` only for a session it finished — the passes
+  share one instant, and the last mark is behind the closing settle. A mesh
+  drive asks its transport to send
   nothing and moves no cursor or backfill floor; a device reads from the mesh
   only an update whose send-time check passed; and the rig's plane oracle
   (O7) admits every frame of both passes. Counted apart, as the plan has it:
@@ -1883,7 +1885,7 @@ back an idle relay manager.
   handed to the mesh); one more send. Its floor: frames crossed links, a
   peer read the refused update from the mesh, it was passed on, a location
   was sealed for the mesh alone, the refusal fell in both passes, and no wait
-  of the script ran out.
+  of the arm ran out.
   **S28, T-BRIDGE-9**, three members of one circle having a part (a wider
   world's other devices are in the circle and never told of it): one offline
   and on mesh (its endpoint refuses its events, its engine is never told of
@@ -1904,11 +1906,17 @@ back an idle relay manager.
   **Lanes.** Both run in the `pr` soak profile, and so in the nightly and
   the weekly: the PR run budget rose from 1 320 s to 1 440 s (deadline
   25 min) and the nightly's from 6 240 s to 6 360 s (116 min). Each arm is
-  priced at its closing round and one more round trip: the first of its
-  bounded waits that runs out is the finding and it waits for nothing after,
-  and `tests/oracles.rs` holds that price in a world whose relays deliver no
-  location. Each scenario has a control that puts the mesh devices out of
-  range and must answer rc 3; the arms are run in the nightly's and the
+  priced at its closing round and one more round trip: after the first of
+  its bounded waits that runs out it makes none, and `tests/oracles.rs`
+  holds that price in a world whose relays deliver no location. Which wait
+  it was decides what the run says: a delivery waited for and never made is
+  `probe-not-delivered`; a wait of the setting-up — an entry's pass, a still
+  wire, the bridger's catching up — is no finding of these arms', and the
+  run is rc 3; a wait not made grades nothing. Each scenario has a control
+  that puts the mesh devices out of range and one that runs it as after a
+  setting-up wait that ran out, rc 3 each, and each arm holds after a
+  foreground entry whose NIP-77 sessions no relay answered in time (the
+  rig's `withhold-negentropy` fault); the arms are run in the nightly's and the
   weekly's worlds too; and each arm, run twice under one seed and once under
   another, must give the same verdict and the same digest of every `EVENT`
   frame sent.
@@ -1954,7 +1962,11 @@ Residuals of M2g-2b. S27 compares what a relay's record can show of a
 device, by shape and by count: not the order of its frames, not when each
 was sent, not a connection opened that carries no frame, and nothing a
 frame says beyond its shape — another `created_at`, routing id or filter
-under the same verb compares equal. A wait that ends in time is not priced,
+under the same verb compares equal — and not a NIP-77 session's course
+after its opening (`NEG-MSG`, `NEG-CLOSE`), which is the relay's pace. The
+marks stand behind a wire seen still for two ticks, which is an observation
+and no guarantee: a frame a device still held back longer would fall in the
+wrong pass and read as a moved path. A wait that ends in time is not priced,
 for these arms as for every other. `CLAUDE.md`'s CI section still calls the PR soak
 profile "four durability scenarios"; it is six, and the file is the owner's.
 

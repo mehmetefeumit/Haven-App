@@ -299,6 +299,9 @@ pub enum Fault {
     /// and never reaches the relay: a relay that does not speak NIP-77, as
     /// strfry with negentropy off. The in-process relay has no switch for it.
     RefusesNegentropy,
+    /// Every `NEG-MSG` and `NEG-ERR` the relay sends is kept from the client:
+    /// a relay slower to answer a session than the client waits for it.
+    WithholdNegentropy,
     /// Everything above is undone.
     Heal,
 }
@@ -327,6 +330,7 @@ impl Fault {
             Self::Unanswering => "unanswering",
             Self::WithholdEose => "withhold-eose",
             Self::RefusesNegentropy => "refuses-negentropy",
+            Self::WithholdNegentropy => "withhold-negentropy",
             Self::Heal => "heal",
         }
     }
@@ -352,6 +356,7 @@ impl Fault {
             Self::Unanswering => 16,
             Self::WithholdEose => 17,
             Self::RefusesNegentropy => 18,
+            Self::WithholdNegentropy => 19,
         };
         buf.push(code);
         match self {

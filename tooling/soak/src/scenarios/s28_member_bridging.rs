@@ -46,7 +46,12 @@
 //!
 //! The arms' own bounded waits — the foreground entries, the bridger's
 //! catching up, the far member's delivery, its view of the relay — share
-//! one [`Allowance`]: after the first that runs out, none is made.
+//! one [`Allowance`]: after the first that runs out, none is made, and a
+//! wait that was not made grades nothing. An update the far member was
+//! waited for and never delivered is the finding, by name. A wait of the
+//! setting-up that ran out — an entry's pass, the bridger's catching up — is
+//! none of these arms': nothing they grade was observed, so the run is
+//! unusable (rc 3).
 //!
 //! # What the second arm is not
 //!
@@ -54,11 +59,12 @@
 //! removal from its own commit, not from a relay. A bridger that has not yet
 //! fetched a removal another member made is the first arm's unreceived drive.
 //!
-//! # The control
+//! # The controls
 //!
 //! [`out_of_range_control`] runs the first arm with the two mesh members out
 //! of radio range: nothing is read from the mesh, so nothing could be passed
-//! on — rc 3.
+//! on — rc 3. [`late_setup_control`] runs it as after a setting-up wait that
+//! ran out: rc 3, and no delivery named that nobody waited for.
 
 use std::time::Duration;
 
@@ -128,7 +134,7 @@ pub(crate) async fn run<T: TimelineSink, L: LogDrain>(
     tick: Duration,
 ) -> Result<ArmOutcome, RigError> {
     if arm.label == ARMS[0].label {
-        bridged(world, tick, true).await
+        bridged(world, tick, true, Allowance::new()).await
     } else if arm.label == ARMS[1].label {
         removed(world, tick).await
     } else {
@@ -150,7 +156,24 @@ pub async fn out_of_range_control<T: TimelineSink, L: LogDrain>(
     tick: Duration,
 ) -> Result<ScenarioReport, RigError> {
     let started = tokio::time::Instant::now();
-    let outcome = bridged(world, tick, false).await?;
+    let outcome = bridged(world, tick, false, Allowance::new()).await?;
+    Ok(Scenario::MemberBridging.report(world, &ARMS[0], outcome, started))
+}
+
+/// The first arm as it runs once a wait of its setting-up has run out.
+///
+/// The control in `tests/oracles.rs` requires rc 3 and no delivery finding:
+/// the arm then waits for nothing, and a wait it did not make grades nothing.
+///
+/// # Errors
+///
+/// As [`run`].
+pub async fn late_setup_control<T: TimelineSink, L: LogDrain>(
+    world: &mut ScenarioWorld<T, L>,
+    tick: Duration,
+) -> Result<ScenarioReport, RigError> {
+    let started = tokio::time::Instant::now();
+    let outcome = bridged(world, tick, true, Allowance::run_out()).await?;
     Ok(Scenario::MemberBridging.report(world, &ARMS[0], outcome, started))
 }
 
@@ -158,30 +181,37 @@ async fn bridged<T: TimelineSink, L: LogDrain>(
     world: &mut ScenarioWorld<T, L>,
     tick: Duration,
     in_range: bool,
+    waits: Allowance,
 ) -> Result<ArmOutcome, RigError> {
-    let mut stage = Stage::set(world, in_range).await?;
+    let mut stage = Stage::set(world, in_range, waits).await?;
     let mut canaries = Canaries::new();
 
     // A drive whose relay receive had not completed passes nothing on.
-    let held_back = stage.update(world).await?;
+    let Some(held_back) = stage.update(world).await? else {
+        return stage.close(world, tick, canaries, Vec::new()).await;
+    };
     let unreceived = stage.send(world, false).await?;
     // A drive whose receive completed passes the next update on.
-    let passed = stage.update(world).await?;
+    let Some(passed) = stage.update(world).await? else {
+        return stage.close(world, tick, canaries, Vec::new()).await;
+    };
     let mut far = listen(world, &[stage.far])?;
     let received = stage.send(world, true).await?;
     // Awaited only where the bridger read it and a relay took its send:
     // nothing else can bring it, and from there on passing it on is owed.
+    // And only while the arm may still wait: a wait not made finds nothing.
     let passed_on = passed.read && received.taken;
     let author = world.device(stage.offline)?.pubkey_hex();
-    let bound = stage.waits.bound();
-    let delivered = passed_on
-        && stage.waits.ended(
-            undelivered_to(&mut far, &author, passed.probe, bound)
-                .await
-                .is_none(),
-        );
+    let undelivered = match stage.waits.bound().filter(|_| passed_on) {
+        Some(bound) => {
+            let missed = undelivered_to(&mut far, &author, passed.probe, bound).await;
+            !stage.waits.ended(missed.is_none())
+        }
+        None => false,
+    };
 
-    // 1. Mesh on, the bridger caught up, and frames crossed the link.
+    // 1. The setting-up waits ended, mesh is on, and frames crossed the
+    //    link.
     canaries.check(stage.ready && stage.plane.carried() > 0);
     // 2. No relay took either of the offline member's own sends.
     canaries.check(held_back.refused && passed.refused);
@@ -211,7 +241,7 @@ async fn bridged<T: TimelineSink, L: LogDrain>(
     {
         extra.push(stage.past_its_gate());
     }
-    if passed_on && !delivered {
+    if undelivered {
         extra.push((
             Invariant::LocationRoundTrip,
             Verdict::Failed(Finding::ProbeNotDelivered {
@@ -228,7 +258,7 @@ async fn removed<T: TimelineSink, L: LogDrain>(
     world: &mut ScenarioWorld<T, L>,
     tick: Duration,
 ) -> Result<ArmOutcome, RigError> {
-    let mut stage = Stage::set(world, true).await?;
+    let mut stage = Stage::set(world, true, Allowance::new()).await?;
     let mut canaries = Canaries::new();
 
     let before = (
@@ -240,11 +270,14 @@ async fn removed<T: TimelineSink, L: LogDrain>(
         stage.epoch(world, stage.bridger).await?,
         stage.epoch(world, stage.offline).await?,
     );
-    let update = stage.update(world).await?;
+    let Some(update) = stage.update(world).await? else {
+        return stage.close(world, tick, canaries, Vec::new()).await;
+    };
     let own = stage.send(world, true).await?;
     let view = stage.far_view(world).await?;
 
-    // 1. Mesh on, the bridger caught up, and frames crossed the link.
+    // 1. The setting-up waits ended, mesh is on, and frames crossed the
+    //    link.
     canaries.check(stage.ready && stage.plane.carried() > 0);
     // 2. The removal stands on the bridger, and the offline member never
     //    heard of it.
@@ -278,8 +311,9 @@ struct Stage {
     offline: DeviceTag,
     /// A relay and no mesh.
     far: DeviceTag,
-    /// Whether mesh is on at both mesh members and the bridger's relay
-    /// receive of the circle completed.
+    /// Whether every wait of the setting-up ended in time — each entry's
+    /// pass, the bridger's relay receive of the circle — and mesh is on at
+    /// both mesh members.
     ready: bool,
     minted: u32,
     waits: Allowance,
@@ -316,29 +350,33 @@ impl Stage {
     async fn set<T: TimelineSink, L: LogDrain>(
         world: &mut ScenarioWorld<T, L>,
         in_range: bool,
+        mut waits: Allowance,
     ) -> Result<Self, RigError> {
         let tags: Vec<DeviceTag> = world.devices().iter().map(|device| device.tag).collect();
         let [bridger, offline, .., far] = *tags.as_slice() else {
             return Err(RigError::ShapeMismatch);
         };
-        let mut waits = Allowance::new();
         // A device brought to the foreground holds its seals until the
         // NIP-77 pass its entry is owed has ended.
         for &tag in &tags {
-            let ended = world.device(tag)?.entry_pass_ended(waits.bound()).await?;
-            waits.ended(ended);
+            if let Some(bound) = waits.bound() {
+                let ended = world.device(tag)?.entry_pass_ended(bound).await?;
+                waits.ended(ended);
+            }
         }
         let circle = world.build_extra_circle().await?;
         for online in [bridger, far] {
             let spec = circle.spec_for(online, world.relays());
             world.device_mut(online)?.subscribe_circle(spec).await?;
         }
-        let session = world.device(bridger)?.session()?;
-        let caught_up = await_condition(waits.bound(), || async {
-            Ok(session.caught_up_for_test(circle.mls_group_id()))
-        })
-        .await?;
-        waits.ended(caught_up);
+        if let Some(bound) = waits.bound() {
+            let session = world.device(bridger)?.session()?;
+            let caught_up = await_condition(bound, || async {
+                Ok(session.caught_up_for_test(circle.mls_group_id()))
+            })
+            .await?;
+            waits.ended(caught_up);
+        }
         let cap = ByteCap::new(REFUSES_EVERY_EVENT);
         for plane in world.relays_mut() {
             plane
@@ -357,7 +395,7 @@ impl Stage {
             bridger,
             offline,
             far,
-            ready: caught_up && lit_bridger && lit_offline,
+            ready: waits.all_ended() && lit_bridger && lit_offline,
             minted: 0,
             waits,
         })
@@ -369,16 +407,18 @@ impl Stage {
     }
 
     /// The offline member seals an update and sends it as the app does; the
-    /// mesh runs one emission slot; the bridger drives.
+    /// mesh runs one emission slot; the bridger drives. `None` if its seals
+    /// are held: a device inside its entry's pass, never waited for, seals
+    /// nothing, and the arm has then no update to grade.
     async fn update<T: TimelineSink, L: LogDrain>(
         &mut self,
         world: &ScenarioWorld<T, L>,
-    ) -> Result<Update, RigError> {
+    ) -> Result<Option<Update>, RigError> {
         let probe = self.mint();
         let group = self.circle.mls_group_id();
-        let event = seal_probe(world, self.offline, group, probe, &WallClock)
-            .await?
-            .map_err(|_| RigError::Core(Step::Publish))?;
+        let Ok(event) = seal_probe(world, self.offline, group, probe, &WallClock).await? else {
+            return Ok(None);
+        };
         let (publish, _) = world
             .publish_and_bridge(self.offline, &event, false, &WallClock)
             .await?;
@@ -401,13 +441,13 @@ impl Stage {
             .session()?
             .mesh_bridge_waiting_for_test(group)
             .contains(&event.id);
-        Ok(Update {
+        Ok(Some(Update {
             event,
             probe,
             refused: !taken(&publish),
             read,
             waiting,
-        })
+        }))
     }
 
     /// The bridger seals a location of its own and sends it as the app does,
@@ -481,12 +521,12 @@ impl Stage {
             SingleLetterTag::lowercase(Alphabet::H),
             self.circle.group_id_hex(),
         );
-        let bound = self.waits.bound();
-        if bound.is_zero() {
+        // A view that was not asked for, or could not be read, shows nothing,
+        // and the canary that requires the bridger's own send in it then
+        // goes unmet.
+        let Some(bound) = self.waits.bound() else {
             return Ok(Vec::new());
-        }
-        // A view that could not be read shows nothing, and the canary that
-        // requires the bridger's own send in it then goes unmet.
+        };
         Ok(world
             .device(self.far)?
             .relays
