@@ -14,7 +14,7 @@ use haven_core::nostr::mls::storage::{
 };
 use haven_core::nostr::mls::types::{
     GroupId, HeldRowKind, HeldRowProbe, IngestOutcome, LocationMessageResult, MessageState,
-    PendingStateRef, PublishWork, ScreenedIngest, SessionEffects,
+    PendingStateRef, PublishWork, QueuedIntentRef, ScreenedIngest, SessionEffects,
 };
 use haven_core::nostr::mls::{SessionManager, StorageConfig};
 use nostr::{Event, EventBuilder, Keys, Timestamp};
@@ -155,23 +155,43 @@ pub async fn served(session: &SessionManager, group: &GroupId) -> SessionEffects
 }
 
 /// A location `session` seals at the epoch it stands on.
+///
+/// A send first replays the circle's stored input against MDK's 250 ms
+/// foreground wall clock, and holds the location when the replay does not
+/// settle in time (v0.10.4 `message_processor/mod.rs` 219, 1177-1232,
+/// 1536-1539); the circle's next advance seals that held intent, as a receive
+/// plane's does. MDK's session takes no budget or clock a test could fix
+/// (tracker `T-PREFLIGHT-CLOCK`), so a slow runner sees the hold.
 pub async fn sealed_alone(session: &SessionManager, group: &GroupId) -> Event {
     let content = haven_core::location::LocationMessage::new(51.5, -0.12)
         .to_string()
         .expect("a location serializes");
-    session
+    let sent = session
         .send_location(group, content)
         .await
-        .expect("the engine seals")
-        .publish
-        .iter()
-        .find_map(|work| match work {
-            PublishWork::ApplicationMessage { msg, .. } => {
-                SessionManager::transport_message_to_event(msg).ok()
-            }
-            _ => None,
-        })
-        .expect("a sealed location")
+        .expect("the engine seals");
+    if let Some(sealed) = sealed_location(&sent, None) {
+        return sealed;
+    }
+    let held = sent
+        .queued
+        .first()
+        .cloned()
+        .expect("the engine neither sealed the location nor held it");
+    sealed_location(&served(session, group).await, Some(&held))
+        .expect("the next advance seals the held location")
+}
+
+/// The location `effects` seal: any, or the one drained from `held`.
+fn sealed_location(effects: &SessionEffects, held: Option<&QueuedIntentRef>) -> Option<Event> {
+    effects.publish.iter().find_map(|work| match work {
+        PublishWork::ApplicationMessage {
+            msg, queued_intent, ..
+        } if held.is_none() || queued_intent.as_ref() == held => {
+            SessionManager::transport_message_to_event(msg).ok()
+        }
+        _ => None,
+    })
 }
 
 /// Confirms `pending` so that the confirm's transaction lands and the engine
