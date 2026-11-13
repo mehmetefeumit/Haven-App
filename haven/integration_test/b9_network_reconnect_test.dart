@@ -714,10 +714,10 @@ void main() {
       try {
         final peerKps = <MemberKeyPackageFfi>[];
         for (final invitee in <SyntheticUser>[bob, carol]) {
-          final kp = await relayManager.fetchMemberKeypackage(
+          final kp = (await relayManager.fetchMemberKeypackage(
             pubkey: invitee.pubkeyHex,
             circle: manager,
-          );
+          )).member;
           if (kp == null) {
             throw StateError(
               '[b9] fetchMemberKeypackage returned null for '

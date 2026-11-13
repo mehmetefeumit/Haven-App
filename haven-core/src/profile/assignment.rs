@@ -73,7 +73,8 @@ const HRW_SEPARATOR: u8 = 0x1F;
 /// Highest rank an author's kind-0 may ever be requested from.
 ///
 /// The retry ladder walks the HRW ranking, but is hard-capped here so a pubkey
-/// is disclosed to at most this many pool relays for the life of the install.
+/// is disclosed to at most this many relays of one pool (a pool change
+/// re-ranks).
 /// Raising it directly widens per-author disclosure — treat as a privacy
 /// parameter, not a tuning knob.
 pub const PROFILE_MAX_RELAY_RANK: usize = 2;
@@ -210,11 +211,12 @@ pub fn assigned_relay(
 
 /// The relay to try for `author` on retry number `attempt`.
 ///
-/// `attempt` is saturated at [`PROFILE_MAX_RELAY_RANK`] − 1, so the ladder
-/// cycles between at most that many relays no matter how many times an author
-/// misses. An author whose kind-0 genuinely does not exist is therefore
+/// `attempt` wraps over the top [`PROFILE_MAX_RELAY_RANK`] ranks, so the ladder
+/// alternates between at most that many relays no matter how many times an
+/// author misses. An author whose kind-0 genuinely does not exist is therefore
 /// disclosed to a bounded set of relays rather than eventually to the whole
-/// pool.
+/// pool — and a relay that missed once is asked again, so one miss on the
+/// top-ranked relay never leaves the author to the second-ranked one alone.
 #[must_use]
 pub fn assigned_relay_for_attempt(
     salt: &ProfileRelaySalt,
@@ -226,10 +228,9 @@ pub fn assigned_relay_for_attempt(
     if ranked.is_empty() {
         return None;
     }
-    let capped = usize::from(attempt).min(PROFILE_MAX_RELAY_RANK - 1);
     // A pool smaller than the rank cap falls back to the last available rank
     // rather than returning None — a 1-relay pool must still resolve.
-    let index = capped.min(ranked.len() - 1);
+    let index = (usize::from(attempt) % PROFILE_MAX_RELAY_RANK).min(ranked.len() - 1);
     ranked.into_iter().nth(index)
 }
 
@@ -432,6 +433,25 @@ mod tests {
                 assert!(
                     permitted.contains(&chosen),
                     "attempt {attempt} escaped the top-{PROFILE_MAX_RELAY_RANK} ladder",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_relay_that_missed_is_asked_again() {
+        // Saturating at the last rank would leave an author whose top-ranked
+        // relay missed ONCE — before the profile was published, or while the
+        // relay was unreachable — to the second-ranked relay for good.
+        let p = pool(8);
+        for seed in 0..16 {
+            let a = author(seed);
+            let ranked = rank_relays(&salt_a(), &a, &p);
+            for attempt in 0..=u8::MAX {
+                assert_eq!(
+                    assigned_relay_for_attempt(&salt_a(), &a, &p, attempt).as_ref(),
+                    Some(&ranked[usize::from(attempt) % PROFILE_MAX_RELAY_RANK]),
+                    "attempt {attempt} left the alternation",
                 );
             }
         }

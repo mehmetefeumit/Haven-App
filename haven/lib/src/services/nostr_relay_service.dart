@@ -115,6 +115,66 @@ SubscriptionHealthAction mapSubscriptionHealthAction(
   }
 }
 
+/// Turns an invite lookup's verdict into what [RelayService.fetchKeyPackage]
+/// promises: the person's package, `null` only when absence was proven, and a
+/// [RelayServiceException] when it was not — the callers' retryable "couldn't
+/// finish" path, never "no account".
+@visibleForTesting
+KeyPackageData? keyPackageDataOf(MemberLookupFfi lookup) {
+  final member = switch (lookup.verdict) {
+    MemberLookupVerdictFfi.found => lookup.member,
+    MemberLookupVerdictFfi.notFound => null,
+    MemberLookupVerdictFfi.lookupIncomplete =>
+      throw const RelayServiceException('Member lookup incomplete'),
+  };
+  if (member == null) return null;
+  // The verified author Rust returns, never the requested label: that is who
+  // the Welcome reaches and whom the confirm screen names.
+  return KeyPackageData(
+    pubkey: member.authorNpub,
+    eventJson: member.keyPackageJson,
+    relays: member.inboxRelays,
+    nip65Relays: member.nip65Relays,
+    nip65WriteRelays: member.nip65WriteRelays,
+  );
+}
+
+/// Maps an FFI relay-list per-category outcome to the service type.
+///
+/// Exhaustive with no `default`, for the reason [mapSubscriptionHealthAction]
+/// has none. Top-level so every branch is reachable from a host `flutter test`.
+@visibleForTesting
+RelayListCategoryResult mapRelayListCategory(RelayListCategoryOutcomeFfi c) {
+  final action = switch (c.action) {
+    // Rust reports a failed read of the toggle or the relay list as
+    // `suppressed` with an error tallied: no setting of the user's, so not
+    // something to wait out.
+    RelayListActionFfi.suppressed when c.relayErrors > 0 =>
+      RelayListMaintenanceAction.failed,
+    RelayListActionFfi.suppressed => RelayListMaintenanceAction.suppressed,
+    RelayListActionFfi.alreadyCurrent =>
+      RelayListMaintenanceAction.alreadyCurrent,
+    RelayListActionFfi.republished => RelayListMaintenanceAction.republished,
+    RelayListActionFfi.awaitingResetAcknowledgement =>
+      RelayListMaintenanceAction.awaitingResetAcknowledgement,
+    RelayListActionFfi.nothingConfigured =>
+      RelayListMaintenanceAction.nothingConfigured,
+    RelayListActionFfi.unacknowledged =>
+      RelayListMaintenanceAction.unacknowledged,
+  };
+  return RelayListCategoryResult(
+    action: action,
+    // Only the actions that reached a relay may carry it (the type asserts).
+    ownConfirmed:
+        c.ownConfirmed &&
+        (action == RelayListMaintenanceAction.alreadyCurrent ||
+            action == RelayListMaintenanceAction.republished ||
+            action == RelayListMaintenanceAction.unacknowledged),
+    respondersProbed: c.respondersProbed,
+    relayErrors: c.relayErrors,
+  );
+}
+
 @visibleForTesting
 KeyPackageMaintenanceOutcome classifyKeyPackageMaintenance(
   KpMaintenanceOutcomeFfi r,
@@ -150,6 +210,7 @@ KeyPackageMaintenanceOutcome classifyKeyPackageMaintenance(
         relayErrors: r.relayErrors,
         expiredInitKeyPurged: r.expiredInitKeyPurged,
         isMalformedSlotRetired: r.retiredMalformedSlot,
+        publishedCurrent: r.publishedCurrent,
       );
     case KpMaintenanceActionFfi.alreadyHealthy:
     case KpMaintenanceActionFfi.seededD:
@@ -193,6 +254,7 @@ KeyPackageMaintenanceOutcome classifyKeyPackageMaintenance(
         isStableSlotSeeded: r.action == KpMaintenanceActionFfi.seededD,
         relayErrors: r.relayErrors,
         isMalformedSlotRetired: r.retiredMalformedSlot,
+        publishedCurrent: r.publishedCurrent,
       );
     case KpMaintenanceActionFfi.awaitingResetAcknowledgement:
       return KeyPackageMaintenanceFailed(
@@ -448,26 +510,12 @@ class NostrRelayService implements RelayService, CircleChangeDriver {
       if (circleManagerFactory == null) {
         throw StateError('no circle manager to select a KeyPackage for');
       }
-      // Use the convenience method that fetches both key package and relays
-      final result = await manager.fetchMemberKeypackage(
+      final lookup = await manager.fetchMemberKeypackage(
         pubkey: pubkey,
         circle: await circleManagerFactory(),
         mlsGroupId: mlsGroupId == null ? null : Uint8List.fromList(mlsGroupId),
       );
-
-      if (result == null) {
-        return null;
-      }
-
-      // The verified author Rust returns, never the requested label: that is
-      // who the Welcome reaches and whom the confirm screen names.
-      return KeyPackageData(
-        pubkey: result.authorNpub,
-        eventJson: result.keyPackageJson,
-        relays: result.inboxRelays,
-        nip65Relays: result.nip65Relays,
-        nip65WriteRelays: result.nip65WriteRelays,
-      );
+      return keyPackageDataOf(lookup);
     } on Object catch (e) {
       debugPrint('Failed to fetch KeyPackage: ${e.runtimeType}');
       throw const RelayServiceException('Failed to fetch KeyPackage');
@@ -620,12 +668,12 @@ class NostrRelayService implements RelayService, CircleChangeDriver {
         identitySecretBytes: identitySecretBytes,
       );
       return RelayListMaintenanceResult(
-        inbox: _mapRelayListCategory(r.inbox),
-        keyPackage: _mapRelayListCategory(r.keyPackage),
+        inbox: mapRelayListCategory(r.inbox),
+        keyPackage: mapRelayListCategory(r.keyPackage),
       );
     } on Object catch (e) {
       debugPrint('[Maintenance] relay-list tick failed: ${e.runtimeType}');
-      return const RelayListMaintenanceResult.empty();
+      return const RelayListMaintenanceResult.failed();
     }
   }
 
@@ -652,24 +700,6 @@ class NostrRelayService implements RelayService, CircleChangeDriver {
       debugPrint('[Maintenance] health tick failed: ${e.runtimeType}');
       return const SubscriptionHealthResult.empty();
     }
-  }
-
-  /// Maps an FFI relay-list per-category outcome to the service type.
-  RelayListCategoryResult _mapRelayListCategory(
-    RelayListCategoryOutcomeFfi c,
-  ) {
-    final RelayListMaintenanceAction action;
-    switch (c.action) {
-      case RelayListActionFfi.suppressed:
-        action = RelayListMaintenanceAction.suppressed;
-      case RelayListActionFfi.alreadyCurrent:
-        action = RelayListMaintenanceAction.alreadyCurrent;
-      case RelayListActionFfi.republished:
-        action = RelayListMaintenanceAction.republished;
-      case RelayListActionFfi.awaitingResetAcknowledgement:
-        action = RelayListMaintenanceAction.awaitingResetAcknowledgement;
-    }
-    return RelayListCategoryResult(action: action, relayErrors: c.relayErrors);
   }
 
   @override
@@ -734,33 +764,23 @@ class NostrRelayService implements RelayService, CircleChangeDriver {
   }
 
   @override
-  Future<RelayEventCheck> checkEventOnRelay({
-    required String relayUrl,
-    required String authorPubkey,
-    required int eventKind,
+  Future<List<OwnRelayPresenceFfi>> checkOwnReachability({
+    required String ownPubkey,
   }) async {
     final manager = await _ensureInitialized();
 
     try {
-      final ffiResult = await manager.checkEventOnRelay(
-        relayUrl: relayUrl,
-        authorPubkey: authorPubkey,
-        eventKind: eventKind,
-      );
-
-      return RelayEventCheck(
-        relayUrl: ffiResult.relayUrl,
-        found: ffiResult.found,
-        eventCount: ffiResult.eventCount,
-        newestTimestamp: ffiResult.newestTimestamp != null
-            ? DateTime.fromMillisecondsSinceEpoch(
-                ffiResult.newestTimestamp! * 1000,
-              )
-            : null,
+      final circleManagerFactory = _circleManagerFactory;
+      if (circleManagerFactory == null) {
+        throw StateError('no circle manager to read the relay lists from');
+      }
+      return await manager.checkOwnReachability(
+        circle: await circleManagerFactory(),
+        ownPubkey: ownPubkey,
       );
     } on Object catch (e) {
-      debugPrint('Failed to check event on relay: ${e.runtimeType}');
-      throw const RelayServiceException('Failed to check event on relay');
+      debugPrint('Failed to check own reachability: ${e.runtimeType}');
+      throw const RelayServiceException('Failed to check own reachability');
     }
   }
 

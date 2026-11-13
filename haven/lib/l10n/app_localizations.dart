@@ -312,6 +312,18 @@ abstract class AppLocalizations {
   /// **'Setting things up…'**
   String get onboardingCreateIdentityLoading;
 
+  /// Busy label on the onboarding button while Haven makes the new account findable so others can invite it (can take up to a minute). Also read by screen readers as the progress indicator's label. Keep it short: it sits on one button next to a spinner.
+  ///
+  /// In en, this message translates to:
+  /// **'Finishing setup…'**
+  String get onboardingFinishingSetup;
+
+  /// Error shown on the last onboarding step when Haven could not make the new account findable within a minute (no connection, or no relay accepted it). The button below then reads 'Retry' (commonRetry) and tries again without creating a new account. Must not name a technical cause or blame the user.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t finish setting up your account. Check your connection and try again.'**
+  String get onboardingFinishSetupError;
+
   /// Secondary affordance text inviting the user to import an existing key instead of creating one.
   ///
   /// In en, this message translates to:
@@ -612,12 +624,6 @@ abstract class AppLocalizations {
   /// **'Remove {url}'**
   String relaySettingsRemoveTooltip(String url);
 
-  /// Relay status label: the relay was reachable and returned the expected event.
-  ///
-  /// In en, this message translates to:
-  /// **'Connected'**
-  String get relaySettingsStatusConnected;
-
   /// Relay status label: a reachability check is in progress.
   ///
   /// In en, this message translates to:
@@ -630,17 +636,89 @@ abstract class AppLocalizations {
   /// **'Can\'t reach'**
   String get relaySettingsStatusUnreachable;
 
+  /// One line under a relay's address on the Relay settings page: which of the user's published items it is about, and whether this relay has it, e.g. 'KeyPackage: Published'. Rows show one such line per item that relay should hold, and a screen reader reads the address and its lines as one sentence. Reorder or change the separator if this locale needs it.
+  ///
+  /// In en, this message translates to:
+  /// **'{kind}: {status}'**
+  String relaySettingsKindLine(String kind, String status);
+
+  /// Item name in a relay row's status line (relaySettingsKindLine): the user's invitation key, kind 30443. Keep this locale's established rendering of 'KeyPackage' (the same term as the KeyPackage section title).
+  ///
+  /// In en, this message translates to:
+  /// **'KeyPackage'**
+  String get relaySettingsKindKeyPackage;
+
+  /// Item name in a relay row's status line (relaySettingsKindLine): the user's published list of their KeyPackage relays (kind 10002), which inviters read to find the KeyPackage. 'relay' is a Nostr term of art — keep this locale's established rendering.
+  ///
+  /// In en, this message translates to:
+  /// **'Relay list'**
+  String get relaySettingsKindRelayList;
+
+  /// Item name in a relay row's status line (relaySettingsKindLine): the user's published list of their Inbox relays (kind 10050), where others send invitations. Use the same word for 'Inbox' as the Inbox section title.
+  ///
+  /// In en, this message translates to:
+  /// **'Inbox list'**
+  String get relaySettingsKindInboxList;
+
+  /// Status in a relay row's line (relaySettingsKindLine): this relay has the current version of the item.
+  ///
+  /// In en, this message translates to:
+  /// **'Published'**
+  String get relaySettingsPresencePublished;
+
+  /// Status in a relay row's line (relaySettingsKindLine): this relay answered and does not have the item. Distinct from 'Can't reach' (relaySettingsStatusUnreachable), where the relay did not answer.
+  ///
+  /// In en, this message translates to:
+  /// **'Missing'**
+  String get relaySettingsPresenceMissing;
+
+  /// Status in a relay row's line (relaySettingsKindLine): this relay has an older version of the item that Haven would replace (for a KeyPackage, one this phone can no longer use).
+  ///
+  /// In en, this message translates to:
+  /// **'Old version'**
+  String get relaySettingsPresenceOutdated;
+
+  /// Section title on the Relay settings page for the public relays others search to find the user. Read-only: the user cannot edit this list. 'relays' is a Nostr term of art — keep this locale's established rendering.
+  ///
+  /// In en, this message translates to:
+  /// **'Lookup relays'**
+  String get relaySettingsLookupTitle;
+
+  /// Caption under the Lookup relays section title. States what is sent there and why: only the user's relay lists (not their invitation key), so people who only have their ID can invite them.
+  ///
+  /// In en, this message translates to:
+  /// **'Public relays where others look you up. Haven keeps a copy of your relay lists here so people can invite you.'**
+  String get relaySettingsLookupSubtitle;
+
+  /// Button on the Relay settings page, shown when a relay is missing one of the user's published items or has an old version. Publishes them again and checks every relay again.
+  ///
+  /// In en, this message translates to:
+  /// **'Republish'**
+  String get relaySettingsRepublish;
+
+  /// Snackbar after Republish (relaySettingsRepublish) when every relay that answered has the current version of every item it should hold.
+  ///
+  /// In en, this message translates to:
+  /// **'Every relay that answered now has what others need to invite you'**
+  String get relaySettingsRepublishDone;
+
+  /// Snackbar after Republish (relaySettingsRepublish) when a relay that answered is still missing an item or has an old version. Must not name a relay or a technical cause.
+  ///
+  /// In en, this message translates to:
+  /// **'Some relays still don\'t have what others need to invite you'**
+  String get relaySettingsRepublishIncomplete;
+
+  /// Snackbar after Republish (relaySettingsRepublish) while the one-time notice that this update reset the relay settings is unanswered: Haven publishes the user's relay settings (their relay lists) and invitation key (the key others need to invite them) only after the user presses Continue on that notice or comes back from Relay settings. This is a promise the code keeps, so keep its scope exact, as in storageResetAcknowledgeFailed: do NOT widen it to 'nothing is published' — the public profile, invitations the user sends and location still go out. Reuse this locale's wording of storageResetAcknowledgeFailed's middle sentence.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven won’t publish your relay settings or invitation key until you continue past the relay settings notice'**
+  String get relaySettingsRepublishHeld;
+
   /// Relay status label: the relay has not been checked yet.
   ///
   /// In en, this message translates to:
   /// **'Not checked'**
   String get relaySettingsStatusNotChecked;
-
-  /// Accessibility label announcing a relay's connection status, where {status} is one of the status labels.
-  ///
-  /// In en, this message translates to:
-  /// **'Relay status: {status}'**
-  String relaySettingsStatusSemantics(String status);
 
   /// Title of the empty state shown when a relay category has no relays.
   ///
@@ -726,7 +804,7 @@ abstract class AppLocalizations {
   /// **'Keep sharing while Haven runs in the background'**
   String get locationSettingsToggleSubtitle;
 
-  /// iOS-only note shown when background sharing is on but the location permission is only 'while in use'. Must stay honest in both directions: While-In-Use IS sufficient for continued background sharing while the app stays running (never claim 'Always' is required for that), and 'Always' still genuinely improves catch-up after iOS terminates the app (never present While-In-Use as loss-free), and 'Always' does NOT resume the user's own sharing — the SLC relaunch it enables is receive-only (HavenSLCHandler.swift), so never imply the user keeps being seen. The closing 'resumes when you reopen Haven' is true ONLY because this note is iOS-scoped — it renders behind `sharingEnabled && iosLimited`, and iosLimited is always false off iOS (location_settings_page.dart). The same sentence would be false on Android, where a reboot restarts the publishing foreground service by itself (see locationSettingsIntro), so never lift it into a cross-platform string. Sentence order is state → advice → what 'Always' changes → resume. The blue-bar clause belongs to the FIRST sentence: appended after 'resumes when you reopen Haven' any indicator clause reads as a claim about the reopened app, which is exactly why the THIRD sentence sits before that one and not after it. That third sentence is the honest consequence of the advice above it, and the note was misleading without it: a truthful sequence that told this reader the blue bar shows while Haven shares and then told them to choose 'Always', while following that advice can REMOVE the bar — under a CONFIRMED 'Always' the session handler holds no CLBackgroundActivitySession and clears showsBackgroundLocationIndicator, so only the status-bar arrow is left. It says 'may' because that is not universal: on the iOS 15/16 floor of the deployment target, under an iOS 17 'Always' (no diagnostics API, so never confirmed) and under a provisional 'Always', the bar stays — a version split no copy can resolve. Without the sentence the note recommends a change it does not disclose, and the user finds out only by re-reading a card that has silently started saying something else. 'the bar' there is an ANAPHOR for the 'blue location bar' named in the first sentence, never a second noun for it, and the arrow it names is the one locationSettingsIosIndicatorArrow names, so a single vocabulary carries this reader across the transition. The blue-bar clause is true here on iOS 15–26 whatever Haven does — the bar is mandatory OS behaviour under While-In-Use background use (QA1965), and Haven also holds a CLBackgroundActivitySession — and it uses the same ONE noun as locationSettingsIosIndicatorBar, 'blue location bar'. Under a confirmed 'Always' the card shows locationSettingsIosIndicatorArrow instead; never merge the two. Six widget tests locate this note by the English fragment 'with your current permission' (test/pages/settings/location_settings_page_test.dart), so an English rewording that moves, recases or drops that fragment has to update them in the same commit.
+  /// iOS-only note shown when background sharing is on but the location permission is only 'while in use'. Must stay honest in both directions: While-In-Use IS sufficient for continued background sharing while the app stays running (never claim 'Always' is required for that), and 'Always' still genuinely improves catch-up after iOS terminates the app (never present While-In-Use as loss-free), and 'Always' does NOT resume the user's own sharing — the SLC relaunch it enables is receive-only (HavenSLCHandler.swift), so never imply the user keeps being seen. The closing 'resumes when you reopen Haven' is true ONLY because this note is iOS-scoped — it renders behind `sharingEnabled && iosLimited`, and iosLimited is always false off iOS (location_settings_page.dart). The same sentence would be false on Android, where a reboot restarts the publishing foreground service by itself (see locationSettingsIntro), so never lift it into a cross-platform string. Sentence order is state → advice → what 'Always' changes → resume. The blue-bar clause belongs to the FIRST sentence: appended after 'resumes when you reopen Haven' any indicator clause reads as a claim about the reopened app, which is exactly why the THIRD sentence sits before that one and not after it. That third sentence is the honest consequence of the advice above it, and the note was misleading without it: a truthful sequence that told this reader the blue bar shows while Haven shares and then told them to choose 'Always', while following that advice can REMOVE the bar — under a CONFIRMED 'Always' with Precise Location on the session handler holds no CLBackgroundActivitySession and clears showsBackgroundLocationIndicator, so only the status-bar arrow is left. It says 'may' because that is not universal: on the iOS 15/16 floor of the deployment target, under an iOS 17 'Always' (no diagnostics API, so never confirmed), under a provisional 'Always' and under a confirmed 'Always' with Precise Location off, the bar stays — a version split no copy can resolve. Without the sentence the note recommends a change it does not disclose, and the user finds out only by re-reading a card that has silently started saying something else. 'the bar' there is an ANAPHOR for the 'blue location bar' named in the first sentence, never a second noun for it, and the arrow it names is the one locationSettingsIosIndicatorArrow names, so a single vocabulary carries this reader across the transition. The blue-bar clause is true here on iOS 15–26 whatever Haven does — the bar is mandatory OS behaviour under While-In-Use background use (QA1965), and Haven also holds a CLBackgroundActivitySession — and it uses the same ONE noun as locationSettingsIosIndicatorBar, 'blue location bar'. Under a confirmed 'Always' with Precise Location on the card shows locationSettingsIosIndicatorArrow instead; never merge the two. Six widget tests locate this note by the English fragment 'with your current permission' (test/pages/settings/location_settings_page_test.dart), so an English rewording that moves, recases or drops that fragment has to update them in the same commit.
   ///
   /// In en, this message translates to:
   /// **'Sharing keeps working in the background with your current permission, and iOS shows its blue location bar at the top of the screen while it does. Choose \'Always\' for Haven in Settings so Haven can also catch up on your circles\' locations after iOS closes the app. Under \'Always\', iOS may show its location arrow in the status bar instead of the bar. Your own sharing resumes when you reopen Haven.'**
@@ -756,19 +834,19 @@ abstract class AppLocalizations {
   /// **'On Samsung devices, remove Haven from \"Sleeping apps\" (Device care → Battery → Background usage limits). On Xiaomi, enable Autostart for Haven.'**
   String get locationSettingsAndroidVendors;
 
-  /// FIRST of the two sentences of the iOS-only reliability card, which renders ONLY under IosAuthStatus.always — never under denied/notDetermined/restricted/unknown, whose users have no session to describe. The card composes, in this order: this base, then exactly ONE of locationSettingsIosIndicatorArrow / locationSettingsIosIndicatorBar, and nothing else, so a screen reader hears session → indicator as one paragraph. The indicator sentence is chosen by the session handler's own alwaysConfirmed — the predicate BOTH native branches decide from — and never by the authorization tier nor by backgroundActivitySessionHeld: a provisional 'Always' reports .authorizedAlways while the OS still treats the app as While-In-Use, and CLBackgroundActivitySession is iOS 17+, so on the iOS 15/16 floor of the deployment target nothing is ever held while the blue bar is up. Because this sentence renders under BOTH indicator states it MUST NOT name any indicator — no 'blue', no 'arrow', no 'indicator', and not the phrase 'blue location bar' (the bare word 'bar' is fine; the arrow sentence has to say 'status bar'). It must make no battery promise either — 'low-power' is banned, because the session runs at GPS accuracy whenever the user is moving or the screen is on — and must invent no pause or timer, neither of which Haven has. The accuracy tier is deliberately NOT user-visible copy: while stationary in the background the session drops to roughly 100 m accuracy and returns to GPS accuracy on movement.
+  /// FIRST of the two sentences of the iOS-only reliability card, which renders ONLY under IosAuthStatus.always — never under denied/notDetermined/restricted/unknown, whose users have no session to describe. The card composes, in this order: this base, then exactly ONE of locationSettingsIosIndicatorArrow / locationSettingsIosIndicatorBar, and nothing else, so a screen reader hears session → indicator as one paragraph. The indicator sentence is chosen by the session handler's own indicatorRequested — the predicate the native indicator flag is set from — and never by the authorization tier, by alwaysConfirmed alone (a confirmed 'Always' with Precise Location off keeps the bar) nor by backgroundActivitySessionHeld: a provisional 'Always' reports .authorizedAlways while the OS still treats the app as While-In-Use, and CLBackgroundActivitySession is iOS 17+, so on the iOS 15/16 floor of the deployment target nothing is ever held while the blue bar is up. Because this sentence renders under BOTH indicator states it MUST NOT name any indicator — no 'blue', no 'arrow', no 'indicator', and not the phrase 'blue location bar' (the bare word 'bar' is fine; the arrow sentence has to say 'status bar'). It must make no battery promise either — 'low-power' is banned, because the session runs at GPS accuracy whenever the user is moving or the screen is on — and must invent no pause or timer, neither of which Haven has. The accuracy tier is deliberately NOT user-visible copy: while stationary in the background the session drops to roughly 100 m accuracy and returns to GPS accuracy on movement.
   ///
   /// In en, this message translates to:
   /// **'While background sharing is on, Haven keeps a location session running so your circles keep seeing you.'**
   String get locationSettingsIosGuidance;
 
-  /// SECOND sentence of the iOS reliability card, selected when the session handler reports alwaysConfirmed true — a CONFIRMED 'Always', which holds no CLBackgroundActivitySession. HavenBackgroundSessionHandler gates that session on !alwaysConfirmed and HavenLocationStreamHandler clears showsBackgroundLocationIndicator from the same predicate, so for this user the status-bar arrow and the Location Services listing are the only signals left, and the card must not promise a blue bar that is not there. Must name the arrow AND the status bar it appears in; must never say 'blue' or 'blue location bar'. The second half says what the Location Services listing TELLS this reader, not merely that Haven appears in it: iOS keeps the same arrow glyph beside an app that has recently used location (Apple documents a grey arrow for the last 24 hours), so the reader learns ONE symbol and can check afterwards, in the one place that survives the moment. 'for a while afterwards' is deliberately unquantified — Apple owns that window, not Haven — and no timestamp is promised, because the Location Services row carries a glyph and not a time (the timestamped view is the separate App Privacy Report, which is off by default). 'small' was dropped: it described nothing the reader can act on. 'its' is kept, matching locationSettingsIosIndicatorBar's 'its blue location bar' — the possessive is what marks both signals as the OS's own rather than something Haven draws. The Settings wording stays tier-neutral and uses only the OS's own localized 'Location Services' name: the deployment target is iOS 15, which has Settings → Privacy → Location Services, while iOS 16+ moved it under 'Privacy & Security' — a version split no localizer can resolve. Any breadcrumb uses '→', which screen readers speak, never '›', which they skip.
+  /// SECOND sentence of the iOS reliability card, selected when the session handler reports indicatorRequested false — a CONFIRMED 'Always' with Precise Location on, which holds no CLBackgroundActivitySession. HavenBackgroundSessionHandler gates that session on !alwaysConfirmed and HavenLocationStreamHandler clears showsBackgroundLocationIndicator from indicatorRequested (!alwaysConfirmed, or Precise Location off), the value this sentence is selected on, so for this user the status-bar arrow and the Location Services listing are the only signals left, and the card must not promise a blue bar that is not there. Must name the arrow AND the status bar it appears in; must never say 'blue' or 'blue location bar'. The second half says what the Location Services listing TELLS this reader, not merely that Haven appears in it: iOS keeps the same arrow glyph beside an app that has recently used location (Apple documents a grey arrow for the last 24 hours), so the reader learns ONE symbol and can check afterwards, in the one place that survives the moment. 'for a while afterwards' is deliberately unquantified — Apple owns that window, not Haven — and no timestamp is promised, because the Location Services row carries a glyph and not a time (the timestamped view is the separate App Privacy Report, which is off by default). 'small' was dropped: it described nothing the reader can act on. 'its' is kept, matching locationSettingsIosIndicatorBar's 'its blue location bar' — the possessive is what marks both signals as the OS's own rather than something Haven draws. The Settings wording stays tier-neutral and uses only the OS's own localized 'Location Services' name: the deployment target is iOS 15, which has Settings → Privacy → Location Services, while iOS 16+ moved it under 'Privacy & Security' — a version split no localizer can resolve. Any breadcrumb uses '→', which screen readers speak, never '›', which they skip.
   ///
   /// In en, this message translates to:
   /// **'iOS shows its location arrow in the status bar while Haven uses your location, and keeps that same arrow next to Haven in Location Services for a while afterwards.'**
   String get locationSettingsIosIndicatorArrow;
 
-  /// SECOND sentence of the iOS reliability card, selected when the session handler reports alwaysConfirmed false — every reading in which the blue bar is on screen: a provisional 'Always' (reported as .authorizedAlways while the OS still treats the app as While-In-Use), an iOS 17 'Always' (no diagnostics API, so never confirmed), the iOS 15/16 floor of the deployment target (where no CLBackgroundActivitySession can exist and showsBackgroundLocationIndicator, set from !alwaysConfirmed, is the only thing raising the bar), and every 'Always' should the confirmed-Always policy ever be withdrawn — which is why this key is also that rollback's version of the card. It NAMES the authorization instead of pointing at it: an earlier version said 'with this permission', and since the page never displays the authorization tier that phrase had no antecedent anywhere on the screen (locationSettingsIosLimitedNote's 'your current permission' works only because that note IS about the permission). Naming it is safe here and only here — this key renders exclusively under IosAuthStatus.always, so every reader of it holds 'Always', and 'Always' is the word iOS Settings shows them (a provisional 'Always' displays that way too). It states the tier and never urges granting it: that advice belongs to the While-In-Use note, and here it would ask a reader for a permission they already have. It must also not OPEN with the connector locationSettingsIosGuidance opens with — the two are read as one paragraph, and 'While ... . While ...' stutters; the reviewer wave already made this repair in es (Mientras → Cuando) and pt (Enquanto → Quando), and the other ten locales never had it. ONE noun everywhere for what the user sees, 'blue location bar', never 'indicator' or 'pill', so the words match the thing on screen. The bar is mandatory OS behaviour in this posture and cannot be turned off, so the sentence states it rather than offering it as a choice.
+  /// SECOND sentence of the iOS reliability card, selected when the session handler reports indicatorRequested true — every reading in which the blue bar is on screen: a confirmed 'Always' with Precise Location off (accuracy writes then have no effect, so the handler keeps asking for the indicator, Apple's other way to keep the session running), a provisional 'Always' (reported as .authorizedAlways while the OS still treats the app as While-In-Use), an iOS 17 'Always' (no diagnostics API, so never confirmed), the iOS 15/16 floor of the deployment target (where no CLBackgroundActivitySession can exist and showsBackgroundLocationIndicator, set from indicatorRequested, is the only thing raising the bar), and every 'Always' should the confirmed-Always policy ever be withdrawn — which is why this key is also that rollback's version of the card. It NAMES the authorization instead of pointing at it: an earlier version said 'with this permission', and since the page never displays the authorization tier that phrase had no antecedent anywhere on the screen (locationSettingsIosLimitedNote's 'your current permission' works only because that note IS about the permission). Naming it is safe here and only here — this key renders exclusively under IosAuthStatus.always, so every reader of it holds 'Always', and 'Always' is the word iOS Settings shows them (a provisional 'Always' displays that way too). It states the tier and never urges granting it: that advice belongs to the While-In-Use note, and here it would ask a reader for a permission they already have. It must also not OPEN with the connector locationSettingsIosGuidance opens with — the two are read as one paragraph, and 'While ... . While ...' stutters; the reviewer wave already made this repair in es (Mientras → Cuando) and pt (Enquanto → Quando), and the other ten locales never had it. ONE noun everywhere for what the user sees, 'blue location bar', never 'indicator' or 'pill', so the words match the thing on screen. The bar is mandatory OS behaviour in this posture and cannot be turned off, so the sentence states it rather than offering it as a choice.
   ///
   /// In en, this message translates to:
   /// **'With your \'Always\' permission, iOS shows its blue location bar at the top of the screen while Haven uses your location.'**
@@ -1128,17 +1206,17 @@ abstract class AppLocalizations {
   /// **'No valid ID found in QR code'**
   String get createCircleNoIdInQr;
 
-  /// Member validation error: no KeyPackage was found for the entered ID, so the person has no Haven account. 'Haven' is intentionally English (brand name).
+  /// Member validation message when every relay that was asked answered and none holds an invitation key for the entered ID. Shown next to a Retry button. Deliberately not certain ('yet'): someone who set up Haven moments ago may not be findable for a minute, so the second sentence invites trying again. Must not say the person does not exist or blame anyone. 'Haven' is intentionally English (brand name). 'ID' is the person's public ID the user typed or scanned.
   ///
   /// In en, this message translates to:
-  /// **'Couldn\'t find a Haven account for this ID'**
-  String get createCircleNoAccountFound;
+  /// **'No Haven account found for this ID yet. If they just set up Haven, try again in a minute.'**
+  String get memberLookupNotFound;
 
-  /// Member validation error shown on a relay/network failure; the validation can be retried.
+  /// Member validation message when the lookup could not finish (a relay did not answer, or the network failed), so it is unknown whether the person has a Haven account. Shown next to a Retry button. Must not suggest the person has no account. 'ID' is the person's public ID the user typed or scanned.
   ///
   /// In en, this message translates to:
-  /// **'Could not verify member'**
-  String get createCircleCouldNotVerify;
+  /// **'Couldn\'t finish checking this ID. Check your connection and try again.'**
+  String get memberLookupIncomplete;
 
   /// Generic member validation error shown on an unexpected failure.
   ///
@@ -1602,11 +1680,29 @@ abstract class AppLocalizations {
   /// **'Circle: {circleName}'**
   String memberPickerCollisionCircleLabel(String circleName);
 
-  /// Shown on the ONE row that appears when the user types or pastes a complete, valid npub for someone not already in the local directory (plan §10 D2), and spoken as the screen-reader label on that row's loading spinner while the lookup is in flight. Appears whether or not anything resolves. Discloses exactly four things and no more: (1) Haven asked ONE public relay (never more — see docs/MEMBER_PICKER_PLAN.md, the design deliberately adds no fan-out of its own — it never pads with decoys, and it issues one request per attempt through the existing per-author relay assignment, whose own ladder is bounded by PROFILE_MAX_RELAY_RANK); (2) that relay can see THIS DEVICE asked about THAT KEY at THAT MOMENT — do not soften this into 'may be able to see' or omit it, it is a real, unavoidable disclosure; (3) the request is NOT tied to the user's Haven identity, because it carries no cryptographic signature and therefore cannot answer a relay's NIP-42 AUTH challenge — translate 'signature' in the cryptographic sense, not a handwritten or email signature; (4) no photo is downloaded at this stage (only the published name, if any, is looked up). Do NOT use a word meaning 'anonymous' or 'anonymously' anywhere in this string — it overclaims: the network address and timing of the request are still visible to the relay, which is exactly what point (2) discloses. Do not add or imply a duration, a retry count, or which relay was asked.
+  /// Shown on the ONE row that appears when the user types or pastes a complete, valid npub for someone not already in the local directory (plan §10 D2), and also under a staged row (added by the paste button, Done, a QR scan or a tap on that row) whose person was looked up the same way. Appears whether or not anything resolves. Discloses exactly four things and no more: (1) Haven asked a public relay for the person's published profile — never more than two relays (it never pads with decoys; they are the two relays the existing per-author relay assignment allows, PROFILE_MAX_RELAY_RANK). Do NOT say or imply WHEN the second one is asked, e.g. 'only if the first did not answer': it is also asked when the key is entered again after the first answered without a profile; (2) a relay that was asked can see THIS DEVICE asked about THAT KEY at THAT MOMENT — do not soften this into 'may be able to see' or omit it, it is a real, unavoidable disclosure; (3) the request is NOT tied to the user's Haven identity, because it carries no cryptographic signature and therefore cannot answer a relay's NIP-42 AUTH challenge — translate 'signature' in the cryptographic sense, not a handwritten or email signature; (4) ONLY IF the published profile names a photo, Haven downloads that photo from the server the PERSON chose (not a server Haven or the user chose), and that server can see this device's network address — translate 'network address' as the device's internet (IP) address, not a street or email address. Do NOT use a word meaning 'anonymous' or 'anonymously' anywhere in this string — it overclaims: the network address and timing of the requests are still visible, which is exactly what points (2) and (4) disclose. Do not add or imply a duration, a retry count, or which relay or server was asked. 'This person' is deliberately not a pronoun: do not introduce a gendered pronoun for them.
   ///
   /// In en, this message translates to:
-  /// **'Haven asked a relay to look up this person\'s published name. That relay can see this device asked about this key just now — but the request carries no signature, so it isn\'t tied to your Haven identity. No photo is downloaded yet.'**
+  /// **'Haven asked a relay — two at most — for this person\'s published profile. A relay it asked can see that this device asked about this key just now, but the request carries no signature, so it isn\'t tied to your Haven identity. If the profile has a photo, Haven downloads it from the server this person chose, which can see this device\'s network address.'**
   String get memberPickerStrangerLookupNote;
+
+  /// Shown, and spoken by a screen reader as part of the row's label, on the typed-npub row of the invite picker while the lookup of that person's published profile is still in flight. Also announced once on its own when the row appears with the lookup still running, so it must read as a complete status. A short status, not a sentence about relays — the disclosure is memberPickerStrangerLookupNote, shown beneath it. Ends with an ellipsis character to mark an activity in progress.
+  ///
+  /// In en, this message translates to:
+  /// **'Looking up published profile…'**
+  String get memberPickerStrangerLookingUp;
+
+  /// Shown, and spoken by a screen reader, on the typed-npub row of the invite picker when the lookup finished without a name to show — because the person has published none, or because no relay answered. It must NOT say or imply that the person, the key or the account does not exist, is invalid or is wrong: the key is valid and the person can still be added. It is also announced once on its own when the lookup settles, so it must read as a complete statement.
+  ///
+  /// In en, this message translates to:
+  /// **'No published name found'**
+  String get memberPickerStrangerNotFound;
+
+  /// Announced to screen readers ONCE when the lookup for a typed npub finds a published name. {name} is the name the PERSON chose and published themselves — remote-authored text, not verified by Haven. Translate as a label-and-value construction, exactly like memberPickerMatchesAnnouncement: the noun phrase for a name someone has published, a colon, then the name. Never use a word meaning 'verified', 'confirmed' or 'real name'.
+  ///
+  /// In en, this message translates to:
+  /// **'Published name: {name}'**
+  String memberPickerStrangerFoundAnnouncement(String name);
 
   /// Indicator shown after the visible member chips for the remaining members, e.g. '+2 more'.
   ///
@@ -2328,6 +2424,48 @@ abstract class AppLocalizations {
   /// **'Your public key'**
   String get qrCodeYourPublicKeyLabel;
 
+  /// Status line above the user's QR code (and on the Identity page) while Haven has not yet confirmed that others can invite the user, or while a Retry runs. Announced to screen readers when it appears. Plain language: no 'relay' or 'KeyPackage'.
+  ///
+  /// In en, this message translates to:
+  /// **'Getting ready to receive invitations…'**
+  String get reachabilityChecking;
+
+  /// Status line above the user's QR code (and on the Identity page) once Haven has confirmed others can find the user and invite them to a circle. Shown with a check icon. Plain language: no 'relay' or 'KeyPackage'.
+  ///
+  /// In en, this message translates to:
+  /// **'Ready to be invited'**
+  String get reachabilityReady;
+
+  /// Neutral status line above the user's QR code (and on the Identity page) when Haven could not reach the network to check. Shown next to a Retry button. Must NOT say the user cannot be invited — nothing is known, and the phone may simply be offline. Plain language: no 'relay' or 'KeyPackage'.
+  ///
+  /// In en, this message translates to:
+  /// **'Can\'t check right now whether others can invite you'**
+  String get reachabilityCantCheck;
+
+  /// Status line above the user's QR code (and on the Identity page) when Haven reached the network and confirmed that others cannot find the user to invite them yet. Shown with a warning icon and a Retry button. Plain language: no 'relay' or 'KeyPackage'; must not blame the user.
+  ///
+  /// In en, this message translates to:
+  /// **'Others can\'t invite you yet'**
+  String get reachabilityNotReady;
+
+  /// Status line above the user's QR code (and on the Identity page) when the user has removed every relay of a kind Haven needs, so nothing can be published for others to find. Followed by a link to Relay settings (reachabilityOpenRelaySettings). 'relay' is a Nostr term of art — keep this locale's established rendering.
+  ///
+  /// In en, this message translates to:
+  /// **'Others can\'t invite you until you add a relay'**
+  String get reachabilityNoRelays;
+
+  /// Link under the 'add a relay' status line above the user's QR code; opens the Relay settings page. Use the same name as the Relay settings page title in this locale.
+  ///
+  /// In en, this message translates to:
+  /// **'Relay settings'**
+  String get reachabilityOpenRelaySettings;
+
+  /// Status line above the user's QR code (and on the Identity page) while the one-time notice that this update reset the relay settings is still unanswered: Haven publishes nothing others need to invite the user until the user presses Continue on that notice or comes back from Relay settings. No Retry is offered here because it would do nothing.
+  ///
+  /// In en, this message translates to:
+  /// **'Others can invite you once you continue past the relay settings notice'**
+  String get reachabilityAwaitingReset;
+
   /// Heading of the plain-language explainer on the Public Key QR page.
   ///
   /// In en, this message translates to:
@@ -2976,13 +3114,13 @@ abstract class AppLocalizations {
   /// **'Something about recent changes to {circleName} needs your attention. Open that circle’s details to read it.'**
   String changeNoticeArrivedAnnouncement(String circleName);
 
-  /// Accessible name (and tooltip) of the Circle details button while the selected circle has a sharing problem or a note about changes. Only on that button; a circle row in the selector list uses circleRowAttentionSemantics. 'Circle details' must match circleDetailsButtonTooltip. The badge itself has no text, so this is its only name.
+  /// Accessible name (and tooltip) of a Circle details button while its circle has a sharing problem or a note about changes: the selected circle's details button, and the button on a circle's row in the open selector list. The row itself, and the button beside the closed selector that is about a circle other than the selected one, use circleRowAttentionSemantics. 'Circle details' must match circleDetailsButtonTooltip. The badge itself has no text, so this is its only name.
   ///
   /// In en, this message translates to:
   /// **'Circle details, needs attention'**
   String get circleDetailsAttentionTooltip;
 
-  /// Accessible name of a circle row in the circle selector list while that circle has a sharing problem or a note about changes. {circleName} is the row's circle name; the placeholder lets word order follow the language. Not bidi-isolated: this is a semantics label.
+  /// Accessible name of a circle row in the circle selector list while that circle has a sharing problem or a note about changes; also the accessible name (and tooltip) of the button beside the closed selector that marks a circle other than the selected one and opens its details. {circleName} is that circle's name; the placeholder lets word order follow the language. Not bidi-isolated: a semantics label, shown only as that button's tooltip.
   ///
   /// In en, this message translates to:
   /// **'{circleName}, needs attention'**

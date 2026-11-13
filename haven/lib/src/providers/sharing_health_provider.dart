@@ -28,6 +28,15 @@
 /// * A momentary relay disconnect is normal on mobile. Every transient cause
 ///   must stand for [kSharingFaultConfirmationWindow] before it reaches the
 ///   user, unless the user's own action just made it.
+/// * A silence nobody was looking through is not a silence. While the app is
+///   away nothing may be sending or receiving at all, so the stored delivery
+///   instants only age; read at the moment the app comes back they say how
+///   long it was away, not that anything broke — and the resume's own publish
+///   and reconnect are already under way. So that window is counted in time
+///   the app was in front ([SharingHealthNotifier] `_watchedSince`), across
+///   visits — for a silence, from where it stops being ordinary: a fault that
+///   began unwatched is shown once it has outlasted one window of watching,
+///   and at once on every later visit until a delivery ends it.
 ///
 /// What the core knows holds the circle — a disband, a halt, a pending change,
 /// a removal not made — is READ from it ([CircleService.circleRecovery]) and
@@ -77,6 +86,11 @@ final Duration kLocationMessageRetention = Duration(
 /// within one cadence is ordinary mobile behaviour, not an outage. Anything
 /// shorter cries wolf; anything longer hides a gap that has already lost an
 /// update.
+///
+/// Counted in time the app was in front. Inside one such window a working
+/// pipeline has sent (this device's own cadence) and received (the peer's), so
+/// a cause still standing at its end is one the app watched fail, not one it
+/// found on its way back.
 const Duration kSharingFaultConfirmationWindow = kLocationPublishMaxInterval;
 
 /// No relay has ACKed a publish for this long → the send plane is failing.
@@ -401,10 +415,20 @@ final sharingHealthForegroundProvider = Provider<ValueListenable<bool>>((ref) {
 /// transition.
 class AppForegroundNotifier extends ValueNotifier<bool>
     with WidgetsBindingObserver {
-  /// Starts observing the app lifecycle, assuming foreground until told
-  /// otherwise (the first callback arrives only when something changes).
-  AppForegroundNotifier() : super(true) {
+  /// Starts observing the app lifecycle from what the binding reads now.
+  ///
+  /// The binding dispatches only changes, so a process started in the
+  /// background (an iOS location relaunch, an Android activity stopped during
+  /// start-up) is never told it is not in front: assuming it was would count
+  /// that whole time as watched. A lifecycle not yet reported reads as in
+  /// front; the first dispatch corrects it.
+  AppForegroundNotifier() : super(_inFront()) {
     WidgetsBinding.instance.addObserver(this);
+  }
+
+  static bool _inFront() {
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    return lifecycle == null || lifecycle == AppLifecycleState.resumed;
   }
 
   @override
@@ -516,6 +540,28 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
   /// When the engine last entered [SyncConnectionPhase.disconnected].
   DateTime? _disconnectedSince;
 
+  /// When the app last came to the front; `null` while it is away.
+  DateTime? _watchingSince;
+
+  /// The visits already ended, oldest first: only the newest that together
+  /// outlast one confirmation window, which is all [_watchedSince] can need.
+  final List<({DateTime from, DateTime to})> _watched = [];
+
+  /// How much more watching the nearest withheld cause of the derivation in
+  /// hand needs; `null` when it withheld none.
+  Duration? _confirmIn;
+
+  /// Re-derives when that watching is done, rather than at the next tick.
+  Timer? _confirm;
+
+  /// When the engine was first seen paused with the app on screen, `null`
+  /// otherwise. Only the background plane pauses the engine, so a pause still
+  /// there in the foreground is a receive plane nothing re-anchored: it dates
+  /// `receiveSubscriptionLost` exactly as a dropped subscription does.
+  DateTime? _pausedOnScreenSince;
+
+  late ValueListenable<bool> _foreground;
+
   Timer? _tick;
   Duration _tickInterval = kSharingHealthTick;
 
@@ -550,6 +596,10 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
     _sessionHeldSince = null;
     _subscriptionLostSince = null;
     _disconnectedSince = null;
+    _watchingSince = null;
+    _watched.clear();
+    _pausedOnScreenSince = null;
+    final foreground = _foreground = ref.read(sharingHealthForegroundProvider);
 
     // A disconnect has no timestamp of its own — `SyncStatus` carries a phase,
     // not an instant — so the transition edge is where the clock is read.
@@ -563,8 +613,9 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
     // honest too: an outage that spans a pause is still dated from when it
     // started, not re-dated to the un-pause. The pause is instead prevented
     // from confirming a fault by [refresh], which derives nothing at all while
-    // the engine is paused.
+    // the engine is paused out of sight.
     ref.listen<SyncStatus>(syncStatusProvider, (previous, next) {
+      _notePausedOnScreen();
       switch (next.phase) {
         case SyncConnectionPhase.disconnected:
           _disconnectedSince ??= _now();
@@ -582,17 +633,21 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
     // this the model could only update when something arrived — which is
     // exactly what stops when the pipeline dies. Gated on the foreground: see
     // [sharingHealthForegroundProvider].
-    final foreground = ref.read(sharingHealthForegroundProvider);
     void syncTick() {
+      _notePausedOnScreen();
       if (foreground.value) {
+        _watchingSince ??= _now();
         // Re-derive immediately as well as re-arming, so the first thing a
         // returning user sees is a fresh verdict rather than the one that was
         // true when they left.
         _tick ??= Timer.periodic(_tickInterval, (_) => unawaited(refresh()));
         unawaited(refresh());
       } else {
+        _endVisit();
         _tick?.cancel();
         _tick = null;
+        _confirm?.cancel();
+        _confirm = null;
       }
     }
 
@@ -602,6 +657,8 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
       foreground.removeListener(syncTick);
       _tick?.cancel();
       _tick = null;
+      _confirm?.cancel();
+      _confirm = null;
     });
     syncTick();
 
@@ -620,6 +677,17 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
 
     return SharingHealth.healthy;
   }
+
+  bool get _enginePaused =>
+      ref.read(syncStatusProvider).phase == SyncConnectionPhase.paused;
+
+  /// Dates [_pausedOnScreenSince] from the first moment the engine reads
+  /// paused with the app on screen, and clears it otherwise — so a return to
+  /// the background, or any un-pause, restarts the confirmation window.
+  void _notePausedOnScreen() => _pausedOnScreenSince =
+      _enginePaused && _foreground.value
+      ? (_pausedOnScreenSince ?? _now())
+      : null;
 
   /// Records the outcome of one publish attempt.
   ///
@@ -689,24 +757,104 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
     unawaited(refresh());
   }
 
+  /// Records that this isolate just stored a peer's location.
+  ///
+  /// The receipt is already in the store the verdict reads; this makes it
+  /// count now rather than at the next tick, so a "not receiving" verdict
+  /// ends with the delivery that disproves it. A healthy verdict with no
+  /// derivation in flight cannot change on a delivery, and reads nothing.
+  void recordPeerDelivery() {
+    if (state.isStopped || _inFlight != null) unawaited(refresh());
+  }
+
+  /// Closes the visit in progress into [_watched].
+  void _endVisit() {
+    final from = _watchingSince;
+    if (from == null) return;
+    _watchingSince = null;
+    _watched.add((from: from, to: _now()));
+    // A cause older than the visits that outlast one window has been watched
+    // for the window whatever came before them.
+    var kept = Duration.zero;
+    var first = _watched.length;
+    while (first > 0 && kept <= kSharingFaultConfirmationWindow) {
+      first--;
+      kept += _watched[first].to.difference(_watched[first].from);
+    }
+    _watched.removeRange(0, first);
+  }
+
+  /// How long the app has been in front since [onset], over every visit.
+  Duration _watchedSince(DateTime onset, DateTime now) {
+    Duration within(DateTime from, DateTime to) {
+      final start = from.isBefore(onset) ? onset : from;
+      return to.isAfter(start) ? to.difference(start) : Duration.zero;
+    }
+
+    var total = Duration.zero;
+    for (final visit in _watched) {
+      total += within(visit.from, visit.to);
+    }
+    final current = _watchingSince;
+    return current == null ? total : total + within(current, now);
+  }
+
+  /// Whether a cause dated [onset] has outlasted the confirmation window in
+  /// time the app was in front to watch it.
+  ///
+  /// Time away is not counted: nothing may have been sending or receiving
+  /// then, and what the app finds on its way back its own resume is already
+  /// repairing. A cause that has not is withheld, and [_confirmIn] has the
+  /// derivation run again the moment it will have.
+  bool _stood(DateTime onset, DateTime now) {
+    final short = kSharingFaultConfirmationWindow - _watchedSince(onset, now);
+    if (short < Duration.zero) return true;
+    final nearest = _confirmIn;
+    if (nearest == null || short < nearest) _confirmIn = short;
+    return false;
+  }
+
+  /// Whether nothing has been delivered since [delivered] for longer than
+  /// [threshold], and the app watched that silence stop being ordinary.
+  ///
+  /// The window is counted from one window short of the threshold, never from
+  /// the delivery: until then the quiet is ordinary, and watching ordinary
+  /// quiet proves nothing about what followed it while the app was away. In
+  /// front throughout, this is the threshold alone.
+  ///
+  /// The threshold is asked first although the watching implies it: [_stood]
+  /// arms the confirm timer for whatever it withholds, and asked of a silence
+  /// still short of its threshold it would arm one on every healthy circle.
+  bool _watchedPast(DateTime delivered, Duration threshold, DateTime now) =>
+      now.difference(delivered) > threshold &&
+      _stood(
+        delivered.add(threshold - kSharingFaultConfirmationWindow),
+        now,
+      );
+
   /// Re-derives the verdict now.
   ///
   /// Safe to call concurrently: a call made while a derivation is in flight
   /// joins it, and one more derivation runs after it, so the verdict always
   /// follows the newest call and never an older one.
   ///
-  /// A PAUSED engine derives nothing and the last verdict stands. Between
-  /// background bursts there is no REQ and no socket: the app is not looking,
-  /// so it learns nothing in either direction, and both directions do harm.
-  /// Deriving `healthy` announces a recovery that did not happen — the app
-  /// stopped looking, the relay did not come back — and deriving a fault dates
-  /// an outage from a silence the app chose. The generation bump lands BEFORE
-  /// the early return so a derivation already in flight when the pause began
-  /// cannot land its answer either. The status listener above refreshes on
-  /// every phase change, so the verdict is re-derived the moment the next
-  /// burst opens.
+  /// A PAUSED engine derives nothing while the app is away, and the last
+  /// verdict stands. Between background bursts there is no REQ and no socket:
+  /// the app is not looking, so it learns nothing in either direction, and
+  /// both directions do harm. Deriving `healthy` announces a recovery that did
+  /// not happen — the app stopped looking, the relay did not come back — and
+  /// deriving a fault dates an outage from a silence the app chose. The
+  /// generation bump lands BEFORE the early return so a derivation already in
+  /// flight when the pause began cannot land its answer either. The status
+  /// listener above refreshes on every phase change, so the verdict is
+  /// re-derived the moment the next burst opens.
+  ///
+  /// With the app on screen a paused engine is no silence the app chose — the
+  /// resume re-anchors it within seconds — so it derives as at any other
+  /// phase, which is what keeps a wedged receive plane from freezing the
+  /// banner at its last verdict.
   Future<void> refresh() {
-    if (ref.read(syncStatusProvider).phase == SyncConnectionPhase.paused) {
+    if (_enginePaused && !_foreground.value) {
       ++_generation;
       return Future<void>.value();
     }
@@ -721,7 +869,7 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
   Future<void> _derive() async {
     do {
       _again = false;
-      if (ref.read(syncStatusProvider).phase == SyncConnectionPhase.paused) {
+      if (_enginePaused && !_foreground.value) {
         ++_generation;
         return;
       }
@@ -737,11 +885,24 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
       // derivation.
       if (_disposed) return;
       // A refresh asked meanwhile reads newer evidence: only its answer lands.
-      if (generation == _generation && !_again) state = next;
+      if (generation == _generation && !_again) {
+        state = next;
+        _confirm?.cancel();
+        final due = _confirmIn;
+        // A second past it: a cause must OUTLAST the window, so a timer that
+        // fires on the instant would find it not yet confirmed.
+        _confirm = due == null || !_foreground.value
+            ? null
+            : Timer(
+                due + const Duration(seconds: 1),
+                () => unawaited(refresh()),
+              );
+      }
     } while (_again);
   }
 
   Future<SharingHealth> _evaluate() async {
+    _confirmIn = null;
     final circle = ref.read(selectedCircleProvider);
     if (circle == null ||
         circle.membershipStatus != MembershipStatus.accepted) {
@@ -826,8 +987,8 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
   }
 
   /// A transient core cause, shown once it has stood for the confirmation
-  /// window — from the first read naming it, or the first held send if that
-  /// is older — or at once when the user's own action made the hold.
+  /// window ([_stood]) — from the first read naming it, or the first held send
+  /// if that is older — or at once when the user's own action made the hold.
   SharingHealth? _transientVerdict(
     String key,
     SharingPausedReason reason,
@@ -839,8 +1000,7 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
     _transientSince[key] = (reason: reason, since: readSince);
     final held = _heldSince[key];
     final onset = held != null && held.isBefore(readSince) ? held : readSince;
-    if (_userHeld.contains(key) ||
-        now.difference(onset) > kSharingFaultConfirmationWindow) {
+    if (_userHeld.contains(key) || _stood(onset, now)) {
       return _paused(reason, onset, health);
     }
     return null;
@@ -903,15 +1063,20 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
   }
 
   SharingHealth? _pausedVerdict(DateTime now, CircleHealthTimestamps health) {
+    final lost = _subscriptionLostSince;
+    final pausedOnScreen = _pausedOnScreenSince;
     final candidates = <SharingPausedReason, DateTime?>{
-      SharingPausedReason.receiveSubscriptionLost: _subscriptionLostSince,
+      SharingPausedReason.receiveSubscriptionLost:
+          lost == null ||
+              (pausedOnScreen != null && pausedOnScreen.isBefore(lost))
+          ? pausedOnScreen
+          : lost,
       SharingPausedReason.relayDisconnected: _disconnectedSince,
       SharingPausedReason.sessionStillHeld: _sessionHeldSince,
     };
     for (final entry in candidates.entries) {
       final onset = entry.value;
-      if (onset != null &&
-          now.difference(onset) > kSharingFaultConfirmationWindow) {
+      if (onset != null && _stood(onset, now)) {
         return _paused(entry.key, onset, health);
       }
     }
@@ -983,8 +1148,7 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
     // Route 1 — this isolate watched a publish come back unacked and nothing
     // has acked since. Fast, but only ever available in the foreground.
     final failingSince = _publishFailingSince[key];
-    if (failingSince != null &&
-        now.difference(failingSince) > kSharingFaultConfirmationWindow) {
+    if (failingSince != null && _stood(failingSince, now)) {
       // With no stored ack, the onset is this process's own and proves no age.
       return SharingHealth.publishFailing(
         ackedAt ?? failingSince,
@@ -994,8 +1158,12 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
 
     // Route 2 — whoever was publishing (either isolate), nothing has been kept
     // by a relay for two cadences. Requires a baseline: a circle that has never
-    // published successfully has nothing to have stopped.
-    if (ackedAt != null && now.difference(ackedAt) > kPublishSilenceThreshold) {
+    // published successfully has nothing to have stopped. And the silence must
+    // have been watched: an ack that only aged while the app was away is
+    // replaced by the resume's own publish, or stands and is shown
+    // ([_watchedPast]).
+    if (ackedAt != null &&
+        _watchedPast(ackedAt, kPublishSilenceThreshold, now)) {
       return SharingHealth.publishFailing(ackedAt);
     }
     return null;
@@ -1030,7 +1198,10 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
     // Never received anything: indistinguishable from a peer who has never
     // shared, so there is no fault to report.
     if (lastPeerAt == null) return null;
-    if (now.difference(lastPeerAt) > kReceiveSilenceThreshold) {
+    // Watched, as the send side is: while the app was away nothing may have
+    // been listening, and what peers published since arrives with the
+    // resume's reconnect.
+    if (_watchedPast(lastPeerAt, kReceiveSilenceThreshold, now)) {
       return SharingHealth.receiveSilent(lastPeerAt);
     }
     return null;

@@ -196,9 +196,14 @@ class _ResumeEngine implements SubscriptionService {
   bool paused = false;
   bool throwOnReanchor = false;
 
+  /// Parks every re-anchor until completed, as a held lifecycle lock does.
+  Completer<void>? held;
+
   @override
   Future<void> resumeAfterBackground() async {
     reanchors++;
+    final lock = held;
+    if (lock != null) await lock.future;
     paused = false;
     if (throwOnReanchor) throw const SubscriptionServiceException('no session');
   }
@@ -350,6 +355,11 @@ class _BurstPublisher implements BurstPublisher {
             longitude: -0.1,
           );
   }
+
+  // No seal is ever stranded here, so no pass is ever skipped.
+  @override
+  void recordBurstPublishSkipped(Iterable<Circle> circles) =>
+      throw UnimplementedError();
 
   @override
   Future<void> publishInBurst(
@@ -914,6 +924,49 @@ void main() {
     });
   });
 
+  group("the burst stall allowance's terms are the engine's own", () {
+    // `kBurstStallAllowance` decides when a later tick stops waiting on a
+    // burst and runs on a fresh lane. Priced too low, healthy bursts are
+    // superseded (an extra open each); too high, a wedge stops background
+    // sharing for longer. Its terms are mirrors, so each is pinned to what it
+    // mirrors rather than to a comment saying it does.
+
+    test('the shared mirrors are the Rust constants', () {
+      final config = _rustSource('src/relay/live_sync/config.rs');
+      expect(
+        kRelayLifecycleOpSecs,
+        _rustConst(config, 'RELAY_LIFECYCLE_OP_TIMEOUT_SECS'),
+      );
+      expect(kBurstSettleCapSecs, _rustConst(config, 'BURST_SETTLE_CAP_SECS'));
+      expect(kBurstPublishBudget, const Duration(seconds: kBurstPublishSecs));
+    });
+
+    test('the commit ladder is the relay manager three-attempt ladder', () {
+      final manager = _rustSource('src/relay/manager.rs');
+      final attempts = _rustConst(manager, 'MAX_PUBLISH_ATTEMPTS');
+      expect(
+        kCommitLadderSecs,
+        attempts *
+                (_rustSecs(manager, 'CONNECTION_TIMEOUT') +
+                    _rustSecs(manager, 'DEFAULT_TIMEOUT')) +
+            (attempts - 1) * _rustSecs(manager, 'PUBLISH_RETRY_BACKOFF'),
+      );
+      expect(kCommitLadderSecs, 49);
+    });
+
+    test("the login settle is the maintenance scheduler's own cap", () {
+      expect(
+        File(
+          'lib/src/providers/maintenance_scheduler_provider.dart',
+        ).readAsStringSync(),
+        contains(
+          'const Duration _loginPublishSettleTimeout = '
+          'Duration(seconds: $kLoginPublishSettleSecs);',
+        ),
+      );
+    });
+  });
+
   group('a resume never leaves the engine paused by a burst', () {
     // The burst that starts at the pause instant runs for 2-4 s, and the
     // glance-and-return pattern lands 1-3 s later — INSIDE it. Clearing the
@@ -1002,6 +1055,40 @@ void main() {
       await resume;
 
       expect(engine.reanchors, 2);
+    });
+
+    test('a burst that never ends still gets its engine checked, once the '
+        'teardown it owes has had its time', () {
+      // A pause parked behind a held engine lock never returns, so the burst
+      // carrying it never completes. Awaited without a bound, this resume
+      // never reached its `isPaused` check: the foreground stayed paused, and
+      // the resume handler with it.
+      fakeAsync((async) {
+        final engine = _ResumeEngine();
+        var done = false;
+        unawaited(
+          MapShell.reanchorOnResume(
+            engine: engine,
+            burstInFlight: Completer<void>().future,
+          ).then((_) => done = true),
+        );
+        async.flushMicrotasks();
+        expect(engine.reanchors, 1);
+        engine.paused = true; // the stuck pause raises the flag first
+
+        async.elapse(kOptOutBurstWait - const Duration(seconds: 1));
+        expect(
+          engine.reanchors,
+          1,
+          reason: 'a healthy burst still owes up to its teardown; re-anchoring '
+              'inside it would race the pause it is about to make',
+        );
+
+        async.elapse(const Duration(seconds: 1));
+        expect(engine.reanchors, 2);
+        expect(engine.isPaused, isFalse);
+        expect(done, isTrue);
+      });
     });
 
     test('a re-anchor that throws never escapes the lifecycle callback',
@@ -1135,6 +1222,44 @@ void main() {
         isTrue,
       );
       expect(engine.reanchors, 1);
+    });
+
+    test('a heal past its deadline joins the re-anchor still parked, never '
+        'queues another', () async {
+      // The backstop draws the next heal at `healDeadline` while a re-anchor
+      // waits on a held lifecycle lock, and heals land 90 s or more apart —
+      // past the 60 s throttle — so only the heal's latch stops each one
+      // queueing another pool reconnect and 96 h `#p` replay to run when the
+      // lock frees. `_healLiveSyncIfStopped` runs it through exactly this
+      // latch (pinned in map_shell_receive_recovery_test.dart).
+      final engine = _ResumeEngine()
+        ..paused = true
+        ..held = Completer<void>();
+      final flight = SingleFlight<bool>();
+      DateTime? lastReanchorAt;
+      Future<void> heal(DateTime at) async {
+        if (await flight.run(
+          () => MapShell.reanchorPausedEngine(
+            engine: engine,
+            foregrounded: true,
+            now: at,
+            lastReanchorAt: lastReanchorAt,
+          ),
+        )) {
+          lastReanchorAt = at;
+        }
+      }
+
+      final first = heal(t0);
+      final second = heal(t0.add(const Duration(seconds: 90)));
+      final third = heal(t0.add(const Duration(seconds: 180)));
+      await pumpEventQueue();
+      expect(engine.reanchors, 1);
+
+      engine.held!.complete();
+      await Future.wait([first, second, third]);
+      expect(engine.reanchors, 1);
+      expect(engine.isPaused, isFalse);
     });
   });
 
@@ -1304,6 +1429,35 @@ void main() {
         SharingHealth.healthy,
         reason: 'the run ended, so the evidence for the fault is gone',
       );
+    });
+  });
+
+  group('a burst that stalls is reported as a RECEIVE fault', () {
+    test('it confirms receiveSubscriptionLost after the window, and the next '
+        'open clears it', () async {
+      final h = _HealthHarness();
+      expect(await h.settle(), SharingHealth.healthy);
+
+      MapShell.recordBurstStalled(h.notifier);
+      h.advance(kSharingFaultConfirmationWindow);
+      expect(
+        (await h.settle()).state,
+        SharingHealthState.healthy,
+        reason: 'exactly at the confirmation window is not yet past it',
+      );
+
+      h.advance(const Duration(seconds: 1));
+      final verdict = await h.settle();
+      expect(verdict.state, SharingHealthState.paused);
+      expect(
+        verdict.pausedReason,
+        SharingPausedReason.receiveSubscriptionLost,
+        reason: 'a burst that never ends holds no receive subscription; its '
+            'remedy, Repair, is the re-anchor',
+      );
+
+      MapShell.recordBurstOpenOutcome(h.notifier, 0);
+      expect(await h.settle(), SharingHealth.healthy);
     });
   });
 }

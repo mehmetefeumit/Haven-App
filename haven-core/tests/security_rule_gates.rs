@@ -740,10 +740,15 @@ async fn a_burst_backlog_larger_than_the_intake_cap_holds_the_cursor() {
 /// — a second cut added without its drain is exactly the kind of thing that is
 /// silent when broken.
 ///
-/// A drive of the stored fanout records is counted on the same gauge for its
-/// whole pass, and each cut also closes the pool the drive's calls ride — after
-/// the gauge and after the engine's own radio, so no call of a drive is cut by
-/// a pause: it has answered, or it was never begun.
+/// Every relay call of the live plane's drives and NIP-77 passes is counted on
+/// the same gauge, from before it can begin until its answer, and reads the
+/// lifecycle only after its count; each cut also closes the pool those calls
+/// ride — after the gauge and after the engine's own radio, so no call is cut
+/// by a pause: it has answered, or it was never begun. The calls, and never
+/// the passes around them: a pass's local work has no bound of its own, and
+/// the pause waits holding the lifecycle lock every other entry needs. So the
+/// cover is pinned where it has to hold — at the one call site of each kind,
+/// each pinned as the only one, so a new way to a relay shows here first.
 ///
 /// The behavioural proof, over a real relay withholding a real OK, is
 /// `live_sync_burst_e2e::pause_never_disconnects_while_an_auto_commit_awaits_its_ok`.
@@ -825,35 +830,334 @@ fn rule13_a_burst_never_pauses_with_a_pending_publish_outstanding() {
         );
     }
 
+    assert_every_live_relay_call_is_counted_before_it_can_begin(&LiveCalls::shipped());
+
     let processor =
         std::fs::read_to_string(repo_root().join("haven-core/src/relay/live_sync/processor.rs"))
             .expect("read processor.rs");
-    let drive = fn_body(&processor, "pub(super) async fn drive_due(")
-        .expect("processor.rs must define drive_due");
-    let counted = drive
-        .find("self.in_flight_publishes.fetch_add(1, Ordering::SeqCst);")
-        .expect("a drive of the stored records must raise the in-flight gauge");
-    let guarded = drive
-        .find("let _gauge = PublishGauge(&self.in_flight_publishes, &self.publish_drained);")
-        .expect("and lower it through the drop guard, however the pass ends");
-    assert!(
-        counted < guarded
-            && guarded
-                < drive
-                    .find("Publishing {")
-                    .expect("drive_due builds the driver"),
-        "a drive must be on the gauge before it can reach a relay",
-    );
     let wait = fn_body(&processor, "pub async fn wait_publishes_drained")
         .expect("processor.rs must define wait_publishes_drained");
     for capped in ["timeout", "sleep", "Duration"] {
         assert!(
             !wait.contains(capped),
             "the in-flight publish wait must stay UNCAPPED (Rule 13); it now mentions \
-             `{capped}`. Its bound is the crate's own 10 s per-relay OK wait, never a \
-             clock this engine chose"
+             `{capped}`. Its bound is each counted call's own deadline, never a clock \
+             this engine chose"
         );
     }
+}
+
+/// The sources Rule 13's call-by-call cover is read from.
+struct LiveCalls {
+    fanout: String,
+    drive: String,
+    processor: String,
+    session: String,
+    supervisor: String,
+    /// Every other file of the live plane, so a route added there is seen.
+    rest: String,
+}
+
+impl LiveCalls {
+    /// As shipped.
+    fn shipped() -> Self {
+        let read = |file: &str| production_source(&repo_root().join(file));
+        let named = ["drive.rs", "processor.rs", "session.rs", "supervisor.rs"];
+        let mut files = Vec::new();
+        sources_under(
+            &repo_root().join("haven-core/src/relay/live_sync"),
+            "rs",
+            &mut files,
+        );
+        files.sort();
+        let rest = files
+            .iter()
+            .filter(|path| {
+                path.parent().and_then(|dir| dir.file_name()) != Some("live_sync".as_ref())
+                    || !named.iter().any(|name| path.ends_with(name))
+            })
+            .map(|path| production_source(path))
+            .collect();
+        Self {
+            fanout: read("haven-core/src/relay/fanout.rs"),
+            drive: read("haven-core/src/relay/live_sync/drive.rs"),
+            processor: read("haven-core/src/relay/live_sync/processor.rs"),
+            session: read("haven-core/src/relay/live_sync/session.rs"),
+            supervisor: read("haven-core/src/relay/live_sync/supervisor.rs"),
+            rest,
+        }
+    }
+
+    /// As shipped, with `from` replaced by `to` once in the file `pick`
+    /// chooses: a mutation arm. `from` must be there, or the arm proves
+    /// nothing.
+    fn mutated(pick: fn(&mut Self) -> &mut String, from: &str, to: &str) -> Self {
+        let mut calls = Self::shipped();
+        let file = pick(&mut calls);
+        assert!(
+            file.contains(from),
+            "the mutation no longer applies: {from}"
+        );
+        *file = file.replacen(from, to, 1);
+        calls
+    }
+}
+
+/// Rule 13's cover, call by call: each way the live plane reaches a relay is
+/// the only one of its kind, and is counted on the gauge the pause waits on
+/// before it can begin, reading the lifecycle after its count.
+fn assert_every_live_relay_call_is_counted_before_it_can_begin(calls: &LiveCalls) {
+    let squash = |text: &str| -> String { text.chars().filter(|c| !c.is_whitespace()).collect() };
+    let flat = squash(&calls.fanout);
+    // A recorded event reaches a relay at one call site, and a recordless one
+    // at one other: a second added beside either is not counted by the
+    // admission below.
+    assert_eq!(
+        (
+            flat.matches("transport.publish(").count(),
+            flat.matches(".publish_unrecorded(").count(),
+        ),
+        (1, 1),
+        "a second call site sends a fanout's event or a recordless one to a relay; the \
+         pause's wait does not count it, and can close its socket between SEND and OK",
+    );
+    let send =
+        squash(fn_body(&calls.fanout, "async fn send_what_is_due<").expect("send_what_is_due"));
+    let admit = send
+        .find(
+            "session.begin_fanout_attempts(fanout,|all,fanout|{\
+             admitted=mode.in_flight().map(InFlight::count);\
+             letended=admitted.is_some()&&!mode.stands();\
+             letfull=a_leave||mode.mode()==DriveMode::Full;\
+             if(first_send&&!full)||ended{all_taken=false;returnfalse;}",
+        )
+        .expect(
+            "a fanout call must be counted first thing under the store, and refused there \
+             once its lifecycle has ended",
+        );
+    let mark = send.find("mark_attempt_started_at(").expect("the mark");
+    let call = send.find("transport.publish(").expect("the call");
+    let answered = send
+        .find("within(clock,deadline_ms,calls)")
+        .expect("the bounded join");
+    let given_back = send.find("drop(admitted);").expect("the count given back");
+    let stored = send.find("session.put_fanout(fanout)").expect("the store");
+    assert!(
+        admit < mark && mark < call && call < answered,
+        "a fanout call is marked or made before it is counted",
+    );
+    assert!(
+        answered < given_back && given_back < stored,
+        "a fanout call's count is given back before its answer, or held over the store \
+         after it: a pause must wait for the call, and only for the call",
+    );
+    assert!(
+        squash(fn_body(&calls.fanout, "async fn send_unrecorded").expect("send_unrecorded"))
+            .contains("publisher.publish_unrecorded("),
+        "the one recordless publish is no longer the driver's",
+    );
+
+    // The live plane hands its driver nothing but its leashed wrappers, on a
+    // leash that counts.
+    assert_eq!(
+        squash(fn_body(&calls.drive, "fn in_flight(&self)").expect("Leash::in_flight")),
+        "{self.in_flight}",
+        "a drive's leash no longer hands on its count",
+    );
+    let unrecorded = squash(
+        fn_body(&calls.drive, "fn publish_unrecorded<'a>(").expect("LeashedPublisher's publish"),
+    );
+    assert!(
+        unrecorded
+            .find("let_counted=self.leash.in_flight.map(InFlight::count);")
+            .zip(unrecorded.find("self.leash.mode()"))
+            .is_some_and(|(counted, read)| counted < read),
+        "a recordless publish of the live plane reads its mode before it is counted",
+    );
+    let live = [
+        &calls.processor,
+        &calls.session,
+        &calls.supervisor,
+        &calls.rest,
+    ]
+    .map(|file| squash(file));
+    let drive =
+        squash(fn_body(&calls.processor, "pub(super) async fn drive_due(").expect("drive_due"));
+    assert!(
+        drive.contains(
+            "letleash=Leash::counted(&self.lifecycle,&self.in_flight,self.halt.clone());"
+        ) && drive.contains(
+            "letfanout=Leashed{inner:driver.fanout.as_ref(),leash:&leash,};\
+             letpublisher=LeashedPublisher{inner:driver.publisher.as_ref(),leash:&leash,};"
+        ) && drive.contains("Publishing{fanout:&fanout,publisher:&publisher,")
+            && live
+                .iter()
+                .map(|file| {
+                    file.matches("driver.fanout").count() + file.matches("driver.publisher").count()
+                })
+                .sum::<usize>()
+                == 2
+            && live[0].matches("Leash::counted(").count() == 1,
+        "the live plane's drive hands its driver a transport or a publisher off its \
+         counting leash",
+    );
+    // A location send is not counted: only the bridge's leash wrapper may make one.
+    assert_eq!(
+        live.iter()
+            .chain([&squash(&calls.drive)])
+            .map(|file| file.matches(".publish_location(").count())
+            .sum::<usize>(),
+        1,
+        "the live plane sends a location, which no pause counts, outside the bridge's \
+         leash wrapper",
+    );
+
+    assert_a_negentropy_pass_is_counted_for_its_relay_work_alone(calls, &live);
+}
+
+/// A NIP-77 pass is counted for its relay work alone — its dial, sessions
+/// and fetches — only in the stretch of lifecycle it began in, and nothing
+/// else of the live plane (`live`, squashed) starts one.
+fn assert_a_negentropy_pass_is_counted_for_its_relay_work_alone(
+    calls: &LiveCalls,
+    live: &[String],
+) {
+    let squash = |text: &str| -> String { text.chars().filter(|c| !c.is_whitespace()).collect() };
+    let reconcile =
+        squash(fn_body(&calls.session, "async fn reconcile_live(").expect("reconcile_live"));
+    let began = reconcile
+        .find("letbegan=processor.stretch();")
+        .expect("its stretch");
+    let lifecycle = reconcile
+        .find("processor.still_serves(serves)")
+        .expect("its lifecycle read");
+    let routes = reconcile
+        .find("negentropy::begin_pass(")
+        .expect("its reads");
+    let counted = reconcile
+        .find("letSome(_in_flight)=processor.negentropy_in_flight(serves,began)else{return;};")
+        .expect("its relay work counted, in its own stretch");
+    let dialled = reconcile
+        .find("negentropy::run_pass(")
+        .expect("its relay work");
+    assert!(
+        began < lifecycle && routes < counted && counted < dialled,
+        "a NIP-77 pass reaches a relay before it is counted, or is counted outside the \
+         stretch it began in",
+    );
+    assert_eq!(
+        squash(fn_body(&calls.processor, "fn negentropy_in_flight(").expect("its gate")),
+        "{letcounted=self.in_flight.count();\
+         (self.lifecycle.changes()==began&&self.still_serves(serves)).then_some(counted)}",
+        "a NIP-77 pass's count no longer comes before its reads of the lifecycle",
+    );
+    assert_eq!(
+        live.iter()
+            .map(|file| file.matches("run_pass(").count())
+            .sum::<usize>(),
+        1,
+        "the live plane runs a NIP-77 pass other than through reconcile_live",
+    );
+}
+
+#[test]
+#[should_panic(expected = "outside the bridge's leash wrapper")]
+fn the_relay_call_cover_refuses_a_live_location_send() {
+    let calls = LiveCalls::shipped();
+    let calls = LiveCalls {
+        rest: format!(
+            "{}\nfn f(p: &P) {{ p.publish_location(e, t); }}",
+            calls.rest
+        ),
+        ..calls
+    };
+    assert_every_live_relay_call_is_counted_before_it_can_begin(&calls);
+}
+
+#[test]
+#[should_panic(expected = "a second call site sends")]
+fn the_relay_call_cover_refuses_a_second_fanout_call() {
+    assert_every_live_relay_call_is_counted_before_it_can_begin(&LiveCalls::mutated(
+        |calls| &mut calls.fanout,
+        "async fn within<",
+        "fn uncounted(t: &T) { t.transport.publish(a, b, c); }\nasync fn within<",
+    ));
+}
+
+#[test]
+#[should_panic(expected = "a fanout call must be counted first thing under the store")]
+fn the_relay_call_cover_refuses_a_fanout_call_counted_nowhere() {
+    assert_every_live_relay_call_is_counted_before_it_can_begin(&LiveCalls::mutated(
+        |calls| &mut calls.fanout,
+        "admitted = mode.in_flight().map(InFlight::count);",
+        "admitted = None;",
+    ));
+}
+
+#[test]
+#[should_panic(expected = "given back before its answer")]
+fn the_relay_call_cover_refuses_a_count_given_back_before_the_answer() {
+    let calls = LiveCalls::mutated(|calls| &mut calls.fanout, "drop(admitted);", "");
+    let calls = LiveCalls {
+        fanout: calls.fanout.replacen(
+            "    let calls = futures::future::join_all(",
+            "    drop(admitted);\n    let calls = futures::future::join_all(",
+            1,
+        ),
+        ..calls
+    };
+    assert_every_live_relay_call_is_counted_before_it_can_begin(&calls);
+}
+
+#[test]
+#[should_panic(expected = "reads its mode before it is counted")]
+fn the_relay_call_cover_refuses_a_recordless_publish_counted_nowhere() {
+    assert_every_live_relay_call_is_counted_before_it_can_begin(&LiveCalls::mutated(
+        |calls| &mut calls.drive,
+        "let _counted = self.leash.in_flight.map(InFlight::count);",
+        "",
+    ));
+}
+
+#[test]
+#[should_panic(expected = "off its counting leash")]
+fn the_relay_call_cover_refuses_a_drive_on_a_leash_that_counts_nothing() {
+    assert_every_live_relay_call_is_counted_before_it_can_begin(&LiveCalls::mutated(
+        |calls| &mut calls.processor,
+        "Leash::counted(&self.lifecycle, &self.in_flight, self.halt.clone())",
+        "Leash::over(&self.lifecycle, self.halt.clone())",
+    ));
+}
+
+#[test]
+#[should_panic(expected = "counted outside the stretch it began in")]
+fn the_relay_call_cover_refuses_a_negentropy_pass_counted_before_its_reads() {
+    let calls = LiveCalls::mutated(
+        |calls| &mut calls.session,
+        "    let began = processor.stretch();",
+        "    let began = processor.stretch();\n    let Some(_in_flight) = processor.negentropy_in_flight(serves, began) else {\n        return;\n    };",
+    );
+    assert_every_live_relay_call_is_counted_before_it_can_begin(&calls);
+}
+
+#[test]
+#[should_panic(expected = "no longer comes before its reads of the lifecycle")]
+fn the_relay_call_cover_refuses_a_negentropy_count_outside_its_stretch() {
+    assert_every_live_relay_call_is_counted_before_it_can_begin(&LiveCalls::mutated(
+        |calls| &mut calls.processor,
+        "(self.lifecycle.changes() == began && self.still_serves(serves))",
+        "self.still_serves(serves)",
+    ));
+}
+
+#[test]
+#[should_panic(expected = "other than through reconcile_live")]
+fn the_relay_call_cover_refuses_a_second_negentropy_pass() {
+    assert_every_live_relay_call_is_counted_before_it_can_begin(&LiveCalls::mutated(
+        |calls| &mut calls.supervisor,
+        "async fn ingest_group_event(",
+        "async fn uncounted() { negentropy::run_pass(a, b, c, d).await; }\nasync fn ingest_group_event(",
+    ));
 }
 
 /// Rule 14: pausing and re-opening a burst opens no second session.
@@ -1603,6 +1907,8 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
                 "FanoutClock",
                 "FanoutSend",
                 "FanoutTargetOutcome",
+                // What a drive's relay calls are counted on, for the pause.
+                "InFlight",
                 "ModeSource",
                 "Taken",
                 "UnrecordedPublisher",
@@ -1615,8 +1921,10 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
             &[
                 "BUSY_RETRY_MS",
                 "BurstEnd",
+                "Counted",
                 "DriveMode",
                 "FanoutClock",
+                "InFlight",
                 "ModeSource",
                 "Publishing",
                 "RESUME_BUDGET_MS",
@@ -1631,7 +1939,15 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
         ),
         (
             "haven-core/src/relay/live_sync/session.rs",
-            &["RelayMappedFanout", "UnrecordedPublisher", "WallClock"],
+            &[
+                // How long a pass runs before it is said to have outlived
+                // its wake.
+                "RESUME_BUDGET_MS",
+                "ROW_BUDGET_MS",
+                "RelayMappedFanout",
+                "UnrecordedPublisher",
+                "WallClock",
+            ],
         ),
         (
             "haven-core/src/relay/manager.rs",
@@ -1876,7 +2192,7 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
     // from that same leash, once.
     let gate = drive
         .find(
-            "letleash=Leash::over(&self.lifecycle,self.halt.clone());\
+            "letleash=Leash::counted(&self.lifecycle,&self.in_flight,self.halt.clone());\
              if!leash.runs(){return;}",
         )
         .expect("the live plane's drive must ask its leash whether it may run");
@@ -1907,10 +2223,12 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
             && !drive.contains("self.lifecycle.get()")
             && drive.matches("letleash=").count() == 1
             // Four leashes in the plane, each taken where its pass begins:
-            // the drive's; the one a staging hold keeps what it could not
-            // record under; and the ones a full advance and a staging
-            // ingest read again once they have the engine.
-            && flat.matches("Leash::over(").count() == 4
+            // the drive's, which counts its relay calls; the one a staging
+            // hold keeps what it could not record under; and the ones a full
+            // advance and a staging ingest read again once they have the
+            // engine.
+            && flat.matches("Leash::over(").count() == 3
+            && flat.matches("Leash::counted(").count() == 1
             && squash(fn_body(&processor, "async fn advance(").expect("advance")).contains(
                 "DriveMode::Full=>{letleash=Leash::over(&self.lifecycle,None);session\
                  .advance_for_drive_while(group_id,now_ms,Still::new(&leash,DriveMode::Full))\
@@ -1921,9 +2239,11 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
          plane's runs on no leash of its own",
     );
     assert!(
-        drive.find("self.in_flight_publishes.fetch_add(1,Ordering::SeqCst)") < Some(gate),
-        "the drive must be counted before it reads the lifecycle: a pause flips the \
-         lifecycle and then waits on that count",
+        drive
+            .find("let_pass=self.pass_under_way();")
+            .is_some_and(|pass| pass < gate),
+        "the drive must be counted as a pass before it reads the lifecycle: a settle \
+         waits for the passes under way",
     );
     let stages = squash(fn_body(&processor, "fn staging(").expect("processor.rs defines staging"));
     assert!(
@@ -2201,12 +2521,13 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
             "implModeSourceforLeash<'_>{fnmode(&self)->DriveMode{matchself.began{\
              Some((DriveMode::Full,at))ifat==self.lifecycle.changes()=>DriveMode::Full,\
              _=>DriveMode::FinishOnly,}}\
-             fnstands(&self)->bool{self.began.is_some_and(|(_,at)|at==self.lifecycle.changes())}}"
+             fnstands(&self)->bool{self.began.is_some_and(|(_,at)|at==self.lifecycle.changes())}\
+             fnin_flight(&self)->Option<&InFlight>{self.in_flight}}"
         ) && leash.contains(
             "pub(super)fnover(lifecycle:&'aLifecycleCell,halt:Option<watch::Receiver<bool>>)->Self{\
              letchanges=lifecycle.changes();\
              letbegan=lifecycle.get().drives().map(|mode|(mode,changes));\
-             Self{lifecycle,halt,began,}}"
+             Self{lifecycle,halt,in_flight:None,began,}}"
         ) && leash.contains("pub(super)constfnruns(&self)->bool{self.began.is_some()}")
             && leash.contains(
                 "asyncfntake(&self,target:&str)->Option<Taken>{\
@@ -2218,7 +2539,9 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
                 .count()
                 == 1
             && leash.matches("began").count() == 6
-            && drive.contains("letleash=Leash::over(&self.lifecycle,self.halt.clone());")
+            && drive.contains(
+                "letleash=Leash::counted(&self.lifecycle,&self.in_flight,self.halt.clone());"
+            )
             && drive.contains("mode:&leash,")
             && drive.contains("self.attempt_queued_changes(clock.now_ms(),&leash).await;"),
         "a pass under way when its lifecycle changes still takes a relay or publishes what \
@@ -2343,15 +2666,19 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
     assert_eq!(
         (
             core_flat.matches(".drive_due()").count(),
-            squash(fn_body(&core, "async fn run_drive(").expect("session.rs defines run_drive"))
+            squash(fn_body(&core, "async fn drive_once(").expect("session.rs defines drive_once"))
                 .matches(".drive_due()")
+                .count(),
+            core_flat.matches("drive_once(").count(),
+            squash(fn_body(&core, "async fn run_drive(").expect("session.rs defines run_drive"))
+                .matches("drive_once(&processor)")
                 .count(),
             core_flat.matches("run_drive(").count(),
             squash(fn_body(&core, "fn spawn_supervisor(").expect("spawn_supervisor"))
                 .matches("tokio::spawn(run_drive(")
                 .count(),
         ),
-        (1, 1, 2, 1),
+        (1, 1, 2, 1, 2, 1),
         "a drive is run from somewhere other than the session's one drive task",
     );
     let resume =
@@ -2652,7 +2979,7 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
     // The timer: the drive task wakes itself on the last drive's own hint.
     let run = squash(fn_body(&core, "async fn run_drive(").expect("checked"));
     assert!(
-        run.contains("()=processor.drive_requested()=>{}()=processor.drive_due_again()=>{}}processor.drive_due().await;"),
+        run.contains("()=processor.drive_requested()=>{}()=processor.drive_due_again()=>{}}Box::pin(drive_once(&processor)).await;"),
         "the drive task no longer wakes on a request and on its own hint alone",
     );
     let timer = squash(
@@ -3077,6 +3404,14 @@ fn the_drivers_public_surface_is_pinned() {
         "enum DriveMode",
         "trait ModeSource",
         "impl ModeSource for DriveMode",
+        // The count a live plane's pause waits on: no drive of its own.
+        "struct InFlight",
+        "impl InFlight",
+        "pub(crate) fn count",
+        "pub(crate) fn now",
+        "pub(crate) async fn drained",
+        "struct Counted",
+        "impl Drop for Counted<'_>",
         "struct Claimed",
         "impl<'a> Claimed<'a>",
         "fn new",
@@ -3373,7 +3708,9 @@ fn every_driver_is_given_its_mode_by_name() {
     let live = squash(fn_body(&processor, "pub(super) async fn drive_due(").expect("drive_due"));
     assert!(
         live.matches("letleash=").count() == 1
-            && live.contains("letleash=Leash::over(&self.lifecycle,self.halt.clone());"),
+            && live.contains(
+                "letleash=Leash::counted(&self.lifecycle,&self.in_flight,self.halt.clone());"
+            ),
         "the live plane hands its driver a leash other than the one taken over the \
          session's lifecycle when the pass began",
     );
@@ -4076,8 +4413,9 @@ fn assert_one_disconnect_closes_the_drive_pool(session: &str) {
     );
     assert_eq!(
         squashed(fn_body(&manager, "pub async fn shutdown").expect("manager.rs has shutdown")),
-        "{self.client.disconnect().await;}",
-        "`RelayManager::shutdown` is one `disconnect`",
+        "{self.client.disconnect().await;self.client.force_remove_all_relays().await;}",
+        "`RelayManager::shutdown` is one `disconnect`, then drops every relay: a relay \
+         object a `disconnect` found without a connection task ends its next dial",
     );
     let options = fn_body(&manager, "fn publish_relay_options")
         .expect("manager.rs must define publish_relay_options");

@@ -51,11 +51,7 @@ class CircleListTile extends ConsumerWidget {
         ref.read(selectedCircleIdProvider.notifier).state = circle.mlsGroupId;
         // §6.2: refresh member/own public profiles on circle-select — the
         // strongest signal that the user is about to look at these members.
-        triggerProfileRefresh(
-          ref,
-          maxAge: profileInteractiveMaxAge,
-          circles: ref.read(circlesProvider).valueOrNull,
-        );
+        triggerProfileRefresh(ref, maxAge: profileInteractiveMaxAge);
       },
     );
   }

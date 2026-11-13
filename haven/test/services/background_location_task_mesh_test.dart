@@ -12,6 +12,7 @@
 //  * a build without the mesh calls no mesh entry, and the cycle's relay work
 //    is the same whatever the mesh does.
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/src/rust/api.dart' show LocationPublishFfi;
 import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/mesh_service.dart';
@@ -157,6 +158,9 @@ void main() {
     await harness.tick(base);
     expect(mesh.calls, ['drive'], reason: 'premise');
 
+    // Only a cycle that got no publish to a relay leaves its fetch to the
+    // floor; one that got a publish there fetches every time.
+    harness.relay.publishAnswer = LocationPublishFfi.unreachable;
     harness.handler.dueTrackerForTest.markBurstPublished([
       scheduleKeyOf(circle),
     ], DateTime.now());

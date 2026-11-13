@@ -88,7 +88,8 @@
 ///     missing.
 ///   * **Confirmed Always** — the `.always` `CLServiceSession` is held, a
 ///     `CLServiceSessionDiagnostic` has POSITIVELY confirmed the grant, the
-///     activity session is released and no indicator is asked for. This is
+///     activity session is released and, with Precise Location on (as on
+///     the simulator), no indicator is asked for. This is
 ///     the shape whose only physical neighbour failed in the field, which is
 ///     why it gets its own job and its own terminal proof marker
 ///     ([kAlwaysSessionMarker]) rather than riding the other's.
@@ -1340,10 +1341,10 @@ void main() {
       final relayManager = await RelayManagerFfi.newInstance();
       final DeliveredCircle creation;
       try {
-        final bobKp = await relayManager.fetchMemberKeypackage(
+        final bobKp = (await relayManager.fetchMemberKeypackage(
           pubkey: bob.pubkeyHex,
           circle: aliceManager,
-        );
+        )).member;
         if (bobKp == null) {
           throw StateError(
             '[bg-publish] fetchMemberKeypackage returned null for Bob — his '
@@ -1798,11 +1799,13 @@ void main() {
             'to the backgrounding would be attributed wrongly.',
       );
       // The indicator is where the two tiers visibly differ, and it is chosen
-      // by the handler's own confirmed-Always state, never by the raw
+      // by the session handler's `indicatorRequested`, never by the raw
       // authorization. Under When-In-Use the OS shows the bar regardless, so
       // asking for it is documentation-honest; under a CONFIRMED Always the
       // flag is the only remaining source of a bar, and OD1 is the decision
-      // that there is none.
+      // that there is none — with Precise Location on, which the simulator
+      // always is. (With it off the flag stays on; that branch is proved by
+      // the source pins and widget tests, not by this lane.)
       expect(
         streamStatus.showsBackgroundLocationIndicator,
         expectedTier == IosAuthStatus.whenInUse,
@@ -1820,6 +1823,18 @@ void main() {
                   'blue bar is what P3 removes). A true flag here is the '
                   'un-applied indicator policy — the handler confirmed Always '
                   'but never re-applied it.',
+      );
+      // One predicate, two consumers: the flag above and the settings copy,
+      // which reads this value over the session handler's own channel.
+      final indicatorReading = await sessionService.status();
+      expect(
+        indicatorReading.indicatorRequested,
+        streamStatus.showsBackgroundLocationIndicator,
+        reason:
+            'The settings copy picks its indicator sentence from the session '
+            "handler's indicatorRequested, and the manager's flag is set from "
+            'the same value. Disagreement means the copy names an indicator '
+            'the OS was not asked for.',
       );
       // Printed only under Always, and only after the last assertion that
       // establishes the confirmed-Always shape. The When-In-Use job must not

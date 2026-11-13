@@ -387,7 +387,8 @@ void main() {
         'supported=${posture.supported} '
         'held=${posture.backgroundActivitySessionHeld} '
         'serviceSessionHeld=${posture.serviceSessionHeld} '
-        'alwaysConfirmed=${posture.alwaysConfirmed}',
+        'alwaysConfirmed=${posture.alwaysConfirmed} '
+        'indicatorRequested=${posture.indicatorRequested}',
       );
 
       if (tier == IosAuthStatus.always) {
@@ -482,6 +483,22 @@ void main() {
             'MethodChannel bridge. LocationSettingsPage branches on the '
             'provider, so the user would be shown copy for a tier they do '
             'not hold.',
+      );
+
+      // The predicate the sentence is selected on. The simulator runs with
+      // Precise Location on, so it is off exactly under the confirmed Always
+      // measured above; with Precise Location off it would stay on (the
+      // reduced-accuracy branch is proved by the source pins and widget tests,
+      // not here).
+      expect(
+        posture.indicatorRequested,
+        tier != IosAuthStatus.always,
+        reason:
+            'indicatorRequested disagrees with the posture measured above '
+            '(alwaysConfirmed=${posture.alwaysConfirmed}). On a full-accuracy '
+            'simulator it is !alwaysConfirmed, so either the runner has '
+            'Precise Location off or the native predicate changed — and the '
+            'card names its indicator from this value.',
       );
 
       // Likewise the indicator reading, against the posture measured above:
@@ -705,10 +722,10 @@ void main() {
       final relayManager = await RelayManagerFfi.newInstance();
       final DeliveredCircle creation;
       try {
-        final bobKp = await relayManager.fetchMemberKeypackage(
+        final bobKp = (await relayManager.fetchMemberKeypackage(
           pubkey: bob.pubkeyHex,
           circle: aliceManager,
-        );
+        )).member;
         if (bobKp == null) {
           throw StateError(
             '[b7] fetchMemberKeypackage returned null for Bob — his '

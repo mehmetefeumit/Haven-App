@@ -337,9 +337,9 @@ impl CircleStorage {
     /// bar the pool itself is held to.
     ///
     /// When rows were actually pruned, the unknown-profile retry backoff is
-    /// reset in the same transaction: those authors earned their backoff (up
-    /// to 6 h) against relays that just left the ranking, so holding them to
-    /// it would delay their re-resolution for no reason.
+    /// reset in the same transaction: those authors earned their backoff
+    /// against relays that just left the ranking, so holding them to it would
+    /// delay their re-resolution for no reason.
     ///
     /// # Errors
     ///

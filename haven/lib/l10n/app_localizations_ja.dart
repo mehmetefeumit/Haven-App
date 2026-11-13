@@ -128,6 +128,13 @@ class AppLocalizationsJa extends AppLocalizations {
   String get onboardingCreateIdentityLoading => '準備しています…';
 
   @override
+  String get onboardingFinishingSetup => '設定を完了しています…';
+
+  @override
+  String get onboardingFinishSetupError =>
+      'アカウントの設定を完了できませんでした。接続を確認して、もう一度お試しください。';
+
+  @override
   String get onboardingCreateIdentityImportPrompt => 'すでに鍵をお持ちですか？';
 
   @override
@@ -295,21 +302,58 @@ class AppLocalizationsJa extends AppLocalizations {
   }
 
   @override
-  String get relaySettingsStatusConnected => '接続済み';
-
-  @override
   String get relaySettingsStatusChecking => '確認中';
 
   @override
   String get relaySettingsStatusUnreachable => '接続できません';
 
   @override
-  String get relaySettingsStatusNotChecked => '未確認';
+  String relaySettingsKindLine(String kind, String status) {
+    return '$kind: $status';
+  }
 
   @override
-  String relaySettingsStatusSemantics(String status) {
-    return 'リレーの状態: $status';
-  }
+  String get relaySettingsKindKeyPackage => 'KeyPackage';
+
+  @override
+  String get relaySettingsKindRelayList => 'リレーのリスト';
+
+  @override
+  String get relaySettingsKindInboxList => '受信トレイのリスト';
+
+  @override
+  String get relaySettingsPresencePublished => '公開済み';
+
+  @override
+  String get relaySettingsPresenceMissing => 'なし';
+
+  @override
+  String get relaySettingsPresenceOutdated => '古いバージョン';
+
+  @override
+  String get relaySettingsLookupTitle => '検索用リレー';
+
+  @override
+  String get relaySettingsLookupSubtitle =>
+      'ほかの人があなたを探すときに使う公開リレーです。人々があなたを招待できるよう、Haven はあなたのリレーのリストのコピーをここに置いています。';
+
+  @override
+  String get relaySettingsRepublish => '再公開';
+
+  @override
+  String get relaySettingsRepublishDone =>
+      '応答したすべてのリレーに、ほかの人があなたを招待するために必要なものがそろいました';
+
+  @override
+  String get relaySettingsRepublishIncomplete =>
+      'ほかの人があなたを招待するために必要なものが、まだそろっていないリレーがあります';
+
+  @override
+  String get relaySettingsRepublishHeld =>
+      'リレー設定に関するお知らせを確認して先に進むまで、Haven はリレーの設定も招待用の鍵も公開しません';
+
+  @override
+  String get relaySettingsStatusNotChecked => '未確認';
 
   @override
   String get relaySettingsEmptyTitle => 'リレーが設定されていません';
@@ -604,10 +648,12 @@ class AppLocalizationsJa extends AppLocalizations {
   String get createCircleNoIdInQr => 'QRコードに有効なIDが見つかりませんでした';
 
   @override
-  String get createCircleNoAccountFound => 'この ID の Haven アカウントが見つかりませんでした';
+  String get memberLookupNotFound =>
+      'このIDの Haven アカウントは、まだ見つかりません。相手が Haven を設定したばかりの場合は、少し待ってから、もう一度お試しください。';
 
   @override
-  String get createCircleCouldNotVerify => 'メンバーを確認できませんでした';
+  String get memberLookupIncomplete =>
+      'このIDを最後まで確認できませんでした。接続を確認して、もう一度お試しください。';
 
   @override
   String get createCircleSomethingWentWrong => '問題が発生しました';
@@ -970,7 +1016,18 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get memberPickerStrangerLookupNote =>
-      'Haven は、この人が公開している名前を1つのリレーに問い合わせました。そのリレーには、この端末がたった今この鍵について問い合わせたことが分かります。ただし、この問い合わせには署名が付いていないため、Haven でのあなたの識別情報とは結びつきません。写真はまだダウンロードしていません。';
+      'Haven は、この人が公開しているプロフィールを、最大2つのリレーに問い合わせました。問い合わせを受けたリレーには、この端末がたった今この鍵について問い合わせたことが分かります。ただし、この問い合わせには電子署名が付いていないため、Haven でのあなたの識別情報とは結びつきません。プロフィールに写真が設定されている場合、Haven はその写真を、この人が選んだサーバーからダウンロードします。そのサーバーには、この端末のネットワークアドレスが分かります。';
+
+  @override
+  String get memberPickerStrangerLookingUp => '公開プロフィールを調べています…';
+
+  @override
+  String get memberPickerStrangerNotFound => '公開されている名前は見つかりませんでした';
+
+  @override
+  String memberPickerStrangerFoundAnnouncement(String name) {
+    return '公開されている名前: $name';
+  }
 
   @override
   String selectedMembersMore(int count) {
@@ -1517,6 +1574,28 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get qrCodeYourPublicKeyLabel => 'あなたの公開鍵';
+
+  @override
+  String get reachabilityChecking => '招待を受け取る準備をしています…';
+
+  @override
+  String get reachabilityReady => '招待を受け取れる状態です';
+
+  @override
+  String get reachabilityCantCheck => 'ほかの人があなたを招待できるかどうか、今は確認できません';
+
+  @override
+  String get reachabilityNotReady => 'ほかの人はまだあなたを招待できません';
+
+  @override
+  String get reachabilityNoRelays => 'リレーを追加するまで、ほかの人はあなたを招待できません';
+
+  @override
+  String get reachabilityOpenRelaySettings => 'リレー設定';
+
+  @override
+  String get reachabilityAwaitingReset =>
+      'リレー設定に関するお知らせを確認して先に進むと、ほかの人があなたを招待できるようになります';
 
   @override
   String get qrCodeWhatIsThisTitle => 'これは何ですか？';

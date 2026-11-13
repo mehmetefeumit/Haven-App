@@ -587,7 +587,7 @@
     {
       "id": "INV-L-IOS-INDICATOR-HONEST",
       "title": "The iOS indicator the copy names is the one the OS will actually show",
-      "statement": "Under a POSITIVELY confirmed Always (iOS 18+, a CLServiceSessionDiagnostic with alwaysAuthorizationDenied, authorizationRequestInProgress and insufficientlyInUse all false) HavenLocationStreamHandler leaves showsBackgroundLocationIndicator false and HavenBackgroundSessionHandler.arm() holds no CLBackgroundActivitySession, so the OS status-bar arrow is the whole signal; under When-In-Use, a provisional Always and every iOS 17 Always the activity session IS held and the blue location bar IS shown. The settings card's indicator sentence is chosen from that same alwaysConfirmed predicate over the session handler's own status channel — never from authorizationStatus, never from backgroundActivitySessionHeld (false for the whole iOS 15/16 cohort, who see the bar) — and only while the handler reports itself ARMED, because disarm() clears alwaysConfirmed unconditionally and its false is then a teardown residue rather than a reading of the tier; with no reading the page renders no card at all rather than naming an indicator. The card renders only under IosAuthStatus.always. Gating the activity session on .authorizedWhenInUse alone (so a provisional Always falls through to the arrow posture), hardcoding the indicator flag, selecting the sentence from any other value, or letting the base sentence name an indicator, each falsifies this.",
+      "statement": "Under a POSITIVELY confirmed Always (iOS 18+, a CLServiceSessionDiagnostic with alwaysAuthorizationDenied, authorizationRequestInProgress and insufficientlyInUse all false) HavenBackgroundSessionHandler.arm() holds no CLBackgroundActivitySession, and with Precise Location ON HavenLocationStreamHandler also leaves showsBackgroundLocationIndicator false, so the OS status-bar arrow is the whole signal — the ONLY posture in which the arrow is shown. With Precise Location OFF a confirmed Always keeps the indicator asked for (its desiredAccuracy writes have no effect, so the session may leave the iOS 16.4 delivery shape, and the indicator is Apple's other documented lever) and the blue location bar IS shown; under When-In-Use, a provisional Always and every iOS 17 Always the activity session IS held and the bar IS shown. Both the flag and the settings card's indicator sentence read ONE predicate, the session handler's indicatorRequested (!alwaysConfirmed || accuracyAuthorization == .reducedAccuracy), re-applied natively on every authorization callback — which also fires on an accuracy-authorization change — and read by Dart over the session handler's own status channel: never from authorizationStatus, never from alwaysConfirmed alone (true for a reduced-accuracy reader who sees the bar), never from backgroundActivitySessionHeld (false for the whole iOS 15/16 cohort, who see the bar), and only while the handler reports itself ARMED, because disarm() clears alwaysConfirmed unconditionally and the predicate is then a teardown residue rather than a reading of the tier; with no reading the page renders no card at all rather than naming an indicator. The card renders only under IosAuthStatus.always. The reduced-accuracy branch is proved by the source pins and the widget/provider tests, not by an e2e lane: the CI simulator runs at full accuracy. Gating the activity session on .authorizedWhenInUse alone (so a provisional Always falls through to the arrow posture), hardcoding the indicator flag, dropping the reduced-accuracy clause, not re-applying the policy on an authorization callback, selecting the sentence from any other value, or letting the base sentence name an indicator, each falsifies this.",
       "status": "enforced",
       "assertion_arb_keys": [
         "locationSettingsIosGuidance",
@@ -614,6 +614,10 @@
           "symbol": "arm"
         },
         {
+          "file": "haven/ios/Runner/HavenBackgroundSessionHandler.swift",
+          "symbol": "indicatorRequested"
+        },
+        {
           "file": "haven/ios/Runner/HavenLocationStreamHandler.swift",
           "symbol": "applyIndicatorPolicy"
         },
@@ -633,7 +637,15 @@
         },
         {
           "file": "haven/test/lints/ios_indicator_copy_accuracy_test.dart",
-          "name": "Dart selects the sentence on alwaysConfirmed, never on the held session"
+          "name": "the indicator predicate keeps a reduced-accuracy Always on the bar"
+        },
+        {
+          "file": "haven/test/lints/ios_indicator_copy_accuracy_test.dart",
+          "name": "the indicator predicate reaches Dart"
+        },
+        {
+          "file": "haven/test/lints/ios_indicator_copy_accuracy_test.dart",
+          "name": "Dart selects the sentence on indicatorRequested, never on alwaysConfirmed alone or the held session"
         },
         {
           "file": "haven/test/lints/ios_indicator_copy_accuracy_test.dart",
@@ -658,6 +670,18 @@
         {
           "file": "haven/test/pages/settings/location_settings_page_test.dart",
           "name": "a confirmed Always with no session held means the arrow"
+        },
+        {
+          "file": "haven/test/pages/settings/location_settings_page_test.dart",
+          "name": "a confirmed Always with Precise Location off still means the blue bar"
+        },
+        {
+          "file": "haven/test/pages/settings/location_settings_page_test.dart",
+          "name": "30. a confirmed Always with Precise Location off names the blue location bar, never the arrow"
+        },
+        {
+          "file": "haven/test/pages/settings/location_settings_page_test.dart",
+          "name": "31. turning Precise Location off in Settings brings the bar sentence back on resume"
         },
         {
           "file": "haven/test/pages/settings/location_settings_page_test.dart",
@@ -695,7 +719,7 @@
     {
       "id": "INV-L-IOS-PUBLISH-INPUT-BEST-PROFILE-ONLY",
       "title": "Only Best-profile iOS fixes ever become a published coordinate",
-      "statement": "On iOS the session runs at one of exactly two accuracy tiers, and only a fix delivered under the Best profile — desiredAccuracy == kCLLocationAccuracyBest AND computed after the switch to it (the bestSince comparison) — is emitted to Dart, cached as the publish input, or returned as last-known. A kCLLocationAccuracyHundredMeters fix serves the stationary/movement detector and the freshness bound and nothing else; it never reaches a subscriber, the motion trigger or the relay. A live session holds that fix THREE times — the native lastBestFix, the location service's _lastStreamPosition, and the profile controller's anchor — and all three clear together, on stream cancel, on a toggle-off pause, on logout and on an observed access loss, so no full-precision coordinate outlives the session in any of them. The last-known read is age-bounded by the same freshness rule as the cache read, so the fix one rejects as stale is not served by the other. Emitting or caching a 100 m-tier fix, dropping the bestSince comparison, adding a third accuracy value, serving the native cache unbounded, or clearing fewer than all three copies, each falsifies this. That freshness rule is itself bounded in TIME. A coarse-tier confirmation may extend how long the Best anchor is served past its own timestamp, but never beyond kStationaryAnchorMaxAge (5 min), enforced in two places: IosProfileController escalates to Best at that age however many coarse fixes have confirmed the anchor, and _streamFixIsFresh refuses to serve a fix older than it whatever the confirmation says. A published location carries the instant of the PUBLISH and never the fix time, so without that cap a stationary backgrounded device would re-publish one anchor indefinitely and a peer would read \"just now\" for a coordinate hours old and up to 200 m wrong. Removing either half of the cap, or measuring it from the confirmation rather than from the anchor's own timestamp, falsifies this too.",
+      "statement": "On iOS the session runs at one of exactly two accuracy tiers, and only a fix delivered under the Best profile — Best is the tier HavenLocationStreamHandler last REQUESTED (bestRequested, never a read-back of desiredAccuracy, which is undocumented under reduced accuracy) AND the fix was computed after the switch to it (the bestSince comparison) — is emitted to Dart, cached as the publish input, or returned as last-known. A kCLLocationAccuracyHundredMeters fix serves the stationary/movement detector and the freshness bound and nothing else; it never reaches a subscriber, the motion trigger or the relay. A live session holds that fix THREE times — the native lastBestFix, the location service's _lastStreamPosition, and the profile controller's anchor — and all three clear together, on stream cancel, on a toggle-off pause, on logout and on an observed access loss, so no full-precision coordinate outlives the session in any of them. The last-known read is age-bounded by the same freshness rule as the cache read, so the fix one rejects as stale is not served by the other. Emitting or caching a 100 m-tier fix, dropping the bestSince comparison, tagging by a desiredAccuracy read-back, adding a third accuracy value, serving the native cache unbounded, or clearing fewer than all three copies, each falsifies this. That freshness rule is itself bounded in TIME. A coarse-tier confirmation may extend how long the Best anchor is served past its own timestamp, but never beyond kStationaryAnchorMaxAge (5 min), enforced in two places: IosProfileController escalates to Best at that age however many coarse fixes have confirmed the anchor, and _streamFixIsFresh refuses to serve a fix older than it whatever the confirmation says. A published location carries the instant of the PUBLISH and never the fix time, so without that cap a stationary backgrounded device would re-publish one anchor indefinitely and a peer would read \"just now\" for a coordinate hours old and up to 200 m wrong. Removing either half of the cap, or measuring it from the confirmation rather than from the anchor's own timestamp, falsifies this too.",
       "status": "enforced",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
@@ -715,6 +739,10 @@
         {
           "file": "haven/ios/Runner/HavenLocationStreamHandler.swift",
           "symbol": "bestSince"
+        },
+        {
+          "file": "haven/ios/Runner/HavenLocationStreamHandler.swift",
+          "symbol": "bestRequested"
         },
         {
           "file": "haven/lib/src/services/ios_location_source.dart",
@@ -3056,10 +3084,12 @@
     {
       "id": "INV-W-RELAY-LISTS-PUBLISHED-KINDS",
       "title": "The inbox and KeyPackage relay lists are published under the identity key",
-      "statement": "Haven publishes a kind-10050 inbox relay list and a kind-10002 NIP-65 list, both signed by the identity key and both fanned out to the relays already on them, and it publishes kind-30443 KeyPackages to those relays; consequently every URL a user adds to those lists becomes public and permanently linked to their pubkey, and the retired kind-10051 is not emitted at all. Gift wraps (kind 1059) are read only from the inbox list `inboxRelaysProvider` gives — the stored list kind 10050 is built from, or the compile-time seed while seeding has failed — by the invitation poller, the manual inbox refresh and the live-sync engine's inbox REQ, whose start is handed that list, over 96 h (the poller and the refresh from the wall clock; the engine from its inbox cursor, and 7 days on the one REQ made before any cursor exists); an empty list polls nothing rather than ask other relays for this pubkey's gift wraps.",
+      "statement": "Haven publishes a kind-10050 inbox relay list and a kind-10002 NIP-65 list, both signed by the identity key and both fanned out to the relays already on them and, unchanged, to the discovery relays (owner-directed 2026-11-12; an opt-out retracts them there too), and it publishes kind-30443 KeyPackages to those relays; consequently every URL a user adds to those lists becomes public and permanently linked to their pubkey, and the retired kind-10051 is not emitted at all. Gift wraps (kind 1059) are read only from the inbox list `inboxRelaysProvider` gives — the stored list kind 10050 is built from, or the compile-time seed while seeding has failed — by the invitation poller, the manual inbox refresh and the live-sync engine's inbox REQ, whose start is handed that list, over 96 h (the poller and the refresh from the wall clock; the engine from its inbox cursor, and 7 days on the one REQ made before any cursor exists); an empty list polls nothing rather than ask other relays for this pubkey's gift wraps.",
       "status": "enforced",
       "assertion_arb_keys": [],
-      "disclosure_arb_keys": [],
+      "disclosure_arb_keys": [
+        "relaySettingsLookupSubtitle"
+      ],
       "non_arb_claims": [],
       "event_kinds": [
         {
@@ -3091,11 +3121,6 @@
           "kind": 30443,
           "token": "Kind::Custom(30443)",
           "note": "Read-side filter at relay/manager.rs:853, spelled as a literal rather than via KIND_MARMOT_KEY_PACKAGE."
-        },
-        {
-          "kind": 0,
-          "token": "Kind::Custom(event_kind)",
-          "note": "COMPUTED, not literal (rust_builder/src/api.rs:6763): the kind is an FFI parameter Dart supplies from relay_status_provider.dart as 30443/10002/10050. Read-only probe. Declared at kind 0 as a placeholder because no single number describes it — the token is what the gate keys on."
         },
         {
           "kind": 443,
@@ -3149,6 +3174,10 @@
         {
           "file": "haven/rust_builder/src/api.rs",
           "name": "ffi_account_and_profile_traffic_stays_on_its_planes"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "the_first_publish_goes_out_in_spec_order_and_lookup_relays_get_the_lists_only"
         }
       ],
       "guards": []
@@ -3606,7 +3635,7 @@
     {
       "id": "INV-R-RELAY-PLANE-CONTAINMENT",
       "title": "Every frame Haven sends a relay reaches only a relay whose plane admits it",
-      "statement": "Every client-to-relay frame Haven sends reaches only a relay whose plane admits that verb, kind and exact tag or filter-key set for that binding, as the allow matrix ROWS (tooling/e2e/local-relay/src/planes/policy.rs, rendered verbatim in haven-core/SECURITY.md \"The relay-plane allow matrix\") states it: a circle's kind 445 on that circle's routing (a commit on the targets frozen when it was staged, the routing a relay change leaves included), its #h REQs and NIP-77 sessions where that routing stands and its by-id fetches where it is kept; a Welcome on its invitee's inbox list; the account's own key package and relay lists on its own lists, each list naming no relay of another plane; kind 0 and its lookups on the profile plane alone; another account's relay lists and key packages asked of the discovery plane or of that account's own lists; and a CLOSE only for a subscription that relay was sent, and a NEG-MSG or NEG-CLOSE only for a session its own connection opened. One judge (judge) applies it to every frame in-process relays recorded across a circle's lifecycle — three real engines over thirteen relays, one per role, through the live plane, both catch-up planes, invites, a relay change, a leave and the profile plane — and to the FFI's key-package, relay-list and profile orchestration with the sender known; in the lifecycle run every relay any client dials is a relay of the test's world, and in both runs a crossing planted on a plane is reported exactly. The soak rig's O7 applies the same judge to every frame every device of a soak world sent — with the sender known on a device's own and alias endpoints — after every arm and the nemesis phase, its profile and key-package planes driven under a downed profile relay (S26), and its own planted crossings each reported.",
+      "statement": "Every client-to-relay frame Haven sends reaches only a relay whose plane admits that verb, kind and exact tag or filter-key set for that binding, as the allow matrix ROWS (tooling/e2e/local-relay/src/planes/policy.rs, rendered verbatim in haven-core/SECURITY.md \"The relay-plane allow matrix\") states it: a circle's kind 445 on that circle's routing (a commit on the targets frozen when it was staged, the routing a relay change leaves included), its #h REQs and NIP-77 sessions where that routing stands and its by-id fetches where it is kept; a Welcome on its invitee's inbox list; the account's own key package on its own key-package list and its relay lists on its own lists or a discovery relay (owner-directed 2026-11-12), each list naming no relay of another plane; kind 0 and its lookups on the profile plane alone; another account's relay lists and key packages asked of the discovery plane or of that account's own lists; and a CLOSE only for a subscription that relay was sent, and a NEG-MSG or NEG-CLOSE only for a session its own connection opened. One judge (judge) applies it to every frame in-process relays recorded across a circle's lifecycle — three real engines over thirteen relays, one per role, through the live plane, both catch-up planes, invites, a relay change, a leave and the profile plane — and to the FFI's key-package, relay-list and profile orchestration with the sender known; in the lifecycle run every relay any client dials is a relay of the test's world, and in both runs a crossing planted on a plane is reported exactly. The soak rig's O7 applies the same judge to every frame every device of a soak world sent — with the sender known on a device's own and alias endpoints — after every arm and the nemesis phase, its profile and key-package planes driven under a downed profile relay (S26), and its own planted crossings each reported.",
       "status": "enforced",
       "residual": "Two things this does not hold. (a) An invitee's own relay lists steer an invite onto other planes: the lifecycle run's last phase pins, as current behaviour, the key-package lookup asked of a profile relay that the invitee's NIP-65 write set names and the Welcome sent to a location relay that the invitee's inbox list names first (PLAN_v2 section 4 finding 1, owner decision OQ-1: no product change in this work); that expected set becomes empty when a rule drops such entries. (b) The lifecycle run judges with no sender, so a request bound to another identity's own list there (an inbox REQ by #p of an account other than the sending device's) passes; the per-identity bindings are proved only by the FFI run, with the sender known. The dial check is the lifecycle run's alone: the FFI run arms no dial witness, its binary's tests sharing one process concurrently. O7 judges a frame on a plane's canonical endpoint (catch-up sweeps, the rig's inbox reads, an invite's key-package lookup) with no sender, so there too a request bound to another identity's own list passes. O7 holds a location on a relay a change left admissible (a member that has not applied the change still seals for the routing it holds, and the rig knows that instant for the stager alone), and grades no discovery traffic: a soak process points discovery at a port that refuses every dial.",
       "assertion_arb_keys": [],
@@ -3671,7 +3700,7 @@
     {
       "id": "INV-R-RELAY-PLANES-WIRE-CONTAINMENT",
       "title": "On the hermetic core-flow lanes, every frame Haven puts on the wire lands on a relay whose role admits it",
-      "statement": "On the recorded core-flow lanes (Android and iOS, poll and live-sync), every client-to-relay EVENT, REQ filter and NEG-OPEN filter outside the harness, at or below the sentinel, reaches only a proxy listen whose declared role (inbox, key-package, discovery, location; no profile listen exists there) admits its verb, kind and shape: a kind-445 and every #h REQ and NEG-OPEN only on a relay of its circle's declared routing, a kind-1059 only on an inbox relay some kind-10050 of its recipient names, a kind-30443 or kind-10002 only on a relay its author's kind-10002 names, a kind-10050 only on its own inbox relays, a key-package or relay-list lookup only on discovery or on the target's own lists, nothing at all on discovery, and no kind 0 or kind-0 REQ anywhere, since that lane's profile plane fails closed. Every declared role is witnessed, every circle with traffic is declared, and every frame's listen is declared, so a run that judged nothing is a failure rather than a pass. False if any such frame reaches a listen outside its role.",
+      "statement": "On the recorded core-flow lanes (Android and iOS, poll and live-sync), every client-to-relay EVENT, REQ filter and NEG-OPEN filter outside the harness, at or below the sentinel, reaches only a proxy listen whose declared role (inbox, key-package, discovery, location; no profile listen exists there) admits its verb, kind and shape: a kind-445 and every #h REQ and NEG-OPEN only on a relay of its circle's declared routing, a kind-1059 only on an inbox relay some kind-10050 of its recipient names, a kind-30443 only on a relay its author's kind-10002 names, a kind-10002 only there or on discovery, a kind-10050 only on its own inbox relays or on discovery (the account's own relay lists are copied to the lookup relays, owner-directed 2026-11-12), a key-package or relay-list lookup only on discovery or on the target's own lists, no other event on discovery, and no kind 0 or kind-0 REQ anywhere, since that lane's profile plane fails closed. Every declared role is witnessed, every circle with traffic is declared, and every frame's listen is declared, so a run that judged nothing is a failure rather than a pass. False if any such frame reaches a listen outside its role.",
       "status": "enforced",
       "residual": "ROLE PLACEMENT, not the per-identity bindings: the oracle judges every frame with no sender, so a request on another identity's own list passes it; those bindings are held by INV-R-RELAY-PLANE-CONTAINMENT's L1b test and the soak oracle O7. The lanes give one listen three roles — the account's inbox and key-package relay, which discovery also reads through the default-relay fallback, the same seed-and-discovery overlap production has — so a frame for one of those roles on the relay of another of them is not told apart here; the Rust layers, where each role has its own relay, tell them apart. A circle's routing is the one the drive declares from Rust's view of the circle (CircleFfi.relays), so a routing Rust itself recorded wrong is not caught here. Blossom (HTTP) is outside every relay oracle. The unproxied multi-relay lanes (relay customization, the profile plane, key-package rotation) carry no recorder: their relays are judged from the STORE, which shows no REQ, no NEG session, no expired location and no binding beyond the kind.",
       "assertion_arb_keys": [],
@@ -6206,7 +6235,7 @@
     {
       "id": "INV-P-PROFILE-LOOKUPS-ARE-ONE-AUTHOR-PER-REQ",
       "title": "Profile lookups ask one relay about one person, bounded at two relays",
-      "statement": "Every kind-0 filter carries exactly one author, no p tag and kind 0 only; each author resolves to its own assigned relay by salted rendezvous hash, and PROFILE_MAX_RELAY_RANK = 2 caps the retry ladder — so a lookup discloses an author to at most two of the eight. This becomes false if authors are batched into one filter, if the rank cap is raised, or if a fetch fans out beyond the assignment.",
+      "statement": "Every kind-0 filter carries exactly one author, no p tag and kind 0 only; each author resolves to its own assigned relay by salted rendezvous hash, and PROFILE_MAX_RELAY_RANK = 2 bounds the relays it may ever be asked of — its second-ranked relay is asked only after the first answered without a profile (the retry ladder, which alternates between the two), or in the same cycle when the first did not answer at all. So a lookup discloses an author to at most two of the eight. Only a relay's own EOSE says it holds nothing. A relay that did not answer is not asked for the rest of its slice and is not sent another author's second request in that cycle; an author no relay could be reached for is stamped nothing, and an author a relay was reached for, and no relay answered, backs off as a miss — unstamped it would be asked again on every trigger, handing a relay that declines to answer a count of them. This becomes false if authors are batched into one filter, if the rank cap is raised, or if a fetch fans out beyond the assignment.",
       "status": "enforced",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
@@ -6247,6 +6276,34 @@
         {
           "file": "haven-core/src/profile/assignment.rs",
           "name": "assignment_is_independent_of_pool_input_order"
+        },
+        {
+          "file": "haven-core/src/profile/assignment.rs",
+          "name": "a_relay_that_missed_is_asked_again"
+        },
+        {
+          "file": "haven-core/src/profile/fetch.rs",
+          "name": "an_author_whose_relay_does_not_answer_resolves_from_its_other_relay"
+        },
+        {
+          "file": "haven-core/src/profile/fetch.rs",
+          "name": "a_relay_that_ends_its_answer_without_a_kind0_is_a_miss_and_the_other_is_not_asked"
+        },
+        {
+          "file": "haven-core/src/profile/fetch.rs",
+          "name": "an_author_no_relay_could_be_reached_for_is_unattempted_not_missed"
+        },
+        {
+          "file": "haven-core/src/profile/fetch.rs",
+          "name": "a_relay_that_did_not_answer_is_not_sent_another_authors_second_request"
+        },
+        {
+          "file": "haven-core/src/profile/fetch.rs",
+          "name": "an_author_only_a_declining_relay_was_asked_about_backs_off"
+        },
+        {
+          "file": "haven-core/src/profile/fetch.rs",
+          "name": "an_author_one_relay_declined_and_the_other_is_down_for_backs_off"
         }
       ],
       "guards": [
@@ -6779,6 +6836,225 @@
       "guards": []
     },
     {
+      "id": "INV-P-PUBLISHED-PROFILE-REACHES-A-RELAY-THAT-JOINS-THE-POOL",
+      "title": "A published profile is re-sent, unchanged and unsigned-for, to a pool relay it was never sent to — the copy a whole read of the pool shows to be current, or the one this device had already recorded.",
+      "statement": "Peers read a profile from the one or two pool relays their own install is assigned, so a pool relay that lacks the kind-0 hides the user from every peer assigned there. 'Every usable pool relay serves it' is true of the pool as it was: profile_sync_state.covered_pool_json records the pool coverage was last settled against, and coverage is owed (profile_coverage_owed) when none is recorded — an upgraded install, or one whose record a storage reset took — or the usable pool has a relay it lacks (a release that swaps pool relays, a relay the user adds). A pool that only shrank owes nothing, an underflowed pool owes nothing, and a retracted profile owes nothing until the next save settles a pool. A coverage pass (sync_own_profile with nothing pending, on the triggers and ladder of a save) reads the own kind-0 from every pool relay and offers the newest copy any relay serves, byte for byte, to the relays that answered without it; a relay is covered only by a read-back serving that id. It signs nothing, is given no key, and the app does not read the identity secret out of secure storage for it (ProfilePendingStateFfi.save_pending gates the read); it publishes nothing for an account no relay serves a profile of; it acts on a whole read (every relay ended its answer or serves the newest copy), because a relay that did not answer may hold a blank or a rename newer than the copy in hand — except that the newest copy this device has itself recorded (the dated own row — its acknowledged publish, or a copy an own-profile read cached — at the same created_at) is re-sent past a silent relay, which is then owed it on the ladder: that is the profile this device already holds as current, and without it one pool relay that is down would keep the profile off every relay that joined; it offers no copy older than the dated own row; and its records are keyed to the version it started from, so a save made meanwhile keeps its own owed event and its own ladder. Disclosure is what a save already makes: one single-author REQ for the own pubkey and the own already-public event, to profile-pool relays only. Not covered: a relay that takes the profile and drops it later (a settled pool is not read again); a relay that refuses the served copy as too old, which stays owed since nothing may re-date it; a pool relay that never answers, which keeps the read from ever being whole for an install with no dated own row; a profile retracted from another client whose blank only a silent pool relay holds, which is re-sent until that relay answers; and a deletion that failed on a build before 2026-11-12, whose row reads as an upgraded install's. This becomes false if a coverage pass signs, reads the identity secret, acts on a partial read for a copy this device had not already recorded, or records against a version a save has passed.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "symbols": [
+        {
+          "file": "haven-core/src/circle/profile_sync.rs",
+          "symbol": "sync_own_profile"
+        },
+        {
+          "file": "haven-core/src/circle/profile_sync.rs",
+          "symbol": "judge_coverage"
+        },
+        {
+          "file": "haven-core/src/circle/profile_sync.rs",
+          "symbol": "close_coverage"
+        },
+        {
+          "file": "haven-core/src/circle/storage_profile_sync.rs",
+          "symbol": "profile_coverage_owed"
+        },
+        {
+          "file": "haven-core/src/circle/storage_profile_sync.rs",
+          "symbol": "settle_profile_coverage"
+        },
+        {
+          "file": "haven-core/src/circle/storage_profile_sync.rs",
+          "symbol": "owe_profile_coverage"
+        },
+        {
+          "file": "haven-core/src/profile/outbox.rs",
+          "symbol": "newest_own_event"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "symbol": "sync_my_profile"
+        },
+        {
+          "file": "haven/lib/src/providers/profile_sync_provider.dart",
+          "symbol": "retryIfPending"
+        },
+        {
+          "file": "haven/lib/src/services/nostr_profile_service.dart",
+          "symbol": "syncWithSecretOnlyToSign"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/profile_local_first_sync_e2e.rs",
+          "name": "a_relay_that_joins_the_pool_is_sent_the_published_profile_byte_for_byte"
+        },
+        {
+          "file": "haven-core/tests/profile_local_first_sync_e2e.rs",
+          "name": "an_install_with_no_record_adopts_the_copy_the_pool_serves"
+        },
+        {
+          "file": "haven-core/tests/profile_local_first_sync_e2e.rs",
+          "name": "an_account_no_relay_serves_a_profile_of_settles_without_publishing_one"
+        },
+        {
+          "file": "haven-core/tests/profile_local_first_sync_e2e.rs",
+          "name": "a_copy_is_not_resent_while_a_relay_that_may_hold_a_newer_one_has_not_answered"
+        },
+        {
+          "file": "haven-core/tests/profile_local_first_sync_e2e.rs",
+          "name": "a_copy_older_than_this_devices_own_row_is_not_put_on_a_relay_that_lacks_it"
+        },
+        {
+          "file": "haven-core/tests/profile_local_first_sync_e2e.rs",
+          "name": "a_save_made_while_a_coverage_pass_is_on_the_network_keeps_its_own_record_and_ladder"
+        },
+        {
+          "file": "haven-core/tests/profile_local_first_sync_e2e.rs",
+          "name": "a_relay_refusing_the_served_copy_as_too_old_is_never_sent_one_signed_afresh"
+        },
+        {
+          "file": "haven-core/tests/profile_local_first_sync_e2e.rs",
+          "name": "a_coverage_pass_logs_no_relay_url_event_id_or_pubkey"
+        },
+        {
+          "file": "haven-core/src/circle/storage_profile_sync.rs",
+          "name": "coverage_is_owed_until_settled_and_again_when_a_relay_joins_the_pool"
+        },
+        {
+          "file": "haven-core/src/circle/storage_profile_sync.rs",
+          "name": "a_retraction_owes_the_pool_nothing_until_the_next_save_settles_one"
+        },
+        {
+          "file": "haven-core/src/circle/storage_profile_sync.rs",
+          "name": "the_covered_pool_column_reaches_an_existing_database_unset"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "a_sync_with_nothing_to_sign_never_touches_the_identity_secret"
+        },
+        {
+          "file": "haven-core/tests/profile_local_first_sync_e2e.rs",
+          "name": "the_copy_this_device_published_reaches_a_joined_relay_past_one_that_is_down"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "a_saved_edit_met_without_the_secret_stays_queued_and_due"
+        },
+        {
+          "file": "haven/test/services/profile_service_test.dart",
+          "name": "a pass with nothing to sign never reads the identity secret"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "a_coverage_pass_runs_with_no_secret_at_all"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_profile_privacy_boundaries.sh"
+      ]
+    },
+    {
+      "id": "INV-P-A-KEY-THE-USER-ENTERS-IS-LOOKED-UP-AND-SAID-SO",
+      "title": "Entering someone's key on an invite screen looks up their published name and photo, and the typed row says exactly who learns what.",
+      "statement": "Owner-directed 2026-11-12 (docs/MEMBER_PICKER_PLAN.md §10 D2, reversing 'no picture until the person is selected'). A complete, valid npub typed or pasted into the invite search, or staged by the paste button, Done or a QR scan, is resolved through resolve_stranger_profile: the same single-author REQ a member lookup issues, to the one or two relays that author's assignment allows, with no signer. A key that has not resolved is asked again each time it is entered, past the miss backoff a background refresh honours, and after a relay answered without a profile the next entry asks the other of the two. Whenever the device's own directory can answer it does and nothing is asked: a key already in the local directory is named from it, and a directory read that is degraded, failed or still on its first load asks nothing, because 'not already known locally' cannot be judged from a read that did not complete. A key that resolved with no picture cached then has its picture fetched once (strangerPictureProvider → downloadMemberPictures), from the HTTPS URL its own kind-0 names, through the anti-SSRF filter and re-encode — never as part of the lookup, so the name is not held back, and never for a key that did not resolve or was abandoned before it did. That photo host is chosen by the person, so it learns this device's network address and when it asked, and a person can publish a URL unique to themselves. memberPickerStrangerLookupNote on the typed row discloses both: a relay Haven asked — two at most, the two that key's assignment allows — sees this device ask about this key now, unsigned and so not tied to the Haven identity, and a published photo is downloaded from the server the person chose, which sees this device's network address. Opening the picker, and filtering it, still ask nothing. A staged row (paste button, Done, QR, or a tap on the typed row) whose key was looked up shows the same note beneath it, in the same style and in its spoken label, whether or not a profile resolved (owner-directed 2026-11-12) — set by the very branch of stagedMemberIdentityProvider that asks, so the note cannot drift from the lookup; a staged co-member named from the directory, and a key behind a degraded or unfinished directory read, show none, because nothing was asked. The note follows the directory read the row is built from: a staged stranger who later appears in the directory is shown from it, and a directory refresh that comes back degraded drops the looked-up name and note with it, as on the typed row. This becomes false if the lookup batches authors, fans out past the two assigned relays, downloads a picture for a key that did not resolve, asks about a key the local directory holds, or a staged row built from a directory read that leads it to ask shows no note.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "memberPickerStrangerLookupNote"
+      ],
+      "non_arb_claims": [],
+      "doc_anchors": [],
+      "symbols": [
+        {
+          "file": "haven/lib/src/providers/stranger_profile_provider.dart",
+          "symbol": "strangerProfileResolveProvider"
+        },
+        {
+          "file": "haven/lib/src/providers/stranger_profile_provider.dart",
+          "symbol": "strangerPictureProvider"
+        },
+        {
+          "file": "haven/lib/src/providers/stranger_profile_provider.dart",
+          "symbol": "stagedMemberIdentityProvider"
+        },
+        {
+          "file": "haven/lib/src/widgets/circles/member_picker.dart",
+          "symbol": "eligibleStrangerNpub"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "symbol": "resolve_stranger_profile"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven/test/providers/stranger_profile_provider_test.dart",
+          "name": "a co-member is named from the directory with no lookup"
+        },
+        {
+          "file": "haven/test/providers/stranger_profile_provider_test.dart",
+          "name": "a degraded directory read asks nothing"
+        },
+        {
+          "file": "haven/test/providers/stranger_profile_provider_test.dart",
+          "name": "a failed directory read asks nothing"
+        },
+        {
+          "file": "haven/test/providers/stranger_profile_provider_test.dart",
+          "name": "a stranger whose picture is already cached downloads none"
+        },
+        {
+          "file": "haven/test/providers/stranger_profile_provider_test.dart",
+          "name": "a failed lookup logs no identifier"
+        },
+        {
+          "file": "haven/test/widgets/circles/member_picker_test.dart",
+          "name": "O4. an npub abandoned mid-lookup downloads no picture"
+        },
+        {
+          "file": "haven/test/widgets/circles/member_picker_test.dart",
+          "name": "O2. a picture already cached is not downloaded again"
+        },
+        {
+          "file": "haven/test/pages/circles/create_circle_page_test.dart",
+          "name": "CS5. pasting a co-member's npub asks no relay about them"
+        },
+        {
+          "file": "haven/test/providers/stranger_profile_provider_test.dart",
+          "name": "a stranger is marked looked up from the moment relays are asked, whether or not a profile resolves"
+        },
+        {
+          "file": "haven/test/providers/stranger_profile_provider_test.dart",
+          "name": "a co-member, and a stranger behind a degraded directory, are not marked looked up"
+        },
+        {
+          "file": "haven/test/pages/circles/create_circle_page_test.dart",
+          "name": "CS10. a stranger staged by the paste button carries the lookup note under their row, as the typed row does"
+        },
+        {
+          "file": "haven/test/pages/circles/create_circle_page_test.dart",
+          "name": "CS11. a co-member staged by the paste button carries no lookup note"
+        },
+        {
+          "file": "haven/test/pages/circles/add_member_page_test.dart",
+          "name": "S7. a stranger staged by the paste button carries the lookup note under their row, even when no profile resolves"
+        },
+        {
+          "file": "haven/test/pages/circles/add_member_page_test.dart",
+          "name": "S8. a co-member staged by the paste button carries no lookup note"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "a_typed_lookup_asks_again_inside_the_miss_backoff_and_a_refresh_does_not"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_profile_privacy_boundaries.sh"
+      ]
+    },
+    {
       "id": "INV-P-PROFILE-UI-CLAIMS-LOCAL-TRUTH-ONLY",
       "title": "The Identity page and the two photo flows render and announce the same in every publish state",
       "statement": "No screen reports a relay outcome as a state of the user's profile. The Identity page renders the local profile row and nothing else: no publish status, no progress copy, no Retry, and the same widget tree whether the outbox is clean, pending and due, pending and backing off, left over from a failed pass, or being synced right now; a sync in flight disables nothing on it. The copy a save, a photo set or a photo removal shows or announces describes the device only — the edit is held locally and will be published — and never says synced, published, syncing or up to date; the name card announces the saved outcome and an assertive local failure, never a progress message, and the two photo flows announce their local outcome politely with no SnackBar on success. What a relay has or has not taken is visible only in the outbox and retried by the controller (INV-P-PHOTO-REMOVAL-IS-OWED-TO-EVERY-POOL-RELAY). The claim is bounded to the Identity page, the display-name card and the two photo flows, not to every future surface; a widget that renders ProfilePendingState or ProfileSyncResult on that page, or copy that names the network, falsifies it.",
@@ -7215,7 +7491,7 @@
     {
       "id": "INV-O-NO-FIRST-PARTY-SERVER",
       "title": "Haven runs no server of its own for circle traffic",
-      "statement": "Identity-plane publishes (the kind-10050 and kind-10002 lists, KeyPackages) target exactly the user's own stored relay lists; a circle's kind-445 goes to that circle's relays, which for a circle Haven creates without named relays are three third-party relays drawn from the curated location pool (PRODUCTION_LOCATION_RELAYS, INV-R-CIRCLE-RELAYS-FROM-LOCATION-POOL) and for any other circle the relays its creator chose; and the live-sync engine connects only to configured relays — each circle's relays and the inbox list — never a gossip-discovered one. There is no Haven-operated endpoint in the location path. This becomes false if any publisher, engine client or curated relay list acquires a first-party destination.",
+      "statement": "Identity-plane publishes target the user's own stored relay lists — KeyPackages exactly those, and the kind-10050 and kind-10002 lists those and the curated discovery relays (PRODUCTION_DISCOVERY_RELAYS, owner-directed 2026-11-12); a circle's kind-445 goes to that circle's relays, which for a circle Haven creates without named relays are three third-party relays drawn from the curated location pool (PRODUCTION_LOCATION_RELAYS, INV-R-CIRCLE-RELAYS-FROM-LOCATION-POOL) and for any other circle the relays its creator chose; and the live-sync engine connects only to configured relays — each circle's relays and the inbox list — never a gossip-discovered one. There is no Haven-operated endpoint in the location path. This becomes false if any publisher, engine client or curated relay list acquires a first-party destination.",
       "status": "ratcheted",
       "residual": "Nothing proves that no curated list holds a Haven-operated relay: the location and profile pools' operators are recorded when the pools are vetted, not tested. And the user chooses none of: the eight profile relays and six discovery relays (contacted unconditionally, not removable, INV-P-P3), the three location-pool relays Haven picks for each circle it creates (no setting edits them), the Blossom host (hardcoded to blossom.primal.net) and the tile provider (hardcoded to Stadia). The copy claims no such choice: onboardingValueProp2Summary was reworded on 2026-10-31 from 'It runs on a relay network you choose.' — false once Haven picks a circle's relays — to 'No central server. It runs on independent relays.' (extended on 2026-11-04 with 'Many people run them, so no single company can switch it off.', which names no choice either), and relaySettingsBackendCaption names no choice either. Nothing fails if a curated list grows.",
       "assertion_arb_keys": [
@@ -7396,6 +7672,7 @@
       "statement": "The one-time storage reset (the MDK v0.10.4 migration) returns the relay-list publishing choices to their defaults. Until the user has answered the reset notice AND that answer was saved, Haven publishes neither of its relay lists (kind 10050 inbox, kind 10002 NIP-65) and no KeyPackage (kind 30443): every path that could publish one — the relay-list maintenance tick, the KeyPackage maintenance tick, and the user-edit publish — reads storage_reset_acknowledged and returns AwaitingResetAcknowledgement while it is false. A save that fails leaves the marker in place, so the hold stays and the notice is shown again; the snackbar that says so (storageResetAcknowledgeFailed) is therefore a promise the code keeps. It is NOT a promise that nothing is published: the public profile, invitations the user sends and location still go out, and the deletion of a KeyPackage's key at its not_after never waits for the notice. Publishing either list or a KeyPackage on any path while the marker exists, or clearing the hold without a saved answer, falsifies this.",
       "status": "enforced",
       "assertion_arb_keys": [
+        "relaySettingsRepublishHeld",
         "storageResetAcknowledgeFailed"
       ],
       "disclosure_arb_keys": [],

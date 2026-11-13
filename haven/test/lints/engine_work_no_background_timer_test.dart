@@ -173,9 +173,10 @@ const _join =
 const _publishTick =
     'lib/src/providers/location_publish_scheduler_provider.dart#'
     'LocationPublishSchedulerNotifier._pacedPublish';
+// On the lane a burst runs on (`_BurstLane`), behind the coordinator.
 const _burstPass =
     'lib/src/services/background_burst_coordinator.dart#'
-    'BackgroundBurstCoordinator._publishPass';
+    '_BurstLane._publishPass';
 const _resubscribe =
     'lib/src/services/live_sync_resubscriber.dart#'
     'LiveSyncResubscriber.onCirclesChanged';
@@ -221,14 +222,15 @@ const _allowedSites = <String, int>{
           'OwnProfileSyncController._armFrom':
       1,
   'lib/src/providers/sharing_health_provider.dart#'
+          'SharingHealthNotifier._derive':
+      1,
+  'lib/src/providers/sharing_health_provider.dart#'
           'SharingHealthNotifier.syncTick':
       1,
   'lib/src/providers/sharing_health_provider.dart#'
           'SharingHealthNotifier.tickIntervalForTest':
       1,
-  'lib/src/services/background_burst_coordinator.dart#'
-          'BackgroundBurstCoordinator._publishPass':
-      1,
+  _burstPass: 1,
   'lib/src/services/background_idle_waiter.dart#'
           'BackgroundIdleWaiter.waitUntilIdle':
       1,
@@ -271,7 +273,7 @@ const _allowedSites = <String, int>{
 
 /// The sum of [_allowedSites]: a second pin, so an edit that moves a count
 /// from one site to another is still a visible change of this number.
-const _allowedTotal = 46;
+const _allowedTotal = 47;
 
 /// The sites of [_allowedSites] that reach the MLS or the live-sync engine,
 /// reviewed by hand: the existing wakes. A timer's callback reaches through

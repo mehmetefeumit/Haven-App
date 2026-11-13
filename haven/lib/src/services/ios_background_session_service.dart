@@ -37,6 +37,7 @@ class IosBackgroundSessionStatus {
     required this.serviceSessionHeld,
     required this.alwaysConfirmed,
     required this.armed,
+    required this.indicatorRequested,
   });
 
   /// Whether the OS supports `CLBackgroundActivitySession` (iOS 17+).
@@ -71,6 +72,18 @@ class IosBackgroundSessionStatus {
   /// arrived from the channel — and `alwaysConfirmed: false` is the residue of
   /// the last `disarm()` rather than a verdict about this device.
   final bool armed;
+
+  /// Whether the stream handler asks the OS for the background location
+  /// indicator: the native `indicatorRequested`, the ONE predicate both the
+  /// flag and the settings copy read.
+  ///
+  /// False only under a confirmed Always with Precise Location on. With
+  /// Precise Location off the indicator stays asked for, because accuracy
+  /// writes then have no effect and the indicator is Apple's other documented
+  /// way to keep the session running. Absent, it reads true, as the stream
+  /// handler itself defaults when it has no session handler to ask. Only a
+  /// reading while [armed].
+  final bool indicatorRequested;
 }
 
 /// Bridge for the iOS CoreLocation background session objects.
@@ -132,6 +145,7 @@ class MethodChannelIosBackgroundSessionService
         serviceSessionHeld: raw?['serviceSessionHeld'] ?? false,
         alwaysConfirmed: raw?['alwaysConfirmed'] ?? false,
         armed: raw?['armed'] ?? false,
+        indicatorRequested: raw?['indicatorRequested'] ?? true,
       );
     } on PlatformException catch (e) {
       // No key material involved; logging the opaque error code is safe.
@@ -148,6 +162,7 @@ class MethodChannelIosBackgroundSessionService
       serviceSessionHeld: false,
       alwaysConfirmed: false,
       armed: false,
+      indicatorRequested: true,
     );
   }
 
@@ -183,5 +198,6 @@ class NoopIosBackgroundSessionService implements IosBackgroundSessionService {
         serviceSessionHeld: false,
         alwaysConfirmed: false,
         armed: false,
+        indicatorRequested: true,
       );
 }

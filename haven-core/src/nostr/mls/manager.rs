@@ -582,10 +582,11 @@ pub struct SessionManager {
     /// is ever in flight against it on the other connection
     /// (`every_second_handle_write_runs_with_the_engine_held`). Four reads run
     /// beside the engine on a WAL snapshot — [`Self::leave_proposed`],
-    /// [`Self::leave_proposed_epoch`], `engine_processed` and
-    /// [`Self::leave_requested`] — which can be one write stale and each read
-    /// fails safe. `storage-sqlite` opens WAL with a 5 s `busy_timeout`, which
-    /// makes even an unexpected overlap a wait rather than a failure.
+    /// [`Self::leave_proposed_epoch`], `engine_processed` (which
+    /// [`Self::holds_unread_input`] also reads) and [`Self::leave_requested`] —
+    /// which can be one write stale and each read fails safe. `storage-sqlite`
+    /// opens WAL with a 5 s `busy_timeout`, which makes even an unexpected
+    /// overlap a wait rather than a failure.
     message_store: SqliteAccountStorage,
     /// Runtime Rule-14 enforcement: registers this session's `session.sqlite`
     /// path in a process-global set at open and releases it on drop, so a
@@ -2334,7 +2335,7 @@ impl SessionManager {
             }
             let retired = session.confirm_regenerated_queued_intent(&QueuedIntentRef {
                 group_id: queued.group_id.clone(),
-                intent_id: queued.id.clone(),
+                intent_id: queued.id,
             });
             if let Err(e) = retired {
                 log::warn!(
@@ -4056,8 +4057,33 @@ impl SessionManager {
     /// or stored replay a live REQ holds until its relay's `EOSE`. Such a
     /// commit may remove a member, so no location is sealed for the circle
     /// until it is in (Security Rule 10).
+    ///
+    /// A held commit the engine already records as processed is released
+    /// here: a hold set after another plane's ingest took it in would
+    /// otherwise wait for a refetch nothing owes, which could only answer
+    /// `Duplicate`. Recorded is not applied — MDK records a commit when it
+    /// admits it to convergence — but one still unresolved holds the circle
+    /// through the engine's own send gate. A store fault keeps the hold.
     pub(crate) fn holds_unread_input(&self, group_id: &GroupId) -> bool {
-        let unread = self.unread();
+        let held: Vec<Vec<u8>> = self
+            .unread()
+            .pager
+            .get(group_id)
+            .map(|ids| ids.iter().cloned().collect())
+            .unwrap_or_default();
+        // No store read runs under `unread`, as in `note_taken_in`.
+        let recorded: Vec<Vec<u8>> = held
+            .into_iter()
+            .filter(|id| {
+                nostr::EventId::from_slice(id).is_ok_and(|event| self.engine_processed(&event))
+            })
+            .collect();
+        let mut unread = self.unread();
+        if let Some(ids) = unread.pager.get_mut(group_id) {
+            for id in &recorded {
+                ids.remove(id);
+            }
+        }
         unread
             .pager
             .get(group_id)
@@ -4080,7 +4106,8 @@ impl SessionManager {
 
     /// The pager held back `commits`, current-epoch commits of `group_id`:
     /// each stays unread until an ingest takes it in
-    /// ([`Self::note_taken_in`]), whichever plane makes it.
+    /// ([`Self::note_taken_in`]), whichever plane makes it, or the engine's
+    /// record shows one already did ([`Self::holds_unread_input`]).
     pub(crate) fn hold_pager_commits<'a>(
         &self,
         group_id: &GroupId,
@@ -6000,7 +6027,7 @@ impl SessionManager {
                     self.state_input_at
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .entry(group_id.clone())
+                        .entry(group_id)
                         .and_modify(|at| *at = (*at).max(now_ms))
                         .or_insert(now_ms);
                 }
@@ -14703,7 +14730,8 @@ fn welcome_still_wanted(
 #[derive(Default)]
 struct UnreadInput {
     /// The commits the pager held back for each, by event id, until an
-    /// ingest on any plane takes each in.
+    /// ingest on any plane takes each in or the engine's record shows one
+    /// already did.
     pager: HashMap<GroupId, HashSet<Vec<u8>>>,
     /// How many live REQs hold stored replay for each.
     live: HashMap<GroupId, usize>,

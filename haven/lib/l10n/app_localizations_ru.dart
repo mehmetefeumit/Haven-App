@@ -132,6 +132,13 @@ class AppLocalizationsRu extends AppLocalizations {
   String get onboardingCreateIdentityLoading => 'Настраиваем…';
 
   @override
+  String get onboardingFinishingSetup => 'Завершаем настройку…';
+
+  @override
+  String get onboardingFinishSetupError =>
+      'Не удалось завершить настройку аккаунта. Проверьте соединение и попробуйте снова.';
+
+  @override
   String get onboardingCreateIdentityImportPrompt => 'Уже есть ключ?';
 
   @override
@@ -316,21 +323,58 @@ class AppLocalizationsRu extends AppLocalizations {
   }
 
   @override
-  String get relaySettingsStatusConnected => 'Подключено';
-
-  @override
   String get relaySettingsStatusChecking => 'Проверка';
 
   @override
   String get relaySettingsStatusUnreachable => 'Недоступно';
 
   @override
-  String get relaySettingsStatusNotChecked => 'Не проверено';
+  String relaySettingsKindLine(String kind, String status) {
+    return '$kind: $status';
+  }
 
   @override
-  String relaySettingsStatusSemantics(String status) {
-    return 'Статус реле: $status';
-  }
+  String get relaySettingsKindKeyPackage => 'KeyPackage';
+
+  @override
+  String get relaySettingsKindRelayList => 'Список реле';
+
+  @override
+  String get relaySettingsKindInboxList => 'Список входящих реле';
+
+  @override
+  String get relaySettingsPresencePublished => 'Опубликовано';
+
+  @override
+  String get relaySettingsPresenceMissing => 'Отсутствует';
+
+  @override
+  String get relaySettingsPresenceOutdated => 'Старая версия';
+
+  @override
+  String get relaySettingsLookupTitle => 'Реле для поиска';
+
+  @override
+  String get relaySettingsLookupSubtitle =>
+      'Публичные реле, на которых вас ищут другие. Haven хранит на них копию ваших списков реле, чтобы люди могли вас пригласить.';
+
+  @override
+  String get relaySettingsRepublish => 'Опубликовать снова';
+
+  @override
+  String get relaySettingsRepublishDone =>
+      'У всех ответивших реле теперь есть всё, что нужно другим, чтобы вас пригласить';
+
+  @override
+  String get relaySettingsRepublishIncomplete =>
+      'У некоторых реле всё ещё нет того, что нужно другим, чтобы вас пригласить';
+
+  @override
+  String get relaySettingsRepublishHeld =>
+      'Haven не будет публиковать ваши настройки реле и ключ приглашения, пока вы не ответите на уведомление о сбросе настроек реле';
+
+  @override
+  String get relaySettingsStatusNotChecked => 'Не проверено';
 
   @override
   String get relaySettingsEmptyTitle => 'Реле не настроены';
@@ -642,11 +686,12 @@ class AppLocalizationsRu extends AppLocalizations {
   String get createCircleNoIdInQr => 'В QR-коде не найден действительный ID';
 
   @override
-  String get createCircleNoAccountFound =>
-      'Не удалось найти аккаунт Haven по этому идентификатору';
+  String get memberLookupNotFound =>
+      'Аккаунт Haven с этим ID пока не найден. Если этот человек только что настроил Haven, попробуйте снова через минуту.';
 
   @override
-  String get createCircleCouldNotVerify => 'Не удалось проверить участника';
+  String get memberLookupIncomplete =>
+      'Не удалось завершить поиск по этому ID. Проверьте соединение и попробуйте снова.';
 
   @override
   String get createCircleSomethingWentWrong => 'Что-то пошло не так';
@@ -1043,7 +1088,18 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get memberPickerStrangerLookupNote =>
-      'Haven запросил у одного реле опубликованное имя этого человека. Реле видит, что это устройство только что спросило об этом ключе, но запрос не подписан, поэтому не связан с вашей личностью в Haven. Фото пока не скачано.';
+      'Haven запросил опубликованный профиль этого человека у реле — не более чем у двух. Каждое реле, к которому Haven обратился, видит, что это устройство только что спросило об этом ключе, но в запросе нет криптографической подписи, поэтому он не связан с вашей личностью в Haven. Если в профиле указано фото, Haven скачивает это фото с сервера, который выбрал этот человек, и этот сервер видит сетевой адрес этого устройства.';
+
+  @override
+  String get memberPickerStrangerLookingUp => 'Ищем опубликованный профиль…';
+
+  @override
+  String get memberPickerStrangerNotFound => 'Опубликованное имя не найдено';
+
+  @override
+  String memberPickerStrangerFoundAnnouncement(String name) {
+    return 'Опубликованное имя: $name';
+  }
 
   @override
   String selectedMembersMore(int count) {
@@ -1620,6 +1676,30 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get qrCodeYourPublicKeyLabel => 'Ваш публичный ключ';
+
+  @override
+  String get reachabilityChecking => 'Готовимся к получению приглашений…';
+
+  @override
+  String get reachabilityReady => 'Вас можно пригласить';
+
+  @override
+  String get reachabilityCantCheck =>
+      'Сейчас не удаётся проверить, могут ли другие вас пригласить';
+
+  @override
+  String get reachabilityNotReady => 'Другие пока не могут вас пригласить';
+
+  @override
+  String get reachabilityNoRelays =>
+      'Другие не смогут вас пригласить, пока вы не добавите реле';
+
+  @override
+  String get reachabilityOpenRelaySettings => 'Настройки реле';
+
+  @override
+  String get reachabilityAwaitingReset =>
+      'Другие смогут вас пригласить, когда вы ответите на уведомление о сбросе настроек реле';
 
   @override
   String get qrCodeWhatIsThisTitle => 'Что это?';

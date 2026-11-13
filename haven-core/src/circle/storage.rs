@@ -1441,7 +1441,10 @@ impl CircleStorage {
                 edits_json        TEXT    NOT NULL DEFAULT '{}',
                 picture_staged    INTEGER NOT NULL DEFAULT 0,
                 sync_attempts     INTEGER NOT NULL DEFAULT 0,
-                next_retry_at     INTEGER NOT NULL DEFAULT 0
+                next_retry_at     INTEGER NOT NULL DEFAULT 0,
+                -- The usable pool the own profile's coverage was last settled
+                -- against (JSON array of relay URLs); NULL until it has been.
+                covered_pool_json TEXT
             );
 
             -- The one signed kind-0 the outbox still owes to part of the pool,
@@ -1573,6 +1576,15 @@ impl CircleStorage {
         // Epoch-rotation bookkeeping: additive ALTER of the EXISTING
         // `circle_health` table, for the same reason.
         Self::migrate_add_rotation_columns(&conn)?;
+
+        // The pool the own profile's coverage was settled against. NULL on an
+        // existing row, deliberately: nothing recorded which relays an earlier
+        // build's publish covered, so each install checks once.
+        if !Self::table_has_column(&conn, "profile_sync_state", "covered_pool_json")? {
+            conn.execute_batch(
+                "ALTER TABLE profile_sync_state ADD COLUMN covered_pool_json TEXT;",
+            )?;
+        }
 
         Ok(())
     }

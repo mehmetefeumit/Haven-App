@@ -136,8 +136,9 @@ save — see *Public Nostr Profiles* below), three additional exposures apply:
   which pubkeys a client asks about. Haven asks the curated profile pool
   (`profile::relay_pool`) — never a circle's relays, never the discovery plane —
   ONE author per REQ, each from the one pool relay a salted rendezvous hash
-  assigns it and at most one more on a miss, in one-shot REQs with no standing
-  subscription and no NIP-42 AUTH answer. No relay sees a roster in one request,
+  assigns it and at most one more — on a miss, or in the same cycle when the
+  first did not answer — in one-shot REQs with no standing subscription and no
+  NIP-42 AUTH answer. No relay sees a roster in one request,
   but each sees an install-specific slice of the union of all circles' members,
   and two members of one circle can land on the same relay (P1, under
   *Profile-plane relay separation* below).
@@ -148,13 +149,19 @@ save — see *Public Nostr Profiles* below), three additional exposures apply:
 **Relay planes.** Haven keeps four relay lists apart: the account plane (the
 user's Inbox and KeyPackage lists, seeded from `PRODUCTION_DEFAULT_RELAYS`:
 kinds 10050, 10002 and 30443, the inbound kind 1059 and the inbox REQ — the
-user's pubkey is visible there by design), the read-only discovery plane
-(`PRODUCTION_DISCOVERY_RELAYS`: other accounts' relay lists and KeyPackages),
-the profile plane (`PRODUCTION_PROFILE_RELAYS`: kind 0) and, since 2026-10-31,
-the location plane (`PRODUCTION_LOCATION_RELAYS`: the kind 445 of the circles
-Haven creates). The seed and discovery lists share hosts; the profile and
-location pools share none with any other built-in list
-(`tests/profile_plane_separation.rs`).
+user's pubkey is visible there by design), the discovery plane
+(`PRODUCTION_DISCOVERY_RELAYS`: other accounts' relay lists and KeyPackages
+are read there, and, owner-directed 2026-11-12, the relay-list heal also
+copies the account's own kinds 10002 and 10050 there — the configured lists,
+private relays included — so an inviter holding only a bare pubkey finds
+them, as White Noise and MDK do; never a kind 30443, and an opt-out's empty
+replacement and kind 5 go there too), the profile plane
+(`PRODUCTION_PROFILE_RELAYS`: kind 0) and, since 2026-10-31, the location
+plane (`PRODUCTION_LOCATION_RELAYS`: the kind 445 of the circles Haven
+creates). Only an own relay confirms the account reachable
+(`RelayListCategoryOutcomeFfi::own_confirmed`). The seed and discovery lists
+share hosts; the profile and location pools share none with any other
+built-in list (`tests/profile_plane_separation.rs`).
 
 ### The relay-plane allow matrix
 
@@ -183,16 +190,16 @@ when it was sent; a circle's routing counts from the commit's staging.
 | `EV-445A` | EVENT | 445 | `h`, `expiration` | none | - | ephemeral (no known identity), used once | a relay of the `h` circle's routing current at the instant, or one it left at or after the event's `created_at`; `0 < expiration - created_at <= 228` |
 | `EV-1059` | EVENT | 1059 | `p` | none | - | ephemeral (no known identity) | a relay an inbox list of the `p` recipient named at or before the instant |
 | `EV-30443` | EVENT | 30443 | `d`, `mls_protocol_version`, `i`, `mls_ciphersuite`, `mls_extensions`, `mls_proposals`, `app_components` | none | - | an account | the author's own key-package list |
-| `EV-10002` | EVENT | 10002 | none | `r` | - | an account | the author's own key-package list; no relay it names holds the location, profile or discovery role without holding one of the author's own lists |
-| `EV-10050` | EVENT | 10050 | none | `relay` | - | an account | the author's own inbox list; no relay it names holds the location, profile or discovery role without holding one of the author's own lists |
+| `EV-10002` | EVENT | 10002 | none | `r` | - | an account | the author's own key-package list, or a discovery relay; no relay it names holds the location, profile or discovery role without holding one of the author's own lists |
+| `EV-10050` | EVENT | 10050 | none | `relay` | - | an account | the author's own inbox list, or a discovery relay; no relay it names holds the location, profile or discovery role without holding one of the author's own lists |
 | `EV-0` | EVENT | 0 | none | none | - | an account | a profile relay |
-| `EV-5` | EVENT | 5 | none | `e`, `a`, `k` | - | an account | a relay admitting EVERY kind it retracts (each `k`, each `a` coordinate's kind, each `e` id's kind; at least one `k` or `a`): 0 on a profile relay, 10050 / 10002 on the author's own inbox / key-package list current or former, 30443 on the current key-package list |
+| `EV-5` | EVENT | 5 | none | `e`, `a`, `k` | - | an account | a relay admitting EVERY kind it retracts (each `k`, each `a` coordinate's kind, each `e` id's kind; at least one `k` or `a`): 0 on a profile relay, 10050 / 10002 on the author's own inbox / key-package list current or former or on a discovery relay, 30443 on the current key-package list |
 | `REQ-445-H` | REQ | 445 | `kinds`, `#h` | `since`, `until`, `limit` | any | - | a relay where every `#h` circle's routing stands |
 | `REQ-445-IDS` | REQ | 445 | `ids`, `kinds`, `limit` | `#h` | = ids | - | a relay where the routing of every id's circle (the event index) and of every `#h` circle is kept; `limit` = the number of ids |
 | `REQ-1059-P` | REQ | 1059 | `kinds`, `#p` | `since`, `limit` | at most 1000 | - | the inbox list of the one `#p` value, which is the sender when the sender is known |
-| `REQ-30443-A` | REQ | 30443 | `kinds`, `authors` | `limit` | at most 64 | - | one author: the sender's own key-package list when it is the sender; otherwise a discovery relay or the author's key-package or NIP-65 write list; `limit` 5 (the status probe) also either own list of an account |
-| `REQ-10002-A` | REQ | 10002 | `kinds`, `authors` | `limit` | at most 64 | - | one author: the sender's own key-package list when it is the sender; otherwise a discovery relay or the author's key-package or NIP-65 write list; `limit` 5 (the status probe) also either own list of an account |
-| `REQ-10050-A` | REQ | 10050 | `kinds`, `authors` | `limit` | at most 64 | - | one author: the sender's own inbox list when it is the sender; otherwise a discovery relay or the author's inbox list; `limit` 5 (the status probe) also either own list of an account |
+| `REQ-30443-A` | REQ | 30443 | `kinds`, `authors` | `limit` | at most 64 | - | one author: the sender's own key-package list when it is the sender; otherwise a discovery relay or the author's key-package or NIP-65 write list |
+| `REQ-10002-A` | REQ | 10002 | `kinds`, `authors` | `limit` | at most 64 | - | one author: the sender's own key-package list or a discovery relay when it is the sender; otherwise a discovery relay or the author's key-package or NIP-65 write list |
+| `REQ-10050-A` | REQ | 10050 | `kinds`, `authors` | `limit` | at most 64 | - | one author: the sender's own inbox list or a discovery relay when it is the sender; otherwise a discovery relay or the author's inbox list |
 | `REQ-0-A` | REQ | 0 | `kinds`, `authors` | `limit` | at most 4 | - | one author, a profile relay |
 | `NEG-445-H` | NEG-OPEN | 445 | `kinds`, `#h`, `since`, `until`, `limit` | none | at most 16384 | - | one `#h` circle whose routing stands; opening message `6100000200` |
 
@@ -1955,12 +1962,22 @@ Android service's resume claims `false` and only finishes.
   pass that begins — a burst's, a started session's, the foreground's —
   confirms it without calling a relay. A background burst
   opened over a running pass does not wait for it: it meets a pass that can
-  decide nothing a burst must not. The pause counts the drive on the same
-  in-flight count it waits on for any publish and waits for what the pass
-  has out — one call of MDK's relay client, twenty seconds at most, when the
-  pass was sending a record; the rest of a confirm's fold or of a
-  publisher's retries when the flip found it inside one — and only then cuts
-  the radio and closes the drive pool. A stop does not wait: the call under
+  decide nothing a burst must not. Each relay call of a pass — a record's
+  send, counted under the store before it is marked and given back once its
+  calls have answered, a publish of what has no record, a NIP-77 pass's dial
+  and sessions — is counted, before it reads the lifecycle, on the in-flight
+  count the pause waits on; the pause waits for the calls the pass has out —
+  one call of MDK's relay client, twenty seconds at most, when the pass was
+  sending a record — and only then cuts the radio and closes the drive pool.
+  It waits for the calls and never for the pass: the pass's local work
+  around them (a queued change's attempt, a confirm's fold) has no bound of
+  its own, and the pause holds the lifecycle lock every resume, open and
+  claim needs while it waits. A call the flip overtook before its mark is
+  refused there and leaves its record as it was. The settle before a pause
+  waits for the passes too, for no longer than what is left of the wake, so
+  a confirm due on an answer just in is made in its burst; a retry whose
+  local work outlasts the pause is sent by the next burst or the foreground
+  instead. A stop does not wait: the call under
   way is given up and stored as what it is, an attempt that never returned,
   possibly exposed. If the system suspends or kills the process
   instead, the attempt stays stored as begun and the next drive records it
@@ -2888,6 +2905,68 @@ genuine event with the same id is admitted normally afterwards.
   event for a pending name or removal, with the picture left staged. No
   screen reports any of this: the Identity page renders the local row, the
   same in every publish state.
+- **A pool relay the profile was never sent to is sent it, byte for byte,
+  though nothing is saved.** "Every usable pool relay serves it" is a
+  statement about the pool as it was, and the pool changes: a release swaps
+  relays (four of eight on 2026-10-31), the user adds one. The outbox records
+  the pool coverage was last settled against (`covered_pool_json`), and
+  coverage is owed when none is recorded — an upgraded install, an install
+  whose record a storage reset took — or the usable pool has a relay it
+  lacks. A deletion records that no pool is owed, so nothing is re-sent
+  after one — not the blank, and not a profile whose deletion could not be
+  verified — until the next save. A coverage pass (`sync_own_profile` with nothing pending, on the
+  same triggers and ladder as a save) reads the own kind-0 from every pool
+  relay and offers the newest copy any relay serves, unchanged, to the relays
+  that answered without it; each is covered only by a read-back that serves
+  that id. It signs nothing and is handed no key, and the app does not read
+  the identity secret out of secure storage for it
+  (`ProfilePendingStateFfi::save_pending`, `syncWithSecretOnlyToSign`). It
+  publishes nothing for an account no relay serves a profile of. A relay that
+  did not answer may hold a blank or a rename newer than the copy in hand, and
+  re-sending the older one would put a retracted profile on a relay that never
+  had it. So the pass acts on a WHOLE read — every relay ended its answer or
+  serves the newest copy — with one exception: the newest copy this device has
+  itself recorded (the dated own row — its acknowledged publish, or a copy an
+  own-profile read cached — at the same `created_at`) is re-sent past a silent
+  relay, which is then owed it on the ladder like any relay a save could not
+  reach. That is the profile this device already holds as current, and without
+  it one pool relay that is down would keep the profile off every relay that
+  joined. It does not offer a copy older than the dated
+  own row. Its records are keyed to the version it started from, so a save
+  made meanwhile keeps its own owed event and its own ladder. What remains:
+  an install with no dated own row (a storage reset, before its first
+  own-profile read) re-sends nothing while a pool relay is unreachable, and
+  each rung (the 6 h one at most, foreground only) asks every pool relay for
+  the own pubkey again; a profile retracted from ANOTHER client, whose blank
+  only a silent pool relay holds, is re-sent to the relays that lack it until
+  that relay answers, when the newer copy replaces it; a relay that refuses
+  the served copy as too old stays owed on the ladder, since nothing may
+  re-date it; a relay that takes the profile and drops it LATER is not
+  noticed — a settled pool is not read again; and a deletion that failed on a
+  build before 2026-11-12 left a row indistinguishable from an upgraded
+  install's, so the profile it failed to remove is re-sent to the relays that
+  joined the pool. Disclosure is what a save already makes:
+  one single-author `REQ` for the own pubkey, and the own already-public
+  event, to relays of the profile pool only.
+- **A member's relay that does not answer costs one more request, not a
+  miss.** Only a relay's own `EOSE` says it holds nothing for an author. After
+  a failed connect, a `CLOSED` (rate limit, auth-required) or a `REQ` that
+  outlives its bound, the author is asked once more in the same cycle, at the
+  other of its two assigned relays. When that one does not answer either,
+  what is stamped turns on what a relay was told: an author no relay could be
+  reached for is left unstamped — so a device that is offline does not walk
+  every unresolved member up a backoff with no relay having been asked — and
+  an author a relay was reached for backs off as a miss, because unstamped it
+  would be asked again on every trigger and a relay that declines to answer
+  would be handed a count of this device's foregrounds. A relay that did not answer one
+  author is not asked for the rest of its slice, nor sent another author's
+  second request, in that cycle. A real miss alternates the author between
+  its two relays (never a third) behind `30 s → 2 min → 8 min → 30 min`, then
+  every 30 minutes: the authors asked for are the people in the user's
+  circles, a resolved one is re-asked on a 15 to 30 minute tier anyway, and a
+  longer last rung only hid a member for hours after their profile appeared.
+  A lookup of a key the user typed asks at once whatever the backoff, at the
+  rung the misses reached.
 - The policy is not a ban. A relay that sends a forgery is not disconnected,
   demoted or reported: that would be state a relay can reach and a surface the
   user would need, and it cannot be logged per relay.
@@ -4251,16 +4330,26 @@ epoch moved, stably, to the front.
     with any answer but a want of room (processed, rejected by the protocol,
     invalidated, buffered or retained), so a commit the engine rejects never
     holds sharing back; MDK's `ResourceRefused`, its want of room, is not
-    such an answer and leaves the hold standing. No pass that completes
-    without it ends the hold, and a join of the group anew — a Welcome
-    accepted over a removed copy, or a replacement offer consented to — ends
-    every hold of the copy it replaced. While the
-    cursor is held below a deferred commit every sweep fetches it again, and
-    the live plane's REQ from the cursor asks for it too. A relay that served
-    it and then withholds it from every plane keeps the hold — fail closed,
-    never silent: every seal answers `SendHeld::StoredInput` — until it is
-    taken in or the process restarts (the hold is in memory, and nothing
-    fetched survives a restart).
+    such an answer and leaves the hold standing. Or until the engine's record
+    shows one already did, read at every seal and every recovery read: a
+    hold set after another plane's ingest took the commit in, or a commit
+    MDK replays when this device's pending commit resolves, waits on no
+    refetch, which could only answer `Duplicate`. MDK writes that record
+    when it admits a commit to convergence, before a verdict, so recorded is
+    not applied: a commit still unresolved holds the circle through the
+    engine's own send gate (`send_gated`), not through this hold. A commit
+    buffered raw behind this device's own pending commit (until its
+    resolution replays it), refused for want of room, or deferred unpeeled
+    has no record and stays held. No pass that completes without it ends
+    the hold, and a join of the group anew — a Welcome accepted over a
+    removed copy, or a replacement offer consented to — ends every hold of
+    the copy it replaced. While the cursor is held below a deferred commit
+    every sweep fetches it again, and the live plane's REQ from the cursor
+    asks for it too. A relay that served it and then withholds it from every
+    plane keeps the hold — fail closed, never silent: every seal answers
+    `SendHeld::StoredInput` and the circle's recovery read names
+    `StoredInput` — until it is taken in or the process restarts (the hold
+    is in memory, and nothing fetched survives a restart); no time ends it.
   - *The live plane's*: whatever a REQ holds of its stored replay, counted
     under the lock its flush releases under, until it is taken in — at an
     endpoint's `EOSE` or `CLOSED`, a pause, the release of a relay silent
@@ -4277,6 +4366,10 @@ epoch moved, stably, to the front.
   `a_pass_that_completes_without_the_held_commit_never_ends_the_hold`,
   `a_held_commit_the_live_plane_takes_in_ends_the_hold`,
   `a_held_commit_a_plain_ingest_takes_in_ends_the_hold`,
+  `a_hold_set_after_another_plane_took_the_commit_in_never_holds_the_circle`,
+  `a_commit_buffered_behind_a_pending_commit_and_held_again_is_released_by_either_resolution`,
+  `a_held_commit_no_ingest_took_in_still_holds_every_seal_and_recovery_read`,
+  `a_held_commit_is_read_as_stored_input_by_the_circles_recovery`,
   `no_location_is_sealed_while_a_live_req_holds_its_stored_replay`,
   `session::tests::a_relay_left_out_of_coverage_sends_no_stored_replay`).
 - **Refetch by id.** It orders what each REQ brings back.
@@ -5283,7 +5376,7 @@ realized-gap term recorded under "The no-gap invariant" below). Which socket car
 * **The Android foreground service.** There is no engine socket on this plane at
   all — the service holds only a `NostrRelayService` publish pool — so the pool
   *is* the carrier. `RelayManager::shutdown` is a **collective**
-  `client.disconnect()`, and the service calls it at step 9b of every delivery
+  `client.disconnect()` (and then drops every relay), and the service calls it at step 9b of every delivery
   cycle and again in `onDestroy`, so a relay carrying exactly one circle in a pass sees
   connect-at-its-own-publish → disconnect-at-teardown: a tail that grows with
   the circles published *after* it and, over the CSPRNG burst permutation,
@@ -6434,9 +6527,11 @@ history prior to 2026-07-14.
 
 Haven routes kind-0 profile traffic to a curated relay pool
 (`profile::relay_pool`) that is disjoint from every relay carrying the user's
-kind-445 / kind-1059 traffic, and requests each member's kind-0 from exactly
-ONE pool relay chosen by a stable salted rendezvous hash
-(`profile::assignment`). A relay therefore sees either the user's encrypted
+kind-445 / kind-1059 traffic, and requests each member's kind-0 from the ONE
+pool relay a stable salted rendezvous hash picks, and from that author's
+second-ranked relay only on a miss or when the first did not answer — two at
+most while the pool and the install's salt stand (`profile::assignment`; a
+pool change re-ranks). A relay therefore sees either the user's encrypted
 location traffic or their profile queries — never both. The pool is
 host-disjoint from the account seed, the discovery plane and, since 2026-10-31,
 the location pool (`tests/profile_plane_separation.rs`). The same day four
@@ -6476,7 +6571,10 @@ which pool relay a peer will read it from. Publishing the user's own kind-0 to
 a subset would make them invisible to every peer assigned elsewhere, so publish
 targets the **entire** usable pool. Consequence: every pool relay learns
 `(our pubkey, our IP)`, and the one that also serves our reads can link our
-identity to our ~`1/N` contact sample. Reads remain unauthenticated — the fetch
+identity to our ~`1/N` contact sample. "The entire usable pool" includes a
+relay that joins it later: a coverage pass re-sends the published kind-0 to
+it unchanged (see *A pool relay the profile was never sent to* above), or the
+peers assigned there would read a bare key until the next edit. Reads remain unauthenticated — the fetch
 path is built with no signer and structurally cannot answer a NIP-42 challenge
 — so this is IP-level linkage only, never an authenticated one.
 

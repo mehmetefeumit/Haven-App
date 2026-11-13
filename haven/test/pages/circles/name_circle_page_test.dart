@@ -6,10 +6,12 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/constants/circle_name_policy.dart';
+import 'package:haven/src/constants/profile_refresh_tiers.dart';
 import 'package:haven/src/pages/circles/name_circle_page.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
@@ -20,18 +22,24 @@ import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/member_directory_service.dart';
+import 'package:haven/src/services/profile_service.dart';
 import 'package:haven/src/services/publish_stagger.dart'
     show kMaxCirclesPerAccount;
 import 'package:haven/src/services/relay_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/utils/bidi_isolate.dart';
+import 'package:haven/src/utils/npub_speech.dart';
 import 'package:haven/src/utils/npub_validator.dart';
 import 'package:haven/src/widgets/circles/missed_invitations_dialog.dart';
+import 'package:haven/src/widgets/circles/selected_members_list.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../helpers/accessibility_announcements.dart';
 import '../../helpers/log_capture.dart';
 import '../../mocks/mock_circle_service.dart';
+import '../../mocks/mock_member_directory_service.dart';
+import '../../mocks/mock_profile_service.dart';
 
 // ---------------------------------------------------------------------------
 // Fixtures / fakes shared by the "create flow" group below
@@ -39,8 +47,7 @@ import '../../mocks/mock_circle_service.dart';
 
 /// The test identity used by every "create flow" test.
 final _testIdentity = Identity(
-  pubkeyHex:
-      'abc123def456abc123def456abc123def456abc123def456abc123def456abcd',
+  pubkeyHex: 'abc123def456abc123def456abc123def456abc123def456abc123def456abcd',
   npub: 'npub1test',
   createdAt: DateTime(2024),
 );
@@ -123,8 +130,16 @@ KeyPackageData _invitee(String pubkey) => KeyPackageData(
 List<Override> _overrides({
   required MockCircleService mockCircle,
   IdentityNotifier Function()? identityNotifier,
+  MockProfileService? profileService,
+  MemberDirectory? directory,
 }) {
   return [
+    if (profileService != null)
+      profileServiceProvider.overrideWithValue(profileService),
+    if (directory != null)
+      memberDirectoryServiceProvider.overrideWithValue(
+        MockMemberDirectoryService(directory: directory),
+      ),
     circleServiceProvider.overrideWithValue(mockCircle),
     identityServiceProvider.overrideWithValue(const _MockIdentityService()),
     identityProvider.overrideWith((_) async => _testIdentity),
@@ -231,9 +246,7 @@ Future<AppLocalizations> _createCircle(
   await tester.pumpAndSettle();
 
   expect(find.byType(NameCirclePage), findsOneWidget);
-  final l10n = AppLocalizations.of(
-    tester.element(find.byType(NameCirclePage)),
-  );
+  final l10n = AppLocalizations.of(tester.element(find.byType(NameCirclePage)));
 
   await tester.enterText(find.byKey(WidgetKeys.circleNameInput), name);
   await tester.ensureVisible(find.byKey(WidgetKeys.createCircleConfirm));
@@ -273,14 +286,8 @@ void main() {
 
     // The useful disclosure is present: mutual location + name visibility,
     // the name's source, and cross-circle isolation.
-    expect(
-      find.textContaining('public name and photo'),
-      findsOneWidget,
-    );
-    expect(
-      find.textContaining('public on the Nostr network'),
-      findsOneWidget,
-    );
+    expect(find.textContaining('public name and photo'), findsOneWidget);
+    expect(find.textContaining('public on the Nostr network'), findsOneWidget);
     expect(
       find.textContaining('stays separate from any others'),
       findsOneWidget,
@@ -367,10 +374,7 @@ void main() {
         final overCap = flag * (kCircleNameMaxGraphemes + 5);
         expect(overCap.length, greaterThan(kCircleNameMaxLength));
 
-        await tester.enterText(
-          find.byKey(WidgetKeys.circleNameInput),
-          overCap,
-        );
+        await tester.enterText(find.byKey(WidgetKeys.circleNameInput), overCap);
         await tester.pump();
 
         final committed = tester
@@ -473,7 +477,9 @@ void main() {
         final l10n = await _createCircle(tester, name: 'Weekend Trip');
 
         expect(
-          find.text(l10n.nameCircleCreatedSnack(bidiIsolate('Weekend Trip'), 2)),
+          find.text(
+            l10n.nameCircleCreatedSnack(bidiIsolate('Weekend Trip'), 2),
+          ),
           findsOneWidget,
         );
 
@@ -510,11 +516,7 @@ void main() {
           _buildNavApp(
             container: container,
             observer: observer,
-            memberKeyPackages: [
-              _invitee('a'),
-              _invitee('b'),
-              _invitee('c'),
-            ],
+            memberKeyPackages: [_invitee('a'), _invitee('b'), _invitee('c')],
           ),
         );
 
@@ -559,8 +561,10 @@ void main() {
       'partial sending to several people says the count and offers who was '
       'missed',
       (tester) async {
-        const missedB = 'npub1bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
-        const missedC = 'npub1cccccccccccccccccccccccccccccccccccccccccccccccccccccccccc';
+        const missedB =
+            'npub1bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+        const missedC =
+            'npub1cccccccccccccccccccccccccccccccccccccccccccccccccccccccccc';
         final mockCircle = MockCircleService()
           ..createCircleResult = CircleCreationResult(
             circle: TestCircleFactory.createCircle(displayName: 'Family'),
@@ -601,7 +605,8 @@ void main() {
             ),
           ),
           findsOneWidget,
-          reason: 'the member list does not mark who was missed, so the '
+          reason:
+              'the member list does not mark who was missed, so the '
               'remedy is only doable if the snack can say who',
         );
         expect(snack.showCloseIcon, isTrue, reason: 'and it can be closed');
@@ -716,7 +721,11 @@ void main() {
           matching: find.byType(Scrollable),
         );
         final position = tester.state<ScrollableState>(message).position;
-        expect(position.maxScrollExtent, greaterThan(0), reason: 'precondition');
+        expect(
+          position.maxScrollExtent,
+          greaterThan(0),
+          reason: 'precondition',
+        );
         await tester.drag(message, const Offset(0, -2000));
         await tester.pump();
         expect(position.pixels, position.maxScrollExtent);
@@ -775,7 +784,8 @@ void main() {
         expect(
           find.byType(BackButton),
           findsNothing,
-          reason: 'an arrow that does nothing for up to a minute reads as broken',
+          reason:
+              'an arrow that does nothing for up to a minute reads as broken',
         );
 
         tester.takeAnnouncements();
@@ -961,14 +971,16 @@ void main() {
               caseSensitive: false,
             ),
           ),
-          reason: 'the ceiling must be MARKED: a bare positive ("you can be '
+          reason:
+              'the ceiling must be MARKED: a bare positive ("you can be '
               'in 10 circles") reads as capability, and eleven of the twelve '
               'locales had to add a limiter to the unmarked wording',
         );
         expect(
           refusal,
           matches(RegExp(r'\bleave\b', caseSensitive: false)),
-          reason: 'the remedy is leaving a circle; without it the refusal is a '
+          reason:
+              'the remedy is leaving a circle; without it the refusal is a '
               'dead end',
         );
         expect(
@@ -1033,13 +1045,15 @@ void main() {
       expect(
         node.label,
         message,
-        reason: 'the live region must carry the refusal itself — a container '
+        reason:
+            'the live region must carry the refusal itself — a container '
             'node with no label announces nothing',
       );
       expect(
         node.flagsCollection.isLiveRegion,
         isTrue,
-        reason: 'without isLiveRegion on the node that carries the message, '
+        reason:
+            'without isLiveRegion on the node that carries the message, '
             'TalkBack and VoiceOver stay silent when it appears, and the '
             'progress live region that used to be on screen has just been '
             'removed by the same setState',
@@ -1076,9 +1090,7 @@ void main() {
       expectAnnounced(tester, l10n.circleCreateRefusedNoLocationRelay);
       expect(find.text(l10n.nameCircleCreateError), findsNothing);
       expect(
-        find.textContaining(
-          const CircleNoLocationRelayException().message,
-        ),
+        find.textContaining(const CircleNoLocationRelayException().message),
         findsNothing,
         reason: 'Rule 8: the exception text never reaches the screen',
       );
@@ -1143,6 +1155,202 @@ void main() {
       );
       expectAnnounced(tester, l10n.nameCircleIdentityError);
       handle.dispose();
+    });
+  });
+
+  group('NameCirclePage — who is about to be invited, and their profiles', () {
+    const aliceHex =
+        'a11ce0000000000000000000000000000000000000000000000000000000cafe';
+    const aliceNpub =
+        'npub15ywwqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqetlqhgm683';
+
+    MemberDirectory aliceDirectory() => buildDirectory(
+      entries: const [
+        DirectoryEntry(
+          pubkeyHex: aliceHex,
+          npub: aliceNpub,
+          tier: DirectoryTier.current,
+        ),
+      ],
+      profiles: const {
+        aliceHex: Profile(pubkeyHex: aliceHex, displayName: 'Alice Aardvark'),
+      },
+      fold: (value) => value.toLowerCase(),
+    );
+
+    List<Map<String, Object?>> refreshes(MockProfileService service) => [
+      for (final c in service.methodCalls)
+        if (c.method == 'refreshMemberProfiles') c.args,
+    ];
+
+    testWidgets('N1. the confirmation names each person over their key', (
+      tester,
+    ) async {
+      final profiles = MockProfileService();
+      final container = ProviderContainer(
+        overrides: _overrides(
+          mockCircle: MockCircleService(),
+          profileService: profiles,
+          directory: aliceDirectory(),
+        ),
+      );
+      addTearDown(container.dispose);
+      await tester.pumpWidget(
+        _buildNavApp(
+          container: container,
+          observer: _PopCountingNavigatorObserver(),
+          memberKeyPackages: [_invitee(aliceNpub)],
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Open'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('OpenName'));
+      await tester.pumpAndSettle();
+
+      final summary = find.byType(SelectedMembersSummary);
+      expect(
+        find.descendant(of: summary, matching: find.text('Alice Aardvark')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: summary,
+          matching: find.text(NpubValidator.shortenForDisplay(aliceNpub)),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        profiles.methodCalls.where(
+          (c) => c.method == 'resolveTypedStrangerProfile',
+        ),
+        isEmpty,
+      );
+    });
+
+    testWidgets('N4. a chip is spoken as the person: the name, with the key '
+        'one action away, or else the key in chunks', (tester) async {
+      const unnamedNpub =
+          'npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqspcd5';
+      final handle = tester.ensureSemantics();
+      final container = ProviderContainer(
+        overrides: _overrides(
+          mockCircle: MockCircleService(),
+          profileService: MockProfileService(),
+          directory: aliceDirectory(),
+        ),
+      );
+      addTearDown(container.dispose);
+      await tester.pumpWidget(
+        _buildNavApp(
+          container: container,
+          observer: _PopCountingNavigatorObserver(),
+          memberKeyPackages: [_invitee(aliceNpub), _invitee(unnamedNpub)],
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Open'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('OpenName'));
+      await tester.pumpAndSettle();
+      final said = captureAccessibilityAnnouncements(tester);
+      final l10n = AppLocalizations.of(
+        tester.element(find.byType(NameCirclePage)),
+      );
+      final aliceKey = NpubValidator.shortenForDisplay(aliceNpub);
+      final unnamedKey = NpubValidator.shortenForDisplay(unnamedNpub);
+
+      final named = tester.getSemantics(find.text('Alice Aardvark'));
+      expect(named.label, bidiIsolate('Alice Aardvark'));
+      expect(
+        tester.getSemantics(find.text(unnamedKey)).label,
+        bidiIsolate(chunkNpubForSpeech(unnamedKey)),
+        reason: 'a trimmed key read as one word is noise',
+      );
+
+      // The name keeps the key out of the label, so this is how it is heard.
+      final readKey = named
+          .getSemanticsData()
+          .customSemanticsActionIds!
+          .singleWhere(
+            (id) =>
+                CustomSemanticsAction.getAction(id)!.label ==
+                l10n.memberPickerReadPublicKey,
+          );
+      named.owner!.performAction(
+        named.id,
+        SemanticsAction.customAction,
+        readKey,
+      );
+      await tester.pump();
+      expect(said, [chunkNpubForSpeech(aliceKey)]);
+      handle.dispose();
+    });
+
+    testWidgets('N2. creating the circle refreshes profiles once, over the '
+        'union, at the interactive tier', (tester) async {
+      final profiles = MockProfileService();
+      final container = ProviderContainer(
+        overrides: _overrides(
+          mockCircle: MockCircleService()
+            ..createCircleResult = CircleCreationResult(
+              circle: TestCircleFactory.createCircle(displayName: 'Trip'),
+              welcomesSent: 1,
+              welcomesTotal: 1,
+            ),
+          profileService: profiles,
+        ),
+      );
+      addTearDown(container.dispose);
+      await tester.pumpWidget(
+        _buildNavApp(
+          container: container,
+          observer: _PopCountingNavigatorObserver(),
+          memberKeyPackages: [_invitee('a')],
+        ),
+      );
+
+      await _createCircle(tester, name: 'Trip');
+      for (var i = 0; i < 6; i++) {
+        await tester.pump(Duration.zero);
+      }
+      container.read(joinWatcherProvider.notifier).cancel();
+
+      final calls = refreshes(profiles);
+      expect(calls, hasLength(1));
+      expect(calls.single['maxAge'], profileInteractiveMaxAge);
+      expect(
+        calls.single['pubkeyHexes'],
+        contains(_testIdentity.pubkeyHex),
+        reason: 'refreshAll builds the union, own pubkey included',
+      );
+    });
+
+    testWidgets('N3. a create the core refuses refreshes nothing', (
+      tester,
+    ) async {
+      final profiles = MockProfileService();
+      final container = ProviderContainer(
+        overrides: _overrides(
+          mockCircle: _UnreachableInviteeCircleService(),
+          profileService: profiles,
+        ),
+      );
+      addTearDown(container.dispose);
+      await tester.pumpWidget(
+        _buildNavApp(
+          container: container,
+          observer: _PopCountingNavigatorObserver(),
+          memberKeyPackages: [_invitee('a')],
+        ),
+      );
+
+      await _createCircle(tester, name: 'Trip');
+      for (var i = 0; i < 6; i++) {
+        await tester.pump(Duration.zero);
+      }
+
+      expect(refreshes(profiles), isEmpty);
     });
   });
 }

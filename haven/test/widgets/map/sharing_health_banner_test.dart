@@ -142,8 +142,8 @@ void main() {
   }
 
   /// A foreground signal the test drives, disposed with the test.
-  ValueNotifier<bool> foregroundSignal({bool initial = true}) {
-    final signal = ValueNotifier<bool>(initial);
+  ValueNotifier<bool> foregroundSignal() {
+    final signal = ValueNotifier<bool>(true);
     addTearDown(signal.dispose);
     return signal;
   }
@@ -153,9 +153,9 @@ void main() {
   ///
   /// Everything the model reads is injected: the clock, the persisted evidence
   /// (none — the scenario this exists for turns entirely on the relay phase),
-  /// the selected circle and the identity. Pumped BACKGROUNDED so the model's
-  /// periodic re-derivation never arms and every derivation below is one the
-  /// test asked for.
+  /// the selected circle and the identity. The model's own timers never fire:
+  /// a widget test's clock moves only when it is pumped, so every derivation
+  /// below is one the test asked for.
   Future<ProviderContainer> pumpRealModel(
     WidgetTester tester, {
     required ValueListenable<bool> foreground,
@@ -1197,7 +1197,9 @@ void main() {
       // backgrounds the app and the first burst pauses the engine. Nothing
       // recovered — the app stopped looking — so nothing may be spoken.
       final announcements = captureAnnouncements(tester);
-      final foreground = foregroundSignal(initial: false);
+      // In front while the disconnect stands: a cause is confirmed only
+      // through time the app watched it.
+      final foreground = foregroundSignal();
       var now = _t0;
       final container = await pumpRealModel(
         tester,
@@ -1218,6 +1220,7 @@ void main() {
       );
       expect(announcements, isEmpty, reason: 'nothing has resumed yet');
 
+      foreground.value = false;
       status.onStatus(FfiSyncStatusReason.paused);
       now = _t0.add(kSharingFaultConfirmationWindow * 10);
       await container.read(sharingHealthProvider.notifier).refresh();

@@ -46,7 +46,7 @@ use haven_core::profile::{
     PendingEdits, ProfileMetadata, ProfileState, PROFILE_SYNC_BACKOFF_SECS,
 };
 use haven_core::relay::scripted_relay::{Frame, ScriptedRelay, Verdict};
-use haven_core::relay::{allow_ws_loopback_for_test, normalize_relay_url};
+use haven_core::relay::{allow_ws_loopback_for_test, normalize_relay_url, RelayManager};
 use image::{codecs::jpeg::JpegEncoder, RgbImage};
 use nostr::prelude::ToBech32 as _;
 use nostr::util::BoxedFuture;
@@ -357,7 +357,7 @@ fn jpeg(seed: u8) -> Vec<u8> {
 
 async fn sync(manager: &CircleManager, keys: &Keys, now: i64) -> ProfileSyncReport {
     manager
-        .sync_own_profile(keys, move || now)
+        .sync_own_profile(&keys.public_key(), Some(keys), move || now)
         .await
         .expect("sync runs")
 }
@@ -701,12 +701,20 @@ async fn two_concurrent_syncs_publish_exactly_one_kind0() {
     let first = {
         let manager = Arc::clone(&manager);
         let keys = keys.clone();
-        tokio::spawn(async move { manager.sync_own_profile(&keys, || NOW).await })
+        tokio::spawn(async move {
+            manager
+                .sync_own_profile(&keys.public_key(), Some(&keys), || NOW)
+                .await
+        })
     };
     let second = {
         let manager = Arc::clone(&manager);
         let keys = keys.clone();
-        tokio::spawn(async move { manager.sync_own_profile(&keys, || NOW).await })
+        tokio::spawn(async move {
+            manager
+                .sync_own_profile(&keys.public_key(), Some(&keys), || NOW)
+                .await
+        })
     };
     let reports = [
         first.await.expect("task 1").expect("sync 1"),
@@ -1003,7 +1011,11 @@ async fn a_delete_during_an_inflight_sync_cannot_resurrect_the_profile() {
     let inflight = {
         let manager = Arc::clone(&manager);
         let keys = keys.clone();
-        tokio::spawn(async move { manager.sync_own_profile(&keys, || NOW).await })
+        tokio::spawn(async move {
+            manager
+                .sync_own_profile(&keys.public_key(), Some(&keys), || NOW)
+                .await
+        })
     };
     hit.recv()
         .await
@@ -1036,7 +1048,11 @@ async fn a_delete_during_an_inflight_sync_cannot_resurrect_the_profile() {
     let overtaking = {
         let manager = Arc::clone(&manager);
         let keys = keys.clone();
-        tokio::spawn(async move { manager.sync_own_profile(&keys, || NOW + 2).await })
+        tokio::spawn(async move {
+            manager
+                .sync_own_profile(&keys.public_key(), Some(&keys), || NOW + 2)
+                .await
+        })
     };
     // The retraction's cancel half, run exactly where the FFI retraction runs
     // it: inside the lock.
@@ -1720,7 +1736,11 @@ async fn a_removal_staged_while_a_publish_is_in_flight_is_neither_lost_nor_repor
     let inflight = {
         let manager = Arc::clone(&manager);
         let keys = keys.clone();
-        tokio::spawn(async move { manager.sync_own_profile(&keys, || NOW + 1).await })
+        tokio::spawn(async move {
+            manager
+                .sync_own_profile(&keys.public_key(), Some(&keys), || NOW + 1)
+                .await
+        })
     };
     hit.recv().await.expect("the publish reached a relay");
     manager
@@ -1818,7 +1838,9 @@ async fn a_slow_sync_dates_its_backoff_from_when_it_ends() {
         let clock = Arc::clone(&clock);
         tokio::spawn(async move {
             manager
-                .sync_own_profile(&keys, move || clock.load(Ordering::SeqCst))
+                .sync_own_profile(&keys.public_key(), Some(&keys), move || {
+                    clock.load(Ordering::SeqCst)
+                })
                 .await
         })
     };
@@ -1847,6 +1869,389 @@ async fn a_slow_sync_dates_its_backoff_from_when_it_ends() {
 // ===========================================================================
 // Rule 15
 // ===========================================================================
+
+// ===========================================================================
+// The covered pool: a relay the published profile was never sent to
+// ===========================================================================
+
+/// An in-process relay that stores what it is sent and serves it back.
+async fn storing_relay() -> (LocalRelay, String) {
+    let relay = LocalRelay::new(RelayBuilder::default());
+    relay.run().await.expect("local relay runs");
+    let url = relay.url().await.to_string();
+    (relay, url)
+}
+
+/// A relay of the account's own profile pool, beside the three plane relays.
+fn joins_the_pool(manager: &CircleManager, url: &str) {
+    manager
+        .add_user_relay(url, RelayType::Profile)
+        .expect("add a profile relay");
+}
+
+/// The ids of the own kind-0s `url` serves.
+async fn served_by(url: &str, own: PublicKey) -> Vec<String> {
+    RelayManager::new()
+        .fetch_events(
+            Filter::new().author(own).kind(Kind::Metadata),
+            &[url.to_owned()],
+            None,
+        )
+        .await
+        .expect("the relay answers")
+        .iter()
+        .map(|e| e.id.to_hex())
+        .collect()
+}
+
+/// A coverage pass: nothing is saved, so no key is handed over.
+async fn coverage_pass(manager: &CircleManager, keys: &Keys, now: i64) -> ProfileSyncReport {
+    manager
+        .sync_own_profile(&keys.public_key(), None, move || now)
+        .await
+        .expect("the pass runs")
+}
+
+fn owes(manager: &CircleManager, own_hex: &str, now: i64) -> bool {
+    manager
+        .profile_pending_state(own_hex, now)
+        .expect("pending state")
+        .pending
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_relay_that_joins_the_pool_is_sent_the_published_profile_byte_for_byte() {
+    // The field failure: a release swapped pool relays, the outbox was clean,
+    // and nothing ever sent the profile to the relays that joined — where
+    // every peer whose salt points there reads a bare key.
+    let plane = plane();
+    let (_dir, manager, keys, own_hex) = account();
+    manager
+        .stage_own_profile_edits(&own_hex, &name_edit("Covered"), NOW)
+        .expect("stage");
+    assert!(!sync(&manager, &keys, NOW).await.still_pending);
+    let first = plane.ledger.ids(&own_hex);
+    assert_eq!(first.len(), 1);
+    assert!(!owes(&manager, &own_hex, NOW), "the whole pool serves it");
+
+    let (_joined, joined_url) = storing_relay().await;
+    joins_the_pool(&manager, &joined_url);
+    assert!(
+        owes(&manager, &own_hex, NOW),
+        "a relay the profile was never sent to is owed it, with nothing saved",
+    );
+
+    let report = coverage_pass(&manager, &keys, NOW + 1).await;
+    assert_eq!(report.outcome, ProfileSyncOutcome::Published);
+    assert!(!report.still_pending);
+    assert_eq!(
+        served_by(&joined_url, keys.public_key()).await,
+        first,
+        "the very event the first pass signed",
+    );
+    assert_eq!(plane.ledger.ids(&own_hex), first, "nothing new was signed");
+    assert_eq!(
+        plane.ledger.admissions(&own_hex),
+        POOL_SIZE,
+        "the relays that already serve it were offered nothing",
+    );
+
+    // Settled: the next trigger neither reads nor publishes.
+    let settled = plane.ledger.wire(&own_hex);
+    let again = coverage_pass(&manager, &keys, NOW + 2).await;
+    assert_eq!(again.outcome, ProfileSyncOutcome::NothingPending);
+    assert_eq!(plane.ledger.wire(&own_hex), settled);
+    assert!(!owes(&manager, &own_hex, NOW + 2));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_install_with_no_record_adopts_the_copy_the_pool_serves() {
+    // A storage reset leaves no outbox row and no record of any publish, while
+    // the profile stays public on the relays that held it.
+    let plane = plane();
+    let (_dir, published_from, keys, own_hex) = account();
+    published_from
+        .stage_own_profile_edits(&own_hex, &name_edit("Before The Reset"), NOW)
+        .expect("stage");
+    assert!(!sync(&published_from, &keys, NOW).await.still_pending);
+    let first = plane.ledger.ids(&own_hex);
+
+    let reset_dir = TempDir::new().expect("temp dir");
+    let reset = CircleManager::new_unencrypted(reset_dir.path(), &keys).expect("manager opens");
+    let (_lacking, lacking_url) = storing_relay().await;
+    joins_the_pool(&reset, &lacking_url);
+    assert!(reset.get_profile(&own_hex).unwrap().is_none());
+    assert!(
+        owes(&reset, &own_hex, NOW),
+        "no record is not a clean record"
+    );
+
+    let report = coverage_pass(&reset, &keys, NOW + 1).await;
+    assert_eq!(report.outcome, ProfileSyncOutcome::Published);
+    assert!(!report.still_pending);
+    assert_eq!(served_by(&lacking_url, keys.public_key()).await, first);
+    assert_eq!(plane.ledger.ids(&own_hex), first, "nothing new was signed");
+    assert_eq!(plane.ledger.admissions(&own_hex), POOL_SIZE);
+    assert_eq!(
+        reset
+            .get_profile(&own_hex)
+            .unwrap()
+            .expect("the copy read is cached")
+            .metadata
+            .display_name(),
+        Some("Before The Reset"),
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_account_no_relay_serves_a_profile_of_settles_without_publishing_one() {
+    // A coverage pass re-sends what is public. It never makes something
+    // public: an account that saved nothing must leave no event behind.
+    let plane = plane();
+    let (_dir, manager, keys, own_hex) = account();
+    assert!(owes(&manager, &own_hex, NOW));
+
+    let report = coverage_pass(&manager, &keys, NOW).await;
+    assert_eq!(report.outcome, ProfileSyncOutcome::NothingPending);
+    assert!(!report.still_pending);
+    assert_eq!(
+        plane.ledger.wire(&own_hex),
+        (0, POOL_SIZE),
+        "every relay was asked, and none was offered anything",
+    );
+
+    coverage_pass(&manager, &keys, NOW + 1).await;
+    assert_eq!(plane.ledger.wire(&own_hex), (0, POOL_SIZE), "and not again");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_copy_is_not_resent_while_a_relay_that_may_hold_a_newer_one_has_not_answered() {
+    // One relay still serves a profile the user has since deleted or renamed,
+    // and the relays holding the newer copy are out of reach. Re-sending what
+    // was read would put the retracted profile on every relay that lacks it.
+    let plane = plane();
+    let (_dir, manager, keys, own_hex) = account();
+    let (_stale, stale_url) = storing_relay().await;
+    RelayManager::new()
+        .publish_event(
+            &signed(&keys, r#"{"display_name":"Retracted Since"}"#, 100),
+            std::slice::from_ref(&stale_url),
+        )
+        .await
+        .expect("seed the stale copy");
+    joins_the_pool(&manager, &stale_url);
+    joins_the_pool(&manager, &dead_relay_url());
+
+    let report = coverage_pass(&manager, &keys, NOW).await;
+    assert_eq!(report.outcome, ProfileSyncOutcome::PublishFailed);
+    assert!(report.still_pending, "it is still owed a whole read");
+    assert_eq!(
+        plane.ledger.admissions(&own_hex),
+        0,
+        "no relay that lacks the copy was offered it",
+    );
+    // An install with no outbox row still backs off, or every resume would
+    // read the whole pool again.
+    let first_rung = PROFILE_SYNC_BACKOFF_SECS[0];
+    let state = |now| manager.profile_pending_state(&own_hex, now).unwrap();
+    assert!(!state(NOW + first_rung - 1).retry_due);
+    assert!(state(NOW + first_rung).retry_due);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_copy_this_device_published_reaches_a_joined_relay_past_one_that_is_down() {
+    // One pool relay out of reach must not keep the profile off every relay
+    // that joined: what this device recorded as its own profile is the publish
+    // it already made, and re-sending it retracts nothing this device knows of.
+    let plane = plane();
+    let (_dir, manager, keys, own_hex) = account();
+    manager
+        .stage_own_profile_edits(&own_hex, &name_edit("Recorded Here"), NOW)
+        .expect("stage");
+    assert!(!sync(&manager, &keys, NOW).await.still_pending);
+    let first = plane.ledger.ids(&own_hex);
+
+    let (_joined, joined_url) = storing_relay().await;
+    joins_the_pool(&manager, &joined_url);
+    joins_the_pool(&manager, &dead_relay_url());
+
+    let report = coverage_pass(&manager, &keys, NOW + 1).await;
+    assert_eq!(report.outcome, ProfileSyncOutcome::Published);
+    assert!(report.still_pending, "the relay that is down is still owed");
+    assert_eq!(served_by(&joined_url, keys.public_key()).await, first);
+    assert_eq!(plane.ledger.ids(&own_hex), first, "nothing new was signed");
+
+    // The relay still owed is retried on the ladder, not on every trigger.
+    let first_rung = PROFILE_SYNC_BACKOFF_SECS[0];
+    let state = |now| manager.profile_pending_state(&own_hex, now).unwrap();
+    assert!(!state(NOW + first_rung).retry_due);
+    assert!(state(NOW + 1 + first_rung).retry_due);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_copy_older_than_this_devices_own_row_is_not_put_on_a_relay_that_lacks_it() {
+    // This device knows of a newer own profile than any relay serves — the
+    // dated record a deletion keeps. What the relays hold is what it replaced.
+    let plane = plane();
+    let (_dir, manager, keys, own_hex) = account();
+    let (_stale, stale_url) = storing_relay().await;
+    RelayManager::new()
+        .publish_event(
+            &signed(&keys, r#"{"display_name":"Replaced"}"#, 100),
+            std::slice::from_ref(&stale_url),
+        )
+        .await
+        .expect("seed the stale copy");
+    joins_the_pool(&manager, &stale_url);
+    manager
+        .upsert_profile_if_newer(&CachedProfile {
+            pubkey_hex: own_hex.clone(),
+            metadata: ProfileMetadata::default(),
+            state: ProfileState::Known,
+            event_created_at: 200,
+            fetched_at: NOW,
+        })
+        .expect("the dated own row");
+
+    let report = coverage_pass(&manager, &keys, NOW).await;
+    assert_eq!(report.outcome, ProfileSyncOutcome::NothingPending);
+    assert!(!report.still_pending);
+    assert_eq!(plane.ledger.admissions(&own_hex), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_save_made_while_a_coverage_pass_is_on_the_network_keeps_its_own_record_and_ladder() {
+    // The pass records against the version it started from. Recorded against
+    // the save that landed meanwhile, the copy it re-sent would stand as the
+    // event that save owes, and the backoff it earned would hold the save back.
+    let plane = plane();
+    let (_dir, manager, keys, own_hex) = account();
+    let manager = Arc::new(manager);
+    let (_holder, holder_url) = storing_relay().await;
+    let held = signed(&keys, r#"{"display_name":"Already Public"}"#, 100);
+    RelayManager::new()
+        .publish_event(&held, std::slice::from_ref(&holder_url))
+        .await
+        .expect("seed the public copy");
+    joins_the_pool(&manager, &holder_url);
+    // One relay refuses, so the pass ends owing it the copy.
+    let refusing = ScriptedRelay::start();
+    refusing.on_publish(|_| Verdict::Refuse("blocked: not today".to_owned()));
+    joins_the_pool(&manager, refusing.url());
+
+    let (mut hit, open) = plane.ledger.arm_gate(&own_hex);
+    let pass = {
+        let manager = Arc::clone(&manager);
+        let own = keys.public_key();
+        tokio::spawn(async move { manager.sync_own_profile(&own, None, || NOW).await })
+    };
+    hit.recv().await.expect("the pass offered the copy");
+    manager
+        .stage_own_profile_edits(&own_hex, &name_edit("Saved Meanwhile"), NOW)
+        .expect("stage");
+    open.send(true).expect("release the gate");
+    pass.await.expect("task").expect("the pass ends");
+
+    let saved = manager
+        .pending_profile_sync(&own_hex)
+        .unwrap()
+        .expect("the save is still pending");
+    assert!(
+        manager
+            .profile_publish_debt(&keys.public_key(), saved.local_version)
+            .unwrap()
+            .is_none(),
+        "the copy the pass re-sent is not the event this save owes",
+    );
+    assert!(
+        manager
+            .profile_pending_state(&own_hex, NOW)
+            .unwrap()
+            .retry_due,
+        "a save is published at once, not after a backoff the pass earned",
+    );
+
+    sync(&manager, &keys, NOW + 1).await;
+    let published = plane.ledger.published(&own_hex);
+    assert!(
+        published
+            .last()
+            .is_some_and(|c| c.contains("Saved Meanwhile")),
+        "the save reached the relays: {published:?}",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_relay_refusing_the_served_copy_as_too_old_is_never_sent_one_signed_afresh() {
+    // With nothing saved there is nothing to sign: re-dating another pass's
+    // event would publish a profile the user did not save.
+    let plane = plane();
+    let (_dir, manager, keys, own_hex) = account();
+    let (_holder, holder_url) = storing_relay().await;
+    let held = signed(&keys, r#"{"display_name":"Months Old"}"#, 100);
+    RelayManager::new()
+        .publish_event(&held, std::slice::from_ref(&holder_url))
+        .await
+        .expect("seed the public copy");
+    joins_the_pool(&manager, &holder_url);
+    let picky = ScriptedRelay::start();
+    picky.on_publish(|_| Verdict::Refuse("invalid: event too old".to_owned()));
+    joins_the_pool(&manager, picky.url());
+
+    let first = coverage_pass(&manager, &keys, NOW).await;
+    assert_eq!(first.outcome, ProfileSyncOutcome::Published);
+    assert!(first.still_pending, "one relay refused it");
+    assert_eq!(plane.ledger.admissions(&own_hex), POOL_SIZE);
+
+    // The retry, with the key in hand this time: still nothing to sign.
+    let later = NOW + PROFILE_SYNC_BACKOFF_SECS[0];
+    let second = sync(&manager, &keys, later).await;
+    assert!(
+        second.still_pending,
+        "and it stays owed to that relay alone"
+    );
+    assert_eq!(picky.offers(), 2, "offered again, the same event");
+    assert!(picky.published().is_empty());
+    assert_eq!(
+        plane.ledger.ids(&own_hex),
+        [held.id.to_hex()],
+        "one event in all — the one the pool already served",
+    );
+    assert_eq!(plane.ledger.admissions(&own_hex), POOL_SIZE);
+}
+
+#[tokio::test]
+async fn a_coverage_pass_logs_no_relay_url_event_id_or_pubkey() {
+    let mut needles: Vec<String> = Vec::new();
+    let lines = capture_haven_log_here(async {
+        let (_dir, manager, keys, own_hex) = account();
+        let (_holder, holder_url) = storing_relay().await;
+        let held = signed(&keys, r#"{"display_name":"Logged Coverage"}"#, 100);
+        RelayManager::new()
+            .publish_event(&held, std::slice::from_ref(&holder_url))
+            .await
+            .expect("seed the public copy");
+        joins_the_pool(&manager, &holder_url);
+        let refusing = ScriptedRelay::start();
+        refusing
+            .on_publish(|_| Verdict::Refuse("blocked: see wss://leak.example/refused".to_owned()));
+        joins_the_pool(&manager, refusing.url());
+
+        assert!(coverage_pass(&manager, &keys, NOW).await.still_pending);
+        needles.push(own_hex);
+        needles.push(keys.public_key().to_bech32().expect("npub"));
+        needles.push(held.id.to_hex());
+        needles.push("Logged Coverage".to_owned());
+        needles.extend(manager.usable_profile_relays().expect("pool"));
+    })
+    .await;
+
+    needles.push("leak.example".to_owned());
+    let ours = haven_core_lines(&lines);
+    assert_some_line_from(&ours, "haven_core::circle::profile_sync");
+    let needles: Vec<&str> = needles.iter().map(String::as_str).collect();
+    assert_no_needles(&ours, &needles);
+}
 
 #[tokio::test]
 async fn a_resend_and_a_redirect_log_no_relay_url_event_id_or_pubkey() {

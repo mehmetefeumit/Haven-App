@@ -683,7 +683,7 @@ void main() {
             final bobKpJson = (await relayMgrForKp.fetchMemberKeypackage(
               pubkey: bob.pubkeyHex,
               circle: aliceManager,
-            ))?.keyPackageJson;
+            )).member?.keyPackageJson;
             expect(
               bobKpJson,
               isNotNull,
@@ -964,7 +964,7 @@ void main() {
             final bobKpJson = (await relayMgrForKp.fetchMemberKeypackage(
               pubkey: bob.pubkeyHex,
               circle: aliceManager,
-            ))?.keyPackageJson;
+            )).member?.keyPackageJson;
             expect(
               bobKpJson,
               isNotNull,
@@ -1170,7 +1170,7 @@ void main() {
             final bobKpJson = (await relayMgrForKp.fetchMemberKeypackage(
               pubkey: bob.pubkeyHex,
               circle: aliceManager,
-            ))?.keyPackageJson;
+            )).member?.keyPackageJson;
             expect(
               bobKpJson,
               isNotNull,
@@ -1358,7 +1358,7 @@ void main() {
             final bobKpJson = (await relayMgr.fetchMemberKeypackage(
               pubkey: bob.pubkeyHex,
               circle: aliceManager,
-            ))?.keyPackageJson;
+            )).member?.keyPackageJson;
             expect(
               bobKpJson,
               isNotNull,

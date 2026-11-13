@@ -11,11 +11,14 @@ import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
+import 'package:haven/src/constants/profile_refresh_tiers.dart';
 import 'package:haven/src/pages/circles/add_member_page.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
@@ -28,6 +31,7 @@ import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/member_directory_service.dart';
 import 'package:haven/src/services/profile_service.dart';
+import 'package:haven/src/services/relay_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/npub_validator.dart';
@@ -209,13 +213,16 @@ List<Override> _overrides({
   required MockRelayService mockRelay,
   required MockCircleService mockCircle,
   MemberDirectory? directory,
+  MockProfileService? profileService,
 }) {
   return [
     relayServiceProvider.overrideWithValue(mockRelay),
     memberDirectoryServiceProvider.overrideWithValue(
       MockMemberDirectoryService(directory: directory),
     ),
-    profileServiceProvider.overrideWithValue(MockProfileService()),
+    profileServiceProvider.overrideWithValue(
+      profileService ?? MockProfileService(),
+    ),
     circleServiceProvider.overrideWithValue(mockCircle),
     identityServiceProvider.overrideWithValue(const _MockIdentityService()),
     identityProvider.overrideWith((_) async => _testIdentity),
@@ -284,11 +291,7 @@ void main() {
       final circle = _makeCircle();
 
       await tester.pumpWidget(
-        _buildApp(
-          circle: circle,
-          mockRelay: mockRelay,
-          mockCircle: mockCircle,
-        ),
+        _buildApp(circle: circle, mockRelay: mockRelay, mockCircle: mockCircle),
       );
       await tester.pumpAndSettle();
 
@@ -311,41 +314,36 @@ void main() {
     // -----------------------------------------------------------------------
     // 2. Valid member: confirm becomes enabled
     // -----------------------------------------------------------------------
-    testWidgets(
-      '2. valid npub fetches KP, shows valid tile, enables confirm',
-      (tester) async {
-        final mockRelay = MockRelayService(
-          keyPackageResult: _makeKp(_newMemberHex),
-        );
-        final mockCircle = MockCircleService();
-        final circle = _makeCircle();
+    testWidgets('2. valid npub fetches KP, shows valid tile, enables confirm', (
+      tester,
+    ) async {
+      final mockRelay = MockRelayService(
+        keyPackageResult: _makeKp(_newMemberHex),
+      );
+      final mockCircle = MockCircleService();
+      final circle = _makeCircle();
 
-        await tester.pumpWidget(
-          _buildApp(
-            circle: circle,
-            mockRelay: mockRelay,
-            mockCircle: mockCircle,
-          ),
-        );
-        await tester.pumpAndSettle();
+      await tester.pumpWidget(
+        _buildApp(circle: circle, mockRelay: mockRelay, mockCircle: mockCircle),
+      );
+      await tester.pumpAndSettle();
 
-        await _addMember(tester, _newMemberNpub);
+      await _addMember(tester, _newMemberNpub);
 
-        // Spinner may or may not be visible at this point — test 8 covers the
-        // in-flight state with an explicit gate. Allow all microtasks here.
-        await tester.pumpAndSettle();
+      // Spinner may or may not be visible at this point — test 8 covers the
+      // in-flight state with an explicit gate. Allow all microtasks here.
+      await tester.pumpAndSettle();
 
-        // Valid status.
-        expect(find.byIcon(LucideIcons.circleCheck), findsOneWidget);
-        expect(find.text('Ready to invite'), findsOneWidget);
+      // Valid status.
+      expect(find.byIcon(LucideIcons.circleCheck), findsOneWidget);
+      expect(find.text('Ready to invite'), findsOneWidget);
 
-        // Confirm button must now be enabled.
-        final button = tester.widget<FilledButton>(
-          find.byKey(WidgetKeys.addMemberConfirm),
-        );
-        expect(button.onPressed, isNotNull);
-      },
-    );
+      // Confirm button must now be enabled.
+      final button = tester.widget<FilledButton>(
+        find.byKey(WidgetKeys.addMemberConfirm),
+      );
+      expect(button.onPressed, isNotNull);
+    });
 
     // -----------------------------------------------------------------------
     // 3. Existing-member exclusion
@@ -390,9 +388,13 @@ void main() {
     // 4. No Haven account (null KP)
     // -----------------------------------------------------------------------
     testWidgets(
-      '4. null KP shows "No Haven account found"; confirm stays disabled',
+      '4. null KP shows the not-found-yet copy with a retry; confirm stays '
+      'disabled until the retry finds them',
       (tester) async {
-        final mockRelay = MockRelayService(); // keyPackageResult defaults null
+        // Someone who set up Haven a moment ago is findable a moment later:
+        // not found is retryable, never a dead end.
+        final mockRelay = MockRelayService()
+          ..keyPackageAnswers.addAll([null, _makeKp(_newMemberHex)]);
         final mockCircle = MockCircleService();
         final circle = _makeCircle();
 
@@ -409,12 +411,30 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(find.byIcon(LucideIcons.triangleAlert), findsOneWidget);
-        expect(find.text("Couldn't find a Haven account for this ID"), findsOneWidget);
+        expect(
+          find.text(
+            'No Haven account found for this ID yet. If they just set up '
+            'Haven, try again in a minute.',
+          ),
+          findsOneWidget,
+        );
+        expect(find.byIcon(LucideIcons.refreshCw), findsOneWidget);
 
         final button = tester.widget<FilledButton>(
           find.byKey(WidgetKeys.addMemberConfirm),
         );
         expect(button.onPressed, isNull);
+
+        await tester.tap(find.byIcon(LucideIcons.refreshCw));
+        await tester.pumpAndSettle();
+
+        expect(find.text('Ready to invite'), findsOneWidget);
+        expect(
+          tester
+              .widget<FilledButton>(find.byKey(WidgetKeys.addMemberConfirm))
+              .onPressed,
+          isNotNull,
+        );
       },
     );
 
@@ -440,10 +460,7 @@ void main() {
         final observer = _RecordingNavigatorObserver();
 
         final container = ProviderContainer(
-          overrides: _overrides(
-            mockRelay: mockRelay,
-            mockCircle: mockCircle,
-          ),
+          overrides: _overrides(mockRelay: mockRelay, mockCircle: mockCircle),
         );
         addTearDown(container.dispose);
 
@@ -461,16 +478,14 @@ void main() {
               // Wrap in a parent route so AddMemberPage can pop back.
               home: Scaffold(
                 body: Builder(
-                  builder:
-                      (ctx) => ElevatedButton(
-                        onPressed:
-                            () => Navigator.of(ctx).push(
-                              MaterialPageRoute<void>(
-                                builder: (_) => AddMemberPage(circle: circle),
-                              ),
-                            ),
-                        child: const Text('Open'),
+                  builder: (ctx) => ElevatedButton(
+                    onPressed: () => Navigator.of(ctx).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => AddMemberPage(circle: circle),
                       ),
+                    ),
+                    child: const Text('Open'),
+                  ),
                 ),
               ),
             ),
@@ -502,16 +517,10 @@ void main() {
 
         // addMember was called exactly once with the correct group id.
         expect(mockCircle.addMemberCalls, hasLength(1));
-        expect(
-          mockCircle.addMemberCalls.first.mlsGroupId,
-          circle.mlsGroupId,
-        );
+        expect(mockCircle.addMemberCalls.first.mlsGroupId, circle.mlsGroupId);
 
         // The KeyPackage list passed to the service has exactly one entry.
-        expect(
-          mockCircle.addMemberCalls.first.memberKeyPackages,
-          hasLength(1),
-        );
+        expect(mockCircle.addMemberCalls.first.memberKeyPackages, hasLength(1));
 
         // Success snackbar names the circle.
         // Isolated, so a right-to-left circle name cannot reorder it.
@@ -560,10 +569,7 @@ void main() {
         final circle = _makeCircle();
 
         final container = ProviderContainer(
-          overrides: _overrides(
-            mockRelay: mockRelay,
-            mockCircle: mockCircle,
-          ),
+          overrides: _overrides(mockRelay: mockRelay, mockCircle: mockCircle),
         );
         addTearDown(container.dispose);
 
@@ -579,16 +585,14 @@ void main() {
               ),
               home: Scaffold(
                 body: Builder(
-                  builder:
-                      (ctx) => ElevatedButton(
-                        onPressed:
-                            () => Navigator.of(ctx).push(
-                              MaterialPageRoute<void>(
-                                builder: (_) => AddMemberPage(circle: circle),
-                              ),
-                            ),
-                        child: const Text('Open'),
+                  builder: (ctx) => ElevatedButton(
+                    onPressed: () => Navigator.of(ctx).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => AddMemberPage(circle: circle),
                       ),
+                    ),
+                    child: const Text('Open'),
+                  ),
                 ),
               ),
             ),
@@ -802,41 +806,38 @@ void main() {
       },
     );
 
-    testWidgets(
-      '6e. a change not made shows the error and keeps the page',
-      (tester) async {
-        final mockCircle = MockCircleService()
-          ..addMemberResult = const AddMemberResult(
-            delivery: ChangeDelivery.rejected,
-            welcomesDelivered: 0,
-            welcomesTotal: 1,
-          );
-        final observer = _RecordingNavigatorObserver();
-        final container = ProviderContainer(
-          overrides: _overrides(
-            mockRelay: MockRelayService(
-              keyPackageResult: _makeKp(_newMemberHex),
-            ),
-            mockCircle: mockCircle,
-          ),
+    testWidgets('6e. a change not made shows the error and keeps the page', (
+      tester,
+    ) async {
+      final mockCircle = MockCircleService()
+        ..addMemberResult = const AddMemberResult(
+          delivery: ChangeDelivery.rejected,
+          welcomesDelivered: 0,
+          welcomesTotal: 1,
         );
-        addTearDown(container.dispose);
-        await _openAddMemberPage(tester, container, observer: observer);
-        await _addMember(tester, _newMemberNpub);
-        await tester.pumpAndSettle();
-        observer.reset();
+      final observer = _RecordingNavigatorObserver();
+      final container = ProviderContainer(
+        overrides: _overrides(
+          mockRelay: MockRelayService(keyPackageResult: _makeKp(_newMemberHex)),
+          mockCircle: mockCircle,
+        ),
+      );
+      addTearDown(container.dispose);
+      await _openAddMemberPage(tester, container, observer: observer);
+      await _addMember(tester, _newMemberNpub);
+      await tester.pumpAndSettle();
+      observer.reset();
 
-        await tester.tap(find.byKey(WidgetKeys.addMemberConfirm));
-        await tester.pumpAndSettle();
+      await tester.tap(find.byKey(WidgetKeys.addMemberConfirm));
+      await tester.pumpAndSettle();
 
-        expect(
-          find.text('Failed to add member. Please try again.'),
-          findsOneWidget,
-        );
-        expect(observer.popped, isFalse);
-        expect(container.read(joinWatcherProvider).mode, JoinWatchMode.idle);
-      },
-    );
+      expect(
+        find.text('Failed to add member. Please try again.'),
+        findsOneWidget,
+      );
+      expect(observer.popped, isFalse);
+      expect(container.read(joinWatcherProvider).mode, JoinWatchMode.idle);
+    });
 
     testWidgets(
       '6c. leaving the page while the invitations go out still reports them',
@@ -886,7 +887,11 @@ void main() {
 
         await tester.state<NavigatorState>(find.byType(Navigator)).maybePop();
         await tester.pumpAndSettle();
-        expect(find.byType(AddMemberPage), findsNothing, reason: 'precondition');
+        expect(
+          find.byType(AddMemberPage),
+          findsNothing,
+          reason: 'precondition',
+        );
 
         gate.complete(
           const AddMemberResult(
@@ -924,17 +929,13 @@ void main() {
         final mockRelay = MockRelayService(
           keyPackageResult: _makeKp(_newMemberHex),
         );
-        final mockCircle = MockCircleService()
-          ..shouldThrowOnAddMember = true;
+        final mockCircle = MockCircleService()..shouldThrowOnAddMember = true;
         final circle = _makeCircle();
 
         final observer = _RecordingNavigatorObserver();
 
         final container = ProviderContainer(
-          overrides: _overrides(
-            mockRelay: mockRelay,
-            mockCircle: mockCircle,
-          ),
+          overrides: _overrides(mockRelay: mockRelay, mockCircle: mockCircle),
         );
         addTearDown(container.dispose);
 
@@ -951,16 +952,14 @@ void main() {
               ),
               home: Scaffold(
                 body: Builder(
-                  builder:
-                      (ctx) => ElevatedButton(
-                        onPressed:
-                            () => Navigator.of(ctx).push(
-                              MaterialPageRoute<void>(
-                                builder: (_) => AddMemberPage(circle: circle),
-                              ),
-                            ),
-                        child: const Text('Open'),
+                  builder: (ctx) => ElevatedButton(
+                    onPressed: () => Navigator.of(ctx).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => AddMemberPage(circle: circle),
                       ),
+                    ),
+                    child: const Text('Open'),
+                  ),
                 ),
               ),
             ),
@@ -1006,83 +1005,76 @@ void main() {
     // -----------------------------------------------------------------------
     // 8. Confirm is disabled while validation is in flight (gate test)
     // -----------------------------------------------------------------------
-    testWidgets(
-      '8. confirm stays disabled while KP fetch is in flight',
-      (tester) async {
-        final gate = Completer<void>();
-        final mockRelay = MockRelayService(
-          keyPackageResult: _makeKp(_newMemberHex),
-        )..fetchKeyPackageGate = gate;
-        final mockCircle = MockCircleService();
-        final circle = _makeCircle();
+    testWidgets('8. confirm stays disabled while KP fetch is in flight', (
+      tester,
+    ) async {
+      final gate = Completer<void>();
+      final mockRelay = MockRelayService(
+        keyPackageResult: _makeKp(_newMemberHex),
+      )..fetchKeyPackageGate = gate;
+      final mockCircle = MockCircleService();
+      final circle = _makeCircle();
 
-        await tester.pumpWidget(
-          _buildApp(
-            circle: circle,
-            mockRelay: mockRelay,
-            mockCircle: mockCircle,
-          ),
-        );
-        await tester.pumpAndSettle();
+      await tester.pumpWidget(
+        _buildApp(circle: circle, mockRelay: mockRelay, mockCircle: mockCircle),
+      );
+      await tester.pumpAndSettle();
 
-        await _addMember(tester, _newMemberNpub);
-        // Gate is still open — validation is pending.
+      await _addMember(tester, _newMemberNpub);
+      // Gate is still open — validation is pending.
 
-        final button = tester.widget<FilledButton>(
-          find.byKey(WidgetKeys.addMemberConfirm),
-        );
-        expect(button.onPressed, isNull);
+      final button = tester.widget<FilledButton>(
+        find.byKey(WidgetKeys.addMemberConfirm),
+      );
+      expect(button.onPressed, isNull);
 
-        // Clean up to avoid leaked async.
-        gate.complete();
-        await tester.pumpAndSettle();
-      },
-    );
+      // Clean up to avoid leaked async.
+      gate.complete();
+      await tester.pumpAndSettle();
+    });
 
     // -----------------------------------------------------------------------
     // 9. Removing a member brings back the empty state
     // -----------------------------------------------------------------------
-    testWidgets(
-      '9. removing the only member reverts to empty state',
-      (tester) async {
-        final mockRelay = MockRelayService(
-          keyPackageResult: _makeKp(_newMemberHex),
-        );
-        final mockCircle = MockCircleService();
-        final circle = _makeCircle();
+    testWidgets('9. removing the only member reverts to empty state', (
+      tester,
+    ) async {
+      final mockRelay = MockRelayService(
+        keyPackageResult: _makeKp(_newMemberHex),
+      );
+      final mockCircle = MockCircleService();
+      final circle = _makeCircle();
 
-        await tester.pumpWidget(
-          _buildApp(
-            circle: circle,
-            mockRelay: mockRelay,
-            mockCircle: mockCircle,
-          ),
-        );
-        await tester.pumpAndSettle();
+      await tester.pumpWidget(
+        _buildApp(circle: circle, mockRelay: mockRelay, mockCircle: mockCircle),
+      );
+      await tester.pumpAndSettle();
 
-        await _addMember(tester, _newMemberNpub);
-        await tester.pumpAndSettle();
+      await _addMember(tester, _newMemberNpub);
+      await tester.pumpAndSettle();
 
-        expect(find.byIcon(LucideIcons.circleCheck), findsOneWidget);
+      expect(find.byIcon(LucideIcons.circleCheck), findsOneWidget);
 
-        // Remove via the × button on the PendingMemberTile.
-        await tester.tap(find.byIcon(LucideIcons.x));
-        await tester.pump();
+      // Remove via the × button on the PendingMemberTile.
+      await tester.tap(find.byIcon(LucideIcons.x));
+      await tester.pump();
 
-        expect(find.byIcon(LucideIcons.circleCheck), findsNothing);
-        expect(find.text('Add circle members'), findsOneWidget);
-      },
-    );
+      expect(find.byIcon(LucideIcons.circleCheck), findsNothing);
+      expect(find.text('Add circle members'), findsOneWidget);
+    });
 
     // -----------------------------------------------------------------------
     // 10. RelayServiceException shows network-error tile + retry button
     // -----------------------------------------------------------------------
     testWidgets(
-      '10. RelayServiceException shows "Could not verify member" + retry',
+      '10. an unfinished lookup shows the incomplete copy + a retry that '
+      're-validates',
       (tester) async {
-        final mockRelay = MockRelayService(
-          shouldThrowOnFetchKeyPackage: true,
-        );
+        final mockRelay = MockRelayService()
+          ..keyPackageAnswers.addAll([
+            const RelayServiceException('Member lookup incomplete'),
+            _makeKp(_newMemberHex),
+          ]);
         final mockCircle = MockCircleService();
         final circle = _makeCircle();
 
@@ -1099,8 +1091,20 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(find.byIcon(LucideIcons.triangleAlert), findsOneWidget);
-        expect(find.text('Could not verify member'), findsOneWidget);
+        expect(
+          find.text(
+            "Couldn't finish checking this ID. Check your connection and try "
+            'again.',
+          ),
+          findsOneWidget,
+        );
+        expect(find.textContaining('No Haven account'), findsNothing);
         expect(find.byIcon(LucideIcons.refreshCw), findsOneWidget);
+
+        await tester.tap(find.byIcon(LucideIcons.refreshCw));
+        await tester.pumpAndSettle();
+
+        expect(find.text('Ready to invite'), findsOneWidget);
       },
     );
 
@@ -1125,7 +1129,9 @@ void main() {
 
         // The useful copy is preserved verbatim...
         expect(
-          find.textContaining("Once they accept, they will see everyone's location"),
+          find.textContaining(
+            "Once they accept, they will see everyone's location",
+          ),
           findsOneWidget,
         );
         // ...but the green security badge's lock icon is gone.
@@ -1180,7 +1186,8 @@ void main() {
       expect(
         find.byIcon(LucideIcons.refreshCw),
         findsOneWidget,
-        reason: 'opening Haven publishes a current package, so a retry can '
+        reason:
+            'opening Haven publishes a current package, so a retry can '
             'succeed',
       );
       final button = tester.widget<FilledButton>(
@@ -1198,7 +1205,10 @@ void main() {
       await tester.tap(find.byIcon(LucideIcons.refreshCw));
       await tester.pumpAndSettle();
 
-      expect(find.text(l10n(tester).pendingMemberReadyToInvite), findsOneWidget);
+      expect(
+        find.text(l10n(tester).pendingMemberReadyToInvite),
+        findsOneWidget,
+      );
       expect(find.text(l10n(tester).pendingMemberNeedsUpdate), findsNothing);
       final button = tester.widget<FilledButton>(
         find.byKey(WidgetKeys.addMemberConfirm),
@@ -1624,6 +1634,298 @@ void main() {
         isEmpty,
         reason: 'roster npubs are already on the device',
       );
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // The staged row names the person, and a made invite refreshes profiles
+  // (owner direction 2026-11-12).
+  // -------------------------------------------------------------------------
+  group('AddMemberPage — the people staged and invited', () {
+    List<Map<String, Object?>> refreshes(MockProfileService service) => [
+      for (final c in service.methodCalls)
+        if (c.method == 'refreshMemberProfiles') c.args,
+    ];
+
+    Future<MockProfileService> confirmWith(
+      WidgetTester tester,
+      MockCircleService mockCircle, {
+      List<Override> extra = const [],
+    }) async {
+      final profiles = MockProfileService();
+      final container = ProviderContainer(
+        overrides: [
+          ..._overrides(
+            mockRelay: MockRelayService(
+              keyPackageResult: _makeKp(_newMemberHex),
+            ),
+            mockCircle: mockCircle,
+            profileService: profiles,
+          ),
+          ...extra,
+        ],
+      );
+      addTearDown(container.dispose);
+      await _openAddMemberPage(
+        tester,
+        container,
+        observer: _RecordingNavigatorObserver(),
+      );
+      await _addMember(tester, _newMemberNpub);
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(WidgetKeys.addMemberConfirm));
+      for (var i = 0; i < 6; i++) {
+        await tester.pump(Duration.zero);
+      }
+      container.read(joinWatcherProvider.notifier).cancel();
+      return profiles;
+    }
+
+    testWidgets('S1. a staged stranger shows their published name over the '
+        'trimmed key', (tester) async {
+      final profiles = MockProfileService()
+        ..strangerProfiles[_newMemberNpub] = const Profile(
+          pubkeyHex: _newMemberHex,
+          displayName: 'Distant Cousin',
+        );
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: _overrides(
+            mockRelay: MockRelayService(
+              keyPackageResult: _makeKp(_newMemberHex),
+            ),
+            mockCircle: MockCircleService(),
+            profileService: profiles,
+          ),
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: AddMemberPage(circle: _makeCircle()),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await _addMember(tester, _newMemberNpub);
+      await tester.pumpAndSettle();
+
+      Finder onStagedRow(String text) => find.descendant(
+        of: find.byType(PendingMemberTile),
+        matching: find.text(text),
+      );
+      expect(onStagedRow('Distant Cousin'), findsOneWidget);
+      expect(
+        onStagedRow(NpubValidator.shortenForDisplay(_newMemberNpub)),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('S6. a typed-row tap stages the person and hands the focus '
+        'back to the search field', (tester) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: _overrides(
+            mockRelay: MockRelayService(
+              keyPackageResult: _makeKp(_newMemberHex),
+            ),
+            mockCircle: MockCircleService(),
+            profileService: MockProfileService()
+              ..strangerProfiles[_newMemberNpub] = const Profile(
+                pubkeyHex: _newMemberHex,
+                displayName: 'Distant Cousin',
+              ),
+          ),
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: AddMemberPage(circle: _makeCircle()),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(WidgetKeys.memberSearchInput),
+        _newMemberNpub,
+      );
+      await tester.pumpAndSettle();
+      FocusNode fieldFocus() => tester
+          .widget<TextField>(find.byKey(WidgetKeys.memberSearchInput))
+          .focusNode!;
+
+      // A mouse press outside a text field takes its focus; a touch does not.
+      final press = await tester.startGesture(
+        tester.getCenter(find.text('Distant Cousin')),
+        kind: PointerDeviceKind.mouse,
+      );
+      addTearDown(press.removePointer);
+      await tester.pump();
+      expect(fieldFocus().hasPrimaryFocus, isFalse, reason: 'anti-vacuity');
+      await press.up();
+      await tester.pumpAndSettle();
+
+      expect(
+        find.descendant(
+          of: find.byType(PendingMemberTile),
+          matching: find.text('Distant Cousin'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        fieldFocus().hasPrimaryFocus,
+        isTrue,
+        reason: 'the tapped row is gone, so focus left there is focus lost',
+      );
+    });
+
+    /// Stages [npub] through the picker's paste button.
+    Future<void> pasteStaging(
+      WidgetTester tester,
+      String npub,
+      MockProfileService profiles,
+    ) async {
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async => call.method == 'Clipboard.getData'
+            ? <String, dynamic>{'text': npub}
+            : null,
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: _overrides(
+            mockRelay: MockRelayService(
+              keyPackageResult: _makeKp(_newMemberHex),
+            ),
+            mockCircle: MockCircleService(),
+            directory: _aliceDirectory(),
+            profileService: profiles,
+          ),
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: AddMemberPage(circle: _makeCircle()),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(LucideIcons.clipboard));
+      await tester.pumpAndSettle();
+    }
+
+    String lookupNote(WidgetTester tester) =>
+        l10nOf(tester, AddMemberPage).memberPickerStrangerLookupNote;
+
+    testWidgets('S7. a stranger staged by the paste button carries the lookup '
+        'note under their row, even when no profile resolves', (tester) async {
+      final handle = tester.ensureSemantics();
+      final profiles = MockProfileService();
+      await pasteStaging(tester, _newMemberNpub, profiles);
+
+      final note = lookupNote(tester);
+      expect(
+        find.descendant(
+          of: find.byType(PendingMemberTile),
+          matching: find.text(note),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        tester
+            .getSemantics(find.bySemanticsLabel(RegExp('^\u2068npub ')))
+            .label,
+        endsWith(', $note'),
+        reason: 'the disclosure is spoken in the row label, not a hint',
+      );
+      expect(
+        profiles.methodCalls.where(
+          (c) => c.method == 'resolveTypedStrangerProfile',
+        ),
+        hasLength(1),
+      );
+      handle.dispose();
+    });
+
+    testWidgets('S8. a co-member staged by the paste button carries no lookup '
+        'note', (tester) async {
+      final profiles = MockProfileService();
+      await pasteStaging(tester, _aliceNpub, profiles);
+
+      expect(
+        find.descendant(
+          of: find.byType(PendingMemberTile),
+          matching: find.text('Alice Aardvark'),
+        ),
+        findsOneWidget,
+      );
+      expect(find.text(lookupNote(tester)), findsNothing);
+      expect(
+        profiles.methodCalls.where(
+          (c) => c.method == 'resolveTypedStrangerProfile',
+        ),
+        isEmpty,
+      );
+    });
+
+    testWidgets('S2. an invite made refreshes profiles once, over the union, '
+        'at the interactive tier', (tester) async {
+      final profiles = await confirmWith(
+        tester,
+        MockCircleService()
+          ..addMemberResult = const AddMemberResult(
+            delivery: ChangeDelivery.applied,
+            welcomesDelivered: 1,
+            welcomesTotal: 1,
+          ),
+      );
+
+      final calls = refreshes(profiles);
+      expect(calls, hasLength(1));
+      expect(calls.single['maxAge'], profileInteractiveMaxAge);
+      expect(
+        calls.single['pubkeyHexes'],
+        contains(_existingMemberHex),
+        reason: 'refreshAll builds the union, own pubkey included',
+      );
+    });
+
+    testWidgets('S3. an invite awaiting its relays is made, so it refreshes '
+        'too', (tester) async {
+      final profiles = await confirmWith(
+        tester,
+        MockCircleService()
+          ..addMemberResult = const AddMemberResult(
+            delivery: ChangeDelivery.awaitingRelays,
+            welcomesDelivered: 0,
+            welcomesTotal: 1,
+          ),
+        extra: [sharingHealthProvider.overrideWith(_RecordingHealth.new)],
+      );
+
+      expect(refreshes(profiles), hasLength(1));
+    });
+
+    testWidgets('S4. an invite not made refreshes nothing', (tester) async {
+      final rejected = await confirmWith(
+        tester,
+        MockCircleService()
+          ..addMemberResult = const AddMemberResult(
+            delivery: ChangeDelivery.rejected,
+            welcomesDelivered: 0,
+            welcomesTotal: 1,
+          ),
+      );
+      expect(refreshes(rejected), isEmpty);
+    });
+
+    testWidgets('S5. an invite that throws refreshes nothing', (tester) async {
+      final profiles = await confirmWith(tester, _UnreachableInviteeService());
+      expect(refreshes(profiles), isEmpty);
     });
   });
 }

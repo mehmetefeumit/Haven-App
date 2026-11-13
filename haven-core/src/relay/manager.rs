@@ -15,7 +15,6 @@ use std::time::Duration;
 
 use cgka_traits::app_components::{is_loopback_host, is_public_ip};
 use cgka_traits::TransportEndpoint;
-use nostr::filter::MatchEventOptions;
 #[cfg(debug_assertions)]
 use nostr::Url;
 use nostr::{
@@ -38,13 +37,14 @@ use super::fanout::{self, FanoutTargetOutcome};
 use super::maintenance::key_package::{
     is_pre_migration_key_package_of, kp_event_d_tag, KeyPackageCandidate,
 };
-use super::types::{
-    PublishResult, RelayConnectionStatus, RelayEventCheck, RelayFetchOutcome, RelayStatus,
-};
+use super::types::{PublishResult, RelayConnectionStatus, RelayFetchOutcome, RelayStatus};
 use super::url_norm;
 use super::verified::verified_client;
+use crate::circle::MemberKeyPackage;
 use crate::log_alias::{self, bucket, RelayUrl as AliasRelayUrl};
-use crate::nostr::mls::types::{KeyPackageAdmissionRule, TransportMessage};
+use crate::nostr::mls::types::{
+    KeyPackageAdmissionRule, TransportEndpointFailureKind, TransportMessage,
+};
 
 /// Default timeout for relay operations.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -268,7 +268,9 @@ const PUBLISH_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 /// waking the radio for a relay nobody is publishing to. Neither option can
 /// strand a publish, because every send path re-drives
 /// [`RelayManager::add_relays_and_connect`], and `try_connect_relay` reconnects
-/// from `Sleeping` *and* `Terminated` inside the caller's own wake.
+/// from `Sleeping`, and from a `Terminated` its own task reached, inside the
+/// caller's own wake. A relay Haven disconnects is dropped from the pool instead
+/// (see [`RelayManager::shutdown`]).
 ///
 /// # These must be registered through `RelayPool::add_relay`, never `Client::add_relay`
 ///
@@ -338,9 +340,13 @@ fn publish_relay_options() -> RelayOptions {
 /// # Why only `Connected`
 ///
 /// It is the only status that is both un-dialable and dead: `Pending` and
-/// `Connecting` still have a task that will reach a dialable status by itself,
+/// `Connecting` still have a task that will reach a dialable status by itself
+/// (save a dial its caller dropped, which leaves `Connecting` with none: the
+/// residual of tracker `T-POOL-TERMINATE-PERMIT`),
 /// `Disconnected` belongs to a retrying task this pool never has
-/// (`reconnect(false)`), and `Sleeping` / `Terminated` are already dialable.
+/// (`reconnect(false)`), and `Sleeping` / `Terminated` are dialable unless
+/// Haven disconnected the relay, which it then drops (see
+/// [`RelayManager::shutdown`]).
 /// Matched exhaustively so a crate bump that adds a status has to be decided
 /// rather than silently folded into "not wedged".
 fn terminate_wedged_socket(
@@ -378,14 +384,16 @@ fn terminate_wedged_socket(
 /// runs and is never revisited, so Security Rule 13's "acked means acked" is
 /// untouched.
 ///
-/// `Relay::disconnect` is safe to call from any status and is a no-op once the
-/// relay is `Terminated` (`inner.rs:1255-1271`), so this is idempotent; it
-/// touches nothing but the publish pool's own sockets.
+/// A freed relay is dropped from the pool, and the next send registers a fresh
+/// one: a wedge has no connection task, so its `disconnect` leaves a permit
+/// that would end the next dial (see [`RelayManager::shutdown`]). It touches
+/// nothing but the publish pool's own sockets.
 async fn recover_wedged_publish_sockets(client: &Client, relay_urls: &[RelayUrl]) {
     let mut freed: usize = 0;
     for url in relay_urls {
         if let Ok(relay) = client.relay(url.as_str()).await {
             if terminate_wedged_socket(relay.status(), relay.queue(), || relay.disconnect()) {
+                let _ = client.force_remove_relay(url.as_str()).await;
                 freed += 1;
             }
         }
@@ -1288,7 +1296,7 @@ impl RelayManager {
     ///
     /// * `filter` - Nostr filter for the query
     /// * `relays` - List of relay URLs to query
-    /// * `timeout` - Optional timeout (defaults to 30 seconds)
+    /// * `timeout` - Optional timeout (defaults to 10 seconds)
     ///
     /// # Errors
     ///
@@ -1335,7 +1343,7 @@ impl RelayManager {
 
     /// Fetches a user's relay list for the given event kind.
     ///
-    /// Queries the read-only discovery plane
+    /// Queries the discovery plane
     /// ([`discovery_relays`][crate::relay::discovery::discovery_relays]) for
     /// the user's replaceable relay list event and extracts `wss://` URLs
     /// from `"relay"` tags. This resolves *another* user's relays by bare
@@ -1443,12 +1451,12 @@ impl RelayManager {
     /// valid candidate is eligible.
     ///
     /// Test-only, as the two no-target fetches below are: an invite always has
-    /// a target, and [`Self::fetch_keypackage_for_invite`] is the one fetch a
+    /// a target, and [`Self::lookup_member_for_invite`] is the one lookup a
     /// shipped build can reach. The tests of author binding, slot supersession
     /// and discovery use these to read selection without a session.
     ///
     /// Resolves the user's NIP-65 write-capable relays (kind 10002) and fetches
-    /// from them, falling back to the read-only discovery plane
+    /// from them, falling back to the discovery plane
     /// ([`discovery_relays`][crate::relay::discovery::discovery_relays]) when
     /// that set is empty or holds no usable `KeyPackage`.
     ///
@@ -1477,26 +1485,65 @@ impl RelayManager {
         self.fetch_keypackage_with_cascade(pubkey, &write).await
     }
 
-    /// Fetches the `KeyPackage` to invite `pubkey` with into the target whose
-    /// admission rule is `admit`
+    /// Looks `pubkey` up to invite them into the target whose admission rule is
+    /// `admit`
     /// ([`SessionManager::key_package_admission_rule`](crate::nostr::mls::SessionManager::key_package_admission_rule)),
-    /// through the discovery cascade over the user's pre-fetched NIP-65
-    /// write-capable relays. The rule is applied to every valid candidate
-    /// BEFORE they are ranked. When no tier holds an admissible one, the best
-    /// valid candidate is returned so the caller's admission check can say
-    /// why, and failing that a pre-migration one.
+    /// and says whether absence was proven.
+    ///
+    /// The inviter sequence of Marmot `transports/nostr.md` "Migration from
+    /// kind 10051": the account's kind 10050 and 10002 from the read-only
+    /// discovery plane, then its `KeyPackage`s from the 10002 write set, then
+    /// from discovery when the write set is empty or holds nothing invitable.
+    /// The rule is applied to every valid candidate BEFORE they are ranked
+    /// ([`Self::pick_keypackage_from_events`]); when nothing is admissible the
+    /// best valid candidate, failing that a pre-migration one, is still
+    /// [`MemberLookup::Found`], so the caller's admission check can say why.
+    ///
+    /// Every REQ goes out on one client of its own, shut down before this
+    /// returns: the shared pool never collects every invitee's relays, and a
+    /// socket it left half-dead cannot answer for a lookup.
     ///
     /// # Errors
     ///
-    /// Returns an error if the pubkey is invalid or any tier's fetch fails.
-    pub async fn fetch_keypackage_for_invite(
-        &self,
+    /// Only for a `pubkey` that does not parse. An unreachable or unfinished
+    /// relay is [`MemberLookup::Incomplete`], never an error.
+    pub async fn lookup_member_for_invite(
+        pubkey: &str,
+        admit: &KeyPackageAdmissionRule,
+    ) -> RelayResult<MemberLookup> {
+        Self::member_lookup(pubkey, Some(admit), None, DEFAULT_TIMEOUT).await
+    }
+
+    /// [`Self::lookup_member_for_invite`] with each REQ bounded by
+    /// `req_timeout`, so a test of a silent relay does not wait out
+    /// [`DEFAULT_TIMEOUT`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::lookup_member_for_invite`].
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn lookup_member_for_invite_within(
+        pubkey: &str,
+        admit: &KeyPackageAdmissionRule,
+        req_timeout: Duration,
+    ) -> RelayResult<MemberLookup> {
+        Self::member_lookup(pubkey, Some(admit), None, req_timeout).await
+    }
+
+    /// [`Self::lookup_member_for_invite`]'s `KeyPackage` step alone, over a
+    /// write set the caller already holds: no relay list is asked for, so the
+    /// found member carries `write_relays` and no other list.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::lookup_member_for_invite`].
+    #[cfg(feature = "test-utils")]
+    pub async fn lookup_key_package_on(
         pubkey: &str,
         write_relays: &[String],
         admit: &KeyPackageAdmissionRule,
-    ) -> RelayResult<Option<Event>> {
-        self.key_package_cascade(pubkey, write_relays, Some(admit))
-            .await
+    ) -> RelayResult<MemberLookup> {
+        Self::member_lookup(pubkey, Some(admit), Some(write_relays), DEFAULT_TIMEOUT).await
     }
 
     /// Runs the `KeyPackage` discovery cascade with no target in mind: every
@@ -1504,49 +1551,121 @@ impl RelayManager {
     ///
     /// # Errors
     ///
-    /// Returns an error if the pubkey is invalid or any tier's fetch fails.
+    /// Returns an error if the pubkey is invalid.
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn fetch_keypackage_with_cascade(
         &self,
         pubkey: &str,
         write_relays: &[String],
     ) -> RelayResult<Option<Event>> {
-        self.key_package_cascade(pubkey, write_relays, None).await
+        Ok(
+            match Self::member_lookup(pubkey, None, Some(write_relays), DEFAULT_TIMEOUT).await? {
+                MemberLookup::Found(member) => Some(member.key_package_event),
+                MemberLookup::NotFound | MemberLookup::Incomplete => None,
+            },
+        )
     }
 
-    /// The cascade: the user's write-capable relays first, then
-    /// [`discovery_relays`][crate::relay::discovery::discovery_relays]. An
-    /// empty set is skipped, and the cascade stops as soon as a package
-    /// `admit` admits is found (`None` admits every valid candidate).
-    ///
-    /// The second tier is judged together with what the first returned: a
-    /// slot's newest event stands for the slot across tiers, so a relay that
-    /// still serves a superseded event cannot revive it.
-    async fn key_package_cascade(
-        &self,
+    /// The lookup on a client of its own, shut down on every path.
+    async fn member_lookup(
         pubkey: &str,
-        write_relays: &[String],
         admit: Option<&KeyPackageAdmissionRule>,
-    ) -> RelayResult<Option<Event>> {
-        let pk = PublicKey::parse(pubkey).map_err(|_| RelayError::InvalidPubkey)?;
-        let mut seen = Vec::new();
-        if !write_relays.is_empty() {
-            // Another account's relays: dialled for this lookup on a client of
-            // its own, so the shared pool never collects every invitee's relays.
-            let lookup = Self::new();
-            let result = lookup.key_package_events_on(&pk, write_relays).await;
-            lookup.shutdown().await;
-            seen = result?;
-            if let Some(PickedKeyPackage::Invitable(event)) =
-                Self::pick_keypackage_from_events(&pk, seen.clone(), admit)
-            {
-                return Ok(Some(event));
-            }
+        write_relays: Option<&[String]>,
+        req_timeout: Duration,
+    ) -> RelayResult<MemberLookup> {
+        let account = PublicKey::parse(pubkey).map_err(|_| RelayError::InvalidPubkey)?;
+        let lookup = Self::new();
+        // Boxed: a lookup holds several relays' answers at once, and every
+        // caller's own future would otherwise carry them.
+        let found =
+            Box::pin(lookup.member_lookup_on(&account, admit, write_relays, req_timeout)).await;
+        lookup.shutdown().await;
+        found
+    }
+
+    /// The lookup's REQs, each through [`Self::fetch_events_per_relay_within`]
+    /// so that every relay's answer says whether it was whole. `write_relays`
+    /// stands in for the relay lists when the caller already holds them.
+    async fn member_lookup_on(
+        &self,
+        account: &PublicKey,
+        admit: Option<&KeyPackageAdmissionRule>,
+        write_relays: Option<&[String]>,
+        req_timeout: Duration,
+    ) -> RelayResult<MemberLookup> {
+        let discovery = discovery_relays();
+        let (inbox_relays, nip65, lists_answered) = if let Some(write) = write_relays {
+            let nip65 = Nip65Relays {
+                read: Vec::new(),
+                write: write.to_vec(),
+            };
+            (Vec::new(), nip65, true)
+        } else {
+            let list = |kind| Filter::new().kind(kind).author(*account).limit(1);
+            let (inbox, nip65) = tokio::join!(
+                self.fetch_events_per_relay_within(
+                    list(Kind::InboxRelays),
+                    &discovery,
+                    req_timeout
+                ),
+                self.fetch_events_per_relay_within(list(Kind::RelayList), &discovery, req_timeout),
+            );
+            let (inbox, nip65) = (inbox?, nip65?);
+            let inbox_relays =
+                Self::newest_authored(all_events(&inbox), account, Kind::InboxRelays, |_| true)
+                    .map_or_else(Vec::new, |list| Self::extract_relay_tag_urls(&list.tags));
+            // A relay that connected and stopped short may hold a newer 10002
+            // naming other write relays, so it withholds the holders as well.
+            let lists_answered = answered_whole(&nip65);
+            let nip65 =
+                Self::newest_authored(all_events(&nip65), account, Kind::RelayList, |_| true)
+                    .map_or_else(Nip65Relays::default, |list| Nip65Relays {
+                        read: Self::extract_nip65_read_relays(&list.tags),
+                        write: Self::extract_nip65_write_relays(&list.tags),
+                    });
+            (inbox_relays, nip65, lists_answered)
+        };
+
+        // `limit(10)`: well above any reasonable account's published slots.
+        let filter = Filter::new()
+            .kind(Kind::Custom(30443))
+            .author(*account)
+            .limit(10);
+        let (mut seen, mut holders) = if nip65.write.is_empty() {
+            (Vec::new(), None)
+        } else {
+            let answers = self
+                .fetch_events_per_relay_within(filter.clone(), &nip65.write, req_timeout)
+                .await?;
+            (all_events(&answers), Some(answers))
+        };
+        let mut picked = Self::pick_keypackage_from_events(account, seen.clone(), admit);
+        if !matches!(picked, Some(PickedKeyPackage::Invitable(_))) {
+            // The second tier is judged together with what the first returned:
+            // a slot's newest event stands for the slot across tiers, so a
+            // relay that still serves a superseded event cannot revive it.
+            let answers = self
+                .fetch_events_per_relay_within(filter, &discovery, req_timeout)
+                .await?;
+            seen.extend(all_events(&answers));
+            picked = Self::pick_keypackage_from_events(account, seen, admit);
+            holders.get_or_insert(answers);
         }
 
-        // Final fallback: the read-only discovery plane.
-        seen.extend(self.key_package_events_on(&pk, &[]).await?);
-        Ok(Self::pick_keypackage_from_events(&pk, seen, admit).map(PickedKeyPackage::into_event))
+        let Some(picked) = picked else {
+            let holders = holders.unwrap_or_default();
+            return Ok(if absence_proven(lists_answered, &holders) {
+                MemberLookup::NotFound
+            } else {
+                MemberLookup::Incomplete
+            });
+        };
+        Ok(MemberLookup::Found(Box::new(MemberKeyPackage {
+            key_package_event: picked.into_event(),
+            inbox_relays,
+            nip65_relays: nip65.read,
+            nip65_write_relays: nip65.write,
+        })))
     }
 
     /// Fetches a user's key package (kind 30443) from the given relay list,
@@ -1690,59 +1809,6 @@ impl RelayManager {
                     .cmp(&b.created_at)
                     .then_with(|| b.id.cmp(&a.id))
             })
-    }
-
-    /// Checks whether events matching a filter exist on a specific relay.
-    ///
-    /// Queries a single relay for events matching the given filter and returns
-    /// a summary of what was found.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the relay URL is invalid or the fetch fails.
-    pub async fn check_event_on_relay(
-        &self,
-        relay_url: &str,
-        filter: Filter,
-    ) -> RelayResult<RelayEventCheck> {
-        let relay_urls = Self::validate_relay_urls(&[relay_url.to_string()])?;
-
-        // Add relay, connect, and wait for WebSocket handshake
-        Self::add_relays_and_connect(&self.client, &relay_urls).await;
-
-        // Fetch events from this specific relay
-        let events = self
-            .client
-            .fetch_events_from(
-                relay_urls.iter().map(nostr::RelayUrl::as_str),
-                filter.clone(),
-                DEFAULT_TIMEOUT,
-            )
-            .await
-            .map_err(|e| {
-                log::debug!("[RelayManager] check_event_on_relay failed");
-                RelayError::Fetch(e.to_string())
-            })?;
-
-        // The relay answers with whatever it likes and this client does not
-        // hold it to the filter, so only an event matching what was asked for —
-        // this author, this kind — is evidence the event is published here.
-        let events: Vec<Event> = events
-            .into_iter()
-            .filter(|e| filter.match_event(e, MatchEventOptions::new()))
-            .collect();
-        let event_count = events.len();
-        let newest_timestamp = events
-            .iter()
-            .map(|e| e.created_at.as_secs().cast_signed())
-            .max();
-
-        Ok(RelayEventCheck {
-            relay_url: relay_url.to_string(),
-            found: event_count > 0,
-            event_count,
-            newest_timestamp,
-        })
     }
 
     /// Fetches events matching `filter` from each relay independently,
@@ -2234,9 +2300,17 @@ impl RelayManager {
         false
     }
 
-    /// Disconnects from all relays.
+    /// Disconnects from all relays and drops them: every send path registers
+    /// what it needs again.
+    ///
+    /// Never kept: `disconnect` on a relay with no connection task stores a
+    /// termination permit that its next dial consumes, leaving it `Connecting`,
+    /// which no later dial leaves (`nostr-relay-pool-0.44.3 relay/inner.rs`
+    /// 1255-1271, 659-698). The `disconnect` first ends every in-flight wait,
+    /// so the removal's write lock is not queued behind a full `OK` timeout.
     pub async fn shutdown(&self) {
         self.client.disconnect().await;
+        self.client.force_remove_all_relays().await;
     }
 
     /// Removes a relay from the connection pool and tears down its WebSocket.
@@ -2425,6 +2499,15 @@ impl FanoutTransport {
                 relay.flags().remove(RelayServiceFlags::PING);
             }
         }
+        // MDK's client disconnects a relay after an ambiguous answer
+        // (`sdk_client.rs` 1254-1275); on one with no connection task that
+        // leaves a permit ending every later dial (see `RelayManager::shutdown`).
+        // This relay's gate is held, so no other fanout call is cut.
+        if matches!(&outcome, FanoutTargetOutcome::Failed(failure)
+            if failure.kind() == TransportEndpointFailureKind::PossiblyExposed)
+        {
+            let _ = self.client.force_remove_relay(relay_urls[0].as_str()).await;
+        }
         recover_wedged_publish_sockets(&self.client, &relay_urls).await;
         outcome
     }
@@ -2479,6 +2562,55 @@ pub fn foreign_relay_dialable(url: &str) -> bool {
         Some(Host::Ipv6(ip)) => is_public_ip(IpAddr::V6(ip)),
         None => false,
     }
+}
+
+/// What an invite lookup established about one account
+/// ([`RelayManager::lookup_member_for_invite`]).
+///
+/// No `Debug`: `Found` carries the account's relay lists (Security Rule 15).
+pub enum MemberLookup {
+    /// A package of the account's, with the lists its Welcome is routed by.
+    /// It may be one the target cannot admit: the caller's admission check
+    /// says why.
+    Found(Box<MemberKeyPackage>),
+    /// Every discovery relay that connected finished its answer to the
+    /// 10002 REQ, as did every relay that holds the account's packages and
+    /// connected — at least one of each — and none held one.
+    NotFound,
+    /// Some such relay did not finish, or none did, so absence is unproven:
+    /// the account may well have a package.
+    Incomplete,
+}
+
+/// Whether a lookup that selected no package proved there is none.
+///
+/// `holders` are the relays that hold the account's packages: its 10002 write
+/// set, or the discovery plane when that set is empty (Marmot
+/// `transports/nostr.md`: an absent list and an empty one both leave nothing
+/// else to ask). Fetching from every one of them is not an interop
+/// requirement, so a relay that never connected does not hold the verdict
+/// back; one that connected and did not finish (`CLOSED`, a timeout, the
+/// intake cap) does, and at least one must have finished. The 10002 REQ is
+/// held to the same rule ([`answered_whole`], `lists_answered`): without it
+/// the holders themselves are unknown.
+fn absence_proven(lists_answered: bool, holders: &[RelayFetchOutcome]) -> bool {
+    lists_answered && answered_whole(holders)
+}
+
+/// At least one relay finished its answer and every relay that connected did.
+fn answered_whole(answers: &[RelayFetchOutcome]) -> bool {
+    answers.iter().any(|answer| answer.drained)
+        && answers
+            .iter()
+            .all(|answer| answer.drained || !answer.responded)
+}
+
+/// Every event of every relay's answer.
+fn all_events(answers: &[RelayFetchOutcome]) -> Vec<Event> {
+    answers
+        .iter()
+        .flat_map(|answer| answer.events.iter().cloned())
+        .collect()
 }
 
 /// What [`RelayManager::pick_keypackage_from_events`] selected.
@@ -2583,7 +2715,6 @@ mod tests {
     use nostr_relay_builder::{LocalRelay, RelayBuilder};
 
     use super::*;
-    use crate::nostr::mls::types::TransportEndpointFailureKind;
     use crate::nostr::mls::SessionManager;
     use crate::nostr::KIND_GROUP_MESSAGE;
     use crate::relay::scripted_relay::{ScriptedRelay, Verdict};
@@ -2755,27 +2886,6 @@ mod tests {
         let err =
             allow_ws_loopback_for_test().expect_err("second install must report already-installed");
         assert!(err.contains("already installed"), "got: {err}");
-    }
-
-    #[tokio::test]
-    async fn check_event_on_relay_rejects_plaintext() {
-        let manager = RelayManager::new();
-        let filter = Filter::new().kind(Kind::Custom(443)).limit(1);
-        let result = manager
-            .check_event_on_relay("ws://insecure.relay.com", filter)
-            .await;
-        assert!(matches!(
-            result,
-            Err(RelayError::InvalidUrl(InvalidUrlReason::PlaintextWs))
-        ));
-    }
-
-    #[tokio::test]
-    async fn check_event_on_relay_rejects_invalid_url() {
-        let manager = RelayManager::new();
-        let filter = Filter::new().kind(Kind::Custom(443)).limit(1);
-        let result = manager.check_event_on_relay("not-a-url", filter).await;
-        assert!(matches!(result, Err(RelayError::InvalidUrl(_))));
     }
 
     #[tokio::test]
@@ -3839,6 +3949,102 @@ mod tests {
         }
     }
 
+    /// "Not found" is a claim about every relay that holds the account's
+    /// packages, so only answers that ended in `EOSE` make it; a relay that
+    /// never connected is no evidence either way, and one that connected and
+    /// stopped short (`CLOSED`, timeout, intake cap) withholds it.
+    #[test]
+    fn absence_is_proven_only_by_finished_answers_from_every_connected_holder() {
+        let answer = |responded: bool, drained: bool| RelayFetchOutcome {
+            relay_url: String::new(),
+            responded,
+            drained,
+            events: Vec::new(),
+        };
+        let finished = answer(true, true);
+        let cut_short = answer(true, false);
+        let unreachable = answer(false, false);
+        let rows: [(&str, bool, Vec<RelayFetchOutcome>, bool); 9] = [
+            ("one holder finished", true, vec![finished.clone()], true),
+            (
+                "every holder finished",
+                true,
+                vec![finished.clone(), finished.clone()],
+                true,
+            ),
+            (
+                "an unreachable holder does not hold the verdict back",
+                true,
+                vec![unreachable.clone(), finished.clone()],
+                true,
+            ),
+            (
+                "a holder that connected and stopped short does",
+                true,
+                vec![finished.clone(), cut_short.clone()],
+                false,
+            ),
+            ("no holder connected", true, vec![unreachable], false),
+            ("every holder stopped short", true, vec![cut_short], false),
+            ("no holder at all", true, Vec::new(), false),
+            (
+                "the 10002 lookup never finished, so the holders are unknown",
+                false,
+                vec![finished.clone()],
+                false,
+            ),
+            (
+                "nor does an unfinished 10002 lookup with every holder finished",
+                false,
+                vec![finished.clone(), finished],
+                false,
+            ),
+        ];
+        for (case, lists_answered, holders, proven) in rows {
+            assert_eq!(absence_proven(lists_answered, &holders), proven, "{case}");
+        }
+    }
+
+    /// The 10002 REQ names the holders, so it is held to the holders' rule: a
+    /// discovery relay that connected and stopped short may serve a newer
+    /// list naming other write relays.
+    #[test]
+    fn the_relay_list_answer_is_held_to_the_holders_rule() {
+        let answer = |responded: bool, drained: bool| RelayFetchOutcome {
+            relay_url: String::new(),
+            responded,
+            drained,
+            events: Vec::new(),
+        };
+        let (finished, cut_short, unreachable) = (
+            answer(true, true),
+            answer(true, false),
+            answer(false, false),
+        );
+        let rows: [(&str, Vec<RelayFetchOutcome>, bool); 5] = [
+            (
+                "every indexer finished",
+                vec![finished.clone(), finished.clone()],
+                true,
+            ),
+            (
+                "an unreachable indexer does not hold it back",
+                vec![unreachable.clone(), finished.clone()],
+                true,
+            ),
+            (
+                "an indexer that connected and stopped short does",
+                vec![cut_short.clone(), finished],
+                false,
+            ),
+            ("no indexer connected", vec![unreachable], false),
+            ("every indexer stopped short", vec![cut_short], false),
+        ];
+        for (case, lists, proven) in rows {
+            assert_eq!(answered_whole(&lists), proven, "{case}");
+        }
+    }
+
     #[test]
     fn pick_keypackage_returns_none_for_empty_input() {
         let account = nostr::Keys::generate().public_key();
@@ -4308,7 +4514,9 @@ mod tests {
 
     /// Whatever MDK's client does with a target — accepts on it, is refused on
     /// it, tears its socket down after an ambiguous answer, dials it again — the
-    /// relay stays in the publish pool with the options Haven registered.
+    /// relay the publish pool holds has the options Haven registered. After the
+    /// ambiguous answer that is no relay at all: the one MDK reset is dropped,
+    /// and the next call registers a fresh one.
     ///
     /// Pays three 600 ms adapter backoffs twice over (the refused and the
     /// ambiguous call each make three attempts); every answer is immediate.
@@ -4341,6 +4549,11 @@ mod tests {
             .await;
 
         *answer.lock().expect("script lock") = "error: could not say";
+        let held = manager
+            .client
+            .relay(relay.url())
+            .await
+            .expect("registered by the calls above");
         let ambiguous = fanned_out(&transport, target).await;
         assert!(matches!(
             ambiguous,
@@ -4348,17 +4561,16 @@ mod tests {
                 if failure.kind() == TransportEndpointFailureKind::PossiblyExposed
         ));
         assert_eq!(
-            manager
-                .client
-                .relay(relay.url())
-                .await
-                .expect("still registered")
-                .status(),
+            held.status(),
             PoolRelayStatus::Terminated,
             "MDK's client resets a relay after an ambiguous publish; if it no \
              longer does, the case below stops covering a re-dial",
         );
-        assert_registered_with_haven_options(&manager, relay.url(), "after MDK's disconnect").await;
+        assert!(
+            manager.client.relay(relay.url()).await.is_err(),
+            "the relay MDK reset must be dropped from the publish pool, not kept \
+             for a dial its termination permit may end",
+        );
 
         *answer.lock().expect("script lock") = "";
         let redialled = fanned_out(&transport, target).await;
@@ -5627,6 +5839,12 @@ mod tests {
              is what lands it",
         );
         assert!(
+            manager.client.relay(url.as_str()).await.is_err(),
+            "the freed relay must be dropped from the pool: a wedge has no \
+             connection task, so the disconnect left a permit that would end \
+             the next dial of this same object",
+        );
+        assert!(
             manager
                 .publish_event(&throwaway_note("after the wedge"), &[url])
                 .await
@@ -5635,6 +5853,220 @@ mod tests {
             "and freeing it must leave a target the very next publish reaches, \
              or the recovery trades a silent wedge for a dead relay",
         );
+    }
+
+    // ------------------------------------------------------------------
+    // A relay Haven disconnects is dropped, never dialled again.
+    //
+    // `disconnect` on a relay with no connection task stores a termination
+    // permit, and the next dial of that object consumes it: `TerminationRequest`,
+    // the status left `Connecting`, and every later dial a no-op while sends
+    // queue into a channel nobody reads. Each test below leaves a relay with no
+    // task in the state one product path does, has that path disconnect it, and
+    // requires the next send to land.
+    // ------------------------------------------------------------------
+
+    /// A local relay and a manager that has not touched it yet.
+    async fn local_relay_and_manager() -> (LocalRelay, String, RelayManager) {
+        let _ = allow_ws_loopback_for_test();
+        let server = LocalRelay::new(RelayBuilder::default());
+        server.run().await.expect("local relay runs");
+        let url = server.url().await.to_string();
+        (server, url, RelayManager::new())
+    }
+
+    /// Registers `url` and drops its first dial after one poll, as a send
+    /// cut short by its caller's bound does: `Connecting`, with no task.
+    ///
+    /// One poll on a single thread: the pool's locks are uncontended and the
+    /// admission policy is ready at once, while the handshake needs the server,
+    /// which cannot run until this returns.
+    async fn strand_mid_dial(manager: &RelayManager, url: &str) {
+        use futures::FutureExt;
+        let relay_url = RelayUrl::parse(url).expect("loopback url");
+        RelayManager::register_publish_relays(&manager.client, &[relay_url]).await;
+        assert!(
+            manager
+                .client
+                .try_connect_relay(url, CONNECTION_TIMEOUT)
+                .now_or_never()
+                .is_none(),
+            "the dial finished in one poll, so nothing was cut short",
+        );
+        assert_eq!(
+            manager
+                .client
+                .relay(url)
+                .await
+                .expect("registered")
+                .status(),
+            PoolRelayStatus::Connecting,
+        );
+    }
+
+    /// Whether the pool's relay at `url` is connected now.
+    async fn pool_relay_connected(manager: &RelayManager, url: &str) -> bool {
+        manager
+            .client
+            .relay(url)
+            .await
+            .is_ok_and(|relay| relay.is_connected())
+    }
+
+    /// A relay the pool holds but never dialled is `Initialized`, with no task,
+    /// and `disconnect` and `try_connect` take the same branches on it as on a
+    /// `Sleeping` one. The pool must also stay usable across shutdown after
+    /// shutdown: by the fanout, by a plain publish and by a NIP-77 pass.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_relay_registered_but_never_dialled_is_reachable_after_shutdown() {
+        let (_server, url, manager) = local_relay_and_manager().await;
+        let relay_url = RelayUrl::parse(&url).expect("loopback url");
+        RelayManager::register_publish_relays(&manager.client, &[relay_url]).await;
+        assert_eq!(
+            manager
+                .client
+                .relay(url.as_str())
+                .await
+                .expect("registered")
+                .status(),
+            PoolRelayStatus::Initialized,
+        );
+
+        manager.shutdown().await;
+        assert!(
+            matches!(
+                fanout_publish(&manager, &url, &fanout_message()).await,
+                FanoutTargetOutcome::Accepted
+            ),
+            "a relay the shutdown disconnected before it was ever dialled must \
+             still take the next fanout publish",
+        );
+        assert!(pool_relay_connected(&manager, &url).await);
+
+        manager.shutdown().await;
+        assert!(
+            manager
+                .publish_event(
+                    &throwaway_note("after the second shutdown"),
+                    std::slice::from_ref(&url)
+                )
+                .await
+                .expect("the relay is up")
+                .is_success(),
+            "the pool must take a plain publish after another shutdown",
+        );
+
+        manager.shutdown().await;
+        manager.neg_prepare(std::slice::from_ref(&url)).await;
+        let ends = tokio::time::Instant::now() + wait_budget(30);
+        assert!(
+            matches!(
+                manager
+                    .neg_remote_ids(
+                        &[0xab; 32],
+                        &url,
+                        0,
+                        nostr::Timestamp::now().as_secs(),
+                        ends
+                    )
+                    .await,
+                crate::relay::negentropy::NegAnswer::Complete(_)
+            ),
+            "and a NIP-77 pass after a third",
+        );
+    }
+
+    /// A dial its caller's bound cut short leaves the relay `Connecting` with
+    /// no task, which no later dial leaves; the shutdown has to retire it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_dial_cancelled_mid_handshake_is_healed_by_shutdown() {
+        let (_server, url, manager) = local_relay_and_manager().await;
+        strand_mid_dial(&manager, &url).await;
+
+        manager.shutdown().await;
+        assert!(
+            matches!(
+                fanout_publish(&manager, &url, &fanout_message()).await,
+                FanoutTargetOutcome::Accepted
+            ),
+            "after the shutdown the relay a cut dial stranded must take the next \
+             fanout publish",
+        );
+        assert!(pool_relay_connected(&manager, &url).await);
+    }
+
+    /// The burst pool's own idle sleep: a relay that slept after a burst is
+    /// shut down at the pause and must take the next burst's send.
+    ///
+    /// The permit is stored whichever way the shutdown meets the sleeping
+    /// task: the `Sleeping` broadcast is made inside the poll that ends the
+    /// connection task's `select!`, and a termination waiter dropped notified
+    /// but unreceived hands its `notify_one` on to the next waiter, or stores
+    /// it when there is none (tokio 1.52.1 `sync/notify.rs` 1365-1374).
+    ///
+    /// ~60–70 s of wall clock, for the reason
+    /// `the_publish_socket_sleeps_after_a_burst_and_wakes_for_the_next` gives.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_sleeping_publish_socket_is_reachable_after_shutdown() {
+        let (_server, url, manager) = local_relay_and_manager().await;
+        assert!(manager
+            .publish_event(&throwaway_note("the burst"), std::slice::from_ref(&url))
+            .await
+            .expect("the burst reaches the relay")
+            .is_success());
+        let mut notifications = manager
+            .client
+            .relay(url.as_str())
+            .await
+            .expect("the publish added the relay to the pool")
+            .notifications();
+        assert_eq!(
+            next_relay_status(&mut notifications, wait_budget(180)).await,
+            Some(nostr_sdk::RelayStatus::Sleeping),
+        );
+
+        manager.shutdown().await;
+        assert!(
+            matches!(
+                fanout_publish(&manager, &url, &fanout_message()).await,
+                FanoutTargetOutcome::Accepted
+            ),
+            "a relay that slept before the shutdown must take the next fanout \
+             publish",
+        );
+        assert!(pool_relay_connected(&manager, &url).await);
+    }
+
+    /// A fanout call that ends possibly exposed makes MDK's client disconnect
+    /// the relay; on one with no task that stores the permit, and the target
+    /// would answer every later call unavailable or ambiguous, holding its
+    /// commit pending (Security Rule 13) until the next pause.
+    ///
+    /// The first call's ~20 s of MDK waits run on a paused clock: nothing is
+    /// dialled while the relay is stranded, so only MDK's own timers advance.
+    /// The clock is resumed before the call that does dial.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_relay_mdk_reset_after_an_ambiguous_publish_is_reachable_again() {
+        let (_server, url, manager) = local_relay_and_manager().await;
+        strand_mid_dial(&manager, &url).await;
+
+        tokio::time::pause();
+        let ambiguous = fanout_publish(&manager, &url, &fanout_message()).await;
+        tokio::time::resume();
+        assert!(matches!(
+            ambiguous,
+            FanoutTargetOutcome::Failed(failure)
+                if failure.kind() == TransportEndpointFailureKind::PossiblyExposed
+        ));
+
+        assert!(
+            matches!(
+                fanout_publish(&manager, &url, &fanout_message()).await,
+                FanoutTargetOutcome::Accepted
+            ),
+            "the relay MDK reset after the ambiguous call must take the next one",
+        );
+        assert!(pool_relay_connected(&manager, &url).await);
     }
 
     /// A loopback front door that can stop carrying what the relay SAYS while
@@ -6435,11 +6867,26 @@ mod tests {
             .expect("the relay answers");
         assert_no_long_lived_subscription(&manager, "fetch_events").await;
 
-        manager
-            .check_event_on_relay(&url, answered.clone())
-            .await
-            .expect("the relay answers");
-        assert_no_long_lived_subscription(&manager, "check_event_on_relay").await;
+        let presence = crate::relay::maintenance::own_presence(
+            &manager,
+            &nostr::Keys::generate().public_key(),
+            &crate::relay::maintenance::OwnRelayLists {
+                inbox: &relays,
+                key_package: &relays,
+                lookup: &[],
+            },
+            None,
+            crate::relay::maintenance::TrackedKpLifetime::Absent,
+        )
+        .await;
+        let missing = crate::relay::maintenance::OwnEventPresence::Missing;
+        assert!(
+            presence[0].key_package == missing
+                && presence[0].relay_list == missing
+                && presence[0].inbox_relay_list == missing,
+            "each of the three REQs was answered in full: {presence:?}",
+        );
+        assert_no_long_lived_subscription(&manager, "own_presence").await;
 
         let drained = manager
             .fetch_events_per_relay(answered, &relays)

@@ -1,24 +1,23 @@
 // Static guard for plan §10 D2 (member-picker typed-stranger resolve): the
-// resolve must never force a picture download.
+// resolve itself never waits on a picture.
+//
+// Since 2026-11-12 (owner direction) a resolved person's picture IS
+// downloaded — by `strangerPictureProvider`, a separate provider the row
+// watches only once the resolve has returned a profile with no picture
+// cached. Keeping the download OUT of the resolve is what guarantees the name
+// is never held back by a GET to a server the person chose, which is the
+// promise pinned here.
 //
 // `flutter test` cannot execute
 // `NostrProfileService.resolveTypedStrangerProfile` itself — it wraps a
 // generated Rust-FFI binding with no `RustLib.init()` in the unit-test
-// environment (see CLAUDE.md, "Widget tests with Rust FFI").
-// What CAN be pinned without the bridge is the source shape the promise rests
-// on: `_toProfile`'s `forcePictureLookup` parameter defaults to `false`, and
-// this is the one call site that must never override it. The sibling
-// `refreshMemberProfiles` passes `forcePictureLookup: true` as part of its OWN
-// batched-download flow — copying that pattern here would force a picture
-// download the instant a stranger's npub resolves, which is exactly what D2
-// forbids. No new picture-handling code is added by this method; that
-// restraint IS the implementation, and this test is what makes it fail loud
-// if a future edit adds it back.
+// environment (see CLAUDE.md, "Widget tests with Rust FFI"). What CAN be
+// pinned without the bridge is the source shape the promise rests on: the
+// method reads only already-cached thumbnail bytes (`_toProfile`'s
+// `forcePictureLookup` stays at its default `false`) and starts no download.
 //
-// Scoped to the ONE method's body (never a whole-file substring search): a
-// whole-file `expect(source, isNot(contains('forcePictureLookup: true')))`
-// would also incidentally trip over `refreshMemberProfiles`'s unrelated,
-// legitimate use of the same flag.
+// Scoped to the ONE method's body (never a whole-file substring search): the
+// same file's `downloadMemberPictures` legitimately names the download.
 
 import 'dart:io';
 
@@ -74,29 +73,32 @@ String _codeOnly(String source) => source
 void main() {
   final body = _codeOnly(_methodBody(_read(_path), _signature));
 
-  test('resolveTypedStrangerProfile never forces a picture lookup', () {
+  test('resolveTypedStrangerProfile never waits on a picture', () {
     expect(
       body,
       isNot(contains('forcePictureLookup: true')),
       reason:
-          'D2: a picture URL is an HTTP GET to a host the profile owner '
-          "chose, from the user's IP — that must never fire merely because "
-          "a stranger's npub was typed. forcePictureLookup must stay at "
-          'its default (false) at this call site.',
+          'the resolve reads only cached thumbnail bytes; '
+          'forcePictureLookup must stay at its default (false) here.',
+    );
+    expect(
+      body,
+      isNot(contains('ownloadMemberPicture')),
+      reason:
+          'the picture is downloaded by strangerPictureProvider after the '
+          'resolve returns — inside the resolve, a GET to a server the '
+          'person chose would hold back their name.',
     );
   });
 
-  test(
-    'resolveTypedStrangerProfile mirrors the thumbnail-only resolution '
-    'getMemberProfile uses',
-    () {
-      expect(
-        body,
-        contains('fullResolution: false'),
-        reason:
-            'mirrors getMemberProfile — the lightweight, single-pubkey read '
-            'path, not the full-resolution own-profile path.',
-      );
-    },
-  );
+  test('resolveTypedStrangerProfile mirrors the thumbnail-only resolution '
+      'getMemberProfile uses', () {
+    expect(
+      body,
+      contains('fullResolution: false'),
+      reason:
+          'mirrors getMemberProfile — the lightweight, single-pubkey read '
+          'path, not the full-resolution own-profile path.',
+    );
+  });
 }

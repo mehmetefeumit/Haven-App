@@ -71,7 +71,7 @@ const fallbackDefaultProfileRelays = <String>[
   'wss://relay.nostr.net',
 ];
 
-/// Compile-time fallback list of read-only discovery relay URLs.
+/// Compile-time fallback list of discovery (lookup) relay URLs.
 ///
 /// MUST agree, entry for entry and in order, with `PRODUCTION_DISCOVERY_RELAYS`
 /// in `haven-core/src/relay/discovery.rs` — a CHECKED invariant
@@ -91,12 +91,15 @@ const fallbackDiscoveryRelays = <String>[
   'wss://nos.lol',
 ];
 
-/// The read-only discovery relay list (public indexers).
+/// The discovery (lookup) relay list (public indexers).
 ///
-/// These relays are queried ONLY to discover *other* users' metadata and
-/// relay lists by bare pubkey — they are READ-ONLY and must NEVER be passed
-/// as a publish or gift-wrap-poll target, or a private relay would leak onto
-/// a public relay. The runtime authority is the Rust FFI getter
+/// Queried to discover *other* users' metadata and relay lists by bare
+/// pubkey. The one thing of the user's sent here is a copy of their own relay
+/// lists (kind 10002 and kind 10050), which Rust's relay-list maintenance
+/// writes so an inviter holding only their pubkey finds them (owner decision
+/// OD-B, 2026-11-12). Never pass one as any other publish target or as a
+/// gift-wrap-poll target: never a KeyPackage, a gift wrap or a group message.
+/// The runtime authority is the Rust FFI getter
 /// `discovery_relays()`; this falls back to [`fallbackDiscoveryRelays`] when
 /// the FFI is not initialized (unit tests).
 List<String> get discoveryRelays {

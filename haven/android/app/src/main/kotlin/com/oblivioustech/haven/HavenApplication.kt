@@ -86,7 +86,7 @@ class HavenApplication : Application() {
  * including ones added by a future plugin.
  *
  * [Application.ActivityLifecycleCallbacks.onActivityCreated] is the earliest
- * hook available at minSdk 23 (`onActivityPreCreated` is API 29+), and it still
+ * hook available at minSdk 24 (`onActivityPreCreated` is API 29+), and it still
  * runs before the window is added to the WindowManager — the deadline for
  * `FLAG_SECURE` to take effect — and again on every recreation.
  */

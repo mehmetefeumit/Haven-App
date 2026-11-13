@@ -67,8 +67,8 @@ pub use fetch::{
 };
 pub use merge::{enforce_name_rule, merge_edits};
 pub use outbox::{
-    merge_base, owed_event_from_json, served_against, uncovered, PendingEdits, PendingSnapshot,
-    Served,
+    merge_base, newest_own_event, owed_event_from_json, served_against, uncovered, PendingEdits,
+    PendingSnapshot, Served,
 };
 pub use parse::parse_newest_metadata;
 pub use picture_cache::{

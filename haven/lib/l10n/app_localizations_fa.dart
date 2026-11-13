@@ -131,6 +131,13 @@ class AppLocalizationsFa extends AppLocalizations {
   String get onboardingCreateIdentityLoading => 'در حال آماده‌سازی…';
 
   @override
+  String get onboardingFinishingSetup => 'در حال تکمیل راه‌اندازی…';
+
+  @override
+  String get onboardingFinishSetupError =>
+      'نتوانستیم راه‌اندازی حسابت را کامل کنیم. اتصالت را بررسی کن و دوباره تلاش کن.';
+
+  @override
   String get onboardingCreateIdentityImportPrompt => 'از قبل کلید داری؟';
 
   @override
@@ -309,21 +316,58 @@ class AppLocalizationsFa extends AppLocalizations {
   }
 
   @override
-  String get relaySettingsStatusConnected => 'متصل';
-
-  @override
   String get relaySettingsStatusChecking => 'در حال بررسی';
 
   @override
   String get relaySettingsStatusUnreachable => 'در دسترس نیست';
 
   @override
-  String get relaySettingsStatusNotChecked => 'بررسی نشده';
+  String relaySettingsKindLine(String kind, String status) {
+    return '$kind: $status';
+  }
 
   @override
-  String relaySettingsStatusSemantics(String status) {
-    return 'وضعیت رله: $status';
-  }
+  String get relaySettingsKindKeyPackage => 'KeyPackage';
+
+  @override
+  String get relaySettingsKindRelayList => 'فهرست رله‌ها';
+
+  @override
+  String get relaySettingsKindInboxList => 'فهرست صندوق ورودی';
+
+  @override
+  String get relaySettingsPresencePublished => 'منتشر شده';
+
+  @override
+  String get relaySettingsPresenceMissing => 'موجود نیست';
+
+  @override
+  String get relaySettingsPresenceOutdated => 'نسخهٔ قدیمی';
+
+  @override
+  String get relaySettingsLookupTitle => 'رله‌های جست‌وجو';
+
+  @override
+  String get relaySettingsLookupSubtitle =>
+      'رله‌های عمومی‌ای که دیگران تو را در آن‌ها جست‌وجو می‌کنند. Haven یک نسخه از فهرست‌های رله‌ات را روی این رله‌ها نگه می‌دارد تا دیگران بتوانند دعوتت کنند.';
+
+  @override
+  String get relaySettingsRepublish => 'انتشار دوباره';
+
+  @override
+  String get relaySettingsRepublishDone =>
+      'هر رله‌ای که پاسخ داد، حالا آنچه را دیگران برای دعوت کردنت لازم دارند در خود دارد';
+
+  @override
+  String get relaySettingsRepublishIncomplete =>
+      'برخی رله‌ها هنوز آنچه را دیگران برای دعوت کردنت لازم دارند در خود ندارند';
+
+  @override
+  String get relaySettingsRepublishHeld =>
+      'تا وقتی از اطلاعیهٔ تنظیمات رله‌ها نگذری و ادامه ندهی، Haven تنظیمات رله‌ها و کلید دعوتت را منتشر نمی‌کند';
+
+  @override
+  String get relaySettingsStatusNotChecked => 'بررسی نشده';
 
   @override
   String get relaySettingsEmptyTitle => 'هیچ رله‌ای تنظیم نشده';
@@ -636,11 +680,12 @@ class AppLocalizationsFa extends AppLocalizations {
   String get createCircleNoIdInQr => 'شناسهٔ معتبری در کد QR یافت نشد';
 
   @override
-  String get createCircleNoAccountFound =>
-      'برای این شناسه هیچ حساب Haven پیدا نشد';
+  String get memberLookupNotFound =>
+      'هنوز حسابی در Haven برای این شناسه پیدا نشد. اگر این فرد تازه Haven را راه‌اندازی کرده، یک دقیقهٔ دیگر دوباره تلاش کن.';
 
   @override
-  String get createCircleCouldNotVerify => 'نتوانستیم عضو را تأیید کنیم';
+  String get memberLookupIncomplete =>
+      'نتوانستیم جست‌وجوی این شناسه را کامل کنیم. اتصالت را بررسی کن و دوباره تلاش کن.';
 
   @override
   String get createCircleSomethingWentWrong => 'مشکلی پیش آمد';
@@ -1017,7 +1062,19 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get memberPickerStrangerLookupNote =>
-      'Haven از یک رله خواست که نام عمومی این شخص را جست‌وجو کند. آن رله می‌بیند که این دستگاه همین حالا دربارهٔ این کلید پرسیده است. اما این درخواست هیچ امضایی ندارد، پس به هویتت در Haven گره نمی‌خورد. هنوز هیچ عکسی دانلود نشده است.';
+      'Haven نمایهٔ منتشرشدهٔ این شخص را حداکثر از دو رله خواست. هر رله‌ای که Haven از آن پرسید می‌تواند ببیند که این دستگاه همین حالا دربارهٔ این کلید پرسیده است. اما این درخواست هیچ امضای دیجیتالی ندارد، پس به هویتت در Haven گره نمی‌خورد. اگر این نمایه عکس داشته باشد، Haven آن را از سروری دانلود می‌کند که خودِ این شخص انتخاب کرده است، و آن سرور می‌تواند آدرس شبکهٔ این دستگاه را ببیند.';
+
+  @override
+  String get memberPickerStrangerLookingUp =>
+      'در حال جست‌وجوی نمایهٔ منتشرشده…';
+
+  @override
+  String get memberPickerStrangerNotFound => 'نام منتشرشده‌ای یافت نشد';
+
+  @override
+  String memberPickerStrangerFoundAnnouncement(String name) {
+    return 'نام منتشرشده: $name';
+  }
 
   @override
   String selectedMembersMore(int count) {
@@ -1579,6 +1636,30 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get qrCodeYourPublicKeyLabel => 'کلید عمومی تو';
+
+  @override
+  String get reachabilityChecking => 'در حال آماده شدن برای دریافت دعوت‌ها…';
+
+  @override
+  String get reachabilityReady => 'آمادهٔ دریافت دعوت';
+
+  @override
+  String get reachabilityCantCheck =>
+      'فعلاً نمی‌شود بررسی کرد که دیگران می‌توانند دعوتت کنند یا نه';
+
+  @override
+  String get reachabilityNotReady => 'دیگران هنوز نمی‌توانند دعوتت کنند';
+
+  @override
+  String get reachabilityNoRelays =>
+      'تا وقتی رله‌ای اضافه نکنی، دیگران نمی‌توانند دعوتت کنند';
+
+  @override
+  String get reachabilityOpenRelaySettings => 'تنظیمات رله‌ها';
+
+  @override
+  String get reachabilityAwaitingReset =>
+      'وقتی از اطلاعیهٔ تنظیمات رله‌ها بگذری و ادامه دهی، دیگران می‌توانند دعوتت کنند';
 
   @override
   String get qrCodeWhatIsThisTitle => 'این چیست؟';

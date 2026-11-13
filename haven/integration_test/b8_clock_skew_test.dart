@@ -343,14 +343,14 @@ void main() {
       await waitForKeyPackage(relay: relay, authorPubkeyHex: bob.pubkeyHex);
       await waitForKeyPackage(relay: relay, authorPubkeyHex: carol.pubkeyHex);
 
-      final bobKp = await relayManager.fetchMemberKeypackage(
+      final bobKp = (await relayManager.fetchMemberKeypackage(
         pubkey: bob.pubkeyHex,
         circle: alice.circleManager,
-      );
-      final carolKp = await relayManager.fetchMemberKeypackage(
+      )).member;
+      final carolKp = (await relayManager.fetchMemberKeypackage(
         pubkey: carol.pubkeyHex,
         circle: alice.circleManager,
-      );
+      )).member;
       if (bobKp == null || carolKp == null) {
         throw StateError(
           '[b8] fetchMemberKeypackage returned null for '

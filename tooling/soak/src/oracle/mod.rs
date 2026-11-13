@@ -1154,6 +1154,11 @@ async fn probe_once<R: RelayPlane, T: TimelineSink, L: LogDrain>(
     let _ = sender
         .entry_pass_ended(bounds::round_trip(round.recovery))
         .await?;
+    // Nor inside a REQ's stored replay not yet taken in, which holds seals
+    // the same way and opens again whenever a relay's CLOSED re-issues it.
+    let _ = sender
+        .unread_input_taken_in(circle.mls_group_id(), bounds::round_trip(round.recovery))
+        .await?;
     let sent = sender
         .manager()?
         .seal_location_for_test(circle.mls_group_id(), &probe.as_location())
@@ -1412,6 +1417,12 @@ async fn send_attempt(device: &SimDevice, circle: &SimCircle) -> Result<Verdict,
     // As O1's probe: not inside the pass a foreground entry holds seals for.
     let _ = device
         .entry_pass_ended(bounds::round_trip(Recovery::Undisturbed))
+        .await?;
+    let _ = device
+        .unread_input_taken_in(
+            circle.mls_group_id(),
+            bounds::round_trip(Recovery::Undisturbed),
+        )
         .await?;
     match device
         .manager()?

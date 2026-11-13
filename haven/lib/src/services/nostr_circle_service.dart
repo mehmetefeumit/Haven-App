@@ -207,6 +207,15 @@ class NostrCircleService implements CircleService {
   bool _initialized = false;
   Completer<void>? _initCompleter;
 
+  /// Completed, and dropped, by the next adoption of an opened manager.
+  Completer<void>? _nextOpen;
+
+  /// Completes the next time this service adopts a freshly opened manager.
+  ///
+  /// A read that failed because the session could not be opened waits on this
+  /// rather than holding its failure until something happens to ask again.
+  Future<void> get nextSessionOpen => (_nextOpen ??= Completer<void>()).future;
+
   /// M10: one-way latch set on logout wipe. Once wiped, this instance MUST
   /// NEVER re-open circles.db — otherwise an in-flight maintenance/engine tick
   /// that calls `getCircleManagerFfi()` after the file was deleted would
@@ -459,6 +468,8 @@ class NostrCircleService implements CircleService {
       _initialized = true;
       _initCompleter = null;
       completer.complete();
+      _nextOpen?.complete();
+      _nextOpen = null;
     } on CircleServiceException catch (e) {
       _initCompleter = null;
       completer.completeError(e);

@@ -198,6 +198,8 @@ const DART_FRAME: &str =
 /// them (`the_cargo_lines_that_need_no_exemption_are_clean_on_their_own` is the
 /// proof), so exempting them would buy nothing and cost everything: each of
 /// those tails is unbounded, which is a slot an app print can land a value in.
+/// The one exception is the test-binary path of a `Running` line in cargo's
+/// build-dir layout, which has its own, narrower shape ([`CARGO_TEST_BINARY`]).
 /// `Doc-tests <32 hex>`, `Running x (target/<coordinate pair>)` and an
 /// `Updating git repository` line naming a `wss://` URL all used to pass for
 /// furniture.
@@ -233,6 +235,28 @@ const CARGO_STATUS: &str = concat!(
 /// coordinate, a URL, an IP or a 64-hex run inside a cargo-shaped line is
 /// reported exactly as it would be anywhere else.
 const CARGO_STATUS_RULES: &[&str] = &["S2", "S6"];
+
+/// The test-binary path of a `Running` line in cargo's build-dir layout.
+///
+/// Cargo 1.100 moved test binaries from `target/debug/deps/<bin>-<hash>` to
+/// `target/debug/build/<crate>/<hash>/out/<bin>-<hash>`, and `/` is a base64
+/// character: `logscan/1cd934b6cf06db05/out/haven` is a 34-character run with
+/// two digit runs, so S4 read every such line as a payload. Only S4, and only a
+/// hit lying wholly inside the path, is furniture
+/// ([`RuleSet::is_cargo_test_binary`]): the source slot and every other rule
+/// still read the line.
+///
+/// Every slot is bounded, and the two hashes must be the same hash, as cargo
+/// prints them. Crate and binary names are lowercase, so no mixed-case base64
+/// payload fits the path; the residual is a lowercase alphanumeric value in the
+/// crate or binary slot of a deliberately built line, on a sink whose
+/// `cargo_status` is `exempt` (`rust-test` and `soak`), still read by every
+/// rule but S4. The shape is verbatim from the
+/// `cargo test` transcripts of CI run 43278194001 (rustc 1.100.0).
+const CARGO_TEST_BINARY: &str = concat!(
+    r"^\s*Running (?:unittests )?(?:src|tests)/[a-z0-9_/]+\.rs ",
+    r"\((target/debug/build/[a-z0-9_-]+/([0-9a-f]{16})/out/[a-z0-9_]+-([0-9a-f]{16}))\)$",
+);
 
 /// S-SQLC: a record `SQLCipher`'s own logger wrote from inside Haven's process.
 ///
@@ -336,6 +360,8 @@ pub struct RuleHit {
     /// The matched text. Carried ONLY so `--disclose-values` can print it for
     /// local triage; every other output path must ignore it.
     pub matched: String,
+    /// Where the match lies in the evaluated line.
+    pub span: std::ops::Range<usize>,
 }
 
 /// A date as `(year, month, day)`, compared lexicographically.
@@ -348,6 +374,7 @@ pub struct RuleSet {
     ids: Vec<&'static str>,
     set: RegexSet,
     cargo_status: Regex,
+    cargo_test_binary: Regex,
     dial_failure: Regex,
     dart_frame: Regex,
     sqlcipher_record: Regex,
@@ -402,6 +429,8 @@ impl RuleSet {
             set,
             cargo_status: Regex::new(CARGO_STATUS)
                 .map_err(|e| format!("the cargo status shape does not compile: {e}"))?,
+            cargo_test_binary: Regex::new(CARGO_TEST_BINARY)
+                .map_err(|e| format!("the cargo test-binary shape does not compile: {e}"))?,
             dial_failure: Regex::new(DIAL_FAILURE)
                 .map_err(|e| format!("the dial-failure markers do not compile: {e}"))?,
             dart_frame: Regex::new(DART_FRAME)
@@ -445,6 +474,22 @@ impl RuleSet {
         CARGO_STATUS_RULES.contains(&rule) && self.is_cargo_status(line)
     }
 
+    /// Whether this HIT is an S4 hit inside the test-binary path of a cargo
+    /// `Running` line ([`CARGO_TEST_BINARY`]).
+    #[must_use]
+    pub fn is_cargo_test_binary(&self, hit: &RuleHit, line: &str) -> bool {
+        hit.rule == "S4"
+            && self.cargo_test_binary.captures(line).is_some_and(|shape| {
+                let (Some(path), Some(dir), Some(bin)) = (shape.get(1), shape.get(2), shape.get(3))
+                else {
+                    return false;
+                };
+                dir.as_str() == bin.as_str()
+                    && path.start() <= hit.span.start
+                    && hit.span.end <= path.end()
+            })
+    }
+
     /// Whether a logcat record's tag is `SQLCipher`'s ([`SQLCIPHER_RULE`]).
     #[must_use]
     pub fn is_sqlcipher_tag(&self, tag: &str) -> bool {
@@ -478,7 +523,9 @@ impl RuleSet {
             }
             let regex = &self.regexes[index];
             for capture in regex.captures_iter(line) {
-                let whole = capture.get(0).map_or("", |m| m.as_str());
+                let (whole, span) = capture
+                    .get(0)
+                    .map_or(("", 0..0), |m| (m.as_str(), m.range()));
                 if !self.is_real_hit(id, &capture, whole, line) {
                     continue;
                 }
@@ -488,6 +535,7 @@ impl RuleSet {
                 hits.push(RuleHit {
                     rule: id,
                     matched: whole.to_owned(),
+                    span,
                 });
                 break;
             }
@@ -921,7 +969,7 @@ fn glob_matches(glob: &str, text: &str) -> bool {
 mod tests {
     use super::{
         glob_matches, looks_encoded, parse_date, resolve_proof, runs_into_a_word, shannon_bits,
-        validate_allowlist, AllowEntry, AllowScope, RuleSet,
+        validate_allowlist, AllowEntry, AllowScope, RuleHit, RuleSet,
     };
 
     fn engine() -> RuleSet {
@@ -1210,6 +1258,60 @@ mod tests {
                 "…and therefore must not be inside the exemption: {line:?}"
             );
         }
+    }
+
+    /// Cargo 1.100's test-binary path is S4 furniture inside the path, and
+    /// nowhere else. The accepted line is verbatim from CI run 43278194001.
+    #[test]
+    fn only_s4_inside_a_running_lines_test_binary_path_is_furniture() {
+        let engine = engine();
+        let s4 = |line: &str| -> Vec<RuleHit> {
+            engine
+                .evaluate(line, "/tmp/fixture.log", None)
+                .into_iter()
+                .filter(|hit| hit.rule == "S4")
+                .collect()
+        };
+        let line = "     Running unittests src/lib.rs (target/debug/build/haven-logscan/237a2bf5f9252714/out/haven_logscan-237a2bf5f9252714)";
+        let found = s4(line);
+        assert!(!found.is_empty(), "the exemption must be needed at all");
+        assert!(found
+            .iter()
+            .all(|hit| engine.is_cargo_test_binary(hit, line)));
+        let other_rule = RuleHit {
+            rule: "S2",
+            matched: String::new(),
+            span: found[0].span.clone(),
+        };
+        assert!(!engine.is_cargo_test_binary(&other_rule, line));
+
+        // Each line still fires S4, and none of its S4 hits is furniture: the
+        // hashes differ, the run is in the source slot, or a mixed-case
+        // payload sits where only a lowercase crate name fits.
+        for evasion in [
+            "     Running unittests src/lib.rs (target/debug/build/haven-logscan/237a2bf5f9252714/out/haven_logscan-237a2bf5f9252715)",
+            "     Running tests/k7wq2zp9xm4rv8tn3yb6hc1dj5fg0slaeuoi.rs (target/debug/build/haven-logscan/237a2bf5f9252714/out/cli_contract-237a2bf5f9252714)",
+            "     Running tests/cli_contract.rs (target/debug/build/7mK4pQzXbRvTyLwN3cJhDgFaSeUiOpZxCvBnMq/237a2bf5f9252714/out/cli_contract-237a2bf5f9252714)",
+            "     Running unittests src/lib.rs (target/debug/build/haven-logscan/237a2bf5f9252714/out/haven_logscan-237a2bf5f9252714) 7mK4pQzXbRvTyLwN3cJhDgFaSeUiOpZxCvBnMq",
+        ] {
+            let found = s4(evasion);
+            assert!(!found.is_empty(), "S4 must fire on {evasion:?}");
+            assert!(
+                found
+                    .iter()
+                    .any(|hit| !engine.is_cargo_test_binary(hit, evasion)),
+                "not furniture: {evasion:?}"
+            );
+        }
+
+        // The residual, asserted rather than implied: a lowercase alphanumeric
+        // value in the crate slot of a deliberately built line is inside.
+        let residual = "     Running tests/cli_contract.rs (target/debug/build/k7wq2zp9xm4rv8tn3yb6hc1dj5fg0slaeuoi/237a2bf5f9252714/out/cli_contract-237a2bf5f9252714)";
+        let found = s4(residual);
+        assert!(!found.is_empty());
+        assert!(found
+            .iter()
+            .all(|hit| engine.is_cargo_test_binary(hit, residual)));
     }
 
     /// The exemption is two rules on one shape, never the shape itself.

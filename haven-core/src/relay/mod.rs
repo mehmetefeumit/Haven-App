@@ -63,8 +63,8 @@ pub use error::{InvalidUrlReason, RelayError, RelayResult};
 #[cfg(feature = "test-utils")]
 pub use manager::NegProbe;
 pub use manager::{
-    allow_ws_loopback_for_test, ws_loopback_allowed_for_test, FanoutTransport, Nip65Relays,
-    RelayManager,
+    allow_ws_loopback_for_test, ws_loopback_allowed_for_test, FanoutTransport, MemberLookup,
+    Nip65Relays, RelayManager,
 };
 pub(crate) use manager::{foreign_relay_dialable, retain_dialable_foreign_relays};
 pub use publishers::{
@@ -72,9 +72,7 @@ pub use publishers::{
     build_unpublish_event, dedup_relay_targets, superseding_created_at, PublisherError,
     PublisherResult,
 };
-pub use types::{
-    PublishResult, RelayConnectionStatus, RelayEventCheck, RelayFetchOutcome, RelayStatus,
-};
+pub use types::{PublishResult, RelayConnectionStatus, RelayFetchOutcome, RelayStatus};
 pub use url_norm::{canonicalize, normalize_relay_url};
 
 use crate::log_alias::{self, LogAliasClass, LogHandle};

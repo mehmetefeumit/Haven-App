@@ -25,7 +25,7 @@
 #      the flag must be on the window BEFORE it is added to the WindowManager,
 #      which `onActivityCreated` precedes and every later callback does not.
 #      (`onActivityPreCreated` would be earlier still and is API 29+; minSdk
-#      here is 23.) The body must SET the flag — a `clearFlags` here, the
+#      here is 24.) The body must SET the flag — a `clearFlags` here, the
 #      natural "let the crop screen be screenshotted" edit, is an inversion a
 #      presence grep would pass.
 #

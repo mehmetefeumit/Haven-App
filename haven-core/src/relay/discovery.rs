@@ -3,27 +3,36 @@
 //! Haven uses a **two-plane** relay model:
 //!
 //! - The **account plane** is the user's own configured relays. The user's
-//!   own relay-list events (kind 10050 / 10051) and key packages are
-//!   published there and nowhere else. See [`crate::circle::default_relays`]
-//!   for the one-time account-creation seed.
+//!   key packages (kind 30443) are published there and nowhere else, and so
+//!   are the user's relay lists (kind 10050 / 10002), with the one copy below.
+//!   See [`crate::circle::default_relays`] for the one-time account-creation
+//!   seed.
 //! - The **discovery plane** (this module) is a curated set of public
-//!   indexer relays queried **read-only** to resolve *other* users' relay
-//!   lists (kind 10050 / 10051 / 10002) and key packages when all we have is
-//!   a bare pubkey.
+//!   indexer relays queried to resolve *other* users' relay lists (kind
+//!   10050 / 10002) and key packages when all we have is a bare pubkey.
 //!
 //! # Why a separate plane
 //!
 //! Querying a public indexer for *someone else's* pubkey never exposes the
-//! local user's own relays — it is a read of foreign data. This is what lets
-//! Haven discover contacts by bare pubkey *without* force-publishing the
-//! user's own relay list (and any private relay in it) to public relays. The
-//! discovery plane is therefore **never** a publish target and **never**
-//! carries the local user's writes.
+//! local user's own relays — it is a read of foreign data, and it is what
+//! lets Haven discover contacts by bare pubkey.
+//!
+//! # The one write: the user's own relay lists (owner-directed 2026-11-12)
+//!
+//! The relay-list heal also copies the user's own kind 10002 and kind 10050
+//! here, unchanged — the configured lists, any private relay in them included
+//! — so an inviter holding only this user's pubkey finds them, as White Noise
+//! and MDK do and as `transports/nostr.md` encourages ("through metadata
+//! lookup paths where intended inviters can retrieve it"). An opt-out sends
+//! its empty replacement and kind 5 here too, so the copy goes with the list.
+//! Nothing else of the user's is ever sent here: never a key package (a
+//! lookup relay is not a `KeyPackage` destination), never a gift wrap.
 //!
 //! # Privacy properties
 //!
-//! - Read-only: discovery queries attach no signer and never trigger NIP-42
-//!   AUTH, so they cannot be tied to the local user's identity.
+//! - No identity on the socket: discovery traffic attaches no signer and
+//!   never triggers NIP-42 AUTH; the relay lists sent here are signed events
+//!   that name their author by design.
 //! - Bounded: queries are one-shot `REQ`s with a `limit`, never long-lived
 //!   subscriptions (consistent with Haven's relay-metadata-minimization
 //!   stance).
@@ -37,8 +46,10 @@ use std::sync::OnceLock;
 ///
 /// This set is a strict **superset** of [`crate::circle::PRODUCTION_DEFAULT_RELAYS`]
 /// (the account-creation seed), enforced by a unit test, so that a user who
-/// keeps the seeded public relays stays discoverable by bare pubkey while a
-/// user who configures only private relays does not leak them.
+/// keeps the seeded public relays stays discoverable by bare pubkey. Since
+/// 2026-11-12 the user's own relay lists are copied here as well (see the
+/// module docs), so a user who configures only private relays is
+/// discoverable too — and those lists, naming the private relays, are public.
 ///
 /// Runtime callers must use [`discovery_relays`], which honors the debug-only
 /// override installed via [`set_discovery_relays_for_test`].

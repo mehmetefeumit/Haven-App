@@ -20,6 +20,7 @@ import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/member_pick_state.dart';
 import 'package:haven/src/utils/npub_validator.dart';
 import 'package:haven/src/widgets/circles/member_picker.dart';
+import 'package:haven/src/widgets/circles/staged_member_identities.dart';
 import 'package:haven/src/widgets/widgets.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -42,7 +43,8 @@ class CreateCirclePage extends ConsumerStatefulWidget {
   ConsumerState<CreateCirclePage> createState() => _CreateCirclePageState();
 }
 
-class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
+class _CreateCirclePageState extends ConsumerState<CreateCirclePage>
+    with StagedMemberIdentities {
   /// Selected member npubs.
   final List<String> _selectedMembers = [];
 
@@ -73,6 +75,21 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
   /// text that renders the caret.
   String _query = '';
 
+  /// The search field's text, held here so staging from the typed-npub row
+  /// can clear it.
+  final _searchController = TextEditingController();
+
+  /// The search field's focus, held here so staging from the typed-npub row,
+  /// which then leaves the tree, can hand it back.
+  final _searchFocusNode = FocusNode();
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    _searchFocusNode.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
@@ -100,10 +117,11 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
                 slivers: [
                   SliverToBoxAdapter(
                     child: MemberSearchField(
+                      controller: _searchController,
+                      focusNode: _searchFocusNode,
                       onMemberAdded: _onMemberAdded,
                       onQrScanRequested: _openQrScanner,
-                      onQueryChanged: (query) =>
-                          setState(() => _query = query),
+                      onQueryChanged: (query) => setState(() => _query = query),
                       entryStateFor: _entryStateFor,
                     ),
                   ),
@@ -148,7 +166,7 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
                     circleMemberPubkeysHex: const {},
                     circleMemberNpubs: const {},
                     onSelected: _onCandidateSelected,
-                    onStrangerSelected: _onMemberAdded,
+                    onStrangerSelected: _onStrangerSelected,
                   ),
                   if (showGuidance)
                     SliverFillRemaining(
@@ -204,6 +222,12 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
   void _onCandidateSelected(MemberCandidate candidate) =>
       _onMemberAdded(candidate.npub);
 
+  void _onStrangerSelected(String npub) {
+    _onMemberAdded(npub);
+    _searchController.clear();
+    _searchFocusNode.requestFocus();
+  }
+
   Widget _buildEmptyState() {
     final l10n = AppLocalizations.of(context);
 
@@ -221,7 +245,7 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
     final error = _memberErrors[npub];
     final retryable = _retryable.contains(npub);
 
-    return PendingMemberTile(
+    return StagedMemberTile(
       npub: npub,
       status: status,
       errorMessage: error,
@@ -240,6 +264,7 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
   }
 
   void _onMemberAdded(String npub) {
+    holdStagedIdentity(npub);
     setState(() {
       _selectedMembers.add(npub);
       _stagedNpubs.add(npub);
@@ -252,6 +277,7 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
   }
 
   void _onMemberRemoved(String npub) {
+    releaseStagedIdentity(npub);
     setState(() {
       _selectedMembers.remove(npub);
       _stagedNpubs.remove(npub);
@@ -263,6 +289,7 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
   }
 
   void _clearAll() {
+    releaseAllStagedIdentities();
     setState(() {
       _selectedMembers.clear();
       _stagedNpubs.clear();
@@ -289,8 +316,11 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
       setState(() {
         switch (admission) {
           case null:
+            // Someone who set up Haven a moment ago is findable a moment
+            // later.
             _memberStatus[npub] = ValidationStatus.invalid;
-            _memberErrors[npub] = l10n.createCircleNoAccountFound;
+            _memberErrors[npub] = l10n.memberLookupNotFound;
+            _retryable.add(npub);
           case KeyPackageAdmission.needsUpdate:
             _memberStatus[npub] = ValidationStatus.needsUpdate;
             _memberErrors[npub] = l10n.pendingMemberNeedsUpdate;
@@ -313,7 +343,7 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
       final l10n = AppLocalizations.of(context);
       setState(() {
         _memberStatus[npub] = ValidationStatus.invalid;
-        _memberErrors[npub] = l10n.createCircleCouldNotVerify;
+        _memberErrors[npub] = l10n.memberLookupIncomplete;
         _retryable.add(npub);
       });
     } on Object catch (e) {
@@ -347,9 +377,9 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
       final l10n = AppLocalizations.of(context);
       final npub = NpubValidator.extract(result);
       if (npub == null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(l10n.createCircleNoIdInQr)),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(l10n.createCircleNoIdInQr)));
         return;
       }
       // A scanned code is an entry, so it answers to the same refusals as a

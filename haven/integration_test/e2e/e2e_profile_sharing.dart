@@ -766,10 +766,10 @@ void main() {
           timeout: _kind0WaitDeadline,
         );
         final relayManager = await RelayManagerFfi.newInstance();
-        final bobKp = await relayManager.fetchMemberKeypackage(
+        final bobKp = (await relayManager.fetchMemberKeypackage(
           pubkey: bob.pubkeyHex,
           circle: aliceManager,
-        );
+        )).member;
         if (bobKp == null) {
           throw StateError(
             '[e2e_profile] fetchMemberKeypackage returned null for Bob — his '

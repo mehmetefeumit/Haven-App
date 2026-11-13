@@ -484,10 +484,51 @@ void main() {
     });
   });
 
+  group('syncWithSecretOnlyToSign', () {
+    test('a pass with nothing to sign never reads the identity secret',
+        () async {
+      var secretReads = 0;
+      final passed = <Uint8List?>[];
+      final result = await syncWithSecretOnlyToSign(
+        savePending: false,
+        secretProvider: () async {
+          secretReads++;
+          return Uint8List(32);
+        },
+        sync: (secret) async {
+          passed.add(secret);
+          return 'synced';
+        },
+      );
+      expect(result, 'synced');
+      expect(secretReads, 0);
+      expect(passed, [null]);
+    });
+
+    test('a saved edit is signed with a fresh secret, scrubbed afterwards',
+        () async {
+      final secret = Uint8List.fromList(List.filled(32, 7));
+      var secretReads = 0;
+      List<int>? seenBySync;
+      await syncWithSecretOnlyToSign(
+        savePending: true,
+        secretProvider: () async {
+          secretReads++;
+          return secret;
+        },
+        sync: (bytes) async => seenBySync = List.of(bytes!),
+      );
+      expect(secretReads, 1);
+      expect(seenBySync, List.filled(32, 7));
+      expect(secret, everyElement(0));
+    });
+  });
+
   group('toProfilePendingState (pure FFI mapping)', () {
     test('maps every field 1:1', () {
       const ffi = ProfilePendingStateFfi(
         pending: true,
+        savePending: true,
         retryDue: false,
         nextRetryInSecs: 90,
       );
@@ -498,7 +539,11 @@ void main() {
     });
 
     test('an absent nextRetryInSecs stays absent', () {
-      const ffi = ProfilePendingStateFfi(pending: true, retryDue: true);
+      const ffi = ProfilePendingStateFfi(
+        pending: true,
+        savePending: false,
+        retryDue: true,
+      );
       expect(toProfilePendingState(ffi).nextRetryInSecs, isNull);
     });
 
@@ -569,13 +614,28 @@ void main() {
       expect(body, isNot(contains('syncMyProfile(')));
     });
 
-    test('syncOwnProfile fetches the secret via withFreshSecret (Rule 9)', () {
+    test(
+        'syncOwnProfile hands the secret to Rust only through the '
+        'save-pending gate (Rule 9)', () {
+      final source = readSource();
       final body = methodBody(
-        readSource(),
+        source,
         'Future<ProfileSyncResult> syncOwnProfile(',
       );
-      expect(body, contains('withFreshSecret('));
+      expect(body, contains('syncWithSecretOnlyToSign('));
+      expect(body, contains('savePending: state.savePending'));
       expect(body, contains('syncMyProfile('));
+      // The gate's own behaviour is proved above; this pins that nothing in
+      // the method reaches the secret around it.
+      expect(body, isNot(contains('withFreshSecret(')));
+      expect(body, isNot(contains('getSecretBytes(')));
+      expect(
+        source,
+        contains(
+          '}) => savePending ? withFreshSecret(secretProvider, sync) '
+          ': sync(null);',
+        ),
+      );
     });
   });
 

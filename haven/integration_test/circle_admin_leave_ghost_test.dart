@@ -102,7 +102,7 @@ void main() {
     // loopback-`ws://` opt-in (so `_testRelayUrl` passes every Rust
     // `validate_relay_urls` call site), and the default-relay override.
     // The override is load-bearing for Dark Matter's KeyPackage discovery:
-    // `fetchMemberKeypackage`'s cascade ends at the read-only discovery plane,
+    // `fetchMemberKeypackage`'s cascade ends at the discovery (lookup) plane,
     // which mirrors the default-relay override in debug builds — without
     // it, the fetch below would consult the PUBLIC indexers (non-hermetic,
     // and Bob's KeyPackage only exists on the local strfry → null).
@@ -181,7 +181,7 @@ void main() {
           final bobKpJson = (await bobRelayManager.fetchMemberKeypackage(
             pubkey: bobPub.pubkeyHex,
             circle: aliceCircle,
-          ))?.keyPackageJson;
+          )).member?.keyPackageJson;
           expect(
             bobKpJson,
             isNotNull,

@@ -43,7 +43,7 @@ use haven_core::profile::{
     fetch_profiles_assigned, profile_relay_pool_default, PendingEdits, ProfileRelaySalt,
     PROFILE_MAX_RELAY_RANK, PROFILE_POOL_MIN,
 };
-use haven_core::relay::canonicalize;
+use haven_core::relay::{canonicalize, MemberLookup, RelayManager};
 use nostr::{PublicKey, Timestamp};
 
 use crate::nemesis::types::Fault;
@@ -147,7 +147,7 @@ async fn identity_planes<T: TimelineSink, L: LogDrain>(
             .stage_own_profile_edits(&device.pubkey_hex(), &edits, now)
             .map_err(|_| RigError::Core(Step::Publish))?;
         let synced = manager
-            .sync_own_profile(&device.keys, || now)
+            .sync_own_profile(&device.keys.public_key(), Some(&device.keys), || now)
             .await
             .map_err(|_| RigError::Core(Step::Publish))?;
         if synced.outcome == ProfileSyncOutcome::Published && synced.still_pending {
@@ -244,7 +244,7 @@ async fn healed_relay_alone_completes<T: TimelineSink, L: LogDrain>(
         let device = world.device(tag)?;
         let synced = device
             .manager()?
-            .sync_own_profile(&device.keys, || now)
+            .sync_own_profile(&device.keys.public_key(), Some(&device.keys), || now)
             .await
             .map_err(|_| RigError::Core(Step::Publish))?;
         if synced.outcome == ProfileSyncOutcome::Published && !synced.still_pending {
@@ -396,16 +396,14 @@ async fn key_package_found<T: TimelineSink, L: LogDrain>(
         .key_package_admission_rule(None)
         .await
         .map_err(|_| RigError::Core(Step::MintKeyPackage))?;
-    let found = looking
-        .relays
-        .fetch_keypackage_for_invite(
-            &device.pubkey_hex(),
-            device.stored_key_package(),
-            &admission,
-        )
-        .await
-        .map_err(|_| RigError::Core(Step::Publish))?;
-    Ok(found.is_some_and(|event| event.id == built.id))
+    let found = RelayManager::lookup_key_package_on(
+        &device.pubkey_hex(),
+        device.stored_key_package(),
+        &admission,
+    )
+    .await
+    .map_err(|_| RigError::Core(Step::Publish))?;
+    Ok(matches!(found, MemberLookup::Found(member) if member.key_package_event.id == built.id))
 }
 
 #[cfg(test)]

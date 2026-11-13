@@ -66,7 +66,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => -1581342474;
+  int get rustContentHash => 1545831034;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -465,7 +465,7 @@ abstract class RustLibApi extends BaseApi {
 
   Future<ProfileSyncResultFfi> crateApiCircleManagerFfiSyncMyProfile({
     required CircleManagerFfi that,
-    required List<int> identitySecretBytes,
+    Uint8List? identitySecretBytes,
   });
 
   List<String> crateApiCircleManagerFfiUnmadeRemovalMembers({
@@ -694,11 +694,11 @@ abstract class RustLibApi extends BaseApi {
     required bool foreground,
   });
 
-  Future<RelayEventCheckFfi> crateApiRelayManagerFfiCheckEventOnRelay({
+  Future<List<OwnRelayPresenceFfi>>
+  crateApiRelayManagerFfiCheckOwnReachability({
     required RelayManagerFfi that,
-    required String relayUrl,
-    required String authorPubkey,
-    required int eventKind,
+    required CircleManagerFfi circle,
+    required String ownPubkey,
   });
 
   Future<RecoveryCauseFfi?> crateApiRelayManagerFfiCircleRecovery({
@@ -748,7 +748,7 @@ abstract class RustLibApi extends BaseApi {
     int? limit,
   });
 
-  Future<MemberKeyPackageFfi?> crateApiRelayManagerFfiFetchMemberKeypackage({
+  Future<MemberLookupFfi> crateApiRelayManagerFfiFetchMemberKeypackage({
     required RelayManagerFfi that,
     required String pubkey,
     required CircleManagerFfi circle,
@@ -3916,7 +3916,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   @override
   Future<ProfileSyncResultFfi> crateApiCircleManagerFfiSyncMyProfile({
     required CircleManagerFfi that,
-    required List<int> identitySecretBytes,
+    Uint8List? identitySecretBytes,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -3926,7 +3926,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          sse_encode_list_prim_u_8_loose(identitySecretBytes, serializer);
+          sse_encode_opt_list_prim_u_8_strict(identitySecretBytes, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -5997,11 +5997,11 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<RelayEventCheckFfi> crateApiRelayManagerFfiCheckEventOnRelay({
+  Future<List<OwnRelayPresenceFfi>>
+  crateApiRelayManagerFfiCheckOwnReachability({
     required RelayManagerFfi that,
-    required String relayUrl,
-    required String authorPubkey,
-    required int eventKind,
+    required CircleManagerFfi circle,
+    required String ownPubkey,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -6011,9 +6011,11 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          sse_encode_String(relayUrl, serializer);
-          sse_encode_String(authorPubkey, serializer);
-          sse_encode_u_16(eventKind, serializer);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi(
+            circle,
+            serializer,
+          );
+          sse_encode_String(ownPubkey, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -6022,20 +6024,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
         },
         codec: SseCodec(
-          decodeSuccessData: sse_decode_relay_event_check_ffi,
+          decodeSuccessData: sse_decode_list_own_relay_presence_ffi,
           decodeErrorData: sse_decode_String,
         ),
-        constMeta: kCrateApiRelayManagerFfiCheckEventOnRelayConstMeta,
-        argValues: [that, relayUrl, authorPubkey, eventKind],
+        constMeta: kCrateApiRelayManagerFfiCheckOwnReachabilityConstMeta,
+        argValues: [that, circle, ownPubkey],
         apiImpl: this,
       ),
     );
   }
 
-  TaskConstMeta get kCrateApiRelayManagerFfiCheckEventOnRelayConstMeta =>
+  TaskConstMeta get kCrateApiRelayManagerFfiCheckOwnReachabilityConstMeta =>
       const TaskConstMeta(
-        debugName: "RelayManagerFfi_check_event_on_relay",
-        argNames: ["that", "relayUrl", "authorPubkey", "eventKind"],
+        debugName: "RelayManagerFfi_check_own_reachability",
+        argNames: ["that", "circle", "ownPubkey"],
       );
 
   @override
@@ -6326,7 +6328,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<MemberKeyPackageFfi?> crateApiRelayManagerFfiFetchMemberKeypackage({
+  Future<MemberLookupFfi> crateApiRelayManagerFfiFetchMemberKeypackage({
     required RelayManagerFfi that,
     required String pubkey,
     required CircleManagerFfi circle,
@@ -6354,7 +6356,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
         },
         codec: SseCodec(
-          decodeSuccessData: sse_decode_opt_box_autoadd_member_key_package_ffi,
+          decodeSuccessData: sse_decode_member_lookup_ffi,
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiRelayManagerFfiFetchMemberKeypackageConstMeta,
@@ -9564,8 +9566,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   KpMaintenanceOutcomeFfi dco_decode_kp_maintenance_outcome_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 8)
-      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
+    if (arr.length != 9)
+      throw Exception('unexpected arr length: expect 9 but see ${arr.length}');
     return KpMaintenanceOutcomeFfi(
       action: dco_decode_kp_maintenance_action_ffi(arr[0]),
       canonicalOnRelays: dco_decode_u_32(arr[1]),
@@ -9574,7 +9576,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       relaysHealed: dco_decode_u_32(arr[4]),
       relayErrors: dco_decode_u_32(arr[5]),
       expiredInitKeyPurged: dco_decode_bool(arr[6]),
-      retiredMalformedSlot: dco_decode_bool(arr[7]),
+      publishedCurrent: dco_decode_bool(arr[7]),
+      retiredMalformedSlot: dco_decode_bool(arr[8]),
     );
   }
 
@@ -9726,6 +9729,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<OwnRelayPresenceFfi> dco_decode_list_own_relay_presence_ffi(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>)
+        .map(dco_decode_own_relay_presence_ffi)
+        .toList();
+  }
+
+  @protected
   List<int> dco_decode_list_prim_u_8_loose(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as List<int>;
@@ -9846,6 +9859,24 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       nip65WriteRelays: dco_decode_list_String(arr[3]),
       authorNpub: dco_decode_String(arr[4]),
     );
+  }
+
+  @protected
+  MemberLookupFfi dco_decode_member_lookup_ffi(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return MemberLookupFfi(
+      verdict: dco_decode_member_lookup_verdict_ffi(arr[0]),
+      member: dco_decode_opt_box_autoadd_member_key_package_ffi(arr[1]),
+    );
+  }
+
+  @protected
+  MemberLookupVerdictFfi dco_decode_member_lookup_verdict_ffi(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return MemberLookupVerdictFfi.values[raw as int];
   }
 
   @protected
@@ -10081,11 +10112,34 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  OwnEventPresenceFfi dco_decode_own_event_presence_ffi(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return OwnEventPresenceFfi.values[raw as int];
+  }
+
+  @protected
   OwnProfileRelayAnswerFfi dco_decode_own_profile_relay_answer_ffi(
     dynamic raw,
   ) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return OwnProfileRelayAnswerFfi.values[raw as int];
+  }
+
+  @protected
+  OwnRelayPresenceFfi dco_decode_own_relay_presence_ffi(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 7)
+      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
+    return OwnRelayPresenceFfi(
+      relayUrl: dco_decode_String(arr[0]),
+      own: dco_decode_bool(arr[1]),
+      lookup: dco_decode_bool(arr[2]),
+      reachable: dco_decode_bool(arr[3]),
+      keyPackage: dco_decode_own_event_presence_ffi(arr[4]),
+      relayList: dco_decode_own_event_presence_ffi(arr[5]),
+      inboxRelayList: dco_decode_own_event_presence_ffi(arr[6]),
+    );
   }
 
   @protected
@@ -10112,12 +10166,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ProfilePendingStateFfi dco_decode_profile_pending_state_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 3)
-      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
     return ProfilePendingStateFfi(
       pending: dco_decode_bool(arr[0]),
-      retryDue: dco_decode_bool(arr[1]),
-      nextRetryInSecs: dco_decode_opt_box_autoadd_u_32(arr[2]),
+      savePending: dco_decode_bool(arr[1]),
+      retryDue: dco_decode_bool(arr[2]),
+      nextRetryInSecs: dco_decode_opt_box_autoadd_u_32(arr[3]),
     );
   }
 
@@ -10306,20 +10361,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  RelayEventCheckFfi dco_decode_relay_event_check_ffi(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    final arr = raw as List<dynamic>;
-    if (arr.length != 4)
-      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
-    return RelayEventCheckFfi(
-      relayUrl: dco_decode_String(arr[0]),
-      found: dco_decode_bool(arr[1]),
-      eventCount: dco_decode_u_32(arr[2]),
-      newestTimestamp: dco_decode_opt_box_autoadd_i_64(arr[3]),
-    );
-  }
-
-  @protected
   RelayGiftWrapFetchFfi dco_decode_relay_gift_wrap_fetch_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
@@ -10344,13 +10385,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 4)
-      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    if (arr.length != 5)
+      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
     return RelayListCategoryOutcomeFfi(
       action: dco_decode_relay_list_action_ffi(arr[0]),
       respondersProbed: dco_decode_u_32(arr[1]),
       relaysHealed: dco_decode_u_32(arr[2]),
       relayErrors: dco_decode_u_32(arr[3]),
+      ownConfirmed: dco_decode_bool(arr[4]),
     );
   }
 
@@ -11667,6 +11709,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_relaysHealed = sse_decode_u_32(deserializer);
     var var_relayErrors = sse_decode_u_32(deserializer);
     var var_expiredInitKeyPurged = sse_decode_bool(deserializer);
+    var var_publishedCurrent = sse_decode_bool(deserializer);
     var var_retiredMalformedSlot = sse_decode_bool(deserializer);
     return KpMaintenanceOutcomeFfi(
       action: var_action,
@@ -11676,6 +11719,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       relaysHealed: var_relaysHealed,
       relayErrors: var_relayErrors,
       expiredInitKeyPurged: var_expiredInitKeyPurged,
+      publishedCurrent: var_publishedCurrent,
       retiredMalformedSlot: var_retiredMalformedSlot,
     );
   }
@@ -11910,6 +11954,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<OwnRelayPresenceFfi> sse_decode_list_own_relay_presence_ffi(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <OwnRelayPresenceFfi>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_own_relay_presence_ffi(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
   List<int> sse_decode_list_prim_u_8_loose(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var len_ = sse_decode_i_32(deserializer);
@@ -12103,6 +12161,25 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       nip65WriteRelays: var_nip65WriteRelays,
       authorNpub: var_authorNpub,
     );
+  }
+
+  @protected
+  MemberLookupFfi sse_decode_member_lookup_ffi(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_verdict = sse_decode_member_lookup_verdict_ffi(deserializer);
+    var var_member = sse_decode_opt_box_autoadd_member_key_package_ffi(
+      deserializer,
+    );
+    return MemberLookupFfi(verdict: var_verdict, member: var_member);
+  }
+
+  @protected
+  MemberLookupVerdictFfi sse_decode_member_lookup_verdict_ffi(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return MemberLookupVerdictFfi.values[inner];
   }
 
   @protected
@@ -12477,12 +12554,44 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  OwnEventPresenceFfi sse_decode_own_event_presence_ffi(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return OwnEventPresenceFfi.values[inner];
+  }
+
+  @protected
   OwnProfileRelayAnswerFfi sse_decode_own_profile_relay_answer_ffi(
     SseDeserializer deserializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var inner = sse_decode_i_32(deserializer);
     return OwnProfileRelayAnswerFfi.values[inner];
+  }
+
+  @protected
+  OwnRelayPresenceFfi sse_decode_own_relay_presence_ffi(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_relayUrl = sse_decode_String(deserializer);
+    var var_own = sse_decode_bool(deserializer);
+    var var_lookup = sse_decode_bool(deserializer);
+    var var_reachable = sse_decode_bool(deserializer);
+    var var_keyPackage = sse_decode_own_event_presence_ffi(deserializer);
+    var var_relayList = sse_decode_own_event_presence_ffi(deserializer);
+    var var_inboxRelayList = sse_decode_own_event_presence_ffi(deserializer);
+    return OwnRelayPresenceFfi(
+      relayUrl: var_relayUrl,
+      own: var_own,
+      lookup: var_lookup,
+      reachable: var_reachable,
+      keyPackage: var_keyPackage,
+      relayList: var_relayList,
+      inboxRelayList: var_inboxRelayList,
+    );
   }
 
   @protected
@@ -12520,10 +12629,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_pending = sse_decode_bool(deserializer);
+    var var_savePending = sse_decode_bool(deserializer);
     var var_retryDue = sse_decode_bool(deserializer);
     var var_nextRetryInSecs = sse_decode_opt_box_autoadd_u_32(deserializer);
     return ProfilePendingStateFfi(
       pending: var_pending,
+      savePending: var_savePending,
       retryDue: var_retryDue,
       nextRetryInSecs: var_nextRetryInSecs,
     );
@@ -12734,23 +12845,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  RelayEventCheckFfi sse_decode_relay_event_check_ffi(
-    SseDeserializer deserializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    var var_relayUrl = sse_decode_String(deserializer);
-    var var_found = sse_decode_bool(deserializer);
-    var var_eventCount = sse_decode_u_32(deserializer);
-    var var_newestTimestamp = sse_decode_opt_box_autoadd_i_64(deserializer);
-    return RelayEventCheckFfi(
-      relayUrl: var_relayUrl,
-      found: var_found,
-      eventCount: var_eventCount,
-      newestTimestamp: var_newestTimestamp,
-    );
-  }
-
-  @protected
   RelayGiftWrapFetchFfi sse_decode_relay_gift_wrap_fetch_ffi(
     SseDeserializer deserializer,
   ) {
@@ -12783,11 +12877,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_respondersProbed = sse_decode_u_32(deserializer);
     var var_relaysHealed = sse_decode_u_32(deserializer);
     var var_relayErrors = sse_decode_u_32(deserializer);
+    var var_ownConfirmed = sse_decode_bool(deserializer);
     return RelayListCategoryOutcomeFfi(
       action: var_action,
       respondersProbed: var_respondersProbed,
       relaysHealed: var_relaysHealed,
       relayErrors: var_relayErrors,
+      ownConfirmed: var_ownConfirmed,
     );
   }
 
@@ -14126,6 +14222,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_u_32(self.relaysHealed, serializer);
     sse_encode_u_32(self.relayErrors, serializer);
     sse_encode_bool(self.expiredInitKeyPurged, serializer);
+    sse_encode_bool(self.publishedCurrent, serializer);
     sse_encode_bool(self.retiredMalformedSlot, serializer);
   }
 
@@ -14328,6 +14425,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_list_own_relay_presence_ffi(
+    List<OwnRelayPresenceFfi> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_own_relay_presence_ffi(item, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_list_prim_u_8_loose(
     List<int> self,
     SseSerializer serializer,
@@ -14507,6 +14616,25 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_list_String(self.nip65Relays, serializer);
     sse_encode_list_String(self.nip65WriteRelays, serializer);
     sse_encode_String(self.authorNpub, serializer);
+  }
+
+  @protected
+  void sse_encode_member_lookup_ffi(
+    MemberLookupFfi self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_member_lookup_verdict_ffi(self.verdict, serializer);
+    sse_encode_opt_box_autoadd_member_key_package_ffi(self.member, serializer);
+  }
+
+  @protected
+  void sse_encode_member_lookup_verdict_ffi(
+    MemberLookupVerdictFfi self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
   }
 
   @protected
@@ -14863,12 +14991,36 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_own_event_presence_ffi(
+    OwnEventPresenceFfi self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
   void sse_encode_own_profile_relay_answer_ffi(
     OwnProfileRelayAnswerFfi self,
     SseSerializer serializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_own_relay_presence_ffi(
+    OwnRelayPresenceFfi self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.relayUrl, serializer);
+    sse_encode_bool(self.own, serializer);
+    sse_encode_bool(self.lookup, serializer);
+    sse_encode_bool(self.reachable, serializer);
+    sse_encode_own_event_presence_ffi(self.keyPackage, serializer);
+    sse_encode_own_event_presence_ffi(self.relayList, serializer);
+    sse_encode_own_event_presence_ffi(self.inboxRelayList, serializer);
   }
 
   @protected
@@ -14896,6 +15048,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_bool(self.pending, serializer);
+    sse_encode_bool(self.savePending, serializer);
     sse_encode_bool(self.retryDue, serializer);
     sse_encode_opt_box_autoadd_u_32(self.nextRetryInSecs, serializer);
   }
@@ -15079,18 +15232,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_relay_event_check_ffi(
-    RelayEventCheckFfi self,
-    SseSerializer serializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_String(self.relayUrl, serializer);
-    sse_encode_bool(self.found, serializer);
-    sse_encode_u_32(self.eventCount, serializer);
-    sse_encode_opt_box_autoadd_i_64(self.newestTimestamp, serializer);
-  }
-
-  @protected
   void sse_encode_relay_gift_wrap_fetch_ffi(
     RelayGiftWrapFetchFfi self,
     SseSerializer serializer,
@@ -15120,6 +15261,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_u_32(self.respondersProbed, serializer);
     sse_encode_u_32(self.relaysHealed, serializer);
     sse_encode_u_32(self.relayErrors, serializer);
+    sse_encode_bool(self.ownConfirmed, serializer);
   }
 
   @protected
@@ -15527,7 +15669,9 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   ///
   /// Dart should publish both events to the returned `targets` and then
   /// also flip the toggle off via `set_publish_relay_list`. This method
-  /// itself does not change the toggle.
+  /// itself does not change the toggle. The targets include the lookup
+  /// relays: maintenance copies a published list there, so an opt-out that
+  /// skipped them would leave the list public.
   Future<BuiltUnpublishFfi> buildUnpublishRelayList({
     required List<int> identitySecretBytes,
     required RelayTypeFfi relayType,
@@ -15788,11 +15932,12 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   ///
   /// # Stamping
   ///
-  /// Fetched kind-0s are upserted newest-wins and stamped as HITS; authors
-  /// their assigned relay answered nothing for are stamped as MISSES (which
-  /// advances the bounded retry ladder without resetting the staleness clock).
-  /// Authors the cycle never reached — dropped at the batch deadline, or on a
-  /// relay that turned out to be unusable — are stamped **not at all**.
+  /// Fetched kind-0s are upserted newest-wins and stamped as HITS; authors a
+  /// relay answered nothing for, or was reached for and did not answer, are
+  /// stamped as MISSES (which advances the bounded retry ladder without
+  /// resetting the staleness clock). Authors no relay was reached for —
+  /// dropped at the batch deadline, or behind a relay that could not be
+  /// connected to — are stamped **not at all**.
   /// `has_picture` reflects whether CURRENT picture bytes are cached.
   ///
   /// # Errors
@@ -16092,12 +16237,15 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
         giftWrapEventJson: giftWrapEventJson,
       );
 
-  /// Whether the own profile has unpublished work, whether the persisted
-  /// backoff permits another attempt, and if not, how long until it does.
+  /// Whether the own profile has unpublished work — a saved edit, or a pool
+  /// relay it has never been sent to — whether the persisted backoff permits
+  /// another attempt, and if not, how long until it does.
   ///
   /// The read a resume trigger consults before calling
-  /// [`Self::sync_my_profile`], so a clean install never dials a relay just
-  /// to discover it had nothing to say.
+  /// [`Self::sync_my_profile`], so an install with nothing saved and its pool
+  /// coverage settled never dials a relay just to discover it had nothing to
+  /// say, and so the identity secret is fetched only for a save
+  /// ([`ProfilePendingStateFfi::save_pending`]).
   ///
   /// # Errors
   ///
@@ -16331,7 +16479,11 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   /// its own salted relay independently, so a decoy only helps if it
   /// happens to hash to the SAME relay.
   ///
-  /// The one thing this adds over `fetch_member_profiles`: `pubkey` accepts
+  /// An author with no resolved profile is asked regardless of the miss
+  /// backoff: this is one key the user explicitly asked about, not a roster
+  /// sweep.
+  ///
+  /// The other thing this adds over `fetch_member_profiles`: `pubkey` accepts
   /// EITHER hex or bech32 (`npub1…`), via `PublicKey::parse` (the pattern
   /// already used to resolve another user's pubkey in
   /// `relay/manager.rs`). `fetch_member_profiles` itself stays hex-only
@@ -16567,12 +16719,18 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
     nowSecs: nowSecs,
   );
 
-  /// Publishes whatever the own-profile outbox is holding.
+  /// Publishes whatever the own-profile outbox is holding, and re-sends the
+  /// published profile to a pool relay that has never been given it.
   ///
   /// Idempotent and safe to call from any resume/foreground trigger: with
   /// nothing pending it returns [`ProfileSyncOutcomeFfi::NothingPending`],
   /// and with an unusable relay pool [`ProfileSyncOutcomeFfi::PoolUnderflow`],
-  /// in both cases without touching the network OR the supplied secret.
+  /// in both cases without touching the network OR the supplied secret. The
+  /// secret signs a saved edit and nothing else: a caller passes `None`
+  /// unless [`ProfilePendingStateFfi::save_pending`] says one is waiting, so
+  /// a pass that only re-sends what the pool already serves never takes the
+  /// secret out of the platform keystore. A save that lands after a caller
+  /// read `save_pending` is left for the pass its own trigger starts.
   /// Network failure is an OUTCOME, not an error — the save stays queued with
   /// its retry ladder advanced, and only a local fault produces `Err`.
   ///
@@ -16581,7 +16739,7 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   /// Returns a redacted error string on a malformed secret, a secret that is
   /// not this account's identity, or a local database/signing fault.
   Future<ProfileSyncResultFfi> syncMyProfile({
-    required List<int> identitySecretBytes,
+    Uint8List? identitySecretBytes,
   }) => RustLib.instance.api.crateApiCircleManagerFfiSyncMyProfile(
     that: this,
     identitySecretBytes: identitySecretBytes,
@@ -17290,20 +17448,23 @@ class RelayManagerFfiImpl extends RustOpaque implements RelayManagerFfi {
     foreground: foreground,
   );
 
-  /// Checks whether events of a given kind by an author exist on a relay.
+  /// The relay settings check: what each relay of the user's own inbox and
+  /// `KeyPackage` lists, and each lookup relay, serves of this account's
+  /// kind 30443, 10002 and 10050, judged as maintenance judges them
+  /// ([`own_presence`]). One row per relay, the inbox list first, then the
+  /// `KeyPackage` list, then the lookup relays.
   ///
-  /// Queries a single relay for events matching the given kind and author.
-  /// Used to verify that KeyPackage (30443) and relay list (10002 / 10050)
-  /// events are published.
-  Future<RelayEventCheckFfi> checkEventOnRelay({
-    required String relayUrl,
-    required String authorPubkey,
-    required int eventKind,
-  }) => RustLib.instance.api.crateApiRelayManagerFfiCheckEventOnRelay(
+  /// Only reads: unlike maintenance it does not wait for the storage-reset
+  /// notice, which holds back what is published, not what is asked.
+  ///
+  /// [`own_presence`]: haven_core::relay::maintenance::own_presence
+  Future<List<OwnRelayPresenceFfi>> checkOwnReachability({
+    required CircleManagerFfi circle,
+    required String ownPubkey,
+  }) => RustLib.instance.api.crateApiRelayManagerFfiCheckOwnReachability(
     that: this,
-    relayUrl: relayUrl,
-    authorPubkey: authorPubkey,
-    eventKind: eventKind,
+    circle: circle,
+    ownPubkey: ownPubkey,
   );
 
   /// What the user needs to know first about the circle of
@@ -17455,29 +17616,27 @@ class RelayManagerFfiImpl extends RustOpaque implements RelayManagerFfi {
     limit: limit,
   );
 
-  /// Fetches a user's `KeyPackage` with their relay lists.
+  /// Looks a person up to invite them: their `KeyPackage` with their relay
+  /// lists, and whether "not found" was proven
+  /// (`RelayManager::lookup_member_for_invite`).
   ///
-  /// Concurrently fetches two replaceable relay-list events:
-  /// - kind 10050 for Welcome delivery (NIP-17 inbox)
-  /// - kind 10002 (NIP-65): its write-capable set for `KeyPackage`
-  ///   discovery, its read-capable set for the Welcome delivery fallback
-  ///
-  /// Then runs the `KeyPackage` discovery cascade for one invite target
-  /// (`RelayManager::fetch_keypackage_for_invite`): the person's NIP-65
-  /// write set, then the read-only discovery relays.
-  ///
-  /// Each relay-list fetch is tolerated independently: a transient failure
-  /// on one list does not abort the whole call. The returned
-  /// `MemberKeyPackageFfi` carries the 10050 list — the one place a Welcome
-  /// goes — and the 10002 read set.
+  /// Their kind 10050 (where a Welcome goes) and kind 10002 come from the
+  /// discovery relays; the `KeyPackage` from the 10002 write set,
+  /// then the discovery relays. The returned `MemberKeyPackageFfi` carries
+  /// the 10050 list and both 10002 sets; an absent 10050 leaves its list
+  /// empty and never changes the verdict.
   ///
   /// The selection is made for one invite target: `circle`'s existing circle
   /// `mls_group_id`, or — `None` — a new circle. MDK's own admission rule for
   /// that target is read once and applied to every candidate BEFORE they are
   /// ranked, so a fresher package the target cannot admit never hides an
   /// older one it can. When nothing is admissible the best valid candidate
-  /// is still returned, so [`CircleManagerFfi::check_member_key_package`]
+  /// is still `Found`, so [`CircleManagerFfi::check_member_key_package`]
   /// can say why the person cannot be invited.
+  ///
+  /// `NotFound` only when every relay holding the person's packages that
+  /// connected said it had sent everything, and at least one did; anything
+  /// less is `LookupIncomplete`, never an error.
   ///
   /// # Arguments
   ///
@@ -17485,11 +17644,11 @@ class RelayManagerFfiImpl extends RustOpaque implements RelayManagerFfi {
   /// * `circle` - The inviter's circle manager
   /// * `mls_group_id` - The circle the person is being added to, if it exists
   ///
-  /// # Returns
+  /// # Errors
   ///
-  /// A `MemberKeyPackageFfi` with the key package, inbox relays,
-  /// and NIP-65 relays, or `None` if no `KeyPackage` was found.
-  Future<MemberKeyPackageFfi?> fetchMemberKeypackage({
+  /// A pubkey that does not parse, a circle this device does not hold, or a
+  /// package that does not serialize.
+  Future<MemberLookupFfi> fetchMemberKeypackage({
     required String pubkey,
     required CircleManagerFfi circle,
     Uint8List? mlsGroupId,
@@ -17565,12 +17724,14 @@ class RelayManagerFfiImpl extends RustOpaque implements RelayManagerFfi {
   ///    unconditionally, before any relay decision, because that bound does
   ///    not depend on the transport.
   /// 3. Probe the user's OWN NIP-65 relays (dedup'd, own-relays-only — never a
-  ///    default union) for kind-30443 events authored by self, and build the
-  ///    presence snapshot.
+  ///    default union, never a lookup relay; an install never seeded is seeded
+  ///    first) for kind-30443 events authored by self, and build the presence
+  ///    snapshot.
   /// 4. A replacement staged by an earlier tick that no relay acknowledged is
   ///    republished, byte for byte, and promoted on the first acknowledgement.
   /// 5. Otherwise decide via [`decide_kp_maintenance`]: on `SeedD` record the
-  ///    slot; on a heal republish the tracked event's own bytes; on a
+  ///    slot and decide once more, so the same tick mints into it; on a heal
+  ///    republish the tracked event's own bytes; on a
   ///    replacement stage a fresh package (minted and frozen in one MDK
   ///    transaction), publish it to OWN relays only, and promote it on the
   ///    first acknowledgement — which deletes the private material of every
@@ -17610,24 +17771,31 @@ class RelayManagerFfiImpl extends RustOpaque implements RelayManagerFfi {
   );
 
   /// M8-1 relay-list maintenance — republish-if-missing/drifted for the
-  /// user's kind 10050 (inbox) + 10051 (`KeyPackage`) relay lists, honoring
-  /// the per-category privacy toggle.
+  /// user's kind 10002 (`KeyPackage`-discovery, NIP-65) and kind 10050
+  /// (inbox) relay lists, honoring the per-category privacy toggle.
   ///
   /// Dart-timer-driven; the secret bytes are consumed per-call and zeroized
   /// (Security Rule 9). Fail-soft + idempotent.
   ///
-  /// Per category: reads the user's OWN configured relays, NETWORK-PROBES the
-  /// user's OWN relays for a currently-reachable list (never a local-timestamp
-  /// check — a relay-side drop must be detected), and if missing/drifted
-  /// republishes via [`build_relay_list_event`] + [`dedup_relay_targets`]
-  /// (own relays only, no default union). When the toggle is off it skips (no
-  /// publish). Never NIP-65/kind-10002 (Haven posture). `record_published_event`
-  /// after a successful publish.
+  /// The 10002 goes first, then the 10050; the `KeyPackage` tick runs after
+  /// both. `transports/nostr.md:444-449` lists 10002, `KeyPackage`, 10050,
+  /// and this order keeps both of its constraints: the `KeyPackage` goes to
+  /// the 10002 write set once that list is out, and the 10050 is up before
+  /// any inviter can find a `KeyPackage` to send a Welcome for.
+  ///
+  /// Per category: reads the user's OWN configured relays (seeding an
+  /// install never seeded), NETWORK-PROBES each of them and each lookup
+  /// relay ([`discovery_relays`]) for a currently-reachable list (never a
+  /// local-timestamp check — a relay-side drop must be detected), and if
+  /// missing/drifted republishes the configured list via
+  /// [`build_relay_list_event`] to the responders that lack it. No default
+  /// union. When the toggle is off it skips (no publish).
+  /// `record_published_event` after a successful publish.
   ///
   /// Returns a presence-only [`RelayListMaintenanceOutcomeFfi`].
   ///
   /// [`build_relay_list_event`]: haven_core::relay::build_relay_list_event
-  /// [`dedup_relay_targets`]: haven_core::relay::dedup_relay_targets
+  /// [`discovery_relays`]: haven_core::relay::discovery_relays
   Future<RelayListMaintenanceOutcomeFfi> maintainRelayList({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,

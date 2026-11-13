@@ -14,6 +14,7 @@ library;
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/providers/circles_provider.dart';
@@ -92,10 +93,17 @@ class _Harness {
         memberLocationsProvider.overrideWith(
           (ref) async => const <MemberLocation>[],
         ),
+        // In front from the start: a cause is confirmed through time the app
+        // watched it, and these tests build no widget binding to say so.
+        sharingHealthForegroundProvider.overrideWithValue(foreground),
       ],
     );
     addTearDown(container.dispose);
+    addTearDown(foreground.dispose);
+    container.read(sharingHealthProvider);
   }
+
+  final ValueNotifier<bool> foreground = ValueNotifier<bool>(true);
 
   late final ProviderContainer container;
   DateTime now = _t0;
@@ -500,7 +508,7 @@ class _StubMaintenanceService extends MaintenanceService {
 
   @override
   Future<RelayListMaintenanceResult> maintainRelayList() async =>
-      const RelayListMaintenanceResult.empty();
+      relayListsCurrent;
 
   @override
   Future<KeyPackageMaintenanceOutcome> maintainKeyPackage() async =>

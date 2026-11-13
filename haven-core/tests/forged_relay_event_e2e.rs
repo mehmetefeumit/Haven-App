@@ -25,7 +25,9 @@ use haven_core::profile::{
     set_profile_relays_for_test, CachedProfile, OwnProfileOnRelays, PendingEdits, ProfileMetadata,
     ProfileRelaySalt, ProfileState,
 };
-use haven_core::relay::maintenance::build_kp_maintenance_events;
+use haven_core::relay::maintenance::{
+    build_kp_maintenance_events, own_presence, OwnEventPresence, OwnRelayLists, TrackedKpLifetime,
+};
 use haven_core::relay::scripted_relay::{Frame, ScriptedRelay};
 use haven_core::relay::{
     discovery_relays, normalize_relay_url, set_discovery_relays_for_test, RelayManager,
@@ -531,7 +533,7 @@ async fn a_forged_own_profile_is_never_merged_into_the_one_haven_signs() {
         .stage_own_profile_edits(&own.to_hex(), &edit, NOW)
         .expect("stage the edit");
     let report = manager
-        .sync_own_profile(&keys, || NOW)
+        .sync_own_profile(&keys.public_key(), Some(&keys), || NOW)
         .await
         .expect("the sync runs");
     assert_eq!(report.outcome, ProfileSyncOutcome::Published);
@@ -587,7 +589,10 @@ async fn a_superseded_own_profile_is_never_the_base_of_the_next_edit() {
     manager
         .stage_own_profile_edits(&own.to_hex(), &edit(Some("Mine"), None), NOW)
         .expect("stage the name");
-    let first = manager.sync_own_profile(&keys, || NOW).await.expect("sync");
+    let first = manager
+        .sync_own_profile(&keys.public_key(), Some(&keys), || NOW)
+        .await
+        .expect("sync");
     assert_eq!(first.outcome, ProfileSyncOutcome::Published);
     let current = published_by_now().pop().expect("the first publish");
 
@@ -604,7 +609,7 @@ async fn a_superseded_own_profile_is_never_the_base_of_the_next_edit() {
         .stage_own_profile_edits(&own.to_hex(), &edit(None, Some("bio")), NOW + 1)
         .expect("stage the bio");
     let second = manager
-        .sync_own_profile(&keys, || NOW + 1)
+        .sync_own_profile(&keys.public_key(), Some(&keys), || NOW + 1)
         .await
         .expect("sync");
     assert_eq!(second.outcome, ProfileSyncOutcome::Published);
@@ -669,7 +674,10 @@ async fn a_newer_copy_read_for_a_publish_that_failed_is_what_the_retry_builds_on
     manager
         .stage_own_profile_edits(&own.to_hex(), &bio, NOW)
         .expect("stage the bio");
-    let failed = manager.sync_own_profile(&keys, || NOW).await.expect("sync");
+    let failed = manager
+        .sync_own_profile(&keys.public_key(), Some(&keys), || NOW)
+        .await
+        .expect("sync");
     assert_eq!(failed.outcome, ProfileSyncOutcome::PublishFailed);
     assert_eq!(
         manager
@@ -700,7 +708,7 @@ async fn a_newer_copy_read_for_a_publish_that_failed_is_what_the_retry_builds_on
         .answer(asks(own, Kind::Metadata), honest(vec![held]));
     refusing.store(false, Ordering::SeqCst);
     let retried = manager
-        .sync_own_profile(&keys, || NOW + 1)
+        .sync_own_profile(&keys.public_key(), Some(&keys), || NOW + 1)
         .await
         .expect("sync");
     assert_eq!(retried.outcome, ProfileSyncOutcome::Published);
@@ -844,21 +852,28 @@ async fn a_forged_event_never_reads_as_published_on_a_relay() {
     hermetic();
     let relay = ScriptedRelay::start();
     let own = Keys::generate().public_key();
+    let inbox = urls(&[&relay]);
+    // The very list configured: it would read current were it believed.
     let (prime, forged) = forged_as(
         &own,
         Kind::InboxRelays,
         "",
-        relay_tag("relay", "wss://own.example.com"),
+        relay_tag("relay", relay.url()),
         2_000,
     );
     relay.answer(asks(own, Kind::InboxRelays), primed(&prime, vec![forged]));
 
-    let check = RelayManager::new()
-        .check_event_on_relay(
-            relay.url(),
-            Filter::new().author(own).kind(Kind::InboxRelays),
-        )
-        .await
-        .expect("the check runs");
-    assert!(!check.found && check.event_count == 0);
+    let rows = own_presence(
+        &RelayManager::new(),
+        &own,
+        &OwnRelayLists {
+            inbox: &inbox,
+            key_package: &[],
+            lookup: &[],
+        },
+        None,
+        TrackedKpLifetime::Absent,
+    )
+    .await;
+    assert_eq!(rows[0].inbox_relay_list, OwnEventPresence::Missing);
 }

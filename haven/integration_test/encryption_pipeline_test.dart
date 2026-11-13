@@ -162,7 +162,7 @@ void main() {
     // Full hermetic process bootstrap, shared with the e2e lanes
     // (test_user.dart): Rust bridge init, in-memory keyring, the debug-only
     // loopback-`ws://` opt-in, and the default-relay override pointing every
-    // relay resolution — including the read-only discovery plane — at the
+    // relay resolution — including the discovery (lookup) plane — at the
     // local strfry. Dark Matter made both mandatory here: `addUserRelay`
     // (the NIP-65 seeding step before `maintainKeyPackage`) rejects a plain
     // `ws://` URL with "Use wss:// for security" unless the opt-in is armed,
@@ -269,7 +269,7 @@ void main() {
         final bobKpJson = (await bobRelayManager.fetchMemberKeypackage(
           pubkey: bobIdManager.pubkeyHex(),
           circle: aliceManager,
-        ))?.keyPackageJson;
+        )).member?.keyPackageJson;
         expect(
           bobKpJson,
           isNotNull,
@@ -730,7 +730,7 @@ void main() {
         final bobKpJson = (await bobRelayManager.fetchMemberKeypackage(
           pubkey: bobIdManager.pubkeyHex(),
           circle: aliceManager,
-        ))?.keyPackageJson;
+        )).member?.keyPackageJson;
         expect(
           bobKpJson,
           isNotNull,

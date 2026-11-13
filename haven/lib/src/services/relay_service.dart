@@ -161,6 +161,7 @@ sealed class KeyPackageMaintenanceOutcome {
     required this.relayErrors,
     required this.expiredInitKeyPurged,
     this.isMalformedSlotRetired = false,
+    this.publishedCurrent = false,
   });
 
   /// Relay probes/publishes/record-writes that errored (tallied, never fatal).
@@ -191,6 +192,16 @@ sealed class KeyPackageMaintenanceOutcome {
   /// three-way verdict and lives on the base class so no variant can drop it.
   /// An install created after the width fix never sets it.
   final bool isMalformedSlotRetired;
+
+  /// Whether, after this tick, a responding own `KeyPackage` relay serves this
+  /// device's current package (one it holds the key to) or acknowledged this
+  /// tick's publish of it — the FFI's `publishedCurrent`.
+  ///
+  /// A healthy tick can be `false`: one that only adopted a slot
+  /// ([KeyPackageMaintenanceHealthy.isStableSlotSeeded]) found a package a
+  /// reinstall's old self minted, which an inviter can fetch and this device
+  /// cannot open. Never `true` on a [KeyPackageMaintenanceFailed].
+  final bool publishedCurrent;
 }
 
 /// Nothing needed doing: the probe reached at least one of the user's own
@@ -206,6 +217,7 @@ final class KeyPackageMaintenanceHealthy extends KeyPackageMaintenanceOutcome {
     this.isStableSlotSeeded = false,
     super.relayErrors = 0,
     super.isMalformedSlotRetired = false,
+    super.publishedCurrent = false,
   }) : assert(
          respondersProbed > 0,
          'health requires a relay to have answered — an unprobed tick is a '
@@ -241,6 +253,7 @@ final class KeyPackageMaintenanceHealthy extends KeyPackageMaintenanceOutcome {
       'canonical: ${magnitudeBucket(canonicalOnRelays)}, '
       'responders: ${magnitudeBucket(respondersProbed)}, '
       'seeded: $isStableSlotSeeded, '
+      'current: $publishedCurrent, '
       'relayErrors: ${magnitudeBucket(relayErrors)}, '
       'slotRetired: $isMalformedSlotRetired)';
 }
@@ -263,6 +276,7 @@ final class KeyPackageMaintenancePublished
     super.relayErrors = 0,
     super.expiredInitKeyPurged = false,
     super.isMalformedSlotRetired = false,
+    super.publishedCurrent = true,
   }) : assert(
          relaysAcked > 0,
          'a publish no relay acked is a failure, not a publish',
@@ -284,6 +298,7 @@ final class KeyPackageMaintenancePublished
       'acked: ${magnitudeBucket(relaysAcked)}, '
       'freshSlot: $isFreshSlotMinted, '
       'responders: ${magnitudeBucket(respondersProbed)}, '
+      'current: $publishedCurrent, '
       'relayErrors: ${magnitudeBucket(relayErrors)}, '
       'initKeyPurged: $expiredInitKeyPurged, '
       'slotRetired: $isMalformedSlotRetired)';
@@ -332,35 +347,89 @@ final class KeyPackageMaintenanceFailed extends KeyPackageMaintenanceOutcome {
 }
 
 /// What an M8 relay-list maintenance tick did for one category (mirrors the
-/// Rust `RelayListActionFfi`).
+/// Rust `RelayListActionFfi`, plus [failed]).
 enum RelayListMaintenanceAction {
-  /// Publishing is suppressed by the privacy toggle (or nothing configured).
+  /// Publishing is suppressed by the stored per-category toggle.
   suppressed,
 
   /// A current list was already reachable — no change.
   alreadyCurrent,
 
-  /// The list was (re)published to own relays this tick.
+  /// The list was (re)published and at least one relay acknowledged it.
   republished,
 
   /// Nothing published: the storage-reset notice has not been dismissed yet.
   awaitingResetAcknowledgement,
+
+  /// The category has no relay configured even after the seed.
+  nothingConfigured,
+
+  /// A republish was needed and no relay acknowledged it.
+  unacknowledged,
+
+  /// The tick reached no verdict: it threw, or its local read failed.
+  failed,
 }
 
 /// Presence-only per-category tally of an M8 relay-list maintenance tick.
+///
+/// No defaults: a result that defaulted to "current" is how a thrown tick
+/// used to read as a healthy one.
 @immutable
 class RelayListCategoryResult {
   /// Creates a per-category relay-list result.
   const RelayListCategoryResult({
-    this.action = RelayListMaintenanceAction.alreadyCurrent,
+    required this.action,
+    required this.ownConfirmed,
+    this.respondersProbed = 0,
     this.relayErrors = 0,
-  });
+  }) : assert(
+         !ownConfirmed ||
+             action == RelayListMaintenanceAction.alreadyCurrent ||
+             action == RelayListMaintenanceAction.republished ||
+             action == RelayListMaintenanceAction.unacknowledged,
+         'only a tick that reached a relay can confirm an own relay',
+       );
+
+  /// A category whose tick reached no verdict.
+  static const failed = RelayListCategoryResult(
+    action: RelayListMaintenanceAction.failed,
+    ownConfirmed: false,
+  );
 
   /// What the tick did for this category.
   final RelayListMaintenanceAction action;
 
+  /// Whether one of the user's OWN relays for this category serves a current
+  /// list after this tick. A lookup relay's copy never sets it.
+  final bool ownConfirmed;
+
+  /// Responding relays the probe reached, own and lookup.
+  final int respondersProbed;
+
   /// Relay probes/publishes that errored (tallied, never fatal).
   final int relayErrors;
+
+  /// Whether the next tick should come sooner than the nominal cadence: no
+  /// own relay is known to serve the list, and a relay coming back can fix
+  /// that. A write only a lookup relay refused leaves an own-confirmed list
+  /// findable, so it waits for the nominal tick. The other actions wait on the
+  /// user (or on their deliberate setting), which no retry substitutes for.
+  bool get needsPromptRetry => switch (action) {
+    RelayListMaintenanceAction.failed => true,
+    RelayListMaintenanceAction.alreadyCurrent ||
+    RelayListMaintenanceAction.republished ||
+    RelayListMaintenanceAction.unacknowledged => !ownConfirmed,
+    RelayListMaintenanceAction.suppressed ||
+    RelayListMaintenanceAction.awaitingResetAcknowledgement ||
+    RelayListMaintenanceAction.nothingConfigured => false,
+  };
+
+  @override
+  String toString() =>
+      'RelayListCategoryResult(${action.name}, ownConfirmed: $ownConfirmed, '
+      'responders: ${magnitudeBucket(respondersProbed)}, '
+      'relayErrors: ${magnitudeBucket(relayErrors)})';
 }
 
 /// Presence-only result of an M8 relay-list maintenance tick (both categories).
@@ -371,18 +440,25 @@ class RelayListCategoryResult {
 class RelayListMaintenanceResult {
   /// Creates a relay-list maintenance result.
   const RelayListMaintenanceResult({
-    this.inbox = const RelayListCategoryResult(),
-    this.keyPackage = const RelayListCategoryResult(),
+    required this.inbox,
+    required this.keyPackage,
   });
 
-  /// An empty result (e.g. a best-effort tick that failed / no-op'd).
-  const RelayListMaintenanceResult.empty() : this();
+  /// A tick that reached no verdict for either category.
+  const RelayListMaintenanceResult.failed()
+    : inbox = RelayListCategoryResult.failed,
+      keyPackage = RelayListCategoryResult.failed;
 
   /// The inbox (kind 10050) category outcome.
   final RelayListCategoryResult inbox;
 
   /// The `KeyPackage`-discovery (kind 10002 NIP-65) category outcome.
   final RelayListCategoryResult keyPackage;
+
+  /// Whether either category wants a prompt retry
+  /// ([RelayListCategoryResult.needsPromptRetry]).
+  bool get needsPromptRetry =>
+      inbox.needsPromptRetry || keyPackage.needsPromptRetry;
 }
 
 /// What an M8 subscription-health tick did (presence-only, mirrors the Rust
@@ -569,30 +645,6 @@ class RelayRejection {
   final String reason;
 }
 
-/// Result of checking whether events exist on a specific relay.
-@immutable
-class RelayEventCheck {
-  /// Creates a [RelayEventCheck].
-  const RelayEventCheck({
-    required this.relayUrl,
-    required this.found,
-    required this.eventCount,
-    this.newestTimestamp,
-  });
-
-  /// The relay URL that was checked.
-  final String relayUrl;
-
-  /// Whether at least one matching event was found.
-  final bool found;
-
-  /// Number of matching events found.
-  final int eventCount;
-
-  /// Newest event timestamp, if any.
-  final DateTime? newestTimestamp;
-}
-
 /// Per-relay result of a gift-wrap fetch.
 ///
 /// Distinguishes a relay that answered ([responded] is `true`, even with
@@ -640,9 +692,12 @@ abstract class RelayService {
   /// it is `null` — so one the target cannot admit is never preferred to one
   /// it can, however recently it was published.
   ///
-  /// Returns `null` if no KeyPackage is found (user may not have Haven).
+  /// Returns `null` only when every relay holding the person's packages that
+  /// connected answered in full and none held one (they may not have Haven
+  /// yet).
   ///
-  /// Throws [RelayServiceException] if the fetch fails.
+  /// Throws [RelayServiceException] if the fetch fails or the lookup could
+  /// not finish: absence is then unproven, and worth retrying.
   Future<KeyPackageData?> fetchKeyPackage(
     String pubkey, {
     List<int>? mlsGroupId,
@@ -775,13 +830,14 @@ abstract class RelayService {
   /// Runs an M8 relay-list maintenance tick (kind 10050 inbox + kind 10002
   /// NIP-65 `KeyPackage`-discovery list).
   ///
-  /// Network-probes the user's OWN relays for each list and republishes to
-  /// own relays only when missing/drifted, honoring the per-category privacy
-  /// toggle. `circle` is the circle-manager FFI
-  /// handle; the secret bytes are consumed by the FFI and zeroized Rust-side.
-
+  /// Network-probes the user's own relays for each list, and the lookup
+  /// relays inviters search (owner decision OD-B, 2026-11-12), and republishes
+  /// the same list to any responding relay missing it or holding a drifted
+  /// one, honoring the per-category privacy toggle. The 10002 goes before the
+  /// 10050. `circle` is the circle-manager FFI handle; the secret bytes are
+  /// consumed by the FFI and zeroized Rust-side.
   ///
-  /// Best-effort — returns a [RelayListMaintenanceResult.empty] on failure
+  /// Best-effort — returns [RelayListMaintenanceResult.failed] on failure
   /// rather than throwing.
   Future<RelayListMaintenanceResult> maintainRelayList({
     required CircleManagerFfi circle,
@@ -824,15 +880,19 @@ abstract class RelayService {
     int? limit,
   });
 
-  /// Checks whether events of a given kind by an author exist on a relay.
+  /// The relay settings check: what each relay of the user's own inbox and
+  /// `KeyPackage` lists, and each lookup relay, serves of the account's kind
+  /// 30443, 10002 and 10050, judged as maintenance judges them. One row per
+  /// relay: the inbox list first, then the `KeyPackage` list, then the lookup
+  /// relays. A kind not expected on a relay is
+  /// [OwnEventPresenceFfi.notExpected] and was never asked for.
   ///
-  /// Queries a single relay for events matching the given kind and author.
+  /// Probes run one after another, so this can take tens of seconds when a
+  /// relay never answers; a caller shows that as checking, never as a block.
   ///
-  /// Throws [RelayServiceException] if the check fails.
-  Future<RelayEventCheck> checkEventOnRelay({
-    required String relayUrl,
-    required String authorPubkey,
-    required int eventKind,
+  /// Throws [RelayServiceException] if the check cannot run.
+  Future<List<OwnRelayPresenceFfi>> checkOwnReachability({
+    required String ownPubkey,
   });
 
   /// Removes a single relay from the persistent connection pool by URL.

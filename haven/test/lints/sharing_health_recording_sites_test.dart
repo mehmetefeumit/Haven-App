@@ -131,6 +131,37 @@ void main() {
     });
   });
 
+  group('a peer receipt reaches the model the moment it is stored', () {
+    // Both ends are executed — `circle_health_service_test.dart` (told after
+    // the write) and `sharing_health_provider_test.dart` (a delivery ends a
+    // receive fault at once). What neither can notice is the one line joining
+    // them being dropped: the verdict would then outlive the delivery that
+    // disproves it until the model's next tick, exactly as it used to.
+    test("the UI isolate's health service tells the model", () {
+      final code = _code(_read('lib/src/providers/service_providers.dart'));
+
+      expect(
+        code,
+        contains(
+          'onPeerEvent: () => _safeInvalidate( () => '
+          'ref.read(sharingHealthProvider.notifier).recordPeerDelivery(),',
+        ),
+      );
+    });
+
+    test('and is told only once the receipt is in the store', () {
+      final code = _code(_read('lib/src/services/circle_health_service.dart'));
+
+      expect(
+        code,
+        contains(
+          'await manager.notePeerEvent( nostrGroupId: nostrGroupId, atMs: '
+          'at.millisecondsSinceEpoch, ); _onPeerEvent?.call();',
+        ),
+      );
+    });
+  });
+
   group('thresholds are DERIVED, not typed in', () {
     // A relation test (`kPublishSilenceThreshold == kLocationPublishMaxInterval
     // * 2`) cannot catch this on its own: it passes just as happily against a

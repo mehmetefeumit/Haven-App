@@ -520,6 +520,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<MemberKeyPackageFfi> dco_decode_list_member_key_package_ffi(dynamic raw);
 
   @protected
+  List<OwnRelayPresenceFfi> dco_decode_list_own_relay_presence_ffi(dynamic raw);
+
+  @protected
   List<int> dco_decode_list_prim_u_8_loose(dynamic raw);
 
   @protected
@@ -572,6 +575,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   MemberKeyPackageFfi dco_decode_member_key_package_ffi(dynamic raw);
+
+  @protected
+  MemberLookupFfi dco_decode_member_lookup_ffi(dynamic raw);
+
+  @protected
+  MemberLookupVerdictFfi dco_decode_member_lookup_verdict_ffi(dynamic raw);
 
   @protected
   MeshDriveFfi dco_decode_mesh_drive_ffi(dynamic raw);
@@ -681,7 +690,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List? dco_decode_opt_list_prim_u_8_strict(dynamic raw);
 
   @protected
+  OwnEventPresenceFfi dco_decode_own_event_presence_ffi(dynamic raw);
+
+  @protected
   OwnProfileRelayAnswerFfi dco_decode_own_profile_relay_answer_ffi(dynamic raw);
+
+  @protected
+  OwnRelayPresenceFfi dco_decode_own_relay_presence_ffi(dynamic raw);
 
   @protected
   ProfileMetadataFfi dco_decode_profile_metadata_ffi(dynamic raw);
@@ -742,9 +757,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   RelayConnectionStatusFfi dco_decode_relay_connection_status_ffi(dynamic raw);
-
-  @protected
-  RelayEventCheckFfi dco_decode_relay_event_check_ffi(dynamic raw);
 
   @protected
   RelayGiftWrapFetchFfi dco_decode_relay_gift_wrap_fetch_ffi(dynamic raw);
@@ -1365,6 +1377,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<OwnRelayPresenceFfi> sse_decode_list_own_relay_presence_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<int> sse_decode_list_prim_u_8_loose(SseDeserializer deserializer);
 
   @protected
@@ -1431,6 +1448,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   MemberKeyPackageFfi sse_decode_member_key_package_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  MemberLookupFfi sse_decode_member_lookup_ffi(SseDeserializer deserializer);
+
+  @protected
+  MemberLookupVerdictFfi sse_decode_member_lookup_verdict_ffi(
     SseDeserializer deserializer,
   );
 
@@ -1562,7 +1587,17 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List? sse_decode_opt_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
+  OwnEventPresenceFfi sse_decode_own_event_presence_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   OwnProfileRelayAnswerFfi sse_decode_own_profile_relay_answer_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  OwnRelayPresenceFfi sse_decode_own_relay_presence_ffi(
     SseDeserializer deserializer,
   );
 
@@ -1649,11 +1684,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   RelayConnectionStatusFfi sse_decode_relay_connection_status_ffi(
-    SseDeserializer deserializer,
-  );
-
-  @protected
-  RelayEventCheckFfi sse_decode_relay_event_check_ffi(
     SseDeserializer deserializer,
   );
 
@@ -2421,6 +2451,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_own_relay_presence_ffi(
+    List<OwnRelayPresenceFfi> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_prim_u_8_loose(List<int> self, SseSerializer serializer);
 
   @protected
@@ -2510,6 +2546,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_member_key_package_ffi(
     MemberKeyPackageFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_member_lookup_ffi(
+    MemberLookupFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_member_lookup_verdict_ffi(
+    MemberLookupVerdictFfi self,
     SseSerializer serializer,
   );
 
@@ -2665,8 +2713,20 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_own_event_presence_ffi(
+    OwnEventPresenceFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_own_profile_relay_answer_ffi(
     OwnProfileRelayAnswerFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_own_relay_presence_ffi(
+    OwnRelayPresenceFfi self,
     SseSerializer serializer,
   );
 
@@ -2781,12 +2841,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_relay_connection_status_ffi(
     RelayConnectionStatusFfi self,
-    SseSerializer serializer,
-  );
-
-  @protected
-  void sse_encode_relay_event_check_ffi(
-    RelayEventCheckFfi self,
     SseSerializer serializer,
   );
 

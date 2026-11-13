@@ -31,6 +31,7 @@ import 'package:haven/src/widgets/identity/display_name_card.dart';
 import 'package:haven/src/widgets/identity/identity_photo_header.dart';
 import 'package:haven/src/widgets/identity/npub_qr_code.dart';
 import 'package:haven/src/widgets/identity/public_profile_notice.dart';
+import 'package:haven/src/widgets/identity/reachability_status_row.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../helpers/accessibility_announcements.dart';
@@ -169,6 +170,24 @@ void main() {
         reason: 'photo-sharing settings were removed',
       );
       expect(find.text('Advanced'), findsOneWidget);
+    });
+
+    testWidgets('the Public Key QR entry says whether others can invite you', (
+      tester,
+    ) async {
+      await tester.pumpWidget(build());
+      await tester.pumpAndSettle();
+
+      expect(
+        find.descendant(
+          of: find.ancestor(
+            of: find.text('Public Key QR'),
+            matching: find.byType(Card),
+          ),
+          matching: find.byType(ReachabilityStatusRow),
+        ),
+        findsOneWidget,
+      );
     });
 
     testWidgets('shows the refresh action in the app bar', (tester) async {

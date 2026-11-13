@@ -76,19 +76,22 @@ class _VerifyingRelayManager implements RelayManagerFfi {
   Uint8List? askedFor;
 
   @override
-  Future<MemberKeyPackageFfi?> fetchMemberKeypackage({
+  Future<MemberLookupFfi> fetchMemberKeypackage({
     required String pubkey,
     required CircleManagerFfi circle,
     Uint8List? mlsGroupId,
   }) async {
     askedBy = circle;
     askedFor = mlsGroupId;
-    return MemberKeyPackageFfi(
-      keyPackageJson: '{"kind":30443}',
-      inboxRelays: const ['wss://inbox.example.com'],
-      nip65Relays: const ['wss://nip65.example.com'],
-      nip65WriteRelays: const ['wss://nip65-write.example.com'],
-      authorNpub: verifiedAuthor,
+    return MemberLookupFfi(
+      verdict: MemberLookupVerdictFfi.found,
+      member: MemberKeyPackageFfi(
+        keyPackageJson: '{"kind":30443}',
+        inboxRelays: const ['wss://inbox.example.com'],
+        nip65Relays: const ['wss://nip65.example.com'],
+        nip65WriteRelays: const ['wss://nip65-write.example.com'],
+        authorNpub: verifiedAuthor,
+      ),
     );
   }
 

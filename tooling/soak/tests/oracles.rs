@@ -413,6 +413,46 @@ async fn o2_holds_on_a_converged_world_and_fails_while_a_commit_is_staged_and_un
     world.teardown().await.expect("teardown");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn o2_fails_a_send_held_by_unread_input_that_never_ends() {
+    let mut world = build_world().await;
+    let (alice, _) = pair(&world);
+    let group = group(&world);
+
+    // The plant: a commit the pager holds back that no ingest will ever take
+    // in. Every read O2 makes is still cheerful, so this reaches the send
+    // attempt, which waits out unread input before it seals — and must then
+    // grade a hold that never ends rather than wait past it.
+    let never_taken_in = nostr::EventId::from_slice(&[7; 32]).expect("32 bytes is an event id");
+    world
+        .device(alice)
+        .expect("alice")
+        .session()
+        .expect("a session")
+        .hold_pager_commits_for_test(&group, &[never_taken_in]);
+
+    let verdict = Invariant::SendPathLiveness
+        .check(&mut world, &round(1))
+        .await
+        .expect("the oracle reads");
+    assert!(
+        verdict
+            == Verdict::Failed(Finding::SendRefused {
+                device: alice,
+                circle: world.circles()[0].tag,
+                cause: undecryptable::Verdict::SendDeferred,
+            }),
+        "a send held by input the device never takes in is refused, and the \
+         wait ahead of the attempt is bounded rather than a pass"
+    );
+    assert!(
+        verdict.rc() == Rc::ViolationOrLeak,
+        "a circle that cannot send is a finding about the subject"
+    );
+
+    world.teardown().await.expect("teardown");
+}
+
 /// The circle's relay set plus one more, which is what makes a relay-list commit
 /// a change rather than a no-op.
 fn relay_set(world: &World) -> Vec<String> {

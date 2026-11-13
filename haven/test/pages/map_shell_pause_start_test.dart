@@ -1248,6 +1248,9 @@ class _NothingToPublish implements BurstPublisher {
       null;
 
   @override
+  void recordBurstPublishSkipped(Iterable<Circle> circles) {}
+
+  @override
   Future<void> publishInBurst(
     Circle circle,
     BurstFix fix, {

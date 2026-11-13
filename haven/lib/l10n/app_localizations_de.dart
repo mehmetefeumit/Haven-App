@@ -131,6 +131,13 @@ class AppLocalizationsDe extends AppLocalizations {
   String get onboardingCreateIdentityLoading => 'Wird eingerichtet …';
 
   @override
+  String get onboardingFinishingSetup => 'Einrichtung wird abgeschlossen …';
+
+  @override
+  String get onboardingFinishSetupError =>
+      'Die Einrichtung deines Kontos konnte nicht abgeschlossen werden. Prüfe deine Verbindung und versuche es erneut.';
+
+  @override
   String get onboardingCreateIdentityImportPrompt =>
       'Du hast bereits einen Schlüssel?';
 
@@ -315,21 +322,58 @@ class AppLocalizationsDe extends AppLocalizations {
   }
 
   @override
-  String get relaySettingsStatusConnected => 'Verbunden';
-
-  @override
   String get relaySettingsStatusChecking => 'Wird geprüft';
 
   @override
   String get relaySettingsStatusUnreachable => 'Nicht erreichbar';
 
   @override
-  String get relaySettingsStatusNotChecked => 'Nicht geprüft';
+  String relaySettingsKindLine(String kind, String status) {
+    return '$kind: $status';
+  }
 
   @override
-  String relaySettingsStatusSemantics(String status) {
-    return 'Relay-Status: $status';
-  }
+  String get relaySettingsKindKeyPackage => 'KeyPackage';
+
+  @override
+  String get relaySettingsKindRelayList => 'Relay-Liste';
+
+  @override
+  String get relaySettingsKindInboxList => 'Posteingangsliste';
+
+  @override
+  String get relaySettingsPresencePublished => 'Veröffentlicht';
+
+  @override
+  String get relaySettingsPresenceMissing => 'Fehlt';
+
+  @override
+  String get relaySettingsPresenceOutdated => 'Alte Version';
+
+  @override
+  String get relaySettingsLookupTitle => 'Such-Relays';
+
+  @override
+  String get relaySettingsLookupSubtitle =>
+      'Öffentliche Relays, auf denen andere nach dir suchen. Haven legt hier eine Kopie deiner Relay-Listen ab, damit andere dich einladen können.';
+
+  @override
+  String get relaySettingsRepublish => 'Erneut veröffentlichen';
+
+  @override
+  String get relaySettingsRepublishDone =>
+      'Jedes Relay, das geantwortet hat, verfügt jetzt über alles, was andere brauchen, um dich einzuladen';
+
+  @override
+  String get relaySettingsRepublishIncomplete =>
+      'Manchen Relays fehlt noch, was andere brauchen, um dich einzuladen';
+
+  @override
+  String get relaySettingsRepublishHeld =>
+      'Haven veröffentlicht deine Relay-Einstellungen und deinen Einladungsschlüssel erst, wenn du nach dem Hinweis zu den Relay-Einstellungen fortfährst';
+
+  @override
+  String get relaySettingsStatusNotChecked => 'Nicht geprüft';
 
   @override
   String get relaySettingsEmptyTitle => 'Keine Relays konfiguriert';
@@ -644,12 +688,12 @@ class AppLocalizationsDe extends AppLocalizations {
   String get createCircleNoIdInQr => 'Keine gültige ID im QR-Code gefunden';
 
   @override
-  String get createCircleNoAccountFound =>
-      'Für diese ID wurde kein Haven-Konto gefunden';
+  String get memberLookupNotFound =>
+      'Für diese ID wurde noch kein Haven-Konto gefunden. Falls die Person Haven gerade erst eingerichtet hat, versuche es in einer Minute erneut.';
 
   @override
-  String get createCircleCouldNotVerify =>
-      'Mitglied konnte nicht überprüft werden';
+  String get memberLookupIncomplete =>
+      'Die Überprüfung dieser ID konnte nicht abgeschlossen werden. Prüfe deine Verbindung und versuche es erneut.';
 
   @override
   String get createCircleSomethingWentWrong => 'Etwas ist schiefgelaufen';
@@ -1029,7 +1073,20 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get memberPickerStrangerLookupNote =>
-      'Haven hat ein Relay nach dem veröffentlichten Namen dieser Person gefragt. Das Relay sieht, dass dieses Gerät gerade eben nach dem Namen zu diesem Schlüssel gefragt hat – die Anfrage trägt aber keine Signatur und ist damit nicht mit deiner Haven-Identität verknüpft. Es wird noch kein Foto heruntergeladen.';
+      'Haven hat ein Relay – höchstens zwei – nach dem veröffentlichten Profil dieser Person gefragt. Jedes gefragte Relay kann sehen, dass dieses Gerät gerade eben nach diesem Schlüssel gefragt hat. Die Anfrage trägt aber keine kryptografische Signatur und ist deshalb nicht mit deiner Haven-Identität verknüpft. Wenn das Profil ein Foto hat, lädt Haven dieses Foto von dem Server herunter, den diese Person gewählt hat. Dieser Server kann die Netzwerkadresse dieses Geräts sehen.';
+
+  @override
+  String get memberPickerStrangerLookingUp =>
+      'Veröffentlichtes Profil wird gesucht …';
+
+  @override
+  String get memberPickerStrangerNotFound =>
+      'Kein veröffentlichter Name gefunden';
+
+  @override
+  String memberPickerStrangerFoundAnnouncement(String name) {
+    return 'Veröffentlichter Name: $name';
+  }
 
   @override
   String selectedMembersMore(int count) {
@@ -1603,6 +1660,31 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get qrCodeYourPublicKeyLabel => 'Dein öffentlicher Schlüssel';
+
+  @override
+  String get reachabilityChecking =>
+      'Empfang von Einladungen wird vorbereitet …';
+
+  @override
+  String get reachabilityReady => 'Bereit, eingeladen zu werden';
+
+  @override
+  String get reachabilityCantCheck =>
+      'Gerade lässt sich nicht prüfen, ob andere dich einladen können';
+
+  @override
+  String get reachabilityNotReady => 'Andere können dich noch nicht einladen';
+
+  @override
+  String get reachabilityNoRelays =>
+      'Andere können dich erst einladen, wenn du ein Relay hinzufügst';
+
+  @override
+  String get reachabilityOpenRelaySettings => 'Relay-Einstellungen';
+
+  @override
+  String get reachabilityAwaitingReset =>
+      'Andere können dich einladen, sobald du nach dem Hinweis zu den Relay-Einstellungen fortfährst';
 
   @override
   String get qrCodeWhatIsThisTitle => 'Was ist das?';

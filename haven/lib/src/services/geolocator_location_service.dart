@@ -397,7 +397,8 @@ class GeolocatorLocationService implements LocationService {
   /// `StateError: Stream has already been listened to` on the second listen.
   StreamController<Position>? _outer;
 
-  /// The plugin subscription feeding [_outer], or null while suspended.
+  /// The plugin subscription feeding [_outer], or null while suspended or
+  /// after the iOS session ended.
   ///
   /// Released by [suspendStream], by [_outer]'s `onCancel`, and by the next
   /// [getLocationStream] call — none of which the `cancel_subscriptions` lint
@@ -457,8 +458,9 @@ class GeolocatorLocationService implements LocationService {
   /// A no-op when the current outer has no listener, and when its
   /// subscription is still alive — the iOS background-sharing branch never
   /// suspends, and restarting that session on every resume would tear down
-  /// the keep-alive holding the process executable. An inner that ERRORED is
-  /// not alive: it delivers nothing further, so it is replaced.
+  /// the keep-alive holding the process executable. An inner that ERRORED,
+  /// or an iOS session that ENDED (a refused background start), is not
+  /// alive: it delivers nothing further, so it is replaced.
   void resumeStream() {
     final outer = _outer;
     if (outer == null || outer.isClosed || !outer.hasListener) return;
@@ -1051,7 +1053,9 @@ class GeolocatorLocationService implements LocationService {
   /// permission mid-stream) or a close means no further fix will arrive,
   /// so the teed coordinate is dropped immediately rather than being
   /// served for the rest of [kStreamPositionMaxAge]. Errors are still
-  /// forwarded to subscribers unchanged. Cancelling a subscription — what
+  /// forwarded to subscribers unchanged; an iOS close drops the coordinate
+  /// but leaves the returned stream open for [resumeStream] to re-subscribe,
+  /// while an Android close ends it. Cancelling a subscription — what
   /// a `locationStreamProvider` rebuild does — fires neither handler, so a
   /// settings flip keeps the warm fix (and the provider clears it
   /// explicitly on the background-sharing opt-out branch).
@@ -1132,7 +1136,10 @@ class GeolocatorLocationService implements LocationService {
           onDone: () {
             _inner = null;
             _noteAccessLost('position stream closed');
-            unawaited(outer.close());
+            // iOS ends its session only when it refused a background start;
+            // the next foreground resumeStream() starts a new one. Android's
+            // foreground service re-arms on this done.
+            if (!_isIOS) unawaited(outer.close());
           },
         );
   }

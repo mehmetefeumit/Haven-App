@@ -27,7 +27,7 @@ import 'test_relay.dart';
 const Map<String, Set<int>> kRoleEventKinds = <String, Set<int>>{
   'inbox': <int>{1059, 10050, 5},
   'keypackage': <int>{30443, 10002, 5},
-  'discovery': <int>{},
+  'discovery': <int>{10002, 10050, 5},
   'profile': <int>{0, 5},
   'location': <int>{445},
 };

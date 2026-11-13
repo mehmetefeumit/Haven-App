@@ -35,6 +35,7 @@ import 'package:haven/src/services/profile_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/npub_validator.dart';
 import 'package:haven/src/widgets/circles/circle_member_tile.dart';
+import 'package:haven/src/widgets/circles/member_avatar.dart';
 import 'package:haven/src/widgets/identity/avatar.dart';
 import 'package:haven/src/widgets/map/member_marker.dart'
     show kMemberAgePillThreshold;
@@ -318,24 +319,21 @@ void main() {
       );
     });
 
-    testWidgets(
-      'shows truncated npub as subtitle for a non-self member with a '
-      'contact display name',
-      (tester) async {
-        // Companion to the self-member subtitle test above ('renders
-        // truncated npub as subtitle when settings name is shown'): a
-        // contact display name is rendered as the title, and the
-        // truncated npub must still appear as the subtitle underneath it.
-        await pumpTile(
-          tester,
-          member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
-          identity: buildIdentity(),
-          displayName: 'Alice',
-        );
+    testWidgets('shows truncated npub as subtitle for a non-self member with a '
+        'contact display name', (tester) async {
+      // Companion to the self-member subtitle test above ('renders
+      // truncated npub as subtitle when settings name is shown'): a
+      // contact display name is rendered as the title, and the
+      // truncated npub must still appear as the subtitle underneath it.
+      await pumpTile(
+        tester,
+        member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
+        identity: buildIdentity(),
+        displayName: 'Alice',
+      );
 
-        expect(find.text(shortNpub(otherNpub)), findsOneWidget);
-      },
-    );
+      expect(find.text(shortNpub(otherNpub)), findsOneWidget);
+    });
 
     testWidgets(
       'shows truncated pubkey for non-self members without a contact name',
@@ -671,30 +669,29 @@ void main() {
       );
     });
 
-    testWidgets(
-      'subtitle widget is absent when only the pubkey is shown',
-      (tester) async {
-        await pumpTile(
-          tester,
-          member: buildMember(pubkey: otherPubkey),
-          identity: buildIdentity(),
-          displayName: null,
-        );
+    testWidgets('subtitle widget is absent when only the pubkey is shown', (
+      tester,
+    ) async {
+      await pumpTile(
+        tester,
+        member: buildMember(pubkey: otherPubkey),
+        identity: buildIdentity(),
+        displayName: null,
+      );
 
-        // Since there is no display name the npub-subtitle branch is
-        // skipped (the npub is shown as the TITLE instead). Assert directly
-        // on ListTile.subtitle rather than searching for the truncated-npub
-        // text: the title and subtitle now share the same truncation
-        // format (`_shortNpub`), so the text alone can no longer
-        // distinguish "rendered as title" from "rendered as subtitle".
-        final tile = tester.widget<ListTile>(find.byType(ListTile));
-        expect(
-          tile.subtitle,
-          isNull,
-          reason: 'No subtitle widget should be rendered in this case.',
-        );
-      },
-    );
+      // Since there is no display name the npub-subtitle branch is
+      // skipped (the npub is shown as the TITLE instead). Assert directly
+      // on ListTile.subtitle rather than searching for the truncated-npub
+      // text: the title and subtitle now share the same truncation
+      // format (`_shortNpub`), so the text alone can no longer
+      // distinguish "rendered as title" from "rendered as subtitle".
+      final tile = tester.widget<ListTile>(find.byType(ListTile));
+      expect(
+        tile.subtitle,
+        isNull,
+        reason: 'No subtitle widget should be rendered in this case.',
+      );
+    });
 
     testWidgets(
       'avatar initial for non-self member uses first letter of contact name',
@@ -861,11 +858,7 @@ void main() {
       // crashed in _MemberAvatar at `pubkey[5]`.
       await pumpTile(
         tester,
-        member: const CircleMember(
-          pubkey: 'abc',
-          npub: '',
-          isAdmin: false,
-        ),
+        member: const CircleMember(pubkey: 'abc', npub: '', isAdmin: false),
         identity: buildIdentity(),
         displayName: 'Alice',
       );
@@ -877,11 +870,7 @@ void main() {
     testWidgets('empty pubkey does not crash the tile', (tester) async {
       await pumpTile(
         tester,
-        member: const CircleMember(
-          pubkey: '',
-          npub: '',
-          isAdmin: false,
-        ),
+        member: const CircleMember(pubkey: '', npub: '', isAdmin: false),
         identity: buildIdentity(),
         displayName: null,
       );
@@ -1011,28 +1000,27 @@ void main() {
       expect(tapCount, 1);
     });
 
-    testWidgets(
-      'admin chip renders with no locator icon when interactive',
-      (tester) async {
-        await pumpTile(
-          tester,
-          member: buildMember(
-            pubkey: otherPubkey,
-            displayName: 'Bob',
-            isAdmin: true,
-          ),
-          identity: buildIdentity(),
-          displayName: 'Alice',
-          hasLocation: true,
-          onTap: () {},
-        );
+    testWidgets('admin chip renders with no locator icon when interactive', (
+      tester,
+    ) async {
+      await pumpTile(
+        tester,
+        member: buildMember(
+          pubkey: otherPubkey,
+          displayName: 'Bob',
+          isAdmin: true,
+        ),
+        identity: buildIdentity(),
+        displayName: 'Alice',
+        hasLocation: true,
+        onTap: () {},
+      );
 
-        expect(find.text('Admin'), findsOneWidget);
-        // The per-member locator/crosshair icon was removed; the Admin chip is
-        // now the only trailing element for an interactive admin.
-        expect(find.byIcon(LucideIcons.locateFixed), findsNothing);
-      },
-    );
+      expect(find.text('Admin'), findsOneWidget);
+      // The per-member locator/crosshair icon was removed; the Admin chip is
+      // now the only trailing element for an interactive admin.
+      expect(find.byIcon(LucideIcons.locateFixed), findsNothing);
+    });
 
     testWidgets(
       'admin chip renders alone when the member has no cached location',
@@ -1135,7 +1123,18 @@ void main() {
   group('CircleMemberTile — public-profile avatar display', () {
     // Minimal valid JPEG header so Image.memory decodes without error.
     final jpegBytes = Uint8List.fromList([
-      0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01,
+      0xFF,
+      0xD8,
+      0xFF,
+      0xE0,
+      0x00,
+      0x10,
+      0x4A,
+      0x46,
+      0x49,
+      0x46,
+      0x00,
+      0x01,
     ]);
 
     Future<void> pumpTileWithAvatar(
@@ -1247,86 +1246,75 @@ void main() {
       },
     );
 
-    testWidgets(
-      'falls back to CircleAvatar when getMemberProfile throws',
-      (tester) async {
-        final svc = MockProfileService()..shouldThrowOnGetMemberProfile = true;
-        await pumpTileWithAvatar(
-          tester,
-          member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
-          profileService: svc,
-        );
+    testWidgets('falls back to CircleAvatar when getMemberProfile throws', (
+      tester,
+    ) async {
+      final svc = MockProfileService()..shouldThrowOnGetMemberProfile = true;
+      await pumpTileWithAvatar(
+        tester,
+        member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
+        profileService: svc,
+      );
 
-        // The provider catches the error and returns null → initials shown.
-        expect(find.byType(CircleAvatar), findsOneWidget);
-        expect(find.byType(HavenAvatar), findsNothing);
-      },
-    );
+      // The provider catches the error and returns null → initials shown.
+      expect(find.byType(CircleAvatar), findsOneWidget);
+      expect(find.byType(HavenAvatar), findsNothing);
+    });
 
-    testWidgets(
-      'direct memberProfileProvider override: bytes present renders '
-      'HavenAvatar',
-      (tester) async {
-        await tester.pumpWidget(
-          ProviderScope(
-            overrides: [
-              identityProvider.overrideWith((_) async => null),
-              displayNameProvider.overrideWith((_) async => null),
-              // Inject bytes directly via provider override.
-              memberProfileProvider(otherPubkey).overrideWith(
-                (_) async => Profile(
-                  pubkeyHex: otherPubkey,
-                  pictureBytes: jpegBytes,
-                  pictureHash: 'hash',
-                ),
-              ),
-            ],
-            child: MaterialApp(
-              localizationsDelegates: AppLocalizations.localizationsDelegates,
-              supportedLocales: AppLocalizations.supportedLocales,
-              home: Scaffold(
-                body: CircleMemberTile(
-                  member: buildMember(pubkey: otherPubkey),
-                ),
+    testWidgets('direct memberProfileProvider override: bytes present renders '
+        'HavenAvatar', (tester) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            identityProvider.overrideWith((_) async => null),
+            displayNameProvider.overrideWith((_) async => null),
+            // Inject bytes directly via provider override.
+            memberProfileProvider(otherPubkey).overrideWith(
+              (_) async => Profile(
+                pubkeyHex: otherPubkey,
+                pictureBytes: jpegBytes,
+                pictureHash: 'hash',
               ),
             ),
-          ),
-        );
-        await tester.pumpAndSettle();
-
-        expect(find.byType(HavenAvatar), findsOneWidget);
-      },
-    );
-
-    testWidgets(
-      'direct memberProfileProvider override: null shows initials',
-      (tester) async {
-        await tester.pumpWidget(
-          ProviderScope(
-            overrides: [
-              identityProvider.overrideWith((_) async => null),
-              displayNameProvider.overrideWith((_) async => null),
-              memberProfileProvider(
-                otherPubkey,
-              ).overrideWith((_) async => null),
-            ],
-            child: MaterialApp(
-              localizationsDelegates: AppLocalizations.localizationsDelegates,
-              supportedLocales: AppLocalizations.supportedLocales,
-              home: Scaffold(
-                body: CircleMemberTile(
-                  member: buildMember(pubkey: otherPubkey),
-                ),
-              ),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(
+              body: CircleMemberTile(member: buildMember(pubkey: otherPubkey)),
             ),
           ),
-        );
-        await tester.pumpAndSettle();
+        ),
+      );
+      await tester.pumpAndSettle();
 
-        expect(find.byType(CircleAvatar), findsOneWidget);
-        expect(find.byType(HavenAvatar), findsNothing);
-      },
-    );
+      expect(find.byType(HavenAvatar), findsOneWidget);
+    });
+
+    testWidgets('direct memberProfileProvider override: null shows initials', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            identityProvider.overrideWith((_) async => null),
+            displayNameProvider.overrideWith((_) async => null),
+            memberProfileProvider(otherPubkey).overrideWith((_) async => null),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(
+              body: CircleMemberTile(member: buildMember(pubkey: otherPubkey)),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byType(CircleAvatar), findsOneWidget);
+      expect(find.byType(HavenAvatar), findsNothing);
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -1344,7 +1332,18 @@ void main() {
   group('CircleMemberTile — self avatar (own store)', () {
     // Minimal valid JPEG header so HavenAvatar's Image.memory accepts it.
     final jpegBytes = Uint8List.fromList([
-      0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01,
+      0xFF,
+      0xD8,
+      0xFF,
+      0xE0,
+      0x00,
+      0x10,
+      0x4A,
+      0x46,
+      0x49,
+      0x46,
+      0x00,
+      0x01,
     ]);
 
     Future<void> pumpSelfTile(
@@ -1550,9 +1549,7 @@ void main() {
               localizationsDelegates: AppLocalizations.localizationsDelegates,
               supportedLocales: AppLocalizations.supportedLocales,
               home: Scaffold(
-                body: CircleMemberTile(
-                  member: buildMember(pubkey: selfPubkey),
-                ),
+                body: CircleMemberTile(member: buildMember(pubkey: selfPubkey)),
               ),
             ),
           ),
@@ -1652,9 +1649,7 @@ void main() {
       await drainSnackBarTimer(tester);
     });
 
-    testWidgets('shows a confirmation SnackBar after copying', (
-      tester,
-    ) async {
+    testWidgets('shows a confirmation SnackBar after copying', (tester) async {
       await pumpTile(
         tester,
         member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
@@ -1781,8 +1776,7 @@ void main() {
           find.bySemanticsLabel('Bob, tap to center map on their location'),
         );
         final customActions =
-            (node.getSemanticsData().customSemanticsActionIds ??
-                    const <int>[])
+            (node.getSemanticsData().customSemanticsActionIds ?? const <int>[])
                 .map((id) => CustomSemanticsAction.getAction(id)!)
                 .toList();
 
@@ -1802,39 +1796,36 @@ void main() {
       },
     );
 
-    testWidgets(
-      'forwards tap-to-center to the outer semantics node for an '
-      'interactive member',
-      (tester) async {
-        // Regression guard for the outer node previously declaring
-        // `button: isInteractive` without ever wiring `onTap` — with
-        // excludeSemantics: true the ListTile's own tap semantics are
-        // dropped, so screen readers had no way to activate the row.
-        final handle = tester.ensureSemantics();
+    testWidgets('forwards tap-to-center to the outer semantics node for an '
+        'interactive member', (tester) async {
+      // Regression guard for the outer node previously declaring
+      // `button: isInteractive` without ever wiring `onTap` — with
+      // excludeSemantics: true the ListTile's own tap semantics are
+      // dropped, so screen readers had no way to activate the row.
+      final handle = tester.ensureSemantics();
 
-        await pumpTile(
-          tester,
-          member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
-          identity: buildIdentity(),
-          displayName: 'Alice',
-          onTap: () {},
-        );
+      await pumpTile(
+        tester,
+        member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
+        identity: buildIdentity(),
+        displayName: 'Alice',
+        onTap: () {},
+      );
 
-        final node = tester.getSemantics(find.byType(ListTile));
-        final data = node.getSemanticsData();
+      final node = tester.getSemantics(find.byType(ListTile));
+      final data = node.getSemanticsData();
 
-        expect(
-          data.hasAction(SemanticsAction.tap),
-          isTrue,
-          reason:
-              'An interactive member must forward tap-to-center to the '
-              'outer Semantics node so screen reader users can activate '
-              'the row, not just sighted users tapping the ListTile.',
-        );
+      expect(
+        data.hasAction(SemanticsAction.tap),
+        isTrue,
+        reason:
+            'An interactive member must forward tap-to-center to the '
+            'outer Semantics node so screen reader users can activate '
+            'the row, not just sighted users tapping the ListTile.',
+      );
 
-        handle.dispose();
-      },
-    );
+      handle.dispose();
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -1849,7 +1840,9 @@ void main() {
   // ---------------------------------------------------------------------------
 
   group('last-seen line', () {
-    testWidgets('is absent below the marker age-pill threshold', (tester) async {
+    testWidgets('is absent below the marker age-pill threshold', (
+      tester,
+    ) async {
       // Anti-vacuity for every assertion below, and the "do not cry wolf" half
       // of the promise.
       final l10n = await AppLocalizations.delegate.load(const Locale('en'));
@@ -1972,7 +1965,6 @@ void main() {
     });
   });
 
-
   // ---------------------------------------------------------------------------
   // PendingMemberTile — npub display format.
   //
@@ -2002,8 +1994,17 @@ void main() {
       // first frame already carries the rendered title.
     }
 
-    String renderedTitle(WidgetTester tester) =>
-        (tester.widget<ListTile>(find.byType(ListTile)).title! as Text).data!;
+    // The first line of the row: with no resolved name, the npub carries it.
+    String renderedTitle(WidgetTester tester) => tester
+        .widget<Text>(
+          find
+              .descendant(
+                of: find.byType(PendingMemberTile),
+                matching: find.byType(Text),
+              )
+              .first,
+        )
+        .data!;
 
     testWidgets('renders the npub in the canonical format', (tester) async {
       await pumpPendingTile(tester, npub: otherNpub);
@@ -2037,5 +2038,241 @@ void main() {
         );
       }
     });
+  });
+
+  // ---------------------------------------------------------------------------
+  // PendingMemberTile — the staged row shows the person (owner direction
+  // 2026-11-12): avatar and name, the npub beneath, the status on the avatar
+  // and in one spoken label.
+  // ---------------------------------------------------------------------------
+
+  group('PendingMemberTile — shows the person', () {
+    Future<void> pumpStaged(
+      WidgetTester tester, {
+      String? name,
+      String? pubkeyHex,
+      ValidationStatus status = ValidationStatus.valid,
+      Locale locale = const Locale('en'),
+      TextScaler textScaler = TextScaler.noScaling,
+      VoidCallback? onRetry,
+      bool lookedUp = false,
+    }) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            profileServiceProvider.overrideWithValue(MockProfileService()),
+          ],
+          child: MaterialApp(
+            locale: locale,
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            theme: HavenTheme.light(),
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(context).copyWith(textScaler: textScaler),
+              child: child!,
+            ),
+            home: Scaffold(
+              body: ListView(
+                children: [
+                  PendingMemberTile(
+                    npub: otherNpub,
+                    status: status,
+                    name: name,
+                    pubkeyHex: pubkeyHex,
+                    lookedUp: lookedUp,
+                    onRemove: () {},
+                    onRetry: onRetry,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+      // Not pumpAndSettle: `validating` animates forever.
+      await tester.pump();
+    }
+
+    AppLocalizations l10nOf(WidgetTester tester) =>
+        AppLocalizations.of(tester.element(find.byType(PendingMemberTile)));
+
+    testWidgets('a resolved name is the title, with the trimmed npub '
+        'beneath it and the status still shown', (tester) async {
+      await pumpStaged(tester, name: 'Distant Cousin', pubkeyHex: otherPubkey);
+
+      final texts = tester
+          .widgetList<Text>(
+            find.descendant(
+              of: find.byType(PendingMemberTile),
+              matching: find.byType(Text),
+            ),
+          )
+          .map((t) => t.data)
+          .toList();
+      // After the avatar's initial: name, then the key, then the status.
+      expect(texts.skip(1).take(3), [
+        'Distant Cousin',
+        shortNpub(otherNpub),
+        l10nOf(tester).pendingMemberReadyToInvite,
+      ]);
+      expect(find.byType(MemberAvatar), findsOneWidget);
+      final npub = tester.renderObject<RenderParagraph>(
+        find.text(shortNpub(otherNpub)),
+      );
+      expect(npub.textDirection, TextDirection.ltr);
+      expect(npub.didExceedMaxLines, isFalse);
+    });
+
+    testWidgets('the status rides on the avatar with the same icons — and a '
+        'single ring while validating', (tester) async {
+      final expected = {
+        ValidationStatus.valid: LucideIcons.circleCheck,
+        ValidationStatus.invalid: LucideIcons.triangleAlert,
+        ValidationStatus.needsUpdate: LucideIcons.cloudDownload,
+      };
+      for (final MapEntry(key: status, value: icon) in expected.entries) {
+        await pumpStaged(
+          tester,
+          name: 'Distant Cousin',
+          pubkeyHex: otherPubkey,
+          status: status,
+        );
+        expect(find.byIcon(icon), findsOneWidget, reason: '$status');
+        expect(find.byType(CircularProgressIndicator), findsNothing);
+      }
+
+      await pumpStaged(
+        tester,
+        name: 'Distant Cousin',
+        pubkeyHex: otherPubkey,
+        status: ValidationStatus.validating,
+      );
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+      expect(
+        find.text(l10nOf(tester).pendingMemberCheckingAvailability),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('one label carries the person and the status; the buttons '
+        'stay their own nodes; the key is read aloud on request', (
+      tester,
+    ) async {
+      final handle = tester.ensureSemantics();
+      final announcements = <String>[];
+      tester.binding.defaultBinaryMessenger
+          .setMockDecodedMessageHandler<dynamic>(SystemChannels.accessibility, (
+            message,
+          ) async {
+            if (message is Map && message['type'] == 'announce') {
+              announcements.add((message['data'] as Map)['message'] as String);
+            }
+            return null;
+          });
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger
+            .setMockDecodedMessageHandler<dynamic>(
+              SystemChannels.accessibility,
+              null,
+            ),
+      );
+      await pumpStaged(
+        tester,
+        name: 'Distant Cousin',
+        pubkeyHex: otherPubkey,
+        status: ValidationStatus.invalid,
+        onRetry: () {},
+      );
+      final l10n = l10nOf(tester);
+
+      final label = [
+        '\u2068Distant Cousin\u2069',
+        l10n.memberLookupNotFound,
+      ].join(', ');
+      final node = tester.getSemantics(find.bySemanticsLabel(label));
+      expect(node.label, label);
+      expect(
+        tester
+            .getSemantics(find.byTooltip(l10n.pendingMemberRemoveTooltip))
+            .label,
+        isNot(contains('Distant Cousin')),
+      );
+      expect(
+        tester
+            .getSemantics(find.byTooltip(l10n.pendingMemberRetryTooltip))
+            .label,
+        isNot(contains('Distant Cousin')),
+      );
+
+      final actions = node.getSemanticsData().customSemanticsActionIds!;
+      final readId = actions.singleWhere(
+        (id) =>
+            CustomSemanticsAction.getAction(id)!.label ==
+            l10n.memberPickerReadPublicKey,
+      );
+      node.owner!.performAction(node.id, SemanticsAction.customAction, readId);
+      await tester.pump();
+      expect(announcements, hasLength(1));
+      expect(announcements.single.replaceAll(' ', ''), shortNpub(otherNpub));
+      handle.dispose();
+    });
+
+    testWidgets('with no name the key carries the label and no read-aloud '
+        'action is offered', (tester) async {
+      final handle = tester.ensureSemantics();
+      await pumpStaged(tester);
+      final l10n = l10nOf(tester);
+
+      final node = tester.getSemantics(
+        find.bySemanticsLabel(
+          RegExp(RegExp.escape(l10n.pendingMemberReadyToInvite)),
+        ),
+      );
+      expect(node.label, startsWith('\u2068npub '));
+      expect(node.getSemanticsData().customSemanticsActionIds ?? [], isEmpty);
+      expect(find.byType(MemberAvatar), findsNothing);
+      handle.dispose();
+    });
+
+    for (final locale in const [Locale('de'), Locale('ar')]) {
+      testWidgets(
+        'at 2x on a 320dp phone in ${locale.languageCode} the row does not '
+        'overflow, with the lookup note, and the key wraps unclipped, left '
+        'to right',
+        (tester) async {
+          tester.view.devicePixelRatio = 1.0;
+          tester.view.physicalSize = const Size(320, 568);
+          addTearDown(tester.view.resetPhysicalSize);
+          addTearDown(tester.view.resetDevicePixelRatio);
+
+          await pumpStaged(
+            tester,
+            name: 'Rechtsschutzversicherungsgesellschaften',
+            pubkeyHex: otherPubkey,
+            status: ValidationStatus.invalid,
+            locale: locale,
+            textScaler: const TextScaler.linear(2),
+            onRetry: () {},
+            lookedUp: true,
+          );
+
+          expect(tester.takeException(), isNull);
+          expect(
+            find.text(l10nOf(tester).memberPickerStrangerLookupNote),
+            findsOneWidget,
+          );
+          final npub = tester.renderObject<RenderParagraph>(
+            find.text(shortNpub(otherNpub)),
+          );
+          expect(
+            npub.size.width,
+            lessThan(npub.getMaxIntrinsicWidth(double.infinity)),
+            reason: 'at 2x on 320dp the key cannot fit on one line',
+          );
+          expect(npub.didExceedMaxLines, isFalse);
+          expect(npub.textDirection, TextDirection.ltr);
+        },
+      );
+    }
   });
 }

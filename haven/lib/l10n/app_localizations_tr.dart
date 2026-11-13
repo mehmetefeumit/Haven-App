@@ -131,6 +131,13 @@ class AppLocalizationsTr extends AppLocalizations {
   String get onboardingCreateIdentityLoading => 'Hazırlanıyor…';
 
   @override
+  String get onboardingFinishingSetup => 'Kurulum tamamlanıyor…';
+
+  @override
+  String get onboardingFinishSetupError =>
+      'Hesabınızın kurulumu tamamlanamadı. Bağlantınızı kontrol edip tekrar deneyin.';
+
+  @override
   String get onboardingCreateIdentityImportPrompt =>
       'Zaten bir anahtarınız var mı?';
 
@@ -311,21 +318,58 @@ class AppLocalizationsTr extends AppLocalizations {
   }
 
   @override
-  String get relaySettingsStatusConnected => 'Bağlı';
-
-  @override
   String get relaySettingsStatusChecking => 'Denetleniyor';
 
   @override
   String get relaySettingsStatusUnreachable => 'Ulaşılamıyor';
 
   @override
-  String get relaySettingsStatusNotChecked => 'Denetlenmedi';
+  String relaySettingsKindLine(String kind, String status) {
+    return '$kind: $status';
+  }
 
   @override
-  String relaySettingsStatusSemantics(String status) {
-    return 'Aktarıcı durumu: $status';
-  }
+  String get relaySettingsKindKeyPackage => 'KeyPackage';
+
+  @override
+  String get relaySettingsKindRelayList => 'Aktarıcı listesi';
+
+  @override
+  String get relaySettingsKindInboxList => 'Gelen Kutusu listesi';
+
+  @override
+  String get relaySettingsPresencePublished => 'Yayımlandı';
+
+  @override
+  String get relaySettingsPresenceMissing => 'Eksik';
+
+  @override
+  String get relaySettingsPresenceOutdated => 'Eski sürüm';
+
+  @override
+  String get relaySettingsLookupTitle => 'Sorgu aktarıcıları';
+
+  @override
+  String get relaySettingsLookupSubtitle =>
+      'Başkalarının sizi bulmak için baktığı herkese açık aktarıcılar. İnsanların sizi davet edebilmesi için Haven, aktarıcı listelerinizin bir kopyasını burada tutar.';
+
+  @override
+  String get relaySettingsRepublish => 'Yeniden yayımla';
+
+  @override
+  String get relaySettingsRepublishDone =>
+      'Yanıt veren her aktarıcıda artık başkalarının sizi davet etmek için ihtiyaç duyduğu her şey var';
+
+  @override
+  String get relaySettingsRepublishIncomplete =>
+      'Bazı aktarıcılarda başkalarının sizi davet etmek için ihtiyaç duyduğu şeyler hâlâ eksik';
+
+  @override
+  String get relaySettingsRepublishHeld =>
+      'Aktarıcı ayarları bilgilendirmesini geçene kadar Haven aktarıcı ayarlarınızı ve davet anahtarınızı yayımlamaz';
+
+  @override
+  String get relaySettingsStatusNotChecked => 'Denetlenmedi';
 
   @override
   String get relaySettingsEmptyTitle => 'Yapılandırılmış aktarıcı yok';
@@ -636,11 +680,12 @@ class AppLocalizationsTr extends AppLocalizations {
   String get createCircleNoIdInQr => 'QR kodunda geçerli bir kimlik bulunamadı';
 
   @override
-  String get createCircleNoAccountFound =>
-      'Bu tanımlayıcı için Haven hesabı bulunamadı';
+  String get memberLookupNotFound =>
+      'Bu kimliğe ait bir Haven hesabı henüz bulunamadı. Bu kişi Haven\'ı az önce kurduysa bir dakika sonra tekrar deneyin.';
 
   @override
-  String get createCircleCouldNotVerify => 'Üye doğrulanamadı';
+  String get memberLookupIncomplete =>
+      'Bu kimliğin denetimi tamamlanamadı. Bağlantınızı kontrol edip tekrar deneyin.';
 
   @override
   String get createCircleSomethingWentWrong => 'Bir sorun oluştu';
@@ -1017,7 +1062,18 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get memberPickerStrangerLookupNote =>
-      'Haven, bu kişinin yayımlanmış adını bir aktarıcıya sordu. O aktarıcı, bu cihazın az önce bu anahtarı sorduğunu görür — ama bu istek imza taşımadığı için Haven kimliğinizle ilişkilendirilmez. Henüz hiçbir fotoğraf indirilmedi.';
+      'Haven, bu kişinin yayımlanmış profilini bir aktarıcıya — en fazla ikisine — sordu. Sorulan her aktarıcı, bu cihazın az önce bu anahtarı sorduğunu görür; ama istek imza taşımadığı için Haven kimliğinize bağlı değildir. Profilde fotoğraf varsa Haven fotoğrafı bu kişinin seçtiği sunucudan indirir; o sunucu bu cihazın ağ adresini görür.';
+
+  @override
+  String get memberPickerStrangerLookingUp => 'Yayımlanmış profil aranıyor…';
+
+  @override
+  String get memberPickerStrangerNotFound => 'Yayımlanmış bir ad bulunamadı';
+
+  @override
+  String memberPickerStrangerFoundAnnouncement(String name) {
+    return 'Yayımlanmış ad: $name';
+  }
 
   @override
   String selectedMembersMore(int count) {
@@ -1587,6 +1643,31 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get qrCodeYourPublicKeyLabel => 'Açık anahtarınız';
+
+  @override
+  String get reachabilityChecking =>
+      'Davet alabilmeniz için hazırlık yapılıyor…';
+
+  @override
+  String get reachabilityReady => 'Davet edilmeye hazırsınız';
+
+  @override
+  String get reachabilityCantCheck =>
+      'Başkalarının sizi davet edip edemeyeceği şu anda denetlenemiyor';
+
+  @override
+  String get reachabilityNotReady => 'Başkaları sizi henüz davet edemiyor';
+
+  @override
+  String get reachabilityNoRelays =>
+      'Bir aktarıcı ekleyene kadar başkaları sizi davet edemez';
+
+  @override
+  String get reachabilityOpenRelaySettings => 'Aktarıcı ayarları';
+
+  @override
+  String get reachabilityAwaitingReset =>
+      'Aktarıcı ayarları bilgilendirmesini geçtiğinizde başkaları sizi davet edebilecek';
 
   @override
   String get qrCodeWhatIsThisTitle => 'Bu nedir?';

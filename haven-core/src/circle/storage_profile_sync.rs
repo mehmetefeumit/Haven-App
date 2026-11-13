@@ -35,6 +35,17 @@
 //! WHILE that publish was in flight therefore stays pending instead of being
 //! silently reported as synced.
 //!
+//! # The covered pool
+//!
+//! "Every usable pool relay serves it" is a statement about the pool as it was
+//! when it was made, and the pool changes: a release swaps relays, the user
+//! adds one. `covered_pool_json` records the pool that statement was settled
+//! against, so a relay that joined since — or an install with no record at
+//! all, as a storage reset leaves — is owed a coverage pass
+//! ([`CircleStorage::profile_coverage_owed`]) though no save is pending. A
+//! retraction owes nothing: what it leaves public is a blank, or a profile
+//! whose deletion failed, and neither is re-sent to a relay that joins.
+//!
 //! # The row is never deleted
 //!
 //! Both destructive paths ([`CircleStorage::wipe_all_profiles`] and
@@ -64,8 +75,12 @@ use crate::profile::{
 /// retry ladder next permits an attempt.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ProfilePendingState {
-    /// A save is not yet served by every pool relay (`local > synced`).
+    /// There is work for a sync pass: a save not yet served by every pool
+    /// relay, or a pool relay the published profile was never sent to.
     pub pending: bool,
+    /// A save is waiting to be signed (`local > synced`). The only work that
+    /// needs the identity key.
+    pub save_pending: bool,
     /// The persisted retry ladder permits another attempt now.
     pub retry_due: bool,
     /// Seconds until the next attempt is due: `Some` only when pending and
@@ -115,6 +130,14 @@ pub struct ProfileSyncCommit<'a> {
     /// Injected clock, in Unix seconds.
     pub now: i64,
 }
+
+/// Stored in place of a covered pool once the profile has been retracted.
+///
+/// A deletion leaves nothing a coverage pass may re-send — least of all a
+/// profile whose deletion could not be verified — so it owes no relay
+/// anything, whichever joins the pool, until the next save settles a pool of
+/// its own.
+const NO_POOL_OWED: &str = "*";
 
 /// The backoff to apply after a sync that did not fully land, given the
 /// attempts already recorded. Saturates on the last rung of
@@ -315,6 +338,21 @@ impl CircleStorage {
     ///
     /// As [`Self::stage_own_profile_edits`].
     pub fn profile_pending_state(&self, pubkey_hex: &str, now: i64) -> Result<ProfilePendingState> {
+        self.profile_owing_state(pubkey_hex, now, false)
+    }
+
+    /// [`Self::profile_pending_state`], with a coverage pass the pool is owed
+    /// ([`Self::profile_coverage_owed`]) counted as pending on the same ladder.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::stage_own_profile_edits`].
+    pub fn profile_owing_state(
+        &self,
+        pubkey_hex: &str,
+        now: i64,
+        coverage_owed: bool,
+    ) -> Result<ProfilePendingState> {
         let conn = self
             .conn()
             .lock()
@@ -329,23 +367,158 @@ impl CircleStorage {
             .optional()?;
         let Some((local, synced, next_retry_at)) = row else {
             return Ok(ProfilePendingState {
-                pending: false,
+                pending: coverage_owed,
+                save_pending: false,
                 retry_due: true,
                 next_retry_in_secs: None,
             });
         };
-        let pending = local > synced;
+        let save_pending = local > synced;
+        let pending = save_pending || coverage_owed;
         let wait = next_retry_at.saturating_sub(now);
         // A wait longer than the longest rung was dated on a clock since set
         // back; one retry now beats waiting hours for the clock to catch up.
         let retry_due = wait <= 0 || wait > sync_backoff_secs(i64::MAX);
         Ok(ProfilePendingState {
             pending,
+            save_pending,
             retry_due,
             next_retry_in_secs: (pending && !retry_due)
                 .then(|| u32::try_from(wait).ok())
                 .flatten(),
         })
+    }
+
+    /// Whether `pool` has a relay the own profile's coverage was never settled
+    /// against: no pool is recorded, or a relay has joined it since.
+    ///
+    /// A pool that only shrank owes nothing, and neither does a retracted
+    /// profile.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::stage_own_profile_edits`].
+    pub fn profile_coverage_owed(&self, pubkey_hex: &str, pool: &[String]) -> Result<bool> {
+        let conn = self
+            .conn()
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        let covered: Option<String> = conn
+            .query_row(
+                "SELECT covered_pool_json FROM profile_sync_state WHERE pubkey = ?1",
+                params![pubkey_hex],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        if covered.as_deref() == Some(NO_POOL_OWED) {
+            return Ok(false);
+        }
+        let covered = covered.and_then(|json| serde_json::from_str::<Vec<String>>(&json).ok());
+        Ok(covered.is_none_or(|covered| !uncovered(pool, &covered).is_empty()))
+    }
+
+    /// The newest saved version, `0` for a pubkey that has saved nothing.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::stage_own_profile_edits`].
+    pub fn profile_sync_version(&self, pubkey_hex: &str) -> Result<i64> {
+        let conn = self
+            .conn()
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        Ok(conn
+            .query_row(
+                "SELECT local_version FROM profile_sync_state WHERE pubkey = ?1",
+                params![pubkey_hex],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0))
+    }
+
+    /// Records that every relay of `pool` serves the own profile — or that no
+    /// relay serves one at all — with nothing saved since `version`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::stage_own_profile_edits`].
+    pub fn settle_profile_coverage(
+        &self,
+        pubkey_hex: &str,
+        version: i64,
+        pool: &[String],
+    ) -> Result<()> {
+        let mut conn = self
+            .conn()
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        let tx = conn.transaction()?;
+        if Self::coverage_row_at(&tx, pubkey_hex, version)? {
+            tx.execute(
+                "UPDATE profile_sync_state SET
+                    covered_pool_json = ?2,
+                    sync_attempts     = 0,
+                    next_retry_at     = 0
+                 WHERE pubkey = ?1",
+                params![pubkey_hex, encode_covered(pool)?],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Leaves `event` — the newest own kind-0 the pool serves — owed to the
+    /// relays `covered` does not name, with nothing saved since `version`, and
+    /// advances the ladder.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::stage_own_profile_edits`].
+    pub fn owe_profile_coverage(
+        &self,
+        pubkey_hex: &str,
+        version: i64,
+        event: &Event,
+        covered: &[String],
+        now: i64,
+    ) -> Result<()> {
+        let mut conn = self
+            .conn()
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        let tx = conn.transaction()?;
+        if Self::coverage_row_at(&tx, pubkey_hex, version)? {
+            Self::write_publish_debt(&tx, pubkey_hex, version, event, covered)?;
+            Self::write_sync_attempt_row(&tx, pubkey_hex, now)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Advances the ladder for a coverage pass that could not be judged, with
+    /// nothing saved since `version`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::stage_own_profile_edits`].
+    pub fn record_profile_coverage_attempt(
+        &self,
+        pubkey_hex: &str,
+        version: i64,
+        now: i64,
+    ) -> Result<()> {
+        let mut conn = self
+            .conn()
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        let tx = conn.transaction()?;
+        if Self::coverage_row_at(&tx, pubkey_hex, version)? {
+            Self::write_sync_attempt_row(&tx, pubkey_hex, now)?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// Whether sanitized picture bytes are staged for upload for this pubkey.
@@ -461,10 +634,11 @@ impl CircleStorage {
                     synced_version    = MAX(synced_version, ?2),
                     edits_json     = CASE WHEN local_version = ?2 THEN '{}' ELSE edits_json END,
                     picture_staged = CASE WHEN local_version = ?2 THEN 0 ELSE picture_staged END,
+                    covered_pool_json = ?3,
                     sync_attempts     = 0,
                     next_retry_at     = 0
                  WHERE pubkey = ?1",
-                params![pubkey_hex, c.version],
+                params![pubkey_hex, c.version, encode_covered(c.pool)?],
             )?;
             tx.execute(
                 "DELETE FROM profile_publish_debt WHERE pubkey = ?1 AND version <= ?2",
@@ -629,10 +803,11 @@ impl CircleStorage {
                     synced_version    = MAX(synced_version, ?2),
                     edits_json        = '{}',
                     picture_staged    = 0,
+                    covered_pool_json = ?3,
                     sync_attempts     = 0,
                     next_retry_at     = 0
                  WHERE pubkey = ?1",
-                params![pubkey_hex, version],
+                params![pubkey_hex, version, encode_covered(pool)?],
             )?;
             Self::delete_publish_debt(&tx, pubkey_hex)?;
         } else {
@@ -699,14 +874,20 @@ impl CircleStorage {
 
     /// Levels `version` as settled with nothing sent.
     ///
-    /// For a pending set that carries nothing public to retract. A
-    /// compare-and-set on `local_version`, and never while a photo is staged,
-    /// so content the user saved is never discarded.
+    /// For a pending set that carries nothing public to retract: every relay
+    /// of `pool` answered without a profile, so `pool` is what its coverage is
+    /// settled against. A compare-and-set on `local_version`, and never while a
+    /// photo is staged, so content the user saved is never discarded.
     ///
     /// # Errors
     ///
     /// As [`Self::stage_own_profile_edits`].
-    pub fn settle_profile_sync(&self, pubkey_hex: &str, version: i64) -> Result<()> {
+    pub fn settle_profile_sync(
+        &self,
+        pubkey_hex: &str,
+        version: i64,
+        pool: &[String],
+    ) -> Result<()> {
         let conn = self
             .conn()
             .lock()
@@ -716,10 +897,11 @@ impl CircleStorage {
                 synced_version    = MAX(synced_version, ?2),
                 published_version = MAX(published_version, ?2),
                 edits_json        = '{}',
+                covered_pool_json = ?3,
                 sync_attempts     = 0,
                 next_retry_at     = 0
              WHERE pubkey = ?1 AND local_version = ?2 AND picture_staged = 0",
-            params![pubkey_hex, version],
+            params![pubkey_hex, version, encode_covered(pool)?],
         )?;
         Ok(())
     }
@@ -742,6 +924,8 @@ impl CircleStorage {
             .lock()
             .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
         let tx = conn.transaction()?;
+        // A pubkey that never saved has no row to carry "retracted" on.
+        Self::ensure_profile_sync_row(&tx, pubkey_hex)?;
         Self::reset_profile_sync_rows(&tx, Some(pubkey_hex))?;
         tx.execute(
             "DELETE FROM profile_pictures WHERE pubkey = ?1 AND url = ''",
@@ -769,10 +953,11 @@ impl CircleStorage {
                 picture_staged    = 0,
                 synced_version    = local_version,
                 published_version = local_version,
+                covered_pool_json = ?2,
                 sync_attempts     = 0,
                 next_retry_at     = 0
              WHERE ?1 IS NULL OR pubkey = ?1",
-            params![pubkey_hex],
+            params![pubkey_hex, NO_POOL_OWED],
         )?;
         conn.execute(
             "DELETE FROM profile_publish_debt WHERE ?1 IS NULL OR pubkey = ?1",
@@ -899,6 +1084,38 @@ impl CircleStorage {
         )?;
         Self::delete_publish_debt(conn, pubkey_hex)?;
         Ok(row)
+    }
+
+    /// Creates the outbox row of a pubkey that has saved nothing: what its
+    /// pool is owed, and the ladder that waits on, are recorded on it too.
+    pub(super) fn ensure_profile_sync_row(
+        conn: &Connection,
+        pubkey_hex: &str,
+    ) -> rusqlite::Result<()> {
+        conn.execute(
+            "INSERT OR IGNORE INTO profile_sync_state (pubkey) VALUES (?1)",
+            params![pubkey_hex],
+        )?;
+        Ok(())
+    }
+
+    /// Makes sure the outbox row exists — a coverage pass is owed to a pubkey
+    /// that has saved nothing too, and its ladder needs a row to advance on —
+    /// and says whether `version` is still the newest saved with nothing
+    /// pending: a save made while the pass was on the network keeps its own
+    /// record and its own ladder.
+    fn coverage_row_at(
+        conn: &Connection,
+        pubkey_hex: &str,
+        version: i64,
+    ) -> rusqlite::Result<bool> {
+        Self::ensure_profile_sync_row(conn, pubkey_hex)?;
+        conn.query_row(
+            "SELECT local_version = ?2 AND local_version <= synced_version
+             FROM profile_sync_state WHERE pubkey = ?1",
+            params![pubkey_hex, version],
+            |r| r.get(0),
+        )
     }
 
     /// Replaces the stored pending set, leaving the counters alone.
@@ -2983,6 +3200,256 @@ mod tests {
         assert!(!storage.profile_picture_is_staged(&hex).unwrap());
     }
 
+    // ---- the covered pool ----------------------------------------------------
+
+    #[test]
+    fn coverage_is_owed_until_settled_and_again_when_a_relay_joins_the_pool() {
+        let storage = storage();
+        let pool = relays(&["a", "b", "c"]);
+        assert!(
+            storage.profile_coverage_owed(&hex(), &pool).unwrap(),
+            "no record of what the pool serves is not a clean record",
+        );
+
+        storage.settle_profile_coverage(&hex(), 0, &pool).unwrap();
+        assert!(!storage.profile_coverage_owed(&hex(), &pool).unwrap());
+        // The same relays spelled another way are the same relays.
+        let respelled = vec![
+            "wss://A.example/".to_string(),
+            "wss://b.example".to_string(),
+        ];
+        assert!(
+            !storage.profile_coverage_owed(&hex(), &respelled).unwrap(),
+            "a pool that only shrank owes nothing",
+        );
+
+        let grown = relays(&["a", "b", "c", "d"]);
+        assert!(
+            storage.profile_coverage_owed(&hex(), &grown).unwrap(),
+            "the relay that joined was never sent the profile",
+        );
+    }
+
+    #[test]
+    fn a_complete_publish_settles_the_pool_it_covered() {
+        let storage = storage();
+        let keys = Keys::generate();
+        let own = keys.public_key().to_hex();
+        storage
+            .stage_own_profile_edits(&own, &name_edit("Alice"), 1_000)
+            .unwrap();
+        let version = version_of(&storage, &own);
+
+        commit(&storage, &keys, version, false, 1_001).unwrap();
+        assert!(
+            storage
+                .profile_coverage_owed(&own, &relays(&["a", "b"]))
+                .unwrap(),
+            "a relay did not take it",
+        );
+        commit(&storage, &keys, version, true, 1_002).unwrap();
+        assert!(!storage
+            .profile_coverage_owed(&own, &relays(&["a", "b"]))
+            .unwrap());
+        assert!(storage
+            .profile_coverage_owed(&own, &relays(&["a", "b", "c"]))
+            .unwrap());
+    }
+
+    #[test]
+    fn a_retraction_owes_the_pool_nothing_until_the_next_save_settles_one() {
+        // A coverage pass re-sends what the pool serves. After a deletion that
+        // is a blank — or, when the deletion could not be verified, the very
+        // profile the user asked to delete.
+        let storage = storage();
+        let keys = Keys::generate();
+        let own = keys.public_key().to_hex();
+        assert!(storage
+            .profile_coverage_owed(&own, &relays(&["a"]))
+            .unwrap());
+        storage
+            .stage_own_profile_edits(&own, &name_edit("Alice"), 1_000)
+            .unwrap();
+
+        storage.clear_profile_sync_state(&own).unwrap();
+        assert!(
+            !storage
+                .profile_coverage_owed(&own, &relays(&["a", "b", "c"]))
+                .unwrap(),
+            "whatever relay joins the pool",
+        );
+
+        storage
+            .stage_own_profile_edits(&own, &name_edit("Alice Again"), 1_001)
+            .unwrap();
+        let version = version_of(&storage, &own);
+        commit(&storage, &keys, version, true, 1_002).unwrap();
+        assert!(storage
+            .profile_coverage_owed(&own, &relays(&["a", "b", "c"]))
+            .unwrap());
+
+        // An account that never saved anything has no row to reset, and its
+        // retraction must hold all the same.
+        storage.clear_profile_sync_state(&hex()).unwrap();
+        assert!(!storage
+            .profile_coverage_owed(&hex(), &relays(&["a"]))
+            .unwrap());
+        assert!(storage.pending_profile_sync(&hex()).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_coverage_pass_backs_off_on_the_ladder_though_nothing_was_ever_saved() {
+        // An install whose record a storage reset took has no outbox row, and
+        // a pass that could not be judged must still not be re-run on every
+        // resume.
+        let storage = storage();
+        assert_eq!(
+            storage.profile_owing_state(&hex(), 1_000, true).unwrap(),
+            ProfilePendingState {
+                pending: true,
+                save_pending: false,
+                retry_due: true,
+                next_retry_in_secs: None,
+            },
+        );
+
+        storage
+            .record_profile_coverage_attempt(&hex(), 0, 1_000)
+            .unwrap();
+        let rung = PROFILE_SYNC_BACKOFF_SECS[0];
+        assert_eq!(
+            storage.profile_owing_state(&hex(), 1_001, true).unwrap(),
+            ProfilePendingState {
+                pending: true,
+                save_pending: false,
+                retry_due: false,
+                next_retry_in_secs: Some(u32::try_from(rung - 1).unwrap()),
+            },
+        );
+        assert!(
+            storage
+                .profile_owing_state(&hex(), 1_000 + rung, true)
+                .unwrap()
+                .retry_due
+        );
+        assert!(
+            !storage
+                .profile_pending_state(&hex(), 1_001)
+                .unwrap()
+                .pending,
+            "no save is pending — only the coverage is owed",
+        );
+
+        // Settling clears the ladder with it.
+        storage
+            .settle_profile_coverage(&hex(), 0, &relays(&["a"]))
+            .unwrap();
+        assert_eq!(raw(&storage, &hex()), Some((0, 0, 0, 0, 0)));
+    }
+
+    #[test]
+    fn only_a_saved_edit_asks_for_the_identity_key() {
+        let storage = storage();
+        let owing = storage.profile_owing_state(&hex(), 1_000, true).unwrap();
+        assert!(owing.pending && !owing.save_pending);
+
+        storage
+            .record_profile_coverage_attempt(&hex(), 0, 1_000)
+            .unwrap();
+        let owing = storage.profile_owing_state(&hex(), 1_001, true).unwrap();
+        assert!(owing.pending && !owing.save_pending);
+
+        storage
+            .stage_own_profile_edits(&hex(), &name_edit("Alice"), 1_002)
+            .unwrap();
+        for coverage_owed in [false, true] {
+            let saved = storage
+                .profile_owing_state(&hex(), 1_002, coverage_owed)
+                .unwrap();
+            assert!(saved.pending && saved.save_pending);
+        }
+    }
+
+    #[test]
+    fn a_coverage_record_made_against_a_version_a_save_has_passed_changes_nothing() {
+        // The save resets the ladder so it publishes at once, and its publish
+        // is what settles the pool.
+        let storage = storage();
+        let keys = Keys::generate();
+        let own = keys.public_key().to_hex();
+        let pool = relays(&["a", "b"]);
+        storage
+            .stage_own_profile_edits(&own, &name_edit("Alice"), 1_000)
+            .unwrap();
+        let before = raw(&storage, &own).unwrap();
+        let adopted = kind0_at(&keys, &meta("Adopted"), 1);
+
+        storage.settle_profile_coverage(&own, 0, &pool).unwrap();
+        storage
+            .owe_profile_coverage(&own, 0, &adopted, &pool[..1], 1_001)
+            .unwrap();
+        storage
+            .record_profile_coverage_attempt(&own, 0, 1_001)
+            .unwrap();
+
+        assert_eq!(raw(&storage, &own).unwrap(), before);
+        assert_eq!(debt_rows(&storage), 0);
+        assert!(storage.profile_coverage_owed(&own, &pool).unwrap());
+    }
+
+    #[test]
+    fn an_owed_copy_is_the_event_a_later_pass_resends() {
+        let storage = storage();
+        let keys = Keys::generate();
+        let own = keys.public_key().to_hex();
+        let pool = relays(&["a", "b"]);
+        let adopted = kind0_at(&keys, &meta("Adopted"), 1);
+
+        storage
+            .owe_profile_coverage(&own, 0, &adopted, &pool[..1], 1_000)
+            .unwrap();
+        let debt = storage
+            .profile_publish_debt(&keys.public_key(), 0)
+            .unwrap()
+            .expect("the copy is owed");
+        assert_eq!(debt.event.id, adopted.id);
+        assert_eq!(debt.covered, pool[..1]);
+        assert!(storage.pending_profile_sync(&own).unwrap().is_none());
+
+        // The relay it was owed to now serves it: the pool is settled.
+        storage
+            .commit_profile_coverage(&own, 0, &pool[1..], &pool, 1_001)
+            .unwrap();
+        assert_eq!(debt_rows(&storage), 0);
+        assert!(!storage.profile_coverage_owed(&own, &pool).unwrap());
+    }
+
+    #[test]
+    fn the_covered_pool_column_reaches_an_existing_database_unset() {
+        // `CREATE TABLE IF NOT EXISTS` does not alter an existing table, and a
+        // database from an earlier build recorded no pool: it must come up
+        // owing one look, with its outbox row intact.
+        let storage = storage();
+        storage
+            .stage_own_profile_edits(&hex(), &name_edit("Alice"), 1_000)
+            .unwrap();
+        let before = raw(&storage, &hex()).unwrap();
+        storage
+            .conn()
+            .lock()
+            .unwrap()
+            .execute_batch("ALTER TABLE profile_sync_state DROP COLUMN covered_pool_json;")
+            .unwrap();
+
+        storage.reinitialize_for_test().unwrap();
+        storage.reinitialize_for_test().unwrap();
+
+        assert_eq!(raw(&storage, &hex()).unwrap(), before);
+        assert!(storage
+            .profile_coverage_owed(&hex(), &relays(&["a"]))
+            .unwrap());
+    }
+
     // ---- settling ------------------------------------------------------------
 
     #[test]
@@ -2995,7 +3462,12 @@ mod tests {
         storage.record_profile_sync_attempt(&hex(), 1_002).unwrap();
         let version = version_of(&storage, &hex());
 
-        storage.settle_profile_sync(&hex(), version).unwrap();
+        let pool = relays(&["a", "b"]);
+        storage.settle_profile_sync(&hex(), version, &pool).unwrap();
+        assert!(
+            !storage.profile_coverage_owed(&hex(), &pool).unwrap(),
+            "every relay of the pool answered without a profile",
+        );
 
         assert!(storage.pending_profile_sync(&hex()).unwrap().is_none());
         assert_eq!(
@@ -3022,7 +3494,7 @@ mod tests {
             .unwrap();
         let before = raw(&storage, &hex()).unwrap();
 
-        storage.settle_profile_sync(&hex(), version).unwrap();
+        storage.settle_profile_sync(&hex(), version, &[]).unwrap();
 
         assert_eq!(raw(&storage, &hex()).unwrap(), before);
         assert!(storage.pending_profile_sync(&hex()).unwrap().is_some());
@@ -3045,7 +3517,7 @@ mod tests {
             storage.pending_profile_sync(&hex()).unwrap(),
         );
 
-        storage.settle_profile_sync(&hex(), version).unwrap();
+        storage.settle_profile_sync(&hex(), version, &[]).unwrap();
 
         assert_eq!(
             (

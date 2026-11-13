@@ -17,8 +17,9 @@
 //!
 //! # Why the discovery plane counts as contamination
 //!
-//! The discovery relays ([`crate::relay::discovery_relays`]) are read-only, but
-//! what they are read FOR is the pre-group step of the location plane:
+//! The discovery relays ([`crate::relay::discovery_relays`]) take nothing of
+//! this account's but its relay lists, but what they are read FOR is the
+//! pre-group step of the location plane:
 //! `fetch_relay_list` and `fetch_member_keypackage` (`crate::relay::manager`)
 //! ask them for a specific pubkey's NIP-65 list and kind-30443 `KeyPackage`.
 //! "This IP asked for pubkey X's `KeyPackage`" is a *stronger* co-membership

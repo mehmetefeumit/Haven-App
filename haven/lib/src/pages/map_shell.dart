@@ -136,11 +136,24 @@ class SingleFlight<T> {
 @visibleForTesting
 class LiveSyncHealBackstop {
   /// Creates a backstop over [heal], which must never throw.
+  ///
+  /// [deadline] defaults to [healDeadline].
   LiveSyncHealBackstop({
     required Future<LiveSyncHealOutcome> Function() heal,
     math.Random? random,
+    Duration? deadline,
   }) : _heal = heal,
-       _random = random ?? math.Random.secure();
+       _random = random ?? math.Random.secure(),
+       _deadline = deadline ?? healDeadline;
+
+  /// How long a heal is waited for before it counts as
+  /// [LiveSyncHealOutcome.failed] and the next tick is drawn.
+  ///
+  /// A heal is a restart, bounded by [kLiveSyncRestartBudget], and then at
+  /// most one re-anchor — the same engine's reconnect and REQ re-issue,
+  /// priced at one more restart budget — so a slow but healthy heal ends
+  /// inside it.
+  static final Duration healDeadline = kLiveSyncRestartBudget * 2;
 
   /// The base interval is drawn uniformly from this many seconds, inclusive.
   static const int minSecs = 90;
@@ -155,6 +168,7 @@ class LiveSyncHealBackstop {
 
   final Future<LiveSyncHealOutcome> Function() _heal;
   final math.Random _random;
+  final Duration _deadline;
 
   Timer? _timer;
   bool _armed = false;
@@ -193,12 +207,19 @@ class LiveSyncHealBackstop {
   /// Heals now, counts the outcome, and — while armed — draws the next tick
   /// from the outcome just recorded.
   ///
-  /// Re-arming from the heal's completion is only safe because the heal is
-  /// bounded (`kLiveSyncRestartBudget`): one that could hang would never
-  /// complete, and this backstop — the only periodic recovery the live-sync
-  /// build has — would be gone for the rest of the process.
+  /// The heal's restart is bounded, but its re-anchor is not: it waits on the
+  /// engine's lifecycle lock, which a pause holds until its relay calls answer.
+  /// Re-arming only from the heal's completion would make this backstop — the
+  /// only periodic recovery the live-sync build has — as late as the slowest
+  /// such hold, and end it for good if one ever failed to return. So a heal still running at [_deadline] is counted
+  /// [LiveSyncHealOutcome.failed] and the next tick is drawn; the deadline
+  /// cancels nothing, and while the lock stays held each later heal joins the
+  /// re-anchor already queued behind it rather than queueing another.
   Future<LiveSyncHealOutcome> heal() async {
-    final outcome = await _heal();
+    final outcome = await _heal().timeout(
+      _deadline,
+      onTimeout: () => LiveSyncHealOutcome.failed,
+    );
     switch (outcome) {
       case LiveSyncHealOutcome.running:
         _failures = 0;
@@ -262,29 +283,6 @@ enum PausedRelayOwner {
   burst,
 }
 
-/// Mirror of `RELAY_LIFECYCLE_OP_TIMEOUT_SECS` in
-/// `haven-core/src/relay/live_sync/config.rs` — the engine's own bound on ONE
-/// relay control-plane op.
-const int _kRelayLifecycleOpSecs = 10;
-
-/// How many [_kRelayLifecycleOpSecs]-bounded steps `pause_subscriptions` takes
-/// before it reaches its uncapped Rule-13 publish drain: `unsubscribe_all`,
-/// the leftover-subscription probe, the `RawSignal::Pause` marker send, and
-/// the worker's ack of it.
-///
-/// The leftover SWEEP adds one more per REQ a partial `unsubscribe_all` left
-/// registered, and the drain that follows has no cap at all — which is exactly
-/// why [kOptOutBurstWait] is a bound and not an await.
-const int _kPauseBoundedSteps = 4;
-
-/// Mirror of `BURST_SETTLE_CAP_SECS` in the same Rust module — the cap on the
-/// follow-on commit quiesce a burst holds its sockets open for.
-const int _kBurstSettleCapSecs = 18;
-
-/// Mirror of [kBurstPublishBudget] in seconds, so [kOptOutBurstWait] can be a
-/// compile-time sum (`Duration.inSeconds` is not a const expression).
-const int _kBurstPublishSecs = 10;
-
 /// How long a mid-pause opt-out waits on a burst in flight before it pauses
 /// the engine itself (C4).
 ///
@@ -292,11 +290,11 @@ const int _kBurstPublishSecs = 10;
 /// is re-read between links, so what remains is at most:
 ///
 ///  * the single-attempt location publish it is already inside —
-///    [_kBurstPublishSecs] (`LOCATION_PUBLISH_ATTEMPTS` is 1, so
+///    [kBurstPublishSecs] (`LOCATION_PUBLISH_ATTEMPTS` is 1, so
 ///    `CONNECTION_TIMEOUT` 5 s + `LOCATION_ACK_WINDOW` 5 s);
-///  * its own `settleBeforePause`, capped at [_kBurstSettleCapSecs]; and
+///  * its own `settleBeforePause`, capped at [kBurstSettleCapSecs]; and
 ///  * the BOUNDED prefix of its `pauseSubscriptions` —
-///    [_kPauseBoundedSteps] × [_kRelayLifecycleOpSecs] = 40 s.
+///    [kPauseBoundedSteps] × [kRelayLifecycleOpSecs] = 40 s.
 ///
 /// The last term used to be priced at a single 10 s relay OK wait, which is
 /// the crate's per-relay `wait_for_ok` and not the engine's pause at all: the
@@ -311,12 +309,12 @@ const int _kBurstPublishSecs = 10;
 /// unpriceable is what makes a bound necessary rather than an await.
 ///
 /// It bounds the WAIT, never the burst — see
-/// [MapShell.releaseBurstPlaneOnOptOut].
+/// [MapShell.releaseBurstPlaneOnOptOut] and [MapShell.reanchorOnResume].
 const Duration kOptOutBurstWait = Duration(
   seconds:
-      _kBurstPublishSecs +
-      _kBurstSettleCapSecs +
-      _kPauseBoundedSteps * _kRelayLifecycleOpSecs,
+      kBurstPublishSecs +
+      kBurstSettleCapSecs +
+      kPauseBoundedSteps * kRelayLifecycleOpSecs,
 );
 
 /// The main shell containing the map, bottom sheet, and floating controls.
@@ -768,17 +766,20 @@ class MapShell extends ConsumerStatefulWidget {
   /// the resume landed: it completes, and it completes after the re-anchor
   /// below.
   ///
-  /// Nothing else recovers that. `ensureRunning` reads `isRunning`, which
-  /// stays true across a pause, so the periodic heal short-circuits;
-  /// `_fullRestart` declines while paused; and
-  /// `SharingHealthNotifier.refresh()` early-returns while paused — so the
-  /// banner holds at its last verdict, "healthy", while the device receives
-  /// nothing until the next full background→foreground cycle.
+  /// Little else recovers that. `ensureRunning` reads `isRunning`, which
+  /// stays true across a pause, so the heal's restart short-circuits and
+  /// `_fullRestart` declines while paused; only the heal's own paused-engine
+  /// re-anchor ([reanchorPausedEngine]) gets to it, 90-150 s later.
   ///
-  /// The wait on [burstInFlight] is deliberately unbounded: a `Future.timeout`
-  /// cancels nothing, so a bounded one would simply re-anchor into the same
-  /// race again, and the only link that can still be running at that point is
-  /// one of the engine's two uncapped Rule-13 drains, which must not be cut.
+  /// The wait on [burstInFlight] is BOUNDED by [burstWait], the teardown a
+  /// burst in flight still owes ([kOptOutBurstWait]). A burst whose link never
+  /// returns — a pause parked behind a held engine lock — never completes, and
+  /// an unbounded wait here never reached the `isPaused` check below at all.
+  /// The bound cancels nothing: the burst runs on, its teardown stops at the
+  /// next link because the foreground owns the engine, and a pause that still
+  /// lands after this check is the one [reanchorPausedEngine] repairs. The
+  /// first re-anchor stays unbounded: one stuck behind the same lock gains
+  /// nothing from a second, and the heal is the escalation.
   ///
   /// A static over injected collaborators for the same reason its neighbours
   /// are: `MapShell` cannot be pumped (CLAUDE.md).
@@ -786,11 +787,12 @@ class MapShell extends ConsumerStatefulWidget {
   static Future<void> reanchorOnResume({
     required SubscriptionService engine,
     Future<void>? burstInFlight,
+    Duration burstWait = kOptOutBurstWait,
   }) async {
     await _reanchor(engine);
     if (burstInFlight == null) return;
     try {
-      await burstInFlight;
+      await burstInFlight.timeout(burstWait, onTimeout: () {});
     } on Object catch (e) {
       debugPrint('[MapShell] resume: burst in flight failed: ${e.runtimeType}');
     }
@@ -816,13 +818,15 @@ class MapShell extends ConsumerStatefulWidget {
   /// radio is cold (a captive portal, a dead zone, a lock-screen unlock) lands
   /// foregrounded with a paused engine.
   ///
-  /// Nothing else in the app sees that. `ensureRunning` reads `isRunning`,
+  /// Nothing else in the app repairs that. `ensureRunning` reads `isRunning`,
   /// which a pause leaves TRUE; the subscription-health tick short-circuits on
   /// the paused state; a circle-set delta only stages into the engine's model
   /// while paused; and `_fullRestart` declines outright. Meanwhile publishing
-  /// keeps acking on the SEPARATE publish pool, so the sharing banner stays
-  /// green while the map receives nothing — for the whole foreground session,
-  /// recoverable only by another background→foreground cycle.
+  /// keeps acking on the SEPARATE publish pool, so the map receives nothing
+  /// for the whole foreground session, recoverable only by another
+  /// background→foreground cycle — and the sharing banner says so only once
+  /// the engine has read paused on screen for the confirmation window
+  /// (`SharingHealthNotifier`'s paused-on-screen onset).
   ///
   /// ## Why it is the heal tick that pays for it
   ///
@@ -955,6 +959,20 @@ class MapShell extends ConsumerStatefulWidget {
       health.recordRelaySubscriptionLost();
     }
   }
+
+  /// Reports a burst that ran past its ceiling to the sharing-health model,
+  /// as the receive plane's subscription-lost onset.
+  ///
+  /// With the app on screen — the only place a banner is seen — a burst that
+  /// never ends means no receive subscription: sends go direct once the tick
+  /// sink is cleared, and publish silence catches them separately if they do
+  /// not. The onset is confirmed only after [kSharingFaultConfirmationWindow]
+  /// and cleared by the next successful burst open, the foreground re-anchor
+  /// or the health tick, so "Not receiving" (and Repair, a re-anchor) shows
+  /// only while nothing has opened since.
+  @visibleForTesting
+  static void recordBurstStalled(SharingHealthNotifier health) =>
+      health.recordRelaySubscriptionLost();
 
   /// Vertical space the top-edge floating buttons occupy, measured from the
   /// safe-area inset: `HavenSpacing.sm` of offset plus the 48 dp Material
@@ -1167,6 +1185,12 @@ class _MapShellState extends ConsumerState<MapShell>
   /// install — see [SingleFlight] for what two would cost.
   final SingleFlight<LiveSyncResubscriber?> _installFlight =
       SingleFlight<LiveSyncResubscriber?>();
+
+  /// Serializes the heal's paused-engine re-anchor: one parked behind a held
+  /// lifecycle lock outlives [LiveSyncHealBackstop.healDeadline], and every
+  /// later heal — 90 s or more on, past the 60 s re-anchor throttle — would
+  /// otherwise queue one more pool reconnect and 96 h `#p` replay behind it.
+  final SingleFlight<bool> _healReanchorFlight = SingleFlight<bool>();
 
   /// The `circlesProvider` listener feeding [_liveSyncResubscriber]. Closed on
   /// dispose so no re-subscribe fires after teardown.
@@ -1447,11 +1471,7 @@ class _MapShellState extends ConsumerState<MapShell>
     // kill-and-relaunch loop still costs at most one fetch per tier window.
     _coldStartProfileRefreshTimer = Timer(_coldStartProfileRefreshDelay, () {
       if (!mounted) return;
-      triggerProfileRefresh(
-        ref,
-        maxAge: profileInteractiveMaxAge,
-        circles: ref.read(circlesProvider).valueOrNull,
-      );
+      triggerProfileRefresh(ref, maxAge: profileInteractiveMaxAge);
       // Resume any own-profile publish a prior session left queued — honours
       // the persisted backoff, never dials a relay unconditionally.
       triggerProfileSyncRetry(ref);
@@ -1859,6 +1879,12 @@ class _MapShellState extends ConsumerState<MapShell>
               failures,
             );
           },
+          onStalled: () {
+            if (!mounted) return;
+            MapShell.recordBurstStalled(
+              ref.read(sharingHealthProvider.notifier),
+            );
+          },
         );
     _burstScheduler = scheduler;
     // Backgrounded again, whether this built the coordinator or reused it: one
@@ -2040,9 +2066,9 @@ class _MapShellState extends ConsumerState<MapShell>
   ///
   ///   * `circlesProvider` swallows EVERY failure to `[]` and caches it as a
   ///     SUCCESSFUL answer. A read that lost that race leaves an empty circle
-  ///     list and a bare map, with no error anywhere, for the rest of the
-  ///     process — which is what the field report described. Nothing can
-  ///     detect it after the fact, so it is always re-read.
+  ///     list and a bare map, with no error anywhere, until the session next
+  ///     opens — and a refused open is not one. Nothing can detect it after
+  ///     the fact, so it is always re-read.
   ///   * `relayPreferencesServiceProvider` and `inboxRelaysProvider` DO cache
   ///     their failure, as an `AsyncError` that nothing else ever retries — and
   ///     the inbox list is what a full engine restart re-subscribes the
@@ -2073,10 +2099,10 @@ class _MapShellState extends ConsumerState<MapShell>
   /// Cheap when healthy: `ensureRunning` short-circuits on a running engine.
   ///
   /// Installs the re-subscriber first, so this is also the app's FIRST start
-  /// and its retry (see [_ensureLiveSyncInstalled]). Bounded end to end:
-  /// `ensureRunning` answers within `kLiveSyncRestartBudget` whatever the
-  /// engine does, which is what lets [LiveSyncHealBackstop] re-draw its tick
-  /// from this heal's completion.
+  /// and its retry (see [_ensureLiveSyncInstalled]). `ensureRunning` answers
+  /// within `kLiveSyncRestartBudget` whatever the engine does; the re-anchor
+  /// after it has no bound of its own, so [LiveSyncHealBackstop] re-draws its
+  /// tick at [LiveSyncHealBackstop.healDeadline] if this has not answered.
   ///
   /// It heals the OTHER dead receive plane too. `ensureRunning` cannot see a
   /// PAUSED engine — `isRunning` stays true across a pause — so a resume whose
@@ -2106,11 +2132,13 @@ class _MapShellState extends ConsumerState<MapShell>
       final outcome = await resubscriber.ensureRunning();
       if (outcome != LiveSyncHealOutcome.running || !mounted) return outcome;
       final at = DateTime.now();
-      if (await MapShell.reanchorPausedEngine(
-        engine: ref.read(subscriptionServiceProvider),
-        foregrounded: appIsResumed(),
-        now: at,
-        lastReanchorAt: _lastReanchorAt,
+      if (await _healReanchorFlight.run(
+        () => MapShell.reanchorPausedEngine(
+          engine: ref.read(subscriptionServiceProvider),
+          foregrounded: appIsResumed(),
+          now: at,
+          lastReanchorAt: _lastReanchorAt,
+        ),
       )) {
         _lastReanchorAt = at;
       }
@@ -3108,11 +3136,7 @@ class _MapShellState extends ConsumerState<MapShell>
         ..invalidate(keyPackagePublisherProvider)
         ..read(keyPackagePublisherProvider);
       // §6.2: refresh member/own public profiles on app resume.
-      triggerProfileRefresh(
-        ref,
-        maxAge: profileInteractiveMaxAge,
-        circles: ref.read(circlesProvider).valueOrNull,
-      );
+      triggerProfileRefresh(ref, maxAge: profileInteractiveMaxAge);
       // A reseed a cold start found no relay for is retried here, not only on
       // the next launch.
       unawaited(_reseedOwnNameAfterReset());

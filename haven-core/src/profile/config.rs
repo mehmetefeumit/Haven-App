@@ -107,11 +107,11 @@ pub const PROFILE_OWN_READ_BOUND: Duration =
 /// `30s → 2min → 8min → 30min → 6h`, then 6h forever.
 ///
 /// Indexed by the number of attempts already recorded, saturating on the last
-/// rung, so the first failure schedules the first entry. Deliberately the same
-/// shape as the per-author miss ladder: a failed sync is retried by triggers
-/// the user is already causing (foreground, resume), and without a persisted
-/// ladder every one of those triggers would re-dial the whole pool — a publish
-/// burst a relay could use to count how often this install foregrounds.
+/// rung, so the first failure schedules the first entry. A failed sync is
+/// retried by triggers the user is already causing (foreground, resume), and
+/// without a persisted ladder every one of those triggers would re-dial the
+/// whole pool — a publish burst a relay could use to count how often this
+/// install foregrounds.
 ///
 /// A fresh user edit RESETS the ladder: a save is an explicit user action, and
 /// making it wait out a backoff earned by an earlier failure would be the app

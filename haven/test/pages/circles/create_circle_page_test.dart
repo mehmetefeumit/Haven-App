@@ -6,6 +6,7 @@ library;
 
 import 'dart:async';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:haven/src/test_keys.dart';
@@ -27,6 +28,7 @@ import 'package:haven/src/widgets/circles/circle_member_tile.dart';
 import 'package:haven/src/widgets/circles/member_picker.dart';
 
 import '../../helpers/localized_app_harness.dart';
+import '../../helpers/log_capture.dart';
 import '../../mocks/mock_circle_service.dart';
 import '../../mocks/mock_member_directory_service.dart';
 import '../../mocks/mock_profile_service.dart';
@@ -83,6 +85,7 @@ Widget _buildApp(
   MockRelayService mockRelay, {
   MemberDirectory? directory,
   KeyPackageAdmission admission = KeyPackageAdmission.admissible,
+  MockProfileService? profileService,
 }) {
   return ProviderScope(
     overrides: [
@@ -93,7 +96,9 @@ Widget _buildApp(
       memberDirectoryServiceProvider.overrideWithValue(
         MockMemberDirectoryService(directory: directory),
       ),
-      profileServiceProvider.overrideWithValue(MockProfileService()),
+      profileServiceProvider.overrideWithValue(
+        profileService ?? MockProfileService(),
+      ),
       identityProvider.overrideWith((_) async => _identity),
       circlesProvider.overrideWith((ref) => Future.value(const <Circle>[])),
     ],
@@ -115,6 +120,10 @@ Future<void> _addMember(WidgetTester tester, String npub) async {
   await tester.tap(find.byIcon(LucideIcons.circlePlus));
   await tester.pump();
 }
+
+/// The copy for a lookup that could not finish: absence is unproven.
+const _incomplete =
+    "Couldn't finish checking this ID. Check your connection and try again.";
 
 void main() {
   group('CreateCirclePage KeyPackage validation', () {
@@ -140,24 +149,37 @@ void main() {
       expect(find.byType(CircularProgressIndicator), findsNothing);
     });
 
-    testWidgets('shows invalid status with no retry when KeyPackage is null', (
-      tester,
-    ) async {
-      final mock = MockRelayService(); // keyPackageResult defaults to null
+    // Not a dead end any more: someone who set up Haven a moment ago is
+    // findable a moment later, so "not found" offers a retry, and its copy
+    // no longer asserts certainty.
+    testWidgets('a person not found yet can be retried, and the retry finds '
+        'them', (tester) async {
+      final mock = MockRelayService()
+        ..keyPackageAnswers.addAll([null, _makeKeyPackage('hex')]);
       await tester.pumpWidget(_buildApp(mock));
 
       await _addMember(tester, _testNpub1);
       await tester.pumpAndSettle();
 
-      // Should show warning icon and "No Haven account found"
       expect(find.byIcon(LucideIcons.triangleAlert), findsOneWidget);
-      expect(find.text("Couldn't find a Haven account for this ID"), findsOneWidget);
-
-      // No retry button for permanent failures
-      expect(find.byIcon(LucideIcons.refreshCw), findsNothing);
-
-      // Close button still present
+      expect(
+        find.text(
+          'No Haven account found for this ID yet. If they just set up '
+          'Haven, try again in a minute.',
+        ),
+        findsOneWidget,
+      );
+      expect(find.byIcon(LucideIcons.refreshCw), findsOneWidget);
       expect(find.byIcon(LucideIcons.x), findsOneWidget);
+
+      await tester.tap(find.byIcon(LucideIcons.refreshCw));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Ready to invite'), findsOneWidget);
+      final button = tester.widget<FilledButton>(
+        find.widgetWithText(FilledButton, 'Continue'),
+      );
+      expect(button.onPressed, isNotNull);
     });
 
     testWidgets('shows error with retry button on RelayServiceException', (
@@ -171,7 +193,7 @@ void main() {
 
       // Should show warning icon and network error message
       expect(find.byIcon(LucideIcons.triangleAlert), findsOneWidget);
-      expect(find.text('Could not verify member'), findsOneWidget);
+      expect(find.text(_incomplete), findsOneWidget);
 
       // Retry button should be visible
       expect(find.byIcon(LucideIcons.refreshCw), findsOneWidget);
@@ -188,7 +210,7 @@ void main() {
       await tester.pumpAndSettle();
 
       // Should show error with retry
-      expect(find.text('Could not verify member'), findsOneWidget);
+      expect(find.text(_incomplete), findsOneWidget);
       expect(find.byIcon(LucideIcons.refreshCw), findsOneWidget);
 
       // Add a gate before tapping retry so we can observe the spinner
@@ -203,9 +225,13 @@ void main() {
       expect(find.byType(CircularProgressIndicator), findsOneWidget);
       expect(find.text('Checking availability...'), findsOneWidget);
 
-      // Release gate and let it settle
+      // The relays answer this time.
+      mock.keyPackageAnswers.add(_makeKeyPackage('hex'));
       retryGate.complete();
       await tester.pumpAndSettle();
+
+      expect(find.text(_incomplete), findsNothing);
+      expect(find.text('Ready to invite'), findsOneWidget);
     });
 
     testWidgets('continue button is disabled when any member is invalid', (
@@ -314,9 +340,7 @@ void main() {
       'shows "needs update" for a peer on a pre-migration build and keeps '
       'continue disabled',
       (tester) async {
-        final mock = MockRelayService(
-          keyPackageResult: _makeKeyPackage('hex'),
-        );
+        final mock = MockRelayService(keyPackageResult: _makeKeyPackage('hex'));
         await tester.pumpWidget(
           _buildApp(mock, admission: KeyPackageAdmission.needsUpdate),
         );
@@ -327,12 +351,13 @@ void main() {
         // Distinct icon/status from both "valid" and "invalid" (no-account).
         expect(find.byIcon(LucideIcons.circleCheck), findsNothing);
         expect(find.text('Ready to invite'), findsNothing);
-        expect(find.text("Couldn't find a Haven account for this ID"), findsNothing);
+        expect(find.textContaining('No Haven account found'), findsNothing);
         expect(find.text('Needs to update or open Haven'), findsOneWidget);
         expect(
           find.byIcon(LucideIcons.refreshCw),
           findsOneWidget,
-          reason: 'opening Haven publishes a current package, so a retry can '
+          reason:
+              'opening Haven publishes a current package, so a retry can '
               'succeed without removing and re-adding the person',
         );
 
@@ -347,9 +372,7 @@ void main() {
       'a KeyPackage the engine would refuse says it may be out of date, '
       'offers a retry and keeps continue disabled',
       (tester) async {
-        final mock = MockRelayService(
-          keyPackageResult: _makeKeyPackage('hex'),
-        );
+        final mock = MockRelayService(keyPackageResult: _makeKeyPackage('hex'));
         await tester.pumpWidget(
           _buildApp(mock, admission: KeyPackageAdmission.unusable),
         );
@@ -481,9 +504,7 @@ void main() {
       tester,
     ) async {
       final mock = MockRelayService();
-      await tester.pumpWidget(
-        _buildApp(mock, directory: _aliceDirectory()),
-      );
+      await tester.pumpWidget(_buildApp(mock, directory: _aliceDirectory()));
       await tester.pumpAndSettle();
 
       final l10n = l10nOf(tester, CreateCirclePage);
@@ -503,9 +524,7 @@ void main() {
 
     testWidgets('C2. tapping a row stages that person', (tester) async {
       final mock = MockRelayService(keyPackageResult: _makeKeyPackage('hex'));
-      await tester.pumpWidget(
-        _buildApp(mock, directory: _aliceDirectory()),
-      );
+      await tester.pumpWidget(_buildApp(mock, directory: _aliceDirectory()));
       await tester.pumpAndSettle();
 
       await tester.tap(find.text('Alice Aardvark'));
@@ -525,9 +544,7 @@ void main() {
     testWidgets('C3. a staged person is shown on a disabled row, with the '
         'reason', (tester) async {
       final mock = MockRelayService(keyPackageResult: _makeKeyPackage('hex'));
-      await tester.pumpWidget(
-        _buildApp(mock, directory: _aliceDirectory()),
-      );
+      await tester.pumpWidget(_buildApp(mock, directory: _aliceDirectory()));
       await tester.pumpAndSettle();
 
       await tester.tap(find.text('Alice Aardvark'));
@@ -537,7 +554,13 @@ void main() {
       expect(find.byType(MemberCandidateTile), findsOneWidget);
       expect(find.text(l10n.memberSearchAlreadyAdded), findsOneWidget);
 
-      await tester.tap(find.text('Alice Aardvark'));
+      // The staged tile now names her too; tap the refused picker row.
+      await tester.tap(
+        find.descendant(
+          of: find.byType(MemberCandidateTile),
+          matching: find.text('Alice Aardvark'),
+        ),
+      );
       await tester.pumpAndSettle();
       expect(
         find.byType(PendingMemberTile),
@@ -655,6 +678,407 @@ void main() {
         [null],
         reason: 'no circle exists yet: the package is chosen for a new one',
       );
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // A staged row shows the person, by npub, whatever staged it (owner
+  // direction 2026-11-12) — and asks a relay only about someone the local
+  // directory does not already hold, once.
+  // -------------------------------------------------------------------------
+  group('CreateCirclePage — a staged row shows the person', () {
+    const cousinHex =
+        'de1e00000000000000000000000000000000000000000000000000000000fac3';
+
+    MockProfileService cousinProfiles() => MockProfileService()
+      ..strangerProfiles[_testNpub1] = const Profile(
+        pubkeyHex: cousinHex,
+        displayName: 'Distant Cousin',
+      );
+
+    int resolves(MockProfileService service) => service.methodCalls
+        .where((c) => c.method == 'resolveTypedStrangerProfile')
+        .length;
+
+    Finder onStagedRow(String text) => find.descendant(
+      of: find.byType(PendingMemberTile),
+      matching: find.text(text),
+    );
+
+    void expectStagedPerson(String name, String npub) {
+      expect(onStagedRow(name), findsOneWidget);
+      expect(
+        onStagedRow(NpubValidator.shortenForDisplay(npub)),
+        findsOneWidget,
+      );
+    }
+
+    void mockClipboard(WidgetTester tester, String text) {
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async => call.method == 'Clipboard.getData'
+            ? <String, dynamic>{'text': text}
+            : null,
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+    }
+
+    testWidgets('CS1. a suggestion tap names the co-member from the '
+        'directory, asking no relay', (tester) async {
+      final profiles = MockProfileService();
+      await tester.pumpWidget(
+        _buildApp(
+          MockRelayService(keyPackageResult: _makeKeyPackage('hex')),
+          directory: _aliceDirectory(),
+          profileService: profiles,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Alice Aardvark'));
+      await tester.pumpAndSettle();
+
+      expectStagedPerson('Alice Aardvark', _aliceNpub);
+      expect(resolves(profiles), 0);
+    });
+
+    testWidgets(
+      'CS2. a typed-row tap names the person, clears the field, leaves no '
+      '"No matches" under them, and asks once',
+      (tester) async {
+        final profiles = cousinProfiles();
+        await tester.pumpWidget(
+          _buildApp(
+            MockRelayService(keyPackageResult: _makeKeyPackage('hex')),
+            directory: _aliceDirectory(),
+            profileService: profiles,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.enterText(
+          find.byKey(WidgetKeys.memberSearchInput),
+          _testNpub1,
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Distant Cousin'));
+        await tester.pumpAndSettle();
+
+        expectStagedPerson('Distant Cousin', _testNpub1);
+        final l10n = l10nOf(tester, CreateCirclePage);
+        expect(
+          tester
+              .widget<TextField>(find.byKey(WidgetKeys.memberSearchInput))
+              .controller!
+              .text,
+          isEmpty,
+        );
+        expect(find.text(l10n.memberPickerNoMatches), findsNothing);
+        expect(resolves(profiles), 1);
+      },
+    );
+
+    testWidgets('CS9. a typed-row tap hands the focus back to the search '
+        'field', (tester) async {
+      await tester.pumpWidget(
+        _buildApp(
+          MockRelayService(keyPackageResult: _makeKeyPackage('hex')),
+          directory: _aliceDirectory(),
+          profileService: cousinProfiles(),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(WidgetKeys.memberSearchInput),
+        _testNpub1,
+      );
+      await tester.pumpAndSettle();
+      FocusNode fieldFocus() => tester
+          .widget<TextField>(find.byKey(WidgetKeys.memberSearchInput))
+          .focusNode!;
+
+      // A mouse press outside a text field takes its focus; a touch does not.
+      final press = await tester.startGesture(
+        tester.getCenter(find.text('Distant Cousin')),
+        kind: PointerDeviceKind.mouse,
+      );
+      addTearDown(press.removePointer);
+      await tester.pump();
+      expect(fieldFocus().hasPrimaryFocus, isFalse, reason: 'anti-vacuity');
+      await press.up();
+      await tester.pumpAndSettle();
+
+      expectStagedPerson('Distant Cousin', _testNpub1);
+      expect(
+        fieldFocus().hasPrimaryFocus,
+        isTrue,
+        reason: 'the tapped row is gone, so focus left there is focus lost',
+      );
+    });
+
+    testWidgets('CS8. looking up, naming and fetching the picture of a '
+        'staged person logs no key, pubkey or name', (tester) async {
+      final capture = LogCapture.install();
+      final profiles = cousinProfiles();
+      await tester.pumpWidget(
+        _buildApp(
+          MockRelayService(shouldThrowOnFetchKeyPackage: true),
+          directory: _aliceDirectory(),
+          profileService: profiles,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.enterText(
+        find.byKey(WidgetKeys.memberSearchInput),
+        _testNpub1,
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Distant Cousin'));
+      await tester.pumpAndSettle();
+      expectStagedPerson('Distant Cousin', _testNpub1);
+      expect(
+        profiles.methodCalls.where((c) => c.method == 'downloadMemberPictures'),
+        hasLength(1),
+      );
+
+      capture
+        ..restore()
+        ..assertContains('Relay error fetching KeyPackage')
+        ..assertNoNeedles([_testNpub1, cousinHex, 'Distant Cousin']);
+    });
+
+    testWidgets('CS3. the paste button names the person', (tester) async {
+      final profiles = cousinProfiles();
+      mockClipboard(tester, _testNpub1);
+      await tester.pumpWidget(
+        _buildApp(
+          MockRelayService(keyPackageResult: _makeKeyPackage('hex')),
+          directory: _aliceDirectory(),
+          profileService: profiles,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byIcon(LucideIcons.clipboard));
+      await tester.pumpAndSettle();
+
+      expectStagedPerson('Distant Cousin', _testNpub1);
+      expect(resolves(profiles), 1);
+    });
+
+    testWidgets('CS4. Done names the person', (tester) async {
+      final profiles = cousinProfiles();
+      await tester.pumpWidget(
+        _buildApp(
+          MockRelayService(keyPackageResult: _makeKeyPackage('hex')),
+          directory: _aliceDirectory(),
+          profileService: profiles,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.enterText(
+        find.byKey(WidgetKeys.memberSearchInput),
+        _testNpub1,
+      );
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pumpAndSettle();
+
+      expectStagedPerson('Distant Cousin', _testNpub1);
+      expect(resolves(profiles), 1);
+    });
+
+    testWidgets("CS5. pasting a co-member's npub asks no relay about them", (
+      tester,
+    ) async {
+      final profiles = MockProfileService();
+      mockClipboard(tester, _aliceNpub);
+      await tester.pumpWidget(
+        _buildApp(
+          MockRelayService(keyPackageResult: _makeKeyPackage('hex')),
+          directory: _aliceDirectory(),
+          profileService: profiles,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byIcon(LucideIcons.clipboard));
+      await tester.pumpAndSettle();
+
+      expectStagedPerson('Alice Aardvark', _aliceNpub);
+      expect(resolves(profiles), 0);
+    });
+
+    testWidgets('CS6. with a degraded directory a staged stranger is shown '
+        'by key alone and no relay is asked', (tester) async {
+      final profiles = cousinProfiles();
+      await tester.pumpWidget(
+        _buildApp(
+          MockRelayService(keyPackageResult: _makeKeyPackage('hex')),
+          directory: MemberDirectory.readFailed,
+          profileService: profiles,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await _addMember(tester, _testNpub1);
+      await tester.pumpAndSettle();
+
+      expect(onStagedRow('Distant Cousin'), findsNothing);
+      expect(
+        onStagedRow(NpubValidator.shortenForDisplay(_testNpub1)),
+        findsOneWidget,
+      );
+      expect(resolves(profiles), 0);
+      expect(
+        onStagedRow(
+          l10nOf(tester, CreateCirclePage).memberPickerStrangerLookupNote,
+        ),
+        findsNothing,
+        reason: 'nothing was asked, so there is nothing to disclose',
+      );
+    });
+
+    testWidgets('CS10. a stranger staged by the paste button carries the '
+        'lookup note under their row, as the typed row does', (tester) async {
+      final handle = tester.ensureSemantics();
+      final profiles = cousinProfiles();
+      mockClipboard(tester, _testNpub1);
+      await tester.pumpWidget(
+        _buildApp(
+          MockRelayService(keyPackageResult: _makeKeyPackage('hex')),
+          directory: _aliceDirectory(),
+          profileService: profiles,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byIcon(LucideIcons.clipboard));
+      await tester.pumpAndSettle();
+
+      final note = l10nOf(
+        tester,
+        CreateCirclePage,
+      ).memberPickerStrangerLookupNote;
+      expectStagedPerson('Distant Cousin', _testNpub1);
+      expect(onStagedRow(note), findsOneWidget);
+      expect(
+        tester
+            .getSemantics(find.bySemanticsLabel(RegExp('Distant Cousin')))
+            .label,
+        endsWith(', $note'),
+        reason: 'the disclosure is spoken in the row label, not a hint',
+      );
+      expect(resolves(profiles), 1);
+      handle.dispose();
+    });
+
+    testWidgets('CS11. a co-member staged by the paste button carries no '
+        'lookup note', (tester) async {
+      mockClipboard(tester, _aliceNpub);
+      await tester.pumpWidget(
+        _buildApp(
+          MockRelayService(keyPackageResult: _makeKeyPackage('hex')),
+          directory: _aliceDirectory(),
+          profileService: cousinProfiles(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byIcon(LucideIcons.clipboard));
+      await tester.pumpAndSettle();
+
+      expectStagedPerson('Alice Aardvark', _aliceNpub);
+      expect(
+        find.text(
+          l10nOf(tester, CreateCirclePage).memberPickerStrangerLookupNote,
+        ),
+        findsNothing,
+      );
+    });
+
+    testWidgets('CS7. a staged row scrolled out of view and back asks no '
+        'relay again', (tester) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(400, 600);
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      const charset = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+      final entries = [
+        for (var i = 0; i < 60; i++)
+          DirectoryEntry(
+            pubkeyHex: i.toRadixString(16).padLeft(64, '0'),
+            npub: 'npub1${'z' * 51}${charset[i ~/ 32]}${charset[i % 32]}qqqqq',
+            tier: DirectoryTier.current,
+          ),
+      ];
+      final directory = buildDirectory(
+        entries: entries,
+        profiles: {
+          for (final (i, e) in entries.indexed)
+            e.pubkeyHex: Profile(
+              pubkeyHex: e.pubkeyHex,
+              displayName: 'Member $i',
+            ),
+        },
+        fold: (value) => value.toLowerCase(),
+      );
+      final profiles = cousinProfiles();
+      await tester.pumpWidget(
+        _buildApp(
+          MockRelayService(keyPackageResult: _makeKeyPackage('hex')),
+          directory: directory,
+          profileService: profiles,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await _addMember(tester, _testNpub1);
+      await tester.pumpAndSettle();
+      expectStagedPerson('Distant Cousin', _testNpub1);
+      // More rows after it: a sliver list always keeps its last child, so
+      // the stranger must not be the last.
+      for (final name in ['Member 0', 'Member 1']) {
+        // The stranger's row carries the lookup note, which pushes the
+        // suggestions below the fold of this short view.
+        await tester.scrollUntilVisible(
+          find.text(name),
+          100,
+          scrollable: find
+              .descendant(
+                of: find.byType(CustomScrollView),
+                matching: find.byType(Scrollable),
+              )
+              .first,
+        );
+        await tester.ensureVisible(find.text(name));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text(name));
+        await tester.pumpAndSettle();
+      }
+      Finder strangerRow({bool skipOffstage = true}) => find.byWidgetPredicate(
+        (w) => w is PendingMemberTile && w.npub == _testNpub1,
+        skipOffstage: skipOffstage,
+      );
+
+      await tester.drag(find.byType(CustomScrollView), const Offset(0, -6000));
+      await tester.pumpAndSettle();
+      expect(
+        strangerRow(skipOffstage: false),
+        findsNothing,
+        reason: 'the row really left the lazily built list',
+      );
+
+      await tester.drag(find.byType(CustomScrollView), const Offset(0, 6000));
+      await tester.pumpAndSettle();
+
+      expectStagedPerson('Distant Cousin', _testNpub1);
+      expect(resolves(profiles), 1);
     });
   });
 }

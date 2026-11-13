@@ -98,7 +98,7 @@ use transport_nostr_adapter::NostrKeyPackagePublication;
 
 use super::kp_lifetime::TrackedKpLifetime;
 use crate::log_alias::{self, bucket, EventIdHex};
-use crate::nostr::mls::SessionManager;
+use crate::nostr::mls::{SessionManager, TrackedKeyPackage};
 use crate::relay::publishers::{PublisherError, PublisherResult};
 
 /// The Marmot `KeyPackage` event kind (NIP-33 addressable).
@@ -318,7 +318,7 @@ impl RelayKpPerRelay {
     /// in the tracked slot (a relay that missed the last publish), does NOT
     /// count.
     #[must_use]
-    fn serves_tracked(&self, tracked: &TrackedKpSlot<'_>) -> bool {
+    pub(super) fn serves_tracked(&self, tracked: &TrackedKpSlot<'_>) -> bool {
         self.canonical.iter().any(|e| {
             e.d_tag == tracked.d_tag
                 && (e.event_id == tracked.event_id || e.created_at >= tracked.created_at)
@@ -351,6 +351,43 @@ impl RelayKpPerRelay {
 pub struct RelayKpSnapshot {
     /// Canonical (kind 30443) entries for RESPONDING own relays only.
     pub responders: Vec<RelayKpPerRelay>,
+}
+
+impl RelayKpSnapshot {
+    /// Returns whether at least one responder serves the tracked package
+    /// ([`RelayKpPerRelay::serves_tracked`]).
+    #[must_use]
+    pub fn serves_tracked(&self, tracked: &TrackedKpSlot<'_>) -> bool {
+        self.responders.iter().any(|r| r.serves_tracked(tracked))
+    }
+
+    /// Whether a responder serves the package `tracked` names as one an
+    /// inviter can use: published by this device, its key still held and not
+    /// lost, its lifetime current, in a slot a conformant inviter accepts.
+    #[must_use]
+    pub fn serves_current_package(
+        &self,
+        tracked: Option<&TrackedKeyPackage>,
+        lifetime: TrackedKpLifetime,
+    ) -> bool {
+        tracked.is_some_and(|t| {
+            let Some(published) = t.published.as_ref() else {
+                return false;
+            };
+            let openable = !t.package.is_empty()
+                && matches!(lifetime, TrackedKpLifetime::Known(_))
+                && (!t.replacement_owed || t.consumed_but_held);
+            openable
+                && is_conformant_slot_id(&t.slot)
+                && self.serves_tracked(&TrackedKpSlot {
+                    d_tag: &t.slot,
+                    event_id: &published.id.to_hex(),
+                    created_at: t.created_at.unwrap_or(0),
+                    adopted: t.adopted,
+                    replacement_owed: t.replacement_owed,
+                })
+        })
+    }
 }
 
 /// The deterministic canonical seed-`d`: the byte-order-MIN over each
@@ -1257,6 +1294,12 @@ pub struct KpMaintenanceOutcome {
     /// — reports `false` and leaves the sentinel unset, so this is "the account
     /// is now conformant", never "the migration was attempted".
     pub retired_malformed_slot: bool,
+    /// Whether, after this tick, at least one responding own relay serves this
+    /// device's current package — one it holds the key to — or acknowledged
+    /// this tick's publish of it. Never set by a tick that only adopted a slot
+    /// ([`KpMaintenanceAction::SeededD`]): the package there is not one this
+    /// device can open.
+    pub published_current: bool,
 }
 
 impl KpMaintenanceOutcome {
@@ -1276,6 +1319,7 @@ impl KpMaintenanceOutcome {
             relay_errors: 0,
             expired_init_key_purged: false,
             retired_malformed_slot: false,
+            published_current: false,
         }
     }
 }
@@ -1345,6 +1389,32 @@ mod tests {
     /// the pre-existing (lifetime-agnostic) behaviour these tests pin.
     fn decide_fresh(snap: &RelayKpSnapshot, stored_d: Option<&str>) -> KpMaintenanceDecision {
         decide_kp_maintenance(snap, stored_d.map(tracked), fresh_lifetime(), NOW)
+    }
+
+    #[test]
+    fn the_snapshot_serves_the_tracked_package_when_any_responder_does() {
+        let tracked = TrackedKpSlot {
+            event_id: "ev-tracked",
+            created_at: 10,
+            ..tracked("d-slot")
+        };
+        let entry_at = |d: &str, id: &str, at| RelayKpEntry {
+            created_at: at,
+            ..entry(d, id)
+        };
+        let missing = snapshot(vec![
+            per("wss://a.example.com", vec![]),
+            per("wss://b.example.com", vec![entry_at("other", "ev-x", 20)]),
+            per("wss://c.example.com", vec![entry_at("d-slot", "ev-old", 9)]),
+        ]);
+        assert!(!missing.serves_tracked(&tracked));
+        assert!(!RelayKpSnapshot::default().serves_tracked(&tracked));
+        let mut one = missing;
+        one.responders.push(per(
+            "wss://d.example.com",
+            vec![entry("d-slot", "ev-tracked")],
+        ));
+        assert!(one.serves_tracked(&tracked));
     }
 
     #[test]
@@ -1542,6 +1612,7 @@ mod tests {
             relay_errors: 1,
             expired_init_key_purged: true,
             retired_malformed_slot: true,
+            published_current: true,
         };
         let dbg = format!("{o:?}");
         assert!(
@@ -1604,6 +1675,7 @@ mod tests {
             relay_errors: 1,
             expired_init_key_purged: true,
             retired_malformed_slot: false,
+            published_current: false,
         };
         assert_eq!(
             unacked_rotation.relays_healed, 0,

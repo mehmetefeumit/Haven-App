@@ -23,6 +23,7 @@ import 'package:haven/src/providers/maintenance_scheduler_provider.dart';
 import 'package:haven/src/providers/member_profile_refresh_provider.dart';
 import 'package:haven/src/providers/member_removal_provider.dart';
 import 'package:haven/src/providers/mesh_provider.dart';
+import 'package:haven/src/providers/own_reachability_provider.dart';
 import 'package:haven/src/providers/profile_sync_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/relay_status_provider.dart';
@@ -60,6 +61,7 @@ final List<ProviderOrFamily> identityScopedProviders = [
   invitationPollerProvider,
   invitationPollStatusProvider,
   keyPackagePublisherProvider,
+  ownReachabilityProvider,
   // Locations.
   memberLocationsProvider,
   locationPublisherProvider,

@@ -20,12 +20,14 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/member_directory_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/member_directory_service.dart';
 import 'package:haven/src/services/profile_service.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/utils/npub_speech.dart';
 import 'package:haven/src/utils/npub_validator.dart';
 import 'package:haven/src/widgets/circles/member_avatar.dart';
 import 'package:haven/src/widgets/circles/member_picker.dart';
@@ -265,11 +267,7 @@ void main() {
       final service = MockMemberDirectoryService(directory: _threePeople())
         ..loadGate = Completer<void>();
 
-      await _pumpPicker(
-        tester,
-        directoryService: service,
-        settle: false,
-      );
+      await _pumpPicker(tester, directoryService: service, settle: false);
       await tester.pump();
 
       expect(find.byType(CircularProgressIndicator), findsOneWidget);
@@ -293,9 +291,7 @@ void main() {
         'claims only roster membership', (tester) async {
       await _pumpPicker(
         tester,
-        directoryService: MockMemberDirectoryService(
-          directory: _threePeople(),
-        ),
+        directoryService: MockMemberDirectoryService(directory: _threePeople()),
       );
 
       final l10n = _l10n(tester);
@@ -309,15 +305,9 @@ void main() {
     testWidgets('S3. a fresh install renders no list and no heading', (
       tester,
     ) async {
-      await _pumpPicker(
-        tester,
-        directoryService: MockMemberDirectoryService(),
-      );
+      await _pumpPicker(tester, directoryService: MockMemberDirectoryService());
 
-      expect(
-        find.text(_l10n(tester).memberPickerSectionRoster),
-        findsNothing,
-      );
+      expect(find.text(_l10n(tester).memberPickerSectionRoster), findsNothing);
       expect(find.byType(MemberCandidateTile), findsNothing);
       expect(
         find.text(_l10n(tester).memberPickerNoMatches),
@@ -328,35 +318,31 @@ void main() {
       );
     });
 
-    testWidgets(
-      'S42. a directory that fails to load renders a message '
-      'distinguishable from both "no matches" and a fresh install\'s '
-      'silence (plan F2)',
-      (tester) async {
-        final service = MockMemberDirectoryService()
-          ..shouldThrowOnLoadDirectory = true;
-        await _pumpPicker(tester, directoryService: service);
+    testWidgets('S42. a directory that fails to load renders a message '
+        'distinguishable from both "no matches" and a fresh install\'s '
+        'silence (plan F2)', (tester) async {
+      final service = MockMemberDirectoryService()
+        ..shouldThrowOnLoadDirectory = true;
+      await _pumpPicker(tester, directoryService: service);
 
-        final l10n = _l10n(tester);
-        expect(
-          find.text(l10n.memberPickerDirectoryUnavailable),
-          findsOneWidget,
-          reason: 'a failed read is not "you know nobody" — it must say so, '
-              'not stay blank like S3\'s fresh install',
-        );
-        expect(find.text(l10n.memberPickerNoMatches), findsNothing);
-        expect(find.byType(MemberCandidateTile), findsNothing);
-      },
-    );
+      final l10n = _l10n(tester);
+      expect(
+        find.text(l10n.memberPickerDirectoryUnavailable),
+        findsOneWidget,
+        reason:
+            'a failed read is not "you know nobody" — it must say so, '
+            'not stay blank like S3\'s fresh install',
+      );
+      expect(find.text(l10n.memberPickerNoMatches), findsNothing);
+      expect(find.byType(MemberCandidateTile), findsNothing);
+    });
 
     testWidgets('S4. typing narrows to the matches, in the same frame', (
       tester,
     ) async {
       await _pumpPicker(
         tester,
-        directoryService: MockMemberDirectoryService(
-          directory: _threePeople(),
-        ),
+        directoryService: MockMemberDirectoryService(directory: _threePeople()),
       );
 
       // One pump, no clock advanced: a debounced filter would still be
@@ -373,9 +359,7 @@ void main() {
     ) async {
       await _pumpPicker(
         tester,
-        directoryService: MockMemberDirectoryService(
-          directory: _threePeople(),
-        ),
+        directoryService: MockMemberDirectoryService(directory: _threePeople()),
       );
 
       await _type(tester, 'zzzz');
@@ -391,9 +375,7 @@ void main() {
     ) async {
       await _pumpPicker(
         tester,
-        directoryService: MockMemberDirectoryService(
-          directory: _threePeople(),
-        ),
+        directoryService: MockMemberDirectoryService(directory: _threePeople()),
       );
 
       await _type(tester, _bobNpub);
@@ -403,36 +385,29 @@ void main() {
       expect(find.text(_short(_bobNpub)), findsOneWidget);
     });
 
-    testWidgets(
-      'S7. a complete npub that is NOT known locally is offered as a '
-      'typed-stranger row, never as a MemberCandidateTile with a name '
-      'nothing local vouched for (D2 — the network resolve itself is '
-      'covered by its own group below)',
-      (tester) async {
-        await _pumpPicker(
-          tester,
-          directoryService: MockMemberDirectoryService(
-            directory: _threePeople(),
-          ),
-        );
+    testWidgets('S7. a complete npub that is NOT known locally is offered as a '
+        'typed-stranger row, never as a MemberCandidateTile with a name '
+        'nothing local vouched for (D2 — the network resolve itself is '
+        'covered by its own group below)', (tester) async {
+      await _pumpPicker(
+        tester,
+        directoryService: MockMemberDirectoryService(directory: _threePeople()),
+      );
 
-        await _type(tester, _strangerNpub);
-        await tester.pumpAndSettle();
+      await _type(tester, _strangerNpub);
+      await tester.pumpAndSettle();
 
-        expect(find.byType(MemberCandidateTile), findsNothing);
-        expect(find.text(_l10n(tester).memberPickerNoMatches), findsNothing);
-        expect(find.text(_short(_strangerNpub)), findsOneWidget);
-      },
-    );
+      expect(find.byType(MemberCandidateTile), findsNothing);
+      expect(find.text(_l10n(tester).memberPickerNoMatches), findsNothing);
+      expect(find.text(_short(_strangerNpub)), findsOneWidget);
+    });
 
     testWidgets('S8. malformed input matches nobody and raises nothing', (
       tester,
     ) async {
       await _pumpPicker(
         tester,
-        directoryService: MockMemberDirectoryService(
-          directory: _threePeople(),
-        ),
+        directoryService: MockMemberDirectoryService(directory: _threePeople()),
       );
 
       await _type(tester, 'npub1!!! not a key ###');
@@ -448,9 +423,7 @@ void main() {
       // everyone for "n" — keystroke one of "Nadia".
       await _pumpPicker(
         tester,
-        directoryService: MockMemberDirectoryService(
-          directory: _threePeople(),
-        ),
+        directoryService: MockMemberDirectoryService(directory: _threePeople()),
       );
 
       await _type(tester, 'npub1');
@@ -468,9 +441,7 @@ void main() {
       var picked = 0;
       await _pumpPicker(
         tester,
-        directoryService: MockMemberDirectoryService(
-          directory: _threePeople(),
-        ),
+        directoryService: MockMemberDirectoryService(directory: _threePeople()),
         stagedNpubs: const {_bobNpub},
         onSelected: (_) => picked++,
       );
@@ -491,9 +462,7 @@ void main() {
       var picked = 0;
       await _pumpPicker(
         tester,
-        directoryService: MockMemberDirectoryService(
-          directory: _threePeople(),
-        ),
+        directoryService: MockMemberDirectoryService(directory: _threePeople()),
         circleMemberPubkeysHex: const {_carolHex},
         onSelected: (_) => picked++,
       );
@@ -549,9 +518,7 @@ void main() {
       final picks = <MemberCandidate>[];
       await _pumpPicker(
         tester,
-        directoryService: MockMemberDirectoryService(
-          directory: _threePeople(),
-        ),
+        directoryService: MockMemberDirectoryService(directory: _threePeople()),
         onSelected: picks.add,
       );
 
@@ -574,9 +541,7 @@ void main() {
       // sharing, so a name-only row must not exist.
       await _pumpPicker(
         tester,
-        directoryService: MockMemberDirectoryService(
-          directory: _threePeople(),
-        ),
+        directoryService: MockMemberDirectoryService(directory: _threePeople()),
       );
 
       for (final npub in [_aliceNpub, _bobNpub, _carolNpub]) {
@@ -600,9 +565,7 @@ void main() {
     testWidgets('S16. the key is never clipped', (tester) async {
       await _pumpPicker(
         tester,
-        directoryService: MockMemberDirectoryService(
-          directory: _threePeople(),
-        ),
+        directoryService: MockMemberDirectoryService(directory: _threePeople()),
       );
 
       final npub = tester.widget<Text>(find.text(_short(_aliceNpub)));
@@ -711,15 +674,15 @@ void main() {
       final handle = tester.ensureSemantics();
       await _pumpPicker(
         tester,
-        directoryService: MockMemberDirectoryService(
-          directory: _threePeople(),
-        ),
+        directoryService: MockMemberDirectoryService(directory: _threePeople()),
       );
 
       final l10n = _l10n(tester);
       expect(
         find.bySemanticsLabel(
-          RegExp('Alice Aardvark.*${RegExp.escape(l10n.memberPickerTierRoster)}'),
+          RegExp(
+            'Alice Aardvark.*${RegExp.escape(l10n.memberPickerTierRoster)}',
+          ),
         ),
         findsOneWidget,
       );
@@ -732,9 +695,7 @@ void main() {
       final handle = tester.ensureSemantics();
       await _pumpPicker(
         tester,
-        directoryService: MockMemberDirectoryService(
-          directory: _threePeople(),
-        ),
+        directoryService: MockMemberDirectoryService(directory: _threePeople()),
         stagedNpubs: const {_bobNpub},
       );
 
@@ -757,9 +718,7 @@ void main() {
       final announcements = captureAccessibilityAnnouncements(tester);
       await _pumpPicker(
         tester,
-        directoryService: MockMemberDirectoryService(
-          directory: _threePeople(),
-        ),
+        directoryService: MockMemberDirectoryService(directory: _threePeople()),
       );
 
       final l10n = _l10n(tester);
@@ -824,6 +783,10 @@ void main() {
               CustomSemanticsAction.getAction(id)!.label ==
               l10n.memberPickerReadPublicKey,
         );
+        // Only what the action speaks: the lookup's settle is announced
+        // before it.
+        await tester.pump(const Duration(milliseconds: 400));
+        announcements.clear();
         tester.binding.pipelineOwner.semanticsOwner!.performAction(
           node.id,
           SemanticsAction.customAction,
@@ -836,22 +799,21 @@ void main() {
         expect(
           tokens,
           contains('...'),
-          reason: 'the elision must be its own token, so no TTS engine can '
+          reason:
+              'the elision must be its own token, so no TTS engine can '
               'drop it silently into an adjacent chunk',
         );
         for (final token in tokens) {
           expect(
             token == '...' || !token.contains('.'),
             isTrue,
-            reason: 'no chunk may mix elision dots with real key '
+            reason:
+                'no chunk may mix elision dots with real key '
                 'characters: "$token"',
           );
         }
         // The existing round-trip promise (S22) must still hold.
-        expect(
-          announcements.single.replaceAll(' ', ''),
-          _short(_aliceNpub),
-        );
+        expect(announcements.single.replaceAll(' ', ''), _short(_aliceNpub));
         handle.dispose();
       },
     );
@@ -860,9 +822,7 @@ void main() {
         'result set changed', (tester) async {
       await _pumpPicker(
         tester,
-        directoryService: MockMemberDirectoryService(
-          directory: _threePeople(),
-        ),
+        directoryService: MockMemberDirectoryService(directory: _threePeople()),
       );
       final announcements = captureAccessibilityAnnouncements(tester);
       final l10n = _l10n(tester);
@@ -888,9 +848,7 @@ void main() {
     testWidgets('S24. zero results is announced exactly once', (tester) async {
       await _pumpPicker(
         tester,
-        directoryService: MockMemberDirectoryService(
-          directory: _threePeople(),
-        ),
+        directoryService: MockMemberDirectoryService(directory: _threePeople()),
       );
       final announcements = captureAccessibilityAnnouncements(tester);
       final l10n = _l10n(tester);
@@ -911,11 +869,7 @@ void main() {
     testWidgets('S25. opening the picker announces nothing', (tester) async {
       final service = MockMemberDirectoryService(directory: _threePeople())
         ..loadGate = Completer<void>();
-      await _pumpPicker(
-        tester,
-        directoryService: service,
-        settle: false,
-      );
+      await _pumpPicker(tester, directoryService: service, settle: false);
       final announcements = captureAccessibilityAnnouncements(tester);
 
       service.loadGate!.complete();
@@ -945,7 +899,8 @@ void main() {
         expect(
           announcements,
           isEmpty,
-          reason: 'the on-device read has not finished — speech must not '
+          reason:
+              'the on-device read has not finished — speech must not '
               'claim an answer the screen itself does not have yet',
         );
 
@@ -957,34 +912,30 @@ void main() {
         expect(
           announcements,
           [l10n.memberPickerMatchesAnnouncement(1)],
-          reason: 'the query never changed, so nothing but the directory '
+          reason:
+              'the query never changed, so nothing but the directory '
               'settling could have re-armed this announcement',
         );
       },
     );
 
-    testWidgets(
-      'S40. typing on a fresh install (an empty directory) is never '
-      'announced as "no matches" — matching the visible branch\'s silence '
-      '(S3, plan F1)',
-      (tester) async {
-        await _pumpPicker(
-          tester,
-          directoryService: MockMemberDirectoryService(),
-        );
-        final announcements = captureAccessibilityAnnouncements(tester);
+    testWidgets('S40. typing on a fresh install (an empty directory) is never '
+        'announced as "no matches" — matching the visible branch\'s silence '
+        '(S3, plan F1)', (tester) async {
+      await _pumpPicker(tester, directoryService: MockMemberDirectoryService());
+      final announcements = captureAccessibilityAnnouncements(tester);
 
-        await _type(tester, 'zzz');
-        await tester.pump(const Duration(milliseconds: 400));
+      await _type(tester, 'zzz');
+      await tester.pump(const Duration(milliseconds: 400));
 
-        expect(
-          announcements,
-          isEmpty,
-          reason: '"No matches" answers a query; someone who shares no '
-              'circles yet has not asked one, on screen or in speech',
-        );
-      },
-    );
+      expect(
+        announcements,
+        isEmpty,
+        reason:
+            '"No matches" answers a query; someone who shares no '
+            'circles yet has not asked one, on screen or in speech',
+      );
+    });
 
     testWidgets(
       'S41. a directory that fails to load is announced as unavailable once '
@@ -1050,7 +1001,8 @@ void main() {
         expect(
           announcements,
           isEmpty,
-          reason: 'the on-device read has not finished — speech must not '
+          reason:
+              'the on-device read has not finished — speech must not '
               'claim an answer the screen itself does not have yet',
         );
 
@@ -1062,7 +1014,8 @@ void main() {
         expect(
           announcements,
           [l10n.memberPickerDirectoryUnavailable],
-          reason: 'the query never changed, so nothing but the directory '
+          reason:
+              'the query never changed, so nothing but the directory '
               'settling into failure could have re-armed this announcement',
         );
       },
@@ -1092,9 +1045,7 @@ void main() {
       final handle = tester.ensureSemantics();
       await _pumpPicker(
         tester,
-        directoryService: MockMemberDirectoryService(
-          directory: _threePeople(),
-        ),
+        directoryService: MockMemberDirectoryService(directory: _threePeople()),
       );
 
       // A liveRegion re-announces its WHOLE subtree on every rebuild, which
@@ -1115,9 +1066,58 @@ void main() {
       handle.dispose();
     });
 
+    for (final found in [true, false]) {
+      testWidgets(
+        'S27. a typed-stranger row is announced by its lookup — looking up, '
+        'then ${found ? 'the published name' : 'that none was found'} — never '
+        'as a match count or "no matches" (D2)',
+        (tester) async {
+          final gate = Completer<void>();
+          final profileService = MockProfileService()
+            ..resolveTypedStrangerProfileGate = gate;
+          if (found) {
+            profileService.strangerProfiles[_strangerNpub] = const Profile(
+              pubkeyHex: _strangerHex,
+              displayName: 'Distant Cousin',
+            );
+          }
+          await _pumpPicker(
+            tester,
+            directoryService: MockMemberDirectoryService(
+              directory: _threePeople(),
+            ),
+            profileService: profileService,
+          );
+          final announcements = captureAccessibilityAnnouncements(tester);
+          final l10n = _l10n(tester);
+
+          await _type(tester, _strangerNpub);
+          await tester.pump(const Duration(milliseconds: 400));
+          expect(
+            announcements,
+            [l10n.memberPickerStrangerLookingUp],
+            reason: 'a count here is what the settle below would be cut off by',
+          );
+
+          gate.complete();
+          await tester.pumpAndSettle();
+          await tester.pump(const Duration(milliseconds: 400));
+          expect(announcements, [
+            l10n.memberPickerStrangerLookingUp,
+            if (found)
+              l10n.memberPickerStrangerFoundAnnouncement(
+                _isolated('Distant Cousin'),
+              )
+            else
+              l10n.memberPickerStrangerNotFound,
+          ]);
+        },
+      );
+    }
+
     testWidgets(
-      'S27. an offered typed-stranger row is announced as a match, never '
-      'as "no matches" (D2)',
+      'S47. a lookup that settled before the query stood still is announced '
+      'once, as how it settled — no "looking up" after the fact, no count',
       (tester) async {
         await _pumpPicker(
           tester,
@@ -1131,7 +1131,7 @@ void main() {
         await _type(tester, _strangerNpub);
         await tester.pump(const Duration(milliseconds: 400));
 
-        expect(announcements, [l10n.memberPickerMatchesAnnouncement(1)]);
+        expect(announcements, [l10n.memberPickerStrangerNotFound]);
       },
     );
   });
@@ -1290,9 +1290,7 @@ void main() {
         'nickname note', (tester) async {
       await _pumpPicker(
         tester,
-        directoryService: MockMemberDirectoryService(
-          directory: _threePeople(),
-        ),
+        directoryService: MockMemberDirectoryService(directory: _threePeople()),
       );
 
       expect(
@@ -1366,7 +1364,8 @@ void main() {
         expect(
           glyph.size.width,
           lessThan(24),
-          reason: 'the fix pads the HIT REGION, not the glyph — this pins '
+          reason:
+              'the fix pads the HIT REGION, not the glyph — this pins '
               'that the glyph itself did not just get bigger',
         );
       },
@@ -1462,10 +1461,7 @@ void main() {
       );
 
       expect(find.bySemanticsLabel(RegExp('Alex.*Family')), findsOneWidget);
-      expect(
-        find.bySemanticsLabel(RegExp('Alex.*Work Trip')),
-        findsOneWidget,
-      );
+      expect(find.bySemanticsLabel(RegExp('Alex.*Work Trip')), findsOneWidget);
       handle.dispose();
     });
 
@@ -1553,72 +1549,73 @@ void main() {
       handle.dispose();
     });
 
-    testWidgets(
-      'C6. two colliding rows sharing their only circle have NO '
-      'disambiguating note, yet still produce DIFFERENT semantics labels '
-      '— the npub joins the label when nothing else does (plan F3)',
-      (tester) async {
-        final handle = tester.ensureSemantics();
-        await _pumpPicker(
-          tester,
-          directoryService: MockMemberDirectoryService(
-            directory: _directory(
-              [_entry(_aliceHex, _aliceNpub), _entry(_bobHex, _bobNpub)],
-              profiles: const {
-                _aliceHex: Profile(pubkeyHex: _aliceHex, displayName: 'Alex'),
-                _bobHex: Profile(pubkeyHex: _bobHex, displayName: 'Alex'),
-              },
-              // The ONLY circle each of them has is the one they share, so
-              // `_distinguishingCircleName` has nothing unique to offer
-              // either row — same setup C2 uses to prove no note renders.
-              circleNamesByPubkey: const {
-                _aliceHex: ['Family'],
-                _bobHex: ['Family'],
-              },
-            ),
+    testWidgets('C6. two colliding rows sharing their only circle have NO '
+        'disambiguating note, yet still produce DIFFERENT semantics labels '
+        '— the npub joins the label when nothing else does (plan F3)', (
+      tester,
+    ) async {
+      final handle = tester.ensureSemantics();
+      await _pumpPicker(
+        tester,
+        directoryService: MockMemberDirectoryService(
+          directory: _directory(
+            [_entry(_aliceHex, _aliceNpub), _entry(_bobHex, _bobNpub)],
+            profiles: const {
+              _aliceHex: Profile(pubkeyHex: _aliceHex, displayName: 'Alex'),
+              _bobHex: Profile(pubkeyHex: _bobHex, displayName: 'Alex'),
+            },
+            // The ONLY circle each of them has is the one they share, so
+            // `_distinguishingCircleName` has nothing unique to offer
+            // either row — same setup C2 uses to prove no note renders.
+            circleNamesByPubkey: const {
+              _aliceHex: ['Family'],
+              _bobHex: ['Family'],
+            },
           ),
-        );
+        ),
+      );
 
-        final l10n = _l10n(tester);
-        expect(
-          find.text(l10n.memberPickerCollisionCircleLabel('Family')),
-          findsNothing,
-          reason: 'no circle is unique to either row, so neither may show '
-              'the collision note (same claim as C2)',
-        );
+      final l10n = _l10n(tester);
+      expect(
+        find.text(l10n.memberPickerCollisionCircleLabel('Family')),
+        findsNothing,
+        reason:
+            'no circle is unique to either row, so neither may show '
+            'the collision note (same claim as C2)',
+      );
 
-        final alexLabels = _announcedLabels(
-          tester,
-        ).where((label) => label.contains('Alex')).toList();
-        expect(alexLabels, hasLength(2));
-        expect(
-          alexLabels[0],
-          isNot(equals(alexLabels[1])),
-          reason: 'two rows read aloud as the identical string are '
-              'indistinguishable to a listener, even though the npub tells '
-              'them apart on screen',
-        );
-        // Each row's OWN chunked key, not the other's — proves the
-        // difference is the mechanism this fix adds, not an accident of
-        // some other clause. `singleWhere` throws unless EXACTLY one label
-        // matches, which is the assertion itself.
-        expect(
-          () => alexLabels.singleWhere(
-            (l) => l.replaceAll(' ', '').contains(_short(_aliceNpub)),
-          ),
-          returnsNormally,
-          reason: "Alice's own chunked key must appear in exactly one label",
-        );
-        expect(
-          () => alexLabels.singleWhere(
-            (l) => l.replaceAll(' ', '').contains(_short(_bobNpub)),
-          ),
-          returnsNormally,
-          reason: "Bob's own chunked key must appear in exactly one label",
-        );
-        handle.dispose();
-      },
-    );
+      final alexLabels = _announcedLabels(
+        tester,
+      ).where((label) => label.contains('Alex')).toList();
+      expect(alexLabels, hasLength(2));
+      expect(
+        alexLabels[0],
+        isNot(equals(alexLabels[1])),
+        reason:
+            'two rows read aloud as the identical string are '
+            'indistinguishable to a listener, even though the npub tells '
+            'them apart on screen',
+      );
+      // Each row's OWN chunked key, not the other's — proves the
+      // difference is the mechanism this fix adds, not an accident of
+      // some other clause. `singleWhere` throws unless EXACTLY one label
+      // matches, which is the assertion itself.
+      expect(
+        () => alexLabels.singleWhere(
+          (l) => l.replaceAll(' ', '').contains(_short(_aliceNpub)),
+        ),
+        returnsNormally,
+        reason: "Alice's own chunked key must appear in exactly one label",
+      );
+      expect(
+        () => alexLabels.singleWhere(
+          (l) => l.replaceAll(' ', '').contains(_short(_bobNpub)),
+        ),
+        returnsNormally,
+        reason: "Bob's own chunked key must appear in exactly one label",
+      );
+      handle.dispose();
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -1765,9 +1762,7 @@ void main() {
       final profileService = MockProfileService();
       await _pumpPicker(
         tester,
-        directoryService: MockMemberDirectoryService(
-          directory: _threePeople(),
-        ),
+        directoryService: MockMemberDirectoryService(directory: _threePeople()),
         profileService: profileService,
       );
 
@@ -1782,9 +1777,7 @@ void main() {
       final profileService = MockProfileService();
       await _pumpPicker(
         tester,
-        directoryService: MockMemberDirectoryService(
-          directory: _threePeople(),
-        ),
+        directoryService: MockMemberDirectoryService(directory: _threePeople()),
         profileService: profileService,
       );
 
@@ -1794,33 +1787,28 @@ void main() {
       expect(resolvedStranger(profileService), isFalse);
     });
 
-    testWidgets(
-      "S30. the user's own npub never triggers a network resolve",
-      (tester) async {
-        final profileService = MockProfileService();
-        await _pumpPicker(
-          tester,
-          directoryService: MockMemberDirectoryService(
-            directory: _threePeople(),
-          ),
-          profileService: profileService,
-        );
+    testWidgets("S30. the user's own npub never triggers a network resolve", (
+      tester,
+    ) async {
+      final profileService = MockProfileService();
+      await _pumpPicker(
+        tester,
+        directoryService: MockMemberDirectoryService(directory: _threePeople()),
+        profileService: profileService,
+      );
 
-        await _type(tester, _selfNpub);
-        await tester.pumpAndSettle();
+      await _type(tester, _selfNpub);
+      await tester.pumpAndSettle();
 
-        expect(resolvedStranger(profileService), isFalse);
-      },
-    );
+      expect(resolvedStranger(profileService), isFalse);
+    });
 
     testWidgets('S31. an npub already staged on this screen never triggers '
         'a network resolve', (tester) async {
       final profileService = MockProfileService();
       await _pumpPicker(
         tester,
-        directoryService: MockMemberDirectoryService(
-          directory: _threePeople(),
-        ),
+        directoryService: MockMemberDirectoryService(directory: _threePeople()),
         profileService: profileService,
         stagedNpubs: const {_strangerNpub},
       );
@@ -1836,9 +1824,7 @@ void main() {
       final profileService = MockProfileService();
       await _pumpPicker(
         tester,
-        directoryService: MockMemberDirectoryService(
-          directory: _threePeople(),
-        ),
+        directoryService: MockMemberDirectoryService(directory: _threePeople()),
         profileService: profileService,
         circleMemberNpubs: const {_strangerNpub},
       );
@@ -1858,9 +1844,7 @@ void main() {
         );
       await _pumpPicker(
         tester,
-        directoryService: MockMemberDirectoryService(
-          directory: _threePeople(),
-        ),
+        directoryService: MockMemberDirectoryService(directory: _threePeople()),
         profileService: profileService,
       );
 
@@ -1967,7 +1951,8 @@ void main() {
         expect(
           find.text('First Candidate'),
           findsNothing,
-          reason: 'changing the query must drop the FIRST npub row '
+          reason:
+              'changing the query must drop the FIRST npub row '
               'immediately, without waiting for its in-flight resolve',
         );
 
@@ -1978,7 +1963,8 @@ void main() {
         expect(
           find.text('First Candidate'),
           findsNothing,
-          reason: 'the abandoned resolve must never render even once it '
+          reason:
+              'the abandoned resolve must never render even once it '
               'eventually completes — nothing is watching it any more',
         );
         expect(find.text('Second Candidate'), findsOneWidget);
@@ -1991,9 +1977,7 @@ void main() {
       final staged = <String>[];
       await _pumpPicker(
         tester,
-        directoryService: MockMemberDirectoryService(
-          directory: _threePeople(),
-        ),
+        directoryService: MockMemberDirectoryService(directory: _threePeople()),
         onStrangerSelected: staged.add,
       );
 
@@ -2051,6 +2035,10 @@ void main() {
               CustomSemanticsAction.getAction(id)!.label ==
               l10n.memberPickerReadPublicKey,
         );
+        // Only what the action speaks: the lookup's settle is announced
+        // before it.
+        await tester.pump(const Duration(milliseconds: 400));
+        announcements.clear();
         tester.binding.pipelineOwner.semanticsOwner!.performAction(
           node.id,
           SemanticsAction.customAction,
@@ -2065,6 +2053,430 @@ void main() {
           reason: 'spoken in chunks, but the same characters',
         );
         handle.dispose();
+      },
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // The typed npub shows the person (owner direction 2026-11-12, plan §10 D2
+  // reversed): name and photo over the trimmed key, three spoken states, one
+  // lookup and at most one picture download.
+  // -------------------------------------------------------------------------
+  group('MemberPickerResults — the typed npub shows the person', () {
+    const cousin = Profile(
+      pubkeyHex: _strangerHex,
+      displayName: 'Distant Cousin',
+    );
+
+    List<Object?> downloads(MockProfileService service) => [
+      for (final c in service.methodCalls)
+        if (c.method == 'downloadMemberPictures') c.args['pubkeyHexes'],
+    ];
+
+    int resolves(MockProfileService service) => service.methodCalls
+        .where((c) => c.method == 'resolveTypedStrangerProfile')
+        .length;
+
+    /// The typed row's one semantics label: the only one carrying the
+    /// lookup disclosure.
+    String rowLabel(WidgetTester tester) => _announcedLabels(tester)
+        .where((l) => l.contains(_l10n(tester).memberPickerStrangerLookupNote))
+        .single;
+
+    testWidgets(
+      'O1. a resolved npub shows the name over the trimmed key, and its '
+      'picture is downloaded once without holding the name back',
+      (tester) async {
+        final pictureGate = Completer<void>();
+        final profileService = MockProfileService()
+          ..pictureGate = pictureGate
+          ..strangerProfiles[_strangerNpub] = cousin;
+        await _pumpPicker(
+          tester,
+          directoryService: MockMemberDirectoryService(
+            directory: _threePeople(),
+          ),
+          profileService: profileService,
+        );
+
+        await _type(tester, _strangerNpub);
+        await tester.pumpAndSettle();
+
+        final row = find.ancestor(
+          of: find.text('Distant Cousin'),
+          matching: find.byType(ListTile),
+        );
+        expect(
+          (tester.widget<ListTile>(row).title! as Text).data,
+          'Distant Cousin',
+          reason: 'the name, not the key, is the title',
+        );
+        expect(
+          find.descendant(of: row, matching: find.text(_short(_strangerNpub))),
+          findsOneWidget,
+        );
+        expect(downloads(profileService), [
+          [_strangerHex],
+        ]);
+        expect(
+          find.descendant(of: row, matching: find.byType(HavenAvatar)),
+          findsNothing,
+        );
+
+        profileService.memberProfiles[_strangerHex] = Profile(
+          pubkeyHex: _strangerHex,
+          displayName: 'Distant Cousin',
+          pictureBytes: _pngBytes,
+          pictureHash: 'hash',
+        );
+        pictureGate.complete();
+        await tester.pumpAndSettle();
+
+        expect(
+          find.descendant(of: row, matching: find.byType(HavenAvatar)),
+          findsOneWidget,
+          reason: 'the avatar re-reads the cache once the picture lands',
+        );
+        expect(downloads(profileService), hasLength(1));
+      },
+    );
+
+    testWidgets('O2. a picture already cached is not downloaded again', (
+      tester,
+    ) async {
+      final profileService = MockProfileService()
+        ..strangerProfiles[_strangerNpub] = Profile(
+          pubkeyHex: _strangerHex,
+          displayName: 'Distant Cousin',
+          pictureBytes: _pngBytes,
+        );
+      await _pumpPicker(
+        tester,
+        directoryService: MockMemberDirectoryService(directory: _threePeople()),
+        profileService: profileService,
+      );
+
+      await _type(tester, _strangerNpub);
+      await tester.pumpAndSettle();
+
+      expect(downloads(profileService), isEmpty);
+    });
+
+    for (final throws in [false, true]) {
+      testWidgets(
+        'O3. ${throws ? 'a failed lookup' : 'nothing resolving'} downloads '
+        'no picture',
+        (tester) async {
+          final profileService = MockProfileService()
+            ..shouldThrowOnResolveTypedStrangerProfile = throws;
+          await _pumpPicker(
+            tester,
+            directoryService: MockMemberDirectoryService(
+              directory: _threePeople(),
+            ),
+            profileService: profileService,
+          );
+
+          await _type(tester, _strangerNpub);
+          await tester.pumpAndSettle();
+
+          expect(resolves(profileService), 1);
+          expect(downloads(profileService), isEmpty);
+        },
+      );
+    }
+
+    testWidgets('O4. an npub abandoned mid-lookup downloads no picture', (
+      tester,
+    ) async {
+      final gate = Completer<void>();
+      final profileService = MockProfileService()
+        ..resolveTypedStrangerProfileGate = gate
+        ..strangerProfiles[_strangerNpub] = cousin;
+      await _pumpPicker(
+        tester,
+        directoryService: MockMemberDirectoryService(directory: _threePeople()),
+        profileService: profileService,
+      );
+
+      await _type(tester, _strangerNpub);
+      await _type(tester, '');
+      gate.complete();
+      await tester.pumpAndSettle();
+
+      expect(resolves(profileService), 1);
+      expect(downloads(profileService), isEmpty);
+      expect(find.text('Distant Cousin'), findsNothing);
+    });
+
+    testWidgets('O5. deleting and retyping a character mid-lookup sends one '
+        'request, not two', (tester) async {
+      final gate = Completer<void>();
+      final profileService = MockProfileService()
+        ..resolveTypedStrangerProfileGate = gate
+        ..strangerProfiles[_strangerNpub] = cousin;
+      await _pumpPicker(
+        tester,
+        directoryService: MockMemberDirectoryService(directory: _threePeople()),
+        profileService: profileService,
+      );
+
+      await _type(tester, _strangerNpub);
+      await _type(tester, _strangerNpub.substring(0, _strangerNpub.length - 1));
+      await _type(tester, _strangerNpub);
+      gate.complete();
+      await tester.pumpAndSettle();
+
+      expect(resolves(profileService), 1);
+      expect(find.text('Distant Cousin'), findsOneWidget);
+    });
+
+    testWidgets('O6. a pasted key with surrounding whitespace is looked up '
+        'once, as the trimmed npub, and stages trimmed', (tester) async {
+      final staged = <String>[];
+      final profileService = MockProfileService()
+        ..strangerProfiles[_strangerNpub] = cousin;
+      await _pumpPicker(
+        tester,
+        directoryService: MockMemberDirectoryService(directory: _threePeople()),
+        profileService: profileService,
+        onStrangerSelected: staged.add,
+      );
+
+      await _type(tester, ' $_strangerNpub \n');
+      await tester.pumpAndSettle();
+
+      expect(
+        profileService.methodCalls
+            .where((c) => c.method == 'resolveTypedStrangerProfile')
+            .single
+            .args['npub'],
+        _strangerNpub,
+      );
+      await tester.tap(find.text('Distant Cousin'));
+      expect(staged, [_strangerNpub]);
+    });
+
+    testWidgets('O7. a degraded directory read asks no relay, because "not '
+        'already known" cannot be judged from it', (tester) async {
+      final profileService = MockProfileService();
+      await _pumpPicker(
+        tester,
+        directoryService: MockMemberDirectoryService(
+          directory: MemberDirectory.readFailed,
+        ),
+        profileService: profileService,
+      );
+
+      await _type(tester, _strangerNpub);
+      await tester.pumpAndSettle();
+
+      expect(resolves(profileService), 0);
+    });
+
+    testWidgets('O8. a failed directory read asks no relay either', (
+      tester,
+    ) async {
+      final profileService = MockProfileService();
+      await _pumpPicker(
+        tester,
+        directoryService: MockMemberDirectoryService()
+          ..shouldThrowOnLoadDirectory = true,
+        profileService: profileService,
+      );
+
+      await _type(tester, _strangerNpub);
+      await tester.pumpAndSettle();
+
+      expect(resolves(profileService), 0);
+    });
+
+    testWidgets(
+      'O9. looking up, found and not found are shown and spoken three '
+      'different ways, the disclosure last in each label',
+      (tester) async {
+        final handle = tester.ensureSemantics();
+        final gate = Completer<void>();
+        final profileService = MockProfileService()
+          ..resolveTypedStrangerProfileGate = gate;
+        await _pumpPicker(
+          tester,
+          directoryService: MockMemberDirectoryService(
+            directory: _threePeople(),
+          ),
+          profileService: profileService,
+        );
+        final l10n = _l10n(tester);
+        final note = l10n.memberPickerStrangerLookupNote;
+        final spokenKey = _isolated(chunkNpubForSpeech(_short(_strangerNpub)));
+
+        await _type(tester, _strangerNpub);
+        final looking = rowLabel(tester);
+        expect(find.text(l10n.memberPickerStrangerLookingUp), findsOneWidget);
+        expect(
+          looking,
+          [spokenKey, l10n.memberPickerStrangerLookingUp, note].join(', '),
+        );
+
+        gate.complete();
+        await tester.pumpAndSettle();
+        final notFound = rowLabel(tester);
+        expect(find.text(l10n.memberPickerStrangerNotFound), findsOneWidget);
+        expect(find.text(l10n.memberPickerStrangerLookingUp), findsNothing);
+        expect(
+          notFound,
+          [spokenKey, l10n.memberPickerStrangerNotFound, note].join(', '),
+        );
+
+        // Found: a fresh lookup for the same key once the first is dropped.
+        await _type(tester, '');
+        await tester.pumpAndSettle();
+        profileService.strangerProfiles[_strangerNpub] = cousin;
+        await _type(tester, _strangerNpub);
+        await tester.pumpAndSettle();
+        final found = rowLabel(tester);
+        expect(found, [_isolated('Distant Cousin'), note].join(', '));
+        expect(find.text(l10n.memberPickerStrangerNotFound), findsNothing);
+
+        expect({looking, notFound, found}, hasLength(3));
+        handle.dispose();
+      },
+    );
+
+    testWidgets(
+      'O10. a found name is announced once when the lookup settles — not on '
+      'a rebuild, and not again for a trailing space',
+      (tester) async {
+        final gate = Completer<void>();
+        final profileService = MockProfileService()
+          ..resolveTypedStrangerProfileGate = gate
+          ..strangerProfiles[_strangerNpub] = cousin;
+        await _pumpPicker(
+          tester,
+          directoryService: MockMemberDirectoryService(
+            directory: _threePeople(),
+          ),
+          profileService: profileService,
+        );
+        final announcements = captureAccessibilityAnnouncements(tester);
+        final l10n = _l10n(tester);
+        final settle = l10n.memberPickerStrangerFoundAnnouncement(
+          _isolated('Distant Cousin'),
+        );
+
+        await _type(tester, _strangerNpub);
+        await tester.pump();
+        expect(announcements.where((a) => a == settle), isEmpty);
+
+        gate.complete();
+        await tester.pumpAndSettle();
+        await _type(tester, '$_strangerNpub ');
+        await tester.pump(const Duration(milliseconds: 400));
+        await tester.pumpAndSettle();
+
+        expect(announcements.where((a) => a == settle), hasLength(1));
+        expect(
+          announcements,
+          isNot(contains(l10n.memberPickerStrangerNotFound)),
+        );
+      },
+    );
+
+    testWidgets('O11. "no published name" is announced once when nothing '
+        'resolves', (tester) async {
+      final gate = Completer<void>();
+      final profileService = MockProfileService()
+        ..resolveTypedStrangerProfileGate = gate;
+      await _pumpPicker(
+        tester,
+        directoryService: MockMemberDirectoryService(directory: _threePeople()),
+        profileService: profileService,
+      );
+      final announcements = captureAccessibilityAnnouncements(tester);
+      final l10n = _l10n(tester);
+
+      await _type(tester, _strangerNpub);
+      gate.complete();
+      await tester.pumpAndSettle();
+      await _type(tester, '$_strangerNpub ');
+      await tester.pump(const Duration(milliseconds: 400));
+
+      expect(
+        announcements.where((a) => a == l10n.memberPickerStrangerNotFound),
+        hasLength(1),
+      );
+    });
+
+    testWidgets(
+      'O12. a refresh while the picker is open keeps the rows — no spinner, '
+      'no announcement — and the renamed row updates and is findable by its '
+      'new name',
+      (tester) async {
+        final directoryService = MockMemberDirectoryService(
+          directory: _threePeople(),
+        );
+        await _pumpPicker(tester, directoryService: directoryService);
+        final announcements = captureAccessibilityAnnouncements(tester);
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(_PickerHost)),
+        );
+
+        // A standing, already answered query: an empty one never re-arms the
+        // announcement, and the rename below moves the row, so a re-armed one
+        // would not be de-duplicated away.
+        await _type(tester, 'a');
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(announcements, [
+          _l10n(tester).memberPickerMatchesAnnouncement(3),
+        ]);
+        announcements.clear();
+
+        directoryService
+          ..loadGate = Completer<void>()
+          ..directory = _directory(
+            [
+              _entry(_aliceHex, _aliceNpub),
+              _entry(_bobHex, _bobNpub),
+              _entry(_carolHex, _carolNpub),
+            ],
+            profiles: const {
+              _aliceHex: Profile(
+                pubkeyHex: _aliceHex,
+                displayName: 'Zoe Aardvark',
+              ),
+              _bobHex: Profile(pubkeyHex: _bobHex, displayName: 'Bob Badger'),
+              _carolHex: Profile(
+                pubkeyHex: _carolHex,
+                displayName: 'Carol Coyote',
+              ),
+            },
+          );
+        container.invalidate(memberDirectoryProvider);
+        // One frame for the provider to rebuild into its refreshing state,
+        // one for the picker to rebuild over it.
+        await tester.pump();
+        await tester.pump();
+        expect(
+          container.read(memberDirectoryProvider).isLoading,
+          isTrue,
+          reason: 'the refresh really is in flight',
+        );
+
+        expect(find.byType(CircularProgressIndicator), findsNothing);
+        expect(find.byType(MemberCandidateTile), findsNWidgets(3));
+        expect(find.text('Alice Aardvark'), findsOneWidget);
+
+        directoryService.loadGate!.complete();
+        await tester.pumpAndSettle();
+        await tester.pump(const Duration(milliseconds: 400));
+
+        expect(find.text('Zoe Aardvark'), findsOneWidget);
+        expect(find.text('Alice Aardvark'), findsNothing);
+        expect(announcements, isEmpty);
+
+        await _type(tester, 'zoe');
+        expect(find.byType(MemberCandidateTile), findsOneWidget);
+        expect(find.text('Zoe Aardvark'), findsOneWidget);
       },
     );
   });
@@ -2087,6 +2499,7 @@ void main() {
         eligibleStrangerNpub(
           _strangerNpub,
           localResults: const [],
+          directoryDegraded: false,
           stagedNpubs: const {},
           circleMemberNpubs: const {},
           selfNpub: _selfNpub,
@@ -2100,6 +2513,7 @@ void main() {
         eligibleStrangerNpub(
           _strangerNpub.substring(0, 20),
           localResults: const [],
+          directoryDegraded: false,
           stagedNpubs: const {},
           circleMemberNpubs: const {},
           selfNpub: _selfNpub,
@@ -2108,22 +2522,20 @@ void main() {
       );
     });
 
-    test(
-      'gate 1: an npub embedded inside a longer pasted string is never '
-      'eligible — only an exact match',
-      () {
-        expect(
-          eligibleStrangerNpub(
-            'nostr:$_strangerNpub',
-            localResults: const [],
-            stagedNpubs: const {},
-            circleMemberNpubs: const {},
-            selfNpub: _selfNpub,
-          ),
-          isNull,
-        );
-      },
-    );
+    test('gate 1: an npub embedded inside a longer pasted string is never '
+        'eligible — only an exact match', () {
+      expect(
+        eligibleStrangerNpub(
+          'nostr:$_strangerNpub',
+          localResults: const [],
+          directoryDegraded: false,
+          stagedNpubs: const {},
+          circleMemberNpubs: const {},
+          selfNpub: _selfNpub,
+        ),
+        isNull,
+      );
+    });
 
     test('gate 2: an npub already found in the local results is never '
         'eligible', () {
@@ -2131,6 +2543,7 @@ void main() {
         eligibleStrangerNpub(
           _strangerNpub,
           localResults: [localCandidate(_strangerNpub)],
+          directoryDegraded: false,
           stagedNpubs: const {},
           circleMemberNpubs: const {},
           selfNpub: _selfNpub,
@@ -2144,6 +2557,7 @@ void main() {
         eligibleStrangerNpub(
           _selfNpub,
           localResults: const [],
+          directoryDegraded: false,
           stagedNpubs: const {},
           circleMemberNpubs: const {},
           selfNpub: _selfNpub,
@@ -2157,6 +2571,7 @@ void main() {
         eligibleStrangerNpub(
           _strangerNpub,
           localResults: const [],
+          directoryDegraded: false,
           stagedNpubs: const {_strangerNpub},
           circleMemberNpubs: const {},
           selfNpub: _selfNpub,
@@ -2170,8 +2585,41 @@ void main() {
         eligibleStrangerNpub(
           _strangerNpub,
           localResults: const [],
+          directoryDegraded: false,
           stagedNpubs: const {},
           circleMemberNpubs: const {_strangerNpub},
+          selfNpub: _selfNpub,
+        ),
+        isNull,
+      );
+    });
+
+    test(
+      'surrounding whitespace is ignored, and the trimmed npub returned',
+      () {
+        expect(
+          eligibleStrangerNpub(
+            ' $_strangerNpub \n',
+            localResults: const [],
+            directoryDegraded: false,
+            stagedNpubs: const {},
+            circleMemberNpubs: const {},
+            selfNpub: _selfNpub,
+          ),
+          _strangerNpub,
+        );
+      },
+    );
+
+    test('gate 2: a degraded directory read is never enough to say the npub '
+        'is unknown', () {
+      expect(
+        eligibleStrangerNpub(
+          _strangerNpub,
+          localResults: const [],
+          directoryDegraded: true,
+          stagedNpubs: const {},
+          circleMemberNpubs: const {},
           selfNpub: _selfNpub,
         ),
         isNull,
@@ -2185,6 +2633,7 @@ void main() {
           eligibleStrangerNpub(
             _strangerNpub,
             localResults: const [],
+            directoryDegraded: false,
             stagedNpubs: const {},
             circleMemberNpubs: const {},
             selfNpub: null,
@@ -2235,31 +2684,21 @@ void main() {
     test('an unnamed entry never collides, and is never confused with '
         'another unnamed entry', () {
       expect(
-        collidingDisplayNames([
-          candidate(_aliceHex),
-          candidate(_bobHex),
-        ]),
+        collidingDisplayNames([candidate(_aliceHex), candidate(_bobHex)]),
         isEmpty,
       );
     });
 
-    test(
-      'a recent-tier (tier-1) name-sharer does not create a collision — '
-      'a tier-1 person is no longer a co-member of anything',
-      () {
-        expect(
-          collidingDisplayNames([
-            candidate(_aliceHex, displayName: 'Alex'),
-            candidate(
-              _bobHex,
-              displayName: 'Alex',
-              tier: DirectoryTier.recent,
-            ),
-          ]),
-          isEmpty,
-        );
-      },
-    );
+    test('a recent-tier (tier-1) name-sharer does not create a collision — '
+        'a tier-1 person is no longer a co-member of anything', () {
+      expect(
+        collidingDisplayNames([
+          candidate(_aliceHex, displayName: 'Alex'),
+          candidate(_bobHex, displayName: 'Alex', tier: DirectoryTier.recent),
+        ]),
+        isEmpty,
+      );
+    });
 
     test('three-way collisions are still reported once', () {
       expect(

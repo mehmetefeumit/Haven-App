@@ -511,8 +511,10 @@ the routing id.
 - **Always on with mesh**, disclosed in the enable flow; no separate switch.
 - **Reach.** The chain is seal, announce tick, hop, the bridger's next
   receive-then-publish (72–168 s apart): it serves members a hop or two
-  away, and seldom from an Android phone in the background, whose receives
-  are throttled.
+  away, and never from an Android phone in the background, which seals
+  before it fetches and so says "not received" (§16). That phone still takes
+  in what the mesh brought it, behind each cycle's fetch — since 2026-11-12
+  every cycle that got a publish to a relay fetches.
 - **What relays learn.** Authorship stays hidden (a fresh key per event), but
   a bridged event arrives tens of seconds after its `created_at`, off the
   bridger's own rhythm: a relay can infer that a member of that circle is
