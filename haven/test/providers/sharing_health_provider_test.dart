@@ -625,15 +625,20 @@ void main() {
 
       h.foreground.value = false;
       h.advance(const Duration(seconds: 300));
+      final reads = h.health.reads;
       h.container.read(syncStatusProvider.notifier).onStatus(
         FfiSyncStatusReason.paused,
       );
+      h.notifier.recordPublishOutcome('010203', acked: false);
       h.advance(kPublishSilenceThreshold * 10);
       expect(
         await h.settle(),
         SharingHealth.healthy,
         reason: 'between bursts the app is not looking: a silence it chose',
       );
+      // The watched-time rule alone would also answer healthy here; what the
+      // freeze adds is that nothing is read at all between bursts.
+      expect(h.health.reads, reads, reason: 'a frozen model reads nothing');
     });
 
     test('a pause that stands on screen past the window is not receiving, '
