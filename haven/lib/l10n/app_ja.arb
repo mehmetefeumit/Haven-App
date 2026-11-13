@@ -98,7 +98,7 @@
   "relaySettingsRepublish": "再公開",
   "relaySettingsRepublishDone": "応答したすべてのリレーに、ほかの人があなたを招待するために必要なものがそろいました",
   "relaySettingsRepublishIncomplete": "ほかの人があなたを招待するために必要なものが、まだそろっていないリレーがあります",
-  "relaySettingsRepublishHeld": "リレー設定に関するお知らせを確認して先に進むまで、何も公開されません",
+  "relaySettingsRepublishHeld": "リレー設定に関するお知らせを確認して先に進むまで、Haven はリレーの設定も招待用の鍵も公開しません",
   "relaySettingsStatusNotChecked": "未確認",
   "relaySettingsEmptyTitle": "リレーが設定されていません",
   "relaySettingsEmptyMessage": "ほかの人があなたに連絡できるよう、リレーが少なくとも1件必要です。下をタップして Haven のデフォルトに戻してください。",

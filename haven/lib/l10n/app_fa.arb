@@ -98,7 +98,7 @@
   "relaySettingsRepublish": "انتشار دوباره",
   "relaySettingsRepublishDone": "هر رله‌ای که پاسخ داد، حالا آنچه را دیگران برای دعوت کردنت لازم دارند در خود دارد",
   "relaySettingsRepublishIncomplete": "برخی رله‌ها هنوز آنچه را دیگران برای دعوت کردنت لازم دارند در خود ندارند",
-  "relaySettingsRepublishHeld": "تا وقتی از اطلاعیهٔ تنظیمات رله‌ها نگذری و ادامه ندهی، چیزی منتشر نمی‌شود",
+  "relaySettingsRepublishHeld": "تا وقتی از اطلاعیهٔ تنظیمات رله‌ها نگذری و ادامه ندهی، Haven تنظیمات رله‌ها و کلید دعوتت را منتشر نمی‌کند",
   "relaySettingsStatusNotChecked": "بررسی نشده",
   "relaySettingsEmptyTitle": "هیچ رله‌ای تنظیم نشده",
   "relaySettingsEmptyMessage": "برای اینکه دیگران بتوانند به تو دسترسی داشته باشند، به دست‌کم یک رله نیاز داری. برای بازگرداندن پیش‌فرض‌های Haven، روی دکمهٔ پایین بزن.",

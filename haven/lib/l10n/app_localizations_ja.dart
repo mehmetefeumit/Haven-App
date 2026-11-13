@@ -349,7 +349,8 @@ class AppLocalizationsJa extends AppLocalizations {
       'ほかの人があなたを招待するために必要なものが、まだそろっていないリレーがあります';
 
   @override
-  String get relaySettingsRepublishHeld => 'リレー設定に関するお知らせを確認して先に進むまで、何も公開されません';
+  String get relaySettingsRepublishHeld =>
+      'リレー設定に関するお知らせを確認して先に進むまで、Haven はリレーの設定も招待用の鍵も公開しません';
 
   @override
   String get relaySettingsStatusNotChecked => '未確認';

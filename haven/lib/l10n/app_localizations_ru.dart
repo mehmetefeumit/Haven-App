@@ -371,7 +371,7 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get relaySettingsRepublishHeld =>
-      'Ничего не публикуется, пока вы не ответите на уведомление о сбросе настроек реле';
+      'Haven не будет публиковать ваши настройки реле и ключ приглашения, пока вы не ответите на уведомление о сбросе настроек реле';
 
   @override
   String get relaySettingsStatusNotChecked => 'Не проверено';

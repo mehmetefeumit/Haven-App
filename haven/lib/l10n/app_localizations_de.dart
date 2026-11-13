@@ -370,7 +370,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get relaySettingsRepublishHeld =>
-      'Es wird erst etwas veröffentlicht, wenn du nach dem Hinweis zu den Relay-Einstellungen fortfährst';
+      'Haven veröffentlicht deine Relay-Einstellungen und deinen Einladungsschlüssel erst, wenn du nach dem Hinweis zu den Relay-Einstellungen fortfährst';
 
   @override
   String get relaySettingsStatusNotChecked => 'Nicht geprüft';

@@ -364,7 +364,7 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get relaySettingsRepublishHeld =>
-      'جب تک آپ ریلے کی ترتیبات والے نوٹس سے آگے نہ بڑھیں، کچھ بھی شائع نہیں کیا جائے گا';
+      'جب تک آپ ریلے کی ترتیبات والے نوٹس سے آگے نہ بڑھیں، Haven آپ کی ریلے کی ترتیبات یا دعوتی کلید شائع نہیں کرے گا';
 
   @override
   String get relaySettingsStatusNotChecked => 'جانچ نہیں ہوئی';

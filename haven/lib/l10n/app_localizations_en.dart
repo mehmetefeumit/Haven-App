@@ -362,7 +362,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get relaySettingsRepublishHeld =>
-      'Nothing is published until you continue past the relay settings notice';
+      'Haven won’t publish your relay settings or invitation key until you continue past the relay settings notice';
 
   @override
   String get relaySettingsStatusNotChecked => 'Not checked';

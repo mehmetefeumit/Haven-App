@@ -708,10 +708,10 @@ abstract class AppLocalizations {
   /// **'Some relays still don\'t have what others need to invite you'**
   String get relaySettingsRepublishIncomplete;
 
-  /// Snackbar after Republish (relaySettingsRepublish) while the one-time notice that this update reset the relay settings is unanswered: Haven publishes the user's relay lists and invitation key only after the user presses Continue on that notice or comes back from Relay settings.
+  /// Snackbar after Republish (relaySettingsRepublish) while the one-time notice that this update reset the relay settings is unanswered: Haven publishes the user's relay settings (their relay lists) and invitation key (the key others need to invite them) only after the user presses Continue on that notice or comes back from Relay settings. This is a promise the code keeps, so keep its scope exact, as in storageResetAcknowledgeFailed: do NOT widen it to 'nothing is published' — the public profile, invitations the user sends and location still go out. Reuse this locale's wording of storageResetAcknowledgeFailed's middle sentence.
   ///
   /// In en, this message translates to:
-  /// **'Nothing is published until you continue past the relay settings notice'**
+  /// **'Haven won’t publish your relay settings or invitation key until you continue past the relay settings notice'**
   String get relaySettingsRepublishHeld;
 
   /// Relay status label: the relay has not been checked yet.

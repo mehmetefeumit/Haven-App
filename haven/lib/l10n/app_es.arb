@@ -558,5 +558,5 @@
   "relaySettingsRepublish": "Volver a publicar",
   "relaySettingsRepublishDone": "Todos los relés que respondieron ya tienen lo que los demás necesitan para invitarte",
   "relaySettingsRepublishIncomplete": "Algunos relés todavía no tienen lo que los demás necesitan para invitarte",
-  "relaySettingsRepublishHeld": "No se publicará nada hasta que respondas al aviso sobre los ajustes de relés"
+  "relaySettingsRepublishHeld": "Haven no publicará tus ajustes de relés ni tu clave de invitación hasta que respondas al aviso sobre los ajustes de relés"
 }

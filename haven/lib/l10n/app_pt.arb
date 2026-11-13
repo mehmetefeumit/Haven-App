@@ -98,7 +98,7 @@
   "relaySettingsRepublish": "Publicar de novo",
   "relaySettingsRepublishDone": "Todos os relays que responderam agora têm o necessário para que outras pessoas convidem você",
   "relaySettingsRepublishIncomplete": "Alguns relays ainda não têm o necessário para que outras pessoas convidem você",
-  "relaySettingsRepublishHeld": "Nada será publicado até você continuar após o aviso sobre as configurações de relays",
+  "relaySettingsRepublishHeld": "O Haven não vai publicar suas configurações de relays nem sua chave de convite até você continuar após o aviso sobre as configurações de relays",
   "relaySettingsStatusNotChecked": "Não verificado",
   "relaySettingsEmptyTitle": "Nenhum relay configurado",
   "relaySettingsEmptyMessage": "Você precisa de pelo menos um relay para que outras pessoas possam alcançar você. Toque abaixo para restaurar os padrões do Haven.",

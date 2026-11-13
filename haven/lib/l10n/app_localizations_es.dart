@@ -373,7 +373,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get relaySettingsRepublishHeld =>
-      'No se publicará nada hasta que respondas al aviso sobre los ajustes de relés';
+      'Haven no publicará tus ajustes de relés ni tu clave de invitación hasta que respondas al aviso sobre los ajustes de relés';
 
   @override
   String get relaySettingsStatusNotChecked => 'Sin comprobar';

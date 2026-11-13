@@ -558,5 +558,5 @@
   "relaySettingsRepublish": "Republier",
   "relaySettingsRepublishDone": "Tous les relais qui ont répondu disposent désormais de ce dont les autres ont besoin pour vous inviter",
   "relaySettingsRepublishIncomplete": "Certains relais ne disposent toujours pas de ce dont les autres ont besoin pour vous inviter",
-  "relaySettingsRepublishHeld": "Rien n'est publié tant que vous n'avez pas répondu au message sur les paramètres de relais"
+  "relaySettingsRepublishHeld": "Haven ne publiera ni vos paramètres de relais ni votre clé d'invitation tant que vous n'aurez pas répondu au message sur les paramètres de relais"
 }

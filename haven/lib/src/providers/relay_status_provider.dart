@@ -117,7 +117,8 @@ enum RepublishOutcome {
   /// expected kind or serves an old one.
   incomplete,
 
-  /// Nothing is published until the storage-reset notice is answered.
+  /// The relay lists and KeyPackage are held until the storage-reset notice
+  /// is answered.
   heldForReset,
 }
 

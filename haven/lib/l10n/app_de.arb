@@ -558,5 +558,5 @@
   "relaySettingsRepublish": "Erneut veröffentlichen",
   "relaySettingsRepublishDone": "Jedes Relay, das geantwortet hat, verfügt jetzt über alles, was andere brauchen, um dich einzuladen",
   "relaySettingsRepublishIncomplete": "Manchen Relays fehlt noch, was andere brauchen, um dich einzuladen",
-  "relaySettingsRepublishHeld": "Es wird erst etwas veröffentlicht, wenn du nach dem Hinweis zu den Relay-Einstellungen fortfährst"
+  "relaySettingsRepublishHeld": "Haven veröffentlicht deine Relay-Einstellungen und deinen Einladungsschlüssel erst, wenn du nach dem Hinweis zu den Relay-Einstellungen fortfährst"
 }

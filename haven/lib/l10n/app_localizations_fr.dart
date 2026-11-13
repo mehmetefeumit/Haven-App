@@ -371,7 +371,7 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get relaySettingsRepublishHeld =>
-      'Rien n\'est publié tant que vous n\'avez pas répondu au message sur les paramètres de relais';
+      'Haven ne publiera ni vos paramètres de relais ni votre clé d\'invitation tant que vous n\'aurez pas répondu au message sur les paramètres de relais';
 
   @override
   String get relaySettingsStatusNotChecked => 'Non vérifié';

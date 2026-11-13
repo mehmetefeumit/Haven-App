@@ -98,7 +98,7 @@
   "relaySettingsRepublish": "फिर से प्रकाशित करें",
   "relaySettingsRepublishDone": "जवाब देने वाले हर रिले पर अब वह सब है जो दूसरों को आपको आमंत्रित करने के लिए चाहिए",
   "relaySettingsRepublishIncomplete": "कुछ रिले पर अब भी वह नहीं है जो दूसरों को आपको आमंत्रित करने के लिए चाहिए",
-  "relaySettingsRepublishHeld": "जब तक आप रिले सेटिंग्स वाली सूचना से आगे न बढ़ें, तब तक कुछ भी प्रकाशित नहीं होगा",
+  "relaySettingsRepublishHeld": "जब तक आप रिले सेटिंग्स वाली सूचना से आगे न बढ़ें, तब तक Haven आपकी रिले सेटिंग्स या निमंत्रण कुंजी प्रकाशित नहीं करेगा",
   "relaySettingsStatusNotChecked": "जाँचा नहीं गया",
   "relaySettingsEmptyTitle": "कोई रिले कॉन्फ़िगर नहीं है",
   "relaySettingsEmptyMessage": "आपको कम से कम एक रिले चाहिए ताकि दूसरे आप तक पहुँच सकें। Haven डिफ़ॉल्ट बहाल करने के लिए नीचे टैप करें।",

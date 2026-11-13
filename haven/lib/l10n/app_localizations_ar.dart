@@ -374,7 +374,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get relaySettingsRepublishHeld =>
-      'لن يُنشَر أي شيء قبل تجاوز تنبيه إعدادات المُرحِّلات';
+      'لن ينشر Haven إعدادات المُرحِّلات الخاصة بك ولا مفتاح الدعوة قبل تجاوز تنبيه إعدادات المُرحِّلات';
 
   @override
   String get relaySettingsStatusNotChecked => 'لم يُفحَص';

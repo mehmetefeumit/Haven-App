@@ -35,8 +35,8 @@ enum OwnReachability {
   /// A category has no relay to publish to.
   noRelaysConfigured,
 
-  /// Nothing is published until the storage-reset notice is answered, so a
-  /// Retry would do nothing.
+  /// The relay lists and KeyPackage are held until the storage-reset notice
+  /// is answered, so a Retry would do nothing.
   awaitingReset,
 }
 

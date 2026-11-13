@@ -364,7 +364,7 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get relaySettingsRepublishHeld =>
-      'تا وقتی از اطلاعیهٔ تنظیمات رله‌ها نگذری و ادامه ندهی، چیزی منتشر نمی‌شود';
+      'تا وقتی از اطلاعیهٔ تنظیمات رله‌ها نگذری و ادامه ندهی، Haven تنظیمات رله‌ها و کلید دعوتت را منتشر نمی‌کند';
 
   @override
   String get relaySettingsStatusNotChecked => 'بررسی نشده';

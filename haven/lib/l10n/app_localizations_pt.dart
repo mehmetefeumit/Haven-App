@@ -370,7 +370,7 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get relaySettingsRepublishHeld =>
-      'Nada será publicado até você continuar após o aviso sobre as configurações de relays';
+      'O Haven não vai publicar suas configurações de relays nem sua chave de convite até você continuar após o aviso sobre as configurações de relays';
 
   @override
   String get relaySettingsStatusNotChecked => 'Não verificado';

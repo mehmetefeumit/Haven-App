@@ -98,7 +98,7 @@
   "relaySettingsRepublish": "إعادة النشر",
   "relaySettingsRepublishDone": "أصبح لدى كل مُرحِّل استجاب ما يحتاج إليه الآخرون لدعوتك",
   "relaySettingsRepublishIncomplete": "لا تزال بعض المُرحِّلات تفتقر إلى ما يحتاج إليه الآخرون لدعوتك",
-  "relaySettingsRepublishHeld": "لن يُنشَر أي شيء قبل تجاوز تنبيه إعدادات المُرحِّلات",
+  "relaySettingsRepublishHeld": "لن ينشر Haven إعدادات المُرحِّلات الخاصة بك ولا مفتاح الدعوة قبل تجاوز تنبيه إعدادات المُرحِّلات",
   "relaySettingsStatusNotChecked": "لم يُفحَص",
   "relaySettingsEmptyTitle": "لا توجد مُرحِّلات مُهيّأة",
   "relaySettingsEmptyMessage": "تحتاج إلى مُرحِّل واحد على الأقل ليتمكّن الآخرون من الوصول إليك. اضغط أدناه لاستعادة إعدادات Haven الافتراضية.",

@@ -98,7 +98,7 @@
   "relaySettingsRepublish": "Опубликовать снова",
   "relaySettingsRepublishDone": "У всех ответивших реле теперь есть всё, что нужно другим, чтобы вас пригласить",
   "relaySettingsRepublishIncomplete": "У некоторых реле всё ещё нет того, что нужно другим, чтобы вас пригласить",
-  "relaySettingsRepublishHeld": "Ничего не публикуется, пока вы не ответите на уведомление о сбросе настроек реле",
+  "relaySettingsRepublishHeld": "Haven не будет публиковать ваши настройки реле и ключ приглашения, пока вы не ответите на уведомление о сбросе настроек реле",
   "relaySettingsStatusNotChecked": "Не проверено",
   "relaySettingsEmptyTitle": "Реле не настроены",
   "relaySettingsEmptyMessage": "Нужно хотя бы одно реле, чтобы вас могли найти. Нажмите ниже, чтобы восстановить реле Haven по умолчанию.",

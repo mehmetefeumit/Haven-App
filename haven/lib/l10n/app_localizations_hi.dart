@@ -363,7 +363,7 @@ class AppLocalizationsHi extends AppLocalizations {
 
   @override
   String get relaySettingsRepublishHeld =>
-      'जब तक आप रिले सेटिंग्स वाली सूचना से आगे न बढ़ें, तब तक कुछ भी प्रकाशित नहीं होगा';
+      'जब तक आप रिले सेटिंग्स वाली सूचना से आगे न बढ़ें, तब तक Haven आपकी रिले सेटिंग्स या निमंत्रण कुंजी प्रकाशित नहीं करेगा';
 
   @override
   String get relaySettingsStatusNotChecked => 'जाँचा नहीं गया';

@@ -366,7 +366,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get relaySettingsRepublishHeld =>
-      'Aktarıcı ayarları bilgilendirmesini geçene kadar hiçbir şey yayımlanmaz';
+      'Aktarıcı ayarları bilgilendirmesini geçene kadar Haven aktarıcı ayarlarınızı ve davet anahtarınızı yayımlamaz';
 
   @override
   String get relaySettingsStatusNotChecked => 'Denetlenmedi';

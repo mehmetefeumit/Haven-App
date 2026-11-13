@@ -7419,6 +7419,7 @@
       "statement": "The one-time storage reset (the MDK v0.10.4 migration) returns the relay-list publishing choices to their defaults. Until the user has answered the reset notice AND that answer was saved, Haven publishes neither of its relay lists (kind 10050 inbox, kind 10002 NIP-65) and no KeyPackage (kind 30443): every path that could publish one — the relay-list maintenance tick, the KeyPackage maintenance tick, and the user-edit publish — reads storage_reset_acknowledged and returns AwaitingResetAcknowledgement while it is false. A save that fails leaves the marker in place, so the hold stays and the notice is shown again; the snackbar that says so (storageResetAcknowledgeFailed) is therefore a promise the code keeps. It is NOT a promise that nothing is published: the public profile, invitations the user sends and location still go out, and the deletion of a KeyPackage's key at its not_after never waits for the notice. Publishing either list or a KeyPackage on any path while the marker exists, or clearing the hold without a saved answer, falsifies this.",
       "status": "enforced",
       "assertion_arb_keys": [
+        "relaySettingsRepublishHeld",
         "storageResetAcknowledgeFailed"
       ],
       "disclosure_arb_keys": [],

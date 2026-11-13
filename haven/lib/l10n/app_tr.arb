@@ -558,5 +558,5 @@
   "relaySettingsRepublish": "Yeniden yayımla",
   "relaySettingsRepublishDone": "Yanıt veren her aktarıcıda artık başkalarının sizi davet etmek için ihtiyaç duyduğu her şey var",
   "relaySettingsRepublishIncomplete": "Bazı aktarıcılarda başkalarının sizi davet etmek için ihtiyaç duyduğu şeyler hâlâ eksik",
-  "relaySettingsRepublishHeld": "Aktarıcı ayarları bilgilendirmesini geçene kadar hiçbir şey yayımlanmaz"
+  "relaySettingsRepublishHeld": "Aktarıcı ayarları bilgilendirmesini geçene kadar Haven aktarıcı ayarlarınızı ve davet anahtarınızı yayımlamaz"
 }
