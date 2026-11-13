@@ -173,9 +173,10 @@ const _join =
 const _publishTick =
     'lib/src/providers/location_publish_scheduler_provider.dart#'
     'LocationPublishSchedulerNotifier._pacedPublish';
+// On the lane a burst runs on (`_BurstLane`), behind the coordinator.
 const _burstPass =
     'lib/src/services/background_burst_coordinator.dart#'
-    'BackgroundBurstCoordinator._publishPass';
+    '_BurstLane._publishPass';
 const _resubscribe =
     'lib/src/services/live_sync_resubscriber.dart#'
     'LiveSyncResubscriber.onCirclesChanged';
@@ -223,9 +224,7 @@ const _allowedSites = <String, int>{
   'lib/src/providers/sharing_health_provider.dart#'
           'SharingHealthNotifier.tickIntervalForTest':
       1,
-  'lib/src/services/background_burst_coordinator.dart#'
-          'BackgroundBurstCoordinator._publishPass':
-      1,
+  _burstPass: 1,
   'lib/src/services/background_idle_waiter.dart#'
           'BackgroundIdleWaiter.waitUntilIdle':
       1,

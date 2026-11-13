@@ -1924,12 +1924,22 @@ Android service's resume claims `false` and only finishes.
   pass that begins — a burst's, a started session's, the foreground's —
   confirms it without calling a relay. A background burst
   opened over a running pass does not wait for it: it meets a pass that can
-  decide nothing a burst must not. The pause counts the drive on the same
-  in-flight count it waits on for any publish and waits for what the pass
-  has out — one call of MDK's relay client, twenty seconds at most, when the
-  pass was sending a record; the rest of a confirm's fold or of a
-  publisher's retries when the flip found it inside one — and only then cuts
-  the radio and closes the drive pool. A stop does not wait: the call under
+  decide nothing a burst must not. Each relay call of a pass — a record's
+  send, counted under the store before it is marked and given back once its
+  calls have answered, a publish of what has no record, a NIP-77 pass's dial
+  and sessions — is counted, before it reads the lifecycle, on the in-flight
+  count the pause waits on; the pause waits for the calls the pass has out —
+  one call of MDK's relay client, twenty seconds at most, when the pass was
+  sending a record — and only then cuts the radio and closes the drive pool.
+  It waits for the calls and never for the pass: the pass's local work
+  around them (a queued change's attempt, a confirm's fold) has no bound of
+  its own, and the pause holds the lifecycle lock every resume, open and
+  claim needs while it waits. A call the flip overtook before its mark is
+  refused there and leaves its record as it was. The settle before a pause
+  waits for the passes too, for no longer than what is left of the wake, so
+  a confirm due on an answer just in is made in its burst; a retry whose
+  local work outlasts the pause is sent by the next burst or the foreground
+  instead. A stop does not wait: the call under
   way is given up and stored as what it is, an attempt that never returned,
   possibly exposed. If the system suspends or kills the process
   instead, the attempt stays stored as begun and the next drive records it
@@ -3532,16 +3542,26 @@ epoch moved, stably, to the front.
     with any answer but a want of room (processed, rejected by the protocol,
     invalidated, buffered or retained), so a commit the engine rejects never
     holds sharing back; MDK's `ResourceRefused`, its want of room, is not
-    such an answer and leaves the hold standing. No pass that completes
-    without it ends the hold, and a join of the group anew — a Welcome
-    accepted over a removed copy, or a replacement offer consented to — ends
-    every hold of the copy it replaced. While the
-    cursor is held below a deferred commit every sweep fetches it again, and
-    the live plane's REQ from the cursor asks for it too. A relay that served
-    it and then withholds it from every plane keeps the hold — fail closed,
-    never silent: every seal answers `SendHeld::StoredInput` — until it is
-    taken in or the process restarts (the hold is in memory, and nothing
-    fetched survives a restart).
+    such an answer and leaves the hold standing. Or until the engine's record
+    shows one already did, read at every seal and every recovery read: a
+    hold set after another plane's ingest took the commit in, or a commit
+    MDK replays when this device's pending commit resolves, waits on no
+    refetch, which could only answer `Duplicate`. MDK writes that record
+    when it admits a commit to convergence, before a verdict, so recorded is
+    not applied: a commit still unresolved holds the circle through the
+    engine's own send gate (`send_gated`), not through this hold. A commit
+    buffered raw behind this device's own pending commit (until its
+    resolution replays it), refused for want of room, or deferred unpeeled
+    has no record and stays held. No pass that completes without it ends
+    the hold, and a join of the group anew — a Welcome accepted over a
+    removed copy, or a replacement offer consented to — ends every hold of
+    the copy it replaced. While the cursor is held below a deferred commit
+    every sweep fetches it again, and the live plane's REQ from the cursor
+    asks for it too. A relay that served it and then withholds it from every
+    plane keeps the hold — fail closed, never silent: every seal answers
+    `SendHeld::StoredInput` and the circle's recovery read names
+    `StoredInput` — until it is taken in or the process restarts (the hold
+    is in memory, and nothing fetched survives a restart); no time ends it.
   - *The live plane's*: whatever a REQ holds of its stored replay, counted
     under the lock its flush releases under, until it is taken in — at an
     endpoint's `EOSE` or `CLOSED`, a pause, the release of a relay silent
@@ -3558,6 +3578,10 @@ epoch moved, stably, to the front.
   `a_pass_that_completes_without_the_held_commit_never_ends_the_hold`,
   `a_held_commit_the_live_plane_takes_in_ends_the_hold`,
   `a_held_commit_a_plain_ingest_takes_in_ends_the_hold`,
+  `a_hold_set_after_another_plane_took_the_commit_in_never_holds_the_circle`,
+  `a_commit_buffered_behind_a_pending_commit_and_held_again_is_released_by_either_resolution`,
+  `a_held_commit_no_ingest_took_in_still_holds_every_seal_and_recovery_read`,
+  `a_held_commit_is_read_as_stored_input_by_the_circles_recovery`,
   `no_location_is_sealed_while_a_live_req_holds_its_stored_replay`,
   `session::tests::a_relay_left_out_of_coverage_sends_no_stored_replay`).
 - **Refetch by id.** It orders what each REQ brings back.
@@ -4547,7 +4571,7 @@ realized-gap term recorded under "The no-gap invariant" below). Which socket car
 * **The Android foreground service.** There is no engine socket on this plane at
   all — the service holds only a `NostrRelayService` publish pool — so the pool
   *is* the carrier. `RelayManager::shutdown` is a **collective**
-  `client.disconnect()`, and the service calls it at step 9b of every delivery
+  `client.disconnect()` (and then drops every relay), and the service calls it at step 9b of every delivery
   cycle and again in `onDestroy`, so a relay carrying exactly one circle in a pass sees
   connect-at-its-own-publish → disconnect-at-teardown: a tail that grows with
   the circles published *after* it and, over the CSPRNG burst permutation,

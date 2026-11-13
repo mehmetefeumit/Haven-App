@@ -30,6 +30,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:fake_async/fake_async.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -482,6 +483,39 @@ void main() {
 
         expect(fakeIos.cancels, 0);
         expect(fakeIos.sessions, hasLength(1));
+      });
+    });
+
+    test('a session refused at a background launch is restarted by the next '
+        'resume, with no rebuild', () {
+      // A background launch that loads its window reads `inactive`, which
+      // counts as foregrounded, so the build asks for a session iOS refuses.
+      // The foreground build reads the provider without watching it, so the
+      // resume write rebuilds nothing: the service has to restart it.
+      fakeAsync((async) {
+        final container = containerWith(foregrounded: true);
+        final sub = container.listen(locationStreamProvider, (_, _) {});
+        addTearDown(sub.close);
+        async.flushMicrotasks();
+        fakeIos.session.addError(
+          PlatformException(code: 'background_start_refused'),
+        );
+        unawaited(fakeIos.session.close());
+        async.flushMicrotasks();
+
+        (container.read(locationServiceProvider) as GeolocatorLocationService)
+            .resumeStream();
+        final fix = Position(
+          latitude: 51.5,
+          longitude: -0.12,
+          timestamp: DateTime.now(),
+          accuracy: 5,
+        );
+        fakeIos.session.add(fix);
+        async.flushMicrotasks();
+
+        expect(fakeIos.sessions, hasLength(2));
+        expect(container.read(locationStreamProvider).value, fix);
       });
     });
   });

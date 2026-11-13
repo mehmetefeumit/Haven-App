@@ -25,6 +25,9 @@ drains; found while building the soak's S20, not graded.**
 **AMENDED 2026-10-26: C8 and C10 are FIXED on relays that speak NIP-77 by the MDK v0.10.4 migration's
 R4 (Haven's own advertise-nothing reconciliation pass), and both persist on a relay without NIP-77
 (recorded soak arms); their sections carry the status.**
+**AMENDED 2026-11-12: C11 was added — a second field incident (1 iOS + 1 Android): the iOS device
+silently stopped sending AND receiving and only a process KILL recovered it. Four in-memory wedges
+(W1–W4) were found and fixed; its section carries the diagnosis, the fixes and what remains open.**
 This is the canonical reference for every session working on the
 "sharing stops after a few hours and reopening does not help" incident. Update the work-unit
 status lines in place; do not fork this document.
@@ -628,6 +631,102 @@ with a relay without NIP-77 the window stays held, recorded by `same-second-pile
   pile-up arms, which answer owner question **OQ-V** (`PLAN_PHASE2.md` §8). The measurement is also
   in `docs/SOAK_LANE.md`'s S20 section.
 
+### C11 — iOS stops sending and receiving until a kill: four in-memory wedges (added 2026-11-12)
+
+**FIXED 2026-11-12** (`55fa705`, `ddc029c`, `c242048`, `1226b03`, `699d6ec`), each reviewed by
+independent reviewers. **The field trigger is unproven:** no device log was captured, so what follows
+is the set of in-process states that produce the symptom, each confirmed at the source by several of
+eleven independent diagnosticians, not a reconstruction of the owner's phone.
+
+- **Field report.** A circle of one iOS and one Android device; after some time the iPhone neither
+  sent nor showed the Android's location. Killing Haven from the app switcher and relaunching it
+  recovered both directions. So the wedge lived in process memory (native, Dart or Rust), not in a
+  stored row: the distinguishing fact from §1's incident, which a process restart did not clear.
+- **Framing.** Backgrounded on iOS with sharing on, the P4 burst is the ONLY send AND the only
+  receive path, so anything that stops bursts stops both directions at once.
+
+- **W1 — one stuck burst step ended every later burst, blocked the foreground repair and froze the
+  banner.**
+  1. Rust: the pause held the live-sync lifecycle lock across an uncapped wait on an in-flight gauge
+     that a drive pass and a NIP-77 pass raised for their WHOLE run, local engine and store work
+     included. The wait's doc called it bounded by the crate's 10 s `OK` wait; that was false. A long
+     pass held the pause, and with it the lock that the next burst's open, the foreground re-anchor,
+     `claim_foreground` and the heal all take.
+  2. Dart: one `BackgroundBurstCoordinator` per MapShell mount serialised every burst on one chain
+     with no watchdog, and was reused across pauses, so a hung link queued every later tick behind it.
+     The resume re-anchor awaited the burst unbounded, and the heal backstop re-armed only when its
+     unbounded re-anchor returned.
+  3. Health: `refresh()` returned early on any `paused` phase, in any lifecycle, so the banner froze at
+     its last verdict.
+
+  **Fix:**
+  1. The pause now counts relay calls, not passes. Each call is admitted at the fanout mark and given
+     back after its own deadline-bounded call (`699d6ec`), so Rule 13 holds call by call.
+  2. A tick that finds a burst past its priced ceiling supersedes it with a fresh lane and reports the
+     stall. A pass skipped beside a stranded seal is recorded as a failed publish. The resume and heal
+     waits are bounded, and the heal's re-anchor is single-flight (`c242048`, `1226b03`).
+  3. Health freezes only while out of sight.
+- **W2 — an emptied roster disarmed the only background wake.** `circlesProvider` reports any read
+  failure as `[]`, and `_syncCircles` cancelled the scheduler on `[]`. In the background only a peer
+  event re-reads the roster, and peer events only arrive inside the bursts those ticks start.
+  **Fix:** behind a tick sink the armed tick is kept, and its tick only re-reads the roster locally
+  (`c242048`). A circle the app cannot read is still never sent to.
+- **W3 — a relay a `disconnect` found without a connection task never dialled again.**
+  nostr-relay-pool 0.44.3's terminate permit leaves it `Connecting` for good. On the session's drive
+  pool, which lives for the whole process, that included MDK's reset of a possibly exposed target, which
+  could leave a commit pending (Rule 13.4 holds the circle both ways).
+  **Fix:** drop the object, never reuse it (`ddc029c`, tracker `T-POOL-TERMINATE-PERMIT`).
+- **W4 — the iOS position stream, once ended, was never reopened.** The native side ends it only when
+  it refuses a start made in the background. That can happen on a background relaunch whose window
+  loads (`inactive` fails open: the embedder seeds `detached`, so V-P1-1's premise was wrong), on a
+  glance-away resume, or on a rebuild before Dart handles `paused`. The service then closed its own
+  stream for good, so no `CLLocationManager` ran in any later background window, and iOS suspended the
+  process every time.
+  **Fix:** keep the outer stream open on iOS, so the next foreground `resumeStream()` restarts it
+  (`55fa705`).
+- **Regression tests (each fails if its wedge returns).**
+  - W1 Rust: `session.rs`
+    `a_drive_pass_stalled_on_the_session_holds_neither_the_pause_nor_the_lifecycle_lock`,
+    `a_negentropy_pass_stalled_before_its_dial_holds_no_pause_and_dials_nothing_after_it`,
+    `a_pass_stalled_in_local_work_holds_the_settle_no_longer_than_the_wake`; `live_plane_drive_e2e`
+    `a_pause_waits_for_a_relay_call_between_send_and_ok`,
+    `a_call_a_pause_overtakes_at_its_mark_is_never_begun`; the call-by-call cover in
+    `security_rule_gates.rs`.
+  - W1 Dart: `background_burst_coordinator_test.dart` group "a burst that never ends does not end
+    bursting"; the `reanchorOnResume` / backstop tests in `test/pages/`; the paused-on-screen tests in
+    `sharing_health_provider_test.dart`.
+  - W2: the kept-wake tests in `location_publish_scheduler_provider_test.dart`.
+  - W3: the `T-POOL-TERMINATE-PERMIT` pinning tests.
+  - W4: "a refused background start leaves the stream open and the next…" and its siblings in
+    `geolocator_location_service_test.dart`, and the refused-start restart in
+    `location_provider_test.dart`.
+- **Open (not fixed here; recorded so they are not lost).**
+  1. **W5 — FIXED 2026-11-12.** An in-memory `UnreadInput.pager` hold (`nostr/mls/manager.rs`) set
+     after another plane's ingest had taken the commit in, or on a commit MDK replays when this
+     device's own pending commit resolves, could keep every seal of a circle `SendHeld::StoredInput`
+     until a kill while `circle_recovery` named no cause. `SessionManager::holds_unread_input` now
+     releases, at every seal and recovery read, a held commit the engine already records as
+     processed (`engine_processed`, read outside the hold's lock; a store fault keeps the hold), and
+     `Publishing::send_held` reads the hold, so the circle card names `StoredInput`. A commit no
+     ingest took in stays held, with no timeout. Tests: `commit_before_proposal_e2e`
+     `a_hold_set_after_another_plane_took_the_commit_in_never_holds_the_circle`,
+     `a_held_commit_no_ingest_took_in_still_holds_every_seal_and_recovery_read`,
+     `a_held_commit_is_read_as_stored_input_by_the_circles_recovery`; `fanout_driver_e2e`
+     `a_commit_buffered_behind_a_pending_commit_and_held_again_is_released_by_either_resolution`.
+  2. **OS suspension in the stationary tier — ADDRESSED 2026-11-12 (owner directive) as far as a
+     documented setting reaches.** Every tier is now inside one of Apple's two documented 16.4
+     conditions: the Precise tiers meet the shape (background updates, no distance filter, 100 m or
+     better — `kCLLocationAccuracyHundredMeters` is inside it, not at risk), and every other tier asks
+     for the indicator. The one cohort that was outside both, a confirmed Always with Precise Location
+     off, now keeps the indicator on (`indicatorRequested`; `docs/POWER_EFFICIENCY_PLAN.md` D2, amended).
+     What remains is not configurable: termination under memory or resource pressure, after which a
+     publish waits for the user to open Haven; an indicator that may only appear after the next
+     foreground→background transition following a Precise toggle made in Settings; and V-P3-3, still
+     unmeasured on a device.
+  3. **No background notice — owner decision 2026-11-12: none.** Every verdict is derived on the
+     next foreground and nothing notifies a backgrounded user that sharing stopped; do not add a
+     local notification for it.
+
 ### Downgraded hypotheses (kept so nobody re-investigates them)
 
 - **iOS OS suspension while stationary.** Apple DTS: the iOS 16.4+ suspension applies to apps
@@ -654,6 +753,16 @@ with a relay without NIP-77 the window stays held, recorded by `same-second-pile
   2026-08-20. See `docs/M7_BACKGROUND_SHARING.md` §6 item 0a (DEFERRED, still authoritative) and
   `docs/POWER_EFFICIENCY_PLAN.md` §5.3 Risks / rollback for the containment and the one-line
   revert.
+  **Amended 2026-11-12 (owner directive) — inside Apple's documented conditions in every tier.** A
+  confirmed Always with Precise Location OFF was outside both alternatives: its `desiredAccuracy`
+  writes have no effect (the accuracy is always reduced, kilometre-scale), so the shape was doubtful,
+  and the indicator was off. It now keeps the indicator on (`indicatorRequested = !alwaysConfirmed ||
+  accuracyAuthorization == .reducedAccuracy`), so every tier meets one alternative or the other. The
+  residual is what no setting covers: termination under memory or resource pressure (and no publish
+  until the user reopens Haven), plus an indicator that may only appear after the next
+  foreground→background transition following a Precise toggle made in Settings. The revert lever, if
+  the shape-only posture ever fails on a device, is that indicator flag, not the activity session
+  (`docs/M7_BACKGROUND_SHARING.md` §6 0a).
 - **Android Doze / wake lock** — see C6.
 - **`circlesProvider` cached `[]` during the handoff window** — requires a provider
   re-evaluation while `_handoffHolds`, which nothing normally triggers on Android (engine

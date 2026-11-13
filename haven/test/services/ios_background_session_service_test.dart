@@ -55,6 +55,7 @@ void main() {
           'serviceSessionHeld': false,
           'alwaysConfirmed': true,
           'armed': true,
+          'indicatorRequested': false,
         },
       );
       final status = await service.status();
@@ -63,6 +64,23 @@ void main() {
       expect(status.serviceSessionHeld, isFalse);
       expect(status.alwaysConfirmed, isTrue);
       expect(status.armed, isTrue);
+      expect(status.indicatorRequested, isFalse);
+    });
+
+    test('status reads indicatorRequested as sent, independently of '
+        'alwaysConfirmed', () async {
+      // A confirmed Always with Precise Location off: the handler still asks
+      // for the indicator, and the copy must name the bar it shows.
+      mock(
+        (_) async => <String, bool>{
+          'alwaysConfirmed': true,
+          'armed': true,
+          'indicatorRequested': true,
+        },
+      );
+      final status = await service.status();
+      expect(status.alwaysConfirmed, isTrue);
+      expect(status.indicatorRequested, isTrue);
     });
 
     test('status treats missing keys as not held (fail-closed)', () async {
@@ -82,6 +100,12 @@ void main() {
         isFalse,
         reason: 'a handler that reported no arming has measured no tier, and '
             'the settings copy names no indicator without one',
+      );
+      expect(
+        status.indicatorRequested,
+        isTrue,
+        reason: 'the stream handler asks for the indicator when it has no '
+            'predicate to read, so an absent reading means asked for',
       );
     });
 
