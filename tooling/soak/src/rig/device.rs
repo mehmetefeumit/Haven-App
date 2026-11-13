@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use haven_core::circle::CircleManager;
 use haven_core::nostr::mls::storage::{is_session_live, StorageConfig};
+use haven_core::nostr::mls::types::GroupId;
 use haven_core::nostr::mls::SessionManager;
 use haven_core::relay::fanout::RelayMappedFanout;
 use haven_core::relay::live_sync::{CircleSpec, Claim, LiveSyncCore, LiveSyncEvent};
@@ -35,6 +36,10 @@ use crate::clock::{PolicyNow, WallNow};
 use crate::nemesis::types::DeviceOp;
 use crate::rig::address_map::{endpoint_map, AliasBook};
 use crate::rig::{CircleTag, DeviceTag, RigError, SimCircle, Step};
+
+/// How often [`SimDevice::unread_input_taken_in`] reads the hold: the
+/// scenarios' condition poll.
+const HOLD_POLL: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// What a device has seen on its engine bus.
 ///
@@ -566,6 +571,32 @@ impl SimDevice {
             .for_test()
             .entry_pass_ended(bound)
             .await)
+    }
+
+    /// Waits, at most `bound`, until `group` holds no unread input, and
+    /// answers whether that came to hold.
+    ///
+    /// Unread input is what this device fetched and has not taken in: a REQ's
+    /// stored replay, or a commit the pager holds back. Until it is taken in
+    /// every seal for the circle is deferred (Security Rule 10,
+    /// `SendHeld::StoredInput`), and a REQ re-issued after a `CLOSED` opens
+    /// that window again outside any device op. A hold that never ends leaves
+    /// the condition unmet.
+    ///
+    /// # Errors
+    ///
+    /// [`RigError::SessionNotLive`] if no session is open.
+    pub async fn unread_input_taken_in(
+        &self,
+        group: &GroupId,
+        bound: std::time::Duration,
+    ) -> Result<bool, RigError> {
+        let session = self.session()?;
+        let taken_in = crate::rig::poll_until(bound, HOLD_POLL, || async {
+            Ok(!session.holds_unread_input_for_test(group))
+        })
+        .await?;
+        Ok(taken_in.is_some())
     }
 
     /// Folds every bus event waiting for this device into its ledger and
