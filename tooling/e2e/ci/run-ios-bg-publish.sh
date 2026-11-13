@@ -1292,6 +1292,14 @@ run_self_test() {
       fail=1
     fi
   }
+  # _at <epoch> <cmd...> — <cmd> with `bgp_now` pinned at <epoch>. A clock
+  # helper reads the clock itself, so a case that computes its anchor from a
+  # second read lost a second whenever the two reads straddled a tick.
+  _at() {
+    local at="$1"
+    shift
+    ( bgp_now() { printf '%s\n' "${at}"; }; "$@" )
+  }
 
   # --- (P1) An Xcode whose `simctl privacy` offers the location service.
   local rc=0
@@ -1675,15 +1683,15 @@ Usage: simctl location <device> <action> [<arguments>]
   #     the settle window and reds P3 for an app that did nothing wrong.
   local w6_now
   w6_now="$(bgp_now)"
-  got="$(bgp_budget_after_lag "$(( w6_now - 4 ))" 210 10)"
+  got="$(_at "${w6_now}" bgp_budget_after_lag "$(( w6_now - 4 ))" 210 10)"
   _check "W6 a 4 s observation lag comes off the budget" 206 "${got}"
-  got="$(bgp_budget_after_lag "$(( w6_now - 10 ))" 210 10)"
+  got="$(_at "${w6_now}" bgp_budget_after_lag "$(( w6_now - 10 ))" 210 10)"
   _check "W6b a lag of exactly the cap still counts" 200 "${got}"
-  got="$(bgp_budget_after_lag "$(( w6_now - 11 ))" 210 10)"
+  got="$(_at "${w6_now}" bgp_budget_after_lag "$(( w6_now - 11 ))" 210 10)"
   _check "W6c a lag past the cap is not trusted (whole budget)" 210 "${got}"
-  got="$(bgp_budget_after_lag "$(( w6_now + 30 ))" 210 10)"
+  got="$(_at "${w6_now}" bgp_budget_after_lag "$(( w6_now + 30 ))" 210 10)"
   _check "W6d an anchor in the FUTURE is not trusted" 210 "${got}"
-  got="$(bgp_budget_after_lag '' 210 10)"
+  got="$(_at "${w6_now}" bgp_budget_after_lag '' 210 10)"
   _check "W6e an unreadable anchor is not trusted" 210 "${got}"
 
   # --- (W7) …and the anchor is the mtime of the signal that CARRIES the
@@ -2103,12 +2111,14 @@ Usage: simctl location <device> <action> [<arguments>]
   #     future one is the remainder, and a remainder larger than what is left
   #     of the DISARM budget is CAPPED — without the cap a stale anchor from a
   #     previous attempt would hold the job for its whole span.
+  local t_now
+  t_now="$(bgp_now)"
   _check "T1 a target already past waits for nothing" \
-    0 "$(bgp_secs_until "$(( $(bgp_now) - 5 ))" 200)"
+    0 "$(_at "${t_now}" bgp_secs_until "$(( t_now - 5 ))" 200)"
   _check "T2 a future target waits out the remainder" \
-    30 "$(bgp_secs_until "$(( $(bgp_now) + 30 ))" 200)"
+    30 "$(_at "${t_now}" bgp_secs_until "$(( t_now + 30 ))" 200)"
   _check "T3 a remainder past the budget is capped" \
-    200 "$(bgp_secs_until "$(( $(bgp_now) + 9999 ))" 200)"
+    200 "$(_at "${t_now}" bgp_secs_until "$(( t_now + 9999 ))" 200)"
   _check "T4 an unreadable anchor waits for nothing" \
     0 "$(bgp_secs_until 'not-a-number' 200)"
 
