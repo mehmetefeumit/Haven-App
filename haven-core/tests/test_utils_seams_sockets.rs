@@ -209,14 +209,14 @@ async fn the_claimed_foregrounds_eviction_goes_to_the_address_the_map_returns() 
     let before = asked.lock().unwrap().len();
     core.claim_foreground(Claim::Foreground).await;
     // The obligation is never written on this path, so the witness is the
-    // map asked for the stored address by the drive's send, with the gauge
-    // that counts the drive back at zero: a send that has returned.
+    // map asked for the stored address by the drive's send, with no drive
+    // pass left under way: a send that has returned.
     assert!(
         within(Duration::from_secs(20), || {
             asked.lock().unwrap()[before..]
                 .iter()
                 .any(|relay| relay == GROUP_RELAY)
-                && core.processor().in_flight_publishes() == 0
+                && core.processor().passes_under_way() == 0
         })
         .await,
         "the claimed foreground's drive did not send the eviction through the map",

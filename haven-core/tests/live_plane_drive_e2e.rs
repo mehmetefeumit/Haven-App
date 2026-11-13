@@ -3926,7 +3926,10 @@ impl Scripted {
     /// Waits until a drive of `core` that got as far as reading the clock
     /// after `reads_before` has ended, and answers whether one did.
     async fn a_drive_ran(&self, core: &LiveSyncCore, reads_before: u64) -> bool {
-        held(|| async { self.read.reads() > reads_before && core.in_flight_publishes() == 0 }).await
+        held(|| async {
+            self.read.reads() > reads_before && core.processor().passes_under_way() == 0
+        })
+        .await
     }
 }
 
@@ -4251,7 +4254,7 @@ async fn real_sessions_started_one_after_another_keep_a_stored_records_schedule(
         // asked for, which only finishes and so begins no first call.
         core.processor().for_test().drive_due().await;
         assert!(
-            held(|| async { core.in_flight_publishes() == 0 }).await,
+            held(|| async { core.processor().passes_under_way() == 0 }).await,
             "a visit's drive never ended",
         );
         let _ = core.stop().await;
@@ -4574,7 +4577,7 @@ async fn a_burst_opened_within_a_measured_budget_hands_it_to_its_drive() {
         "premise: the eviction was sent once, unanswered",
     );
     assert!(
-        held(|| async { core.processor().in_flight_publishes() == 0 }).await,
+        held(|| async { core.processor().passes_under_way() == 0 }).await,
         "premise: the foreground's drive has ended",
     );
     let _ = scripted.transport.calls();
@@ -4591,7 +4594,7 @@ async fn a_burst_opened_within_a_measured_budget_hands_it_to_its_drive() {
     assert!(
         held(|| async {
             core.processor().drive_retry_after_ms() == Some(0)
-                && core.processor().in_flight_publishes() == 0
+                && core.processor().passes_under_way() == 0
         })
         .await,
         "premise: the burst drove and left the row for want of room",
@@ -4658,7 +4661,7 @@ async fn a_session_started_into_a_burst_within_a_measured_budget_hands_it_to_its
         // left for want of room, which it says by asking to come back at once.
         assert!(
             held(|| async {
-                core.processor().in_flight_publishes() == 0
+                core.processor().passes_under_way() == 0
                     && (staged_ref(admin, &fx.group).await.is_none()
                         || core.processor().drive_retry_after_ms() == Some(0))
             })
