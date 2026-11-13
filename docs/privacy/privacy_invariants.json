@@ -3050,10 +3050,12 @@
     {
       "id": "INV-W-RELAY-LISTS-PUBLISHED-KINDS",
       "title": "The inbox and KeyPackage relay lists are published under the identity key",
-      "statement": "Haven publishes a kind-10050 inbox relay list and a kind-10002 NIP-65 list, both signed by the identity key and both fanned out to the relays already on them, and it publishes kind-30443 KeyPackages to those relays; consequently every URL a user adds to those lists becomes public and permanently linked to their pubkey, and the retired kind-10051 is not emitted at all. Gift wraps (kind 1059) are read only from the inbox list `inboxRelaysProvider` gives — the stored list kind 10050 is built from, or the compile-time seed while seeding has failed — by the invitation poller, the manual inbox refresh and the live-sync engine's inbox REQ, whose start is handed that list, over 96 h (the poller and the refresh from the wall clock; the engine from its inbox cursor, and 7 days on the one REQ made before any cursor exists); an empty list polls nothing rather than ask other relays for this pubkey's gift wraps.",
+      "statement": "Haven publishes a kind-10050 inbox relay list and a kind-10002 NIP-65 list, both signed by the identity key and both fanned out to the relays already on them and, unchanged, to the discovery relays (owner-directed 2026-11-12; an opt-out retracts them there too), and it publishes kind-30443 KeyPackages to those relays; consequently every URL a user adds to those lists becomes public and permanently linked to their pubkey, and the retired kind-10051 is not emitted at all. Gift wraps (kind 1059) are read only from the inbox list `inboxRelaysProvider` gives — the stored list kind 10050 is built from, or the compile-time seed while seeding has failed — by the invitation poller, the manual inbox refresh and the live-sync engine's inbox REQ, whose start is handed that list, over 96 h (the poller and the refresh from the wall clock; the engine from its inbox cursor, and 7 days on the one REQ made before any cursor exists); an empty list polls nothing rather than ask other relays for this pubkey's gift wraps.",
       "status": "enforced",
       "assertion_arb_keys": [],
-      "disclosure_arb_keys": [],
+      "disclosure_arb_keys": [
+        "relaySettingsLookupSubtitle"
+      ],
       "non_arb_claims": [],
       "event_kinds": [
         {
@@ -3085,11 +3087,6 @@
           "kind": 30443,
           "token": "Kind::Custom(30443)",
           "note": "Read-side filter at relay/manager.rs:853, spelled as a literal rather than via KIND_MARMOT_KEY_PACKAGE."
-        },
-        {
-          "kind": 0,
-          "token": "Kind::Custom(event_kind)",
-          "note": "COMPUTED, not literal (rust_builder/src/api.rs:6763): the kind is an FFI parameter Dart supplies from relay_status_provider.dart as 30443/10002/10050. Read-only probe. Declared at kind 0 as a placeholder because no single number describes it — the token is what the gate keys on."
         },
         {
           "kind": 443,
@@ -3143,6 +3140,10 @@
         {
           "file": "haven/rust_builder/src/api.rs",
           "name": "ffi_account_and_profile_traffic_stays_on_its_planes"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "the_first_publish_goes_out_in_spec_order_and_lookup_relays_get_the_lists_only"
         }
       ],
       "guards": []
