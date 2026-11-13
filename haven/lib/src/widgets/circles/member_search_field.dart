@@ -34,6 +34,8 @@ class MemberSearchField extends StatefulWidget {
     required this.onQrScanRequested,
     required this.entryStateFor,
     this.onQueryChanged,
+    this.controller,
+    this.focusNode,
     super.key,
   });
 
@@ -55,13 +57,35 @@ class MemberSearchField extends StatefulWidget {
   /// its list in the same frame. Never debounced.
   final void Function(String query)? onQueryChanged;
 
+  /// The field's text, when the host must clear it itself — after staging
+  /// from a row outside the field, which would otherwise leave the staged
+  /// key in the field and "No matches" beneath the person just added. Owned
+  /// and disposed by the host, and never swapped for another; without one
+  /// the field makes its own.
+  final TextEditingController? controller;
+
+  /// The field's focus, when the host must return it itself — after staging
+  /// from a row outside the field, which is gone once it is staged. Owned and
+  /// disposed by the host, and never swapped for another; without one the
+  /// field makes its own.
+  final FocusNode? focusNode;
+
   @override
   State<MemberSearchField> createState() => _MemberSearchFieldState();
 }
 
 class _MemberSearchFieldState extends State<MemberSearchField> {
-  final _controller = TextEditingController();
-  final _focusNode = FocusNode();
+  /// The field's own controller, when the host supplied none.
+  TextEditingController? _ownController;
+
+  /// The field's own focus node, when the host supplied none.
+  FocusNode? _ownFocusNode;
+
+  TextEditingController get _controller =>
+      widget.controller ?? (_ownController ??= TextEditingController());
+
+  FocusNode get _focusNode =>
+      widget.focusNode ?? (_ownFocusNode ??= FocusNode());
 
   /// The refusal currently shown, or `null` while the helper line is showing.
   String? _errorMessage;
@@ -74,10 +98,9 @@ class _MemberSearchFieldState extends State<MemberSearchField> {
 
   @override
   void dispose() {
-    _controller
-      ..removeListener(_onTextChanged)
-      ..dispose();
-    _focusNode.dispose();
+    _controller.removeListener(_onTextChanged);
+    _ownController?.dispose();
+    _ownFocusNode?.dispose();
     super.dispose();
   }
 

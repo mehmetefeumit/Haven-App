@@ -563,6 +563,79 @@ void main() {
       );
       expect(marker.avatarImage, isNull);
     });
+
+    testWidgets(
+      'a name the refresh resolves after the location fetch reaches the '
+      'marker without waiting for the next fetch',
+      (tester) async {
+        const pubkey = 'f1f2';
+        final svc = MockProfileService();
+        await tester.pumpWidget(
+          _wrap(
+            MemberMarkersLayer(
+              members: [_loc(pubkey: pubkey)],
+              bottomInset: 0,
+              onFocusMember: (_) {},
+            ),
+            overrides: [profileServiceProvider.overrideWithValue(svc)],
+          ),
+        );
+        await tester.pumpAndSettle();
+        MemberMarker marker() => tester.widget<MemberMarker>(
+          find.byKey(WidgetKeys.memberMarker(pubkey)),
+        );
+        String label() => tester
+            .getSemantics(find.byKey(WidgetKeys.markerSemantics(pubkey)))
+            .label;
+        expect(marker().initials, 'f1');
+        expect(label(), isNot(contains('Jane Doe')));
+
+        svc.memberProfiles[pubkey] = const Profile(
+          pubkeyHex: pubkey,
+          displayName: 'Jane Doe',
+        );
+        ProviderScope.containerOf(
+          tester.element(find.byType(MemberMarker)),
+        ).invalidate(memberProfileProvider);
+        await tester.pumpAndSettle();
+
+        expect(marker().initials, 'JD');
+        expect(marker().displayName, 'Jane Doe');
+        expect(label(), contains('Jane Doe'));
+      },
+    );
+
+    testWidgets('a fetch-time name keeps winning over a different profile '
+        'name', (tester) async {
+      const pubkey = 'f3f4';
+      final svc = MockProfileService(
+        memberProfiles: {
+          pubkey: const Profile(pubkeyHex: pubkey, displayName: 'Jane Doe'),
+        },
+      );
+      await tester.pumpWidget(
+        _wrap(
+          MemberMarkersLayer(
+            members: [_loc(pubkey: pubkey, displayName: 'Mum')],
+            bottomInset: 0,
+            onFocusMember: (_) {},
+          ),
+          overrides: [profileServiceProvider.overrideWithValue(svc)],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final marker = tester.widget<MemberMarker>(
+        find.byKey(WidgetKeys.memberMarker(pubkey)),
+      );
+      expect(marker.displayName, 'Mum');
+      expect(marker.initials, 'M');
+      final label = tester
+          .getSemantics(find.byKey(WidgetKeys.markerSemantics(pubkey)))
+          .label;
+      expect(label, contains('Mum'));
+      expect(label, isNot(contains('Jane')));
+    });
   });
 
   group('MemberMarkersLayer — avatar decode at display size', () {

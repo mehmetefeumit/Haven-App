@@ -1063,7 +1063,18 @@ class AppLocalizationsNe extends AppLocalizations {
 
   @override
   String get memberPickerStrangerLookupNote =>
-      'Haven ले एउटा रिलेलाई यी व्यक्तिको प्रकाशित नाम सोध्यो। यो यन्त्रले भर्खरै यही कुञ्जीबारे सोधेको कुरा त्यो रिलेले देख्छ — तर यो अनुरोधले कुनै हस्ताक्षर बोक्दैन, त्यसैले यो तपाईंको Haven परिचयसँग जोडिँदैन। अहिलेसम्म कुनै फोटो डाउनलोड भएको छैन।';
+      'Haven ले एउटा रिलेसँग (बढीमा दुईवटासँग) यी व्यक्तिको प्रकाशित प्रोफाइल माग्यो। जुन रिलेसँग सोधियो, त्यसले यो यन्त्रले भर्खरै यही कुञ्जीबारे सोधेको कुरा देख्छ, तर यो अनुरोधले कुनै डिजिटल हस्ताक्षर बोक्दैन, त्यसैले यो तपाईंको Haven परिचयसँग जोडिँदैन। प्रोफाइलमा फोटो छ भने Haven ले त्यो फोटो यी व्यक्तिले छानेको सर्भरबाट डाउनलोड गर्छ, र त्यो सर्भरले यो यन्त्रको नेटवर्क ठेगाना देख्छ।';
+
+  @override
+  String get memberPickerStrangerLookingUp => 'प्रकाशित प्रोफाइल खोज्दै…';
+
+  @override
+  String get memberPickerStrangerNotFound => 'कुनै प्रकाशित नाम फेला परेन';
+
+  @override
+  String memberPickerStrangerFoundAnnouncement(String name) {
+    return 'प्रकाशित नाम: $name';
+  }
 
   @override
   String selectedMembersMore(int count) {

@@ -49,7 +49,7 @@ class MockProfileService implements ProfileService {
   Profile? ownProfile;
 
   /// Member profiles keyed by pubkeyHex, backing [getMemberProfile] and
-  /// [refreshMemberProfiles]. Settable directly by tests.
+  /// [getCachedMemberProfiles]. Settable directly by tests.
   final Map<String, Profile> memberProfiles;
 
   /// Pubkey used to synthesize a fresh [ownProfile] the first time
@@ -99,6 +99,13 @@ class MockProfileService implements ProfileService {
   /// cannot flake under parallel load.
   Completer<void>? refreshGate;
 
+  /// What [refreshMemberProfiles] reports as still owed a picture download.
+  List<String> picturesToDownload = const [];
+
+  /// When set, [downloadMemberPictures] blocks on this until it completes —
+  /// same shape as [refreshGate].
+  Completer<void>? pictureGate;
+
   /// Profiles returned by [resolveTypedStrangerProfile], keyed by the EXACT
   /// npub argument — not by hex, since the whole point of that method is
   /// accepting a key nothing local has decoded to hex yet. Settable directly
@@ -125,6 +132,9 @@ class MockProfileService implements ProfileService {
 
   /// When set, [syncOwnProfile] blocks on this until it completes.
   Completer<void>? syncOwnProfileGate;
+
+  /// When set, [pendingSyncState] blocks on this until it completes.
+  Completer<void>? pendingSyncStateGate;
 
   /// Set to make [syncOwnProfile] throw.
   bool shouldThrowOnSyncOwnProfile = false;
@@ -254,6 +264,7 @@ class MockProfileService implements ProfileService {
   @override
   Future<ProfilePendingState> pendingSyncState() async {
     methodCalls.add((method: 'pendingSyncState', args: const {}));
+    await pendingSyncStateGate?.future;
     if (shouldThrowOnPendingSyncState) throw _genericError;
     return nextPendingState;
   }
@@ -302,7 +313,7 @@ class MockProfileService implements ProfileService {
   }
 
   @override
-  Future<Map<String, Profile>> refreshMemberProfiles(
+  Future<List<String>> refreshMemberProfiles(
     List<String> pubkeyHexes, {
     Duration maxAge = profileInteractiveMaxAge,
   }) async {
@@ -313,11 +324,17 @@ class MockProfileService implements ProfileService {
     final gate = refreshGate;
     if (gate != null && !gate.isCompleted) await gate.future;
     if (shouldThrowOnRefreshMemberProfiles) throw _genericError;
-    return {
-      for (final pubkeyHex in pubkeyHexes)
-        if (memberProfiles.containsKey(pubkeyHex))
-          pubkeyHex: memberProfiles[pubkeyHex]!,
-    };
+    return List<String>.of(picturesToDownload);
+  }
+
+  @override
+  Future<void> downloadMemberPictures(List<String> pubkeyHexes) async {
+    methodCalls.add((
+      method: 'downloadMemberPictures',
+      args: {'pubkeyHexes': List<String>.of(pubkeyHexes)},
+    ));
+    final gate = pictureGate;
+    if (gate != null && !gate.isCompleted) await gate.future;
   }
 
   @override

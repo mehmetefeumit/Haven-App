@@ -95,9 +95,7 @@ void main() {
     ) async {
       await tester.pumpWidget(
         _wrap(
-          const SelectedMembersSummary(
-            members: [_hexA, _hexB, _hexC, _hexD],
-          ),
+          const SelectedMembersSummary(members: [_hexA, _hexB, _hexC, _hexD]),
         ),
       );
       final l10n = AppLocalizations.of(
@@ -157,9 +155,8 @@ void main() {
     testWidgets('the identifier survives a 2x RTL layout unreordered', (
       tester,
     ) async {
-      // The chip carries no `textDirection`, so in an RTL locale the ambient
-      // direction applies. A hex/bech32 fragment is all weak+LTR characters,
-      // which must still read left to right in the order they were given.
+      // A hex/bech32 fragment must read left to right in the order it was
+      // given, whatever the ambient direction.
       _useNarrowPhone(tester);
 
       await tester.pumpWidget(
@@ -184,6 +181,54 @@ void main() {
         ),
       );
       expect(paragraph.didExceedMaxLines, isFalse);
+      expect(paragraph.textDirection, TextDirection.ltr);
+    });
+
+    testWidgets('a resolved name is shown with the key beneath it; a member '
+        'with none keeps the key alone', (tester) async {
+      await tester.pumpWidget(
+        _wrap(
+          const SelectedMembersSummary(
+            members: [_hexA, _hexB],
+            names: {_hexA: 'Distant Cousin'},
+          ),
+        ),
+      );
+
+      expect(_rendered(tester), [
+        'Distant Cousin',
+        NpubValidator.shortenForDisplay(_hexA),
+        NpubValidator.shortenForDisplay(_hexB),
+      ]);
+    });
+
+    testWidgets('a named chip wraps rather than clipping its key at 2x in '
+        'RTL on a 320dp phone', (tester) async {
+      _useNarrowPhone(tester);
+
+      await tester.pumpWidget(
+        MediaQuery(
+          data: const MediaQueryData(textScaler: TextScaler.linear(2)),
+          child: _wrap(
+            const SelectedMembersSummary(
+              members: [_hexA],
+              names: {_hexA: 'Rechtsschutzversicherungsgesellschaften'},
+            ),
+            locale: const Locale('ar'),
+          ),
+        ),
+      );
+
+      expect(tester.takeException(), isNull);
+      final key = tester.renderObject<RenderParagraph>(
+        find.text(NpubValidator.shortenForDisplay(_hexA)),
+      );
+      expect(key.didExceedMaxLines, isFalse);
+      expect(key.textDirection, TextDirection.ltr);
+      expect(
+        tester.getRect(find.byType(SelectedMembersSummary)).right,
+        lessThanOrEqualTo(320),
+      );
     });
   });
 }

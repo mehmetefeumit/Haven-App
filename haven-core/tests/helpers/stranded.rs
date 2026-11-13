@@ -155,10 +155,23 @@ pub async fn served(session: &SessionManager, group: &GroupId) -> SessionEffects
 }
 
 /// A location `session` seals at the epoch it stands on.
+///
+/// The send's preflight gives every deferred-peel row untried under the
+/// current context a 250 ms foreground try and holds the location when that
+/// overruns, so each such row is tried here first, as
+/// `CircleManager::seal_location_staging` does before the user's own send
+/// (tracker `T-FOREGROUND-PEEL`).
 pub async fn sealed_alone(session: &SessionManager, group: &GroupId) -> Event {
+    while session
+        .drain_deferred_peels(group, None)
+        .await
+        .expect("the drain runs")
+        .is_some()
+    {}
     let content = haven_core::location::LocationMessage::new(51.5, -0.12)
         .to_string()
         .expect("a location serializes");
+    let epoch = session.epoch(group).await.expect("epoch");
     session
         .send_location(group, content)
         .await
@@ -166,7 +179,13 @@ pub async fn sealed_alone(session: &SessionManager, group: &GroupId) -> Event {
         .publish
         .iter()
         .find_map(|work| match work {
-            PublishWork::ApplicationMessage { msg, .. } => {
+            PublishWork::ApplicationMessage {
+                msg, source_epoch, ..
+            } => {
+                assert_eq!(
+                    source_epoch.0, epoch,
+                    "sealed at the epoch the device stands on"
+                );
                 SessionManager::transport_message_to_event(msg).ok()
             }
             _ => None,

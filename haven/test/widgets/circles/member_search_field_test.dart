@@ -25,8 +25,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../helpers/accessibility_announcements.dart';
 
-const _npub =
-    'npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqspcd5';
+const _npub = 'npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqspcd5';
 const _otherNpub =
     'npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqs9n5u';
 
@@ -50,8 +49,7 @@ Future<_Harness> _pumpField(
           onMemberAdded: harness.staged.add,
           onQueryChanged: harness.queries.add,
           onQrScanRequested: () => harness.qrRequests++,
-          entryStateFor:
-              entryState ?? (_) => MemberPickState.selectable,
+          entryStateFor: entryState ?? (_) => MemberPickState.selectable,
         ),
       ),
     ),
@@ -270,10 +268,7 @@ void main() {
       await tester.pump();
 
       expect(harness.staged, isEmpty);
-      expect(
-        find.text(_l10n(tester).addMemberAlreadyInCircle),
-        findsOneWidget,
-      );
+      expect(find.text(_l10n(tester).addMemberAlreadyInCircle), findsOneWidget);
     });
 
     testWidgets('an already-staged npub is refused', (tester) async {
@@ -399,6 +394,76 @@ void main() {
 
       await tester.enterText(find.byKey(WidgetKeys.memberSearchInput), '');
       expect(harness.queries.last, isEmpty);
+    });
+  });
+
+  group('MemberSearchField — a host-owned controller', () {
+    testWidgets('the host clearing it empties the field and reports the '
+        'empty query, and the field never disposes it', (tester) async {
+      final controller = TextEditingController();
+      addTearDown(controller.dispose);
+      final queries = <String>[];
+      await tester.pumpWidget(
+        MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: Scaffold(
+            body: MemberSearchField(
+              controller: controller,
+              onMemberAdded: (_) {},
+              onQueryChanged: queries.add,
+              onQrScanRequested: () {},
+              entryStateFor: (_) => MemberPickState.selectable,
+            ),
+          ),
+        ),
+      );
+
+      await tester.enterText(find.byKey(WidgetKeys.memberSearchInput), _npub);
+      expect(controller.text, _npub);
+      controller.clear();
+      await tester.pump();
+
+      expect(_field(tester).controller!.text, isEmpty);
+      expect(queries.last, isEmpty);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      // Still usable: a disposed controller throws on any listener change.
+      controller.text = 'still mine';
+      expect(controller.text, 'still mine');
+    });
+  });
+
+  group('MemberSearchField — a host-owned focus node', () {
+    testWidgets('the host focusing it focuses the field, and the field never '
+        'disposes it', (tester) async {
+      final focusNode = FocusNode();
+      addTearDown(focusNode.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: Scaffold(
+            body: MemberSearchField(
+              focusNode: focusNode,
+              onMemberAdded: (_) {},
+              onQrScanRequested: () {},
+              entryStateFor: (_) => MemberPickState.selectable,
+            ),
+          ),
+        ),
+      );
+      expect(_field(tester).focusNode!.hasPrimaryFocus, isFalse);
+
+      focusNode.requestFocus();
+      await tester.pump();
+
+      expect(_field(tester).focusNode!.hasPrimaryFocus, isTrue);
+      expect(tester.testTextInput.isVisible, isTrue);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      // Still usable: a disposed node throws on any listener change.
+      focusNode.addListener(() {});
     });
   });
 }

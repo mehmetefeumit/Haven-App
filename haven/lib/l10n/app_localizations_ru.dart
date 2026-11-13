@@ -1088,7 +1088,18 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get memberPickerStrangerLookupNote =>
-      'Haven запросил у одного реле опубликованное имя этого человека. Реле видит, что это устройство только что спросило об этом ключе, но запрос не подписан, поэтому не связан с вашей личностью в Haven. Фото пока не скачано.';
+      'Haven запросил опубликованный профиль этого человека у реле — не более чем у двух. Каждое реле, к которому Haven обратился, видит, что это устройство только что спросило об этом ключе, но в запросе нет криптографической подписи, поэтому он не связан с вашей личностью в Haven. Если в профиле указано фото, Haven скачивает это фото с сервера, который выбрал этот человек, и этот сервер видит сетевой адрес этого устройства.';
+
+  @override
+  String get memberPickerStrangerLookingUp => 'Ищем опубликованный профиль…';
+
+  @override
+  String get memberPickerStrangerNotFound => 'Опубликованное имя не найдено';
+
+  @override
+  String memberPickerStrangerFoundAnnouncement(String name) {
+    return 'Опубликованное имя: $name';
+  }
 
   @override
   String selectedMembersMore(int count) {

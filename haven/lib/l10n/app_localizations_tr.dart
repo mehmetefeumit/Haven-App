@@ -1062,7 +1062,18 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get memberPickerStrangerLookupNote =>
-      'Haven, bu kişinin yayımlanmış adını bir aktarıcıya sordu. O aktarıcı, bu cihazın az önce bu anahtarı sorduğunu görür — ama bu istek imza taşımadığı için Haven kimliğinizle ilişkilendirilmez. Henüz hiçbir fotoğraf indirilmedi.';
+      'Haven, bu kişinin yayımlanmış profilini bir aktarıcıya — en fazla ikisine — sordu. Sorulan her aktarıcı, bu cihazın az önce bu anahtarı sorduğunu görür; ama istek imza taşımadığı için Haven kimliğinize bağlı değildir. Profilde fotoğraf varsa Haven fotoğrafı bu kişinin seçtiği sunucudan indirir; o sunucu bu cihazın ağ adresini görür.';
+
+  @override
+  String get memberPickerStrangerLookingUp => 'Yayımlanmış profil aranıyor…';
+
+  @override
+  String get memberPickerStrangerNotFound => 'Yayımlanmış bir ad bulunamadı';
+
+  @override
+  String memberPickerStrangerFoundAnnouncement(String name) {
+    return 'Yayımlanmış ad: $name';
+  }
 
   @override
   String selectedMembersMore(int count) {

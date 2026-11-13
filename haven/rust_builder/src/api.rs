@@ -4980,7 +4980,8 @@ pub struct ProfilePoolStatusFfi {
 struct ProfileStampLists {
     /// Authors whose assigned relay returned a usable kind-0.
     hits: Vec<String>,
-    /// Authors whose assigned relay completed the `REQ` and had nothing.
+    /// Authors a relay ended its answer for without a kind-0, and authors a
+    /// relay was reached for and no relay answered.
     misses: Vec<String>,
 }
 
@@ -5084,8 +5085,12 @@ impl ProfileSyncResultFfi {
 /// concern, and collapsing them here would decide it in Rust.
 #[derive(Debug, Clone, Copy)]
 pub struct ProfilePendingStateFfi {
-    /// A save is not yet served by every pool relay.
+    /// There is work for a sync pass: a save not yet served by every pool
+    /// relay, or a pool relay the published profile was never sent to.
     pub pending: bool,
+    /// A save is waiting to be signed — the only work
+    /// [`CircleManagerFfi::sync_my_profile`] needs the identity secret for.
+    pub save_pending: bool,
     /// The persisted retry ladder permits another attempt now.
     pub retry_due: bool,
     /// Seconds until the next attempt is due: `Some` only when pending and
@@ -5098,6 +5103,7 @@ impl ProfilePendingStateFfi {
     const fn from_state(state: ProfilePendingState) -> Self {
         Self {
             pending: state.pending,
+            save_pending: state.save_pending,
             retry_due: state.retry_due,
             next_retry_in_secs: state.next_retry_in_secs,
         }
@@ -5315,11 +5321,12 @@ impl CircleManagerFfi {
     ///
     /// # Stamping
     ///
-    /// Fetched kind-0s are upserted newest-wins and stamped as HITS; authors
-    /// their assigned relay answered nothing for are stamped as MISSES (which
-    /// advances the bounded retry ladder without resetting the staleness clock).
-    /// Authors the cycle never reached — dropped at the batch deadline, or on a
-    /// relay that turned out to be unusable — are stamped **not at all**.
+    /// Fetched kind-0s are upserted newest-wins and stamped as HITS; authors a
+    /// relay answered nothing for, or was reached for and did not answer, are
+    /// stamped as MISSES (which advances the bounded retry ladder without
+    /// resetting the staleness clock). Authors no relay was reached for —
+    /// dropped at the batch deadline, or behind a relay that could not be
+    /// connected to — are stamped **not at all**.
     /// `has_picture` reflects whether CURRENT picture bytes are cached.
     ///
     /// # Errors
@@ -5451,7 +5458,11 @@ impl CircleManagerFfi {
     /// its own salted relay independently, so a decoy only helps if it
     /// happens to hash to the SAME relay.
     ///
-    /// The one thing this adds over `fetch_member_profiles`: `pubkey` accepts
+    /// An author with no resolved profile is asked regardless of the miss
+    /// backoff: this is one key the user explicitly asked about, not a roster
+    /// sweep.
+    ///
+    /// The other thing this adds over `fetch_member_profiles`: `pubkey` accepts
     /// EITHER hex or bech32 (`npub1…`), via `PublicKey::parse` (the pattern
     /// already used to resolve another user's pubkey in
     /// `relay/manager.rs`). `fetch_member_profiles` itself stays hex-only
@@ -5479,9 +5490,19 @@ impl CircleManagerFfi {
         let Ok(parsed) = nostr::PublicKey::parse(&pubkey) else {
             return Ok(None);
         };
-        let mut resolved = self
-            .fetch_member_profiles(vec![parsed.to_hex()], max_age_secs)
-            .await?;
+        let hex = parsed.to_hex();
+        // The user asked for this key by name. A backoff earned by an earlier
+        // miss would answer "nothing found" without asking anyone, so an
+        // unresolved author is asked now — forced, which resumes at the rung
+        // its misses reached and so stays on the same two relays. A resolved
+        // one keeps the caller's staleness tier.
+        let resolved_before = self
+            .inner
+            .get_profile(&hex)
+            .map_err(redact_profile_err)?
+            .is_some_and(|row| row.state == ProfileState::Known);
+        let max_age_secs = if resolved_before { max_age_secs } else { 0 };
+        let mut resolved = self.fetch_member_profiles(vec![hex], max_age_secs).await?;
         Ok(resolved.pop())
     }
 
@@ -5992,12 +6013,18 @@ impl CircleManagerFfi {
         .await
     }
 
-    /// Publishes whatever the own-profile outbox is holding.
+    /// Publishes whatever the own-profile outbox is holding, and re-sends the
+    /// published profile to a pool relay that has never been given it.
     ///
     /// Idempotent and safe to call from any resume/foreground trigger: with
     /// nothing pending it returns [`ProfileSyncOutcomeFfi::NothingPending`],
     /// and with an unusable relay pool [`ProfileSyncOutcomeFfi::PoolUnderflow`],
-    /// in both cases without touching the network OR the supplied secret.
+    /// in both cases without touching the network OR the supplied secret. The
+    /// secret signs a saved edit and nothing else: a caller passes `None`
+    /// unless [`ProfilePendingStateFfi::save_pending`] says one is waiting, so
+    /// a pass that only re-sends what the pool already serves never takes the
+    /// secret out of the platform keystore. A save that lands after a caller
+    /// read `save_pending` is left for the pass its own trigger starts.
     /// Network failure is an OUTCOME, not an error — the save stays queued with
     /// its retry ladder advanced, and only a local fault produces `Err`.
     ///
@@ -6007,11 +6034,11 @@ impl CircleManagerFfi {
     /// not this account's identity, or a local database/signing fault.
     pub async fn sync_my_profile(
         &self,
-        identity_secret_bytes: Vec<u8>,
+        identity_secret_bytes: Option<Vec<u8>>,
     ) -> Result<ProfileSyncResultFfi, String> {
         // Wrapped before the pending pre-check so the common early return does
         // not leave the secret unwiped (Security Rule 7/9).
-        let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
+        let identity_secret_bytes = identity_secret_bytes.map(zeroize::Zeroizing::new);
         let now = profile_now_secs();
         let inner = self.inner.clone();
         let own_hex = self.own_pubkey_hex.clone();
@@ -6058,27 +6085,44 @@ impl CircleManagerFfi {
             return Ok(report);
         }
 
-        let keys = keys_from_secret_bytes(identity_secret_bytes.to_vec())?;
-        // The outbox row, the cached kind-0 and the retraction gate are all
-        // keyed on THIS manager's pubkey; signing them with a different key
-        // would publish one account's saved edit under another's identity.
-        self.ensure_own_identity(&keys)?;
+        let own_pk = nostr::PublicKey::from_hex(&self.own_pubkey_hex)
+            .map_err(|_| PROFILE_IDENTITY_MISMATCH.to_string())?;
+        // Only a saved edit is signed. A pass that re-sends what the pool
+        // already serves is given no key (Rule 9).
+        let save_pending = self
+            .inner
+            .pending_profile_sync(&self.own_pubkey_hex)
+            .map_err(redact_profile_err)?
+            .is_some();
+        let keys = if let (true, Some(secret)) = (save_pending, identity_secret_bytes) {
+            let keys = keys_from_secret_bytes(secret.to_vec())?;
+            // The outbox row, the cached kind-0 and the retraction gate are all
+            // keyed on THIS manager's pubkey; signing them with a different key
+            // would publish one account's saved edit under another's identity.
+            self.ensure_own_identity(&keys)?;
+            Some(keys)
+        } else {
+            None
+        };
         // The clock itself, not `now`: a pass is dated when it ends, so a slow
         // upload cannot leave its retry already due.
         let report = self
             .inner
-            .sync_own_profile(&keys, profile_now_secs)
+            .sync_own_profile(&own_pk, keys.as_ref(), profile_now_secs)
             .await
             .map_err(redact_profile_err)?;
         Ok(ProfileSyncResultFfi::from_report(&report))
     }
 
-    /// Whether the own profile has unpublished work, whether the persisted
-    /// backoff permits another attempt, and if not, how long until it does.
+    /// Whether the own profile has unpublished work — a saved edit, or a pool
+    /// relay it has never been sent to — whether the persisted backoff permits
+    /// another attempt, and if not, how long until it does.
     ///
     /// The read a resume trigger consults before calling
-    /// [`Self::sync_my_profile`], so a clean install never dials a relay just
-    /// to discover it had nothing to say.
+    /// [`Self::sync_my_profile`], so an install with nothing saved and its pool
+    /// coverage settled never dials a relay just to discover it had nothing to
+    /// say, and so the identity secret is fetched only for a save
+    /// ([`ProfilePendingStateFfi::save_pending`]).
     ///
     /// # Errors
     ///
@@ -12606,15 +12650,16 @@ mod tests {
         // `retry_due` accidentally read from `pending`) by varying each
         // combination rather than only the all-true/all-false corners. The
         // seconds-until-retry rides along untouched, including its extremes.
-        for (pending, retry_due, next_retry_in_secs) in [
-            (false, true, None),
-            (true, false, Some(30)),
-            (true, false, Some(1)),
-            (true, false, Some(21_600)),
-            (true, true, None),
+        for (pending, save_pending, retry_due, next_retry_in_secs) in [
+            (false, false, true, None),
+            (true, true, false, Some(30)),
+            (true, false, false, Some(1)),
+            (true, true, false, Some(21_600)),
+            (true, false, true, None),
         ] {
             let state = ProfilePendingState {
                 pending,
+                save_pending,
                 retry_due,
                 next_retry_in_secs,
             };
@@ -12622,6 +12667,10 @@ mod tests {
             assert_eq!(
                 ffi.pending, pending,
                 "pending must pass through for {state:?}"
+            );
+            assert_eq!(
+                ffi.save_pending, save_pending,
+                "save_pending must pass through for {state:?}"
             );
             assert_eq!(
                 ffi.retry_due, retry_due,
@@ -19806,6 +19855,60 @@ mod maintenance_real_ffi_tests {
         assert!(via_npub.is_known);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_typed_lookup_asks_again_inside_the_miss_backoff_and_a_refresh_does_not() {
+        // The user asked about this one key. Answering "nothing found" from a
+        // backoff an earlier miss earned would tell them so without asking
+        // anyone — while a roster sweep of the same key still waits it out.
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let keys = Keys::generate();
+        let plane = CountedProfilePlane::start(3, 0).await;
+        let dir = DataDir::new("typed_lookup_ignores_backoff");
+        let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
+            .expect("CircleManagerFfi::new");
+        plane.serve(&circle);
+        let stranger = Keys::generate().public_key().to_hex();
+        let lookup = || circle.resolve_stranger_profile(stranger.clone(), 900);
+
+        let first = lookup().await.expect("the lookup").expect("a parsed key");
+        assert!(!first.is_known);
+        assert_eq!(
+            plane.asked(),
+            1,
+            "anti-vacuity: one relay answered without it"
+        );
+
+        lookup().await.expect("the lookup again");
+        assert_eq!(plane.asked(), 2, "asked again at once, of the other relay");
+
+        circle
+            .fetch_member_profiles(vec![stranger.clone()], 900)
+            .await
+            .expect("a refresh naming the same key");
+        assert_eq!(plane.asked(), 2, "a refresh waits out the backoff");
+
+        // A resolved author is held to the caller's staleness tier, not forced.
+        let known = Keys::generate().public_key().to_hex();
+        circle
+            .inner
+            .upsert_profile_if_newer(&CachedProfile {
+                pubkey_hex: known.clone(),
+                metadata: ProfileMetadata::from_metadata(nostr::Metadata::new().name("known")),
+                state: ProfileState::Known,
+                event_created_at: 1,
+                fetched_at: profile_now_secs(),
+            })
+            .expect("seed a resolved row");
+        let resolved = circle
+            .resolve_stranger_profile(known, 900)
+            .await
+            .expect("the lookup")
+            .expect("a parsed key");
+        assert!(resolved.is_known);
+        assert_eq!(plane.asked(), 2, "a fresh resolved row asks nobody");
+    }
+
     // ------------------------------------------------------------------------
     // Retraction vs. the local-first outbox.
     //
@@ -20159,7 +20262,7 @@ mod maintenance_real_ffi_tests {
             .expect("save a name");
         let synced = fx
             .circle
-            .sync_my_profile(fx.secret())
+            .sync_my_profile(Some(fx.secret()))
             .await
             .expect("publish the name");
         assert_eq!(synced.outcome, super::ProfileSyncOutcomeFfi::Published);
@@ -20296,7 +20399,7 @@ mod maintenance_real_ffi_tests {
             .expect("gate read"));
         assert!(matches!(
             fx.circle
-                .sync_my_profile(fx.secret())
+                .sync_my_profile(Some(fx.secret()))
                 .await
                 .expect("sync")
                 .outcome,
@@ -20446,7 +20549,11 @@ mod maintenance_real_ffi_tests {
             |_| true,
             vec![Frame::Event(first_blank.clone()), Frame::Eose],
         );
-        let synced = fx.circle.sync_my_profile(fx.secret()).await.expect("sync");
+        let synced = fx
+            .circle
+            .sync_my_profile(Some(fx.secret()))
+            .await
+            .expect("sync");
         assert_eq!(synced.outcome, ProfileSyncOutcomeFfi::Published);
         assert!(!synced.still_pending);
 
@@ -20476,7 +20583,7 @@ mod maintenance_real_ffi_tests {
         );
         assert!(matches!(
             fx.circle
-                .sync_my_profile(fx.secret())
+                .sync_my_profile(Some(fx.secret()))
                 .await
                 .expect("sync")
                 .outcome,
@@ -20513,7 +20620,7 @@ mod maintenance_real_ffi_tests {
         assert!(!state.pending, "a deletion every relay took reads as owed");
         assert!(matches!(
             fx.circle
-                .sync_my_profile(fx.secret())
+                .sync_my_profile(Some(fx.secret()))
                 .await
                 .expect("sync")
                 .outcome,
@@ -20555,7 +20662,11 @@ mod maintenance_real_ffi_tests {
             move |_| after.load(Ordering::SeqCst),
             vec![Frame::Event(first_blank), Frame::Eose],
         );
-        let synced = fx.circle.sync_my_profile(fx.secret()).await.expect("sync");
+        let synced = fx
+            .circle
+            .sync_my_profile(Some(fx.secret()))
+            .await
+            .expect("sync");
         assert_eq!(synced.outcome, ProfileSyncOutcomeFfi::Published);
 
         let sent = fx.profiles_sent();
@@ -20732,7 +20843,7 @@ mod maintenance_real_ffi_tests {
             .expect("save a name");
         let synced = fx
             .circle
-            .sync_my_profile(fx.secret())
+            .sync_my_profile(Some(fx.secret()))
             .await
             .expect("publish the name");
         assert_eq!(synced.outcome, super::ProfileSyncOutcomeFfi::Published);
@@ -20813,7 +20924,10 @@ mod maintenance_real_ffi_tests {
             .remove_my_profile_picture()
             .await
             .expect("remove the picture");
-        fx.circle.sync_my_profile(fx.secret()).await.expect("sync")
+        fx.circle
+            .sync_my_profile(Some(fx.secret()))
+            .await
+            .expect("sync")
     }
 
     /// The distinct events among `sent`, by id.
@@ -21140,7 +21254,7 @@ mod maintenance_real_ffi_tests {
         );
         assert!(matches!(
             fx.circle
-                .sync_my_profile(fx.secret())
+                .sync_my_profile(Some(fx.secret()))
                 .await
                 .expect("sync")
                 .outcome,
@@ -21185,7 +21299,11 @@ mod maintenance_real_ffi_tests {
         fx.pool[1].answer(|_| true, vec![Frame::Eose]);
         fx.pool[0].answer(|_| true, vec![Frame::Event(held), Frame::Eose]);
         refusing.store(false, Ordering::SeqCst);
-        let synced = fx.circle.sync_my_profile(fx.secret()).await.expect("sync");
+        let synced = fx
+            .circle
+            .sync_my_profile(Some(fx.secret()))
+            .await
+            .expect("sync");
         assert_eq!(synced.outcome, ProfileSyncOutcomeFfi::Published);
 
         let sent = fx.profiles_sent();
@@ -21221,7 +21339,11 @@ mod maintenance_real_ffi_tests {
         let failed = remove_then_sync(&fx).await;
         assert_eq!(failed.outcome, ProfileSyncOutcomeFfi::PublishFailed);
         refusing.store(false, Ordering::SeqCst);
-        let synced = fx.circle.sync_my_profile(fx.secret()).await.expect("sync");
+        let synced = fx
+            .circle
+            .sync_my_profile(Some(fx.secret()))
+            .await
+            .expect("sync");
         assert_eq!(synced.outcome, ProfileSyncOutcomeFfi::Published);
 
         let sent = fx.profiles_sent();
@@ -21265,7 +21387,7 @@ mod maintenance_real_ffi_tests {
             vec![Frame::Event(current), Frame::Eose],
         );
 
-        let (synced, ()) = tokio::join!(fx.circle.sync_my_profile(fx.secret()), async {
+        let (synced, ()) = tokio::join!(fx.circle.sync_my_profile(Some(fx.secret())), async {
             reached(was_asked, "the sync read the pool").await;
             fx.circle
                 .save_my_profile_picture_local(tiny_png())
@@ -21349,7 +21471,11 @@ mod maintenance_real_ffi_tests {
 
         refusing.store(false, Ordering::SeqCst);
         fx.pool[2].answer(|_| true, vec![Frame::Event(sent[0].clone()), Frame::Eose]);
-        let second = fx.circle.sync_my_profile(fx.secret()).await.expect("sync");
+        let second = fx
+            .circle
+            .sync_my_profile(Some(fx.secret()))
+            .await
+            .expect("sync");
 
         assert_eq!(second.outcome, ProfileSyncOutcomeFfi::Published);
         assert!(!second.still_pending);
@@ -21393,7 +21519,11 @@ mod maintenance_real_ffi_tests {
             .await
             .expect("remove the picture");
         let before = profile_now_secs();
-        let first = fx.circle.sync_my_profile(fx.secret()).await.expect("sync");
+        let first = fx
+            .circle
+            .sync_my_profile(Some(fx.secret()))
+            .await
+            .expect("sync");
         let after = profile_now_secs();
 
         assert_eq!(first.outcome, ProfileSyncOutcomeFfi::Published);
@@ -21428,7 +21558,11 @@ mod maintenance_real_ffi_tests {
             |_| true,
             vec![Frame::Event(removal[0].clone()), Frame::Eose],
         );
-        let second = fx.circle.sync_my_profile(fx.secret()).await.expect("sync");
+        let second = fx
+            .circle
+            .sync_my_profile(Some(fx.secret()))
+            .await
+            .expect("sync");
         assert_eq!(second.outcome, ProfileSyncOutcomeFfi::Published);
         assert!(!second.still_pending);
 
@@ -21458,7 +21592,7 @@ mod maintenance_real_ffi_tests {
         );
         assert!(matches!(
             fx.circle
-                .sync_my_profile(fx.secret())
+                .sync_my_profile(Some(fx.secret()))
                 .await
                 .expect("sync")
                 .outcome,
@@ -21493,7 +21627,11 @@ mod maintenance_real_ffi_tests {
                 .expect("pending state")
                 .pending
         );
-        let synced = fx.circle.sync_my_profile(fx.secret()).await.expect("sync");
+        let synced = fx
+            .circle
+            .sync_my_profile(Some(fx.secret()))
+            .await
+            .expect("sync");
 
         assert_eq!(synced.outcome, ProfileSyncOutcomeFfi::Published);
         assert!(!synced.still_pending);
@@ -21508,7 +21646,7 @@ mod maintenance_real_ffi_tests {
         );
         assert!(matches!(
             fx.circle
-                .sync_my_profile(fx.secret())
+                .sync_my_profile(Some(fx.secret()))
                 .await
                 .expect("sync")
                 .outcome,
@@ -21547,7 +21685,7 @@ mod maintenance_real_ffi_tests {
             refuses.load(Ordering::SeqCst)
         });
 
-        let (synced, ()) = tokio::join!(fx.circle.sync_my_profile(fx.secret()), async {
+        let (synced, ()) = tokio::join!(fx.circle.sync_my_profile(Some(fx.secret())), async {
             reached(was_offered, "the removal was offered to the pool").await;
             fx.circle
                 .save_my_profile_local(Some("Renamed".to_string()), None)
@@ -21594,7 +21732,11 @@ mod maintenance_real_ffi_tests {
         );
 
         refusing.store(false, Ordering::SeqCst);
-        let synced = fx.circle.sync_my_profile(fx.secret()).await.expect("sync");
+        let synced = fx
+            .circle
+            .sync_my_profile(Some(fx.secret()))
+            .await
+            .expect("sync");
         assert_eq!(synced.outcome, ProfileSyncOutcomeFfi::Published);
         for relay in &fx.pool {
             let newest = relay.published().pop().expect("the relay took the sync");
@@ -21699,7 +21841,7 @@ mod maintenance_real_ffi_tests {
         );
         assert!(matches!(
             fx.circle
-                .sync_my_profile(fx.secret())
+                .sync_my_profile(Some(fx.secret()))
                 .await
                 .expect("sync")
                 .outcome,
@@ -21735,7 +21877,11 @@ mod maintenance_real_ffi_tests {
 
         let state = super::PROFILE_CLOCK_AHEAD_SECS
             .scope(ahead.clone(), async {
-                let synced = fx.circle.sync_my_profile(fx.secret()).await.expect("sync");
+                let synced = fx
+                    .circle
+                    .sync_my_profile(Some(fx.secret()))
+                    .await
+                    .expect("sync");
                 assert!(synced.still_pending);
                 fx.circle
                     .profile_pending_state()
@@ -21780,7 +21926,11 @@ mod maintenance_real_ffi_tests {
         let refusing = std::sync::Arc::new(AtomicBool::new(true));
         let refuses = refusing.clone();
         fx.pool[2].refuse(move |_| refuses.load(Ordering::SeqCst));
-        let first = fx.circle.sync_my_profile(fx.secret()).await.expect("sync");
+        let first = fx
+            .circle
+            .sync_my_profile(Some(fx.secret()))
+            .await
+            .expect("sync");
         assert_eq!(first.outcome, ProfileSyncOutcomeFfi::Published);
         assert!(first.still_pending, "anti-vacuity: one relay is owed");
         let e1 = fx.pool[0].published().remove(0);
@@ -21794,7 +21944,11 @@ mod maintenance_real_ffi_tests {
         );
         fx.pool[2].on_publish(|_| Verdict::KeepSaying(String::new()));
         fx.pool[2].answer(|_| true, vec![Frame::Event(foreign.clone()), Frame::Eose]);
-        let second = fx.circle.sync_my_profile(fx.secret()).await.expect("sync");
+        let second = fx
+            .circle
+            .sync_my_profile(Some(fx.secret()))
+            .await
+            .expect("sync");
 
         assert_eq!(second.outcome, ProfileSyncOutcomeFfi::Published);
         assert!(!second.still_pending);
@@ -21852,7 +22006,11 @@ mod maintenance_real_ffi_tests {
         refusing.store(false, Ordering::SeqCst);
         fx.pool[2].on_publish(|_| Verdict::Keep);
         fx.pool[2].answer(|_| true, vec![Frame::Event(deleted), Frame::Eose]);
-        let synced = fx.circle.sync_my_profile(fx.secret()).await.expect("sync");
+        let synced = fx
+            .circle
+            .sync_my_profile(Some(fx.secret()))
+            .await
+            .expect("sync");
 
         assert_eq!(synced.outcome, ProfileSyncOutcomeFfi::PublishFailed);
         assert!(synced.still_pending, "a relay still serving the profile");
@@ -21876,46 +22034,117 @@ mod maintenance_real_ffi_tests {
     }
 
     // ------------------------------------------------------------------------
-    // sync_my_profile: the pending pre-check must run BEFORE any signing key
-    // is built from the caller's secret (Security Rule 9 — the resume/
-    // foreground trigger should not have to construct one just to discover
-    // there is nothing to publish). No relay is contacted by this test: a
-    // clean outbox resolves `NothingPending` locally.
+    // sync_my_profile: the identity secret signs a saved edit and nothing else
+    // (Security Rule 9). A pass that re-sends what the pool already serves —
+    // and a clean outbox, which reaches no relay at all — runs without one,
+    // and `save_pending` is how a caller knows not to fetch it.
     // ------------------------------------------------------------------------
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn sync_with_nothing_pending_never_touches_the_identity_secret() {
+    async fn a_sync_with_nothing_to_sign_never_touches_the_identity_secret() {
         let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
         install_test_seams();
 
         let keys = Keys::generate();
-        let dir = DataDir::new("profile_sync_nothing_pending");
+        let plane = CountedProfilePlane::start(3, 0).await;
+        let dir = DataDir::new("profile_sync_nothing_to_sign");
         let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
             .expect("CircleManagerFfi::new");
-        isolate_profile_plane(&circle);
+        plane.serve(&circle);
 
-        // Never staged anything, so the outbox is empty for this account.
+        // Nothing was ever saved, but the pool has never been looked at: the
+        // pass reads it, finds no profile to re-send, and settles.
+        let owing = circle.profile_pending_state().await.expect("pending state");
         assert!(
-            !circle
-                .profile_pending_state()
+            owing.pending,
+            "an install with no record of what the pool serves owes it a look",
+        );
+        assert!(!owing.save_pending, "and that look signs nothing");
+        // A secret supplied all the same is never parsed: anything that is not
+        // exactly 32 bytes fails `keys_from_secret_bytes`, so a pass that built
+        // a key from this one would return that error.
+        let malformed_secret = || Some(vec![0u8; 4]);
+        let covering = circle
+            .sync_my_profile(malformed_secret())
+            .await
+            .expect("a pass that signs nothing must not build a signing key");
+        assert_eq!(plane.asked(), 3, "anti-vacuity: the pass read the pool");
+        assert_eq!(covering.outcome, ProfileSyncOutcomeFfi::NothingPending);
+        assert!(!covering.still_pending);
+
+        // Settled: the next trigger is answered locally, secret or none.
+        for secret in [malformed_secret(), None] {
+            let clean = circle
+                .sync_my_profile(secret)
                 .await
-                .expect("pending state")
-                .pending,
-            "a fresh account has nothing queued",
+                .expect("a clean outbox must short-circuit before any key is built");
+            assert_eq!(clean.outcome, ProfileSyncOutcomeFfi::NothingPending);
+            assert!(!clean.still_pending);
+        }
+        assert_eq!(plane.asked(), 3, "and reaches no relay");
+    }
+
+    // ------------------------------------------------------------------------
+    // sync_my_profile: a coverage pass handed no secret at all — what the app
+    // does when `save_pending` is false — reads the pool and settles.
+    // ------------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_coverage_pass_runs_with_no_secret_at_all() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+
+        let keys = Keys::generate();
+        let plane = CountedProfilePlane::start(3, 0).await;
+        let dir = DataDir::new("profile_sync_no_secret");
+        let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
+            .expect("CircleManagerFfi::new");
+        plane.serve(&circle);
+
+        let covering = circle.sync_my_profile(None).await.expect("sync");
+        assert_eq!(plane.asked(), 3, "anti-vacuity: the pass read the pool");
+        assert_eq!(covering.outcome, ProfileSyncOutcomeFfi::NothingPending);
+        assert!(!covering.still_pending);
+    }
+
+    // ------------------------------------------------------------------------
+    // sync_my_profile: a save that lands after a caller read `save_pending`
+    // meets a pass holding no secret. That pass must publish nothing and spend
+    // none of the save's retry ladder, so the pass the save's own trigger
+    // starts — with the secret — publishes it at once.
+    // ------------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_saved_edit_met_without_the_secret_stays_queued_and_due() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+
+        let keys = Keys::generate();
+        let plane = CountedProfilePlane::start(3, 0).await;
+        let dir = DataDir::new("profile_sync_save_without_secret");
+        let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
+            .expect("CircleManagerFfi::new");
+        plane.serve(&circle);
+
+        circle
+            .save_my_profile_local(Some("Queued".to_string()), None)
+            .await
+            .expect("save locally");
+        let saved = circle.profile_pending_state().await.expect("pending state");
+        assert!(saved.pending && saved.save_pending && saved.retry_due);
+
+        let keyless = circle.sync_my_profile(None).await.expect("sync");
+        assert_eq!(keyless.outcome, ProfileSyncOutcomeFfi::PublishFailed);
+        assert!(keyless.still_pending);
+        let after = circle.profile_pending_state().await.expect("pending state");
+        assert!(
+            after.save_pending && after.retry_due,
+            "a pass that could not sign must not push the save's retry back",
         );
 
-        // Structurally invalid: `keys_from_secret_bytes` rejects anything that
-        // is not exactly 32 bytes with "Invalid secret bytes length". If
-        // `sync_my_profile` tried to build a signing key from this BEFORE
-        // consulting the pending state, the call would fail with that error
-        // instead of succeeding.
-        let malformed_secret = vec![0u8; 4];
-        let report = circle.sync_my_profile(malformed_secret).await.expect(
-            "a clean outbox must short-circuit to NothingPending before the \
-                 malformed secret is ever used to build a signing key",
-        );
-
-        assert_eq!(report.outcome, ProfileSyncOutcomeFfi::NothingPending);
-        assert!(!report.still_pending);
+        let signed = circle
+            .sync_my_profile(Some(secret_bytes(&keys)))
+            .await
+            .expect("sync");
+        assert_eq!(signed.outcome, ProfileSyncOutcomeFfi::Published);
+        assert!(!signed.still_pending);
     }
 
     // ------------------------------------------------------------------------
@@ -21953,7 +22182,7 @@ mod maintenance_real_ffi_tests {
         // Structurally invalid, exactly as in the test above: if the pool
         // question were asked AFTER the key was built, this call would fail
         // with "Invalid secret bytes length" instead of reporting the pool.
-        let report = circle.sync_my_profile(vec![0u8; 4]).await.expect(
+        let report = circle.sync_my_profile(Some(vec![0u8; 4])).await.expect(
             "an unusable pool must short-circuit before the malformed secret \
                  is ever used to build a signing key",
         );
@@ -22015,7 +22244,7 @@ mod maintenance_real_ffi_tests {
         isolate_profile_plane(&circle);
 
         let err = circle
-            .sync_my_profile(secret_bytes(&stranger))
+            .sync_my_profile(Some(secret_bytes(&stranger)))
             .await
             .expect_err("a foreign secret must not sign this account's edit");
         assert!(
@@ -22093,7 +22322,7 @@ mod maintenance_real_ffi_tests {
             .await
             .expect("stage the profile");
         publisher
-            .sync_my_profile(secret_bytes(&keys))
+            .sync_my_profile(Some(secret_bytes(&keys)))
             .await
             .expect("publish the profile");
 
@@ -22254,7 +22483,7 @@ mod maintenance_real_ffi_tests {
             .await
             .expect("stage the profile");
         publisher
-            .sync_my_profile(secret_bytes(&keys))
+            .sync_my_profile(Some(secret_bytes(&keys)))
             .await
             .expect("publish the profile");
 
@@ -22323,7 +22552,7 @@ mod maintenance_real_ffi_tests {
             .await
             .expect("stage the profile");
         before
-            .sync_my_profile(secret_bytes(&keys))
+            .sync_my_profile(Some(secret_bytes(&keys)))
             .await
             .expect("publish the profile");
         drop(before);
@@ -22400,7 +22629,7 @@ mod maintenance_real_ffi_tests {
             "the removal cancels the queued photo"
         );
         let held = isolated
-            .sync_my_profile(secret_bytes(&keys))
+            .sync_my_profile(Some(secret_bytes(&keys)))
             .await
             .expect("the sync runs");
         assert_eq!(
@@ -22636,7 +22865,7 @@ mod maintenance_real_ffi_tests {
             .await
             .expect("the local save");
         let synced = circle
-            .sync_my_profile(secret.clone())
+            .sync_my_profile(Some(secret.clone()))
             .await
             .expect("the sync");
         assert!(

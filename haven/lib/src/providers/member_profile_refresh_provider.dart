@@ -4,7 +4,8 @@
 /// (`ProfileService.refreshMemberProfiles`) that resolves every currently
 /// stale/unknown pubkey passed in, then invalidates the whole
 /// [memberProfileProvider] family so every mounted member tile/marker
-/// re-reads the refreshed cache. Per plan §1.7/§6.2, callers MUST pass the
+/// re-reads the refreshed cache — once for the names, and again after the
+/// paced picture batch (`ProfileService.downloadMemberPictures`). Per plan §1.7/§6.2, callers MUST pass the
 /// **union** of member pubkeys across every circle — never a clean
 /// per-circle partition, which would hand the relay exact co-membership
 /// clusters. [MemberProfileRefreshNotifier.refreshAll] builds that union for
@@ -31,6 +32,7 @@ import 'package:haven/src/constants/feature_flags.dart';
 import 'package:haven/src/constants/profile_refresh_tiers.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/member_directory_provider.dart';
 import 'package:haven/src/providers/member_profile_provider.dart';
 import 'package:haven/src/providers/own_profile_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
@@ -71,9 +73,10 @@ class MemberProfileRefreshNotifier extends Notifier<void> {
   final Set<String> _queuedPubkeys = {};
 
   /// Set once this notifier is torn down (logout invalidates it before the MLS
-  /// wipe). Checked before the FFI call and before starting a queued follow-up
-  /// so no kind-0 REQ for the deleted identity's social graph can be issued
-  /// after the user asked for it to be erased.
+  /// wipe). Checked before the FFI call, before the picture batch and before
+  /// starting a queued follow-up so no kind-0 REQ or picture GET for the
+  /// deleted identity's social graph can be issued after the user asked for
+  /// it to be erased.
   bool _disposed = false;
 
   @override
@@ -90,20 +93,16 @@ class MemberProfileRefreshNotifier extends Notifier<void> {
   ///
   /// This is the entry point every trigger should use: it builds the
   /// all-circles union required by plan §1.7 rather than leaving each call
-  /// site to get that right. Pass [circles] when the caller already has them
-  /// (avoids a redundant read); otherwise they are resolved from
-  /// [circlesProvider].
+  /// site to get that right. Always awaits [circlesProvider] itself: a
+  /// caller's snapshot can predate an invalidation and so narrow the union.
   ///
   /// Own profile rides the same batch instead of a separate forced
   /// `fetch_my_profile`, so a refresh costs one relay round trip, not two.
-  Future<void> refreshAll({
-    required Duration maxAge,
-    List<Circle>? circles,
-  }) async {
+  Future<void> refreshAll({required Duration maxAge}) async {
     if (!publicProfilesEnabled) return;
     if (_disposed) return;
 
-    final resolved = circles ?? await _readCircles();
+    final resolved = await _readCircles();
     final pubkeys = <String>{
       for (final circle in resolved)
         for (final member in circle.members) member.pubkey,
@@ -118,7 +117,10 @@ class MemberProfileRefreshNotifier extends Notifier<void> {
   }
 
   /// Batch-refreshes [pubkeyHexes] in a single relay fetch, then invalidates
-  /// the [memberProfileProvider] family and [ownProfileProvider].
+  /// the [memberProfileProvider] family, [ownProfileProvider] and
+  /// [memberDirectoryProvider] so names show without waiting for the picture
+  /// batch that follows, after which the profile providers are invalidated
+  /// again.
   ///
   /// Fire-and-forget: returns immediately: the caller (e.g. a circle-select
   /// handler) must not block the UI on a relay round trip. Best-effort —
@@ -128,7 +130,8 @@ class MemberProfileRefreshNotifier extends Notifier<void> {
   ///
   /// [maxAge] is the staleness tolerance; pick a tier from
   /// `constants/profile_refresh_tiers.dart`. Concurrent calls coalesce (see
-  /// [_inFlight]).
+  /// [_inFlight]), which spans both steps so two picture batches never run
+  /// at once.
   ///
   /// Prefer [refreshAll]: this takes an arbitrary pubkey list, so calling it
   /// with one circle's roster would leak an exact co-membership cluster to the
@@ -161,14 +164,30 @@ class MemberProfileRefreshNotifier extends Notifier<void> {
         // Re-check: teardown can land between scheduling and running.
         if (_disposed) return;
         final service = ref.read(profileServiceProvider);
-        await service.refreshMemberProfiles(pubkeyHexes, maxAge: maxAge);
-        ref
-          ..invalidate(memberProfileProvider)
-          ..invalidate(ownProfileProvider);
+        final List<String> owed;
+        try {
+          owed = await service.refreshMemberProfiles(
+            pubkeyHexes,
+            maxAge: maxAge,
+          );
+        } finally {
+          // Also on a throw: a partial Rust pass may have written rows.
+          _invalidateProfiles();
+          // Through the container: a debug build's `ref.invalidate` mounts a
+          // provider nothing has read, which here would load the directory.
+          ref.container.invalidate(memberDirectoryProvider);
+        }
         debugPrint(
           '[Profile] refreshRoster: refreshed '
           '${magnitudeBucket(pubkeyHexes.length)} pubkey(s)',
         );
+        // A logout that landed during the kind-0 step: no picture GET for
+        // the erased identity's social graph.
+        if (_disposed) return;
+        if (owed.isNotEmpty) {
+          await service.downloadMemberPictures(owed);
+          _invalidateProfiles();
+        }
       } on Object catch (e) {
         debugPrint('[Profile] refreshRoster failed: ${e.runtimeType}');
       } finally {
@@ -186,6 +205,12 @@ class MemberProfileRefreshNotifier extends Notifier<void> {
         }
       }
     });
+  }
+
+  void _invalidateProfiles() {
+    ref
+      ..invalidate(memberProfileProvider)
+      ..invalidate(ownProfileProvider);
   }
 
   /// Reads the current circle list, tolerating a not-yet-loaded/failed

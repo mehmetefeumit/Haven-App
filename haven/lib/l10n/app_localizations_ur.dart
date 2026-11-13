@@ -1058,7 +1058,19 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get memberPickerStrangerLookupNote =>
-      'Haven نے ایک ریلے سے کہا کہ اس شخص کا عوامی نام تلاش کرے۔ وہ ریلے دیکھتا ہے کہ اس آلے نے ابھی ابھی اس کلید کے بارے میں پوچھا ہے۔ مگر اس درخواست پر دستخط نہیں ہوتے، اس لیے یہ آپ کی Haven شناخت سے نہیں جڑتی۔ ابھی تک کوئی تصویر ڈاؤن لوڈ نہیں ہوئی۔';
+      'Haven نے اس شخص کا شائع شدہ پروفائل ایک ریلے سے مانگا ہے، زیادہ سے زیادہ دو ریلے سے۔ جس ریلے سے بھی پوچھا گیا، وہ دیکھ سکتا ہے کہ اس آلے نے ابھی ابھی اس کلید کے بارے میں پوچھا ہے، مگر اس درخواست پر کوئی ڈیجیٹل دستخط نہیں ہوتے، اس لیے یہ آپ کی Haven شناخت سے نہیں جڑتی۔ اگر پروفائل میں تصویر ہو تو Haven وہ تصویر اُس سرور سے ڈاؤن لوڈ کرتا ہے جسے اس شخص نے چنا ہے، اور وہ سرور اس آلے کا نیٹ ورک پتہ دیکھ سکتا ہے۔';
+
+  @override
+  String get memberPickerStrangerLookingUp =>
+      'شائع شدہ پروفائل تلاش کیا جا رہا ہے…';
+
+  @override
+  String get memberPickerStrangerNotFound => 'کوئی شائع شدہ نام نہیں ملا';
+
+  @override
+  String memberPickerStrangerFoundAnnouncement(String name) {
+    return 'شائع شدہ نام: $name';
+  }
 
   @override
   String selectedMembersMore(int count) {

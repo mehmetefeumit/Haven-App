@@ -312,7 +312,6 @@ class _DropdownBodyState extends ConsumerState<_DropdownBody>
                       triggerProfileRefresh(
                         ref,
                         maxAge: profileInteractiveMaxAge,
-                        circles: widget.circles,
                       );
                     }
                   },

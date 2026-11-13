@@ -40,8 +40,12 @@ save / photo / remove tap ──► stage locally (ms): row rewritten, outbox ro
         │                     local_version+1, ladder reset, owed event dropped
         │                     (a removal also drops staged AND published bytes)
         ▼  UI live at once; nothing on screen says synced, syncing or failed
-sync_own_profile(keys, clock)   (idempotent, serialized under profile_sync_lock;
-        │                        gate read `has_published_profile` before any footprint)
+sync_own_profile(own_pk, keys?, clock)
+        │   (idempotent, serialized under profile_sync_lock; gate read
+        │    `has_published_profile` before any footprint; `keys` is None for
+        │    a pass with nothing saved, which signs nothing)
+        ├─ nothing saved, no owed event, pool coverage settled ──► NothingPending,
+        │      no relay client built
         ├─ owed event for local_version?  ── yes ──► RE-SEND PASS
         │      offer the IDENTICAL signed kind-0 only to uncovered(pool, covered)
         │      read back each relay that answered: Holds ⇒ covered,
@@ -49,7 +53,20 @@ sync_own_profile(keys, clock)   (idempotent, serialized under profile_sync_lock;
         │      Lacks / not drained ⇒ still owed (timestamp refusal + Lacks ⇒
         │      one fresh signing per edit, then owed)
         │      commit_profile_coverage: covered ⊇ pool ⇒ clean; else ladder
-        └─ no ──► FULL PASS
+        │      (with nothing saved a refused copy is never signed afresh)
+        ├─ nothing saved, pool coverage owed ──► COVERAGE PASS (no key, no signing)
+        │      read_own_per_relay over the WHOLE pool; act on a whole read
+        │      (every relay ended its answer or serves the newest copy), or
+        │      on the copy this device recorded as its own (dated own row,
+        │      same created_at); else ladder: a silent relay may hold a newer
+        │      copy — a blank that retracted the one in hand
+        │      no relay serves a profile ⇒ settle, publish nothing
+        │      newest copy older than the dated own row ⇒ settle, offer nothing
+        │      else offer the IDENTICAL served kind-0 to the relays that
+        │      answered without it, read back (an OK is no coverage);
+        │      all covered ⇒ covered_pool = pool; else the copy is the owed
+        │      event at the unchanged version, ladder advanced
+        └─ a save is pending ──► FULL PASS
                Blossom upload of staged picture  ∥  read_own_profile_on_relays
                (every pool relay at once, ≤ 5 s connect + 4 s REQ each)
                cache the newest copy if newer than the row
@@ -70,8 +87,12 @@ and from ONE foreground timer armed to the ladder's relative due time
 (`next_retry_in_secs`) — only while the outbox is pending, the backoff is not
 yet due and the app is `resumed`; it is cancelled on pause/hide/detach and on
 an identity-scope reset, re-armed on resume, and never armed from a pass that
-left the state due. While a sync is in flight another trigger neither starts
-nor queues one. Never from the background isolates.
+left the state due — except once per failure streak, 30 s after a pass that
+THREW before any attempt was recorded, which would otherwise wait for the next
+resume. "Pending" here is `CircleManager::profile_pending_state`: a save to
+publish, OR pool coverage owed (below), so the same drivers run a coverage
+pass with no Dart of their own. While a sync is in flight another trigger
+neither starts nor queues one. Never from the background isolates.
 
 ### Key pieces
 
@@ -81,10 +102,10 @@ nor queues one. Never from the background isolates.
 | Own read | `haven-core/src/profile/fetch.rs::read_own_profile_on_relays` on `read_own_per_relay` | every pool relay at once, each bounded by its own connect + `PROFILE_AUTHOR_FETCH_TIMEOUT` (together `PROFILE_OWN_READ_BOUND`, 9 s); events served before a missed `EOSE` are kept; `newest_own_copy` resolves across relays (newest `created_at`, lower id on a tie); `Published / Absent / Unverified` |
 | Profile-plane offer | `haven-core/src/relay/manager.rs::offer_profile_event` (`offer_metadata` in `profile/publish.rs`) | per relay concurrently: connect, then `send_event` under `PROFILE_PUBLISH_ACK_TIMEOUT`; a failed connect is `Unanswered`, never sent; ONE attempt, the full harvest returned even with no ack; `publish_profile_event` (2 attempts / 1 s backoff) stays for the deletion; location path untouched |
 | Retraction gate | `haven-core/src/profile/consent.rs::retraction_gate` | pure: `(published_here, OwnReadVerdict, local_dated) → Publish / Settle / Hold`; evaluated in `sync_own_profile` on what the pass will ACTUALLY publish |
-| Durable outbox + ledger | `haven-core/src/circle/storage_profile_sync.rs` | `profile_sync_state` (local / synced / published versions, sparse `edits_json`, `picture_staged`, `sync_attempts`, `next_retry_at`) and `profile_publish_debt` (`pubkey, version, event_json, covered_json`; `CREATE TABLE IF NOT EXISTS`, no migration); `stage_own_picture_removal`, `commit_profile_sync`, `profile_publish_debt` + `commit_profile_coverage`, `discard_profile_publish_debt`, `settle_profile_sync`; every commit is one transaction with a compare-and-set |
-| Orchestration | `haven-core/src/circle/profile_sync.rs::sync_own_profile` | holds `profile_sync_lock`; takes a clock so the backoff is dated at pass END; outcomes, never `Err`, for upload/publish failures; `ProfileSyncReport { outcome, still_pending }` (no counts) |
+| Durable outbox + ledger | `haven-core/src/circle/storage_profile_sync.rs` | `profile_sync_state` (local / synced / published versions, sparse `edits_json`, `picture_staged`, `sync_attempts`, `next_retry_at`, and `covered_pool_json` — the usable pool coverage was last settled against, NULL until it has been; added to an existing database by one guarded `ALTER`) and `profile_publish_debt` (`pubkey, version, event_json, covered_json`; `CREATE TABLE IF NOT EXISTS`, no migration); `profile_coverage_owed`, `settle_profile_coverage`, `owe_profile_coverage`, `record_profile_coverage_attempt` (each a compare-and-set on "this version, nothing pending", and each creates the row an install that saved nothing lacks, so its ladder has somewhere to advance); `stage_own_picture_removal`, `commit_profile_sync`, `profile_publish_debt` + `commit_profile_coverage`, `discard_profile_publish_debt`, `settle_profile_sync`; every commit is one transaction with a compare-and-set |
+| Orchestration | `haven-core/src/circle/profile_sync.rs::sync_own_profile` | holds `profile_sync_lock`; takes a clock so the backoff is dated at pass END; outcomes, never `Err`, for upload/publish failures; `ProfileSyncReport { outcome, still_pending }` (no counts; `still_pending` counts owed coverage); every `offer_metadata` and the upload stay in its own body (guard check 6), the coverage decision in `judge_coverage` / `close_coverage` |
 | Sealed upload type | `haven-core/src/avatar/image.rs::StagedPicture` | only the sanitizer (or cache rehydration, which recomputes the hash) can mint bytes that reach Blossom |
-| FFI | `haven/rust_builder/src/api.rs` | `save_my_profile_local`, `save_my_profile_picture_local`, `remove_my_profile_picture` (no secret, no lock, no relay: `stage_own_picture_removal`, returns the stored row), `sync_my_profile` (pending + pool pre-checks before any key is built; clock = `profile_now_secs`), `profile_pending_state` (`pending`, `retry_due`, `next_retry_in_secs: Option<u32>` — relative, ≤ the longest rung, never an instant); `delete_my_public_profile` keeps its own gate and lock; `get_cached_profile` is async |
+| FFI | `haven/rust_builder/src/api.rs` | `save_my_profile_local`, `save_my_profile_picture_local`, `remove_my_profile_picture` (no secret, no lock, no relay: `stage_own_picture_removal`, returns the stored row), `sync_my_profile` (pending + pool pre-checks before any key is built, and a key is built only when a save is pending — a coverage pass never touches the secret; clock = `profile_now_secs`), `profile_pending_state` (`pending`, `retry_due`, `next_retry_in_secs: Option<u32>` — relative, ≤ the longest rung, never an instant); `delete_my_public_profile` keeps its own gate and lock; `get_cached_profile` is async |
 | Flutter | `providers/profile_sync_provider.dart` | one stateless coalescing `OwnProfileSyncController` (`Notifier<void>`, identity-scoped, non-autoDispose, absent from background isolates): `sync()` unconditional, `retryIfPending()` due-gated, the one foreground timer, a bare `WidgetsBindingObserver` that cancels it off-`resumed` and calls `retryIfPending()` on resume. No widget, no status, no Retry |
 
 ## Invariants this design adds (all CI- or test-pinned)
@@ -112,6 +133,28 @@ nor queues one. Never from the background isolates.
   `covered ⊇ usable pool`, so a relay that leaves the pool (retired,
   contaminated, removed by the user) ends its debt at the next pass with no
   network.
+- **The covered pool.** "Every usable pool relay serves it" is true of the
+  pool as it was. `covered_pool_json` records that pool; coverage is OWED when
+  none is recorded (an upgraded install, a storage reset, an identity that
+  saved nothing) or the usable pool has a relay it lacks (a release swapped
+  pool relays, the user added one). A pool that only shrank owes nothing, an
+  underflowed pool owes nothing, and a RETRACTED profile owes nothing: the
+  reset a deletion makes (`reset_profile_sync_rows`, which creates the row an
+  account that never saved lacks) records "no pool owed" in place of a pool,
+  so neither a blank nor — when the deletion could not be verified — the very
+  profile the user asked to delete is re-sent to a relay that joins, until
+  the next save settles a pool of its own. A coverage pass re-sends the newest own
+  kind-0 the pool serves, byte for byte, to the relays that answered without
+  it: it never signs, never takes a key, never makes a first public event (no
+  relay serves one ⇒ settled with nothing sent), and never acts on a partial
+  read or on a copy older than the dated own row — either could put a
+  retracted profile on a relay that never had it. Its records are keyed to the
+  version it started from, so a save made while it is on the network keeps its
+  own owed event and its own ladder. A relay that refuses the served copy as
+  too old stays owed on the ladder; nothing is re-dated for it. This is what
+  the 2026-10-31 pool swap needed and did not have: profiles saved before it
+  stayed on four of the eight relays, and a peer whose two assigned relays
+  were both new ones could never resolve them.
 - A timestamp-classified refusal of the owed event (prefix only; the text is
   never logged) with a `Lacks` read-back earns ONE fresh signing per edit
   (`resigned`, reset by every staging call); a relay that refuses the fresh
@@ -240,6 +283,19 @@ nor queues one. Never from the background isolates.
 - **A connectivity-package trigger** — link state is not reachability; it
   would fire outside the ladder; a new dependency not justified.
 - **A timer that arms from a pass that left the state due** — a tight loop.
+  The one bounded exception is a pass that THREW before an attempt was
+  recorded: a single 30 s fallback per failure streak (reset by a pass that
+  completes, and by a resume), so a persistent local fault costs one retry,
+  not one every 30 s.
+- **Signing afresh in a coverage pass** — re-dating the copy the pool serves
+  would publish, under a new `created_at`, a profile the user did not save
+  now; the pass re-sends the bytes that are already public or nothing.
+- **Acting on a partial read in a coverage pass** — the relays that did not
+  answer may hold a blank or a rename newer than the copy in hand; re-sending
+  the older one would put a retracted profile on every relay that lacks it.
+- **Marking the pool covered without reading it** (a migration backfill) —
+  nothing recorded which relays an earlier build's publish reached, and the
+  2026-10-31 swap proves the answer was "not all of today's".
 
 ## Accepted costs
 
@@ -259,6 +315,18 @@ nor queues one. Never from the background isolates.
   when every relay of the usable pool serves it, when the relay that never
   does leaves the pool, or when a later save, removal, deletion or redirect
   supersedes it.
+- A coverage pass costs one single-author `REQ` for the own pubkey to every
+  usable pool relay — what a save's merge-base read already shows them — once
+  per install after this lands, and again when the usable pool gains a relay.
+  While some relay does not answer it repeats on the ladder (the 6 h rung at
+  most, foreground only), reading the whole pool each time until one read is
+  whole; once a copy is owed, only the relays that lack it are dialled. A
+  relay that never takes the served copy (it refuses old timestamps) stays
+  owed indefinitely, as OD-R1 already accepts for a save.
+- **Not built, owner's call:** a relay that takes the profile and drops it
+  LATER is not detected — the one read after upgrade catches a drop that
+  already happened, and nothing re-reads a settled pool. Closing that needs a
+  periodic pool-wide read, which is a standing cadence signal to eight relays.
 - An offline removal is instant on the device while the photo stays public
   until the next pass lands — the same window every other edit has (OD-F3);
   the confirm dialog's disclosure that the image file stays on the server is

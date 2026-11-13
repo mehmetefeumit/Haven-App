@@ -32,9 +32,12 @@ import 'package:haven/src/providers/member_directory_provider.dart';
 import 'package:haven/src/providers/stranger_profile_provider.dart';
 import 'package:haven/src/services/circle_service.dart' show DirectoryTier;
 import 'package:haven/src/services/member_directory_service.dart';
+import 'package:haven/src/services/profile_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/bidi_isolate.dart';
+import 'package:haven/src/utils/member_display.dart';
 import 'package:haven/src/utils/member_pick_state.dart';
+import 'package:haven/src/utils/npub_speech.dart';
 import 'package:haven/src/utils/npub_validator.dart';
 import 'package:haven/src/widgets/circles/member_avatar.dart';
 import 'package:haven/src/widgets/common/section_header.dart';
@@ -157,7 +160,9 @@ class _MemberPickerResultsState extends ConsumerState<MemberPickerResults> {
     // matches" here would tell the user something the screen does not yet
     // know, and the correction would never follow: `build`'s loading→settled
     // transition is what re-arms this call once the read finishes (plan F1).
-    if (directory.isLoading) return;
+    // A refresh that keeps the previous value is not a first load: the rows
+    // on screen are still the answer.
+    if (directory.isLoading && !directory.hasValue) return;
 
     // A read failure (plan F2) has no result set to describe, and must not
     // be spoken as "no matches" — the visible branch below already renders
@@ -185,16 +190,14 @@ class _MemberPickerResultsState extends ConsumerState<MemberPickerResults> {
       return;
     }
 
-    final results = ref.read(
-      memberDirectoryResultsProvider(widget.query),
-    );
-    // A pending/resolved typed-stranger row is itself an offered match — it
-    // must not be announced as "no matches" while it is exactly what answers
-    // the query (D2).
+    final results = ref.read(memberDirectoryResultsProvider(widget.query));
+    // A pending/resolved typed-stranger row is what answers the query — it
+    // must not be announced as "no matches", nor as a count (D2).
     final strangerNpub = publicProfilesEnabled
         ? eligibleStrangerNpub(
             widget.query,
             localResults: results,
+            directoryDegraded: _directoryDegraded(directory),
             stagedNpubs: widget.stagedNpubs,
             circleMemberNpubs: widget.circleMemberNpubs,
             selfNpub: ref.read(identityProvider).valueOrNull?.npub,
@@ -207,6 +210,22 @@ class _MemberPickerResultsState extends ConsumerState<MemberPickerResults> {
     // a query that matches nobody must not repeat "no matches" per character.
     if (_lastAnnounced != null && listEquals(_lastAnnounced, keys)) return;
     _lastAnnounced = keys;
+
+    // The typed row speaks how its lookup settles; a count spoken on top
+    // would cut that off. `exists` first, so only the row starts a lookup.
+    if (strangerNpub != null) {
+      final lookup = strangerProfileResolveProvider(strangerNpub);
+      if (ref.exists(lookup) && ref.read(lookup).isLoading) {
+        unawaited(
+          SemanticsService.sendAnnouncement(
+            View.of(context),
+            AppLocalizations.of(context).memberPickerStrangerLookingUp,
+            Directionality.of(context),
+          ),
+        );
+      }
+      return;
+    }
 
     // Mirrors the visible branch's fresh-install gate (`build`, below): "No
     // matches" answers a query, and someone who shares no circles yet has
@@ -243,15 +262,20 @@ class _MemberPickerResultsState extends ConsumerState<MemberPickerResults> {
     // query itself never changes across this transition, so nothing else
     // would. Gated on a non-empty query — an empty one is the auto-populate
     // view, which was never silently misannounced in the first place.
+    //
+    // Only a FIRST load counts. A refresh (the profile refresh invalidates
+    // the directory) reports `isLoading` while keeping the previous value;
+    // replacing the rows with a spinner then would flash the list, lose the
+    // scroll position and drop screen-reader focus, for rows that stay the
+    // right answer until the new ones arrive.
+    final firstLoad = directory.isLoading && !directory.hasValue;
     final wasLoading = _directoryWasLoading;
-    _directoryWasLoading = directory.isLoading;
-    if ((wasLoading ?? false) &&
-        !directory.isLoading &&
-        widget.query.trim().isNotEmpty) {
+    _directoryWasLoading = firstLoad;
+    if ((wasLoading ?? false) && !firstLoad && widget.query.trim().isNotEmpty) {
       _scheduleAnnouncement();
     }
 
-    if (directory.isLoading) {
+    if (firstLoad) {
       return SliverToBoxAdapter(
         child: Padding(
           padding: const EdgeInsets.symmetric(vertical: HavenSpacing.base),
@@ -268,12 +292,13 @@ class _MemberPickerResultsState extends ConsumerState<MemberPickerResults> {
       );
     }
 
-    // Computed only once the directory has settled (never while `isLoading`
+    // Computed only once the directory has settled (never on its first load
     // above): until it has, `results` is unconditionally empty regardless of
     // the query, so gate 2 ("not already known locally") would read as
     // trivially satisfied for someone who actually IS a known co-member —
     // firing a network request for them the instant the directory finishes
-    // loading a moment later. `publicProfilesEnabled` is the build-time kill
+    // loading a moment later. A failed or degraded read fails the gate for
+    // the same reason. `publicProfilesEnabled` is the build-time kill
     // switch for the profile-fetch machinery (`constants/feature_flags.dart`)
     // — off means this call site never even constructs the eligibility
     // check, exactly like `MemberAvatar` never watching its own profile
@@ -282,6 +307,7 @@ class _MemberPickerResultsState extends ConsumerState<MemberPickerResults> {
         ? eligibleStrangerNpub(
             widget.query,
             localResults: results,
+            directoryDegraded: _directoryDegraded(directory),
             stagedNpubs: widget.stagedNpubs,
             circleMemberNpubs: widget.circleMemberNpubs,
             selfNpub: identity?.npub,
@@ -469,20 +495,29 @@ Set<String> collidingDisplayNames(Iterable<MemberCandidate> entries) {
   return colliding;
 }
 
+/// Whether [directory] cannot vouch that a person is NOT already known
+/// locally: a failed read, or one that degraded to [MemberDirectory
+/// .readFailed].
+bool _directoryDegraded(AsyncValue<MemberDirectory> directory) =>
+    directory.hasError || (directory.valueOrNull?.degraded ?? true);
+
 /// The complete, valid npub eligible for D2's network resolve, or `null` when
 /// any of the three caller-side gates fails — in which case NO network call
 /// may be made (plan §10 D2).
 ///
-/// The three gates, all of which must hold:
-/// 1. [query] is a COMPLETE match for [NpubValidator.extract] — never a
-///    partial prefix mid-keystroke, and never a substring found inside a
-///    longer pasted string.
-/// 2. [query] does not already resolve to a [MemberCandidate] in
-///    [localResults] — the caller's already-computed, zero-wire-cost local
-///    search. If it did, that row renders and the network is never asked.
-/// 3. [resolveEntryPickState] returns [MemberPickState.selectable] for
-///    [query] against [stagedNpubs]/[circleMemberNpubs]/[selfNpub] — not
-///    self, not already staged, not already in the target circle.
+/// Surrounding whitespace is ignored — a pasted key often carries a trailing
+/// space or newline — and the trimmed npub is what is returned. The three
+/// gates, all of which must hold for the trimmed [query]:
+/// 1. It is a COMPLETE match for [NpubValidator.extract] — never a partial
+///    prefix mid-keystroke, and never a substring found inside a longer
+///    pasted string.
+/// 2. It does not already resolve to a [MemberCandidate] in [localResults]
+///    — the caller's already-computed, zero-wire-cost local search. If it
+///    did, that row renders and the network is never asked. A
+///    [directoryDegraded] read cannot say that, so it fails this gate.
+/// 3. [resolveEntryPickState] returns [MemberPickState.selectable] for it
+///    against [stagedNpubs]/[circleMemberNpubs]/[selfNpub] — not self, not
+///    already staged, not already in the target circle.
 ///
 /// Extracted and `@visibleForTesting` so the gating is provable independent
 /// of the widget tree, and reused identically by both the row that renders
@@ -492,20 +527,23 @@ Set<String> collidingDisplayNames(Iterable<MemberCandidate> entries) {
 String? eligibleStrangerNpub(
   String query, {
   required List<MemberCandidate> localResults,
+  required bool directoryDegraded,
   required Set<String> stagedNpubs,
   required Set<String> circleMemberNpubs,
   required String? selfNpub,
 }) {
-  if (NpubValidator.extract(query) != query) return null;
-  if (localResults.any((c) => c.npub == query)) return null;
+  final npub = query.trim();
+  if (NpubValidator.extract(npub) != npub) return null;
+  if (directoryDegraded) return null;
+  if (localResults.any((c) => c.npub == npub)) return null;
   final state = resolveEntryPickState(
-    query,
+    npub,
     stagedNpubs: stagedNpubs,
     circleMemberNpubs: circleMemberNpubs,
     selfNpub: selfNpub,
   );
   if (state != MemberPickState.selectable) return null;
-  return query;
+  return npub;
 }
 
 /// The ONE row offered for a complete, valid, D2-eligible npub — the only
@@ -517,6 +555,10 @@ String? eligibleStrangerNpub(
 /// Always tappable, unlike [MemberCandidateTile]: by the time this widget
 /// exists, [eligibleStrangerNpub] has already confirmed [MemberPickState
 /// .selectable], so there is no refusal state left to render.
+///
+/// Three states, each shown AND spoken differently — looking up, found (the
+/// published name over the trimmed npub) and not found — so a screen-reader
+/// user is never left guessing whether the lookup is still running.
 class _TypedStrangerRow extends ConsumerWidget {
   const _TypedStrangerRow({required this.npub, required this.onSelected});
 
@@ -534,27 +576,51 @@ class _TypedStrangerRow extends ConsumerWidget {
     // instance, so a stale in-flight resolve for a since-abandoned key is
     // never observed here (see the provider's own doc for why that is
     // correct by construction, not by a manually-tracked "latest" flag).
-    final resolve = ref.watch(strangerProfileResolveProvider(npub));
+    final lookup = strangerProfileResolveProvider(npub);
+    // Spoken once, when THIS lookup settles: not on a rebuild, and not when
+    // a trailing space leaves the same npub (and so the same lookup) in place.
+    ref.listen(lookup, (previous, next) {
+      if (!(previous?.isLoading ?? false) || next.isLoading) return;
+      final settledName = _nameOf(next.valueOrNull);
+      unawaited(
+        SemanticsService.sendAnnouncement(
+          View.of(context),
+          settledName == null
+              ? l10n.memberPickerStrangerNotFound
+              : l10n.memberPickerStrangerFoundAnnouncement(
+                  bidiIsolate(settledName),
+                ),
+          Directionality.of(context),
+        ),
+      );
+    });
+    final resolve = ref.watch(lookup);
     final profile = resolve.valueOrNull;
     final isLoading = resolve.isLoading;
-    final name = profile?.displayName ?? profile?.name;
+    if (profile != null && profile.pictureBytes == null) {
+      ref.watch(strangerPictureProvider(profile.pubkeyHex));
+    }
+    final name = _nameOf(profile);
     final shortNpub = NpubValidator.shortenForDisplay(npub);
     final lookupNote = l10n.memberPickerStrangerLookupNote;
+    final status = name != null
+        ? null
+        : isLoading
+        ? l10n.memberPickerStrangerLookingUp
+        : l10n.memberPickerStrangerNotFound;
+    final secondaryStyle = Theme.of(
+      context,
+    ).textTheme.bodySmall?.copyWith(color: colorScheme.onSurfaceVariant);
 
     // Same no-ellipsis, forced-LTR rule the rest of the picker applies to an
     // npub — see `MemberCandidateTile.npubLine`'s doc.
-    Widget npubLine(TextStyle style) => Text(
-      shortNpub,
-      textDirection: TextDirection.ltr,
-      style: style,
-    );
+    Widget npubLine(TextStyle style) =>
+        Text(shortNpub, textDirection: TextDirection.ltr, style: style);
 
     Widget leading;
     if (profile != null) {
-      // Only ever cache-driven: `MemberAvatar` calls `memberProfileProvider`,
-      // which reads the LOCAL cache and never downloads a picture on its own
-      // (Rule 8/D2) — the resolve above is what populated this pubkey's row,
-      // if anything did.
+      // Cache-driven: `MemberAvatar` reads the LOCAL cache, which
+      // `strangerPictureProvider` above fills and then invalidates.
       leading = MemberAvatar(pubkey: profile.pubkeyHex, displayName: name);
     } else {
       leading = CircleAvatar(
@@ -567,7 +633,6 @@ class _TypedStrangerRow extends ConsumerWidget {
                 child: CircularProgressIndicator(
                   strokeWidth: 2,
                   color: colorScheme.onSurfaceVariant,
-                  semanticsLabel: lookupNote,
                 ),
               )
             : const Icon(LucideIcons.userRound),
@@ -578,8 +643,11 @@ class _TypedStrangerRow extends ConsumerWidget {
       button: true,
       excludeSemantics: true,
       onTap: () => onSelected(npub),
+      // The note stays in the LABEL, not a hint: hints can be switched off,
+      // and it is a privacy disclosure.
       label: [
-        bidiIsolate(name ?? _chunkForSpeech(shortNpub)),
+        bidiIsolate(name ?? chunkNpubForSpeech(shortNpub)),
+        ?status,
         lookupNote,
       ].join(', '),
       customSemanticsActions: {
@@ -590,7 +658,7 @@ class _TypedStrangerRow extends ConsumerWidget {
         // process-wide map with no prune path; the key is spoken from the
         // callback, never held in the label itself).
         CustomSemanticsAction(label: l10n.memberPickerReadPublicKey): () =>
-            _speakNpub(context, shortNpub),
+            speakNpub(context, shortNpub),
       },
       child: ListTile(
         leading: leading,
@@ -607,17 +675,21 @@ class _TypedStrangerRow extends ConsumerWidget {
                   color: colorScheme.onSurfaceVariant,
                 ),
               ),
-            Text(
-              lookupNote,
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: colorScheme.onSurfaceVariant,
-              ),
-            ),
+            if (status != null) Text(status, style: secondaryStyle),
+            Text(lookupNote, style: secondaryStyle),
           ],
         ),
         onTap: () => onSelected(npub),
       ),
     );
+  }
+
+  /// The published name to show for [profile], or `null` when it has none —
+  /// the same precedence as every other member row.
+  static String? _nameOf(Profile? profile) {
+    if (profile == null) return null;
+    final name = resolveEffectiveMemberName(npubFallback: '', profile: profile);
+    return name.isEmpty ? null : name;
   }
 }
 
@@ -696,11 +768,8 @@ class MemberCandidateTile extends StatelessWidget {
     // bech32 key laid out right-to-left is a different string to the eye.
     // It carries the row when nothing else identifies the person, and steps
     // down beside a name, matching `CircleMemberTile`'s two positions.
-    Widget npubLine(TextStyle style) => Text(
-      shortNpub,
-      textDirection: TextDirection.ltr,
-      style: style,
-    );
+    Widget npubLine(TextStyle style) =>
+        Text(shortNpub, textDirection: TextDirection.ltr, style: style);
 
     return Semantics(
       button: selectable,
@@ -715,13 +784,10 @@ class MemberCandidateTile extends StatelessWidget {
         // of the process — outside SQLCipher, unreachable by the logout
         // wipe. The key is spoken from the callback instead.
         CustomSemanticsAction(label: l10n.memberPickerReadPublicKey): () =>
-            _speakNpub(context, shortNpub),
+            speakNpub(context, shortNpub),
       },
       child: ListTile(
-        leading: MemberAvatar(
-          pubkey: candidate.pubkeyHex,
-          displayName: name,
-        ),
+        leading: MemberAvatar(pubkey: candidate.pubkeyHex, displayName: name),
         title: name == null
             ? npubLine(HavenTypography.mono.copyWith(fontSize: 14))
             : Row(
@@ -806,78 +872,22 @@ class MemberCandidateTile extends StatelessWidget {
     String? reason,
     String? collisionLabel,
   ) {
-    final identity = name ?? _chunkForSpeech(shortNpub);
+    final identity = name ?? chunkNpubForSpeech(shortNpub);
     final tier = switch (candidate.tier) {
       DirectoryTier.current => l10n.memberPickerTierRoster,
       DirectoryTier.recent => l10n.memberPickerTierRecent,
     };
     return [
       bidiIsolate(identity),
-      if (name != null && undistinguishedCollision) _chunkForSpeech(shortNpub),
+      if (name != null && undistinguishedCollision)
+        chunkNpubForSpeech(shortNpub),
       tier,
       if (candidate.petname != null) l10n.memberPickerNicknameNote,
       if (collisionLabel != null) collisionLabel,
       if (reason != null) reason,
     ].join(', ');
   }
-
 }
-
-/// Speaks [shortNpub] aloud, chunked into pronounceable groups.
-///
-/// A free function (not a `MemberCandidateTile` method) so [_TypedStrangerRow]
-/// can share it: both rows carry the same "Read public key aloud" custom
-/// action for the same reason — a resolved name (published or a nickname)
-/// keeps the raw key out of the main label, so this action is the only way a
-/// screen-reader user can still hear it for verification.
-Future<void> _speakNpub(BuildContext context, String shortNpub) {
-  return SemanticsService.sendAnnouncement(
-    View.of(context),
-    _chunkForSpeech(shortNpub),
-    TextDirection.ltr,
-  );
-}
-
-/// The elision [NpubValidator.shortenForDisplay] puts between the retained
-/// prefix and suffix. Bech32's data charset has no `.`, so this substring
-/// can only ever be the elision itself, never a data character.
-const _npubElision = '...';
-
-/// Groups [shortNpub] into runs of four so a screen reader reads a key as
-/// separable pieces instead of one unpronounceable word.
-///
-/// Purely a rendering of the SAME characters, in the same order: strip the
-/// spaces and the original is back, which is what makes it usable for
-/// checking a key against one read aloud elsewhere.
-///
-/// The retained prefix and suffix either side of the elision are chunked
-/// INDEPENDENTLY, with the elision left as its own token, rather than
-/// chunking the whole string end to end (plan F5): a flat every-four split
-/// cuts across the elision boundary at Haven's 12/6 format, fusing the dots
-/// to the first checksum character and leaving a one-character final
-/// chunk — so depending on a TTS engine's punctuation verbosity the elision
-/// is spoken, paused over, or dropped, and in the last case the two
-/// retained runs are heard as one contiguous key, exactly what the
-/// truncation exists to prevent. A string with no elision (an untruncated
-/// npub) falls back to one flat run.
-String _chunkForSpeech(String shortNpub) {
-  final splitAt = shortNpub.indexOf(_npubElision);
-  if (splitAt == -1) return _chunkRun(shortNpub).join(' ');
-  final prefix = shortNpub.substring(0, splitAt);
-  final suffix = shortNpub.substring(splitAt + _npubElision.length);
-  return [..._chunkRun(prefix), _npubElision, ..._chunkRun(suffix)].join(' ');
-}
-
-/// Splits [run] into consecutive four-character groups, the last as short
-/// as one character when [run]'s length is not a multiple of four.
-List<String> _chunkRun(String run) {
-  final chunks = <String>[];
-  for (var i = 0; i < run.length; i += 4) {
-    chunks.add(run.substring(i, (i + 4).clamp(0, run.length)));
-  }
-  return chunks;
-}
-
 
 /// The mark that says the name beside it is the user's own local petname,
 /// not the person's published name.

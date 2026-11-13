@@ -2,9 +2,12 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/utils/bidi_isolate.dart';
+import 'package:haven/src/utils/npub_speech.dart';
 import 'package:haven/src/utils/npub_validator.dart';
 
 /// Displays a compact summary of selected members.
@@ -14,6 +17,7 @@ class SelectedMembersSummary extends StatelessWidget {
   /// Creates a [SelectedMembersSummary].
   const SelectedMembersSummary({
     required this.members,
+    this.names = const {},
     this.maxVisible = 3,
     super.key,
   });
@@ -26,6 +30,11 @@ class SelectedMembersSummary extends StatelessWidget {
   /// cross-checked against the npub they were handed
   /// (docs/MEMBER_PICKER_PLAN.md §7.1).
   final List<String> members;
+
+  /// Resolved names, keyed by the identifier in [members]. A member with no
+  /// entry is shown by the key alone; one with an entry by the name with the
+  /// key beneath it, because a name is chosen by whoever published it.
+  final Map<String, String> names;
 
   /// Maximum number of chips to show before "+N more".
   final int maxVisible;
@@ -45,7 +54,8 @@ class SelectedMembersSummary extends StatelessWidget {
       crossAxisAlignment: WrapCrossAlignment.center,
       children: [
         ...visibleMembers.map(
-          (member) => _CompactMemberChip(identifier: member),
+          (member) =>
+              _CompactMemberChip(identifier: member, name: names[member]),
         ),
         if (remainingCount > 0)
           Text(
@@ -60,29 +70,63 @@ class SelectedMembersSummary extends StatelessWidget {
 }
 
 class _CompactMemberChip extends StatelessWidget {
-  const _CompactMemberChip({required this.identifier});
+  const _CompactMemberChip({required this.identifier, this.name});
 
   final String identifier;
+
+  final String? name;
 
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final shortNpub = NpubValidator.shortenForDisplay(identifier);
 
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: HavenSpacing.sm,
-        vertical: HavenSpacing.xs,
-      ),
-      decoration: BoxDecoration(
-        color: colorScheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(HavenSpacing.xs),
-      ),
-      // No `maxLines`/`overflow`: the identifier wraps rather than clipping,
-      // because the trailing characters are what distinguish two staged
-      // members from one another.
-      child: Text(
-        NpubValidator.shortenForDisplay(identifier),
-        style: HavenTypography.monoSmall,
+    // Spoken as on the staged row (`PendingMemberTile`): a trimmed key read
+    // as one word is noise, so it goes in chunks, or behind the action when
+    // a name carries the chip.
+    return Semantics(
+      container: true,
+      excludeSemantics: true,
+      label: bidiIsolate(name ?? chunkNpubForSpeech(shortNpub)),
+      customSemanticsActions: name == null
+          ? null
+          : {
+              CustomSemanticsAction(
+                label: AppLocalizations.of(context).memberPickerReadPublicKey,
+              ): () =>
+                  speakNpub(context, shortNpub),
+            },
+      child: Container(
+        padding: const EdgeInsets.symmetric(
+          horizontal: HavenSpacing.sm,
+          vertical: HavenSpacing.xs,
+        ),
+        decoration: BoxDecoration(
+          color: colorScheme.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(HavenSpacing.xs),
+        ),
+        // No `maxLines`/`overflow` on the identifier: it wraps rather than
+        // clipping, because the trailing characters are what distinguish two
+        // staged members from one another. Forced LTR: a bech32 key laid out
+        // right-to-left is a different string to the eye.
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (name case final name?)
+              Text(
+                name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            Text(
+              shortNpub,
+              textDirection: TextDirection.ltr,
+              style: HavenTypography.monoSmall,
+            ),
+          ],
+        ),
       ),
     );
   }

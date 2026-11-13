@@ -1080,8 +1080,9 @@ bgp_calibrated_app_state() {
   printf '%s\n' "${state}"
 }
 
-# bgp_secs_until <target-epoch> <cap-secs> — how long to wait for <target>,
-# never more than <cap> and never less than nothing.
+# bgp_secs_until <target-epoch> <cap-secs> [now] — how long to wait for
+# <target>, never more than <cap> and never less than nothing. [now] defaults
+# to the clock, as `bgp_budget_after_lag`'s does.
 #
 # The host takes over P3's settle window when the OS reclaims the app inside
 # it, and that takeover must cost the lane NO extra wall clock: <cap> is
@@ -1089,9 +1090,9 @@ bgp_calibrated_app_state() {
 # would have spent. A target that is not a number, or already past, is 0 —
 # the same fail-to-now reading `bgp_budget_after_lag` gives a bad anchor.
 bgp_secs_until() {
-  local target="${1:-}" cap="$2" remaining
+  local target="${1:-}" cap="$2" now="${3:-$(bgp_now)}" remaining
   if ! [[ "${target}" =~ ^[0-9]+$ ]]; then printf '0\n'; return 0; fi
-  remaining=$(( target - $(bgp_now) ))
+  remaining=$(( target - now ))
   if (( remaining <= 0 )); then printf '0\n'; return 0; fi
   if (( remaining > cap )); then printf '%s\n' "${cap}"; return 0; fi
   printf '%s\n' "${remaining}"
@@ -2105,12 +2106,14 @@ Usage: simctl location <device> <action> [<arguments>]
   #     future one is the remainder, and a remainder larger than what is left
   #     of the DISARM budget is CAPPED — without the cap a stale anchor from a
   #     previous attempt would hold the job for its whole span.
+  local t_now
+  t_now="$(bgp_now)"
   _check "T1 a target already past waits for nothing" \
-    0 "$(bgp_secs_until "$(( $(bgp_now) - 5 ))" 200)"
+    0 "$(bgp_secs_until "$(( t_now - 5 ))" 200 "${t_now}")"
   _check "T2 a future target waits out the remainder" \
-    30 "$(bgp_secs_until "$(( $(bgp_now) + 30 ))" 200)"
+    30 "$(bgp_secs_until "$(( t_now + 30 ))" 200 "${t_now}")"
   _check "T3 a remainder past the budget is capped" \
-    200 "$(bgp_secs_until "$(( $(bgp_now) + 9999 ))" 200)"
+    200 "$(bgp_secs_until "$(( t_now + 9999 ))" 200 "${t_now}")"
   _check "T4 an unreadable anchor waits for nothing" \
     0 "$(bgp_secs_until 'not-a-number' 200)"
 

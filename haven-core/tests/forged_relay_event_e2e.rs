@@ -533,7 +533,7 @@ async fn a_forged_own_profile_is_never_merged_into_the_one_haven_signs() {
         .stage_own_profile_edits(&own.to_hex(), &edit, NOW)
         .expect("stage the edit");
     let report = manager
-        .sync_own_profile(&keys, || NOW)
+        .sync_own_profile(&keys.public_key(), Some(&keys), || NOW)
         .await
         .expect("the sync runs");
     assert_eq!(report.outcome, ProfileSyncOutcome::Published);
@@ -589,7 +589,10 @@ async fn a_superseded_own_profile_is_never_the_base_of_the_next_edit() {
     manager
         .stage_own_profile_edits(&own.to_hex(), &edit(Some("Mine"), None), NOW)
         .expect("stage the name");
-    let first = manager.sync_own_profile(&keys, || NOW).await.expect("sync");
+    let first = manager
+        .sync_own_profile(&keys.public_key(), Some(&keys), || NOW)
+        .await
+        .expect("sync");
     assert_eq!(first.outcome, ProfileSyncOutcome::Published);
     let current = published_by_now().pop().expect("the first publish");
 
@@ -606,7 +609,7 @@ async fn a_superseded_own_profile_is_never_the_base_of_the_next_edit() {
         .stage_own_profile_edits(&own.to_hex(), &edit(None, Some("bio")), NOW + 1)
         .expect("stage the bio");
     let second = manager
-        .sync_own_profile(&keys, || NOW + 1)
+        .sync_own_profile(&keys.public_key(), Some(&keys), || NOW + 1)
         .await
         .expect("sync");
     assert_eq!(second.outcome, ProfileSyncOutcome::Published);
@@ -671,7 +674,10 @@ async fn a_newer_copy_read_for_a_publish_that_failed_is_what_the_retry_builds_on
     manager
         .stage_own_profile_edits(&own.to_hex(), &bio, NOW)
         .expect("stage the bio");
-    let failed = manager.sync_own_profile(&keys, || NOW).await.expect("sync");
+    let failed = manager
+        .sync_own_profile(&keys.public_key(), Some(&keys), || NOW)
+        .await
+        .expect("sync");
     assert_eq!(failed.outcome, ProfileSyncOutcome::PublishFailed);
     assert_eq!(
         manager
@@ -702,7 +708,7 @@ async fn a_newer_copy_read_for_a_publish_that_failed_is_what_the_retry_builds_on
         .answer(asks(own, Kind::Metadata), honest(vec![held]));
     refusing.store(false, Ordering::SeqCst);
     let retried = manager
-        .sync_own_profile(&keys, || NOW + 1)
+        .sync_own_profile(&keys.public_key(), Some(&keys), || NOW + 1)
         .await
         .expect("sync");
     assert_eq!(retried.outcome, ProfileSyncOutcome::Published);

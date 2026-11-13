@@ -989,7 +989,7 @@ async fn lifecycle_then_plants(watch: &DialWatch, needles: &mut Vec<String>) {
         .expect("the edit is staged");
     let synced = alice
         .circle
-        .sync_own_profile(&alice.keys, || now)
+        .sync_own_profile(&alice.keys.public_key(), Some(&alice.keys), || now)
         .await
         .expect("the sync runs");
     assert!(

@@ -95,7 +95,7 @@ async fn an_unreachable_pool_leaves_the_edit_pending_with_a_backoff() {
         .expect("pending")
         .local_version;
     let report = manager
-        .sync_own_profile(&keys, || NOW)
+        .sync_own_profile(&keys.public_key(), Some(&keys), || NOW)
         .await
         .expect("a failed publish is an outcome, never an error");
 
@@ -141,7 +141,10 @@ async fn the_local_row_still_shows_the_edit_while_it_is_pending() {
     manager
         .stage_own_profile_edits(&own_hex, &name_edit("Offline Name"), NOW)
         .expect("stage");
-    let report = manager.sync_own_profile(&keys, || NOW).await.expect("sync");
+    let report = manager
+        .sync_own_profile(&keys.public_key(), Some(&keys), || NOW)
+        .await
+        .expect("sync");
     assert_eq!(report.outcome, ProfileSyncOutcome::PublishFailed);
 
     let stored = manager
@@ -179,7 +182,10 @@ async fn an_auto_retry_is_gated_until_the_ladder_says_so() {
         "a fresh save is due immediately — nothing has failed yet",
     );
 
-    let report = manager.sync_own_profile(&keys, || NOW).await.expect("sync");
+    let report = manager
+        .sync_own_profile(&keys.public_key(), Some(&keys), || NOW)
+        .await
+        .expect("sync");
     assert_eq!(report.outcome, ProfileSyncOutcome::PublishFailed);
 
     let rung = PROFILE_SYNC_BACKOFF_SECS[0];
@@ -258,7 +264,7 @@ async fn a_picture_whose_publish_no_relay_took_is_uploaded_once_per_pass_and_sta
         .enumerate()
     {
         let report = manager
-            .sync_own_profile(&keys, move || now)
+            .sync_own_profile(&keys.public_key(), Some(&keys), move || now)
             .await
             .expect("sync");
         assert_eq!(
@@ -325,7 +331,7 @@ async fn a_photo_removal_offline_is_instant_and_stays_owed() {
     assert_eq!(row.metadata.display_name(), Some("Has A Photo"));
 
     let report = manager
-        .sync_own_profile(&keys, || NOW + 2)
+        .sync_own_profile(&keys.public_key(), Some(&keys), || NOW + 2)
         .await
         .expect("sync");
     assert_eq!(report.outcome, ProfileSyncOutcome::PublishFailed);

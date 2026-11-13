@@ -465,7 +465,7 @@ abstract class RustLibApi extends BaseApi {
 
   Future<ProfileSyncResultFfi> crateApiCircleManagerFfiSyncMyProfile({
     required CircleManagerFfi that,
-    required List<int> identitySecretBytes,
+    Uint8List? identitySecretBytes,
   });
 
   List<String> crateApiCircleManagerFfiUnmadeRemovalMembers({
@@ -3889,7 +3889,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   @override
   Future<ProfileSyncResultFfi> crateApiCircleManagerFfiSyncMyProfile({
     required CircleManagerFfi that,
-    required List<int> identitySecretBytes,
+    Uint8List? identitySecretBytes,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -3899,7 +3899,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          sse_encode_list_prim_u_8_loose(identitySecretBytes, serializer);
+          sse_encode_opt_list_prim_u_8_strict(identitySecretBytes, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -9793,12 +9793,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ProfilePendingStateFfi dco_decode_profile_pending_state_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 3)
-      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
     return ProfilePendingStateFfi(
       pending: dco_decode_bool(arr[0]),
-      retryDue: dco_decode_bool(arr[1]),
-      nextRetryInSecs: dco_decode_opt_box_autoadd_u_32(arr[2]),
+      savePending: dco_decode_bool(arr[1]),
+      retryDue: dco_decode_bool(arr[2]),
+      nextRetryInSecs: dco_decode_opt_box_autoadd_u_32(arr[3]),
     );
   }
 
@@ -12212,10 +12213,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_pending = sse_decode_bool(deserializer);
+    var var_savePending = sse_decode_bool(deserializer);
     var var_retryDue = sse_decode_bool(deserializer);
     var var_nextRetryInSecs = sse_decode_opt_box_autoadd_u_32(deserializer);
     return ProfilePendingStateFfi(
       pending: var_pending,
+      savePending: var_savePending,
       retryDue: var_retryDue,
       nextRetryInSecs: var_nextRetryInSecs,
     );
@@ -14603,6 +14606,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_bool(self.pending, serializer);
+    sse_encode_bool(self.savePending, serializer);
     sse_encode_bool(self.retryDue, serializer);
     sse_encode_opt_box_autoadd_u_32(self.nextRetryInSecs, serializer);
   }
@@ -15486,11 +15490,12 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   ///
   /// # Stamping
   ///
-  /// Fetched kind-0s are upserted newest-wins and stamped as HITS; authors
-  /// their assigned relay answered nothing for are stamped as MISSES (which
-  /// advances the bounded retry ladder without resetting the staleness clock).
-  /// Authors the cycle never reached — dropped at the batch deadline, or on a
-  /// relay that turned out to be unusable — are stamped **not at all**.
+  /// Fetched kind-0s are upserted newest-wins and stamped as HITS; authors a
+  /// relay answered nothing for, or was reached for and did not answer, are
+  /// stamped as MISSES (which advances the bounded retry ladder without
+  /// resetting the staleness clock). Authors no relay was reached for —
+  /// dropped at the batch deadline, or behind a relay that could not be
+  /// connected to — are stamped **not at all**.
   /// `has_picture` reflects whether CURRENT picture bytes are cached.
   ///
   /// # Errors
@@ -15790,12 +15795,15 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
         giftWrapEventJson: giftWrapEventJson,
       );
 
-  /// Whether the own profile has unpublished work, whether the persisted
-  /// backoff permits another attempt, and if not, how long until it does.
+  /// Whether the own profile has unpublished work — a saved edit, or a pool
+  /// relay it has never been sent to — whether the persisted backoff permits
+  /// another attempt, and if not, how long until it does.
   ///
   /// The read a resume trigger consults before calling
-  /// [`Self::sync_my_profile`], so a clean install never dials a relay just
-  /// to discover it had nothing to say.
+  /// [`Self::sync_my_profile`], so an install with nothing saved and its pool
+  /// coverage settled never dials a relay just to discover it had nothing to
+  /// say, and so the identity secret is fetched only for a save
+  /// ([`ProfilePendingStateFfi::save_pending`]).
   ///
   /// # Errors
   ///
@@ -16029,7 +16037,11 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   /// its own salted relay independently, so a decoy only helps if it
   /// happens to hash to the SAME relay.
   ///
-  /// The one thing this adds over `fetch_member_profiles`: `pubkey` accepts
+  /// An author with no resolved profile is asked regardless of the miss
+  /// backoff: this is one key the user explicitly asked about, not a roster
+  /// sweep.
+  ///
+  /// The other thing this adds over `fetch_member_profiles`: `pubkey` accepts
   /// EITHER hex or bech32 (`npub1…`), via `PublicKey::parse` (the pattern
   /// already used to resolve another user's pubkey in
   /// `relay/manager.rs`). `fetch_member_profiles` itself stays hex-only
@@ -16265,12 +16277,18 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
     nowSecs: nowSecs,
   );
 
-  /// Publishes whatever the own-profile outbox is holding.
+  /// Publishes whatever the own-profile outbox is holding, and re-sends the
+  /// published profile to a pool relay that has never been given it.
   ///
   /// Idempotent and safe to call from any resume/foreground trigger: with
   /// nothing pending it returns [`ProfileSyncOutcomeFfi::NothingPending`],
   /// and with an unusable relay pool [`ProfileSyncOutcomeFfi::PoolUnderflow`],
-  /// in both cases without touching the network OR the supplied secret.
+  /// in both cases without touching the network OR the supplied secret. The
+  /// secret signs a saved edit and nothing else: a caller passes `None`
+  /// unless [`ProfilePendingStateFfi::save_pending`] says one is waiting, so
+  /// a pass that only re-sends what the pool already serves never takes the
+  /// secret out of the platform keystore. A save that lands after a caller
+  /// read `save_pending` is left for the pass its own trigger starts.
   /// Network failure is an OUTCOME, not an error — the save stays queued with
   /// its retry ladder advanced, and only a local fault produces `Err`.
   ///
@@ -16279,7 +16297,7 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   /// Returns a redacted error string on a malformed secret, a secret that is
   /// not this account's identity, or a local database/signing fault.
   Future<ProfileSyncResultFfi> syncMyProfile({
-    required List<int> identitySecretBytes,
+    Uint8List? identitySecretBytes,
   }) => RustLib.instance.api.crateApiCircleManagerFfiSyncMyProfile(
     that: this,
     identitySecretBytes: identitySecretBytes,

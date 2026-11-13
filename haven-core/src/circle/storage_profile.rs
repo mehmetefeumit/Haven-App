@@ -43,8 +43,8 @@ use crate::profile::{merge_edits, picture_is_current, uncovered, PICTURE_CACHE_M
 /// lowercase hex characters.
 const PROFILE_RELAY_SALT_KEY: &str = "profile_relay_salt_v1";
 
-/// Retry ladder (seconds) for an author whose kind-0 MISSED on its assigned
-/// relay: `30s → 2min → 8min → 30min → 6h`, then 6h forever.
+/// Retry ladder (seconds) for an author whose relay answered WITHOUT a kind-0:
+/// `30s → 2min → 8min → 30min`, then 30min forever.
 ///
 /// Indexed by the author's `miss_count` **before** the miss being recorded is
 /// counted (equivalently `new_miss_count - 1`), saturating at the last rung, so
@@ -52,16 +52,22 @@ const PROFILE_RELAY_SALT_KEY: &str = "profile_relay_salt_v1";
 ///
 /// # Why the first rung is only 30 seconds
 ///
-/// Under one-relay-per-member assignment a miss means "*that* relay did not
-/// have it", not "nobody has it" — the member very likely exists and is simply
-/// not mirrored there. The retry walks to the next-ranked relay
-/// (`assigned_relay_for_attempt`), so a short first rung is what turns a
-/// transient `Unknown` into a resolved name inside one UI session instead of
-/// pinning the member as `Unknown` for a staleness tier. The ladder then grows
-/// quickly, so an author whose kind-0 genuinely does not exist costs at most a
-/// handful of REQs per day (and, per `PROFILE_MAX_RELAY_RANK`, is disclosed to
-/// a bounded number of relays no matter how long the ladder runs).
-pub const PROFILE_MISS_BACKOFF_SECS: &[i64] = &[30, 120, 480, 1_800, 21_600];
+/// A miss means "*that* relay did not have it", not "nobody has it" — the
+/// member very likely exists and is simply not mirrored there. The retry asks
+/// the author's other relay (`assigned_relay_for_attempt`), so a short first
+/// rung is what turns a transient `Unknown` into a resolved name inside one UI
+/// session instead of pinning the member as `Unknown` for a staleness tier.
+///
+/// # Why the last rung is only 30 minutes
+///
+/// The authors asked for are the people in the user's circles, and one of them
+/// who had not published yet — a new install, a publish still on its own
+/// ladder — is exactly who a longer rung would hide for hours after their
+/// profile appeared. A resolved member is re-asked on a 15 to 30 minute
+/// staleness tier already, so this rung asks no more often than that, of the
+/// same two relays (`PROFILE_MAX_RELAY_RANK`), and only while the app is in
+/// the foreground.
+pub const PROFILE_MISS_BACKOFF_SECS: &[i64] = &[30, 120, 480, 1_800];
 
 /// Everything a renderer needs about one pubkey's cached profile: the row plus
 /// the two picture facts that live in a different table.
@@ -506,13 +512,13 @@ impl CircleStorage {
     /// |---|---|---|
     /// | any (`max_age_secs == 0`, forced) | always due | `miss_count` |
     /// | no row | always due | `0` |
-    /// | `Known` | `now - fetched_at >= max_age_secs` | `0` |
+    /// | `Known` | `now - fetched_at >= max_age_secs` and `now >= next_retry_at` | `miss_count` |
     /// | `Unknown` | `now >= next_retry_at` | `miss_count` |
     /// | otherwise | not due | — |
     ///
-    /// A `Known` row is retried at attempt `0` because its assigned relay
-    /// demonstrably serves that author; only an unresolved author walks the
-    /// ladder. Output preserves input order, one entry per due input element;
+    /// A hit clears `miss_count` and `next_retry_at`, so a `Known` row no relay
+    /// has since answered without is held to its staleness alone, at attempt
+    /// `0`. Output preserves input order, one entry per due input element;
     /// callers pass the normalized, de-duplicated list.
     ///
     /// # Errors
@@ -990,6 +996,7 @@ impl CircleStorage {
             },
         )?;
         Self::write_published_event_row(&tx, 0, "", &blank.id, own_pubkey, now)?;
+        Self::ensure_profile_sync_row(&tx, &own_hex)?;
         Self::reset_profile_sync_rows(&tx, None)?;
         if !uncovered(pool, covered).is_empty() {
             Self::write_unqueued_publish_owed(&tx, &own_hex, now)?;
@@ -1051,20 +1058,23 @@ impl CircleStorage {
             return Some(Self::attempt_index(miss_count));
         }
         if state == ProfileState::Known.as_db_value() {
-            // Resolved content: plain staleness, and its assigned relay
-            // demonstrably serves this author, so stay at rank 0.
-            return (now.saturating_sub(fetched_at) >= max_age_secs).then_some(0);
+            // Resolved content: staleness — and, once a relay has answered
+            // without it, the backoff too, or a stale row would re-ask that
+            // relay on every trigger and never reach the other one.
+            let aged = now.saturating_sub(fetched_at) >= max_age_secs;
+            return (aged && now >= next_retry_at).then(|| Self::attempt_index(miss_count));
         }
         // Unresolved: the backoff schedule is authoritative, NOT `fetched_at`.
         (now >= next_retry_at).then(|| Self::attempt_index(miss_count))
     }
 
-    /// Clamps a stored `miss_count` into the `u8` attempt index. A negative
-    /// value (only reachable by hand-editing the database) reads as zero; a
-    /// huge one saturates, and is capped again by `PROFILE_MAX_RELAY_RANK`
-    /// when it reaches the assignment ladder.
+    /// The ladder rung a stored `miss_count` asks at: the misses wrapped over
+    /// the ranks an author may be disclosed to, so each miss moves to the other
+    /// relay and none is left behind for good. A negative value (only
+    /// reachable by hand-editing the database) reads as zero.
     fn attempt_index(miss_count: i64) -> u8 {
-        u8::try_from(miss_count.max(0)).unwrap_or(u8::MAX)
+        let ranks = i64::try_from(crate::profile::PROFILE_MAX_RELAY_RANK).unwrap_or(1);
+        u8::try_from(miss_count.max(0) % ranks).unwrap_or(0)
     }
 
     /// Writes (insert-or-replace) a picture row on an ALREADY-LOCKED connection,
@@ -2820,6 +2830,12 @@ mod tests {
     }
 
     #[test]
+    fn an_unresolved_member_is_never_parked_for_longer_than_half_an_hour() {
+        // The authors asked for are the people in the user's circles. A longer
+        // last rung hides one of them for hours after their profile appears.
+        assert_eq!(PROFILE_MISS_BACKOFF_SECS.last(), Some(&1_800));
+    }
+    #[test]
     fn miss_on_an_unseen_pubkey_seeds_an_unknown_row() {
         let storage = CircleStorage::in_memory().unwrap();
         storage.record_profile_misses(&one("zz"), 700).unwrap();
@@ -2873,6 +2889,42 @@ mod tests {
         // Exactly at the tier boundary → due (the predicate is `>=`).
         assert_eq!(
             storage.profiles_due(&one("aa"), 1_900, 900).unwrap(),
+            vec![("aa".to_string(), 0)],
+        );
+    }
+
+    #[test]
+    fn a_resolved_row_a_relay_answered_without_waits_out_the_backoff_then_asks_the_other() {
+        // Staleness alone would re-ask the relay that just said no on every
+        // trigger, with no pause, and never reach the one that still holds a
+        // rename.
+        let storage = CircleStorage::in_memory().unwrap();
+        storage
+            .upsert_profile(&known_profile("aa", "alice", 1, 1_000))
+            .unwrap();
+        storage.record_profile_misses(&one("aa"), 2_000).unwrap();
+
+        assert!(
+            storage
+                .profiles_due(&one("aa"), 2_029, 900)
+                .unwrap()
+                .is_empty(),
+            "stale, but the relay that answered without it is not asked again yet"
+        );
+        assert_eq!(
+            storage.profiles_due(&one("aa"), 2_030, 900).unwrap(),
+            vec![("aa".to_string(), 1)],
+            "past the backoff: the other relay"
+        );
+
+        // A hit puts the row back on staleness alone.
+        storage.touch_profiles_hit(&one("aa"), 2_030).unwrap();
+        assert!(storage
+            .profiles_due(&one("aa"), 2_929, 900)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            storage.profiles_due(&one("aa"), 2_930, 900).unwrap(),
             vec![("aa".to_string(), 0)],
         );
     }
@@ -2940,8 +2992,8 @@ mod tests {
             .unwrap();
         assert_eq!(
             due,
-            vec![("aa".to_string(), 0), ("bb".to_string(), 2)],
-            "forced: both due, each resuming the ladder at its own miss_count"
+            vec![("aa".to_string(), 0), ("bb".to_string(), 0)],
+            "forced: both due; two misses asked each rank once, so the ladder is back on the first"
         );
     }
 
@@ -2978,8 +3030,26 @@ mod tests {
         );
         assert_eq!(
             CircleStorage::due_attempt(Some((0, 0, i64::MAX, 0)), 10, 900),
-            Some(u8::MAX)
+            Some(1)
         );
+    }
+
+    #[test]
+    fn each_miss_moves_an_unresolved_author_to_its_other_relay() {
+        // A rung that saturated would ask the second relay alone after the
+        // first miss, however many misses followed.
+        let storage = CircleStorage::in_memory().unwrap();
+        let mut now = 1_000;
+        for miss in 1..=6_u8 {
+            storage.record_profile_misses(&one("aa"), now).unwrap();
+            let (_, next_retry_at) = miss_state(&storage, "aa").unwrap();
+            now = next_retry_at;
+            assert_eq!(
+                storage.profiles_due(&one("aa"), now, 900).unwrap(),
+                vec![("aa".to_string(), miss % 2)],
+                "after {miss} miss(es)"
+            );
+        }
     }
 
     // ---- profile-relay salt -------------------------------------------------
