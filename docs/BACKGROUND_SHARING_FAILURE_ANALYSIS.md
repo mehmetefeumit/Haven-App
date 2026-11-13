@@ -1496,9 +1496,12 @@ No FFI change.
   poison sweep is asymmetric on purpose: `circlesProvider` swallows every failure to `[]` and
   caches it as a SUCCESSFUL answer, so a read that lost the race with the Android handoff is
   undetectable afterwards and is invalidated unconditionally, while
-  `relayPreferencesServiceProvider` and `inboxRelaysProvider` do cache an `AsyncError` nothing
+  `relayPreferencesServiceProvider` and every relay list (Inbox, KeyPackage, Profile — and the
+  profile-pool status and relay status built from them) do cache an `AsyncError` nothing
   else retries but cost FFI reads (and two publish-toggle writes) to rebuild, so only a cached
-  error is dropped. It runs immediately after `_endMlsSessionHandoff`'s replay so the
+  error is dropped (`retryFailedRelayLoads`, which the Relays page also runs as it opens). The
+  sweep first covered only the service and the Inbox list, so a KeyPackage or Profile list that
+  failed stayed failed on the Relays page until the app was restarted. It runs immediately after `_endMlsSessionHandoff`'s replay so the
   possibly-empty snapshot that replay just fed the re-subscriber is superseded well inside the
   re-subscriber's own 500 ms debounce. Ahead of the debounce it also needed a throttle of its
   own (review fix): unguarded, ten shade-pull glances became ten pool reconnects and ten inbox

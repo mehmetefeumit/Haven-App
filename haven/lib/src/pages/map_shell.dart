@@ -2039,21 +2039,18 @@ class _MapShellState extends ConsumerState<MapShell>
   ///     list and a bare map, with no error anywhere, until the session next
   ///     opens — and a refused open is not one. Nothing can detect it after
   ///     the fact, so it is always re-read.
-  ///   * `relayPreferencesServiceProvider` and `inboxRelaysProvider` DO cache
-  ///     their failure, as an `AsyncError` that nothing else ever retries — and
-  ///     the inbox list is what a full engine restart re-subscribes the
-  ///     gift-wrap REQ with, so a stuck error there costs invitations.
-  ///     Rebuilding them is not free (relay-list FFI reads, plus two
+  ///   * the relay-preference service and every relay list DO cache their
+  ///     failure, as an `AsyncError` that nothing else ever retries — the inbox
+  ///     list is what a full engine restart re-subscribes the gift-wrap REQ
+  ///     with, so a stuck error there costs invitations, and a stuck
+  ///     KeyPackage or Profile list leaves the Relays page unable to show or
+  ///     edit it. Rebuilding them is not free (relay-list FFI reads, plus two
   ///     publish-toggle writes for the service), and this runs on every resume
-  ///     ahead of the 30 s debounce, so only a cached error is dropped.
+  ///     ahead of the 30 s debounce, so only a cached error is dropped
+  ///     ([retryFailedRelayLoads]).
   void _invalidateHandoffWindowPoison() {
     ref.invalidate(circlesProvider);
-    if (ref.read(relayPreferencesServiceProvider).hasError) {
-      ref.invalidate(relayPreferencesServiceProvider);
-    }
-    if (ref.read(inboxRelaysProvider).hasError) {
-      ref.invalidate(inboxRelaysProvider);
-    }
+    retryFailedRelayLoads(ref);
   }
 
   /// Restarts the live-sync engine if it stopped while a session is still

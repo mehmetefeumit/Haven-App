@@ -36,10 +36,10 @@ import 'package:haven/src/utils/relay_url_validator.dart';
 
 /// Provides the [`RelayPreferencesService`] singleton.
 ///
-/// Production binding lazily wraps the existing [`circleServiceProvider`]'s
-/// [`CircleManagerFfi`] handle so all relay-preference operations go
-/// through the same authoritative SQLCipher connection used by the
-/// circle storage. Tests override this with a mock.
+/// Production binding goes through the existing [`circleServiceProvider`]'s
+/// [`CircleManagerFfi`] handle — fetched at every call, never held — so all
+/// relay-preference operations use the same authoritative SQLCipher
+/// connection as the circle storage. Tests override this with a mock.
 final relayPreferencesServiceProvider = FutureProvider<RelayPreferencesService>(
   (ref) async {
     final circleService = ref.read(circleServiceProvider);
@@ -49,8 +49,13 @@ final relayPreferencesServiceProvider = FutureProvider<RelayPreferencesService>(
         'in production. In tests, override this provider with a mock.',
       );
     }
-    final manager = await circleService.getCircleManagerFfi();
-    final service = NostrRelayPreferencesService(manager: manager);
+    // Opened up front so the toggles below are written, not skipped, and a
+    // manager that cannot open fails this build — which
+    // [retryFailedRelayLoads] drops.
+    await circleService.getCircleManagerFfi();
+    final service = NostrRelayPreferencesService(
+      circleManagerFactory: circleService.getCircleManagerFfi,
+    );
     // Publishing of kind 10050 / 10002 is always on. Force-enable the
     // underlying FFI toggle so the build path never returns suppressed.
     await forceEnablePublishToggles(service);
@@ -245,7 +250,7 @@ class InboxRelaysNotifier extends AsyncNotifier<List<String>>
     // Inbox affects the gift-wrap polling target list.
     // KeyPackage publisher also publishes kind 10050 (inbox relay list)
     // — see `_publishRelayListIfEnabled` in `key_package_provider.dart`
-    // — so inbox-list mutations must republish it too. Invalidating the
+    // — so inbox-list mutations must republish it too. Bumping the
     // marker ALONE is not enough: `keyPackagePublisherProvider` is a
     // listener-less FutureProvider, so a marker change only marks it dirty;
     // the trailing `read` is what actually drives the rebuild that
@@ -254,11 +259,12 @@ class InboxRelaysNotifier extends AsyncNotifier<List<String>>
     // name_circle_page, onboarding) pairs the invalidate with a read for
     // the same reason; without the read, an added inbox relay would not be
     // advertised (no kind 10050 republish) until the next app resume.
-    ref
-      ..invalidate(relayStatusInvalidatorProvider)
-      ..invalidate(invitationInvalidatorProvider)
-      ..invalidate(keyPackagePublisherInvalidatorProvider)
-      ..read(keyPackagePublisherProvider);
+    _bumpMarkers(ref, [
+      relayStatusInvalidatorProvider,
+      invitationInvalidatorProvider,
+      keyPackagePublisherInvalidatorProvider,
+    ]);
+    ref.read(keyPackagePublisherProvider);
   }
 }
 
@@ -329,17 +335,18 @@ class KeyPackageRelaysNotifier extends AsyncNotifier<List<String>>
 
   void _invalidateDownstream() {
     // KeyPackage list changes affect the kind 30443/10002 publisher.
-    // Invalidating the marker ALONE is not enough: keyPackagePublisher
+    // Bumping the marker ALONE is not enough: keyPackagePublisher
     // Provider is a listener-less FutureProvider, so a marker change only
     // marks it dirty; the trailing `read` is what actually drives the
     // rebuild that republishes the KeyPackage (30443) and its relay list
     // (10002) to the updated relay set — matching every other republish
     // call site. Without the read, an added KeyPackage relay would not
     // receive the user's KeyPackage until the next app resume.
-    ref
-      ..invalidate(relayStatusInvalidatorProvider)
-      ..invalidate(keyPackagePublisherInvalidatorProvider)
-      ..read(keyPackagePublisherProvider);
+    _bumpMarkers(ref, [
+      relayStatusInvalidatorProvider,
+      keyPackagePublisherInvalidatorProvider,
+    ]);
+    ref.read(keyPackagePublisherProvider);
   }
 }
 
@@ -557,6 +564,33 @@ final profilePoolStatusProvider = FutureProvider<ProfilePoolStatus>((
   return service.profilePoolStatus();
 });
 
+/// Drops every relay-preference read that cached a failure, so the next read
+/// retries instead of showing "Failed to load relays." for the rest of the
+/// process.
+///
+/// Each one is dropped on its own because none watches the service or the
+/// lists it is built from — they `ref.read` them — so rebuilding the service
+/// alone never rebuilds a list that already failed. A provider never read is
+/// left unbuilt, and one holding data is left alone.
+void retryFailedRelayLoads(WidgetRef ref) {
+  var dropped = false;
+  for (final provider in <ProviderBase<AsyncValue<Object?>>>[
+    relayPreferencesServiceProvider,
+    inboxRelaysProvider,
+    keyPackageRelaysProvider,
+    profileRelaysProvider,
+    profilePoolStatusProvider,
+  ]) {
+    if (ref.exists(provider) && ref.read(provider).hasError) {
+      ref.invalidate(provider);
+      dropped = true;
+    }
+  }
+  // `relayStatusProvider` caches the error of a list it read; it rebuilds on
+  // this marker, which keeps it out of this file's imports.
+  if (dropped) ref.read(relayStatusInvalidatorProvider.notifier).state++;
+}
+
 /// Normalizes a relay URL for set-membership comparison (e.g. the
 /// contamination check above).
 ///
@@ -586,8 +620,16 @@ String normalizeRelayUrlForComparison(String url) =>
 //
 // To couple a downstream provider to one of these, simply
 // `ref.watch(relayStatusInvalidatorProvider);` somewhere in its build
-// path. Calling `ref.invalidate(relayStatusInvalidatorProvider)` here
-// then forces the downstream rebuild.
+// path, and bump it ([_bumpMarkers]) to force the downstream rebuild.
+// Never `ref.invalidate` one: it rebuilds to the same 0, and Riverpod
+// rebuilds a dependent only when the value it watches changes.
+
+/// Advances each marker so everything watching it rebuilds.
+void _bumpMarkers(Ref ref, List<StateProvider<int>> markers) {
+  for (final marker in markers) {
+    ref.read(marker.notifier).state++;
+  }
+}
 
 /// Invalidate marker watched by `relayStatusProvider`.
 final relayStatusInvalidatorProvider = StateProvider<int>((ref) => 0);

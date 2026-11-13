@@ -42,47 +42,61 @@ Identity _stubIdentity() => Identity(
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  List<Override> appOverrides({
+    required MockRelayPreferencesService mock,
+    Identity? identity,
+    Future<RelayPreferencesService> Function()? openService,
+    MockRelayService? relay,
+    List<Override> extra = const [],
+  }) => [
+    ...extra,
+    identityProvider.overrideWith(
+      (ref) async => identity ?? _stubIdentity(),
+    ),
+    relayPreferencesServiceProvider.overrideWith(
+      (ref) async => openService == null ? mock : await openService(),
+    ),
+    // disconnect_relay routes through RelayService now; tests don't
+    // exercise the persistent FFI client, but the page still calls
+    // it on remove and would otherwise hit production NostrRelayService.
+    relayServiceProvider.overrideWithValue(relay ?? MockRelayService()),
+    // Removing/restoring a relay invalidates `keyPackagePublisherProvider`
+    // downstream (`InboxRelaysNotifier._invalidateDownstream`), which now
+    // resolves a real `CircleManagerFfi` via `maintenanceServiceProvider`
+    // (Dark Matter DM-4). Without this override the default provider
+    // constructs a real `NostrCircleService`, which reaches the native
+    // keyring plugin in this pure widget-test sandbox — a slow, flaky
+    // real-async round trip that can settle after `pumpAndSettle` gives
+    // up, surfacing as an unhandled exception "after the test had
+    // completed". A non-`NostrCircleService` fake makes
+    // `maintenanceServiceProvider`'s `circleManagerFactory` fail fast and
+    // synchronously (`StateError`, caught by
+    // `MaintenanceService._withSecret`) instead.
+    circleServiceProvider.overrideWithValue(MockCircleService()),
+  ];
+
+  const page = MaterialApp(
+    localizationsDelegates: AppLocalizations.localizationsDelegates,
+    supportedLocales: AppLocalizations.supportedLocales,
+    home: RelaySettingsPage(),
+  );
+
   Widget buildApp({
     required MockRelayPreferencesService mock,
     Identity? identity,
     Future<RelayPreferencesService> Function()? openService,
     MockRelayService? relay,
     List<Override> extra = const [],
-  }) {
-    return ProviderScope(
-      overrides: [
-        ...extra,
-        identityProvider.overrideWith(
-          (ref) async => identity ?? _stubIdentity(),
-        ),
-        relayPreferencesServiceProvider.overrideWith(
-          (ref) async => openService == null ? mock : await openService(),
-        ),
-        // disconnect_relay routes through RelayService now; tests don't
-        // exercise the persistent FFI client, but the page still calls
-        // it on remove and would otherwise hit production NostrRelayService.
-        relayServiceProvider.overrideWithValue(relay ?? MockRelayService()),
-        // Removing/restoring a relay invalidates `keyPackagePublisherProvider`
-        // downstream (`InboxRelaysNotifier._invalidateDownstream`), which now
-        // resolves a real `CircleManagerFfi` via `maintenanceServiceProvider`
-        // (Dark Matter DM-4). Without this override the default provider
-        // constructs a real `NostrCircleService`, which reaches the native
-        // keyring plugin in this pure widget-test sandbox — a slow, flaky
-        // real-async round trip that can settle after `pumpAndSettle` gives
-        // up, surfacing as an unhandled exception "after the test had
-        // completed". A non-`NostrCircleService` fake makes
-        // `maintenanceServiceProvider`'s `circleManagerFactory` fail fast and
-        // synchronously (`StateError`, caught by
-        // `MaintenanceService._withSecret`) instead.
-        circleServiceProvider.overrideWithValue(MockCircleService()),
-      ],
-      child: const MaterialApp(
-        localizationsDelegates: AppLocalizations.localizationsDelegates,
-        supportedLocales: AppLocalizations.supportedLocales,
-        home: RelaySettingsPage(),
-      ),
-    );
-  }
+  }) => ProviderScope(
+    overrides: appOverrides(
+      mock: mock,
+      identity: identity,
+      openService: openService,
+      relay: relay,
+      extra: extra,
+    ),
+    child: page,
+  );
 
   MockRelayPreferencesService seededMock() => MockRelayPreferencesService(
     initialRelays: const {
@@ -103,6 +117,19 @@ void main() {
       expect(find.text('inbox.example.com'), findsOneWidget);
       expect(find.text('kp.example.com'), findsOneWidget);
       expect(find.text('profile.example.com'), findsOneWidget);
+    });
+
+    testWidgets('checks the relays as it opens', (tester) async {
+      final relayService = MockRelayService();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: appOverrides(mock: seededMock(), relay: relayService),
+          child: page,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(relayService.ownPresenceAsks, [_stubIdentity().pubkeyHex]);
     });
 
     testWidgets('uses the refresh ring, not a spinner', (tester) async {
@@ -1050,6 +1077,51 @@ void main() {
         expect(find.text('Inbox list: Not checked'), findsOneWidget);
         expect(find.text('KeyPackage: Not checked'), findsOneWidget);
         expect(find.text('Relay list: Not checked'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'opening the page loads the KeyPackage and Profile lists that failed '
+      'before it was opened, beside an Inbox list that did not',
+      (tester) async {
+        growSurface(tester);
+        final mock = seededMock();
+        var failing = true;
+        final container = ProviderContainer(
+          overrides: appOverrides(
+            mock: mock,
+            openService: () async {
+              if (failing) throw StateError('handoff');
+              return mock;
+            },
+          ),
+        );
+        addTearDown(container.dispose);
+        // The field report's state: the KeyPackage and Profile lists were read
+        // while the manager could not be opened, and cached that failure; the
+        // manager came back and the Inbox list, read after, loaded.
+        await expectLater(
+          container.read(keyPackageRelaysProvider.future),
+          throwsA(anything),
+        );
+        await expectLater(
+          container.read(profileRelaysProvider.future),
+          throwsA(anything),
+        );
+        failing = false;
+        container.invalidate(relayPreferencesServiceProvider);
+        await container.read(inboxRelaysProvider.future);
+
+        await tester.pumpWidget(
+          UncontrolledProviderScope(container: container, child: page),
+        );
+        await tester.pumpAndSettle();
+
+        expect(tester.takeException(), isNull);
+        expect(find.text('Failed to load relays.'), findsNothing);
+        expect(find.text('inbox.example.com'), findsOneWidget);
+        expect(find.text('kp.example.com'), findsOneWidget);
+        expect(find.text('profile.example.com'), findsOneWidget);
       },
     );
 

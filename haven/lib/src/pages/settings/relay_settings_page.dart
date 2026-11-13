@@ -57,6 +57,9 @@ class _RelaySettingsPageState extends ConsumerState<RelaySettingsPage> {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
+      // Opening the page is the user asking for the lists, so a read that
+      // failed earlier is asked again rather than shown as failed.
+      retryFailedRelayLoads(ref);
       ref.read(relayStatusProvider.notifier).checkAllRelays();
       unawaited(_topUpProfileRelays());
     });
