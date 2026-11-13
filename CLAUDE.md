@@ -49,6 +49,21 @@ logs is the required proof for any new log line.
 A change that improves one pillar by weakening another is not finished. If you
 believe a pillar genuinely must give, STOP and ask — do not decide it silently.
 
+### Future-facing, and no standing debt (owner-directed 2026-11-13)
+
+Haven stays state of the art wherever that serves privacy, security and
+performance, and never at their cost. When a dependency moves, or a change
+forces a large refactor, design for where the dependency and the protocol are
+going, not for the smallest diff from where they were: adopt the upstream API
+as it now is, delete in the same change every Haven-side workaround the release
+made unnecessary, and never carry a compatibility shim, a held-back version or
+a hand-port of something upstream now offers. Tech debt is repaid in the change
+that first makes repaying it possible. Debt that genuinely cannot be repaid yet
+is recorded with its removal condition and its pinning test
+(`docs/MDK_UPSTREAM_TRACKER.md` for MDK), never left implicit. This is not
+licence for speculative abstraction (below): build for the future upstream has
+shipped or specified, never for one that is guessed.
+
 ### Simple and correct, not clever and verbose
 
 - Write the **smallest correct implementation**. No speculative abstraction, no
