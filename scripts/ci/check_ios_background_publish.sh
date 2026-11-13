@@ -53,10 +53,16 @@
 #          literal, never `?? true` (check 4a). It stays a pure function of the
 #          user's toggle across the whole hop.
 #   `showBackgroundLocationIndicator: backgroundSharingEnabled`
-#       -> `manager.showsBackgroundLocationIndicator = !alwaysConfirmed`
-#          (check 4a): the indicator is a TIER decision now, not a toggle
-#          decision (OD1). Its other half — which tier holds a
-#          CLBackgroundActivitySession — is check 8.
+#       -> `manager.showsBackgroundLocationIndicator =
+#          sessionHandler?.indicatorRequested ?? true` (check 4a), re-applied
+#          from the authorization delegate, which also fires on a Precise
+#          Location change; the predicate is `!alwaysConfirmed ||
+#          accuracyAuthorization == .reducedAccuracy` (check 8): the indicator
+#          is a TIER decision now, not a toggle decision (OD1), except that
+#          reduced accuracy keeps it on, because its accuracy writes have no
+#          effect and the indicator is Apple's other 16.4 lever. The
+#          remaining half — which tier holds a CLBackgroundActivitySession —
+#          is check 8 too.
 #   `pauseLocationUpdatesAutomatically: false`
 #       -> `manager.pausesLocationUpdatesAutomatically = false` in `init`, with
 #          the same file-wide single-assignment count.
@@ -714,20 +720,64 @@ check_native_stream_handler() { # <HavenLocationStreamHandler.swift>
   n=0; [[ -n "$ind" ]] && n="$(wc -l <<<"$ind")"
   if [[ "$n" != "1" ]]; then
     lfail "expected exactly 1 showsBackgroundLocationIndicator assignment in $(basename "$sh"), found ${n}: ${ind:-none} — one site, one policy; a second assignment decides the pill somewhere the tier is not known"
-  elif ! grep -qE 'showsBackgroundLocationIndicator *= *!' <<<"$ind" || ! grep -qF 'alwaysConfirmed' <<<"$ind"; then
-    lfail "showsBackgroundLocationIndicator is not assigned '!<...>alwaysConfirmed': ${ind} — a hardcoded value decouples the pill from the tier. Under CONFIRMED Always the flag is the only remaining pill source and OD1 turns it off; under When-In-Use (which is what the OS makes of a provisional or iOS 17 Always) the pill is mandatory and the flag must stay true so the settings copy, which follows this state, stays honest"
+  elif ! grep -qE 'showsBackgroundLocationIndicator = sessionHandler\?\.indicatorRequested \?\? true[[:space:]]*$' <<<"$ind"; then
+    lfail "showsBackgroundLocationIndicator is not assigned exactly 'sessionHandler?.indicatorRequested ?? true': ${ind} — the flag and the settings copy must read ONE predicate, the session handler's. A hardcoded value decouples the pill from the tier; a '?? false' drops it for a manager with no session handler; re-deriving it here from alwaysConfirmed loses the reduced-accuracy clause, which keeps a confirmed-Always user with Precise Location off inside Apple's documented 16.4 conditions (their desiredAccuracy writes have no effect, and the indicator is the other lever)"
+  fi
+  # An accuracy-authorization change fires this delegate and nothing else: no
+  # confirmation flips, so `onAlwaysConfirmedChanged` never runs.
+  local didauth
+  didauth="$(fn_slice 'func locationManagerDidChangeAuthorization(' "$sh")"
+  if [[ -z "$didauth" ]]; then
+    lfail "locationManagerDidChangeAuthorization not found in $(basename "$sh") — it is the only callback CoreLocation fires when the user turns Precise Location off or on (WWDC20 10660), so nothing would re-apply the indicator policy then"
+  elif ! fn_body <<<"$didauth" | has_unconditional 'applyIndicatorPolicy()'; then
+    lfail "locationManagerDidChangeAuthorization no longer calls applyIndicatorPolicy() unconditionally — it is the ONLY re-apply path for an accuracy-authorization change (WWDC20 10660: the callback fires for authorizationStatus AND accuracyAuthorization), so a confirmed-Always user who turns Precise Location off would keep the indicator off while outside the 16.4 delivery shape, and the settings copy would name the bar the OS was never asked for"
   fi
 
   # --- only Best-profile fixes are ever cached ------------------------------
+  #
+  # The tier is the one Haven last REQUESTED, never a read-back of
+  # desiredAccuracy: with Precise Location off a write to it has no effect and
+  # Apple does not document what it then reads, so a read-back that never
+  # equals Best would tag nothing Best and end publishing for that user.
   local best_guard
-  best_guard="$(brace_block 'desiredAccuracy == kCLLocationAccuracyBest && loc.timestamp >= bestSince' <<<"$view")"
+  best_guard="$(brace_block 'bestRequested && loc.timestamp >= bestSince' <<<"$view")"
+  local didupdate
+  didupdate="$(fn_slice 'didUpdateLocations locations: [CLLocation]) {' "$sh")"
+  if grep -qF 'desiredAccuracy' <<<"$didupdate"; then
+    lfail "didUpdateLocations reads desiredAccuracy back: $(grep -F 'desiredAccuracy' <<<"$didupdate" | sed -E 's/^ +//') — with Precise Location off writes to it have no effect and its read-back is undocumented; a read-back that never equals Best tags no fix Best, and the Dart side publishes only Best-tagged fixes. Tag by bestRequested, the tier Haven asked for"
+  fi
+  local req_bad req_false profile_body best_case_line hm_case_line default_line
+  req_bad="$(grep -nE 'bestRequested *= *[^=]' <<<"$view" | grep -vE 'bestRequested *= *(true|false)[[:space:]]*$' || true)"
+  if [[ -n "$req_bad" ]]; then
+    lfail "bestRequested is assigned something other than a literal in $(basename "$sh"): ${req_bad} — it records which tier setProfile/onListen WROTE, and anything computed (a desiredAccuracy read-back above all) reintroduces the undocumented reduced-accuracy reading it exists to avoid"
+  fi
+  req_false="$(grep -cE 'bestRequested *= *false' <<<"$view" || true)"
+  [[ "$req_false" == "1" ]] ||
+    lfail "expected exactly 1 'bestRequested = false' in $(basename "$sh"), found ${req_false} — it belongs to the HundredMeters case of setProfile and nowhere else"
+  grep -qE 'bestRequested *= *true' <<<"$onlisten" ||
+    lfail "onListen no longer records bestRequested = true beside its Best write — a session restarted after one cancelled at the 100 m tier would tag nothing Best until Dart re-sent a profile it believes is already in force, and no fix would ever be published"
+  profile_body="$(fn_slice 'private func setProfile(' "$sh")"
+  best_case_line="$(code_line_of 'case Self\.profileBest:' <<<"$profile_body")"
+  hm_case_line="$(code_line_of 'case Self\.profileHundredMeters:' <<<"$profile_body")"
+  default_line="$(code_line_of 'default:' <<<"$profile_body")"
+  local true_line false_line
+  true_line="$(code_line_of 'bestRequested *= *true' <<<"$profile_body")"
+  false_line="$(code_line_of 'bestRequested *= *false' <<<"$profile_body")"
+  if [[ -z "$best_case_line" || -z "$hm_case_line" || -z "$default_line" || -z "$true_line" ]] ||
+    (( true_line <= best_case_line || true_line >= hm_case_line )); then
+    lfail "setProfile's Best case no longer sets bestRequested = true (Best case at line ${best_case_line:-none}, HundredMeters case at ${hm_case_line:-none}, assignment at ${true_line:-none}) — a return to Best would keep tagging every fix hundredMeters and nothing would be published"
+  fi
+  if [[ -z "$hm_case_line" || -z "$default_line" || -z "$false_line" ]] ||
+    (( false_line <= hm_case_line || false_line >= default_line )); then
+    lfail "setProfile's HundredMeters case no longer sets bestRequested = false (case at line ${hm_case_line:-none}, default at ${default_line:-none}, assignment at ${false_line:-none}) — every coarse-tier fix would be tagged best and published as a GPS-grade coordinate"
+  fi
   local assigns
   assigns="$(grep -nE 'lastBestFix *= *[^=]' <<<"$view" | grep -vE 'lastBestFix *= *nil' || true)"
   n=0; [[ -n "$assigns" ]] && n="$(wc -l <<<"$assigns")"
   if [[ "$n" != "1" ]]; then
     lfail "expected exactly 1 non-nil assignment to lastBestFix in $(basename "$sh"), found ${n}: ${assigns:-none} — the cache that feeds every published coordinate has one writer"
   elif [[ -z "$best_guard" ]]; then
-    lfail "no 'if manager.desiredAccuracy == kCLLocationAccuracyBest && loc.timestamp >= bestSince' block in $(basename "$sh") — BOTH clauses are the rule: the tier says what the manager was asked for, and the timestamp excludes a fix that was COMPUTED under the 100 m tier and merely arrived after the switch. Dropping either one publishes a coarse coordinate as a GPS-grade one"
+    lfail "no 'if bestRequested && loc.timestamp >= bestSince' block in $(basename "$sh") — BOTH clauses are the rule: the tier says what the manager was asked for, and the timestamp excludes a fix that was COMPUTED under the 100 m tier and merely arrived after the switch. Dropping either one publishes a coarse coordinate as a GPS-grade one"
   elif ! grep -qF "$(sed -E 's/^ *[0-9]+://; s/^ *//' <<<"$assigns")" <<<"$best_guard"; then
     lfail "the lastBestFix assignment (${assigns}) is not inside the Best-profile guard — a fix taken at the 100 m tier would become the publish input and the last-known answer"
   fi
@@ -1327,6 +1377,34 @@ check_arm_tier_policy() { # <HavenBackgroundSessionHandler.swift>
   if grep -qE 'NSLog\(|[^a-zA-Z]print\(' <<<"$view"; then
     lfail "$(basename "$sh") logs — the handler has nothing safe to say (presence-only policy, and no DEBUG-gated logger is wired here)"
   fi
+  return "$_lf"
+}
+
+# The indicator predicate the stream handler's flag AND the settings copy read.
+#
+# One expression, exactly: `!alwaysConfirmed` is OD1 (no indicator under a
+# confirmed Always), and the reduced-accuracy clause keeps it on for a user
+# with Precise Location off, whose desiredAccuracy writes have no effect and
+# may leave the iOS 16.4 delivery shape — the indicator is Apple's other
+# documented lever. It must reach Dart too, or the copy selects from a
+# fallback the OS never saw.
+check_indicator_predicate() { # <HavenBackgroundSessionHandler.swift>
+  local sh="$1"
+  _lf=0
+  local slice body_lines
+  slice="$(fn_slice 'var indicatorRequested: Bool {' "$sh")"
+  if [[ -z "$slice" ]]; then
+    lfail "$(basename "$sh") has no 'var indicatorRequested: Bool { ... }' — the stream handler's indicator flag and the settings copy both read it, so without it neither has a predicate"
+    return "$_lf"
+  fi
+  body_lines="$(sed '1d;$d' <<<"$slice" | grep -vE '^[[:space:]]*$' || true)"
+  if ! grep -qxE '[[:space:]]*!alwaysConfirmed \|\| CLLocationManager\(\)\.accuracyAuthorization == \.reducedAccuracy[[:space:]]*' <<<"$body_lines" ||
+    [[ "$(wc -l <<<"$body_lines")" != "1" ]]; then
+    lfail "indicatorRequested is not exactly '!alwaysConfirmed || CLLocationManager().accuracyAuthorization == .reducedAccuracy': $(tr '\n' ' ' <<<"$body_lines") — dropping the reduced clause leaves a confirmed-Always user with Precise Location off outside BOTH of Apple's 16.4 conditions (their accuracy writes have no effect, and the indicator is off); '&&' turns the indicator off for every other tier, where the copy promises the bar; a constant decouples the indicator from the tier"
+  fi
+  local view; view="$(code_view "$sh")"
+  grep -qE '^[[:space:]]*"indicatorRequested": indicatorRequested,?[[:space:]]*$' <<<"$view" ||
+    lfail "$(basename "$sh")'s status() no longer exports \"indicatorRequested\" — the settings copy selects its indicator sentence from that key, and without it the Dart parse answers from a fallback instead of the predicate the OS was given"
   return "$_lf"
 }
 
@@ -2118,9 +2196,11 @@ check_presence_only_logging \
 #    `applicationState != .background`; the diagnostics observer re-running the
 #    policy rather than only setting a flag; and disarm() UNCONDITIONAL,
 #    invalidating and nilling both sessions — an invalidated session can never
-#    become active again, so silent reuse is a latent no-op.
+#    become active again, so silent reuse is a latent no-op. And the one
+#    indicator predicate, `indicatorRequested`, exact and on the status wire.
 # ---------------------------------------------------------------------------
 check_arm_tier_policy "$SESSION_HANDLER" || FAILED=1
+check_indicator_predicate "$SESSION_HANDLER" || FAILED=1
 
 # ---------------------------------------------------------------------------
 # 9. AppDelegate: both native handlers registered on the messenger; the session
@@ -2388,7 +2468,7 @@ fi
 # hide under the slack.
 # ---------------------------------------------------------------------------
 self_test() {
-  local -r SELF_TEST_FIXTURES=221
+  local -r SELF_TEST_FIXTURES=240
   local tmp fails=0 checked=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -2990,6 +3070,45 @@ self_test() {
     _confirmedAt = fix.timestamp;
   }' '' ''
 
+  # --- check_indicator_predicate --------------------------------------------
+  #
+  # The one predicate both consumers read. Every mutation compiles, and all but
+  # the last read as plausible simplifications of a two-clause expression.
+  local ind_status='  private func status() -> [String: Bool] {
+    return [
+      "alwaysConfirmed": alwaysConfirmed,
+      "armed": armed,
+      "indicatorRequested": indicatorRequested,
+    ]
+  }'
+  _indpred() { # <label> <want-rc> <body-line> [<status>]
+    local got=0
+    printf 'final class HavenBackgroundSessionHandler: NSObject {\n  private(set) var alwaysConfirmed = false\n  var indicatorRequested: Bool {\n%s\n  }\n%s\n}\n' \
+      "$3" "${4:-$ind_status}" >"${tmp}/HavenBackgroundSessionHandler.swift"
+    ( check_indicator_predicate "${tmp}/HavenBackgroundSessionHandler.swift" ) >/dev/null 2>&1 || got=$?
+    _record "$1" "$2" "${got}"
+  }
+  local ind_ok='    !alwaysConfirmed || CLLocationManager().accuracyAuthorization == .reducedAccuracy'
+  _indpred 'indicator predicate: today'"'"'s passes' 0 "${ind_ok}"
+  _indpred 'indicator predicate: the reduced-accuracy clause dropped' 1 '    !alwaysConfirmed'
+  _indpred 'indicator predicate: || turned into &&' 1 \
+    '    !alwaysConfirmed && CLLocationManager().accuracyAuthorization == .reducedAccuracy'
+  _indpred 'indicator predicate: the accuracy clause inverted to full accuracy' 1 \
+    '    !alwaysConfirmed || CLLocationManager().accuracyAuthorization == .fullAccuracy'
+  _indpred 'indicator predicate: hardcoded true' 1 '    true'
+  _indpred 'indicator predicate: an override ahead of the expression' 1 \
+    '    if forceIndicator { return true }
+    return !alwaysConfirmed || CLLocationManager().accuracyAuthorization == .reducedAccuracy'
+  _indpred 'indicator predicate: commented out' 1 \
+    '    // !alwaysConfirmed || CLLocationManager().accuracyAuthorization == .reducedAccuracy'
+  _indpred 'indicator predicate: no longer exported on the status channel' 1 "${ind_ok}" \
+    '  private func status() -> [String: Bool] {
+    return [
+      "alwaysConfirmed": alwaysConfirmed,
+      "armed": armed,
+    ]
+  }'
+
   # --- check_native_stream_handler ------------------------------------------
   #
   # Nothing runs Swift unit tests in CI, so every property of Haven's own
@@ -3004,6 +3123,7 @@ self_test() {
   private let manager = CLLocationManager()
   private var sink: FlutterEventSink?
   private var bestSince = Date.distantFuture
+  private var bestRequested = true
   private var lastBestFix: CLLocation?'
   local swift_init='  override init() {
     super.init()
@@ -3029,6 +3149,7 @@ self_test() {
     manager.allowsBackgroundLocationUpdates = allowsBg
     applyIndicatorPolicy()
     bestSince = Date()
+    bestRequested = true
     manager.desiredAccuracy = kCLLocationAccuracyBest
     manager.startUpdatingLocation()
     return nil
@@ -3044,8 +3165,10 @@ self_test() {
     switch name {
     case Self.profileBest:
       bestSince = Date()
+      bestRequested = true
       manager.desiredAccuracy = kCLLocationAccuracyBest
     case Self.profileHundredMeters:
+      bestRequested = false
       manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
     default:
       return false
@@ -3055,7 +3178,7 @@ self_test() {
   local swift_didupdate='  func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
     guard let events = sink else { return }
     for loc in locations {
-      if manager.desiredAccuracy == kCLLocationAccuracyBest && loc.timestamp >= bestSince {
+      if bestRequested && loc.timestamp >= bestSince {
         lastBestFix = loc
         events(fixMap(loc, profile: Self.profileBest))
       } else {
@@ -3064,7 +3187,11 @@ self_test() {
     }
   }'
   local swift_indicator='  func applyIndicatorPolicy() {
-    manager.showsBackgroundLocationIndicator = !(sessionHandler?.alwaysConfirmed ?? false)
+    manager.showsBackgroundLocationIndicator = sessionHandler?.indicatorRequested ?? true
+  }'
+  local swift_didauth='  func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+    onAuthorizationChanged?()
+    applyIndicatorPolicy()
   }'
   local swift_register='  func register(with messenger: FlutterBinaryMessenger) {
     channel.setMethodCallHandler { [weak self] call, result in
@@ -3089,13 +3216,13 @@ self_test() {
     ))
   }'
 
-  _native() { # <label> <want-rc> <init> <onListen> <onCancel> <setProfile> <didUpdate> <indicator> <register> <didFail> <extra>
+  _native() { # <label> <want-rc> <init> <onListen> <onCancel> <setProfile> <didUpdate> <indicator> <register> <didFail> <extra> <didAuth>
     local got=0
-    printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n}\n' \
+    printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n}\n' \
       "${swift_head}" "${3:-$swift_init}" "${4:-$swift_onlisten}" \
       "${5:-$swift_oncancel}" "${6:-$swift_profile}" "${7:-$swift_didupdate}" \
       "${8:-$swift_indicator}" "${9:-$swift_register}" "${10:-$swift_didfail}" \
-      "${11:-}" \
+      "${11:-}" "${12:-$swift_didauth}" \
       >"${tmp}/HavenLocationStreamHandler.swift"
     ( check_native_stream_handler "${tmp}/HavenLocationStreamHandler.swift" ) >/dev/null 2>&1 || got=$?
     _record "$1" "$2" "${got}"
@@ -3139,8 +3266,10 @@ self_test() {
     switch name {
     case Self.profileBest:
       bestSince = Date()
+      bestRequested = true
       manager.desiredAccuracy = kCLLocationAccuracyBest
     case Self.profileHundredMeters:
+      bestRequested = false
       manager.desiredAccuracy = kCLLocationAccuracyThreeKilometers
     default:
       return false
@@ -3174,6 +3303,7 @@ self_test() {
     manager.allowsBackgroundLocationUpdates = true
     applyIndicatorPolicy()
     bestSince = Date()
+    bestRequested = true
     manager.desiredAccuracy = kCLLocationAccuracyBest
     manager.startUpdatingLocation()
     return nil
@@ -3195,6 +3325,7 @@ self_test() {
     manager.allowsBackgroundLocationUpdates = allowsBg
     applyIndicatorPolicy()
     bestSince = Date()
+    bestRequested = true
     manager.desiredAccuracy = kCLLocationAccuracyBest
     manager.startUpdatingLocation()
     return nil
@@ -3215,6 +3346,7 @@ self_test() {
     manager.allowsBackgroundLocationUpdates = allowsBg
     applyIndicatorPolicy()
     bestSince = Date()
+    bestRequested = true
     manager.desiredAccuracy = kCLLocationAccuracyBest
     manager.startUpdatingLocation()
     return nil
@@ -3232,6 +3364,7 @@ self_test() {
     manager.allowsBackgroundLocationUpdates = allowsBg
     applyIndicatorPolicy()
     bestSince = Date()
+    bestRequested = true
     manager.desiredAccuracy = kCLLocationAccuracyBest
     manager.startUpdatingLocation()
     return nil
@@ -3253,6 +3386,7 @@ self_test() {
     manager.allowsBackgroundLocationUpdates = allowsBg
     applyIndicatorPolicy()
     bestSince = Date()
+    bestRequested = true
     manager.desiredAccuracy = kCLLocationAccuracyBest
     manager.startUpdatingLocation()
     return nil
@@ -3275,6 +3409,7 @@ self_test() {
     manager.allowsBackgroundLocationUpdates = allowsBg
     applyIndicatorPolicy()
     bestSince = Date()
+    bestRequested = true
     manager.desiredAccuracy = kCLLocationAccuracyBest
     manager.startUpdatingLocation()
     return nil
@@ -3283,17 +3418,42 @@ self_test() {
     '  func restart() {
     manager.startUpdatingLocation()
   }'
-  # OD1: the pill follows the TIER, not a literal and not the toggle.
+  # OD1: the pill follows the TIER, not a literal and not the toggle — and
+  # the tier is read from the session handler's ONE predicate, which also
+  # carries the reduced-accuracy clause.
   _native 'native: the indicator hardcoded' 1 '' '' '' '' '' \
     '  func applyIndicatorPolicy() {
     manager.showsBackgroundLocationIndicator = true
   }' '' ''
+  _native 'native: the indicator defaults to off without a session handler' 1 '' '' '' '' '' \
+    '  func applyIndicatorPolicy() {
+    manager.showsBackgroundLocationIndicator = sessionHandler?.indicatorRequested ?? false
+  }' '' ''
+  _native 'native: the indicator re-derived from alwaysConfirmed (reduced clause lost)' 1 '' '' '' '' '' \
+    '  func applyIndicatorPolicy() {
+    manager.showsBackgroundLocationIndicator = !(sessionHandler?.alwaysConfirmed ?? false)
+  }' '' ''
+  # A Precise Location toggle fires the authorization delegate and nothing
+  # else, so that delegate is the only re-apply for it.
+  _native 'native: the authorization delegate no longer re-applies the indicator' 1 '' '' '' '' '' '' '' '' '' \
+    '  func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+    onAuthorizationChanged?()
+  }'
+  _native 'native: the indicator re-applied only on a branch of the authorization delegate' 1 '' '' '' '' '' '' '' '' '' \
+    '  func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+    onAuthorizationChanged?()
+    if manager.authorizationStatus == .authorizedAlways {
+      applyIndicatorPolicy()
+    }
+  }'
+  _native 'native: no authorization delegate at all' 1 '' '' '' '' '' '' '' '' '' \
+    '  // no authorization delegate'
   # Only-Best, both clauses.
   _native 'native: a 100 m-tier fix cached as the publish input' 1 '' '' '' '' \
     '  func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
     guard let events = sink else { return }
     for loc in locations {
-      if manager.desiredAccuracy == kCLLocationAccuracyBest && loc.timestamp >= bestSince {
+      if bestRequested && loc.timestamp >= bestSince {
         events(fixMap(loc, profile: Self.profileBest))
       } else {
         lastBestFix = loc
@@ -3301,11 +3461,104 @@ self_test() {
       }
     }
   }' '' '' ''
+  # The tier is the REQUESTED one: under reduced accuracy the read-back is
+  # undocumented, and one that never equals Best tags nothing Best.
+  _native 'native: the tag reads desiredAccuracy back instead of the request' 1 '' '' '' '' \
+    '  func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+    guard let events = sink else { return }
+    for loc in locations {
+      if manager.desiredAccuracy == kCLLocationAccuracyBest && loc.timestamp >= bestSince {
+        lastBestFix = loc
+        events(fixMap(loc, profile: Self.profileBest))
+      } else {
+        events(fixMap(loc, profile: Self.profileHundredMeters))
+      }
+    }
+  }' '' '' ''
+  _native 'native: the request recorded as a read-back' 1 '' '' '' \
+    '  private func setProfile(_ name: String) -> Bool {
+    switch name {
+    case Self.profileBest:
+      bestSince = Date()
+      bestRequested = true
+      manager.desiredAccuracy = kCLLocationAccuracyBest
+    case Self.profileHundredMeters:
+      manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
+      bestRequested = manager.desiredAccuracy == kCLLocationAccuracyBest
+    default:
+      return false
+    }
+    return true
+  }' '' '' '' ''
+  _native 'native: the coarse tier never clears the request' 1 '' '' '' \
+    '  private func setProfile(_ name: String) -> Bool {
+    switch name {
+    case Self.profileBest:
+      bestSince = Date()
+      bestRequested = true
+      manager.desiredAccuracy = kCLLocationAccuracyBest
+    case Self.profileHundredMeters:
+      manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
+    default:
+      return false
+    }
+    return true
+  }' '' '' '' ''
+  _native 'native: the return to Best never sets the request' 1 '' '' '' \
+    '  private func setProfile(_ name: String) -> Bool {
+    switch name {
+    case Self.profileBest:
+      bestSince = Date()
+      manager.desiredAccuracy = kCLLocationAccuracyBest
+    case Self.profileHundredMeters:
+      bestRequested = false
+      manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
+    default:
+      return false
+    }
+    return true
+  }' '' '' '' ''
+  _native 'native: the request cleared in the Best case instead' 1 '' '' '' \
+    '  private func setProfile(_ name: String) -> Bool {
+    switch name {
+    case Self.profileBest:
+      bestSince = Date()
+      bestRequested = false
+      manager.desiredAccuracy = kCLLocationAccuracyBest
+    case Self.profileHundredMeters:
+      bestRequested = true
+      manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
+    default:
+      return false
+    }
+    return true
+  }' '' '' '' ''
+  _native 'native: a restart never re-records the Best request' 1 '' \
+    '  func onListen(
+    withArguments arguments: Any?,
+    eventSink events: @escaping FlutterEventSink
+  ) -> FlutterError? {
+    guard sink == nil else { return nil }
+    let args = arguments as? [String: Any] ?? [:]
+    let allowsBg = args["allowsBackgroundLocationUpdates"] as? Bool ?? false
+    if allowsBg && UIApplication.shared.applicationState == .background {
+      events(FlutterError(code: "background_start_refused", message: nil, details: nil))
+      events(FlutterEndOfEventStream)
+      return nil
+    }
+    sink = events
+    manager.allowsBackgroundLocationUpdates = allowsBg
+    applyIndicatorPolicy()
+    bestSince = Date()
+    manager.desiredAccuracy = kCLLocationAccuracyBest
+    manager.startUpdatingLocation()
+    return nil
+  }' '' '' '' '' '' ''
   _native 'native: the bestSince clause dropped from the only-Best guard' 1 '' '' '' '' \
     '  func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
     guard let events = sink else { return }
     for loc in locations {
-      if manager.desiredAccuracy == kCLLocationAccuracyBest {
+      if bestRequested {
         lastBestFix = loc
         events(fixMap(loc, profile: Self.profileBest))
       } else {

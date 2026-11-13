@@ -41,7 +41,9 @@
 /// reported that way would leave subscribers waiting forever. A refused
 /// background-capable start (iOS will not start one from the background —
 /// the 2026-08-20 field failure) arrives as a `background_start_refused`
-/// [PlatformException] followed by the end of the stream.
+/// [PlatformException] followed by the end of the stream; the location
+/// service keeps its own stream open, and the next foreground `resumeStream()`
+/// re-listens.
 ///
 /// An error that arrives WITHOUT an end of stream is not a dead session:
 /// CoreLocation reports a failure and keeps the manager running at the tier it

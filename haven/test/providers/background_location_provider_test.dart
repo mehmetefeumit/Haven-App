@@ -189,6 +189,7 @@ class _FakeIosBackgroundSessionService implements IosBackgroundSessionService {
         // record of whether its gates passed, so a double that reported a
         // constant would contradict the arm/disarm sequence these tests drive.
         armed: _armed,
+        indicatorRequested: true,
       );
 }
 

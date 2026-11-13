@@ -20,6 +20,7 @@ import 'dart:async';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/location.dart';
@@ -1364,6 +1365,143 @@ void main() {
       expect(env.mock.encryptedMlsGroupIds, [const [1]]);
     });
 
+    group('a roster that empties behind the sink', () {
+      // Backgrounded on iOS the scheduler's tick is the only wake there is:
+      // every other `circlesProvider` refresh rides an inbound peer event, and
+      // peer events arrive only inside the bursts these ticks start. A failed
+      // roster read — which `circlesProvider` turns into `[]` — used to disarm
+      // that tick, and nothing could re-arm it until the app came back.
+
+      int reads(_FlakyCircleService mock) =>
+          mock.methodCalls.where((c) => c == 'getVisibleCircles').length;
+
+      Circle circleA() => TestCircleFactory.createCircle(
+        mlsGroupId: const [1],
+        nostrGroupId: const [10],
+        members: [TestCircleFactory.createMember(pubkey: _selfPubkey)],
+      );
+
+      void reread(ProviderContainer container) {
+        container
+          ..invalidate(circlesProvider)
+          ..read(circlesProvider.future).ignore();
+      }
+
+      test('a failed read keeps the wake, whose tick re-reads the roster and '
+          'bursts once the circle is back', () {
+        fakeAsync((async) {
+          final env = build([circleA()]); // ticks every 120 s
+          final sink = _RecordingSink();
+          final notifier = env.container.read(
+            locationPublishSchedulerProvider.notifier,
+          )..setTickSink(sink);
+          async.flushMicrotasks();
+          final armed = notifier.armedSchedulerForTest;
+          expect(armed, isNotNull);
+
+          env.mock.failNextRead = true;
+          reread(env.container);
+          async.flushMicrotasks();
+          expect(
+            notifier.eligibleKeysForTest,
+            isEmpty,
+            reason: 'anti-vacuity: the failed read reached the scheduler as '
+                'an empty roster',
+          );
+          expect(
+            notifier.armedSchedulerForTest,
+            same(armed),
+            reason: 'behind the sink the tick is the only wake: disarmed, '
+                'nothing re-arms it until the app comes back',
+          );
+
+          final before = reads(env.mock);
+          async.elapse(const Duration(seconds: 121));
+          expect(
+            reads(env.mock),
+            before + 1,
+            reason: 'the tick re-read the roster instead of waiting for a '
+                'peer event that only a burst could fetch',
+          );
+          expect(sink.ticks, isEmpty, reason: 'and started no burst');
+          expect(notifier.eligibleKeysForTest, {_hex(const [1])});
+
+          async.elapse(const Duration(seconds: 120));
+          expect(
+            sink.ticks,
+            [_hex(const [1])],
+            reason: 'the next tick bursts for the circle the re-read restored',
+          );
+          expect(env.mock.encryptedMlsGroupIds, isEmpty);
+        });
+      });
+
+      test('a roster that is genuinely empty bursts nothing on its ticks, and '
+          'only re-reads the roster', () {
+        fakeAsync((async) {
+          final gps = _FixedLocationService();
+          final env = build([circleA()], locationService: gps);
+          final sink = _RecordingSink();
+          final notifier = env.container.read(
+            locationPublishSchedulerProvider.notifier,
+          )..setTickSink(sink);
+          async.flushMicrotasks();
+
+          // The last publishable circle is gone, as when it is left.
+          env.mock.setEngineState(const [1], CircleEngineState.unrecoverable);
+          reread(env.container);
+          async.flushMicrotasks();
+          expect(notifier.eligibleKeysForTest, isEmpty);
+
+          final before = reads(env.mock);
+          async.elapse(const Duration(seconds: 3 * 120 + 1));
+          expect(
+            sink.ticks,
+            isEmpty,
+            reason: 'a tick with nothing to publish must not open a burst: a '
+                'connect and a REQ set for nobody',
+          );
+          expect(gps.fixes, 0, reason: 'nor spend a GPS window');
+          expect(
+            reads(env.mock) - before,
+            3,
+            reason: 'one local roster read per tick, and nothing else',
+          );
+          expect(env.mock.encryptedMlsGroupIds, isEmpty);
+        });
+      });
+
+      test('once the sink is cleared, an empty roster disarms the tick as '
+          'it does in the foreground', () {
+        fakeAsync((async) {
+          final env = build([circleA()]);
+          final sink = _RecordingSink();
+          final notifier = env.container.read(
+            locationPublishSchedulerProvider.notifier,
+          )..setTickSink(sink);
+          async.flushMicrotasks();
+          env.mock.failNextRead = true;
+          reread(env.container);
+          async.flushMicrotasks();
+          expect(
+            notifier.armedWakesForTest,
+            1,
+            reason: 'anti-vacuity: kept while the sink was installed',
+          );
+
+          notifier.setTickSink(null);
+          final before = reads(env.mock);
+          async.elapse(const Duration(seconds: 121));
+          expect(notifier.armedWakesForTest, 0);
+          expect(reads(env.mock), before, reason: 'no re-read in the '
+              'foreground: its resume re-reads the roster itself');
+          async.elapse(const Duration(seconds: 10 * 120));
+          expect(sink.ticks, isEmpty);
+          expect(env.mock.encryptedMlsGroupIds, isEmpty);
+        });
+      });
+    });
+
     test('the tick watchdog reports a slow burst but never cancels it',
         () async {
       // `Future.timeout` does not cancel the future it wraps. If this chain
@@ -1545,6 +1683,45 @@ void main() {
         [_hex(const [1]), _hex(const [2])],
       );
       expect(spy.publishOutcomes.every((o) => !o.acked), isTrue);
+    });
+
+    test('a burst pass that skipped its publish is recorded against every '
+        'circle it dropped', () async {
+      // The pass a stranded seal makes the coordinator skip sends nothing, and
+      // the stall report that names it is cleared by the same burst's open:
+      // this record is all that keeps a seal stuck for good from reading as
+      // healthy.
+      final a = TestCircleFactory.createCircle(
+        mlsGroupId: const [1],
+        nostrGroupId: const [10],
+        members: [TestCircleFactory.createMember(pubkey: _selfPubkey)],
+      );
+      final b = TestCircleFactory.createCircle(
+        mlsGroupId: const [2],
+        nostrGroupId: const [20],
+        members: [TestCircleFactory.createMember(pubkey: _selfPubkey)],
+      );
+      final spy = _SpyHealthNotifier();
+      final env = build([a, b], health: spy);
+      final notifier = await ready(env.container)
+        ..recordBurstPublishSkipped([a, b]);
+
+      expect(
+        spy.publishOutcomes.map((o) => o.key),
+        [_hex(const [1]), _hex(const [2])],
+      );
+      expect(spy.publishOutcomes.every((o) => !o.acked), isTrue);
+      expect(env.mock.encryptedMlsGroupIds, isEmpty);
+
+      notifier
+        ..stopScheduling()
+        ..recordBurstPublishSkipped([a]);
+      expect(
+        spy.publishOutcomes,
+        hasLength(2),
+        reason: 'a stopped scheduler publishes nothing, so a burst behind it '
+            'skipped nothing',
+      );
     });
 
     test('a burst publish the core holds sends nothing and routes to the '

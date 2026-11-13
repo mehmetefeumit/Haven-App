@@ -1316,6 +1316,24 @@ void main() {
         expect(inners, hasLength(1));
         expect(innerCancels, 0);
       });
+
+      test('on Android a plugin stream that ends still ends the outer',
+          () async {
+        // The foreground service re-arms its registration on this done; only
+        // the iOS session is kept open across an end.
+        final service = serviceFor();
+        var done = false;
+        final sub = service.getLocationStream().listen(
+          (_) {},
+          onDone: () => done = true,
+        );
+        addTearDown(sub.cancel);
+
+        await inners.single.close();
+        await Future<void>.delayed(Duration.zero);
+
+        expect(done, isTrue);
+      });
     });
 
     group('platform-specific location settings', () {
@@ -1630,6 +1648,123 @@ void main() {
           reason: 'a restart that reverted to the default would drop the '
               'background capability the toggle asked for',
         );
+      });
+
+      // The native side ends a session only when it refuses a background
+      // start; nothing can start one until the app is foregrounded again, so
+      // the stream subscribers hold must survive until that resume.
+      test('a refused background start leaves the stream open and the next '
+          'resumeStream re-opens the session', () async {
+        final service = serviceFor();
+        final seen = <Position>[];
+        final errors = <Object>[];
+        var done = false;
+        final sub = service
+            .getLocationStream(backgroundSharingEnabled: true)
+            .listen(seen.add, onError: errors.add, onDone: () => done = true);
+        addTearDown(sub.cancel);
+
+        fakeIos.session.addError(
+          PlatformException(code: 'background_start_refused'),
+        );
+        await fakeIos.session.close();
+
+        expect(errors, hasLength(1));
+        expect(
+          done,
+          isFalse,
+          reason: 'a closed outer can never be resumed: the session would '
+              'stay dead until the process died',
+        );
+
+        service.resumeStream();
+        fakeIos.session.add(asPosition(positionAt(DateTime.now())));
+        await Future<void>.delayed(Duration.zero);
+
+        expect(
+          fakeIos.listenArguments,
+          [true, true],
+          reason: 'the restart must carry the background intent the toggle '
+              'asked for',
+        );
+        expect(seen, hasLength(1));
+        expect(done, isFalse);
+      });
+
+      test('a session that ends without an error is re-opened by the next '
+          'resumeStream', () async {
+        final service = serviceFor();
+        final seen = <Position>[];
+        var done = false;
+        final sub = service
+            .getLocationStream(backgroundSharingEnabled: true)
+            .listen(seen.add, onDone: () => done = true);
+        addTearDown(sub.cancel);
+
+        await fakeIos.session.close();
+        service.resumeStream();
+        fakeIos.session.add(asPosition(positionAt(DateTime.now())));
+        await Future<void>.delayed(Duration.zero);
+
+        expect(fakeIos.listenArguments, [true, true]);
+        expect(seen, hasLength(1));
+        expect(done, isFalse);
+      });
+
+      test('a restart that is itself refused is retried by the next '
+          'resumeStream', () async {
+        // A resume replaces a failed session; if the user glanced away before
+        // the replacement's listen reached the native side, it is refused
+        // from the background — that must leave the same restartable state.
+        final service = serviceFor();
+        final seen = <Position>[];
+        final errors = <Object>[];
+        final sub = service
+            .getLocationStream(backgroundSharingEnabled: true)
+            .listen(seen.add, onError: errors.add);
+        addTearDown(sub.cancel);
+        fakeIos.session.addError(PlatformException(code: 'failed'));
+        await Future<void>.delayed(Duration.zero);
+
+        service.resumeStream();
+
+        expect(fakeIos.listenArguments, [true, true]);
+        expect(
+          fakeIos.cancels,
+          1,
+          reason: 'the failed session is released before its replacement',
+        );
+
+        fakeIos.session.addError(
+          PlatformException(code: 'background_start_refused'),
+        );
+        await fakeIos.session.close();
+        service.resumeStream();
+        fakeIos.session.add(asPosition(positionAt(DateTime.now())));
+        await Future<void>.delayed(Duration.zero);
+
+        expect(fakeIos.listenArguments, [true, true, true]);
+        expect(errors, hasLength(2));
+        expect(seen, hasLength(1));
+      });
+
+      test('a refused session whose subscriber has gone is never revived',
+          () async {
+        // Toggle-off and dispose cancel the outer; the background intent the
+        // ended session carried must not outlive that withdrawn consent.
+        final service = serviceFor();
+        final sub = service
+            .getLocationStream(backgroundSharingEnabled: true)
+            .listen((_) {}, onError: (Object _) {});
+        fakeIos.session.addError(
+          PlatformException(code: 'background_start_refused'),
+        );
+        await fakeIos.session.close();
+
+        await sub.cancel();
+        service.resumeStream();
+
+        expect(fakeIos.listenArguments, [true]);
       });
 
       test('the foreground hint reaches the native session', () {
@@ -2153,6 +2288,77 @@ void main() {
           51.5,
           reason: 'the publish input must still be the Best-profile fix',
         );
+      });
+
+      test('a refused background start is re-listened on the next resume, '
+          'across the channel', () async {
+        final calls = <MethodCall>[];
+        messenger
+          ..setMockMethodCallHandler(
+            MethodChannelIosLocationSource.methodChannel,
+            (call) async => null,
+          )
+          ..setMockMethodCallHandler(
+            const MethodChannel(eventChannelName),
+            (call) async {
+              calls.add(call);
+              return null;
+            },
+          );
+        final service = GeolocatorLocationService(
+          geolocator: mockGeolocator,
+          isIOS: true,
+          iosSource: MethodChannelIosLocationSource(),
+        );
+        final seen = <Position>[];
+        final sub = service
+            .getLocationStream(backgroundSharingEnabled: true)
+            .listen(seen.add, onError: (Object _) {});
+        addTearDown(sub.cancel);
+        await pumpEventQueue();
+
+        // What `HavenLocationStreamHandler.onListen` sends from the
+        // background: the refusal, then the end of the stream.
+        unawaited(
+          messenger.handlePlatformMessage(
+            eventChannelName,
+            codec.encodeErrorEnvelope(code: 'background_start_refused'),
+            null,
+          ),
+        );
+        unawaited(
+          messenger.handlePlatformMessage(eventChannelName, null, null),
+        );
+        await pumpEventQueue();
+        service.resumeStream();
+        await pumpEventQueue();
+
+        expect(
+          calls.map((c) => c.method),
+          ['listen', 'cancel', 'listen'],
+          reason: 'the native handler accepts a listen only on a channel '
+              'whose earlier session was cancelled',
+        );
+        expect(calls.last.arguments, <String, Object?>{
+          'allowsBackgroundLocationUpdates': true,
+        });
+
+        unawaited(
+          messenger.handlePlatformMessage(
+            eventChannelName,
+            codec.encodeSuccessEnvelope(
+              wireFix(
+                timestamp: DateTime.now(),
+                latitude: 51.5,
+                profile: 'best',
+              ),
+            ),
+            null,
+          ),
+        );
+        await pumpEventQueue();
+
+        expect(seen.map((p) => p.latitude), [51.5]);
       });
     });
 

@@ -5,10 +5,13 @@
 // indicator". That was true only while Haven holds a
 // `CLBackgroundActivitySession`, which is inseparable from the blue bar. Under
 // a CONFIRMED "Always" the handler holds none — `HavenBackgroundSessionHandler`
-// gates it on `!alwaysConfirmed`, and `HavenLocationStreamHandler` clears
-// `showsBackgroundLocationIndicator` from the same predicate — so that user
-// sees only the OS's status-bar arrow, and the old sentence promised them an
-// indicator that is not there.
+// gates it on `!alwaysConfirmed` — and, with Precise Location on,
+// `HavenLocationStreamHandler` clears `showsBackgroundLocationIndicator` too,
+// from the handler's `indicatorRequested` — so that user sees only the OS's
+// status-bar arrow, and the old sentence promised them an indicator that is
+// not there. With Precise Location off the flag stays on (accuracy writes then
+// have no effect, and the indicator is Apple's other way to keep the session
+// running), so that reader sees the bar.
 //
 // So the card is now two sentences: a base that names NO indicator, then
 // exactly one of two indicator sentences chosen by the handler's own state.
@@ -22,12 +25,13 @@
 //     bar, in that ONE noun — "indicator"/"pill" are not synonyms a reader can
 //     match against what they see.
 //
-// It also pins the SELECTION, in both languages: Swift decides the activity
-// session and the indicator flag from `alwaysConfirmed`, exports that field on
-// its status channel, and Dart chooses the sentence from the same field —
-// never from `backgroundActivitySessionHeld`, which is structurally false on
-// the iOS 15/16 floor of the deployment target while those users are looking
-// at the bar.
+// It also pins the SELECTION, in both languages: Swift sets the indicator flag
+// from `indicatorRequested`, exports that field on its status channel, and
+// Dart chooses the sentence from the same field — never from `alwaysConfirmed`
+// alone, which misses the reduced-accuracy reader, and never from
+// `backgroundActivitySessionHeld`, which is structurally false on the iOS
+// 15/16 floor of the deployment target while those users are looking at the
+// bar.
 //
 // Deliberately NOT forbidden: the bare word "bar". The arrow sentence has to
 // say "status bar", and a guard that banned the word would force that sentence
@@ -47,7 +51,8 @@ import 'package:flutter_test/flutter_test.dart';
 /// The tier-neutral first sentence. Renders under both indicator states.
 const kBase = 'locationSettingsIosGuidance';
 
-/// Selected when the handler reports `alwaysConfirmed` (a confirmed Always).
+/// Selected when the handler reports `indicatorRequested` false (a confirmed
+/// Always with Precise Location on).
 const kArrow = 'locationSettingsIosIndicatorArrow';
 
 /// Selected on every other reading, in all of which the blue bar is up.
@@ -114,25 +119,48 @@ String? activitySessionPolicyLine(String source) {
   return null;
 }
 
+/// The exact assignment that asks the OS for the location indicator.
+const kIndicatorFlagLine =
+    'manager.showsBackgroundLocationIndicator = '
+    'sessionHandler?.indicatorRequested ?? true';
+
+/// The exact body of the session handler's `indicatorRequested`.
+const kIndicatorPredicate =
+    '!alwaysConfirmed || '
+    'CLLocationManager().accuracyAuthorization == .reducedAccuracy';
+
 /// The uncommented line of [source] that asks the OS for the location
-/// indicator, or null if it no longer follows `alwaysConfirmed`.
+/// indicator, or null if it is no longer exactly [kIndicatorFlagLine].
 ///
 /// The other half of the native decision, and the half that reaches the users
 /// the activity session cannot: `CLBackgroundActivitySession` is iOS 17+ and
 /// Haven deploys to iOS 15.5, so on iOS 15/16 this flag is the ONLY thing
-/// putting the bar on screen.
+/// putting the bar on screen. Exact, because every plausible rewrite — a
+/// constant, `?? false`, a local `!alwaysConfirmed` — drops a reader the copy
+/// still names the bar to.
 String? indicatorFlagPolicyLine(String source) {
   for (final raw in source.split('\n')) {
     final line = raw.trim();
     if (line.startsWith('//')) continue;
-    if (line.contains('showsBackgroundLocationIndicator') &&
-        line.contains('=') &&
-        line.contains('!') &&
-        line.contains('alwaysConfirmed')) {
-      return line;
-    }
+    if (line == kIndicatorFlagLine) return line;
   }
   return null;
+}
+
+/// Whether [source] declares `indicatorRequested` as exactly
+/// [kIndicatorPredicate], and nothing else.
+///
+/// The reduced-accuracy clause is the one a "simplification" deletes, and the
+/// one reader it protects — a confirmed Always with Precise Location off — is
+/// the reader the arrow sentence would lie to.
+bool declaresIndicatorPredicate(String source) {
+  final body = swiftFunctionBody(source, 'var indicatorRequested: Bool {');
+  if (body == null) return false;
+  final lines = [
+    for (final l in body.split('\n'))
+      if (l.trim().isNotEmpty) l.trim(),
+  ];
+  return lines.length == 1 && lines.single == kIndicatorPredicate;
 }
 
 /// The body of the Swift function whose declaration line contains
@@ -167,6 +195,22 @@ bool statusExportsAlwaysConfirmed(String source) {
     final line = raw.trim();
     if (line.startsWith('//')) continue;
     if (line.startsWith('"alwaysConfirmed":')) return true;
+  }
+  return false;
+}
+
+/// Whether [source] still puts `indicatorRequested` on the wire.
+///
+/// The value the sentence is selected on. Dropping the key leaves no compile
+/// error: Dart's parse falls back to "asked for" and every confirmed-Always
+/// user with Precise Location on is promised a bar again.
+bool statusExportsIndicatorRequested(String source) {
+  for (final raw in source.split('\n')) {
+    final line = raw.trim();
+    if (line.startsWith('//')) continue;
+    if (line.startsWith('"indicatorRequested": indicatorRequested')) {
+      return true;
+    }
   }
   return false;
 }
@@ -236,20 +280,50 @@ void main() {
         indicatorFlagPolicyLine(swift.readAsStringSync()),
         isNotNull,
         reason: 'showsBackgroundLocationIndicator is what shows the bar on '
-            'every iOS below 17, where no activity session can exist. If it '
-            'stops following !alwaysConfirmed, the sentence the page picks is '
-            'no longer the one the OS obeys.',
+            'every iOS below 17, where no activity session can exist. It must '
+            'read exactly "$kIndicatorFlagLine": if it stops following '
+            'indicatorRequested, the sentence the page picks is no longer the '
+            'one the OS obeys.',
+      );
+    });
+
+    test('the indicator predicate keeps a reduced-accuracy Always on the '
+        'bar', () {
+      final swift = File('ios/Runner/HavenBackgroundSessionHandler.swift');
+      expect(
+        declaresIndicatorPredicate(swift.readAsStringSync()),
+        isTrue,
+        reason: 'indicatorRequested must be exactly "$kIndicatorPredicate". '
+            'Without the reduced-accuracy clause a confirmed-Always user with '
+            'Precise Location off gets no indicator and is told about the '
+            'arrow; with && instead of || every unconfirmed tier loses the '
+            'flag while the copy names the bar.',
+      );
+    });
+
+    test('the indicator predicate reaches Dart', () {
+      final swift = File('ios/Runner/HavenBackgroundSessionHandler.swift');
+      expect(
+        statusExportsIndicatorRequested(swift.readAsStringSync()),
+        isTrue,
+        reason: 'the sentence selector reads this key over the status channel; '
+            'without it the parse falls back to "asked for" and the page '
+            'promises a blue bar to every confirmed-Always user with Precise '
+            'Location on, silently.',
       );
     });
 
     test('the predicate the copy is selected on still reaches Dart', () {
+      // `alwaysConfirmed` no longer selects the sentence on its own, but it
+      // is half of `indicatorRequested` and the tier oracles read it.
       final swift = File('ios/Runner/HavenBackgroundSessionHandler.swift');
       expect(
         statusExportsAlwaysConfirmed(swift.readAsStringSync()),
         isTrue,
-        reason: 'the sentence selector reads this key over the status channel; '
-            'without it the parse falls back to false and the page promises a '
-            'blue bar to every confirmed-Always user, silently.',
+        reason: 'the b7 and bg-publish lanes read this key to establish the '
+            'tier the indicator reading is checked against; without it the '
+            'parse falls back to false and the confirmed-Always shape can no '
+            'longer be observed, silently.',
       );
     });
 
@@ -311,21 +385,29 @@ void main() {
       );
     });
 
-    test('Dart selects the sentence on alwaysConfirmed, never on the held '
-        'session', () {
+    test('Dart selects the sentence on indicatorRequested, never on '
+        'alwaysConfirmed alone or the held session', () {
       // The two sources are pinned against each other so a change to either
-      // one fails: Swift decides both the activity session and the indicator
-      // flag from `alwaysConfirmed`, so anything else in Dart is a second,
-      // divergent policy. `backgroundActivitySessionHeld` was that second
-      // policy — false for the whole iOS 15/16 cohort, who see the bar.
+      // one fails: Swift sets the indicator flag from `indicatorRequested`, so
+      // anything else in Dart is a second, divergent policy.
+      // `backgroundActivitySessionHeld` was that second policy — false for the
+      // whole iOS 15/16 cohort, who see the bar — and `alwaysConfirmed` alone
+      // is another, true for a reduced-accuracy reader who also sees the bar.
       final body = indicatorProviderBody(
         File('lib/src/providers/service_providers.dart').readAsStringSync(),
       );
       expect(
         body,
-        contains('alwaysConfirmed'),
-        reason: 'the sentence must be selected on the value both native '
-            'branches decide from — "$body"',
+        contains('status.indicatorRequested'),
+        reason: 'the sentence must be selected on the value the native flag '
+            'is set from — "$body"',
+      );
+      expect(
+        body,
+        isNot(contains('alwaysConfirmed')),
+        reason: 'a confirmed Always with Precise Location off keeps the '
+            'indicator, so alwaysConfirmed names the arrow to a reader '
+            'looking at the bar — "$body"',
       );
       expect(
         body,
@@ -370,8 +452,9 @@ void main() {
       expect(
         violations(arrow, const ['blue', kBlueBarPhrase]),
         isEmpty,
-        reason: 'this sentence is selected exactly when no activity session is '
-            'held, i.e. when there is no blue bar — "${arb[kArrow]}"',
+        reason: 'this sentence is selected only when the handler asks for no '
+            'indicator and holds no activity session, i.e. when there is no '
+            'blue bar — "${arb[kArrow]}"',
       );
     });
 
@@ -475,21 +558,73 @@ void main() {
       );
     });
 
-    test('the indicator-flag reader needs the negation, not just the name', () {
+    test('the indicator-flag reader wants the exact line, not just the '
+        'name', () {
+      const flag = 'manager.showsBackgroundLocationIndicator =';
       expect(
         indicatorFlagPolicyLine(
-          '    manager.showsBackgroundLocationIndicator = '
-          '!(sessionHandler?.alwaysConfirmed ?? false)',
+          '    $flag sessionHandler?.indicatorRequested ?? true',
         ),
         isNotNull,
       );
+      for (final mutant in const [
+        '    $flag false',
+        '    $flag true',
+        '    $flag sessionHandler?.indicatorRequested ?? false',
+        '    $flag !(sessionHandler?.alwaysConfirmed ?? false)',
+        '    // $flag sessionHandler?.indicatorRequested ?? true',
+      ]) {
+        expect(
+          indicatorFlagPolicyLine(mutant),
+          isNull,
+          reason: 'a constant, an off default or a local re-derivation no '
+              'longer reads the predicate the copy is selected on — $mutant',
+        );
+      }
+    });
+
+    test('the predicate reader rejects every mutant of the expression', () {
+      String handler(String body) =>
+          '  var indicatorRequested: Bool {\n$body\n  }\n';
       expect(
-        indicatorFlagPolicyLine(
-          '    manager.showsBackgroundLocationIndicator = false',
+        declaresIndicatorPredicate(handler('    $kIndicatorPredicate')),
+        isTrue,
+      );
+      const accuracy = 'CLLocationManager().accuracyAuthorization';
+      for (final mutant in const [
+        '    !alwaysConfirmed',
+        '    !alwaysConfirmed && $accuracy == .reducedAccuracy',
+        '    !alwaysConfirmed || $accuracy == .fullAccuracy',
+        '    true',
+        '    // $kIndicatorPredicate',
+        '    if forced { return true }\n    return $kIndicatorPredicate',
+      ]) {
+        expect(
+          declaresIndicatorPredicate(handler(mutant)),
+          isFalse,
+          reason: mutant,
+        );
+      }
+      expect(declaresIndicatorPredicate('final class Handler {}'), isFalse);
+    });
+
+    test('the indicator-export reader wants the key, not the field', () {
+      expect(
+        statusExportsIndicatorRequested(
+          '      "indicatorRequested": indicatorRequested,',
         ),
-        isNull,
-        reason: 'a flag pinned to a constant no longer tracks the tier, and '
-            'the copy would have to be re-derived',
+        isTrue,
+      );
+      expect(
+        statusExportsIndicatorRequested(
+          '  // "indicatorRequested": indicatorRequested,',
+        ),
+        isFalse,
+      );
+      expect(
+        statusExportsIndicatorRequested('  var indicatorRequested: Bool {'),
+        isFalse,
+        reason: 'the property existing is not the property being exported',
       );
     });
 
@@ -553,16 +688,16 @@ final iosIndicatorSentenceProvider = FutureProvider<IosIndicatorSentence>((
   ref,
 ) async {
   final status = await ref.read(iosBackgroundSessionServiceProvider).status();
-  return status.alwaysConfirmed
-      ? IosIndicatorSentence.arrow
-      : IosIndicatorSentence.bar;
+  return status.indicatorRequested
+      ? IosIndicatorSentence.bar
+      : IosIndicatorSentence.arrow;
 });
 final somethingElse = 1;
 ''';
       const prose = '/// NOT backgroundActivitySessionHeld: it is iOS 17+.\n';
 
       final body = indicatorProviderBody(prose + declaration);
-      expect(body, contains('alwaysConfirmed'));
+      expect(body, contains('status.indicatorRequested'));
       expect(body, isNot(contains('backgroundActivitySessionHeld')));
       expect(
         body,
@@ -572,7 +707,7 @@ final somethingElse = 1;
 
       expect(
         indicatorProviderBody(declaration.replaceAll(
-          'status.alwaysConfirmed',
+          'status.indicatorRequested',
           'status.backgroundActivitySessionHeld',
         )),
         contains('backgroundActivitySessionHeld'),

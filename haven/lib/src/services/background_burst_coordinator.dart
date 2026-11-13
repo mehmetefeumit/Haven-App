@@ -77,6 +77,7 @@
 ///   onOpenOutcome: (failures) => failures == 0
 ///       ? health.recordRelaySubscriptionRestored()
 ///       : health.recordRelaySubscriptionLost(),
+///   onStalled: health.recordRelaySubscriptionLost,
 /// );
 /// final scheduler = ref.read(locationPublishSchedulerProvider.notifier);
 /// scheduler.setTickSink(coordinator);
@@ -102,12 +103,33 @@
 /// sink back, and false again when the sink is re-installed.** It is what stops
 /// a burst that was in flight at resume from pausing an engine the foreground
 /// now owns — `burstEnabled` cannot: it reads the background-sharing consent,
-/// which is still true in the foreground. A pause landing there is invisible
-/// and unrecoverable within the window: `ensureRunning` sees `isRunning`, the
-/// health model's `refresh()` early-returns while paused, and the banner holds
-/// at its last verdict while the device receives nothing. Unwired, the read
-/// defaults to false and every burst tears down exactly as it did before this
-/// signal existed.
+/// which is still true in the foreground. A pause landing there leaves an app
+/// on screen receiving nothing: `ensureRunning` sees `isRunning`, and only the
+/// heal backstop's re-anchor and the health model's paused-on-screen onset
+/// (confirmed after `kSharingFaultConfirmationWindow`) ever notice it. Unwired,
+/// the read defaults to false and every burst tears down exactly as it did
+/// before this signal existed.
+///
+/// ## A burst that never ends does not end bursting
+///
+/// None of a burst's links may be given a `.timeout(` (Security Rule 13), so a
+/// link that never returns — an engine call parked behind a held Rust lock, a
+/// seal that does not come back — cannot be bounded, only abandoned. Each
+/// burst's state lives in a lane; once a burst has run past [burstBound] plus
+/// [kBurstStallAllowance], the NEXT tick (or idle close) supersedes its lane
+/// and runs on a fresh one. Nothing is cancelled: the stuck lane stops at its
+/// next link, every one of which re-reads whether it was superseded, so it
+/// issues no further engine call, seal, fold or pool shutdown. The tick is the
+/// clock, so supersession adds no timer.
+///
+/// Two stalls are reported but not superseded around. A lane stuck in its open
+/// or start keeps the engine: a replacement's open would only queue behind the
+/// same Rust lifecycle lock (the Rust side's narrowed in-flight gauge is what
+/// frees receive there). And while a superseded lane's seal is still out, the
+/// live lane publishes nothing — sealing beside it could put two circles'
+/// `created_at` in one whole second — but still opens, folds and pauses, so no
+/// REQ stands between bursts; its first seal after that one returns waits one
+/// stagger gap.
 library;
 
 import 'dart:async';
@@ -139,14 +161,69 @@ const Duration kBurstBacklogBudget = Duration(seconds: 5);
 /// preference reads in front of it are local.
 const Duration kBurstWindowBudget = kOneShotLocationTimeout;
 
+/// [kBurstPublishBudget] in seconds, so the ceilings derived from it can be
+/// compile-time sums (`Duration.inSeconds` is not a const expression).
+const int kBurstPublishSecs = 10;
+
 /// Worst case for ONE circle's publish: `CONNECTION_TIMEOUT` (5 s) +
 /// `LOCATION_ACK_WINDOW` (5 s) of radio.
 ///
 /// The WHOLE ladder, not one attempt of it — `LOCATION_PUBLISH_ATTEMPTS` is
 /// exactly 1 (`haven-core/src/relay/manager.rs`), because the next tick
-/// supersedes a location that missed. The 3-attempt ≈49 s ladder belongs to
-/// the COMMIT path, and nothing on the publish pass takes it.
-const Duration kBurstPublishBudget = Duration(seconds: 10);
+/// supersedes a location that missed. The 3-attempt ≈49 s ladder
+/// ([kCommitLadderSecs]) belongs to the COMMIT path, and nothing on the
+/// publish pass takes it.
+const Duration kBurstPublishBudget = Duration(seconds: kBurstPublishSecs);
+
+/// Mirror of `RELAY_LIFECYCLE_OP_TIMEOUT_SECS` in
+/// `haven-core/src/relay/live_sync/config.rs` — the engine's own bound on ONE
+/// relay control-plane op.
+const int kRelayLifecycleOpSecs = 10;
+
+/// How many [kRelayLifecycleOpSecs]-bounded steps `pause_subscriptions` takes
+/// before it reaches its uncapped Rule-13 publish drain: `unsubscribe_all`,
+/// the leftover-subscription probe, the `RawSignal::Pause` marker send, and
+/// the worker's ack of it.
+///
+/// The leftover SWEEP adds one more per REQ a partial `unsubscribe_all` left
+/// registered, and the drain that follows has no cap at all — which is why
+/// every wait priced from this is a bound and not an await.
+const int kPauseBoundedSteps = 4;
+
+/// Mirror of `BURST_SETTLE_CAP_SECS` in the same Rust module — the cap on the
+/// follow-on commit quiesce a burst holds its sockets open for.
+const int kBurstSettleCapSecs = 18;
+
+/// The COMMIT publish ladder, in seconds: `MAX_PUBLISH_ATTEMPTS` (3) ×
+/// (`CONNECTION_TIMEOUT` 5 s + `DEFAULT_TIMEOUT` 10 s) + 2 ×
+/// `PUBLISH_RETRY_BACKOFF` (2 s) in `haven-core/src/relay/manager.rs`.
+const int kCommitLadderSecs = 49;
+
+/// Mirror of the maintenance scheduler's `_loginPublishSettleTimeout`: how long
+/// a generation's first `KeyPackage` tick may wait for the login publish.
+const int kLoginPublishSettleSecs = 60;
+
+/// What a burst may spend beyond [burstBound] before a LATER tick treats it as
+/// stalled: its maintenance fold and its teardown at their worst case.
+///
+/// * the fold — [kLoginPublishSettleSecs] for a first `KeyPackage` tick, then
+///   one [kCommitLadderSecs] each for the `KeyPackage`, the relay list and one
+///   leave;
+/// * the teardown — the settle ([kBurstSettleCapSecs]) and the pause's bounded
+///   prefix ([kPauseBoundedSteps] × [kRelayLifecycleOpSecs]); and
+/// * one adopted drive round of the drain, one more [kCommitLadderSecs].
+///
+/// Crossing it proves nothing and cancels nothing: it only lets the next tick
+/// run on a fresh lane (see [BackgroundBurstCoordinator]). A healthy burst
+/// that crosses it — more adopted rounds, more leaves — costs one extra open.
+const Duration kBurstStallAllowance = Duration(
+  seconds:
+      kLoginPublishSettleSecs +
+      3 * kCommitLadderSecs +
+      kBurstSettleCapSecs +
+      kPauseBoundedSteps * kRelayLifecycleOpSecs +
+      kCommitLadderSecs,
+);
 
 /// Worst-case decorrelation stagger a burst of [circles] publishes can spend.
 ///
@@ -250,6 +327,13 @@ abstract class BurstPublisher {
   /// Never throws.
   Future<BurstFix?> openBurstPublishWindow(Iterable<Circle> circles);
 
+  /// Records a failed publish for each of [circles], due in a burst that
+  /// skipped its publish pass, so a pass that never sends reads as not
+  /// sharing rather than as silence.
+  ///
+  /// Never throws.
+  void recordBurstPublishSkipped(Iterable<Circle> circles);
+
   /// Publishes [circle] at [fix], recording the outcome. Never throws.
   Future<void> publishInBurst(Circle circle, BurstFix fix);
 }
@@ -306,6 +390,9 @@ Future<void>? _noCommitCriticalWork() => null;
 /// rather than a new failure.
 bool _stillBackgrounded() => false;
 
+/// The default `onStalled`: nobody is told.
+void _reportsNoStall() {}
+
 /// Where the per-circle publish scheduler sends a tick when something other
 /// than a direct publish should handle it.
 abstract class BurstSink {
@@ -333,8 +420,14 @@ abstract class BurstSink {
 // ---------------------------------------------------------------------------
 
 /// Serializes background publish ticks into bounded open→publish→close bursts.
+///
+/// The bursts themselves run on a [_BurstLane]; this forwards to the live one
+/// and replaces it once its burst has stalled (see the library header).
 class BackgroundBurstCoordinator implements BurstSink {
   /// Creates a coordinator over its injected collaborators.
+  ///
+  /// [onStalled] is told once for each lane whose burst has run past its
+  /// ceiling — whether or not that lane could be superseded. Never throws.
   BackgroundBurstCoordinator({
     required SubscriptionService engine,
     required BurstPublisher publisher,
@@ -348,7 +441,104 @@ class BackgroundBurstCoordinator implements BurstSink {
     Future<BurstStart?> Function(Duration budget) prepareStartIntoBurst =
         _startsNone,
     Future<bool> Function()? receiveWithoutSession,
+    void Function() onStalled = _reportsNoStall,
     DateTime Function() now = DateTime.now,
+  }) : _onStalled = onStalled,
+       _now = now {
+    _newLane = ({required bool afterStrandedSeal}) => _BurstLane(
+      engine: engine,
+      publisher: publisher,
+      maintenance: maintenance,
+      stagger: stagger,
+      shutdownPublishPool: shutdownPublishPool,
+      burstEnabled: burstEnabled,
+      onOpenOutcome: onOpenOutcome,
+      pendingCommitCritical: pendingCommitCritical,
+      foregrounded: foregrounded,
+      prepareStartIntoBurst: prepareStartIntoBurst,
+      receiveWithoutSession: receiveWithoutSession,
+      sealStranded: () => _strandedSeal != null,
+      gapBeforeFirstSeal: afterStrandedSeal,
+      now: now,
+    );
+    _lane = _newLane(afterStrandedSeal: false);
+  }
+
+  final void Function() _onStalled;
+  final DateTime Function() _now;
+  late final _BurstLane Function({required bool afterStrandedSeal}) _newLane;
+  late _BurstLane _lane;
+
+  /// A superseded lane's seal that has not returned yet, handed to every live
+  /// lane until it does.
+  Future<void>? _strandedSeal;
+
+  @override
+  Future<void>? get runningBurst => _lane.runningBurst;
+
+  /// Queues [circleKey] on the live lane and returns the burst that will
+  /// publish it (see [_BurstLane.onTick]).
+  @override
+  Future<void> onTick({required String circleKey, required Circle circle}) {
+    _supersedeIfStalled();
+    return _lane.onTick(circleKey: circleKey, circle: circle);
+  }
+
+  /// Runs a teardown with no burst in front of it, on the live lane (see
+  /// [_BurstLane.closeIdle]).
+  Future<void> closeIdle() {
+    _supersedeIfStalled();
+    return _lane.closeIdle();
+  }
+
+  void _supersedeIfStalled() {
+    final stale = _lane;
+    if (!stale.stalledAt(_now())) return;
+    final firstReport = stale.reportStall();
+    // Its replacement's open would queue behind the same engine lifecycle
+    // lock the stuck one waits on, adding one more call to run when it frees.
+    if (!stale.receiving) {
+      final seal = stale.supersede();
+      if (seal != null) {
+        _strandedSeal = seal;
+        seal.whenComplete(() {
+          if (identical(_strandedSeal, seal)) _strandedSeal = null;
+        }).ignore();
+      }
+      _lane = _newLane(afterStrandedSeal: _strandedSeal != null);
+      debugPrint('[BackgroundBurst] stalled burst superseded: the next burst '
+          'runs on a fresh lane');
+    }
+    if (firstReport) {
+      // Constant text: no circle, key, relay or count (Rule 15).
+      debugPrint('[BackgroundBurst] burst stalled past its ceiling');
+      _onStalled();
+    }
+  }
+}
+
+/// One coordinator's burst state: the due set, the chain, and the flags of
+/// the burst running on it.
+///
+/// Kept per lane so a lane abandoned by [BackgroundBurstCoordinator] cannot
+/// touch the live one's state from its own `finally` blocks.
+class _BurstLane {
+  _BurstLane({
+    required SubscriptionService engine,
+    required BurstPublisher publisher,
+    required BurstMaintenance maintenance,
+    required PublishStagger stagger,
+    required Future<void> Function() shutdownPublishPool,
+    required bool Function() burstEnabled,
+    required void Function(int consecutiveFailures) onOpenOutcome,
+    required Future<void>? Function() pendingCommitCritical,
+    required bool Function() foregrounded,
+    required Future<BurstStart?> Function(Duration budget)
+    prepareStartIntoBurst,
+    required Future<bool> Function()? receiveWithoutSession,
+    required bool Function() sealStranded,
+    required bool gapBeforeFirstSeal,
+    required DateTime Function() now,
   }) : _engine = engine,
        _publisher = publisher,
        _maintenance = maintenance,
@@ -360,6 +550,8 @@ class BackgroundBurstCoordinator implements BurstSink {
        _foregrounded = foregrounded,
        _prepareStartIntoBurst = prepareStartIntoBurst,
        _receiveWithoutSession = receiveWithoutSession,
+       _sealStranded = sealStranded,
+       _gapBeforeFirstSeal = gapBeforeFirstSeal,
        _now = now;
 
   final SubscriptionService _engine;
@@ -401,11 +593,9 @@ class BackgroundBurstCoordinator implements BurstSink {
   /// Deliberately separate from [_burstEnabled], which reads the
   /// background-sharing consent and is still true in the foreground. Without
   /// this read a burst still running at resume settles, pauses and shuts the
-  /// pool while the app is on screen, and nothing recovers it: `ensureRunning`
-  /// reads `isRunning` (true across a pause), `_fullRestart` declines while
-  /// paused, and the health model's `refresh()` early-returns while paused, so
-  /// the banner holds at "healthy" while the device receives nothing until the
-  /// next background→foreground cycle.
+  /// pool while the app is on screen: `ensureRunning` reads `isRunning` (true
+  /// across a pause) and `_fullRestart` declines while paused, so the device
+  /// receives nothing until the heal backstop's re-anchor gets to it.
   final bool Function() _foregrounded;
 
   /// Reports the receive plane after EVERY burst open: how many opens in a row
@@ -468,15 +658,75 @@ class BackgroundBurstCoordinator implements BurstSink {
   /// Burst opens that have failed in a row, `0` after any open that succeeded.
   int _openFailures = 0;
 
-  @override
+  /// Whether a superseded lane's seal is still out (see the library header).
+  final bool Function() _sealStranded;
+
+  /// Whether this lane's first seal waits a stagger gap: it was made while a
+  /// superseded lane's seal was out, which may return just before it.
+  bool _gapBeforeFirstSeal;
+
+  /// When the running burst (or idle close) began; `null` between them.
+  DateTime? _runningSince;
+
+  /// Whether the running burst is still in its receive step: the lifecycle
+  /// read, the start into the burst, the open, or the session-less receive.
+  bool _receiving = false;
+
+  /// Set once [BackgroundBurstCoordinator] has replaced this lane. Every link
+  /// after the one in flight re-reads it, through [_handedOver] or [_live].
+  bool _superseded = false;
+
+  bool _stallReported = false;
+
+  /// The seal this lane is awaiting, or `null`.
+  Future<void>? _sealing;
+
   Future<void>? get runningBurst => _bursting ? _chain : null;
+
+  /// Whether the burst running here has outlasted its own links' bound plus
+  /// [kBurstStallAllowance] at [now].
+  ///
+  /// Priced when asked, so circles that joined mid-burst raise the ceiling.
+  bool stalledAt(DateTime now) {
+    final since = _runningSince;
+    return since != null &&
+        now.difference(since) >
+            burstBound(_due.length + _encrypted.length, _stagger) +
+                kBurstStallAllowance;
+  }
+
+  /// Whether the running burst is still in its receive step.
+  bool get receiving => _receiving;
+
+  /// True the first time it is asked, so a stall is reported once per lane.
+  bool reportStall() {
+    if (_stallReported) return false;
+    return _stallReported = true;
+  }
+
+  /// Marks this lane replaced and returns the seal it is awaiting, if any.
+  ///
+  /// Clearing [_due] makes a burst queued behind the stuck one return at once;
+  /// the scheduler hands every circle over again on its next tick.
+  Future<void>? supersede() {
+    _superseded = true;
+    _due.clear();
+    return _sealing;
+  }
+
+  /// Whether this lane may no longer touch the engine: the foreground took it
+  /// back, or a later lane owns it.
+  bool _handedOver() => _superseded || _foregrounded();
+
+  /// Whether this lane may still publish and fold: consent stands and no later
+  /// lane owns the burst.
+  bool _live() => !_superseded && _burstEnabled();
 
   /// Queues [circleKey] and returns the burst that will publish it.
   ///
   /// [circle] is deliberately not kept: it is a snapshot taken at tick time,
   /// and a burst publishes seconds to a minute later. The pass re-reads the
   /// scheduler's roster instead — see [_pendingCircles].
-  @override
   Future<void> onTick({required String circleKey, required Circle circle}) {
     _due.add(circleKey);
     if (_joinable && !_encrypted.contains(circleKey)) {
@@ -516,10 +766,12 @@ class BackgroundBurstCoordinator implements BurstSink {
     return _chain = _chain
         .then((_) async {
           _bursting = true;
+          _runningSince = _now();
           try {
             await _closeBurst();
           } finally {
             _bursting = false;
+            _runningSince = null;
           }
         })
         .catchError((Object e) {
@@ -535,7 +787,7 @@ class BackgroundBurstCoordinator implements BurstSink {
   /// Runs one burst over whatever is currently due. Never throws.
   Future<void> _runBurst() async {
     if (_due.isEmpty) return; // drained by the burst this one queued behind
-    if (_foregrounded()) {
+    if (_handedOver()) {
       // Queued while backgrounded, reached after the resume took the sink
       // back. Opening now would replace the foreground's anchor with a burst
       // one — which carries no inbox REQ, so gift-wrapped invitations would
@@ -562,7 +814,9 @@ class BackgroundBurstCoordinator implements BurstSink {
     // starts a session orders behind it ([runningBurst]) instead of racing
     // the start for the engine.
     _bursting = true;
+    _runningSince = startedAt;
     _joinable = true;
+    _receiving = true;
     try {
       try {
         // How this burst receives before it seals (receive-before-seal, both
@@ -633,7 +887,8 @@ class BackgroundBurstCoordinator implements BurstSink {
           }
           _onOpenOutcome(_openFailures);
         }
-        if (opened && _burstEnabled()) {
+        _receiving = false;
+        if (opened && _live()) {
           final outcome = await _engine.waitBacklogSettled();
           if (outcome == BacklogOutcomeFfi.timedOut) {
             // A report, not a failure: an endpoint stayed silent, so this
@@ -651,9 +906,10 @@ class BackgroundBurstCoordinator implements BurstSink {
         // already-completed chain, queues nothing, and background sharing
         // stops for the rest of the window with no error anywhere.
         _joinable = false;
+        _receiving = false;
         _reportOverBudget(startedAt);
       }
-      if (_burstEnabled()) await _foldMaintenance();
+      if (_live()) await _foldMaintenance();
     } finally {
       // Nested, because the flag must be cleared even when the teardown throws
       // — its handback and drive reads are caller-supplied closures.
@@ -665,6 +921,7 @@ class BackgroundBurstCoordinator implements BurstSink {
         await _closeBurst();
       } finally {
         _bursting = false;
+        _runningSince = null;
       }
     }
   }
@@ -674,7 +931,7 @@ class BackgroundBurstCoordinator implements BurstSink {
   Future<bool> _receivedWithoutSession(Future<bool> Function() receive) async {
     try {
       final completed = await receive();
-      return completed && !_foregrounded() && _burstEnabled();
+      return completed && !_handedOver() && _burstEnabled();
     } on Object catch (e) {
       debugPrint('[BackgroundBurst] receive failed: ${e.runtimeType}');
       return false;
@@ -689,13 +946,13 @@ class BackgroundBurstCoordinator implements BurstSink {
   Future<bool> _startedIntoBurst(Duration budget) async {
     if (!await _startIntoBurst(budget)) {
       _due.clear();
-      if (_foregrounded() || !_burstEnabled()) return false;
+      if (_handedOver() || !_burstEnabled()) return false;
       _openFailures++;
       debugPrint('[BackgroundBurst] no session: nothing published');
       _onOpenOutcome(_openFailures);
       return false;
     }
-    if (_foregrounded()) {
+    if (_handedOver()) {
       _due.clear();
       return false;
     }
@@ -707,7 +964,7 @@ class BackgroundBurstCoordinator implements BurstSink {
   Future<bool> _startIntoBurst(Duration budget) async {
     try {
       final start = await _prepareStartIntoBurst(budget);
-      if (start == null || _foregrounded() || !_burstEnabled()) return false;
+      if (start == null || _handedOver() || !_burstEnabled()) return false;
       await start();
       return true;
     } on Object catch (e) {
@@ -744,9 +1001,25 @@ class BackgroundBurstCoordinator implements BurstSink {
   /// Re-reads the due set after each pass so a tick that arrived mid-publish
   /// joins this burst. Terminates because every published circle enters
   /// [_encrypted] and is filtered out of the next pass.
+  ///
+  /// Publishes nothing while a superseded lane's seal is still out, and drops
+  /// what is due, as a refused window does: a seal here could land in the same
+  /// whole second as that one when it returns, and waiting for it would hold
+  /// this burst's REQs and sockets open for as long as it is stuck. The drop
+  /// is attributed to each due circle, as the refused window's is: the stall
+  /// report is cleared by this lane's own open, so a seal that never returns
+  /// would otherwise end background sending with nothing on the banner.
   Future<void> _publishPass() async {
+    if (_sealStranded()) {
+      final dropped = [for (final entry in _pendingCircles()) entry.circle];
+      _due.clear();
+      _publisher.recordBurstPublishSkipped(dropped);
+      debugPrint('[BackgroundBurst] a superseded burst is still sealing: '
+          'nothing published');
+      return;
+    }
     BurstFix? fix;
-    while (_burstEnabled()) {
+    while (_live()) {
       final pending = _pendingCircles();
       if (pending.isEmpty) return;
       // The window opens on the first pass only: one fix per burst, and a
@@ -776,9 +1049,10 @@ class BackgroundBurstCoordinator implements BurstSink {
       }
       final total = _encrypted.length + pending.length;
       for (final entry in _stagger.shuffled(pending)) {
-        if (_encrypted.isNotEmpty) {
+        if (_encrypted.isNotEmpty || _gapBeforeFirstSeal) {
           // No gap before the burst's FIRST publish — freshness is not spent
-          // on a separation nobody can observe.
+          // on a separation nobody can observe — unless a superseded lane's
+          // seal may have returned just before it.
           await Future<void>.delayed(
             _stagger.sampleGap(totalPublishes: total),
           );
@@ -787,7 +1061,7 @@ class BackgroundBurstCoordinator implements BurstSink {
         // pass: the previous publish and the stagger gap are each seconds
         // long, and a withdrawal inside either must stop the publish that
         // follows it rather than the one after that.
-        if (!_burstEnabled()) return;
+        if (!_live()) return;
         // ELIGIBILITY, re-read at the same point and for the same reason. The
         // pass reads [_pendingCircles] once per round, so without this a
         // circle the engine flags Unrecoverable mid-pass is still sent to for
@@ -804,7 +1078,13 @@ class BackgroundBurstCoordinator implements BurstSink {
         // pass's next round and publish twice.
         _encrypted.add(entry.key);
         _due.remove(entry.key);
-        await _publisher.publishInBurst(circle, fix);
+        _gapBeforeFirstSeal = false;
+        final seal = _sealing = _publisher.publishInBurst(circle, fix);
+        try {
+          await seal;
+        } finally {
+          _sealing = null;
+        }
       }
     }
   }
@@ -841,6 +1121,10 @@ class BackgroundBurstCoordinator implements BurstSink {
   /// two tasks are independent publishes of the user's own reachability, and a
   /// `KeyPackage` relay that throws must not cost the relay list its fold —
   /// which no one would see, because the next fold is 30 minutes away.
+  ///
+  /// [_live] is re-read before each link: a lane superseded while one of them
+  /// hung must not wake into the next and reopen publish sockets no teardown
+  /// will close.
   Future<void> _foldMaintenance() async {
     final now = _now();
     try {
@@ -848,11 +1132,13 @@ class BackgroundBurstCoordinator implements BurstSink {
     } on Object catch (e) {
       debugPrint('[BackgroundBurst] KeyPackage fold failed: ${e.runtimeType}');
     }
+    if (!_live()) return;
     try {
       await _maintenance.runRelayListIfDue(now);
     } on Object catch (e) {
       debugPrint('[BackgroundBurst] relay-list fold failed: ${e.runtimeType}');
     }
+    if (!_live()) return;
     try {
       await _maintenance.carryOnLeaves();
     } on Object catch (e) {
@@ -871,14 +1157,14 @@ class BackgroundBurstCoordinator implements BurstSink {
   /// coordinator return while a commit is still between SEND and OK (Security
   /// Rule 13). Pinned by `test/lints/commit_critical_no_timeout_test.dart`.
   ///
-  /// The teardown stops wherever the foreground takes the engine back
-  /// ([_foregrounded]), re-read before each link rather than once at the top:
-  /// the settle can wait for as long as the engine's uncapped publish drain
-  /// takes, and a resume inside it must not be followed by the pause it was
-  /// waiting for. The publish PASS is deliberately not gated the same way — a
-  /// burst that stopped mid-pass would silently skip circles whose locations
-  /// are due, where stopping the teardown only leaves the foreground owning
-  /// what it already owns.
+  /// The teardown stops wherever the foreground takes the engine back, or a
+  /// later lane does ([_handedOver]), re-read before each link rather than
+  /// once at the top: the settle can wait for as long as the engine's uncapped
+  /// publish drain takes, and a resume inside it must not be followed by the
+  /// pause it was waiting for. The foreground does not gate the publish PASS
+  /// the same way — a burst that stopped mid-pass would silently skip circles
+  /// whose locations are due, where stopping the teardown only leaves the
+  /// foreground owning what it already owns.
   ///
   /// The handback read itself is the one thing here that is deliberately NOT
   /// guarded: a caller whose signal cannot be read has no safe answer — one
@@ -914,9 +1200,14 @@ class BackgroundBurstCoordinator implements BurstSink {
     }
   }
 
-  /// Whether the foreground has taken the engine back, so the teardown stops
-  /// before [link].
+  /// Whether the foreground or a later lane has taken the engine, so the
+  /// teardown stops before [link].
   bool _handedBack(String link) {
+    if (_superseded) {
+      debugPrint('[BackgroundBurst] teardown stopped before the $link: the '
+          'engine belongs to a later burst');
+      return true;
+    }
     if (!_foregrounded()) return false;
     debugPrint('[BackgroundBurst] teardown stopped before the $link: the '
         'foreground owns the engine now');

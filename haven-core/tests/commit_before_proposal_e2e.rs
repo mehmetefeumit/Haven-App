@@ -33,13 +33,13 @@ use haven_core::nostr::mls::types::{EpochState, GroupId, PendingStateRef, Publis
 use haven_core::nostr::mls::SessionManager;
 use haven_core::relay::catchup::{run_catchup_all_circles, run_refused_refetch};
 use haven_core::relay::fanout::scripted::ScriptedFanout;
-use haven_core::relay::fanout::{DriveMode, LocationSeal, SendHeld};
+use haven_core::relay::fanout::{DriveMode, LocationSeal, RecoveryCause, SendHeld};
 use haven_core::relay::live_sync::{BacklogOutcome, CircleSpec, LiveSyncCore};
 use haven_core::relay::scripted_relay::{Frame, ScriptedRelay};
 use haven_core::relay::{allow_ws_loopback_for_test, RelayManager};
 use helpers::drive::{
     epoch, leave_of, ngid, reads, roster, sealed_by, stored_fix, through, wait_out_the_engine,
-    ManualClock, Recorder,
+    ManualClock, Recorder, HOUR_MS,
 };
 use helpers::{setup_circle, CircleFixture, CircleMember};
 use nostr::{Event, Filter, Kind, RelayUrl, Timestamp};
@@ -638,12 +638,18 @@ async fn driver_seal(
     group: &GroupId,
     latitude: f64,
 ) -> Result<Event, SendHeld> {
-    let (transport, outbox, clock) = (
-        ScriptedFanout::default(),
-        Recorder::acking(true),
-        ManualClock::at(0),
-    );
-    match through(&transport, &outbox, &clock, &DriveMode::Full)
+    driver_seal_at(member, group, latitude, &ManualClock::at(0)).await
+}
+
+/// [`driver_seal`], with the driver's clock reading `clock`.
+async fn driver_seal_at(
+    member: &CircleMember,
+    group: &GroupId,
+    latitude: f64,
+    clock: &ManualClock,
+) -> Result<Event, SendHeld> {
+    let (transport, outbox) = (ScriptedFanout::default(), Recorder::acking(true));
+    match through(&transport, &outbox, clock, &DriveMode::Full)
         .seal_location(&member.circle, group, &LocationMessage::new(latitude, 2.0))
         .await
         .expect("the seal runs")
@@ -896,6 +902,126 @@ async fn a_pass_that_completes_without_the_held_commit_never_ends_the_hold() {
         Some(SendHeld::StoredInput),
         "a pass that never took the held removal in ended its hold"
     );
+}
+
+/// A hold set after another plane already took the commit in — the late
+/// insertion a pager or a live sink makes for a commit it classified before
+/// that ingest — waits on nothing: the engine records the commit, so no
+/// seal and no recovery read is held by it, and the seal is one the member
+/// the commit removed cannot read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hold_set_after_another_plane_took_the_commit_in_never_holds_the_circle() {
+    let relay = SeededRelay::with(RelayBuilder::default()).await;
+    let fx = setup_circle(3, &[relay.url.as_str()]).await;
+    let departure = depart(&fx).await;
+    let (alice, bob, carol) = (&fx.members[ALICE], &fx.members[BOB], &fx.members[CAROL]);
+    for event in [&departure.leave, &departure.eviction] {
+        let _ = carol
+            .session()
+            .process_event(event)
+            .await
+            .expect("carol's engine takes the event");
+    }
+    assert!(
+        carol.session().engine_processed(&departure.eviction.id),
+        "premise: another plane took the removal in"
+    );
+
+    carol
+        .session()
+        .hold_pager_commits_for_test(&fx.group, &[departure.eviction.id]);
+    let sealed = match driver_seal(carol, &fx.group, 68.0).await {
+        Err(SendHeld::Nothing) => driver_seal(carol, &fx.group, 68.0).await,
+        first => first,
+    }
+    .unwrap_or_else(|held| {
+        panic!("a hold set after the commit was taken in held the seal: {held:?}")
+    });
+    assert!(
+        !reads(bob, &sealed).await && reads(alice, &sealed).await,
+        "the seal is readable by the member the commit removed"
+    );
+    assert_eq!(
+        carol
+            .circle
+            .circle_recovery_for_test(&fx.group, true)
+            .await
+            .expect("the recovery read"),
+        None,
+        "a hold on a commit already taken in is reported as holding the circle"
+    );
+}
+
+/// A held commit no ingest took in, which the engine does not record, holds
+/// every seal and every recovery read however long it stands — days on the
+/// driver's clock — and only its ingest ends the hold, with a seal the member
+/// it removes cannot read (Security Rule 12: fail closed, never on time).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_commit_no_ingest_took_in_still_holds_every_seal_and_recovery_read() {
+    let (_relay, fx, departure, _refusing) = halted_with_the_eviction_held().await;
+    let (alice, bob, carol) = (&fx.members[ALICE], &fx.members[BOB], &fx.members[CAROL]);
+    assert!(
+        !carol.session().engine_processed(&departure.eviction.id),
+        "premise: the removal was held back, not taken in"
+    );
+    let (transport, outbox, clock) = (
+        ScriptedFanout::default(),
+        Recorder::acking(true),
+        ManualClock::at(0),
+    );
+    for day in 1..=3_u64 {
+        clock.set(day * 25 * HOUR_MS);
+        assert_eq!(
+            driver_seal_at(carol, &fx.group, 69.0, &clock).await.err(),
+            Some(SendHeld::StoredInput),
+            "a location was sealed past a held removal no ingest took in"
+        );
+        assert_eq!(
+            through(&transport, &outbox, &clock, &DriveMode::Full)
+                .circle_recovery(&carol.circle, &fx.group)
+                .await
+                .expect("the recovery read"),
+            Some(RecoveryCause::StoredInput),
+            "the recovery read does not name the held removal"
+        );
+    }
+
+    for event in [&departure.leave, &departure.eviction] {
+        let _ = carol
+            .session()
+            .process_event(event)
+            .await
+            .expect("carol's engine takes the event");
+    }
+    let sealed = match driver_seal_at(carol, &fx.group, 70.0, &clock).await {
+        Err(SendHeld::Nothing) => driver_seal_at(carol, &fx.group, 70.0, &clock).await,
+        first => first,
+    }
+    .unwrap_or_else(|held| panic!("the seal is held after an ingest took the commit in: {held:?}"));
+    assert!(
+        !reads(bob, &sealed).await && reads(alice, &sealed).await,
+        "the seal after the ingest took the removal in is readable by the member it removed"
+    );
+}
+
+/// A held commit is what the circle's recovery read names, in the
+/// foreground and out of it: the circle's card tells the user why it is not
+/// sharing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_commit_is_read_as_stored_input_by_the_circles_recovery() {
+    let (_relay, fx, _departure, _refusing) = halted_with_the_eviction_held().await;
+    let carol = &fx.members[CAROL];
+    for foreground in [true, false] {
+        assert_eq!(
+            carol
+                .circle
+                .circle_recovery_for_test(&fx.group, foreground)
+                .await
+                .expect("the recovery read"),
+            Some(RecoveryCause::StoredInput),
+            "the recovery read (foreground: {foreground}) does not name the held removal"
+        );
+    }
 }
 
 /// A commit held at one page of a chase holds the circle's seals while the

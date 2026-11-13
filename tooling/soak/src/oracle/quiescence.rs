@@ -83,7 +83,8 @@ pub enum PendingReason {
     /// Answered as pending rather than quiescent: a world nobody is running is
     /// not a world that settled.
     NoOnlineDevice,
-    /// A publish is between SEND and OK.
+    /// A drive or NIP-77 pass is under way: a publish between SEND and OK,
+    /// or the local work around it.
     InFlightPublish(DeviceTag),
     /// A cursor-anchor generation has not spent its advance.
     AdvanceUnconsumed(DeviceTag),
@@ -141,7 +142,9 @@ pub async fn quiescent<R: RelayPlane, T: TimelineSink, L: LogDrain>(
         }
         online += 1;
         let engine = device.engine()?;
-        if engine.in_flight_publishes() != 0 {
+        // The passes, not only their relay calls: a pass between its answer
+        // and its confirm has nothing on the wire and is not done.
+        if engine.processor().passes_under_way() != 0 {
             return Ok(Quiescence::Pending(PendingReason::InFlightPublish(
                 device.tag,
             )));
