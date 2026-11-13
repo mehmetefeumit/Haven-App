@@ -266,7 +266,9 @@ pub enum RelayListAction {
     /// The category has no relay configured (its seed failed), so there is
     /// no list to publish.
     NothingConfigured,
-    /// A republish was needed and no relay acknowledged it.
+    /// A republish was needed and no relay acknowledged one: none accepted
+    /// it, or it could not be built. Either way a retry may succeed, which no
+    /// other action says.
     Unacknowledged,
 }
 

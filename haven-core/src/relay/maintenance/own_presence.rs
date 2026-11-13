@@ -7,12 +7,13 @@
 use nostr::{Event, Filter, Kind, PublicKey};
 
 use super::key_package::{
-    kp_event_d_tag, kp_event_is_pre_migration, RelayKpEntry, RelayKpPerRelay, TrackedKpSlot,
+    kp_event_d_tag, kp_event_is_pre_migration, RelayKpEntry, RelayKpPerRelay, RelayKpSnapshot,
     KIND_MARMOT_KEY_PACKAGE,
 };
 use super::kp_lifetime::TrackedKpLifetime;
 use super::relay_list::list_relay_healthy;
 use crate::log_alias;
+use crate::nostr::mls::TrackedKeyPackage;
 use crate::relay::publishers::dedup_key;
 use crate::relay::{RelayFetchOutcome, RelayManager};
 
@@ -88,15 +89,15 @@ pub struct OwnRelayLists<'a> {
 ///
 /// The probes are maintenance's (30443 `limit` 64, 10002 and 10050 `limit` 4),
 /// one kind after another so a relay's handshake is never raced against
-/// itself, and only events `own` signed count. A 30443 is current when it is
-/// `tracked`'s ([`RelayKpPerRelay::serves_tracked`]) and that package's
-/// lifetime is valid now; a relay list when its newest copy names exactly the
-/// configured list ([`list_relay_healthy`]).
+/// itself, and only events `own` signed count. A 30443 is current exactly when
+/// maintenance would count the relay as serving `tracked`
+/// ([`RelayKpSnapshot::serves_current_package`]); a relay list when its newest
+/// copy names exactly the configured list ([`list_relay_healthy`]).
 pub async fn own_presence<'a>(
     relay: &RelayManager,
     own: &PublicKey,
     lists: &OwnRelayLists<'a>,
-    tracked: Option<TrackedKpSlot<'_>>,
+    tracked: Option<&TrackedKeyPackage>,
     tracked_lifetime: TrackedKpLifetime,
 ) -> Vec<OwnRelayPresence> {
     let on = |list: &[String], key: &str| list.iter().any(|url| dedup_key(url) == key);
@@ -137,14 +138,13 @@ pub async fn own_presence<'a>(
     }
 
     let kp_current = |mine: &[&Event]| {
-        let tracked = tracked.filter(|_| matches!(tracked_lifetime, TrackedKpLifetime::Known(_)));
-        tracked.is_some_and(|tracked| {
-            RelayKpPerRelay {
+        RelayKpSnapshot {
+            responders: vec![RelayKpPerRelay {
                 relay_url: String::new(),
                 canonical: mine.iter().copied().map(kp_entry).collect(),
-            }
-            .serves_tracked(&tracked)
-        })
+            }],
+        }
+        .serves_current_package(tracked, tracked_lifetime)
     };
     let list_current = |tag: &'static str, configured: &'a [String]| {
         move |mine: &[&Event]| {
@@ -266,6 +266,8 @@ mod tests {
 
     const VALID: TrackedKpLifetime = TrackedKpLifetime::Known(KeyPackageLifetime::new(0, u64::MAX));
     const GONE: &str = "wss://gone.example.com";
+    /// A slot a conformant inviter accepts.
+    const SLOT: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
 
     fn signed(keys: &Keys, kind: Kind, tags: Vec<Tag>, at: u64) -> Event {
         EventBuilder::new(kind, "")
@@ -311,13 +313,17 @@ mod tests {
             .collect()
     }
 
-    fn tracked_in_slot<'a>(event: &Event, id: &'a str) -> TrackedKpSlot<'a> {
-        TrackedKpSlot {
-            d_tag: "slot",
-            event_id: id,
-            created_at: event.created_at.as_secs(),
+    /// This device's record of `event`, published and still openable.
+    fn tracked_in_slot(event: &Event) -> TrackedKeyPackage {
+        TrackedKeyPackage {
+            slot: kp_event_d_tag(event).expect("a slot"),
+            published: Some(event.clone()),
+            created_at: Some(event.created_at.as_secs()),
+            package: vec![1],
+            pending: None,
             adopted: false,
             replacement_owed: false,
+            consumed_but_held: false,
         }
     }
 
@@ -326,7 +332,7 @@ mod tests {
         inbox: &[String],
         key_package: &[String],
         lookup: &[String],
-        tracked: Option<TrackedKpSlot<'_>>,
+        tracked: Option<&TrackedKeyPackage>,
         lifetime: TrackedKpLifetime,
     ) -> Vec<OwnRelayPresence> {
         own_presence(
@@ -526,13 +532,12 @@ mod tests {
         let own = Keys::generate();
         let relay = ScriptedRelay::start();
         let kp_list = vec![relay.url().to_owned()];
-        let tracked_event = key_package(&own, "slot", 1_000);
-        let tracked_id = tracked_event.id.to_hex();
-        let tracked = Some(tracked_in_slot(&tracked_event, &tracked_id));
-        let newer = key_package(&own, "slot", 2_000);
-        let older = key_package(&own, "slot", 500);
-        let other_slot = key_package(&own, "other", 2_000);
-
+        let tracked_event = key_package(&own, SLOT, 1_000);
+        let record = tracked_in_slot(&tracked_event);
+        let tracked = Some(&record);
+        let newer = key_package(&own, SLOT, 2_000);
+        let older = key_package(&own, SLOT, 500);
+        let other_slot = key_package(&own, &"b2".repeat(32), 2_000);
         let cases = [
             ("the tracked event", &tracked_event, tracked, VALID, Current),
             ("a newer event in the slot", &newer, tracked, VALID, Current),
@@ -585,18 +590,102 @@ mod tests {
         assert_eq!(rows[0].key_package, Missing, "nothing served");
     }
 
+    /// A package maintenance would replace never reads current, however the
+    /// relay serves it: the Settings check and the tick share one rule.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_package_maintenance_would_replace_reads_outdated() {
+        let own = Keys::generate();
+        let relay = ScriptedRelay::start();
+        let kp_list = vec![relay.url().to_owned()];
+        let tracked_event = key_package(&own, SLOT, 1_000);
+        let record = tracked_in_slot(&tracked_event);
+        // Maintenance's own rule: a Welcome consumed the package and its key
+        // is gone, so it is owed a replacement and opens nothing.
+        let consumed_not_held = TrackedKeyPackage {
+            replacement_owed: true,
+            ..record.clone()
+        };
+        let consumed_but_held = TrackedKeyPackage {
+            replacement_owed: true,
+            consumed_but_held: true,
+            ..record.clone()
+        };
+        let bundle_lost = TrackedKeyPackage {
+            package: Vec::new(),
+            ..record.clone()
+        };
+        let never_acknowledged = TrackedKeyPackage {
+            published: None,
+            ..record
+        };
+
+        let cases = [
+            (
+                "a consumed package whose key is not held",
+                &consumed_not_held,
+                Outdated,
+            ),
+            (
+                "a consumed package whose key is still held",
+                &consumed_but_held,
+                Current,
+            ),
+            ("a package whose bundle is lost", &bundle_lost, Outdated),
+            (
+                "a package no relay acknowledged",
+                &never_acknowledged,
+                Outdated,
+            ),
+        ];
+        answer(
+            &relay,
+            Kind::Custom(KIND_MARMOT_KEY_PACKAGE),
+            served(vec![tracked_event]),
+        );
+        for (case, tracked, expected) in cases {
+            let rows = presence(&own, &[], &kp_list, &[], Some(tracked), VALID).await;
+            assert_eq!(rows[0].key_package, expected, "{case}");
+        }
+    }
+
+    /// A slot a conformant inviter rejects is retired by maintenance before
+    /// anything is published into it, so the package there is not current.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_package_in_a_non_conformant_slot_is_outdated() {
+        let own = Keys::generate();
+        let relay = ScriptedRelay::start();
+        let kp_list = vec![relay.url().to_owned()];
+        for (slot, expected) in [("slot", Outdated), (SLOT, Current)] {
+            let event = key_package(&own, slot, 1_000);
+            answer(
+                &relay,
+                Kind::Custom(KIND_MARMOT_KEY_PACKAGE),
+                served(vec![event.clone()]),
+            );
+            let rows = presence(
+                &own,
+                &[],
+                &kp_list,
+                &[],
+                Some(&tracked_in_slot(&event)),
+                VALID,
+            )
+            .await;
+            assert_eq!(rows[0].key_package, expected, "slot {slot:?}");
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn another_authors_event_never_counts() {
         let (own, other) = (Keys::generate(), Keys::generate());
         let relay = ScriptedRelay::start();
         let lists = vec![relay.url().to_owned()];
-        let tracked_event = key_package(&own, "slot", 1_000);
-        let tracked_id = tracked_event.id.to_hex();
+        let tracked_event = key_package(&own, SLOT, 1_000);
         // Each would read current were its author not checked.
         answer(
             &relay,
             Kind::Custom(KIND_MARMOT_KEY_PACKAGE),
-            served(vec![key_package(&other, "slot", 2_000)]),
+            served(vec![key_package(&other, SLOT, 2_000)]),
         );
         answer(
             &relay,
@@ -614,7 +703,7 @@ mod tests {
             &lists,
             &lists,
             &[],
-            Some(tracked_in_slot(&tracked_event, &tracked_id)),
+            Some(&tracked_in_slot(&tracked_event)),
             VALID,
         )
         .await;

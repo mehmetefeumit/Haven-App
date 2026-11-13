@@ -17317,9 +17317,11 @@ class RelayManagerFfiImpl extends RustOpaque implements RelayManagerFfi {
   /// Dart-timer-driven; the secret bytes are consumed per-call and zeroized
   /// (Security Rule 9). Fail-soft + idempotent.
   ///
-  /// The 10002 goes first: `transports/nostr.md` orders an account's
-  /// publication 10002, then its `KeyPackage` to the 10002 write set, then
-  /// the 10050.
+  /// The 10002 goes first, then the 10050; the `KeyPackage` tick runs after
+  /// both. `transports/nostr.md:444-449` lists 10002, `KeyPackage`, 10050,
+  /// and this order keeps both of its constraints: the `KeyPackage` goes to
+  /// the 10002 write set once that list is out, and the 10050 is up before
+  /// any inviter can find a `KeyPackage` to send a Welcome for.
   ///
   /// Per category: reads the user's OWN configured relays (seeding an
   /// install never seeded), NETWORK-PROBES each of them and each lookup

@@ -8825,34 +8825,6 @@ fn maintenance_now_secs() -> u64 {
     }
 }
 
-/// Whether a responder of `snapshot` serves the package `tracked` names as one
-/// an inviter can use: published by this device, its key still held and not
-/// lost, its lifetime current, in a slot a conformant inviter accepts.
-fn serves_current_package(
-    snapshot: &haven_core::relay::maintenance::RelayKpSnapshot,
-    tracked: Option<&haven_core::nostr::mls::TrackedKeyPackage>,
-    lifetime: haven_core::relay::maintenance::TrackedKpLifetime,
-) -> bool {
-    use haven_core::relay::maintenance::{is_conformant_slot_id, TrackedKpLifetime, TrackedKpSlot};
-    tracked.is_some_and(|t| {
-        let Some(published) = t.published.as_ref() else {
-            return false;
-        };
-        let openable = !t.package.is_empty()
-            && matches!(lifetime, TrackedKpLifetime::Known(_))
-            && (!t.replacement_owed || t.consumed_but_held);
-        openable
-            && is_conformant_slot_id(&t.slot)
-            && snapshot.serves_tracked(&TrackedKpSlot {
-                d_tag: &t.slot,
-                event_id: &published.id.to_hex(),
-                created_at: t.created_at.unwrap_or(0),
-                adopted: t.adopted,
-                replacement_owed: t.replacement_owed,
-            })
-    })
-}
-
 /// What became of one publish of a staged `KeyPackage` — INTERNAL.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StagedPublish {
@@ -8935,7 +8907,9 @@ pub enum RelayListActionFfi {
     /// The category has no relay configured even after the seed, so there is
     /// no list to publish.
     NothingConfigured,
-    /// A republish was needed and no relay acknowledged it.
+    /// A republish was needed and no relay acknowledged one: none accepted
+    /// it, or it could not be built. Either way a retry may succeed, which no
+    /// other action says.
     Unacknowledged,
 }
 
@@ -9216,7 +9190,7 @@ impl RelayManagerFfi {
         own_pubkey: String,
     ) -> Result<Vec<OwnRelayPresenceFfi>, String> {
         use haven_core::relay::maintenance::{
-            own_presence, read_kp_lifetime, OwnRelayLists, TrackedKpLifetime, TrackedKpSlot,
+            own_presence, read_kp_lifetime, OwnRelayLists, TrackedKpLifetime,
         };
 
         let own = nostr::PublicKey::parse(&own_pubkey).map_err(|_| "Invalid pubkey".to_string())?;
@@ -9228,11 +9202,6 @@ impl RelayManagerFfi {
             .tracked_key_package()
             .await
             .map_err(|_| "Could not read the KeyPackage record".to_string())?;
-        let tracked_id = tracked
-            .as_ref()
-            .and_then(|t| t.published.as_ref())
-            .map(|event| event.id.to_hex())
-            .unwrap_or_default();
         let tracked_lifetime = tracked
             .as_ref()
             .map_or(TrackedKpLifetime::Absent, |t| read_kp_lifetime(&t.package));
@@ -9261,13 +9230,7 @@ impl RelayManagerFfi {
                 key_package: &key_package,
                 lookup: &lookup,
             },
-            tracked.as_ref().map(|t| TrackedKpSlot {
-                d_tag: &t.slot,
-                event_id: &tracked_id,
-                created_at: t.created_at.unwrap_or(0),
-                adopted: t.adopted,
-                replacement_owed: t.replacement_owed,
-            }),
+            tracked.as_ref(),
             tracked_lifetime,
         )
         .await;
@@ -9713,7 +9676,7 @@ impl RelayManagerFfi {
         let responders_probed = responders.len();
         let canonical_on_relays: usize = responders.iter().map(|r| r.canonical.len()).sum();
         let snapshot = RelayKpSnapshot { responders };
-        let served_before = serves_current_package(&snapshot, tracked.as_ref(), tracked_lifetime);
+        let served_before = snapshot.serves_current_package(tracked.as_ref(), tracked_lifetime);
         let outcome = |action, relays_healed, relay_errors, retired_malformed_slot| {
             KpMaintenanceOutcomeFfi::from(KpMaintenanceOutcome {
                 action,
@@ -10361,9 +10324,11 @@ impl RelayManagerFfi {
     /// Dart-timer-driven; the secret bytes are consumed per-call and zeroized
     /// (Security Rule 9). Fail-soft + idempotent.
     ///
-    /// The 10002 goes first: `transports/nostr.md` orders an account's
-    /// publication 10002, then its `KeyPackage` to the 10002 write set, then
-    /// the 10050.
+    /// The 10002 goes first, then the 10050; the `KeyPackage` tick runs after
+    /// both. `transports/nostr.md:444-449` lists 10002, `KeyPackage`, 10050,
+    /// and this order keeps both of its constraints: the `KeyPackage` goes to
+    /// the 10002 write set once that list is out, and the 10050 is up before
+    /// any inviter can find a `KeyPackage` to send a Welcome for.
     ///
     /// Per category: reads the user's OWN configured relays (seeding an
     /// install never seeded), NETWORK-PROBES each of them and each lookup

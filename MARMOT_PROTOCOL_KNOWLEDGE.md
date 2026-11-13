@@ -422,8 +422,10 @@ in the template's order, with the values a Haven package carries today:
   falling back to the discovery plane when that set is empty or holds no usable package
   (`RelayManager::lookup_member_for_invite`, one throwaway client per lookup). "Not found" is
   claimed only when every relay of that write set (the discovery plane when it is empty) that
-  connected ended its answer with `EOSE`, at least one did, and the 10002 lookup itself ended
-  with one; anything less is "lookup incomplete", which the inviter may retry. Kind 10051 is
+  connected ended its answer with `EOSE`, at least one did, and the 10002 lookup held to the
+  same rule (every discovery relay that connected ended it with `EOSE`, at least one did — one
+  stopped short may hold a newer list naming other write relays); anything less is "lookup
+  incomplete", which the inviter may retry. Kind 10051 is
   abolished.
 - **Last-resort semantics**: every Haven KeyPackage is minted last-resort (the engine marks it
   with the empty `last_resort_key_package` component `0x0004` in the KeyPackage-level

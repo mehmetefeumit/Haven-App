@@ -38,6 +38,7 @@ use haven_core::circle::{
 };
 use haven_core::location::LocationMessage;
 use haven_core::nostr::mls::types::GroupId;
+use haven_core::nostr::mls::TrackedKeyPackage;
 use haven_core::profile::{
     build_metadata_event, fetch_profiles_assigned, set_profile_relays_for_test, PendingEdits,
     ProfileMetadata,
@@ -51,7 +52,7 @@ use haven_core::relay::fanout::{
 use haven_core::relay::live_sync::{CircleSpec, LiveSyncCore};
 use haven_core::relay::maintenance::{
     build_kp_maintenance_events, kp_event_d_tag, own_presence, read_kp_lifetime, OwnEventPresence,
-    OwnRelayLists, TrackedKpSlot,
+    OwnRelayLists,
 };
 use haven_core::relay::recording_front::{RecordedFrame, RecordingFront};
 use haven_core::relay::{
@@ -438,7 +439,7 @@ impl Device {
             .key_package_admission_rule(target)
             .await
             .expect("the admission rule");
-        match RelayManager::lookup_member_for_invite(who, &admit)
+        match Box::pin(RelayManager::lookup_member_for_invite(who, &admit))
             .await
             .expect("the key-package lookup")
         {
@@ -739,13 +740,20 @@ async fn lifecycle_then_plants(watch: &DialWatch, needles: &mut Vec<String>) {
         &[&alice_10002, &alice_10050],
     ))
     .await;
-    let (slot, kp_id) = (
-        kp_event_d_tag(&alice_kp).expect("a slot"),
-        alice_kp.id.to_hex(),
-    );
     let package = BASE64
         .decode(&alice_kp.content)
         .expect("the 30443 content is base64");
+    let lifetime = read_kp_lifetime(&package);
+    let tracked = TrackedKeyPackage {
+        slot: kp_event_d_tag(&alice_kp).expect("a slot"),
+        published: Some(alice_kp.clone()),
+        created_at: Some(alice_kp.created_at.as_secs()),
+        package,
+        pending: None,
+        adopted: false,
+        replacement_owed: false,
+        consumed_but_held: false,
+    };
     let (inbox, key_packages, lookup) = ([w.url(R::AInbox)], [w.url(R::AKp)], [w.url(R::Disc)]);
     let rows = Box::pin(own_presence(
         &alice.pool,
@@ -755,14 +763,8 @@ async fn lifecycle_then_plants(watch: &DialWatch, needles: &mut Vec<String>) {
             key_package: &key_packages,
             lookup: &lookup,
         },
-        Some(TrackedKpSlot {
-            d_tag: &slot,
-            event_id: &kp_id,
-            created_at: alice_kp.created_at.as_secs(),
-            adopted: false,
-            replacement_owed: false,
-        }),
-        read_kp_lifetime(&package),
+        Some(&tracked),
+        lifetime,
     ))
     .await;
     assert!(
@@ -787,26 +789,26 @@ async fn lifecycle_then_plants(watch: &DialWatch, needles: &mut Vec<String>) {
     let step = w.next();
     let alice_transport = alice.pool.fanout_transport();
     let driver = alice.driver(&alice_transport);
-    let a = driver
-        .create_circle(
-            &alice.circle,
-            &alice.keys,
-            vec![bob_member.clone()],
-            &CircleConfig::new("A"),
-        )
-        .await
-        .expect("circle A is created")
-        .circle;
-    let b = driver
-        .create_circle(
-            &alice.circle,
-            &alice.keys,
-            vec![bob_member],
-            &CircleConfig::new("B").with_relays([w.url(R::LocB)]),
-        )
-        .await
-        .expect("circle B is created")
-        .circle;
+    // Each driver call boxed: their futures would otherwise all sit in this
+    // scenario's one frame.
+    let a = Box::pin(driver.create_circle(
+        &alice.circle,
+        &alice.keys,
+        vec![bob_member.clone()],
+        &CircleConfig::new("A"),
+    ))
+    .await
+    .expect("circle A is created")
+    .circle;
+    let b = Box::pin(driver.create_circle(
+        &alice.circle,
+        &alice.keys,
+        vec![bob_member],
+        &CircleConfig::new("B").with_relays([w.url(R::LocB)]),
+    ))
+    .await
+    .expect("circle B is created")
+    .circle;
     assert!(
         a.relays == [w.url(R::LocA)] && b.relays == [w.url(R::LocB)],
         "premise: A was drawn from the location pool and B kept the list it was given",
@@ -873,8 +875,7 @@ async fn lifecycle_then_plants(watch: &DialWatch, needles: &mut Vec<String>) {
             carol_member.inbox_relays == [w.url(R::CInbox)],
             "premise: the lookup read carol's inbox list",
         );
-        let added = driver
-            .add_members(&alice.circle, gid, &[carol_member])
+        let added = Box::pin(driver.add_members(&alice.circle, gid, &[carol_member]))
             .await
             .expect("carol is invited");
         assert!(
@@ -900,8 +901,7 @@ async fn lifecycle_then_plants(watch: &DialWatch, needles: &mut Vec<String>) {
     // routing it leaves, which stays kept, and the next location to the new.
     let step = w.next();
     w.table.add_routing(&b_h, World::ix(R::LocC), step);
-    let moved = driver
-        .update_relays(&alice.circle, &b_gid, &[w.url(R::LocC)])
+    let moved = Box::pin(driver.update_relays(&alice.circle, &b_gid, &[w.url(R::LocC)]))
         .await
         .expect("circle B's relays change");
     assert!(
@@ -960,11 +960,13 @@ async fn lifecycle_then_plants(watch: &DialWatch, needles: &mut Vec<String>) {
     w.next();
     let bob_transport = bob.pool.fanout_transport();
     bob.share(&bob_transport, &a_gid).await;
-    let left = bob
-        .driver(&bob_transport)
-        .leave(&bob.circle, &b_gid, &bob.keys.public_key())
-        .await
-        .expect("bob's leave runs");
+    let left = Box::pin(bob.driver(&bob_transport).leave(
+        &bob.circle,
+        &b_gid,
+        &bob.keys.public_key(),
+    ))
+    .await
+    .expect("bob's leave runs");
     assert!(
         left.status == LeaveStatus::Proposed,
         "bob's leave was not proposed"
@@ -1215,8 +1217,7 @@ async fn lifecycle_then_plants(watch: &DialWatch, needles: &mut Vec<String>) {
         step,
     );
     let dave_member = alice.look_up(&dave.hex(), Some(&a_gid)).await;
-    let invited = driver
-        .add_members(&alice.circle, &a_gid, &[dave_member])
+    let invited = Box::pin(driver.add_members(&alice.circle, &a_gid, &[dave_member]))
         .await
         .expect("dave's invitation runs");
     assert!(

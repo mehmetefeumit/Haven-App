@@ -98,7 +98,7 @@ use transport_nostr_adapter::NostrKeyPackagePublication;
 
 use super::kp_lifetime::TrackedKpLifetime;
 use crate::log_alias::{self, bucket, EventIdHex};
-use crate::nostr::mls::SessionManager;
+use crate::nostr::mls::{SessionManager, TrackedKeyPackage};
 use crate::relay::publishers::{PublisherError, PublisherResult};
 
 /// The Marmot `KeyPackage` event kind (NIP-33 addressable).
@@ -359,6 +359,34 @@ impl RelayKpSnapshot {
     #[must_use]
     pub fn serves_tracked(&self, tracked: &TrackedKpSlot<'_>) -> bool {
         self.responders.iter().any(|r| r.serves_tracked(tracked))
+    }
+
+    /// Whether a responder serves the package `tracked` names as one an
+    /// inviter can use: published by this device, its key still held and not
+    /// lost, its lifetime current, in a slot a conformant inviter accepts.
+    #[must_use]
+    pub fn serves_current_package(
+        &self,
+        tracked: Option<&TrackedKeyPackage>,
+        lifetime: TrackedKpLifetime,
+    ) -> bool {
+        tracked.is_some_and(|t| {
+            let Some(published) = t.published.as_ref() else {
+                return false;
+            };
+            let openable = !t.package.is_empty()
+                && matches!(lifetime, TrackedKpLifetime::Known(_))
+                && (!t.replacement_owed || t.consumed_but_held);
+            openable
+                && is_conformant_slot_id(&t.slot)
+                && self.serves_tracked(&TrackedKpSlot {
+                    d_tag: &t.slot,
+                    event_id: &published.id.to_hex(),
+                    created_at: t.created_at.unwrap_or(0),
+                    adopted: t.adopted,
+                    replacement_owed: t.replacement_owed,
+                })
+        })
     }
 }
 

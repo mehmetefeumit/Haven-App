@@ -179,6 +179,23 @@ async fn an_unanswered_relay_list_is_incomplete() {
     assert_eq!(verdict(&look_up(&invitee).await), "incomplete");
 }
 
+/// One indexer closes only the 10002 REQ and answers the package REQ empty,
+/// the other answers everything empty: the one that stopped short may hold
+/// a newer 10002 naming write relays nobody asked, so absence is unproven.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_indexer_closing_the_relay_list_req_is_incomplete() {
+    let plane = discovery();
+    let invitee = Keys::generate();
+    plane
+        .a
+        .answer(asks(invitee.public_key(), Kind::RelayList), closed());
+    plane.a.answer(
+        asks(invitee.public_key(), Kind::Custom(30443)),
+        vec![Frame::Eose],
+    );
+    assert_eq!(verdict(&look_up(&invitee).await), "incomplete");
+}
+
 /// The person names one write relay and it is down: discovery answering
 /// empty does not prove they have no package, since it is not where they put
 /// it.

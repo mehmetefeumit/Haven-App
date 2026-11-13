@@ -3756,7 +3756,7 @@ relays are also lookup relays, six on custom lists.
 | Case | What it adds | **ESTIMATED** |
 |---|---|---|
 | iOS background burst that folds the relay-list task in (at the nominal ≈ 2/h) | 3 to 6 more TLS handshakes inside the burst's own wake (≈ 0.5 J each, E-I6); no wake | 2 × 3–6 × 0.5 J ≈ 3–6 J/h ≈ **0.005–0.01 %/h** (E-P1) |
-| A reinstall's adopt-only `KeyPackage` tick | one prompt retry, on the ladder, until the next tick mints into the slot | below the table's rounding |
+| A reinstall's adopt-only `KeyPackage` tick | none when the same tick mints into the adopted slot, as it does after a successful adoption; one prompt retry, on the ladder, only when the adoption itself fails | below the table's rounding |
 
 None of these is measured.
 

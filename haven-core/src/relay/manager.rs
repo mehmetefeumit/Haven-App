@@ -1602,7 +1602,9 @@ impl RelayManager {
             let inbox_relays =
                 Self::newest_authored(all_events(&inbox), account, Kind::InboxRelays, |_| true)
                     .map_or_else(Vec::new, |list| Self::extract_relay_tag_urls(&list.tags));
-            let lists_answered = nip65.iter().any(|answer| answer.drained);
+            // A relay that connected and stopped short may hold a newer 10002
+            // naming other write relays, so it withholds the holders as well.
+            let lists_answered = answered_whole(&nip65);
             let nip65 =
                 Self::newest_authored(all_events(&nip65), account, Kind::RelayList, |_| true)
                     .map_or_else(Nip65Relays::default, |list| Nip65Relays {
@@ -2542,8 +2544,9 @@ pub enum MemberLookup {
     /// It may be one the target cannot admit: the caller's admission check
     /// says why.
     Found(Box<MemberKeyPackage>),
-    /// Every relay that holds the account's packages and connected finished
-    /// its answer, and none held one.
+    /// Every discovery relay that connected finished its answer to the
+    /// 10002 REQ, as did every relay that holds the account's packages and
+    /// connected — at least one of each — and none held one.
     NotFound,
     /// Some such relay did not finish, or none did, so absence is unproven:
     /// the account may well have a package.
@@ -2558,12 +2561,17 @@ pub enum MemberLookup {
 /// else to ask). Fetching from every one of them is not an interop
 /// requirement, so a relay that never connected does not hold the verdict
 /// back; one that connected and did not finish (`CLOSED`, a timeout, the
-/// intake cap) does, and at least one must have finished. Without a 10002
-/// answer (`lists_answered`) the holders themselves are unknown.
+/// intake cap) does, and at least one must have finished. The 10002 REQ is
+/// held to the same rule ([`answered_whole`], `lists_answered`): without it
+/// the holders themselves are unknown.
 fn absence_proven(lists_answered: bool, holders: &[RelayFetchOutcome]) -> bool {
-    lists_answered
-        && holders.iter().any(|answer| answer.drained)
-        && holders
+    lists_answered && answered_whole(holders)
+}
+
+/// At least one relay finished its answer and every relay that connected did.
+fn answered_whole(answers: &[RelayFetchOutcome]) -> bool {
+    answers.iter().any(|answer| answer.drained)
+        && answers
             .iter()
             .all(|answer| answer.drained || !answer.responded)
 }
@@ -3966,6 +3974,46 @@ mod tests {
         ];
         for (case, lists_answered, holders, proven) in rows {
             assert_eq!(absence_proven(lists_answered, &holders), proven, "{case}");
+        }
+    }
+
+    /// The 10002 REQ names the holders, so it is held to the holders' rule: a
+    /// discovery relay that connected and stopped short may serve a newer
+    /// list naming other write relays.
+    #[test]
+    fn the_relay_list_answer_is_held_to_the_holders_rule() {
+        let answer = |responded: bool, drained: bool| RelayFetchOutcome {
+            relay_url: String::new(),
+            responded,
+            drained,
+            events: Vec::new(),
+        };
+        let (finished, cut_short, unreachable) = (
+            answer(true, true),
+            answer(true, false),
+            answer(false, false),
+        );
+        let rows: [(&str, Vec<RelayFetchOutcome>, bool); 5] = [
+            (
+                "every indexer finished",
+                vec![finished.clone(), finished.clone()],
+                true,
+            ),
+            (
+                "an unreachable indexer does not hold it back",
+                vec![unreachable.clone(), finished.clone()],
+                true,
+            ),
+            (
+                "an indexer that connected and stopped short does",
+                vec![cut_short.clone(), finished],
+                false,
+            ),
+            ("no indexer connected", vec![unreachable], false),
+            ("every indexer stopped short", vec![cut_short], false),
+        ];
+        for (case, lists, proven) in rows {
+            assert_eq!(answered_whole(&lists), proven, "{case}");
         }
     }
 
