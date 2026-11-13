@@ -231,14 +231,15 @@ class _DropdownBodyState extends ConsumerState<_DropdownBody>
     );
   }
 
-  /// The circle the resting trigger's cue opens: the selected circle when it
-  /// needs attention, else the first accepted circle that does, so a circle
-  /// not selected is marked at rest too.
-  Circle? _firstNeedingAttention() {
+  /// The circle the resting trigger's cue opens: the first accepted circle
+  /// that needs attention and is NOT the selected one, so a circle the closed
+  /// list hides is still marked at rest. The selected circle's own mark is
+  /// its details button in the header, and the dot on its avatar here.
+  Circle? _otherNeedingAttention() {
     final selected = widget.selectedCircle;
-    if (_needsAttention(selected)) return selected;
     for (final circle in widget.circles) {
-      if (circle.membershipStatus == MembershipStatus.accepted &&
+      if (circle != selected &&
+          circle.membershipStatus == MembershipStatus.accepted &&
           _needsAttention(circle)) {
         return circle;
       }
@@ -273,7 +274,8 @@ class _DropdownBodyState extends ConsumerState<_DropdownBody>
             ref.read(circleDropdownOpenProvider.notifier).state =
                 !widget.isOpen;
           },
-          attentionCircle: _firstNeedingAttention(),
+          selectedNeedsAttention: _needsAttention(widget.selectedCircle),
+          attentionCircle: _otherNeedingAttention(),
           onOpenDetails: _openDetails,
         ),
         // ClipRRect outside SizeTransition: the bottom corners stay
@@ -405,6 +407,7 @@ class _TriggerRow extends StatelessWidget {
     required this.isOpen,
     required this.chevronAnimation,
     required this.onTap,
+    required this.selectedNeedsAttention,
     required this.attentionCircle,
     required this.onOpenDetails,
   });
@@ -414,7 +417,13 @@ class _TriggerRow extends StatelessWidget {
   final Animation<double> chevronAnimation;
   final VoidCallback onTap;
 
-  /// The circle the cue opens; `null` when no circle needs attention.
+  /// Whether the selected circle needs attention: dots its avatar, which is
+  /// all of it a collapsed sheet shows — the header's button is below the
+  /// fold there.
+  final bool selectedNeedsAttention;
+
+  /// The circle the cue opens — never the selected one; `null` when no other
+  /// circle needs attention.
   final Circle? attentionCircle;
   final void Function(Circle circle) onOpenDetails;
 
@@ -426,8 +435,8 @@ class _TriggerRow extends StatelessWidget {
 
     final circle = attentionCircle;
     // The cue sits beside the trigger, not inside it: its own 48 dp target
-    // and its own node, so one tap from the resting sheet opens the details
-    // rather than the list.
+    // and its own node, so one tap from the resting sheet opens that other
+    // circle's details rather than the list.
     return Row(
       children: [
         Expanded(
@@ -445,7 +454,15 @@ class _TriggerRow extends StatelessWidget {
                 child: Row(
                   children: [
                     if (selectedCircle != null) ...[
-                      _CircleAvatar(circle: selectedCircle!),
+                      // No name of its own: the header's details button and
+                      // the announcer say it.
+                      Badge(
+                        key: WidgetKeys.circleSelectedAttentionDot,
+                        isLabelVisible: selectedNeedsAttention,
+                        smallSize: 10,
+                        backgroundColor: colorScheme.error,
+                        child: _CircleAvatar(circle: selectedCircle!),
+                      ),
                       const SizedBox(width: HavenSpacing.md),
                       Expanded(
                         key: WidgetKeys.circleSelectorActive(
@@ -490,6 +507,9 @@ class _TriggerRow extends StatelessWidget {
         if (circle != null)
           CircleAttentionCue(
             key: WidgetKeys.circleAttentionCue,
+            // Named for its circle: it sits beside the selected one's name
+            // and is never about that one.
+            label: l10n.circleRowAttentionSemantics(circle.displayName),
             onPressed: () => onOpenDetails(circle),
           ),
       ],

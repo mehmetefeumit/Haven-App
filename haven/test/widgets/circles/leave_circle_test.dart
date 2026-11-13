@@ -23,10 +23,11 @@ import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/providers/sharing_health_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../mocks/mock_circle_service.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 final _testIdentity = Identity(
   pubkeyHex: 'abc123def456abc123def456abc123def456abc123def456abc123def456abcd',
@@ -112,7 +113,7 @@ void main() {
   /// Opens the circle-details sheet from the info button and taps the
   /// Leave Circle button inside it.
   Future<void> openLeaveCircleDialog(WidgetTester tester) async {
-    await tester.tap(find.byIcon(LucideIcons.info));
+    await tester.tap(find.byKey(WidgetKeys.circleDetailsButton));
     await tester.pumpAndSettle();
     await tester.tap(find.widgetWithText(OutlinedButton, 'Leave Circle'));
     await tester.pumpAndSettle();
@@ -132,7 +133,7 @@ void main() {
       expect(find.byIcon(LucideIcons.ellipsisVertical), findsNothing);
       expect(find.byType(PopupMenuButton<String>), findsNothing);
 
-      await tester.tap(find.byIcon(LucideIcons.info));
+      await tester.tap(find.byKey(WidgetKeys.circleDetailsButton));
       await tester.pumpAndSettle();
 
       expect(
@@ -275,7 +276,7 @@ void main() {
       );
       container.read(selectedCircleIdProvider.notifier).state =
           testCircle.mlsGroupId;
-      await tester.tap(find.byIcon(LucideIcons.info));
+      await tester.tap(find.byKey(WidgetKeys.circleDetailsButton));
       await tester.pumpAndSettle();
       expect(find.widgetWithText(OutlinedButton, 'Leave Circle'), findsOne);
 
@@ -519,7 +520,7 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.byIcon(LucideIcons.info));
+      await tester.tap(find.byKey(WidgetKeys.circleDetailsButton));
       await tester.pumpAndSettle();
       final l10n = AppLocalizations.of(
         tester.element(find.byType(CirclesBottomSheet)),
@@ -550,7 +551,7 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.byIcon(LucideIcons.info));
+      await tester.tap(find.byKey(WidgetKeys.circleDetailsButton));
       await tester.pumpAndSettle();
       final leave = find.widgetWithText(OutlinedButton, 'Leave Circle');
       expect(leave, findsOneWidget);
@@ -569,7 +570,7 @@ void main() {
         _buildTestWidget(mockService: service, selectedCircle: circle),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.byIcon(LucideIcons.info));
+      await tester.tap(find.byKey(WidgetKeys.circleDetailsButton));
       await tester.pumpAndSettle();
 
       service.setEngineState(circle.mlsGroupId, CircleEngineState.disbanded);

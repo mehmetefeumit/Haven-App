@@ -95,11 +95,18 @@ abstract class CircleHealthService {
 /// inventing an outage. Only the error TYPE is logged (Security Rule 8).
 class NostrCircleHealthService implements CircleHealthService {
   /// Creates a service over the shared circle-manager handle.
+  ///
+  /// [onPeerEvent] is told once a peer receipt is stored, so the isolate that
+  /// shows the verdict can re-derive it on the delivery rather than at its
+  /// next tick. It must not throw.
   const NostrCircleHealthService({
     required Future<CircleManagerFfi> Function() circleManagerFactory,
-  }) : _circleManagerFactory = circleManagerFactory;
+    void Function()? onPeerEvent,
+  }) : _circleManagerFactory = circleManagerFactory,
+       _onPeerEvent = onPeerEvent;
 
   final Future<CircleManagerFfi> Function() _circleManagerFactory;
+  final void Function()? _onPeerEvent;
 
   @override
   Future<void> notePublishAcked({
@@ -128,6 +135,7 @@ class NostrCircleHealthService implements CircleHealthService {
         nostrGroupId: nostrGroupId,
         atMs: at.millisecondsSinceEpoch,
       );
+      _onPeerEvent?.call();
     } on Object catch (e) {
       debugPrint('[CircleHealth] peer-event record failed: ${e.runtimeType}');
     }

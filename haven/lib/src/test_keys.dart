@@ -106,8 +106,9 @@ abstract final class WidgetKeys {
   // Circle management
   // ---------------------------------------------------------------------------
 
-  /// Info button in the selected-circle header that opens the
-  /// circle-details bottom sheet. Keyed so tests don't couple to the
+  /// The selected-circle header's details button (the info glyph, or the
+  /// attention glyph in its place) that opens the circle-details bottom
+  /// sheet. Keyed so tests don't couple to the glyph or to the
   /// (user-facing, translatable) "Circle details" tooltip text.
   static const Key circleDetailsButton = Key('circle_details_button');
 
@@ -247,8 +248,14 @@ abstract final class WidgetKeys {
     'change_notice_review_members',
   );
 
-  /// The attention cue on the circle selector's trigger row.
+  /// The attention cue on the circle selector's trigger row: a circle other
+  /// than the selected one needs attention.
   static const Key circleAttentionCue = Key('circle_attention_cue');
+
+  /// The dot on the selected circle's avatar in the trigger row.
+  static const Key circleSelectedAttentionDot = Key(
+    'circle_selected_attention_dot',
+  );
 
   /// The attention cue on a circle's row in the selector list, keyed by the
   /// circle's `nostrGroupId` hex as [circleTile] is.

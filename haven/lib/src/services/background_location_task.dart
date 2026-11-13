@@ -381,10 +381,8 @@ class BackgroundLocationTaskHandler extends TaskHandler {
   /// that exists only inside the foreground-service engine.
   final PublishWakeLock _wakeLock = const PublishWakeLock();
 
-  /// Last time the background ran the all-circles peer-location fetch.
-  /// Throttles the fetch to ~`kLocationUpdateInterval` so a cycle that
-  /// publishes (or a deferred circle that makes one fire early) does not
-  /// multiply background relay round-trips (battery parity, `_publishCycle`).
+  /// When this isolate last fetched. Read only by a cycle that got no publish
+  /// to a relay (step 9).
   DateTime? _lastBackgroundFetchAt;
 
   /// Number of completed publish cycles since the last prune. The bg
@@ -2104,9 +2102,9 @@ class BackgroundLocationTaskHandler extends TaskHandler {
             // or refused. No relay verdict: nothing is stamped, no failure is
             // raised and the retry is not pulled forward, so a hold that
             // lasts until a foreground costs no extra wake; the circle stays
-            // due. This isolate has no Riverpod container: the hold surfaces
-            // on the next foreground open through the health model, which
-            // reads the missing publish-ack stamp and its age.
+            // due. This isolate has no Riverpod container: a hold the next
+            // foreground does not end surfaces there through the health
+            // model, which reads the missing publish-ack stamp and its age.
             debugPrint('[BackgroundTask] send held by the core — skipping '
                 'this circle');
             continue;
@@ -2192,37 +2190,42 @@ class BackgroundLocationTaskHandler extends TaskHandler {
         );
       }
 
-      // 9. Fetch peer locations for each accepted circle. Piggybacks on
-      //    the wake-up the publish step already paid for: the radio is
-      //    awake, the relay WebSocket is open, and the GPS fix is
-      //    cached. Without this, the SQLCipher last-known store grows
+      // 9. Fetch peer locations for each accepted circle, inside the wake
+      //    this cycle already took for a due circle: the GPS fix is cached
+      //    and, when a publish reached a relay, the WebSocket is open.
+      //    Without this, the SQLCipher last-known store grows
       //    stale during long backgrounded sessions and the foreground
       //    rehydrates to old data on resume.
       //
-      //    Throttled to `kLocationUpdateInterval`: "a circle is due" can fire
-      //    more often than the nominal cadence — a deferred circle stays
-      //    overdue, and the watchdog re-runs the cycle — but fetching ALL
-      //    circles on every such wake would multiply the background relay
-      //    round-trips. Gating the fetch on its own ~nominal cadence keeps
-      //    background fetch frequency (and battery) at parity with one fetch
-      //    per publish interval regardless of how many circles the user is
-      //    in.
+      //    On every cycle that got a publish to a relay (owner-directed
+      //    2026-11-12): what the store holds when the app opens is what the
+      //    map shows until the live plane catches up, so the gap between
+      //    fetches is the age a returning user sees. A burst whose tail the
+      //    stagger budget defers is followed sooner by another cycle, which
+      //    fetches too. A cycle that got none to a relay — every due circle
+      //    held by the core, or no relay reached — fetches at most once per
+      //    `kLocationUpdateInterval`, as every cycle used to: while a circle
+      //    stays overdue the watchdog runs a cycle every 72 s, for as long
+      //    as a hold lasts, and fetching in each would dial relays twice as
+      //    often as before for no publish. A cycle that handed publishing
+      //    back to the foreground fetches nothing: the foreground receives
+      //    for itself.
       //
-      //    Receiver-side auto-commit: `fetchMemberLocations` ingests
-      //    through the fanout driver, which records and drives in Rust a
-      //    commit the engine stages for a peer's `SelfRemove`. If no relay
-      //    acknowledges it the driver does NOT roll the commit back: Rust
-      //    recorded the removal as owed (`owe_removal_publish`) and refuses
-      //    to discard a peer's eviction, so a later drive, or a FOREGROUND
-      //    that makes it, finishes it. The next cycle does not re-surface
-      //    it — a probe against the engine at the pinned MDK rev disproved
-      //    that (this comment used to claim it); the durable obligation is
-      //    the retry. A failed fetch costs one circle (catch + debugPrint).
+      //    Ingested claiming no foreground, so each drive runs in
+      //    `DriveMode::FinishOnly`: it finishes what is recorded and makes
+      //    nothing new, so a peer's departure stays due until a foreground
+      //    makes its removal under its fanout record (Security Rule 13). A
+      //    failed fetch costs one circle (catch + debugPrint).
       var fetchCount = 0;
-      final fetchDue = _lastBackgroundFetchAt == null ||
+      final fetchDue =
+          publishCount > 0 ||
+          _lastBackgroundFetchAt == null ||
           timestamp.difference(_lastBackgroundFetchAt!) >=
               kLocationUpdateInterval;
-      if (fetchDue && !_shuttingDown && _locationSharingService != null) {
+      if (fetchDue &&
+          !yieldedToForeground &&
+          !_shuttingDown &&
+          _locationSharingService != null) {
         _lastBackgroundFetchAt = timestamp;
         // The burst above may have spent most of the hold on stagger waits and
         // relay ladders; the fetch drives what its circles owe and must not

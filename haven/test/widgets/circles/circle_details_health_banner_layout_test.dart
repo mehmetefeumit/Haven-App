@@ -4,9 +4,10 @@
 /// remedy reachable wherever it lives) to the sheet that now hosts it (OD-1).
 /// For every snap detent the circles sheet rests at, on a common phone and the
 /// smallest supported one, at 1.0× and 2.0× text, left-to-right and Arabic:
-/// the details open from the attention cue in one tap, nothing throws, the
-/// card is met first after the title, its remedy is hit-testable and inside
-/// the viewport once scrolled to, and Leave is still reachable below it.
+/// the details open from the circle's details button — the attention cue,
+/// while the circle needs attention — nothing throws, the card is met first
+/// after the title, its remedy is hit-testable and inside the viewport once
+/// scrolled to, and Leave is still reachable below it.
 library;
 
 import 'dart:math';
@@ -128,8 +129,20 @@ void main() {
               await tester.pumpAndSettle();
             }
 
-            // One tap from the resting sheet: the cue beside the selector.
-            await tester.tap(find.byKey(WidgetKeys.circleAttentionCue));
+            // The header's one details button, here the cue. Where a detent
+            // leaves it below the fold the sheet is pulled up first, as a
+            // user must.
+            final details = find.byKey(WidgetKeys.circleDetailsButton);
+            if (details.evaluate().isEmpty ||
+                tester.getRect(details).bottom > viewport.height) {
+              await tester.drag(find.text('Family'), const Offset(0, -300));
+              await tester.pumpAndSettle();
+            }
+            expect(
+              tester.getRect(details).bottom,
+              lessThanOrEqualTo(viewport.height),
+            );
+            await tester.tap(details);
             await tester.pumpAndSettle();
             expect(tester.takeException(), isNull);
 
