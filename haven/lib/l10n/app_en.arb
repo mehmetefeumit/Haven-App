@@ -374,7 +374,8 @@
   "relaySettingsStatusUnreachable": "Can't reach",
   "@relaySettingsStatusUnreachable": {
     "description": "Relay status label: the relay could not be reached or returned an error."
-  },  "relaySettingsKindLine": "{kind}: {status}",
+  },
+  "relaySettingsKindLine": "{kind}: {status}",
   "@relaySettingsKindLine": {
     "description": "One line under a relay's address on the Relay settings page: which of the user's published items it is about, and whether this relay has it, e.g. 'KeyPackage: Published'. Rows show one such line per item that relay should hold, and a screen reader reads the address and its lines as one sentence. Reorder or change the separator if this locale needs it.",
     "placeholders": {

@@ -493,7 +493,9 @@ void main() {
     'a publish that never settles times out to a fixed error with Retry, '
     'which resumes without creating or saving anything again',
     (tester) async {
-      final logs = LogCapture.install();
+      // Restored inside the body: testWidgets checks debugPrint before
+      // addTearDown callbacks run (see log_capture.dart).
+      final logs = LogCapture();
       addTearDown(logs.restore);
       final service = _RecordingIdentityService();
       final maintenance = _FakeMaintenance(MockRelayPreferencesService());
@@ -537,6 +539,7 @@ void main() {
       expect(service.createIdentityCalls, 1);
       expect(service.setDisplayNameCalls, hasLength(1));
       expect(maintenance.calls, ['relayList', 'kp', 'relayList', 'kp']);
+      logs.restore();
     },
   );
 
@@ -577,7 +580,9 @@ void main() {
   testWidgets(
     'a publisher that throws shows fixed copy only and logs no identifier',
     (tester) async {
-      final logs = LogCapture.install();
+      // Restored inside the body: testWidgets checks debugPrint before
+      // addTearDown callbacks run (see log_capture.dart).
+      final logs = LogCapture();
       addTearDown(logs.restore);
       final maintenance = _FakeMaintenance(MockRelayPreferencesService())
         ..relayListThrows = StateError(
@@ -603,7 +608,8 @@ void main() {
       expect(find.textContaining('StateError'), findsNothing);
       logs
         ..assertContains('[Reachability] republish failed')
-        ..assertNoNeedles(['npub1plantedplanted', 'wss://planted.example']);
+        ..assertNoNeedles(['npub1plantedplanted', 'wss://planted.example'])
+        ..restore();
     },
   );
 
