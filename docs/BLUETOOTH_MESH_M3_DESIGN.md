@@ -506,6 +506,7 @@ of the app's build and changes nothing in it.
 | `ScanPolicy` | restart before 30 min; no more than one start in 6 s |
 | `MeshRadioConstants` | every mode, interval and cap of §G, one site |
 | `RadioPort`, `MeshThread` (as built, M3f) | the interface of §B.2; the wrapper below, and the one stop of §B.5 |
+| `LogLever`, `LinkEvents`, `ServerLinks`, `GattClientSteps`, `ChannelWords` (as built, M3g units 1 and 2) | the lever's two calls; what the two GATT roles tell the core; the server's connections; the dial's steps; the channel's words (§N.2, §N.7) |
 
 | Adapter — [C], behaviour [E]/[H] | Wraps |
 |---|---|
@@ -600,6 +601,11 @@ written or says too little:**
   the reminder's or the deadline's alone.
 - `MeshRadioCore` takes a fourth argument, the picker `PeerTable` forgets
   by (§B.1), a `SecureRandom` unless a test hands one in.
+- **As built (M3g unit 2):** and the log lever, as its second
+  (`MeshRadioCore(engine, lever, port, clock, pick)`): every input asks
+  whether it holds before it reads the time left (§N.1.3). The core
+  implements `LinkEvents`, through which `ServerLinks` and
+  `GattClientSteps` tell it of links (§N.7).
 
 **What the core asks of the adapters (for M3g).**
 
@@ -809,7 +815,11 @@ asked for, the engine is told the connect failed.
   is one `if` of it. **As researched, 2026-11-12:** the rule of §M.3
   comes before the permission — the API level, then the lever of §M.2
   installed and checked — and before any Bluetooth object. `StartPolicy`
-  gains that input, and its [J] test, with M3g.
+  gains that input, and its [J] test, with M3g. **As built (M3g unit
+  2):** §N.1.5 — `refusal` for whoever would start the service, and in
+  `start` the foreground first, so that every refusal is a stop from
+  the foreground; the answer is `Refused(word, notice)` or
+  `Run(deadline)`.
 - **The deadline is enforced by the engine**, read at every pump. The copy
   in `MeshPrefs` serves only a restart with no engine and the alarm. Like
   the session's own across a restart (`haven-core/SECURITY.md`,
@@ -1016,7 +1026,8 @@ review of M3f: `aFloodOfAddressesDoesNotPushOutAPeerUnlessItIsPicked`,
 `aWeakSightingOfAKnownAddressIsToldToTheEngine`,
 `aCompletionWhileARefusedFrameWaitsClosesItsLink` and
 `aLinkTheEngineClosesAtOnceHoldsNoLock`; the table's own test is now
-`thePeerTableHoldsSixtyFourAndForgetsOnePickedAmongThoseNotHeld`.
+`thePeerTableHoldsSixtyFourAndForgetsOnePickedAmongThoseNotHeld`. With
+M3g's second unit: the twenty-one of §N.2.8 and §N.7, 54 in all.
 The script fails unless the tests that ran are the tests the sources
 declare, by name; it cannot tell a test whose body was emptied.
 
@@ -2773,8 +2784,9 @@ mapping to `unsupported` and `failed` (§M.3).
 ## N. M3g as it will be built
 
 > **Drafted by one agent and confirmed with changes by an independent
-> review, both 2026-11-12.** Paper only when written; unit 1 has been
-> built since (N.7), and nothing of this section has run on Android.
+> review, both 2026-11-12.** Paper only when written; units 1 and 2
+> have been built since (N.7), and nothing of this section has run on
+> Android.
 > It settles what §M.2 left to M3g, orders the unit into six that CI can
 > compile one at a time, and lists what the code will rest on unproved.
 > Where it departs from §B, §C or §M it says so.
@@ -3661,3 +3673,197 @@ and the library loading below API 30. Until then the call order inside
 `install` and `holds`, the sentinel and the release floor have run
 nowhere.
 
+**Unit 2, the pure additions (2026-11-12).** Built as N.1.3, N.1.5 and
+N.2.3 to N.2.8 say, in `kt/mesh/core/`, with its JVM tests. **No adapter
+exists: nothing here is called by any build, and nothing of it has run
+on Android**; plan §16 has what is proved and how. `MeshNative` does not
+exist either, so the two lever calls this unit writes
+(`StartPolicy.refusal`, `MeshRadioCore`) reach no native code: the rule
+above, of the unit that first calls `leverInstall`, falls on the unit
+that gives `LogLever` an implementation something calls. Where the code
+differs from this section, or settles what it left open:
+
+- **Ports, not values (N.2.3, N.2.4).** N.2.3 has the pure class answer
+  "one of *connected, link up, …*". An input comes to two things whose
+  order matters — the answer and then the link, the core told and then
+  the cancel — so each class calls, in that order, an interface the
+  adapter implements (`ServerPort`: `answer`, `cancel`, `notify`;
+  `GattClientPort`: the dial's steps, `write`, `disconnect`, `close`,
+  `timer`) and a third the core implements (`LinkEvents`, six of
+  `MeshRadioCore`'s inputs), as the core has `RadioPort`. The adapter
+  maps a callback to one input and implements each port method as one
+  platform call. `LinkEvents.kt` is a file N.2's list does not have.
+- **`StartPolicy` (N.1.5).** As written. Settled: `supported` is the
+  level and the Bluetooth LE feature; behind a logout's marker no
+  refusal posts the notice, whichever it is (N.1.5's "none behind a
+  logout's marker" read as every refusal, not the marker's own); the
+  marker's own word, and an engine that is not there, are `failed`. The
+  permission is still handed in read, as M3f had it.
+  `aStartWithoutTheBluetoothPermissionIsAStopWithTheNotice` now reads
+  `noPermission` with the notice and the engine untouched; that the
+  foreground comes first is
+  `inTheServiceTheForegroundComesBeforeAnyRefusal`.
+- **The check in the core (N.1.3).** `MeshRadioCore` takes the lever as
+  its second argument. A check that fails puts the lever back and ends
+  `running`; once it has ended the lever is not asked again, as the
+  engine is not. **A reading at an instant is taken as enough** (the
+  point unit 1's review left to this unit): every input asks again, so
+  a wrong yes lasts one input. The exact form is not built.
+- **`ServerLinks` (N.2.3).** Its inputs: `onMtu`, `onDisconnected`,
+  `onDialDown`, `onDescriptorWrite`, `onWrite`, `onNotified`, `onBond`;
+  from the core's port `close`, `send`; `clear` at the radio's stop.
+  - *What subscribes.* The descriptor's value `01 00`, whole, at offset
+    0. `00 00` ends the subscription: the core is told, nobody is
+    cancelled. Anything else — indications, another length, a prepared
+    write, an offset — is answered with the plain failure. **A device
+    that is not Haven's is answered too**: it wrote to Haven's own
+    descriptor, and a request left unanswered ends its connection half
+    a minute later. That answer is the one thing done to such a device.
+    A write that wants no answer gets none.
+  - *A write.* From a subscriber with a link: a frame, or refused and
+    the link ended. From a subscriber with no link yet: a frame is
+    dropped, anything else refused, and the core's ten seconds end it —
+    N.2.3 closes "a linked device". From anyone else: nothing, no
+    answer.
+  - *Ended* is the core told first, then `cancel`, as the core drops a
+    link itself.
+  - *The note's end.* At the server's word of a disconnect, at the
+    dial's own disconnect callback, at the cap and at `clear`. **Not
+    when Haven closes a dial itself**: no callback follows a close, and
+    if the connection ended the server is told. The cap is 64
+    (`MTU_NOTES_MAX`), a guess above what a phone connects (**[U]**).
+  - `close` and `send` of a number that is no subscriber's do nothing
+    and answer false, so whoever implements `RadioPort` asks both roles
+    without knowing whose a link is.
+- **`GattClientSteps` (N.2.4).** §B.3's order, and:
+  - **Every connection has a number of its own**, drawn at the dial
+    from the one counter and the link's once it is one; a second
+    connection draws a second. Every port call and every callback names
+    it, the address only the `connect`. So a callback that arrives
+    after its client was closed names a number nobody holds, in one
+    start as across two (N.2.2 has only the second), and the adapter
+    needs no address but the one it dials.
+  - **The connection is made at the timer, not inside
+    `RadioPort.connect`**, which the core calls from its pump: a dial
+    answered there — a client the platform does not make — would be the
+    core's input from inside its own pump. `connect` asks `timer(0)` and
+    nothing else. No answer of either class is made from inside a call
+    of the core's.
+  - **One timer of its own** (`timer(inMs)`, answered by `onTimer`), for
+    the earliest of a connection to make and a dial to give up. §B.3
+    has the 300 ms "on the handler"; the 25 s are there with it, and
+    neither is a term of the core's alarm: on a phone that sleeps they
+    come late. `onTimer` reads the clock, so calling it early or twice
+    does nothing.
+  - *Once more* is for a connection that ends before its link at any
+    step, not only while connecting: the client is closed, a new one is
+    made 300 ms on, and a second end is the failed connect. The 25 s
+    are the whole dial's; a second connection that would come after
+    them is not made. A *step* that fails — a call the platform does
+    not begin, a callback that reports failure, an MTU below 51 — is
+    not tried again.
+  - The link is told, then the priority asked — unless the core closed
+    the link in that call.
+  - After the link: `onFrame`, `onWritten`, `send`, `close`; a link
+    lost is the core told, then the client closed; `stop` closes every
+    client and tells nobody.
+  - An MTU callback out of its turn is noted for `ServerLinks` and
+    begins nothing.
+- **Never bond (N.2.5): option (a), in one function.**
+  `ServerLinks.endsAtBond` is `address in subscribers`; the test
+  `aDeviceThatStartsToBondIsDroppedOnlyIfItIsHavens` fails under the
+  other. Option (b) is that function reading the notes instead, and one
+  branch of the adapter: every device the server is told connected is
+  noted with no MTU (`onMtu(address, 0)`), and `onBond` is told only of
+  a device that was not bonded before. A dial is held from its
+  `connect`, in both. **`onBond(address)` means the bond state is no
+  longer "none"**: the comparison with the platform's constant is the
+  adapter's, where the compiler checks the name, and no bond state is
+  an integer in the pure package.
+- **`ChannelWords` (N.2.8).** The eleven methods, the two channels, the
+  six keys, the answers' words, and four decisions: `copy` (the six
+  strings, or null for any other argument), `permission(granted, asked,
+  rationale)`, `status(serving, radioUp, wanted, canSearch)` and the
+  tap rule, `HeldTaps` — a class, one a Flutter engine, since "held" is
+  state. `permission` takes three inputs because the platform does not
+  tell "never asked" from "refused for good": never asked is `denied`.
+  A dialog the user dismissed without answering reads as refused for
+  good (**[U]**, the platform's behaviour from memory). The failure
+  code is `failed`. **The words were read against
+  `mesh_radio.dart` by eye and are held here as literals in the JVM
+  test**; a check that reads both files is unit 6's, when the Dart side
+  has the two new methods.
+- **Constants (N.2.6).** The six numbers and the three `UUID`s built
+  from them; the level from which the advertiser is told "not
+  discoverable"; the MTU asked, the smallest that links, the dial's two
+  times, the notes' cap. **No platform integer was added**: an
+  attribute's properties and permissions, a response's status, the
+  transport and the bond states stay the adapters', under the
+  platform's own names, so N.4's `javap` step still has four integers
+  to hold and the never-bond bans stay unit 4's guard. The smallest MTU
+  is held to 51 by the JVM test here and by Rust's own test of
+  `radio_frame_len`; no guard ties the two, since the engine's constant
+  is not a literal, and the engine closes a link it does not admit.
+- **The stop's order (N.2.7)** is `MeshThread.steps(radioDown,
+  cancelAlarm, forget, unpost, end)`: a function, so that
+  `theStopCancelsTheAlarmAfterTheRadioIsDown` has something to hold.
+- **Tests.** The nineteen names of N.2.8 as given, and two more:
+  `aCloseForgetsASubscriberAndAFrameGoesToItsDeviceAlone`,
+  `aClientIsClosedAfterEveryDisconnectAndAtTheRadiosStop`. 54 in all.
+- **Android 6's JDK.** The classes load on every level from 23, so
+  they call nothing of the JDK that Android 6 lacks without desugaring
+  — no `java.time`, no `Map.forEach`, `getOrDefault`, `putIfAbsent`,
+  `computeIfAbsent` or `removeIf`, no stream; of the JDK they name
+  `UUID`, `LinkedHashMap` and `SecureRandom`. **Nothing holds this but
+  a reader**: the JVM build compiles against JDK 17's API (plan §16's
+  mutation that stands).
+- **Guard.** Check 11 has the 54 names. Check 8 gains "the constants'
+  one site": no file of the radio's Kotlin but `MeshRadioConstants.kt`
+  calls `UUID(`, names a member of `UUID` or `ParcelUuid.fromString`,
+  or imports `UUID` under another name. 170 self-test fixtures.
+
+**What the adapters owe these classes (unit 4's brief, with §B.2's
+list).**
+
+- One counter of link numbers, never reset while the process lives,
+  handed to `ServerLinks` and `GattClientSteps` both.
+- `RadioPort.connect(address)` is `GattClientSteps.connect`;
+  `close(link)` is both classes' `close`; `send(link, frame)` is the
+  client's `send` or else the server's. No adapter asks whose a link
+  is.
+- **The server's adapter.** `onConnectionStateChange`: a disconnect is
+  `onDisconnected(address)`; a connect is nothing (under option (b),
+  the note). `onMtuChanged` → `onMtu`. `onDescriptorWriteRequest` and
+  `onCharacteristicWriteRequest` → `onDescriptorWrite`, `onWrite`, with
+  the request's id and flags as given — the server has one service, so
+  no UUID is compared. `onNotificationSent` → `onNotified`.
+  `onExecuteWrite` and every read request: nothing. `answer` is
+  `sendResponse` with success or the plain failure and no value;
+  `cancel` is `cancelConnection`; `notify` answers what the platform
+  answered. `clear()` when the server is closed.
+- **The client's adapter.** One callback object a `connect`, holding
+  that call's number; one client kept under it until `close(link)`,
+  which releases it whatever its state and is the last call for that
+  number. `onConnection(link, connected)`: connected is success and the
+  connected state, anything else is not. `onMtu`, `onDiscovered`,
+  `onSubscribed`, `onWritten` with the status as a yes or no; `onFrame`
+  with the value (read on the platform's thread below API 33, N.2.2).
+  `subscribe` answers false too where the service or the descriptor is
+  not found. `timer(inMs)` replaces the timer before it; `onTimer` is
+  also called at every wake of the core's alarm, before `onWake`.
+  `stop()` when the radio stops.
+- **The bond receiver.** For a state that is not "none":
+  `ServerLinks.onBond` and `GattClientSteps.onBond`, the address and
+  nothing else of the broadcast.
+- **An address** goes into these two classes and comes out to their
+  two ports, and nowhere else: not to the core but as the dial's own,
+  never to the engine, a log, a preference or an exception's text.
+- **The channel.** One `HeldTaps` a Flutter engine, made no later than
+  the first tap it could be sent. A method in
+  `ChannelWords.BEHIND_THE_LEVER` is answered only after
+  `StartPolicy.refusal` answered null, with its word otherwise where
+  the method has one. `asked` of `permission` is kept by the channel.
+- **The service.** `StartPolicy.start` with `foreground` as
+  `startForeground`; `Refused` is `MeshThread.stop(notice)` and its
+  word the answer to the channel's `start`, `Run` the deadline to
+  store and `started`. Its stop's steps are `MeshThread.steps`.

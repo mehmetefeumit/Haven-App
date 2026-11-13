@@ -142,7 +142,11 @@
 #      canonical form there or in the JVM tests.
 #   8. `MeshRadioConstants.kt` names the Android scan mode, advertise mode,
 #      advertise power and connection priority it holds, and no other file
-#      names one.
+#      names one. And it alone builds a UUID — the service's, the
+#      characteristic's and the descriptor's, from the six numbers the JVM
+#      test `theUuidsAreTheOnesDrawn` holds: no other file calls `UUID(`,
+#      names a member of `UUID` or `ParcelUuid.fromString`, or imports `UUID`
+#      under another name.
 #   9. `scripts/ci/native_log_allowlist.txt` has no row for a file under a
 #      `mesh/` directory.
 #  10. No `AndroidManifest.xml` under `haven/android/app/src` but the mesh's
@@ -261,7 +265,7 @@ readonly -a LEVER_STRINGS=(
 
 # How many fixtures the self-test runs. Pinned, because a fixture that stops
 # running is the one way a deleted check reports success.
-readonly SELF_TEST_FIXTURES=166
+readonly SELF_TEST_FIXTURES=170
 
 # The Kotlin of the radio (design §B): the app's mesh packages, whatever the
 # source set, and the JVM build of the pure one with its tests.
@@ -275,8 +279,10 @@ readonly ENGINE='haven-core/src/mesh/engine.rs'
 readonly RADIO_CFG='#[cfg(any(target_os = "android", test))]'
 # The platform's radio modes: named in CONSTANTS, used by no other file.
 readonly MODES='(SCAN_MODE|ADVERTISE_MODE|ADVERTISE_TX_POWER|CONNECTION_PRIORITY)_[A-Z]'
-# The JVM tests, by name: design §B.10's and the ones M3f added. Pinned,
-# because a test that is deleted, renamed or ignored fails nothing.
+# The JVM tests, by name: design §B.10's, the ones M3f added, and from
+# `aLeverThatStopsHoldingIsPutBackAndStopsTheRadio` on those of M3g's second
+# unit (§N.2). Pinned, because a test that is deleted, renamed or ignored
+# fails nothing.
 readonly -a JVM_TEST_NAMES=(
   aPolledFrameIsSentOrItsLinkIsClosed
   aLinkWithAFrameInFlightIsNotReady
@@ -311,6 +317,27 @@ readonly -a JVM_TEST_NAMES=(
   anEngineThatAnswersNoWakeIsGone
   aStopTheUserDidNotMakeIsAStopWithTheNoticeAndIsFinal
   anEngineWhoseTimeIsUpStopsTheServiceWithTheNotice
+  aLeverThatStopsHoldingIsPutBackAndStopsTheRadio
+  inTheServiceTheForegroundComesBeforeAnyRefusal
+  belowApiThirtyAStartIsUnsupportedAndTouchesNothing
+  aLeverThatIsMissingIsUnsupportedAndOneThatDoesNotHoldIsFailed
+  aStartBehindALogoutIsAStopWithNoNotice
+  theStopCancelsTheAlarmAfterTheRadioIsDown
+  theUuidsAreTheOnesDrawn
+  aConnectionThatNeverWritesHavensDescriptorIsNeverKnown
+  aSubscriberLinksAtOnceWhereItsConnectionsMtuIsKnownAndAtItsNextMtuWhereNot
+  theMtuThisPhonesOwnDialWasToldServesThatDevicesSubscription
+  anMtuNoteGoesAtDisconnectAtTheCapAndWithTheRadio
+  aLongAnOffsetOrAnAnsweredWriteIsRefusedAndItsLinkClosed
+  aDeviceThatStartsToBondIsDroppedOnlyIfItIsHavens
+  aCloseForgetsASubscriberAndAFrameGoesToItsDeviceAlone
+  anOutgoingLinkIsMtuThenDiscoveryThenSubscription
+  aStepThatFailsOrTwentyFiveSecondsIsOneFailedConnect
+  aConnectionThatFailsBeforeItsLinkIsTriedOnceMore
+  aClientIsClosedAfterEveryDisconnectAndAtTheRadiosStop
+  theChannelsWordsAreTheseAndTheStatusIsOneFunction
+  onlyThreeChannelMethodsAreBehindTheLever
+  theTapHeldForAnEngineIsKeepOnIfAnyWas
 )
 
 readonly B='(^|[^A-Za-z0-9_])'
@@ -697,7 +724,8 @@ run_check() {
     fi
   done <<<"${kotlin}"$'\n'"${jvm}"
 
-  # Check 8: the platform's radio modes are named at one site.
+  # Check 8: the platform's radio modes are named, and the radio's UUIDs
+  # built, at one site.
   if [[ "$(grep -oE "${B}${MODES}" "${REPO_ROOT}/${CONSTANTS}" | grep -oE '(SCAN_MODE|ADVERTISE_MODE|ADVERTISE_TX_POWER|CONNECTION_PRIORITY)' | LC_ALL=C sort -u | tr '\n' ' ' || true)" != 'ADVERTISE_MODE ADVERTISE_TX_POWER CONNECTION_PRIORITY SCAN_MODE ' ]]; then
     fail "${CONSTANTS} does not name the scan mode, the advertise mode, the advertise power and the connection priority it holds — each the Android constant whose integer it is. It is the one site of the radio's modes (T-PWR-1)."
   fi
@@ -708,6 +736,10 @@ run_check() {
     hits="$(grep -nE "${B}${MODES}" <<<"${view}" | cut -d: -f1 | tr '\n' ' ' || true)"
     if [[ -n "${hits}" ]]; then
       fail "${rel} names a scan, advertise or connection-priority constant of the platform (line(s) ${hits}). An adapter passes on the value ${CONSTANTS##*/} holds: a mode chosen anywhere else is one the power table does not have."
+    fi
+    hits="$(grep -nE "${B}UUID[[:space:]]*(\\(|\\.|::)|${B}ParcelUuid[[:space:]]*(\\.|::)[[:space:]]*fromString${E}|${B}UUID[[:space:]]+as${E}" <<<"${view}" | cut -d: -f1 | tr '\n' ' ' || true)"
+    if [[ -n "${hits}" ]]; then
+      fail "${rel} builds a UUID, or takes the class under another name (line(s) ${hits}). The service's, the characteristic's and the descriptor's are the three ${CONSTANTS##*/} builds from its six numbers, which a JVM test holds: one made anywhere else is a service no other phone looks for, under a number nobody pinned."
     fi
   done <<<"${kotlin}"
 
@@ -817,7 +849,7 @@ run_check() {
   if (( FAILED )); then
     exit 1
   fi
-  log "OK: unsafe is written in the generated bridge, the exports' file and the log lever alone, under the crate's deny; the exports' file is uses and the $(grep -c . <<<"${pinned}") pinned exports, each one call into ${CALLS##*/}; each of those is one guarded call of its radio entry, and calls nothing of Java's; the lever is its ${LEVER_UNSAFE_BLOCKS} unsafe blocks and one logger, looks up five functions by name and names nothing it could log, lock or panic with. The radio's Kotlin logs nothing and holds no UUID, names its modes at one site, takes the engine's signal floor, and has its ${#JVM_TEST_NAMES[@]} JVM tests; no manifest outside the mesh's own names Bluetooth."
+  log "OK: unsafe is written in the generated bridge, the exports' file and the log lever alone, under the crate's deny; the exports' file is uses and the $(grep -c . <<<"${pinned}") pinned exports, each one call into ${CALLS##*/}; each of those is one guarded call of its radio entry, and calls nothing of Java's; the lever is its ${LEVER_UNSAFE_BLOCKS} unsafe blocks and one logger, looks up five functions by name and names nothing it could log, lock or panic with. The radio's Kotlin logs nothing and holds no UUID written out, names its modes and builds its UUIDs at one site, takes the engine's signal floor, and has its ${#JVM_TEST_NAMES[@]} JVM tests; no manifest outside the mesh's own names Bluetooth."
 }
 
 # ---------------------------------------------------------------------------
@@ -1185,6 +1217,9 @@ class ScannerAdapter {
     fun mode(): Int = MeshRadioConstants.SCAN_MODE /* not System.err */
 
     fun blueprint(catalog: Int): Int = catalog + MeshRadioConstants.ADVERTISE_TX_POWER
+
+    // Never UUID.fromString(…) here: the filter is the one the constants built.
+    fun filter(found: java.util.UUID): Boolean = ParcelUuid(MeshRadioConstants.SERVICE_UUID).uuid == found
 }
 KT
     {
@@ -1742,6 +1777,23 @@ RS
   t="${tmp}/priority-elsewhere"; _tree "${t}"
   _line "${t}/${adapter}" 'fun blueprint(' '    fun blueprint(catalog: Int): Int = catalog + BluetoothGatt.CONNECTION_PRIORITY_HIGH'
   _case "a connection priority named in an adapter fails" 1 "${adapter} names a scan, advertise or connection-priority constant" "${t}"
+
+  t="${tmp}/uuid-parsed"; _tree "${t}"
+  _line "${t}/${adapter}" 'fun filter(' '    fun filter(found: java.util.UUID): Boolean = java.util.UUID.fromString(NAME) == found'
+  _case "a UUID parsed in an adapter fails" 1 "${adapter} builds a UUID" "${t}"
+
+  t="${tmp}/uuid-built"; _tree "${t}"
+  _line "${t}/${adapter}" 'fun filter(' '    fun filter(found: java.util.UUID): Boolean = java.util.UUID (1L, 2L) == found'
+  _case "a UUID built from numbers of an adapter's own fails" 1 "${adapter} builds a UUID" "${t}"
+
+  t="${tmp}/uuid-parcel"; _tree "${t}"
+  _line "${t}/${adapter}" 'fun filter(' '    fun filter(found: java.util.UUID): Boolean = ParcelUuid.fromString(NAME).uuid == found'
+  _case "a UUID parsed by the platform's own wrapper fails" 1 "${adapter} builds a UUID" "${t}"
+
+  t="${tmp}/uuid-alias"; _tree "${t}"
+  sed -i 's/^import com.oblivioustech.haven.mesh.core.MeshRadioConstants$/import com.oblivioustech.haven.mesh.core.MeshRadioConstants\nimport java.util.UUID as Id/' "${t}/${adapter}"
+  _line "${t}/${adapter}" 'fun filter(' '    fun filter(found: Id): Boolean = Id(1L, 2L) == found'
+  _case "the class imported under another name fails" 1 "${adapter} builds a UUID" "${t}"
 
   t="${tmp}/mode-unnamed"; _tree "${t}"
   sed -i '/ADVERTISE_TX_POWER_MEDIUM/d' "${t}/${CONSTANTS}"

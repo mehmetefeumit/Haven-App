@@ -46,4 +46,19 @@ class MeshThread(
             }
         }
     }
+
+    companion object {
+        /**
+         * A stop's steps, in their order. [radioDown] closes the adapters and
+         * calls [MeshRadioCore.stopRadio], which asks for the deadline's wake:
+         * an alarm cancelled before it would be armed again behind it.
+         */
+        fun steps(
+            radioDown: () -> Unit,
+            cancelAlarm: () -> Unit,
+            forget: () -> Unit,
+            unpost: () -> Unit,
+            end: () -> Unit,
+        ): List<() -> Unit> = listOf(radioDown, cancelAlarm, forget, unpost, end)
+    }
 }

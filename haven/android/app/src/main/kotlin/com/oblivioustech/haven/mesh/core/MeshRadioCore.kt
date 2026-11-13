@@ -16,20 +16,21 @@ import java.security.SecureRandom
  * Bluetooth callbacks and the engine (`docs/BLUETOOTH_MESH_M3_DESIGN.md`
  * §B.2). It runs on the mesh thread alone, inside [MeshThread.run].
  *
- * Every input reads the engine's time left before anything else, and ends by
- * taking what the engine has for the radio and asking for the next wake. The
- * engine's timers run nowhere else.
+ * Every input asks first whether the log lever still holds, then reads the
+ * engine's time left, and ends by taking what the engine has for the radio and
+ * asking for the next wake. The engine's timers run nowhere else.
  *
  * [clock] is milliseconds that keep counting while the phone sleeps. [pick]
  * is [PeerTable]'s: whom it forgets is not for a stranger to predict.
  */
 class MeshRadioCore(
     private val engine: MeshEngineApi,
+    private val lever: LogLever,
     private val port: RadioPort,
     private val clock: () -> Long,
     pick: (Int) -> Int = SecureRandom()::nextInt,
-) {
-    /** False once the engine is gone, or has answered what is no output: the service stops. */
+) : LinkEvents {
+    /** False once the lever no longer holds, the engine is gone, or it has answered what is no output: the service stops. */
     var running = true
         private set
 
@@ -77,7 +78,7 @@ class MeshRadioCore(
     }
 
     /** A central connected to the server: not a link until it subscribes. */
-    fun onConnected(link: Long) = input {
+    override fun onConnected(link: Long) = input {
         if (!up) return@input null
         if (unlinked.size < MAX_UNLINKED) unlinked[link] = clock() + UNLINKED_TIMEOUT_MS else port.close(link)
         null
@@ -87,7 +88,7 @@ class MeshRadioCore(
      * [address] is the one dialled, for a link this phone made. A link taken
      * has no peer: a central's address is not the one it advertises under.
      */
-    fun onLinkUp(link: Long, central: Boolean, attMtu: Int, address: String?) = input {
+    override fun onLinkUp(link: Long, central: Boolean, attMtu: Int, address: String?) = input {
         if (!up) return@input null
         unlinked.remove(link)
         val peer = (if (central) address?.let(dialing::remove) else null) ?: NO_PEER
@@ -101,25 +102,25 @@ class MeshRadioCore(
         link
     }
 
-    fun onLinkDown(link: Long) = input {
+    override fun onLinkDown(link: Long) = input {
         unlinked.remove(link)
         if (links.remove(link) != null) engine.linkDown(link)
         null
     }
 
-    fun onConnectFailed(address: String) = input {
+    override fun onConnectFailed(address: String) = input {
         dialing.remove(address)?.let(engine::connectFailed)
         null
     }
 
-    fun onFrame(link: Long, frame: ByteArray) = input {
+    override fun onFrame(link: Long, frame: ByteArray) = input {
         if (link !in links) return@input null
         engine.receive(link, frame)
         link
     }
 
     /** The platform's completion of the frame it took for [link]. */
-    fun onSendDone(link: Long, ok: Boolean) = input {
+    override fun onSendDone(link: Long, ok: Boolean) = input {
         val state = links[link] ?: return@input null
         if (ok && state.refused == null) state.due = null else drop(link)
         null
@@ -136,6 +137,12 @@ class MeshRadioCore(
     /** The engine's time left, or null when the service is to stop. */
     private fun left(): Long? {
         if (!running) return null
+        if (!lever.leverHolds()) {
+            // The platform's callbacks outlive the stop and log in each: the lever goes back in.
+            lever.leverInstall()
+            running = false
+            return null
+        }
         val left = engine.leftMs()
         when (deadline.at(left)) {
             DeadlineStep.STOP -> {

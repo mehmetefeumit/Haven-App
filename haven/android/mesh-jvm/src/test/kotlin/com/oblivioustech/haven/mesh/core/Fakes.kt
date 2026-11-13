@@ -90,6 +90,35 @@ class FakeEngine : MeshEngineApi {
     }
 }
 
+/** The log lever, scripted. [onCall] runs as each call comes in: what must not have happened by then. */
+class FakeLever : LogLever {
+    val calls = mutableListOf<String>()
+    var installs = true
+    var holds = true
+    var onCall: () -> Unit = {}
+    var throwsIn: String? = null
+    var threw = false
+
+    private fun record(name: String) {
+        onCall()
+        calls += "$name()"
+        if (throwsIn == name) {
+            threw = true
+            throw Thrown()
+        }
+    }
+
+    override fun leverInstall(): Boolean {
+        record("leverInstall")
+        return installs
+    }
+
+    override fun leverHolds(): Boolean {
+        record("leverHolds")
+        return holds
+    }
+}
+
 /** The adapters, recording: every call in order, with its arguments. */
 class RecordingPort : RadioPort {
     val calls = mutableListOf<String>()
@@ -135,13 +164,14 @@ class RecordingPort : RadioPort {
 /** A core over the two fakes and a clock the test moves. */
 class Rig {
     val engine = FakeEngine()
+    val lever = FakeLever()
     val port = RecordingPort()
     var now = 0L
 
     /** Whom a full peer table forgets, of [it] candidates in the order they were first seen, and what it was asked. */
     var pick: (Int) -> Int = { 0 }
     val pickedAmong = mutableListOf<Int>()
-    val core = MeshRadioCore(engine, port, { now }) { among ->
+    val core = MeshRadioCore(engine, lever, port, { now }) { among ->
         pickedAmong += among
         pick(among)
     }
@@ -159,7 +189,174 @@ class Rig {
     fun fresh() {
         engine.calls.clear()
         engine.readies.clear()
+        lever.calls.clear()
         port.calls.clear()
         port.frames.clear()
+    }
+}
+
+/**
+ * The core as the two GATT roles tell it, recording; [order] is the one list the three fakes of a [Radios] share.
+ * [then] runs inside each call: what the core does in its pump.
+ */
+class RecordingEvents(private val order: MutableList<String> = mutableListOf()) : LinkEvents {
+    val calls = mutableListOf<String>()
+    var then: (String) -> Unit = {}
+
+    private fun record(call: String) {
+        calls += call
+        order += call
+        then(call)
+    }
+
+    fun called(name: String): List<String> = calls.filter { it.startsWith("$name(") }
+
+    override fun onConnected(link: Long) = record("connected($link)")
+
+    override fun onLinkUp(link: Long, central: Boolean, attMtu: Int, address: String?) =
+        record("linkUp($link,$central,$attMtu,$address)")
+
+    override fun onLinkDown(link: Long) = record("linkDown($link)")
+
+    override fun onConnectFailed(address: String) = record("connectFailed($address)")
+
+    override fun onFrame(link: Long, frame: ByteArray) = record("frame($link,${frame.toList()})")
+
+    override fun onSendDone(link: Long, ok: Boolean) = record("sendDone($link,$ok)")
+}
+
+/** The GATT server's adapter, recording. */
+class RecordingServerPort(private val order: MutableList<String> = mutableListOf()) : ServerPort {
+    val calls = mutableListOf<String>()
+
+    /** Whether the platform takes a notification. */
+    var takes = true
+
+    private fun record(call: String) {
+        calls += call
+        order += call
+    }
+
+    override fun answer(address: String, request: Int, ok: Boolean) = record("answer($address,$request,$ok)")
+
+    override fun cancel(address: String) = record("cancel($address)")
+
+    override fun notify(address: String, frame: ByteArray): Boolean {
+        record("notify($address,${frame.toList()})")
+        return takes
+    }
+}
+
+/**
+ * The GATT client's adapter, recording, and holding the pure half to its word: a client is asked something only
+ * between the connect that made it and its close, and no number makes two.
+ */
+class RecordingClientPort(private val order: MutableList<String> = mutableListOf()) : GattClientPort {
+    val calls = mutableListOf<String>()
+
+    /** The clients made and not yet closed. */
+    val open = mutableSetOf<Long>()
+
+    /** Every client ever made, with the address it was made for. */
+    val made = mutableMapOf<Long, String>()
+
+    /** The steps the platform does not begin. */
+    val refuses = mutableSetOf<String>()
+
+    private fun record(call: String) {
+        calls += call
+        order += call
+    }
+
+    fun called(name: String): List<String> = calls.filter { it.startsWith("$name(") }
+
+    private fun step(name: String, link: Long, vararg more: Any): Boolean {
+        check(link in open) { "$name was asked of client $link, which is not open" }
+        record("$name(${(listOf(link) + more).joinToString(",")})")
+        return name !in refuses
+    }
+
+    override fun connect(link: Long, address: String): Boolean {
+        check(link !in made) { "the number $link made two clients" }
+        record("connect($link,$address)")
+        if ("connect" in refuses) return false
+        made[link] = address
+        open += link
+        return true
+    }
+
+    override fun requestMtu(link: Long, mtu: Int) = step("requestMtu", link, mtu)
+
+    override fun discover(link: Long) = step("discover", link)
+
+    override fun subscribe(link: Long) = step("subscribe", link)
+
+    override fun lowPower(link: Long) {
+        step("lowPower", link)
+    }
+
+    override fun write(link: Long, frame: ByteArray) = step("write", link, frame.toList())
+
+    override fun disconnect(link: Long) {
+        step("disconnect", link)
+    }
+
+    override fun close(link: Long) {
+        step("close", link)
+        open -= link
+    }
+
+    override fun timer(inMs: Long) = record("timer($inMs)")
+}
+
+/** The two GATT roles' pure halves over recording adapters, one counter of link numbers and a clock the test moves. */
+class Radios {
+    /** Every call of the three fakes, in the order made. */
+    val order = mutableListOf<String>()
+    val events = RecordingEvents(order)
+    val server = RecordingServerPort(order)
+    val client = RecordingClientPort(order)
+    var now = 0L
+    private var next = 0L
+    val links = ServerLinks(server, events) { next++ }
+    val steps = GattClientSteps(client, events, links, { now }) { next++ }
+
+    /** [ms] pass and the client's timer comes. */
+    fun pass(ms: Long) {
+        now += ms
+        steps.onTimer()
+    }
+
+    /** A device enables notifications on Haven's characteristic, as request [request]. */
+    fun subscribes(address: String, request: Int = 1) =
+        links.onDescriptorWrite(address, request, prepared = false, responseNeeded = true, offset = 0, value = byteArrayOf(1, 0))
+
+    /** A frame as a peer writes one: whole, and wanting no answer. */
+    fun writes(address: String, frame: ByteArray) =
+        links.onWrite(address, request = 0, prepared = false, responseNeeded = false, offset = 0, value = frame)
+
+    /** Dials [address]: the connection is made, under the number answered. */
+    fun dials(address: String): Long {
+        steps.connect(address)
+        steps.onTimer()
+        return client.made.entries.last { it.value == address }.key
+    }
+
+    /** Dials [address] up to its link, at [mtu]; answers the link's number. */
+    fun dialled(address: String, mtu: Int = 517): Long {
+        val link = dials(address)
+        steps.onConnection(link, connected = true)
+        steps.onMtu(link, mtu, ok = true)
+        steps.onDiscovered(link, ok = true)
+        steps.onSubscribed(link, ok = true)
+        return link
+    }
+
+    /** Forgets what was recorded so far. */
+    fun fresh() {
+        order.clear()
+        events.calls.clear()
+        server.calls.clear()
+        client.calls.clear()
     }
 }

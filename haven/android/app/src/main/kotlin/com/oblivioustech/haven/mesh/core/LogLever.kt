@@ -7,8 +7,8 @@ package com.oblivioustech.haven.mesh.core
  *
  * Android's Bluetooth classes log from this process the address of whatever
  * connects. With the lever in, a release build writes no log line at all and
- * a debug build only Haven's own. The radio is to make no Bluetooth object
- * without it; nothing calls it yet.
+ * a debug build only Haven's own. No Bluetooth object is to be made without
+ * it: [StartPolicy] asks before the first, [MeshRadioCore] at every input.
  */
 interface LogLever {
     /** Puts the lever in, or back; false where this Android has none (below API 30). */

@@ -39,11 +39,17 @@ class MeshThreadTest {
     @Test
     fun aRadioPortThatThrowsStopsTheRadioAndNothingEscapes() {
         val throwers = listOf("connect", "close", "send", "scan", "remind", "holdAwake", "wakeAt").map { "port" to it } +
-            listOf("leftMs", "sighting", "linkUp", "linkDown", "connectFailed", "receive", "poll", "wakeInMs").map { "engine" to it }
+            listOf("leftMs", "sighting", "linkUp", "linkDown", "connectFailed", "receive", "poll", "wakeInMs").map { "engine" to it } +
+            // A native method JNI does not find throws at its first call.
+            ("lever" to "leverHolds")
         for ((side, method) in throwers) {
             val service = Service()
             val (rig, thread) = service.rig to service.thread
-            if (side == "port") rig.port.throwsIn = method else rig.engine.throwsIn = method
+            when (side) {
+                "port" -> rig.port.throwsIn = method
+                "engine" -> rig.engine.throwsIn = method
+                else -> rig.lever.throwsIn = method
+            }
             val frame = byteArrayOf(1, 2, 3)
             val output = written {
                 thread.run { rig.core.startRadio() }
@@ -59,7 +65,7 @@ class MeshThreadTest {
                 thread.run { rig.core.onWake() }
             }
             val name = "$side.$method"
-            assertTrue(rig.port.threw || rig.engine.threw, "premise: $name was never called")
+            assertTrue(rig.port.threw || rig.engine.threw || rig.lever.threw, "premise: $name was never called")
             assertTrue(thread.stopped, "$name threw and the radio was not stopped")
             assertFalse(service.flag, "$name threw and the on flag was left set")
             assertEquals(1, service.stoppedNotices, "$name threw and the stopped notice was not posted once")
@@ -93,6 +99,34 @@ class MeshThreadTest {
         refused.thread.stop(notice = true)
         refused.thread.stop(notice = true)
         assertTrue(!refused.flag && refused.stoppedNotices == 1)
+    }
+
+    /**
+     * §B.2: the radio-down step asks for the deadline's wake, as every stop of the radio does. An alarm cancelled
+     * before it would be armed again behind it, and wake a service that is gone.
+     */
+    @Test
+    fun theStopCancelsTheAlarmAfterTheRadioIsDown() {
+        for (notice in listOf(true, false)) {
+            val rig = Rig().started()
+            val done = mutableListOf<String>()
+            val thread = MeshThread(
+                running = { rig.core.running },
+                steps = MeshThread.steps(
+                    radioDown = { rig.core.stopRadio() },
+                    cancelAlarm = { rig.port.calls += "cancelAlarm()" },
+                    forget = { done += "forget" },
+                    unpost = { done += "unpost" },
+                    end = { done += "end" },
+                ),
+                notice = { done += "notice" },
+            )
+            rig.fresh()
+            thread.stop(notice)
+            val alarm = rig.port.calls.filter { it.startsWith("wakeAt(") || it == "cancelAlarm()" }
+            assertTrue(alarm.size == 2 && alarm.last() == "cancelAlarm()", "the alarm was left armed behind the stop: $alarm")
+            assertEquals(listOf("forget", "unpost", "end") + if (notice) listOf("notice") else emptyList(), done)
+        }
     }
 
     /** T-AUTO-2: at the deadline the service stops itself, with the notice, at the first input after it. */

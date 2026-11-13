@@ -4,58 +4,170 @@ import com.oblivioustech.haven.mesh.core.MeshRadioConstants.MAX_PEERS
 import com.oblivioustech.haven.mesh.core.MeshRadioConstants.SCAN_MIN_GAP_MS
 import com.oblivioustech.haven.mesh.core.MeshRadioConstants.SCAN_RESTART_MS
 import kotlin.test.Test
+import java.util.UUID
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class PoliciesTest {
     private val wallClock = 1_800_000_000_000L
 
-    private class Start(val deadline: Long?, val inForeground: Boolean, val engine: FakeEngine)
+    private class Started(val start: Start, val inForeground: Boolean, val engine: FakeEngine, val lever: FakeLever) {
+        val deadline: Long? get() = (start as? Start.Run)?.deadlineMs
+        val word: MeshStart? get() = (start as? Start.Refused)?.word
+        val notice: Boolean? get() = (start as? Start.Refused)?.notice
+    }
 
-    private fun start(permission: Boolean, left: Long, stored: Long, resumes: Boolean = true): Start {
+    /** A start of the service on a phone that can run the mesh, but for what the arguments say. */
+    private fun start(
+        left: Long,
+        stored: Long,
+        resumes: Boolean = true,
+        api: Int = 34,
+        bluetoothLe: Boolean = true,
+        permission: Boolean = true,
+        wipePending: Boolean = false,
+        lever: FakeLever = FakeLever(),
+    ): Started {
         val engine = FakeEngine().apply {
             this.left = left
             this.resumes = resumes
         }
         var inForeground = false
-        val deadline = StartPolicy.start(permission, engine, stored, wallClock) {
+        lever.onCall = { assertTrue(inForeground, "the lever was asked before the service was in the foreground") }
+        val start = StartPolicy.start(api, bluetoothLe, lever, wipePending, permission, engine, stored, wallClock) {
             assertTrue(engine.calls.isEmpty(), "the engine was touched before the service was in the foreground")
             inForeground = true
         }
-        return Start(deadline, inForeground, engine)
+        return Started(start, inForeground, engine, lever)
     }
 
     @Test
     fun aStartWithoutTheBluetoothPermissionIsAStopWithTheNotice() {
-        // Not left to the platform to refuse: no foreground start is tried, and no engine is started.
+        // Not left to the platform to refuse: the service reads the permission itself, and no engine is started.
         val unpermitted = start(permission = false, left = 0, stored = wallClock + HOUR)
-        assertNull(unpermitted.deadline)
-        assertTrue(!unpermitted.inForeground && unpermitted.engine.calls.isEmpty())
+        assertEquals(MeshStart.NO_PERMISSION, unpermitted.word)
+        assertTrue(unpermitted.notice == true && unpermitted.engine.calls.isEmpty())
 
         for (stored in listOf(0, wallClock - 1, wallClock)) {
-            val passed = start(permission = true, left = 0, stored = stored)
-            assertNull(passed.deadline, "a deadline that passed started the radio")
+            val passed = start(left = 0, stored = stored)
+            assertEquals(MeshStart.FAILED, passed.word, "a deadline that passed started the radio")
+            assertEquals(true, passed.notice)
             assertTrue(passed.engine.called("resume").isEmpty(), "an engine was asked for after its deadline")
         }
 
-        val owed = start(permission = true, left = 0, stored = wallClock + HOUR, resumes = false)
-        assertNull(owed.deadline, "an engine that would not start left the radio on")
+        val owed = start(left = 0, stored = wallClock + HOUR, resumes = false)
+        assertEquals(MeshStart.FAILED, owed.word, "an engine that would not start left the radio on")
+        assertEquals(true, owed.notice)
         assertEquals(listOf("resume($HOUR)"), owed.engine.called("resume"))
 
         // An engine the session started is left alone; the copy becomes its word.
-        val running = start(permission = true, left = 5 * HOUR, stored = wallClock + HOUR)
+        val running = start(left = 5 * HOUR, stored = wallClock + HOUR)
         assertEquals(wallClock + 5 * HOUR, running.deadline)
         assertTrue(running.inForeground && running.engine.called("resume").isEmpty())
 
-        val resumed = start(permission = true, left = 0, stored = wallClock + HOUR)
+        val resumed = start(left = 0, stored = wallClock + HOUR)
         assertEquals(wallClock + HOUR, resumed.deadline)
         assertEquals(listOf("resume($HOUR)"), resumed.engine.called("resume"))
 
         // A wall clock set back while Haven was not running: twelve hours from this start, no more.
-        val setBack = start(permission = true, left = 0, stored = wallClock + 30 * 24 * HOUR)
+        val setBack = start(left = 0, stored = wallClock + 30 * 24 * HOUR)
         assertEquals(listOf("resume(${12 * HOUR})"), setBack.engine.called("resume"))
         assertEquals(wallClock + 12 * HOUR, setBack.deadline)
+    }
+
+    /**
+     * A service started with `startForegroundService` that ends before its foreground start takes the process
+     * down, and the process is the relay path's. So nothing refuses before it, and every refusal is a stop from
+     * the foreground.
+     */
+    @Test
+    fun inTheServiceTheForegroundComesBeforeAnyRefusal() {
+        val refusals = mapOf(
+            "an Android below 11" to start(left = 5 * HOUR, stored = 0, api = 29),
+            "no Bluetooth LE" to start(left = 5 * HOUR, stored = 0, bluetoothLe = false),
+            "no lever" to start(left = 5 * HOUR, stored = 0, lever = FakeLever().apply { installs = false }),
+            "a lever that does not hold" to start(left = 5 * HOUR, stored = 0, lever = FakeLever().apply { holds = false }),
+            "no permission" to start(left = 5 * HOUR, stored = 0, permission = false),
+            "a logout" to start(left = 5 * HOUR, stored = 0, wipePending = true),
+            "no engine" to start(left = 0, stored = 0),
+        )
+        for ((why, refused) in refusals) {
+            assertNotNull(refused.word, "$why did not stop the service")
+            assertTrue(refused.inForeground, "$why refused the start before the service was in the foreground")
+        }
+        assertEquals(
+            listOf(
+                MeshStart.UNSUPPORTED, MeshStart.UNSUPPORTED, MeshStart.UNSUPPORTED, MeshStart.FAILED,
+                MeshStart.NO_PERMISSION, MeshStart.FAILED, MeshStart.FAILED,
+            ),
+            refusals.values.map { it.word },
+        )
+        // What the caller asked just before is asked again here: a lever can stop holding in between.
+        assertEquals(listOf("leverInstall()", "leverHolds()"), start(left = 5 * HOUR, stored = 0).lever.calls)
+    }
+
+    /** §M.3: below Android 11 no process can keep the platform's Bluetooth lines out of its own log. */
+    @Test
+    fun belowApiThirtyAStartIsUnsupportedAndTouchesNothing() {
+        for (api in 23..29) {
+            val lever = FakeLever()
+            assertFalse(StartPolicy.supported(api, bluetoothLe = true), "API $api")
+            assertEquals(MeshStart.UNSUPPORTED, StartPolicy.refusal(api, bluetoothLe = true, lever, permission = true), "API $api")
+            assertTrue(lever.calls.isEmpty(), "the lever was looked up on API $api, where it cannot exist")
+            val service = start(left = 5 * HOUR, stored = wallClock + HOUR, api = api)
+            assertEquals(MeshStart.UNSUPPORTED, service.word)
+            assertTrue(service.engine.calls.isEmpty() && service.lever.calls.isEmpty(), "API $api")
+        }
+        for (api in listOf(30, 31, 34, 36)) {
+            val lever = FakeLever()
+            assertTrue(StartPolicy.supported(api, bluetoothLe = true), "API $api")
+            assertNull(StartPolicy.refusal(api, bluetoothLe = true, lever, permission = true), "API $api")
+            // A phone with no Bluetooth LE is as fixed.
+            assertFalse(StartPolicy.supported(api, bluetoothLe = false))
+            assertEquals(MeshStart.UNSUPPORTED, StartPolicy.refusal(api, bluetoothLe = false, FakeLever(), permission = true))
+        }
+    }
+
+    /** §M.3 in its order: the lever before the permission, and each of its two answers its own word. */
+    @Test
+    fun aLeverThatIsMissingIsUnsupportedAndOneThatDoesNotHoldIsFailed() {
+        fun refusal(installs: Boolean, holds: Boolean, permission: Boolean): Pair<MeshStart?, List<String>> {
+            val lever = FakeLever().apply {
+                this.installs = installs
+                this.holds = holds
+            }
+            return StartPolicy.refusal(30, bluetoothLe = true, lever, permission) to lever.calls
+        }
+        // Missing: this Android has none, for good. What is not there is not asked whether it holds.
+        assertEquals(MeshStart.UNSUPPORTED to listOf("leverInstall()"), refusal(installs = false, holds = false, permission = true))
+        // In, and not in force: something that may pass.
+        assertEquals(MeshStart.FAILED to listOf("leverInstall()", "leverHolds()"), refusal(installs = true, holds = false, permission = true))
+        assertEquals(MeshStart.FAILED, refusal(installs = true, holds = false, permission = false).first, "the permission was read first")
+        assertEquals(MeshStart.UNSUPPORTED, refusal(installs = false, holds = true, permission = false).first)
+        assertEquals(MeshStart.NO_PERMISSION, refusal(installs = true, holds = true, permission = false).first)
+        assertNull(refusal(installs = true, holds = true, permission = true).first)
+    }
+
+    /**
+     * A logout sets its marker and then stops the radio. A process that died between the two must not come back,
+     * at a sticky restart or at boot, with an engine that has no keys — and the user who logged out is told nothing.
+     */
+    @Test
+    fun aStartBehindALogoutIsAStopWithNoNotice() {
+        for (left in listOf(0, 5 * HOUR)) {
+            val behind = start(left = left, stored = wallClock + HOUR, wipePending = true)
+            assertEquals(MeshStart.FAILED, behind.word)
+            assertEquals(false, behind.notice)
+            assertTrue(behind.engine.calls.isEmpty(), "an engine was asked for behind a logout: ${behind.engine.calls}")
+        }
+        // Whatever else refuses the start behind a logout says nothing either.
+        val unpermitted = start(left = 0, stored = wallClock + HOUR, wipePending = true, permission = false)
+        assertEquals(MeshStart.NO_PERMISSION to false, unpermitted.word to unpermitted.notice)
+        assertEquals(wallClock + HOUR, start(left = 0, stored = wallClock + HOUR, wipePending = false).deadline)
     }
 
     @Test
@@ -166,8 +278,37 @@ class PoliciesTest {
         assertTrue(!MeshRadioConstants.ADVERTISE_DEVICE_NAME, "the advertisement carries the phone's Bluetooth name")
         assertTrue(!MeshRadioConstants.ADVERTISE_POWER_LEVEL, "the advertisement carries a power level")
         assertTrue(!MeshRadioConstants.ADVERTISE_DISCOVERABLE)
+        // Android 14 is the first that can be told so; with it the platform adds no flags either.
+        assertEquals(34, MeshRadioConstants.ADVERTISE_DISCOVERABLE_FROM_API)
         assertTrue(MeshRadioConstants.ADVERTISE_CONNECTABLE)
         assertEquals(0, MeshRadioConstants.ADVERTISE_TIMEOUT_MS)
+    }
+
+    /**
+     * The service and its characteristic are fixed for good from the first release that has the mesh on: a
+     * phone with another number finds nobody, and nothing fails. Six numbers, here a second time.
+     */
+    @Test
+    fun theUuidsAreTheOnesDrawn() {
+        assertEquals(-0x72BA_D7A1_5C56_BB88L, MeshRadioConstants.SERVICE_UUID_MSB)
+        assertEquals(-0x64CD_9C17_9A57_406EL, MeshRadioConstants.SERVICE_UUID_LSB)
+        assertEquals(0x5882_B206_3487_45F9L, MeshRadioConstants.CHARACTERISTIC_UUID_MSB)
+        assertEquals(-0x41B1_3657_AF24_137FL, MeshRadioConstants.CHARACTERISTIC_UUID_LSB)
+        assertEquals(0x0000_2902_0000_1000L, MeshRadioConstants.CCCD_UUID_MSB)
+        assertEquals(-0x7FFF_FF7F_A064_CB05L, MeshRadioConstants.CCCD_UUID_LSB)
+
+        val service = MeshRadioConstants.SERVICE_UUID
+        val characteristic = MeshRadioConstants.CHARACTERISTIC_UUID
+        assertEquals(UUID(MeshRadioConstants.SERVICE_UUID_MSB, MeshRadioConstants.SERVICE_UUID_LSB), service)
+        assertEquals(UUID(MeshRadioConstants.CHARACTERISTIC_UUID_MSB, MeshRadioConstants.CHARACTERISTIC_UUID_LSB), characteristic)
+        // Random ones: version 4, in the standard layout, and two of them.
+        for (drawn in listOf(service, characteristic)) assertEquals(4 to 2, drawn.version() to drawn.variant())
+        assertNotEquals(service, characteristic)
+        // The descriptor is Bluetooth's own 0x2902, on its base UUID: spelt in parts, as no UUID is written whole here.
+        assertEquals(
+            listOf("00002902", "0000", "1000", "8000", "00805f9b34fb").joinToString("-"),
+            MeshRadioConstants.CCCD_UUID.toString(),
+        )
     }
 
     /** T-PWR-1: the values of design §G. The Android integers are those of the platform's reference pages. */
@@ -178,6 +319,10 @@ class PoliciesTest {
         assertEquals(2, MeshRadioConstants.ADVERTISE_TX_POWER, "not ADVERTISE_TX_POWER_MEDIUM")
         assertEquals(2, MeshRadioConstants.CONNECTION_PRIORITY, "not CONNECTION_PRIORITY_LOW_POWER")
         assertEquals(8, MeshRadioConstants.MAX_LINKS)
+        assertEquals(517, MeshRadioConstants.REQUEST_MTU)
+        // Rust's `radio_frame_len` answers a frame from 51 up, and none below.
+        assertEquals(51, MeshRadioConstants.MIN_ATT_MTU)
+        assertEquals(64, MeshRadioConstants.MTU_NOTES_MAX)
         assertEquals(250, MeshRadioConstants.HOLD_MARGIN_MS)
         assertEquals(10_000, MeshRadioConstants.HOLD_CAP_MS)
     }

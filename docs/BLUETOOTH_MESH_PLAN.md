@@ -3159,6 +3159,99 @@ item 6, that address rotation is the build's; §7.1 carries a note now.
   build — and §0.4's two items stay owed to the unit that makes a phone
   refuse.
 
+- **M3g unit 2**, the pure Kotlin additions
+  (`docs/BLUETOOTH_MESH_M3_DESIGN.md` §N.1.3, §N.1.5, §N.2.3–N.2.8, and
+  §N.7 for where the code differs and for what the adapters owe;
+  `…/mesh/core/StartPolicy.kt`, `MeshRadioCore.kt`, `ServerLinks.kt`,
+  `GattClientSteps.kt`, `ChannelWords.kt`, `LinkEvents.kt`,
+  `MeshRadioConstants.kt`, `MeshThread.kt`; `haven/android/mesh-jvm`'s
+  tests; `scripts/ci/check_mesh_radio.sh`). Kotlin that imports nothing
+  of Android, its JVM tests, one guard and documents: no adapter, no
+  manifest, no Gradle change in the app, no Dart, no Rust. **Nothing
+  calls any of it: no service, no channel and no `MeshNative` exist, so
+  a build differs by classes nothing loads. Nothing of it has run on
+  Android.**
+  **What is decided here**, each as a function or a small class with no
+  platform call in it:
+  whether the radio may start, in §M.3's order — below Android 11 or
+  with no Bluetooth LE `unsupported`, with the lever not looked up; a
+  lever that is missing `unsupported`; one that does not hold `failed`;
+  then the permission (`StartPolicy.refusal`) — and the service's own
+  start, which is in the foreground before anything can refuse, asks
+  the same again, and stops behind a logout's marker with no notice
+  and no engine asked for (`StartPolicy.start`, answering
+  `Refused(word, notice)` or `Run(deadline)`);
+  that every input of the radio's queue asks the lever before it reads
+  the time left, and that a lever which stopped holding is put back and
+  ends the radio (`MeshRadioCore`);
+  which of the phone's connections are Haven's — a device only from the
+  moment it enables notifications on Haven's characteristic, linked then
+  if its connection's MTU is known and 51 or more, else at the next MTU
+  that is; the MTU kept in memory for each connected device, at most
+  64, dropped at its disconnect and with the radio; a write that is
+  prepared, at an offset or wants an answer refused and its link ended;
+  nothing done to a device that never subscribed but the answer to a
+  write on Haven's own descriptor (`ServerLinks`);
+  a dial as steps — the connection, the MTU, discovery, the
+  subscription, then the link and the connection priority — each
+  waiting for its callback, given up after 25 s, a connection that ends
+  before its link made once more 300 ms on, every client closed on
+  every path (`GattClientSteps`);
+  that a device Haven holds which starts to bond is ended, and no other
+  (owner question Q-15, option (a), as one function; option (b) is that
+  function and one branch of an adapter);
+  the channel's words, which three of its eleven methods are behind the
+  lever, and that a tap on a notice is held until the Flutter engine
+  asks for it (`ChannelWords`, `HeldTaps`);
+  and the service's and the characteristic's UUIDs, drawn once from the
+  system's generator and kept as two numbers each — **fixed for good
+  from the first release that has the mesh on**.
+  **Proved here, on the JVM** (54 tests, 21 of them new, against fakes
+  and a clock the tests move; no sleep, no order between tests): each of
+  the above, by a test named for it; that no address reaches what the
+  core is told of an inbound link; that a callback of a client already
+  closed does nothing; that no call is made on a client before its
+  connect or after its close, and no number makes two — the recording
+  adapter fails the test otherwise. The package still compiles with no
+  Android SDK, warnings as errors.
+  **Mutation pass**, 132 changes to the Kotlin: every order, word,
+  bound and branch named above altered in turn — the lever asked after
+  the time left, or not put back; the permission read before the lever;
+  the foreground after a refusal; a notice behind a logout; a link
+  before its subscription, or at an MTU below 51; the note kept past a
+  disconnect or the radio; a stranger's write answered; option (b)
+  built; a client left open; a second connection without end, at once,
+  or under the first's number; the priority asked of a closed link; one
+  digit of a UUID; a method or a word misspelt; a held tap sent early,
+  told twice or lost. 130 fail a named test, two of them only after
+  the test was made to: a prepared write that wants no answer, and a
+  third connection. An Android import does not compile. **One stands:**
+  a call of the JDK that Android 6 does not have (`java.time`) compiles
+  and passes — the JVM build reads JDK 17's API, and nothing here holds
+  the pure package to Android 6's. None is used; a reviewer holds it.
+  **The guard**, `check_mesh_radio.sh`: check 11 pins the 54 names;
+  check 8 gains that `MeshRadioConstants.kt` alone builds a UUID. 170
+  self-test fixtures (166, and four); the new clause silenced, and each
+  of its three alternatives in turn, fails the self-test.
+  **Not proved, by anything.** Every adapter: no code maps a platform
+  callback to these inputs or a port's method to a platform call, so
+  nothing shows that Android's GATT server and client behave as these
+  classes assume — that the server is told of a disconnect, that an MTU
+  agreed before a subscription is the one noted, that a write without
+  response is paced by its callback, that `cancelConnection` ends
+  anything (design N-7: on the one release read it does not), that
+  dropping a link ends a pairing. The lever's two calls are made
+  against a fake: `leverInstall` and `leverHolds` have still never run
+  on Android, and the rule of unit 1's review — no landing without an
+  emulator lane for the unit that first calls them — falls on the unit
+  that makes them reachable. The dial's two timers are a handler
+  timer's and not the alarm's, so on a sleeping phone they come late:
+  measured nowhere. The channel's words agree with `mesh_radio.dart`
+  by reading; the check that reads both files is the channel's unit's.
+  The UUIDs have been seen by no second implementation. `haven-core/
+  SECURITY.md`, the privacy manifest and `CLAUDE.md` are unchanged:
+  nothing here is in force in a build.
+
 ### Proposed CLAUDE.md wording (owner to approve)
 
 Each is the text as it stands, then the text proposed. Nothing in

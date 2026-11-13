@@ -77,21 +77,61 @@ class MeshRadioCoreTest {
         assertEquals(listOf(1L, 2L), rig.engine.readies.last())
     }
 
+    private val inputs = mapOf<String, (MeshRadioCore) -> Unit>(
+        "startRadio" to { it.startRadio() },
+        "stopRadio" to { it.stopRadio() },
+        "onSighting" to { it.onSighting(ADDRESS, -40) },
+        "onConnected" to { it.onConnected(2) },
+        "onLinkUp" to { it.onLinkUp(2, central = false, attMtu = 517, address = null) },
+        "onLinkDown" to { it.onLinkDown(1) },
+        "onConnectFailed" to { it.onConnectFailed(ADDRESS) },
+        "onFrame" to { it.onFrame(1, frame) },
+        "onSendDone" to { it.onSendDone(1, ok = true) },
+        "onWake" to { it.onWake() },
+    )
+
+    /**
+     * §M.3, §N.1.3: the platform logs the address of whatever connects, so the radio runs only while the lever
+     * holds, and every input asks before it does anything else.
+     */
+    @Test
+    fun aLeverThatStopsHoldingIsPutBackAndStopsTheRadio() {
+        for ((name, input) in inputs) {
+            val rig = linked()
+            rig.engine.outputs += sendOf(1, frame)
+            rig.lever.onCall = { assertTrue(rig.engine.calls.isEmpty(), "$name read the engine before it asked the lever") }
+            input(rig.core)
+            assertEquals(listOf("leverHolds()"), rig.lever.calls, "$name, with a lever that holds")
+            assertTrue(rig.core.running, name)
+
+            rig.fresh()
+            rig.lever.holds = false
+            input(rig.core)
+            // Put back: the platform's callbacks still arrive after the stop, and log in each.
+            assertEquals(listOf("leverHolds()", "leverInstall()"), rig.lever.calls, name)
+            assertFalse(rig.core.running, "$name left the radio running with no lever")
+            assertTrue(rig.port.calls.isEmpty(), "$name used the radio with no lever: ${rig.port.calls}")
+            if (name != "stopRadio") assertTrue(rig.engine.calls.isEmpty(), "$name drove the engine with no lever")
+            rig.fresh()
+            input(rig.core)
+            assertTrue(rig.lever.calls.isEmpty() && rig.port.calls.isEmpty(), "$name went on after the stop")
+        }
+
+        // In the service it is a stop the user did not make: the notice, the flag cleared, the engine left no link.
+        val rig = linked()
+        var flag = true
+        var notices = 0
+        val thread = MeshThread({ rig.core.running }, listOf({ rig.core.stopRadio() }, { flag = false })) { notices++ }
+        rig.lever.holds = false
+        thread.run { rig.core.onFrame(1, frame) }
+        assertTrue(thread.stopped && !flag)
+        assertEquals(1, notices)
+        assertEquals(listOf("linkDown(1)"), rig.engine.calls)
+    }
+
     /** T-AUTO-4. */
     @Test
     fun everyInputChecksTheDeadlineBeforeAnythingElse() {
-        val inputs = mapOf<String, (MeshRadioCore) -> Unit>(
-            "startRadio" to { it.startRadio() },
-            "stopRadio" to { it.stopRadio() },
-            "onSighting" to { it.onSighting(ADDRESS, -40) },
-            "onConnected" to { it.onConnected(2) },
-            "onLinkUp" to { it.onLinkUp(2, central = false, attMtu = 517, address = null) },
-            "onLinkDown" to { it.onLinkDown(1) },
-            "onConnectFailed" to { it.onConnectFailed(ADDRESS) },
-            "onFrame" to { it.onFrame(1, frame) },
-            "onSendDone" to { it.onSendDone(1, ok = true) },
-            "onWake" to { it.onWake() },
-        )
         for ((name, input) in inputs) {
             val rig = linked()
             rig.engine.outputs += sendOf(1, frame)
@@ -190,7 +230,7 @@ class MeshRadioCoreTest {
     fun theTableABuildHasForgetsByNoFixedRule() {
         val engine = FakeEngine()
         val port = RecordingPort()
-        val core = MeshRadioCore(engine, port, { 0L })
+        val core = MeshRadioCore(engine, FakeLever(), port, { 0L })
         core.startRadio()
         for (n in 0 until 2 * MAX_PEERS) core.onSighting(address(n), -40)
         for (n in 0 until MAX_PEERS) engine.outputs += connectOf(n.toLong())
