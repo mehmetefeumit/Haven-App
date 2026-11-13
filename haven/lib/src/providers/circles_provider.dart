@@ -4,6 +4,8 @@
 /// draggable bottom sheet interface.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/providers/service_providers.dart';
@@ -18,20 +20,32 @@ import 'package:haven/src/services/nostr_circle_service.dart';
 /// Returns an empty list if the service fails to initialize (e.g., keyring
 /// not available on the platform). This allows the UI to display gracefully
 /// even when the backend is unavailable.
+///
+/// That empty list is cached as an answer, so a failed read re-reads itself
+/// the next time the circle session opens: on Android the resume's open can
+/// lose the Rule-14 guard to the foreground service, and nothing else would
+/// ask again until the process died.
 final circlesProvider = FutureProvider<List<Circle>>((ref) async {
   final circleService = ref.read(circleServiceProvider);
+  // Taken before the read, so an open that completes while it fails counts.
+  final reopened = circleService is NostrCircleService
+      ? circleService.nextSessionOpen
+      : null;
+  var current = true;
+  ref.onDispose(() => current = false);
   try {
     return await circleService.getVisibleCircles();
-  } on CircleServiceException catch (e) {
-    // Log the error but return empty list for graceful degradation
-    debugPrint('CircleService error: ${e.runtimeType}');
-    return [];
-  }
-  // FFI errors may not extend Exception, so we need a bare catch clause.
-  // This handles keyring init failures, storage errors, and MLS errors.
-  // ignore: avoid_catches_without_on_clauses
-  catch (e) {
+  } on Object catch (e) {
+    // FFI errors may not extend Exception: keyring init failures, storage
+    // errors, MLS errors and a refused open all land here.
     debugPrint('Failed to load circles: ${e.runtimeType}');
+    if (reopened != null) {
+      unawaited(
+        reopened.then((_) {
+          if (current) ref.invalidateSelf();
+        }),
+      );
+    }
     return [];
   }
 });
