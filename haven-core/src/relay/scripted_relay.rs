@@ -30,6 +30,9 @@ pub enum Frame {
     Raw(String),
     /// `EOSE` for the subscription the `REQ` opened.
     Eose,
+    /// `CLOSED` for the subscription the `REQ` opened, with this text: the
+    /// relay ends it without saying it has sent everything.
+    Closed(String),
     /// Nothing, until the switch reads `true`: the frames after it wait,
     /// and so does this socket's next client message.
     Hold(tokio::sync::watch::Receiver<bool>),
@@ -307,6 +310,9 @@ impl Script {
                                     Reply::Text(format!(r#"["EVENT",{sub},{event}]"#))
                                 }
                                 Frame::Eose => Reply::Text(eose()),
+                                Frame::Closed(text) => Reply::Text(
+                                    serde_json::json!(["CLOSED", sub, text]).to_string(),
+                                ),
                                 Frame::Hold(open) => Reply::Hold(open.clone()),
                             })
                             .collect()

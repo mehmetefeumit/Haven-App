@@ -29,6 +29,13 @@ abstract final class WidgetKeys {
   /// public profile, runs the location disclosure, and enters the map shell.
   static const Key createIdentityCta = Key('create_identity_cta');
 
+  /// The "couldn't finish setting up" error on the identity-creation screen,
+  /// shown when the reachability publish timed out or failed (with Retry on
+  /// the CTA).
+  static const Key createIdentitySetupError = Key(
+    'create_identity_setup_error',
+  );
+
   // ---------------------------------------------------------------------------
   // Circle creation flow
   // ---------------------------------------------------------------------------
@@ -99,8 +106,9 @@ abstract final class WidgetKeys {
   // Circle management
   // ---------------------------------------------------------------------------
 
-  /// Info button in the selected-circle header that opens the
-  /// circle-details bottom sheet. Keyed so tests don't couple to the
+  /// The selected-circle header's details button (the info glyph, or the
+  /// attention glyph in its place) that opens the circle-details bottom
+  /// sheet. Keyed so tests don't couple to the glyph or to the
   /// (user-facing, translatable) "Circle details" tooltip text.
   static const Key circleDetailsButton = Key('circle_details_button');
 
@@ -139,6 +147,10 @@ abstract final class WidgetKeys {
   static const Key storageResetOpenRelaySettings = Key(
     'storage_reset_open_relay_settings',
   );
+
+  /// "Republish" on the Relay settings page, shown when a relay that answered
+  /// misses one of the account's expected events or serves an old one.
+  static const Key relaySettingsRepublish = Key('relay_settings_republish');
 
   /// Root [ListTile] of a [CircleMemberTile], keyed by the member's pubkey hex.
   static Key memberTile(String pubkeyHex) => ValueKey('member_tile_$pubkeyHex');
@@ -236,8 +248,14 @@ abstract final class WidgetKeys {
     'change_notice_review_members',
   );
 
-  /// The attention cue on the circle selector's trigger row.
+  /// The attention cue on the circle selector's trigger row: a circle other
+  /// than the selected one needs attention.
   static const Key circleAttentionCue = Key('circle_attention_cue');
+
+  /// The dot on the selected circle's avatar in the trigger row.
+  static const Key circleSelectedAttentionDot = Key(
+    'circle_selected_attention_dot',
+  );
 
   /// The attention cue on a circle's row in the selector list, keyed by the
   /// circle's `nostrGroupId` hex as [circleTile] is.

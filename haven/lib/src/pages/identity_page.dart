@@ -26,6 +26,7 @@ import 'package:haven/src/widgets/common/disclosure_chevron.dart';
 import 'package:haven/src/widgets/identity/display_name_card.dart';
 import 'package:haven/src/widgets/identity/identity_photo_header.dart';
 import 'package:haven/src/widgets/identity/public_profile_notice.dart';
+import 'package:haven/src/widgets/identity/reachability_status_row.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Page for managing the user's identity.
@@ -186,17 +187,32 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
 
         const SizedBox(height: HavenSpacing.base),
 
-        // Public-key QR subpage: QR + npub text + copy.
+        // Public-key QR subpage: QR + npub text + copy, and whether others
+        // can invite this account yet.
         Card(
           clipBehavior: Clip.antiAlias,
-          child: ListTile(
-            leading: const Icon(LucideIcons.qrCode),
-            title: Text(l10n.identityPublicKeyQrTitle),
-            subtitle: Text(l10n.identityPublicKeyQrSubtitle),
-            trailing: const DisclosureChevron(),
-            onTap: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(builder: (_) => const QrCodePage()),
-            ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              ListTile(
+                leading: const Icon(LucideIcons.qrCode),
+                title: Text(l10n.identityPublicKeyQrTitle),
+                subtitle: Text(l10n.identityPublicKeyQrSubtitle),
+                trailing: const DisclosureChevron(),
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(builder: (_) => const QrCodePage()),
+                ),
+              ),
+              const Padding(
+                padding: EdgeInsets.fromLTRB(
+                  HavenSpacing.base,
+                  0,
+                  HavenSpacing.base,
+                  HavenSpacing.sm,
+                ),
+                child: ReachabilityStatusRow(),
+              ),
+            ],
           ),
         ),
 

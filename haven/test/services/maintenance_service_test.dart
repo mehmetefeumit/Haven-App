@@ -58,6 +58,11 @@ class _RecordingRelay extends MockRelayService {
     return const RelayListMaintenanceResult(
       inbox: RelayListCategoryResult(
         action: RelayListMaintenanceAction.republished,
+        ownConfirmed: true,
+      ),
+      keyPackage: RelayListCategoryResult(
+        action: RelayListMaintenanceAction.alreadyCurrent,
+        ownConfirmed: true,
       ),
     );
   }
@@ -294,7 +299,11 @@ void main() {
       expect(captured!.every((b) => b == 0), isTrue);
     });
 
-    test('returns empty (never throws) when a dependency throws', () async {
+    test('a dependency that throws reads as failed, never as current',
+        () async {
+      // The `.empty()` this replaced answered `alreadyCurrent` here, so a
+      // tick that never ran was indistinguishable from a healthy one and the
+      // scheduler slept a full 30 minutes on it.
       final relay = _RecordingRelay();
       final service = MaintenanceService(
         relayService: relay,
@@ -304,8 +313,12 @@ void main() {
 
       final result = await service.maintainRelayList();
 
-      expect(result.inbox.action, RelayListMaintenanceAction.alreadyCurrent);
       expect(relay.relayListCalls, 0);
+      for (final category in [result.inbox, result.keyPackage]) {
+        expect(category.action, RelayListMaintenanceAction.failed);
+        expect(category.ownConfirmed, isFalse);
+      }
+      expect(result.needsPromptRetry, isTrue);
     });
   });
 

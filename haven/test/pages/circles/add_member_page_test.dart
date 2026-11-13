@@ -31,6 +31,7 @@ import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/member_directory_service.dart';
 import 'package:haven/src/services/profile_service.dart';
+import 'package:haven/src/services/relay_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/npub_validator.dart';
@@ -387,9 +388,13 @@ void main() {
     // 4. No Haven account (null KP)
     // -----------------------------------------------------------------------
     testWidgets(
-      '4. null KP shows "No Haven account found"; confirm stays disabled',
+      '4. null KP shows the not-found-yet copy with a retry; confirm stays '
+      'disabled until the retry finds them',
       (tester) async {
-        final mockRelay = MockRelayService(); // keyPackageResult defaults null
+        // Someone who set up Haven a moment ago is findable a moment later:
+        // not found is retryable, never a dead end.
+        final mockRelay = MockRelayService()
+          ..keyPackageAnswers.addAll([null, _makeKp(_newMemberHex)]);
         final mockCircle = MockCircleService();
         final circle = _makeCircle();
 
@@ -407,14 +412,29 @@ void main() {
 
         expect(find.byIcon(LucideIcons.triangleAlert), findsOneWidget);
         expect(
-          find.text("Couldn't find a Haven account for this ID"),
+          find.text(
+            'No Haven account found for this ID yet. If they just set up '
+            'Haven, try again in a minute.',
+          ),
           findsOneWidget,
         );
+        expect(find.byIcon(LucideIcons.refreshCw), findsOneWidget);
 
         final button = tester.widget<FilledButton>(
           find.byKey(WidgetKeys.addMemberConfirm),
         );
         expect(button.onPressed, isNull);
+
+        await tester.tap(find.byIcon(LucideIcons.refreshCw));
+        await tester.pumpAndSettle();
+
+        expect(find.text('Ready to invite'), findsOneWidget);
+        expect(
+          tester
+              .widget<FilledButton>(find.byKey(WidgetKeys.addMemberConfirm))
+              .onPressed,
+          isNotNull,
+        );
       },
     );
 
@@ -1047,9 +1067,14 @@ void main() {
     // 10. RelayServiceException shows network-error tile + retry button
     // -----------------------------------------------------------------------
     testWidgets(
-      '10. RelayServiceException shows "Could not verify member" + retry',
+      '10. an unfinished lookup shows the incomplete copy + a retry that '
+      're-validates',
       (tester) async {
-        final mockRelay = MockRelayService(shouldThrowOnFetchKeyPackage: true);
+        final mockRelay = MockRelayService()
+          ..keyPackageAnswers.addAll([
+            const RelayServiceException('Member lookup incomplete'),
+            _makeKp(_newMemberHex),
+          ]);
         final mockCircle = MockCircleService();
         final circle = _makeCircle();
 
@@ -1066,8 +1091,20 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(find.byIcon(LucideIcons.triangleAlert), findsOneWidget);
-        expect(find.text('Could not verify member'), findsOneWidget);
+        expect(
+          find.text(
+            "Couldn't finish checking this ID. Check your connection and try "
+            'again.',
+          ),
+          findsOneWidget,
+        );
+        expect(find.textContaining('No Haven account'), findsNothing);
         expect(find.byIcon(LucideIcons.refreshCw), findsOneWidget);
+
+        await tester.tap(find.byIcon(LucideIcons.refreshCw));
+        await tester.pumpAndSettle();
+
+        expect(find.text('Ready to invite'), findsOneWidget);
       },
     );
 

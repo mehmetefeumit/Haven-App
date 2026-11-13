@@ -403,9 +403,11 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage>
       final l10n = AppLocalizations.of(context);
 
       if (keyPackage == null) {
+        // Someone who set up Haven a moment ago is findable a moment later.
         setState(() {
           _memberStatus[npub] = ValidationStatus.invalid;
-          _memberErrors[npub] = l10n.createCircleNoAccountFound;
+          _memberErrors[npub] = l10n.memberLookupNotFound;
+          _retryable.add(npub);
         });
         return;
       }
@@ -473,7 +475,7 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage>
       final l10n = AppLocalizations.of(context);
       setState(() {
         _memberStatus[npub] = ValidationStatus.invalid;
-        _memberErrors[npub] = l10n.createCircleCouldNotVerify;
+        _memberErrors[npub] = l10n.memberLookupIncomplete;
         _retryable.add(npub);
       });
     } on Object catch (e) {

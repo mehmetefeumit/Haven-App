@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1986744494;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -549989935;
 
 // Section: executor
 
@@ -7405,7 +7405,7 @@ fn wire__crate__api__RelayManagerFfi_admin_handoff_driven_impl(
         },
     )
 }
-fn wire__crate__api__RelayManagerFfi_check_event_on_relay_impl(
+fn wire__crate__api__RelayManagerFfi_check_own_reachability_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
@@ -7413,7 +7413,7 @@ fn wire__crate__api__RelayManagerFfi_check_event_on_relay_impl(
 ) {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "RelayManagerFfi_check_event_on_relay",
+            debug_name: "RelayManagerFfi_check_own_reachability",
             port: Some(port_),
             mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
         },
@@ -7430,19 +7430,28 @@ fn wire__crate__api__RelayManagerFfi_check_event_on_relay_impl(
             let api_that = <RustOpaqueMoi<
                 flutter_rust_bridge::for_generated::RustAutoOpaqueInner<RelayManagerFfi>,
             >>::sse_decode(&mut deserializer);
-            let api_relay_url = <String>::sse_decode(&mut deserializer);
-            let api_author_pubkey = <String>::sse_decode(&mut deserializer);
-            let api_event_kind = <u16>::sse_decode(&mut deserializer);
+            let api_circle = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>,
+            >>::sse_decode(&mut deserializer);
+            let api_own_pubkey = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, String>(
                     (move || async move {
                         let mut api_that_guard = None;
+                        let mut api_circle_guard = None;
                         let decode_indices_ =
                             flutter_rust_bridge::for_generated::lockable_compute_decode_order(
-                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
-                                    &api_that, 0, false,
-                                )],
+                                vec![
+                                    flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                        &api_that, 0, false,
+                                    ),
+                                    flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                        &api_circle,
+                                        1,
+                                        false,
+                                    ),
+                                ],
                             );
                         for i in decode_indices_ {
                             match i {
@@ -7450,15 +7459,19 @@ fn wire__crate__api__RelayManagerFfi_check_event_on_relay_impl(
                                     api_that_guard =
                                         Some(api_that.lockable_decode_async_ref().await)
                                 }
+                                1 => {
+                                    api_circle_guard =
+                                        Some(api_circle.lockable_decode_async_ref().await)
+                                }
                                 _ => unreachable!(),
                             }
                         }
                         let api_that_guard = api_that_guard.unwrap();
-                        let output_ok = crate::api::RelayManagerFfi::check_event_on_relay(
+                        let api_circle_guard = api_circle_guard.unwrap();
+                        let output_ok = crate::api::RelayManagerFfi::check_own_reachability(
                             &*api_that_guard,
-                            api_relay_url,
-                            api_author_pubkey,
-                            api_event_kind,
+                            &*api_circle_guard,
+                            api_own_pubkey,
                         )
                         .await?;
                         Ok(output_ok)
@@ -11421,6 +11434,7 @@ impl SseDecode for crate::api::KpMaintenanceOutcomeFfi {
         let mut var_relaysHealed = <u32>::sse_decode(deserializer);
         let mut var_relayErrors = <u32>::sse_decode(deserializer);
         let mut var_expiredInitKeyPurged = <bool>::sse_decode(deserializer);
+        let mut var_publishedCurrent = <bool>::sse_decode(deserializer);
         let mut var_retiredMalformedSlot = <bool>::sse_decode(deserializer);
         return crate::api::KpMaintenanceOutcomeFfi {
             action: var_action,
@@ -11430,6 +11444,7 @@ impl SseDecode for crate::api::KpMaintenanceOutcomeFfi {
             relays_healed: var_relaysHealed,
             relay_errors: var_relayErrors,
             expired_init_key_purged: var_expiredInitKeyPurged,
+            published_current: var_publishedCurrent,
             retired_malformed_slot: var_retiredMalformedSlot,
         };
     }
@@ -11669,6 +11684,18 @@ impl SseDecode for Vec<crate::api::MemberKeyPackageFfi> {
     }
 }
 
+impl SseDecode for Vec<crate::api::OwnRelayPresenceFfi> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = vec![];
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::OwnRelayPresenceFfi>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
 impl SseDecode for Vec<u8> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -11881,6 +11908,31 @@ impl SseDecode for crate::api::MemberKeyPackageFfi {
             nip65_relays: var_nip65Relays,
             nip65_write_relays: var_nip65WriteRelays,
             author_npub: var_authorNpub,
+        };
+    }
+}
+
+impl SseDecode for crate::api::MemberLookupFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_verdict = <crate::api::MemberLookupVerdictFfi>::sse_decode(deserializer);
+        let mut var_member = <Option<crate::api::MemberKeyPackageFfi>>::sse_decode(deserializer);
+        return crate::api::MemberLookupFfi {
+            verdict: var_verdict,
+            member: var_member,
+        };
+    }
+}
+
+impl SseDecode for crate::api::MemberLookupVerdictFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::MemberLookupVerdictFfi::Found,
+            1 => crate::api::MemberLookupVerdictFfi::NotFound,
+            2 => crate::api::MemberLookupVerdictFfi::LookupIncomplete,
+            _ => unreachable!("Invalid variant for MemberLookupVerdictFfi: {}", inner),
         };
     }
 }
@@ -12173,6 +12225,21 @@ impl SseDecode for Option<Vec<u8>> {
     }
 }
 
+impl SseDecode for crate::api::OwnEventPresenceFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::OwnEventPresenceFfi::NotExpected,
+            1 => crate::api::OwnEventPresenceFfi::Current,
+            2 => crate::api::OwnEventPresenceFfi::Outdated,
+            3 => crate::api::OwnEventPresenceFfi::Missing,
+            4 => crate::api::OwnEventPresenceFfi::NoAnswer,
+            _ => unreachable!("Invalid variant for OwnEventPresenceFfi: {}", inner),
+        };
+    }
+}
+
 impl SseDecode for crate::api::OwnProfileRelayAnswerFfi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -12182,6 +12249,28 @@ impl SseDecode for crate::api::OwnProfileRelayAnswerFfi {
             1 => crate::api::OwnProfileRelayAnswerFfi::Published,
             2 => crate::api::OwnProfileRelayAnswerFfi::Absent,
             _ => unreachable!("Invalid variant for OwnProfileRelayAnswerFfi: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::OwnRelayPresenceFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_relayUrl = <String>::sse_decode(deserializer);
+        let mut var_own = <bool>::sse_decode(deserializer);
+        let mut var_lookup = <bool>::sse_decode(deserializer);
+        let mut var_reachable = <bool>::sse_decode(deserializer);
+        let mut var_keyPackage = <crate::api::OwnEventPresenceFfi>::sse_decode(deserializer);
+        let mut var_relayList = <crate::api::OwnEventPresenceFfi>::sse_decode(deserializer);
+        let mut var_inboxRelayList = <crate::api::OwnEventPresenceFfi>::sse_decode(deserializer);
+        return crate::api::OwnRelayPresenceFfi {
+            relay_url: var_relayUrl,
+            own: var_own,
+            lookup: var_lookup,
+            reachable: var_reachable,
+            key_package: var_keyPackage,
+            relay_list: var_relayList,
+            inbox_relay_list: var_inboxRelayList,
         };
     }
 }
@@ -12498,22 +12587,6 @@ impl SseDecode for crate::api::RelayConnectionStatusFfi {
     }
 }
 
-impl SseDecode for crate::api::RelayEventCheckFfi {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut var_relayUrl = <String>::sse_decode(deserializer);
-        let mut var_found = <bool>::sse_decode(deserializer);
-        let mut var_eventCount = <u32>::sse_decode(deserializer);
-        let mut var_newestTimestamp = <Option<i64>>::sse_decode(deserializer);
-        return crate::api::RelayEventCheckFfi {
-            relay_url: var_relayUrl,
-            found: var_found,
-            event_count: var_eventCount,
-            newest_timestamp: var_newestTimestamp,
-        };
-    }
-}
-
 impl SseDecode for crate::api::RelayGiftWrapFetchFfi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -12537,6 +12610,8 @@ impl SseDecode for crate::api::RelayListActionFfi {
             1 => crate::api::RelayListActionFfi::AlreadyCurrent,
             2 => crate::api::RelayListActionFfi::Republished,
             3 => crate::api::RelayListActionFfi::AwaitingResetAcknowledgement,
+            4 => crate::api::RelayListActionFfi::NothingConfigured,
+            5 => crate::api::RelayListActionFfi::Unacknowledged,
             _ => unreachable!("Invalid variant for RelayListActionFfi: {}", inner),
         };
     }
@@ -12549,11 +12624,13 @@ impl SseDecode for crate::api::RelayListCategoryOutcomeFfi {
         let mut var_respondersProbed = <u32>::sse_decode(deserializer);
         let mut var_relaysHealed = <u32>::sse_decode(deserializer);
         let mut var_relayErrors = <u32>::sse_decode(deserializer);
+        let mut var_ownConfirmed = <bool>::sse_decode(deserializer);
         return crate::api::RelayListCategoryOutcomeFfi {
             action: var_action,
             responders_probed: var_respondersProbed,
             relays_healed: var_relaysHealed,
             relay_errors: var_relayErrors,
+            own_confirmed: var_ownConfirmed,
         };
     }
 }
@@ -13437,7 +13514,7 @@ fn pde_ffi_dispatcher_primary_impl(
             rust_vec_len,
             data_len,
         ),
-        133 => wire__crate__api__RelayManagerFfi_check_event_on_relay_impl(
+        133 => wire__crate__api__RelayManagerFfi_check_own_reachability_impl(
             port,
             ptr,
             rust_vec_len,
@@ -14524,6 +14601,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::KpMaintenanceOutcomeFfi {
             self.relays_healed.into_into_dart().into_dart(),
             self.relay_errors.into_into_dart().into_dart(),
             self.expired_init_key_purged.into_into_dart().into_dart(),
+            self.published_current.into_into_dart().into_dart(),
             self.retired_malformed_slot.into_into_dart().into_dart(),
         ]
         .into_dart()
@@ -14792,6 +14870,70 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::MemberKeyPackageFfi>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::MemberLookupFfi {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.verdict.into_into_dart().into_dart(),
+            self.member.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::MemberLookupFfi {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::MemberLookupFfi>
+    for crate::api::MemberLookupFfi
+{
+    fn into_into_dart(self) -> crate::api::MemberLookupFfi {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::MemberLookupVerdictFfi {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Found => 0.into_dart(),
+            Self::NotFound => 1.into_dart(),
+            Self::LookupIncomplete => 2.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::MemberLookupVerdictFfi
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::MemberLookupVerdictFfi>
+    for crate::api::MemberLookupVerdictFfi
+{
+    fn into_into_dart(self) -> crate::api::MemberLookupVerdictFfi {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::OwnEventPresenceFfi {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::NotExpected => 0.into_dart(),
+            Self::Current => 1.into_dart(),
+            Self::Outdated => 2.into_dart(),
+            Self::Missing => 3.into_dart(),
+            Self::NoAnswer => 4.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::OwnEventPresenceFfi
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::OwnEventPresenceFfi>
+    for crate::api::OwnEventPresenceFfi
+{
+    fn into_into_dart(self) -> crate::api::OwnEventPresenceFfi {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::OwnProfileRelayAnswerFfi {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         match self {
@@ -14810,6 +14952,32 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::OwnProfileRelayAnswerFfi>
     for crate::api::OwnProfileRelayAnswerFfi
 {
     fn into_into_dart(self) -> crate::api::OwnProfileRelayAnswerFfi {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::OwnRelayPresenceFfi {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.relay_url.into_into_dart().into_dart(),
+            self.own.into_into_dart().into_dart(),
+            self.lookup.into_into_dart().into_dart(),
+            self.reachable.into_into_dart().into_dart(),
+            self.key_package.into_into_dart().into_dart(),
+            self.relay_list.into_into_dart().into_dart(),
+            self.inbox_relay_list.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::OwnRelayPresenceFfi
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::OwnRelayPresenceFfi>
+    for crate::api::OwnRelayPresenceFfi
+{
+    fn into_into_dart(self) -> crate::api::OwnRelayPresenceFfi {
         self
     }
 }
@@ -15243,29 +15411,6 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::RelayConnectionStatusFfi>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::RelayEventCheckFfi {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        [
-            self.relay_url.into_into_dart().into_dart(),
-            self.found.into_into_dart().into_dart(),
-            self.event_count.into_into_dart().into_dart(),
-            self.newest_timestamp.into_into_dart().into_dart(),
-        ]
-        .into_dart()
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
-    for crate::api::RelayEventCheckFfi
-{
-}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::RelayEventCheckFfi>
-    for crate::api::RelayEventCheckFfi
-{
-    fn into_into_dart(self) -> crate::api::RelayEventCheckFfi {
-        self
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::RelayGiftWrapFetchFfi {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -15295,6 +15440,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::RelayListActionFfi {
             Self::AlreadyCurrent => 1.into_dart(),
             Self::Republished => 2.into_dart(),
             Self::AwaitingResetAcknowledgement => 3.into_dart(),
+            Self::NothingConfigured => 4.into_dart(),
+            Self::Unacknowledged => 5.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -15318,6 +15465,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::RelayListCategoryOutcomeFfi {
             self.responders_probed.into_into_dart().into_dart(),
             self.relays_healed.into_into_dart().into_dart(),
             self.relay_errors.into_into_dart().into_dart(),
+            self.own_confirmed.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -16404,6 +16552,7 @@ impl SseEncode for crate::api::KpMaintenanceOutcomeFfi {
         <u32>::sse_encode(self.relays_healed, serializer);
         <u32>::sse_encode(self.relay_errors, serializer);
         <bool>::sse_encode(self.expired_init_key_purged, serializer);
+        <bool>::sse_encode(self.published_current, serializer);
         <bool>::sse_encode(self.retired_malformed_slot, serializer);
     }
 }
@@ -16602,6 +16751,16 @@ impl SseEncode for Vec<crate::api::MemberKeyPackageFfi> {
     }
 }
 
+impl SseEncode for Vec<crate::api::OwnRelayPresenceFfi> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::OwnRelayPresenceFfi>::sse_encode(item, serializer);
+        }
+    }
+}
+
 impl SseEncode for Vec<u8> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -16793,6 +16952,31 @@ impl SseEncode for crate::api::MemberKeyPackageFfi {
         <Vec<String>>::sse_encode(self.nip65_relays, serializer);
         <Vec<String>>::sse_encode(self.nip65_write_relays, serializer);
         <String>::sse_encode(self.author_npub, serializer);
+    }
+}
+
+impl SseEncode for crate::api::MemberLookupFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <crate::api::MemberLookupVerdictFfi>::sse_encode(self.verdict, serializer);
+        <Option<crate::api::MemberKeyPackageFfi>>::sse_encode(self.member, serializer);
+    }
+}
+
+impl SseEncode for crate::api::MemberLookupVerdictFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::MemberLookupVerdictFfi::Found => 0,
+                crate::api::MemberLookupVerdictFfi::NotFound => 1,
+                crate::api::MemberLookupVerdictFfi::LookupIncomplete => 2,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
     }
 }
 
@@ -17056,6 +17240,25 @@ impl SseEncode for Option<Vec<u8>> {
     }
 }
 
+impl SseEncode for crate::api::OwnEventPresenceFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::OwnEventPresenceFfi::NotExpected => 0,
+                crate::api::OwnEventPresenceFfi::Current => 1,
+                crate::api::OwnEventPresenceFfi::Outdated => 2,
+                crate::api::OwnEventPresenceFfi::Missing => 3,
+                crate::api::OwnEventPresenceFfi::NoAnswer => 4,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
 impl SseEncode for crate::api::OwnProfileRelayAnswerFfi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -17070,6 +17273,19 @@ impl SseEncode for crate::api::OwnProfileRelayAnswerFfi {
             },
             serializer,
         );
+    }
+}
+
+impl SseEncode for crate::api::OwnRelayPresenceFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.relay_url, serializer);
+        <bool>::sse_encode(self.own, serializer);
+        <bool>::sse_encode(self.lookup, serializer);
+        <bool>::sse_encode(self.reachable, serializer);
+        <crate::api::OwnEventPresenceFfi>::sse_encode(self.key_package, serializer);
+        <crate::api::OwnEventPresenceFfi>::sse_encode(self.relay_list, serializer);
+        <crate::api::OwnEventPresenceFfi>::sse_encode(self.inbox_relay_list, serializer);
     }
 }
 
@@ -17342,16 +17558,6 @@ impl SseEncode for crate::api::RelayConnectionStatusFfi {
     }
 }
 
-impl SseEncode for crate::api::RelayEventCheckFfi {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <String>::sse_encode(self.relay_url, serializer);
-        <bool>::sse_encode(self.found, serializer);
-        <u32>::sse_encode(self.event_count, serializer);
-        <Option<i64>>::sse_encode(self.newest_timestamp, serializer);
-    }
-}
-
 impl SseEncode for crate::api::RelayGiftWrapFetchFfi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -17370,6 +17576,8 @@ impl SseEncode for crate::api::RelayListActionFfi {
                 crate::api::RelayListActionFfi::AlreadyCurrent => 1,
                 crate::api::RelayListActionFfi::Republished => 2,
                 crate::api::RelayListActionFfi::AwaitingResetAcknowledgement => 3,
+                crate::api::RelayListActionFfi::NothingConfigured => 4,
+                crate::api::RelayListActionFfi::Unacknowledged => 5,
                 _ => {
                     unimplemented!("");
                 }
@@ -17386,6 +17594,7 @@ impl SseEncode for crate::api::RelayListCategoryOutcomeFfi {
         <u32>::sse_encode(self.responders_probed, serializer);
         <u32>::sse_encode(self.relays_healed, serializer);
         <u32>::sse_encode(self.relay_errors, serializer);
+        <bool>::sse_encode(self.own_confirmed, serializer);
     }
 }
 

@@ -10,31 +10,48 @@ import 'package:flutter/material.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// A 48 dp button showing an error-coloured badge on an alert glyph.
+/// A 48 dp button showing the [CircleAttentionGlyph].
 class CircleAttentionCue extends StatelessWidget {
   /// Creates the cue; [onPressed] opens the circle's details.
-  const CircleAttentionCue({required this.onPressed, super.key});
+  const CircleAttentionCue({required this.onPressed, this.label, super.key});
 
   /// Opens the circle's details.
   final VoidCallback onPressed;
 
+  /// The cue's accessible name and tooltip where its place does not say
+  /// which circle it is about; the details button's attention name otherwise.
+  final String? label;
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      tooltip:
+          label ?? AppLocalizations.of(context).circleDetailsAttentionTooltip,
+      onPressed: onPressed,
+      icon: const CircleAttentionGlyph(),
+    );
+  }
+}
+
+/// An error-coloured badge on an alert glyph: what a details button shows in
+/// its info glyph's place while its circle needs attention.
+class CircleAttentionGlyph extends StatelessWidget {
+  /// Creates the glyph.
+  const CircleAttentionGlyph({super.key});
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return IconButton(
-      tooltip: AppLocalizations.of(context).circleDetailsAttentionTooltip,
-      onPressed: onPressed,
-      icon: Badge(
-        smallSize: 10,
-        // `error` clears 3:1 against both the sheet surface and the selector
-        // panel in both themes (WCAG 2.1 SC 1.4.11; circle_attention_cue_test).
-        backgroundColor: scheme.error,
-        // Not the details button's own `info` glyph: the two can sit on
-        // screen together, and must not read as one control twice.
-        child: Icon(
-          LucideIcons.triangleAlert,
-          color: scheme.onSurfaceVariant,
-        ),
+    return Badge(
+      smallSize: 10,
+      // `error` clears 3:1 against both the sheet surface and the selector
+      // panel in both themes (WCAG 2.1 SC 1.4.11; circle_attention_cue_test).
+      backgroundColor: scheme.error,
+      // Not the `info` glyph: a cue for another circle can sit on screen with
+      // a details button, and the two must not read as one control.
+      child: Icon(
+        LucideIcons.triangleAlert,
+        color: scheme.onSurfaceVariant,
       ),
     );
   }

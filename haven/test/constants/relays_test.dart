@@ -1,4 +1,4 @@
-/// Tests for the relay constants — in particular the read-only discovery
+/// Tests for the relay constants — in particular the discovery (lookup)
 /// relay set introduced by the two-plane relay model.
 library;
 

@@ -61,6 +61,7 @@ KpMaintenanceOutcomeFfi _ffi({
   int relayErrors = 0,
   bool expiredInitKeyPurged = false,
   bool retiredMalformedSlot = false,
+  bool publishedCurrent = false,
 }) {
   return KpMaintenanceOutcomeFfi(
     action: action,
@@ -70,6 +71,7 @@ KpMaintenanceOutcomeFfi _ffi({
     relaysHealed: relaysHealed,
     relayErrors: relayErrors,
     expiredInitKeyPurged: expiredInitKeyPurged,
+    publishedCurrent: publishedCurrent,
     retiredMalformedSlot: retiredMalformedSlot,
   );
 }

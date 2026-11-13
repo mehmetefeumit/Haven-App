@@ -13,20 +13,16 @@
 //! Dart's perspective: Dart cannot publish without first calling Rust, and
 //! Rust will not produce an event when the toggle is off.
 //!
-//! # Why publish only to the user's own relays
+//! # Where a relay list goes
 //!
-//! Marmot's MIP-00 leaves the question of *where* a user's kind 10051 itself
-//! should be published implementation-defined. A relay-list event enumerates
-//! every relay the user uses in its tags, so force-publishing it to a public
-//! relay would expose any private relay in that list. Haven therefore
-//! publishes 10050 / 10051 **only** to the user's own configured relays (see
-//! [`dedup_relay_targets`]). Cold-start discovery by bare pubkey is handled
-//! separately on the read-only discovery plane
-//! ([`discovery_relays`][crate::relay::discovery::discovery_relays]): a
-//! stranger queries public indexers for the target's pubkey, which never
-//! exposes the target's relay set beyond what the target chose to publish. A
-//! user who keeps the seeded public relays stays discoverable; a user who
-//! configures only private relays stays private.
+//! A relay-list event enumerates every relay the user uses in its tags. The
+//! user-edit publish sends 10050 / 10002 to the user's own configured relays
+//! (see [`dedup_relay_targets`]), never a default union. The relay-list heal
+//! and the opt-out also send them to the discovery relays
+//! ([`discovery_relays`][crate::relay::discovery::discovery_relays]),
+//! owner-directed 2026-11-12, so an inviter holding a bare pubkey finds them
+//! there — which makes any private relay in the list public; the owner
+//! accepted that cost. A key package is never sent to a discovery relay.
 //!
 //! # `created_at` monotonicity
 //!
@@ -61,16 +57,16 @@ pub type PublisherResult<T> = std::result::Result<T, PublisherError>;
 
 /// Returns the deduplicated list of the user's own configured relay targets.
 ///
-/// This is the publish target set for the user's own relay-list events (kind
-/// 10050 / 10051): the user's configured relays and **nothing else**. Order
-/// is preserved by first occurrence.
+/// This is the own-relay half of a relay-list event's targets (kind 10050 /
+/// 10002); the heal adds the discovery relays to it. Order is preserved by
+/// first occurrence.
 ///
 /// The hardcoded default set is a one-time account-creation seed only (see
 /// [`default_relays`][crate::circle::default_relays]) and is deliberately NOT
 /// unioned in here. Force-unioning it would publish the user's relay list —
 /// which enumerates every relay, including any private one — to the public
 /// defaults, leaking it. Cold-start discovery of *other* users happens on the
-/// read-only discovery plane
+/// discovery plane
 /// ([`discovery_relays`][crate::relay::discovery::discovery_relays]), never
 /// via a publish union. An empty input yields an empty output (no implicit
 /// fallback).

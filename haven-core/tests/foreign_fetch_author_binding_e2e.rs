@@ -14,9 +14,12 @@ use futures::{SinkExt, StreamExt};
 use haven_core::nostr::mls::types::{KeyPackageAdmission, KeyPackageAdmissionRule};
 use haven_core::nostr::mls::SessionManager;
 use haven_core::relay::maintenance::{
-    build_kp_maintenance_events, build_kp_maintenance_events_reusing,
+    build_kp_maintenance_events, build_kp_maintenance_events_reusing, own_presence,
+    OwnEventPresence, OwnRelayLists, TrackedKpLifetime,
 };
-use haven_core::relay::{allow_ws_loopback_for_test, set_discovery_relays_for_test, RelayManager};
+use haven_core::relay::{
+    allow_ws_loopback_for_test, set_discovery_relays_for_test, MemberLookup, RelayManager,
+};
 use nostr::{Event, EventBuilder, Filter, Keys, Kind, PublicKey, Tag, Timestamp};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
@@ -375,49 +378,61 @@ async fn an_invitees_relays_are_dialled_for_the_lookup_and_never_kept_in_the_sha
     );
 }
 
-/// The "is our event published on this relay" check counts only events that
-/// match what it asked for: another author's event of the kind is not ours.
+/// The relay settings check counts only events that match what it asked for:
+/// another author's event of the kind is not ours.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_substituted_event_never_reads_as_published() {
     discovery();
     let (account, attacker) = (Keys::generate(), Keys::generate());
     let answers = Answers::default();
-    answers.lock().unwrap().insert(
-        account.public_key(),
-        vec![inbox_list(&attacker, "wss://attacker.example", 2_000)],
-    );
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let url = format!("ws://{}", listener.local_addr().expect("local addr"));
     let server = tokio::spawn(serve(listener, Arc::clone(&answers)));
-    let asked = Filter::new()
-        .kind(Kind::InboxRelays)
-        .author(account.public_key());
+    let inbox = vec![url.clone()];
+    // Newer than the account's own, and naming exactly the configured list:
+    // it would read current were it counted.
+    answers.lock().unwrap().insert(
+        account.public_key(),
+        vec![inbox_list(&attacker, &url, 2_000)],
+    );
 
     let manager = RelayManager::new();
-    let check = manager
-        .check_event_on_relay(&url, asked.clone())
-        .await
-        .expect("the check runs");
-    assert!(
-        !check.found && check.event_count == 0,
+    let own = account.public_key();
+    let lists = OwnRelayLists {
+        inbox: &inbox,
+        key_package: &[],
+        lookup: &[],
+    };
+    let check = || own_presence(&manager, &own, &lists, None, TrackedKpLifetime::Absent);
+    assert_eq!(
+        check().await[0].inbox_relay_list,
+        OwnEventPresence::Missing,
         "another author's event was counted as ours being published"
     );
 
     answers.lock().unwrap().insert(
         account.public_key(),
         vec![
-            inbox_list(&attacker, "wss://attacker.example", 2_000),
+            inbox_list(&attacker, &url, 2_000),
             inbox_list(&account, "wss://genuine.example", 1_000),
         ],
     );
-    let check = manager
-        .check_event_on_relay(&url, asked)
-        .await
-        .expect("the check runs");
+    let drifted = check().await[0].inbox_relay_list;
+    answers.lock().unwrap().insert(
+        account.public_key(),
+        vec![
+            inbox_list(&attacker, "wss://attacker.example", 2_000),
+            inbox_list(&account, &url, 1_000),
+        ],
+    );
+    let current = check().await[0].inbox_relay_list;
     server.abort();
-    assert!(check.found);
-    assert_eq!(check.event_count, 1);
-    assert_eq!(check.newest_timestamp, Some(1_000));
+    assert_eq!(
+        drifted,
+        OwnEventPresence::Outdated,
+        "the account's own copy is judged, not the newer one another author signed"
+    );
+    assert_eq!(current, OwnEventPresence::Current);
 }
 
 // ── Validation before ranking, and the ranking itself ───────────────────────
@@ -639,13 +654,26 @@ impl Inviter {
 /// The id of the package selected for `asked` from the discovery plane: for
 /// the invite target whose rule is `rule`, or with no target in mind.
 async fn selected(asked: &str, rule: Option<&KeyPackageAdmissionRule>) -> Option<nostr::EventId> {
-    let manager = RelayManager::new();
     match rule {
-        Some(rule) => manager.fetch_keypackage_for_invite(asked, &[], rule).await,
-        None => manager.fetch_keypackage_with_cascade(asked, &[]).await,
+        Some(rule) => RelayManager::lookup_member_for_invite(asked, rule)
+            .await
+            .map(found),
+        None => {
+            RelayManager::new()
+                .fetch_keypackage_with_cascade(asked, &[])
+                .await
+        }
     }
     .expect("the fetch runs")
     .map(|event| event.id)
+}
+
+/// The package an invite lookup found, if it found one.
+fn found(lookup: MemberLookup) -> Option<Event> {
+    match lookup {
+        MemberLookup::Found(member) => Some(member.key_package_event),
+        MemberLookup::NotFound | MemberLookup::Incomplete => None,
+    }
 }
 
 /// `foundation/key-packages.md:65-66,72-75`: an incompatible candidate is
@@ -715,11 +743,12 @@ async fn an_unlabelled_package_the_circle_cannot_admit_never_beats_a_labelled_on
     ] {
         relay.answer(&invitee, order);
         for rule in &rules {
-            let picked = RelayManager::new()
-                .fetch_keypackage_for_invite(&invitee.public_key().to_hex(), &[], rule)
-                .await
-                .expect("the fetch runs")
-                .expect("a package is selected");
+            let picked = found(
+                RelayManager::lookup_member_for_invite(&invitee.public_key().to_hex(), rule)
+                    .await
+                    .expect("the fetch runs"),
+            )
+            .expect("a package is selected");
             assert_eq!(picked.id, other_app.id);
         }
     }
@@ -745,11 +774,12 @@ async fn an_admissible_unlabelled_package_beats_a_fresher_admissible_labelled_on
 
     relay.answer(&invitee, vec![other_app, unlabelled.clone()]);
     for rule in &asking.rules().await {
-        let picked = RelayManager::new()
-            .fetch_keypackage_for_invite(&invitee.public_key().to_hex(), &[], rule)
-            .await
-            .expect("the fetch runs")
-            .expect("a package is selected");
+        let picked = found(
+            RelayManager::lookup_member_for_invite(&invitee.public_key().to_hex(), rule)
+                .await
+                .expect("the fetch runs"),
+        )
+        .expect("a package is selected");
         assert_eq!(picked.id, unlabelled.id);
     }
 }

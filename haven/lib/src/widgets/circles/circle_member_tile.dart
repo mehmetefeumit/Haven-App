@@ -749,7 +749,7 @@ class PendingMemberTile extends StatelessWidget {
         HavenSecurityColors.encrypted,
       ),
       ValidationStatus.invalid => (
-        errorMessage ?? l10n.createCircleNoAccountFound,
+        errorMessage ?? l10n.memberLookupNotFound,
         HavenSecurityColors.warning,
       ),
       ValidationStatus.needsUpdate => (

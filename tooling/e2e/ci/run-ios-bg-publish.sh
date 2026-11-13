@@ -1012,8 +1012,10 @@ bgp_signal_mtime_with() {
   return 1
 }
 
-# bgp_budget_after_lag <anchor-epoch> <budget-secs> <max-lag-secs> — what is
-# left of <budget> once it is measured from <anchor> rather than from now.
+# bgp_budget_after_lag <anchor-epoch> <budget-secs> <max-lag-secs> [now] — what
+# is left of <budget> once it is measured from <anchor> rather than from now.
+# [now] defaults to the clock; the self-test passes its own so a second that
+# ticks between two clock reads cannot move the lag it asserts.
 #
 # The two directions of error are not each other's mirror, so the correction
 # is deliberately one-sided: it may only ever give back the observation lag
@@ -1026,9 +1028,9 @@ bgp_signal_mtime_with() {
 # number at all is not trusted: the caller gets the whole budget, which is
 # exactly the behaviour that predates the anchor.
 bgp_budget_after_lag() {
-  local anchor="${1:-}" budget="$2" max_lag="$3" lag
+  local anchor="${1:-}" budget="$2" max_lag="$3" now="${4:-$(bgp_now)}" lag
   [[ "${anchor}" =~ ^[0-9]+$ ]] || { printf '%s\n' "${budget}"; return 0; }
-  lag=$(( $(bgp_now) - anchor ))
+  lag=$(( now - anchor ))
   if (( lag < 0 || lag > max_lag )); then
     printf '%s\n' "${budget}"
     return 0
@@ -1078,8 +1080,9 @@ bgp_calibrated_app_state() {
   printf '%s\n' "${state}"
 }
 
-# bgp_secs_until <target-epoch> <cap-secs> — how long to wait for <target>,
-# never more than <cap> and never less than nothing.
+# bgp_secs_until <target-epoch> <cap-secs> [now] — how long to wait for
+# <target>, never more than <cap> and never less than nothing. [now] defaults
+# to the clock, as `bgp_budget_after_lag`'s does.
 #
 # The host takes over P3's settle window when the OS reclaims the app inside
 # it, and that takeover must cost the lane NO extra wall clock: <cap> is
@@ -1087,9 +1090,9 @@ bgp_calibrated_app_state() {
 # would have spent. A target that is not a number, or already past, is 0 —
 # the same fail-to-now reading `bgp_budget_after_lag` gives a bad anchor.
 bgp_secs_until() {
-  local target="${1:-}" cap="$2" remaining
+  local target="${1:-}" cap="$2" now="${3:-$(bgp_now)}" remaining
   if ! [[ "${target}" =~ ^[0-9]+$ ]]; then printf '0\n'; return 0; fi
-  remaining=$(( target - $(bgp_now) ))
+  remaining=$(( target - now ))
   if (( remaining <= 0 )); then printf '0\n'; return 0; fi
   if (( remaining > cap )); then printf '%s\n' "${cap}"; return 0; fi
   printf '%s\n' "${remaining}"
@@ -1291,14 +1294,6 @@ run_self_test() {
       printf '  \033[1;31mFAIL\033[0m %s (want %s, got %s)\n' "$1" "$2" "$3" >&2
       fail=1
     fi
-  }
-  # _at <epoch> <cmd...> — <cmd> with `bgp_now` pinned at <epoch>. A clock
-  # helper reads the clock itself, so a case that computes its anchor from a
-  # second read lost a second whenever the two reads straddled a tick.
-  _at() {
-    local at="$1"
-    shift
-    ( bgp_now() { printf '%s\n' "${at}"; }; "$@" )
   }
 
   # --- (P1) An Xcode whose `simctl privacy` offers the location service.
@@ -1683,15 +1678,15 @@ Usage: simctl location <device> <action> [<arguments>]
   #     the settle window and reds P3 for an app that did nothing wrong.
   local w6_now
   w6_now="$(bgp_now)"
-  got="$(_at "${w6_now}" bgp_budget_after_lag "$(( w6_now - 4 ))" 210 10)"
+  got="$(bgp_budget_after_lag "$(( w6_now - 4 ))" 210 10 "${w6_now}")"
   _check "W6 a 4 s observation lag comes off the budget" 206 "${got}"
-  got="$(_at "${w6_now}" bgp_budget_after_lag "$(( w6_now - 10 ))" 210 10)"
+  got="$(bgp_budget_after_lag "$(( w6_now - 10 ))" 210 10 "${w6_now}")"
   _check "W6b a lag of exactly the cap still counts" 200 "${got}"
-  got="$(_at "${w6_now}" bgp_budget_after_lag "$(( w6_now - 11 ))" 210 10)"
+  got="$(bgp_budget_after_lag "$(( w6_now - 11 ))" 210 10 "${w6_now}")"
   _check "W6c a lag past the cap is not trusted (whole budget)" 210 "${got}"
-  got="$(_at "${w6_now}" bgp_budget_after_lag "$(( w6_now + 30 ))" 210 10)"
+  got="$(bgp_budget_after_lag "$(( w6_now + 30 ))" 210 10 "${w6_now}")"
   _check "W6d an anchor in the FUTURE is not trusted" 210 "${got}"
-  got="$(_at "${w6_now}" bgp_budget_after_lag '' 210 10)"
+  got="$(bgp_budget_after_lag '' 210 10 "${w6_now}")"
   _check "W6e an unreadable anchor is not trusted" 210 "${got}"
 
   # --- (W7) …and the anchor is the mtime of the signal that CARRIES the
@@ -2114,11 +2109,11 @@ Usage: simctl location <device> <action> [<arguments>]
   local t_now
   t_now="$(bgp_now)"
   _check "T1 a target already past waits for nothing" \
-    0 "$(_at "${t_now}" bgp_secs_until "$(( t_now - 5 ))" 200)"
+    0 "$(bgp_secs_until "$(( t_now - 5 ))" 200 "${t_now}")"
   _check "T2 a future target waits out the remainder" \
-    30 "$(_at "${t_now}" bgp_secs_until "$(( t_now + 30 ))" 200)"
+    30 "$(bgp_secs_until "$(( t_now + 30 ))" 200 "${t_now}")"
   _check "T3 a remainder past the budget is capped" \
-    200 "$(_at "${t_now}" bgp_secs_until "$(( t_now + 9999 ))" 200)"
+    200 "$(bgp_secs_until "$(( t_now + 9999 ))" 200 "${t_now}")"
   _check "T4 an unreadable anchor waits for nothing" \
     0 "$(bgp_secs_until 'not-a-number' 200)"
 

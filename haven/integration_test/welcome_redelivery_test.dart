@@ -161,10 +161,10 @@ void main() {
           authorPubkeyHex: carol.pubkeyHex,
         );
         // Bob's inbox is the hermetic relay itself: the founding is ordinary.
-        final bobKp = await relayManager.fetchMemberKeypackage(
+        final bobKp = (await relayManager.fetchMemberKeypackage(
           pubkey: bob.pubkeyHex,
           circle: alice.circleManager,
-        );
+        )).member;
         if (bobKp == null) {
           throw StateError('[redelivery] no KeyPackage for Bob');
         }
@@ -249,11 +249,11 @@ Future<MemberKeyPackageFfi> _inboxBehind(
   _RelayGate gate, {
   Uint8List? mlsGroupId,
 }) async {
-  final fetched = await relayManager.fetchMemberKeypackage(
+  final fetched = (await relayManager.fetchMemberKeypackage(
     pubkey: user.pubkeyHex,
     circle: inviter,
     mlsGroupId: mlsGroupId,
-  );
+  )).member;
   if (fetched == null) {
     throw StateError('[redelivery] no KeyPackage for ${user.role}');
   }

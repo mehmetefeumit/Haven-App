@@ -133,6 +133,13 @@ class AppLocalizationsNe extends AppLocalizations {
   String get onboardingCreateIdentityLoading => 'तयारी गर्दै…';
 
   @override
+  String get onboardingFinishingSetup => 'सेटअप पूरा गर्दै…';
+
+  @override
+  String get onboardingFinishSetupError =>
+      'तपाईंको खाता सेटअप पूरा गर्न सकिएन। आफ्नो जडान जाँचेर फेरि प्रयास गर्नुहोस्।';
+
+  @override
   String get onboardingCreateIdentityImportPrompt => 'पहिल्यै कुञ्जी छ?';
 
   @override
@@ -314,21 +321,58 @@ class AppLocalizationsNe extends AppLocalizations {
   }
 
   @override
-  String get relaySettingsStatusConnected => 'जोडिएको';
-
-  @override
   String get relaySettingsStatusChecking => 'जाँच्दै';
 
   @override
   String get relaySettingsStatusUnreachable => 'पुग्न सकिएन';
 
   @override
-  String get relaySettingsStatusNotChecked => 'जाँचिएको छैन';
+  String relaySettingsKindLine(String kind, String status) {
+    return '$kind: $status';
+  }
 
   @override
-  String relaySettingsStatusSemantics(String status) {
-    return 'रिले स्थिति: $status';
-  }
+  String get relaySettingsKindKeyPackage => 'KeyPackage';
+
+  @override
+  String get relaySettingsKindRelayList => 'रिले सूची';
+
+  @override
+  String get relaySettingsKindInboxList => 'इनबक्स सूची';
+
+  @override
+  String get relaySettingsPresencePublished => 'प्रकाशित';
+
+  @override
+  String get relaySettingsPresenceMissing => 'छैन';
+
+  @override
+  String get relaySettingsPresenceOutdated => 'पुरानो संस्करण';
+
+  @override
+  String get relaySettingsLookupTitle => 'खोजी रिलेहरू';
+
+  @override
+  String get relaySettingsLookupSubtitle =>
+      'अरूले तपाईंलाई खोज्ने सार्वजनिक रिलेहरू। मानिसहरूले तपाईंलाई निमन्त्रणा गर्न सकून् भनेर Haven ले तपाईंका रिले सूचीहरूको एउटा प्रतिलिपि यहाँ राख्छ।';
+
+  @override
+  String get relaySettingsRepublish => 'फेरि प्रकाशित गर्नुहोस्';
+
+  @override
+  String get relaySettingsRepublishDone =>
+      'जवाफ दिने हरेक रिलेसँग अब अरूले तपाईंलाई निमन्त्रणा गर्न चाहिने कुरा छ';
+
+  @override
+  String get relaySettingsRepublishIncomplete =>
+      'केही रिलेहरूसँग अझै पनि अरूले तपाईंलाई निमन्त्रणा गर्न चाहिने कुरा छैन';
+
+  @override
+  String get relaySettingsRepublishHeld =>
+      'रिले सेटिङहरूबारेको सूचनाबाट तपाईं अगाडि नबढेसम्म Haven ले तपाईंका रिले सेटिङहरू वा निमन्त्रणा कुञ्जी प्रकाशित गर्दैन';
+
+  @override
+  String get relaySettingsStatusNotChecked => 'जाँचिएको छैन';
 
   @override
   String get relaySettingsEmptyTitle => 'कुनै रिले कन्फिगर गरिएको छैन';
@@ -637,11 +681,12 @@ class AppLocalizationsNe extends AppLocalizations {
   String get createCircleNoIdInQr => 'QR कोडमा कुनै वैध ID फेला परेन';
 
   @override
-  String get createCircleNoAccountFound =>
-      'यो ID का लागि कुनै Haven खाता फेला परेन';
+  String get memberLookupNotFound =>
+      'यो ID को कुनै Haven खाता अहिलेसम्म फेला परेन। तिनले भर्खरै Haven सेटअप गरेका हुन् भने, एक मिनेटपछि फेरि प्रयास गर्नुहोस्।';
 
   @override
-  String get createCircleCouldNotVerify => 'सदस्य प्रमाणित गर्न सकिएन';
+  String get memberLookupIncomplete =>
+      'यो ID जाँच्ने काम पूरा गर्न सकिएन। आफ्नो जडान जाँचेर फेरि प्रयास गर्नुहोस्।';
 
   @override
   String get createCircleSomethingWentWrong => 'केही गडबड भयो';
@@ -1600,6 +1645,31 @@ class AppLocalizationsNe extends AppLocalizations {
 
   @override
   String get qrCodeYourPublicKeyLabel => 'तपाईंको सार्वजनिक कुञ्जी';
+
+  @override
+  String get reachabilityChecking => 'निमन्त्रणा पाउने तयारी गर्दै…';
+
+  @override
+  String get reachabilityReady => 'निमन्त्रणा पाउन तयार';
+
+  @override
+  String get reachabilityCantCheck =>
+      'अरूले तपाईंलाई निमन्त्रणा गर्न सक्छन् कि सक्दैनन् भनेर अहिले जाँच्न सकिँदैन';
+
+  @override
+  String get reachabilityNotReady =>
+      'अरूले तपाईंलाई अझै निमन्त्रणा गर्न सक्दैनन्';
+
+  @override
+  String get reachabilityNoRelays =>
+      'तपाईंले एउटा रिले नथपेसम्म अरूले तपाईंलाई निमन्त्रणा गर्न सक्दैनन्';
+
+  @override
+  String get reachabilityOpenRelaySettings => 'रिले सेटिङहरू';
+
+  @override
+  String get reachabilityAwaitingReset =>
+      'रिले सेटिङहरूबारेको सूचनाबाट तपाईं अगाडि बढेपछि अरूले तपाईंलाई निमन्त्रणा गर्न सक्नेछन्';
 
   @override
   String get qrCodeWhatIsThisTitle => 'यो के हो?';

@@ -159,10 +159,10 @@ void main() {
       // Alice fetches Bob's KeyPackage (RelayManagerFfi, not CircleManagerFfi)
       // and creates a 2-member circle whose stored relay is the CI relay.
       final relayManager = await RelayManagerFfi.newInstance();
-      final bobKp = await relayManager.fetchMemberKeypackage(
+      final bobKp = (await relayManager.fetchMemberKeypackage(
         pubkey: bob.pubkeyHex,
         circle: aliceManager,
-      );
+      )).member;
       if (bobKp == null) {
         throw StateError(
           '[m7-setup] fetchMemberKeypackage returned null for Bob — his '

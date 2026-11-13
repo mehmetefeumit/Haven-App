@@ -126,7 +126,8 @@ pub enum Role {
     Inbox,
     /// Key-package relays (kind 10002, the key packages).
     KeyPackage,
-    /// Read-only discovery relays.
+    /// Discovery (lookup) relays: asked about any account, and sent an
+    /// account's own relay lists and nothing else (owner-directed 2026-11-12).
     Discovery,
     /// Profile relays (kind 0).
     Profile,
@@ -290,10 +291,6 @@ pub const NEG_INITIAL_MESSAGE: &str = "6100000200";
 /// component 0x8005, `RetentionBoundPeeler`).
 pub const LOCATION_RETENTION_MAX_SECS: u64 = 228;
 
-/// The `limit` of the relay-status probe, the one lookup shape admitted on
-/// either own list (`check_event_on_relay`).
-pub const STATUS_PROBE_LIMIT: u64 = 5;
-
 /// Haven's key-package tags, each exactly once (MDK's publication template).
 const KEY_PACKAGE_TAGS: &[&str] = &[
     "d",
@@ -359,8 +356,8 @@ pub static ROWS: [RowSpec; 16] = [
         optional: &["r"],
         limit: Limit::Any,
         author: Author::Account,
-        roles: &[Role::KeyPackage],
-        admitted_on: "the author's own key-package list; no relay it names holds the location, profile or discovery role without holding one of the author's own lists",
+        roles: &[Role::KeyPackage, Role::Discovery],
+        admitted_on: "the author's own key-package list, or a discovery relay; no relay it names holds the location, profile or discovery role without holding one of the author's own lists",
     },
     RowSpec {
         row: Row::Ev10050,
@@ -370,8 +367,8 @@ pub static ROWS: [RowSpec; 16] = [
         optional: &["relay"],
         limit: Limit::Any,
         author: Author::Account,
-        roles: &[Role::Inbox],
-        admitted_on: "the author's own inbox list; no relay it names holds the location, profile or discovery role without holding one of the author's own lists",
+        roles: &[Role::Inbox, Role::Discovery],
+        admitted_on: "the author's own inbox list, or a discovery relay; no relay it names holds the location, profile or discovery role without holding one of the author's own lists",
     },
     RowSpec {
         row: Row::Ev0,
@@ -392,8 +389,8 @@ pub static ROWS: [RowSpec; 16] = [
         optional: &["e", "a", "k"],
         limit: Limit::Any,
         author: Author::Account,
-        roles: &[Role::Inbox, Role::KeyPackage, Role::Profile],
-        admitted_on: "a relay admitting EVERY kind it retracts (each `k`, each `a` coordinate's kind, each `e` id's kind; at least one `k` or `a`): 0 on a profile relay, 10050 / 10002 on the author's own inbox / key-package list current or former, 30443 on the current key-package list",
+        roles: &[Role::Inbox, Role::KeyPackage, Role::Discovery, Role::Profile],
+        admitted_on: "a relay admitting EVERY kind it retracts (each `k`, each `a` coordinate's kind, each `e` id's kind; at least one `k` or `a`): 0 on a profile relay, 10050 / 10002 on the author's own inbox / key-package list current or former or on a discovery relay, 30443 on the current key-package list",
     },
     RowSpec {
         row: Row::Req445H,
@@ -437,7 +434,7 @@ pub static ROWS: [RowSpec; 16] = [
         limit: Limit::AtMost(64),
         author: Author::NotAnEvent,
         roles: &[Role::Inbox, Role::KeyPackage, Role::Discovery],
-        admitted_on: "one author: the sender's own key-package list when it is the sender; otherwise a discovery relay or the author's key-package or NIP-65 write list; `limit` 5 (the status probe) also either own list of an account",
+        admitted_on: "one author: the sender's own key-package list when it is the sender; otherwise a discovery relay or the author's key-package or NIP-65 write list",
     },
     RowSpec {
         row: Row::Req10002A,
@@ -448,7 +445,7 @@ pub static ROWS: [RowSpec; 16] = [
         limit: Limit::AtMost(64),
         author: Author::NotAnEvent,
         roles: &[Role::Inbox, Role::KeyPackage, Role::Discovery],
-        admitted_on: "one author: the sender's own key-package list when it is the sender; otherwise a discovery relay or the author's key-package or NIP-65 write list; `limit` 5 (the status probe) also either own list of an account",
+        admitted_on: "one author: the sender's own key-package list or a discovery relay when it is the sender; otherwise a discovery relay or the author's key-package or NIP-65 write list",
     },
     RowSpec {
         row: Row::Req10050A,
@@ -459,7 +456,7 @@ pub static ROWS: [RowSpec; 16] = [
         limit: Limit::AtMost(64),
         author: Author::NotAnEvent,
         roles: &[Role::Inbox, Role::KeyPackage, Role::Discovery],
-        admitted_on: "one author: the sender's own inbox list when it is the sender; otherwise a discovery relay or the author's inbox list; `limit` 5 (the status probe) also either own list of an account",
+        admitted_on: "one author: the sender's own inbox list or a discovery relay when it is the sender; otherwise a discovery relay or the author's inbox list",
     },
     RowSpec {
         row: Row::Req0A,

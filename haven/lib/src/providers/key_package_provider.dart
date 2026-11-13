@@ -1,5 +1,5 @@
-/// Provider for publishing the user's `KeyPackage` (kind 30443) and relay
-/// lists (kind 10050 inbox + kind 10002 NIP-65, Dark Matter W2) to relays.
+/// Provider for publishing the user's relay lists (kind 10002 NIP-65 + kind
+/// 10050 inbox, Dark Matter W2) and `KeyPackage` (kind 30443) to relays.
 ///
 /// Dark Matter (DM-4): `maintain_key_package` is now the ONE publish path for
 /// `KeyPackage` material — decide → reuse-or-mint → publish → record all
@@ -17,12 +17,14 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/own_reachability_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/relay_service.dart';
 
-/// Publishes the user's `KeyPackage` (kind 30443, reuse-or-mint into a
-/// stable slot) and relay lists (kind 10050 inbox + kind 10002 NIP-65).
+/// Publishes the user's relay lists (kind 10002 NIP-65, then kind 10050 inbox)
+/// and then their `KeyPackage` (kind 30443, reuse-or-mint into a stable slot),
+/// and reports each outcome to [ownReachabilityProvider].
 ///
 /// Exposes the tick's [KeyPackageMaintenanceOutcome] rather than a bool.
 ///
@@ -46,6 +48,10 @@ final keyPackagePublisherProvider =
       // Coupling to the relay-preferences invalidator: when the user adds /
       // removes a KP relay or toggles the publish setting, we re-run.
       ref.watch(keyPackagePublisherInvalidatorProvider);
+      // A run superseded meanwhile (an invalidation, or a logout) is no longer
+      // this identity's to report.
+      var superseded = false;
+      ref.onDispose(() => superseded = true);
 
       final identity = await ref.read(identityProvider.future);
       if (identity == null) {
@@ -55,18 +61,22 @@ final keyPackagePublisherProvider =
       }
 
       final maintenanceService = ref.read(maintenanceServiceProvider);
+      final reachability = ref.read(ownReachabilityProvider.notifier);
 
-      final kpOutcome = await maintenanceService.maintainKeyPackage();
-      debugPrint('[KeyPackage] maintain tick: $kpOutcome');
-
-      // Relay lists (kind 10050 inbox + the kind-10002 NIP-65 slot) are
-      // best-effort and never block the KeyPackage outcome.
+      // Relay lists first, in the order the Marmot transport binding gives
+      // (`transports/nostr.md`): the kind 10002 says where the KeyPackage
+      // goes, and the 10050 is up before anyone can send a Welcome.
       final relayListResult = await maintenanceService.maintainRelayList();
       debugPrint(
         '[KeyPackage] relay-list tick: '
         'inbox=${relayListResult.inbox.action.name}, '
         'nip65=${relayListResult.keyPackage.action.name}',
       );
+      if (!superseded) reachability.recordRelayLists(relayListResult);
+
+      final kpOutcome = await maintenanceService.maintainKeyPackage();
+      debugPrint('[KeyPackage] maintain tick: $kpOutcome');
+      if (!superseded) reachability.recordKeyPackage(kpOutcome);
 
       return kpOutcome;
     });

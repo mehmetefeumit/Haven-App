@@ -19,7 +19,6 @@ import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/constants/text_input_privacy.dart';
 import 'package:haven/src/pages/onboarding/onboarding_scaffold.dart';
 import 'package:haven/src/providers/identity_provider.dart';
-import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/theme/theme.dart';
 
 /// Screen that imports an existing identity from a bech32 secret key.
@@ -78,12 +77,10 @@ class _ImportNsecScreenState extends ConsumerState<ImportNsecScreen> {
     // Clear the text buffer to minimise plaintext secret lifetime.
     _controller.text = '';
 
-    ref
-      ..invalidate(keyPackagePublisherProvider)
-      ..read(keyPackagePublisherProvider);
-
     // Pop back to the onboarding shell; the derived step provider will
-    // route the user to the display-name screen.
+    // route the user to the display-name screen, which seeds the default
+    // relays and only then publishes — a publish fired here would run
+    // against a relay list not yet seeded.
     Navigator.of(context).pop();
   }
 

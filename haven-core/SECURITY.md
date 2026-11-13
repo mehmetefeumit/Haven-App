@@ -149,13 +149,19 @@ save — see *Public Nostr Profiles* below), three additional exposures apply:
 **Relay planes.** Haven keeps four relay lists apart: the account plane (the
 user's Inbox and KeyPackage lists, seeded from `PRODUCTION_DEFAULT_RELAYS`:
 kinds 10050, 10002 and 30443, the inbound kind 1059 and the inbox REQ — the
-user's pubkey is visible there by design), the read-only discovery plane
-(`PRODUCTION_DISCOVERY_RELAYS`: other accounts' relay lists and KeyPackages),
-the profile plane (`PRODUCTION_PROFILE_RELAYS`: kind 0) and, since 2026-10-31,
-the location plane (`PRODUCTION_LOCATION_RELAYS`: the kind 445 of the circles
-Haven creates). The seed and discovery lists share hosts; the profile and
-location pools share none with any other built-in list
-(`tests/profile_plane_separation.rs`).
+user's pubkey is visible there by design), the discovery plane
+(`PRODUCTION_DISCOVERY_RELAYS`: other accounts' relay lists and KeyPackages
+are read there, and, owner-directed 2026-11-12, the relay-list heal also
+copies the account's own kinds 10002 and 10050 there — the configured lists,
+private relays included — so an inviter holding only a bare pubkey finds
+them, as White Noise and MDK do; never a kind 30443, and an opt-out's empty
+replacement and kind 5 go there too), the profile plane
+(`PRODUCTION_PROFILE_RELAYS`: kind 0) and, since 2026-10-31, the location
+plane (`PRODUCTION_LOCATION_RELAYS`: the kind 445 of the circles Haven
+creates). Only an own relay confirms the account reachable
+(`RelayListCategoryOutcomeFfi::own_confirmed`). The seed and discovery lists
+share hosts; the profile and location pools share none with any other
+built-in list (`tests/profile_plane_separation.rs`).
 
 ### The relay-plane allow matrix
 
@@ -184,16 +190,16 @@ when it was sent; a circle's routing counts from the commit's staging.
 | `EV-445A` | EVENT | 445 | `h`, `expiration` | none | - | ephemeral (no known identity), used once | a relay of the `h` circle's routing current at the instant, or one it left at or after the event's `created_at`; `0 < expiration - created_at <= 228` |
 | `EV-1059` | EVENT | 1059 | `p` | none | - | ephemeral (no known identity) | a relay an inbox list of the `p` recipient named at or before the instant |
 | `EV-30443` | EVENT | 30443 | `d`, `mls_protocol_version`, `i`, `mls_ciphersuite`, `mls_extensions`, `mls_proposals`, `app_components` | none | - | an account | the author's own key-package list |
-| `EV-10002` | EVENT | 10002 | none | `r` | - | an account | the author's own key-package list; no relay it names holds the location, profile or discovery role without holding one of the author's own lists |
-| `EV-10050` | EVENT | 10050 | none | `relay` | - | an account | the author's own inbox list; no relay it names holds the location, profile or discovery role without holding one of the author's own lists |
+| `EV-10002` | EVENT | 10002 | none | `r` | - | an account | the author's own key-package list, or a discovery relay; no relay it names holds the location, profile or discovery role without holding one of the author's own lists |
+| `EV-10050` | EVENT | 10050 | none | `relay` | - | an account | the author's own inbox list, or a discovery relay; no relay it names holds the location, profile or discovery role without holding one of the author's own lists |
 | `EV-0` | EVENT | 0 | none | none | - | an account | a profile relay |
-| `EV-5` | EVENT | 5 | none | `e`, `a`, `k` | - | an account | a relay admitting EVERY kind it retracts (each `k`, each `a` coordinate's kind, each `e` id's kind; at least one `k` or `a`): 0 on a profile relay, 10050 / 10002 on the author's own inbox / key-package list current or former, 30443 on the current key-package list |
+| `EV-5` | EVENT | 5 | none | `e`, `a`, `k` | - | an account | a relay admitting EVERY kind it retracts (each `k`, each `a` coordinate's kind, each `e` id's kind; at least one `k` or `a`): 0 on a profile relay, 10050 / 10002 on the author's own inbox / key-package list current or former or on a discovery relay, 30443 on the current key-package list |
 | `REQ-445-H` | REQ | 445 | `kinds`, `#h` | `since`, `until`, `limit` | any | - | a relay where every `#h` circle's routing stands |
 | `REQ-445-IDS` | REQ | 445 | `ids`, `kinds`, `limit` | `#h` | = ids | - | a relay where the routing of every id's circle (the event index) and of every `#h` circle is kept; `limit` = the number of ids |
 | `REQ-1059-P` | REQ | 1059 | `kinds`, `#p` | `since`, `limit` | at most 1000 | - | the inbox list of the one `#p` value, which is the sender when the sender is known |
-| `REQ-30443-A` | REQ | 30443 | `kinds`, `authors` | `limit` | at most 64 | - | one author: the sender's own key-package list when it is the sender; otherwise a discovery relay or the author's key-package or NIP-65 write list; `limit` 5 (the status probe) also either own list of an account |
-| `REQ-10002-A` | REQ | 10002 | `kinds`, `authors` | `limit` | at most 64 | - | one author: the sender's own key-package list when it is the sender; otherwise a discovery relay or the author's key-package or NIP-65 write list; `limit` 5 (the status probe) also either own list of an account |
-| `REQ-10050-A` | REQ | 10050 | `kinds`, `authors` | `limit` | at most 64 | - | one author: the sender's own inbox list when it is the sender; otherwise a discovery relay or the author's inbox list; `limit` 5 (the status probe) also either own list of an account |
+| `REQ-30443-A` | REQ | 30443 | `kinds`, `authors` | `limit` | at most 64 | - | one author: the sender's own key-package list when it is the sender; otherwise a discovery relay or the author's key-package or NIP-65 write list |
+| `REQ-10002-A` | REQ | 10002 | `kinds`, `authors` | `limit` | at most 64 | - | one author: the sender's own key-package list or a discovery relay when it is the sender; otherwise a discovery relay or the author's key-package or NIP-65 write list |
+| `REQ-10050-A` | REQ | 10050 | `kinds`, `authors` | `limit` | at most 64 | - | one author: the sender's own inbox list or a discovery relay when it is the sender; otherwise a discovery relay or the author's inbox list |
 | `REQ-0-A` | REQ | 0 | `kinds`, `authors` | `limit` | at most 4 | - | one author, a profile relay |
 | `NEG-445-H` | NEG-OPEN | 445 | `kinds`, `#h`, `since`, `until`, `limit` | none | at most 16384 | - | one `#h` circle whose routing stands; opening message `6100000200` |
 

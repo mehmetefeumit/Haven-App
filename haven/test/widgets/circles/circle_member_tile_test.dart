@@ -2187,7 +2187,7 @@ void main() {
 
       final label = [
         '\u2068Distant Cousin\u2069',
-        l10n.createCircleNoAccountFound,
+        l10n.memberLookupNotFound,
       ].join(', ');
       final node = tester.getSemantics(find.bySemanticsLabel(label));
       expect(node.label, label);

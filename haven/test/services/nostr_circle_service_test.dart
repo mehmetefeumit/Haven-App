@@ -66,7 +66,7 @@ class _StubRelayService implements RelayService {
   Future<RelayListMaintenanceResult> maintainRelayList({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,
-  }) async => const RelayListMaintenanceResult.empty();
+  }) async => const RelayListMaintenanceResult.failed();
 
   @override
   Future<SubscriptionHealthResult> maintainSubscriptionHealth({
@@ -113,10 +113,8 @@ class _StubRelayService implements RelayService {
   }) => throw UnimplementedError();
 
   @override
-  Future<RelayEventCheck> checkEventOnRelay({
-    required String relayUrl,
-    required String authorPubkey,
-    required int eventKind,
+  Future<List<OwnRelayPresenceFfi>> checkOwnReachability({
+    required String ownPubkey,
   }) => throw UnimplementedError();
 
   @override

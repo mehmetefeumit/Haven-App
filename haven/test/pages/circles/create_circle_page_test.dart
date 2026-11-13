@@ -121,6 +121,10 @@ Future<void> _addMember(WidgetTester tester, String npub) async {
   await tester.pump();
 }
 
+/// The copy for a lookup that could not finish: absence is unproven.
+const _incomplete =
+    "Couldn't finish checking this ID. Check your connection and try again.";
+
 void main() {
   group('CreateCirclePage KeyPackage validation', () {
     testWidgets('shows valid status when KeyPackage is found', (tester) async {
@@ -145,27 +149,37 @@ void main() {
       expect(find.byType(CircularProgressIndicator), findsNothing);
     });
 
-    testWidgets('shows invalid status with no retry when KeyPackage is null', (
-      tester,
-    ) async {
-      final mock = MockRelayService(); // keyPackageResult defaults to null
+    // Not a dead end any more: someone who set up Haven a moment ago is
+    // findable a moment later, so "not found" offers a retry, and its copy
+    // no longer asserts certainty.
+    testWidgets('a person not found yet can be retried, and the retry finds '
+        'them', (tester) async {
+      final mock = MockRelayService()
+        ..keyPackageAnswers.addAll([null, _makeKeyPackage('hex')]);
       await tester.pumpWidget(_buildApp(mock));
 
       await _addMember(tester, _testNpub1);
       await tester.pumpAndSettle();
 
-      // Should show warning icon and "No Haven account found"
       expect(find.byIcon(LucideIcons.triangleAlert), findsOneWidget);
       expect(
-        find.text("Couldn't find a Haven account for this ID"),
+        find.text(
+          'No Haven account found for this ID yet. If they just set up '
+          'Haven, try again in a minute.',
+        ),
         findsOneWidget,
       );
-
-      // No retry button for permanent failures
-      expect(find.byIcon(LucideIcons.refreshCw), findsNothing);
-
-      // Close button still present
+      expect(find.byIcon(LucideIcons.refreshCw), findsOneWidget);
       expect(find.byIcon(LucideIcons.x), findsOneWidget);
+
+      await tester.tap(find.byIcon(LucideIcons.refreshCw));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Ready to invite'), findsOneWidget);
+      final button = tester.widget<FilledButton>(
+        find.widgetWithText(FilledButton, 'Continue'),
+      );
+      expect(button.onPressed, isNotNull);
     });
 
     testWidgets('shows error with retry button on RelayServiceException', (
@@ -179,7 +193,7 @@ void main() {
 
       // Should show warning icon and network error message
       expect(find.byIcon(LucideIcons.triangleAlert), findsOneWidget);
-      expect(find.text('Could not verify member'), findsOneWidget);
+      expect(find.text(_incomplete), findsOneWidget);
 
       // Retry button should be visible
       expect(find.byIcon(LucideIcons.refreshCw), findsOneWidget);
@@ -196,7 +210,7 @@ void main() {
       await tester.pumpAndSettle();
 
       // Should show error with retry
-      expect(find.text('Could not verify member'), findsOneWidget);
+      expect(find.text(_incomplete), findsOneWidget);
       expect(find.byIcon(LucideIcons.refreshCw), findsOneWidget);
 
       // Add a gate before tapping retry so we can observe the spinner
@@ -211,9 +225,13 @@ void main() {
       expect(find.byType(CircularProgressIndicator), findsOneWidget);
       expect(find.text('Checking availability...'), findsOneWidget);
 
-      // Release gate and let it settle
+      // The relays answer this time.
+      mock.keyPackageAnswers.add(_makeKeyPackage('hex'));
       retryGate.complete();
       await tester.pumpAndSettle();
+
+      expect(find.text(_incomplete), findsNothing);
+      expect(find.text('Ready to invite'), findsOneWidget);
     });
 
     testWidgets('continue button is disabled when any member is invalid', (
@@ -333,10 +351,7 @@ void main() {
         // Distinct icon/status from both "valid" and "invalid" (no-account).
         expect(find.byIcon(LucideIcons.circleCheck), findsNothing);
         expect(find.text('Ready to invite'), findsNothing);
-        expect(
-          find.text("Couldn't find a Haven account for this ID"),
-          findsNothing,
-        );
+        expect(find.textContaining('No Haven account found'), findsNothing);
         expect(find.text('Needs to update or open Haven'), findsOneWidget);
         expect(
           find.byIcon(LucideIcons.refreshCw),
