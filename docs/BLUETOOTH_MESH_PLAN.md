@@ -3183,9 +3183,12 @@ item 6, that address rotation is the build's; §7.1 carries a note now.
   the same again, and stops behind a logout's marker with no notice
   and no engine asked for (`StartPolicy.start`, answering
   `Refused(word, notice)` or `Run(deadline)`);
-  that every input of the radio's queue asks the lever before it reads
-  the time left, and that a lever which stopped holding is put back and
-  ends the radio (`MeshRadioCore`);
+  that nothing of the radio runs once the lever stopped holding: the
+  wrapper every body runs inside asks it before the body, and where it
+  does not hold puts it back and stops the radio with its notice, the
+  body not run — the service's start excepted, which must reach its
+  foreground start and is what puts the lever in (`MeshThread.run`,
+  `MeshThread.start`);
   which of the phone's connections are Haven's — a device only from the
   moment it enables notifications on Haven's characteristic, linked then
   if its connection's MTU is known and 51 or more, else at the next MTU
@@ -3198,7 +3201,10 @@ item 6, that address rotation is the build's; §7.1 carries a note now.
   subscription, then the link and the connection priority — each
   waiting for its callback, given up after 25 s, a connection that ends
   before its link made once more 300 ms on, every client closed on
-  every path (`GattClientSteps`);
+  every path, whatever a call to the port throws (`GattClientSteps`);
+  that an address the engine asks for again while it is being dialled
+  is the same dial (`MeshRadioCore`); that a stop tells the engine
+  before an adapter is closed (`MeshThread.steps`);
   that a device Haven holds which starts to bond is ended, and no other
   (owner question Q-15, option (a), as one function; option (b) is that
   function and one branch of an adapter);
@@ -3208,7 +3214,7 @@ item 6, that address rotation is the build's; §7.1 carries a note now.
   and the service's and the characteristic's UUIDs, drawn once from the
   system's generator and kept as two numbers each — **fixed for good
   from the first release that has the mesh on**.
-  **Proved here, on the JVM** (54 tests, 21 of them new, against fakes
+  **Proved here, on the JVM** (57 tests, 24 of them new, against fakes
   and a clock the tests move; no sleep, no order between tests): each of
   the above, by a test named for it; that no address reaches what the
   core is told of an inbound link; that a callback of a client already
@@ -3231,7 +3237,36 @@ item 6, that address rotation is the build's; §7.1 carries a note now.
   a call of the JDK that Android 6 does not have (`java.time`) compiles
   and passes — the JVM build reads JDK 17's API, and nothing here holds
   the pure package to Android 6's. None is used; a reviewer holds it.
-  **The guard**, `check_mesh_radio.sh`: check 11 pins the 54 names;
+  **Review** (independent, read-only, of `9609128`): no blocker and no
+  high finding. Two medium, fixed. **The lever was asked by the core's
+  inputs alone**, and a dial's steps and the server's answers are made
+  from the platform's callbacks with no such input between them — up to
+  25 s of platform calls behind a lever nobody asked: the question is
+  now the wrapper's, one site for every body, and the core's own is
+  gone. **A port call that threw could leave a client open for the life
+  of the process**, and a close that threw in the stop's first step
+  skipped the engine being told: the close now follows whatever is
+  thrown, the radio's stop asks every client, and `stopRadio` is a step
+  of its own before the adapters'. Three low, fixed or recorded: four
+  guarantees no test held (a late timer, an MTU of exactly 51 in each
+  role, an MTU told out of its turn); two dials for one address; and
+  one line on why a stranger's write to the characteristic is left
+  unanswered where its write to the descriptor is not. With them, the
+  two step classes are final once stopped. The detail, what the review
+  found sound and its list of what no test can know before adapters
+  exist are design §N.7.
+  **Second mutation pass**, 34 changes over what the review changed and
+  added — the lever not asked, asked after the body, not put back, or
+  not stopping the radio; the start waiting on the lever, or its throw
+  leaving the thread; an adapter closed before the engine is told; a
+  close skipped behind a throw, in each of five places; a stopped
+  class answering, noting or dialling; a late timer making its
+  connection; each MTU bound moved by one; an address dialled twice —
+  all fail a named test. The first pass was run again over the code as
+  it stands: 112 of its changes still apply and each fails a named
+  test; the other 18 changed code the review rewrote, and each was made
+  again to the new text, among the 34 or beside them, and fails.
+  **The guard**, `check_mesh_radio.sh`: check 11 pins the 57 names;
   check 8 gains that `MeshRadioConstants.kt` alone builds a UUID. 170
   self-test fixtures (166, and four); the new clause silenced, and each
   of its three alternatives in turn, fails the self-test.
@@ -3242,7 +3277,10 @@ item 6, that address rotation is the build's; §7.1 carries a note now.
   agreed before a subscription is the one noted, that a write without
   response is paced by its callback, that `cancelConnection` ends
   anything (design N-7: on the one release read it does not), that
-  dropping a link ends a pairing. The lever's two calls are made
+  dropping a link ends a pairing, what still arrives after a close.
+  That every body runs inside the wrapper, which is now what asks the
+  lever, is §B.2's contract and no check until the adapters' guard.
+  The lever's two calls are made
   against a fake: `leverInstall` and `leverHolds` have still never run
   on Android, and the rule of unit 1's review — no landing without an
   emulator lane for the unit that first calls them — falls on the unit

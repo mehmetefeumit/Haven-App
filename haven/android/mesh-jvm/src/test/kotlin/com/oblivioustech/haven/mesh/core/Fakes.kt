@@ -164,6 +164,8 @@ class RecordingPort : RadioPort {
 /** A core over the two fakes and a clock the test moves. */
 class Rig {
     val engine = FakeEngine()
+
+    /** The thread's, where a test makes one over this core. */
     val lever = FakeLever()
     val port = RecordingPort()
     var now = 0L
@@ -171,7 +173,7 @@ class Rig {
     /** Whom a full peer table forgets, of [it] candidates in the order they were first seen, and what it was asked. */
     var pick: (Int) -> Int = { 0 }
     val pickedAmong = mutableListOf<Int>()
-    val core = MeshRadioCore(engine, lever, port, { now }) { among ->
+    val core = MeshRadioCore(engine, port, { now }) { among ->
         pickedAmong += among
         pick(among)
     }
@@ -263,6 +265,9 @@ class RecordingClientPort(private val order: MutableList<String> = mutableListOf
     /** The steps the platform does not begin. */
     val refuses = mutableSetOf<String>()
 
+    /** The calls that throw, once recorded: `disconnect`, or `close(<link>)` for one client's. */
+    val throws = mutableSetOf<String>()
+
     private fun record(call: String) {
         calls += call
         order += call
@@ -273,6 +278,7 @@ class RecordingClientPort(private val order: MutableList<String> = mutableListOf
     private fun step(name: String, link: Long, vararg more: Any): Boolean {
         check(link in open) { "$name was asked of client $link, which is not open" }
         record("$name(${(listOf(link) + more).joinToString(",")})")
+        if (name in throws || "$name($link)" in throws) throw Thrown()
         return name !in refuses
     }
 

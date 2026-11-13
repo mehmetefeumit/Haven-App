@@ -48,6 +48,11 @@ class ServerLinksTest {
      */
     @Test
     fun aSubscriberLinksAtOnceWhereItsConnectionsMtuIsKnownAndAtItsNextMtuWhereNot() {
+        // The smallest MTU that carries a frame is one that links.
+        val smallest = Radios().apply { links.onMtu(ADDRESS, 51) }
+        smallest.subscribes(ADDRESS)
+        assertEquals(listOf("linkUp(0,false,51,null)"), smallest.events.calls)
+
         val radios = Radios()
         // The last one told is the connection's.
         radios.links.onMtu(ADDRESS, 23)
@@ -123,6 +128,16 @@ class ServerLinksTest {
         subscribedFirst.steps.onMtu(dial, 247, ok = true)
         assertEquals(listOf("linkUp(0,false,247,null)"), subscribedFirst.events.calls)
 
+        // Told out of its turn — the dial is past that step — it is the connection's all the same.
+        val later = Radios()
+        val moved = later.dials(ADDRESS)
+        later.steps.onConnection(moved, connected = true)
+        later.steps.onMtu(moved, 185, ok = true)
+        later.steps.onMtu(moved, 247, ok = true)
+        later.fresh()
+        later.subscribes(ADDRESS)
+        assertEquals(listOf("linkUp(1,false,247,null)"), later.events.calls)
+
         // An exchange that failed told nothing of the connection.
         val failed = Radios()
         failed.subscribes(ADDRESS)
@@ -164,17 +179,23 @@ class ServerLinksTest {
         for (n in listOf(1, MTU_NOTES_MAX - 1, 100)) assertTrue(full.linksAtOnce(address(n)), "note $n was pushed out")
 
         // With the radio: every note and every subscriber, and nobody is told or cancelled — the adapters close all.
+        // The stop is final: what still arrives of a closed server finds nobody, and makes nobody known.
         val stopped = Radios()
         stopped.links.onMtu(ADDRESS, 517)
         stopped.links.onMtu(address(1), 517)
         stopped.subscribes(address(1))
         stopped.fresh()
-        stopped.links.clear()
+        assertEquals(2, stopped.links.kept)
+        stopped.links.stop()
         stopped.writes(address(1), frame)
         assertFalse(stopped.links.send(0, frame))
-        assertTrue(stopped.order.isEmpty(), "${stopped.order}")
-        assertFalse(stopped.linksAtOnce(ADDRESS))
-        assertFalse(stopped.linksAtOnce(address(1)))
+        stopped.links.onMtu(address(2), 517)
+        for (address in listOf(ADDRESS, address(1), address(2))) stopped.subscribes(address)
+        stopped.links.onMtu(ADDRESS, 517)
+        stopped.links.onBond(address(1))
+        stopped.links.onDisconnected(address(1))
+        assertTrue(stopped.order.isEmpty(), "a stopped server's links went on: ${stopped.order}")
+        assertEquals(0, stopped.links.kept, "an address was kept past the radio's stop")
     }
 
     /** §B.3: a frame is one whole write that wants no answer. Anything else from a link is refused, and the link ended. */

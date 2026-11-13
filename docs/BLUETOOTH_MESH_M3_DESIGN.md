@@ -545,7 +545,11 @@ the stop — a dead adapter — throws again in the steps of it, and the flag
 and the notice must not depend on that. A stop is final: one `MeshThread`
 serves one start, and the service makes a new one for a start that comes
 after. Nothing caught is kept or rendered. The `HandlerThread`, and the
-guard that every callback is inside `run`, are M3g's.
+guard that every callback is inside `run`, are M3g's. **As built (M3g
+unit 2, after its review):** `MeshThread(lever, running, steps, notice)`.
+`run` asks the log lever before the body and does not run it where the
+lever does not hold (§N.1.3, §N.7); `start { … }` is the same wrapper
+without that question, for the service's start alone.
 
 ### B.2 `MeshRadioCore`
 
@@ -601,11 +605,10 @@ written or says too little:**
   the reminder's or the deadline's alone.
 - `MeshRadioCore` takes a fourth argument, the picker `PeerTable` forgets
   by (§B.1), a `SecureRandom` unless a test hands one in.
-- **As built (M3g unit 2):** and the log lever, as its second
-  (`MeshRadioCore(engine, lever, port, clock, pick)`): every input asks
-  whether it holds before it reads the time left (§N.1.3). The core
-  implements `LinkEvents`, through which `ServerLinks` and
-  `GattClientSteps` tell it of links (§N.7).
+- **As built (M3g unit 2):** the core implements `LinkEvents`, through
+  which `ServerLinks` and `GattClientSteps` tell it of links (§N.7). It
+  does not take the log lever: the lever is asked by the wrapper every
+  input runs inside, `MeshThread.run` (§N.1.3 as built, §N.7).
 
 **What the core asks of the adapters (for M3g).**
 
@@ -614,6 +617,8 @@ written or says too little:**
 - **The stop's steps cancel the alarm after the radio-down step.**
   `stopRadio()` asks for the deadline's wake even when the service's own
   stop calls it, so an alarm cancelled first is armed again behind it.
+  **As built (M3g unit 2):** `stopRadio()` is a step of its own, before
+  the step that closes the adapters (`MeshThread.steps`, §N.7).
 - One counter of link numbers across both roles, never used twice. An
   inbound connection is numbered at `onConnected` and keeps its number.
 - **Exactly one `onLinkUp` a connection.** A second for the same number
@@ -622,7 +627,10 @@ written or says too little:**
 - `onConnected` only for a central that connected to Haven's server: the
   core cancels after 10 s whatever it is told of.
 - Every `connect(address)` answered once, by `onLinkUp(central = true, …,
-  address)` or `onConnectFailed(address)`.
+  address)` or `onConnectFailed(address)`. **As built (M3g unit 2, after
+  its review):** the core asks the port once an address: a connect the
+  engine asks for while that address is still being dialled is the same
+  dial (`aSecondConnectForAnAddressBeingDialledIsTheSameDial`).
 - `send` answers false only when no completion follows; true is followed
   by exactly one `onSendDone`.
 - `close` of a number the port does not know does nothing: the core closes
@@ -1027,7 +1035,7 @@ review of M3f: `aFloodOfAddressesDoesNotPushOutAPeerUnlessItIsPicked`,
 `aCompletionWhileARefusedFrameWaitsClosesItsLink` and
 `aLinkTheEngineClosesAtOnceHoldsNoLock`; the table's own test is now
 `thePeerTableHoldsSixtyFourAndForgetsOnePickedAmongThoseNotHeld`. With
-M3g's second unit: the twenty-one of §N.2.8 and §N.7, 54 in all.
+M3g's second unit: the twenty-four of §N.2.8 and §N.7, 57 in all.
 The script fails unless the tests that ran are the tests the sources
 declare, by name; it cannot tell a test whose body was emptied.
 
@@ -2996,7 +3004,14 @@ back.** It replaces §M.2's item 5 and settles the "how often" of item 6.
   of `MeshRadioCore` does, before the time left (`MeshRadioCore.kt:137`):
   one JNI call, no timer. A check that fails puts the lever back —
   callbacks still arrive after a stop (§M.2 item 4) — and stops the
-  radio as a stop the user did not make.
+  radio as a stop the user did not make. **As built (unit 2, after its
+  review):** not in the core. The core's inputs are not the only bodies
+  that make a platform call — a dial's steps and the server's answers
+  run from the platform's callbacks with no input of the core's between
+  them — so the question is asked at the one place every body passes
+  through, `MeshThread.run`, before the body: one JNI call a body, and
+  with a lever that does not hold the body is not run. The service's
+  start is the exception, and asks through `StartPolicy.start` (N.7).
 - §M.9 item 3 becomes: with `log.tag.BluetoothGatt` set to VERBOSE over
   `adb` during a link, nothing of the platform's appears under Haven's
   pid.
@@ -3678,7 +3693,7 @@ N.2.3 to N.2.8 say, in `kt/mesh/core/`, with its JVM tests. **No adapter
 exists: nothing here is called by any build, and nothing of it has run
 on Android**; plan §16 has what is proved and how. `MeshNative` does not
 exist either, so the two lever calls this unit writes
-(`StartPolicy.refusal`, `MeshRadioCore`) reach no native code: the rule
+(`StartPolicy.refusal`, `MeshThread.run`) reach no native code: the rule
 above, of the unit that first calls `leverInstall`, falls on the unit
 that gives `LogLever` an implementation something calls. Where the code
 differs from this section, or settles what it left open:
@@ -3703,15 +3718,44 @@ differs from this section, or settles what it left open:
   `noPermission` with the notice and the engine untouched; that the
   foreground comes first is
   `inTheServiceTheForegroundComesBeforeAnyRefusal`.
-- **The check in the core (N.1.3).** `MeshRadioCore` takes the lever as
-  its second argument. A check that fails puts the lever back and ends
-  `running`; once it has ended the lever is not asked again, as the
-  engine is not. **A reading at an instant is taken as enough** (the
-  point unit 1's review left to this unit): every input asks again, so
-  a wrong yes lasts one input. The exact form is not built.
+- **The check while the radio runs (N.1.3): in `MeshThread.run`, and
+  nowhere else.** As first built it was the first thing every input of
+  `MeshRadioCore` did. The review of this unit showed that this leaves
+  the two step classes unasked: a dial's `connect`, `requestMtu`,
+  `discover` and `subscribe`, its second connection 300 ms on, and the
+  server's `answer` and `cancel` are made from the platform's callbacks
+  and a timer, with no input of the core's until the link — up to 25 s.
+  So `MeshThread` takes the lever, and `run` asks it before the body:
+  where it does not hold the lever is put back, **the body is not
+  run**, and the radio stops with its notice. The core's own check is
+  removed, not kept beside it: with both, every input wrote two
+  sentinels, and the core's saw nothing the wrapper had not seen an
+  instant before. What makes one site enough is that every body runs
+  inside `run` — the same rule that keeps a throw from ending the relay
+  path's process (§B.1, F-14): §B.2's contract today, and from unit 4
+  the guard that every adapter callback and handler post is inside
+  `MeshThread.run`. A body outside it is unchecked and unguarded both,
+  and that guard is what fails it.
+  - **The start is not asked by the wrapper**: `MeshThread.start { … }`,
+    for the service's start alone. A sticky restart or a boot comes
+    with no lever in the process, and a service that ended there
+    before `startForeground` would take the process down (N-5);
+    `StartPolicy.start` is what puts the lever in and asks it, after
+    the foreground start and before the radio's first object.
+  - **The user's stop is a body like any other**
+    (`run { stop(notice = false) }`): what a stop closes the platform
+    logs of. With a lever that does not hold it is a stop all the
+    same, put back first — and it posts the notice.
+  - Once stopped, nothing asks again: every body is dropped.
+  - **A reading at an instant is taken as enough** (the point unit 1's
+    review left to this unit): every body asks again, so a wrong yes
+    lasts one body. The exact form is not built.
 - **`ServerLinks` (N.2.3).** Its inputs: `onMtu`, `onDisconnected`,
   `onDialDown`, `onDescriptorWrite`, `onWrite`, `onNotified`, `onBond`;
-  from the core's port `close`, `send`; `clear` at the radio's stop.
+  from the core's port `close`, `send`; `stop` at the radio's stop,
+  which is final — what still arrives of a closed server answers
+  nobody, tells nobody and keeps nothing, and a radio that comes back
+  has a new `ServerLinks`.
   - *What subscribes.* The descriptor's value `01 00`, whole, at offset
     0. `00 00` ends the subscription: the core is told, nobody is
     cancelled. Anything else — indications, another length, a prepared
@@ -3724,11 +3768,17 @@ differs from this section, or settles what it left open:
     the link ended. From a subscriber with no link yet: a frame is
     dropped, anything else refused, and the core's ten seconds end it —
     N.2.3 closes "a linked device". From anyone else: nothing, no
-    answer.
+    answer. **That silence is deliberate, and unlike the descriptor's
+    answer above**: a write to the characteristic that wants a response
+    is no step toward a link, and "nothing is done to a device that
+    never subscribed" is kept whole for it — its request times out, as
+    one to any attribute nobody serves would. The descriptor is where a
+    device asks to become Haven's, so there a malformed asking is told
+    no.
   - *Ended* is the core told first, then `cancel`, as the core drops a
     link itself.
   - *The note's end.* At the server's word of a disconnect, at the
-    dial's own disconnect callback, at the cap and at `clear`. **Not
+    dial's own disconnect callback, at the cap and at `stop`. **Not
     when Haven closes a dial itself**: no callback follows a close, and
     if the connection ended the server is told. The cap is 64
     (`MTU_NOTES_MAX`), a guess above what a phone connects (**[U]**).
@@ -3754,7 +3804,10 @@ differs from this section, or settles what it left open:
     has the 300 ms "on the handler"; the 25 s are there with it, and
     neither is a term of the core's alarm: on a phone that sleeps they
     come late. `onTimer` reads the clock, so calling it early or twice
-    does nothing.
+    does nothing; late, it gives up a dial past its 25 s before it
+    would make that dial's connection. In one pass every connection
+    due is made before the core is told of any failure: told, the core
+    may find its own time up, and nothing is dialled behind that.
   - *Once more* is for a connection that ends before its link at any
     step, not only while connecting: the client is closed, a new one is
     made 300 ms on, and a second end is the failed connect. The 25 s
@@ -3766,7 +3819,16 @@ differs from this section, or settles what it left open:
     the link in that call.
   - After the link: `onFrame`, `onWritten`, `send`, `close`; a link
     lost is the core told, then the client closed; `stop` closes every
-    client and tells nobody.
+    client and tells nobody, and is final: a radio that comes back has
+    new steps, and stopped ones dial nobody.
+  - **A client is closed whatever is thrown on the way.** The ports
+    may throw. The close follows a disconnect that throws, and a link's
+    end the core throws at; `stop` asks every client though one's close
+    throws, forgets them all, and then throws on what was thrown first
+    — so that a Bluetooth-off inside `run` still ends as F-14 has it,
+    while inside a stop's step, each in its own `try`, it ends there.
+    A dial whose step throws before any close stays held, and the stop
+    that follows closes it.
   - An MTU callback out of its turn is noted for `ServerLinks` and
     begins nothing.
 - **Never bond (N.2.5): option (a), in one function.**
@@ -3804,12 +3866,18 @@ differs from this section, or settles what it left open:
   is held to 51 by the JVM test here and by Rust's own test of
   `radio_frame_len`; no guard ties the two, since the engine's constant
   is not a literal, and the engine closes a link it does not admit.
-- **The stop's order (N.2.7)** is `MeshThread.steps(radioDown,
-  cancelAlarm, forget, unpost, end)`: a function, so that
+- **The stop's order (N.2.7)** is `MeshThread.steps(stopRadio,
+  closeAdapters, cancelAlarm, forget, unpost, end)`: a function, so that
   `theStopCancelsTheAlarmAfterTheRadioIsDown` has something to hold.
-- **Tests.** The nineteen names of N.2.8 as given, and two more:
+  N.2.7 has "the adapters closed and `stopRadio()`" as one step; they
+  are two, the core first: a close that throws would otherwise skip
+  `stopRadio`, and the engine would keep links nobody told it are down.
+- **Tests.** The nineteen names of N.2.8 as given, and five more:
   `aCloseForgetsASubscriberAndAFrameGoesToItsDeviceAlone`,
-  `aClientIsClosedAfterEveryDisconnectAndAtTheRadiosStop`. 54 in all.
+  `aClientIsClosedAfterEveryDisconnectAndAtTheRadiosStop`, and after
+  the review `aClientIsClosedThoughAPortCallThrows`,
+  `theServicesStartRunsBeforeTheLeverIsAsked`,
+  `aSecondConnectForAnAddressBeingDialledIsTheSameDial`. 57 in all.
 - **Android 6's JDK.** The classes load on every level from 23, so
   they call nothing of the JDK that Android 6 lacks without desugaring
   — no `java.time`, no `Map.forEach`, `getOrDefault`, `putIfAbsent`,
@@ -3817,7 +3885,7 @@ differs from this section, or settles what it left open:
   `UUID`, `LinkedHashMap` and `SecureRandom`. **Nothing holds this but
   a reader**: the JVM build compiles against JDK 17's API (plan §16's
   mutation that stands).
-- **Guard.** Check 11 has the 54 names. Check 8 gains "the constants'
+- **Guard.** Check 11 has the 57 names. Check 8 gains "the constants'
   one site": no file of the radio's Kotlin but `MeshRadioConstants.kt`
   calls `UUID(`, names a member of `UUID` or `ParcelUuid.fromString`,
   or imports `UUID` under another name. 170 self-test fixtures.
@@ -3825,8 +3893,20 @@ differs from this section, or settles what it left open:
 **What the adapters owe these classes (unit 4's brief, with §B.2's
 list).**
 
+- **One input a body.** Every platform callback, timer and receiver
+  posts one body through `MeshThread.run`, and that body makes one
+  input of one class — the radio's start and its stop, below, are the
+  two bodies that touch all three. `run` asks the lever, so no adapter
+  does; a second input in the same body would run behind a core that
+  may have just stopped.
 - One counter of link numbers, never reset while the process lives,
-  handed to `ServerLinks` and `GattClientSteps` both.
+  handed to `ServerLinks` and `GattClientSteps` both. The two are made
+  with the radio — at each `startRadio()` — and stopped with it: their
+  `stop` is final.
+- **The radio's stop, in this order**, at Bluetooth off as in the
+  service's stop: `MeshRadioCore.stopRadio()`, so the engine is told
+  first; then `GattClientSteps.stop()`, `ServerLinks.stop()` and the
+  platform's own objects closed.
 - `RadioPort.connect(address)` is `GattClientSteps.connect`;
   `close(link)` is both classes' `close`; `send(link, frame)` is the
   client's `send` or else the server's. No adapter asks whose a link
@@ -3840,7 +3920,7 @@ list).**
   `onExecuteWrite` and every read request: nothing. `answer` is
   `sendResponse` with success or the plain failure and no value;
   `cancel` is `cancelConnection`; `notify` answers what the platform
-  answered. `clear()` when the server is closed.
+  answered. `stop()` when the server is closed.
 - **The client's adapter.** One callback object a `connect`, holding
   that call's number; one client kept under it until `close(link)`,
   which releases it whatever its state and is the last call for that
@@ -3849,9 +3929,11 @@ list).**
   `onSubscribed`, `onWritten` with the status as a yes or no; `onFrame`
   with the value (read on the platform's thread below API 33, N.2.2).
   `subscribe` answers false too where the service or the descriptor is
-  not found. `timer(inMs)` replaces the timer before it; `onTimer` is
-  also called at every wake of the core's alarm, before `onWake`.
-  `stop()` when the radio stops.
+  not found. `timer(inMs)` replaces the timer before it. At a wake of
+  the core's alarm two bodies are posted, `onWake` and then `onTimer`,
+  each through `run`: if the first stopped the radio the second is
+  dropped, so nothing is dialled behind a stop. `stop()` when the radio
+  stops.
 - **The bond receiver.** For a state that is not "none":
   `ServerLinks.onBond` and `GattClientSteps.onBond`, the address and
   nothing else of the broadcast.
@@ -3863,7 +3945,51 @@ list).**
   `ChannelWords.BEHIND_THE_LEVER` is answered only after
   `StartPolicy.refusal` answered null, with its word otherwise where
   the method has one. `asked` of `permission` is kept by the channel.
-- **The service.** `StartPolicy.start` with `foreground` as
-  `startForeground`; `Refused` is `MeshThread.stop(notice)` and its
-  word the answer to the channel's `start`, `Run` the deadline to
-  store and `started`. Its stop's steps are `MeshThread.steps`.
+- **The service.** Its start, and only that, is `MeshThread.start
+  { … }`: `StartPolicy.start` with `foreground` as `startForeground`;
+  `Refused` is `MeshThread.stop(notice)` and its word the answer to the
+  channel's `start`, `Run` the deadline to store, `startRadio()` and
+  `started`. Every other body, the user's stop among them, is
+  `MeshThread.run`. Its stop's steps are `MeshThread.steps`.
+
+**Review of unit 2 (independent, read-only, of `9609128`).** No blocker
+and no high finding. Fixed:
+
+- **M1, the lever asked before every platform call.** One site,
+  `MeshThread.run`, as above. Proved by
+  `aLeverThatStopsHoldingIsPutBackAndStopsTheRadio`: a dial's
+  connection, its MTU request, its discovery, its subscription, its
+  second connection, the server's answer, its cancel and a frame's
+  write are each made with a lever that holds and not made with one
+  that does not — the body not run, the lever put back, the stop with
+  its notice — and for a core input the engine is left no link; and by
+  `theServicesStartRunsBeforeTheLeverIsAsked`.
+- **M2, a client closed though a port call throws.** As above, and
+  `stopRadio` a step of its own before the adapters' closes. Proved by
+  `aClientIsClosedThoughAPortCallThrows` and
+  `theStopCancelsTheAlarmAfterTheRadioIsDown`, whose adapters' step
+  throws.
+- **L1, four guarantees no test held**, each now failing under its
+  mutation: a timer that comes late, past the 25 s, makes no
+  connection (`aConnectionThatFailsBeforeItsLinkIsTriedOnceMore`); an
+  MTU of exactly 51 links at a subscription
+  (`aSubscriberLinksAtOnce…`) and on a dial
+  (`anOutgoingLinkIsMtuThenDiscoveryThenSubscription`); an MTU told
+  out of its turn is noted
+  (`theMtuThisPhonesOwnDialWasToldServesThatDevicesSubscription`).
+- **L3, two dials for one address.** Held by the core, which knows
+  what it dials: `aSecondConnectForAnAddressBeingDialledIsTheSameDial`.
+- **L2, recorded, no code**: the two silences above.
+
+Found sound, and what unit 4 may rest on: the channel's words are
+`mesh_radio.dart`'s letter for letter; no address reaches the engine,
+the core but as the dial's own, or a `toString()`; nothing these
+classes call is missing at API 23.
+
+**What cannot be known until adapters exist** (the review's list): whether
+the server is told every disconnect; whether an MTU agreed before a
+subscription reaches the server at all; whether `cancelConnection`
+ends anything; whether ending a link stops a pairing; what callbacks
+still arrive after a close; how late a handler's timer comes on a
+phone that sleeps; whether a write without response is paced by its
+callback.

@@ -16,21 +16,20 @@ import java.security.SecureRandom
  * Bluetooth callbacks and the engine (`docs/BLUETOOTH_MESH_M3_DESIGN.md`
  * §B.2). It runs on the mesh thread alone, inside [MeshThread.run].
  *
- * Every input asks first whether the log lever still holds, then reads the
- * engine's time left, and ends by taking what the engine has for the radio and
- * asking for the next wake. The engine's timers run nowhere else.
+ * Every input reads the engine's time left before anything else, and ends by
+ * taking what the engine has for the radio and asking for the next wake. The
+ * engine's timers run nowhere else.
  *
  * [clock] is milliseconds that keep counting while the phone sleeps. [pick]
  * is [PeerTable]'s: whom it forgets is not for a stranger to predict.
  */
 class MeshRadioCore(
     private val engine: MeshEngineApi,
-    private val lever: LogLever,
     private val port: RadioPort,
     private val clock: () -> Long,
     pick: (Int) -> Int = SecureRandom()::nextInt,
 ) : LinkEvents {
-    /** False once the lever no longer holds, the engine is gone, or it has answered what is no output: the service stops. */
+    /** False once the engine is gone, or has answered what is no output: the service stops. */
     var running = true
         private set
 
@@ -137,12 +136,6 @@ class MeshRadioCore(
     /** The engine's time left, or null when the service is to stop. */
     private fun left(): Long? {
         if (!running) return null
-        if (!lever.leverHolds()) {
-            // The platform's callbacks outlive the stop and log in each: the lever goes back in.
-            lever.leverInstall()
-            running = false
-            return null
-        }
         val left = engine.leftMs()
         when (deadline.at(left)) {
             DeadlineStep.STOP -> {
@@ -249,8 +242,8 @@ class MeshRadioCore(
         val address = peers.addressOf(peer)
         if (address == null) {
             engine.connectFailed(peer)
-        } else {
-            dialing[address] = peer
+        } else if (dialing.put(address, peer) == null) {
+            // Asked again while the port still dials it, it is the same dial: the port answers by the address, once.
             port.connect(address)
         }
     }

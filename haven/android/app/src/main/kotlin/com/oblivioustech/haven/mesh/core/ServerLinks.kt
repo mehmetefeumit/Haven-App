@@ -36,6 +36,9 @@ interface ServerPort {
  * while the connection lives and read by a subscriber's link alone.
  *
  * Addresses stay here and in the adapter: the core is told a link's [number].
+ *
+ * One of these serves one GATT server: [stop] is final, and a radio that comes
+ * back has a new one.
  */
 class ServerLinks(
     private val port: ServerPort,
@@ -46,9 +49,14 @@ class ServerLinks(
 
     private val mtus = LinkedHashMap<String, Int>()
     private val subscribers = LinkedHashMap<String, Subscriber>()
+    private var stopped = false
+
+    /** How many devices anything is kept of. None, for good, once stopped. */
+    internal val kept: Int get() = (mtus.keys + subscribers.keys).size
 
     /** The MTU of [address]'s connection, as the server's callback or the dial's told it. */
     fun onMtu(address: String, mtu: Int) {
+        if (stopped) return
         if (address !in mtus && mtus.size == MTU_NOTES_MAX) mtus.remove(mtus.keys.first())
         mtus[address] = mtu
         val subscriber = subscribers[address] ?: return
@@ -77,6 +85,7 @@ class ServerLinks(
         offset: Int,
         value: ByteArray,
     ) {
+        if (stopped) return
         val enable = when {
             prepared || offset != 0 || value.size != 2 || value[1] != NONE -> null
             value[0] == NOTIFICATIONS -> true
@@ -143,8 +152,13 @@ class ServerLinks(
     /** Hands [frame] to the subscriber numbered [link]; false for any other number. */
     fun send(link: Long, frame: ByteArray): Boolean = addressOf(link)?.let { port.notify(it, frame) } ?: false
 
-    /** The radio stops: the adapter closes the server, and nothing outlives it here. */
-    fun clear() {
+    /**
+     * The radio stops and the adapter closes the server: nothing outlives it
+     * here, and a callback that still arrives finds nobody and makes nobody
+     * known. The core has told the engine, so nobody is told.
+     */
+    fun stop() {
+        stopped = true
         mtus.clear()
         subscribers.clear()
     }

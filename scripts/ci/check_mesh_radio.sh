@@ -338,6 +338,9 @@ readonly -a JVM_TEST_NAMES=(
   theChannelsWordsAreTheseAndTheStatusIsOneFunction
   onlyThreeChannelMethodsAreBehindTheLever
   theTapHeldForAnEngineIsKeepOnIfAnyWas
+  aSecondConnectForAnAddressBeingDialledIsTheSameDial
+  theServicesStartRunsBeforeTheLeverIsAsked
+  aClientIsClosedThoughAPortCallThrows
 )
 
 readonly B='(^|[^A-Za-z0-9_])'

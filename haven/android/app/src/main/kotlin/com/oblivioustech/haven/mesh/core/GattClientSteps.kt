@@ -48,9 +48,12 @@ interface GattClientPort {
  * Every connection made has a number of its own — the link's, once it is
  * one — and every callback comes back under it: one that arrives after its
  * client was closed names a number nobody holds, and does nothing. A client
- * opened is closed, on every path: a leaked one is what exhausts Android's.
+ * opened is closed, on every path, whatever a call to the port throws on the
+ * way: a leaked one is what exhausts Android's.
  *
- * [clock] is milliseconds that keep counting while the phone sleeps.
+ * One of these serves one radio: [stop] is final, and a radio that comes back
+ * has a new one. [clock] is milliseconds that keep counting while the phone
+ * sleeps.
  */
 class GattClientSteps(
     private val port: GattClientPort,
@@ -68,6 +71,7 @@ class GattClientSteps(
     }
 
     private val dials = LinkedHashMap<Long, Dial>()
+    private var stopped = false
 
     /**
      * The core dials [address]. The connection is made at the timer, not
@@ -75,21 +79,32 @@ class GattClientSteps(
      * answered.
      */
     fun connect(address: String) {
+        if (stopped) return
         val now = clock()
         dials[number()] = Dial(address, giveUpAt = now + DIAL_TIMEOUT_MS, opensAt = now, retried = false)
         arm()
     }
 
+    /**
+     * What is due is done: a dial past its time is given up — and its second
+     * connection, if that was still to come, never made — and a connection
+     * whose moment has come is made. Every connection of the pass is made
+     * before the core is told of any failure: told, it may find its own time
+     * up, and nothing is dialled behind that.
+     */
     fun onTimer() {
         val now = clock()
-        for ((link, dial) in dials.entries.toList()) {
-            when {
-                dial.step == Step.LINKED -> {}
-                dial.giveUpAt <= now -> fail(link, dial)
-                dial.step == Step.WAITING && dial.opensAt <= now -> begin(link, dial, Step.CONNECTING, port.connect(link, dial.address))
-            }
-        }
+        val (spent, live) = dials.toList().filter { it.second.step != Step.LINKED }.partition { it.second.giveUpAt <= now }
+        val unmade = live.filter { (link, dial) -> dial.step == Step.WAITING && dial.opensAt <= now && !open(link, dial) }
+        for ((link, dial) in spent + unmade) fail(link, dial)
         arm()
+    }
+
+    /** Makes the connection a dial waited for; false where the platform made no client. */
+    private fun open(link: Long, dial: Dial): Boolean {
+        val made = port.connect(link, dial.address)
+        if (made) dial.step = Step.CONNECTING
+        return made
     }
 
     /** [connected]: the platform reports success and the connected state. Anything else is a connection that is gone. */
@@ -101,9 +116,12 @@ class GattClientSteps(
         }
         dials.remove(link)
         val linked = dial.step == Step.LINKED
-        // The core first, as it drops a link itself: a close that throws leaves it none.
-        if (linked) events.onLinkDown(link)
-        port.close(link)
+        try {
+            // The core first, as it drops a link itself: a close that throws leaves it none.
+            if (linked) events.onLinkDown(link)
+        } finally {
+            port.close(link)
+        }
         links.onDialDown(dial.address)
         when {
             linked -> {}
@@ -156,8 +174,11 @@ class GattClientSteps(
                 fail(link, dial)
             } else {
                 dials.remove(link)
-                events.onLinkDown(link)
-                shut(link)
+                try {
+                    events.onLinkDown(link)
+                } finally {
+                    shut(link)
+                }
             }
         }
     }
@@ -170,10 +191,24 @@ class GattClientSteps(
     /** Hands [frame] to the link numbered [link]; false for any other number. */
     fun send(link: Long, frame: ByteArray): Boolean = linked(link) && port.write(link, frame)
 
-    /** The radio stops. The core has told the engine of every dial and link, so nobody is told here. */
+    /**
+     * The radio stops. The core has told the engine of every dial and link, so
+     * nobody is told here. Every client is closed though one's close throws;
+     * what was thrown first is thrown on once all are, for [MeshThread].
+     */
     fun stop() {
-        for ((link, dial) in dials) if (dial.step != Step.WAITING) port.close(link)
+        stopped = true
+        var thrown: Throwable? = null
+        for ((link, dial) in dials) {
+            if (dial.step == Step.WAITING) continue
+            try {
+                port.close(link)
+            } catch (caught: Throwable) {
+                if (thrown == null) thrown = caught
+            }
+        }
         dials.clear()
+        thrown?.let { throw it }
     }
 
     private fun linked(link: Long) = dials[link]?.step == Step.LINKED
@@ -190,8 +225,11 @@ class GattClientSteps(
     }
 
     private fun shut(link: Long) {
-        port.disconnect(link)
-        port.close(link)
+        try {
+            port.disconnect(link)
+        } finally {
+            port.close(link)
+        }
     }
 
     /** One timer for the earliest thing due: a connection to make, or a dial to give up. */

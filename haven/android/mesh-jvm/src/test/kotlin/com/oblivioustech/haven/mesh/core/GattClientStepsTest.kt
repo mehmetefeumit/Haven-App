@@ -2,6 +2,7 @@ package com.oblivioustech.haven.mesh.core
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -28,6 +29,11 @@ class GattClientStepsTest {
             ),
             radios.order,
         )
+
+        // The smallest MTU that carries a frame is a link's.
+        val smallest = Radios()
+        smallest.dialled(ADDRESS, mtu = 51)
+        assertEquals(listOf("linkUp(0,true,51,$ADDRESS)"), smallest.events.calls)
 
         // A link: its frames and its completions are told under its number, and a frame goes out on it alone.
         radios.fresh()
@@ -126,6 +132,19 @@ class GattClientStepsTest {
         two.pass(10_000)
         assertEquals(listOf(address(1), address(2)).map { "connectFailed($it)" }, two.events.calls)
 
+        // Every connection of a pass is made before the core is told of a failure in it: told, the core may find
+        // its own time up, and nothing is dialled behind that.
+        val pass = Radios()
+        pass.dials(address(1))
+        pass.now = 25_000
+        pass.steps.connect(address(2))
+        pass.fresh()
+        pass.steps.onTimer()
+        assertEquals(
+            listOf("connect(1,${address(2)})", "disconnect(0)", "close(0)", "connectFailed(${address(1)})"),
+            pass.order.filterNot { it.startsWith("timer(") },
+        )
+
         // A client the platform did not make has nothing to close, and its dial is answered at the timer all the same.
         val unmade = Radios()
         unmade.client.refuses += "connect"
@@ -207,6 +226,18 @@ class GattClientStepsTest {
         spent.pass(60_000)
         assertEquals(listOf("connect(0,$ADDRESS)"), spent.client.called("connect"))
         assertEquals(listOf("connectFailed($ADDRESS)"), spent.events.calls)
+        // Nor when the timer itself comes late — a phone that slept — and finds both due: the first connection of a
+        // dial, or its second.
+        val late = Radios()
+        late.steps.connect(ADDRESS)
+        late.pass(30_000)
+        val lateAgain = Radios()
+        lateAgain.dials(ADDRESS)
+        lateAgain.now = 24_800
+        lateAgain.steps.onConnection(0, connected = false)
+        lateAgain.pass(5_000)
+        assertTrue(late.client.called("connect").isEmpty() && lateAgain.client.called("connect").size == 1, "a connection after the dial's time")
+        for (radios in listOf(late, lateAgain)) assertEquals(listOf("connectFailed($ADDRESS)"), radios.events.calls)
     }
 
     private fun callbacksOf(radios: Radios) = listOf<(Long) -> Unit>(
@@ -252,8 +283,61 @@ class GattClientStepsTest {
         stopped.steps.onDiscovered(discovering, ok = true)
         stopped.steps.onConnection(connecting, connected = false)
         stopped.pass(60_000)
+        // The stop is final: a radio that comes back has steps of its own, and these dial nobody.
+        stopped.steps.connect(address(5))
         assertEquals(3, stopped.order.size, "a dial outlived the radio: ${stopped.order}")
 
         for (radios in listOf(lost, closed, stopped)) assertTrue(radios.client.open.isEmpty(), "a client was left open")
+    }
+
+    /**
+     * A call to the port may throw — the adapter changed under it — and what is thrown stops the radio. A client
+     * must be closed all the same: forgotten and not closed, it is one nothing closes again.
+     */
+    @Test
+    fun aClientIsClosedThoughAPortCallThrows() {
+        // A dial given up, the core's close, a bond: the disconnect throws, and the close is made behind it.
+        val endings = mapOf<String, Radios.() -> Unit>(
+            "a dial given up" to { steps.onDiscovered(0, ok = false) },
+            "the core's close" to { steps.close(0) },
+            "a bond" to { steps.onBond(ADDRESS) },
+        )
+        for ((name, ends) in endings) {
+            val radios = Radios()
+            if (name == "a dial given up") {
+                radios.dials(ADDRESS)
+                radios.steps.onConnection(0, connected = true)
+                radios.steps.onMtu(0, 517, ok = true)
+            } else {
+                radios.dialled(ADDRESS)
+            }
+            radios.client.throws += "disconnect"
+            radios.fresh()
+            assertFailsWith<Thrown>(name) { radios.ends() }
+            assertEquals(listOf("disconnect(0)", "close(0)"), radios.client.calls, name)
+            assertTrue(radios.client.open.isEmpty(), "$name left its client open")
+        }
+
+        // The core throws as it is told a link is down — its own port, the engine: the client is closed behind that.
+        for (ends in listOf<Radios.() -> Unit>({ steps.onConnection(0, connected = false) }, { steps.onBond(ADDRESS) })) {
+            val radios = Radios()
+            radios.dialled(ADDRESS)
+            radios.events.then = { if (it.startsWith("linkDown(")) throw Thrown() }
+            assertFailsWith<Thrown> { radios.ends() }
+            assertTrue(radios.client.open.isEmpty(), "a client was left open behind what the core threw")
+        }
+
+        // The radio's stop: a close that throws skips no other client, and is thrown on once every one was asked.
+        val stopped = Radios()
+        for (n in 1..3) stopped.dials(address(n))
+        stopped.client.throws += "close(0)"
+        stopped.fresh()
+        assertFailsWith<Thrown> { stopped.steps.stop() }
+        assertEquals(listOf("close(0)", "close(1)", "close(2)"), stopped.order)
+        // All three are forgotten: the one that would not close is not asked again.
+        stopped.steps.stop()
+        stopped.steps.onConnection(1, connected = true)
+        assertEquals(3, stopped.order.size)
+        assertEquals(setOf(0L), stopped.client.open)
     }
 }
