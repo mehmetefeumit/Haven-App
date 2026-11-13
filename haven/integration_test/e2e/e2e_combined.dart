@@ -1474,10 +1474,10 @@ void main() {
       // instance here. It is scoped to this test and not reused.
       // ------------------------------------------------------------------
       final relayManager = await RelayManagerFfi.newInstance();
-      final daveKp = await relayManager.fetchMemberKeypackage(
+      final daveKp = (await relayManager.fetchMemberKeypackage(
         pubkey: fe2Dave.pubkeyHex,
         circle: fe2Alice.user.circleManager,
-      );
+      )).member;
       if (daveKp == null) {
         throw StateError(
           '[FE-2] fetchMemberKeypackage returned null for Dave — '
@@ -2128,10 +2128,10 @@ void main() {
             authorPubkeyHex: _alicePubkeyHex(),
           );
           final relayManager = await RelayManagerFfi.newInstance();
-          final aliceKp = await relayManager.fetchMemberKeypackage(
+          final aliceKp = (await relayManager.fetchMemberKeypackage(
             pubkey: _alicePubkeyHex(),
             circle: bob.user.circleManager,
-          );
+          )).member;
           if (aliceKp == null) {
             throw StateError(
               '[M11:f] fetchMemberKeypackage returned null for Alice — her KP '
@@ -2645,10 +2645,10 @@ void main() {
             authorPubkeyHex: _alicePubkeyHex(),
           );
           final relayManager = await RelayManagerFfi.newInstance();
-          final aliceKp = await relayManager.fetchMemberKeypackage(
+          final aliceKp = (await relayManager.fetchMemberKeypackage(
             pubkey: _alicePubkeyHex(),
             circle: bob.user.circleManager,
-          );
+          )).member;
           if (aliceKp == null) {
             throw StateError(
               '[M11:g] fetchMemberKeypackage returned null for Alice.',
@@ -6241,10 +6241,10 @@ Future<CircleFfi> _m11AliceCreatesCircle({
   final members = <MemberKeyPackageFfi>[];
   for (final invitee in invitees) {
     await waitForKeyPackage(relay: relay, authorPubkeyHex: invitee.pubkeyHex);
-    final kp = await relayManager.fetchMemberKeypackage(
+    final kp = (await relayManager.fetchMemberKeypackage(
       pubkey: invitee.pubkeyHex,
       circle: manager,
-    );
+    )).member;
     if (kp == null) {
       throw StateError(
         '[M11] fetchMemberKeypackage returned null for ${invitee.role}',

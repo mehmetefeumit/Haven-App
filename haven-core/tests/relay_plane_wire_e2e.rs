@@ -9,7 +9,9 @@
 //! her invitees — run the account traffic, the lookups an invite makes, two
 //! circles (one drawn from the location pool, one on a relay list that is then
 //! changed), locations, a leave, both catch-up planes, the live plane and the
-//! profile plane. The ground truth is the test's own: who listed which relay
+//! profile plane; Alice's relay lists also go to the discovery relay, as the
+//! relay-list heal sends them (owner-directed 2026-11-12), and her key package
+//! never does. The ground truth is the test's own: who listed which relay
 //! and which routing each circle had, with `[added, removed)` in the step
 //! counter, a routing recorded at the call that stages it. Every frame a front
 //! recorded is judged; the run is clean, every row it drove was admitted
@@ -26,6 +28,9 @@
 mod helpers;
 
 use std::sync::Arc;
+
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use std::time::Duration;
 
 use haven_core::circle::{
@@ -33,6 +38,7 @@ use haven_core::circle::{
 };
 use haven_core::location::LocationMessage;
 use haven_core::nostr::mls::types::GroupId;
+use haven_core::nostr::mls::TrackedKeyPackage;
 use haven_core::profile::{
     build_metadata_event, fetch_profiles_assigned, set_profile_relays_for_test, PendingEdits,
     ProfileMetadata,
@@ -44,11 +50,14 @@ use haven_core::relay::fanout::{
     LocationSeal, Publishing, RelayMappedFanout, WallClock,
 };
 use haven_core::relay::live_sync::{CircleSpec, LiveSyncCore};
-use haven_core::relay::maintenance::build_kp_maintenance_events;
+use haven_core::relay::maintenance::{
+    build_kp_maintenance_events, kp_event_d_tag, own_presence, read_kp_lifetime, OwnEventPresence,
+    OwnRelayLists,
+};
 use haven_core::relay::recording_front::{RecordedFrame, RecordingFront};
 use haven_core::relay::{
     allow_ws_loopback_for_test, build_nip65_relay_list_event, build_relay_list_event,
-    set_discovery_relays_for_test, RelayManager,
+    set_discovery_relays_for_test, MemberLookup, RelayManager,
 };
 use haven_local_relay::planes::frame::Frame;
 use haven_local_relay::planes::judge::{judge, Class, Finding, Judgement, Observed};
@@ -430,19 +439,14 @@ impl Device {
             .key_package_admission_rule(target)
             .await
             .expect("the admission rule");
-        let inbox = self.pool.fetch_inbox_relays(who).await.expect("10050");
-        let nip65 = self.pool.fetch_nip65_relay_list(who).await.expect("10002");
-        let event = self
-            .pool
-            .fetch_keypackage_for_invite(who, &nip65.write, &admit)
+        match Box::pin(RelayManager::lookup_member_for_invite(who, &admit))
             .await
             .expect("the key-package lookup")
-            .expect("a key package is found");
-        MemberKeyPackage {
-            key_package_event: event,
-            inbox_relays: inbox,
-            nip65_relays: nip65.read,
-            nip65_write_relays: nip65.write,
+        {
+            MemberLookup::Found(member) => *member,
+            MemberLookup::NotFound | MemberLookup::Incomplete => {
+                panic!("a key package is found")
+            }
         }
     }
 
@@ -545,6 +549,27 @@ fn junk(h: &str, count: usize, secs: u64) -> Vec<Event> {
         .collect()
 }
 
+/// What the relay-list heal sends `relay` for `lists`: the probe of the
+/// author's own list, then the list.
+async fn heal_onto(device: &Device, relay: &str, lists: &[&Event]) {
+    for event in lists {
+        let probe = Filter::new()
+            .kind(event.kind)
+            .author(device.keys.public_key())
+            .limit(4);
+        device
+            .pool
+            .fetch_events(probe, &[relay.to_owned()], Some(budget()))
+            .await
+            .expect("the heal's probe");
+        device
+            .pool
+            .publish_event(event, &[relay.to_owned()])
+            .await
+            .expect("the relay list is published");
+    }
+}
+
 /// The rows the lifecycle drives, each of which must be admitted at least
 /// once: a row nobody sent would pass vacuously.
 const DRIVEN: [Row; 15] = [
@@ -567,7 +592,8 @@ const DRIVEN: [Row; 15] = [
 
 /// The clean judgement's own assertions: no finding, every driven row
 /// admitted, the key-package lookup both on an invitee's write relay and on
-/// discovery, every front reached.
+/// discovery, both of an account's relay lists on discovery, every front
+/// reached.
 fn assert_clean(world: &mut World) {
     let judgement = world.judge();
     let findings: Vec<Seen> = judgement.findings.iter().map(seen).collect();
@@ -591,6 +617,10 @@ fn assert_clean(world: &mut World) {
     assert!(
         hit(Row::Req30443A, Some(R::BWrite)) && hit(Row::Req30443A, Some(R::Disc)),
         "a key package was not looked up both on an invitee's write relay and on discovery",
+    );
+    assert!(
+        hit(Row::Ev10002, Some(R::Disc)) && hit(Row::Ev10050, Some(R::Disc)),
+        "an account's relay lists did not both reach discovery",
     );
     for role in ROLES {
         assert!(
@@ -682,7 +712,7 @@ async fn lifecycle_then_plants(watch: &DialWatch, needles: &mut Vec<String>) {
 
     // Step 1: each account's own traffic on its own lists. Bob's key package
     // to his key-package relay; Alice's key package and relay lists, and the
-    // status probe of each.
+    // relay settings check of her own relays and the lookup relay.
     w.next();
     let bob_kp = bob.key_package(&w.url(R::BWrite)).await;
     bob.pool
@@ -701,20 +731,50 @@ async fn lifecycle_then_plants(watch: &DialWatch, needles: &mut Vec<String>) {
             .publish_event(event, &[w.url(relay)])
             .await
             .expect("alice's own event is published");
-        let probe = Filter::new()
-            .kind(event.kind)
-            .author(alice.keys.public_key())
-            .limit(5);
-        assert!(
-            alice
-                .pool
-                .check_event_on_relay(&w.url(relay), probe)
-                .await
-                .expect("the status probe")
-                .found,
-            "the status probe does not find what was just published",
-        );
     }
+    // Her relay lists go to the discovery relay too, after the heal's probe
+    // there; her key package does not (plant 6 below).
+    Box::pin(heal_onto(
+        &alice,
+        &w.url(R::Disc),
+        &[&alice_10002, &alice_10050],
+    ))
+    .await;
+    let package = BASE64
+        .decode(&alice_kp.content)
+        .expect("the 30443 content is base64");
+    let lifetime = read_kp_lifetime(&package);
+    let tracked = TrackedKeyPackage {
+        slot: kp_event_d_tag(&alice_kp).expect("a slot"),
+        published: Some(alice_kp.clone()),
+        created_at: Some(alice_kp.created_at.as_secs()),
+        package,
+        pending: None,
+        adopted: false,
+        replacement_owed: false,
+        consumed_but_held: false,
+    };
+    let (inbox, key_packages, lookup) = ([w.url(R::AInbox)], [w.url(R::AKp)], [w.url(R::Disc)]);
+    let rows = Box::pin(own_presence(
+        &alice.pool,
+        &alice.keys.public_key(),
+        &OwnRelayLists {
+            inbox: &inbox,
+            key_package: &key_packages,
+            lookup: &lookup,
+        },
+        Some(&tracked),
+        lifetime,
+    ))
+    .await;
+    assert!(
+        rows[0].inbox_relay_list == OwnEventPresence::Current
+            && rows[1].key_package == OwnEventPresence::Current
+            && rows[1].relay_list == OwnEventPresence::Current
+            && rows[2].relay_list == OwnEventPresence::Current
+            && rows[2].inbox_relay_list == OwnEventPresence::Current,
+        "the relay settings check does not find what was just published",
+    );
 
     // Step 2: Alice looks her invitees up, as an invite does.
     w.next();
@@ -729,26 +789,26 @@ async fn lifecycle_then_plants(watch: &DialWatch, needles: &mut Vec<String>) {
     let step = w.next();
     let alice_transport = alice.pool.fanout_transport();
     let driver = alice.driver(&alice_transport);
-    let a = driver
-        .create_circle(
-            &alice.circle,
-            &alice.keys,
-            vec![bob_member.clone()],
-            &CircleConfig::new("A"),
-        )
-        .await
-        .expect("circle A is created")
-        .circle;
-    let b = driver
-        .create_circle(
-            &alice.circle,
-            &alice.keys,
-            vec![bob_member],
-            &CircleConfig::new("B").with_relays([w.url(R::LocB)]),
-        )
-        .await
-        .expect("circle B is created")
-        .circle;
+    // Each driver call boxed: their futures would otherwise all sit in this
+    // scenario's one frame.
+    let a = Box::pin(driver.create_circle(
+        &alice.circle,
+        &alice.keys,
+        vec![bob_member.clone()],
+        &CircleConfig::new("A"),
+    ))
+    .await
+    .expect("circle A is created")
+    .circle;
+    let b = Box::pin(driver.create_circle(
+        &alice.circle,
+        &alice.keys,
+        vec![bob_member],
+        &CircleConfig::new("B").with_relays([w.url(R::LocB)]),
+    ))
+    .await
+    .expect("circle B is created")
+    .circle;
     assert!(
         a.relays == [w.url(R::LocA)] && b.relays == [w.url(R::LocB)],
         "premise: A was drawn from the location pool and B kept the list it was given",
@@ -815,8 +875,7 @@ async fn lifecycle_then_plants(watch: &DialWatch, needles: &mut Vec<String>) {
             carol_member.inbox_relays == [w.url(R::CInbox)],
             "premise: the lookup read carol's inbox list",
         );
-        let added = driver
-            .add_members(&alice.circle, gid, &[carol_member])
+        let added = Box::pin(driver.add_members(&alice.circle, gid, &[carol_member]))
             .await
             .expect("carol is invited");
         assert!(
@@ -842,8 +901,7 @@ async fn lifecycle_then_plants(watch: &DialWatch, needles: &mut Vec<String>) {
     // routing it leaves, which stays kept, and the next location to the new.
     let step = w.next();
     w.table.add_routing(&b_h, World::ix(R::LocC), step);
-    let moved = driver
-        .update_relays(&alice.circle, &b_gid, &[w.url(R::LocC)])
+    let moved = Box::pin(driver.update_relays(&alice.circle, &b_gid, &[w.url(R::LocC)]))
         .await
         .expect("circle B's relays change");
     assert!(
@@ -902,11 +960,13 @@ async fn lifecycle_then_plants(watch: &DialWatch, needles: &mut Vec<String>) {
     w.next();
     let bob_transport = bob.pool.fanout_transport();
     bob.share(&bob_transport, &a_gid).await;
-    let left = bob
-        .driver(&bob_transport)
-        .leave(&bob.circle, &b_gid, &bob.keys.public_key())
-        .await
-        .expect("bob's leave runs");
+    let left = Box::pin(bob.driver(&bob_transport).leave(
+        &bob.circle,
+        &b_gid,
+        &bob.keys.public_key(),
+    ))
+    .await
+    .expect("bob's leave runs");
     assert!(
         left.status == LeaveStatus::Proposed,
         "bob's leave was not proposed"
@@ -1107,7 +1167,25 @@ async fn lifecycle_then_plants(watch: &DialWatch, needles: &mut Vec<String>) {
         )],
     );
 
-    // Plant 6, last: an invitee whose lists steer an invite. Dave's inbox
+    // Plant 6: Alice's key package on the discovery relay, which takes her
+    // relay lists and nothing else of hers.
+    w.next();
+    Box::pin(alice.pool.publish_event(&alice_kp, &[w.url(R::Disc)]))
+        .await
+        .expect("the relay takes it");
+    plant(
+        &mut w,
+        6,
+        "a key package on discovery",
+        &[(
+            R::Disc as u32,
+            Verb::Event,
+            Some(Row::Ev30443),
+            Class::CrossedEvent,
+        )],
+    );
+
+    // Plant 7, last: an invitee whose lists steer an invite. Dave's inbox
     // list names circle A's location relay and a profile relay ahead of
     // Alice's inbox (the seed every install shares, so that overlap is
     // declared), and his NIP-65 write set names the profile relay; his ground
@@ -1139,8 +1217,7 @@ async fn lifecycle_then_plants(watch: &DialWatch, needles: &mut Vec<String>) {
         step,
     );
     let dave_member = alice.look_up(&dave.hex(), Some(&a_gid)).await;
-    let invited = driver
-        .add_members(&alice.circle, &a_gid, &[dave_member])
+    let invited = Box::pin(driver.add_members(&alice.circle, &a_gid, &[dave_member]))
         .await
         .expect("dave's invitation runs");
     assert!(
@@ -1149,7 +1226,7 @@ async fn lifecycle_then_plants(watch: &DialWatch, needles: &mut Vec<String>) {
     );
     plant(
         &mut w,
-        6,
+        7,
         "an invitee's lists steering the invite",
         &[
             (

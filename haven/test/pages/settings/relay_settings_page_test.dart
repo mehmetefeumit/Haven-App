@@ -18,10 +18,15 @@ import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/constants/relays.dart';
 import 'package:haven/src/pages/settings/relay_settings_page.dart';
 import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/rust/api.dart'
+    show OwnEventPresenceFfi, OwnRelayPresenceFfi;
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/relay_preferences_service.dart';
+import 'package:haven/src/services/relay_service.dart';
+import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/widgets/common/refresh_ring/refresh_ring_button.dart';
 
 import '../../mocks/mock_circle_service.dart';
@@ -41,9 +46,12 @@ void main() {
     required MockRelayPreferencesService mock,
     Identity? identity,
     Future<RelayPreferencesService> Function()? openService,
+    MockRelayService? relay,
+    List<Override> extra = const [],
   }) {
     return ProviderScope(
       overrides: [
+        ...extra,
         identityProvider.overrideWith(
           (ref) async => identity ?? _stubIdentity(),
         ),
@@ -53,7 +61,7 @@ void main() {
         // disconnect_relay routes through RelayService now; tests don't
         // exercise the persistent FFI client, but the page still calls
         // it on remove and would otherwise hit production NostrRelayService.
-        relayServiceProvider.overrideWithValue(MockRelayService()),
+        relayServiceProvider.overrideWithValue(relay ?? MockRelayService()),
         // Removing/restoring a relay invalidates `keyPackagePublisherProvider`
         // downstream (`InboxRelaysNotifier._invalidateDownstream`), which now
         // resolves a real `CircleManagerFfi` via `maintenanceServiceProvider`
@@ -794,6 +802,183 @@ void main() {
   // the relay providers cache that as an `AsyncError` with no previous value.
   // Reading such a value with `.value` throws, and a release build paints the
   // throwing widget as a grey box filling the page.
+  group('RelaySettingsPage — per relay, per kind', () {
+    OwnRelayPresenceFfi row(
+      String url, {
+      bool own = true,
+      bool lookup = false,
+      OwnEventPresenceFfi keyPackage = OwnEventPresenceFfi.notExpected,
+      OwnEventPresenceFfi relayList = OwnEventPresenceFfi.notExpected,
+      OwnEventPresenceFfi inboxRelayList = OwnEventPresenceFfi.notExpected,
+    }) => OwnRelayPresenceFfi(
+      relayUrl: url,
+      own: own,
+      lookup: lookup,
+      reachable: true,
+      keyPackage: keyPackage,
+      relayList: relayList,
+      inboxRelayList: inboxRelayList,
+    );
+
+    void growSurface(WidgetTester tester) {
+      tester.view.physicalSize = const Size(800, 3200);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+    }
+
+    testWidgets(
+      'each row says, per expected kind, what the relay serves — Missing and '
+      "Can't reach apart",
+      (tester) async {
+        growSurface(tester);
+        final relay = MockRelayService()
+          ..ownPresence = [
+            row(
+              'wss://inbox.example.com',
+              inboxRelayList: OwnEventPresenceFfi.noAnswer,
+            ),
+            row(
+              'wss://kp.example.com',
+              keyPackage: OwnEventPresenceFfi.outdated,
+              relayList: OwnEventPresenceFfi.missing,
+            ),
+            row(
+              'wss://lookup.example.com',
+              own: false,
+              lookup: true,
+              relayList: OwnEventPresenceFfi.current,
+              inboxRelayList: OwnEventPresenceFfi.current,
+            ),
+          ];
+        await tester.pumpWidget(buildApp(mock: seededMock(), relay: relay));
+        await tester.pumpAndSettle();
+
+        expect(find.text("Inbox list: Can't reach"), findsOneWidget);
+        expect(find.text('KeyPackage: Old version'), findsOneWidget);
+        expect(find.text('Relay list: Missing'), findsOneWidget);
+        expect(find.text('Lookup relays'), findsOneWidget);
+        expect(find.text('lookup.example.com'), findsOneWidget);
+        expect(find.text('Relay list: Published'), findsOneWidget);
+        expect(find.text('Inbox list: Published'), findsOneWidget);
+        expect(
+          find.text('KeyPackage: Published'),
+          findsNothing,
+          reason: 'a lookup relay is never a KeyPackage destination',
+        );
+      },
+    );
+
+    testWidgets('a row is one sentence to a screen reader; the dot is not '
+        'read', (tester) async {
+      growSurface(tester);
+      final semantics = tester.ensureSemantics();
+      final relay = MockRelayService()
+        ..ownPresence = [
+          row(
+            'wss://kp.example.com',
+            keyPackage: OwnEventPresenceFfi.current,
+            relayList: OwnEventPresenceFfi.missing,
+          ),
+        ];
+      await tester.pumpWidget(buildApp(mock: seededMock(), relay: relay));
+      await tester.pumpAndSettle();
+
+      final node = tester.getSemantics(find.text('kp.example.com'));
+      expect(node.label, contains('kp.example.com'));
+      expect(node.label, contains('KeyPackage: Published'));
+      expect(node.label, contains('Relay list: Missing'));
+      expect(
+        find.bySemanticsLabel(RegExp('^Relay status')),
+        findsNothing,
+        reason: 'the dot is decorative: the words already say it',
+      );
+      semantics.dispose();
+    });
+
+    testWidgets('Republish is not offered for a relay that only did not '
+        'answer', (tester) async {
+      growSurface(tester);
+      final relay = MockRelayService()
+        ..ownPresence = [
+          row(
+            'wss://inbox.example.com',
+            inboxRelayList: OwnEventPresenceFfi.noAnswer,
+          ),
+          row(
+            'wss://kp.example.com',
+            keyPackage: OwnEventPresenceFfi.current,
+            relayList: OwnEventPresenceFfi.current,
+          ),
+        ];
+      await tester.pumpWidget(buildApp(mock: seededMock(), relay: relay));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(WidgetKeys.relaySettingsRepublish), findsNothing);
+    });
+
+    testWidgets('Republish publishes, checks again, is disabled while it '
+        'runs, and reports in fixed copy', (tester) async {
+      growSurface(tester);
+      final published = Completer<void>();
+      var publishes = 0;
+      final relay = MockRelayService()
+        ..ownPresence = [
+          row('wss://kp.example.com', keyPackage: OwnEventPresenceFfi.missing),
+        ];
+      await tester.pumpWidget(
+        buildApp(
+          mock: seededMock(),
+          relay: relay,
+          extra: [
+            keyPackagePublisherProvider.overrideWith((ref) async {
+              publishes++;
+              await published.future;
+              relay.ownPresence = [
+                row(
+                  'wss://kp.example.com',
+                  keyPackage: OwnEventPresenceFfi.current,
+                ),
+              ];
+              return const KeyPackageMaintenancePublished(
+                relaysAcked: 1,
+                isFreshSlotMinted: false,
+              );
+            }),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('KeyPackage: Missing'), findsOneWidget);
+
+      await tester.tap(find.byKey(WidgetKeys.relaySettingsRepublish));
+      await tester.pump();
+      expect(publishes, 1);
+      expect(
+        tester
+            .widget<ButtonStyleButton>(
+              find.byKey(WidgetKeys.relaySettingsRepublish),
+            )
+            .onPressed,
+        isNull,
+        reason: 'one Republish at a time',
+      );
+
+      published.complete();
+      await tester.pumpAndSettle();
+
+      expect(relay.ownPresenceAsks, hasLength(2), reason: 'checked again');
+      expect(find.text('KeyPackage: Published'), findsOneWidget);
+      expect(
+        find.text(
+          'Every relay that answered now has what others need to invite you',
+        ),
+        findsOneWidget,
+      );
+      expect(find.byKey(WidgetKeys.relaySettingsRepublish), findsNothing);
+    });
+  });
+
   group('RelaySettingsPage when the relay providers failed to load', () {
     void growSurface(WidgetTester tester) {
       final originalSize = tester.view.physicalSize;
@@ -861,7 +1046,10 @@ void main() {
         expect(find.text('inbox.example.com'), findsOneWidget);
         expect(find.text('kp.example.com'), findsOneWidget);
         expect(find.text('profile.example.com'), findsOneWidget);
-        expect(find.byTooltip('Not checked'), findsNWidgets(3));
+        // One line per kind each list publishes there, none checked yet.
+        expect(find.text('Inbox list: Not checked'), findsOneWidget);
+        expect(find.text('KeyPackage: Not checked'), findsOneWidget);
+        expect(find.text('Relay list: Not checked'), findsOneWidget);
       },
     );
 

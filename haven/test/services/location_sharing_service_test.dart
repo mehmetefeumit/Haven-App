@@ -3445,7 +3445,7 @@ class _MutableMockRelayService implements RelayService {
   Future<RelayListMaintenanceResult> maintainRelayList({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,
-  }) async => const RelayListMaintenanceResult.empty();
+  }) async => relayListsCurrent;
 
   @override
   Future<SubscriptionHealthResult> maintainSubscriptionHealth({
@@ -3514,11 +3514,9 @@ class _MutableMockRelayService implements RelayService {
   }) async => [];
 
   @override
-  Future<RelayEventCheck> checkEventOnRelay({
-    required String relayUrl,
-    required String authorPubkey,
-    required int eventKind,
-  }) async => RelayEventCheck(relayUrl: relayUrl, found: false, eventCount: 0);
+  Future<List<OwnRelayPresenceFfi>> checkOwnReachability({
+    required String ownPubkey,
+  }) async => const [];
 
   @override
   Future<void> disconnectRelay(String url) async {}
@@ -3560,7 +3558,7 @@ class _PauseRacingRelayService implements RelayService {
   Future<RelayListMaintenanceResult> maintainRelayList({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,
-  }) async => const RelayListMaintenanceResult.empty();
+  }) async => relayListsCurrent;
 
   @override
   Future<SubscriptionHealthResult> maintainSubscriptionHealth({
@@ -3625,11 +3623,9 @@ class _PauseRacingRelayService implements RelayService {
   }) async => [];
 
   @override
-  Future<RelayEventCheck> checkEventOnRelay({
-    required String relayUrl,
-    required String authorPubkey,
-    required int eventKind,
-  }) async => RelayEventCheck(relayUrl: relayUrl, found: false, eventCount: 0);
+  Future<List<OwnRelayPresenceFfi>> checkOwnReachability({
+    required String ownPubkey,
+  }) async => const [];
 
   @override
   Future<void> disconnectRelay(String url) async {}
@@ -3666,7 +3662,7 @@ class _SinceCapturingRelayService implements RelayService {
   Future<RelayListMaintenanceResult> maintainRelayList({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,
-  }) async => const RelayListMaintenanceResult.empty();
+  }) async => relayListsCurrent;
 
   @override
   Future<SubscriptionHealthResult> maintainSubscriptionHealth({
@@ -3726,11 +3722,9 @@ class _SinceCapturingRelayService implements RelayService {
   }) async => [];
 
   @override
-  Future<RelayEventCheck> checkEventOnRelay({
-    required String relayUrl,
-    required String authorPubkey,
-    required int eventKind,
-  }) async => RelayEventCheck(relayUrl: relayUrl, found: false, eventCount: 0);
+  Future<List<OwnRelayPresenceFfi>> checkOwnReachability({
+    required String ownPubkey,
+  }) async => const [];
 
   @override
   Future<void> disconnectRelay(String url) async {}

@@ -1,13 +1,15 @@
-/// Tests for relay status provider.
+/// Tests for the relay settings check.
 ///
 /// Verifies that:
-/// - Initial state has all default relays in pending status
-/// - checkAllRelays updates to found when mock returns events
-/// - checkAllRelays updates to notFound when mock returns no events
-/// - checkAllRelays updates to error when mock throws
-/// - checkAllRelays is a no-op when no identity exists
-/// - isRefreshing flag is set during check and cleared after
-/// - lastChecked timestamp is set after completion
+/// - each row expects exactly the kinds its lists publish there, before and
+///   after the check, and the check's own rows are what is shown;
+/// - "Missing", "Old version" and "Can't reach" stay three different answers;
+/// - a relay is green only when EVERY expected kind is current — never
+///   because one of them is;
+/// - every expected kind reads checking while the one answer is awaited;
+/// - a failed check reads as "Can't reach", never as missing;
+/// - Republish runs the publisher, then checks again, and reports in three
+///   fixed outcomes.
 library;
 
 import 'dart:async';
@@ -17,379 +19,515 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/relays.dart';
 import 'package:haven/src/models/relay_ring_slot.dart';
 import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/key_package_provider.dart';
+import 'package:haven/src/providers/own_reachability_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/relay_status_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/rust/api.dart'
+    show OwnEventPresenceFfi, OwnRelayPresenceFfi;
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/relay_preferences_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 
+import '../helpers/log_capture.dart';
 import '../mocks/mock_relay_preferences_service.dart';
 import '../mocks/mock_relay_service.dart';
 
-/// Returns a relay-prefs override seeded so the union builder finds at
-/// least one relay per category. Falls back to `fallbackDefaultRelays`
-/// for the actual content so existing test assertions against
-/// `defaultRelays.length` still hold.
-Override _relayPrefsOverride() {
-  return relayPreferencesServiceProvider.overrideWith(
-    (ref) async => MockRelayPreferencesService(
-      initialRelays: {
-        RelayCategory.inbox: List<String>.from(fallbackDefaultRelays),
-        RelayCategory.keyPackage: List<String>.from(fallbackDefaultRelays),
-      },
-    ),
+const _inbox = 'wss://inbox.example.com';
+const _kp = 'wss://kp.example.com';
+
+final _testIdentity = Identity(
+  pubkeyHex: 'abc123def456abc123def456abc123def456abc123def456abc123def456abcd',
+  npub: 'npub1test',
+  createdAt: DateTime(2024),
+);
+
+OwnRelayPresenceFfi _row(
+  String url, {
+  bool own = true,
+  bool lookup = false,
+  OwnEventPresenceFfi keyPackage = OwnEventPresenceFfi.notExpected,
+  OwnEventPresenceFfi relayList = OwnEventPresenceFfi.notExpected,
+  OwnEventPresenceFfi inboxRelayList = OwnEventPresenceFfi.notExpected,
+}) => OwnRelayPresenceFfi(
+  relayUrl: url,
+  own: own,
+  lookup: lookup,
+  reachable: true,
+  keyPackage: keyPackage,
+  relayList: relayList,
+  inboxRelayList: inboxRelayList,
+);
+
+ProviderContainer _container(
+  MockRelayService relay, {
+  Identity? identity,
+  bool noIdentity = false,
+  List<Override> extra = const [],
+}) {
+  final container = ProviderContainer(
+    overrides: [
+      ...extra,
+      identityProvider.overrideWith(
+        (_) async => noIdentity ? null : (identity ?? _testIdentity),
+      ),
+      relayServiceProvider.overrideWithValue(relay),
+      relayPreferencesServiceProvider.overrideWith(
+        (ref) async => MockRelayPreferencesService(
+          initialRelays: const {
+            RelayCategory.inbox: [_inbox],
+            RelayCategory.keyPackage: [_kp],
+          },
+        ),
+      ),
+    ],
   );
+  addTearDown(container.dispose);
+  return container;
 }
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  final testIdentity = Identity(
-    pubkeyHex:
-        'abc123def456abc123def456abc123def456abc123def456abc123def456abcd',
-    npub: 'npub1test',
-    createdAt: DateTime(2024),
-  );
-
   group('RelayStatusNotifier', () {
-    test('initial state has all default relays in pending', () async {
-      final container = ProviderContainer(
-        overrides: [
-          identityProvider.overrideWith((_) async => testIdentity),
-          relayServiceProvider.overrideWithValue(MockRelayService()),
-          _relayPrefsOverride(),
-        ],
-      );
-      addTearDown(container.dispose);
+    test('before a check, each row expects exactly the kinds its lists '
+        'publish there', () async {
+      final container = _container(MockRelayService());
 
       final state = await container.read(relayStatusProvider.future);
+      final byUrl = {for (final r in state.relays) r.relayUrl: r};
 
-      expect(state.relays.length, defaultRelays.length);
-      for (final relay in state.relays) {
-        expect(relay.keyPackage.status, EventCheckStatus.pending);
-        expect(relay.relayList.status, EventCheckStatus.pending);
+      expect(byUrl[_inbox]!.own, isTrue);
+      expect(byUrl[_inbox]!.keyPackage, isNull);
+      expect(byUrl[_inbox]!.relayList, isNull);
+      expect(byUrl[_inbox]!.inboxRelayList, KindPresence.notChecked);
+
+      expect(byUrl[_kp]!.keyPackage, KindPresence.notChecked);
+      expect(byUrl[_kp]!.relayList, KindPresence.notChecked);
+      expect(byUrl[_kp]!.inboxRelayList, isNull);
+
+      // Lookup relays hold the relay lists only — never a KeyPackage.
+      for (final url in fallbackDiscoveryRelays) {
+        final row = byUrl[url]!;
+        expect(row.own, isFalse);
+        expect(row.lookup, isTrue);
+        expect(row.keyPackage, isNull, reason: url);
+        expect(row.relayList, KindPresence.notChecked);
+        expect(row.inboxRelayList, KindPresence.notChecked);
       }
-      expect(state.isRefreshing, false);
+      expect(state.relays.map((r) => r.relayUrl).take(2), [
+        _inbox,
+        _kp,
+      ], reason: 'the own lists first, as the check orders them');
+      expect(state.isRefreshing, isFalse);
       expect(state.lastChecked, isNull);
     });
 
+    test('own rows are exactly the configured relays; the public defaults '
+        'appear only as lookup relays', () async {
+      // A privacy-conscious user whose ONLY relays are private. A seed relay
+      // that is also a lookup relay may be listed — as a lookup relay, never
+      // as one of theirs.
+      final container = _container(MockRelayService());
+
+      final state = await container.read(relayStatusProvider.future);
+
+      expect(state.relays.where((r) => r.own).map((r) => r.relayUrl), [
+        _inbox,
+        _kp,
+      ]);
+      for (final r in state.relays.where((r) => !r.own)) {
+        expect(fallbackDiscoveryRelays, contains(r.relayUrl));
+        expect(r.lookup, isTrue);
+      }
+    });
+
     test(
-      'shows exactly the user-configured relays — never the public defaults',
+      "the check's own rows are what is shown, each kind as judged",
       () async {
-        // A privacy-conscious user whose ONLY relay is a private one. The
-        // status page must show exactly that relay and NEVER re-introduce the
-        // public defaults — doing so would mean the old defaults-union has
-        // regressed into the status display. (The seeded-defaults test above
-        // cannot catch that, since its user list already equals the defaults.)
-        final container = ProviderContainer(
-          overrides: [
-            identityProvider.overrideWith((_) async => testIdentity),
-            relayServiceProvider.overrideWithValue(MockRelayService()),
-            relayPreferencesServiceProvider.overrideWith(
-              (ref) async => MockRelayPreferencesService(
-                initialRelays: const {
-                  RelayCategory.inbox: ['wss://private.example.com'],
-                  RelayCategory.keyPackage: ['wss://private.example.com'],
-                },
-              ),
+        final relay = MockRelayService()
+          ..ownPresence = [
+            _row(_inbox, inboxRelayList: OwnEventPresenceFfi.current),
+            _row(
+              _kp,
+              keyPackage: OwnEventPresenceFfi.outdated,
+              relayList: OwnEventPresenceFfi.missing,
             ),
-          ],
+            _row(
+              'wss://lookup.example.com',
+              own: false,
+              lookup: true,
+              relayList: OwnEventPresenceFfi.noAnswer,
+              inboxRelayList: OwnEventPresenceFfi.noAnswer,
+            ),
+          ];
+        final container = _container(relay);
+        await container.read(relayStatusProvider.future);
+
+        await container.read(relayStatusProvider.notifier).checkAllRelays();
+
+        final state = container.read(relayStatusProvider).value!;
+        expect(relay.ownPresenceAsks, [_testIdentity.pubkeyHex]);
+        expect(state.relays, hasLength(3));
+        final kp = state.relays[1];
+        expect(kp.keyPackage, KindPresence.outdated);
+        expect(kp.relayList, KindPresence.missing);
+        expect(kp.inboxRelayList, isNull, reason: 'not expected, never asked');
+        expect(state.relays[2].relayList, KindPresence.noAnswer);
+        expect(
+          {KindPresence.outdated, KindPresence.missing, KindPresence.noAnswer},
+          hasLength(3),
+          reason:
+              'Missing is not "Can\'t reach", and neither is an old version',
         );
-        addTearDown(container.dispose);
-
-        final state = await container.read(relayStatusProvider.future);
-
-        final urls = state.relays.map((r) => r.relayUrl).toList();
-        expect(urls, ['wss://private.example.com']);
-        for (final d in fallbackDefaultRelays) {
-          expect(urls, isNot(contains(d)));
-        }
+        expect(state.isRefreshing, isFalse);
+        expect(state.lastChecked, isNotNull);
       },
     );
 
-    test('checkAllRelays sets found when mock returns events', () async {
-      final now = DateTime.now();
-      final checkResults = <String, RelayEventCheck>{};
-      for (final relay in defaultRelays) {
-        checkResults['$relay:30443'] = RelayEventCheck(
-          relayUrl: relay,
-          found: true,
-          eventCount: 1,
-          newestTimestamp: now,
+    test(
+      'every expected kind reads checking while the answer is awaited',
+      () async {
+        final gate = Completer<void>();
+        final relay = MockRelayService()..ownPresenceGate = gate;
+        final container = _container(relay);
+        await container.read(relayStatusProvider.future);
+
+        final check = container
+            .read(relayStatusProvider.notifier)
+            .checkAllRelays();
+        await pumpEventQueue();
+
+        final mid = container.read(relayStatusProvider).value!;
+        expect(mid.isRefreshing, isTrue);
+        for (final r in mid.relays) {
+          expect(r.expected, everyElement(KindPresence.checking));
+          expect(r.expected, isNotEmpty);
+        }
+        expect(mid.ringSlots, everyElement(RelayRingSlotState.checking));
+
+        gate.complete();
+        await check;
+        expect(
+          container.read(relayStatusProvider).value!.isRefreshing,
+          isFalse,
         );
-        checkResults['$relay:10002'] = RelayEventCheck(
-          relayUrl: relay,
-          found: true,
-          eventCount: 1,
-          newestTimestamp: now,
-        );
-      }
+      },
+    );
 
-      final mockRelay = MockRelayService(checkEventResults: checkResults);
-      final container = ProviderContainer(
-        overrides: [
-          identityProvider.overrideWith((_) async => testIdentity),
-          relayServiceProvider.overrideWithValue(mockRelay),
-          _relayPrefsOverride(),
-        ],
-      );
-      addTearDown(container.dispose);
-
-      // Wait for initial build
+    test('a check that cannot run reads as "Can\'t reach", never as missing, '
+        'and logs no identifier', () async {
+      final logs = LogCapture.install();
+      addTearDown(logs.restore);
+      final relay = MockRelayService()..shouldThrowOnOwnPresence = true;
+      final container = _container(relay);
       await container.read(relayStatusProvider.future);
 
-      // Run check
       await container.read(relayStatusProvider.notifier).checkAllRelays();
 
-      final state = await container.read(relayStatusProvider.future);
-
-      for (final relay in state.relays) {
-        expect(relay.keyPackage.status, EventCheckStatus.found);
-        expect(relay.relayList.status, EventCheckStatus.found);
-        expect(relay.keyPackage.newestTimestamp, isNotNull);
-        expect(relay.relayList.newestTimestamp, isNotNull);
+      final state = container.read(relayStatusProvider).value!;
+      for (final r in state.relays) {
+        expect(r.expected, everyElement(KindPresence.noAnswer));
       }
-      expect(state.isRefreshing, false);
-      expect(state.lastChecked, isNotNull);
+      logs
+        ..assertContains('[RelayStatus] check failed')
+        ..assertNoNeedles([_inbox, _kp, _testIdentity.pubkeyHex]);
     });
 
-    test('checkAllRelays sets notFound when mock returns no events', () async {
-      final mockRelay = MockRelayService();
-      final container = ProviderContainer(
-        overrides: [
-          identityProvider.overrideWith((_) async => testIdentity),
-          relayServiceProvider.overrideWithValue(mockRelay),
-          _relayPrefsOverride(),
-        ],
-      );
-      addTearDown(container.dispose);
-
-      await container.read(relayStatusProvider.future);
-      await container.read(relayStatusProvider.notifier).checkAllRelays();
-
-      final state = await container.read(relayStatusProvider.future);
-
-      for (final relay in state.relays) {
-        expect(relay.keyPackage.status, EventCheckStatus.notFound);
-        expect(relay.relayList.status, EventCheckStatus.notFound);
-      }
-    });
-
-    test('checkAllRelays sets error when mock throws', () async {
-      final mockRelay = MockRelayService(shouldThrowOnCheckEvent: true);
-      final container = ProviderContainer(
-        overrides: [
-          identityProvider.overrideWith((_) async => testIdentity),
-          relayServiceProvider.overrideWithValue(mockRelay),
-          _relayPrefsOverride(),
-        ],
-      );
-      addTearDown(container.dispose);
-
-      await container.read(relayStatusProvider.future);
-      await container.read(relayStatusProvider.notifier).checkAllRelays();
-
-      final state = await container.read(relayStatusProvider.future);
-
-      for (final relay in state.relays) {
-        expect(relay.keyPackage.status, EventCheckStatus.error);
-        expect(relay.relayList.status, EventCheckStatus.error);
-      }
-    });
-
-    test('checkAllRelays is no-op when no identity', () async {
-      final mockRelay = MockRelayService();
-      final container = ProviderContainer(
-        overrides: [
-          identityProvider.overrideWith((_) async => null),
-          relayServiceProvider.overrideWithValue(mockRelay),
-          _relayPrefsOverride(),
-        ],
-      );
-      addTearDown(container.dispose);
-
-      await container.read(relayStatusProvider.future);
-      await container.read(relayStatusProvider.notifier).checkAllRelays();
-
-      final state = await container.read(relayStatusProvider.future);
-
-      // Should still be pending (no check happened)
-      for (final relay in state.relays) {
-        expect(relay.keyPackage.status, EventCheckStatus.pending);
-        expect(relay.relayList.status, EventCheckStatus.pending);
-      }
-      expect(mockRelay.methodCalls, isEmpty);
-    });
-
-    test('lastChecked timestamp is set after completion', () async {
-      final mockRelay = MockRelayService();
-      final container = ProviderContainer(
-        overrides: [
-          identityProvider.overrideWith((_) async => testIdentity),
-          relayServiceProvider.overrideWithValue(mockRelay),
-          _relayPrefsOverride(),
-        ],
-      );
-      addTearDown(container.dispose);
-
+    test('checkAllRelays is a no-op with no identity', () async {
+      final relay = MockRelayService();
+      final container = _container(relay, noIdentity: true);
       await container.read(relayStatusProvider.future);
 
-      final beforeCheck = DateTime.now();
       await container.read(relayStatusProvider.notifier).checkAllRelays();
-      final afterCheck = DateTime.now();
 
-      final state = await container.read(relayStatusProvider.future);
-
-      expect(state.lastChecked, isNotNull);
-      expect(
-        state.lastChecked!.isAfter(
-          beforeCheck.subtract(const Duration(seconds: 1)),
-        ),
-        true,
-      );
-      expect(
-        state.lastChecked!.isBefore(afterCheck.add(const Duration(seconds: 1))),
-        true,
-      );
-    });
-
-    test('relay URLs match defaultRelays', () async {
-      final container = ProviderContainer(
-        overrides: [
-          identityProvider.overrideWith((_) async => testIdentity),
-          relayServiceProvider.overrideWithValue(MockRelayService()),
-          _relayPrefsOverride(),
-        ],
-      );
-      addTearDown(container.dispose);
-
-      final state = await container.read(relayStatusProvider.future);
-
-      final relayUrls = state.relays.map((r) => r.relayUrl).toList();
-      expect(relayUrls, defaultRelays);
+      final state = container.read(relayStatusProvider).value!;
+      for (final r in state.relays) {
+        expect(r.expected, everyElement(KindPresence.notChecked));
+      }
+      expect(relay.methodCalls, isEmpty);
     });
   });
 
-  group('RelayStatusState.ringSlots', () {
-    KindCheckResult kind(EventCheckStatus s) => KindCheckResult(status: s);
-    RelayStatusState stateWith(RelayEventStatus relay) =>
-        RelayStatusState(relays: [relay]);
+  group('summarizePresence (the ring and every row dot)', () {
+    test('ok only when every expected kind is current', () {
+      // The defect this replaced: one kind found made the whole relay green,
+      // so a relay serving the relay list but not the KeyPackage read as fine.
+      expect(
+        summarizePresence([KindPresence.current, KindPresence.missing]),
+        RelayRingSlotState.error,
+      );
+      expect(
+        summarizePresence([KindPresence.current, KindPresence.outdated]),
+        RelayRingSlotState.error,
+      );
+      expect(
+        summarizePresence([KindPresence.current, KindPresence.noAnswer]),
+        RelayRingSlotState.error,
+      );
+      expect(
+        summarizePresence([KindPresence.current, KindPresence.current]),
+        RelayRingSlotState.ok,
+      );
+    });
 
-    test('an unchecked relay is pending', () {
-      expect(stateWith(const RelayEventStatus(relayUrl: 'wss://a')).ringSlots, [
+    test('checking wins; nothing checked yet is pending', () {
+      expect(
+        summarizePresence([KindPresence.missing, KindPresence.checking]),
+        RelayRingSlotState.checking,
+      );
+      expect(
+        summarizePresence([KindPresence.notChecked]),
         RelayRingSlotState.pending,
+      );
+      expect(summarizePresence(const []), RelayRingSlotState.pending);
+    });
+
+    test('ringSlots is one summary per row, over its expected kinds', () {
+      const state = RelayStatusState(
+        relays: [
+          RelayPresence(
+            relayUrl: 'wss://a',
+            own: true,
+            lookup: false,
+            keyPackage: KindPresence.missing,
+            relayList: KindPresence.current,
+          ),
+          RelayPresence(
+            relayUrl: 'wss://b',
+            own: true,
+            lookup: false,
+            inboxRelayList: KindPresence.current,
+          ),
+        ],
+      );
+      expect(state.ringSlots, [
+        RelayRingSlotState.error,
+        RelayRingSlotState.ok,
       ]);
+      expect(state.needsRepublish, isTrue);
     });
 
-    test('any kind still checking -> checking', () {
-      expect(
-        stateWith(
-          RelayEventStatus(
+    test('an unreachable relay alone is nothing a Republish can fix', () {
+      const state = RelayStatusState(
+        relays: [
+          RelayPresence(
             relayUrl: 'wss://a',
-            keyPackage: kind(EventCheckStatus.found),
-            relayList: kind(EventCheckStatus.checking),
+            own: true,
+            lookup: false,
+            keyPackage: KindPresence.noAnswer,
+            relayList: KindPresence.current,
           ),
-        ).ringSlots,
-        [RelayRingSlotState.checking],
+        ],
+      );
+      expect(state.needsRepublish, isFalse);
+    });
+  });
+
+  group('RelayStatusNotifier.republish', () {
+    test(
+      'runs the publisher, then checks again, and reports all current',
+      () async {
+        var publishes = 0;
+        final relay = MockRelayService()
+          ..ownPresence = [
+            _row(_inbox, inboxRelayList: OwnEventPresenceFfi.missing),
+          ];
+        final container = _container(
+          relay,
+          extra: [
+            keyPackagePublisherProvider.overrideWith((ref) async {
+              // Past its synchronous build, as the real publisher's writes are.
+              await Future<void>.value();
+              publishes++;
+              relay.ownPresence = [
+                _row(_inbox, inboxRelayList: OwnEventPresenceFfi.current),
+                _row(
+                  'wss://down.example.com',
+                  own: false,
+                  lookup: true,
+                  relayList: OwnEventPresenceFfi.noAnswer,
+                  inboxRelayList: OwnEventPresenceFfi.noAnswer,
+                ),
+              ];
+              const kp = KeyPackageMaintenancePublished(
+                relaysAcked: 1,
+                isFreshSlotMinted: false,
+              );
+              ref.read(ownReachabilityProvider.notifier)
+                ..recordRelayLists(relayListsCurrent)
+                ..recordKeyPackage(kp);
+              return kp;
+            }),
+          ],
+        );
+        await container.read(relayStatusProvider.future);
+        await container.read(relayStatusProvider.notifier).checkAllRelays();
+        expect(
+          container.read(relayStatusProvider).value!.needsRepublish,
+          isTrue,
+        );
+
+        final outcome = await container
+            .read(relayStatusProvider.notifier)
+            .republish();
+
+        expect(publishes, 1);
+        expect(relay.ownPresenceAsks, hasLength(2), reason: 'checked again');
+        expect(
+          outcome,
+          RepublishOutcome.allCurrent,
+          reason:
+              'a lookup relay that did not answer is not counted '
+              'against it',
+        );
+        expect(
+          container.read(relayStatusProvider).value!.isRepublishing,
+          isFalse,
+        );
+      },
+    );
+
+    /// Republishes against a check that answers [after].
+    Future<RepublishOutcome> republishAgainst(
+      List<OwnRelayPresenceFfi> after,
+    ) async {
+      final relay = MockRelayService()..ownPresence = after;
+      final container = _container(
+        relay,
+        extra: [
+          keyPackagePublisherProvider.overrideWith((ref) async {
+            await Future<void>.value();
+            const kp = KeyPackageMaintenancePublished(
+              relaysAcked: 1,
+              isFreshSlotMinted: false,
+            );
+            ref.read(ownReachabilityProvider.notifier)
+              ..recordRelayLists(relayListsCurrent)
+              ..recordKeyPackage(kp);
+            return kp;
+          }),
+        ],
+      );
+      await container.read(relayStatusProvider.future);
+      return container.read(relayStatusProvider.notifier).republish();
+    }
+
+    OwnRelayPresenceFfi ownKp(OwnEventPresenceFfi p) =>
+        _row(_kp, keyPackage: p, relayList: p);
+    OwnRelayPresenceFfi ownInbox(OwnEventPresenceFfi p) =>
+        _row(_inbox, inboxRelayList: p);
+    OwnRelayPresenceFfi lookup(OwnEventPresenceFfi p) => _row(
+      fallbackDiscoveryRelays.first,
+      own: false,
+      lookup: true,
+      relayList: p,
+      inboxRelayList: p,
+    );
+
+    test('no relay answering is never reported as done', () async {
+      expect(
+        await republishAgainst([
+          ownInbox(OwnEventPresenceFfi.noAnswer),
+          ownKp(OwnEventPresenceFfi.noAnswer),
+          lookup(OwnEventPresenceFfi.noAnswer),
+        ]),
+        RepublishOutcome.incomplete,
       );
     });
 
-    test('any kind found (and none checking) -> ok', () {
+    test('a lookup relay answering does not stand in for an own relay that '
+        'did not', () async {
+      // The KeyPackage lives only on own relays: without one heard, nobody
+      // is shown to be able to invite the user.
       expect(
-        stateWith(
-          RelayEventStatus(
-            relayUrl: 'wss://a',
-            keyPackage: kind(EventCheckStatus.found),
-            relayList: kind(EventCheckStatus.notFound),
-            inboxRelayList: kind(EventCheckStatus.notFound),
-          ),
-        ).ringSlots,
-        [RelayRingSlotState.ok],
+        await republishAgainst([
+          ownInbox(OwnEventPresenceFfi.current),
+          ownKp(OwnEventPresenceFfi.noAnswer),
+          lookup(OwnEventPresenceFfi.current),
+        ]),
+        RepublishOutcome.incomplete,
       );
     });
 
-    test('all kinds notFound/error -> error', () {
+    test(
+      'a lookup relay that answered without the lists is not done',
+      () async {
+        expect(
+          await republishAgainst([
+            ownInbox(OwnEventPresenceFfi.current),
+            ownKp(OwnEventPresenceFfi.current),
+            lookup(OwnEventPresenceFfi.missing),
+          ]),
+          RepublishOutcome.incomplete,
+        );
+      },
+    );
+
+    test('every own relay current is done', () async {
       expect(
-        stateWith(
-          RelayEventStatus(
-            relayUrl: 'wss://a',
-            keyPackage: kind(EventCheckStatus.notFound),
-            relayList: kind(EventCheckStatus.error),
-            inboxRelayList: kind(EventCheckStatus.notFound),
-          ),
-        ).ringSlots,
-        [RelayRingSlotState.error],
+        await republishAgainst([
+          ownInbox(OwnEventPresenceFfi.current),
+          ownKp(OwnEventPresenceFfi.current),
+          lookup(OwnEventPresenceFfi.current),
+        ]),
+        RepublishOutcome.allCurrent,
       );
     });
 
-    test('fills in per relay as each one resolves', () async {
-      // Relay a's checks resolve immediately (found -> ok); relay b is gated,
-      // so the ring shows [ok, checking] mid-flight, proving the per-relay
-      // writes land incrementally rather than all at once on completion.
-      final now = DateTime.now();
-      final checkResults = <String, RelayEventCheck>{
-        for (final k in [30443, 10002, 10050])
-          'wss://a:$k': RelayEventCheck(
-            relayUrl: 'wss://a',
-            found: true,
-            eventCount: 1,
-            newestTimestamp: now,
-          ),
-      };
-      final mock = MockRelayService(checkEventResults: checkResults);
-      mock.checkEventGates['wss://b'] = Completer<void>();
-
-      final container = ProviderContainer(
-        overrides: [
-          identityProvider.overrideWith((_) async => testIdentity),
-          relayServiceProvider.overrideWithValue(mock),
-          relayPreferencesServiceProvider.overrideWith(
-            (ref) async => MockRelayPreferencesService(
-              initialRelays: const {
-                RelayCategory.inbox: ['wss://a'],
-                RelayCategory.keyPackage: ['wss://b'],
-              },
+    test('a relay still missing a kind after it is reported', () async {
+      final relay = MockRelayService()
+        ..ownPresence = [_row(_kp, keyPackage: OwnEventPresenceFfi.missing)];
+      final container = _container(
+        relay,
+        extra: [
+          keyPackagePublisherProvider.overrideWith(
+            (ref) async => const KeyPackageMaintenanceFailed(
+              KeyPackageFailureKind.publishNotAcked,
             ),
           ),
         ],
       );
-      addTearDown(container.dispose);
-
       await container.read(relayStatusProvider.future);
-      final check = container
+
+      final outcome = await container
           .read(relayStatusProvider.notifier)
-          .checkAllRelays();
+          .republish();
 
-      // a resolves while b stays gated -> [ok, checking].
-      await _pumpUntil(
-        () =>
-            container.read(relayStatusProvider).value?.ringSlots.first ==
-            RelayRingSlotState.ok,
+      expect(outcome, RepublishOutcome.incomplete);
+    });
+
+    test('while the storage-reset notice is unanswered it says so', () async {
+      final relay = MockRelayService();
+      final container = _container(
+        relay,
+        extra: [
+          keyPackagePublisherProvider.overrideWith((ref) async {
+            await Future<void>.value();
+            const kp = KeyPackageMaintenanceFailed(
+              KeyPackageFailureKind.awaitingResetAcknowledgement,
+            );
+            const held = RelayListCategoryResult(
+              action: RelayListMaintenanceAction.awaitingResetAcknowledgement,
+              ownConfirmed: false,
+            );
+            ref.read(ownReachabilityProvider.notifier)
+              ..recordRelayLists(
+                const RelayListMaintenanceResult(inbox: held, keyPackage: held),
+              )
+              ..recordKeyPackage(kp);
+            return kp;
+          }),
+        ],
       );
-      expect(container.read(relayStatusProvider).value!.ringSlots, const [
-        RelayRingSlotState.ok,
-        RelayRingSlotState.checking,
-      ]);
+      await container.read(relayStatusProvider.future);
 
-      mock.checkEventGates['wss://b']!.complete();
-      await check;
+      final outcome = await container
+          .read(relayStatusProvider.notifier)
+          .republish();
 
-      expect(container.read(relayStatusProvider).value!.ringSlots, const [
-        RelayRingSlotState.ok,
-        RelayRingSlotState.error,
-      ]);
+      expect(outcome, RepublishOutcome.heldForReset);
     });
   });
-}
-
-/// Spins the microtask/timer queue until [condition] holds (or a tick cap is
-/// reached), so a test can observe an intermediate in-flight state.
-Future<void> _pumpUntil(bool Function() condition, {int maxTicks = 100}) async {
-  for (var i = 0; i < maxTicks && !condition(); i++) {
-    await Future<void>.delayed(Duration.zero);
-  }
-  if (!condition()) {
-    fail('_pumpUntil: condition not satisfied after $maxTicks ticks');
-  }
 }

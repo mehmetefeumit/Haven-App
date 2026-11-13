@@ -148,6 +148,14 @@
   "@onboardingCreateIdentityLoading": {
     "description": "Loading label shown while the user's keypair is being generated."
   },
+  "onboardingFinishingSetup": "Finishing setup…",
+  "@onboardingFinishingSetup": {
+    "description": "Busy label on the onboarding button while Haven makes the new account findable so others can invite it (can take up to a minute). Also read by screen readers as the progress indicator's label. Keep it short: it sits on one button next to a spinner."
+  },
+  "onboardingFinishSetupError": "Couldn't finish setting up your account. Check your connection and try again.",
+  "@onboardingFinishSetupError": {
+    "description": "Error shown on the last onboarding step when Haven could not make the new account findable within a minute (no connection, or no relay accepted it). The button below then reads 'Retry' (commonRetry) and tries again without creating a new account. Must not name a technical cause or blame the user."
+  },
   "onboardingCreateIdentityImportPrompt": "Already have a key?",
   "@onboardingCreateIdentityImportPrompt": {
     "description": "Secondary affordance text inviting the user to import an existing key instead of creating one."
@@ -359,10 +367,6 @@
       "url": { "type": "String" }
     }
   },
-  "relaySettingsStatusConnected": "Connected",
-  "@relaySettingsStatusConnected": {
-    "description": "Relay status label: the relay was reachable and returned the expected event."
-  },
   "relaySettingsStatusChecking": "Checking",
   "@relaySettingsStatusChecking": {
     "description": "Relay status label: a reachability check is in progress."
@@ -371,16 +375,72 @@
   "@relaySettingsStatusUnreachable": {
     "description": "Relay status label: the relay could not be reached or returned an error."
   },
+  "relaySettingsKindLine": "{kind}: {status}",
+  "@relaySettingsKindLine": {
+    "description": "One line under a relay's address on the Relay settings page: which of the user's published items it is about, and whether this relay has it, e.g. 'KeyPackage: Published'. Rows show one such line per item that relay should hold, and a screen reader reads the address and its lines as one sentence. Reorder or change the separator if this locale needs it.",
+    "placeholders": {
+      "kind": {
+        "type": "String",
+        "example": "KeyPackage"
+      },
+      "status": {
+        "type": "String",
+        "example": "Published"
+      }
+    }
+  },
+  "relaySettingsKindKeyPackage": "KeyPackage",
+  "@relaySettingsKindKeyPackage": {
+    "description": "Item name in a relay row's status line (relaySettingsKindLine): the user's invitation key, kind 30443. Keep this locale's established rendering of 'KeyPackage' (the same term as the KeyPackage section title)."
+  },
+  "relaySettingsKindRelayList": "Relay list",
+  "@relaySettingsKindRelayList": {
+    "description": "Item name in a relay row's status line (relaySettingsKindLine): the user's published list of their KeyPackage relays (kind 10002), which inviters read to find the KeyPackage. 'relay' is a Nostr term of art — keep this locale's established rendering."
+  },
+  "relaySettingsKindInboxList": "Inbox list",
+  "@relaySettingsKindInboxList": {
+    "description": "Item name in a relay row's status line (relaySettingsKindLine): the user's published list of their Inbox relays (kind 10050), where others send invitations. Use the same word for 'Inbox' as the Inbox section title."
+  },
+  "relaySettingsPresencePublished": "Published",
+  "@relaySettingsPresencePublished": {
+    "description": "Status in a relay row's line (relaySettingsKindLine): this relay has the current version of the item."
+  },
+  "relaySettingsPresenceMissing": "Missing",
+  "@relaySettingsPresenceMissing": {
+    "description": "Status in a relay row's line (relaySettingsKindLine): this relay answered and does not have the item. Distinct from 'Can't reach' (relaySettingsStatusUnreachable), where the relay did not answer."
+  },
+  "relaySettingsPresenceOutdated": "Old version",
+  "@relaySettingsPresenceOutdated": {
+    "description": "Status in a relay row's line (relaySettingsKindLine): this relay has an older version of the item that Haven would replace (for a KeyPackage, one this phone can no longer use)."
+  },
+  "relaySettingsLookupTitle": "Lookup relays",
+  "@relaySettingsLookupTitle": {
+    "description": "Section title on the Relay settings page for the public relays others search to find the user. Read-only: the user cannot edit this list. 'relays' is a Nostr term of art — keep this locale's established rendering."
+  },
+  "relaySettingsLookupSubtitle": "Public relays where others look you up. Haven keeps a copy of your relay lists here so people can invite you.",
+  "@relaySettingsLookupSubtitle": {
+    "description": "Caption under the Lookup relays section title. States what is sent there and why: only the user's relay lists (not their invitation key), so people who only have their ID can invite them."
+  },
+  "relaySettingsRepublish": "Republish",
+  "@relaySettingsRepublish": {
+    "description": "Button on the Relay settings page, shown when a relay is missing one of the user's published items or has an old version. Publishes them again and checks every relay again."
+  },
+  "relaySettingsRepublishDone": "Every relay that answered now has what others need to invite you",
+  "@relaySettingsRepublishDone": {
+    "description": "Snackbar after Republish (relaySettingsRepublish) when every relay that answered has the current version of every item it should hold."
+  },
+  "relaySettingsRepublishIncomplete": "Some relays still don't have what others need to invite you",
+  "@relaySettingsRepublishIncomplete": {
+    "description": "Snackbar after Republish (relaySettingsRepublish) when a relay that answered is still missing an item or has an old version. Must not name a relay or a technical cause."
+  },
+  "relaySettingsRepublishHeld": "Haven won’t publish your relay settings or invitation key until you continue past the relay settings notice",
+  "@relaySettingsRepublishHeld": {
+    "description": "Snackbar after Republish (relaySettingsRepublish) while the one-time notice that this update reset the relay settings is unanswered: Haven publishes the user's relay settings (their relay lists) and invitation key (the key others need to invite them) only after the user presses Continue on that notice or comes back from Relay settings. This is a promise the code keeps, so keep its scope exact, as in storageResetAcknowledgeFailed: do NOT widen it to 'nothing is published' — the public profile, invitations the user sends and location still go out. Reuse this locale's wording of storageResetAcknowledgeFailed's middle sentence."
+  },
+
   "relaySettingsStatusNotChecked": "Not checked",
   "@relaySettingsStatusNotChecked": {
     "description": "Relay status label: the relay has not been checked yet."
-  },
-  "relaySettingsStatusSemantics": "Relay status: {status}",
-  "@relaySettingsStatusSemantics": {
-    "description": "Accessibility label announcing a relay's connection status, where {status} is one of the status labels.",
-    "placeholders": {
-      "status": { "type": "String" }
-    }
   },
   "relaySettingsEmptyTitle": "No relays configured",
   "@relaySettingsEmptyTitle": {
@@ -738,13 +798,13 @@
   "@createCircleNoIdInQr": {
     "description": "Snackbar shown when a scanned QR code contains no recognizable member ID."
   },
-  "createCircleNoAccountFound": "Couldn't find a Haven account for this ID",
-  "@createCircleNoAccountFound": {
-    "description": "Member validation error: no KeyPackage was found for the entered ID, so the person has no Haven account. 'Haven' is intentionally English (brand name)."
+  "memberLookupNotFound": "No Haven account found for this ID yet. If they just set up Haven, try again in a minute.",
+  "@memberLookupNotFound": {
+    "description": "Member validation message when every relay that was asked answered and none holds an invitation key for the entered ID. Shown next to a Retry button. Deliberately not certain ('yet'): someone who set up Haven moments ago may not be findable for a minute, so the second sentence invites trying again. Must not say the person does not exist or blame anyone. 'Haven' is intentionally English (brand name). 'ID' is the person's public ID the user typed or scanned."
   },
-  "createCircleCouldNotVerify": "Could not verify member",
-  "@createCircleCouldNotVerify": {
-    "description": "Member validation error shown on a relay/network failure; the validation can be retried."
+  "memberLookupIncomplete": "Couldn't finish checking this ID. Check your connection and try again.",
+  "@memberLookupIncomplete": {
+    "description": "Member validation message when the lookup could not finish (a relay did not answer, or the network failed), so it is unknown whether the person has a Haven account. Shown next to a Retry button. Must not suggest the person has no account. 'ID' is the person's public ID the user typed or scanned."
   },
   "createCircleSomethingWentWrong": "Something went wrong",
   "@createCircleSomethingWentWrong": {
@@ -1763,6 +1823,34 @@
   "qrCodeYourPublicKeyLabel": "Your public key",
   "@qrCodeYourPublicKeyLabel": {
     "description": "Field label above the selectable npub on the Public Key QR page."
+  },
+  "reachabilityChecking": "Getting ready to receive invitations…",
+  "@reachabilityChecking": {
+    "description": "Status line above the user's QR code (and on the Identity page) while Haven has not yet confirmed that others can invite the user, or while a Retry runs. Announced to screen readers when it appears. Plain language: no 'relay' or 'KeyPackage'."
+  },
+  "reachabilityReady": "Ready to be invited",
+  "@reachabilityReady": {
+    "description": "Status line above the user's QR code (and on the Identity page) once Haven has confirmed others can find the user and invite them to a circle. Shown with a check icon. Plain language: no 'relay' or 'KeyPackage'."
+  },
+  "reachabilityCantCheck": "Can't check right now whether others can invite you",
+  "@reachabilityCantCheck": {
+    "description": "Neutral status line above the user's QR code (and on the Identity page) when Haven could not reach the network to check. Shown next to a Retry button. Must NOT say the user cannot be invited — nothing is known, and the phone may simply be offline. Plain language: no 'relay' or 'KeyPackage'."
+  },
+  "reachabilityNotReady": "Others can't invite you yet",
+  "@reachabilityNotReady": {
+    "description": "Status line above the user's QR code (and on the Identity page) when Haven reached the network and confirmed that others cannot find the user to invite them yet. Shown with a warning icon and a Retry button. Plain language: no 'relay' or 'KeyPackage'; must not blame the user."
+  },
+  "reachabilityNoRelays": "Others can't invite you until you add a relay",
+  "@reachabilityNoRelays": {
+    "description": "Status line above the user's QR code (and on the Identity page) when the user has removed every relay of a kind Haven needs, so nothing can be published for others to find. Followed by a link to Relay settings (reachabilityOpenRelaySettings). 'relay' is a Nostr term of art — keep this locale's established rendering."
+  },
+  "reachabilityOpenRelaySettings": "Relay settings",
+  "@reachabilityOpenRelaySettings": {
+    "description": "Link under the 'add a relay' status line above the user's QR code; opens the Relay settings page. Use the same name as the Relay settings page title in this locale."
+  },
+  "reachabilityAwaitingReset": "Others can invite you once you continue past the relay settings notice",
+  "@reachabilityAwaitingReset": {
+    "description": "Status line above the user's QR code (and on the Identity page) while the one-time notice that this update reset the relay settings is still unanswered: Haven publishes nothing others need to invite the user until the user presses Continue on that notice or comes back from Relay settings. No Retry is offered here because it would do nothing."
   },
   "qrCodeWhatIsThisTitle": "What is this?",
   "@qrCodeWhatIsThisTitle": {

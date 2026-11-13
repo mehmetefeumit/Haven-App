@@ -722,10 +722,10 @@ void main() {
       final relayManager = await RelayManagerFfi.newInstance();
       final DeliveredCircle creation;
       try {
-        final bobKp = await relayManager.fetchMemberKeypackage(
+        final bobKp = (await relayManager.fetchMemberKeypackage(
           pubkey: bob.pubkeyHex,
           circle: aliceManager,
-        );
+        )).member;
         if (bobKp == null) {
           throw StateError(
             '[b7] fetchMemberKeypackage returned null for Bob — his '

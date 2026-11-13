@@ -167,8 +167,8 @@ class MaintenanceService {
   /// the phase that broke so the caller can tell "logged out" (nothing to
   /// retry) from "the tick blew up" (retry, with a back-off).
   ///
-  /// It does NOT reuse the other tasks' `.empty()` fallback: that fallback is
-  /// what made a dead publish path read as a healthy one for as long as it did.
+  /// A dead publish path must never read as a healthy one, which is what an
+  /// `.empty()` fallback once made it do.
   @useResult
   Future<KeyPackageMaintenanceOutcome> maintainKeyPackage() async {
     return _withSecret(
@@ -192,17 +192,18 @@ class MaintenanceService {
     );
   }
 
-  /// Runs a relay-list maintenance tick (kind 10050 inbox + kind 10002
-  /// `KeyPackage`).
+  /// Runs a relay-list maintenance tick (kind 10002 `KeyPackage`, then kind
+  /// 10050 inbox).
   ///
-  /// Returns [RelayListMaintenanceResult.empty] on any failure — never throws.
+  /// Returns [RelayListMaintenanceResult.failed] on any failure — never
+  /// throws, and never a value that reads as a current list.
   Future<RelayListMaintenanceResult> maintainRelayList() async {
     return _withSecret(
       (circle, secret) => _relayService.maintainRelayList(
         circle: circle,
         identitySecretBytes: secret,
       ),
-      onFailure: (_) => const RelayListMaintenanceResult.empty(),
+      onFailure: (_) => const RelayListMaintenanceResult.failed(),
       opKind: 'relay-list',
     );
   }

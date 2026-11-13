@@ -289,8 +289,11 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
       setState(() {
         switch (admission) {
           case null:
+            // Someone who set up Haven a moment ago is findable a moment
+            // later.
             _memberStatus[npub] = ValidationStatus.invalid;
-            _memberErrors[npub] = l10n.createCircleNoAccountFound;
+            _memberErrors[npub] = l10n.memberLookupNotFound;
+            _retryable.add(npub);
           case KeyPackageAdmission.needsUpdate:
             _memberStatus[npub] = ValidationStatus.needsUpdate;
             _memberErrors[npub] = l10n.pendingMemberNeedsUpdate;
@@ -313,7 +316,7 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
       final l10n = AppLocalizations.of(context);
       setState(() {
         _memberStatus[npub] = ValidationStatus.invalid;
-        _memberErrors[npub] = l10n.createCircleCouldNotVerify;
+        _memberErrors[npub] = l10n.memberLookupIncomplete;
         _retryable.add(npub);
       });
     } on Object catch (e) {

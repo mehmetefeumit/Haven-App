@@ -3776,6 +3776,23 @@ The NIP-77 rows above are per relay, and a default circle has three relays befor
 circles over more relays also means more operators see the device's IP and presence instants — a privacy cost,
 recorded in `haven-core/SECURITY.md` ("The location relay pool"), not an energy one.
 
+**Discoverability (owner decisions OD-B and OD-C of the discoverability fix, added 2026-11-12) adds no background
+wake, and what it adds inside one is ESTIMATED here.** The relay-list task now retries a list no own relay confirms on
+the `KeyPackage`'s prompt ladder (60 s doubling to the 5 min cap), but only while the lifecycle reads `resumed`: a
+backgrounded app records the nominal 30 min deadline, so a burst folds the relay-list task in no more often than
+before and E-A2 is unchanged (pinned by `maintenance_scheduler_provider_test.dart`, "in the background a failed fold
+keeps the nominal deadline"). Foreground retries, like the onboarding "Finishing setup…" wait, are outside this
+model's subject. What each relay-list tick adds is the lookup relays (OD-B): it also probes the six discovery relays
+and republishes the same list to any that misses it — three more dials on a default install, whose three seed
+relays are also lookup relays, six on custom lists.
+
+| Case | What it adds | **ESTIMATED** |
+|---|---|---|
+| iOS background burst that folds the relay-list task in (at the nominal ≈ 2/h) | 3 to 6 more TLS handshakes inside the burst's own wake (≈ 0.5 J each, E-I6); no wake | 2 × 3–6 × 0.5 J ≈ 3–6 J/h ≈ **0.005–0.01 %/h** (E-P1) |
+| A reinstall's adopt-only `KeyPackage` tick | none when the same tick mints into the adopted slot, as it does after a successful adoption; one prompt retry, on the ladder, only when the adoption itself fails | below the table's rounding |
+
+None of these is measured.
+
 **Three findings the model itself produces**, each worth acting on and none of which needed a phone:
 1. **Most of the Android GNSS win is P1's, not P2a's.** Releasing the never-cancelled 1 Hz UI stream at pause takes
    the duty from ≈ 100 % to the FGS one-shot's ≈ 7–42 % (5–30 s per 72 s tick); P2a then takes ≈ 7–42 % to ≈ 4 % and,

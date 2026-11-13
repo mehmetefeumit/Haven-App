@@ -29,6 +29,13 @@ abstract final class WidgetKeys {
   /// public profile, runs the location disclosure, and enters the map shell.
   static const Key createIdentityCta = Key('create_identity_cta');
 
+  /// The "couldn't finish setting up" error on the identity-creation screen,
+  /// shown when the reachability publish timed out or failed (with Retry on
+  /// the CTA).
+  static const Key createIdentitySetupError = Key(
+    'create_identity_setup_error',
+  );
+
   // ---------------------------------------------------------------------------
   // Circle creation flow
   // ---------------------------------------------------------------------------
@@ -139,6 +146,10 @@ abstract final class WidgetKeys {
   static const Key storageResetOpenRelaySettings = Key(
     'storage_reset_open_relay_settings',
   );
+
+  /// "Republish" on the Relay settings page, shown when a relay that answered
+  /// misses one of the account's expected events or serves an old one.
+  static const Key relaySettingsRepublish = Key('relay_settings_republish');
 
   /// Root [ListTile] of a [CircleMemberTile], keyed by the member's pubkey hex.
   static Key memberTile(String pubkeyHex) => ValueKey('member_tile_$pubkeyHex');

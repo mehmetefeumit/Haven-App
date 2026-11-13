@@ -1012,8 +1012,10 @@ bgp_signal_mtime_with() {
   return 1
 }
 
-# bgp_budget_after_lag <anchor-epoch> <budget-secs> <max-lag-secs> — what is
-# left of <budget> once it is measured from <anchor> rather than from now.
+# bgp_budget_after_lag <anchor-epoch> <budget-secs> <max-lag-secs> [now] — what
+# is left of <budget> once it is measured from <anchor> rather than from now.
+# [now] defaults to the clock; the self-test passes its own so a second that
+# ticks between two clock reads cannot move the lag it asserts.
 #
 # The two directions of error are not each other's mirror, so the correction
 # is deliberately one-sided: it may only ever give back the observation lag
@@ -1026,9 +1028,9 @@ bgp_signal_mtime_with() {
 # number at all is not trusted: the caller gets the whole budget, which is
 # exactly the behaviour that predates the anchor.
 bgp_budget_after_lag() {
-  local anchor="${1:-}" budget="$2" max_lag="$3" lag
+  local anchor="${1:-}" budget="$2" max_lag="$3" now="${4:-$(bgp_now)}" lag
   [[ "${anchor}" =~ ^[0-9]+$ ]] || { printf '%s\n' "${budget}"; return 0; }
-  lag=$(( $(bgp_now) - anchor ))
+  lag=$(( now - anchor ))
   if (( lag < 0 || lag > max_lag )); then
     printf '%s\n' "${budget}"
     return 0
@@ -1675,15 +1677,15 @@ Usage: simctl location <device> <action> [<arguments>]
   #     the settle window and reds P3 for an app that did nothing wrong.
   local w6_now
   w6_now="$(bgp_now)"
-  got="$(bgp_budget_after_lag "$(( w6_now - 4 ))" 210 10)"
+  got="$(bgp_budget_after_lag "$(( w6_now - 4 ))" 210 10 "${w6_now}")"
   _check "W6 a 4 s observation lag comes off the budget" 206 "${got}"
-  got="$(bgp_budget_after_lag "$(( w6_now - 10 ))" 210 10)"
+  got="$(bgp_budget_after_lag "$(( w6_now - 10 ))" 210 10 "${w6_now}")"
   _check "W6b a lag of exactly the cap still counts" 200 "${got}"
-  got="$(bgp_budget_after_lag "$(( w6_now - 11 ))" 210 10)"
+  got="$(bgp_budget_after_lag "$(( w6_now - 11 ))" 210 10 "${w6_now}")"
   _check "W6c a lag past the cap is not trusted (whole budget)" 210 "${got}"
-  got="$(bgp_budget_after_lag "$(( w6_now + 30 ))" 210 10)"
+  got="$(bgp_budget_after_lag "$(( w6_now + 30 ))" 210 10 "${w6_now}")"
   _check "W6d an anchor in the FUTURE is not trusted" 210 "${got}"
-  got="$(bgp_budget_after_lag '' 210 10)"
+  got="$(bgp_budget_after_lag '' 210 10 "${w6_now}")"
   _check "W6e an unreadable anchor is not trusted" 210 "${got}"
 
   # --- (W7) …and the anchor is the mtime of the signal that CARRIES the

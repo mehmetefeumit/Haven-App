@@ -650,7 +650,7 @@ class PendingMemberTile extends StatelessWidget {
         style: textStyle?.copyWith(color: HavenSecurityColors.encrypted),
       ),
       ValidationStatus.invalid => Text(
-        errorMessage ?? l10n.createCircleNoAccountFound,
+        errorMessage ?? l10n.memberLookupNotFound,
         style: textStyle?.copyWith(color: HavenSecurityColors.warning),
       ),
       ValidationStatus.needsUpdate => Text(

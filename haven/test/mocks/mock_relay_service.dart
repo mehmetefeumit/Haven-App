@@ -7,6 +7,22 @@ import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 
+/// A relay-list tick that confirmed both lists on one of the user's own
+/// relays — spelled out for the reason [MockRelayService.keyPackageOutcome]
+/// is.
+const relayListsCurrent = RelayListMaintenanceResult(
+  inbox: RelayListCategoryResult(
+    action: RelayListMaintenanceAction.alreadyCurrent,
+    ownConfirmed: true,
+    respondersProbed: 1,
+  ),
+  keyPackage: RelayListCategoryResult(
+    action: RelayListMaintenanceAction.alreadyCurrent,
+    ownConfirmed: true,
+    respondersProbed: 1,
+  ),
+);
+
 /// A mock [RelayService] for testing.
 class MockRelayService implements RelayService {
   @override
@@ -45,7 +61,7 @@ class MockRelayService implements RelayService {
   Future<RelayListMaintenanceResult> maintainRelayList({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,
-  }) async => const RelayListMaintenanceResult.empty();
+  }) async => relayListsCurrent;
 
   @override
   Future<SubscriptionHealthResult> maintainSubscriptionHealth({
@@ -59,8 +75,6 @@ class MockRelayService implements RelayService {
     this.keyPackageResult,
     this.shouldThrowOnFetchKeyPackage = false,
     this.fetchKeyPackageException,
-    this.checkEventResults = const {},
-    this.shouldThrowOnCheckEvent = false,
   });
 
   /// Group messages to return from fetchGroupMessages.
@@ -76,19 +90,28 @@ class MockRelayService implements RelayService {
   /// [RelayServiceException]).
   final Exception? fetchKeyPackageException;
 
-  /// Configurable results for [checkEventOnRelay].
-  ///
-  /// Keyed by `"$relayUrl:$eventKind"`.
-  final Map<String, RelayEventCheck> checkEventResults;
+  /// What [checkOwnReachability] answers.
+  List<OwnRelayPresenceFfi> ownPresence = const [];
 
-  /// Whether checkEventOnRelay should throw.
-  final bool shouldThrowOnCheckEvent;
+  /// When set, [checkOwnReachability] throws.
+  bool shouldThrowOnOwnPresence = false;
+
+  /// When set, [checkOwnReachability] parks on it before answering.
+  Completer<void>? ownPresenceGate;
+
+  /// The pubkey each [checkOwnReachability] call asked about, in call order.
+  final List<String> ownPresenceAsks = [];
 
   /// Optional completer to control when fetchKeyPackage resolves.
   ///
   /// When set, fetchKeyPackage waits for this completer before returning.
   /// Complete it in tests to simulate network delay.
   Completer<void>? fetchKeyPackageGate;
+
+  /// What successive [fetchKeyPackage] calls answer, one each, before the
+  /// constructor's fixed answer applies: a [KeyPackageData], `null` (absence
+  /// proven), or an [Exception] to throw.
+  final List<Object?> keyPackageAnswers = [];
 
   /// The circle each [fetchKeyPackage] call was made for, in call order:
   /// its MLS group id, or `null` for a new circle.
@@ -103,14 +126,6 @@ class MockRelayService implements RelayService {
 
   /// The `since` of the most recent per-relay gift-wrap fetch.
   DateTime? lastGiftWrapSince;
-
-  /// Optional per-relay gates for [checkEventOnRelay], keyed by relay URL.
-  ///
-  /// When a completer is present for a relay, every kind-check on that relay
-  /// awaits it before returning — letting a test observe the ring's
-  /// incremental per-relay progress (one relay resolved while another is still
-  /// in flight).
-  final Map<String, Completer<void>> checkEventGates = {};
 
   /// Tracks method calls for verification.
   final List<String> methodCalls = [];
@@ -209,6 +224,11 @@ class MockRelayService implements RelayService {
     if (fetchKeyPackageGate != null) {
       await fetchKeyPackageGate!.future;
     }
+    if (keyPackageAnswers.isNotEmpty) {
+      final answer = keyPackageAnswers.removeAt(0);
+      if (answer is Exception) throw answer;
+      return answer as KeyPackageData?;
+    }
     if (shouldThrowOnFetchKeyPackage) {
       throw fetchKeyPackageException ??
           const RelayServiceException('Network error');
@@ -243,19 +263,16 @@ class MockRelayService implements RelayService {
   }
 
   @override
-  Future<RelayEventCheck> checkEventOnRelay({
-    required String relayUrl,
-    required String authorPubkey,
-    required int eventKind,
+  Future<List<OwnRelayPresenceFfi>> checkOwnReachability({
+    required String ownPubkey,
   }) async {
-    methodCalls.add('checkEventOnRelay:$relayUrl:$eventKind');
-    await checkEventGates[relayUrl]?.future;
-    if (shouldThrowOnCheckEvent) {
-      throw const RelayServiceException('Check event failed');
+    methodCalls.add('checkOwnReachability');
+    ownPresenceAsks.add(ownPubkey);
+    await ownPresenceGate?.future;
+    if (shouldThrowOnOwnPresence) {
+      throw const RelayServiceException('Check failed');
     }
-    final key = '$relayUrl:$eventKind';
-    return checkEventResults[key] ??
-        RelayEventCheck(relayUrl: relayUrl, found: false, eventCount: 0);
+    return ownPresence;
   }
 
   @override

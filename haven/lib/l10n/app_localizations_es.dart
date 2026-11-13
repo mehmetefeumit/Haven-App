@@ -132,6 +132,13 @@ class AppLocalizationsEs extends AppLocalizations {
   String get onboardingCreateIdentityLoading => 'Preparándolo todo…';
 
   @override
+  String get onboardingFinishingSetup => 'Terminando la configuración…';
+
+  @override
+  String get onboardingFinishSetupError =>
+      'No se pudo terminar de configurar tu cuenta. Comprueba tu conexión e inténtalo de nuevo.';
+
+  @override
   String get onboardingCreateIdentityImportPrompt => '¿Ya tienes una clave?';
 
   @override
@@ -318,21 +325,58 @@ class AppLocalizationsEs extends AppLocalizations {
   }
 
   @override
-  String get relaySettingsStatusConnected => 'Conectado';
-
-  @override
   String get relaySettingsStatusChecking => 'Comprobando';
 
   @override
   String get relaySettingsStatusUnreachable => 'Sin acceso';
 
   @override
-  String get relaySettingsStatusNotChecked => 'Sin comprobar';
+  String relaySettingsKindLine(String kind, String status) {
+    return '$kind: $status';
+  }
 
   @override
-  String relaySettingsStatusSemantics(String status) {
-    return 'Estado del relé: $status';
-  }
+  String get relaySettingsKindKeyPackage => 'KeyPackage';
+
+  @override
+  String get relaySettingsKindRelayList => 'Lista de relés';
+
+  @override
+  String get relaySettingsKindInboxList => 'Lista de bandeja de entrada';
+
+  @override
+  String get relaySettingsPresencePublished => 'Al día';
+
+  @override
+  String get relaySettingsPresenceMissing => 'Falta';
+
+  @override
+  String get relaySettingsPresenceOutdated => 'Versión antigua';
+
+  @override
+  String get relaySettingsLookupTitle => 'Relés de búsqueda';
+
+  @override
+  String get relaySettingsLookupSubtitle =>
+      'Relés públicos donde los demás te buscan. Haven mantiene aquí una copia de tus listas de relés para que otras personas puedan invitarte.';
+
+  @override
+  String get relaySettingsRepublish => 'Volver a publicar';
+
+  @override
+  String get relaySettingsRepublishDone =>
+      'Todos los relés que respondieron ya tienen lo que los demás necesitan para invitarte';
+
+  @override
+  String get relaySettingsRepublishIncomplete =>
+      'Algunos relés todavía no tienen lo que los demás necesitan para invitarte';
+
+  @override
+  String get relaySettingsRepublishHeld =>
+      'Haven no publicará tus ajustes de relés ni tu clave de invitación hasta que respondas al aviso sobre los ajustes de relés';
+
+  @override
+  String get relaySettingsStatusNotChecked => 'Sin comprobar';
 
   @override
   String get relaySettingsEmptyTitle => 'No hay relés configurados';
@@ -650,11 +694,12 @@ class AppLocalizationsEs extends AppLocalizations {
       'No se encontró ningún ID válido en el código QR';
 
   @override
-  String get createCircleNoAccountFound =>
-      'No se encontró ninguna cuenta de Haven para este ID';
+  String get memberLookupNotFound =>
+      'Todavía no se ha encontrado ninguna cuenta de Haven para este ID. Si esa persona acaba de configurar Haven, vuelve a intentarlo dentro de un minuto.';
 
   @override
-  String get createCircleCouldNotVerify => 'No se pudo verificar al miembro';
+  String get memberLookupIncomplete =>
+      'No se pudo terminar de verificar este ID. Comprueba tu conexión e inténtalo de nuevo.';
 
   @override
   String get createCircleSomethingWentWrong => 'Algo salió mal';
@@ -1626,6 +1671,31 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get qrCodeYourPublicKeyLabel => 'Tu clave pública';
+
+  @override
+  String get reachabilityChecking =>
+      'Preparando todo para recibir invitaciones…';
+
+  @override
+  String get reachabilityReady => 'Ya pueden invitarte';
+
+  @override
+  String get reachabilityCantCheck =>
+      'Ahora mismo no se puede comprobar si los demás pueden invitarte';
+
+  @override
+  String get reachabilityNotReady => 'Los demás aún no pueden invitarte';
+
+  @override
+  String get reachabilityNoRelays =>
+      'Los demás no pueden invitarte hasta que añadas un relé';
+
+  @override
+  String get reachabilityOpenRelaySettings => 'Ajustes de relés';
+
+  @override
+  String get reachabilityAwaitingReset =>
+      'Los demás podrán invitarte cuando respondas al aviso sobre los ajustes de relés';
 
   @override
   String get qrCodeWhatIsThisTitle => '¿Qué es esto?';

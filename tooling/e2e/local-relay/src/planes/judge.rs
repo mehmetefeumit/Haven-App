@@ -15,7 +15,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use super::frame::{Event, Filter, Frame};
 use super::policy::{
     Author, Limit, Plane, Row, Verb, LOCATION_RETENTION_MAX_SECS, NEG_INITIAL_MESSAGE, ROWS,
-    STATUS_PROBE_LIMIT,
 };
 use super::table::{PlaneTable, RelayIx, Unusable};
 
@@ -367,16 +366,20 @@ impl Judge<'_> {
             }
             Row::Ev10002 | Row::Ev10050 => {
                 self.account_author(row, event, obs)?;
-                let (plane, tag) = if row == Row::Ev10002 {
+                let (own, tag) = if row == Row::Ev10002 {
                     (Plane::OwnKeyPackage, "r")
                 } else {
                     (Plane::OwnInbox, "relay")
                 };
-                require(
-                    self.own(plane, &event.pubkey, obs),
-                    row,
-                    Class::CrossedEvent,
-                )?;
+                // The lookup relays carry an account's own lists too, so an
+                // inviter holding only a pubkey finds them (2026-11-12).
+                let plane = if self.own(own, &event.pubkey, obs) {
+                    own
+                } else if self.table.current(Plane::Discovery, None, relay, at) {
+                    Plane::Discovery
+                } else {
+                    return Err((Some(row), Class::CrossedEvent));
+                };
                 for named in event.tag_values(tag) {
                     require(
                         !self.foreign_plane(named, &event.pubkey, at),
@@ -468,6 +471,9 @@ impl Judge<'_> {
                 0 if self.table.current(Plane::Profile, None, relay, at) => Plane::Profile,
                 10050 if own_or_former(Plane::OwnInbox) => Plane::OwnInbox,
                 10002 if own_or_former(Plane::OwnKeyPackage) => Plane::OwnKeyPackage,
+                10050 | 10002 if self.table.current(Plane::Discovery, None, relay, at) => {
+                    Plane::Discovery
+                }
                 30443 if self.table.current(Plane::OwnKeyPackage, author, relay, at) => {
                     Plane::OwnKeyPackage
                 }
@@ -591,29 +597,27 @@ impl Judge<'_> {
         } else {
             (Plane::OwnKeyPackage, Plane::InviteeNip65Write)
         };
-        // The relay-status probe asks each of an account's own relays about
-        // all three of its own kinds, whichever list the relay is on.
-        let probed = || {
-            (filter.limit == Some(STATUS_PROBE_LIMIT))
-                .then(|| {
-                    [Plane::OwnInbox, Plane::OwnKeyPackage]
-                        .into_iter()
-                        .find(|plane| self.own(*plane, author, obs))
-                })
-                .flatten()
-        };
         match obs.sender {
             Some(sender) if sender == author => {
                 require(self.table.is_account(author), row, Class::NoGroundTruth)?;
                 if self.own(lists.0, author, obs) {
                     return Ok(lists.0);
                 }
+                // An account's own lists are kept on the lookup relays too, and
+                // asked there for the heal; its key package never is.
+                if row != Row::Req30443A
+                    && self
+                        .table
+                        .current(Plane::Discovery, None, obs.relay, obs.at)
+                {
+                    return Ok(Plane::Discovery);
+                }
                 let class = if self.table.has_list(lists.0, author) {
                     Class::CrossedRequest
                 } else {
                     Class::NoGroundTruth
                 };
-                probed().ok_or((Some(row), class))
+                Err((Some(row), class))
             }
             sender => {
                 if self
@@ -621,9 +625,6 @@ impl Judge<'_> {
                     .current(Plane::Discovery, None, obs.relay, obs.at)
                 {
                     return Ok(Plane::Discovery);
-                }
-                if let Some(plane) = probed().filter(|_| sender.is_none()) {
-                    return Ok(plane);
                 }
                 self.list_of(row, author, obs, lists, sender.is_none())
             }

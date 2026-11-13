@@ -133,6 +133,13 @@ class AppLocalizationsAr extends AppLocalizations {
   String get onboardingCreateIdentityLoading => 'جارٍ التجهيز…';
 
   @override
+  String get onboardingFinishingSetup => 'جارٍ إكمال الإعداد…';
+
+  @override
+  String get onboardingFinishSetupError =>
+      'تعذّر إكمال إعداد حسابك. يُرجى التحقّق من اتصالك وإعادة المحاولة.';
+
+  @override
   String get onboardingCreateIdentityImportPrompt => 'لديك مفتاح بالفعل؟';
 
   @override
@@ -319,21 +326,58 @@ class AppLocalizationsAr extends AppLocalizations {
   }
 
   @override
-  String get relaySettingsStatusConnected => 'متصل';
-
-  @override
   String get relaySettingsStatusChecking => 'جارٍ الفحص';
 
   @override
   String get relaySettingsStatusUnreachable => 'تعذّر الوصول';
 
   @override
-  String get relaySettingsStatusNotChecked => 'لم يُفحَص';
+  String relaySettingsKindLine(String kind, String status) {
+    return '$kind: $status';
+  }
 
   @override
-  String relaySettingsStatusSemantics(String status) {
-    return 'حالة المُرحِّل: $status';
-  }
+  String get relaySettingsKindKeyPackage => 'KeyPackage';
+
+  @override
+  String get relaySettingsKindRelayList => 'قائمة المُرحِّلات';
+
+  @override
+  String get relaySettingsKindInboxList => 'قائمة صندوق الوارد';
+
+  @override
+  String get relaySettingsPresencePublished => 'تم النشر';
+
+  @override
+  String get relaySettingsPresenceMissing => 'لا يوجد';
+
+  @override
+  String get relaySettingsPresenceOutdated => 'إصدار قديم';
+
+  @override
+  String get relaySettingsLookupTitle => 'مُرحِّلات البحث';
+
+  @override
+  String get relaySettingsLookupSubtitle =>
+      'مُرحِّلات عامة يبحث فيها الآخرون عنك. يحتفظ Haven هنا بنسخة من قوائم مُرحِّلاتك ليتمكّن الناس من دعوتك.';
+
+  @override
+  String get relaySettingsRepublish => 'إعادة النشر';
+
+  @override
+  String get relaySettingsRepublishDone =>
+      'أصبح لدى كل مُرحِّل استجاب ما يحتاج إليه الآخرون لدعوتك';
+
+  @override
+  String get relaySettingsRepublishIncomplete =>
+      'لا تزال بعض المُرحِّلات تفتقر إلى ما يحتاج إليه الآخرون لدعوتك';
+
+  @override
+  String get relaySettingsRepublishHeld =>
+      'لن ينشر Haven إعدادات المُرحِّلات الخاصة بك ولا مفتاح الدعوة قبل تجاوز تنبيه إعدادات المُرحِّلات';
+
+  @override
+  String get relaySettingsStatusNotChecked => 'لم يُفحَص';
 
   @override
   String get relaySettingsEmptyTitle => 'لا توجد مُرحِّلات مُهيّأة';
@@ -644,11 +688,12 @@ class AppLocalizationsAr extends AppLocalizations {
   String get createCircleNoIdInQr => 'لم يُعثَر على معرّف صالح في رمز QR';
 
   @override
-  String get createCircleNoAccountFound =>
-      'لم يُعثَر على حساب Haven لهذا المعرّف';
+  String get memberLookupNotFound =>
+      'لم يُعثَر بعدُ على حساب Haven لهذا المعرّف. إن كان الحساب قد أُنشئ للتوّ، فيُرجى إعادة المحاولة بعد دقيقة.';
 
   @override
-  String get createCircleCouldNotVerify => 'تعذّر التحقق من العضو';
+  String get memberLookupIncomplete =>
+      'تعذّر إكمال فحص هذا المعرّف. يُرجى التحقّق من اتصالك وإعادة المحاولة.';
 
   @override
   String get createCircleSomethingWentWrong => 'حدث خطأ ما';
@@ -1658,6 +1703,29 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get qrCodeYourPublicKeyLabel => 'مفتاحك العام';
+
+  @override
+  String get reachabilityChecking => 'جارٍ الاستعداد لتلقّي الدعوات…';
+
+  @override
+  String get reachabilityReady => 'يمكن للآخرين دعوتك';
+
+  @override
+  String get reachabilityCantCheck =>
+      'يتعذّر الآن التحقّق مما إذا كان بإمكان الآخرين دعوتك';
+
+  @override
+  String get reachabilityNotReady => 'لا يمكن للآخرين دعوتك بعد';
+
+  @override
+  String get reachabilityNoRelays => 'لا يمكن للآخرين دعوتك قبل إضافة مُرحِّل';
+
+  @override
+  String get reachabilityOpenRelaySettings => 'إعدادات المُرحِّلات';
+
+  @override
+  String get reachabilityAwaitingReset =>
+      'سيتمكّن الآخرون من دعوتك بمجرّد تجاوز تنبيه إعدادات المُرحِّلات';
 
   @override
   String get qrCodeWhatIsThisTitle => 'ما هذا؟';
