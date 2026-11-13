@@ -2006,9 +2006,9 @@ class _MapShellState extends ConsumerState<MapShell>
   ///
   ///   * `circlesProvider` swallows EVERY failure to `[]` and caches it as a
   ///     SUCCESSFUL answer. A read that lost that race leaves an empty circle
-  ///     list and a bare map, with no error anywhere, for the rest of the
-  ///     process — which is what the field report described. Nothing can
-  ///     detect it after the fact, so it is always re-read.
+  ///     list and a bare map, with no error anywhere, until the session next
+  ///     opens — and a refused open is not one. Nothing can detect it after
+  ///     the fact, so it is always re-read.
   ///   * `relayPreferencesServiceProvider` and `inboxRelaysProvider` DO cache
   ///     their failure, as an `AsyncError` that nothing else ever retries — and
   ///     the inbox list is what a full engine restart re-subscribes the

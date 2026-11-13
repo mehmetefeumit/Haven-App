@@ -12,8 +12,17 @@ These pillars are never traded off, never "temporarily" degraded, and never
 deferred to a follow-up:
 
 **privacy · security · log anonymity · performance · user experience ·
-documentation accuracy (user-visible AND internal) · accessibility · code
-quality · simplicity · test coverage · test reliability**
+responsiveness to input · documentation accuracy (user-visible AND internal) ·
+accessibility · code quality · simplicity · test coverage · test reliability**
+
+### Responsiveness to input (owner-directed 2026-11-12)
+
+User input is paramount: a tap, press or drag takes effect the moment it lands,
+whatever is already moving on screen. Motion in flight (a fling, a glide, a
+transition) yields to newer input; it never swallows the input or makes the user
+repeat it once the screen settles. Haven keeps pace with the user, never the
+reverse, and never by giving up frame rate, animation quality or smoothness. The
+proof is a test that delivers the input mid-motion and asserts it took effect.
 
 ### Log anonymity (owner-directed 2026-09-10)
 

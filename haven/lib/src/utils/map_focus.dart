@@ -49,7 +49,7 @@ void focusMapOnPoint({
       distance <= 2 * camera.nonRotatedSize.longestSide &&
       !reduceMotionOf(context);
   if (canGlide) {
-    _glide.start(controller, fromCenter, fromZoom, target, toZoom);
+    _glide.start(controller, target, toZoom);
   } else {
     _glide.cancel();
     controller.move(target, toZoom);
@@ -73,6 +73,13 @@ void cancelMapFocusGlide() => _glide.cancel();
 
 final _MapFocusGlide _glide = _MapFocusGlide();
 
+/// Map motion already in flight when the user taps. The tap is the newer
+/// intent, so the glide supersedes it instead of yielding to it.
+const Set<MapEventSource> _momentum = {
+  MapEventSource.flingAnimationController,
+  MapEventSource.doubleTapZoomAnimationController,
+};
+
 /// The one recentre tween. Any gesture on the map, a newer focus, or the map's
 /// disposal ends it, so it never fights the user or moves a disposed map.
 class _MapFocusGlide {
@@ -81,21 +88,23 @@ class _MapFocusGlide {
   Ticker? _ticker;
   StreamSubscription<MapEvent>? _events;
 
-  void start(
-    MapController controller,
-    LatLng fromCenter,
-    double fromZoom,
-    LatLng target,
-    double toZoom,
-  ) {
+  void start(MapController controller, LatLng target, double toZoom) {
     cancel();
-    var lastCenter = fromCenter;
-    var lastZoom = fromZoom;
+    late LatLng fromCenter;
+    late double fromZoom;
+    late LatLng lastCenter;
+    late double lastZoom;
+    var owned = false;
     final ticker = Ticker((elapsed) {
-      // A zoom or home button moves the camera with the same source the glide
-      // emits itself, so a pose it did not set is the only sign of it.
       final camera = controller.camera;
-      if (camera.center != lastCenter || camera.zoom != lastZoom) {
+      if (!owned) {
+        // Momentum keeps moving the camera until a `move` of ours changes it
+        // (flutter_map then stops it), so start from wherever it has got to.
+        fromCenter = camera.center;
+        fromZoom = camera.zoom;
+      } else if (camera.center != lastCenter || camera.zoom != lastZoom) {
+        // A zoom or home button moves the camera with the same source the
+        // glide emits itself, so a pose it did not set is the only sign of it.
         cancel();
         return;
       }
@@ -108,13 +117,19 @@ class _MapFocusGlide {
       final c = Curves.easeInOutCubic.transform(t);
       lastCenter = glideLerp(fromCenter, target, c);
       lastZoom = lerpDouble(fromZoom, toZoom, c)!;
-      controller.move(lastCenter, lastZoom);
+      if (controller.move(lastCenter, lastZoom)) owned = true;
     });
     _ticker = ticker;
     // `move` emits a `mapController` event, so the tween never cancels itself.
     _events = controller.mapEventStream.listen(
       (event) {
-        if (event.source != MapEventSource.mapController) cancel();
+        // A double-tap zoom that starts now is newer input than the tap; a
+        // fling cannot start without a drag, which already cancels.
+        if (event is MapEventDoubleTapZoomStart ||
+            (event.source != MapEventSource.mapController &&
+                !_momentum.contains(event.source))) {
+          cancel();
+        }
       },
       onDone: cancel,
     );

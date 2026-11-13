@@ -3,13 +3,17 @@
 ///
 /// # The failure this exists for
 ///
-/// The service opens its own `CircleManagerFfi` at `onStart`. Normally the UI
-/// isolate is already up and wins that race, but on an Android auto-restart of
+/// The service opens its own `CircleManagerFfi` at `onStart` unless the
+/// foreground's ownership stamp is fresh or was never written. Normally the UI
+/// isolate is already up and holds the guard, but on an Android auto-restart of
 /// the service — before any Activity exists — the service can take the guard
 /// first. Nothing then makes it let go: the UI's own initialisation retries on
 /// every call, and every retry hits the same held guard. The user opens the app
 /// to no circles, no map, no publishing and no receiving, and it stays that way
 /// until they toggle background sharing off or the process dies.
+///
+/// The service this restarts finds the stamp fresh, so it leaves the guard to
+/// the UI's retry rather than racing it.
 ///
 /// The service's `onDestroy` DOES release the guard properly (it disposes its
 /// manager rather than leaving it to a GC in a dying isolate), so stopping the
