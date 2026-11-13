@@ -125,9 +125,12 @@ test result: ok. 40 passed; 0 failed; 13 ignored; 0 measured; 0 filtered out; fi
 # toolchain, neither is a relay, a host of ours or anything that tells one
 # user, circle or device from another; the hyperlink's target survives
 # stripping deliberately, so a URL in an OSC payload is still scanned.
-# Only the `Compiling` lines here are exempt, and only from S2 and S6: the
-# `Finished`, `Running` and `Doc-tests` lines below are rule-scanned in full
-# and clean on their own, which is what makes them negative controls.
+# The `Compiling` lines here are exempt from S2 and S6 only, and the two
+# `Running` lines in cargo 1.100's build-dir layout (verbatim from the logscan
+# crate's own transcript in CI run 43278194001) from S4 only, inside their
+# test-binary path. The `Finished`, the deps-layout `Running` and the
+# `Doc-tests` lines are rule-scanned in full and clean on their own, which is
+# what makes them negative controls.
 [1m[92m   Compiling[0m cgka-traits v0.9.4 (https://github.com/marmot-protocol/mdk?rev=e391adc133a9b60e420da7a0446f014a180ac8d2#e391adc1)
 [1m[92m   Compiling[0m fs-private v0.9.4 (https://github.com/marmot-protocol/mdk?rev=e391adc133a9b60e420da7a0446f014a180ac8d2#e391adc1)
 [1m[92m   Compiling[0m marmot-forensics v0.9.4 (https://github.com/marmot-protocol/mdk?rev=e391adc133a9b60e420da7a0446f014a180ac8d2#e391adc1)
@@ -138,4 +141,6 @@ test result: ok. 40 passed; 0 failed; 13 ignored; 0 measured; 0 filtered out; fi
 [1m[92m   Compiling[0m transport-nostr-peeler v0.9.4 (https://github.com/marmot-protocol/mdk?rev=e391adc133a9b60e420da7a0446f014a180ac8d2#e391adc1)
 [1m[92m    Finished[0m ]8;;https://doc.rust-lang.org/cargo/reference/profiles.html#default-profiles\`dev` profile [unoptimized + debuginfo]]8;;\ target(s) in 22.61s
 [1m[92m     Running[0m unittests src/lib.rs (target/debug/deps/haven_core-78272f4b45ab4866)
+[1m[92m     Running[0m unittests src/lib.rs (target/debug/build/haven-logscan/237a2bf5f9252714/out/haven_logscan-237a2bf5f9252714)
+[1m[92m     Running[0m tests/cli_contract.rs (target/debug/build/haven-logscan/6509ca87d18f23d4/out/cli_contract-6509ca87d18f23d4)
 [1m[92m   Doc-tests[0m haven_core

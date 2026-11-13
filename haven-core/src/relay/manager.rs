@@ -42,7 +42,9 @@ use super::url_norm;
 use super::verified::verified_client;
 use crate::circle::MemberKeyPackage;
 use crate::log_alias::{self, bucket, RelayUrl as AliasRelayUrl};
-use crate::nostr::mls::types::{KeyPackageAdmissionRule, TransportMessage};
+use crate::nostr::mls::types::{
+    KeyPackageAdmissionRule, TransportEndpointFailureKind, TransportMessage,
+};
 
 /// Default timeout for relay operations.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -266,7 +268,9 @@ const PUBLISH_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 /// waking the radio for a relay nobody is publishing to. Neither option can
 /// strand a publish, because every send path re-drives
 /// [`RelayManager::add_relays_and_connect`], and `try_connect_relay` reconnects
-/// from `Sleeping` *and* `Terminated` inside the caller's own wake.
+/// from `Sleeping`, and from a `Terminated` its own task reached, inside the
+/// caller's own wake. A relay Haven disconnects is dropped from the pool instead
+/// (see [`RelayManager::shutdown`]).
 ///
 /// # These must be registered through `RelayPool::add_relay`, never `Client::add_relay`
 ///
@@ -336,9 +340,13 @@ fn publish_relay_options() -> RelayOptions {
 /// # Why only `Connected`
 ///
 /// It is the only status that is both un-dialable and dead: `Pending` and
-/// `Connecting` still have a task that will reach a dialable status by itself,
+/// `Connecting` still have a task that will reach a dialable status by itself
+/// (save a dial its caller dropped, which leaves `Connecting` with none: the
+/// residual of tracker `T-POOL-TERMINATE-PERMIT`),
 /// `Disconnected` belongs to a retrying task this pool never has
-/// (`reconnect(false)`), and `Sleeping` / `Terminated` are already dialable.
+/// (`reconnect(false)`), and `Sleeping` / `Terminated` are dialable unless
+/// Haven disconnected the relay, which it then drops (see
+/// [`RelayManager::shutdown`]).
 /// Matched exhaustively so a crate bump that adds a status has to be decided
 /// rather than silently folded into "not wedged".
 fn terminate_wedged_socket(
@@ -376,14 +384,16 @@ fn terminate_wedged_socket(
 /// runs and is never revisited, so Security Rule 13's "acked means acked" is
 /// untouched.
 ///
-/// `Relay::disconnect` is safe to call from any status and is a no-op once the
-/// relay is `Terminated` (`inner.rs:1255-1271`), so this is idempotent; it
-/// touches nothing but the publish pool's own sockets.
+/// A freed relay is dropped from the pool, and the next send registers a fresh
+/// one: a wedge has no connection task, so its `disconnect` leaves a permit
+/// that would end the next dial (see [`RelayManager::shutdown`]). It touches
+/// nothing but the publish pool's own sockets.
 async fn recover_wedged_publish_sockets(client: &Client, relay_urls: &[RelayUrl]) {
     let mut freed: usize = 0;
     for url in relay_urls {
         if let Ok(relay) = client.relay(url.as_str()).await {
             if terminate_wedged_socket(relay.status(), relay.queue(), || relay.disconnect()) {
+                let _ = client.force_remove_relay(url.as_str()).await;
                 freed += 1;
             }
         }
@@ -2288,9 +2298,17 @@ impl RelayManager {
         false
     }
 
-    /// Disconnects from all relays.
+    /// Disconnects from all relays and drops them: every send path registers
+    /// what it needs again.
+    ///
+    /// Never kept: `disconnect` on a relay with no connection task stores a
+    /// termination permit that its next dial consumes, leaving it `Connecting`,
+    /// which no later dial leaves (`nostr-relay-pool-0.44.3 relay/inner.rs`
+    /// 1255-1271, 659-698). The `disconnect` first ends every in-flight wait,
+    /// so the removal's write lock is not queued behind a full `OK` timeout.
     pub async fn shutdown(&self) {
         self.client.disconnect().await;
+        self.client.force_remove_all_relays().await;
     }
 
     /// Removes a relay from the connection pool and tears down its WebSocket.
@@ -2478,6 +2496,15 @@ impl FanoutTransport {
             if relay.flags().has_ping() {
                 relay.flags().remove(RelayServiceFlags::PING);
             }
+        }
+        // MDK's client disconnects a relay after an ambiguous answer
+        // (`sdk_client.rs` 1254-1275); on one with no connection task that
+        // leaves a permit ending every later dial (see `RelayManager::shutdown`).
+        // This relay's gate is held, so no other fanout call is cut.
+        if matches!(&outcome, FanoutTargetOutcome::Failed(failure)
+            if failure.kind() == TransportEndpointFailureKind::PossiblyExposed)
+        {
+            let _ = self.client.force_remove_relay(relay_urls[0].as_str()).await;
         }
         recover_wedged_publish_sockets(&self.client, &relay_urls).await;
         outcome
@@ -2686,7 +2713,6 @@ mod tests {
     use nostr_relay_builder::{LocalRelay, RelayBuilder};
 
     use super::*;
-    use crate::nostr::mls::types::TransportEndpointFailureKind;
     use crate::nostr::mls::SessionManager;
     use crate::nostr::KIND_GROUP_MESSAGE;
     use crate::relay::scripted_relay::{ScriptedRelay, Verdict};
@@ -4486,7 +4512,9 @@ mod tests {
 
     /// Whatever MDK's client does with a target — accepts on it, is refused on
     /// it, tears its socket down after an ambiguous answer, dials it again — the
-    /// relay stays in the publish pool with the options Haven registered.
+    /// relay the publish pool holds has the options Haven registered. After the
+    /// ambiguous answer that is no relay at all: the one MDK reset is dropped,
+    /// and the next call registers a fresh one.
     ///
     /// Pays three 600 ms adapter backoffs twice over (the refused and the
     /// ambiguous call each make three attempts); every answer is immediate.
@@ -4519,6 +4547,11 @@ mod tests {
             .await;
 
         *answer.lock().expect("script lock") = "error: could not say";
+        let held = manager
+            .client
+            .relay(relay.url())
+            .await
+            .expect("registered by the calls above");
         let ambiguous = fanned_out(&transport, target).await;
         assert!(matches!(
             ambiguous,
@@ -4526,17 +4559,16 @@ mod tests {
                 if failure.kind() == TransportEndpointFailureKind::PossiblyExposed
         ));
         assert_eq!(
-            manager
-                .client
-                .relay(relay.url())
-                .await
-                .expect("still registered")
-                .status(),
+            held.status(),
             PoolRelayStatus::Terminated,
             "MDK's client resets a relay after an ambiguous publish; if it no \
              longer does, the case below stops covering a re-dial",
         );
-        assert_registered_with_haven_options(&manager, relay.url(), "after MDK's disconnect").await;
+        assert!(
+            manager.client.relay(relay.url()).await.is_err(),
+            "the relay MDK reset must be dropped from the publish pool, not kept \
+             for a dial its termination permit may end",
+        );
 
         *answer.lock().expect("script lock") = "";
         let redialled = fanned_out(&transport, target).await;
@@ -5805,6 +5837,12 @@ mod tests {
              is what lands it",
         );
         assert!(
+            manager.client.relay(url.as_str()).await.is_err(),
+            "the freed relay must be dropped from the pool: a wedge has no \
+             connection task, so the disconnect left a permit that would end \
+             the next dial of this same object",
+        );
+        assert!(
             manager
                 .publish_event(&throwaway_note("after the wedge"), &[url])
                 .await
@@ -5813,6 +5851,220 @@ mod tests {
             "and freeing it must leave a target the very next publish reaches, \
              or the recovery trades a silent wedge for a dead relay",
         );
+    }
+
+    // ------------------------------------------------------------------
+    // A relay Haven disconnects is dropped, never dialled again.
+    //
+    // `disconnect` on a relay with no connection task stores a termination
+    // permit, and the next dial of that object consumes it: `TerminationRequest`,
+    // the status left `Connecting`, and every later dial a no-op while sends
+    // queue into a channel nobody reads. Each test below leaves a relay with no
+    // task in the state one product path does, has that path disconnect it, and
+    // requires the next send to land.
+    // ------------------------------------------------------------------
+
+    /// A local relay and a manager that has not touched it yet.
+    async fn local_relay_and_manager() -> (LocalRelay, String, RelayManager) {
+        let _ = allow_ws_loopback_for_test();
+        let server = LocalRelay::new(RelayBuilder::default());
+        server.run().await.expect("local relay runs");
+        let url = server.url().await.to_string();
+        (server, url, RelayManager::new())
+    }
+
+    /// Registers `url` and drops its first dial after one poll, as a send
+    /// cut short by its caller's bound does: `Connecting`, with no task.
+    ///
+    /// One poll on a single thread: the pool's locks are uncontended and the
+    /// admission policy is ready at once, while the handshake needs the server,
+    /// which cannot run until this returns.
+    async fn strand_mid_dial(manager: &RelayManager, url: &str) {
+        use futures::FutureExt;
+        let relay_url = RelayUrl::parse(url).expect("loopback url");
+        RelayManager::register_publish_relays(&manager.client, &[relay_url]).await;
+        assert!(
+            manager
+                .client
+                .try_connect_relay(url, CONNECTION_TIMEOUT)
+                .now_or_never()
+                .is_none(),
+            "the dial finished in one poll, so nothing was cut short",
+        );
+        assert_eq!(
+            manager
+                .client
+                .relay(url)
+                .await
+                .expect("registered")
+                .status(),
+            PoolRelayStatus::Connecting,
+        );
+    }
+
+    /// Whether the pool's relay at `url` is connected now.
+    async fn pool_relay_connected(manager: &RelayManager, url: &str) -> bool {
+        manager
+            .client
+            .relay(url)
+            .await
+            .is_ok_and(|relay| relay.is_connected())
+    }
+
+    /// A relay the pool holds but never dialled is `Initialized`, with no task,
+    /// and `disconnect` and `try_connect` take the same branches on it as on a
+    /// `Sleeping` one. The pool must also stay usable across shutdown after
+    /// shutdown: by the fanout, by a plain publish and by a NIP-77 pass.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_relay_registered_but_never_dialled_is_reachable_after_shutdown() {
+        let (_server, url, manager) = local_relay_and_manager().await;
+        let relay_url = RelayUrl::parse(&url).expect("loopback url");
+        RelayManager::register_publish_relays(&manager.client, &[relay_url]).await;
+        assert_eq!(
+            manager
+                .client
+                .relay(url.as_str())
+                .await
+                .expect("registered")
+                .status(),
+            PoolRelayStatus::Initialized,
+        );
+
+        manager.shutdown().await;
+        assert!(
+            matches!(
+                fanout_publish(&manager, &url, &fanout_message()).await,
+                FanoutTargetOutcome::Accepted
+            ),
+            "a relay the shutdown disconnected before it was ever dialled must \
+             still take the next fanout publish",
+        );
+        assert!(pool_relay_connected(&manager, &url).await);
+
+        manager.shutdown().await;
+        assert!(
+            manager
+                .publish_event(
+                    &throwaway_note("after the second shutdown"),
+                    std::slice::from_ref(&url)
+                )
+                .await
+                .expect("the relay is up")
+                .is_success(),
+            "the pool must take a plain publish after another shutdown",
+        );
+
+        manager.shutdown().await;
+        manager.neg_prepare(std::slice::from_ref(&url)).await;
+        let ends = tokio::time::Instant::now() + wait_budget(30);
+        assert!(
+            matches!(
+                manager
+                    .neg_remote_ids(
+                        &[0xab; 32],
+                        &url,
+                        0,
+                        nostr::Timestamp::now().as_secs(),
+                        ends
+                    )
+                    .await,
+                crate::relay::negentropy::NegAnswer::Complete(_)
+            ),
+            "and a NIP-77 pass after a third",
+        );
+    }
+
+    /// A dial its caller's bound cut short leaves the relay `Connecting` with
+    /// no task, which no later dial leaves; the shutdown has to retire it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_dial_cancelled_mid_handshake_is_healed_by_shutdown() {
+        let (_server, url, manager) = local_relay_and_manager().await;
+        strand_mid_dial(&manager, &url).await;
+
+        manager.shutdown().await;
+        assert!(
+            matches!(
+                fanout_publish(&manager, &url, &fanout_message()).await,
+                FanoutTargetOutcome::Accepted
+            ),
+            "after the shutdown the relay a cut dial stranded must take the next \
+             fanout publish",
+        );
+        assert!(pool_relay_connected(&manager, &url).await);
+    }
+
+    /// The burst pool's own idle sleep: a relay that slept after a burst is
+    /// shut down at the pause and must take the next burst's send.
+    ///
+    /// The permit is stored whichever way the shutdown meets the sleeping
+    /// task: the `Sleeping` broadcast is made inside the poll that ends the
+    /// connection task's `select!`, and a termination waiter dropped notified
+    /// but unreceived hands its `notify_one` on to the next waiter, or stores
+    /// it when there is none (tokio 1.52.1 `sync/notify.rs` 1365-1374).
+    ///
+    /// ~60–70 s of wall clock, for the reason
+    /// `the_publish_socket_sleeps_after_a_burst_and_wakes_for_the_next` gives.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_sleeping_publish_socket_is_reachable_after_shutdown() {
+        let (_server, url, manager) = local_relay_and_manager().await;
+        assert!(manager
+            .publish_event(&throwaway_note("the burst"), std::slice::from_ref(&url))
+            .await
+            .expect("the burst reaches the relay")
+            .is_success());
+        let mut notifications = manager
+            .client
+            .relay(url.as_str())
+            .await
+            .expect("the publish added the relay to the pool")
+            .notifications();
+        assert_eq!(
+            next_relay_status(&mut notifications, wait_budget(180)).await,
+            Some(nostr_sdk::RelayStatus::Sleeping),
+        );
+
+        manager.shutdown().await;
+        assert!(
+            matches!(
+                fanout_publish(&manager, &url, &fanout_message()).await,
+                FanoutTargetOutcome::Accepted
+            ),
+            "a relay that slept before the shutdown must take the next fanout \
+             publish",
+        );
+        assert!(pool_relay_connected(&manager, &url).await);
+    }
+
+    /// A fanout call that ends possibly exposed makes MDK's client disconnect
+    /// the relay; on one with no task that stores the permit, and the target
+    /// would answer every later call unavailable or ambiguous, holding its
+    /// commit pending (Security Rule 13) until the next pause.
+    ///
+    /// The first call's ~20 s of MDK waits run on a paused clock: nothing is
+    /// dialled while the relay is stranded, so only MDK's own timers advance.
+    /// The clock is resumed before the call that does dial.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_relay_mdk_reset_after_an_ambiguous_publish_is_reachable_again() {
+        let (_server, url, manager) = local_relay_and_manager().await;
+        strand_mid_dial(&manager, &url).await;
+
+        tokio::time::pause();
+        let ambiguous = fanout_publish(&manager, &url, &fanout_message()).await;
+        tokio::time::resume();
+        assert!(matches!(
+            ambiguous,
+            FanoutTargetOutcome::Failed(failure)
+                if failure.kind() == TransportEndpointFailureKind::PossiblyExposed
+        ));
+
+        assert!(
+            matches!(
+                fanout_publish(&manager, &url, &fanout_message()).await,
+                FanoutTargetOutcome::Accepted
+            ),
+            "the relay MDK reset after the ambiguous call must take the next one",
+        );
+        assert!(pool_relay_connected(&manager, &url).await);
     }
 
     /// A loopback front door that can stop carrying what the relay SAYS while

@@ -129,6 +129,7 @@
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
@@ -530,11 +531,70 @@ pub trait ModeSource: Send + Sync {
     fn stands(&self) -> bool {
         true
     }
+
+    /// What counts each relay call this source's pass marks as begun, until
+    /// its answer: what a pause waits on before it closes the socket the
+    /// call rides (Security Rule 13). `None` counts nothing.
+    fn in_flight(&self) -> Option<&InFlight> {
+        None
+    }
 }
 
 impl ModeSource for DriveMode {
     fn mode(&self) -> DriveMode {
         *self
+    }
+}
+
+/// How many of something are under way, and a wait for none.
+///
+/// Counted `SeqCst`, against a pause that writes the lifecycle and then
+/// reads this: what counts itself and then reads the lifecycle either is
+/// waited for or sees the pause.
+#[derive(Default)]
+pub struct InFlight {
+    count: AtomicUsize,
+    drained: tokio::sync::Notify,
+}
+
+impl InFlight {
+    /// Counts one more, until the guard drops.
+    pub(crate) fn count(&self) -> Counted<'_> {
+        self.count.fetch_add(1, Ordering::SeqCst);
+        Counted(self)
+    }
+
+    /// How many are counted now.
+    pub(crate) fn now(&self) -> usize {
+        self.count.load(Ordering::SeqCst)
+    }
+
+    /// Completes once none is counted. No cap of its own: what it waits for
+    /// is bounded by whoever counted it.
+    pub(crate) async fn drained(&self) {
+        loop {
+            let notified = self.drained.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.now() == 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+/// One count on an [`InFlight`], given back on drop: what panics, is
+/// cancelled or returns early never leaves the count above zero, which would
+/// hold an uncapped wait on it for good.
+#[must_use]
+pub struct Counted<'a>(&'a InFlight);
+
+impl Drop for Counted<'_> {
+    fn drop(&mut self) {
+        if self.0.count.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.0.drained.notify_waiters();
+        }
     }
 }
 
@@ -2456,6 +2516,7 @@ enum Sent {
 /// marked, nothing is called and every relay taken is given back — a first
 /// send the operating system cut would leave a commit nobody may hold stored
 /// as possibly exposed for good.
+#[allow(clippy::too_many_lines)]
 async fn send_what_is_due<T: FanoutSend + ?Sized>(
     circle: &CircleManager,
     transport: &T,
@@ -2517,10 +2578,15 @@ async fn send_what_is_due<T: FanoutSend + ?Sized>(
     let now_ms = clock.now_ms();
     let mut attempts: Vec<(Attempt, Taken)> = Vec::new();
     let mut marked = Ok(());
+    let mut admitted = None;
     session
         .begin_fanout_attempts(fanout, |all, fanout| {
+            // Counted under the store, before the lifecycle is read: a pause
+            // that closes this call's socket waits for it or finds none begun.
+            admitted = mode.in_flight().map(InFlight::count);
+            let ended = admitted.is_some() && !mode.stands();
             let full = a_leave || mode.mode() == DriveMode::Full;
-            if first_send && !full {
+            if (first_send && !full) || ended {
                 all_taken = false;
                 return false;
             }
@@ -2563,6 +2629,8 @@ async fn send_what_is_due<T: FanoutSend + ?Sized>(
     let Some(answers) = within(clock, deadline_ms, calls).await else {
         return Ok((Sent::Cut, None));
     };
+    // Before the store: a pause waits for the calls, never for the store.
+    drop(admitted);
     let mut clock_blamed: Option<crate::relay::clock_skew::DeviceClockComplaint> = None;
     for (attempt, answer) in attempts.iter().zip(answers) {
         if let FanoutTargetOutcome::Failed(failed) = &answer {
@@ -3011,8 +3079,12 @@ pub enum SendHeld {
     /// or retained rows MDK queues a send behind are still untried — a wake
     /// too short for the pre-send drain leaves them — or the engine could not
     /// be had for the send at all: input stranded in the circle is still
-    /// owed to it, or a rolled-back commit is not yet retired. The next call
-    /// carries on from there.
+    /// owed to it, or a rolled-back commit is not yet retired. Or this device
+    /// fetched input for the circle it has not taken in: a commit the
+    /// catch-up pager held back, which no ingest took in and the engine does
+    /// not record, or stored replay a live REQ holds until its relay's
+    /// `EOSE` (`SessionManager::holds_unread_input`). The next call carries
+    /// on from there.
     StoredInput,
     /// Nothing: whatever deferred the send was resolved in the call, and the
     /// next one is sealed.
@@ -4518,7 +4590,8 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
                 {
                     SendHeld::DepartureDue
                 }
-                None if session.send_gated(group_id).await
+                None if session.holds_unread_input(group_id)
+                    || session.send_gated(group_id).await
                     || session.deferred_peels_due(group_id).await =>
                 {
                     SendHeld::StoredInput

@@ -587,12 +587,17 @@ class BackgroundLocationTaskHandler extends TaskHandler {
   /// in-memory engine sessions. With no identity the manager stays null and
   /// every downstream call site no-ops.
   ///
+  /// No open while the foreground owns publishing. The UI's handover restarts
+  /// this service just before its own single retry of the open, and a session
+  /// taken here first leaves the visible app with no circles; the first cycle
+  /// that owns publishing acquires it instead (step 3c).
+  ///
   /// The circle service shares that one manager rather than opening a second
   /// MLS state cache over the same DB, and the identity adapter exposes only
   /// the pubkey hex — secret material stays inside the identity manager.
   Future<void> _bringUpSession(String dataDir) async {
     _dataDir = dataDir;
-    await _openCircleManager();
+    if (!await _foregroundOwnsPublishing()) await _openCircleManager();
     await _ensureAuxServices();
     _wireSharingServices();
   }
@@ -717,9 +722,10 @@ class BackgroundLocationTaskHandler extends TaskHandler {
 
   /// Reads the foreground-ownership stamp from a freshly reloaded snapshot.
   ///
-  /// One judgement, two callers ([_runWatchdog] and [_publishCycle]) — a
-  /// second, hand-rolled reading of the same stamp is how the two paths
-  /// silently disagree about who owns publishing.
+  /// One judgement for [_runWatchdog] and [_bringUpSession], over the same
+  /// [_foregroundActiveFrom] that [_publishCycle] reads — a second, hand-rolled
+  /// reading of the stamp is how the paths silently disagree about who owns
+  /// publishing.
   Future<bool> _foregroundOwnsPublishing() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.reload();

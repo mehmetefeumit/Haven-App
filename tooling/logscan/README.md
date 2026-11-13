@@ -800,9 +800,9 @@ other rule still reads it — a value printed after the host is reported by
 whichever rule its shape belongs to — while S7 keeps its stricter exemption, so
 `ws://10.0.2.2:7777/<anything>` is still a hit.
 
-Seven things narrow what the scanner catches — four rule qualifiers, one
-sink-class rule exemption, one per-emitter NEEDLE scope and one property of the
-escape stripper — so all seven are written down as **declared residuals**, the
+Eight things narrow what the scanner catches — four rule qualifiers, two
+sink-class rule exemptions, one per-emitter NEEDLE scope and one property of the
+escape stripper — so all eight are written down as **declared residuals**, the
 same discipline the ledger's `not_gaps` follow: a boundary stated in one
 sentence beats a boundary discovered by an adversarial reader later.
 
@@ -813,6 +813,7 @@ sentence beats a boundary discovered by an adversarial reader later.
 | **S8** | a blob next to a key word that sits inside the source location ending a Dart stack frame line: `#<n>`, a member, then `(package:` or `(file://` up to `.dart:<line>[:<column>])` with no space or parenthesis inside | every other rule and the needle search, which still read the whole line, and `scan-logs-for-secrets.sh`; what is inside is a source path compiled into the app, and a value anywhere else on a frame line is read by S8 as before |
 | **S13** | an `https?://` URL sitting mid-line with neither a dial-failure marker nor solitude — a Haven line that printed a host inside prose of its own composition | the needle search for a declared `relay_url` (whose `scheme-alt`, `host-only` and `with-port` labels are searched), S7 for the `wss?://` spellings, S12 when the host is an address, and the source guards, which are what keep Haven's own code from composing such a line at all |
 | **cargo's crate-build line** (`rust-test` and `soak` only) | **S2 and S6 only**, and only on a `Compiling\|Checking\|Downloaded <name> v<semver> [(<source>)]` line: a 32–63-hex run or a geohash-shaped token in the crate-name or source-URL slot. Every other rule still fires on that line, and cargo's other status lines are not exempt at all | the needle search, which reads those lines byte for byte like any other; S1 for a 64-hex run; and the shape itself, which has to be produced deliberately |
+| **cargo's test-binary path** (`rust-test` and `soak` only) | **S4 only**, and only for a run lying wholly inside the path of a `Running [unittests ]<src\|tests>/….rs (target/debug/build/<crate>/<16 hex>/out/<bin>-<16 hex>)` line whose two hashes are equal: a lowercase alphanumeric value in the crate or binary slot, or a 16-hex value in the two hash slots (which no rule reads anywhere). Every other rule, and S4 anywhere else on the line, still fires | the needle search, which reads the line byte for byte; S1/S2 for the hex spellings; and the shape itself, which has to be produced deliberately and holds no mixed-case payload |
 | **`locationd` / `com.apple.locationd.Position`** (`ios` only) | the `coordinate` NEEDLE, on records whose process AND emitter are exactly those: a lane injects the fix into that daemon, so it holds the value by construction | every other program (Haven's own included, and that same subsystem inside Haven's process), every other class on the same records, every structural rule, and the other sinks — the same coordinate in a logcat, a drive transcript or a relay log is reported as before |
 | **escaped value** | a value the app printed immediately after a LITERAL `ESC [` it emitted itself: the CSI consumer eats the parameter bytes (digits, `;`, `:`, `<=>?`) up to the first `@`–`~`, so the head of such a value is removed before matching | `tooling/e2e/ci/scan-logs-for-secrets.sh`, which runs FIRST and over raw bytes; and the fact that nothing in this tree emits a bare `ESC [` — the app's own log backends do not colour |
 
@@ -821,7 +822,9 @@ S8's frame location was paid for by the three Android lanes of CI run
 `s8_reads_past_a_dart_frame_location_and_nowhere_else`, which pins the
 blob-outside-the-location and not-a-location shapes as hits; S4, S6 and the
 cargo line were each paid for by a real transcript and are in
-`furniture.rust-test.log` / `furniture.flutter-test.log` now; S13's is the price
+`furniture.rust-test.log` / `furniture.flutter-test.log` now, as is the
+test-binary path CI run 43278194001 paid for (its control is
+`only_s4_inside_a_running_lines_test_binary_path_is_furniture`); S13's is the price
 of not reddening the deliberate URLs above, and its controls are the VM-service
 and plugin-notice lines in `s13_reads_a_failed_dials_rescheme_and_not_a_deliberate_url`
 and the clean scan of `buildonly.ios.drive.log`; the `locationd` scope was
@@ -862,8 +865,9 @@ keeps `location::geohash::tests::nan_latitude_returns_empty` — a delimited
 keyword, `::` as the separator, and five geohash-alphabet letters — from
 reddening every `cargo test` transcript this tree produces.
 
-The cargo residual is the only exemption that belongs to a SINK CLASS rather than
-to a rule, and it is deliberately the narrowest thing that closes the failure it
+The cargo residuals are the only exemptions that belong to a SINK CLASS rather than
+to a rule (the test-binary path is described in its table row), and the
+crate-build line is deliberately the narrowest thing that closes the failure it
 was written for. Before a single test runs, cargo prints the public pinned git
 revision of every git dependency (a 40-hex run, which S2 reads as a truncated id)
 and the name of every crate it touches (one of which S6 reads as a cell next to a
@@ -883,7 +887,11 @@ mechanical:
   triple, and the source is not free text. Cargo's other status lines —
   `Finished`, `Running`, `Doc-tests`, `Updating`, `Downloading` — are **not**
   exempt: they trip no rule as cargo prints them (asserted, not assumed), and
-  each has an unbounded tail, which is a slot a value can be printed into.
+  each has an unbounded tail, which is a slot a value can be printed into. The
+  one exception is S4 inside the test-binary path of cargo 1.100's build-dir
+  layout (`target/debug/build/<crate>/<hash>/out/<bin>-<hash>`), whose `/`
+  makes a 32-character base64 run of a path; that has its own bounded shape and
+  row in the table above.
   `Doc-tests <32 hex>`, `Running x (target/<coordinate pair>)` and
   `Updating git repository \`wss://…\`` were all furniture under a wider shape;
   each is a regression test now.

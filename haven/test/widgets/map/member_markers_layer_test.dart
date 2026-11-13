@@ -17,11 +17,13 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
+import 'package:haven/src/providers/map_controller_provider.dart';
 import 'package:haven/src/providers/member_profile_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/services/profile_service.dart';
 import 'package:haven/src/test_keys.dart';
+import 'package:haven/src/utils/map_focus.dart';
 import 'package:haven/src/utils/marker_geometry.dart';
 import 'package:haven/src/utils/marker_glide.dart';
 import 'package:haven/src/widgets/map/avatar_image_cache.dart';
@@ -1237,6 +1239,148 @@ void main() {
       expect(tester.hasRunningAnimations, isTrue);
       await tester.pump(const Duration(milliseconds: 400));
       await tester.pump(const Duration(milliseconds: 16));
+      expect(tester.hasRunningAnimations, isFalse);
+    });
+  });
+
+  group('MemberMarkersLayer — edge tap during map motion', () {
+    tearDown(cancelMapFocusGlide);
+
+    /// A real map whose droplet taps recentre through [focusMapOnPoint].
+    Future<MapController> pumpMap(
+      WidgetTester tester,
+      MemberLocation member,
+    ) async {
+      final controller = MapController();
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            profileServiceProvider.overrideWithValue(MockProfileService()),
+            mapControllerProvider.overrideWithValue(controller),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(
+              body: FlutterMap(
+                mapController: controller,
+                options: const MapOptions(
+                  initialCenter: LatLng(51.5, -0.1),
+                  initialZoom: 15,
+                ),
+                children: [
+                  Consumer(
+                    builder: (context, ref, _) => MemberMarkersLayer(
+                      members: [member],
+                      bottomInset: 0,
+                      onFocusMember: (m) => focusMapOnPoint(
+                        ref: ref,
+                        context: context,
+                        target: LatLng(m.latitude, m.longitude),
+                        announcementName: 'x',
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 300));
+      final marker = find.byKey(WidgetKeys.memberMarker(member.pubkey));
+      expect(tester.widget<MemberMarker>(marker).offScreen, isTrue);
+      return controller;
+    }
+
+    /// Throws the map sideways, so a member due north stays off the top edge,
+    /// and checks the fling is still moving the map.
+    Future<void> fling(WidgetTester tester, MapController controller) async {
+      await tester.fling(find.byType(FlutterMap), const Offset(-200, 0), 2000);
+      await tester.pump(const Duration(milliseconds: 16));
+      final before = controller.camera.center;
+      await tester.pump(const Duration(milliseconds: 16));
+      expect(
+        controller.camera.center,
+        isNot(before),
+        reason: 'the fling is still moving the map',
+      );
+    }
+
+    Future<List<LatLng>> settle(
+      WidgetTester tester,
+      MapController controller,
+    ) async {
+      final path = <LatLng>[];
+      for (var i = 0; i < 40; i++) {
+        await tester.pump(const Duration(milliseconds: 16));
+        path.add(controller.camera.center);
+      }
+      return path;
+    }
+
+    testWidgets('a tap on a near droplet while a fling is still moving the '
+        'map glides to that member', (tester) async {
+      // ~750 px due north at zoom 15: off-screen, yet near enough to glide to.
+      final member = _loc(pubkey: 'aa', lat: 51.52);
+      final controller = await pumpMap(tester, member);
+      await fling(tester, controller);
+
+      await tester.tap(find.byKey(WidgetKeys.markerSemantics('aa')));
+      final path = await settle(tester, controller);
+
+      // A glide, not a cut, heading north to the member every frame.
+      expect(path[12].latitude, inExclusiveRange(51.5, member.latitude));
+      for (var i = 1; i < path.length; i++) {
+        expect(path[i].latitude, greaterThanOrEqualTo(path[i - 1].latitude));
+      }
+      expect(
+        controller.camera.center,
+        LatLng(member.latitude, member.longitude),
+      );
+      expect(controller.camera.zoom, 15);
+      expect(tester.hasRunningAnimations, isFalse);
+    });
+
+    testWidgets('a tap on a far droplet while a fling is still moving the '
+        'map cuts to that member', (tester) async {
+      // Over two viewports north: the recentre is a cut.
+      final member = _loc(pubkey: 'aa', lat: 51.6);
+      final controller = await pumpMap(tester, member);
+      await fling(tester, controller);
+
+      await tester.tap(find.byKey(WidgetKeys.markerSemantics('aa')));
+      expect(
+        controller.camera.center,
+        LatLng(member.latitude, member.longitude),
+      );
+      await settle(tester, controller);
+
+      expect(
+        controller.camera.center,
+        LatLng(member.latitude, member.longitude),
+      );
+      expect(tester.hasRunningAnimations, isFalse);
+    });
+
+    testWidgets('a double-tap zoom on the map mid-glide wins over the glide', (
+      tester,
+    ) async {
+      final member = _loc(pubkey: 'aa', lat: 51.52);
+      final controller = await pumpMap(tester, member);
+      await tester.tap(find.byKey(WidgetKeys.markerSemantics('aa')));
+      for (var i = 0; i < 5; i++) {
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+
+      final map = find.byType(FlutterMap);
+      await tester.tap(map);
+      await tester.pump(const Duration(milliseconds: 60));
+      await tester.tap(map);
+      await settle(tester, controller);
+
+      expect(controller.camera.zoom, closeTo(16, 1e-9));
       expect(tester.hasRunningAnimations, isFalse);
     });
   });

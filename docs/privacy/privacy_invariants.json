@@ -581,7 +581,7 @@
     {
       "id": "INV-L-IOS-INDICATOR-HONEST",
       "title": "The iOS indicator the copy names is the one the OS will actually show",
-      "statement": "Under a POSITIVELY confirmed Always (iOS 18+, a CLServiceSessionDiagnostic with alwaysAuthorizationDenied, authorizationRequestInProgress and insufficientlyInUse all false) HavenLocationStreamHandler leaves showsBackgroundLocationIndicator false and HavenBackgroundSessionHandler.arm() holds no CLBackgroundActivitySession, so the OS status-bar arrow is the whole signal; under When-In-Use, a provisional Always and every iOS 17 Always the activity session IS held and the blue location bar IS shown. The settings card's indicator sentence is chosen from that same alwaysConfirmed predicate over the session handler's own status channel — never from authorizationStatus, never from backgroundActivitySessionHeld (false for the whole iOS 15/16 cohort, who see the bar) — and only while the handler reports itself ARMED, because disarm() clears alwaysConfirmed unconditionally and its false is then a teardown residue rather than a reading of the tier; with no reading the page renders no card at all rather than naming an indicator. The card renders only under IosAuthStatus.always. Gating the activity session on .authorizedWhenInUse alone (so a provisional Always falls through to the arrow posture), hardcoding the indicator flag, selecting the sentence from any other value, or letting the base sentence name an indicator, each falsifies this.",
+      "statement": "Under a POSITIVELY confirmed Always (iOS 18+, a CLServiceSessionDiagnostic with alwaysAuthorizationDenied, authorizationRequestInProgress and insufficientlyInUse all false) HavenBackgroundSessionHandler.arm() holds no CLBackgroundActivitySession, and with Precise Location ON HavenLocationStreamHandler also leaves showsBackgroundLocationIndicator false, so the OS status-bar arrow is the whole signal — the ONLY posture in which the arrow is shown. With Precise Location OFF a confirmed Always keeps the indicator asked for (its desiredAccuracy writes have no effect, so the session may leave the iOS 16.4 delivery shape, and the indicator is Apple's other documented lever) and the blue location bar IS shown; under When-In-Use, a provisional Always and every iOS 17 Always the activity session IS held and the bar IS shown. Both the flag and the settings card's indicator sentence read ONE predicate, the session handler's indicatorRequested (!alwaysConfirmed || accuracyAuthorization == .reducedAccuracy), re-applied natively on every authorization callback — which also fires on an accuracy-authorization change — and read by Dart over the session handler's own status channel: never from authorizationStatus, never from alwaysConfirmed alone (true for a reduced-accuracy reader who sees the bar), never from backgroundActivitySessionHeld (false for the whole iOS 15/16 cohort, who see the bar), and only while the handler reports itself ARMED, because disarm() clears alwaysConfirmed unconditionally and the predicate is then a teardown residue rather than a reading of the tier; with no reading the page renders no card at all rather than naming an indicator. The card renders only under IosAuthStatus.always. The reduced-accuracy branch is proved by the source pins and the widget/provider tests, not by an e2e lane: the CI simulator runs at full accuracy. Gating the activity session on .authorizedWhenInUse alone (so a provisional Always falls through to the arrow posture), hardcoding the indicator flag, dropping the reduced-accuracy clause, not re-applying the policy on an authorization callback, selecting the sentence from any other value, or letting the base sentence name an indicator, each falsifies this.",
       "status": "enforced",
       "assertion_arb_keys": [
         "locationSettingsIosGuidance",
@@ -608,6 +608,10 @@
           "symbol": "arm"
         },
         {
+          "file": "haven/ios/Runner/HavenBackgroundSessionHandler.swift",
+          "symbol": "indicatorRequested"
+        },
+        {
           "file": "haven/ios/Runner/HavenLocationStreamHandler.swift",
           "symbol": "applyIndicatorPolicy"
         },
@@ -627,7 +631,15 @@
         },
         {
           "file": "haven/test/lints/ios_indicator_copy_accuracy_test.dart",
-          "name": "Dart selects the sentence on alwaysConfirmed, never on the held session"
+          "name": "the indicator predicate keeps a reduced-accuracy Always on the bar"
+        },
+        {
+          "file": "haven/test/lints/ios_indicator_copy_accuracy_test.dart",
+          "name": "the indicator predicate reaches Dart"
+        },
+        {
+          "file": "haven/test/lints/ios_indicator_copy_accuracy_test.dart",
+          "name": "Dart selects the sentence on indicatorRequested, never on alwaysConfirmed alone or the held session"
         },
         {
           "file": "haven/test/lints/ios_indicator_copy_accuracy_test.dart",
@@ -652,6 +664,18 @@
         {
           "file": "haven/test/pages/settings/location_settings_page_test.dart",
           "name": "a confirmed Always with no session held means the arrow"
+        },
+        {
+          "file": "haven/test/pages/settings/location_settings_page_test.dart",
+          "name": "a confirmed Always with Precise Location off still means the blue bar"
+        },
+        {
+          "file": "haven/test/pages/settings/location_settings_page_test.dart",
+          "name": "30. a confirmed Always with Precise Location off names the blue location bar, never the arrow"
+        },
+        {
+          "file": "haven/test/pages/settings/location_settings_page_test.dart",
+          "name": "31. turning Precise Location off in Settings brings the bar sentence back on resume"
         },
         {
           "file": "haven/test/pages/settings/location_settings_page_test.dart",
@@ -689,7 +713,7 @@
     {
       "id": "INV-L-IOS-PUBLISH-INPUT-BEST-PROFILE-ONLY",
       "title": "Only Best-profile iOS fixes ever become a published coordinate",
-      "statement": "On iOS the session runs at one of exactly two accuracy tiers, and only a fix delivered under the Best profile — desiredAccuracy == kCLLocationAccuracyBest AND computed after the switch to it (the bestSince comparison) — is emitted to Dart, cached as the publish input, or returned as last-known. A kCLLocationAccuracyHundredMeters fix serves the stationary/movement detector and the freshness bound and nothing else; it never reaches a subscriber, the motion trigger or the relay. A live session holds that fix THREE times — the native lastBestFix, the location service's _lastStreamPosition, and the profile controller's anchor — and all three clear together, on stream cancel, on a toggle-off pause, on logout and on an observed access loss, so no full-precision coordinate outlives the session in any of them. The last-known read is age-bounded by the same freshness rule as the cache read, so the fix one rejects as stale is not served by the other. Emitting or caching a 100 m-tier fix, dropping the bestSince comparison, adding a third accuracy value, serving the native cache unbounded, or clearing fewer than all three copies, each falsifies this. That freshness rule is itself bounded in TIME. A coarse-tier confirmation may extend how long the Best anchor is served past its own timestamp, but never beyond kStationaryAnchorMaxAge (5 min), enforced in two places: IosProfileController escalates to Best at that age however many coarse fixes have confirmed the anchor, and _streamFixIsFresh refuses to serve a fix older than it whatever the confirmation says. A published location carries the instant of the PUBLISH and never the fix time, so without that cap a stationary backgrounded device would re-publish one anchor indefinitely and a peer would read \"just now\" for a coordinate hours old and up to 200 m wrong. Removing either half of the cap, or measuring it from the confirmation rather than from the anchor's own timestamp, falsifies this too.",
+      "statement": "On iOS the session runs at one of exactly two accuracy tiers, and only a fix delivered under the Best profile — Best is the tier HavenLocationStreamHandler last REQUESTED (bestRequested, never a read-back of desiredAccuracy, which is undocumented under reduced accuracy) AND the fix was computed after the switch to it (the bestSince comparison) — is emitted to Dart, cached as the publish input, or returned as last-known. A kCLLocationAccuracyHundredMeters fix serves the stationary/movement detector and the freshness bound and nothing else; it never reaches a subscriber, the motion trigger or the relay. A live session holds that fix THREE times — the native lastBestFix, the location service's _lastStreamPosition, and the profile controller's anchor — and all three clear together, on stream cancel, on a toggle-off pause, on logout and on an observed access loss, so no full-precision coordinate outlives the session in any of them. The last-known read is age-bounded by the same freshness rule as the cache read, so the fix one rejects as stale is not served by the other. Emitting or caching a 100 m-tier fix, dropping the bestSince comparison, tagging by a desiredAccuracy read-back, adding a third accuracy value, serving the native cache unbounded, or clearing fewer than all three copies, each falsifies this. That freshness rule is itself bounded in TIME. A coarse-tier confirmation may extend how long the Best anchor is served past its own timestamp, but never beyond kStationaryAnchorMaxAge (5 min), enforced in two places: IosProfileController escalates to Best at that age however many coarse fixes have confirmed the anchor, and _streamFixIsFresh refuses to serve a fix older than it whatever the confirmation says. A published location carries the instant of the PUBLISH and never the fix time, so without that cap a stationary backgrounded device would re-publish one anchor indefinitely and a peer would read \"just now\" for a coordinate hours old and up to 200 m wrong. Removing either half of the cap, or measuring it from the confirmation rather than from the anchor's own timestamp, falsifies this too.",
       "status": "enforced",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
@@ -709,6 +733,10 @@
         {
           "file": "haven/ios/Runner/HavenLocationStreamHandler.swift",
           "symbol": "bestSince"
+        },
+        {
+          "file": "haven/ios/Runner/HavenLocationStreamHandler.swift",
+          "symbol": "bestRequested"
         },
         {
           "file": "haven/lib/src/services/ios_location_source.dart",

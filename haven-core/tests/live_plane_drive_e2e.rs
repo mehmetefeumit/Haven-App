@@ -2970,13 +2970,10 @@ async fn a_pass_in_flight_when_a_burst_opens_rolls_nothing_back_and_applies_no_b
     }
 }
 
-/// A pass that outlives the foreground ends no record. A change is applied
-/// on one relay's word with two still owed; the next foreground pass calls
-/// them, the foreground ends under those calls, and both then take the
-/// event. The answers are stored and the record is left for a full drive,
-/// which ends it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_pass_that_outlived_the_foreground_ends_no_record() {
+/// A change applied on one relay's word with two relays still owed, the
+/// clock past their schedule and both scripted to take the event: what the
+/// next foreground pass calls, as retries.
+async fn a_change_owed_two_relays() -> (CircleFixture, Arc<ScriptedFanout>, Arc<Clock>) {
     const THIRD: &str = "wss://three.live-canary7d2f.example.com";
     let fx = setup_circle(3, &[RELAY, OTHER, THIRD]).await;
     let admin = fx.admin();
@@ -3013,6 +3010,18 @@ async fn a_pass_that_outlived_the_foreground_ends_no_record() {
     for relay in [OTHER, THIRD] {
         transport.answer(relay, [Answer::Accepted]);
     }
+    (fx, transport, clock)
+}
+
+/// A pass that outlives the foreground ends no record. A change is applied
+/// on one relay's word with two still owed; the next foreground pass calls
+/// them, the foreground ends under those calls, and both then take the
+/// event. The answers are stored and the record is left for a full drive,
+/// which ends it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pass_that_outlived_the_foreground_ends_no_record() {
+    let (fx, transport, clock) = a_change_owed_two_relays().await;
+    let admin = fx.admin();
     transport.park();
     let plane = Plane::with(&admin.circle, Arc::clone(&transport), Arc::clone(&clock));
     plane.processor.for_test().set_background_burst(false);
@@ -3043,6 +3052,214 @@ async fn a_pass_that_outlived_the_foreground_ends_no_record() {
     assert!(
         records_of(admin, &fx.group).await.is_empty(),
         "premise: a full drive ends a record every relay has taken",
+    );
+}
+
+/// The pause waits for a relay call between SEND and OK, and for nothing
+/// after its answer: the call is counted from its mark until the relay
+/// answers, so a pause that lands under it keeps its socket, and the answer
+/// is stored as what it was — taken, by both relays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pause_waits_for_a_relay_call_between_send_and_ok() {
+    let (fx, transport, clock) = a_change_owed_two_relays().await;
+    let admin = fx.admin();
+    transport.park();
+    let plane = Plane::with(&admin.circle, Arc::clone(&transport), clock);
+    plane.processor.for_test().set_background_burst(false);
+    let pass = plane.processor.for_test().drive_due();
+    tokio::pin!(pass);
+    tokio::select! {
+        biased;
+        () = &mut pass => panic!("the drive finished while its call was parked"),
+        () = transport.parked() => {}
+    }
+    assert_eq!(
+        plane.processor.in_flight_publishes(),
+        1,
+        "a pass with its calls between SEND and OK was not counted",
+    );
+    plane.processor.for_test().leave_foreground();
+    let drained = plane.processor.wait_publishes_drained();
+    tokio::pin!(drained);
+    assert!(
+        futures::poll!(&mut drained).is_pending(),
+        "a pause would have closed the socket of a call between SEND and OK",
+    );
+    transport.unpark();
+    pass.await;
+    assert!(futures::poll!(&mut drained).is_ready());
+    let [record] = <[FanoutProbe; 1]>::try_from(records_of(admin, &fx.group).await)
+        .unwrap_or_else(|_| panic!("the record was ended by a pass the pause overtook"));
+    assert!(
+        record
+            .statuses
+            .iter()
+            .all(|status| *status == FanoutTargetStatus::Accepted),
+        "a call the pause waited for was not stored as taken",
+    );
+}
+
+/// The scripted transport with every take held until the test frees them,
+/// counting the takes begun and returned: a pass stopped after its reads and
+/// before its mark.
+struct HeldAtTake {
+    inner: Arc<ScriptedFanout>,
+    free: tokio::sync::watch::Sender<bool>,
+    begun: AtomicU64,
+    returned: AtomicU64,
+}
+
+/// Polls `pass` until `reached` holds, asserting it stays pending: counted
+/// polls, never a clock. Nothing but these polls moves the pass, so one that
+/// has not reached the point in a thousand never will.
+async fn poll_until<F: Future + Unpin>(pass: &mut F, reached: impl Fn() -> bool) {
+    for _ in 0..1_000 {
+        if reached() {
+            return;
+        }
+        assert!(
+            futures::poll!(&mut *pass).is_pending(),
+            "the pass ended early"
+        );
+        tokio::task::yield_now().await;
+    }
+    panic!("the pass never reached the point the test waits for");
+}
+
+#[async_trait::async_trait]
+impl FanoutSend for HeldAtTake {
+    async fn take(&self, target: &str) -> Option<haven_core::relay::fanout::Taken> {
+        self.begun.fetch_add(1, Ordering::SeqCst);
+        let _ = self.free.subscribe().wait_for(|free| *free).await;
+        let taken = self.inner.take(target).await;
+        self.returned.fetch_add(1, Ordering::SeqCst);
+        taken
+    }
+
+    async fn publish(
+        &self,
+        target: &str,
+        message: &haven_core::nostr::mls::types::TransportMessage,
+        taken: haven_core::relay::fanout::Taken,
+    ) -> haven_core::relay::fanout::FanoutTargetOutcome {
+        self.inner.publish(target, message, taken).await
+    }
+
+    async fn publish_location(
+        &self,
+        event: &nostr::Event,
+        targets: &[String],
+    ) -> haven_core::relay::RelayResult<haven_core::relay::PublishResult> {
+        self.inner.publish_location(event, targets).await
+    }
+}
+
+/// A pause that lands while a pass waits at its mark — its relays taken,
+/// the store not yet its own — waits for nothing, and the pass then marks
+/// and calls nothing: the call is counted under the store, and the
+/// lifecycle read after the count refuses it. The record is a retry, which a
+/// pass that outlived its foreground would otherwise send in the mode it
+/// narrowed to; so this fails if the admission at the mark is deleted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_a_pause_overtakes_at_its_mark_is_never_begun() {
+    let (fx, transport, clock) = a_change_owed_two_relays().await;
+    let admin = fx.admin();
+    let [before] = <[FanoutProbe; 1]>::try_from(records_of(admin, &fx.group).await)
+        .unwrap_or_else(|_| panic!("premise: one record"));
+    let (free, _) = tokio::sync::watch::channel(false);
+    let held = Arc::new(HeldAtTake {
+        inner: Arc::clone(&transport),
+        free,
+        begun: AtomicU64::new(0),
+        returned: AtomicU64::new(0),
+    });
+    let processor = EngineProcessor::with_driver(
+        Arc::clone(&admin.circle),
+        EventBus::new(),
+        LiveDriver {
+            fanout: Arc::clone(&held) as Arc<dyn FanoutSend>,
+            publisher: Recording::acking(true) as Arc<dyn UnrecordedPublisher>,
+            clock: clock as Arc<dyn FanoutClock>,
+        },
+    );
+    processor.for_test().set_background_burst(false);
+    let pass = processor.for_test().drive_due();
+    tokio::pin!(pass);
+    poll_until(&mut pass, || held.begun.load(Ordering::SeqCst) == 2).await;
+    // The store is the test's from here: the pass's reads are behind it, its
+    // mark ahead of it.
+    let session = admin.session().hold_session_for_test().await;
+    held.free.send_replace(true);
+    // Both relays taken while the foreground stood; the pass waits for the
+    // store to mark them.
+    poll_until(&mut pass, || held.returned.load(Ordering::SeqCst) == 2).await;
+    assert!(futures::poll!(&mut pass).is_pending());
+
+    processor.for_test().leave_foreground();
+    assert!(
+        futures::poll!(std::pin::pin!(processor.wait_publishes_drained())).is_ready(),
+        "a pause waited for a pass with no call begun",
+    );
+    drop(session);
+    pass.await;
+
+    assert_eq!(
+        transport.call_count(),
+        0,
+        "a pass the pause overtook at its mark called a relay",
+    );
+    let [after] = <[FanoutProbe; 1]>::try_from(records_of(admin, &fx.group).await)
+        .unwrap_or_else(|_| panic!("the record was ended"));
+    assert_eq!(
+        (after.statuses, after.attempts),
+        (before.statuses, before.attempts),
+        "a pass the pause overtook at its mark marked an attempt",
+    );
+    assert_eq!(processor.in_flight_publishes(), 0);
+}
+
+/// A settle waits for the pass a call belongs to, not only for the call: a
+/// pass whose calls have answered and whose fold is still to come — held on
+/// the session — keeps the settle waiting, and the record its answers end is
+/// ended before the settle returns, so the pause after it cannot end the
+/// pass's lifecycle under its fold.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_settle_waits_for_the_fold_after_the_last_answer() {
+    let (fx, transport, clock) = a_change_owed_two_relays().await;
+    let admin = fx.admin();
+    transport.park();
+    let core = LiveSyncCore::new_local_with_driver_for_test(
+        Arc::clone(&admin.circle),
+        admin.keys.public_key(),
+        LiveDriver {
+            fanout: Arc::clone(&transport) as Arc<dyn FanoutSend>,
+            publisher: Recording::acking(true) as Arc<dyn UnrecordedPublisher>,
+            clock: clock as Arc<dyn FanoutClock>,
+        },
+    );
+    core.processor().for_test().set_background_burst(false);
+    let pass = core.processor().for_test().drive_due();
+    tokio::pin!(pass);
+    tokio::select! {
+        biased;
+        () = &mut pass => panic!("the drive finished while its call was parked"),
+        () = transport.parked() => {}
+    }
+    let session = admin.session().hold_session_for_test().await;
+    let settle = core.settle_before_pause();
+    tokio::pin!(settle);
+    transport.unpark();
+    // The calls answer; the pass then waits on the store to keep the answers.
+    poll_until(&mut pass, || core.in_flight_publishes() == 0).await;
+    assert!(
+        futures::poll!(&mut settle).is_pending(),
+        "the settle returned with the fold of an answer still to come",
+    );
+    drop(session);
+    tokio::join!(&mut pass, &mut settle);
+    assert!(
+        records_of(admin, &fx.group).await.is_empty(),
+        "the record every relay took was not ended before the settle returned",
     );
 }
 
@@ -3709,7 +3926,10 @@ impl Scripted {
     /// Waits until a drive of `core` that got as far as reading the clock
     /// after `reads_before` has ended, and answers whether one did.
     async fn a_drive_ran(&self, core: &LiveSyncCore, reads_before: u64) -> bool {
-        held(|| async { self.read.reads() > reads_before && core.in_flight_publishes() == 0 }).await
+        held(|| async {
+            self.read.reads() > reads_before && core.processor().passes_under_way() == 0
+        })
+        .await
     }
 }
 
@@ -4034,7 +4254,7 @@ async fn real_sessions_started_one_after_another_keep_a_stored_records_schedule(
         // asked for, which only finishes and so begins no first call.
         core.processor().for_test().drive_due().await;
         assert!(
-            held(|| async { core.in_flight_publishes() == 0 }).await,
+            held(|| async { core.processor().passes_under_way() == 0 }).await,
             "a visit's drive never ended",
         );
         let _ = core.stop().await;
@@ -4357,7 +4577,7 @@ async fn a_burst_opened_within_a_measured_budget_hands_it_to_its_drive() {
         "premise: the eviction was sent once, unanswered",
     );
     assert!(
-        held(|| async { core.processor().in_flight_publishes() == 0 }).await,
+        held(|| async { core.processor().passes_under_way() == 0 }).await,
         "premise: the foreground's drive has ended",
     );
     let _ = scripted.transport.calls();
@@ -4374,7 +4594,7 @@ async fn a_burst_opened_within_a_measured_budget_hands_it_to_its_drive() {
     assert!(
         held(|| async {
             core.processor().drive_retry_after_ms() == Some(0)
-                && core.processor().in_flight_publishes() == 0
+                && core.processor().passes_under_way() == 0
         })
         .await,
         "premise: the burst drove and left the row for want of room",
@@ -4441,7 +4661,7 @@ async fn a_session_started_into_a_burst_within_a_measured_budget_hands_it_to_its
         // left for want of room, which it says by asking to come back at once.
         assert!(
             held(|| async {
-                core.processor().in_flight_publishes() == 0
+                core.processor().passes_under_way() == 0
                     && (staged_ref(admin, &fx.group).await.is_none()
                         || core.processor().drive_retry_after_ms() == Some(0))
             })

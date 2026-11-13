@@ -110,15 +110,17 @@ class _FakeIosLocationAuth implements IosLocationAuthService {
 /// [confirmAlways] is the only way in — from the one state that has a session
 /// to be diagnosed.
 ///
-/// `backgroundActivitySessionHeld` and `serviceSessionHeld` are DERIVED for
-/// the same reason: on a device they follow the same predicates, and a free
-/// field could contradict the arming it is supposed to describe.
+/// `backgroundActivitySessionHeld`, `serviceSessionHeld` and
+/// `indicatorRequested` are DERIVED for the same reason: on a device they
+/// follow the same predicates, and a free field could contradict the arming
+/// it is supposed to describe.
 class _FakeIosBackgroundSession implements IosBackgroundSessionService {
   _FakeIosBackgroundSession({
     bool armed = false,
     bool alwaysConfirmed = false,
     this.supported = true,
     this.neverAnswers = false,
+    this.reducedAccuracy = false,
   }) : _armed = armed,
        _alwaysConfirmed = alwaysConfirmed,
        assert(
@@ -137,6 +139,10 @@ class _FakeIosBackgroundSession implements IosBackgroundSessionService {
   /// handler has answered — the state in which no indicator sentence is yet
   /// known to be true.
   final bool neverAnswers;
+
+  /// Precise Location off (`.reducedAccuracy`). A Settings choice the user can
+  /// change at any moment, independently of the session, hence mutable.
+  bool reducedAccuracy;
 
   bool _armed;
   bool _alwaysConfirmed;
@@ -180,6 +186,7 @@ class _FakeIosBackgroundSession implements IosBackgroundSessionService {
         serviceSessionHeld: _armed,
         alwaysConfirmed: _alwaysConfirmed,
         armed: _armed,
+        indicatorRequested: !_alwaysConfirmed || reducedAccuracy,
       ),
     );
   }
@@ -1223,7 +1230,8 @@ void main() {
         // iOS 15.5: on iOS 15/16 no session can ever be held, so the handler
         // reports `backgroundActivitySessionHeld: false` while
         // `showsBackgroundLocationIndicator` — which the stream handler sets
-        // from `!alwaysConfirmed` — is TRUE and the bar is on screen. The
+        // from `indicatorRequested`, true while Always is unconfirmed — is
+        // TRUE and the bar is on screen. The
         // same reading occurs on every iOS before the Always confirmation
         // lands. Selecting the sentence from the held flag showed those users
         // the arrow sentence while they were looking at the bar.
@@ -1434,6 +1442,88 @@ void main() {
       },
     );
 
+    testWidgets(
+      '30. a confirmed Always with Precise Location off names the blue '
+      'location bar, never the arrow',
+      (tester) async {
+        // Under reduced accuracy desiredAccuracy writes have no effect, so the
+        // handler keeps asking for the indicator — Apple's other way to keep
+        // the session running — even once Always is confirmed. The OS shows
+        // the bar, and the arrow sentence would name a signal this reader is
+        // not looking at.
+        SharedPreferences.setMockInitialValues({
+          kBackgroundSharingKey: true,
+          kLocationDisclosureBackgroundAcceptedKey: true,
+        });
+
+        await tester.pumpWidget(
+          _buildApp(
+            ensurePermissions: _stubThatThrows(),
+            fakeDisclosure: _FakeDisclosureController(false),
+            iosSession: _FakeIosBackgroundSession(
+              armed: true,
+              alwaysConfirmed: true,
+              reducedAccuracy: true,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final l10n = l10nOf(tester);
+        expect(
+          iosCardParagraph(tester),
+          '${l10n.locationSettingsIosGuidance} '
+          '${l10n.locationSettingsIosIndicatorBar}',
+        );
+      },
+    );
+
+    testWidgets(
+      '31. turning Precise Location off in Settings brings the bar sentence '
+      'back on resume',
+      (tester) async {
+        // The toggle lives in the Settings app, so Haven sees it only on its
+        // way back to the foreground: the resume re-read is what keeps the
+        // card from naming the arrow after the OS has put the bar back.
+        SharedPreferences.setMockInitialValues({
+          kBackgroundSharingKey: true,
+          kLocationDisclosureBackgroundAcceptedKey: true,
+        });
+        final session = _FakeIosBackgroundSession(
+          armed: true,
+          alwaysConfirmed: true,
+        );
+
+        await tester.pumpWidget(
+          _buildApp(
+            ensurePermissions: _stubThatThrows(),
+            fakeDisclosure: _FakeDisclosureController(false),
+            iosSession: session,
+          ),
+        );
+        await tester.pumpAndSettle();
+        final l10n = l10nOf(tester);
+        expect(
+          iosCardParagraph(tester),
+          '${l10n.locationSettingsIosGuidance} '
+          '${l10n.locationSettingsIosIndicatorArrow}',
+        );
+
+        session.reducedAccuracy = true;
+        tester.binding
+          ..handleAppLifecycleStateChanged(AppLifecycleState.inactive)
+          ..handleAppLifecycleStateChanged(AppLifecycleState.paused)
+          ..handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+        await tester.pumpAndSettle();
+
+        expect(
+          iosCardParagraph(tester),
+          '${l10n.locationSettingsIosGuidance} '
+          '${l10n.locationSettingsIosIndicatorBar}',
+        );
+      },
+    );
+
     // -------------------------------------------------------------------------
     // The double itself: it is only evidence while it obeys the native
     // contract, and the last defect on this page was written INTO a fake that
@@ -1480,6 +1570,28 @@ void main() {
         );
       });
 
+      test('it asks for the indicator exactly where the native predicate '
+          'does', () async {
+        // `!alwaysConfirmed || accuracyAuthorization == .reducedAccuracy`:
+        // only a confirmed Always with Precise Location on goes without.
+        Future<bool> requested({
+          required bool confirmed,
+          required bool reduced,
+        }) async {
+          final session = _FakeIosBackgroundSession(
+            armed: true,
+            alwaysConfirmed: confirmed,
+            reducedAccuracy: reduced,
+          );
+          return (await session.status()).indicatorRequested;
+        }
+
+        expect(await requested(confirmed: false, reduced: false), isTrue);
+        expect(await requested(confirmed: false, reduced: true), isTrue);
+        expect(await requested(confirmed: true, reduced: true), isTrue);
+        expect(await requested(confirmed: true, reduced: false), isFalse);
+      });
+
       test('confirmed-while-disarmed cannot even be constructed', () {
         expect(
           () => _FakeIosBackgroundSession(alwaysConfirmed: true),
@@ -1489,16 +1601,17 @@ void main() {
     });
   });
 
-  /// The indicator sentence is chosen from `alwaysConfirmed` — the same value
-  /// both native branches decide from.
+  /// The indicator sentence is chosen from `indicatorRequested` — the same
+  /// reading the native indicator flag is set from.
   ///
   /// Never from the authorization tier: a provisional Always reports
   /// `.authorizedAlways` while the OS still treats the app as While-In-Use,
   /// and every iOS 17 Always user is in the same position (no diagnostics API
-  /// to confirm with). And never from `backgroundActivitySessionHeld`: the
-  /// session type is iOS 17+, so on the iOS 15/16 floor of Haven's deployment
-  /// target nothing is ever held while `showsBackgroundLocationIndicator`
-  /// (`= !alwaysConfirmed`) still puts the bar on screen.
+  /// to confirm with). Never from `alwaysConfirmed` alone: with Precise
+  /// Location off a confirmed Always keeps the indicator. And never from
+  /// `backgroundActivitySessionHeld`: the session type is iOS 17+, so on the
+  /// iOS 15/16 floor of Haven's deployment target nothing is ever held while
+  /// `showsBackgroundLocationIndicator` still puts the bar on screen.
   group('iosIndicatorSentenceProvider', () {
     Future<IosIndicatorSentence?> sentenceFor(
       _FakeIosBackgroundSession session,
@@ -1546,6 +1659,22 @@ void main() {
           _FakeIosBackgroundSession(armed: true, alwaysConfirmed: true),
         ),
         IosIndicatorSentence.arrow,
+      );
+    });
+
+    test('a confirmed Always with Precise Location off still means the blue '
+        'bar', () async {
+      // The one cohort where `alwaysConfirmed` and the indicator part ways:
+      // reduced accuracy keeps the handler asking for the indicator.
+      expect(
+        await sentenceFor(
+          _FakeIosBackgroundSession(
+            armed: true,
+            alwaysConfirmed: true,
+            reducedAccuracy: true,
+          ),
+        ),
+        IosIndicatorSentence.bar,
       );
     });
 

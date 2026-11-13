@@ -1125,7 +1125,8 @@ class _S {
         methodSource(
           File('lib/src/services/background_burst_coordinator.dart')
               .readAsStringSync(),
-          className: 'BackgroundBurstCoordinator',
+          // The lane the coordinator runs every burst on.
+          className: '_BurstLane',
           method: '_closeBurst',
         ),
         contains('pauseSubscriptions()'),
