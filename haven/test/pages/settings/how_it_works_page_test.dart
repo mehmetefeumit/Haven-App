@@ -58,6 +58,34 @@ void main() {
     }
   });
 
+  testWidgets('no paragraph is set larger than the section headings', (
+    tester,
+  ) async {
+    await pumpLocalized(tester, const HowItWorksPage());
+
+    double sizeOf(String text) => tester
+        .renderObject<RenderParagraph>(find.text(text))
+        .text
+        .style!
+        .fontSize!;
+
+    final keys = _pageKeys().where((k) => k != 'howItWorksTitle');
+    final headings = keys.where((k) => k.endsWith('Heading')).map(englishArb);
+    final paragraphs = keys
+        .where((k) => !k.endsWith('Heading'))
+        .map(englishArb);
+    final smallestHeading = headings
+        .map(sizeOf)
+        .reduce((a, b) => a < b ? a : b);
+    for (final paragraph in paragraphs) {
+      expect(
+        sizeOf(paragraph),
+        lessThanOrEqualTo(smallestHeading),
+        reason: paragraph,
+      );
+    }
+  });
+
   testWidgets('section titles are level-2 headings for screen readers', (
     tester,
   ) async {

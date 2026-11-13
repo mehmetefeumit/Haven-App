@@ -1,4 +1,4 @@
-/// How It Works page for Haven.
+/// How it works page for Haven.
 ///
 /// A plain-language overview of how Haven, Nostr, Marmot and MLS fit together,
 /// reached from Settings. The copy stays at the level of design and protocol so
@@ -13,7 +13,7 @@ import 'package:haven/src/widgets/common/section_header.dart';
 
 /// Page explaining, in plain language, how Haven works.
 class HowItWorksPage extends StatelessWidget {
-  /// Creates the How It Works page.
+  /// Creates the How it works page.
   const HowItWorksPage({super.key});
 
   @override
@@ -94,6 +94,7 @@ class _Paragraph extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     return Padding(
       padding: const EdgeInsetsDirectional.fromSTEB(
         HavenSpacing.base,
@@ -101,7 +102,14 @@ class _Paragraph extends StatelessWidget {
         HavenSpacing.base,
         HavenSpacing.md,
       ),
-      child: Text(text, style: Theme.of(context).textTheme.bodyLarge),
+      // The app's explanatory-paragraph style (Location settings' intro, the
+      // QR page), which keeps every paragraph below its section heading's size.
+      child: Text(
+        text,
+        style: theme.textTheme.bodyMedium?.copyWith(
+          color: theme.colorScheme.onSurfaceVariant,
+        ),
+      ),
     );
   }
 }

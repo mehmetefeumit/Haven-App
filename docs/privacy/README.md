@@ -16,9 +16,9 @@ maintenance cost in the repository, and an explanation the app cannot keep
 accurate is worse than none. A different way to inform the user may be built
 later; nothing here reserves this one.
 
-## The How It Works page (owner directive, 2026-11-12)
+## The How it works page (owner directive, 2026-11-12)
 
-Settings → How It Works is that different way: one plain-language page, its
+Settings → How it works is that different way: one plain-language page, its
 `howItWorks*` strings in all 13 locales, written at the level of design and
 protocol so that ordinary code changes do not falsify it. It is a claim
 surface like any other. Every paragraph that promises something is an
@@ -91,7 +91,7 @@ you have accepted deviating from. The second half of that rule — *and at least
 one disclosure*, so that no deviation is recorded which the user was never told
 about — was dropped on 2026-08-29 when the surface that carried every
 deviation's disclosure was deleted; 9 of the accepted-deviation invariants then
-carried none, and 10 by the time the How It Works page arrived. That page
+carried none, and 10 by the time the How it works page arrived. That page
 discloses four of them (LOCATION-POOL, RC1, PUB-COALESCE and P6) and so brought
 the count to 6, but the requirement
 itself was NOT restored when it arrived: the owner scoped the page to a
@@ -450,7 +450,7 @@ Recorded here rather than papered over:
   copy's scope.
 * **`LEAVE-GHOST` is declared with no invariant; the copy now discloses it —
   RESOLVED (2026-11-12).** The Privacy-page sentence that asserted the bounded
-  form its record forbids went with the page on 2026-08-29. The How It Works
+  form its record forbids went with the page on 2026-08-29. The How it works
   page's `howItWorksMembership` now states the residual itself: a leave asks the
   other members to make the key switch, and if nobody does, the leaver stays in
   the circle until an admin removes them. It states no time bound. It is still

@@ -450,10 +450,10 @@ abstract class AppLocalizations {
   /// **'About'**
   String get settingsAboutTitle;
 
-  /// Title of the How It Works tile on the Settings hub, opening the How It Works page. The owner named the page 'How It Works'; render it the way this locale titles such a page.
+  /// Title of the How it works tile on the Settings hub, opening the How it works page. Sentence case, like the other Settings rows; use this locale's own capitalization for a page title.
   ///
   /// In en, this message translates to:
-  /// **'How It Works'**
+  /// **'How it works'**
   String get settingsHowItWorksTitle;
 
   /// Title of the debug-only switch tile that toggles the on-screen log overlay (visible only in debug builds).
@@ -1008,163 +1008,163 @@ abstract class AppLocalizations {
   /// **'Version {version}'**
   String aboutFooterVersion(String version);
 
-  /// Title of the How It Works page (AppBar). Same wording as settingsHowItWorksTitle.
+  /// Title of the How it works page (AppBar). Same wording as settingsHowItWorksTitle.
   ///
   /// In en, this message translates to:
-  /// **'How It Works'**
+  /// **'How it works'**
   String get howItWorksTitle;
 
-  /// Paragraph on the How It Works page (Settings > How It Works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. Opening paragraph. 'locked' is the page's plain word for encryption, which the encryption section then names; keep a word a reader understands without that definition. 'the services that carry it' are the relays.
+  /// Paragraph on the How it works page (Settings > How it works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. Opening paragraph. 'locked' is the page's plain word for encryption, which the encryption section then names; keep a word a reader understands without that definition. 'the services that carry it' are the relays.
   ///
   /// In en, this message translates to:
   /// **'Haven lets you share your live location with small groups of people, called circles. Your location is locked on your phone before it leaves, so the services that carry it can\'t read it, and neither can the people who make Haven.'**
   String get howItWorksIntro;
 
-  /// Section heading on the How It Works page, read by screen readers as a heading. Sentence case, short.
+  /// Section heading on the How it works page, read by screen readers as a heading. Sentence case, short.
   ///
   /// In en, this message translates to:
   /// **'Your identity'**
   String get howItWorksIdentityHeading;
 
-  /// Paragraph on the How It Works page (Settings > How It Works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. 'never sends it over the internet' is deliberately scoped to the network: the user can reveal and copy the key themselves, so do not widen it to 'never leaves your phone'.
+  /// Paragraph on the How it works page (Settings > How it works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. 'never sends it over the internet' is deliberately scoped to the network: the user can reveal and copy the key themselves, so do not widen it to 'never leaves your phone'.
   ///
   /// In en, this message translates to:
   /// **'When you first open Haven, your phone creates your identity. It is a pair of matching keys, which are long codes. Your public key works like a username. It\'s safe to share, and people scan or paste it to invite you to a circle. Your secret key proves that you are you. It stays in a protected part of your phone, and Haven never sends it over the internet.'**
   String get howItWorksIdentityKeys;
 
-  /// Paragraph on the How It Works page (Settings > How It Works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. Promises no restore: Haven has no reachable key import today, and circle state never moves between phones. Do not add one.
+  /// Paragraph on the How it works page (Settings > How it works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. Promises no restore: Haven has no reachable key import today, and circle state never moves between phones. Do not add one.
   ///
   /// In en, this message translates to:
   /// **'There is no sign-up, email or phone number, so no company can reset your identity for you, and Haven keeps no other copy of your secret key. You can view it in Settings, under Identity, and keep a copy somewhere safe and private. Your circles can\'t be moved to another phone, so a new phone would need new invitations to rejoin them.'**
   String get howItWorksIdentityBackup;
 
-  /// Paragraph on the How It Works page (Settings > How It Works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. The profile is public to anyone, not only circle members. The random name is generated on the phone.
+  /// Paragraph on the How it works page (Settings > How it works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. The profile is public to anyone, not only circle members. The random name is generated on the phone.
   ///
   /// In en, this message translates to:
   /// **'Your display name and photo are public. When you save them, Haven publishes them as your profile on the Nostr network, with the photo on a separate photo server, and anyone can look them up. Haven starts you off with a random made-up name, so you don\'t have to use your real one.'**
   String get howItWorksIdentityProfile;
 
-  /// Section heading on the How It Works page, read by screen readers as a heading. Sentence case, short.
+  /// Section heading on the How it works page, read by screen readers as a heading. Sentence case, short.
   ///
   /// In en, this message translates to:
   /// **'The Nostr network'**
   String get howItWorksNostrHeading;
 
-  /// Paragraph on the How It Works page (Settings > How It Works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. The parenthesis defines 'servers' for a reader who does not know the word.
+  /// Paragraph on the How it works page (Settings > How it works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. The parenthesis defines 'servers' for a reader who does not know the word.
   ///
   /// In en, this message translates to:
   /// **'Haven runs on Nostr, an open network for passing messages over the internet. Nobody owns or controls it. Messages travel through relays, which are servers (computers that stay online) run by many independent people and organizations. Anyone can run a relay, and Haven runs none of its own.'**
   String get howItWorksNostrRelays;
 
-  /// Paragraph on the How It Works page (Settings > How It Works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. A relay cannot alter or forge a message undetected, but CAN delay or delete one: keep both halves. 'lock you out of your identity' is scoped to the identity on purpose.
+  /// Paragraph on the How it works page (Settings > How it works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. A relay cannot alter or forge a message undetected, but CAN delay or delete one: keep both halves. 'lock you out of your identity' is scoped to the identity on purpose.
   ///
   /// In en, this message translates to:
   /// **'Haven checks every message it receives, so a relay can\'t secretly change a message or fake one from someone else. A relay can still delay or delete messages, and each relay decides for itself what to accept and how long to keep it. Because the network has no central server, no single company runs it or can lock you out of your identity.'**
   String get howItWorksNostrChecks;
 
-  /// Paragraph on the How It Works page (Settings > How It Works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. Two kinds of relays: the identity's own (editable on the Relays page) and each circle's (shown in the circle's details, not set from Settings). Do not merge them.
+  /// Paragraph on the How it works page (Settings > How it works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. Two kinds of relays: the identity's own (editable on the Relays page) and each circle's (shown in the circle's details, not set from Settings). Do not merge them.
   ///
   /// In en, this message translates to:
   /// **'Your identity uses its own relays, which hold your profile and receive your invitations. You can see them on the Relays page in Settings and add others. Each circle sends its updates through its own set of relays, which you can see in that circle\'s details.'**
   String get howItWorksNostrYourRelays;
 
-  /// Section heading on the How It Works page, read by screen readers as a heading. Sentence case, short.
+  /// Section heading on the How it works page, read by screen readers as a heading. Sentence case, short.
   ///
   /// In en, this message translates to:
   /// **'Encryption with MLS and Marmot'**
   String get howItWorksEncryptionHeading;
 
-  /// Paragraph on the How It Works page (Settings > How It Works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. 'This locking' refers back to the intro's 'locked'. 'decrypt' is introduced in parentheses as the word for unscrambling.
+  /// Paragraph on the How it works page (Settings > How it works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. 'This locking' refers back to the intro's 'locked'. 'decrypt' is introduced in parentheses as the word for unscrambling.
   ///
   /// In en, this message translates to:
   /// **'This locking is called encryption. It scrambles information so that only someone with the right key can unscramble (decrypt) it. Haven uses MLS (Messaging Layer Security), an open standard for encrypted group messaging published by the IETF, a group of experts that develops internet standards. Marmot is a protocol, a shared set of rules, that carries MLS messages over Nostr. Other apps use Marmot too.'**
   String get howItWorksEncryptionStandards;
 
-  /// Paragraph on the How It Works page (Settings > How It Works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. Circle keys are separate from the identity keys.
+  /// Paragraph on the How it works page (Settings > How it works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. Circle keys are separate from the identity keys.
   ///
   /// In en, this message translates to:
   /// **'Each circle has its own secret keys, separate from your identity keys and held only by the phones of its members. Your phone encrypts your location with them before it leaves, and only phones in that circle can decrypt it. Because each circle has different keys, members of one circle can\'t see your other circles or who is in them.'**
   String get howItWorksEncryptionCircleKeys;
 
-  /// Section heading on the How It Works page, read by screen readers as a heading. Sentence case, short.
+  /// Section heading on the How it works page, read by screen readers as a heading. Sentence case, short.
   ///
   /// In en, this message translates to:
   /// **'Invitations and members'**
   String get howItWorksInvitationsHeading;
 
-  /// Paragraph on the How It Works page (Settings > How It Works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. The relay sees the invitation's addressee; the invitation itself does not show the sender or the circle. Keep 'the invitation itself' (the relay can still see the sender's network address, which the last section discloses). An invitee does not share their LOCATION before accepting; do not widen it to 'nothing'.
+  /// Paragraph on the How it works page (Settings > How it works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. The relay sees the invitation's addressee; the invitation itself does not show the sender or the circle. Keep 'the invitation itself' (the relay can still see the sender's network address, which the last section discloses). An invitee does not share their LOCATION before accepting; do not widen it to 'nothing'.
   ///
   /// In en, this message translates to:
   /// **'Haven publishes a public invitation key for you on your relays, so people can invite you even while your phone is offline. Circles are run by admins, who decide who is invited and who is removed. An invitation is sealed in layers of encryption. A relay can see who it is addressed to, but the invitation itself doesn\'t show who sent it or which circle it is for. Someone who is invited doesn\'t share their location with the circle until they accept.'**
   String get howItWorksInvitations;
 
-  /// Paragraph on the How It Works page (Settings > How It Works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. Precise on purpose: keys switch when someone is INVITED (not when they accept) or REMOVED. A leave is different: the leaver's phone asks others to make the switch, and if nobody does the person stays in the circle until an admin removes them; never say leaving always or quickly switches the keys. A new member can read from the moment of the invitation; a removed member may still tell when the circle is active.
+  /// Paragraph on the How it works page (Settings > How it works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. Precise on purpose: keys switch when someone is INVITED (not when they accept) or REMOVED. A leave is different: the leaver's phone asks others to make the switch, and if nobody does the person stays in the circle until an admin removes them; never say leaving always or quickly switches the keys. A new member can read from the moment of the invitation; a removed member may still tell when the circle is active.
   ///
   /// In en, this message translates to:
   /// **'When someone is invited or removed, the circle switches to new keys. When someone leaves, their phone asks the others to make that switch. If nobody does, they stay in the circle until an admin removes them. A new member can read what the circle shares from the moment they are invited, but nothing from before. After a switch, someone who left or was removed can\'t read anything new, though they may still be able to tell when the circle is active. Anything that already reached their phone stays there. Members can see each other\'s locations, display names, photos and public keys.'**
   String get howItWorksMembership;
 
-  /// Section heading on the How It Works page, read by screen readers as a heading. Sentence case, short.
+  /// Section heading on the How it works page, read by screen readers as a heading. Sentence case, short.
   ///
   /// In en, this message translates to:
   /// **'Sharing your location'**
   String get howItWorksSharingHeading;
 
-  /// Paragraph on the How It Works page (Settings > How It Works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. Background sharing is off until the user turns it on. Do not name a platform.
+  /// Paragraph on the How it works page (Settings > How it works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. Background sharing is off until the user turns it on. Do not name a platform.
   ///
   /// In en, this message translates to:
   /// **'While Haven is open, it regularly shares your location with each of your circles. You can also turn on background sharing on the Location page in Settings, so sharing continues while you use other apps. How well that works depends on your phone and its settings.'**
   String get howItWorksSharingWhen;
 
-  /// Paragraph on the How It Works page (Settings > How It Works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. Relays are ASKED to delete the update and are not forced to: never render this as the update being deleted or disappearing. 'a few minutes' is deliberately vague; do not add a number. The single-use key means the update does not NAME its sender; do not widen it to updates being unlinkable or anonymous.
+  /// Paragraph on the How it works page (Settings > How it works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. Relays are ASKED to delete the update and are not forced to: never render this as the update being deleted or disappearing. 'a few minutes' is deliberately vague; do not add a number. The single-use key means the update does not NAME its sender; do not widen it to updates being unlinkable or anonymous.
   ///
   /// In en, this message translates to:
   /// **'Each update is encrypted on your phone and sent to the circle\'s relays under a brand-new key that is used once and then thrown away, so the update by itself doesn\'t name who sent it. It also asks relays to delete it after a few minutes. Relays are expected to do so, but nothing forces them to, and the update stays encrypted either way. Your circle members\' phones pick it up, decrypt it, and show you on their map.'**
   String get howItWorksSharingUpdate;
 
-  /// Section heading on the How It Works page, read by screen readers as a heading. Sentence case, short.
+  /// Section heading on the How it works page, read by screen readers as a heading. Sentence case, short.
   ///
   /// In en, this message translates to:
   /// **'The map'**
   String get howItWorksMapHeading;
 
-  /// Paragraph on the How It Works page (Settings > How It Works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. The map service learns rough places, around the user AND around their circle members, but no name, key or member list.
+  /// Paragraph on the How it works page (Settings > How it works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. The map service learns rough places, around the user AND around their circle members, but no name, key or member list.
   ///
   /// In en, this message translates to:
   /// **'Map images come from an online map service. Haven asks it for the areas you view and the areas around your circle members, so the service can tell roughly which places those are. It doesn\'t learn your name, your keys, or who is in your circles.'**
   String get howItWorksMap;
 
-  /// Section heading on the How It Works page, read by screen readers as a heading. Sentence case, short.
+  /// Section heading on the How it works page, read by screen readers as a heading. Sentence case, short.
   ///
   /// In en, this message translates to:
   /// **'On your phone'**
   String get howItWorksOnDeviceHeading;
 
-  /// Paragraph on the How It Works page (Settings > How It Works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. 'source code' is defined in the following clause for a reader who does not know the term.
+  /// Paragraph on the How it works page (Settings > How it works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. 'source code' is defined in the following clause for a reader who does not know the term.
   ///
   /// In en, this message translates to:
   /// **'Haven keeps your circles in an encrypted database on your phone, and stores the key to that database in the phone\'s protected storage. Haven runs no servers of its own and contains no code that tracks how you use it or shows you ads. Its source code, the instructions that make up the app, is public, so anyone can check how it works.'**
   String get howItWorksOnDevice;
 
-  /// Section heading on the How It Works page, read by screen readers as a heading. Sentence case, short.
+  /// Section heading on the How it works page, read by screen readers as a heading. Sentence case, short.
   ///
   /// In en, this message translates to:
   /// **'What Haven can\'t hide'**
   String get howItWorksLimitsHeading;
 
-  /// Paragraph on the How It Works page (Settings > How It Works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. Disclosure: the network (IP) address is visible to relays, the map service and photo servers, and can let relays link activity. The VPN sentence says what a VPN changes, not that Haven provides one.
+  /// Paragraph on the How it works page (Settings > How it works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. Disclosure: the network (IP) address is visible to relays, the map service and photo servers, and can let relays link activity. The VPN sentence says what a VPN changes, not that Haven provides one.
   ///
   /// In en, this message translates to:
   /// **'Relays, the map service and photo servers can see your phone\'s network address (its IP address), a number that identifies your internet connection. It can hint at your general area, and it can let relays link your updates, your circles and your public key to each other, especially if they share what they see. A VPN, a service that sends your internet traffic through its own computers, can hide your address by showing its own instead.'**
   String get howItWorksLimitsAddress;
 
-  /// Paragraph on the How It Works page (Settings > How It Works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. Disclosure of what relays and network observers can still see, including that timing can link your circles and hint at how many you have. Keep 'may be able to tell', 'probably' and the many-relays limit as written.
+  /// Paragraph on the How it works page (Settings > How it works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. Disclosure of what relays and network observers can still see, including that timing can link your circles and hint at how many you have. Keep 'may be able to tell', 'probably' and the many-relays limit as written.
   ///
   /// In en, this message translates to:
   /// **'Relays can see when updates are sent, roughly how large they are, and which updates belong to the same circle. Their timing can also show which circles belong to the same phone, and roughly how many you are in. Someone watching internet traffic, such as an internet provider, may be able to tell that you use Haven and which phones are probably in the same circle. Haven isn\'t designed to hide your activity from someone who can watch many relays at once.'**
   String get howItWorksLimitsPatterns;
 
-  /// Paragraph on the How It Works page (Settings > How It Works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. Disclosure. 'as precisely as your phone reports it': Haven sends the location the phone gives it. 'controls your phone' is deliberately broad: do not narrow it to unlocking, since a locked phone does not keep Haven's data from someone in control of it.
+  /// Paragraph on the How it works page (Settings > How it works), a plain-language overview for readers with no technical background: keep it that plain, and define a term the way the English does rather than reaching for jargon. Every claim was checked against Haven's behaviour and is registered in docs/privacy/privacy_invariants.json: do not strengthen, soften or drop one. 'Haven', 'Nostr', 'MLS', 'Marmot' and 'IETF' are intentionally English names. Use this locale's established renderings of circle, relay, identity, public key, secret key, invitation and admin. Write no em or en dashes. Disclosure. 'as precisely as your phone reports it': Haven sends the location the phone gives it. 'controls your phone' is deliberately broad: do not narrow it to unlocking, since a locked phone does not keep Haven's data from someone in control of it.
   ///
   /// In en, this message translates to:
   /// **'The people in your circles see where you are, as precisely as your phone reports it, so share only with people you trust. Removing your name or photo later doesn\'t delete copies others already have, and a removed photo stays on the server that stored it. Haven also can\'t protect your information from someone who controls your phone.'**

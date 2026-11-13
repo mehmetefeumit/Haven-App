@@ -1,14 +1,16 @@
-// Copy rules for the How It Works page, in EVERY supported locale.
+// Copy rules for the How it works page, in EVERY supported locale.
 //
 // The page's claims are held true by the invariants each paragraph is
 // registered under in docs/privacy/privacy_invariants.json. What this file
-// holds are the owner's two rules for the copy itself:
+// holds are the owner's rules for the copy itself:
 //
 //   1. no dash used as punctuation (em, en and their kin) in any locale's
 //      rendering of the page;
 //   2. the English reads in three to five minutes, at the 238 words a minute
 //      an adult reads non-fiction silently (Brysbaert 2019, a meta-analysis
-//      of 190 studies), so the page cannot quietly grow into a manual.
+//      of 190 studies), so the page cannot quietly grow into a manual;
+//   3. the English title and headings are in sentence case, like every other
+//      Settings row and section heading.
 //
 // Not covered: whether a translation is accurate or idiomatic. That is the
 // reviewer half of the l10n workflow.
@@ -67,5 +69,22 @@ void main() {
         .map((e) => e.value.split(RegExp(r'\s+')).length)
         .reduce((a, b) => a + b);
     expect(words, inInclusiveRange(3 * wordsPerMinute, 5 * wordsPerMinute));
+  });
+
+  test('the English title and headings are in sentence case', () {
+    // Only these may be capitalized after a heading's first word.
+    const properNouns = {'Haven', 'Nostr', 'MLS', 'Marmot'};
+    final titles = _pageStrings('en').entries
+        .where((e) => e.key.endsWith('Title') || e.key.endsWith('Heading'))
+        .map((e) => e.value);
+    expect(titles.length, greaterThanOrEqualTo(10));
+    for (final title in titles) {
+      final capitalized = title
+          .split(' ')
+          .skip(1)
+          .where((w) => w.isNotEmpty && w[0] != w[0].toLowerCase())
+          .where((w) => !properNouns.contains(w));
+      expect(capitalized, isEmpty, reason: '"$title" is not in sentence case');
+    }
   });
 }

@@ -53,17 +53,17 @@ void main() {
     expect(find.text('Location'), findsOneWidget);
     expect(find.text('Map style'), findsOneWidget);
     expect(find.text('Appearance'), findsOneWidget);
-    expect(find.text('How It Works'), findsOneWidget);
+    expect(find.text('How it works'), findsOneWidget);
     expect(find.text('About'), findsOneWidget);
   });
 
-  testWidgets('the How It Works row opens the How It Works page', (
+  testWidgets('the How it works row opens the How it works page', (
     tester,
   ) async {
     await tester.pumpWidget(build());
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('How It Works'));
+    await tester.tap(find.text('How it works'));
     await tester.pumpAndSettle();
 
     expect(find.byType(HowItWorksPage), findsOneWidget);

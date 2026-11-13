@@ -204,7 +204,7 @@ class AppLocalizationsEn extends AppLocalizations {
   String get settingsAboutTitle => 'About';
 
   @override
-  String get settingsHowItWorksTitle => 'How It Works';
+  String get settingsHowItWorksTitle => 'How it works';
 
   @override
   String get settingsDebugOverlayTitle => 'Debug Log Overlay';
@@ -542,7 +542,7 @@ class AppLocalizationsEn extends AppLocalizations {
   }
 
   @override
-  String get howItWorksTitle => 'How It Works';
+  String get howItWorksTitle => 'How it works';
 
   @override
   String get howItWorksIntro =>
