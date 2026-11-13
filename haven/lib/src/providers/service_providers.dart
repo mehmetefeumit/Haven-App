@@ -135,8 +135,8 @@ final iosBackgroundSessionServiceProvider =
 /// Which indicator sentence the iOS guidance copy must use.
 enum IosIndicatorSentence {
   /// The OS status-bar arrow is the only signal: a POSITIVELY confirmed
-  /// Always, where the handler neither asks for the indicator nor keeps an
-  /// activity session.
+  /// Always with Precise Location on, where the handler neither asks for the
+  /// indicator nor keeps an activity session.
   arrow,
 
   /// The blue location bar is on screen and cannot be turned off.
@@ -145,42 +145,48 @@ enum IosIndicatorSentence {
 
 /// Which indicator the user will actually see while background sharing runs.
 ///
-/// Selected on `alwaysConfirmed`, the SAME value both native branches decide
+/// Selected on `indicatorRequested`, the SAME reading the native flag is set
 /// from — `HavenLocationStreamHandler` sets
-/// `showsBackgroundLocationIndicator = !alwaysConfirmed` and
-/// `HavenBackgroundSessionHandler` gates the activity session on
-/// `status == .authorizedWhenInUse || !alwaysConfirmed` — so Dart and Swift
-/// cannot disagree about what is on screen.
+/// `showsBackgroundLocationIndicator = sessionHandler?.indicatorRequested ??
+/// true`, and `HavenBackgroundSessionHandler` defines it as
+/// `!alwaysConfirmed || accuracyAuthorization == .reducedAccuracy` and exports
+/// it on its status channel — so Dart and Swift cannot disagree about what is
+/// on screen.
 ///
-/// NOT `backgroundActivitySessionHeld`: `CLBackgroundActivitySession` is
-/// iOS 17+ and Haven deploys to iOS 15.5, so on iOS 15/16 nothing is ever held
-/// while the indicator flag is on and the bar is up. Every remaining
-/// bar-showing cohort also reads `alwaysConfirmed == false` — When-In-Use
-/// (where the bar is mandatory), a provisional Always (`.authorizedAlways`
-/// while the OS still treats the app as When-In-Use), and iOS 17 Always (no
-/// diagnostics API to confirm with). The arrow is honest only once Always is
-/// positively confirmed, which is also when the handler stops asking for the
-/// bar.
+/// NOT `alwaysConfirmed` alone: a confirmed-Always user with Precise Location
+/// off keeps the indicator (their accuracy writes have no effect, and the
+/// indicator is Apple's other way to keep the session running), so the arrow
+/// sentence would name a signal they are not looking at. And NOT
+/// `backgroundActivitySessionHeld`: `CLBackgroundActivitySession` is iOS 17+
+/// and Haven deploys to iOS 15.5, so on iOS 15/16 nothing is ever held while
+/// the indicator flag is on and the bar is up. Every remaining bar-showing
+/// cohort also reads `indicatorRequested == true` — When-In-Use (where the bar
+/// is mandatory), a provisional Always (`.authorizedAlways` while the OS still
+/// treats the app as When-In-Use), and iOS 17 Always (no diagnostics API to
+/// confirm with). The arrow is honest only once Always is positively confirmed
+/// with Precise Location on, which is also when the handler stops asking for
+/// the bar.
 ///
 /// Null while the handler is NOT armed, which is not a third indicator but the
 /// absence of a reading: `disarm()` clears `alwaysConfirmed` unconditionally,
 /// so with background sharing off (or the background disclosure unaccepted, or
-/// the channel silent) its `false` is a teardown residue, not a measurement of
-/// this device's tier. Selecting from it there promises the blue bar to a user
-/// who may get the arrow the moment sharing starts — the page has no honest
-/// sentence for that reader and renders no card at all.
+/// the channel silent) the predicate is a teardown residue, not a measurement
+/// of this device's tier. Selecting from it there promises the blue bar to a
+/// user who may get the arrow the moment sharing starts — the page has no
+/// honest sentence for that reader and renders no card at all.
 ///
 /// Invalidate after toggling background sharing and on
-/// `AppLifecycleState.resumed`: the confirmation arrives asynchronously and the
-/// user may have answered the second prompt in Settings.
+/// `AppLifecycleState.resumed`: the confirmation arrives asynchronously, and
+/// the user may have answered the second prompt or turned Precise Location off
+/// in Settings.
 final iosIndicatorSentenceProvider = FutureProvider<IosIndicatorSentence?>((
   ref,
 ) async {
   final status = await ref.read(iosBackgroundSessionServiceProvider).status();
   if (!status.armed) return null;
-  return status.alwaysConfirmed
-      ? IosIndicatorSentence.arrow
-      : IosIndicatorSentence.bar;
+  return status.indicatorRequested
+      ? IosIndicatorSentence.bar
+      : IosIndicatorSentence.arrow;
 });
 
 /// Exposes the current iOS location authorization status.

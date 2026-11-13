@@ -56,9 +56,13 @@ import UIKit
 ///
 /// `bestSince` records the instant of every switch to Best. A fix is treated
 /// as Best — cached in `lastBestFix`, tagged `best` on the wire to Dart — only
-/// when the manager is at Best AND the fix was computed after that switch, so
-/// a fix produced under the 100 m tier that arrives just after the switch is
-/// never mistaken for a GPS-grade one. `lastBestFix` is dropped on `onCancel`
+/// when Best is the tier last REQUESTED AND the fix was computed after that
+/// switch, so a fix produced under the 100 m tier that arrives just after the
+/// switch is never mistaken for a GPS-grade one. The request, never a
+/// read-back of `desiredAccuracy`: with Precise Location off writes to it have
+/// no effect and Apple does not document what it then reads, and a read-back
+/// that never equals Best would tag no fix Best and silently end publishing
+/// for that user. `lastBestFix` is dropped on `onCancel`
 /// and on `clearLastBestFix` (logout, opt-out pause): a full-precision
 /// coordinate must not outlive the consent that produced it, in Dart or in
 /// native memory (privacy Rule 10).
@@ -90,7 +94,7 @@ final class HavenLocationStreamHandler: NSObject, CLLocationManagerDelegate, Flu
   /// manager creation finds nothing to call.
   var onAuthorizationChanged: (() -> Void)?
 
-  /// Owner of the `alwaysConfirmed` predicate that decides the indicator
+  /// Owner of `indicatorRequested`, the predicate that decides the indicator
   /// policy. Weak: `AppDelegate` retains both handlers for the app's lifetime.
   weak var sessionHandler: HavenBackgroundSessionHandler?
 
@@ -103,6 +107,9 @@ final class HavenLocationStreamHandler: NSObject, CLLocationManagerDelegate, Flu
   /// Instant of the most recent switch to the Best profile. `distantFuture`
   /// until the first start, so nothing counts as Best before one.
   private var bestSince = Date.distantFuture
+
+  /// Whether Best is the tier last written to `desiredAccuracy`.
+  private var bestRequested = true
 
   /// The most recent Best-profile fix, served to Dart as the last-known
   /// position while backgrounded. Cleared with the subscription and on demand.
@@ -172,13 +179,15 @@ final class HavenLocationStreamHandler: NSObject, CLLocationManagerDelegate, Flu
   /// Re-applies the tier-driven indicator policy.
   ///
   /// Under CONFIRMED Always the flag is the only remaining source of the blue
-  /// bar, and OD1 turns it off; under When-In-Use — which is what the OS
-  /// treats a provisional or iOS 17 Always as — the bar is mandatory and the
-  /// OS ignores the flag, so `true` there is simply honest. Called at start,
-  /// on every authorization change, and whenever the session handler's
-  /// confirmation flips.
+  /// bar, and OD1 turns it off — unless Precise Location is off, where the
+  /// session may leave the iOS 16.4 delivery shape and the indicator is
+  /// Apple's other documented way to keep it running. Under When-In-Use —
+  /// which is what the OS treats a provisional or iOS 17 Always as — the bar
+  /// is mandatory and the OS ignores the flag, so `true` there is simply
+  /// honest. Called at start, on every authorization or accuracy change, and
+  /// whenever the session handler's confirmation flips.
   func applyIndicatorPolicy() {
-    manager.showsBackgroundLocationIndicator = !(sessionHandler?.alwaysConfirmed ?? false)
+    manager.showsBackgroundLocationIndicator = sessionHandler?.indicatorRequested ?? true
   }
 
   // MARK: - FlutterStreamHandler
@@ -209,6 +218,7 @@ final class HavenLocationStreamHandler: NSObject, CLLocationManagerDelegate, Flu
     // Recorded BEFORE the accuracy write, so no fix computed under the
     // previous tier can fall on the Best side of the comparison.
     bestSince = Date()
+    bestRequested = true
     manager.desiredAccuracy = kCLLocationAccuracyBest
     manager.startUpdatingLocation()
     return nil
@@ -231,8 +241,10 @@ final class HavenLocationStreamHandler: NSObject, CLLocationManagerDelegate, Flu
     switch name {
     case Self.profileBest:
       bestSince = Date()
+      bestRequested = true
       manager.desiredAccuracy = kCLLocationAccuracyBest
     case Self.profileHundredMeters:
+      bestRequested = false
       manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
     default:
       return false
@@ -245,7 +257,7 @@ final class HavenLocationStreamHandler: NSObject, CLLocationManagerDelegate, Flu
   func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
     guard let events = sink else { return }
     for loc in locations {
-      if manager.desiredAccuracy == kCLLocationAccuracyBest && loc.timestamp >= bestSince {
+      if bestRequested && loc.timestamp >= bestSince {
         lastBestFix = loc
         events(fixMap(loc, profile: Self.profileBest))
       } else {
@@ -272,8 +284,10 @@ final class HavenLocationStreamHandler: NSObject, CLLocationManagerDelegate, Flu
 
   func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
     // Re-arm first: the indicator policy reads the predicate that arm()
-    // re-evaluates. CoreLocation fires this at manager creation and in the
-    // background, and both callees are idempotent.
+    // re-evaluates. CoreLocation fires this at manager creation, in the
+    // background, and on an accuracy-authorization change (WWDC20 10660) —
+    // the ONLY re-apply for a Precise Location toggle, which flips no
+    // confirmation. Both callees are idempotent.
     onAuthorizationChanged?()
     applyIndicatorPolicy()
   }

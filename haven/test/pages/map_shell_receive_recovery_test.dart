@@ -377,6 +377,66 @@ void main() {
       });
     });
 
+    test('a heal that never returns counts as a failed restart, and the '
+        'backstop ticks on', () {
+      // Its re-anchor waits on the engine's lifecycle lock, which a wedged
+      // pause holds for the life of the process. Re-armed only from the
+      // heal's completion, the backstop — the only periodic recovery the
+      // live-sync build has — ended with that heal.
+      fakeAsync((async) {
+        final replay = math.Random(seed);
+        var heals = 0;
+        final backstop = LiveSyncHealBackstop(
+          random: math.Random(seed),
+          heal: () {
+            heals++;
+            return Completer<LiveSyncHealOutcome>().future;
+          },
+        )..start();
+        async.elapse(draw(replay));
+        expect(heals, 1, reason: 'premise: the first heal is out');
+
+        for (final multiplier in const [2, 4]) {
+          crossExpecting(
+            async,
+            LiveSyncHealBackstop.healDeadline + draw(replay) * multiplier,
+            () => heals,
+            reason: 'past its deadline a heal is a failed restart: the next '
+                'tick is one back-off step further out (x$multiplier)',
+          );
+        }
+        backstop.stop();
+      });
+    });
+
+    test('a slow but healthy heal is not counted a failure', () {
+      // A restart can take its whole budget and the re-anchor behind it more.
+      fakeAsync((async) {
+        final replay = math.Random(seed);
+        var heals = 0;
+        final backstop = LiveSyncHealBackstop(
+          random: math.Random(seed),
+          heal: () async {
+            heals++;
+            await Future<void>.delayed(
+              kLiveSyncRestartBudget + const Duration(seconds: 30),
+            );
+            return LiveSyncHealOutcome.running;
+          },
+        )..start();
+        async.elapse(draw(replay));
+        expect(heals, 1);
+
+        crossExpecting(
+          async,
+          kLiveSyncRestartBudget + const Duration(seconds: 30) + draw(replay),
+          () => heals,
+          reason: 'a heal that came back running re-arms at the base interval',
+        );
+        backstop.stop();
+      });
+    });
+
     test('a heal that completes after a stop does not re-arm', () {
       // The pause cancels the timer while a heal is in flight; that heal's
       // completion is the re-arm. Armed there, it ticks for the whole
@@ -666,6 +726,29 @@ void main() {
       );
     });
 
+    test('a heal joins the re-anchor an earlier heal left parked', () {
+      // The behavioural proof is in map_shell_burst_wiring_test.dart; this
+      // ties it to production. Past `healDeadline` heals overlap, 90 s or more
+      // apart and so past the 60 s throttle, and each one used to queue a full
+      // re-anchor behind the held lifecycle lock.
+      final body = methodSource(
+        source,
+        className: '_MapShellState',
+        method: '_healLiveSyncIfStopped',
+      );
+      expect(
+        body,
+        contains(
+          '_healReanchorFlight.run(() => MapShell.reanchorPausedEngine(',
+        ),
+      );
+      expect(
+        body,
+        isNot(contains('SingleFlight')),
+        reason: 'a latch built per heal latches nothing',
+      );
+    });
+
     test('concurrent installs are single-flighted through the latch', () {
       // The behavioural proof is the `SingleFlight` group above; this is what
       // ties it to production. Two installs would build two re-subscribers
@@ -940,6 +1023,12 @@ void main() {
       // Rust mirrors are pinned by
       // `scripts/ci/check_live_sync_restart_budget.sh`.
       expect(kLiveSyncRestartBudget, const Duration(seconds: 65));
+    });
+
+    test('the heal deadline leaves a restart and a re-anchor their time', () {
+      // A healthy heal past its deadline would be counted a failed restart
+      // and back the next tick off for nothing.
+      expect(LiveSyncHealBackstop.healDeadline, kLiveSyncRestartBudget * 2);
     });
 
     test('it expires before the heal backstop could tick again', () {

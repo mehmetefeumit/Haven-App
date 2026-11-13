@@ -73,8 +73,8 @@ use crate::nostr::mls::{PlaneStanding, SessionManager};
 use crate::nostr::NostrError;
 pub(super) use crate::relay::fanout::BurstEnd;
 use crate::relay::fanout::{
-    DriveMode, FanoutClock, ModeSource, Publishing, ResumeOutcome, Still, WallClock, BUSY_RETRY_MS,
-    RESUME_BUDGET_MS,
+    Counted, DriveMode, FanoutClock, InFlight, ModeSource, Publishing, ResumeOutcome, Still,
+    WallClock, BUSY_RETRY_MS, RESUME_BUDGET_MS,
 };
 use crate::relay::retick::{next_receive_retick, owe_unfinished, MAX_CONVERGENCE_RETICKS};
 
@@ -529,23 +529,6 @@ pub enum BacklogOutcome {
     TimedOut,
 }
 
-/// Decrements the in-flight publish gauge on drop, so a publish that panics,
-/// is cancelled, or returns early can never leave the gauge above zero.
-///
-/// A gauge that never returns to zero would make [`EngineProcessor::wait_publishes_drained`]
-/// — which is deliberately UNCAPPED (Security Rule 13: the pause may not cut a
-/// commit between SEND and OK) — hang forever, which is a background receive
-/// outage. The guard is what makes "uncapped" safe to write.
-struct PublishGauge<'a>(&'a AtomicUsize, &'a Notify);
-
-impl Drop for PublishGauge<'_> {
-    fn drop(&mut self) {
-        if self.0.fetch_sub(1, Ordering::AcqRel) == 1 {
-            self.1.notify_waiters();
-        }
-    }
-}
-
 /// The least the session's drive task sleeps before a drive it wakes for
 /// itself: what a drive answers when a relay it wanted was not free.
 const DRIVE_TIMER_FLOOR_MS: u64 = BUSY_RETRY_MS;
@@ -679,17 +662,20 @@ pub struct EngineProcessor {
     /// Which relays each live GROUP REQ still owes an `EOSE` before its circles
     /// may advance their cursors. See [`EoseCoverage`].
     eose_coverage: EoseCoverage,
-    /// Drives of stored records under way ([`Self::drive_due`]).
+    /// The relay calls of this plane's passes under way: a drive's, each
+    /// from just before its mark to its answer, and a NIP-77 pass's, from
+    /// its dial to its end.
     ///
-    /// Incremented BEFORE a drive reads the lifecycle and decremented by a
-    /// drop guard. A background pause MUST NOT `disconnect` while this is
-    /// non-zero: a commit between SEND and OK would be cut, stored possibly
-    /// exposed (Security Rule 13). A drive is counted for its whole pass: the
-    /// pause that waits here is also what closes the pool the drive's calls
-    /// ride.
-    in_flight_publishes: AtomicUsize,
-    /// Fired when [`Self::in_flight_publishes`] reaches zero.
-    publish_drained: Notify,
+    /// Counted BEFORE the call reads the lifecycle, and given back by a drop
+    /// guard. A pause MUST NOT close a socket while this is non-zero: a
+    /// commit between SEND and OK would be cut, stored possibly exposed
+    /// (Security Rule 13). Only the calls: a pass stalled in local work
+    /// holds no pause, and so no lifecycle lock.
+    in_flight: InFlight,
+    /// The drive and NIP-77 passes under way, each from its start to its
+    /// end: what a settle waits for, within the wake, so a confirm due on an
+    /// answer just in is made before the pause ends the pass's lifecycle.
+    passes: InFlight,
     /// Which lifecycle the session is serving ([`Lifecycle`]).
     ///
     /// Written by [`super::LiveSyncCore`]: from the typed `BurstKind` every
@@ -807,8 +793,8 @@ impl EngineProcessor {
             eose_notify: Notify::new(),
             coverage_changed: Notify::new(),
             eose_coverage: EoseCoverage::default(),
-            in_flight_publishes: AtomicUsize::new(0),
-            publish_drained: Notify::new(),
+            in_flight: InFlight::default(),
+            passes: InFlight::default(),
             lifecycle: LifecycleCell::new(),
             driver,
             halt: None,
@@ -1743,11 +1729,28 @@ impl EngineProcessor {
         self.lifecycle.get() == lifecycle && !self.halt.as_ref().is_some_and(|halt| *halt.borrow())
     }
 
-    /// Counts a NIP-77 pass as under way on the in-flight gauge a pause and
-    /// a stop wait on before they close the drive pool, until the guard drops.
-    pub(super) fn negentropy_in_flight(&self) -> impl Drop + '_ {
-        self.in_flight_publishes.fetch_add(1, Ordering::SeqCst);
-        PublishGauge(&self.in_flight_publishes, &self.publish_drained)
+    /// Which stretch of lifecycle a pass begins in
+    /// ([`LifecycleCell::changes`]).
+    pub(super) fn stretch(&self) -> u64 {
+        self.lifecycle.changes()
+    }
+
+    /// Counts a pass as under way, until the guard drops.
+    pub(super) fn pass_under_way(&self) -> Counted<'_> {
+        self.passes.count()
+    }
+
+    /// Counts a NIP-77 pass's relay work, until the guard drops, on the
+    /// count a pause waits on before it closes the drive pool; `None`,
+    /// counting nothing, once the session no longer serves `serves` in the
+    /// stretch `began` named.
+    pub(super) fn negentropy_in_flight(
+        &self,
+        serves: Lifecycle,
+        began: u64,
+    ) -> Option<Counted<'_>> {
+        let counted = self.in_flight.count();
+        (self.lifecycle.changes() == began && self.still_serves(serves)).then_some(counted)
     }
 
     /// The drive task began waiting for a foreground entry's replay
@@ -1854,15 +1857,11 @@ impl EngineProcessor {
         let Some(driver) = &self.driver else {
             return;
         };
-        // Counted BEFORE the lifecycle is read: a pause flips the lifecycle
-        // and then waits on this count, so it either sees this pass or this
-        // pass sees the pause.
-        self.in_flight_publishes.fetch_add(1, Ordering::SeqCst);
-        let _gauge = PublishGauge(&self.in_flight_publishes, &self.publish_drained);
+        let _pass = self.pass_under_way();
         // The leash first, and the pass begins on its word alone: read
         // apart, the lifecycle and the leash could disagree, and a pass
         // would begin narrowed and widen.
-        let leash = Leash::over(&self.lifecycle, self.halt.clone());
+        let leash = Leash::counted(&self.lifecycle, &self.in_flight, self.halt.clone());
         if !leash.runs() {
             return;
         }
@@ -2333,41 +2332,39 @@ impl EngineProcessor {
         expected.iter().all(|key| settled.contains(key))
     }
 
-    /// Waits — with NO cap — until every publish this processor put on the wire
-    /// has resolved.
+    /// Waits — with NO cap — until every relay call this processor's passes
+    /// have under way has answered.
     ///
     /// Uncapped on purpose (Security Rule 13). The alternative, a time-based
     /// cap, would let a pause `disconnect` a commit between SEND and OK: the
     /// relay may already have stored and served that commit to every peer
     /// while the drive records the attempt as unanswered, and the circle then
-    /// waits a whole retry schedule on a commit its peers already hold. The wait is bounded in practice by the crate's own 10 s
-    /// per-relay OK wait, and by [`PublishGauge`], which decrements even if the
-    /// publish panics or is cancelled.
+    /// waits a whole retry schedule on a commit its peers already hold. The
+    /// wait is bounded by each counted call's own deadline — a drive's wake,
+    /// a NIP-77 pass's connection and session wait — and by the drop guard,
+    /// which gives the count back however the call ends.
     pub async fn wait_publishes_drained(&self) {
-        loop {
-            let notified = self.publish_drained.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            // `SeqCst`, against a drive's own count-then-read
-            // ([`Self::drive_due`]).
-            if self.in_flight_publishes.load(Ordering::SeqCst) == 0 {
-                return;
-            }
-            notified.await;
-        }
+        self.in_flight.drained().await;
     }
 
-    /// Raises the in-flight publish gauge and hands back the REAL production
+    /// Waits until no drive or NIP-77 pass is under way, for no longer than
+    /// what is left of the wake a pass begun now would run in: a pass stalled
+    /// in local work holds no socket, and so may not hold a settle either.
+    pub(super) async fn wait_passes_ended(&self) {
+        let left = self.wake_left().unwrap_or_default();
+        let _ = tokio::time::timeout(left, self.passes.drained()).await;
+    }
+
+    /// Counts a relay call as under way and hands back the REAL production
     /// drop guard, so a test can hold a publish "between SEND and OK" without a
-    /// relay — and without a second, divergent copy of the gauge protocol.
+    /// relay — and without a second, divergent copy of the count.
     ///
     /// Test-only: it is the one way to observe the UNCAPPED half of
     /// [`Self::wait_publishes_drained`] on a virtual clock, where no socket may
     /// exist.
     #[cfg(test)]
     pub(crate) fn hold_publish_for_test(&self) -> impl Drop + '_ {
-        self.in_flight_publishes.fetch_add(1, Ordering::AcqRel);
-        PublishGauge(&self.in_flight_publishes, &self.publish_drained)
+        self.in_flight.count()
     }
 
     /// Records one commit-shaped observation, for a test that needs the settle
@@ -2378,13 +2375,21 @@ impl EngineProcessor {
         self.note_commit_activity();
     }
 
-    /// How many publishes are between SEND and OK right now.
+    /// How many relay calls are between SEND and OK right now.
     ///
     /// Presence-only (a count). The authoritative Rule-13 read taken by the
     /// pause immediately before `client.disconnect()`.
     #[must_use]
     pub fn in_flight_publishes(&self) -> usize {
-        self.in_flight_publishes.load(Ordering::Acquire)
+        self.in_flight.now()
+    }
+
+    /// How many drive and NIP-77 passes are under way right now, local work
+    /// included. Presence-only (a count).
+    #[cfg(any(test, feature = "test-utils"))]
+    #[must_use]
+    pub fn passes_under_way(&self) -> usize {
+        self.passes.now()
     }
 
     /// Forgets the commit activity observed so far, so the settle after a burst

@@ -464,6 +464,8 @@ void main() {
       // when it goes.
       final h = _Harness();
       await h.settle();
+      // A burst pauses only while the app is away.
+      h.foreground.value = false;
       final status = h.container.read(syncStatusProvider.notifier)
         ..onStatus(FfiSyncStatusReason.disconnected)
         // Paused before the window could confirm anything.
@@ -475,9 +477,17 @@ void main() {
       // Anti-vacuity, and the other half of the promise: the next burst opens
       // and the relay is still gone. The disconnect stamp SURVIVED the pause,
       // so the outage is dated from when the relay actually went — not from
-      // the un-pause, which would report a long outage as brand new and start
-      // the confirmation window over.
+      // the un-pause, which would report a long outage as brand new. Time
+      // away confirms nothing, so it is shown once the app has watched it for
+      // one window.
       status.onStatus(FfiSyncStatusReason.disconnected);
+      expect(
+        await h.settle(),
+        SharingHealth.healthy,
+        reason: 'time away confirms nothing',
+      );
+      h.foreground.value = true;
+      h.advance(kSharingFaultConfirmationWindow + const Duration(seconds: 1));
       expect(
         await h.settle(),
         SharingHealth.paused(
@@ -507,6 +517,8 @@ void main() {
         reason: 'anti-vacuity: the verdict must be reachable first',
       );
 
+      // A burst pauses only while the app is away.
+      h.foreground.value = false;
       status.onStatus(FfiSyncStatusReason.paused);
       expect(
         await h.settle(),
@@ -535,6 +547,8 @@ void main() {
       // engine is looking again. Recorded while paused, reported on un-pause.
       final h = _Harness();
       await h.settle();
+      // A burst pauses only while the app is away.
+      h.foreground.value = false;
       final status = h.container.read(syncStatusProvider.notifier)
         ..onStatus(FfiSyncStatusReason.paused);
 
@@ -547,6 +561,13 @@ void main() {
       );
 
       status.onStatus(FfiSyncStatusReason.connected);
+      expect(
+        await h.settle(),
+        SharingHealth.healthy,
+        reason: 'time away confirms nothing',
+      );
+      h.foreground.value = true;
+      h.advance(kSharingFaultConfirmationWindow + const Duration(seconds: 1));
       expect(
         await h.settle(),
         SharingHealth.publishFailing(_t0, ageProvable: false),
@@ -564,10 +585,114 @@ void main() {
       h.advance(kSharingFaultConfirmationWindow + const Duration(seconds: 1));
       expect((await h.settle()).state, SharingHealthState.paused);
 
+      // A burst pauses only while the app is away.
+      h.foreground.value = false;
       status
         ..onStatus(FfiSyncStatusReason.paused)
         ..onStatus(FfiSyncStatusReason.connected);
       expect(await h.settle(), SharingHealth.healthy);
+    });
+
+    test('with the app on screen a paused engine derives, so publish silence '
+        'is still reported', () async {
+      // Only a burst pauses the engine, and only while the app is away; the
+      // resume re-anchors it within seconds. A pause still standing on screen
+      // is a receive plane nothing re-anchored — a burst whose pause landed
+      // behind the resume — and freezing the verdict there held the banner
+      // at "healthy" while nothing moved in either direction.
+      final h = _Harness()
+        ..health.stored = CircleHealthTimestamps(lastPublishAckedAt: _t0);
+      expect(await h.settle(), SharingHealth.healthy);
+
+      // Paused well inside the confirmation window of the instant derived, so
+      // the paused-on-screen onset is not what answers.
+      h.advance(kPublishSilenceThreshold - const Duration(seconds: 36));
+      h.container.read(syncStatusProvider.notifier).onStatus(
+        FfiSyncStatusReason.paused,
+      );
+      h.advance(const Duration(seconds: 37));
+      expect(
+        await h.settle(),
+        SharingHealth.publishFailing(_t0),
+        reason: 'nothing kept for two cadences is a fault whatever the phase',
+      );
+    });
+
+    test('out of sight the same pause still derives nothing', () async {
+      final h = _Harness()
+        ..health.stored = CircleHealthTimestamps(lastPublishAckedAt: _t0);
+      expect(await h.settle(), SharingHealth.healthy);
+
+      h.foreground.value = false;
+      h.advance(const Duration(seconds: 300));
+      h.container.read(syncStatusProvider.notifier).onStatus(
+        FfiSyncStatusReason.paused,
+      );
+      h.advance(kPublishSilenceThreshold * 10);
+      expect(
+        await h.settle(),
+        SharingHealth.healthy,
+        reason: 'between bursts the app is not looking: a silence it chose',
+      );
+    });
+
+    test('a pause that stands on screen past the window is not receiving, '
+        'until it un-pauses', () async {
+      final h = _Harness();
+      expect(await h.settle(), SharingHealth.healthy);
+      final status = h.container.read(syncStatusProvider.notifier)
+        ..onStatus(FfiSyncStatusReason.paused);
+
+      h.advance(kSharingFaultConfirmationWindow);
+      expect(
+        await h.settle(),
+        SharingHealth.healthy,
+        reason: 'the resume re-anchor lands well inside the window',
+      );
+
+      h.advance(const Duration(seconds: 1));
+      expect(
+        await h.settle(),
+        SharingHealth.paused(
+          SharingPausedReason.receiveSubscriptionLost,
+          _t0,
+          ageProvable: false,
+        ),
+      );
+
+      status.onStatus(FfiSyncStatusReason.connected);
+      expect(await h.settle(), SharingHealth.healthy);
+    });
+
+    test('the paused-on-screen onset starts over at every return to the '
+        'screen', () async {
+      final h = _Harness();
+      await h.settle();
+      h.container.read(syncStatusProvider.notifier).onStatus(
+        FfiSyncStatusReason.paused,
+      );
+      h.advance(kSharingFaultConfirmationWindow ~/ 2);
+
+      // Away: the bursts pause the engine by design, and the onset goes.
+      h.foreground.value = false;
+      h.advance(kSharingFaultConfirmationWindow * 10);
+      expect(await h.settle(), SharingHealth.healthy);
+
+      // Back, still paused: dated from now, not from the first sighting.
+      h.foreground.value = true;
+      final back = h.now;
+      h.advance(kSharingFaultConfirmationWindow);
+      expect(await h.settle(), SharingHealth.healthy);
+
+      h.advance(const Duration(seconds: 1));
+      expect(
+        await h.settle(),
+        SharingHealth.paused(
+          SharingPausedReason.receiveSubscriptionLost,
+          back,
+          ageProvable: false,
+        ),
+      );
     });
 
     test('reconnecting clears the disconnect', () async {

@@ -554,6 +554,12 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
   /// Re-derives when that watching is done, rather than at the next tick.
   Timer? _confirm;
 
+  /// When the engine was first seen paused with the app on screen, `null`
+  /// otherwise. Only the background plane pauses the engine, so a pause still
+  /// there in the foreground is a receive plane nothing re-anchored: it dates
+  /// `receiveSubscriptionLost` exactly as a dropped subscription does.
+  DateTime? _pausedOnScreenSince;
+
   late ValueListenable<bool> _foreground;
 
   Timer? _tick;
@@ -592,6 +598,8 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
     _disconnectedSince = null;
     _watchingSince = null;
     _watched.clear();
+    _pausedOnScreenSince = null;
+    final foreground = _foreground = ref.read(sharingHealthForegroundProvider);
 
     // A disconnect has no timestamp of its own — `SyncStatus` carries a phase,
     // not an instant — so the transition edge is where the clock is read.
@@ -605,8 +613,9 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
     // honest too: an outage that spans a pause is still dated from when it
     // started, not re-dated to the un-pause. The pause is instead prevented
     // from confirming a fault by [refresh], which derives nothing at all while
-    // the engine is paused.
+    // the engine is paused out of sight.
     ref.listen<SyncStatus>(syncStatusProvider, (previous, next) {
+      _notePausedOnScreen();
       switch (next.phase) {
         case SyncConnectionPhase.disconnected:
           _disconnectedSince ??= _now();
@@ -624,8 +633,8 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
     // this the model could only update when something arrived — which is
     // exactly what stops when the pipeline dies. Gated on the foreground: see
     // [sharingHealthForegroundProvider].
-    final foreground = _foreground = ref.read(sharingHealthForegroundProvider);
     void syncTick() {
+      _notePausedOnScreen();
       if (foreground.value) {
         _watchingSince ??= _now();
         // Re-derive immediately as well as re-arming, so the first thing a
@@ -668,6 +677,17 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
 
     return SharingHealth.healthy;
   }
+
+  bool get _enginePaused =>
+      ref.read(syncStatusProvider).phase == SyncConnectionPhase.paused;
+
+  /// Dates [_pausedOnScreenSince] from the first moment the engine reads
+  /// paused with the app on screen, and clears it otherwise — so a return to
+  /// the background, or any un-pause, restarts the confirmation window.
+  void _notePausedOnScreen() => _pausedOnScreenSince =
+      _enginePaused && _foreground.value
+      ? (_pausedOnScreenSince ?? _now())
+      : null;
 
   /// Records the outcome of one publish attempt.
   ///
@@ -818,18 +838,23 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
   /// joins it, and one more derivation runs after it, so the verdict always
   /// follows the newest call and never an older one.
   ///
-  /// A PAUSED engine derives nothing and the last verdict stands. Between
-  /// background bursts there is no REQ and no socket: the app is not looking,
-  /// so it learns nothing in either direction, and both directions do harm.
-  /// Deriving `healthy` announces a recovery that did not happen — the app
-  /// stopped looking, the relay did not come back — and deriving a fault dates
-  /// an outage from a silence the app chose. The generation bump lands BEFORE
-  /// the early return so a derivation already in flight when the pause began
-  /// cannot land its answer either. The status listener above refreshes on
-  /// every phase change, so the verdict is re-derived the moment the next
-  /// burst opens.
+  /// A PAUSED engine derives nothing while the app is away, and the last
+  /// verdict stands. Between background bursts there is no REQ and no socket:
+  /// the app is not looking, so it learns nothing in either direction, and
+  /// both directions do harm. Deriving `healthy` announces a recovery that did
+  /// not happen — the app stopped looking, the relay did not come back — and
+  /// deriving a fault dates an outage from a silence the app chose. The
+  /// generation bump lands BEFORE the early return so a derivation already in
+  /// flight when the pause began cannot land its answer either. The status
+  /// listener above refreshes on every phase change, so the verdict is
+  /// re-derived the moment the next burst opens.
+  ///
+  /// With the app on screen a paused engine is no silence the app chose — the
+  /// resume re-anchors it within seconds — so it derives as at any other
+  /// phase, which is what keeps a wedged receive plane from freezing the
+  /// banner at its last verdict.
   Future<void> refresh() {
-    if (ref.read(syncStatusProvider).phase == SyncConnectionPhase.paused) {
+    if (_enginePaused && !_foreground.value) {
       ++_generation;
       return Future<void>.value();
     }
@@ -844,7 +869,7 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
   Future<void> _derive() async {
     do {
       _again = false;
-      if (ref.read(syncStatusProvider).phase == SyncConnectionPhase.paused) {
+      if (_enginePaused && !_foreground.value) {
         ++_generation;
         return;
       }
@@ -1038,8 +1063,14 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
   }
 
   SharingHealth? _pausedVerdict(DateTime now, CircleHealthTimestamps health) {
+    final lost = _subscriptionLostSince;
+    final pausedOnScreen = _pausedOnScreenSince;
     final candidates = <SharingPausedReason, DateTime?>{
-      SharingPausedReason.receiveSubscriptionLost: _subscriptionLostSince,
+      SharingPausedReason.receiveSubscriptionLost:
+          lost == null ||
+              (pausedOnScreen != null && pausedOnScreen.isBefore(lost))
+          ? pausedOnScreen
+          : lost,
       SharingPausedReason.relayDisconnected: _disconnectedSince,
       SharingPausedReason.sessionStillHeld: _sessionHeldSince,
     };

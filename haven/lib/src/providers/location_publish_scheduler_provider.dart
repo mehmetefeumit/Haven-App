@@ -222,8 +222,10 @@ const Duration kPublishLinkTimeout = Duration(minutes: 3);
 class LocationPublishSchedulerNotifier extends Notifier<void>
     implements BurstPublisher {
   /// The one armed wake of this plane, or `null` while paused or with nothing
-  /// eligible to publish. One, not one per circle: that is the whole of P5's
-  /// battery claim, and a second one would double this plane's wake count.
+  /// eligible to publish — except behind a tick sink, where an emptied roster
+  /// keeps it (see [_syncCircles]). One, not one per circle: that is the whole
+  /// of P5's battery claim, and a second one would double this plane's wake
+  /// count.
   JitteredScheduler? _scheduler;
 
   final Map<String, Circle> _circles = {};
@@ -240,7 +242,7 @@ class LocationPublishSchedulerNotifier extends Notifier<void>
   /// the same first slice (see the library header). Every key here is a key of
   /// [_circles] whenever [_circles] is non-empty (`a departed circle loses its
   /// place in the queue`); an empty roster is the one state where the queue
-  /// outlives its circles, and it holds no armed tick.
+  /// outlives its circles, and any tick still armed in it publishes nothing.
   final List<String> _rotation = [];
 
   /// Serializes every publish onto one FIFO chain so two circles can never run
@@ -336,14 +338,22 @@ class LocationPublishSchedulerNotifier extends Notifier<void>
       // there is no armed timer here, and the next non-empty emission prunes
       // them below.
       //
-      // What it still costs, because the queue is the only part this repairs:
-      // the disarm is unconditional, so the next healthy emission builds a NEW
-      // [JitteredScheduler] and samples a fresh 72-168 s — a transient read
-      // failure spends up to one whole interval of freshness. Backgrounded on
-      // iOS it can spend the rest of the window: every `circlesProvider`
-      // invalidation reachable there rides an inbound peer event (live-sync's
-      // `onGroupUpdated` / `onInvitationReceived`), so the re-arm waits for a
-      // peer to publish something.
+      // What it still costs in the foreground, because the queue is the only
+      // part this repairs: the disarm means the next healthy emission builds a
+      // NEW [JitteredScheduler] and samples a fresh 72-168 s — a transient read
+      // failure spends up to one whole interval of freshness.
+      //
+      // Behind a tick sink (backgrounded on iOS) the armed tick is KEPT. There
+      // it is the only wake there is: every other `circlesProvider` refresh
+      // rides an inbound peer event, and peer events arrive only inside the
+      // bursts these ticks start — so a disarm here ended background sharing
+      // for the window. A tick that finds the roster empty publishes nothing
+      // and starts no burst; it only re-reads the roster ([_onCircleTick]),
+      // which is local, and the emission that follows re-syncs through this
+      // listener. Only while backgrounded with sharing on, where the location
+      // keep-alive already holds the process awake, and only for a tick that
+      // was armed before the roster emptied.
+      if (_tickSink != null) return;
       _scheduler?.cancel();
       _scheduler = null;
       return;
@@ -379,6 +389,20 @@ class LocationPublishSchedulerNotifier extends Notifier<void>
 
   void _onCircleTick(int generation) {
     if (!_isCurrent(generation) || !_active) return;
+    if (_circles.isEmpty) {
+      // Kept armed only behind a tick sink ([_syncCircles]); a sink cleared
+      // since is the foreground, where an empty roster holds no tick.
+      if (_tickSink == null) {
+        _scheduler?.cancel();
+        _scheduler = null;
+        return;
+      }
+      // Frames are off while backgrounded, so the invalidate alone schedules
+      // a rebuild that never runs: the read is what performs it.
+      ref.invalidate(circlesProvider);
+      ref.read(circlesProvider.future).ignore();
+      return;
+    }
     // A LOOKUP, not `_circles[key]!`. The queue outlives an emptied roster on
     // purpose (see [_rotation]), so the two key sets are equal only while the
     // roster is non-empty — and a `!` would make any divergence permanent
@@ -425,9 +449,10 @@ class LocationPublishSchedulerNotifier extends Notifier<void>
   /// ladder, plus up to a minute for a generation's first `KeyPackage` tick)
   /// and the pause's Rule-13 publish drain — so [burstBound] bounds the
   /// burst's own links only and no honest bound on a whole burst exists. A
-  /// report costs a log line and nothing else: moving on cannot start a second
-  /// burst, because the coordinator serializes them on its own chain and the
-  /// tick that follows a reported burst joins or queues behind it.
+  /// report costs a log line and nothing else: moving on starts no burst of its
+  /// own, because the coordinator serializes bursts on a lane and the tick that
+  /// follows joins or queues behind the running one until that one passes its
+  /// stall ceiling, when the coordinator itself supersedes it.
   Future<void> _dispatchBurst(List<_BurstTarget> burst, int generation) {
     final sink = _tickSink;
     if (sink == null) return _publishBurst(burst, generation);
@@ -717,6 +742,14 @@ class LocationPublishSchedulerNotifier extends Notifier<void>
   }
 
   @override
+  void recordBurstPublishSkipped(Iterable<Circle> circles) {
+    if (_disposed || !_active) return;
+    for (final circle in circles) {
+      _recordPublishOutcome(circle, acked: false);
+    }
+  }
+
+  @override
   Future<void> publishInBurst(Circle circle, BurstFix fix) =>
       _publishCircle(circle, _generation, fix: fix);
 
@@ -727,8 +760,9 @@ class LocationPublishSchedulerNotifier extends Notifier<void>
 
   /// How many timers this plane has armed — the wake count P5 is about.
   ///
-  /// One for any non-empty roster, none while paused or with nothing eligible.
-  /// A per-circle scheduler would make this the circle count.
+  /// One for any non-empty roster, none while paused or with nothing eligible
+  /// (behind a tick sink, an emptied roster keeps the one it had). A
+  /// per-circle scheduler would make this the circle count.
   @visibleForTesting
   int get armedWakesForTest => _scheduler == null ? 0 : 1;
 

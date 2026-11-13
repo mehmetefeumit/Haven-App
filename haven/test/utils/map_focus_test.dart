@@ -8,6 +8,7 @@ library;
 
 import 'dart:async';
 
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -149,6 +150,56 @@ void main() {
       await tester.pump(const Duration(milliseconds: 200));
       expect(controller.moveCalls.last.center, near);
     });
+
+    for (final source in [
+      MapEventSource.flingAnimationController,
+      MapEventSource.doubleTapZoomAnimationController,
+    ]) {
+      testWidgets('a focus during ${source.name} momentum supersedes it, '
+          'from wherever it left the camera', (tester) async {
+        await host(tester, camera: _camera(zoom: 13.5));
+        // Like flutter_map's own animation: it moves the camera each frame,
+        // ahead of the glide, until a `mapController` move changes the camera.
+        var afterTap = 0;
+        var tapped = false;
+        final momentum = Ticker((_) {
+          if (tapped) afterTap++;
+          final old = controller.fakeCamera;
+          controller.fakeCamera = old.withPosition(
+            center: LatLng(0, old.center.longitude - 0.0001),
+          );
+          controller.events.add(
+            MapEventMove(
+              source: source,
+              oldCamera: old,
+              camera: controller.fakeCamera,
+            ),
+          );
+        });
+        addTearDown(momentum.dispose);
+        controller.onInterrupt = momentum.stop;
+        unawaited(momentum.start());
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 16));
+
+        final tapCenter = controller.fakeCamera.center;
+        tapped = true;
+        focus(near);
+        for (var i = 0; i < 30; i++) {
+          await tester.pump(const Duration(milliseconds: 16));
+        }
+
+        expect(afterTap, greaterThan(0), reason: 'the race really ran');
+        expect(momentum.isActive, isFalse);
+        expect(
+          controller.moveCalls.first.center.longitude,
+          lessThan(tapCenter.longitude),
+          reason: 'no snap back to where the tap found the camera',
+        );
+        expect(controller.moveCalls.last, (center: near, zoom: 14.0));
+        expect(tester.binding.hasScheduledFrame, isFalse);
+      });
+    }
 
     testWidgets('a user gesture mid-glide stops it', (tester) async {
       await host(tester, camera: _camera(zoom: 13.5));
@@ -332,8 +383,13 @@ class _FakeMapController extends Fake implements MapController {
 
   MapCamera fakeCamera = _camera();
 
+  /// Called when a `move` changes the camera, as flutter_map then stops its
+  /// own fling or double-tap zoom.
+  VoidCallback? onInterrupt;
+
   /// Stands in for the real controller's event stream; `move` echoes a
-  /// `mapController`-sourced event as the real one does.
+  /// `mapController`-sourced event as the real one does, and like it returns
+  /// false and emits nothing when the camera would not change.
   final StreamController<MapEvent> events = StreamController.broadcast(
     sync: true,
   );
@@ -353,7 +409,9 @@ class _FakeMapController extends Fake implements MapController {
   }) {
     moveCalls.add((center: center, zoom: zoom));
     final old = fakeCamera;
+    if (old.center == center && old.zoom == zoom) return false;
     fakeCamera = old.withPosition(center: center, zoom: zoom);
+    onInterrupt?.call();
     if (!events.isClosed) {
       events.add(
         MapEventMove(
