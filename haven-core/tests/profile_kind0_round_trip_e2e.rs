@@ -18,8 +18,6 @@
 //! `unattempted.is_empty()` is the standing proof that the request really was
 //! issued and answered.
 
-use std::time::Duration;
-
 use haven_core::profile::{
     build_metadata_event, fetch_profiles_assigned, merge_edits, publish_metadata, AssignedFetch,
     ProfileEdits, ProfileMetadata, ProfileRelaySalt, ProfileState,
@@ -44,12 +42,22 @@ const fn salt() -> ProfileRelaySalt {
 }
 
 /// Builds + publishes a kind-0 for `keys` to `url` via the production
-/// `publish_metadata` path.
-async fn publish_profile(relay: &RelayManager, keys: &Keys, meta: &ProfileMetadata, url: &str) {
-    let event = build_metadata_event(keys, meta, None).expect("build kind-0");
+/// `publish_metadata` path, superseding a kind-0 dated `previous_created_at`.
+///
+/// Returns once the relay has acknowledged it, which it does only after storing
+/// it, so a fetch issued next reads it.
+async fn publish_profile(
+    relay: &RelayManager,
+    keys: &Keys,
+    meta: &ProfileMetadata,
+    url: &str,
+    previous_created_at: Option<u64>,
+) -> Event {
+    let event = build_metadata_event(keys, meta, previous_created_at).expect("build kind-0");
     publish_metadata(relay, &event, &[url.to_string()])
         .await
         .expect("publish kind-0");
+    event
 }
 
 /// Requests every author in `authors` at attempt 0 from a one-relay pool.
@@ -77,9 +85,9 @@ async fn publish_fetch_parse_round_trip() {
         &keys,
         &metadata(r#"{"display_name":"Alice","about":"hi"}"#),
         &url,
+        None,
     )
     .await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
 
     let fetched = fetch_from(&manager, &[keys.public_key()], &url).await;
     assert!(
@@ -109,23 +117,27 @@ async fn two_publishes_newest_wins() {
     let manager = RelayManager::new();
     let keys = Keys::generate();
 
-    publish_profile(
+    let old = publish_profile(
         &manager,
         &keys,
         &metadata(r#"{"display_name":"Old"}"#),
         &url,
+        None,
     )
     .await;
-    // Ensure a strictly later created_at (replaceable supersession).
-    tokio::time::sleep(Duration::from_millis(1_100)).await;
-    publish_profile(
+    let new = publish_profile(
         &manager,
         &keys,
         &metadata(r#"{"display_name":"New"}"#),
         &url,
+        Some(old.created_at.as_secs()),
     )
     .await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        new.created_at > old.created_at,
+        "precondition: the newer kind-0 must be dated strictly later, or the relay \
+         would decide the replaceable slot by its tie-break"
+    );
 
     let fetched = fetch_from(&manager, &[keys.public_key()], &url).await;
     assert!(fetched.unattempted.is_empty(), "the author was queried");
@@ -149,14 +161,14 @@ async fn edit_preserves_field_written_by_another_client() {
     // includes a lightning address Haven does not model in its editor.
     let client_a = Keys::generate();
     let client_b = Keys::new(client_a.secret_key().clone());
-    publish_profile(
+    let other_client = publish_profile(
         &manager,
         &client_b,
         &metadata(r#"{"display_name":"Alice","lud16":"alice@wallet","bot":true}"#),
         &url,
+        None,
     )
     .await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Haven (client A) fetches the freshest, merges a display-name edit, and
     // republishes the WHOLE object.
@@ -170,10 +182,20 @@ async fn edit_preserves_field_written_by_another_client() {
             ..ProfileEdits::default()
         },
     );
-    // Later created_at so the edit supersedes.
-    tokio::time::sleep(Duration::from_millis(1_100)).await;
-    publish_profile(&manager, &client_a, &merged, &url).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Dated after the fetched copy, as the production edit path stamps it, so
+    // the edit supersedes.
+    let edit = publish_profile(
+        &manager,
+        &client_a,
+        &merged,
+        &url,
+        Some(other_client.created_at.as_secs()),
+    )
+    .await;
+    assert!(
+        edit.created_at > other_client.created_at,
+        "precondition: the edit must be dated strictly later than the copy it replaces"
+    );
 
     let after = fetch_from(&manager, &[client_a.public_key()], &url).await;
     assert!(after.unattempted.is_empty(), "the author was queried");
@@ -208,6 +230,7 @@ async fn forged_signature_kind0_rejected() {
         &alice,
         &metadata(r#"{"display_name":"Alice"}"#),
         &url,
+        None,
     )
     .await;
 
@@ -226,12 +249,12 @@ async fn forged_signature_kind0_rejected() {
 
     // Attempt to inject the forged event via a raw client. Either the client
     // refuses to transmit it or the relay rejects it; either way it must never
-    // become a resolvable profile.
+    // become a resolvable profile. The send returns on the relay's `OK` (or the
+    // client's refusal), so whatever the relay did with it is done.
     let publisher = Client::builder().build();
     publisher.add_relay(&url).await.unwrap();
     publisher.connect().await;
     let _ = publisher.send_event(&forged).await;
-    tokio::time::sleep(Duration::from_millis(400)).await;
 
     let fetched = fetch_from(&manager, &[alice.public_key(), mallory.public_key()], &url).await;
 

@@ -26,8 +26,6 @@
 
 mod helpers;
 
-use std::time::Duration;
-
 use haven_core::nostr::mls::SessionManager;
 use haven_core::relay::maintenance::{
     build_kp_maintenance_events, build_kp_maintenance_events_reusing, decide_kp_maintenance,
@@ -166,11 +164,6 @@ async fn served_until(
     panic!("the relay never reached the expected state: {what}");
 }
 
-/// Waits for the relay to have persisted a write before the next probe.
-async fn settle() {
-    tokio::time::sleep(Duration::from_millis(250)).await;
-}
-
 /// A lifetime whose rotation threshold falls exactly at `now`.
 fn lifetime_due_at(now: u64) -> KeyPackageLifetime {
     #[allow(
@@ -205,7 +198,6 @@ async fn past_threshold_package_is_reminted_into_the_same_slot() {
     mgr.publish_event(&first.event, &own)
         .await
         .expect("publish");
-    settle().await;
 
     // The real lifetime of the real package, read off the package itself.
     let TrackedKpLifetime::Known(lifetime) = read_kp_lifetime(&first_bytes) else {
@@ -291,7 +283,6 @@ async fn past_threshold_package_is_reminted_into_the_same_slot() {
     mgr.publish_event(&second.event, &targets)
         .await
         .expect("publish rotation");
-    settle().await;
 
     // What a peer now fetches from the slot.
     let served = fetch_slot(&mgr, dev.keys.public_key(), &own, &slot_d).await;
@@ -342,7 +333,6 @@ async fn a_heal_republishes_the_tracked_event_and_the_rotation_clock_does_not_mo
         .promote_key_package(&first.event.id)
         .await
         .expect("promote"));
-    settle().await;
 
     let tracked_package = dev
         .session
@@ -383,7 +373,6 @@ async fn a_heal_republishes_the_tracked_event_and_the_rotation_clock_does_not_mo
     mgr.publish_event(&frozen, &targets)
         .await
         .expect("publish heal");
-    settle().await;
 
     // B now serves the very event A serves: one signature, one `created_at`.
     for url in [&url_a, &url_b] {
@@ -697,11 +686,9 @@ async fn a_created_at_tie_leaves_the_slot_winner_up_to_the_relay() {
     mgr.publish_event(&lower_id.event, &own)
         .await
         .expect("lower id first");
-    settle().await;
     mgr.publish_event(&higher_id.event, &own)
         .await
         .expect("higher id second");
-    settle().await;
 
     let served = fetch_slot(&mgr, dev.keys.public_key(), &own, &slot_d).await;
     assert_eq!(served.len(), 1, "one addressable slot, one event");
@@ -784,9 +771,7 @@ async fn monotonic_floor_makes_a_same_second_replacement_win_the_slot() {
     };
 
     mgr.publish_event(&old.event, &own).await.expect("old");
-    settle().await;
     mgr.publish_event(&new.event, &own).await.expect("new");
-    settle().await;
 
     let served = fetch_slot(&mgr, dev.keys.public_key(), &own, &slot_d).await;
     assert_eq!(served.len(), 1, "one addressable slot, one event");
@@ -837,7 +822,6 @@ async fn a_fresh_package_is_not_reminted_and_its_bytes_are_untouched() {
     mgr.publish_event(&first.event, &own)
         .await
         .expect("publish");
-    settle().await;
 
     let lifetime = read_kp_lifetime(&bytes);
     let TrackedKpLifetime::Known(l) = lifetime else {
@@ -903,7 +887,6 @@ async fn an_account_published_before_the_feature_rotates_on_its_next_check() {
     mgr.publish_event(&published.event, &own)
         .await
         .expect("publish");
-    settle().await;
 
     let lifetime = read_kp_lifetime(published.key_package.bytes());
     let TrackedKpLifetime::Known(l) = lifetime else {
@@ -962,7 +945,6 @@ async fn past_threshold_plus_partial_drop_remints_once_to_every_relay() {
     mgr.publish_event(&first.event, std::slice::from_ref(&url_a))
         .await
         .expect("publish A");
-    settle().await;
 
     let now = haven_core::relay::maintenance::now_secs();
     let due = lifetime_due_at(now);
@@ -998,10 +980,17 @@ async fn past_threshold_plus_partial_drop_remints_once_to_every_relay() {
     .await
     .expect("rotate");
     assert_ne!(rotated.key_package.bytes(), old_bytes.as_slice());
-    mgr.publish_event(&rotated.event, &targets)
+    let published = mgr
+        .publish_event(&rotated.event, &targets)
         .await
         .expect("publish rotation");
-    settle().await;
+    // A relay acknowledges only what it stored, so every slot read below
+    // reads the replacement.
+    assert_eq!(
+        published.success_count(),
+        targets.len(),
+        "every target must acknowledge the replacement"
+    );
 
     for relay_url in &own {
         let served = fetch_slot(

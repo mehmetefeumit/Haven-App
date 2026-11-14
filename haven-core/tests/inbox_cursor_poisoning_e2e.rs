@@ -63,6 +63,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use haven_core::circle::CircleManager;
+use haven_core::nostr::mls::storage::{is_session_live, session_db_path};
 use haven_core::relay::cursor::{
     since_for_stream, SubscribePhase, INBOX_GIFTWRAP_LOOKBACK_SECS,
     INBOX_RESUBSCRIBE_LOOKBACK_SECS, STREAM_INBOX_1059,
@@ -70,7 +71,7 @@ use haven_core::relay::cursor::{
 use haven_core::relay::live_sync::{Claim, LiveSyncCore, LiveSyncEvent, StopOutcome};
 use nostr::nips::nip59::RANGE_RANDOM_TIMESTAMP_TWEAK;
 use nostr::{
-    Event, EventBuilder, EventId, Filter, JsonUtil, Keys, Kind, PublicKey, Tag, Timestamp,
+    Event, EventBuilder, EventId, Filter, JsonUtil, Keys, Kind, PublicKey, RelayUrl, Tag, Timestamp,
 };
 use nostr_relay_builder::prelude::{
     BoxedFuture, MemoryDatabase, MemoryDatabaseOptions, NostrDatabase, PolicyResult, QueryPolicy,
@@ -81,6 +82,14 @@ use tempfile::TempDir;
 
 fn now_secs() -> i64 {
     i64::try_from(Timestamp::now().as_secs()).unwrap()
+}
+
+/// Returns once the local wall clock has ticked strictly past `secs`, at the
+/// whole-second precision the cursor is anchored at.
+async fn wait_until_after(secs: i64) {
+    while now_secs() <= secs {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 /// A day before `start`'s own clock read, which the EOSE anchor — the REQ's
@@ -143,11 +152,48 @@ fn routed_giftwrap_at(recipient: PublicKey, created_at_secs: i64) -> Event {
         .unwrap()
 }
 
+/// Publishes `event` and returns once the relay has acknowledged storing it.
 async fn publish(url: &str, event: &Event) {
     let publisher = Client::builder().build();
     publisher.add_relay(url).await.unwrap();
     publisher.connect().await;
-    publisher.send_event(event).await.expect("publish");
+    let output = publisher.send_event(event).await.expect("publish");
+    assert!(
+        !output.success.is_empty(),
+        "precondition: the relay must acknowledge the event"
+    );
+}
+
+/// Waits (bounded) until a REQ endpoint of `relay` has answered with `EOSE`:
+/// what it replayed was taken in, and the anchor redeemed, before that.
+async fn wait_settled(engine: &LiveSyncCore, relay: &RelayUrl, budget: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        if engine.endpoint_settled_for_test(relay) {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// Waits (bounded) until the Rule-14 session guard on `dir`'s store is
+/// released: tasks that still hold a manager clone end after the last handle
+/// the test drops.
+async fn wait_session_released(dir: &std::path::Path, budget: Duration) -> bool {
+    let db = session_db_path(dir);
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        if !is_session_live(&db).expect("the registry answers for a canonical path") {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 /// Waits (bounded) for a `Welcome` to surface on the engine bus — i.e. for a
@@ -367,6 +413,7 @@ async fn a_live_gift_wrap_after_eose_moves_the_inbox_cursor_nowhere() {
         own,
         Arc::new(haven_core::relay::RelayManager::new()),
     );
+    let mut bus = engine.bus().subscribe();
     engine
         .start(&[], std::slice::from_ref(&url))
         .await
@@ -385,16 +432,36 @@ async fn a_live_gift_wrap_after_eose_moves_the_inbox_cursor_nowhere() {
         "precondition: the EOSE anchor must have been redeemed already"
     );
 
-    // Let whole seconds pass so a per-event advance would be unmistakable.
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // A per-event rule clamps the wrap's date to `now`, so the clock must pass
+    // the anchor's second first, or a clamped advance would write the anchor's
+    // own value and pass unseen.
+    wait_until_after(anchored / 1000).await;
     let live_secs = now_secs() + 86_400;
     assert!(
         live_secs * 1000 > anchored,
         "precondition: the live wrap must be dated strictly above the anchored \
          cursor, or a per-event advance would be invisible here"
     );
-    publish(&url, &routed_giftwrap_at(own, live_secs)).await;
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    let live = routed_giftwrap_at(own, live_secs);
+    publish(&url, &live).await;
+    assert!(
+        wait_for_welcomes(&mut bus, &[live.id], wait_budget(10))
+            .await
+            .is_empty(),
+        "precondition: the live wrap must be DELIVERED, or the cursor check below \
+         holds because nothing arrived"
+    );
+    // The fence: the worker is serial, so a second wrap delivered behind the
+    // first means everything the first one did — to the cursor included — is
+    // done.
+    let fence = routed_giftwrap_at(own, live_secs);
+    publish(&url, &fence).await;
+    assert!(
+        wait_for_welcomes(&mut bus, &[fence.id], wait_budget(10))
+            .await
+            .is_empty(),
+        "the fence wrap must be delivered behind the live one"
+    );
 
     assert_eq!(
         circle.read_sync_cursor(STREAM_INBOX_1059).unwrap(),
@@ -422,8 +489,10 @@ async fn the_anchored_inbox_cursor_survives_a_restart() {
     let keys = Keys::generate();
     let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &keys).unwrap());
     let own = Keys::generate().public_key();
+    let relay_url = RelayUrl::parse(&url).expect("the mock relay's url parses");
 
-    publish(&url, &routed_giftwrap_at(own, now_secs() + 365 * 86_400)).await;
+    let forged = routed_giftwrap_at(own, now_secs() + 365 * 86_400);
+    publish(&url, &forged).await;
 
     let engine1 = LiveSyncCore::new_local(
         Arc::clone(&circle),
@@ -463,7 +532,10 @@ async fn the_anchored_inbox_cursor_survives_a_restart() {
     // single-session guard will let the file be reopened.
     drop(engine1);
     drop(circle);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        wait_session_released(dir.path(), wait_budget(10)).await,
+        "session 1's Rule-14 guard must be released once every handle is gone"
+    );
     let reopened = Arc::new(CircleManager::new_unencrypted(dir.path(), &keys).expect("reopen"));
     assert_eq!(
         reopened.read_sync_cursor(STREAM_INBOX_1059).unwrap(),
@@ -476,15 +548,41 @@ async fn the_anchored_inbox_cursor_survives_a_restart() {
         own,
         Arc::new(haven_core::relay::RelayManager::new()),
     );
+    let mut bus = engine2.bus().subscribe();
+    let opened_at2 = now_secs();
     engine2
         .start(&[], std::slice::from_ref(&url))
         .await
         .expect("start session 2");
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        reopened
+            .read_sync_cursor(STREAM_INBOX_1059)
+            .unwrap()
+            .is_some_and(|cursor| cursor >= advanced),
+        "opening a session must never regress the persisted cursor"
+    );
+    assert!(
+        wait_for_welcomes(&mut bus, &[forged.id], wait_budget(10))
+            .await
+            .is_empty(),
+        "precondition: session 2 must be replayed the future-dated wrap, or the \
+         clock check below holds because nothing arrived"
+    );
+    // Session 2's own EOSE: everything its REQ replayed has been taken in, and
+    // its anchor redeemed, by then.
+    assert!(
+        wait_settled(&engine2, &relay_url, wait_budget(10)).await,
+        "session 2's inbox REQ must be answered"
+    );
     let after_restart = reopened
         .read_sync_cursor(STREAM_INBOX_1059)
         .unwrap()
         .unwrap();
+    assert!(
+        after_restart >= opened_at2 * 1000,
+        "session 2's EOSE must anchor the cursor at its own REQ's open time \
+         ({opened_at2} s): {after_restart} ms"
+    );
     assert!(
         after_restart >= advanced,
         "a restart must never regress the persisted cursor: {after_restart} ms \

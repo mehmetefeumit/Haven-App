@@ -14,8 +14,6 @@
 //!   relay, the signer-less fetch resolves nothing — it cannot (and must not)
 //!   authenticate, so it can never be attributed to the local user.
 
-use std::time::Duration;
-
 use haven_core::profile::{
     build_metadata_event, fetch_profiles_assigned, AssignedFetch, ProfileMetadata, ProfileRelaySalt,
 };
@@ -38,12 +36,19 @@ const fn salt() -> ProfileRelaySalt {
 }
 
 /// Publishes a kind-0 for `keys` to exactly `url` via a raw client.
+///
+/// Returns once the relay has acknowledged storing it, so a fetch issued next
+/// reads it.
 async fn publish_to(url: &str, keys: &Keys, meta: &ProfileMetadata) {
     let event = build_metadata_event(keys, meta, None).expect("build kind-0");
     let client = Client::builder().build();
     client.add_relay(url).await.unwrap();
     client.connect().await;
-    client.send_event(&event).await.expect("publish");
+    let output = client.send_event(&event).await.expect("publish");
+    assert!(
+        !output.success.is_empty(),
+        "precondition: the relay must acknowledge the kind-0"
+    );
 }
 
 /// Requests every author in `authors` at attempt 0 from a one-relay pool.
@@ -82,7 +87,6 @@ async fn profile_fetch_never_dials_the_circle_relay() {
         &metadata(r#"{"display_name":"CircleOnly"}"#),
     )
     .await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Fetch BOTH authors from a pool containing ONLY the discovery relay, so
     // both are assigned to it and the circle relay is never a target.
@@ -152,7 +156,6 @@ async fn fetch_never_answers_nip42_auth() {
     let author = Keys::generate();
     // Publish is a write — permitted without AUTH under Read mode.
     publish_to(&url, &author, &metadata(r#"{"display_name":"Secret"}"#)).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
 
     // The RelayManager is built with NO signer, so it cannot satisfy the AUTH
     // challenge. The read therefore yields nothing (the relay refuses to serve

@@ -45,7 +45,6 @@
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use std::collections::BTreeSet;
 
@@ -346,7 +345,6 @@ async fn profile_plane_never_touches_circle_relays_e2e() {
     publish_metadata(&manager, &event, std::slice::from_ref(&profile_url))
         .await
         .expect("publish kind-0 to the profile relay");
-    tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Both counters must still be zero: publishing sends `EVENT`, never `REQ`,
     // so everything counted from here on belongs to the fetch under test.

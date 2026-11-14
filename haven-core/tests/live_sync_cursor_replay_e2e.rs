@@ -49,8 +49,8 @@ use haven_core::relay::live_sync::{
 };
 use haven_core::relay::maintenance::build_kp_maintenance_events;
 use nostr::{
-    Alphabet, Event, EventBuilder, Keys, Kind, SingleLetterTag, Tag, TagKind, TagStandard,
-    Timestamp,
+    Alphabet, Event, EventBuilder, EventId, Keys, Kind, RelayUrl, SingleLetterTag, Tag, TagKind,
+    TagStandard, Timestamp,
 };
 use nostr_relay_builder::MockRelay;
 use nostr_sdk::Client;
@@ -74,13 +74,9 @@ use tempfile::TempDir;
 /// and it costs nothing when the arrival comes, because each wait returns on its
 /// condition.
 ///
-/// The file's three fixed sleeps are deliberately NOT scaled: none of them is a
-/// budget. Two are ABSENCE windows (nothing may move / no regression), whose
-/// expiry is their success path and which spend their full length on every run;
-/// each already dwarfs the millisecond in-process ingest path by three orders of
-/// magnitude, instrumented or not. The third exists only to put whole seconds
-/// between two candidate timestamps, and its own precondition `assert!` fails
-/// loudly if it ever stops doing so.
+/// No absence here is a window of time: each is asserted only once an event
+/// ordered after the one it is about has been observed, so there is nothing
+/// left to scale.
 ///
 /// Set by the coverage workflow and `scripts/ci/check_coverage.sh`. Absent or
 /// unparsable means 1, so an ordinary `cargo test` keeps today's timings.
@@ -98,8 +94,8 @@ fn wait_budget(base: Duration) -> Duration {
 }
 
 /// Publishes an undecryptable `kind:445` carrying `#h = h_value` at
-/// `created_at_secs` via a fresh publisher.
-async fn publish_kind445_at(url: &str, h_value: &str, created_at_secs: u64) {
+/// `created_at_secs` via a fresh publisher, returning its id.
+async fn publish_kind445_at(url: &str, h_value: &str, created_at_secs: u64) -> EventId {
     let event = EventBuilder::new(Kind::Custom(445), "opaque-ciphertext")
         .tags([Tag::custom(
             TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H)),
@@ -109,13 +105,52 @@ async fn publish_kind445_at(url: &str, h_value: &str, created_at_secs: u64) {
         .sign_with_keys(&Keys::generate())
         .unwrap();
     publish(url, &event).await;
+    event.id
 }
 
+/// Publishes `event` and returns once the relay has acknowledged storing it.
 async fn publish(url: &str, event: &Event) {
     let publisher = Client::builder().build();
     publisher.add_relay(url).await.unwrap();
     publisher.connect().await;
-    publisher.send_event(event).await.expect("publish");
+    let output = publisher.send_event(event).await.expect("publish");
+    assert!(
+        !output.success.is_empty(),
+        "precondition: the relay must acknowledge the event"
+    );
+}
+
+/// Waits (bounded) until `engine`'s ingest worker has taken `id` in.
+///
+/// The worker is serial and awaits each event's ingest before it reads the
+/// next, so a second event taken in after a first is the fence that everything
+/// the first one did — to the cursor included — is done.
+async fn wait_taken_in(engine: &LiveSyncCore, id: EventId, budget: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        if engine.group_events_taken_in_for_test().contains(&id) {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// Waits (bounded) until a REQ endpoint of `relay` has answered with `EOSE`:
+/// what it replayed was ingested, and the anchor redeemed, before that.
+async fn wait_settled(engine: &LiveSyncCore, relay: &RelayUrl, budget: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        if engine.endpoint_settled_for_test(relay) {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 /// Polls `manager`'s `key` cursor until it reaches `target_ms` (or the budget
@@ -161,6 +196,14 @@ fn now_secs() -> i64 {
     i64::try_from(Timestamp::now().as_secs()).unwrap()
 }
 
+/// Returns once the local wall clock has ticked strictly past `secs`, at the
+/// whole-second precision the cursor is anchored at.
+async fn wait_until_after(secs: i64) {
+    while now_secs() <= secs {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 /// A delivered 445 must NOT move the cursor; the cursor advances on the
 /// subscription's EOSE, to the REQ's local open time — and that advanced value
 /// survives a session restart without regressing.
@@ -173,20 +216,23 @@ fn now_secs() -> i64 {
 /// * a STORED event dated an hour in the past, replayed at subscribe time. The
 ///   old per-event rule set the cursor to `now − 3600`; the anchor sets it to
 ///   the REQ's open time, an hour higher.
-/// * a LIVE event published several seconds AFTER the EOSE anchor has been
-///   redeemed. The old rule pushed the cursor forward again, to `now`; the
-///   anchor is spent for this generation, so the cursor must not move at all.
-///   The deliberate settle before publishing is what puts whole seconds between
-///   the two candidate values — without it both rules land on the same second
-///   and the assertion would pass either way.
+/// * a LIVE event, dated two seconds above the anchored cursor, published AFTER
+///   the EOSE anchor has been redeemed. The old rule pushed the cursor forward
+///   again, to that date clamped to `now`; the anchor is spent for this
+///   generation, so the cursor must not move at all. The clock is first let
+///   pass the anchor's second, and the cursor is read only once a later event
+///   has been taken in behind it, so a per-event advance has always landed, a
+///   whole second above the anchor, by then.
 ///
 /// The complementary assertion — that the cursor moves at all, on EOSE — is what
 /// fails if the anchor were removed rather than redirected.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::too_many_lines)]
 async fn delivered_445_never_sets_the_cursor_but_eose_does() {
     let _ = haven_core::relay::allow_ws_loopback_for_test();
     let relay = MockRelay::run().await.expect("mock relay");
     let url = relay.url().await.to_string();
+    let relay_url = RelayUrl::parse(&url).expect("the mock relay's url parses");
 
     let dir = TempDir::new().unwrap();
     let circle =
@@ -249,20 +295,28 @@ async fn delivered_445_never_sets_the_cursor_but_eose_does() {
          remotely-chosen created_at ({planted_secs} s). Got {advanced} ms.",
     );
 
-    // --- THE INVARIANT, live. Let whole seconds pass so a per-event advance
-    // would be unmistakable, then deliver a 445 dated `now`. The generation's
-    // anchor is already spent, so nothing may move. ---
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    let live_secs = now_secs();
+    // --- THE INVARIANT, live. The generation's anchor is already spent, so
+    // nothing may move. A per-event rule clamps the event's date to `now`, so
+    // the clock must pass the anchor's second first, or a clamped advance would
+    // write the anchor's own value and pass unseen. ---
+    wait_until_after(advanced / 1000).await;
+    let live_secs = advanced / 1000 + 2;
     assert!(
         live_secs * 1000 > advanced,
         "precondition: the live event must be dated strictly above the anchored \
          cursor, or a per-event advance would be invisible here"
     );
-    publish_kind445_at(&url, &group_hex, u64::try_from(live_secs).unwrap()).await;
-    // Long enough for the event to traverse receive → route → ingest; the
-    // engine-path latency is milliseconds (see `live_sync_engine_e2e_test`).
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    let live = publish_kind445_at(&url, &group_hex, u64::try_from(live_secs).unwrap()).await;
+    assert!(
+        wait_taken_in(&engine1, live, wait_budget(Duration::from_secs(10))).await,
+        "precondition: the live event must reach the ingest worker, or the cursor \
+         check below holds because nothing was delivered"
+    );
+    let fence = publish_kind445_at(&url, &group_hex, u64::try_from(live_secs).unwrap()).await;
+    assert!(
+        wait_taken_in(&engine1, fence, wait_budget(Duration::from_secs(10))).await,
+        "the fence event must reach the ingest worker behind the live one"
+    );
     assert_eq!(
         circle.read_sync_cursor(&cursor_key).unwrap(),
         Some(advanced),
@@ -297,12 +351,30 @@ async fn delivered_445_never_sets_the_cursor_but_eose_does() {
         Keys::generate().public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
+    let opened_at2 = now_secs();
     engine2
         .start(std::slice::from_ref(&spec), &[])
         .await
         .expect("start session 2");
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    let after_start = circle.read_sync_cursor(&cursor_key).unwrap().unwrap();
+    assert!(
+        after_start >= advanced,
+        "opening a session must never regress the persisted cursor: \
+         {after_start} ms < {advanced} ms"
+    );
+    // Session 2's own EOSE: everything its REQ replayed has been ingested, and
+    // its anchor redeemed, by then.
+    assert!(
+        wait_settled(&engine2, &relay_url, wait_budget(Duration::from_secs(10))).await,
+        "session 2's REQ must be answered, or the replay checks below read a \
+         cursor no replay has touched"
+    );
     let after_restart = circle.read_sync_cursor(&cursor_key).unwrap().unwrap();
+    assert!(
+        after_restart >= opened_at2 * 1000,
+        "session 2's EOSE must anchor the cursor at its own REQ's open time \
+         ({opened_at2} s): {after_restart} ms"
+    );
     assert!(
         after_restart >= advanced,
         "a restart must never regress the persisted cursor: {after_restart} ms \

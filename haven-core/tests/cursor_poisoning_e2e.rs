@@ -83,7 +83,9 @@ use std::time::Duration;
 
 use haven_core::circle::{CircleConfig, CircleManager, MemberKeyPackage};
 use haven_core::location::LocationMessage;
-use haven_core::nostr::mls::storage::set_stored_message_write_fault_for_test;
+use haven_core::nostr::mls::storage::{
+    is_session_live, session_db_path, set_stored_message_write_fault_for_test,
+};
 use haven_core::nostr::mls::types::GroupId;
 use haven_core::nostr::mls::{SessionManager, StorageConfig};
 use haven_core::relay::catchup::run_catchup_all_circles;
@@ -313,6 +315,22 @@ fn secs_of(event: &Event) -> i64 {
 async fn wait_until_after(secs: i64) {
     while now_secs() <= secs {
         tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Waits (bounded) until the Rule-14 session guard on `dir`'s store is
+/// released, so the store can be reopened.
+async fn wait_session_released(dir: &std::path::Path) -> bool {
+    let db = session_db_path(dir);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if !is_session_live(&db).expect("the registry answers for a canonical path") {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
@@ -929,7 +947,10 @@ async fn livesync_the_held_cursor_survives_a_restart() {
 
     drop(processor);
     drop(alice);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        wait_session_released(dir.path()).await,
+        "the Rule-14 guard must be released once every handle is gone"
+    );
 
     let reopened = CircleManager::new_unencrypted(dir.path(), &alice_keys).expect("reopen");
     assert_eq!(

@@ -28,7 +28,7 @@ use haven_core::location::LocationMessage;
 use haven_core::nostr::mls::types::{GroupId, LocationMessageResult};
 use haven_core::relay::live_sync::{CircleSpec, LiveSyncCore};
 use haven_core::relay::maintenance::build_kp_maintenance_events;
-use nostr::{Event, Keys};
+use nostr::{Event, Keys, RelayUrl};
 use nostr_relay_builder::MockRelay;
 use nostr_sdk::Client;
 use tempfile::TempDir;
@@ -129,12 +129,32 @@ async fn cross_decrypts(
     )
 }
 
-/// Publishes an already-built event to `url`.
+/// Publishes an already-built event to `url`, returning once the relay has
+/// acknowledged storing it.
 async fn publish_event(url: &str, event: &Event) {
     let publisher = Client::builder().build();
     publisher.add_relay(url).await.unwrap();
     publisher.connect().await;
-    publisher.send_event(event).await.expect("publish event");
+    let output = publisher.send_event(event).await.expect("publish event");
+    assert!(
+        !output.success.is_empty(),
+        "the relay must acknowledge the commit"
+    );
+}
+
+/// Waits (bounded) until `engine`'s REQ on `relay` has answered with `EOSE`,
+/// so the relay holds the REQ and serves what is published from here on live.
+async fn wait_settled(engine: &LiveSyncCore, relay: &RelayUrl) -> bool {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if engine.endpoint_settled_for_test(relay) {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 /// TWO wired engines over ONE relay converge through the engine loop: Alice's
@@ -173,7 +193,12 @@ async fn two_engines_converge_over_one_relay_via_the_engine_loop() {
         .start(std::slice::from_ref(&spec), &[])
         .await
         .expect("bob engine starts");
-    tokio::time::sleep(Duration::from_millis(500)).await; // both REQs register
+    let relay_url = RelayUrl::parse(&url).expect("the mock relay's url parses");
+    assert!(
+        wait_settled(&alice_engine, &relay_url).await
+            && wait_settled(&bob_engine, &relay_url).await,
+        "both engines' REQs must be registered and answered before the commit is published"
+    );
 
     let n = fx.alice.group_epoch(&fx.mls_group_id).await.unwrap();
     assert_eq!(

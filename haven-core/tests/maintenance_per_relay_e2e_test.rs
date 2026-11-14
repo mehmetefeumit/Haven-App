@@ -11,8 +11,6 @@
 //! module; these tests prove the network glue (per-relay probe → decide →
 //! subset publish → re-probe) converges over the wire.
 
-use std::time::Duration;
-
 use haven_core::circle::RelayType;
 use haven_core::relay::maintenance::{
     decide_kp_maintenance, decide_relay_list, list_relay_healthy, KeyPackageLifetime,
@@ -174,14 +172,17 @@ async fn list_snapshot(
 
 /// Publishes an event to just `relay` via a bare client, so a probe against
 /// that relay (and NOT the other) finds it. (Simulates a package present on one
-/// own relay but not another.)
+/// own relay but not another.) Returns once the relay has acknowledged storing
+/// it, so a probe issued next reads it.
 async fn seed_event_on(relay: &str, event: &nostr::Event) {
     let client = nostr_sdk::Client::builder().build();
     client.add_relay(relay).await.unwrap();
     client.connect().await;
-    client.send_event(event).await.unwrap();
-    // Give the relay a moment to persist before a subsequent probe.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let output = client.send_event(event).await.unwrap();
+    assert!(
+        !output.success.is_empty(),
+        "precondition: the relay must acknowledge the seeded event"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -231,7 +232,6 @@ async fn test20_kp_partial_drop_heals_b_only_a_untouched() {
     let republished = kp_30443(&keys, d);
     let heal_id = republished.id;
     mgr.publish_event(&republished, &targets).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Re-probe: B now serves the same-`d` canonical; A's original event id is
     // unchanged (no republish reached A).
@@ -320,7 +320,6 @@ async fn test21_relay_list_drift_on_b_heals_b_only_with_full_set() {
     )
     .unwrap();
     mgr.publish_event(&heal, &targets).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Re-probe B: its newest list now enumerates the full configured set.
     let after = list_snapshot(

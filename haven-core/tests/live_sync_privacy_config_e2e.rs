@@ -18,15 +18,21 @@
 //!   the configured circle ∪ inbox relay set and never a NIP-65-discovered relay,
 //!   so it cannot silently fan the user's subscriptions out to relays they never
 //!   chose. `engine_connects_only_to_configured_relays_never_gossip_discovered`
-//!   proves the pool equals the configured union even after a kind:10002 relay
-//!   list (authored by the engine's own identity) advertises a phantom relay.
+//!   proves the engine dials exactly the configured union through a full
+//!   re-subscription after a kind:10002 relay list (authored by the engine's own
+//!   identity) advertises a phantom relay.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use haven_core::circle::CircleManager;
-use haven_core::relay::live_sync::{CircleSpec, LiveSyncCore, LiveSyncEvent, SyncStatusReason};
-use nostr::{Alphabet, EventBuilder, Filter, Keys, Kind, SingleLetterTag, Tag, TagKind, Timestamp};
+use haven_core::relay::dial_witness::{dials_cover_exactly, DialWatch};
+use haven_core::relay::live_sync::{
+    BacklogOutcome, CircleSpec, Claim, LiveSyncCore, LiveSyncEvent, SyncStatusReason,
+};
+use nostr::{
+    Alphabet, EventBuilder, Filter, Keys, Kind, RelayUrl, SingleLetterTag, Tag, TagKind, Timestamp,
+};
 use nostr_relay_builder::builder::{RelayBuilder, RelayBuilderNip42, RelayBuilderNip42Mode};
 use nostr_relay_builder::{LocalRelay, MockRelay};
 use nostr_sdk::pool::RelayNotification;
@@ -72,6 +78,11 @@ fn wait_scale() -> u32 {
 fn wait_budget(base: Duration) -> Duration {
     base * wait_scale()
 }
+
+/// Held by every test here: the dial witness records every dial in the
+/// process, and another test's engine dialling beside it would read as a dial
+/// outside the gossip test's world.
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Builds a `kind:445` carrying `#h = group_hex` (opaque ciphertext, random key).
 fn kind445_with_h(group_hex: &str) -> nostr::Event {
@@ -179,6 +190,7 @@ async fn control_authenticates_then_reads(
 /// nsec↔circle linkage), not a broken relay.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn engine_never_authenticates_to_an_auth_required_relay() {
+    let _serial = SERIAL.lock().await;
     let _ = haven_core::relay::allow_ws_loopback_for_test();
 
     // A relay that requires NIP-42 AUTH to READ. In Read mode, WRITES need no
@@ -291,8 +303,15 @@ async fn engine_never_authenticates_to_an_auth_required_relay() {
 /// kind:10002 relay list authored by the engine's own identity advertises a
 /// phantom relay. With gossip compiled off (own-relays-only, PSI-8) the pool
 /// stays the configured union; a gossip-enabled build could grow it.
+///
+/// The absence is bounded by completed client calls, not by time: after the
+/// list is stored the engine re-subscribes on every configured relay and each
+/// answers with `EOSE`. A gossip client resolves an author's NIP-65 list inside
+/// the subscribe call that names it, so a relay it adopted would have been
+/// dialled — and the dial witness asked — by then.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn engine_connects_only_to_configured_relays_never_gossip_discovered() {
+    let _serial = SERIAL.lock().await;
     let _ = haven_core::relay::allow_ws_loopback_for_test();
 
     // Three DISTINCT configured relays: two for the circle group + one inbox.
@@ -302,6 +321,7 @@ async fn engine_connects_only_to_configured_relays_never_gossip_discovered() {
     let g1 = r_group1.url().await.to_string();
     let g2 = r_group2.url().await.to_string();
     let inbox = r_inbox.url().await.to_string();
+    let configured = [g1.clone(), g2.clone(), inbox.clone()];
 
     let identity = Keys::generate();
     let dir = TempDir::new().unwrap();
@@ -314,6 +334,9 @@ async fn engine_connects_only_to_configured_relays_never_gossip_discovered() {
         identity.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
+    let Ok(watch) = DialWatch::arm() else {
+        panic!("this binary arms the dial witness once");
+    };
     engine
         .start(
             &[CircleSpec {
@@ -360,25 +383,45 @@ async fn engine_connects_only_to_configured_relays_never_gossip_discovered() {
         .custom_created_at(Timestamp::now())
         .sign_with_keys(&identity)
         .expect("sign nip-65");
-    publisher
+    let output = publisher
         .send_event(&relay_list)
         .await
         .expect("publish nip-65 relay list");
+    assert!(
+        !output.success.is_empty(),
+        "precondition: g1 must store the relay list, or nothing could discover the phantom"
+    );
 
-    // Over a settling window the pool stays EXACTLY the configured union — the
-    // phantom relay is never adopted (no gossip discovery). An ABSENCE window:
-    // scaling it only lengthens the interval the phantom must stay out of, and
-    // an instrumented build is exactly where a discovery slow enough to land
-    // after a fixed 1.5s would hide.
-    let settle_until = tokio::time::Instant::now() + wait_budget(Duration::from_millis(1_500));
-    while tokio::time::Instant::now() < settle_until {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let s = engine.relay_health().await;
-        assert_eq!(
-            s.total, 3,
-            "the engine must never adopt a gossip-discovered relay (own-relays-only)"
+    // One complete engine cycle with the list stored: every configured relay is
+    // asked afresh, and the cycle ends only when each has answered.
+    engine
+        .resume_after_background(Claim::Foreground)
+        .await
+        .expect("the engine re-subscribes");
+    assert_eq!(
+        engine.wait_backlog_settled().await,
+        BacklogOutcome::Settled,
+        "every configured relay must answer the re-subscription, or the dial \
+         check below would not cover the calls a gossip client adopts a relay in"
+    );
+    for relay in &configured {
+        assert!(
+            engine.endpoint_settled_for_test(&RelayUrl::parse(relay).expect("a relay url")),
+            "each configured relay answered its REQ"
         );
     }
+
+    // Nothing but the configured relays was ever dialled, and the pool stays
+    // EXACTLY their union — the phantom relay is never adopted (no gossip
+    // discovery).
+    if let Err(message) = dials_cover_exactly(&watch.dials(), &configured) {
+        panic!("the engine must dial exactly its configured relays: {message}");
+    }
+    assert_eq!(
+        engine.relay_health().await.total,
+        3,
+        "the engine must never adopt a gossip-discovered relay (own-relays-only)"
+    );
 
     // NB (F2): no positive gossip control (a `.gossip(true)` client that DOES
     // adopt the phantom) is included. Reliably driving nostr-sdk's outbox/gossip
@@ -388,7 +431,7 @@ async fn engine_connects_only_to_configured_relays_never_gossip_discovered() {
     // flaky and would test the SDK, not Haven. The differential is instead
     // guaranteed structurally: gossip is compiled OFF for the engine client
     // (own-relays-only, PSI-8 — see `session.rs::build_engine_client`), so the
-    // `total == 3` invariant above holds by construction, not by chance
+    // dial and `total == 3` invariants above hold by construction, not by chance
     // non-discovery. The NIP-65 event IS live on g1 (the control-authored publish
     // succeeded), so "never adopted" is a genuine refusal, not an unfetched list.
     // Teardown only: every assertion has already run. The outcome is not
