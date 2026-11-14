@@ -161,7 +161,8 @@ class MeshRadioCore(
     private fun pump(left: Long, holdFor: Long?) {
         if (!up) {
             // No radio: the engine is not driven, and only the deadline wakes the phone.
-            port.wakeAt(deadline.reminderIn(left) ?: left)
+            val at = deadline.reminderIn(left) ?: left
+            port.wakeAt(at, at)
             return
         }
         val now = clock()
@@ -199,9 +200,14 @@ class MeshRadioCore(
             running = false
             return
         }
-        val own = links.values.mapNotNull { it.due } + unlinked.values
-        val terms = own.map { it - now } + listOfNotNull(scan.dueIn(now), deadline.reminderIn(left), wake)
-        port.wakeAt(terms.min())
+        // What must come though the phone sleeps: the scan's restart, the
+        // reminder, and the engine's wake, which is never later than its
+        // deadline. A frame's and a connection's own times are not among
+        // them: each follows something that woke the phone, and late, they
+        // cost a link its place a little longer.
+        val asleep = listOfNotNull(scan.dueIn(now), deadline.reminderIn(left), if (budget == 0) left else wake).min()
+        val awake = links.values.mapNotNull { it.due } + unlinked.values
+        port.wakeAt((awake.map { it - now } + asleep + wake).min(), asleep)
         if (hold) port.holdAwake(minOf(wake + HOLD_MARGIN_MS, HOLD_CAP_MS))
     }
 

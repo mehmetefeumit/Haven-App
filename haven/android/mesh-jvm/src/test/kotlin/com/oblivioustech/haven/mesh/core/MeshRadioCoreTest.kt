@@ -3,7 +3,11 @@ package com.oblivioustech.haven.mesh.core
 import com.oblivioustech.haven.mesh.core.MeshRadioConstants.HOLD_CAP_MS
 import com.oblivioustech.haven.mesh.core.MeshRadioConstants.MAX_LINKS
 import com.oblivioustech.haven.mesh.core.MeshRadioConstants.MAX_PEERS
+import com.oblivioustech.haven.mesh.core.MeshRadioConstants.PUMP_BUDGET
+import com.oblivioustech.haven.mesh.core.MeshRadioConstants.REMINDER_MS
 import com.oblivioustech.haven.mesh.core.MeshRadioConstants.SCAN_RESTART_MS
+import com.oblivioustech.haven.mesh.core.MeshRadioConstants.SEND_RETRY_MS
+import com.oblivioustech.haven.mesh.core.MeshRadioConstants.UNLINKED_TIMEOUT_MS
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -352,6 +356,61 @@ class MeshRadioCoreTest {
         rig.core.onConnected(2)
         rig.core.onLinkDown(1)
         assertEquals(holds, rig.port.called("holdAwake").size)
+    }
+
+    /**
+     * §G: the alarm wakes a phone that sleeps, and each wake costs. Only what must come though nothing else wakes
+     * the phone is asked of it — the engine's wake, the scan's restart, the reminder. A frame in flight, a frame
+     * refused and a connection not yet a link each follow something that already woke the phone: theirs is the
+     * thread's timer, and late, a link keeps its place a little longer.
+     */
+    @Test
+    fun onlyWhatMustComeWhileThePhoneSleepsIsATermOfTheAlarm() {
+        val rig = Rig().started()
+        rig.engine.wake = 90_000
+        rig.core.onWake()
+        assertEquals(90_000L to 90_000L, rig.port.wakes.last() to rig.port.alarms.last())
+
+        // A connection that is no link yet: cancelled in ten seconds, by the timer.
+        rig.core.onConnected(7)
+        assertEquals(UNLINKED_TIMEOUT_MS to 90_000L, rig.port.wakes.last() to rig.port.alarms.last())
+        // A frame in flight, and one the platform refused: the timer's too.
+        rig.core.onLinkUp(1, central = false, attMtu = 517, address = null)
+        rig.engine.outputs += sendOf(1, frame)
+        rig.core.onWake()
+        assertEquals(UNLINKED_TIMEOUT_MS to 90_000L, rig.port.wakes.last() to rig.port.alarms.last())
+        rig.core.onSendDone(1, ok = true)
+        rig.port.refuses = 1
+        rig.engine.outputs += sendOf(1, frame)
+        rig.core.onWake()
+        assertEquals(SEND_RETRY_MS to 90_000L, rig.port.wakes.last() to rig.port.alarms.last())
+
+        // The engine's own wake is the alarm's, however soon: the two sides cannot tell its tick from its slot.
+        rig.engine.wake = 5_000
+        rig.core.onWake()
+        assertEquals(5_000L, rig.port.alarms.last())
+        // So are the scan's restart and the reminder.
+        rig.engine.wake = 2 * HOUR
+        rig.now += SCAN_RESTART_MS - MINUTE
+        rig.core.onWake()
+        assertEquals(MINUTE, rig.port.alarms.last())
+        rig.engine.left = REMINDER_MS + 7_000
+        rig.engine.wake = REMINDER_MS + 7_000
+        rig.core.onWake()
+        assertEquals(7_000L, rig.port.alarms.last())
+        // The alarm is never asked for sooner than the timer, and with no radio both are the deadline's.
+        assertTrue(rig.port.wakes.zip(rig.port.alarms).all { (timer, alarm) -> timer <= alarm })
+        rig.core.stopRadio()
+        assertEquals(rig.port.wakes.last(), rig.port.alarms.last())
+
+        // A pump that gave the thread back comes again at once, by the timer; the alarm then is the deadline's.
+        val busy = Rig().started()
+        busy.core.onLinkUp(1, central = false, attMtu = 517, address = null)
+        busy.engine.left = 3 * HOUR
+        repeat(PUMP_BUDGET) { busy.engine.outputs += closeOf(99) }
+        busy.core.onWake()
+        assertEquals(0L, busy.port.wakes.last())
+        assertTrue(busy.port.alarms.last() in MINUTE..3 * HOUR, "the alarm was asked for ${busy.port.alarms.last()} ms ahead")
     }
 
     @Test

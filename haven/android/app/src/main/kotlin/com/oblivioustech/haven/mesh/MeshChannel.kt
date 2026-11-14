@@ -33,7 +33,7 @@ class MeshChannel(private val activity: Activity, messenger: BinaryMessenger) : 
     private val state = BasicMessageChannel(messenger, ChannelWords.STATE_CHANNEL, StandardMessageCodec.INSTANCE)
     private val taps = HeldTaps()
 
-    /** The system's dialog has been asked for in this process: before that, "refused" may still be asked again. */
+    /** The system's dialog has been answered in this process: before that, "refused" may still be asked again. */
     private var asked = false
 
     /** The `requestPermission` the dialog on screen will answer. */
@@ -86,7 +86,6 @@ class MeshChannel(private val activity: Activity, messenger: BinaryMessenger) : 
         val permissions = PermissionMatrix.asked(Build.VERSION.SDK_INT)
         // Before Android 12 there is nothing to ask, and the platform refuses a request for nothing.
         if (permissions.isEmpty()) return result.success(permission())
-        asked = true
         // One dialog at a time: asked for again under it, the platform answers "cancelled" at once, which would
         // read as refused for good. The call before is given up — the Dart side has, by its bound — and the
         // dialog still on screen answers this one.
@@ -96,9 +95,14 @@ class MeshChannel(private val activity: Activity, messenger: BinaryMessenger) : 
         if (!open) activity.requestPermissions(permissions.toTypedArray(), REQUEST)
     }
 
-    /** The activity's `onRequestPermissionsResult`. */
-    fun permissionResult(requestCode: Int) {
+    /**
+     * The activity's `onRequestPermissionsResult`, with how many answers it
+     * carries: none where the platform cancelled the request — a dialog of
+     * another plugin's was open — which is nobody asked, not a refusal.
+     */
+    fun permissionResult(requestCode: Int, results: Int) {
         if (requestCode != REQUEST) return
+        asked = ChannelWords.answered(asked, results)
         waiting?.success(permission())
         waiting = null
     }

@@ -127,7 +127,7 @@ class MeshThreadTest {
                         throw Thrown()
                     },
                     cancelAlarm = { rig.port.calls += "cancelAlarm()" },
-                    forget = { done += "forget" },
+                    tell = { done += "tell" },
                     unpost = { done += "unpost" },
                     end = { done += "end" },
                 ),
@@ -137,7 +137,7 @@ class MeshThreadTest {
             thread.stop(notice)
             val alarm = rig.port.calls.filter { it.startsWith("wakeAt(") || it == "cancelAlarm()" }
             assertTrue(alarm.size == 2 && alarm.last() == "cancelAlarm()", "the alarm was left armed behind the stop: $alarm")
-            assertEquals(listOf("detach", "close", "forget", "unpost", "end") + if (notice) listOf("notice") else emptyList(), done)
+            assertEquals(listOf("detach", "close", "tell", "unpost", "end") + if (notice) listOf("notice") else emptyList(), done)
         }
     }
 
@@ -149,9 +149,10 @@ class MeshThreadTest {
      */
     @Test
     fun aStopLetsGoOfTheServiceBeforeAnythingElse() {
-        for (thrower in listOf(null, "stopRadio", "closeAdapters", "cancelAlarm", "forget", "unpost", "end")) {
+        for (thrower in listOf(null, "stopRadio", "closeAdapters", "cancelAlarm", "tell", "unpost", "end")) {
             val starts = ServiceStarts<String>()
             starts.command(1) { "first" }
+            var wanted = true
             val done = mutableListOf<String>()
             fun step(name: String): () -> Unit = {
                 // What a command arriving now would find.
@@ -162,11 +163,11 @@ class MeshThreadTest {
                 lever = { FakeLever() },
                 running = { true },
                 steps = MeshThread.steps(
-                    detach = { starts.detach() },
+                    detach = { starts.detach { wanted = false } },
                     stopRadio = step("stopRadio"),
                     closeAdapters = step("closeAdapters"),
                     cancelAlarm = step("cancelAlarm"),
-                    forget = step("forget"),
+                    tell = step("tell"),
                     unpost = step("unpost"),
                     end = step("end"),
                 ),
@@ -174,10 +175,11 @@ class MeshThreadTest {
             )
             thread.stop(notice = true)
             assertEquals(
-                listOf("stopRadio", "closeAdapters", "cancelAlarm", "forget", "unpost", "end", "notice").map { "$it:null" },
+                listOf("stopRadio", "closeAdapters", "cancelAlarm", "tell", "unpost", "end", "notice").map { "$it:null" },
                 done,
                 "a step of the stop still saw the start it was stopping (thrown in: $thrower)",
             )
+            assertFalse(wanted, "the stop let go of the service and left its flag set")
             // The command that arrives behind it is a start of its own.
             var made = false
             starts.command(2) { "second".also { made = true } }
@@ -203,7 +205,7 @@ class MeshThreadTest {
         assertEquals(listOf("first"), made)
         assertEquals("first", starts.live())
         // After the stop the next command is not dropped: it is the fresh start.
-        starts.detach()
+        starts.detach {}
         assertNull(starts.live())
         command(4, "fourth")
         assertEquals(listOf("first", "fourth"), made)
@@ -220,12 +222,12 @@ class MeshThreadTest {
     fun theStopNamesTheLastStartThatJoined() {
         val starts = ServiceStarts<String>()
         starts.command(7) { "first" }
-        assertEquals(7, starts.detach())
+        assertEquals(7, starts.detach {})
 
         starts.command(8) { "second" }
         starts.command(9) { error("a second start beside a live one") }
         starts.command(12) { error("a second start beside a live one") }
-        assertEquals(12, starts.detach(), "not the last command that joined")
+        assertEquals(12, starts.detach {}, "not the last command that joined")
 
         // A command behind the stop is the next start's: the stop that is still running names the one before it,
         // and leaves the foreground and the notices alone.
@@ -235,9 +237,44 @@ class MeshThreadTest {
         starts.command(13) { "third" }
         starts.idle { left++ }
         assertEquals(1, left, "a stop took the foreground from the start made behind it")
-        assertEquals(13, starts.detach())
+        assertEquals(13, starts.detach {})
         starts.idle { left++ }
         assertEquals(2, left)
+    }
+
+    /**
+     * A stop the service made is final: nothing may ask for the radio back while it still runs. What would ask is
+     * whoever reads "no service, and the mesh wanted" — so the flag is cleared in the very step that lets go of the
+     * start, with no start to be found by then and none made before it is done. And a start the user asks for
+     * behind the stop is its own: the flag it sets, the alarm it arms and the foreground it takes are not the
+     * stopping one's to clear, cancel or leave.
+     */
+    @Test
+    fun aStartMadeBehindAStopKeepsItsFlagItsAlarmAndTheForeground() {
+        val starts = ServiceStarts<String>()
+        starts.command(1) { "first" }
+        var wanted = true
+        var foundWhileClearing: String? = "unread"
+        starts.detach {
+            foundWhileClearing = starts.live()
+            wanted = false
+        }
+        assertNull(foundWhileClearing, "the flag was cleared while the start it belonged to could still be found")
+        assertFalse(wanted, "a start was let go of with its flag left set: read now, it is a mesh to bring back")
+        assertNull(starts.live())
+
+        // The old stop goes on: with nobody behind it, it cancels the alarm and leaves the foreground.
+        val did = mutableListOf<String>()
+        starts.idle { did += "cancelAlarm" }
+        assertEquals(listOf("cancelAlarm"), did)
+
+        // The user turns the mesh on again in the middle of it. That start sets the flag and arms the alarm …
+        starts.command(2) { "second" }
+        wanted = true
+        // … and the rest of the old stop touches none of it.
+        for (step in listOf("cancelAlarm", "unpost", "notice")) starts.idle { did += "old:$step" }
+        assertEquals(listOf("cancelAlarm"), did, "a stop reached into the start made behind it")
+        assertTrue(wanted && starts.live() == "second")
     }
 
     /**
@@ -255,7 +292,9 @@ class MeshThreadTest {
                         {
                             ran += name
                             if (name in throwers) throw Thrown()
-                            if (name == "lock" && "scanner" in throwers) throw OutOfMemoryError()
+                            // What a native library that does not load throws is no exception: an error, as this is.
+                            if (name == "lock" && "scanner" in throwers) throw UnsatisfiedLinkError("no $ADDRESS")
+                            if (name == "advertiser" && "server" in throwers) throw ExceptionInInitializerError()
                         }
                     }.toTypedArray(),
                 )

@@ -26,6 +26,12 @@ interface RadioPort {
     /** Holds a wake lock for [ms], replacing the hold before it. */
     fun holdAwake(ms: Long)
 
-    /** Calls `onWake` in [inMs], by the thread's timer and by the one alarm; replaces the wake before it. */
-    fun wakeAt(inMs: Long)
+    /**
+     * Calls `onWake` in [inMs] by the thread's timer, which serves a phone
+     * that is awake, and in [asleepInMs] by the one alarm, which wakes one
+     * that sleeps; replaces the wake before it. [asleepInMs] is never the
+     * earlier: only what must come though nothing else wakes the phone is a
+     * term of it.
+     */
+    fun wakeAt(inMs: Long, asleepInMs: Long)
 }

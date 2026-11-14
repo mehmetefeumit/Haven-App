@@ -168,49 +168,85 @@ class PoliciesTest {
         assertTrue(started(api = 29, throwing = null).first)
     }
 
+    /** One broadcast through `ReceiverPolicy`: its step, how often the refusal was asked, and whether the alarm was offered to a live start. */
+    private fun received(
+        boot: Boolean,
+        wanted: Boolean,
+        deadline: Long,
+        refusal: MeshStart? = null,
+        live: Boolean = false,
+    ): Triple<ReceiverStep, Int, Int> {
+        var asked = 0
+        var offered = 0
+        val step = ReceiverPolicy.step(
+            boot,
+            taken = {
+                offered++
+                live
+            },
+            wanted,
+            deadline,
+            wallClock,
+        ) {
+            asked++
+            refusal
+        }
+        return Triple(step, asked, offered)
+    }
+
     /**
      * §B.5, §O.1.8: after a reboot or an update the mesh comes back by itself only while the user's turn-on still
-     * stands. And the refusal — which puts the log lever in — is asked only then: a boot is no reason for a process
-     * nobody turned the mesh on in to lose its log.
+     * stands. The refusal — which puts the log lever in — is asked only then: a boot is no reason for a process
+     * nobody turned the mesh on in to lose its log. And a boot that finds the twelve hours gone ends the mesh and
+     * says so: a flag left set would bring it back, without the user, were the clock ever set behind the deadline.
      */
     @Test
     fun afterBootTheServiceIsStartedOnlyWithTheFlagADeadlineAheadAndNoRefusal() {
-        fun boots(wanted: Boolean, deadline: Long, refusal: MeshStart?): Pair<Boolean, Int> {
-            var asked = 0
-            val starts = ReceiverPolicy.startsAtBoot(wanted, deadline, wallClock) {
-                asked++
-                refusal
-            }
-            return starts to asked
+        fun boots(wanted: Boolean, deadline: Long, refusal: MeshStart?) = received(boot = true, wanted, deadline, refusal)
+        assertEquals(Triple(ReceiverStep.START, 1, 0), boots(wanted = true, deadline = wallClock + 1, refusal = null))
+        assertEquals(Triple(ReceiverStep.START, 1, 0), boots(wanted = true, deadline = wallClock + 12 * HOUR, refusal = null))
+        // The flag clear: a stop the service or the user made is final, whatever the copy says.
+        for (deadline in listOf(0, wallClock - 1, wallClock + HOUR)) {
+            assertEquals(Triple(ReceiverStep.NONE, 0, 0), boots(wanted = false, deadline = deadline, refusal = null), "deadline $deadline")
         }
-        assertEquals(true to 1, boots(wanted = true, deadline = wallClock + 1, refusal = null))
-        assertEquals(true to 1, boots(wanted = true, deadline = wallClock + 12 * HOUR, refusal = null))
-        // The flag clear: a stop the service or the user made is final.
-        assertEquals(false to 0, boots(wanted = false, deadline = wallClock + HOUR, refusal = null))
-        // The twelve hours ran out while the phone was off.
+        // The twelve hours ran out while the phone was off: ended, with its notice, and the lever not touched.
         for (deadline in listOf(0, wallClock - 1, wallClock)) {
-            assertEquals(false to 0, boots(wanted = true, deadline = deadline, refusal = null), "deadline $deadline")
+            assertEquals(Triple(ReceiverStep.END, 0, 0), boots(wanted = true, deadline = deadline, refusal = null), "deadline $deadline")
         }
         // Whatever would refuse the start refuses it here, before a service exists to end without its foreground.
+        // The flag stays: the time is not up, and what refuses may pass.
         for (refusal in listOf(MeshStart.UNSUPPORTED, MeshStart.FAILED, MeshStart.NO_PERMISSION)) {
-            assertEquals(false to 1, boots(wanted = true, deadline = wallClock + HOUR, refusal = refusal), "$refusal")
+            assertEquals(Triple(ReceiverStep.NONE, 1, 0), boots(wanted = true, deadline = wallClock + HOUR, refusal = refusal), "$refusal")
         }
     }
 
     /**
      * §O.1.5: the alarm outlives the process. One that finds no service starts none — an alarm is no licence for a
-     * foreground service, and the one answer here is whether to end — and where the twelve hours are up it ends the
-     * mesh the dead process left: flag and copy cleared, the stopped notice.
+     * foreground service — and where the twelve hours are up it ends the mesh the dead process left: flag and copy
+     * cleared, the stopped notice.
      */
     @Test
     fun anAlarmThatFindsNoServiceStartsNoneAndEndsAMeshWhoseTimeIsUp() {
-        assertTrue(ReceiverPolicy.endsAtAlarm(wanted = true, deadlineMs = wallClock, wallClockMs = wallClock))
-        assertTrue(ReceiverPolicy.endsAtAlarm(wanted = true, deadlineMs = wallClock - HOUR, wallClockMs = wallClock))
-        // Time left: the restart the platform owes a sticky service finds the copy and goes on. Nothing is done here.
-        assertFalse(ReceiverPolicy.endsAtAlarm(wanted = true, deadlineMs = wallClock + 1, wallClockMs = wallClock))
+        fun alarm(wanted: Boolean, deadline: Long, live: Boolean = false) = received(boot = false, wanted, deadline, live = live)
+        assertEquals(Triple(ReceiverStep.END, 0, 1), alarm(wanted = true, deadline = wallClock))
+        assertEquals(Triple(ReceiverStep.END, 0, 1), alarm(wanted = true, deadline = wallClock - HOUR))
+        // Time left: the restart the platform owes a sticky service finds the copy and goes on. Nothing is started
+        // here, and the refusal — the lever — is not asked.
+        assertEquals(Triple(ReceiverStep.NONE, 0, 1), alarm(wanted = true, deadline = wallClock + 1))
+        assertEquals(Triple(ReceiverStep.NONE, 0, 1), alarm(wanted = true, deadline = wallClock + 12 * HOUR))
         // No mesh was left on: nothing to end, and no notice of a stop that was told already.
         for (deadline in listOf(0, wallClock - 1, wallClock + HOUR)) {
-            assertFalse(ReceiverPolicy.endsAtAlarm(wanted = false, deadlineMs = deadline, wallClockMs = wallClock))
+            assertEquals(Triple(ReceiverStep.NONE, 0, 1), alarm(wanted = false, deadline = deadline))
+        }
+        // A live start takes its alarm, and nothing is read of what is stored: the deadline is the engine's to keep.
+        for (deadline in listOf(wallClock - HOUR, wallClock + HOUR)) {
+            assertEquals(Triple(ReceiverStep.NONE, 0, 1), alarm(wanted = true, deadline = deadline, live = true))
+        }
+        // No alarm starts a service, whatever is stored.
+        for (wanted in listOf(true, false)) {
+            for (deadline in listOf(0, wallClock, wallClock + HOUR)) {
+                for (live in listOf(true, false)) assertNotEquals(ReceiverStep.START, alarm(wanted, deadline, live).first)
+            }
         }
     }
 

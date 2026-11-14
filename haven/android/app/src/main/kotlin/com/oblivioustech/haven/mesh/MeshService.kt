@@ -86,16 +86,16 @@ class MeshService : Service() {
             lever = native,
             running = { ::core.isInitialized && core.running },
             steps = MeshThread.steps(
-                detach = { joined = starts.detach() },
+                detach = { joined = starts.detach(prefs::forget) },
                 stopRadio = { if (::core.isInitialized) core.stopRadio() },
                 closeAdapters = {
                     closeRadio()
                     RadioEnd.each({ unregisterReceiver(bluetooth) }, { unregisterReceiver(screenOff) }, { unregisterReceiver(bond) })
                 },
-                cancelAlarm = { alarms.cancel(alarm) },
-                forget = {
-                    prefs.forget()
+                cancelAlarm = { starts.idle { alarms.cancel(alarm) } },
+                tell = {
                     over()
+                    onStatus?.invoke(status(this@MeshService))
                 },
                 unpost = {
                     starts.idle {
@@ -267,13 +267,12 @@ class MeshService : Service() {
 
         /** With Bluetooth off two of these throw; none may keep the next from running, or make a pause a stop. */
         private fun closeRadio() {
-            RadioEnd.each({ client?.stop() }, { server?.stop() }, { advertiser?.stop() }, { scanner?.stop() }, { lock.release() })
+            RadioEnd.each({ client?.stop() }, { server?.stop() }, { advertiser?.stop() }, { scanner?.stop() }, { wake.release(lock::release) })
             client = null
             server = null
             advertiser = null
             scanner = null
             up = false
-            wake.released()
         }
 
         /** The ongoing notice and the status, after a change of either. */
@@ -285,7 +284,8 @@ class MeshService : Service() {
         /** The address of the device a bond-state broadcast tells of, where its state is no longer "not bonded"; nothing else of it is read. */
         private fun bonding(intent: Intent): String? {
             if (intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE) == BluetoothDevice.BOND_NONE) return null
-            val device = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            // The typed form is Android 13's and faulty there: androidx's own wrapper calls it from Android 14 only.
+            val device = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
             } else {
                 @Suppress("DEPRECATION")
@@ -297,7 +297,7 @@ class MeshService : Service() {
         /** The stop the service did not make: the user's, or the platform's end of the service. A body like any other. */
         fun stop() = loop.post { mesh.stop(notice = false) }
 
-        /** [done] once this start has stopped and its flag is cleared; at once where it has. */
+        /** [done] once this start's radio is down and its flag cleared; at once where they are. */
         @Synchronized
         fun whenOver(done: () -> Unit) {
             if (over) done() else waiting += done
@@ -308,7 +308,6 @@ class MeshService : Service() {
             over = true
             waiting.forEach { it() }
             waiting.clear()
-            onStatus?.invoke(status(this@MeshService))
         }
 
         /**
@@ -328,14 +327,18 @@ class MeshService : Service() {
         /**
          * The alarm, on the main thread. The platform keeps the phone awake
          * for a broadcast only until its receiver returns: the lock is what
-         * holds it for the two bodies. The dial's timer does not count while
-         * the phone sleeps, so it is asked here too — second, and dropped if
-         * the wake stopped the radio.
+         * holds it for the two bodies, and it is let go of when the second
+         * has run. The dial's timer does not count while the phone sleeps,
+         * so it is asked here too — second, and dropped if the wake stopped
+         * the radio, whose end releases the lock.
          */
         fun alarm() {
-            holdAwake(MeshRadioConstants.WAKE_HOLD_MS)
+            wake.wakeHold(MeshRadioConstants.WAKE_HOLD_MS, lock::acquire)
             loop.post { core.onWake() }
-            loop.post { client?.steps?.onTimer() }
+            loop.post {
+                client?.steps?.onTimer()
+                wake.wakeDone(lock::acquire, lock::release)
+            }
         }
 
         override fun connect(address: String) {
@@ -358,10 +361,16 @@ class MeshService : Service() {
 
         override fun holdAwake(ms: Long) = wake.hold(ms, lock::acquire)
 
-        /** The thread's timer serves a phone that is awake on time; the alarm is what wakes one that sleeps, late. Inexact: it needs no permission. */
-        override fun wakeAt(inMs: Long) {
+        /**
+         * The thread's timer serves a phone that is awake, on time; the alarm
+         * is what wakes one that sleeps, late. Inexact: it needs no
+         * permission. A start that has been let go of arms none: the alarm is
+         * one, the phone's, and by then it may be a later start's.
+         */
+        override fun wakeAt(inMs: Long, asleepInMs: Long) {
             loop.timer(this, inMs) { core.onWake() }
-            wake.alarm(inMs)?.let { alarms.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, it, alarm) }
+            if (starts.live() !== this) return
+            wake.alarm(asleepInMs)?.let { alarms.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, it, alarm) }
         }
 
         // Last: the start may run before this constructor returns, and reads everything above.
@@ -415,10 +424,16 @@ class MeshService : Service() {
             )
         }
 
-        /** The channel's `status`. No address and no count. */
+        /**
+         * The channel's `status`. No address and no count. The flag is read
+         * behind the live start: a stop clears it in the step that lets go
+         * of its start, so "no service" is never read beside a flag that
+         * stop has yet to clear.
+         */
         fun status(context: Context): Map<String, Any> {
             val live = starts.live()
-            return ChannelWords.status(live?.serving == true, live?.up == true, MeshPrefs(context).wanted, canSearch(context))
+            val wanted = MeshPrefs(context).wanted
+            return ChannelWords.status(live?.serving == true, live?.up == true, wanted, canSearch(context))
         }
 
         /** The channel's `sync`, once it has stored the words. */
@@ -428,9 +443,10 @@ class MeshService : Service() {
 
         /**
          * The channel's `stop`, and a logout's: flag and copy cleared whether
-         * or not a service runs. [done] once the radio is down, so that the
-         * engine is turned off behind a service that has stopped and posts
-         * no notice of a stop the user made.
+         * or not a service runs. [done] once the radio is down — before the
+         * service has left the foreground and ended — so that the engine is
+         * turned off behind a radio that has stopped, and no notice is
+         * posted of a stop the user made.
          */
         fun stop(context: Context, done: () -> Unit) {
             val live = starts.live()

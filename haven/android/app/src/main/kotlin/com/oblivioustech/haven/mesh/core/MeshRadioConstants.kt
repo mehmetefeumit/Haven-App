@@ -134,8 +134,9 @@ object MeshRadioConstants {
      * from it by [ALARM_SLACK_MS] or less. A hold is taken only where it
      * outlasts the one held by more than [HOLD_SLACK_MS], less than
      * [HOLD_MARGIN_MS] or the margin would be the slack's to give away. At
-     * an alarm the phone is held awake [WAKE_HOLD_MS], never past
-     * [HOLD_CAP_MS], for the bodies the alarm posts.
+     * an alarm the phone is held awake until the bodies the alarm posts have
+     * run, [WAKE_HOLD_MS] at most — a mesh thread that is blocked — and never
+     * past [HOLD_CAP_MS].
      */
     const val ALARM_AHEAD_MAX_MS = 15 * 60_000L
     const val ALARM_MIN_MS = 5_000L

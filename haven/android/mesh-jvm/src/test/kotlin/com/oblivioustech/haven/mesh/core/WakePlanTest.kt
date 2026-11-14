@@ -27,6 +27,20 @@ class WakePlanTest {
         return taken
     }
 
+    /** What an alarm's hold took the lock for, or null. */
+    private fun woken(ms: Long = WAKE_HOLD_MS): Long? {
+        var taken: Long? = null
+        plan.wakeHold(ms) { taken = it }
+        return taken
+    }
+
+    /** What the end of an alarm's bodies did with the lock: `take(ms)`, `release` or nothing. */
+    private fun done(): String {
+        var did = "nothing"
+        plan.wakeDone({ did = "take($it)" }) { did = "release" }
+        return did
+    }
+
     @Test
     fun theAlarmIsArmedOnlyForAChangeThatMatters() {
         assertEquals(now + 90_000, plan.alarm(90_000), "the first wake armed no alarm")
@@ -92,14 +106,79 @@ class WakePlanTest {
         // Once it has run out, the next is taken whatever its length.
         now += HOLD_CAP_MS
         assertEquals(HOLD_SLACK_MS + 1, held(HOLD_SLACK_MS + 1))
-        // The radio's end releases the lock: a hold counted as still held would leave the next frame none.
+        // The radio's end releases the lock, and forgets it in the same step: a hold counted as still held would
+        // leave the next frame none.
         assertEquals(HOLD_CAP_MS, held(HOLD_CAP_MS))
-        plan.released()
+        var released = 0
+        plan.release { released++ }
+        assertEquals(1, released)
         assertEquals(300, held(300))
         // The slack is less than the margin a hold has over the engine's next work, or it would give that away;
         // and the hold at an alarm is within the cap of every hold.
         assertTrue(HOLD_SLACK_MS < HOLD_MARGIN_MS)
         assertTrue(WAKE_HOLD_MS in 1..HOLD_CAP_MS)
+    }
+
+    /**
+     * The platform keeps the phone awake for an alarm only until the receiver returns, and the alarm's work is two
+     * bodies on another thread: the lock bridges that. But for as long as they take, not for a fixed time — an
+     * alarm comes at every emission slot, for twelve hours.
+     */
+    @Test
+    fun anAlarmHoldsThePhoneOnlyUntilItsBodiesHaveRun() {
+        // Held at the alarm, released when the bodies are done: milliseconds, whatever the bound.
+        assertEquals(WAKE_HOLD_MS, woken())
+        now += 3
+        assertEquals("release", done())
+        // The bound is for a mesh thread that is blocked: the lock runs out by itself, and the bodies, when they
+        // come, release nothing.
+        assertEquals(WAKE_HOLD_MS, woken())
+        now += WAKE_HOLD_MS + 1
+        assertEquals("nothing", done())
+
+        // A frame came in under the alarm: its hold is owed past the bodies' end, and no longer than itself.
+        assertEquals(WAKE_HOLD_MS, woken())
+        assertNull(held(1_000), "a shorter hold took the place of the alarm's")
+        now += 4
+        assertEquals("take(996)", done())
+        // … and where the frame's hold is the longer, the lock is already what is owed.
+        now += 5_000
+        assertEquals(WAKE_HOLD_MS, woken())
+        assertEquals(HOLD_CAP_MS, held(HOLD_CAP_MS))
+        assertEquals("nothing", done())
+        assertNull(held(HOLD_CAP_MS - 50), "the frame's hold was forgotten at the alarm's end")
+        now += HOLD_CAP_MS
+
+        // A second alarm before the first one's bodies ran: the lock is kept until both are done.
+        assertEquals(WAKE_HOLD_MS, woken())
+        now += 200
+        assertEquals(WAKE_HOLD_MS, woken())
+        assertEquals("nothing", done())
+        assertEquals("release", done())
+        // Released, the next alarm takes it again.
+        assertEquals(WAKE_HOLD_MS, woken())
+        // A radio's end under an alarm — Bluetooth switched off, its bodies still to come — releases it, and
+        // those bodies, when they end, release nothing a later hold took.
+        var released = 0
+        plan.release { released++ }
+        assertEquals(1, released)
+        assertEquals(700, held(700))
+        assertEquals("nothing", done())
+        assertNull(held(650))
+        // What a frame's hold was owed ends with the radio too: an alarm behind it lets the phone go.
+        now += 700
+        assertEquals(HOLD_CAP_MS, held(HOLD_CAP_MS))
+        plan.release { released++ }
+        assertEquals(WAKE_HOLD_MS, woken())
+        now += 2
+        assertEquals("release", done())
+        // And an alarm that came before a radio's end is still counted behind it: a second one's bodies are
+        // not left unheld by the first one's end.
+        assertEquals(WAKE_HOLD_MS, woken())
+        plan.release { released++ }
+        assertEquals(WAKE_HOLD_MS, woken())
+        assertEquals("nothing", done())
+        assertEquals("release", done())
     }
 
     /**

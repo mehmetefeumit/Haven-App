@@ -83,10 +83,11 @@ class MeshThread(
     companion object {
         /**
          * A stop's steps, in their order. [detach] comes first: the service
-         * lets go of this start before anything of it is taken down, so that
-         * a start command arriving from here on finds none and makes its own
-         * — it may be owed a foreground start, which a start that is
-         * stopping would never make.
+         * lets go of this start, and clears its flag, before anything of it
+         * is taken down, so that a start command arriving from here on finds
+         * none and makes its own — it may be owed a foreground start, which
+         * a start that is stopping would never make. [tell] answers whoever
+         * waits for the stop, once the radio is down.
          *
          * [stopRadio] is [MeshRadioCore.stopRadio], a step of its own before
          * the adapters are closed: a close that throws must not leave the
@@ -99,9 +100,9 @@ class MeshThread(
             stopRadio: () -> Unit,
             closeAdapters: () -> Unit,
             cancelAlarm: () -> Unit,
-            forget: () -> Unit,
+            tell: () -> Unit,
             unpost: () -> Unit,
             end: () -> Unit,
-        ): List<() -> Unit> = listOf(detach, stopRadio, closeAdapters, cancelAlarm, forget, unpost, end)
+        ): List<() -> Unit> = listOf(detach, stopRadio, closeAdapters, cancelAlarm, tell, unpost, end)
     }
 }

@@ -33,6 +33,12 @@ class ChannelWordsTest {
         assertEquals("denied", ChannelWords.permission(granted = false, asked = true, rationale = true))
         assertEquals("deniedForGood", ChannelWords.permission(granted = false, asked = true, rationale = false))
 
+        // A request the platform cancelled — another dialog was open — comes back with no answer at all. Nobody was
+        // asked: it is "refused, and may be asked again", never "for good".
+        assertEquals(listOf(false, true, true, true), listOf(false to 0, false to 3, true to 0, true to 3).map { ChannelWords.answered(it.first, it.second) })
+        assertEquals("denied", ChannelWords.permission(granted = false, asked = ChannelWords.answered(before = false, results = 0), rationale = false))
+        assertEquals("deniedForGood", ChannelWords.permission(granted = false, asked = ChannelWords.answered(before = false, results = 3), rationale = false))
+
         // The status: three keys, three states. With no service nothing runs, whatever Bluetooth does.
         fun status(serving: Boolean, radioUp: Boolean) = ChannelWords.status(serving, radioUp, wanted = true, canSearch = false)
         assertEquals(mapOf("state" to "running", "wanted" to true, "canSearch" to false), status(serving = true, radioUp = true))

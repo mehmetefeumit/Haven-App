@@ -8,6 +8,7 @@ import android.os.Build
 import com.oblivioustech.haven.mesh.core.Notice
 import com.oblivioustech.haven.mesh.core.RadioEnd
 import com.oblivioustech.haven.mesh.core.ReceiverPolicy
+import com.oblivioustech.haven.mesh.core.ReceiverStep
 import com.oblivioustech.haven.mesh.core.StartPolicy
 
 /**
@@ -16,29 +17,31 @@ import com.oblivioustech.haven.mesh.core.StartPolicy
  * the two broadcasts are the system's, and the alarm is sent as Haven
  * itself, by name and with no action.
  *
- * Whether to start the service is `ReceiverPolicy`'s to say, and it is asked
- * before the start: a service started here and refused there would have to
- * reach its foreground start first. An alarm starts none — the platform
- * gives it no licence to — and the start itself is the one call here the
- * platform may still refuse, with an exception that must end nothing.
+ * What to do is `ReceiverPolicy`'s to say. It is asked before a start: a
+ * service started here and refused there would have to reach its foreground
+ * start first. An alarm starts none — the platform gives it no licence to.
+ *
+ * All of it runs on the main thread of the process that also publishes to
+ * relays, at boot among other times, so all of it is inside `RadioEnd.each`:
+ * a native library that does not load, a stored copy that does not read and
+ * a start the platform refuses each throw, and none may end the process.
  */
 // A foreground service is started as one from Android 8. Below Android 11 none is: no start ever set the flag there.
 @TargetApi(Build.VERSION_CODES.R)
 class MeshReceiver : BroadcastReceiver() {
-    override fun onReceive(context: Context, intent: Intent) {
+    override fun onReceive(context: Context, intent: Intent) = RadioEnd.each({
         val prefs = MeshPrefs(context)
-        val now = System.currentTimeMillis()
-        when (intent.action) {
-            Intent.ACTION_BOOT_COMPLETED, Intent.ACTION_MY_PACKAGE_REPLACED -> {
-                val starts = ReceiverPolicy.startsAtBoot(prefs.wanted, prefs.deadlineMs, now) {
-                    StartPolicy.refusal(Build.VERSION.SDK_INT, MeshService.bluetoothLe(context), MeshNative, MeshService.permitted(context))
-                }
-                if (starts) RadioEnd.each({ context.startForegroundService(Intent(context, MeshService::class.java)) })
-            }
-            null -> if (!MeshService.alarm() && ReceiverPolicy.endsAtAlarm(prefs.wanted, prefs.deadlineMs, now)) {
+        // The alarm has no action; whatever has one is boot, or Haven replaced.
+        val step = ReceiverPolicy.step(intent.action != null, MeshService::alarm, prefs.wanted, prefs.deadlineMs, System.currentTimeMillis()) {
+            StartPolicy.refusal(Build.VERSION.SDK_INT, MeshService.bluetoothLe(context), MeshNative, MeshService.permitted(context))
+        }
+        when (step) {
+            ReceiverStep.START -> context.startForegroundService(Intent(context, MeshService::class.java))
+            ReceiverStep.END -> {
                 prefs.forget()
                 MeshNotices(context, prefs).post(Notice.STOPPED)
             }
+            ReceiverStep.NONE -> {}
         }
-    }
+    })
 }

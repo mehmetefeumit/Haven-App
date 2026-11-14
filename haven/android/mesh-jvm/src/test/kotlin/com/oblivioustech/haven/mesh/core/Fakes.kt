@@ -158,7 +158,13 @@ class RecordingPort : RadioPort {
 
     override fun holdAwake(ms: Long) = record("holdAwake", ms)
 
-    override fun wakeAt(inMs: Long) = record("wakeAt", inMs)
+    /** What every [wakeAt] asked of the alarm, in order: its timer's half is [wakes]. */
+    val alarms = mutableListOf<Long>()
+
+    override fun wakeAt(inMs: Long, asleepInMs: Long) {
+        alarms += asleepInMs
+        record("wakeAt", inMs)
+    }
 }
 
 /** A core over the two fakes and a clock the test moves. */

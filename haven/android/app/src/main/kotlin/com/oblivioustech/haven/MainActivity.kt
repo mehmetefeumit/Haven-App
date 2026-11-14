@@ -39,6 +39,6 @@ class MainActivity : FlutterActivity() {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        mesh?.permissionResult(requestCode)
+        mesh?.permissionResult(requestCode, grantResults.size)
     }
 }

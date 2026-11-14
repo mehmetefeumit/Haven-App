@@ -31,21 +31,27 @@ class ServiceStarts<Live : Any> {
 
     /**
      * A stop's first step. The start is let go of — a command from here on
-     * makes its own — and the answer is the last command that joined it,
-     * the one to end the service by: ended by an older one, the platform
-     * leaves the service to the command that came since.
+     * makes its own — and [forget] clears the stored flag in the same step,
+     * under the lock. So whoever finds no live start finds no mesh wanted
+     * either, and nothing asks for the radio back while a stop the service
+     * made still runs; and a start made behind the stop keeps the flag it
+     * sets. The answer is the last command that joined the start, the one
+     * to end the service by: ended by an older one, the platform leaves the
+     * service to the command that came since.
      */
     @Synchronized
-    fun detach(): Int {
+    fun detach(forget: () -> Unit): Int {
         live = null
+        forget()
         return last
     }
 
     /**
-     * [leave] — out of the foreground, a notice down or the stopped one up —
-     * unless a start made since [detach] is live: the foreground and the
-     * notices are that one's now. Under the lock, so none is made in the
-     * middle of it.
+     * [leave] — the alarm cancelled, out of the foreground, a notice down or
+     * the stopped one up — unless a start made since [detach] is live: the
+     * alarm, the foreground and the notices are one each, the phone's, and
+     * that start's now. Under the lock, so none is made in the middle of
+     * it.
      */
     @Synchronized
     fun idle(leave: () -> Unit) {

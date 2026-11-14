@@ -70,10 +70,20 @@ object ChannelWords {
     }
 
     /**
+     * Whether the system's dialog has been answered in this process, after a
+     * request came back with [results] answers. With none the platform
+     * cancelled the request — another dialog was open, or the activity went
+     * — and nobody was asked: read as answered, that would be "refused for
+     * good".
+     */
+    fun answered(before: Boolean, results: Int): Boolean = before || results > 0
+
+    /**
      * The answer to `permission` and `requestPermission`. [asked]: the system
-     * dialog has been asked for before, now included. [rationale]: the
-     * platform says the user refused and may be asked again. Never asked, the
-     * platform says nothing, and the dialog can still be shown.
+     * dialog has been answered before, now included ([answered]).
+     * [rationale]: the platform says the user refused and may be asked again.
+     * Never asked, the platform says nothing, and the dialog can still be
+     * shown.
      */
     fun permission(granted: Boolean, asked: Boolean, rationale: Boolean): String = when {
         granted -> "granted"
