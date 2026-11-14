@@ -2233,4 +2233,228 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get avatarSemanticsOffline => 'オフライン';
+
+  @override
+  String get meshButtonLabel => 'Bluetooth メッシュ';
+
+  @override
+  String get meshButtonValueConnected => '近くの端末に接続済み';
+
+  @override
+  String get meshButtonValuePaused => '一時停止中、Bluetooth がオフ';
+
+  @override
+  String get meshButtonHintTurnOn => 'オンにする';
+
+  @override
+  String get meshButtonHintTurnOff => 'オフにする';
+
+  @override
+  String get meshButtonHintStats => 'メッシュの動作状況を表示する';
+
+  @override
+  String get meshTurningOn => 'Bluetooth メッシュをオンにしています…';
+
+  @override
+  String get meshTurnOn => 'オンにする';
+
+  @override
+  String get meshTurnOff => 'オフにする';
+
+  @override
+  String get meshTurnedOn => 'Bluetooth メッシュをオンにしました。ボタンを長押しすると、動作状況を確認できます。';
+
+  @override
+  String get meshUndo => '元に戻す';
+
+  @override
+  String get meshErrorNoPermission => 'Bluetooth メッシュを使うには、「付近のデバイス」の権限が必要です。';
+
+  @override
+  String get meshErrorBluetoothOff => 'メッシュを使うには、Bluetooth をオンにしてください。';
+
+  @override
+  String get meshErrorUnsupported => 'この端末では Bluetooth メッシュを使えません。';
+
+  @override
+  String get meshErrorStartFailed => 'Bluetooth メッシュをオンにできませんでした。もう一度お試しください。';
+
+  @override
+  String get meshErrorStopFailed => 'Bluetooth メッシュをオフにできませんでした。もう一度お試しください。';
+
+  @override
+  String get meshStoppedNotice => 'Bluetooth メッシュがオフになりました。';
+
+  @override
+  String get meshStoppedAfterDeadline => '12時間が経過したため、Bluetooth メッシュがオフになりました。';
+
+  @override
+  String get meshStoppedOk => 'OK';
+
+  @override
+  String get meshIntroTitle => 'Bluetooth メッシュ';
+
+  @override
+  String get meshIntroHeadingDoes => 'メッシュの働き';
+
+  @override
+  String get meshIntroWhat =>
+      'インターネットにつながっていなくても、メッシュをオンにした端末が近くにあるときは、メッシュは、あなたとサークルのメンバーの暗号化された位置情報の更新を、Bluetooth で端末から端末へ受け渡すことができます。更新は、遅れたり届かなかったりすることがあります。あなたの端末は、ほかの人の暗号化されたパケットも運びますが、それを読むことはできません。';
+
+  @override
+  String get meshIntroAutoOff =>
+      'メッシュは、12時間たつと自動的にオフになります。通知が許可されている場合は、その30分前にお知らせが届きます。';
+
+  @override
+  String get meshIntroBattery => 'メッシュを使うと、バッテリーの消費が増えます。';
+
+  @override
+  String get meshIntroClosed =>
+      'メッシュは、Haven を閉じても動き続けます。Haven を閉じていて、バックグラウンド共有がオフのときは、ほかの人のパケットは運びますが、あなたが Haven を開くまで、あなたの位置情報を送ることも、サークルの位置情報を読むこともありません。';
+
+  @override
+  String get meshIntroHeadingLearn => 'ほかの人に分かること';
+
+  @override
+  String get meshIntroNearby =>
+      '近くにいる人は誰でも、この端末で Haven のメッシュがオンになっていることを知ることができ、この端末の電波からその場所を特定することもできます。あなたの端末に接続した端末は、あとになって、あなたの端末の Bluetooth アドレスが変わっていても、それが同じ端末だと見分けることができます。どちらも、あなたの位置情報を読むことや、あなたのサークルを見ることはできません。';
+
+  @override
+  String get meshIntroConnected =>
+      'あなたの端末に接続した端末は、あなたの端末がどの暗号化されたパケットを送り出しているか、それぞれがおおよそどのくらい前のものか、あなたの端末がいつスリープ状態になっているかを見ることができます。その端末があなたのサークルのいずれかに入っていない限り、パケットを読むことはできず、どれがあなた自身の更新なのかも、確実には分かりません。';
+
+  @override
+  String get meshIntroName =>
+      'メッシュで接続した相手の端末は、あなたの端末の Bluetooth 名を読むことができ、あなたの端末がほかにどの Bluetooth サービスを提供しているかも見ることができます。';
+
+  @override
+  String meshIntroNameIs(String name) {
+    return 'あなたの端末の Bluetooth 名は「$name」です。';
+  }
+
+  @override
+  String get meshBluetoothSettings => 'Bluetooth 設定';
+
+  @override
+  String get meshIntroBridge =>
+      'あなたがオンラインのとき、あなたの端末は、近くにいるサークルのメンバーの更新をそのサークルのリレーに渡すことができ、相手の端末も、あなたの更新を同じように渡すことができます。すると、リレーは、そのサークルのメンバーの1人が、更新を渡した端末の近くでオフラインになっていることを知ることができます。両方の端末がオンラインの場合、リレーは、その2台が互いに近くにあることを知ることができます。';
+
+  @override
+  String get meshIntroRemoved =>
+      'あなたがオフラインの間は、サークルから削除された人も、削除されたことをあなたの端末が知るまで、引き続きあなたの更新を読むことができます。';
+
+  @override
+  String get meshIntroHeadingKnow => '知っておきたいこと';
+
+  @override
+  String get meshIntroStats => 'メッシュのボタンを長押しすると、メッシュが運んだ更新の数を確認できます。';
+
+  @override
+  String get meshNameStepTitle => 'この端末の Bluetooth 名';
+
+  @override
+  String get meshNameStepChange => '端末の Bluetooth 設定で変更できます。';
+
+  @override
+  String get meshStatsTitle => 'メッシュの動作状況';
+
+  @override
+  String get meshStatsThisSession => '今回';
+
+  @override
+  String get meshStatsLastSession => '前回';
+
+  @override
+  String get meshStatsAllTime => '累計';
+
+  @override
+  String get meshStatsFromCircles => 'サークルから受け取った更新';
+
+  @override
+  String get meshStatsPassedOn => 'ほかの人のために受け渡したパケット';
+
+  @override
+  String meshStatsCell(String row, String column, String count) {
+    return '$row、$column: $count';
+  }
+
+  @override
+  String get meshStatsFootnote =>
+      '受け渡したパケットを、この端末が読むことはできません。その中には、ほかの人の更新と、どれが本物かを分からなくするためのダミーのパケットが含まれます。';
+
+  @override
+  String get meshStatsUnavailable => 'メッシュの動作状況を読み込めませんでした。';
+
+  @override
+  String get meshStatsAbout => 'Bluetooth メッシュについて';
+
+  @override
+  String get meshStatusConnected => 'メッシュはオン・接続済み';
+
+  @override
+  String get meshStatusSearching => 'メッシュはオン・近くの端末を探しています';
+
+  @override
+  String get meshStatusFindable => 'メッシュはオン・ほかの端末からは見つけられますが、この端末からは探せません';
+
+  @override
+  String get meshStatusPaused => 'メッシュは一時停止中・Bluetooth がオフ';
+
+  @override
+  String get meshStatusOff => 'メッシュはオフ';
+
+  @override
+  String meshTurnsOffAt(DateTime time) {
+    final intl.DateFormat timeDateFormat = intl.DateFormat.jm(localeName);
+    final String timeString = timeDateFormat.format(time);
+
+    return '$timeStringにオフになります';
+  }
+
+  @override
+  String get meshKeepOn => '12時間オンのままにする';
+
+  @override
+  String get meshStatsReset => 'カウントをリセット';
+
+  @override
+  String get meshStatsResetTitle => 'メッシュのカウントをリセットしますか？';
+
+  @override
+  String get meshStatsResetBody => '4つのカウントがすべてゼロに戻ります。';
+
+  @override
+  String get meshStatsResetConfirm => 'リセット';
+
+  @override
+  String get settingsMeshTitle => 'Bluetooth メッシュ';
+
+  @override
+  String get settingsMeshOn => 'オン';
+
+  @override
+  String get settingsMeshOff => 'オフ';
+
+  @override
+  String get meshNoticeChannel => 'Bluetooth メッシュ';
+
+  @override
+  String get meshNoticeOn => 'Bluetooth メッシュはオンです';
+
+  @override
+  String get meshNoticePaused => 'Bluetooth がオフのため、メッシュは一時停止中です';
+
+  @override
+  String get meshNoticeStopped => 'Bluetooth メッシュがオフになりました';
+
+  @override
+  String meshNoticeReminder(DateTime time) {
+    final intl.DateFormat timeDateFormat = intl.DateFormat.jm(localeName);
+    final String timeString = timeDateFormat.format(time);
+
+    return 'Bluetooth メッシュは$timeStringにオフになります';
+  }
+
+  @override
+  String get meshNoticeKeepOn => 'オンのままにする';
 }

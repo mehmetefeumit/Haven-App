@@ -2383,4 +2383,241 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get avatarSemanticsOffline => 'desconectado';
+
+  @override
+  String get meshButtonLabel => 'Malla Bluetooth';
+
+  @override
+  String get meshButtonValueConnected => 'conectada a un teléfono cercano';
+
+  @override
+  String get meshButtonValuePaused => 'en pausa, el Bluetooth está desactivado';
+
+  @override
+  String get meshButtonHintTurnOn => 'activar la malla';
+
+  @override
+  String get meshButtonHintTurnOff => 'desactivar la malla';
+
+  @override
+  String get meshButtonHintStats => 'mostrar la actividad de la malla';
+
+  @override
+  String get meshTurningOn => 'Activando la malla Bluetooth…';
+
+  @override
+  String get meshTurnOn => 'Activar';
+
+  @override
+  String get meshTurnOff => 'Desactivar';
+
+  @override
+  String get meshTurnedOn =>
+      'La malla Bluetooth está activada. Mantén pulsado el botón para ver la actividad.';
+
+  @override
+  String get meshUndo => 'Deshacer';
+
+  @override
+  String get meshErrorNoPermission =>
+      'La malla Bluetooth necesita el permiso «Dispositivos cercanos».';
+
+  @override
+  String get meshErrorBluetoothOff => 'Activa el Bluetooth para usar la malla.';
+
+  @override
+  String get meshErrorUnsupported =>
+      'Este teléfono no puede usar la malla Bluetooth.';
+
+  @override
+  String get meshErrorStartFailed =>
+      'No se pudo activar la malla Bluetooth. Inténtalo de nuevo.';
+
+  @override
+  String get meshErrorStopFailed =>
+      'No se pudo desactivar la malla Bluetooth. Inténtalo de nuevo.';
+
+  @override
+  String get meshStoppedNotice => 'La malla Bluetooth se ha desactivado.';
+
+  @override
+  String get meshStoppedAfterDeadline =>
+      'La malla Bluetooth se ha desactivado tras 12 horas.';
+
+  @override
+  String get meshStoppedOk => 'Entendido';
+
+  @override
+  String get meshIntroTitle => 'Malla Bluetooth';
+
+  @override
+  String get meshIntroHeadingDoes => 'Qué hace';
+
+  @override
+  String get meshIntroWhat =>
+      'Incluso sin internet, la malla puede pasar tus actualizaciones de ubicación cifradas, y las de tus círculos, de teléfono en teléfono por Bluetooth cuando hay cerca teléfonos con la malla activada. Las actualizaciones pueden llegar tarde o perderse. Tu teléfono también transporta paquetes cifrados de otras personas, que no puede leer.';
+
+  @override
+  String get meshIntroAutoOff =>
+      'La malla se desactiva sola al cabo de 12 horas. Si las notificaciones están permitidas, recibes un recordatorio 30 minutos antes.';
+
+  @override
+  String get meshIntroBattery => 'La malla consume más batería.';
+
+  @override
+  String get meshIntroClosed =>
+      'La malla sigue funcionando cuando Haven está cerrado. Con Haven cerrado y «Compartir en segundo plano» desactivado, transporta paquetes de otras personas, pero no envía tu ubicación ni lee las ubicaciones de tus círculos hasta que abras Haven.';
+
+  @override
+  String get meshIntroHeadingLearn => 'Qué pueden averiguar los demás';
+
+  @override
+  String get meshIntroNearby =>
+      'Cualquiera que esté cerca puede saber que este teléfono tiene activada la malla de Haven, y puede localizarlo por su señal de radio. Un teléfono que se conecte al tuyo puede volver a reconocerlo más adelante, incluso después de que cambie la dirección Bluetooth de tu teléfono. Ninguno de ellos puede leer tu ubicación ni ver tus círculos.';
+
+  @override
+  String get meshIntroConnected =>
+      'Un teléfono que se conecte al tuyo puede ver qué paquetes cifrados envía tu teléfono, aproximadamente qué antigüedad tiene cada uno y cuándo está en reposo tu teléfono. A menos que esté en uno de tus círculos, no puede leerlos, y no puede estar seguro de cuáles son tus propias actualizaciones.';
+
+  @override
+  String get meshIntroName =>
+      'Los teléfonos con los que se conecta la malla pueden leer el nombre Bluetooth de tu teléfono y ver qué otros servicios Bluetooth ofrece.';
+
+  @override
+  String meshIntroNameIs(String name) {
+    return 'El nombre Bluetooth de tu teléfono es «$name».';
+  }
+
+  @override
+  String get meshBluetoothSettings => 'Ajustes de Bluetooth';
+
+  @override
+  String get meshIntroBridge =>
+      'Cuando tienes internet, tu teléfono puede reenviar a los relés de tu círculo la actualización de un miembro de ese círculo que esté cerca, y el teléfono de esa persona puede reenviar la tuya. Un relé puede saber entonces que un miembro de ese círculo está sin internet cerca del teléfono que la reenvió. Si los dos teléfonos tienen internet, puede saber que están cerca el uno del otro.';
+
+  @override
+  String get meshIntroRemoved =>
+      'Mientras estás sin internet, alguien a quien hayan quitado de un círculo puede seguir leyendo tus actualizaciones hasta que tu teléfono se entere de que lo han quitado.';
+
+  @override
+  String get meshIntroHeadingKnow => 'Conviene saber';
+
+  @override
+  String get meshIntroStats =>
+      'Mantén pulsado el botón de la malla para ver cuántas actualizaciones ha transportado.';
+
+  @override
+  String get meshNameStepTitle => 'Nombre Bluetooth de tu teléfono';
+
+  @override
+  String get meshNameStepChange =>
+      'Puedes cambiarlo en los ajustes de Bluetooth de tu teléfono.';
+
+  @override
+  String get meshStatsTitle => 'Actividad de la malla';
+
+  @override
+  String get meshStatsThisSession => 'Esta sesión';
+
+  @override
+  String get meshStatsLastSession => 'Última sesión';
+
+  @override
+  String get meshStatsAllTime => 'Total';
+
+  @override
+  String get meshStatsFromCircles => 'Recibido de tus círculos';
+
+  @override
+  String get meshStatsPassedOn => 'Reenviado para otras personas';
+
+  @override
+  String meshStatsCell(String row, String column, String count) {
+    return '$row, $column: $count';
+  }
+
+  @override
+  String get meshStatsFootnote =>
+      'Este teléfono no puede leer los paquetes reenviados. Incluyen actualizaciones de otras personas y paquetes señuelo que ocultan cuáles son reales.';
+
+  @override
+  String get meshStatsUnavailable =>
+      'No se pudo leer la actividad de la malla.';
+
+  @override
+  String get meshStatsAbout => 'Acerca de la malla Bluetooth';
+
+  @override
+  String get meshStatusConnected => 'La malla está activada · conectada';
+
+  @override
+  String get meshStatusSearching =>
+      'La malla está activada · buscando teléfonos cercanos';
+
+  @override
+  String get meshStatusFindable =>
+      'La malla está activada · otros teléfonos pueden encontrar este, pero este no puede buscarlos';
+
+  @override
+  String get meshStatusPaused =>
+      'La malla está en pausa · el Bluetooth está desactivado';
+
+  @override
+  String get meshStatusOff => 'La malla está desactivada';
+
+  @override
+  String meshTurnsOffAt(DateTime time) {
+    final intl.DateFormat timeDateFormat = intl.DateFormat.jm(localeName);
+    final String timeString = timeDateFormat.format(time);
+
+    return 'Hora de desactivación: $timeString';
+  }
+
+  @override
+  String get meshKeepOn => 'Mantener activada 12 horas';
+
+  @override
+  String get meshStatsReset => 'Restablecer contadores';
+
+  @override
+  String get meshStatsResetTitle => '¿Restablecer los contadores de la malla?';
+
+  @override
+  String get meshStatsResetBody => 'Los cuatro contadores vuelven a cero.';
+
+  @override
+  String get meshStatsResetConfirm => 'Restablecer';
+
+  @override
+  String get settingsMeshTitle => 'Malla Bluetooth';
+
+  @override
+  String get settingsMeshOn => 'Activada';
+
+  @override
+  String get settingsMeshOff => 'Desactivada';
+
+  @override
+  String get meshNoticeChannel => 'Malla Bluetooth';
+
+  @override
+  String get meshNoticeOn => 'La malla Bluetooth está activada';
+
+  @override
+  String get meshNoticePaused =>
+      'Malla Bluetooth en pausa: Bluetooth desactivado';
+
+  @override
+  String get meshNoticeStopped => 'La malla Bluetooth se ha desactivado';
+
+  @override
+  String meshNoticeReminder(DateTime time) {
+    final intl.DateFormat timeDateFormat = intl.DateFormat.jm(localeName);
+    final String timeString = timeDateFormat.format(time);
+
+    return 'Desactivación de la malla Bluetooth: $timeString';
+  }
+
+  @override
+  String get meshNoticeKeepOn => 'Mantener activada';
 }

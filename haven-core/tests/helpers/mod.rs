@@ -21,6 +21,7 @@
 #![allow(dead_code)]
 
 pub mod drive;
+pub mod mesh;
 pub mod neg_wire;
 pub mod removals;
 pub mod stranded;

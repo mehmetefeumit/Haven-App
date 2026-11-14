@@ -1011,6 +1011,27 @@ class NostrRelayService implements RelayService, CircleChangeDriver {
     }
   });
 
+  @override
+  Future<SealOutcomeFfi> sealLocationForMesh({
+    required CircleManagerFfi circle,
+    required List<int> mlsGroupId,
+    required double latitude,
+    required double longitude,
+  }) => _driving(() async {
+    final manager = await _ensureInitialized();
+    final fix = await (_fixOf ?? _coreFix)(latitude, longitude);
+    try {
+      // No relay is asked, so there is no clock evidence to hear.
+      return await manager.sealLocationForMeshDriven(
+        circle: circle,
+        mlsGroupId: mlsGroupId,
+        location: fix,
+      );
+    } finally {
+      fix.dispose();
+    }
+  });
+
   Future<LocationMessage> _coreFix(double latitude, double longitude) async =>
       (_locationCore ??= await HavenCore.newInstance()).updateLocation(
         latitude: latitude,
@@ -1024,13 +1045,22 @@ class NostrRelayService implements RelayService, CircleChangeDriver {
   Future<LocationPublishFfi> publishLocation({
     required CircleManagerFfi circle,
     required SealedLocationFfi sealed,
+    required bool received,
   }) => _driving(
     location: true,
     () async => (await _ensureInitialized()).publishLocationDriven(
       circle: circle,
       sealed: sealed,
+      received: received,
     ),
   );
+
+  @override
+  Future<MeshDriveFfi> meshDrive({required CircleManagerFfi circle}) =>
+      _driving(
+        () async =>
+            (await _ensureInitialized()).meshDriveDriven(circle: circle),
+      );
 
   /// The leave presses and carry-ons in flight, by MLS group id: one of
   /// each per circle at a time in this isolate. A carry-on landing beside a

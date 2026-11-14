@@ -123,6 +123,11 @@ use cgka_traits::peeler::GroupMessageMetadata;
 #[cfg(any(test, feature = "test-utils"))]
 use cgka_traits::transport::EncryptedPayload;
 
+mod mesh;
+
+use self::mesh::MeshKeys;
+pub use self::mesh::{MeshDrive, MeshKeyStore, MeshPacket, StoredMeshKey, MESH_ON_MAX_MS};
+
 // `redact_hex_sequences` lives in the neutral `crate::util` module. Re-exported
 // here so every `crate::nostr::mls::redact_hex_sequences` caller (circle/error,
 // relay/manager) keeps working unchanged.
@@ -517,6 +522,9 @@ pub struct SessionManager {
     /// What the NIP-77 pass keeps for the life of the process, never sent
     /// ([`crate::relay::negentropy::NegMemo`]).
     negentropy: std::sync::Mutex<crate::relay::negentropy::NegMemo>,
+    /// The mesh packet keys of each circle and the hand-off they fill, kept
+    /// only while mesh is on ([`Self::mesh_on_until`]).
+    mesh_keys: MeshKeys,
     /// The local identity public key (x-only). Used to stamp inner app-message
     /// pubkeys (W9) and to route welcomes.
     identity_pubkey: PublicKey,
@@ -682,9 +690,10 @@ pub struct SessionManager {
     /// ([`Self::behind_what_was_handed_back`]).
     handed_back: std::sync::Mutex<Option<SessionEffects>>,
     /// The locations this session sealed and recorded
-    /// ([`Self::record_location`]), by transport id: a record that is not
-    /// one of them was left by a process that died with its send unfinished.
-    own_locations: std::sync::Mutex<HashSet<MessageId>>,
+    /// ([`Self::record_location`]), by transport id, each with whether it was
+    /// sealed for the mesh alone: a record that is not one of them was left
+    /// by a process that died with its send unfinished.
+    own_locations: std::sync::Mutex<HashMap<MessageId, bool>>,
     /// What the live plane that shares this session last said of itself,
     /// and which plane said it ([`Self::plane_stands`]): the plane's number
     /// shifted up two, its [`PlaneStanding`] in the low bits.
@@ -1474,6 +1483,7 @@ impl SessionManager {
             groups_at_open,
             unread_input: std::sync::Mutex::new(UnreadInput::default()),
             negentropy: std::sync::Mutex::new(crate::relay::negentropy::NegMemo::default()),
+            mesh_keys: MeshKeys::new(),
             // A pass that failed may have left a rolled-back row unfinished,
             // and a commit the hydrate cleared is owed its retirement.
             session: Gated::new(
@@ -1514,7 +1524,7 @@ impl SessionManager {
             #[cfg(any(test, feature = "test-utils"))]
             requeues_for_test: AtomicBool::new(false),
             handed_back: std::sync::Mutex::new(None),
-            own_locations: std::sync::Mutex::new(HashSet::new()),
+            own_locations: std::sync::Mutex::new(HashMap::new()),
             live_plane: AtomicU64::new(0),
             burst_end: std::sync::Mutex::new(None),
             bridge_claims: AtomicU64::new(0),
@@ -3071,6 +3081,22 @@ impl SessionManager {
         now_ms: u64,
         still: Still<'_>,
     ) -> Result<(ScreenedIngest, Vec<FanoutId>)> {
+        self.staging_ingest(event, now_ms, still, false).await
+    }
+
+    /// [`Self::process_event_staging`], for a relay's event or, with
+    /// `from_mesh`, for one a mesh packet carried. What a relay is asked next
+    /// may not turn on what the mesh brought, so such an event is noted
+    /// nowhere the relay path reads what it has seen: not in the NIP-77
+    /// pass's memory, which a relay's own copy enters when it comes, and not
+    /// in the refused ledger.
+    async fn staging_ingest(
+        &self,
+        event: &Event,
+        now_ms: u64,
+        still: Still<'_>,
+        from_mesh: bool,
+    ) -> Result<(ScreenedIngest, Vec<FanoutId>)> {
         let msg = match Self::screen_before_auth(event) {
             Err(rejection) => {
                 return Ok((ScreenedIngest::RejectedBeforeAuth(rejection), Vec::new()))
@@ -3089,18 +3115,31 @@ impl SessionManager {
         let id = msg.id.clone();
         let route = transport_route(&msg);
         let result = Box::pin(session.ingest(msg)).await.map_err(map_mls_err);
-        let result = self.ingest_faulted(result);
-        self.note_ingested(
-            &session,
-            event,
-            route,
-            &id,
-            &result,
-            mode == DriveMode::Full,
-        );
+        let mut result = self.ingest_faulted(result);
+        if from_mesh {
+            // Owed no refetch when the engine lets it go: its packet is held
+            // and offered again, and no relay is asked for it by id.
+            if let Ok(batch) = &mut result {
+                batch.effects.events.retain(|refused| {
+                    !matches!(refused, GroupEvent::TransportObjectResourceRefused { message_id, .. }
+                        if *message_id == id)
+                });
+            }
+        } else {
+            self.note_ingested(
+                &session,
+                event,
+                route,
+                &id,
+                &result,
+                mode == DriveMode::Full,
+            );
+        }
         let result = self.noted(&session, result);
         let mut ingested = self.behind_what_was_handed_back(ahead, result)?;
         let effects = std::mem::replace(&mut ingested.effects, empty_effects());
+        #[cfg(any(test, feature = "test-utils"))]
+        let effects = self.beside_stranded_for_test(effects);
         let staged = self
             .stage_commits(&mut session, effects, now_ms, None, true, mode)
             .await;
@@ -3109,6 +3148,71 @@ impl SessionManager {
         let mut recorded = staged.fanouts;
         recorded.extend(staged.proposals);
         Ok((ScreenedIngest::Ingested(ingested), recorded))
+    }
+
+    /// One event a mesh packet carried, into the engine:
+    /// [`Self::process_event_staging`] in the mode that makes nothing, and
+    /// never in the full one. Nothing a mesh packet leads to is committed,
+    /// and nothing the relay path reads of what it has seen is written
+    /// ([`Self::staging_ingest`]). The stall detector never arms a history
+    /// walk on it: only a full drive's ingest arms. A peer's update at the
+    /// circle's epoch does end the count of fruitless walks behind the
+    /// `Stalled` reading, as one a relay brought does
+    /// ([`Self::note_stall_evidence`]) — this device read a peer — and that
+    /// changes nothing a relay is asked: when a walk is armed, and how
+    /// often, is left as it stands (`EpochStallDetector::observe_peer_heard`).
+    /// A replayed packet ends nothing: the engine announces an update once.
+    /// The caller has verified the event and found it an application message
+    /// of an epoch this device holds the key of ([`Self::mesh_read`]).
+    ///
+    /// Returns whether the engine took the event in ([`Self::took_in`]),
+    /// whether it read in it a peer's update it had not read before, that
+    /// update as the engine announced it, and the rest of the hold's batch.
+    /// The engine says the second, off its own durable records: it answers
+    /// `Processed` for an application message it reads, and a duplicate or
+    /// an own echo for one it holds a record of — by the event's id or, for
+    /// the same update in another event, by a digest of what it carries —
+    /// whether a relay brought it, the mesh did in an earlier process, or
+    /// this device sent it (MDK `message_processor/ingest.rs` 937-970,
+    /// `store.rs` `recorded_message_outcome`). A proposal the hold recorded
+    /// keeps its stored record, which the next relay drive sends.
+    ///
+    /// The update is taken out of the batch, found by the digest it is
+    /// announced under ([`Self::application_at`]): the rest is relay input
+    /// the hold handed back, folded as any plane's, while the update is
+    /// folded as one the mesh brought (`CircleManager::fold_mesh_update`).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::process_event`]; the event is then not taken in.
+    pub(crate) async fn ingest_from_mesh(
+        &self,
+        group_id: &GroupId,
+        event: &Event,
+        now_ms: u64,
+    ) -> Result<(bool, bool, Option<GroupEvent>, SessionEffects)> {
+        self.mesh_ingesting();
+        let content = self.mesh_content(group_id, event);
+        let still = Still::always(&DriveMode::FinishOnly);
+        let (screened, _) = self.staging_ingest(event, now_ms, still, true).await?;
+        Ok(match screened {
+            ScreenedIngest::Ingested(mut ingested) => {
+                let kept = Self::kept(&ingested);
+                #[cfg(any(test, feature = "test-utils"))]
+                let kept = kept && !self.mesh_ingest_unkept_for_test();
+                let new = matches!(ingested.outcome, IngestOutcome::Processed);
+                let events = &mut ingested.effects.events;
+                let update = (events.iter())
+                    .position(|announced| {
+                        matches!(announced, GroupEvent::MessageReceived { message_id, .. }
+                            if new && content.is_some_and(|id| message_id.as_slice() == id))
+                    })
+                    .map(|at| events.remove(at));
+                (kept, new, update, ingested.effects)
+            }
+            // Never taken in, however often it is offered.
+            ScreenedIngest::RejectedBeforeAuth(_) => (true, false, None, empty_effects()),
+        })
     }
 
     /// `events`, one circle's stored `kind:445`s, in the order the engine is
@@ -3184,17 +3288,8 @@ impl SessionManager {
         if event.content == ORDER_PANIC_FOR_TEST {
             panic!("injected classification panic (test seam)");
         }
-        let Ok(msg) = Self::event_to_transport_message(event) else {
-            return IngestClass::Other;
-        };
-        let Ok(peeled) = self.preview_peeler.peel_group_message(&msg, ctx).await else {
-            return IngestClass::Other;
-        };
-        let PeeledContent::MlsMessage { bytes } = peeled.content else {
-            return IngestClass::Other;
-        };
-        match project_mls_message(&bytes) {
-            Ok(projection) if projection.source_epoch == Some(epoch) => match projection.kind {
+        match self.projected(event, ctx).await {
+            Some((kind, Some(source_epoch), _)) if source_epoch == epoch => match kind {
                 OpenMlsContentKind::Proposal => IngestClass::Proposal,
                 OpenMlsContentKind::Commit => IngestClass::Commit,
                 OpenMlsContentKind::Application
@@ -3203,6 +3298,96 @@ impl SessionManager {
             },
             _ => IngestClass::Other,
         }
+    }
+
+    /// The kind and source epoch of the MLS message `event` carries, peeled
+    /// under `ctx`'s exporter secret and dropped at once, with the SHA-256
+    /// of that message; `None` when it does not peel or parse.
+    async fn projected(
+        &self,
+        event: &Event,
+        ctx: &GroupContextSnapshot,
+    ) -> Option<(OpenMlsContentKind, Option<u64>, [u8; 32])> {
+        let msg = Self::event_to_transport_message(event).ok()?;
+        let peeled = self.preview_peeler.peel_group_message(&msg, ctx).await;
+        let PeeledContent::MlsMessage { bytes } = peeled.ok()?.content else {
+            return None;
+        };
+        let projection = project_mls_message(&bytes).ok()?;
+        let digest = <sha2::Sha256 as sha2::Digest>::digest(&bytes).into();
+        Some((projection.kind, projection.source_epoch, digest))
+    }
+
+    /// Whether `event` is an application message of `epoch`, the epoch
+    /// `exporter` is the group-event secret of: what the mesh ingress asks
+    /// before the engine sees a packet's event (plan §4.3). A commit or a
+    /// proposal a member wrapped is not one — taken in ahead of its proposal
+    /// a commit is dropped for good (T-COMMIT-BEFORE-PROPOSAL) — and neither
+    /// is a message of another epoch, which the engine would buffer without
+    /// bound (Security Rule 12). One that does not peel or parse, or whose
+    /// parse panics, is none.
+    ///
+    /// An application message is answered by the SHA-256 of the MLS message
+    /// it carries: the id the engine announces the update under once it
+    /// reads it, whatever event carried it (MDK `message_processor/mod.rs`
+    /// `content_dedup_id`), and so how its own announcement is told from
+    /// every other in the batch ([`Self::ingest_from_mesh`]).
+    ///
+    /// The secret is moved into a snapshot dropped before this returns
+    /// (Rule 7), under the fixed label (Rule 11).
+    async fn application_at(
+        &self,
+        event: &Event,
+        epoch: u64,
+        exporter: &[u8; 32],
+    ) -> Option<[u8; 32]> {
+        let mut secrets = HashMap::new();
+        secrets.insert(DEFAULT_EXPORTER_LABEL.to_string(), exporter.to_vec());
+        let ctx = GroupContextSnapshot::new(EpochId(epoch), secrets, None);
+        let peel = std::panic::AssertUnwindSafe(self.projected(event, &ctx));
+        match futures::FutureExt::catch_unwind(peel).await {
+            Ok(Some((OpenMlsContentKind::Application, Some(source_epoch), digest)))
+                if source_epoch == epoch =>
+            {
+                Some(digest)
+            }
+            _ => None,
+        }
+    }
+
+    /// Reads the mesh packets `taken` (plan §5.2): each is tried under every
+    /// key of the ring, the event one carried is rebuilt and verified, and
+    /// only an application message of the very epoch its key is of is kept
+    /// for the engine ([`Self::application_at`]) — all before the engine
+    /// sees anything. `drive` is told of every packet settled here: one no
+    /// key opened, one whose event fails any of this, a second packet of an
+    /// event already held, one a circle's quota pushed out.
+    ///
+    /// The ring is brought in line with the engine first, in one hold, so a
+    /// deadline that has passed opens nothing.
+    ///
+    /// Returns, for each circle, the events to offer the engine now: what it
+    /// holds from this drive and from earlier ones, oldest first.
+    pub(crate) async fn mesh_read(
+        &self,
+        taken: Vec<MeshPacket>,
+        drive: &mut MeshDrive,
+    ) -> Vec<(GroupId, Vec<Event>)> {
+        {
+            let session = self.reading().await;
+            let circles = session.live_group_ids().unwrap_or_default();
+            self.sync_mesh_circles(&*session, &circles);
+        }
+        for packet in &taken {
+            let Some(opened) = self.mesh_opened(packet, drive) else {
+                continue;
+            };
+            let update = self
+                .application_at(&opened.event, opened.epoch, &opened.exporter)
+                .await;
+            self.mesh_keep(opened, update, drive);
+        }
+        self.mesh_due()
     }
 
     /// [`Self::order_for_ingest`], the events alone.
@@ -3856,6 +4041,7 @@ impl SessionManager {
             .map(|row| row.message_id().clone())
             .collect();
         session.forget_group_local(group_id).map_err(map_mls_err)?;
+        self.mesh_keys.forget(&*session, group_id);
         drop(session);
         // The rows went with the group (their foreign key cascades); the
         // process-wide registry must not go on refusing their events.
@@ -3932,6 +4118,9 @@ impl SessionManager {
             .entry(group_id.clone())
             .or_default()
             .extend(commits.into_iter().map(|id| id.as_bytes().to_vec()));
+        // After the hold stands: a seal that began once the circle fell
+        // silent then reads the hold.
+        self.mesh_keys.silence(group_id);
     }
 
     /// Ends the pager's hold on `id` once the engine answered its ingest with
@@ -3958,16 +4147,22 @@ impl SessionManager {
                     .has_processed_transport_id(id)
                     .unwrap_or(false)
             },
-            |ingested| match ingested.outcome {
-                IngestOutcome::ResourceRefused { .. } => false,
-                IngestOutcome::Ignored { .. } => true,
-                _ => !ingested.left_object_unpersisted,
-            },
+            Self::kept,
         )
     }
 
-    /// What every ingest funnel notes of an event once the engine answered
-    /// it, with the engine held: the pager's hold ends
+    /// Whether the engine's answer to an ingest says it holds the event:
+    /// anything but a want of room.
+    const fn kept(ingested: &IngestEffects) -> bool {
+        match ingested.outcome {
+            IngestOutcome::ResourceRefused { .. } => false,
+            IngestOutcome::Ignored { .. } => true,
+            _ => !ingested.left_object_unpersisted,
+        }
+    }
+
+    /// What every ingest funnel notes of an event a relay plane fetched once
+    /// the engine answered it, with the engine held: the pager's hold ends
     /// ([`Self::note_taken_in`]), a full drive's ingest feeds the stall
     /// detector (`observe`), and a `kind:445` the engine took in for a group
     /// it knows is recorded where the NIP-77 pass reads what this device
@@ -4158,9 +4353,17 @@ impl SessionManager {
         Self::screen_before_auth(event).is_ok()
     }
 
+    /// As a live REQ beginning to hold stored replay for `group_id`.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn hold_live_replay_for_test(&self, group_id: &GroupId) {
+        self.hold_live_replay(group_id);
+    }
+
     /// A live REQ began holding stored replay for `group_id`.
     pub(crate) fn hold_live_replay(&self, group_id: &GroupId) {
         *self.unread().live.entry(group_id.clone()).or_default() += 1;
+        // After the hold stands, as [`Self::hold_pager_commits`].
+        self.mesh_keys.silence(group_id);
     }
 
     /// A live REQ's stored replay for `group_id` was taken in.
@@ -4533,7 +4736,9 @@ impl SessionManager {
     /// [`Staged::waiting`], with nothing sealed. Then the send; and a
     /// location the engine sealed is given its record before the hold ends
     /// ([`Self::record_location`]), so that no relay is ever written to for
-    /// a location the store does not know of.
+    /// a location the store does not know of. `mesh_only` is kept with that
+    /// record's entry in this session, in the same hold: its send hands the
+    /// location to the mesh and to no relay ([`LocationToSend::mesh_only`]).
     ///
     /// # Errors
     ///
@@ -4545,6 +4750,7 @@ impl SessionManager {
         content: String,
         now_ms: u64,
         still: Still<'_>,
+        mesh_only: bool,
     ) -> Result<(Staged, Option<RecordedLocation>)> {
         let intent = SendIntent::AppMessage {
             group_id: group_id.clone(),
@@ -4583,10 +4789,13 @@ impl SessionManager {
         };
         let result = self.noted(&session, result);
         let result = self.behind_what_was_handed_back(ahead, result);
+        #[cfg(any(test, feature = "test-utils"))]
+        let result = result.map(|effects| self.beside_stranded_for_test(effects));
         let staged = self
             .staged(&mut session, result, now_ms, None, false, mode)
             .await;
-        let recorded = staged.and_then(|staged| self.record_location(&session, staged, now_ms));
+        let recorded =
+            staged.and_then(|staged| self.record_location(&session, staged, now_ms, mesh_only));
         drop(session);
         recorded
     }
@@ -4606,6 +4815,7 @@ impl SessionManager {
         session: &AccountDeviceSession,
         mut staged: Staged,
         now_ms: u64,
+        mesh_only: bool,
     ) -> Result<(Staged, Option<RecordedLocation>)> {
         let sealed = staged
             .effects
@@ -4623,7 +4833,7 @@ impl SessionManager {
                 self.own_locations
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(recorded.id.message().clone());
+                    .insert(recorded.id.message().clone(), mesh_only);
                 Ok((staged, Some(recorded)))
             }
             Err(e) => {
@@ -4722,7 +4932,7 @@ impl SessionManager {
                 Some(LocationRecord {
                     id: FanoutId::new(row.group_id()?.clone(), row.message_id().clone()),
                     expires_at_secs: location_expiry_secs(row),
-                    here: here.contains(row.message_id()),
+                    here: here.contains_key(row.message_id()),
                 })
             })
             .collect())
@@ -4746,32 +4956,46 @@ impl SessionManager {
     ) -> Result<Option<LocationToSend>> {
         let mut session = self.engine().await?;
         let rows = session.outbound_fanouts().map_err(map_mls_err)?;
+        // A record of another process is not in the map, and so is neither
+        // sent nor known as sealed for the mesh alone.
         let sealed_here = self
             .own_locations
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains(message);
+            .get(message)
+            .copied();
         let found = rows
             .iter()
             .find(|row| row.message_id() == message)
             .and_then(|row| Some((row, row.application_message()?)))
-            .map(|(row, application)| LocationToSend {
-                relays: row
-                    .request()
-                    .target
-                    .endpoints()
-                    .iter()
-                    .map(|endpoint| endpoint.as_str().to_owned())
-                    .collect(),
-                expires_at_secs: location_expiry_secs(row),
-                may_be_sent: sealed_here
+            .map(|(row, application)| {
+                // Before the check: a circle silenced while it runs — a
+                // leave asked, fetched input held, with no engine hold — is
+                // then handed nothing by this send.
+                let silences = self.mesh_silences(&application.group_id);
+                let may_be_sent = sealed_here.is_some()
                     && self.location_may_be_sent(
                         &mut session,
                         &application.group_id,
                         application.source_epoch,
                         now_ms,
                         mode,
-                    ),
+                    );
+                LocationToSend {
+                    relays: row
+                        .request()
+                        .target
+                        .endpoints()
+                        .iter()
+                        .map(|endpoint| endpoint.as_str().to_owned())
+                        .collect(),
+                    expires_at_secs: location_expiry_secs(row),
+                    may_be_sent,
+                    mesh_only: sealed_here == Some(true),
+                    mesh_turn: may_be_sent
+                        .then(|| self.mesh_turn(&*session, &application.group_id, now_ms, silences))
+                        .flatten(),
+                }
             });
         drop(session);
         Ok(found)
@@ -4839,14 +5063,17 @@ impl SessionManager {
     }
 
     /// Deletes every location record of `group_id`, unsent: its circle was
-    /// left. A store error leaves the rest for their expiration, and the
-    /// send's own check finds no circle row to send for.
+    /// left or disbanded, and its mesh keys go with them. A store error
+    /// leaves the rest for their expiration, and the send's own check finds
+    /// no circle row to send for.
     pub(crate) async fn end_location_records(&self, group_id: &GroupId) {
-        let rows = self
-            .reading()
-            .await
-            .outbound_fanouts_for_group(group_id)
-            .unwrap_or_default();
+        let rows = {
+            let session = self.reading().await;
+            self.mesh_keys.forget(&*session, group_id);
+            session
+                .outbound_fanouts_for_group(group_id)
+                .unwrap_or_default()
+        };
         for row in rows
             .iter()
             .filter(|row| row.application_message().is_some())
@@ -5596,7 +5823,9 @@ impl SessionManager {
     /// Forgets that `group_id` — or, with `None`, every circle — is caught
     /// up: what was fetched to the end may have gone stale since. Cleared
     /// when the live plane pauses or stops, and for a circle when a sweep of
-    /// it begins.
+    /// it begins. What the circle kept to pass on to its relays was kept
+    /// under the receive that ended, and goes with it
+    /// ([`Self::mesh_bridge_take`]).
     pub(crate) fn forget_caught_up(&self, group_id: Option<&GroupId>) {
         let mut caught_up = self
             .caught_up
@@ -5608,6 +5837,104 @@ impl SessionManager {
             }
             None => caught_up.clear(),
         }
+        drop(caught_up);
+        drop(self.mesh_keys.take_bridge(group_id));
+    }
+
+    /// Whether `group_id` is caught up in this session
+    /// ([`Self::mark_caught_up`]) and nothing has ended that since
+    /// ([`Self::forget_caught_up`]).
+    fn caught_up(&self, group_id: &GroupId) -> bool {
+        self.caught_up
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(group_id)
+    }
+
+    /// Whether a fellow member's location that reached `group_id` by mesh,
+    /// which the engine has just read for the first time, is kept to be
+    /// passed on to the circle's relays (plan §5.5): this device's last
+    /// fetch of the circle was answered to the end — an update that arrives
+    /// before a receive has completed is tied to no drive that may send it —
+    /// and this device has not asked to leave. A circle with a commit of
+    /// this device's pending, or input held unread, takes nothing in by mesh
+    /// at all (`Publishing::mesh_drive`). What is kept is checked again,
+    /// against the engine, immediately before it is sent
+    /// ([`Self::mesh_bridge_check`]).
+    fn keeps_to_pass_on(&self, group_id: &GroupId) -> bool {
+        self.caught_up(group_id) && !self.leaving(group_id)
+    }
+
+    /// What `group_id` kept to pass on to its relays (plan §5.5), newest
+    /// first, taken — the circle keeps none after this, so what the drive
+    /// that asks does not send is never sent. Nothing unless `received`: the
+    /// caller's word that this drive's own relay receive of the circle was
+    /// answered to the end before its send. Only the caller knows where a
+    /// drive begins; this session's own word, that the last receive
+    /// completed and nothing has ended it since, is read with the rest
+    /// ([`Self::mesh_bridge_check`]), and what was kept under a receive that
+    /// has ended is gone already ([`Self::forget_caught_up`]). A device that
+    /// publishes before it fetches so passes nothing on: a member a commit
+    /// it has not fetched removed could otherwise read, from the relays, an
+    /// update that reaches them today only within radio range.
+    pub(crate) fn mesh_bridge_take(
+        &self,
+        group_id: &GroupId,
+        received: bool,
+    ) -> Vec<self::mesh::Candidate> {
+        let waiting = self.mesh_keys.take_bridge(Some(group_id));
+        if received {
+            waiting
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// The event of `update`, one [`Self::mesh_bridge_take`] handed out, and
+    /// the relays to hand it — or `None`: it is not sent. Read in one hold
+    /// of the engine, immediately before the send:
+    /// - the event can still reach a relay before it expires, and declares
+    ///   no longer a life than a location of Haven's (`Candidate::in_time`);
+    /// - a location this device sealed at the same epoch could be sent now
+    ///   ([`Self::location_may_be_sent`]): this device is a member, the
+    ///   circle stands stable on the very epoch the update was sealed at —
+    ///   so nobody removed since is handed it, and its sender, whom the
+    ///   engine authenticated at that epoch, is a member still — with
+    ///   nothing received left unresolved, no commit staged, no hold and no
+    ///   departure in the way;
+    /// - the circle is still caught up, and holds no fetched input unread;
+    /// - the relays are the circle's own, and among them only those of
+    ///   `accepted`, the relays that took this device's own send;
+    /// - no update of the same member was passed on in the last 72 seconds.
+    pub(crate) async fn mesh_bridge_check(
+        &self,
+        group_id: &GroupId,
+        update: self::mesh::Candidate,
+        accepted: &[String],
+        now_ms: u64,
+        mode: DriveMode,
+    ) -> Option<(Event, Vec<String>)> {
+        let (event, epoch, sender) = update.in_time(now_ms)?;
+        let mut session = self.engine().await.ok()?;
+        let stands =
+            self.location_may_be_sent(&mut session, group_id, EpochId(epoch), now_ms, mode)
+                && self.caught_up(group_id)
+                && !self.holds_unread_input(group_id);
+        let targets = if stands {
+            fanout_targets(&session, group_id).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        drop(session);
+        let accepted: Vec<RelayUrl> = (accepted.iter())
+            .filter_map(|relay| RelayUrl::parse(relay).ok())
+            .collect();
+        let targets: Vec<String> = (targets.into_iter())
+            .map(|endpoint| endpoint.0)
+            .filter(|relay| RelayUrl::parse(relay).is_ok_and(|url| accepted.contains(&url)))
+            .collect();
+        (!targets.is_empty() && self.mesh_keys.bridges(group_id, &sender, now_ms))
+            .then_some((event, targets))
     }
 
     /// Whether a full drive may stage `group_id`'s eviction left due: the
@@ -6976,6 +7303,7 @@ impl SessionManager {
                 }
             }
         }
+        self.silence_staged(fanouts.iter().chain(&proposals), &unrecorded);
         Staged {
             effects: SessionEffects {
                 events,
@@ -6988,6 +7316,18 @@ impl SessionManager {
             proposals,
             unrecorded,
             waiting,
+        }
+    }
+
+    /// No location is sent for a circle with a commit or a proposal of this
+    /// device's on its way, and none sealed before it goes out by mesh.
+    fn silence_staged<'a>(
+        &self,
+        recorded: impl Iterator<Item = &'a FanoutId>,
+        unrecorded: &'a [GroupId],
+    ) {
+        for group_id in recorded.map(FanoutId::group).chain(unrecorded) {
+            self.mesh_keys.silence(group_id);
         }
     }
 
@@ -9003,7 +9343,7 @@ impl SessionManager {
         now_ms: u64,
         mode: DriveMode,
     ) -> Result<Staged> {
-        self.send_location_staging(group_id, content, now_ms, Still::new(&mode, mode))
+        self.send_location_staging(group_id, content, now_ms, Still::new(&mode, mode), false)
             .await
             .map(|(staged, _)| staged)
     }
@@ -9102,9 +9442,9 @@ impl SessionManager {
             .await
     }
 
-    /// Makes the next fanout resolution, or the next leave, find `effects`
-    /// beside its own batch, as it finds whatever an earlier engine call left
-    /// in the engine's one-shot buffers: how a test hands the driver a commit
+    /// Makes the next fanout resolution, leave, staging ingest or location
+    /// seal find `effects` beside its own batch, as it finds whatever an
+    /// earlier engine call left in the engine's one-shot buffers: how a test hands the driver a commit
     /// staged with a live ref and no record, or another circle's re-minted
     /// proposal, which no engine call can be made to leave on cue.
     #[cfg(any(test, feature = "test-utils"))]
@@ -9612,6 +9952,7 @@ impl SessionManager {
                 self.note_revalidated_removal(held, group_id, revalidated_commit_id);
             }
         }
+        self.sync_mesh_keys(held, batch.events(), batch.proposals());
     }
 
     /// Restarts the post-join quiet window of each circle `events` move to
@@ -10727,6 +11068,42 @@ impl SessionManager {
         self.stall_evidence = evidence;
     }
 
+    /// Installs the store the mesh keys are kept in and restores what an
+    /// earlier process kept, if mesh is still on; with mesh off, stored keys
+    /// an earlier process left are deleted, and so are those of a circle
+    /// whose row is gone.
+    pub(crate) fn install_mesh_keys(&mut self, at_rest: Arc<dyn MeshKeyStore>) {
+        let now_ms = self.legacy_now_ms();
+        let notes = Arc::clone(&self.commit_notes);
+        let stands = |group: &GroupId| notes.circle_stands(group) == Some(true);
+        self.mesh_keys.install(at_rest, now_ms, &stands);
+    }
+
+    /// Turns the Bluetooth mesh's keys on until `until_ms`, wall-clock
+    /// milliseconds, and never for longer than [`MESH_ON_MAX_MS`] from now: a
+    /// deadline, not a flag, so keys an app that was never opened again left
+    /// behind end by themselves. From here each circle's packet keys are
+    /// kept, in memory and in the circle store, for the epoch it stands on
+    /// and the [`DEFAULT_MAX_PAST_EPOCHS`] before it, and a location's own
+    /// send leaves a packet for the mesh engine ([`Self::mesh_handoff`]).
+    /// Called again, it moves the deadline.
+    ///
+    /// Returns whether mesh is on: not for a deadline that is not ahead of
+    /// the clock, nor when the store did not take it — either is mesh off.
+    pub async fn mesh_on_until(&self, until_ms: u64) -> bool {
+        let session = self.reading().await;
+        let groups = session.live_group_ids().unwrap_or_default();
+        self.turn_mesh_on(&*session, until_ms, &groups)
+    }
+
+    /// Turns the mesh's keys off: every key is dropped, in memory and in the
+    /// store, with the deadline, and every packet left for the engine is
+    /// withdrawn. Returns whether the store took the delete; one it did not
+    /// take is asked again at the next engine call.
+    pub async fn mesh_off(&self) -> bool {
+        self.turn_mesh_off(&*self.reading().await)
+    }
+
     fn stall(&self) -> std::sync::MutexGuard<'_, EpochStallDetector> {
         self.epoch_stall
             .lock()
@@ -11217,6 +11594,13 @@ impl SessionManager {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn mark_caught_up_for_test(&self, group_id: &GroupId) {
         self.mark_caught_up(group_id);
+    }
+
+    /// Forgets that `group_id` is caught up, as a sweep of it that begins
+    /// does.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn forget_caught_up_for_test(&self, group_id: &GroupId) {
+        self.forget_caught_up(Some(group_id));
     }
 
     /// Waits until `group_id` is caught up in this session: on the marks
@@ -12435,12 +12819,18 @@ impl SessionManager {
     /// packages (`cgka-engine/src/key_package.rs:412-435,516-525`); they are
     /// deleted by reference instead (T-KP-EXPIRED-DELETE).
     ///
+    /// The maintenance tick's sweep of what has expired, so it also ends the
+    /// mesh keys of a deadline that has passed ([`Self::mesh_on_until`]).
+    ///
     /// # Errors
     ///
     /// Returns an error if a deletion or the write fails; the record is left
     /// as it was, so the next call retries.
     pub async fn sweep_expired_key_packages(&self, now_secs: u64) -> Result<bool> {
         let session = self.reading().await;
+        // The tick's other expiry: mesh keys whose deadline passed with no
+        // engine batch to see it (Security Rule 5).
+        self.sync_mesh_keys(&*session, &[], &[]);
         let Some(mut state) = session.key_package_lifecycle().map_err(map_mls_err)? else {
             return Ok(false);
         };
@@ -15132,6 +15522,33 @@ fn self_remove_feature_registry() -> FeatureRegistry {
     registry
 }
 
+/// What the mesh key ring reads of the engine, and all it reads.
+impl self::mesh::Held for AccountDeviceSession {
+    fn stable_epoch(&self, group_id: &GroupId) -> Option<u64> {
+        match self.epoch_state(group_id) {
+            Some(EpochState::Stable { epoch }) => Some(epoch.0),
+            _ => None,
+        }
+    }
+
+    // The fixed label (Rule 11): the secret the kind-445 outer layer is
+    // keyed by, read and never re-derived under another.
+    fn exporter(&self, group_id: &GroupId) -> Option<(u64, zeroize::Zeroizing<Vec<u8>>)> {
+        self.exporter_secret_with_epoch(group_id, DEFAULT_EXPORTER_LABEL, 32)
+            .ok()
+            .map(|(epoch, secret)| (epoch.0, secret))
+    }
+
+    fn routing_id(&self, group_id: &GroupId) -> Option<[u8; 32]> {
+        let raw = self
+            .app_component(group_id, NOSTR_ROUTING_COMPONENT_ID)
+            .ok()??;
+        cgka_traits::app_components::decode_nostr_routing_v1(&raw)
+            .ok()
+            .map(|routing| routing.nostr_group_id)
+    }
+}
+
 impl std::fmt::Debug for SessionManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SessionManager")
@@ -15207,6 +15624,13 @@ pub struct LocationToSend {
     /// Whether it may be sent now
     /// (`SessionManager::location_may_be_sent`).
     pub may_be_sent: bool,
+    /// Whether it was sealed for the mesh alone
+    /// (`Publishing::seal_for_mesh`): its send hands it to no relay.
+    pub(crate) mesh_only: bool,
+    /// What the mesh hand-off needs of the check that read this
+    /// ([`SessionManager::mesh_offer`]); `None` when it may not be sent, mesh
+    /// is off or its circle has no key.
+    mesh_turn: Option<self::mesh::Turn>,
 }
 
 /// One stored application record, as a drive reads it.

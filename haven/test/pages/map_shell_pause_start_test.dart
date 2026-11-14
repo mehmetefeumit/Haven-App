@@ -1251,7 +1251,12 @@ class _NothingToPublish implements BurstPublisher {
   void recordBurstPublishSkipped(Iterable<Circle> circles) {}
 
   @override
-  Future<void> publishInBurst(Circle circle, BurstFix fix) async {}
+  Future<void> publishInBurst(
+    Circle circle,
+    BurstFix fix, {
+    required bool received,
+    required bool meshOnly,
+  }) async {}
 }
 
 /// A burst's maintenance, with nothing due.

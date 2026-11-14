@@ -904,10 +904,13 @@ jobs:
   guards:
     name: Static checks
     runs-on: ubuntu-latest
-    # Generous against the measured few minutes, but far below GitHub's 6-hour
-    # default: a hung guard (or a baseline fetch that never returns) should
-    # surface as a bounded red, not burn a runner for the afternoon.
-    timeout-minutes: 20
+    # Far below GitHub's 6-hour default: a hung guard (or a baseline fetch that
+    # never returns) should surface as a bounded red, not burn a runner for the
+    # afternoon. 30, because the job took 17 min 04 s of a 20-minute cap on
+    # 1b5fa0e (2026-11-14) and every guard added since is a self-test more:
+    # the margin has to outlast a slow runner, or a healthy run reds at the cap
+    # with every later guard unreported.
+    timeout-minutes: 30
     steps:
       - name: Checkout
         id: checkout
@@ -1376,6 +1379,155 @@ jobs:
       - name: Publish client subscription guard self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_publish_client_no_subscription.sh --self-test
+
+      # The Bluetooth mesh meets the relay path at one call and keeps its keys
+      # in one file (docs/BLUETOOTH_MESH_PLAN.md T-INDEP-1c): under relay/ and
+      # nostr/ only nostr/mls/manager/mesh.rs names the mesh module, it reads
+      # the engine through one trait and re-exports nothing, and a location is
+      # offered to the mesh once, in publish_location, after its send-time
+      # checks and before its relay send.
+      - name: Mesh seams
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_mesh_seams.sh
+
+      # Plants the mesh module's name in a second file by each path that
+      # reaches it, a re-export, the engine's type and the session's lock in
+      # the key ring, a second hand-off and one from the FFI crate, the
+      # hand-off before each send-time check and after the relay send, and a
+      # mesh item in the pool, a receive plane and the sweep — while a comment
+      # naming all of it still passes.
+      - name: Mesh seams guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_mesh_seams.sh --self-test
+
+      # The mesh's radio reaches Rust through JNI exports that decide nothing
+      # (docs/BLUETOOTH_MESH_M3_DESIGN.md §A.6). The crate's unsafe_code deny
+      # is lifted for the file that holds them, so there the compiler checks
+      # nothing; this guard reads the file's text, as rust_builder's test
+      # every_export_is_one_guarded_call does from the Rust side, and takes
+      # in it only one-line uses and the exports pinned in
+      # fixtures/mesh_radio_exports.txt, each one call that hands its
+      # parameters on to mesh_radio.rs. There, under the deny, each call is
+      # one radio entry under the panic guard — an unwind out of an export
+      # would abort the process that also publishes to relays — and calls
+      # nothing of Java's. The deny is lifted for the log lever's file too
+      # (§N.1): it is held to its pinned count of unsafe blocks and one
+      # logger, to five functions of liblog looked up by name and never
+      # imported, and to naming nothing its logger could log, lock, allocate
+      # or panic with. In the crate's other .rs files it finds no unsafe,
+      # extern or exporting attribute, no path attribute and no include!, and
+      # lib.rs declares the three modules under their pinned attributes and
+      # names them nowhere else. A reader of text, not the compiler: it stops
+      # careless erosion and makes a deliberate one conspicuous; it does not
+      # read outside src/, nor a lint level set elsewhere. The radio's Kotlin
+      # (§B) logs nothing and holds no UUID, names its platform modes in
+      # MeshRadioConstants.kt alone, has no row in the native log allowlist,
+      # keeps its pinned JVM tests and takes the engine's signal floor; no
+      # manifest but the mesh's own names Bluetooth. MeshNative.kt is the
+      # class the exports' symbols name, and its native methods are the
+      # fixture's names and descriptors, the Kotlin side of the same pin; and
+      # the app's Gradle script reads the mesh's build flag once, for the
+      # manifest and BuildConfig both (§N.3). The radio's adapters post every
+      # platform callback through MeshLoop.kt, inside MeshThread.run — but
+      # the service's three lifecycle methods, its receiver's entry and the
+      # channel's handler, each pinned whole — name nothing that could start
+      # a pairing, and advertise the service UUID alone (§N.2.2, §M.4,
+      # §M.3). The service's start, stop, receivers, lock, alarm and taps are
+      # the pinned ones, and what it stores and shows holds no text of its
+      # own (§O.1); and, for as long as no lane proves the log lever, the
+      # channel answers none of the three methods behind it, starts no
+      # service, and no manifest declares a component of the mesh (§O.3).
+      - name: Mesh radio
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_mesh_radio.sh
+
+      # Plants unsafe, extern with and without an ABI string, no_mangle,
+      # export_name and link_section outside the three files; the deny removed
+      # and the allowance widened or moved; in the exports' file a second way
+      # to export a symbol, a function, a module, a static, a cfg, a macro, a
+      # tests module, and an export that does anything but forward its own
+      # parameters in order; an export added, missing, renamed or retyped
+      # against the fixture; a call that makes its entry bare, twice, beside
+      # something else, or makes another's; a call into Java by method or by
+      # path, a JNIEnv under a second name, state kept between calls; code
+      # under a second cfg(test) or behind the tests the guard stops at; code
+      # behind a comment opener that sits in a string, or after a character
+      # literal; a use that renames, globs, spans lines or imports the calls'
+      # module from elsewhere; a module given a path — by a macro too — a
+      # body, another condition or a second name; an include!. In the lever:
+      # an unsafe block more or fewer, an unsafe fn, a second extern fn, an
+      # extern block, a logger that could unwind into liblog; an exported
+      # symbol, a static mut, an unwrap, an allocation, a lock, a log line; a
+      # macro that formats or asserts at run time; a sixth symbol, another
+      # library, a tag; more of libc, or libc imported; the bridge reached;
+      # android_log_sys, or one of the five functions, named elsewhere. In the
+      # radio's Kotlin: a log call, one under an import alias, a UUID, a mode named in
+      # an adapter, an allowlist row, Bluetooth in a manifest of the flag-off
+      # build, a test gone, renamed or ignored, and a floor that is not the
+      # engine's. In MeshNative.kt: a method given a Kotlin body, added,
+      # renamed or retyped, one renamed for the JVM, the class renamed, moved
+      # or nested, the library not loaded or another one, and a native method
+      # in another file. In the Gradle script: the manifest merged whatever
+      # the flag, BuildConfig given its own value, the flag read from
+      # elsewhere or failing open, and a second place that reads it. In the
+      # adapters: a callback that does anything but post through the loop, or
+      # chains work behind its post, a handler of the loop's that dispatches
+      # outside the wrapper, a thread or a handler of an adapter's own, each
+      # name that could start a pairing or make an attribute readable, a dial
+      # or an answer that is not the pinned one, and a field, a setting or a
+      # second start beside the pinned advertisement. In the service: a
+      # start command, an end or a receiver's entry that is not the pinned
+      # one, a try or a lever call of its own, an input read ahead of the
+      # foreground start, the native class named outside its lambda, a stop
+      # that does not let go first or ends by another start command, a
+      # receiver not exported or registered elsewhere, a second lock, alarm,
+      # foreground start or pending intent, an exact alarm, a tap on the
+      # exported activity, a ninth stored key, the logout's marker under
+      # another key, and a notice built from anything but its stored string.
+      # For push A: the channel answering or naming a method behind the
+      # lever, reaching a service, a broadcast or a Bluetooth class, a
+      # component in the mesh's manifest, and a channel made outside the
+      # flag or a class of the mesh named outside its package.
+      - name: Mesh radio guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_mesh_radio.sh --self-test
+
+      # The check itself runs in build-check.yml, on the library each ABI's
+      # APK holds: its exported Java_* symbols against the radio's fixture and
+      # the keyring's one, and its liblog imports against the functions every
+      # Android Haven runs on has. Here, against listings a stand-in for nm
+      # prints: an export missing, unpinned, renamed or another class's; an
+      # API-30 import, plain, versioned or weak; and a path with no library,
+      # a listing that fails or is empty, a fixture with no method — each a
+      # misconfiguration, never a pass.
+      - name: Mesh radio symbols guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_mesh_radio_symbols.sh --self-test
+
+      # The check itself runs in build-check.yml, on built APKs: `off` on
+      # each ABI's, `on` on the one built with HAVEN_MESH. Here, against
+      # dumps in the shape aapt2 prints: with the flag off, a Bluetooth
+      # permission old or new, the feature, a Bluetooth broadcast, the
+      # connected-device permission or service type, a component of the
+      # mesh; with it on, an entry missing or twice, BLUETOOTH_SCAN without
+      # neverForLocation, a legacy permission past API 30, a feature that is
+      # required, anything of the mesh beside the entries, and a badging in
+      # which a Bluetooth feature is required or implied; and no aapt2, a
+      # dump or a badging that fails, is empty or is in a shape the check
+      # does not read — each a misconfiguration, never a pass.
+      - name: Mesh manifest guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_mesh_manifest.sh --self-test
+
+      # The check itself runs in build-check.yml's flag-on job, against the
+      # android.jar the app compiles with. Here, against classes a stand-in
+      # for javap prints: an integer of MeshRadioConstants.kt that is not its
+      # constant's, a comment that names another constant, a constant the
+      # SDK lacks; and no jar, no javap, a platform that is not installed —
+      # each a misconfiguration.
+      - name: Mesh radio constants guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_mesh_radio_constants.sh --self-test
 
       - name: SQLCipher logger omitted
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
@@ -2024,6 +2176,26 @@ jobs:
       - name: E2E harness self-test (permission-revocation oracle)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/run-b5-permission-revocation.sh --self-test
+
+      # Guards the Bluetooth mesh lane's oracle (docs/BLUETOOTH_MESH_M3_DESIGN.md
+      # §O.7), which is where that lane is tested at all before it has run: the
+      # three legs' passing captures, then one fixture per clause, each
+      # required to fail BY NAME — a turn-on that succeeds, a mesh component
+      # the platform knows, a method behind the log lever that answers, a
+      # Bluetooth-tagged line of Haven's that is no plant. The ones that rot
+      # silently are the UNUSABLE ones: a dump with no heading, an `am` that
+      # said nothing, markers written by another pid, a planted line under
+      # another pid, a hold that ran out — each must be rc 3, never a zero
+      # count read as a pass. And the probe must ANSWER rather than judge:
+      # Bluetooth that does not come on is rc 0 with `probe.bt_on=no`. Also
+      # pinned: the redaction that takes every Bluetooth address and the
+      # adapter's name out of what is uploaded, the dump skeleton that keeps
+      # no value, the markers the drive target and the runner share, and the
+      # gate ahead of the one echo of a drive log. About 7 s: the three legs'
+      # suites run side by side.
+      - name: E2E harness self-test (mesh lane oracle)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/run-mesh-lever.sh --self-test
 
       # Guards the B8 clock-skew lane's ANTI-VACUITY parsers. The critical
       # fixture is a servo record whose read-back drift equals the full

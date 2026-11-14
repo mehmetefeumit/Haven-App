@@ -2332,4 +2332,240 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get avatarSemanticsOffline => 'çevrimdışı';
+
+  @override
+  String get meshButtonLabel => 'Bluetooth örgü ağı';
+
+  @override
+  String get meshButtonValueConnected => 'yakındaki bir telefona bağlı';
+
+  @override
+  String get meshButtonValuePaused => 'duraklatıldı, Bluetooth kapalı';
+
+  @override
+  String get meshButtonHintTurnOn => 'açmak';
+
+  @override
+  String get meshButtonHintTurnOff => 'kapatmak';
+
+  @override
+  String get meshButtonHintStats => 'örgü ağ etkinliğini göstermek';
+
+  @override
+  String get meshTurningOn => 'Bluetooth örgü ağı açılıyor…';
+
+  @override
+  String get meshTurnOn => 'Örgü ağı aç';
+
+  @override
+  String get meshTurnOff => 'Örgü ağı kapat';
+
+  @override
+  String get meshTurnedOn =>
+      'Bluetooth örgü ağı açık. Etkinliği görmek için düğmeyi basılı tutun.';
+
+  @override
+  String get meshUndo => 'Geri al';
+
+  @override
+  String get meshErrorNoPermission =>
+      'Bluetooth örgü ağı için \"Yakındaki cihazlar\" izni gerekiyor.';
+
+  @override
+  String get meshErrorBluetoothOff =>
+      'Örgü ağı kullanmak için Bluetooth\'u açın.';
+
+  @override
+  String get meshErrorUnsupported =>
+      'Bu telefon Bluetooth örgü ağını kullanamaz.';
+
+  @override
+  String get meshErrorStartFailed =>
+      'Bluetooth örgü ağı açılamadı. Tekrar deneyin.';
+
+  @override
+  String get meshErrorStopFailed =>
+      'Bluetooth örgü ağı kapatılamadı. Tekrar deneyin.';
+
+  @override
+  String get meshStoppedNotice => 'Bluetooth örgü ağı kapandı.';
+
+  @override
+  String get meshStoppedAfterDeadline =>
+      'Bluetooth örgü ağı 12 saat sonra kapandı.';
+
+  @override
+  String get meshStoppedOk => 'Tamam';
+
+  @override
+  String get meshIntroTitle => 'Bluetooth örgü ağı';
+
+  @override
+  String get meshIntroHeadingDoes => 'Ne yapar?';
+
+  @override
+  String get meshIntroWhat =>
+      'Örgü ağ, internet olmasa bile, yakınınızda örgü ağı açık telefonlar olduğunda sizin ve çevrelerinizin şifreli konum güncellemelerini Bluetooth üzerinden telefondan telefona iletebilir. Güncellemeler gecikebilir veya kaybolabilir. Telefonunuz başkalarının şifreli paketlerini de taşır; bunları okuyamaz.';
+
+  @override
+  String get meshIntroAutoOff =>
+      'Örgü ağ 12 saat sonra kendiliğinden kapanır. Bildirimlere izin verildiyse kapanmadan 30 dakika önce bir hatırlatma alırsınız.';
+
+  @override
+  String get meshIntroBattery => 'Örgü ağ daha fazla pil kullanır.';
+
+  @override
+  String get meshIntroClosed =>
+      'Örgü ağ, Haven kapalıyken de çalışmaya devam eder. Haven kapalıyken arka planda paylaşım da kapalıysa örgü ağ başkalarının paketlerini taşır, ama siz Haven\'ı açana kadar konumunuzu göndermez ve çevrelerinizin konumlarını okumaz.';
+
+  @override
+  String get meshIntroHeadingLearn => 'Başkaları neler öğrenebilir?';
+
+  @override
+  String get meshIntroNearby =>
+      'Yakındaki herkes bu telefonda Haven\'ın örgü ağının açık olduğunu anlayabilir ve radyo sinyalinden telefonun yerini bulabilir. Telefonunuza bağlanan bir telefon, telefonunuzun Bluetooth adresi değiştikten sonra bile telefonunuzu daha sonra yeniden tanıyabilir. Konumunuzu okuyamazlar, çevrelerinizi de göremezler.';
+
+  @override
+  String get meshIntroConnected =>
+      'Telefonunuza bağlanan bir telefon, telefonunuzun hangi şifreli paketleri gönderdiğini, her birinin kabaca ne kadar eski olduğunu ve telefonunuzun ne zaman uykuda olduğunu görebilir. Çevrelerinizden birinde değilse bu paketleri okuyamaz ve hangilerinin sizin kendi güncellemeleriniz olduğundan emin olamaz.';
+
+  @override
+  String get meshIntroName =>
+      'Örgü ağın bağlantı kurduğu telefonlar, telefonunuzun Bluetooth adını okuyabilir ve telefonunuzun başka hangi Bluetooth hizmetlerini sunduğunu görebilir.';
+
+  @override
+  String meshIntroNameIs(String name) {
+    return 'Telefonunuzun Bluetooth adı: “$name”.';
+  }
+
+  @override
+  String get meshBluetoothSettings => 'Bluetooth ayarları';
+
+  @override
+  String get meshIntroBridge =>
+      'Çevrimiçi olduğunuzda telefonunuz, yakındaki bir çevre üyesinin güncellemesini çevrenizin aktarıcılarına iletebilir; onun telefonu da sizin güncellemenizi iletebilir. Bu durumda bir aktarıcı, o çevrenin bir üyesinin, güncellemeyi ileten telefonun yakınında çevrimdışı olduğunu anlayabilir. İki telefon da çevrimiçiyse aktarıcı, bunların birbirine yakın olduğunu anlayabilir.';
+
+  @override
+  String get meshIntroRemoved =>
+      'Siz çevrimdışıyken, bir çevreden çıkarılan biri, telefonunuz bu kişinin çıkarıldığını öğrenene kadar güncellemelerinizi hâlâ okuyabilir.';
+
+  @override
+  String get meshIntroHeadingKnow => 'Bilmekte fayda var';
+
+  @override
+  String get meshIntroStats =>
+      'Örgü ağın kaç güncelleme taşıdığını görmek için örgü ağ düğmesini basılı tutun.';
+
+  @override
+  String get meshNameStepTitle => 'Telefonunuzun Bluetooth adı';
+
+  @override
+  String get meshNameStepChange =>
+      'Bunu telefonunuzun Bluetooth ayarlarından değiştirebilirsiniz.';
+
+  @override
+  String get meshStatsTitle => 'Örgü ağ etkinliği';
+
+  @override
+  String get meshStatsThisSession => 'Bu oturum';
+
+  @override
+  String get meshStatsLastSession => 'Son oturum';
+
+  @override
+  String get meshStatsAllTime => 'Toplam';
+
+  @override
+  String get meshStatsFromCircles => 'Çevrelerinizden alınan';
+
+  @override
+  String get meshStatsPassedOn => 'Başkaları için iletilen';
+
+  @override
+  String meshStatsCell(String row, String column, String count) {
+    return '$row, $column: $count';
+  }
+
+  @override
+  String get meshStatsFootnote =>
+      'Bu telefon, ilettiği paketleri okuyamaz. Bu paketler arasında başkalarının güncellemeleri ve hangilerinin gerçek olduğunu gizleyen sahte paketler bulunur.';
+
+  @override
+  String get meshStatsUnavailable => 'Örgü ağ etkinliği okunamadı.';
+
+  @override
+  String get meshStatsAbout => 'Bluetooth örgü ağı hakkında';
+
+  @override
+  String get meshStatusConnected => 'Örgü ağ açık · bağlı';
+
+  @override
+  String get meshStatusSearching =>
+      'Örgü ağ açık · yakındaki telefonları bulmaya çalışıyor';
+
+  @override
+  String get meshStatusFindable =>
+      'Örgü ağ açık · diğer telefonlar bu telefonu bulabilir, ama bu telefon onları bulmaya çalışamaz';
+
+  @override
+  String get meshStatusPaused => 'Örgü ağ duraklatıldı · Bluetooth kapalı';
+
+  @override
+  String get meshStatusOff => 'Örgü ağ kapalı';
+
+  @override
+  String meshTurnsOffAt(DateTime time) {
+    final intl.DateFormat timeDateFormat = intl.DateFormat.jm(localeName);
+    final String timeString = timeDateFormat.format(time);
+
+    return 'Kapanma saati: $timeString';
+  }
+
+  @override
+  String get meshKeepOn => '12 saat açık tut';
+
+  @override
+  String get meshStatsReset => 'Sayaçları sıfırla';
+
+  @override
+  String get meshStatsResetTitle => 'Örgü ağ sayaçları sıfırlansın mı?';
+
+  @override
+  String get meshStatsResetBody => 'Dört sayacın tümü sıfıra döner.';
+
+  @override
+  String get meshStatsResetConfirm => 'Sıfırla';
+
+  @override
+  String get settingsMeshTitle => 'Bluetooth örgü ağı';
+
+  @override
+  String get settingsMeshOn => 'Açık';
+
+  @override
+  String get settingsMeshOff => 'Kapalı';
+
+  @override
+  String get meshNoticeChannel => 'Bluetooth örgü ağı';
+
+  @override
+  String get meshNoticeOn => 'Bluetooth örgü ağı açık';
+
+  @override
+  String get meshNoticePaused =>
+      'Bluetooth örgü ağı duraklatıldı — Bluetooth kapalı';
+
+  @override
+  String get meshNoticeStopped => 'Bluetooth örgü ağı kapandı';
+
+  @override
+  String meshNoticeReminder(DateTime time) {
+    final intl.DateFormat timeDateFormat = intl.DateFormat.jm(localeName);
+    final String timeString = timeDateFormat.format(time);
+
+    return 'Bluetooth örgü ağının kapanma saati: $timeString';
+  }
+
+  @override
+  String get meshNoticeKeepOn => 'Açık tut';
 }

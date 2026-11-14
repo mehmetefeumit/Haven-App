@@ -2241,6 +2241,7 @@ async fn a_heal_restores_the_pass_through_whatever_was_wrong() {
         Fault::Unanswering,
         Fault::WithholdEose,
         Fault::RefusesNegentropy,
+        Fault::WithholdNegentropy,
         Fault::Down,
     ] {
         plane.apply(fault).await.expect("the fault applies");
@@ -3639,8 +3640,10 @@ async fn a_relay_refusing_negentropy_forwards_nothing_and_answers_unknown_cmd() 
         ledger.neg_total(NegFrame::Open) == 0 && ledger.neg_total(NegFrame::RelayMessage) == 0,
         "nothing of the session reached the relay"
     );
+    // Ledgered after it is written: the pool can have read it first.
     assert!(
-        ledger.notices() == vec![NEG_REFUSAL.to_string()],
+        reaching(WIRE_BOUND, 1, || ledger.notices().len()).await == 1
+            && ledger.notices() == vec![NEG_REFUSAL.to_string()],
         "the answer is strfry's text with NIP-77 off"
     );
 
@@ -3652,5 +3655,41 @@ async fn a_relay_refusing_negentropy_forwards_nothing_and_answers_unknown_cmd() 
     assert!(
         ledger.neg_total(NegFrame::Open) == 1,
         "the healed opening is counted"
+    );
+}
+
+/// The pool closes only a session it finished (`nostr-relay-pool` 0.44.3
+/// `relay/inner.rs`, `handle_neg_msg`): one it gave up at its negotiation
+/// wait leaves a `NEG-OPEN` on the wire and never a `NEG-CLOSE`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_relay_withholding_negentropy_answers_leaves_a_session_the_client_never_closes() {
+    let mut plane = plane().await;
+    plane
+        .apply(Fault::WithholdNegentropy)
+        .await
+        .expect("the fault applies");
+    let client = connected_client(&plane).await;
+
+    assert!(
+        neg_session(&client, &plane).await.is_err(),
+        "the pool gives up a session whose answer never comes"
+    );
+    let ledger = plane.ledger().clone();
+    assert!(
+        ledger.neg_total(NegFrame::Open) == 1 && ledger.neg_total(NegFrame::RelayMessage) == 0,
+        "the opening reached the relay, and its answer no client"
+    );
+
+    plane.apply(Fault::Heal).await.expect("the heal applies");
+    assert!(
+        neg_session(&client, &plane).await.is_ok(),
+        "a healed plane answers the next session"
+    );
+    // The second session's close follows on the socket anything the first
+    // sent: one close for two openings is the first never closed.
+    assert!(
+        reaching(WIRE_BOUND, 1, || ledger.neg_total(NegFrame::Close)).await == 1
+            && ledger.neg_total(NegFrame::Open) == 2,
+        "a session the pool gave up is never closed on the wire"
     );
 }

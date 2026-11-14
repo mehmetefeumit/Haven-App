@@ -6,7 +6,8 @@ A run builds real devices — real MLS stores behind real `LiveSyncCore` engines
 talking to a real in-process relay over a real socket — applies a seeded
 schedule of faults to them, and grades what survives. Nothing about the subject
 is mocked. The only doubles are the *environment*: the relay plane, the timeline
-and the log drain, which is why those three are traits.
+and the log drain, which is why those three are traits — and, for the two
+Bluetooth-mesh scenarios, the radio between the devices' mesh engines.
 
 ## Running it
 
@@ -108,6 +109,21 @@ A restart therefore takes the core OUT and drops it, then takes the manager out
 and drops it, and only then waits — bounded — for the registry to say the
 session is free. A timeout there is `SessionStillLive`: the rig leaked a handle
 (rc 2), never a silent pass.
+
+## The mesh plane
+
+`rig/mesh.rs` gives every device the product's own mesh engine and stands in
+for the radio: a scenario says which devices are in range, a frame an engine
+hands its radio reaches the peer whole and at once, and before every engine
+call the plane applies what the device's session left in its hand-off, by the
+app's own rule (an offer lives as long as its event has left, at most a
+location's life; an expired one empties the slot). The engines' clock is a
+number the scenario steps — an emission slot is reached, never waited for —
+and every engine's generator is seeded from the run's seed, so over the same
+packets one seed carries the same frames in the same order (the plane's own
+test). A world's packets are never the same twice — fresh events, nonces
+from the OS generator — so a seed does not reproduce what a world's mesh
+carried. S27 and S28 are its two users.
 
 ## Two clocks, one direction
 

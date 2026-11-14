@@ -2605,5 +2605,302 @@
   "avatarSemanticsOffline": "offline",
   "@avatarSemanticsOffline": {
     "description": "Screen-reader fragment: the user is currently offline (avatar online indicator)."
+  },
+
+  "meshButtonLabel": "Bluetooth mesh",
+  "@meshButtonLabel": {
+    "description": "Screen-reader name of the mesh button on the map. The button's state (on or off) is read by the screen reader itself, so it is not in this text. 'Bluetooth' is a technology name: write it the way Android's own interface writes it in this language."
+  },
+  "meshButtonValueConnected": "connected to a nearby phone",
+  "@meshButtonValueConnected": {
+    "description": "Read by a screen reader together with the mesh button's name and its 'on' state (on Android before the name, so it must stand on its own), while at least one nearby phone is connected. A fragment: lower case, no full stop. No count is given."
+  },
+  "meshButtonValuePaused": "paused, Bluetooth is off",
+  "@meshButtonValuePaused": {
+    "description": "Read by a screen reader together with the mesh button's name and its 'on' state (on Android before the name, so it must stand on its own), while mesh is on but waiting because the phone's Bluetooth is switched off. A fragment: lower case, no full stop."
+  },
+  "meshButtonHintTurnOn": "turn on",
+  "@meshButtonHintTurnOn": {
+    "description": "Screen-reader hint for tapping the mesh button while mesh is off; in English it is read as 'double tap to turn on'. A fragment that fits the screen reader's own 'double-tap to …' template in this language: lower case, no full stop; in some languages the verb comes last."
+  },
+  "meshButtonHintTurnOff": "turn off",
+  "@meshButtonHintTurnOff": {
+    "description": "Screen-reader hint for tapping the mesh button while mesh is on; in English it is read as 'double tap to turn off'. A fragment that fits the screen reader's own 'double-tap to …' template in this language: lower case, no full stop; in some languages the verb comes last."
+  },
+  "meshButtonHintStats": "show mesh activity",
+  "@meshButtonHintStats": {
+    "description": "Screen-reader hint for pressing and holding the mesh button, which opens the mesh activity sheet; in English it is read as 'double tap and hold to show mesh activity'. A fragment that fits the screen reader's own 'double-tap and hold to …' template in this language: lower case, no full stop; in some languages the verb comes last."
+  },
+  "meshTurningOn": "Turning on Bluetooth mesh…",
+  "@meshTurningOn": {
+    "description": "Read out once by a screen reader while the Bluetooth mesh is being turned on and the button shows a progress mark. Not shown as text."
+  },
+  "meshTurnOn": "Turn on",
+  "@meshTurnOn": {
+    "description": "Button that turns the Bluetooth mesh on: on the mesh explanation sheet, on the Bluetooth-name step, in the mesh activity sheet and on the 'Bluetooth mesh turned off' notice. A button label: keep it short."
+  },
+  "meshTurnOff": "Turn off",
+  "@meshTurnOff": {
+    "description": "Button in the mesh activity sheet that turns the Bluetooth mesh off. A button label: keep it short."
+  },
+  "meshTurnedOn": "Bluetooth mesh is on. Press and hold the button to see activity.",
+  "@meshTurnedOn": {
+    "description": "Brief message shown on the map when the user has just turned the Bluetooth mesh on from the mesh button, beside the 'Undo' action. 'The button' is the mesh button the user just tapped. Say 'press and hold' with the words this language's phones use for a long press."
+  },
+  "meshUndo": "Undo",
+  "@meshUndo": {
+    "description": "Action on the 'Bluetooth mesh is on' message: turns the mesh off again. One short word where the language allows."
+  },
+  "meshErrorNoPermission": "Bluetooth mesh needs the Nearby devices permission.",
+  "@meshErrorNoPermission": {
+    "description": "Message shown when the Bluetooth mesh could not be turned on because Android's 'Nearby devices' permission was refused. Use the name Android shows for that permission in this language."
+  },
+  "meshErrorBluetoothOff": "Turn on Bluetooth to use mesh.",
+  "@meshErrorBluetoothOff": {
+    "description": "Message shown when the Bluetooth mesh could not be turned on because the phone's Bluetooth is switched off. The 'Bluetooth settings' button follows it."
+  },
+  "meshErrorUnsupported": "This phone can't use Bluetooth mesh.",
+  "@meshErrorUnsupported": {
+    "description": "Message shown when the Bluetooth mesh could not be turned on because the phone's Bluetooth hardware cannot do what mesh needs. The mesh button is then removed."
+  },
+  "meshErrorStartFailed": "Couldn't turn Bluetooth mesh on. Try again.",
+  "@meshErrorStartFailed": {
+    "description": "Message shown when the Bluetooth mesh could not be turned on for a reason the app does not explain. No technical detail is shown."
+  },
+  "meshErrorStopFailed": "Couldn't turn Bluetooth mesh off. Try again.",
+  "@meshErrorStopFailed": {
+    "description": "Message shown when the Bluetooth mesh could not be turned off. No technical detail is shown."
+  },
+  "meshStoppedNotice": "Bluetooth mesh turned off.",
+  "@meshStoppedNotice": {
+    "description": "Notice shown beside the mesh button, and read out by a screen reader, when the Bluetooth mesh was turned off by something other than the user and the app does not know what: for example its permission was taken away or its service stopped. Followed by 'Turn on' and 'OK' buttons. It names no cause; do not add one."
+  },
+  "meshStoppedAfterDeadline": "Bluetooth mesh turned off after 12 hours.",
+  "@meshStoppedAfterDeadline": {
+    "description": "Notice shown beside the mesh button, and read out by a screen reader, when the Bluetooth mesh turned itself off because its twelve hours ran out. Followed by 'Turn on' and 'OK' buttons."
+  },
+  "meshStoppedOk": "OK",
+  "@meshStoppedOk": {
+    "description": "Button on the 'Bluetooth mesh turned off' notice, beside 'Turn on', and the closing button of the mesh's brief messages: the user has seen it and it goes away; nothing else happens. It must not be a word that could be read as 'turn off' or 'close the mesh'. One short word, the language's usual acknowledgement on a button."
+  },
+  "meshIntroTitle": "Bluetooth mesh",
+  "@meshIntroTitle": {
+    "description": "Title of the sheet that explains the Bluetooth mesh before it is first turned on. 'Bluetooth' is a technology name: write it the way Android's own interface writes it in this language. After this title the sheet says just 'mesh'."
+  },
+  "meshIntroHeadingDoes": "What it does",
+  "@meshIntroHeadingDoes": {
+    "description": "First of three short headings in the mesh explanation sheet, over the paragraphs on what mesh does. 'It' is the Bluetooth mesh. Keep it to a few words."
+  },
+  "meshIntroWhat": "Even with no internet, mesh can pass your encrypted location updates, and your circles', from phone to phone over Bluetooth when phones with mesh on are nearby. Updates can be late or lost. Your phone also carries other people's encrypted packets, which it can't read.",
+  "@meshIntroWhat": {
+    "description": "Paragraph of the mesh explanation sheet: what the Bluetooth mesh does. It must not promise delivery: say 'can', keep 'late or lost'. 'Circles' are the user's Haven groups; the updates are the user's own and those of the members of their circles. 'Updates' are location updates; 'packets' are what phones carry for each other: keep the two words apart throughout."
+  },
+  "meshIntroAutoOff": "Mesh turns itself off after 12 hours. If notifications are allowed, you get a reminder 30 minutes before.",
+  "@meshIntroAutoOff": {
+    "description": "Paragraph of the mesh explanation sheet: mesh switches itself off twelve hours after it was turned on or kept on, with a reminder notification half an hour earlier."
+  },
+  "meshIntroBattery": "Mesh uses more battery.",
+  "@meshIntroBattery": {
+    "description": "Paragraph of the mesh explanation sheet: a battery note. No figure is given because none has been measured; do not add one."
+  },
+  "meshIntroClosed": "Mesh keeps running when Haven is closed. With Haven closed and background sharing off, it carries other people's packets but doesn't send your location or read your circles' locations until you open Haven.",
+  "@meshIntroClosed": {
+    "description": "Paragraph of the mesh explanation sheet: what mesh does while the app is not open. 'Background sharing' is the app's existing setting of that name; use the same words as the Location settings page. 'Haven' is the app's name, intentionally English."
+  },
+  "meshIntroHeadingLearn": "What others can learn",
+  "@meshIntroHeadingLearn": {
+    "description": "Second of three short headings in the mesh explanation sheet, over the paragraphs on what other phones and the relays can find out. Keep it to a few words."
+  },
+  "meshIntroNearby": "Anyone nearby can tell that this phone has Haven's mesh on, and can locate it from its radio signal. A phone that connects to yours can recognise your phone again later, even after your phone's Bluetooth address changes. They can't read your location or see your circles.",
+  "@meshIntroNearby": {
+    "description": "Paragraph of the mesh explanation sheet: what anyone within radio range learns, and that a phone which connects can tell it is the same phone again later. A privacy disclosure; keep all three sentences and do not soften them. 'Haven' is the app's name, intentionally English."
+  },
+  "meshIntroConnected": "A phone that connects to yours can see which encrypted packets your phone sends out, roughly how old each is, and when your phone is asleep. Unless it's in one of your circles, it can't read them, and can't be sure which are your own updates.",
+  "@meshIntroConnected": {
+    "description": "Paragraph of the mesh explanation sheet: what a phone that links to this one over Bluetooth learns. A privacy disclosure; keep every clause. 'can't be sure' is deliberate: it may guess, so do not strengthen it to 'can't tell'."
+  },
+  "meshIntroName": "Phones that mesh connects with can read your phone's Bluetooth name and see which other Bluetooth services it offers.",
+  "@meshIntroName": {
+    "description": "Paragraph of the mesh explanation sheet and of the Bluetooth-name step: the phone's Bluetooth name is readable by linked phones. 'connects with' covers both a phone that connects to this one and a phone this one connects to; do not narrow it to one direction."
+  },
+  "meshIntroNameIs": "Your phone's Bluetooth name is “{name}”.",
+  "@meshIntroNameIs": {
+    "description": "Shown under meshIntroName in the mesh explanation sheet when the phone's Bluetooth name can be read. {name} is the name the user gave their phone in the system's Bluetooth settings, shown exactly as it is; put it inside the quotation marks this language uses.",
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "meshBluetoothSettings": "Bluetooth settings",
+  "@meshBluetoothSettings": {
+    "description": "Button that opens the system's Bluetooth settings, where the phone's Bluetooth name is changed and Bluetooth is switched on. Shown in the mesh explanation sheet, on the Bluetooth-name step, after 'Turn on Bluetooth to use mesh.' and in the mesh activity sheet while mesh is paused. A button label: keep it short."
+  },
+  "meshIntroBridge": "When you're online, your phone can pass a nearby circle member's update on to your circle's relays, and theirs can pass on yours. A relay can then tell that a member of that circle is offline near the phone that passed it on. If both phones are online, it can tell they are near each other.",
+  "@meshIntroBridge": {
+    "description": "Paragraph of the mesh explanation sheet: a phone that is online forwards an offline circle member's update to the internet relays, and what a relay learns from that. 'Relays' are the Nostr servers Haven sends through; use the word the app already uses for them. A privacy disclosure; keep all three sentences."
+  },
+  "meshIntroRemoved": "While you're offline, someone removed from a circle can still read your updates until your phone learns they were removed.",
+  "@meshIntroRemoved": {
+    "description": "Paragraph of the mesh explanation sheet: a removed circle member keeps reading mesh updates until this phone has been online again. A privacy disclosure; do not soften it."
+  },
+  "meshIntroHeadingKnow": "Good to know",
+  "@meshIntroHeadingKnow": {
+    "description": "Third of three short headings in the mesh explanation sheet, over the paragraph on where to see what mesh has done. Keep it to a few words."
+  },
+  "meshIntroStats": "Press and hold the mesh button to see how many updates it has carried.",
+  "@meshIntroStats": {
+    "description": "Last paragraph of the mesh explanation sheet: a long press on the mesh button on the map opens the mesh activity sheet. Say 'press and hold' with the words this language's phones use for a long press."
+  },
+  "meshNameStepTitle": "Your phone's Bluetooth name",
+  "@meshNameStepTitle": {
+    "description": "Title of the step shown the first time mesh is turned on, once the app may read the phone's Bluetooth name. The name itself is shown in large type right under this title, so the title must read naturally as a caption for it. Keep it short: at large text sizes it shares a small dialog with the name."
+  },
+  "meshNameStepChange": "You can change it in your phone's Bluetooth settings.",
+  "@meshNameStepChange": {
+    "description": "Line on the Bluetooth-name step, above the 'Bluetooth settings' button. 'It' is the phone's Bluetooth name."
+  },
+  "meshStatsTitle": "Mesh activity",
+  "@meshStatsTitle": {
+    "description": "Title of the sheet that shows what the Bluetooth mesh has done. A screen reader also reads it as the name of the action that opens the sheet from the mesh button. A short noun phrase: at large text sizes a longer title takes a third of a small screen."
+  },
+  "meshStatsThisSession": "This session",
+  "@meshStatsThisSession": {
+    "description": "Caption under a count in the mesh activity sheet while mesh is on: the count since mesh was last turned on. Shown twice, in a half-width column; keep it short."
+  },
+  "meshStatsLastSession": "Last session",
+  "@meshStatsLastSession": {
+    "description": "Caption under a count in the mesh activity sheet while mesh is off: the count from the last time mesh was on, kept until it is turned on again. Takes the place of 'This session'. Shown twice, in a half-width column; keep it short."
+  },
+  "meshStatsAllTime": "All time",
+  "@meshStatsAllTime": {
+    "description": "Caption under a count in the mesh activity sheet: the running total on this phone for this identity, since the counts were last reset. It is not the time since the app was installed: logging out, or 'Reset counts', starts it again. Shown twice, in a half-width column; keep it short."
+  },
+  "meshStatsFromCircles": "Received from your circles",
+  "@meshStatsFromCircles": {
+    "description": "Row heading in the mesh activity sheet: how many location updates from members of the user's circles reached this phone through the mesh."
+  },
+  "meshStatsPassedOn": "Passed on for others",
+  "@meshStatsPassedOn": {
+    "description": "Row heading in the mesh activity sheet: how many encrypted packets this phone carried for other people and handed to another phone."
+  },
+  "meshStatsCell": "{row}, {column}: {count}",
+  "@meshStatsCell": {
+    "description": "Screen-reader label of one count in the mesh activity sheet, e.g. 'Received from your circles, This session: 12'. {row} is meshStatsFromCircles or meshStatsPassedOn, {column} is meshStatsThisSession, meshStatsLastSession or meshStatsAllTime, {count} is the number already formatted for the language. Reorder the three parts if the language reads better another way.",
+    "placeholders": {
+      "row": {
+        "type": "String"
+      },
+      "column": {
+        "type": "String"
+      },
+      "count": {
+        "type": "String"
+      }
+    }
+  },
+  "meshStatsFootnote": "Passed-on packets can't be read by this phone. They include other people's updates and decoy packets that hide which ones are real.",
+  "@meshStatsFootnote": {
+    "description": "Footnote under the counts in the mesh activity sheet. 'Decoy packets' are empty packets sent so that an observer cannot tell real updates from them."
+  },
+  "meshStatsUnavailable": "Couldn't read mesh activity.",
+  "@meshStatsUnavailable": {
+    "description": "Shown in the mesh activity sheet in place of the counts when they could not be read. No technical detail is shown; a 'Retry' button follows it."
+  },
+  "meshStatsAbout": "About Bluetooth mesh",
+  "@meshStatsAbout": {
+    "description": "Button at the bottom of the mesh activity sheet that opens the mesh explanation sheet again. 'Bluetooth' is a technology name: write it the way Android's own interface writes it in this language."
+  },
+  "meshStatusConnected": "Mesh is on · connected",
+  "@meshStatusConnected": {
+    "description": "Status line of the mesh activity sheet: mesh is on and at least one nearby phone is connected. The middle dot separates the state from its detail; keep a separator natural to the language."
+  },
+  "meshStatusSearching": "Mesh is on · looking for nearby phones",
+  "@meshStatusSearching": {
+    "description": "Status line of the mesh activity sheet: mesh is on and no nearby phone is connected yet."
+  },
+  "meshStatusFindable": "Mesh is on · other phones can find this one, but it can't look for them",
+  "@meshStatusFindable": {
+    "description": "Status line of the mesh activity sheet: mesh is on and other phones can find this phone, but this phone is not allowed to search for them. 'It' is this phone."
+  },
+  "meshStatusPaused": "Mesh is paused · Bluetooth is off",
+  "@meshStatusPaused": {
+    "description": "Status line of the mesh activity sheet: mesh is on but waiting because the phone's Bluetooth is switched off. The 'Bluetooth settings' button follows it."
+  },
+  "meshStatusOff": "Mesh is off",
+  "@meshStatusOff": {
+    "description": "Status line of the mesh activity sheet: mesh is off."
+  },
+  "meshTurnsOffAt": "Turns off at {time}",
+  "@meshTurnsOffAt": {
+    "description": "Line in the mesh activity sheet under the status line: when mesh will switch itself off. {time} is that moment, which the app shows as a short clock time in the language's own form, e.g. '3:15 PM' or '15:15'.",
+    "placeholders": {
+      "time": {
+        "type": "DateTime",
+        "format": "jm"
+      }
+    }
+  },
+  "meshKeepOn": "Keep on for 12 hours",
+  "@meshKeepOn": {
+    "description": "Button in the mesh activity sheet that restarts the twelve hours after which mesh switches itself off, counted from now."
+  },
+  "meshStatsReset": "Reset counts",
+  "@meshStatsReset": {
+    "description": "Button in the mesh activity sheet that sets all four counts back to zero, after a confirmation."
+  },
+  "meshStatsResetTitle": "Reset mesh counts?",
+  "@meshStatsResetTitle": {
+    "description": "Title of the confirmation dialog shown before the mesh activity counts are reset."
+  },
+  "meshStatsResetBody": "All four counts go back to zero.",
+  "@meshStatsResetBody": {
+    "description": "Body of the confirmation dialog shown before the mesh activity counts are reset."
+  },
+  "meshStatsResetConfirm": "Reset",
+  "@meshStatsResetConfirm": {
+    "description": "Confirming button of the dialog that resets the mesh activity counts. One short word where the language allows."
+  },
+  "settingsMeshTitle": "Bluetooth mesh",
+  "@settingsMeshTitle": {
+    "description": "Title of the row on the Settings page that opens the mesh activity sheet. 'Bluetooth' is a technology name: write it the way Android's own interface writes it in this language."
+  },
+  "settingsMeshOn": "On",
+  "@settingsMeshOn": {
+    "description": "Subtitle of the Bluetooth mesh row on the Settings page while mesh is on (including while it is paused because Bluetooth is off)."
+  },
+  "settingsMeshOff": "Off",
+  "@settingsMeshOff": {
+    "description": "Subtitle of the Bluetooth mesh row on the Settings page while mesh is off."
+  },
+  "meshNoticeChannel": "Bluetooth mesh",
+  "@meshNoticeChannel": {
+    "description": "Name of the Android notification channel that carries the Bluetooth mesh's notifications; Android shows it in the app's notification settings."
+  },
+  "meshNoticeOn": "Bluetooth mesh is on",
+  "@meshNoticeOn": {
+    "description": "One-line text of the ongoing Android notification shown while the Bluetooth mesh is on. Notification text: one line, no full stop."
+  },
+  "meshNoticePaused": "Bluetooth mesh is paused — Bluetooth is off",
+  "@meshNoticePaused": {
+    "description": "One-line text of the ongoing Android notification shown while mesh is on but waiting because Bluetooth is switched off. Also read out by a screen reader when that happens while the app is open. Notification text: one line, no full stop."
+  },
+  "meshNoticeStopped": "Bluetooth mesh has turned off",
+  "@meshNoticeStopped": {
+    "description": "One-line text of the Android notification shown when the Bluetooth mesh turned itself off. Notification text: one line, no full stop."
+  },
+  "meshNoticeReminder": "Bluetooth mesh turns off at {time}",
+  "@meshNoticeReminder": {
+    "description": "One-line text of the Android notification shown half an hour before mesh switches itself off. {time} is that moment, which the app shows as a short clock time in the language's own form, e.g. '3:15 PM' or '15:15'. Notification text: one line, no full stop.",
+    "placeholders": {
+      "time": {
+        "type": "DateTime",
+        "format": "jm"
+      }
+    }
+  },
+  "meshNoticeKeepOn": "Keep on",
+  "@meshNoticeKeepOn": {
+    "description": "Action button on the 'turns off at' notification: restarts the twelve hours. A notification action: one or two short words."
   }
 }

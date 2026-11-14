@@ -135,9 +135,34 @@ abstract interface class CircleChangeDriver {
   });
 
   /// Sends a location [sealLocation] sealed, once, to the relays its record
-  /// names, and ends its record whatever was answered.
+  /// names, and ends its record whatever was answered; one
+  /// [sealLocationForMesh] sealed goes to the Bluetooth mesh and to no relay.
+  /// With the mesh on, a send to the relays also leaves the sealed event for
+  /// the mesh, and then passes on to the relays that took it what fellow
+  /// members of the circle sent by mesh alone — only when [received].
+  ///
+  /// [received] is the caller's word that THIS drive's relay receive of the
+  /// circle was answered to the end before this call. `true` only where a
+  /// typed outcome of that receive says so; `false` everywhere else, or a
+  /// member removed by a commit this device has not fetched could read an
+  /// offline member's fix from the relays.
   Future<LocationPublishFfi> publishLocation({
     required CircleManagerFfi circle,
     required SealedLocationFfi sealed,
+    required bool received,
   });
+
+  /// Seals a fix for the Bluetooth mesh alone: [publishLocation] then hands
+  /// it to the mesh and to no relay. Calls no relay and drives nothing, and
+  /// seals nothing unless the mesh is on.
+  Future<SealOutcomeFfi> sealLocationForMesh({
+    required CircleManagerFfi circle,
+    required List<int> mlsGroupId,
+    required double latitude,
+    required double longitude,
+  });
+
+  /// Takes in what the Bluetooth mesh received. Calls no relay and changes
+  /// nothing a relay is asked; with the mesh off, nothing.
+  Future<MeshDriveFfi> meshDrive({required CircleManagerFfi circle});
 }

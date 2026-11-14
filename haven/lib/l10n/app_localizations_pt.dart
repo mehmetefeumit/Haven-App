@@ -2373,4 +2373,241 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get avatarSemanticsOffline => 'off-line';
+
+  @override
+  String get meshButtonLabel => 'Rede mesh Bluetooth';
+
+  @override
+  String get meshButtonValueConnected => 'conectada a um telefone por perto';
+
+  @override
+  String get meshButtonValuePaused => 'pausada, o Bluetooth está desativado';
+
+  @override
+  String get meshButtonHintTurnOn => 'ativar';
+
+  @override
+  String get meshButtonHintTurnOff => 'desativar';
+
+  @override
+  String get meshButtonHintStats => 'mostrar a atividade da rede mesh';
+
+  @override
+  String get meshTurningOn => 'Ativando a rede mesh Bluetooth…';
+
+  @override
+  String get meshTurnOn => 'Ativar';
+
+  @override
+  String get meshTurnOff => 'Desativar';
+
+  @override
+  String get meshTurnedOn =>
+      'A rede mesh Bluetooth está ativada. Mantenha o botão pressionado para ver a atividade.';
+
+  @override
+  String get meshUndo => 'Desfazer';
+
+  @override
+  String get meshErrorNoPermission =>
+      'A rede mesh Bluetooth precisa da permissão \"Dispositivos por perto\".';
+
+  @override
+  String get meshErrorBluetoothOff =>
+      'Ative o Bluetooth para usar a rede mesh.';
+
+  @override
+  String get meshErrorUnsupported =>
+      'Este telefone não consegue usar a rede mesh Bluetooth.';
+
+  @override
+  String get meshErrorStartFailed =>
+      'Não foi possível ativar a rede mesh Bluetooth. Tente de novo.';
+
+  @override
+  String get meshErrorStopFailed =>
+      'Não foi possível desativar a rede mesh Bluetooth. Tente de novo.';
+
+  @override
+  String get meshStoppedNotice => 'A rede mesh Bluetooth foi desativada.';
+
+  @override
+  String get meshStoppedAfterDeadline =>
+      'A rede mesh Bluetooth foi desativada depois de 12 horas.';
+
+  @override
+  String get meshStoppedOk => 'OK';
+
+  @override
+  String get meshIntroTitle => 'Rede mesh Bluetooth';
+
+  @override
+  String get meshIntroHeadingDoes => 'O que ela faz';
+
+  @override
+  String get meshIntroWhat =>
+      'Mesmo sem internet, a rede mesh pode passar as suas atualizações de localização criptografadas, e as dos seus círculos, de telefone em telefone por Bluetooth quando há telefones com a rede mesh ativada por perto. As atualizações podem atrasar ou se perder. Seu telefone também transporta pacotes criptografados de outras pessoas, que ele não consegue ler.';
+
+  @override
+  String get meshIntroAutoOff =>
+      'A rede mesh se desativa sozinha depois de 12 horas. Se as notificações estiverem permitidas, você recebe um lembrete 30 minutos antes.';
+
+  @override
+  String get meshIntroBattery => 'A rede mesh usa mais bateria.';
+
+  @override
+  String get meshIntroClosed =>
+      'A rede mesh continua funcionando quando o Haven está fechado. Com o Haven fechado e o compartilhamento em segundo plano desativado, ela transporta pacotes de outras pessoas, mas não envia a sua localização nem lê as localizações dos seus círculos até você abrir o Haven.';
+
+  @override
+  String get meshIntroHeadingLearn => 'O que os outros podem descobrir';
+
+  @override
+  String get meshIntroNearby =>
+      'Qualquer pessoa por perto pode saber que este telefone está com a rede mesh do Haven ativada e pode localizá-lo pelo sinal de rádio dele. Um telefone que se conecta ao seu pode reconhecê-lo de novo mais tarde, mesmo depois que o endereço Bluetooth do seu telefone mudar. Nenhum deles consegue ler sua localização nem ver seus círculos.';
+
+  @override
+  String get meshIntroConnected =>
+      'Um telefone que se conecta ao seu pode ver quais pacotes criptografados o seu telefone envia, a idade aproximada de cada um e quando o seu telefone está em repouso. A menos que esteja em um dos seus círculos, ele não consegue lê-los e não pode ter certeza de quais são as suas próprias atualizações.';
+
+  @override
+  String get meshIntroName =>
+      'Os telefones com os quais a rede mesh se conecta podem ler o nome Bluetooth do seu telefone e ver quais outros serviços Bluetooth ele oferece.';
+
+  @override
+  String meshIntroNameIs(String name) {
+    return 'O nome Bluetooth do seu telefone é “$name”.';
+  }
+
+  @override
+  String get meshBluetoothSettings => 'Configurações do Bluetooth';
+
+  @override
+  String get meshIntroBridge =>
+      'Quando você está on-line, seu telefone pode repassar aos relays do seu círculo a atualização de um membro do círculo que esteja por perto, e o telefone dele pode repassar a sua. Com isso, um relay pode saber que um membro desse círculo está off-line perto do telefone que repassou a atualização. Se os dois telefones estiverem on-line, ele pode saber que estão perto um do outro.';
+
+  @override
+  String get meshIntroRemoved =>
+      'Enquanto você está off-line, alguém que foi removido de um círculo ainda consegue ler suas atualizações até o seu telefone ficar sabendo que essa pessoa foi removida.';
+
+  @override
+  String get meshIntroHeadingKnow => 'Bom saber';
+
+  @override
+  String get meshIntroStats =>
+      'Mantenha o botão da rede mesh pressionado para ver quantas atualizações ela transportou.';
+
+  @override
+  String get meshNameStepTitle => 'Nome Bluetooth do seu telefone';
+
+  @override
+  String get meshNameStepChange =>
+      'Você pode alterá-lo nas configurações do Bluetooth do seu telefone.';
+
+  @override
+  String get meshStatsTitle => 'Atividade da rede mesh';
+
+  @override
+  String get meshStatsThisSession => 'Esta sessão';
+
+  @override
+  String get meshStatsLastSession => 'Última sessão';
+
+  @override
+  String get meshStatsAllTime => 'Total';
+
+  @override
+  String get meshStatsFromCircles => 'Atualizações recebidas dos seus círculos';
+
+  @override
+  String get meshStatsPassedOn => 'Pacotes repassados para outras pessoas';
+
+  @override
+  String meshStatsCell(String row, String column, String count) {
+    return '$row, $column: $count';
+  }
+
+  @override
+  String get meshStatsFootnote =>
+      'Este telefone não consegue ler os pacotes repassados. Eles incluem atualizações de outras pessoas e pacotes de disfarce que escondem quais são os verdadeiros.';
+
+  @override
+  String get meshStatsUnavailable =>
+      'Não foi possível ler a atividade da rede mesh.';
+
+  @override
+  String get meshStatsAbout => 'Sobre a rede mesh Bluetooth';
+
+  @override
+  String get meshStatusConnected => 'A rede mesh está ativada · conectada';
+
+  @override
+  String get meshStatusSearching =>
+      'A rede mesh está ativada · procurando telefones por perto';
+
+  @override
+  String get meshStatusFindable =>
+      'A rede mesh está ativada · outros telefones podem encontrar este, mas ele não pode procurá-los';
+
+  @override
+  String get meshStatusPaused =>
+      'A rede mesh está pausada · o Bluetooth está desativado';
+
+  @override
+  String get meshStatusOff => 'A rede mesh está desativada';
+
+  @override
+  String meshTurnsOffAt(DateTime time) {
+    final intl.DateFormat timeDateFormat = intl.DateFormat.jm(localeName);
+    final String timeString = timeDateFormat.format(time);
+
+    return 'Será desativada às $timeString';
+  }
+
+  @override
+  String get meshKeepOn => 'Manter ativada por 12 horas';
+
+  @override
+  String get meshStatsReset => 'Zerar contadores';
+
+  @override
+  String get meshStatsResetTitle => 'Zerar os contadores da rede mesh?';
+
+  @override
+  String get meshStatsResetBody => 'Os quatro contadores voltam a zero.';
+
+  @override
+  String get meshStatsResetConfirm => 'Zerar';
+
+  @override
+  String get settingsMeshTitle => 'Rede mesh Bluetooth';
+
+  @override
+  String get settingsMeshOn => 'Ativada';
+
+  @override
+  String get settingsMeshOff => 'Desativada';
+
+  @override
+  String get meshNoticeChannel => 'Rede mesh Bluetooth';
+
+  @override
+  String get meshNoticeOn => 'Rede mesh Bluetooth ativada';
+
+  @override
+  String get meshNoticePaused => 'Rede mesh pausada — Bluetooth desativado';
+
+  @override
+  String get meshNoticeStopped => 'Rede mesh Bluetooth desativada';
+
+  @override
+  String meshNoticeReminder(DateTime time) {
+    final intl.DateFormat timeDateFormat = intl.DateFormat.jm(localeName);
+    final String timeString = timeDateFormat.format(time);
+
+    return 'A rede mesh Bluetooth será desativada às $timeString';
+  }
+
+  @override
+  String get meshNoticeKeepOn => 'Manter ativada';
 }

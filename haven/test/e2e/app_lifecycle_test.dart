@@ -70,6 +70,10 @@ const _engineCompiledOut = <String, ({String workflow, String runner})>{
     workflow: 'e2e-ios-auth-tier.yml',
     runner: 'run-b7-ios-auth-tier.sh',
   ),
+  'integration_test/mesh_lever_test.dart': (
+    workflow: 'e2e-mesh.yml',
+    runner: 'run-mesh-lever.sh',
+  ),
 };
 
 /// The targets that pump a widget and mount no shell at all: no `MapShell`,
@@ -454,11 +458,13 @@ void main() {
         [lane.workflow],
         reason: 'a second lane runs this target: say here what it compiles',
       );
+      // One declaration a job: a lane of two jobs says it twice, and every
+      // one of them must be the engine compiled out.
       expect(
         _liveSyncValues(
           File('../.github/workflows/${lane.workflow}').readAsStringSync(),
         ),
-        ['"false"'],
+        allOf(isNotEmpty, everyElement('"false"')),
         reason: 'the lane now builds a live-sync session nothing claims for: '
             'move the target to `_targets` and give it the helper',
       );

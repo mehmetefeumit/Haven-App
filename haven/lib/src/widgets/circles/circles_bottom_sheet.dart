@@ -12,6 +12,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
+import 'package:haven/src/constants/map_layout.dart';
 import 'package:haven/src/pages/circles/add_member_page.dart';
 import 'package:haven/src/pages/circles/create_circle_page.dart';
 import 'package:haven/src/providers/circle_attention_provider.dart';
@@ -41,7 +42,7 @@ import 'package:latlong2/latlong.dart' show LatLng;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Minimum snap point (collapsed state).
-const double _kMinChildSize = 0.12;
+const double _kMinChildSize = kCollapsedSheetFraction;
 
 /// Low "peek+" snap point. A deliberate resting place between the
 /// collapsed peek and the half-open state so the user can park the tray

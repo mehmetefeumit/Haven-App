@@ -1261,7 +1261,7 @@ class NostrCircleService implements CircleService {
   /// locations themselves are already stored.
   List<LocationEventResult> absorbReplayed(
     List<LocationMessageResultFfi> replayed,
-  ) => replayed.map(_convertLocationEventResult).toList();
+  ) => replayed.map(locationEventResultFromFfi).toList();
 
   /// What became of a change, by variant only (Rule 8). The locations its
   /// resolution replayed are already stored.
@@ -1277,16 +1277,25 @@ class NostrCircleService implements CircleService {
     required List<int> mlsGroupId,
     required double latitude,
     required double longitude,
+    bool meshOnly = false,
   }) async {
     final manager = await _ensureInitialized();
     try {
-      final outcome = await _driver('Failed to seal location').sealLocation(
-        circle: manager,
-        mlsGroupId: mlsGroupId,
-        latitude: latitude,
-        longitude: longitude,
-        foreground: _appInFront(),
-      );
+      final driver = _driver('Failed to seal location');
+      final outcome = meshOnly
+          ? await driver.sealLocationForMesh(
+              circle: manager,
+              mlsGroupId: mlsGroupId,
+              latitude: latitude,
+              longitude: longitude,
+            )
+          : await driver.sealLocation(
+              circle: manager,
+              mlsGroupId: mlsGroupId,
+              latitude: latitude,
+              longitude: longitude,
+              foreground: _appInFront(),
+            );
       if (outcome.errored) {
         debugPrint('[Circle] seal drive ended on an error');
       }
@@ -1303,12 +1312,16 @@ class NostrCircleService implements CircleService {
   }
 
   @override
-  Future<LocationPublishFfi> publishSealedLocation(LocationSealed seal) async {
+  Future<LocationPublishFfi> publishSealedLocation(
+    LocationSealed seal, {
+    required bool received,
+  }) async {
     final manager = await _ensureInitialized();
     try {
       return await _driver('Failed to publish location').publishLocation(
         circle: manager,
         sealed: seal.sealed,
+        received: received,
       );
     } on CircleServiceException {
       rethrow;
@@ -1316,31 +1329,6 @@ class NostrCircleService implements CircleService {
       debugPrint('[Circle] location publish failed: ${e.runtimeType}');
       throw const CircleServiceException('Failed to publish location');
     }
-  }
-
-  /// Converts one FFI folded engine result to the service-level type.
-  LocationEventResult _convertLocationEventResult(LocationMessageResultFfi r) {
-    return LocationEventResult(
-      kind: _convertLocationEventKind(r.kind),
-      location: peerLocationFromFfi(r),
-      mlsGroupId: r.mlsGroupId.toList(),
-      epoch: r.epoch.toInt(),
-    );
-  }
-
-  LocationEventKind _convertLocationEventKind(
-    LocationMessageResultKindFfi kind,
-  ) {
-    return switch (kind) {
-      LocationMessageResultKindFfi.location => LocationEventKind.location,
-      LocationMessageResultKindFfi.joined => LocationEventKind.joined,
-      LocationMessageResultKindFfi.groupUpdate =>
-        LocationEventKind.groupUpdate,
-      LocationMessageResultKindFfi.invalidated =>
-        LocationEventKind.invalidated,
-      LocationMessageResultKindFfi.unrecoverable =>
-        LocationEventKind.unrecoverable,
-    };
   }
 
   @override
@@ -1356,7 +1344,7 @@ class NostrCircleService implements CircleService {
         debugPrint('[Circle] ingest drive ended on an error');
       }
       return IngestResult(
-        results: outcome.replayed.map(_convertLocationEventResult).toList(),
+        results: outcome.replayed.map(locationEventResultFromFfi).toList(),
         held: switch (outcome.verdict) {
           ReceiveVerdictFfi.deferred_ => true,
           ReceiveVerdictFfi.applied ||
@@ -1808,6 +1796,27 @@ class NostrCircleService implements CircleService {
       throw const CircleServiceException('Failed to set nickname');
     }
   }
+}
+
+/// One FFI folded engine result as the service-level type.
+///
+/// Top-level for the reason [peerLocationFromFfi] is: a drive made outside
+/// [NostrCircleService] — the Bluetooth mesh's — converts what it is handed
+/// through this, never a second copy of it.
+LocationEventResult locationEventResultFromFfi(LocationMessageResultFfi r) {
+  return LocationEventResult(
+    kind: switch (r.kind) {
+      LocationMessageResultKindFfi.location => LocationEventKind.location,
+      LocationMessageResultKindFfi.joined => LocationEventKind.joined,
+      LocationMessageResultKindFfi.groupUpdate => LocationEventKind.groupUpdate,
+      LocationMessageResultKindFfi.invalidated => LocationEventKind.invalidated,
+      LocationMessageResultKindFfi.unrecoverable =>
+        LocationEventKind.unrecoverable,
+    },
+    location: peerLocationFromFfi(r),
+    mlsGroupId: r.mlsGroupId.toList(),
+    epoch: r.epoch.toInt(),
+  );
 }
 
 /// The peer location one FFI folded result carries, or `null` when it is not a

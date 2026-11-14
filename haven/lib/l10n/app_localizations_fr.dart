@@ -2376,4 +2376,241 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get avatarSemanticsOffline => 'hors ligne';
+
+  @override
+  String get meshButtonLabel => 'Réseau maillé Bluetooth';
+
+  @override
+  String get meshButtonValueConnected => 'connecté à un téléphone à proximité';
+
+  @override
+  String get meshButtonValuePaused => 'en pause, le Bluetooth est désactivé';
+
+  @override
+  String get meshButtonHintTurnOn => 'activer';
+
+  @override
+  String get meshButtonHintTurnOff => 'désactiver';
+
+  @override
+  String get meshButtonHintStats => 'afficher l\'activité du réseau maillé';
+
+  @override
+  String get meshTurningOn => 'Activation du réseau maillé Bluetooth…';
+
+  @override
+  String get meshTurnOn => 'Activer';
+
+  @override
+  String get meshTurnOff => 'Désactiver';
+
+  @override
+  String get meshTurnedOn =>
+      'Réseau maillé Bluetooth activé. Appuyez de manière prolongée sur le bouton pour voir l\'activité.';
+
+  @override
+  String get meshUndo => 'Annuler';
+
+  @override
+  String get meshErrorNoPermission =>
+      'Le réseau maillé Bluetooth nécessite l\'autorisation « Appareils à proximité ».';
+
+  @override
+  String get meshErrorBluetoothOff =>
+      'Activez le Bluetooth pour utiliser le réseau maillé.';
+
+  @override
+  String get meshErrorUnsupported =>
+      'Ce téléphone ne peut pas utiliser le réseau maillé Bluetooth.';
+
+  @override
+  String get meshErrorStartFailed =>
+      'Impossible d\'activer le réseau maillé Bluetooth. Veuillez réessayer.';
+
+  @override
+  String get meshErrorStopFailed =>
+      'Impossible de désactiver le réseau maillé Bluetooth. Veuillez réessayer.';
+
+  @override
+  String get meshStoppedNotice => 'Le réseau maillé Bluetooth a été désactivé.';
+
+  @override
+  String get meshStoppedAfterDeadline =>
+      'Le réseau maillé Bluetooth s\'est désactivé au bout de 12 heures.';
+
+  @override
+  String get meshStoppedOk => 'OK';
+
+  @override
+  String get meshIntroTitle => 'Réseau maillé Bluetooth';
+
+  @override
+  String get meshIntroHeadingDoes => 'Ce qu\'il fait';
+
+  @override
+  String get meshIntroWhat =>
+      'Même sans connexion Internet, le réseau maillé peut faire passer vos mises à jour de position chiffrées, et celles de vos cercles, de téléphone en téléphone par Bluetooth, quand des téléphones dont le réseau maillé est activé sont à proximité. Les mises à jour peuvent arriver en retard ou se perdre. Votre téléphone transporte aussi des paquets chiffrés d\'autres personnes, qu\'il ne peut pas lire.';
+
+  @override
+  String get meshIntroAutoOff =>
+      'Le réseau maillé se désactive tout seul au bout de 12 heures. Si les notifications sont autorisées, vous recevez un rappel 30 minutes avant.';
+
+  @override
+  String get meshIntroBattery => 'Le réseau maillé consomme plus de batterie.';
+
+  @override
+  String get meshIntroClosed =>
+      'Le réseau maillé continue de fonctionner quand Haven est fermé. Lorsque Haven est fermé et que le partage en arrière-plan est désactivé, il transporte les paquets d\'autres personnes, mais il n\'envoie pas votre position et ne lit pas celles de vos cercles tant que vous n\'avez pas ouvert Haven.';
+
+  @override
+  String get meshIntroHeadingLearn => 'Ce que d\'autres peuvent apprendre';
+
+  @override
+  String get meshIntroNearby =>
+      'Toute personne à proximité peut savoir que le réseau maillé de Haven est activé sur ce téléphone, et peut localiser ce téléphone à partir de son signal radio. Un téléphone qui se connecte au vôtre peut le reconnaître plus tard, même après un changement de l\'adresse Bluetooth de votre téléphone. Aucun d\'eux ne peut lire votre position ni voir vos cercles.';
+
+  @override
+  String get meshIntroConnected =>
+      'Un téléphone qui se connecte au vôtre peut voir quels paquets chiffrés votre téléphone envoie, l\'âge approximatif de chacun, et quand votre téléphone est en veille. Sauf s\'il fait partie de l\'un de vos cercles, il ne peut pas les lire, et ne peut pas savoir avec certitude lesquels sont vos propres mises à jour.';
+
+  @override
+  String get meshIntroName =>
+      'Les téléphones reliés au vôtre par le réseau maillé peuvent lire le nom Bluetooth de votre téléphone et voir quels autres services Bluetooth il propose.';
+
+  @override
+  String meshIntroNameIs(String name) {
+    return 'Le nom Bluetooth de votre téléphone est « $name ».';
+  }
+
+  @override
+  String get meshBluetoothSettings => 'Réglages Bluetooth';
+
+  @override
+  String get meshIntroBridge =>
+      'Quand vous êtes en ligne, votre téléphone peut transmettre aux relais de votre cercle la mise à jour d\'un membre de ce cercle qui se trouve à proximité, et le sien peut transmettre la vôtre. Un relais peut alors savoir qu\'un membre de ce cercle est hors ligne près du téléphone qui a transmis sa mise à jour. Si les deux téléphones sont en ligne, le relais peut savoir qu\'ils sont proches l\'un de l\'autre.';
+
+  @override
+  String get meshIntroRemoved =>
+      'Pendant que vous êtes hors ligne, une personne retirée d\'un cercle peut encore lire vos mises à jour jusqu\'à ce que votre téléphone apprenne qu\'elle a été retirée.';
+
+  @override
+  String get meshIntroHeadingKnow => 'Bon à savoir';
+
+  @override
+  String get meshIntroStats =>
+      'Appuyez de manière prolongée sur le bouton du réseau maillé pour voir combien de mises à jour il a transportées.';
+
+  @override
+  String get meshNameStepTitle => 'Nom Bluetooth de votre téléphone';
+
+  @override
+  String get meshNameStepChange =>
+      'Vous pouvez le modifier dans les réglages Bluetooth de votre téléphone.';
+
+  @override
+  String get meshStatsTitle => 'Activité du réseau maillé';
+
+  @override
+  String get meshStatsThisSession => 'Cette session';
+
+  @override
+  String get meshStatsLastSession => 'Dernière session';
+
+  @override
+  String get meshStatsAllTime => 'Au total';
+
+  @override
+  String get meshStatsFromCircles => 'Mises à jour reçues de vos cercles';
+
+  @override
+  String get meshStatsPassedOn => 'Paquets transmis pour d\'autres';
+
+  @override
+  String meshStatsCell(String row, String column, String count) {
+    return '$row, $column : $count';
+  }
+
+  @override
+  String get meshStatsFootnote =>
+      'Ce téléphone ne peut pas lire les paquets transmis. Ils comprennent des mises à jour d\'autres personnes et des paquets leurres qui cachent lesquels sont les vrais.';
+
+  @override
+  String get meshStatsUnavailable =>
+      'Impossible de lire l\'activité du réseau maillé.';
+
+  @override
+  String get meshStatsAbout => 'À propos du réseau maillé Bluetooth';
+
+  @override
+  String get meshStatusConnected => 'Réseau maillé activé · connecté';
+
+  @override
+  String get meshStatusSearching =>
+      'Réseau maillé activé · recherche de téléphones à proximité';
+
+  @override
+  String get meshStatusFindable =>
+      'Réseau maillé activé · d\'autres téléphones peuvent trouver celui-ci, mais lui ne peut pas les rechercher';
+
+  @override
+  String get meshStatusPaused => 'Réseau maillé en pause · Bluetooth désactivé';
+
+  @override
+  String get meshStatusOff => 'Réseau maillé désactivé';
+
+  @override
+  String meshTurnsOffAt(DateTime time) {
+    final intl.DateFormat timeDateFormat = intl.DateFormat.jm(localeName);
+    final String timeString = timeDateFormat.format(time);
+
+    return 'Se désactive à $timeString';
+  }
+
+  @override
+  String get meshKeepOn => 'Garder activé 12 heures';
+
+  @override
+  String get meshStatsReset => 'Réinitialiser les compteurs';
+
+  @override
+  String get meshStatsResetTitle =>
+      'Réinitialiser les compteurs du réseau maillé ?';
+
+  @override
+  String get meshStatsResetBody => 'Les quatre compteurs reviennent à zéro.';
+
+  @override
+  String get meshStatsResetConfirm => 'Réinitialiser';
+
+  @override
+  String get settingsMeshTitle => 'Réseau maillé Bluetooth';
+
+  @override
+  String get settingsMeshOn => 'Activé';
+
+  @override
+  String get settingsMeshOff => 'Désactivé';
+
+  @override
+  String get meshNoticeChannel => 'Réseau maillé Bluetooth';
+
+  @override
+  String get meshNoticeOn => 'Réseau maillé Bluetooth activé';
+
+  @override
+  String get meshNoticePaused => 'Réseau maillé en pause — Bluetooth désactivé';
+
+  @override
+  String get meshNoticeStopped => 'Réseau maillé Bluetooth désactivé';
+
+  @override
+  String meshNoticeReminder(DateTime time) {
+    final intl.DateFormat timeDateFormat = intl.DateFormat.jm(localeName);
+    final String timeString = timeDateFormat.format(time);
+
+    return 'Réseau maillé Bluetooth : arrêt à $timeString';
+  }
+
+  @override
+  String get meshNoticeKeepOn => 'Garder activé';
 }

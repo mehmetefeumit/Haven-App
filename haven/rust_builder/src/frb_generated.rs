@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -549989935;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1545831034;
 
 // Section: executor
 
@@ -8412,6 +8412,83 @@ fn wire__crate__api__RelayManagerFfi_maintain_relay_list_impl(
         },
     )
 }
+fn wire__crate__api__RelayManagerFfi_mesh_drive_driven_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "RelayManagerFfi_mesh_drive_driven",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_that = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<RelayManagerFfi>,
+            >>::sse_decode(&mut deserializer);
+            let api_circle = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>,
+            >>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, ()>(
+                    (move || async move {
+                        let mut api_that_guard = None;
+                        let mut api_circle_guard = None;
+                        let decode_indices_ =
+                            flutter_rust_bridge::for_generated::lockable_compute_decode_order(
+                                vec![
+                                    flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                        &api_that, 0, false,
+                                    ),
+                                    flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                        &api_circle,
+                                        1,
+                                        false,
+                                    ),
+                                ],
+                            );
+                        for i in decode_indices_ {
+                            match i {
+                                0 => {
+                                    api_that_guard =
+                                        Some(api_that.lockable_decode_async_ref().await)
+                                }
+                                1 => {
+                                    api_circle_guard =
+                                        Some(api_circle.lockable_decode_async_ref().await)
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        let api_that_guard = api_that_guard.unwrap();
+                        let api_circle_guard = api_circle_guard.unwrap();
+                        let output_ok = Result::<_, ()>::Ok(
+                            crate::api::RelayManagerFfi::mesh_drive_driven(
+                                &*api_that_guard,
+                                &*api_circle_guard,
+                            )
+                            .await,
+                        )?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__RelayManagerFfi_new_instance_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -8540,6 +8617,7 @@ fn wire__crate__api__RelayManagerFfi_publish_location_driven_impl(
             let api_sealed = <RustOpaqueMoi<
                 flutter_rust_bridge::for_generated::RustAutoOpaqueInner<SealedLocationFfi>,
             >>::sse_decode(&mut deserializer);
+            let api_received = <bool>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, ()>(
@@ -8590,6 +8668,7 @@ fn wire__crate__api__RelayManagerFfi_publish_location_driven_impl(
                                 &*api_that_guard,
                                 &*api_circle_guard,
                                 &*api_sealed_guard,
+                                api_received,
                             )
                             .await,
                         )?;
@@ -9236,6 +9315,98 @@ fn wire__crate__api__RelayManagerFfi_seal_location_driven_impl(
                             api_mls_group_id,
                             &*api_location_guard,
                             api_foreground,
+                        )
+                        .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__RelayManagerFfi_seal_location_for_mesh_driven_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "RelayManagerFfi_seal_location_for_mesh_driven",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_that = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<RelayManagerFfi>,
+            >>::sse_decode(&mut deserializer);
+            let api_circle = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>,
+            >>::sse_decode(&mut deserializer);
+            let api_mls_group_id = <Vec<u8>>::sse_decode(&mut deserializer);
+            let api_location = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LocationMessage>,
+            >>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let mut api_that_guard = None;
+                        let mut api_circle_guard = None;
+                        let mut api_location_guard = None;
+                        let decode_indices_ =
+                            flutter_rust_bridge::for_generated::lockable_compute_decode_order(
+                                vec![
+                                    flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                        &api_that, 0, false,
+                                    ),
+                                    flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                        &api_circle,
+                                        1,
+                                        false,
+                                    ),
+                                    flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                        &api_location,
+                                        2,
+                                        false,
+                                    ),
+                                ],
+                            );
+                        for i in decode_indices_ {
+                            match i {
+                                0 => {
+                                    api_that_guard =
+                                        Some(api_that.lockable_decode_async_ref().await)
+                                }
+                                1 => {
+                                    api_circle_guard =
+                                        Some(api_circle.lockable_decode_async_ref().await)
+                                }
+                                2 => {
+                                    api_location_guard =
+                                        Some(api_location.lockable_decode_async_ref().await)
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        let api_that_guard = api_that_guard.unwrap();
+                        let api_circle_guard = api_circle_guard.unwrap();
+                        let api_location_guard = api_location_guard.unwrap();
+                        let output_ok = crate::api::RelayManagerFfi::seal_location_for_mesh_driven(
+                            &*api_that_guard,
+                            &*api_circle_guard,
+                            api_mls_group_id,
+                            &*api_location_guard,
                         )
                         .await?;
                         Ok(output_ok)
@@ -9898,6 +10069,407 @@ fn wire__crate__api__maintain_subscription_health_impl(
                     (move || async move {
                         let output_ok =
                             crate::api::maintain_subscription_health(api_foreground).await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__mesh_keep_on_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "mesh_keep_on",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_circle = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>,
+            >>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, ()>(
+                    (move || async move {
+                        let mut api_circle_guard = None;
+                        let decode_indices_ =
+                            flutter_rust_bridge::for_generated::lockable_compute_decode_order(
+                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                    &api_circle,
+                                    0,
+                                    false,
+                                )],
+                            );
+                        for i in decode_indices_ {
+                            match i {
+                                0 => {
+                                    api_circle_guard =
+                                        Some(api_circle.lockable_decode_async_ref().await)
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        let api_circle_guard = api_circle_guard.unwrap();
+                        let output_ok = Result::<_, ()>::Ok(
+                            crate::api::mesh_keep_on(&*api_circle_guard).await,
+                        )?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__mesh_reset_counts_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "mesh_reset_counts",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_circle = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>,
+            >>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, ()>(
+                    (move || async move {
+                        let mut api_circle_guard = None;
+                        let decode_indices_ =
+                            flutter_rust_bridge::for_generated::lockable_compute_decode_order(
+                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                    &api_circle,
+                                    0,
+                                    false,
+                                )],
+                            );
+                        for i in decode_indices_ {
+                            match i {
+                                0 => {
+                                    api_circle_guard =
+                                        Some(api_circle.lockable_decode_async_ref().await)
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        let api_circle_guard = api_circle_guard.unwrap();
+                        let output_ok = Result::<_, ()>::Ok({
+                            crate::api::mesh_reset_counts(&*api_circle_guard).await;
+                        })?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__mesh_resume_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "mesh_resume",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_circle = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>,
+            >>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, ()>(
+                    (move || async move {
+                        let mut api_circle_guard = None;
+                        let decode_indices_ =
+                            flutter_rust_bridge::for_generated::lockable_compute_decode_order(
+                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                    &api_circle,
+                                    0,
+                                    false,
+                                )],
+                            );
+                        for i in decode_indices_ {
+                            match i {
+                                0 => {
+                                    api_circle_guard =
+                                        Some(api_circle.lockable_decode_async_ref().await)
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        let api_circle_guard = api_circle_guard.unwrap();
+                        let output_ok =
+                            Result::<_, ()>::Ok(crate::api::mesh_resume(&*api_circle_guard).await)?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__mesh_sharing_stopped_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "mesh_sharing_stopped",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_circle = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>,
+            >>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let mut api_circle_guard = None;
+                let decode_indices_ =
+                    flutter_rust_bridge::for_generated::lockable_compute_decode_order(vec![
+                        flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                            &api_circle,
+                            0,
+                            false,
+                        ),
+                    ]);
+                for i in decode_indices_ {
+                    match i {
+                        0 => api_circle_guard = Some(api_circle.lockable_decode_sync_ref()),
+                        _ => unreachable!(),
+                    }
+                }
+                let api_circle_guard = api_circle_guard.unwrap();
+                let output_ok = Result::<_, ()>::Ok({
+                    crate::api::mesh_sharing_stopped(&*api_circle_guard);
+                })?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
+fn wire__crate__api__mesh_start_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "mesh_start",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_circle = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>,
+            >>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, ()>(
+                    (move || async move {
+                        let mut api_circle_guard = None;
+                        let decode_indices_ =
+                            flutter_rust_bridge::for_generated::lockable_compute_decode_order(
+                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                    &api_circle,
+                                    0,
+                                    false,
+                                )],
+                            );
+                        for i in decode_indices_ {
+                            match i {
+                                0 => {
+                                    api_circle_guard =
+                                        Some(api_circle.lockable_decode_async_ref().await)
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        let api_circle_guard = api_circle_guard.unwrap();
+                        let output_ok =
+                            Result::<_, ()>::Ok(crate::api::mesh_start(&*api_circle_guard).await)?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__mesh_stats_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "mesh_stats",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_circle = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>,
+            >>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, ()>(
+                    (move || async move {
+                        let mut api_circle_guard = None;
+                        let decode_indices_ =
+                            flutter_rust_bridge::for_generated::lockable_compute_decode_order(
+                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                    &api_circle,
+                                    0,
+                                    false,
+                                )],
+                            );
+                        for i in decode_indices_ {
+                            match i {
+                                0 => {
+                                    api_circle_guard =
+                                        Some(api_circle.lockable_decode_async_ref().await)
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        let api_circle_guard = api_circle_guard.unwrap();
+                        let output_ok =
+                            Result::<_, ()>::Ok(crate::api::mesh_stats(&*api_circle_guard).await)?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__mesh_stop_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "mesh_stop",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_circle = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>,
+            >>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, ()>(
+                    (move || async move {
+                        let mut api_circle_guard = None;
+                        let decode_indices_ =
+                            flutter_rust_bridge::for_generated::lockable_compute_decode_order(
+                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                    &api_circle,
+                                    0,
+                                    false,
+                                )],
+                            );
+                        for i in decode_indices_ {
+                            match i {
+                                0 => {
+                                    api_circle_guard =
+                                        Some(api_circle.lockable_decode_async_ref().await)
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        let api_circle_guard = api_circle_guard.unwrap();
+                        let output_ok = Result::<_, ()>::Ok({
+                            crate::api::mesh_stop(&*api_circle_guard).await;
+                        })?;
                         Ok(output_ok)
                     })()
                     .await,
@@ -11873,6 +12445,7 @@ impl SseDecode for crate::api::LocationPublishFfi {
             7 => crate::api::LocationPublishFfi::ClockAhead,
             8 => crate::api::LocationPublishFfi::ClockBehind,
             9 => crate::api::LocationPublishFfi::ClockUnspecified,
+            10 => crate::api::LocationPublishFfi::MeshOnly,
             _ => unreachable!("Invalid variant for LocationPublishFfi: {}", inner),
         };
     }
@@ -11933,6 +12506,56 @@ impl SseDecode for crate::api::MemberLookupVerdictFfi {
             1 => crate::api::MemberLookupVerdictFfi::NotFound,
             2 => crate::api::MemberLookupVerdictFfi::LookupIncomplete,
             _ => unreachable!("Invalid variant for MemberLookupVerdictFfi: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::MeshDriveFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_replayed =
+            <Vec<crate::api::LocationMessageResultFfi>>::sse_decode(deserializer);
+        let mut var_errored = <bool>::sse_decode(deserializer);
+        let mut var_more = <bool>::sse_decode(deserializer);
+        return crate::api::MeshDriveFfi {
+            replayed: var_replayed,
+            errored: var_errored,
+            more: var_more,
+        };
+    }
+}
+
+impl SseDecode for crate::api::MeshStartFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::MeshStartFfi::Started,
+            1 => crate::api::MeshStartFfi::AlreadyOn,
+            2 => crate::api::MeshStartFfi::Off,
+            _ => unreachable!("Invalid variant for MeshStartFfi: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::MeshStatsFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_on_ = <bool>::sse_decode(deserializer);
+        let mut var_linked = <bool>::sse_decode(deserializer);
+        let mut var_onForMs = <u64>::sse_decode(deserializer);
+        let mut var_fromCirclesSinceOn = <u64>::sse_decode(deserializer);
+        let mut var_passedOnSinceOn = <u64>::sse_decode(deserializer);
+        let mut var_fromCirclesTotal = <u64>::sse_decode(deserializer);
+        let mut var_passedOnTotal = <u64>::sse_decode(deserializer);
+        return crate::api::MeshStatsFfi {
+            on: var_on_,
+            linked: var_linked,
+            on_for_ms: var_onForMs,
+            from_circles_since_on: var_fromCirclesSinceOn,
+            passed_on_since_on: var_passedOnSinceOn,
+            from_circles_total: var_fromCirclesTotal,
+            passed_on_total: var_passedOnTotal,
         };
     }
 }
@@ -13592,98 +14215,116 @@ fn pde_ffi_dispatcher_primary_impl(
             rust_vec_len,
             data_len,
         ),
-        147 => {
+        147 => wire__crate__api__RelayManagerFfi_mesh_drive_driven_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        148 => {
             wire__crate__api__RelayManagerFfi_new_instance_impl(port, ptr, rust_vec_len, data_len)
         }
-        148 => {
+        149 => {
             wire__crate__api__RelayManagerFfi_publish_event_impl(port, ptr, rust_vec_len, data_len)
         }
-        149 => wire__crate__api__RelayManagerFfi_publish_location_driven_impl(
+        150 => wire__crate__api__RelayManagerFfi_publish_location_driven_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        150 => wire__crate__api__RelayManagerFfi_reinvite_driven_impl(
+        151 => wire__crate__api__RelayManagerFfi_reinvite_driven_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        151 => wire__crate__api__RelayManagerFfi_remove_members_driven_impl(
+        152 => wire__crate__api__RelayManagerFfi_remove_members_driven_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        152 => wire__crate__api__RelayManagerFfi_repair_rotation_driven_impl(
+        153 => wire__crate__api__RelayManagerFfi_repair_rotation_driven_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        153 => {
+        154 => {
             wire__crate__api__RelayManagerFfi_resume_driven_impl(port, ptr, rust_vec_len, data_len)
         }
-        154 => wire__crate__api__RelayManagerFfi_resume_leave_driven_impl(
+        155 => wire__crate__api__RelayManagerFfi_resume_leave_driven_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        155 => wire__crate__api__RelayManagerFfi_run_catchup_all_circles_impl(
+        156 => wire__crate__api__RelayManagerFfi_run_catchup_all_circles_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        156 => wire__crate__api__RelayManagerFfi_run_refused_refetch_impl(
+        157 => wire__crate__api__RelayManagerFfi_run_refused_refetch_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        157 => wire__crate__api__RelayManagerFfi_seal_location_driven_impl(
+        158 => wire__crate__api__RelayManagerFfi_seal_location_driven_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        158 => wire__crate__api__RelayManagerFfi_self_demote_driven_impl(
+        159 => wire__crate__api__RelayManagerFfi_seal_location_for_mesh_driven_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        159 => wire__crate__api__RelayManagerFfi_shutdown_impl(port, ptr, rust_vec_len, data_len),
-        160 => wire__crate__api__RelayManagerFfi_update_circle_relays_driven_impl(
+        160 => wire__crate__api__RelayManagerFfi_self_demote_driven_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        164 => wire__crate__api__circle_health_ffi_default_impl(port, ptr, rust_vec_len, data_len),
-        165 => {
+        161 => wire__crate__api__RelayManagerFfi_shutdown_impl(port, ptr, rust_vec_len, data_len),
+        162 => wire__crate__api__RelayManagerFfi_update_circle_relays_driven_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        166 => wire__crate__api__circle_health_ffi_default_impl(port, ptr, rust_vec_len, data_len),
+        167 => {
             wire__crate__api__convergence_sweep_ffi_default_impl(port, ptr, rust_vec_len, data_len)
         }
-        169 => wire__crate__api__force_release_live_session_impl(port, ptr, rust_vec_len, data_len),
-        170 => wire__crate__api__init_app_impl(port, ptr, rust_vec_len, data_len),
-        171 => wire__crate__api__init_keyring_store_impl(port, ptr, rust_vec_len, data_len),
-        172 => wire__crate__api__is_session_live_impl(port, ptr, rust_vec_len, data_len),
-        174 => {
+        171 => wire__crate__api__force_release_live_session_impl(port, ptr, rust_vec_len, data_len),
+        172 => wire__crate__api__init_app_impl(port, ptr, rust_vec_len, data_len),
+        173 => wire__crate__api__init_keyring_store_impl(port, ptr, rust_vec_len, data_len),
+        174 => wire__crate__api__is_session_live_impl(port, ptr, rust_vec_len, data_len),
+        176 => {
             wire__crate__api__maintain_subscription_health_impl(port, ptr, rust_vec_len, data_len)
         }
-        175 => wire__crate__api__parse_engine_location_impl(port, ptr, rust_vec_len, data_len),
-        187 => wire__crate__api__tile_cache_evict_impl(port, ptr, rust_vec_len, data_len),
-        188 => wire__crate__api__tile_cache_get_impl(port, ptr, rust_vec_len, data_len),
-        189 => wire__crate__api__tile_cache_init_impl(port, ptr, rust_vec_len, data_len),
-        190 => wire__crate__api__tile_cache_put_impl(port, ptr, rust_vec_len, data_len),
-        191 => wire__crate__api__tile_cache_put_metadata_impl(port, ptr, rust_vec_len, data_len),
-        192 => wire__crate__api__tile_cache_wipe_impl(port, ptr, rust_vec_len, data_len),
-        193 => {
+        177 => wire__crate__api__mesh_keep_on_impl(port, ptr, rust_vec_len, data_len),
+        178 => wire__crate__api__mesh_reset_counts_impl(port, ptr, rust_vec_len, data_len),
+        179 => wire__crate__api__mesh_resume_impl(port, ptr, rust_vec_len, data_len),
+        181 => wire__crate__api__mesh_start_impl(port, ptr, rust_vec_len, data_len),
+        182 => wire__crate__api__mesh_stats_impl(port, ptr, rust_vec_len, data_len),
+        183 => wire__crate__api__mesh_stop_impl(port, ptr, rust_vec_len, data_len),
+        184 => wire__crate__api__parse_engine_location_impl(port, ptr, rust_vec_len, data_len),
+        196 => wire__crate__api__tile_cache_evict_impl(port, ptr, rust_vec_len, data_len),
+        197 => wire__crate__api__tile_cache_get_impl(port, ptr, rust_vec_len, data_len),
+        198 => wire__crate__api__tile_cache_init_impl(port, ptr, rust_vec_len, data_len),
+        199 => wire__crate__api__tile_cache_put_impl(port, ptr, rust_vec_len, data_len),
+        200 => wire__crate__api__tile_cache_put_metadata_impl(port, ptr, rust_vec_len, data_len),
+        201 => wire__crate__api__tile_cache_wipe_impl(port, ptr, rust_vec_len, data_len),
+        202 => {
             wire__crate__api__use_in_memory_keyring_for_test_impl(port, ptr, rust_vec_len, data_len)
         }
-        194 => wire__crate__api__wipe_all_mls_state_impl(port, ptr, rust_vec_len, data_len),
+        203 => wire__crate__api__wipe_all_mls_state_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -13750,26 +14391,27 @@ fn pde_ffi_dispatcher_sync_impl(
             wire__crate__api__NostrIdentityManager_has_identity_impl(ptr, rust_vec_len, data_len)
         }
         129 => wire__crate__api__NostrIdentityManager_pubkey_hex_impl(ptr, rust_vec_len, data_len),
-        161 => wire__crate__api__acknowledge_storage_reset_impl(ptr, rust_vec_len, data_len),
-        162 => wire__crate__api__allow_private_blossom_for_test_impl(ptr, rust_vec_len, data_len),
-        163 => wire__crate__api__allow_ws_loopback_for_test_impl(ptr, rust_vec_len, data_len),
-        166 => wire__crate__api__default_relays_impl(ptr, rust_vec_len, data_len),
-        167 => wire__crate__api__discovery_relays_impl(ptr, rust_vec_len, data_len),
-        168 => wire__crate__api__fold_for_search_impl(ptr, rust_vec_len, data_len),
-        173 => wire__crate__api__log_alias_impl(ptr, rust_vec_len, data_len),
-        176 => wire__crate__api__reset_pre_v2_storage_impl(ptr, rust_vec_len, data_len),
-        177 => wire__crate__api__rotate_log_alias_salt_impl(ptr, rust_vec_len, data_len),
-        178 => {
+        163 => wire__crate__api__acknowledge_storage_reset_impl(ptr, rust_vec_len, data_len),
+        164 => wire__crate__api__allow_private_blossom_for_test_impl(ptr, rust_vec_len, data_len),
+        165 => wire__crate__api__allow_ws_loopback_for_test_impl(ptr, rust_vec_len, data_len),
+        168 => wire__crate__api__default_relays_impl(ptr, rust_vec_len, data_len),
+        169 => wire__crate__api__discovery_relays_impl(ptr, rust_vec_len, data_len),
+        170 => wire__crate__api__fold_for_search_impl(ptr, rust_vec_len, data_len),
+        175 => wire__crate__api__log_alias_impl(ptr, rust_vec_len, data_len),
+        180 => wire__crate__api__mesh_sharing_stopped_impl(ptr, rust_vec_len, data_len),
+        185 => wire__crate__api__reset_pre_v2_storage_impl(ptr, rust_vec_len, data_len),
+        186 => wire__crate__api__rotate_log_alias_salt_impl(ptr, rust_vec_len, data_len),
+        187 => {
             wire__crate__api__sealed_location_event_json_for_test_impl(ptr, rust_vec_len, data_len)
         }
-        179 => wire__crate__api__set_blossom_server_for_test_impl(ptr, rust_vec_len, data_len),
-        180 => wire__crate__api__set_default_relays_for_test_impl(ptr, rust_vec_len, data_len),
-        181 => wire__crate__api__set_discovery_relays_for_test_impl(ptr, rust_vec_len, data_len),
-        182 => wire__crate__api__set_location_relays_for_test_impl(ptr, rust_vec_len, data_len),
-        183 => wire__crate__api__set_profile_relays_for_test_impl(ptr, rust_vec_len, data_len),
-        184 => wire__crate__api__storage_reset_notice_owed_impl(ptr, rust_vec_len, data_len),
-        185 => wire__crate__api__storage_reset_prefs_cleared_impl(ptr, rust_vec_len, data_len),
-        186 => wire__crate__api__storage_reset_prefs_owed_impl(ptr, rust_vec_len, data_len),
+        188 => wire__crate__api__set_blossom_server_for_test_impl(ptr, rust_vec_len, data_len),
+        189 => wire__crate__api__set_default_relays_for_test_impl(ptr, rust_vec_len, data_len),
+        190 => wire__crate__api__set_discovery_relays_for_test_impl(ptr, rust_vec_len, data_len),
+        191 => wire__crate__api__set_location_relays_for_test_impl(ptr, rust_vec_len, data_len),
+        192 => wire__crate__api__set_profile_relays_for_test_impl(ptr, rust_vec_len, data_len),
+        193 => wire__crate__api__storage_reset_notice_owed_impl(ptr, rust_vec_len, data_len),
+        194 => wire__crate__api__storage_reset_prefs_cleared_impl(ptr, rust_vec_len, data_len),
+        195 => wire__crate__api__storage_reset_prefs_owed_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -14808,6 +15450,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::LocationPublishFfi {
             Self::ClockAhead => 7.into_dart(),
             Self::ClockBehind => 8.into_dart(),
             Self::ClockUnspecified => 9.into_dart(),
+            Self::MeshOnly => 10.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -14906,6 +15549,61 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::MemberLookupVerdictFfi>
     for crate::api::MemberLookupVerdictFfi
 {
     fn into_into_dart(self) -> crate::api::MemberLookupVerdictFfi {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::MeshDriveFfi {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.replayed.into_into_dart().into_dart(),
+            self.errored.into_into_dart().into_dart(),
+            self.more.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::MeshDriveFfi {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::MeshDriveFfi> for crate::api::MeshDriveFfi {
+    fn into_into_dart(self) -> crate::api::MeshDriveFfi {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::MeshStartFfi {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Started => 0.into_dart(),
+            Self::AlreadyOn => 1.into_dart(),
+            Self::Off => 2.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::MeshStartFfi {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::MeshStartFfi> for crate::api::MeshStartFfi {
+    fn into_into_dart(self) -> crate::api::MeshStartFfi {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::MeshStatsFfi {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.on.into_into_dart().into_dart(),
+            self.linked.into_into_dart().into_dart(),
+            self.on_for_ms.into_into_dart().into_dart(),
+            self.from_circles_since_on.into_into_dart().into_dart(),
+            self.passed_on_since_on.into_into_dart().into_dart(),
+            self.from_circles_total.into_into_dart().into_dart(),
+            self.passed_on_total.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::MeshStatsFfi {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::MeshStatsFfi> for crate::api::MeshStatsFfi {
+    fn into_into_dart(self) -> crate::api::MeshStatsFfi {
         self
     }
 }
@@ -16915,6 +17613,7 @@ impl SseEncode for crate::api::LocationPublishFfi {
                 crate::api::LocationPublishFfi::ClockAhead => 7,
                 crate::api::LocationPublishFfi::ClockBehind => 8,
                 crate::api::LocationPublishFfi::ClockUnspecified => 9,
+                crate::api::LocationPublishFfi::MeshOnly => 10,
                 _ => {
                     unimplemented!("");
                 }
@@ -16977,6 +17676,45 @@ impl SseEncode for crate::api::MemberLookupVerdictFfi {
             },
             serializer,
         );
+    }
+}
+
+impl SseEncode for crate::api::MeshDriveFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <Vec<crate::api::LocationMessageResultFfi>>::sse_encode(self.replayed, serializer);
+        <bool>::sse_encode(self.errored, serializer);
+        <bool>::sse_encode(self.more, serializer);
+    }
+}
+
+impl SseEncode for crate::api::MeshStartFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::MeshStartFfi::Started => 0,
+                crate::api::MeshStartFfi::AlreadyOn => 1,
+                crate::api::MeshStartFfi::Off => 2,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::MeshStatsFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.on, serializer);
+        <bool>::sse_encode(self.linked, serializer);
+        <u64>::sse_encode(self.on_for_ms, serializer);
+        <u64>::sse_encode(self.from_circles_since_on, serializer);
+        <u64>::sse_encode(self.passed_on_since_on, serializer);
+        <u64>::sse_encode(self.from_circles_total, serializer);
+        <u64>::sse_encode(self.passed_on_total, serializer);
     }
 }
 

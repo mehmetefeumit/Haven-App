@@ -219,6 +219,14 @@ readonly KNOWN_UNWIRED_LANES=(
   'e2e-kp-rotation.yml:e2e_kp_rotation'
   'e2e-relay-customization.yml:e2e_relay_customization'
 
+  # The Bluetooth mesh lane (docs/BLUETOOTH_MESH_M3_DESIGN.md §O.7). Its relay
+  # is there so the app mounts as it does in every other lane; the lane's
+  # subject is what a process writes to the DEVICE LOG about Bluetooth, and its
+  # drive target publishes nothing — a journal of it would hold no kind the
+  # closed-world oracle is built to close over.
+  'e2e-mesh.yml:e2e_mesh_lever'
+  'e2e-mesh.yml:e2e_mesh_refusal'
+
   # The kind-0 + Blossom plane. C7's egress guard already runs here; the wire
   # oracles have never been wired to this lane. The allow-list question that
   # once parked them — whether kinds 10002 / 10050 could be marked required —
@@ -584,7 +592,7 @@ check_oracle_runs() { # <records> <file> <job>
 # one list — the day a soak job does bring up a relay, the flag is demanded
 # without anybody having to remember why.
 # ---------------------------------------------------------------------------
-readonly LOGSCAN_RUNNER_RE='run-(single-avd-scenario|ios-sim-scenario|ios-bg-publish|b4-ios-real-gps|b7-ios-auth-tier|integration-tests|relay-customization|m7-background-catchup|b1-fgs-publish|b3-real-gps|b5-permission-revocation|b6-location-provider-toggle|b8-clock-skew|b9-network-reconnect|kp-rotation|soak-core)[.]sh'
+readonly LOGSCAN_RUNNER_RE='run-(single-avd-scenario|ios-sim-scenario|ios-bg-publish|b4-ios-real-gps|b7-ios-auth-tier|integration-tests|relay-customization|m7-background-catchup|b1-fgs-publish|b3-real-gps|b5-permission-revocation|b6-location-provider-toggle|b8-clock-skew|b9-network-reconnect|kp-rotation|mesh-lever|soak-core)[.]sh'
 
 check_logscan_is_on() { # <records> <file> <job>
   local records="$1" file="$2" job="$3"

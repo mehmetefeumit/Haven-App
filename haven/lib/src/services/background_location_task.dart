@@ -54,6 +54,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/providers/location_publish_scheduler_provider.dart'
     show filterPublishEligibleCircles;
+import 'package:haven/src/providers/mesh_provider.dart' show meshEnabled;
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/rust/frb_generated.dart';
 import 'package:haven/src/services/background_fix_request.dart';
@@ -68,6 +69,7 @@ import 'package:haven/src/services/geolocator_location_service.dart';
 import 'package:haven/src/services/leaver_backstop.dart';
 import 'package:haven/src/services/location_service.dart' show Position;
 import 'package:haven/src/services/location_sharing_service.dart';
+import 'package:haven/src/services/mesh_service.dart';
 import 'package:haven/src/services/mls_session_handover.dart'
     show kBackgroundTeardownDrainBudget;
 import 'package:haven/src/services/nostr_circle_service.dart';
@@ -237,8 +239,21 @@ class BackgroundLocationTaskHandler extends TaskHandler {
   /// multi-circle cycle into seconds of sleep; production takes the default,
   /// and `publish_decorrelation_wiring_test.dart` pins that `lib/` never
   /// builds the zero-gap sampler.
-  BackgroundLocationTaskHandler({PublishStagger? stagger})
-    : _stagger = stagger ?? PublishStagger();
+  ///
+  /// [mesh] is whether this build has the Bluetooth mesh ([meshEnabled]); a
+  /// test passes it to run either build.
+  BackgroundLocationTaskHandler({
+    PublishStagger? stagger,
+    bool mesh = meshEnabled,
+  }) : _stagger = stagger ?? PublishStagger(),
+       _mesh = mesh;
+
+  final bool _mesh;
+
+  /// The Bluetooth mesh's entries over this isolate's session, or `null` in
+  /// a build without the mesh. Its engine is the process's, shared with the
+  /// UI isolate; the session it is asked with is whichever isolate's is open.
+  MeshService? _meshService;
 
   CircleManagerFfi? _circleManager;
 
@@ -426,6 +441,10 @@ class BackgroundLocationTaskHandler extends TaskHandler {
   /// circle roster while the receive plane is a stand-in.
   @visibleForTesting
   LocationSharingService? overrideLocationSharingService;
+
+  /// Test-only override for the mesh's entries.
+  @visibleForTesting
+  MeshService? overrideMeshService;
 
   /// Test-only override for the jitter sampler (`LocationEventService` is an
   /// FFI opaque handle whose constructor needs the bridge).
@@ -1082,6 +1101,7 @@ class BackgroundLocationTaskHandler extends TaskHandler {
     // mid-teardown find the underlying handles still valid.
     _locationSharingService = null;
     _circleService = null;
+    _meshService = null;
 
     // Hand the MLS DB's Rule-14 single-session slot back BEFORE dropping the
     // reference. Rust statics — including the `LIVE_SESSIONS` registry backing
@@ -1263,6 +1283,17 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       relayService: _relayService!,
       injectedManager: _circleManager!,
     );
+    if (_mesh) {
+      _meshService =
+          overrideMeshService ??
+          NostrMeshService(
+            driver: _relayService!,
+            // The CURRENT manager at every call, for the reason the health
+            // service below reads it so.
+            circleManager: () async =>
+                _circleManager ?? (throw StateError('no circle manager')),
+          );
+    }
     final overrideSharing = overrideLocationSharingService;
     if (overrideSharing != null) {
       _locationSharingService = overrideSharing;
@@ -1574,6 +1605,20 @@ class BackgroundLocationTaskHandler extends TaskHandler {
 
   /// Not before this instant is the stored-record drive asked again.
   DateTime? _driveNotBefore;
+
+  /// Takes in what the Bluetooth mesh received, behind the cycle's relay
+  /// fetch, and routes it as [_ingestReplayed] routes a drive's. Calls no
+  /// relay; never throws: the mesh is lossy by design, and a drive that
+  /// failed leaves its packets for the next one.
+  Future<void> _driveMesh() async {
+    final mesh = _meshService;
+    if (mesh == null || _shuttingDown) return;
+    try {
+      await _ingestReplayed(await mesh.drive());
+    } on Object catch (_) {
+      // See above.
+    }
+  }
 
   /// Files each replayed fix under the circle its OWN group id names, as the
   /// deferred-send resolution does; a group this device holds no circle for
@@ -2116,6 +2161,10 @@ class BackgroundLocationTaskHandler extends TaskHandler {
           final publish = await _relayService!.publishLocation(
             circle: _circleManager!,
             sealed: sealed,
+            // This cycle publishes before it fetches (step 9 below), so no
+            // receive of the circle has completed in it: nothing the mesh
+            // brought is passed on to a relay from here.
+            received: false,
           );
           switch (publish) {
             case LocationPublishFfi.accepted:
@@ -2144,6 +2193,11 @@ class BackgroundLocationTaskHandler extends TaskHandler {
                 LocationPublishFfi.ended ||
                 LocationPublishFfi.inFlight:
               debugPrint('[BackgroundTask] sealed location not sent');
+              continue;
+            // Handed to the mesh alone: no relay was asked, so nothing is
+            // stamped, nothing failed, and the circle stays due for its
+            // relays.
+            case LocationPublishFfi.meshOnly:
               continue;
           }
 
@@ -2244,6 +2298,7 @@ class BackgroundLocationTaskHandler extends TaskHandler {
               '— aborting remaining fetches.',
             );
             await _yieldToForeground();
+            yieldedToForeground = true;
             break;
           }
           // LAST statement before the fetch, deliberately after the awaited
@@ -2262,6 +2317,9 @@ class BackgroundLocationTaskHandler extends TaskHandler {
             );
           }
         }
+        // Not behind a hand-back: the foreground is waiting for the session
+        // this drive would be made on.
+        if (!yieldedToForeground) await _driveMesh();
       }
 
       // 9b. Close the publish pool. The relay work of this cycle is done, and

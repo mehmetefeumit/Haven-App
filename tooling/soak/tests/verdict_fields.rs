@@ -147,6 +147,10 @@ fn every_finding() -> Vec<Finding> {
         Finding::SilentRelayStalled { device, circle },
         Finding::HeldEventLost { device, circle },
         Finding::ResubscribeUnbounded { device },
+        Finding::RelayPathMoved {
+            device: Some(device),
+        },
+        Finding::BridgedPastItsGate { device, circle },
         Finding::SendRefused {
             device,
             circle,
@@ -191,7 +195,7 @@ fn every_finding() -> Vec<Finding> {
 }
 
 /// The number of `Finding` variants, pinned.
-const FINDING_VARIANTS: usize = 38;
+const FINDING_VARIANTS: usize = 40;
 
 /// A distinct ordinal per `Finding` variant.
 ///
@@ -240,6 +244,8 @@ const fn variant_index(finding: &Finding) -> usize {
         Finding::PlaneUnknownFrame { .. } => 35,
         Finding::PlaneRecordFull { .. } => 36,
         Finding::PlaneUnobserved { .. } => 37,
+        Finding::RelayPathMoved { .. } => 38,
+        Finding::BridgedPastItsGate { .. } => 39,
     }
 }
 

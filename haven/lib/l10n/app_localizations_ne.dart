@@ -2338,4 +2338,237 @@ class AppLocalizationsNe extends AppLocalizations {
 
   @override
   String get avatarSemanticsOffline => 'अफलाइन';
+
+  @override
+  String get meshButtonLabel => 'ब्लुटुथ मेश';
+
+  @override
+  String get meshButtonValueConnected => 'नजिकैको फोनसँग जोडिएको';
+
+  @override
+  String get meshButtonValuePaused => 'रोकिएको, ब्लुटुथ निष्क्रिय छ';
+
+  @override
+  String get meshButtonHintTurnOn => 'सक्रिय';
+
+  @override
+  String get meshButtonHintTurnOff => 'निष्क्रिय';
+
+  @override
+  String get meshButtonHintStats => 'मेश गतिविधि प्रदर्शन';
+
+  @override
+  String get meshTurningOn => 'ब्लुटुथ मेश सक्रिय गरिँदै छ…';
+
+  @override
+  String get meshTurnOn => 'सक्रिय गर्नुहोस्';
+
+  @override
+  String get meshTurnOff => 'निष्क्रिय गर्नुहोस्';
+
+  @override
+  String get meshTurnedOn =>
+      'ब्लुटुथ मेश सक्रिय छ। गतिविधि हेर्न बटन थिचिराख्नुहोस्।';
+
+  @override
+  String get meshUndo => 'पूर्ववत् गर्नुहोस्';
+
+  @override
+  String get meshErrorNoPermission =>
+      'ब्लुटुथ मेशलाई “नजिकै रहेका डिभाइसहरू” को अनुमति चाहिन्छ।';
+
+  @override
+  String get meshErrorBluetoothOff =>
+      'मेश प्रयोग गर्न ब्लुटुथ सक्रिय गर्नुहोस्।';
+
+  @override
+  String get meshErrorUnsupported => 'यो फोनले ब्लुटुथ मेश प्रयोग गर्न सक्दैन।';
+
+  @override
+  String get meshErrorStartFailed =>
+      'ब्लुटुथ मेश सक्रिय गर्न सकिएन। फेरि प्रयास गर्नुहोस्।';
+
+  @override
+  String get meshErrorStopFailed =>
+      'ब्लुटुथ मेश निष्क्रिय गर्न सकिएन। फेरि प्रयास गर्नुहोस्।';
+
+  @override
+  String get meshStoppedNotice => 'ब्लुटुथ मेश निष्क्रिय भयो।';
+
+  @override
+  String get meshStoppedAfterDeadline =>
+      '१२ घण्टापछि ब्लुटुथ मेश निष्क्रिय भयो।';
+
+  @override
+  String get meshStoppedOk => 'ठिक छ';
+
+  @override
+  String get meshIntroTitle => 'ब्लुटुथ मेश';
+
+  @override
+  String get meshIntroHeadingDoes => 'यसले के गर्छ';
+
+  @override
+  String get meshIntroWhat =>
+      'इन्टरनेट नभए पनि, मेश सक्रिय भएका फोन नजिकै हुँदा मेशले तपाईंका र तपाईंका सर्कलका इन्क्रिप्टेड स्थान अपडेट ब्लुटुथ मार्फत एक फोनबाट अर्को फोनमा पठाउन सक्छ। अपडेट ढिलो पुग्न वा हराउन सक्छन्। तपाईंको फोनले अरू मानिसका इन्क्रिप्टेड प्याकेट पनि बोक्छ, जसलाई यसले पढ्न सक्दैन।';
+
+  @override
+  String get meshIntroAutoOff =>
+      'मेश १२ घण्टापछि आफैँ निष्क्रिय हुन्छ। सूचनाहरूलाई अनुमति दिइएको छ भने, त्यसको ३० मिनेटअघि तपाईंले रिमाइन्डर पाउनुहुन्छ।';
+
+  @override
+  String get meshIntroBattery => 'मेशले बढी ब्याट्री प्रयोग गर्छ।';
+
+  @override
+  String get meshIntroClosed =>
+      'Haven बन्द हुँदा पनि मेश चलिरहन्छ। Haven बन्द छ र पृष्ठभूमि साझेदारी निष्क्रिय छ भने, यसले अरू मानिसका प्याकेट त बोक्छ, तर तपाईंले Haven नखोलेसम्म न तपाईंको स्थान पठाउँछ, न तपाईंका सर्कलका स्थान पढ्छ।';
+
+  @override
+  String get meshIntroHeadingLearn => 'अरूले के थाहा पाउन सक्छन्';
+
+  @override
+  String get meshIntroNearby =>
+      'नजिकै रहेको जो कसैले पनि यो फोनमा Haven को मेश सक्रिय छ भन्ने थाहा पाउन सक्छ, र यसको रेडियो सिग्नलबाट यो फोन कहाँ छ भनेर पत्ता लगाउन सक्छ। तपाईंको फोनको ब्लुटुथ ठेगाना बदलिएपछि पनि, तपाईंको फोनसँग जोडिने फोनले तपाईंको फोनलाई पछि फेरि चिन्न सक्छ। तिनीहरूले तपाईंको स्थान पढ्न वा तपाईंका सर्कल देख्न सक्दैनन्।';
+
+  @override
+  String get meshIntroConnected =>
+      'तपाईंको फोनले कुन-कुन इन्क्रिप्टेड प्याकेट बाहिर पठाउँछ, हरेक प्याकेट लगभग कति पुरानो छ, र तपाईंको फोन कहिले स्लिप मोडमा हुन्छ भन्ने कुरा तपाईंको फोनसँग जोडिने फोनले देख्न सक्छ। त्यो फोन तपाईंको कुनै सर्कलमा छैन भने, त्यसले ती प्याकेट पढ्न सक्दैन, र तीमध्ये कुन चाहिँ तपाईंका आफ्नै अपडेट हुन् भनेर ढुक्क हुन सक्दैन।';
+
+  @override
+  String get meshIntroName =>
+      'मेश जुन फोनहरूसँग जोडिन्छ, ती फोनले तपाईंको फोनको ब्लुटुथ नाम पढ्न सक्छन्, र तपाईंको फोनले अरू कुन-कुन ब्लुटुथ सेवा दिन्छ भन्ने देख्न सक्छन्।';
+
+  @override
+  String meshIntroNameIs(String name) {
+    return 'तपाईंको फोनको ब्लुटुथ नाम “$name” हो।';
+  }
+
+  @override
+  String get meshBluetoothSettings => 'ब्लुटुथ सेटिङ';
+
+  @override
+  String get meshIntroBridge =>
+      'तपाईं अनलाइन हुँदा, तपाईंको फोनले नजिकै रहेको सर्कल सदस्यको अपडेट तपाईंको सर्कलका रिलेहरूमा अगाडि पठाउन सक्छ, र तिनको फोनले तपाईंको अपडेट अगाडि पठाउन सक्छ। त्यसो हुँदा, त्यो सर्कलको कुनै सदस्य त्यो अपडेट अगाडि पठाउने फोनको नजिकै अफलाइन छ भन्ने रिलेले थाहा पाउन सक्छ। दुवै फोन अनलाइन छन् भने, ती एकअर्काको नजिकै छन् भन्ने रिलेले थाहा पाउन सक्छ।';
+
+  @override
+  String get meshIntroRemoved =>
+      'तपाईं अफलाइन रहेका बेला, कसैलाई सर्कलबाट हटाइएको कुरा तपाईंको फोनले थाहा नपाएसम्म, त्यो व्यक्तिले तपाईंका अपडेट अझै पढ्न सक्छ।';
+
+  @override
+  String get meshIntroHeadingKnow => 'जानिराख्नुहोस्';
+
+  @override
+  String get meshIntroStats =>
+      'मेशले कति अपडेट बोकेको छ भनेर हेर्न मेश बटन थिचिराख्नुहोस्।';
+
+  @override
+  String get meshNameStepTitle => 'तपाईंको फोनको ब्लुटुथ नाम';
+
+  @override
+  String get meshNameStepChange =>
+      'तपाईं यसलाई आफ्नो फोनको ब्लुटुथ सेटिङमा बदल्न सक्नुहुन्छ।';
+
+  @override
+  String get meshStatsTitle => 'मेश गतिविधि';
+
+  @override
+  String get meshStatsThisSession => 'यस पटक';
+
+  @override
+  String get meshStatsLastSession => 'अघिल्लो पटक';
+
+  @override
+  String get meshStatsAllTime => 'जम्मा';
+
+  @override
+  String get meshStatsFromCircles => 'तपाईंका सर्कलबाट प्राप्त';
+
+  @override
+  String get meshStatsPassedOn => 'अरूका लागि अगाडि पठाइएका';
+
+  @override
+  String meshStatsCell(String row, String column, String count) {
+    return '$row, $column: $count';
+  }
+
+  @override
+  String get meshStatsFootnote =>
+      'अगाडि पठाइएका प्याकेट यो फोनले पढ्न सक्दैन। तिनमा अरू मानिसका अपडेट र कुन चाहिँ असली हुन् भन्ने लुकाउने नक्कली प्याकेट पर्छन्।';
+
+  @override
+  String get meshStatsUnavailable => 'मेश गतिविधि पढ्न सकिएन।';
+
+  @override
+  String get meshStatsAbout => 'ब्लुटुथ मेशबारे';
+
+  @override
+  String get meshStatusConnected => 'मेश सक्रिय छ · जोडिएको';
+
+  @override
+  String get meshStatusSearching => 'मेश सक्रिय छ · नजिकैका फोन खोज्दै';
+
+  @override
+  String get meshStatusFindable =>
+      'मेश सक्रिय छ · अरू फोनले यो फोन भेट्टाउन सक्छन्, तर यसले तिनलाई खोज्न सक्दैन';
+
+  @override
+  String get meshStatusPaused => 'मेश रोकिएको छ · ब्लुटुथ निष्क्रिय छ';
+
+  @override
+  String get meshStatusOff => 'मेश निष्क्रिय छ';
+
+  @override
+  String meshTurnsOffAt(DateTime time) {
+    final intl.DateFormat timeDateFormat = intl.DateFormat.jm(localeName);
+    final String timeString = timeDateFormat.format(time);
+
+    return '$timeString मा निष्क्रिय हुन्छ';
+  }
+
+  @override
+  String get meshKeepOn => '१२ घण्टा सक्रिय राख्नुहोस्';
+
+  @override
+  String get meshStatsReset => 'गन्ती रिसेट गर्नुहोस्';
+
+  @override
+  String get meshStatsResetTitle => 'मेशको गन्ती रिसेट गर्ने?';
+
+  @override
+  String get meshStatsResetBody => 'चारवटै गन्ती शून्यमा फर्किन्छन्।';
+
+  @override
+  String get meshStatsResetConfirm => 'रिसेट गर्नुहोस्';
+
+  @override
+  String get settingsMeshTitle => 'ब्लुटुथ मेश';
+
+  @override
+  String get settingsMeshOn => 'सक्रिय छ';
+
+  @override
+  String get settingsMeshOff => 'निष्क्रिय छ';
+
+  @override
+  String get meshNoticeChannel => 'ब्लुटुथ मेश';
+
+  @override
+  String get meshNoticeOn => 'ब्लुटुथ मेश सक्रिय छ';
+
+  @override
+  String get meshNoticePaused => 'ब्लुटुथ मेश रोकिएको छ — ब्लुटुथ निष्क्रिय छ';
+
+  @override
+  String get meshNoticeStopped => 'ब्लुटुथ मेश निष्क्रिय भएको छ';
+
+  @override
+  String meshNoticeReminder(DateTime time) {
+    final intl.DateFormat timeDateFormat = intl.DateFormat.jm(localeName);
+    final String timeString = timeDateFormat.format(time);
+
+    return 'ब्लुटुथ मेश $timeString मा निष्क्रिय हुन्छ';
+  }
+
+  @override
+  String get meshNoticeKeepOn => 'सक्रिय राख्नुहोस्';
 }

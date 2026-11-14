@@ -202,6 +202,28 @@ drive timeout:DRIVE_TIMEOUT#1 charge DRIVE_TIMEOUT + DRIVE_KILL_AFTER_SECS
 logscan lib:logscan_gate#1 charge @
 logscan-exit cleanup#1/lib:logscan_gate_dir#1 charge @
 
+unit tooling/e2e/ci/run-mesh-lever.sh
+# The Bluetooth mesh lane (docs/BLUETOOTH_MESH_M3_DESIGN.md §O.7). Its legs are
+# the invocation's positional arguments and one loop runs them, so a wait
+# inside a leg is charged once per argument. That over-charges two legs, on the
+# safe side: `s0` and `s2` never ask the adapter on, and `adapter` drives
+# nothing — this file is read once for every job, and which leg takes which
+# branch is not something a lexical reading can see.
+strfry bash:start-strfry.sh#1 charge @
+device wait-for-device#1 allowance
+adapter-on run_leg#1/enable_bluetooth#1/sleep:BT_POLL_SECS#1 charge BT_ON_TIMEOUT_SECS times ARGC
+install run_leg#1/drive_leg#1/lib:install_fresh#1 charge @ times ARGC
+drive run_leg#1/drive_leg#1/timeout:DRIVE_TIMEOUT#1 charge DRIVE_TIMEOUT + DRIVE_KILL_AFTER_SECS times ARGC
+# Polled while the drive runs, and released by its death.
+ready-cue run_leg#1/drive_leg#1/wait_for_marker#1/sleep:MARKER_POLL_SECS#1 poll times ARGC
+# After the drive: the device log is given this long to deliver the last line.
+settle run_leg#1/drive_leg#1/sleep:SETTLE_POLL_SECS#1 charge SETTLE_TIMEOUT_SECS times ARGC
+# The log-privacy gate after each leg's drive and over the whole evidence
+# directory at exit: files already on disk, no wait of its own
+# (logscan-gate.sh).
+logscan run_leg#1/drive_leg#1/report_leg#1/lib:logscan_gate#1 charge @ times ARGC
+logscan-exit cleanup#1/lib:logscan_gate_dir#1 charge @
+
 # ---------------------------------------------------------------------------
 # Aggregate lanes: reaped by design. Budgeted in full all the same — the check
 # accepts the declaration only while the sum really exceeds the deadline, the

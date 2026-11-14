@@ -7,7 +7,10 @@
 # (C8) until R4's NIP-77 pass; it runs in the nightly too now. S05
 # `kill-receive-auto-commit` was expected red (C9) until MDK v0.10.4 made it
 # grade rc 0; it stays here until the owner returns it to the nightly
-# (nightly.toml).
+# (nightly.toml). S27 and S28 run here as in the PR profile and the nightly:
+# three arms priced 39.75 s each, undisturbed, the closing round and the one
+# wait of theirs that may run out. The priced run is 8 836.25 s, 9 736.25 s
+# with the margin, inside the budget as it stood: nothing moved.
 name = "weekly"
 run_budget_secs = 16200
 deadline_secs = 18000
@@ -130,3 +133,11 @@ arms = ["dead-and-silent-relays"]
 [[scenarios]]
 id = "S26"
 arms = ["identity-planes-under-faults"]
+
+[[scenarios]]
+id = "S27"
+arms = ["mesh-off-then-on"]
+
+[[scenarios]]
+id = "S28"
+arms = ["bridged-to-the-far-member", "removed-member-finds-nothing"]

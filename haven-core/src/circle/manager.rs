@@ -170,6 +170,11 @@ pub struct CircleManager {
     /// spends: spent when the fanout driver's confirm applies it
     /// ([`Self::confirm_fanout`]).
     rotation_fanouts: Mutex<HashMap<MessageId, [u8; 32]>>,
+    /// Proposals no record could be written for that a fold handed back to
+    /// a call which may call no relay — a mesh drive, a seal for the mesh
+    /// alone — each owed its one send by the next relay drive
+    /// ([`Self::owe_proposals`]).
+    owed_proposals: Mutex<Vec<Event>>,
     /// Fired whenever a circle's row moved to new relays, by whichever plane
     /// applied the change: the live session's follow waits on it
     /// ([`Self::routing_moved`]).
@@ -305,6 +310,7 @@ impl CircleManager {
         let held_at_open = storage.held_invitation_count().unwrap_or(usize::MAX);
         session.install_refused_ledger(storage.clone());
         session.install_stall_evidence(storage.clone());
+        session.install_mesh_keys(storage.clone());
         Self::backfill_contamination_ledger(&storage);
         Self::prune_retired_profile_pool(&storage);
         Self::sweep_expired_directory_members(&storage);
@@ -314,6 +320,7 @@ impl CircleManager {
             pending_welcomes: PendingWelcomeStore::new(),
             data_dir: data_dir.to_path_buf(),
             rotation_fanouts: Mutex::new(HashMap::new()),
+            owed_proposals: Mutex::new(Vec::new()),
             routing_moved: tokio::sync::Notify::new(),
             #[cfg(any(test, feature = "test-utils"))]
             skip_next_follow: std::sync::atomic::AtomicBool::new(false),
@@ -444,6 +451,7 @@ impl CircleManager {
         let held_at_open = storage.held_invitation_count().unwrap_or(usize::MAX);
         session.install_refused_ledger(storage.clone());
         session.install_stall_evidence(storage.clone());
+        session.install_mesh_keys(storage.clone());
         Self::backfill_contamination_ledger(&storage);
         Self::prune_retired_profile_pool(&storage);
         Self::sweep_expired_directory_members(&storage);
@@ -453,6 +461,7 @@ impl CircleManager {
             pending_welcomes: PendingWelcomeStore::new(),
             data_dir: data_dir.to_path_buf(),
             rotation_fanouts: Mutex::new(HashMap::new()),
+            owed_proposals: Mutex::new(Vec::new()),
             routing_moved: tokio::sync::Notify::new(),
             #[cfg(any(test, feature = "test-utils"))]
             skip_next_follow: std::sync::atomic::AtomicBool::new(false),
@@ -2478,7 +2487,10 @@ impl CircleManager {
             self.storage.renew_leave_intent(mls_group_id, at_secs)
         } else {
             self.storage.mark_leave_intent(mls_group_id, at_secs)
-        }
+        }?;
+        // Nothing sealed before the leave was asked goes out by mesh.
+        self.session.mesh_silence(mls_group_id);
+        Ok(())
     }
 
     /// The engine's refusal of a leave, at the circle boundary. The two no
@@ -3159,6 +3171,18 @@ impl CircleManager {
             self.reconcile_member_directory_best_effort(mode).await;
         }
         (ingest, staged)
+    }
+
+    /// The update a mesh packet carried, as the engine announced it
+    /// (`SessionManager::ingest_from_mesh`): persisted and folded as every
+    /// receive plane's fold does, and stamped as no inbound arrival
+    /// ([`Self::note_inbound_group_events`]). That stamp holds the
+    /// epoch-rotation repair back (`circle::rotation` gate 4), and a repair
+    /// is a commit the relays see: whether one is made may not turn on what
+    /// a phone in radio range sent.
+    pub(crate) async fn fold_mesh_update(&self, update: GroupEvent) -> Vec<LocationMessageResult> {
+        self.fold_resolved_batch(std::slice::from_ref(&update))
+            .await
     }
 
     /// One batch of a resolution, persisted and folded
@@ -4821,10 +4845,17 @@ impl CircleManager {
     /// behind it; a drain cut short leaves the send to MDK's preflight, which
     /// queues it behind what is still untried.
     ///
+    /// `mesh_only` is recorded with the location in the hold that seals it
+    /// (`SessionManager::send_location_staging`).
+    ///
     /// # Errors
     ///
     /// [`CircleError::NotFound`] for a circle this device does not hold, a
     /// store or engine failure otherwise. A deferral is not an error here.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one send: its circle, its fix, its instant and mode, its wake, and its carrier"
+    )]
     pub(crate) async fn seal_location_staging(
         &self,
         mls_group_id: &GroupId,
@@ -4833,6 +4864,7 @@ impl CircleManager {
         still: Still<'_>,
         clock: &dyn crate::relay::fanout::FanoutClock,
         deadline_ms: Option<u64>,
+        mesh_only: bool,
     ) -> Result<StagedSeal> {
         let circle = self
             .storage
@@ -4893,7 +4925,7 @@ impl CircleManager {
 
         let (staged, recorded) = self
             .session
-            .send_location_staging(mls_group_id, content, now_ms, still)
+            .send_location_staging(mls_group_id, content, now_ms, still, mesh_only)
             .await
             .map_err(CircleError::from_session)?;
         let Staged {
@@ -5081,6 +5113,59 @@ impl CircleManager {
                 log::warn!("a relay's owed floor was not cleared");
             }
         }
+    }
+
+    /// Keeps `proposals` — each a proposal of this device's no record could
+    /// be written for, which a fold handed back to a call that may send
+    /// nothing — for the next relay drive, which sends each once as it would
+    /// have sent it itself (`Publishing::send_owed`). In memory, one an
+    /// event id and the newest [`OWED_PROPOSALS_CAP`]: one a process's end
+    /// or the cap loses, the engine proposes again at its circle's next
+    /// epoch.
+    pub(crate) fn owe_proposals(&self, proposals: Vec<Event>) {
+        owe(
+            &mut self
+                .owed_proposals
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            proposals,
+        );
+    }
+
+    /// What [`Self::owe_proposals`] kept, taken.
+    pub(crate) fn take_owed_proposals(&self) -> Vec<Event> {
+        std::mem::take(
+            &mut *self
+                .owed_proposals
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    /// Adds what the mesh counted to its stored totals (plan §7.5): updates
+    /// from this device's circles a mesh drive read, and packets the mesh
+    /// engine passed on. Once a drive, never per packet, and nothing when
+    /// there is nothing to add. A write that fails loses what was counted
+    /// since the last one, as a kill would; a total never decreases.
+    pub fn fold_mesh_counts(&self, from_circles: u64, passed_on: u64) {
+        if from_circles != 0 || passed_on != 0 {
+            let _ = self.storage.add_mesh_counts(from_circles, passed_on);
+        }
+    }
+
+    /// The mesh's counts, to show: exact numbers, logged nowhere.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read.
+    pub fn mesh_counts(&self) -> Result<super::MeshCounts> {
+        self.storage.mesh_counts()
+    }
+
+    /// Forgets the mesh's counts, all four: the user's reset. A write that
+    /// fails leaves them as they were, to be read again.
+    pub fn reset_mesh_counts(&self) {
+        let _ = self.storage.reset_mesh_counts();
     }
 
     /// The circle a `kind:445` event is addressed to, by its `#h` tag: what
@@ -6760,6 +6845,21 @@ fn recorded_by(advanced: Staged, staged: &mut Vec<FanoutId>) -> SessionEffects {
     staged.extend(advanced.fanouts);
     staged.extend(advanced.proposals);
     advanced.effects
+}
+
+/// How many proposals [`CircleManager::owe_proposals`] keeps.
+const OWED_PROPOSALS_CAP: usize = 16;
+
+/// Adds `proposals` to `owed`, one an event id, and drops the oldest past
+/// [`OWED_PROPOSALS_CAP`].
+fn owe(owed: &mut Vec<Event>, proposals: Vec<Event>) {
+    for proposal in proposals {
+        if owed.iter().all(|kept| kept.id != proposal.id) {
+            owed.push(proposal);
+        }
+    }
+    let over = owed.len().saturating_sub(OWED_PROPOSALS_CAP);
+    owed.drain(..over);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14840,7 +14940,7 @@ mod tests {
         funnels.sort();
         assert_eq!(
             funnels,
-            ["hand_back", "ingest", "process_event_staging"],
+            ["hand_back", "ingest", "staging_ingest"],
             "anti-vacuity: the ingest funnels are not the three this pin reads",
         );
         assert_eq!(
@@ -15147,7 +15247,8 @@ mod tests {
                 "send_inner",
                 "departure_holds_a_send",
                 "ingest",
-                "process_event_staging",
+                // A relay's event and, never noted as one, a mesh packet's.
+                "staging_ingest",
                 "advance_once_for_receive",
                 "advance_convergence",
                 // The staging send's hold, with its hand-back, behind the
@@ -15651,5 +15752,43 @@ mod tests {
         for (name, code) in unfollowed_handle_forms() {
             assert!(refuses(code), "{name}");
         }
+    }
+
+    /// Proposals owed a send are kept one an event id, and the newest
+    /// [`OWED_PROPOSALS_CAP`] alone: a call that may call no relay, repeated
+    /// without end, costs a bounded amount of memory, and the oldest is what
+    /// goes.
+    #[test]
+    fn owed_proposals_are_kept_once_each_and_a_bounded_number() {
+        let keys = nostr::Keys::generate();
+        let proposal = |n: usize| {
+            nostr::EventBuilder::new(nostr::Kind::Custom(445), n.to_string())
+                .sign_with_keys(&keys)
+                .expect("signed")
+        };
+        let ids = |owed: &[Event]| owed.iter().map(|event| event.id).collect::<Vec<_>>();
+        let (first, second) = (proposal(0), proposal(1));
+        let mut owed = Vec::new();
+
+        owe(
+            &mut owed,
+            vec![first.clone(), second.clone(), first.clone()],
+        );
+        owe(&mut owed, vec![second.clone()]);
+        assert!(
+            ids(&owed) == [first.id, second.id],
+            "a proposal owed twice is kept twice, and would be sent twice"
+        );
+
+        let later: Vec<Event> = (2..OWED_PROPOSALS_CAP + 3).map(proposal).collect();
+        owe(&mut owed, later.clone());
+        assert!(
+            owed.len() == OWED_PROPOSALS_CAP,
+            "more proposals are kept than the cap"
+        );
+        assert!(
+            ids(&owed) == ids(&later[1..]),
+            "the cap did not drop the oldest, in order"
+        );
     }
 }

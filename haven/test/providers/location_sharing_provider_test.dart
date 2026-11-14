@@ -12,20 +12,26 @@
 ///   when the disclosure flag IS set
 library;
 
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/providers/circles_provider.dart';
+import 'package:haven/src/providers/live_sync_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
+import 'package:haven/src/providers/mesh_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/rust/api.dart' show LocationPublishFfi;
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/location_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
+import 'package:haven/src/services/publish_stagger.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../helpers/fake_mesh.dart';
 import '../mocks/mock_circle_service.dart';
 import '../mocks/mock_profile_service.dart';
 import '../mocks/mock_relay_service.dart';
@@ -680,6 +686,129 @@ void main() {
       },
     );
 
+    test("the map's ripple is told once a one-shot, at its first send past "
+        'the send-time check, and nothing by one that handed nothing '
+        'over', () async {
+      final circles = [
+        for (final id in [1, 2])
+          TestCircleFactory.createCircle(
+            mlsGroupId: [id],
+            nostrGroupId: [id],
+            members: [TestCircleFactory.createMember(pubkey: _selfPubkey)],
+          ),
+      ];
+      for (final (arrange, told) in <(void Function(MockCircleService), int)>[
+        ((_) {}, 1),
+        ((m) => m.publishAnswers = [LocationPublishFfi.unreachable], 1),
+        (
+          (m) => m.publishAnswers = [
+            LocationPublishFfi.expired,
+            LocationPublishFfi.inFlight,
+          ],
+          0,
+        ),
+        ((m) => m.publishSealedThrows = const CircleServiceException('x'), 0),
+      ]) {
+        final mockCircle = MockCircleService(circles: circles);
+        arrange(mockCircle);
+        final handOff = _RecordingHandOff();
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(
+              _MockIdentityService(identity: gateIdentity),
+            ),
+            locationServiceProvider.overrideWithValue(_FixedLocationService()),
+            circleServiceProvider.overrideWithValue(mockCircle),
+            locationSharingServiceProvider.overrideWithValue(
+              LocationSharingService(
+                circleService: mockCircle,
+                relayService: MockRelayService(),
+              ),
+            ),
+            locationPublishStaggerProvider.overrideWithValue(
+              PublishStagger.none(),
+            ),
+            meshHandOffProvider.overrideWith(() => handOff),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await container.read(locationPublisherProvider.future);
+
+        expect(
+          mockCircle.methodCalls.where((m) => m == 'sealLocation'),
+          hasLength(2),
+          reason: 'premise: both circles reached their seal',
+        );
+        expect(handOff.told, told);
+      }
+    });
+
+    test("a one-shot's publishes are the same whatever becomes of the word "
+        'to the ripple: one that throws at once, one that fails later, one '
+        'that never answers', () async {
+      final circles = [
+        for (final id in [1, 2])
+          TestCircleFactory.createCircle(
+            mlsGroupId: [id],
+            nostrGroupId: [id],
+            members: [TestCircleFactory.createMember(pubkey: _selfPubkey)],
+          ),
+      ];
+      final runs = <String, (int, List<String>, List<List<int>>)>{};
+      for (final (name, word) in <(String, MeshHandOffNotifier Function())>[
+        ('told', _RecordingHandOff.new),
+        ('throws at once', _ThrowingHandOff.new),
+        ('fails later', _FailingHandOff.new),
+        ('never answers', _HangingHandOff.new),
+      ]) {
+        final mockCircle = MockCircleService(circles: circles);
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(
+              _MockIdentityService(identity: gateIdentity),
+            ),
+            locationServiceProvider.overrideWithValue(_FixedLocationService()),
+            circleServiceProvider.overrideWithValue(mockCircle),
+            locationSharingServiceProvider.overrideWithValue(
+              LocationSharingService(
+                circleService: mockCircle,
+                relayService: MockRelayService(),
+              ),
+            ),
+            locationPublishStaggerProvider.overrideWithValue(
+              PublishStagger.none(),
+            ),
+            meshHandOffProvider.overrideWith(word),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        final published = await container.read(
+          locationPublisherProvider.future,
+        );
+        await pumpEventQueue();
+
+        runs[name] = (
+          published,
+          mockCircle.methodCalls
+              .where((m) => m == 'sealLocation' || m == 'publishSealedLocation')
+              .toList(),
+          mockCircle.encryptedMlsGroupIds,
+        );
+      }
+
+      final told = runs['told']!;
+      expect(told.$1, 2, reason: 'premise: both circles published');
+      for (final (name, run) in [
+        for (final e in runs.entries) (e.key, e.value),
+      ]) {
+        expect(run.$1, told.$1, reason: name);
+        expect(run.$2, told.$2, reason: name);
+        expect(run.$3, told.$3, reason: name);
+      }
+    });
+
     test('excludes a disbanded circle from publish', () async {
       final healthy = TestCircleFactory.createCircle(
         mlsGroupId: const [1],
@@ -849,6 +978,152 @@ void main() {
       },
     );
   });
+
+  // ---------------------------------------------------------------------------
+  // Group: the Bluetooth mesh (docs/BLUETOOTH_MESH_PLAN.md §5.2, §5.5).
+  // Written to hold under BOTH compile-time branches of `liveSyncEnabled`:
+  // this file is one of the two the coverage gate runs again with the flag
+  // off, and the mesh's promise — it changes nothing a relay is asked — is
+  // kept by different code on each branch.
+  // ---------------------------------------------------------------------------
+
+  group('the Bluetooth mesh', () {
+    final identity = Identity(
+      pubkeyHex: _selfPubkey,
+      npub: 'npub1self',
+      createdAt: DateTime(2025),
+    );
+    final circle = TestCircleFactory.createCircle(
+      mlsGroupId: const [1],
+      nostrGroupId: const [10],
+      members: [
+        TestCircleFactory.createMember(pubkey: _selfPubkey),
+        TestCircleFactory.createMember(pubkey: _otherPubkey),
+      ],
+    );
+
+    LocationEventResult meshFix() => LocationEventResult(
+      kind: LocationEventKind.location,
+      mlsGroupId: circle.mlsGroupId,
+      epoch: 4,
+      location: DecryptedLocation(
+        senderPubkey: _otherPubkey,
+        latitude: 51.5,
+        longitude: -0.12,
+        geohash: 'gcpv',
+        timestamp: DateTime.now().subtract(const Duration(seconds: 30)),
+        expiresAt: DateTime.now().add(const Duration(minutes: 15)),
+      ),
+    );
+
+    ({
+      ProviderContainer container,
+      FakeMeshService mesh,
+      MockCircleService circles,
+      _CountingRelayService relay,
+    })
+    build() {
+      SharedPreferences.setMockInitialValues({
+        kLocationDisclosureAcceptedKey: true,
+      });
+      final mesh = FakeMeshService();
+      final circles = MockCircleService(circles: [circle]);
+      final relay = _CountingRelayService();
+      final container = ProviderContainer(
+        overrides: [
+          meshServiceProvider.overrideWithValue(mesh),
+          identityServiceProvider.overrideWithValue(
+            _MockIdentityService(identity: identity),
+          ),
+          locationServiceProvider.overrideWithValue(_FixedLocationService()),
+          circleServiceProvider.overrideWithValue(circles),
+          relayServiceProvider.overrideWithValue(relay),
+          locationPublishStaggerProvider.overrideWithValue(
+            PublishStagger.none(),
+          ),
+          profileServiceProvider.overrideWithValue(MockProfileService()),
+          selectedCircleProvider.overrideWithValue(circle),
+          locationSharingServiceProvider.overrideWithValue(
+            LocationSharingService(
+              circleService: circles,
+              relayService: relay,
+              identityService: _MockIdentityService(identity: identity),
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      return (container: container, mesh: mesh, circles: circles, relay: relay);
+    }
+
+    test('the one-shot publisher says "not received": it fetched nothing '
+        'first', () async {
+      // Cold start, resume, motion, accept and create all publish through
+      // here with no relay receive ahead of the send. Saying "received"
+      // would pass a fellow member's mesh update on to the relays past a
+      // removal this device has not fetched.
+      final t = build();
+
+      expect(await t.container.read(locationPublisherProvider.future), 1);
+
+      expect(t.circles.publishReceived, [false]);
+      expect(t.circles.sealMeshOnly, [false]);
+    });
+
+    test('what a mesh drive read is stored where a relay receive stores it, '
+        'and the map shows it', () async {
+      final t = build();
+      expect(await t.container.read(memberLocationsProvider.future), isEmpty);
+      t.mesh.driveAnswer = [meshFix()];
+
+      await t.container.read(meshProvider.notifier).drive();
+      // Where the map polls, the poll timer's next tick is what shows it.
+      if (!liveSyncEnabled) t.container.invalidate(memberLocationsProvider);
+
+      expect(t.circles.lastKnownRows.single['senderPubkey'], _otherPubkey);
+      expect(t.circles.lastKnownRows.single['nostrGroupId'], const [10]);
+      final shown = await t.container.read(memberLocationsProvider.future);
+      expect(shown.single.pubkey, _otherPubkey);
+      expect(shown.single.latitude, 51.5);
+    });
+
+    test('a mesh drive asks no relay for anything', () async {
+      // Taking a location in by mesh must never be what makes this device
+      // fetch: where the map polls the relays, the drive leaves the map's
+      // read alone.
+      final t = build();
+      await t.container.read(memberLocationsProvider.future);
+      final asked = t.relay.fetches;
+      t.mesh.driveAnswer = [meshFix()];
+
+      await t.container.read(meshProvider.notifier).drive();
+      await t.container.read(memberLocationsProvider.future);
+      await pumpEventQueue();
+
+      expect(t.relay.fetches, asked);
+    });
+  });
+}
+
+/// A relay service that counts the fetches asked of it.
+class _CountingRelayService extends MockRelayService {
+  int fetches = 0;
+
+  @override
+  Future<List<String>> fetchGroupMessages({
+    required List<int> nostrGroupId,
+    required List<String> relays,
+    DateTime? since,
+    int? limit,
+  }) {
+    fetches++;
+    return super.fetchGroupMessages(
+      nostrGroupId: nostrGroupId,
+      relays: relays,
+      since: since,
+      limit: limit,
+    );
+  }
 }
 
 // =============================================================================
@@ -981,4 +1256,30 @@ class _FixedLocationService implements LocationService {
   @override
   Future<LocationPermissionStatus> checkPermission() async =>
       LocationPermissionStatus.always;
+}
+
+/// Counts what the one-shot tells the map's ripple.
+class _RecordingHandOff extends MeshHandOffNotifier {
+  int told = 0;
+
+  @override
+  Future<void> handedOff() async => told++;
+}
+
+/// A word to the ripple that throws before it returns.
+class _ThrowingHandOff extends MeshHandOffNotifier {
+  @override
+  Future<void> handedOff() => throw StateError('thrown at once');
+}
+
+/// One that fails after it returned.
+class _FailingHandOff extends MeshHandOffNotifier {
+  @override
+  Future<void> handedOff() async => throw StateError('failed later');
+}
+
+/// One that never answers.
+class _HangingHandOff extends MeshHandOffNotifier {
+  @override
+  Future<void> handedOff() => Completer<void>().future;
 }

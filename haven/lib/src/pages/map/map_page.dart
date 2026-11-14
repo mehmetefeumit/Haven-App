@@ -11,14 +11,17 @@ import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
+import 'package:haven/src/constants/map_layout.dart';
 import 'package:haven/src/constants/tile_cache_policy.dart';
 import 'package:haven/src/constants/tile_prefetch_policy.dart';
+import 'package:haven/src/constants/tiles.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/location_access_provider.dart';
 import 'package:haven/src/providers/location_disclosure_provider.dart';
 import 'package:haven/src/providers/location_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/map_controller_provider.dart';
+import 'package:haven/src/providers/mesh_provider.dart';
 import 'package:haven/src/providers/resume_extras_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/providers/tile_cache_provider.dart';
@@ -34,6 +37,7 @@ import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/map_focus.dart';
 import 'package:haven/src/utils/prefetch_scope.dart';
 import 'package:haven/src/utils/tile_coordinates.dart';
+import 'package:haven/src/widgets/map/own_location_ripple.dart';
 import 'package:haven/src/widgets/widgets.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -174,11 +178,6 @@ class _MapPageState extends ConsumerState<MapPage>
   // located user. Not a stored last-known location — Haven never persists one.
   static const _defaultLocation = LatLng(51.5074, -0.1278); // London
   static const _defaultZoom = 15.0;
-
-  /// Fraction of the viewport height occupied by the collapsed bottom sheet.
-  /// Shared by the map-controls offset and the off-screen indicator bottom
-  /// inset so the two cannot silently desync.
-  static const _collapsedSheetFraction = 0.12;
 
   // The controller's lifetime is owned by [mapControllerProvider] so the
   // circles bottom sheet can call `move` from outside this widget. Keep a
@@ -642,7 +641,7 @@ class _MapPageState extends ConsumerState<MapPage>
 
     // Calculate bottom offset for map controls (above collapsed sheet)
     final screenHeight = MediaQuery.of(context).size.height;
-    final sheetCollapsedHeight = screenHeight * _collapsedSheetFraction;
+    final sheetCollapsedHeight = screenHeight * kCollapsedSheetFraction;
 
     return Stack(
       children: [
@@ -750,7 +749,7 @@ class _MapPageState extends ConsumerState<MapPage>
     // Logical pixels occluded by the collapsed bottom sheet, reserved so
     // droplets and the optical centre stay above it.
     final bottomInset =
-        MediaQuery.of(context).size.height * _collapsedSheetFraction;
+        MediaQuery.of(context).size.height * kCollapsedSheetFraction;
 
     return FlutterMap(
       mapController: _mapController,
@@ -839,16 +838,15 @@ class _MapPageState extends ConsumerState<MapPage>
           hasFix: _obfuscatedLocation != null,
           accessBlocked: accessBlocked,
         ))
-          MarkerLayer(
-            markers: [
-              Marker(
-                point: _currentLatLng,
-                width: 32,
-                height: 32,
-                child: const UserLocationMarker(),
-              ),
-            ],
-          ),
+          // Where the Bluetooth mesh exists the dot's layer also ripples
+          // when this location is handed to the mesh.
+          if (ref.watch(meshAvailableProvider))
+            OwnLocationLayer(
+              point: _currentLatLng,
+              darkBasemap: tileConfig.id == kStyleIdAlidadeSmoothDark,
+            )
+          else
+            MarkerLayer(markers: [ownLocationMarker(_currentLatLng)]),
 
         // Attribution is only an obligation when real tiles are shown.
         if (tileConfig.apiKeyConfigured) MapAttribution(config: tileConfig),

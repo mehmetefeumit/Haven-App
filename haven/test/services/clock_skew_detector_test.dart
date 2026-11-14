@@ -161,16 +161,18 @@ void main() {
       }
     });
 
-    test('a send no relay was reached for, or that was not sent, does not '
-        'clear a raised signal', () {
+    test('a send no relay was reached for, or that was not sent to one, '
+        'does not clear a raised signal', () {
       // A dropped connection says nothing either way about the clock; letting
-      // it clear the verdict would hide a clock that is still wrong.
+      // it clear the verdict would hide a clock that is still wrong. Neither
+      // does a location handed to the mesh alone: no relay judged it.
       for (final publish in [
         LocationPublishFfi.unreachable,
         LocationPublishFfi.expired,
         LocationPublishFfi.superseded,
         LocationPublishFfi.ended,
         LocationPublishFfi.inFlight,
+        LocationPublishFfi.meshOnly,
       ]) {
         final detector = ClockSkewDetector();
         addTearDown(detector.dispose);

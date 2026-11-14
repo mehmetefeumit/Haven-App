@@ -175,6 +175,8 @@ pub struct FaultState {
     /// Whether every `NEG-OPEN` is answered as a relay without NIP-77 answers
     /// it, and never passed on.
     pub refuse_negentropy: bool,
+    /// Whether every NIP-77 answer the relay sends is kept from the client.
+    pub withhold_negentropy: bool,
 }
 
 impl FaultState {
@@ -678,7 +680,7 @@ async fn forward_from_client(
             let faults = *state.read().unwrap_or_else(PoisonError::into_inner);
             match message {
                 ClientMessage::Event(event) => {
-                    ledger.note_published(event.id);
+                    ledger.note_published(device, event.id);
                     if oversize(&event, faults) {
                         // Refused on the way OUT, so the relay never sees it:
                         // a plane that both stored the event and told the
@@ -862,7 +864,7 @@ async fn deliver(
                     if !write(to_client, frame.bytes()).await {
                         return false;
                     }
-                    ledger.note_ok(event_id, status, &message);
+                    ledger.note_ok(endpoint.device, event_id, status, &message);
                     return true;
                 }
                 RelayMessage::Event {
@@ -916,6 +918,9 @@ async fn deliver(
                     return true;
                 }
                 RelayMessage::NegMsg { .. } | RelayMessage::NegErr { .. } => {
+                    if faults.withhold_negentropy {
+                        return true;
+                    }
                     if !write(to_client, frame.bytes()).await {
                         return false;
                     }
@@ -980,7 +985,7 @@ async fn write_forged(json: &str, to_client: &mut OwnedWriteHalf, endpoint: Endp
             event_id,
             status,
             message,
-        }) => ledger.note_ok(event_id, status, &message),
+        }) => ledger.note_ok(endpoint.device, event_id, status, &message),
         // An injected `EVENT` is recorded as a delivery like any other: it
         // really went out, and the ledger is the record of what the client was
         // sent, not of who composed it.

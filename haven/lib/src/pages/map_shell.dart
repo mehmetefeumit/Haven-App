@@ -15,6 +15,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/constants/location.dart';
+import 'package:haven/src/constants/map_layout.dart';
 import 'package:haven/src/constants/profile_refresh_tiers.dart';
 import 'package:haven/src/pages/foreground_start_up_gate.dart';
 import 'package:haven/src/pages/map/map_page.dart';
@@ -34,6 +35,7 @@ import 'package:haven/src/providers/location_provider.dart';
 import 'package:haven/src/providers/location_publish_scheduler_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/maintenance_scheduler_provider.dart';
+import 'package:haven/src/providers/mesh_provider.dart';
 import 'package:haven/src/providers/own_profile_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/resume_extras_provider.dart';
@@ -65,6 +67,8 @@ import 'package:haven/src/widgets/common/invitations_button.dart';
 import 'package:haven/src/widgets/common/settings_button.dart';
 import 'package:haven/src/widgets/debug/debug_log_overlay.dart';
 import 'package:haven/src/widgets/map/map_status_banners.dart';
+import 'package:haven/src/widgets/map/mesh_aura_overlay.dart';
+import 'package:haven/src/widgets/map/mesh_button.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// A latch that lets concurrent callers share ONE run of an async build.
@@ -1036,11 +1040,20 @@ class MapShell extends ConsumerStatefulWidget {
     required Widget settingsButton,
     required Widget statusBanners,
     required Widget circlesSheet,
+    Widget? meshButton,
+    Widget? meshAura,
     Widget? debugOverlay,
   }) {
     return [
       // Full-screen map (always visible)
       map,
+
+      // The Bluetooth mesh's button, where the build has one: above the map
+      // and under the dim overlay, so the expanded sheet covers it as it
+      // covers the map controls. It places itself in its corner. Above the
+      // map page's own loading scrim and error overlay too, as the two
+      // buttons below are: the mesh needs neither tiles nor a fix.
+      if (meshButton != null) Positioned.fill(child: meshButton),
 
       // Dim overlay (animated based on sheet expansion)
       Positioned.fill(child: dimOverlay),
@@ -1063,6 +1076,11 @@ class MapShell extends ConsumerStatefulWidget {
 
       // Circles bottom sheet
       circlesSheet,
+
+      // The mesh's aura: above the sheet, so the whole window is framed
+      // whatever the sheet's height, and under the banners, so a warning is
+      // never tinted. It takes no touch.
+      if (meshAura != null) Positioned.fill(child: meshAura),
 
       // Status banners: tell the user, WHILE it is happening, that their
       // location sharing has stopped and what to do about it. Render nothing
@@ -1400,7 +1418,18 @@ class _MapShellState extends ConsumerState<MapShell>
     // `liveSyncEnabled`. Cancelled on dispose + explicitly invalidated in
     // `deleteIdentity` so no secret-bearing tick runs after logout. Their
     // arming gates refuse while the app is away.
-    ref.read(maintenanceSchedulerProvider.notifier);
+    ref
+      ..read(maintenanceSchedulerProvider.notifier)
+      // A Bluetooth mesh an earlier process left on gets its engine back at
+      // this read of its state; a build without the mesh reads nothing.
+      ..read(meshProvider);
+    // Then its engine and its radio are brought back to one answer. Not
+    // under a pause this shell missed: a radio the system will not start
+    // from the background would be taken for one that cannot come back, and
+    // mesh turned off for it. The first resume reconciles.
+    if (!pausedAtMount(currentLifecycle)) {
+      unawaited(ref.read(meshProvider.notifier).reconcile());
+    }
     // Receive plane: the live-sync engine, when enabled; it reads for itself
     // whether a session is wanted. The flag-off pollers are relay contact.
     if (liveSyncEnabled) unawaited(_startLiveSync());
@@ -1842,6 +1871,7 @@ class _MapShellState extends ConsumerState<MapShell>
           receiveWithoutSession: liveSyncEnabled
               ? null
               : _receiveBeforeBurstSeal,
+          mesh: ref.read(meshProvider.notifier),
           onOpenOutcome: (failures) {
             if (!mounted) return;
             MapShell.recordBurstOpenOutcome(
@@ -2967,6 +2997,16 @@ class _MapShellState extends ConsumerState<MapShell>
     // re-subscriber is superseded well inside that class's 500 ms debounce.
     _invalidateHandoffWindowPoison();
 
+    // The Bluetooth mesh's engine and radio, back to one answer: a permission
+    // revoked or a service stopped while away is seen here. Behind the
+    // hand-off's end, since it reads the engine through the session, and
+    // ahead of the debounce: leaving to change a system setting and coming
+    // straight back is how the two come apart.
+    unawaited(ref.read(meshProvider.notifier).reconcile());
+    // And what the map shows of it is compared with the clock now: a
+    // deadline that passed while away shows no hue on the first frame back.
+    ref.invalidate(meshPhaseProvider);
+
     // Re-anchor the engine's subscriptions BEFORE the debounce, deliberately —
     // but on a guard of its own, NOT unthrottled.
     //
@@ -3133,7 +3173,7 @@ class _MapShellState extends ConsumerState<MapShell>
   // (the subset this shell drives: the collapsed min, the low "peek" rest
   // point used after tap-to-focus, and the max — which with the min gives
   // `_animateSheetDuration` a stable range to divide by).
-  static const double _kMinSheetSize = 0.12;
+  static const double _kMinSheetSize = kCollapsedSheetFraction;
   static const double _kPeekSheetSize = 0.30;
   static const double _kMaxSheetSize = 0.85;
 
@@ -3251,6 +3291,8 @@ class _MapShellState extends ConsumerState<MapShell>
     ref.watch(backgroundServiceLifecycleProvider);
 
     final mediaQuery = MediaQuery.of(context);
+    // Nothing of the mesh is on the map where there is no radio.
+    final meshOnMap = ref.watch(meshAvailableProvider);
 
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: SystemUiOverlayStyle(
@@ -3281,6 +3323,8 @@ class _MapShellState extends ConsumerState<MapShell>
                 },
                 onMemberFocused: () => unawaited(_partiallyCollapseSheet()),
               ),
+              meshButton: meshOnMap ? const MeshButton() : null,
+              meshAura: meshOnMap ? const MeshAura() : null,
               // Debug builds only.
               debugOverlay: kDebugMode
                   ? Consumer(

@@ -13,6 +13,7 @@ library;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/mesh_service.dart';
 import 'package:haven/src/services/pending_mls_wipe_service.dart';
 import 'package:haven/src/utils/log_alias.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -82,6 +83,18 @@ void main() {
 
       expect(prefs.getBool(kPendingMlsWipeKey), isTrue,
           reason: 'marker must be true after setPending');
+    });
+
+    test("takes the Bluetooth mesh's read-the-disclosure flag with it: a "
+        'logout that dies after this step cannot leave it to the next '
+        'identity', () async {
+      final (:service, :prefs) = await makeService(
+        prefsValues: {kMeshIntroSeenKey: true},
+      );
+
+      await service.setPending();
+
+      expect(prefs.containsKey(kMeshIntroSeenKey), isFalse);
     });
 
     test('(a) isPending is true after setPending', () async {

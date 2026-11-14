@@ -21,6 +21,7 @@ import 'package:haven/src/network/pinned_tile_client.dart';
 import 'package:haven/src/providers/debug_log_provider.dart';
 import 'package:haven/src/providers/locale_provider.dart';
 import 'package:haven/src/providers/map_style_provider.dart';
+import 'package:haven/src/providers/mesh_provider.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/providers/storage_reset_notice_provider.dart';
@@ -162,6 +163,7 @@ Future<void> main() async {
     final launchWipeService = PendingMlsWipeService(
       prefs: prefs,
       circleService: launchWipeCircle,
+      meshRadio: platformMeshRadio(),
     );
     await launchWipeService.retryWipeIfPending();
   } on Object catch (e) {

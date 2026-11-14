@@ -13,6 +13,7 @@ import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/live_sync_provider.dart';
 import 'package:haven/src/providers/location_publish_scheduler_provider.dart';
+import 'package:haven/src/providers/mesh_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/providers/sharing_health_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
@@ -175,6 +176,10 @@ Future<List<MemberLocation>> _withEffectiveNames(
 /// belongs to `locationPublishSchedulerProvider`.) Returns the number of
 /// circles published to.
 ///
+/// It receives nothing first, so no send here claims a relay receive that
+/// completed before it (`received` stays `false`): nothing the Bluetooth mesh
+/// brought is passed on to a relay from a one-shot.
+///
 /// ## Decorrelation (privacy)
 ///
 /// The circles are published SEQUENTIALLY, in a CSPRNG order, with a CSPRNG
@@ -286,6 +291,9 @@ final locationPublisherProvider = FutureProvider<int>((ref) async {
     final gaps = stagger.sampleGaps(order.length);
 
     var published = 0;
+    // One word to the map's ripple a burst, at its first hand-off to the
+    // Bluetooth mesh.
+    var handedOff = false;
     for (var i = 0; i < order.length; i++) {
       if (gaps[i] > Duration.zero) {
         await Future<void>.delayed(gaps[i]);
@@ -324,8 +332,17 @@ final locationPublisherProvider = FutureProvider<int>((ref) async {
             continue;
           case LocationPublishInFlight():
             continue;
+          // No relay was asked: neither a verdict nor a held send.
+          case LocationPublishMeshOnly():
+            continue;
           case LocationPublishSent(acked: final a):
             acked = a;
+        }
+        // A send past the send-time check, where the core leaves the sealed
+        // location for the mesh.
+        if (!handedOff) {
+          handedOff = true;
+          noteMeshHandOff(ref);
         }
         // A send no relay took delivered nothing: told to the health model,
         // so a send plane cannot die without the user being told.

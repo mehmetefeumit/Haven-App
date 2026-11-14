@@ -1,4 +1,5 @@
 import java.io.FileInputStream
+import java.util.Base64
 import java.util.Properties
 
 plugins {
@@ -95,6 +96,34 @@ kotlin {
 
 flutter {
     source = "../.."
+}
+
+// ---------------------------------------------------------------------------
+// The Bluetooth mesh's one build switch (docs/BLUETOOTH_MESH_M3_DESIGN.md
+// §N.3). Dart reads `HAVEN_MESH` from its defines; the Flutter tool hands
+// Gradle the same defines as `-Pdart-defines`, each base64 of `NAME=value`,
+// joined by commas, and the last one of a name decides. Read here, once, so
+// the manifest and `BuildConfig.HAVEN_MESH` cannot disagree with the Dart
+// flag. A property that is absent, or that does not decode, is off: a build
+// without the flag declares no Bluetooth permission and nothing of the mesh.
+// ---------------------------------------------------------------------------
+val meshOn = runCatching {
+    (findProperty("dart-defines")?.toString()).orEmpty()
+        .split(",")
+        .map { String(Base64.getDecoder().decode(it), Charsets.UTF_8) }
+        .lastOrNull { it.startsWith("HAVEN_MESH=") } == "HAVEN_MESH=true"
+}.getOrDefault(false)
+
+android {
+    defaultConfig {
+        buildConfigField("boolean", "HAVEN_MESH", "$meshOn")
+    }
+}
+
+androidComponents {
+    onVariants { variant ->
+        if (meshOn) variant.sources.manifests.addStaticManifestFile("src/mesh/AndroidManifest.xml")
+    }
 }
 
 // ---------------------------------------------------------------------------

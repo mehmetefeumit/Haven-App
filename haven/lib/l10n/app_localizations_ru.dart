@@ -2378,4 +2378,242 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get avatarSemanticsOffline => 'не в сети';
+
+  @override
+  String get meshButtonLabel => 'Меш-сеть Bluetooth';
+
+  @override
+  String get meshButtonValueConnected =>
+      'есть соединение с телефоном поблизости';
+
+  @override
+  String get meshButtonValuePaused => 'приостановлена, Bluetooth выключен';
+
+  @override
+  String get meshButtonHintTurnOn => 'включить';
+
+  @override
+  String get meshButtonHintTurnOff => 'выключить';
+
+  @override
+  String get meshButtonHintStats => 'посмотреть активность меш-сети';
+
+  @override
+  String get meshTurningOn => 'Включаем меш-сеть Bluetooth…';
+
+  @override
+  String get meshTurnOn => 'Включить';
+
+  @override
+  String get meshTurnOff => 'Выключить';
+
+  @override
+  String get meshTurnedOn =>
+      'Меш-сеть Bluetooth включена. Нажмите и удерживайте кнопку, чтобы посмотреть активность.';
+
+  @override
+  String get meshUndo => 'Отменить';
+
+  @override
+  String get meshErrorNoPermission =>
+      'Меш-сети Bluetooth нужно разрешение «Устройства поблизости».';
+
+  @override
+  String get meshErrorBluetoothOff =>
+      'Включите Bluetooth, чтобы пользоваться меш-сетью.';
+
+  @override
+  String get meshErrorUnsupported =>
+      'Этот телефон не поддерживает меш-сеть Bluetooth.';
+
+  @override
+  String get meshErrorStartFailed =>
+      'Не удалось включить меш-сеть Bluetooth. Попробуйте снова.';
+
+  @override
+  String get meshErrorStopFailed =>
+      'Не удалось выключить меш-сеть Bluetooth. Попробуйте снова.';
+
+  @override
+  String get meshStoppedNotice => 'Меш-сеть Bluetooth выключилась.';
+
+  @override
+  String get meshStoppedAfterDeadline =>
+      'Меш-сеть Bluetooth выключилась: прошло 12 часов.';
+
+  @override
+  String get meshStoppedOk => 'ОК';
+
+  @override
+  String get meshIntroTitle => 'Меш-сеть Bluetooth';
+
+  @override
+  String get meshIntroHeadingDoes => 'Что она делает';
+
+  @override
+  String get meshIntroWhat =>
+      'Даже без интернета меш-сеть может передавать зашифрованные обновления местоположения, ваши и ваших кругов, с телефона на телефон по Bluetooth, когда поблизости есть телефоны с включённой меш-сетью. Обновления могут прийти с опозданием или потеряться. Ваш телефон также переносит зашифрованные пакеты других людей, прочитать которые он не может.';
+
+  @override
+  String get meshIntroAutoOff =>
+      'Меш-сеть сама выключается через 12 часов. Если уведомления разрешены, за 30 минут до этого вы получите напоминание.';
+
+  @override
+  String get meshIntroBattery =>
+      'С меш-сетью телефон расходует больше заряда батареи.';
+
+  @override
+  String get meshIntroClosed =>
+      'Меш-сеть продолжает работать, когда Haven закрыт. Если Haven закрыт, а фоновый обмен отключён, она переносит пакеты других людей, но не отправляет ваше местоположение и не читает местоположения ваших кругов, пока вы не откроете Haven.';
+
+  @override
+  String get meshIntroHeadingLearn => 'Что могут узнать другие';
+
+  @override
+  String get meshIntroNearby =>
+      'Любой, кто находится поблизости, может понять, что на этом телефоне включена меш-сеть Haven, и определить по радиосигналу, где этот телефон находится. Телефон, который подключается к вашему, может позже снова узнать ваш телефон, даже после того как адрес Bluetooth вашего телефона изменится. Никто из них не может ни прочитать ваше местоположение, ни увидеть ваши круги.';
+
+  @override
+  String get meshIntroConnected =>
+      'Телефон, который подключается к вашему, может видеть, какие зашифрованные пакеты отправляет ваш телефон, примерно какой давности каждый из них и когда ваш телефон в спящем режиме. Если это не телефон участника одного из ваших кругов, он не может их прочитать и не может знать наверняка, какие из них — ваши собственные обновления.';
+
+  @override
+  String get meshIntroName =>
+      'Телефоны, с которыми соединяется меш-сеть, могут прочитать имя вашего телефона в Bluetooth и увидеть, какие ещё службы Bluetooth он предоставляет.';
+
+  @override
+  String meshIntroNameIs(String name) {
+    return 'Имя вашего телефона в Bluetooth — «$name».';
+  }
+
+  @override
+  String get meshBluetoothSettings => 'Настройки Bluetooth';
+
+  @override
+  String get meshIntroBridge =>
+      'Когда у вас есть интернет, ваш телефон может передать обновление находящегося поблизости участника круга дальше, на реле вашего круга, а его телефон может передать ваше. Тогда реле может понять, что у участника этого круга нет интернета и что он находится рядом с телефоном, который передал обновление. Если интернет есть у обоих телефонов, реле может понять, что они находятся рядом друг с другом.';
+
+  @override
+  String get meshIntroRemoved =>
+      'Пока у вас нет интернета, человек, удалённый из круга, по-прежнему может читать ваши обновления — до тех пор, пока ваш телефон не узнает, что этого человека удалили.';
+
+  @override
+  String get meshIntroHeadingKnow => 'Полезно знать';
+
+  @override
+  String get meshIntroStats =>
+      'Нажмите и удерживайте кнопку меш-сети, чтобы посмотреть, сколько обновлений через неё прошло.';
+
+  @override
+  String get meshNameStepTitle => 'Имя телефона в Bluetooth';
+
+  @override
+  String get meshNameStepChange =>
+      'Изменить его можно в настройках Bluetooth вашего телефона.';
+
+  @override
+  String get meshStatsTitle => 'Активность меш-сети';
+
+  @override
+  String get meshStatsThisSession => 'За этот сеанс';
+
+  @override
+  String get meshStatsLastSession => 'За прошлый сеанс';
+
+  @override
+  String get meshStatsAllTime => 'За всё время';
+
+  @override
+  String get meshStatsFromCircles => 'Получено от ваших кругов';
+
+  @override
+  String get meshStatsPassedOn => 'Передано для других';
+
+  @override
+  String meshStatsCell(String row, String column, String count) {
+    return '$row, $column: $count';
+  }
+
+  @override
+  String get meshStatsFootnote =>
+      'Переданные пакеты этот телефон прочитать не может. Среди них — обновления других людей и пакеты-пустышки, которые скрывают, какие пакеты настоящие.';
+
+  @override
+  String get meshStatsUnavailable =>
+      'Не удалось загрузить активность меш-сети.';
+
+  @override
+  String get meshStatsAbout => 'О меш-сети Bluetooth';
+
+  @override
+  String get meshStatusConnected => 'Меш-сеть включена · есть соединение';
+
+  @override
+  String get meshStatusSearching =>
+      'Меш-сеть включена · ищет телефоны поблизости';
+
+  @override
+  String get meshStatusFindable =>
+      'Меш-сеть включена · другие телефоны могут найти этот, но сам он искать их не может';
+
+  @override
+  String get meshStatusPaused => 'Меш-сеть приостановлена · Bluetooth выключен';
+
+  @override
+  String get meshStatusOff => 'Меш-сеть выключена';
+
+  @override
+  String meshTurnsOffAt(DateTime time) {
+    final intl.DateFormat timeDateFormat = intl.DateFormat.jm(localeName);
+    final String timeString = timeDateFormat.format(time);
+
+    return 'Выключится в $timeString';
+  }
+
+  @override
+  String get meshKeepOn => 'Не выключать 12 часов';
+
+  @override
+  String get meshStatsReset => 'Сбросить счётчики';
+
+  @override
+  String get meshStatsResetTitle => 'Сбросить счётчики меш-сети?';
+
+  @override
+  String get meshStatsResetBody => 'Все четыре счётчика вернутся к нулю.';
+
+  @override
+  String get meshStatsResetConfirm => 'Сбросить';
+
+  @override
+  String get settingsMeshTitle => 'Меш-сеть Bluetooth';
+
+  @override
+  String get settingsMeshOn => 'Включена';
+
+  @override
+  String get settingsMeshOff => 'Выключена';
+
+  @override
+  String get meshNoticeChannel => 'Меш-сеть Bluetooth';
+
+  @override
+  String get meshNoticeOn => 'Меш-сеть Bluetooth включена';
+
+  @override
+  String get meshNoticePaused => 'Меш-сеть приостановлена — Bluetooth выключен';
+
+  @override
+  String get meshNoticeStopped => 'Меш-сеть Bluetooth выключилась';
+
+  @override
+  String meshNoticeReminder(DateTime time) {
+    final intl.DateFormat timeDateFormat = intl.DateFormat.jm(localeName);
+    final String timeString = timeDateFormat.format(time);
+
+    return 'Меш-сеть Bluetooth выключится в $timeString';
+  }
+
+  @override
+  String get meshNoticeKeepOn => 'Не выключать';
 }

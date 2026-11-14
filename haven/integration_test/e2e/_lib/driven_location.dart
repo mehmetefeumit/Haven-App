@@ -144,6 +144,8 @@ Future<SealedForTest> publishLocationForTest({
   final answer = await relay.publishLocationDriven(
     circle: circle,
     sealed: sealed.sealed,
+    // No relay receive precedes this send: nothing is passed on.
+    received: false,
   );
   expect(answer, LocationPublishFfi.accepted);
   return sealed;

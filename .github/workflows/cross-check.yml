@@ -71,6 +71,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
+          components: clippy
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -104,6 +105,11 @@ jobs:
                    "${TOOLCHAIN}/bin/aarch64-linux-android-${tool}"
           done
 
-      - name: Check Android (aarch64-linux-android)
+      # Clippy with warnings denied, the host's own rule (rust-check.yml), and
+      # not a plain check: the radio's JNI shim and the log lever's symbol
+      # lookup are compiled for Android and for the host's tests only, so
+      # dead code or a lint that exists only in this configuration passes
+      # every other job.
+      - name: Clippy Android (aarch64-linux-android)
         working-directory: haven/rust_builder
-        run: cargo check --target aarch64-linux-android
+        run: cargo clippy --target aarch64-linux-android -- -D warnings

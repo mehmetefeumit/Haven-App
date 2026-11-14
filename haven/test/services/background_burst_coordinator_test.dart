@@ -216,6 +216,12 @@ class _RecordingPublisher implements BurstPublisher {
   /// Circle display names, in publish order.
   final List<String> published = [];
 
+  /// What each publish was told of the burst's relay receive, in order.
+  final List<bool> receivedWords = [];
+
+  /// Whether each publish was a seal for the Bluetooth mesh alone, in order.
+  final List<bool> meshOnlyWords = [];
+
   /// One entry per [openBurstPublishWindow] call: the circles it was opened
   /// for.
   final List<List<String>> windows = [];
@@ -267,8 +273,15 @@ class _RecordingPublisher implements BurstPublisher {
   }
 
   @override
-  Future<void> publishInBurst(Circle circle, BurstFix fix) async {
+  Future<void> publishInBurst(
+    Circle circle,
+    BurstFix fix, {
+    required bool received,
+    required bool meshOnly,
+  }) async {
     published.add(circle.displayName);
+    receivedWords.add(received);
+    meshOnlyWords.add(meshOnly);
     log.add('publish:${circle.displayName}');
     if (duringPublish != null) {
       final hook = duringPublish;
@@ -324,6 +337,48 @@ class _RecordingMaintenance implements BurstMaintenance {
     leavesAfter.add(List.of(log));
     final boom = carryOnThrows;
     if (boom != null) throw boom;
+  }
+}
+
+/// The Bluetooth mesh as a burst sees it: on or off, and a drive that logs
+/// where in the burst it was started.
+class _RecordingMesh implements BurstMesh {
+  _RecordingMesh(this.log, {this.on = true});
+
+  final List<String> log;
+
+  /// What [isOn] answers.
+  bool on;
+
+  /// How many times the burst asked whether mesh is on.
+  int asked = 0;
+
+  /// How many drives the burst started.
+  int drives = 0;
+
+  /// Runs inside [isOn], before it answers.
+  void Function()? duringIsOn;
+
+  /// When set, every drive fails with it.
+  Object? driveThrows;
+
+  /// When set, a drive completes only once it does.
+  Completer<void>? driveGate;
+
+  @override
+  Future<bool> isOn() async {
+    asked++;
+    duringIsOn?.call();
+    return on;
+  }
+
+  @override
+  Future<void> drive() async {
+    drives++;
+    log.add('mesh');
+    if (driveGate != null) await driveGate!.future;
+    final boom = driveThrows;
+    if (boom != null) Error.throwWithStackTrace(boom, StackTrace.current);
   }
 }
 
@@ -411,6 +466,7 @@ void main() {
     bool throwOnShutdown = false,
     Future<BurstStart?> Function(Duration budget)? prepareStartIntoBurst,
     Future<bool> Function()? receiveWithoutSession,
+    BurstMesh? Function(List<String> log)? mesh,
     void Function()? onStalled,
   }) {
     final log = <String>[];
@@ -437,6 +493,7 @@ void main() {
       onOpenOutcome: openOutcomes.add,
       prepareStartIntoBurst: prepareStartIntoBurst ?? (_) async => null,
       receiveWithoutSession: receiveWithoutSession,
+      mesh: mesh?.call(log),
       onStalled: onStalled ?? () {},
       now: now ?? () => DateTime(2026, 9, 7, 12),
     );
@@ -3053,6 +3110,539 @@ void main() {
       });
     });
   });
+
+  /// A start into the burst that succeeds, for a burst that finds no session.
+  Future<BurstStart?> Function(Duration) startsInto(_Env Function() env) =>
+      (budget) async => () => env().engine.startIntoBurst(
+        groups: const [],
+        inboxRelays: const ['wss://inbox.example'],
+        budget: budget,
+      );
+
+  group("what a burst's publish says of its relay receive", () {
+    // `received` lets what fellow members sent by Bluetooth alone be passed
+    // on to the relays behind this send. Said of a receive that did not
+    // complete, it would hand a member removed by a commit this phone has not
+    // fetched an offline member's fix, from the relays.
+    test('"received" behind an open whose backlog settled', () async {
+      final env = build();
+
+      await tick(env, _circle('a', 1));
+
+      expect(env.publisher.receivedWords, [true]);
+      expect(env.publisher.meshOnlyWords, [false]);
+    });
+
+    test('"not received" when an endpoint stayed silent', () async {
+      final env = build()..engine.backlogOutcome = BacklogOutcomeFfi.timedOut;
+
+      await tick(env, _circle('a', 1));
+
+      expect(env.publisher.published, ['a'], reason: 'premise');
+      expect(env.publisher.receivedWords, [false]);
+    });
+
+    test('"not received" behind an open that failed', () async {
+      final env = build()..engine.throwOnOpen = true;
+
+      await tick(env, _circle('a', 1));
+
+      expect(env.publisher.published, ['a'], reason: 'premise');
+      expect(env.publisher.receivedWords, [false]);
+    });
+
+    test('"received" behind a session started into the burst, once its '
+        'backlog settled — and not before', () async {
+      for (final (outcome, word) in [
+        (BacklogOutcomeFfi.settled, true),
+        (BacklogOutcomeFfi.timedOut, false),
+      ]) {
+        late _Env env;
+        env = build(prepareStartIntoBurst: startsInto(() => env))
+          ..engine.lifecycleAnswer = LiveLifecycleFfi.noSession
+          ..engine.backlogOutcome = outcome;
+
+        await tick(env, _circle('a', 1));
+
+        expect(env.publisher.receivedWords, [word], reason: '$outcome');
+      }
+    });
+
+    test('"received" behind a catch-up that completed, where no live plane '
+        'exists', () async {
+      final env = build(receiveWithoutSession: () async => true);
+
+      await tick(env, _circle('a', 1));
+
+      expect(env.publisher.receivedWords, [true]);
+    });
+
+    test('a circle that joins the burst is told what the burst received',
+        () async {
+      for (final (outcome, word) in [
+        (BacklogOutcomeFfi.settled, true),
+        (BacklogOutcomeFfi.timedOut, false),
+      ]) {
+        final env = build()..engine.backlogOutcome = outcome;
+        env.publisher.duringPublish = () async {
+          unawaited(tick(env, _circle('b', 2)));
+        };
+
+        await tick(env, _circle('a', 1));
+
+        expect(env.publisher.published, ['a', 'b'], reason: 'premise');
+        expect(env.publisher.receivedWords, [word, word], reason: '$outcome');
+      }
+    });
+
+    test("each burst speaks for its own receive, never the last one's",
+        () async {
+      final env = build();
+
+      await tick(env, _circle('a', 1));
+      env.engine.backlogOutcome = BacklogOutcomeFfi.timedOut;
+      await tick(env, _circle('a', 1));
+
+      expect(env.publisher.receivedWords, [true, false]);
+    });
+  });
+
+  group('the Bluetooth mesh rides a burst behind its relay receive', () {
+    const relayLinks = [
+      'open',
+      'backlog',
+      'window',
+      'publish:a',
+      'kp',
+      'relayList',
+      'settle',
+      'pause',
+      'shutdown',
+    ];
+
+    test('it is driven once, after the relay receive and before the first '
+        'seal', () async {
+      late _RecordingMesh mesh;
+      final env = build(mesh: (log) => mesh = _RecordingMesh(log));
+
+      await tick(env, _circle('a', 1));
+
+      expect(env.log, [
+        'open',
+        'backlog',
+        'mesh',
+        'window',
+        'publish:a',
+        'kp',
+        'relayList',
+        'settle',
+        'pause',
+        'shutdown',
+      ]);
+      expect(mesh.drives, 1);
+      expect(mesh.asked, 0, reason: 'a burst that received asks nothing');
+    });
+
+    test('with no live plane it is driven behind the catch-up', () async {
+      late _Env env;
+      env = build(
+        receiveWithoutSession: () async {
+          env.log.add('receive');
+          return true;
+        },
+        mesh: _RecordingMesh.new,
+      );
+
+      await tick(env, _circle('a', 1));
+
+      expect(env.log.take(4), ['receive', 'mesh', 'window', 'publish:a']);
+    });
+
+    test("the burst's relay links, their order and what they answer are the "
+        'same with the mesh unwired, off, on, failing and stalled', () async {
+      // Owner requirement: the mesh being on or off never changes how the
+      // relay path runs. A drive that fails, and one that never returns,
+      // included.
+      final logs = LogCapture.install();
+      final stalled = Completer<void>();
+      final meshes = <String, BurstMesh? Function(List<String>)?>{
+        'unwired': null,
+        'off': (log) => _RecordingMesh(log, on: false),
+        'on': _RecordingMesh.new,
+        'failing': (log) => _RecordingMesh(log)
+          ..driveThrows = StateError('group 0xdeadbeefcafe at wss://x.test'),
+        'stalled': (log) => _RecordingMesh(log)..driveGate = stalled,
+      };
+      for (final MapEntry(key: name, value: mesh) in meshes.entries) {
+        final env = build(mesh: mesh);
+
+        await tick(env, _circle('a', 1));
+
+        expect(
+          env.log.where((link) => link != 'mesh'),
+          relayLinks,
+          reason: name,
+        );
+        expect(env.publisher.receivedWords, [true], reason: name);
+        expect(env.publisher.meshOnlyWords, [false], reason: name);
+        expect(env.openOutcomes, [0], reason: name);
+        expect(env.shutdownCount, 1, reason: name);
+        expect(env.coordinator.runningBurst, isNull, reason: name);
+      }
+      // A drive that failed is the mesh's own loss: neither thrown nor
+      // logged (Rule 15: nothing of the mesh reaches a log).
+      expect(logs.joined, isNot(contains('deadbeef')));
+      expect(logs.joined.toLowerCase(), isNot(contains('mesh')));
+    });
+
+    test('a failed open still drives the mesh, and still publishes to the '
+        'relays', () async {
+      late _RecordingMesh mesh;
+      final env = build(mesh: (log) => mesh = _RecordingMesh(log))
+        ..engine.throwOnOpen = true;
+
+      await tick(env, _circle('a', 1));
+
+      expect(env.log.take(4), ['open', 'mesh', 'window', 'publish:a']);
+      expect(env.publisher.meshOnlyWords, [false]);
+      expect(mesh.asked, 0);
+    });
+  });
+
+  group('a burst that could not receive seals for the mesh alone (R1)', () {
+    // Plan §7.7 R1 / T-BG-2. Four cases: the receive failed with mesh on
+    // (mesh-only seals, no relay link more than the teardown, no maintenance
+    // fold); the same with mesh off (nothing, as before the mesh); a burst
+    // stopped by a withdrawn consent; and one the foreground took back —
+    // neither of which seals anything, mesh on or off.
+    const closed = ['settle', 'pause', 'shutdown'];
+
+    group('where no live plane exists', () {
+      test('a receive that failed, mesh on: each due circle is sealed for '
+          'the mesh alone, the fold is skipped and the burst closes',
+          () async {
+        final logs = LogCapture.install();
+        for (final receive in <Future<bool> Function()>[
+          () async => false,
+          () async => throw StateError('relay wss://x.test, 0xdeadbeefcafe'),
+        ]) {
+          late _RecordingMesh mesh;
+          final env = build(
+            receiveWithoutSession: receive,
+            mesh: (log) => mesh = _RecordingMesh(log),
+          );
+
+          await tick(env, _circle('Quiet Wanderer', 0xab));
+
+          expect(env.log, [
+            'mesh',
+            'window',
+            'publish:Quiet Wanderer',
+            ...closed,
+          ]);
+          expect(env.publisher.meshOnlyWords, [true]);
+          expect(env.publisher.receivedWords, [false]);
+          expect(mesh.asked, 1);
+          expect(env.openOutcomes, isEmpty, reason: 'no subscription to lose');
+          expect(env.coordinator.runningBurst, isNull);
+        }
+        expect(
+          logs.joined,
+          isNot(contains('nothing published')),
+          reason: 'a line saying nothing was published, beside a seal',
+        );
+        logs
+          ..assertContains('receive failed')
+          ..assertNoNeedles(['Quiet Wanderer', 'wss://x.test', 'deadbeefcafe']);
+      });
+
+      test('the same receive, mesh off: nothing is published, as before',
+          () async {
+        final logs = LogCapture.install();
+        late _RecordingMesh mesh;
+        final env = build(
+          receiveWithoutSession: () async => false,
+          mesh: (log) => mesh = _RecordingMesh(log, on: false),
+        );
+
+        await tick(env, _circle('a', 1));
+
+        expect(env.publisher.published, isEmpty);
+        expect(env.log, closed);
+        expect(mesh.drives, 0);
+        logs.assertContains('receive not completed: nothing published');
+      });
+
+      test('a burst whose consent was withdrawn seals nothing, mesh on',
+          () async {
+        var enabled = true;
+        late _RecordingMesh mesh;
+        final env = build(
+          burstEnabled: () => enabled,
+          receiveWithoutSession: () async {
+            enabled = false;
+            return false;
+          },
+          mesh: (log) => mesh = _RecordingMesh(log),
+        );
+
+        await tick(env, _circle('a', 1));
+
+        expect(env.publisher.published, isEmpty);
+        expect(mesh.asked, 0, reason: 'a stopped burst does not even ask');
+        expect(mesh.drives, 0);
+      });
+
+      test('a burst the foreground took back seals nothing, mesh on',
+          () async {
+        var foregrounded = false;
+        late _RecordingMesh mesh;
+        final env = build(
+          foregrounded: () => foregrounded,
+          receiveWithoutSession: () async {
+            foregrounded = true;
+            return false;
+          },
+          mesh: (log) => mesh = _RecordingMesh(log),
+        );
+
+        await tick(env, _circle('a', 1));
+
+        expect(env.publisher.published, isEmpty);
+        expect(mesh.asked, 0);
+        expect(mesh.drives, 0);
+      });
+
+      test('a burst stopped while the mesh was being asked seals nothing',
+          () async {
+        for (final stop in ['consent', 'foreground']) {
+          var enabled = true;
+          var foregrounded = false;
+          final env = build(
+            burstEnabled: () => enabled,
+            foregrounded: () => foregrounded,
+            receiveWithoutSession: () async => false,
+            mesh: (log) => _RecordingMesh(log)
+              ..duringIsOn = () {
+                if (stop == 'consent') {
+                  enabled = false;
+                } else {
+                  foregrounded = true;
+                }
+              },
+          );
+
+          await tick(env, _circle('a', 1));
+
+          expect(env.publisher.published, isEmpty, reason: stop);
+          expect(env.log, isNot(contains('mesh')), reason: stop);
+        }
+      });
+    });
+
+    group('where a live plane finds no session and can start none', () {
+      test('mesh on: the due circles are sealed for the mesh alone, and the '
+          'failed open is still told', () async {
+        final logs = LogCapture.install();
+        for (final absent in [
+          LiveLifecycleFfi.noSession,
+          LiveLifecycleFfi.stopped,
+        ]) {
+          final env = build(mesh: _RecordingMesh.new)
+            ..engine.lifecycleAnswer = absent;
+
+          await tick(env, _circle('Quiet Wanderer', 0xab));
+
+          expect(
+            env.log,
+            ['mesh', 'window', 'publish:Quiet Wanderer', ...closed],
+            reason: '$absent',
+          );
+          expect(env.publisher.meshOnlyWords, [true], reason: '$absent');
+          expect(env.publisher.receivedWords, [false], reason: '$absent');
+          expect(env.engine.opens, 0, reason: '$absent');
+          expect(
+            env.openOutcomes,
+            [1],
+            reason: '$absent: the receive plane failed whatever the mesh '
+                'carries',
+          );
+        }
+        expect(logs.joined, isNot(contains('nothing published')));
+      });
+
+      test('mesh off: nothing is published, as before', () async {
+        final logs = LogCapture.install();
+        final env = build(mesh: (log) => _RecordingMesh(log, on: false))
+          ..engine.lifecycleAnswer = LiveLifecycleFfi.noSession;
+
+        await tick(env, _circle('a', 1));
+
+        expect(env.publisher.published, isEmpty);
+        expect(env.openOutcomes, [1]);
+        logs.assertContains('no session: nothing published');
+      });
+
+      test('a start that throws, mesh on: sealed for the mesh alone',
+          () async {
+        late _Env env;
+        env = build(
+          prepareStartIntoBurst: startsInto(() => env),
+          mesh: _RecordingMesh.new,
+        )
+          ..engine.lifecycleAnswer = LiveLifecycleFfi.noSession
+          ..engine.throwOnStart = true;
+
+        await tick(env, _circle('a', 1));
+
+        expect(env.publisher.meshOnlyWords, [true]);
+        expect(env.openOutcomes, [1]);
+      });
+
+      test('a session that ended after the lifecycle read, and a start in '
+          'its place that fails, mesh on: sealed for the mesh alone',
+          () async {
+        late _Env env;
+        env = build(
+          prepareStartIntoBurst: startsInto(() => env),
+          mesh: _RecordingMesh.new,
+        )
+          ..engine.lifecycleAnswer = LiveLifecycleFfi.paused
+          ..engine.openAnswer = BurstOpenFfi.noSession
+          ..engine.throwOnStart = true;
+
+        await tick(env, _circle('a', 1));
+
+        expect(env.publisher.meshOnlyWords, [true]);
+        expect(env.publisher.receivedWords, [false]);
+        expect(env.openOutcomes, [1]);
+        expect(env.log, isNot(contains('kp')));
+      });
+
+      test('a burst the foreground took back while the start was readied '
+          'seals nothing, mesh on', () async {
+        var foregrounded = false;
+        late _RecordingMesh mesh;
+        final env = build(
+          foregrounded: () => foregrounded,
+          prepareStartIntoBurst: (_) async {
+            foregrounded = true;
+            return null;
+          },
+          mesh: (log) => mesh = _RecordingMesh(log),
+        )..engine.lifecycleAnswer = LiveLifecycleFfi.noSession;
+
+        await tick(env, _circle('a', 1));
+
+        expect(env.publisher.published, isEmpty);
+        expect(mesh.asked, 0);
+        expect(env.openOutcomes, isEmpty);
+      });
+
+      test('a burst handed back while its start ran seals nothing, mesh on',
+          () async {
+        var foregrounded = false;
+        late _Env env;
+        env = build(
+          foregrounded: () => foregrounded,
+          prepareStartIntoBurst: (budget) async => () async {
+            await env.engine.startIntoBurst(
+              groups: const [],
+              inboxRelays: const [],
+              budget: budget,
+            );
+            foregrounded = true;
+          },
+          mesh: _RecordingMesh.new,
+        )..engine.lifecycleAnswer = LiveLifecycleFfi.noSession;
+
+        await tick(env, _circle('a', 1));
+
+        expect(env.publisher.published, isEmpty);
+        expect(env.log, isNot(contains('mesh')));
+      });
+    });
+
+    group('a pass for the mesh alone', () {
+      _Env meshOnlyBurst({
+        bool Function()? burstEnabled,
+        bool Function()? foregrounded,
+      }) => build(
+        burstEnabled: burstEnabled,
+        foregrounded: foregrounded,
+        receiveWithoutSession: () async => false,
+        mesh: _RecordingMesh.new,
+      );
+
+      test('takes in a circle whose tick lands inside it, for the mesh '
+          'alone', () async {
+        final env = meshOnlyBurst();
+        env.publisher.duringPublish = () async {
+          unawaited(tick(env, _circle('b', 2)));
+        };
+
+        await tick(env, _circle('a', 1));
+
+        expect(env.publisher.published, ['a', 'b']);
+        expect(env.publisher.meshOnlyWords, [true, true]);
+        expect(env.publisher.receivedWords, [false, false]);
+      });
+
+      test('seals no more once the foreground has the engine back',
+          () async {
+        // A seal for the mesh alone is made at an epoch no receive vouched
+        // for; the foreground receives first.
+        var foregrounded = false;
+        final env = meshOnlyBurst(foregrounded: () => foregrounded);
+        env.publisher.duringPublish = () async => foregrounded = true;
+        final a = _circle('a', 1);
+        final b = _circle('b', 2);
+        env.publisher.roster[b.displayName] = b;
+        unawaited(env.coordinator.onTick(circleKey: 'b', circle: b));
+
+        await tick(env, a);
+
+        expect(env.publisher.published, hasLength(1));
+      });
+
+      test('seals no more once consent is withdrawn', () async {
+        var enabled = true;
+        final env = meshOnlyBurst(burstEnabled: () => enabled);
+        env.publisher.duringPublish = () async => enabled = false;
+        final a = _circle('a', 1);
+        final b = _circle('b', 2);
+        env.publisher.roster[b.displayName] = b;
+        unawaited(env.coordinator.onTick(circleKey: 'b', circle: b));
+
+        await tick(env, a);
+
+        expect(env.publisher.published, hasLength(1));
+      });
+
+      test('a refused window seals nothing and still closes the burst',
+          () async {
+        final env = meshOnlyBurst()..publisher.refuseWindow = true;
+
+        await tick(env, _circle('a', 1));
+
+        expect(env.publisher.published, isEmpty);
+        expect(env.log.sublist(env.log.length - 3), closed);
+      });
+
+      test('its window is opened for no circle, so one that fails is told to '
+          "the health model as nobody's failed relay publish", () async {
+        // The publisher attributes a failed window to the circles it was
+        // opened for (`location_publish_scheduler_provider_test.dart`, "a
+        // window that fails is recorded against every circle waiting on it").
+        final env = meshOnlyBurst()..publisher.refuseWindow = true;
+
+        await tick(env, _circle('a', 1));
+
+        expect(env.publisher.windows, [isEmpty]);
+      });
+    });
+  });
+
   // -------------------------------------------------------------------------
   // A burst that never ends.
   //
@@ -3418,6 +4008,141 @@ void main() {
             const Duration(seconds: kCommitLadderSecs),
       );
       expect(kBurstStallAllowance, const Duration(seconds: 314));
+    });
+
+    // The lane rules hold on the Bluetooth mesh's paths as on the relay's.
+    group('with the Bluetooth mesh', () {
+      test('a seal for the mesh alone that never returns is superseded: the '
+          'next burst seals nothing beside it, and records no failed relay '
+          'publish', () async {
+        var clock = DateTime(2026, 9, 7, 12);
+        var stalls = 0;
+        late _RecordingMesh mesh;
+        final env = build(
+          now: () => clock,
+          onStalled: () => stalls++,
+          receiveWithoutSession: () async => false,
+          mesh: (log) => mesh = _RecordingMesh(log),
+        );
+        final seal = Completer<void>();
+        env.publisher.duringPublish = () => seal.future;
+        final a = _circle('a', 1);
+
+        unawaited(tick(env, a));
+        await pumpEventQueue();
+        expect(
+          env.publisher.meshOnlyWords,
+          [true],
+          reason: 'anti-vacuity: stuck in a seal for the mesh alone',
+        );
+
+        clock = clock.add(ceiling(1) + const Duration(seconds: 1));
+        unawaited(tick(env, a));
+        await pumpEventQueue();
+
+        expect(stalls, 1);
+        expect(
+          mesh.asked,
+          2,
+          reason: 'the next tick ran a burst of its own: kept as a lane stuck '
+              'in its open is, the stuck one would have queued it for good',
+        );
+        expect(
+          env.publisher.published,
+          ['a'],
+          reason: 'a seal beside the stranded one could share its whole-second '
+              'created_at when it returns',
+        );
+        expect(env.publisher.windows, hasLength(1));
+        expect(
+          env.publisher.skipped,
+          isEmpty,
+          reason: 'a pass for the mesh alone owed no relay a publish',
+        );
+        expect(env.engine.pauses, 1, reason: 'and the burst still closed');
+        expect(env.shutdownCount, 1);
+
+        seal.complete();
+        await pumpEventQueue();
+        expect(env.publisher.published, ['a']);
+        expect(env.engine.pauses, 1, reason: 'the superseded lane closes none');
+        expect(env.shutdownCount, 1);
+
+        await tick(env, a);
+        expect(
+          env.publisher.meshOnlyWords,
+          [true, true],
+          reason: 'the tick after the seal returned seals as usual',
+        );
+      });
+
+      test('a relay seal that never returns stops a seal for the mesh alone '
+          'too', () async {
+        var clock = DateTime(2026, 9, 7, 12);
+        var receives = true;
+        late _RecordingMesh mesh;
+        final env = build(
+          now: () => clock,
+          receiveWithoutSession: () async => receives,
+          mesh: (log) => mesh = _RecordingMesh(log),
+        );
+        env.publisher.duringPublish = () => Completer<void>().future;
+        final a = _circle('a', 1);
+
+        unawaited(tick(env, a));
+        await pumpEventQueue();
+        expect(
+          env.publisher.meshOnlyWords,
+          [false],
+          reason: 'anti-vacuity: stuck in a seal sent to the relays',
+        );
+
+        receives = false;
+        clock = clock.add(ceiling(1) + const Duration(seconds: 1));
+        unawaited(tick(env, a));
+        await pumpEventQueue();
+
+        expect(
+          mesh.asked,
+          1,
+          reason: 'anti-vacuity: the live lane reached its pass for the mesh '
+              'alone',
+        );
+        expect(env.publisher.published, ['a']);
+        expect(env.publisher.skipped, isEmpty);
+        expect(env.engine.pauses, 1);
+      });
+
+      test('a lane superseded inside its backlog wait drives the mesh no more '
+          'when it wakes', () async {
+        var clock = DateTime(2026, 9, 7, 12);
+        late _RecordingMesh mesh;
+        final env = build(
+          now: () => clock,
+          mesh: (log) => mesh = _RecordingMesh(log),
+        );
+        final backlog = env.engine.backlogGate = Completer<void>();
+        final a = _circle('a', 1);
+
+        unawaited(tick(env, a));
+        await pumpEventQueue();
+        expect(env.log, ['open', 'backlog'], reason: 'anti-vacuity');
+        env.engine.backlogGate = null; // only the first wait hangs
+
+        clock = clock.add(ceiling(1) + const Duration(seconds: 1));
+        await tick(env, a);
+        expect(mesh.drives, 1);
+        expect(env.publisher.published, ['a']);
+
+        backlog.complete();
+        await pumpEventQueue();
+        expect(
+          mesh.drives,
+          1,
+          reason: 'a drive from a lane that no longer owns the burst',
+        );
+        expect(env.publisher.published, ['a']);
+      });
     });
   });
 }

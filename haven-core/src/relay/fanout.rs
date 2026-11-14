@@ -869,8 +869,10 @@ pub trait FanoutSend: Send + Sync {
     ) -> FanoutTargetOutcome;
 
     /// Offers a location's `event` to every one of `targets` — relay URLs
-    /// exactly as its record froze them — once, inside the location window,
-    /// and answers what the transport did, unchanged: one relay's `OK` is a
+    /// exactly as its record froze them, or, for a fellow member's location
+    /// passed on under no record (`Publishing::bridge_locations`), the
+    /// circle's own that took this device's send — once, inside the location
+    /// window, and answers what the transport did, unchanged: one relay's `OK` is a
     /// success, and when no relay took it and a relay's `invalid:`,
     /// `blocked:` or unprefixed refusal blamed the timestamp it is
     /// [`RelayError::DeviceClockRejected`](crate::relay::RelayError::DeviceClockRejected)
@@ -2770,6 +2772,11 @@ pub enum LocationPublish {
     Ended,
     /// Not sent by this call: a send of it is under way.
     InFlight,
+    /// Sealed for the Bluetooth mesh alone ([`Publishing::seal_for_mesh`]):
+    /// it passed the checks a send passes and was left for the mesh, if the
+    /// mesh would take it. No relay was handed it and none ever is; the
+    /// record is gone.
+    MeshOnly,
 }
 
 /// Ends, unsent, every stored location record but one this session sealed
@@ -3972,7 +3979,9 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
                 self.settle(circle, recorded, handed_back, true, &mut pass)
                     .await;
                 Ok(RepairOutcome::Deferred {
-                    held_by: self.send_held(circle, group_id, false).await,
+                    held_by: self
+                        .send_held(circle, group_id, false, self.mode.mode())
+                        .await,
                     replayed: pass.replayed,
                 })
             }
@@ -4552,19 +4561,23 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
                 unrecoverable: session.unrecoverable(group_id).await == Some(true),
                 quarantined,
                 stalled: session.stalled(group_id),
-                held: self.send_held(circle, group_id, false).await,
+                held: self
+                    .send_held(circle, group_id, false, self.mode.mode())
+                    .await,
             }
         };
         Ok(worst_recovery(facts))
     }
 
-    /// What holds `group_id`'s sends now. `departure_due` says the call
-    /// itself held a send back for a departure it could not make.
+    /// What holds `group_id`'s sends now, for a send made in `mode`.
+    /// `departure_due` says the call itself held a send back for a departure
+    /// it could not make.
     async fn send_held(
         &self,
         circle: &CircleManager,
         group_id: &GroupId,
         departure_due: bool,
+        mode: DriveMode,
     ) -> SendHeld {
         let session = circle.session();
         if session.leaving(group_id) {
@@ -4576,7 +4589,7 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
             }
             Some(true) => SendHeld::AwaitingRelays,
             Some(false) => SendHeld::StagedWithoutRecord,
-            None => match session.held_away(group_id, self.mode.mode()).await {
+            None => match session.held_away(group_id, mode).await {
                 Some(AwayHold::RelayChange) => SendHeld::AwaitsForeground,
                 Some(AwayHold::RemovalUnmade) => SendHeld::RemovalUnmade,
                 Some(AwayHold::Leaving) => SendHeld::Leaving,
@@ -4771,6 +4784,7 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
                 Still::new(self.mode, mode),
                 self.clock,
                 self.deadline_ms,
+                false,
             )
             .await
         {
@@ -4817,14 +4831,9 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
         if unrepaired {
             pass.retry_after_ms = Some(0);
         }
-        let seal = match sealed {
-            Some((event, nostr_group_id, relays)) => LocationSeal::Sealed {
-                event: Box::new(event),
-                nostr_group_id,
-                relays,
-            },
-            None => LocationSeal::Deferred(self.send_held(circle, group_id, departure_due).await),
-        };
+        let seal = self
+            .sealed_or_held(circle, group_id, sealed, departure_due, self.mode)
+            .await;
         Ok(SealOutcome {
             seal,
             replayed: pass.replayed,
@@ -4832,6 +4841,122 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
             errored: pass.errored,
             clock_rejected: pass.clock_rejected,
         })
+    }
+
+    /// [`Self::seal_location`] for the Bluetooth mesh alone (plan §7.7 R1):
+    /// what a background burst whose receive failed seals, so that a phone
+    /// no relay answers still shares by radio.
+    ///
+    /// **Calls no relay**, whatever the caller's mode and whatever the
+    /// engine hands back. A commit of this device's that is pending stays
+    /// pending — it is not sent again here — and the seal is deferred as
+    /// awaiting relays. The seal is made as a call that makes no commit
+    /// ([`DriveMode::FinishOnly`]): an eviction that is due is left due and
+    /// holds the seal. No repair is run and nothing is driven: a record the
+    /// hold wrote stays stored, and a proposal no record could be written
+    /// for is owed its send (`CircleManager::owe_proposals`), both for the
+    /// next relay drive.
+    ///
+    /// The location is recorded as sealed for the mesh alone, in the session
+    /// and in the hold that sealed it: [`Self::publish_location`] hands it to
+    /// the mesh and to no relay, whatever its caller does with the event,
+    /// and a process that did not seal it sends it nowhere.
+    ///
+    /// With mesh off nothing is sealed and the engine is not asked: the
+    /// answer is [`SendHeld::Nothing`], since nothing holds the circle.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::seal_location`].
+    pub async fn seal_for_mesh(
+        &self,
+        circle: &CircleManager,
+        group_id: &GroupId,
+        location: &LocationMessage,
+    ) -> Result<SealOutcome, CircleError> {
+        let deferred = |held_by, retry_after_ms| SealOutcome {
+            seal: LocationSeal::Deferred(held_by),
+            replayed: Vec::new(),
+            retry_after_ms,
+            errored: false,
+            clock_rejected: None,
+        };
+        let (session, now_ms) = (circle.session(), self.clock.now_ms());
+        if !session.mesh_is_on(now_ms) {
+            return Ok(deferred(SendHeld::Nothing, None));
+        }
+        if session.disbanded(group_id).await {
+            return Ok(deferred(SendHeld::Disbanded, None));
+        }
+        if session.leaving(group_id) {
+            return Ok(deferred(SendHeld::Leaving, None));
+        }
+        // As for a relay: a commit fetched and not taken in may remove a
+        // member, who is within reach of the radio too.
+        if session.holds_unread_input(group_id) {
+            return Ok(deferred(SendHeld::StoredInput, None));
+        }
+        let StagedSeal {
+            sealed,
+            handed_back,
+            departure_due,
+            ..
+        } = match circle
+            .seal_location_staging(
+                group_id,
+                location,
+                now_ms,
+                Still::always(&DriveMode::FinishOnly),
+                self.clock,
+                self.deadline_ms,
+                true,
+            )
+            .await
+        {
+            Ok(seal) => seal,
+            Err(CircleError::EngineHeld) => return Ok(deferred(SendHeld::StoredInput, Some(0))),
+            Err(e) => return Err(e),
+        };
+        let seal = self
+            .sealed_or_held(
+                circle,
+                group_id,
+                sealed,
+                departure_due,
+                &DriveMode::FinishOnly,
+            )
+            .await;
+        circle.owe_proposals(handed_back.proposals);
+        Ok(SealOutcome {
+            seal,
+            replayed: handed_back.results,
+            retry_after_ms: None,
+            errored: false,
+            clock_rejected: None,
+        })
+    }
+
+    /// What a staging seal left: the location, or what holds its circle's
+    /// sends for a send made in the mode `mode` reads as.
+    async fn sealed_or_held(
+        &self,
+        circle: &CircleManager,
+        group_id: &GroupId,
+        sealed: Option<(nostr::Event, [u8; 32], Vec<String>)>,
+        departure_due: bool,
+        mode: &dyn ModeSource,
+    ) -> LocationSeal {
+        match sealed {
+            Some((event, nostr_group_id, relays)) => LocationSeal::Sealed {
+                event: Box::new(event),
+                nostr_group_id,
+                relays,
+            },
+            None => LocationSeal::Deferred(
+                self.send_held(circle, group_id, departure_due, mode.mode())
+                    .await,
+            ),
+        }
     }
 
     /// Sends a location [`Self::seal_location`] sealed — `event` — to the
@@ -4847,6 +4972,10 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
     /// event that has expired, or that could not be sent before it does, and
     /// one a fresh seal would no longer be made for — however long the caller
     /// took between the seal and this.
+    ///
+    /// A location sealed for the mesh alone ([`Self::seal_for_mesh`]) passes
+    /// the same checks, is handed to the mesh, and is sent to no relay: its
+    /// record ends, and the answer is [`LocationPublish::MeshOnly`].
     ///
     /// Made in any mode: a burst exists to send the location it has just
     /// sealed. No relay is taken and no commit's call is waited for.
@@ -4881,9 +5010,179 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
             let _ = session.end_location(&message).await;
             return LocationPublish::Superseded;
         }
+        // The one hand-off to the Bluetooth carrier, when the user has it
+        // on: a packet left behind, nothing waited for and no answer read.
+        session.mesh_offer(event, &record);
+        if record.mesh_only {
+            let _ = session.end_location(&message).await;
+            return LocationPublish::MeshOnly;
+        }
         let sent = self.fanout.publish_location(event, &record.relays).await;
         let _ = session.end_location(&message).await;
         LocationPublish::Sent(sent)
+    }
+
+    /// Reads the Bluetooth mesh packets `taken` — what the mesh engine's
+    /// owner took from it — and takes in the locations members of this
+    /// device's circles sent (plan §5.2).
+    ///
+    /// A packet reaches the engine only as an application message of the
+    /// very epoch whose key opened it, verified (Security Rule 16) and
+    /// checked before the engine sees it: a commit or a proposal a member
+    /// wrapped never does. What the engine takes in is persisted by the one
+    /// site every receive plane shares, and a copy a relay delivered first
+    /// is a duplicate there.
+    ///
+    /// **Sends nothing.** No relay is called, whatever the engine hands
+    /// back: when a relay hears from this device must not follow from a
+    /// packet anyone in radio range can replay. A proposal the hold recorded
+    /// keeps its record, one no record could be written for is owed its send
+    /// (`CircleManager::owe_proposals`) and an advance owed stays owed, all
+    /// for the next relay drive; nothing is committed
+    /// ([`DriveMode::FinishOnly`]).
+    ///
+    /// **Changes nothing a relay is asked.** The mesh owns no cursor and no
+    /// floor, and an update it brings is recorded nowhere the relay path
+    /// reads what it has seen (`SessionManager::staging_ingest`): the NIP-77
+    /// pass still asks for it by id — the relay's copy is then a duplicate
+    /// to the engine — it is owed no refetch, no history walk is armed on
+    /// it, and it stamps no inbound arrival, so it holds no epoch-rotation
+    /// repair back (`CircleManager::fold_mesh_update`). A peer's update it
+    /// brings does end the `Stalled` reading, as a relay's does, which moves
+    /// no walk (`SessionManager::ingest_from_mesh`).
+    ///
+    /// A fellow member's update the engine reads here for the first time,
+    /// from a packet marked as one a member may pass on, is kept by the
+    /// session for [`Self::publish_location_and_bridge`]; this sends none.
+    ///
+    /// A circle with a commit of this device's pending, or holding fetched
+    /// input unread, takes nothing in here either (Security Rules 12 and
+    /// 13.4) and is not driven for it. Its packets, and those the engine did
+    /// not take in — a want of room, an error, a wake that ended — are held
+    /// by the session, a bounded number for each circle, and offered again
+    /// at the next drive.
+    pub async fn mesh_drive(
+        &self,
+        circle: &CircleManager,
+        taken: Vec<crate::nostr::mls::MeshPacket>,
+    ) -> crate::nostr::mls::MeshDrive {
+        let (session, now_ms) = (circle.session(), self.clock.now_ms());
+        let mut drive = crate::nostr::mls::MeshDrive::default();
+        for (group_id, events) in session.mesh_read(taken, &mut drive).await {
+            if session.staged_commit(&group_id).await.is_some()
+                || session.holds_unread_input(&group_id)
+            {
+                continue;
+            }
+            for (_, event) in session.order_for_ingest(&group_id, events).await {
+                // An ingest waits for no relay and no engine deadline: it
+                // is begun for as long as the wake lasts.
+                if !self.allows(0) {
+                    break;
+                }
+                let Ok((taken_in, new, update, effects)) =
+                    session.ingest_from_mesh(&group_id, &event, now_ms).await
+                else {
+                    // The circle's other events stay held: what failed one
+                    // ingest is not asked of the engine again in this drive.
+                    drive.errored = true;
+                    break;
+                };
+                if taken_in {
+                    // Counted where it is settled: one the engine read and
+                    // did not keep is held, and would be counted again.
+                    drive.from_circles += u64::from(new);
+                    session.mesh_taken_in(&group_id, &event, update.as_ref(), &mut drive);
+                }
+                let still = Still::always(&DriveMode::FinishOnly);
+                let (folded, _) = circle.fold_staged(effects, false, now_ms, still).await;
+                drive.replayed.extend(folded.results);
+                circle.owe_proposals(folded.proposals);
+                if let Some(update) = update {
+                    (drive.replayed).extend(circle.fold_mesh_update(update).await);
+                }
+            }
+        }
+        circle.fold_mesh_counts(drive.from_circles, 0);
+        drive
+    }
+
+    /// [`Self::publish_location`], and then member bridging (plan §5.5,
+    /// owner decision D-7): the locations fellow members of the same circle
+    /// sent by Bluetooth alone, which this device took in by mesh
+    /// ([`Self::mesh_drive`]), are passed on to the circle's relays, each
+    /// the member's own sealed event byte for byte.
+    ///
+    /// The one send of a `kind:445` this device did not seal, and the one
+    /// with no fanout record (Security Rule 13.1 as amended). It is made
+    /// only when this device's own location was taken by a relay in this
+    /// very call, and only to the relays that took it: a drive that sends
+    /// nothing of its own passes nothing on, and no relay hears of the
+    /// circle from this device that has not just heard this device's own
+    /// update of it. `received` is the caller's word that this drive's relay
+    /// receive of the circle was answered to the end BEFORE this call
+    /// (`SessionManager::mesh_bridge_take`): a caller that publishes before
+    /// it fetches says `false`, and passes nothing on.
+    ///
+    /// Whatever this call does not pass on is dropped: an update waits for
+    /// one send of this device's and no longer. Passing on begins no send
+    /// once it has run for one send's time, so it adds under two to the
+    /// call, whatever the relays do.
+    pub async fn publish_location_and_bridge(
+        &self,
+        circle: &CircleManager,
+        event: &nostr::Event,
+        received: bool,
+    ) -> LocationPublish {
+        let publish = self.publish_location(circle, event).await;
+        if let Some(group_id) = circle.group_of_event(event) {
+            let accepted = match &publish {
+                LocationPublish::Sent(Ok(sent)) => sent.accepted_by.as_slice(),
+                _ => &[],
+            };
+            self.bridge_locations(circle, &group_id, accepted, received)
+                .await;
+        }
+        publish
+    }
+
+    /// Passes on to `relays` — those that took this device's own send for
+    /// `group_id` — what the circle kept of its fellow members' updates,
+    /// newest first, each checked against the engine immediately before its
+    /// send (`SessionManager::mesh_bridge_check`).
+    ///
+    /// One attempt a relay, as a location's own send, under no record: none
+    /// is written, nothing is retried, and a send a kill cuts short is lost.
+    /// What the relays answer is read by nothing — not the sharing-health
+    /// model and not the clock-skew detector, which would blame this device
+    /// for another member's clock.
+    ///
+    /// Its own share of the wake is one send's time ([`LOCATION_SEND_MS`]):
+    /// no send is begun once that has run, so a relay that took this
+    /// device's own send and withholds its answer on what is passed on costs
+    /// the call one wait, not one for each update, and the next circle's own
+    /// send is not kept behind them.
+    async fn bridge_locations(
+        &self,
+        circle: &CircleManager,
+        group_id: &GroupId,
+        relays: &[String],
+        received: bool,
+    ) {
+        let session = circle.session();
+        let until_ms = self.clock.now_ms().saturating_add(LOCATION_SEND_MS);
+        for update in session.mesh_bridge_take(group_id, received) {
+            if self.clock.now_ms() >= until_ms || !self.allows(LOCATION_SEND_MS) {
+                break;
+            }
+            let (now_ms, mode) = (self.clock.now_ms(), self.mode.mode());
+            if let Some((event, targets)) = session
+                .mesh_bridge_check(group_id, update, relays, now_ms, mode)
+                .await
+            {
+                let _ = self.fanout.publish_location(&event, &targets).await;
+            }
+        }
     }
 
     /// The circle's older records first, as MDK's host resumes a group's
@@ -5067,6 +5366,7 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
                 found = Some(Own { status, notes });
             }
         }
+        self.send_owed(circle).await;
         pass.welcomes_sent += self.deliver_welcomes(circle).await.len();
         if errored {
             pass.errored = true;
@@ -5105,6 +5405,22 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
                 // Nothing to confirm and nothing to roll back: an unacked
                 // proposal is minted again by the next commit applied.
                 let _ = self.send_unrecorded(&proposal, &relays).await;
+            }
+        }
+    }
+
+    /// Sends what a call that may call no relay was handed back and could
+    /// not send (`CircleManager::owe_proposals`): each a proposal no record
+    /// could be written for, once, as [`Self::dispose`] sends one. One whose
+    /// send is not begun — the mode makes none, or the wake has no room —
+    /// stays owed.
+    async fn send_owed(&self, circle: &CircleManager) {
+        for proposal in circle.take_owed_proposals() {
+            let relays = circle
+                .relays_for_commit_event(&proposal)
+                .unwrap_or_default();
+            if !relays.is_empty() && self.send_unrecorded(&proposal, &relays).await.is_none() {
+                circle.owe_proposals(vec![proposal]);
             }
         }
     }
@@ -5777,7 +6093,25 @@ impl<T: FanoutSend> FanoutSend for RelayMappedFanout<T> {
         targets: &[String],
     ) -> RelayResult<PublishResult> {
         let routed: Vec<String> = targets.iter().map(|target| (self.route)(target)).collect();
-        self.inner.publish_location(event, &routed).await
+        let mut sent = self.inner.publish_location(event, &routed).await?;
+        // Answered under each target's frozen spelling, as a record's answers
+        // are: what reads a result by relay knows the circle's relays, never
+        // the address a rig dialled. Two targets routed to one address are
+        // both answered under the first; no rig routes two to one.
+        let dialled: Vec<_> = (routed.iter())
+            .map(|relay| nostr::RelayUrl::parse(relay).ok())
+            .collect();
+        let relays = (sent.accepted_by.iter_mut())
+            .chain(&mut sent.failed)
+            .chain(sent.rejected_by.iter_mut().map(|(relay, _)| relay));
+        for relay in relays {
+            let answered = nostr::RelayUrl::parse(relay.as_str()).ok();
+            let at = (dialled.iter()).position(|url| answered.is_some() && *url == answered);
+            if let Some(at) = at {
+                relay.clone_from(&targets[at]);
+            }
+        }
+        Ok(sent)
     }
 }
 
@@ -5962,6 +6296,27 @@ mod tests {
 
     fn id_of(message: &TransportMessage) -> EventId {
         EventId::from_slice(message.id.as_slice()).expect("a 32-byte event id")
+    }
+
+    /// A mapped transport answers a location under each target's frozen
+    /// spelling, whatever address it dialled: member bridging reads the
+    /// relays that took a send against the circle's own.
+    #[tokio::test]
+    async fn a_mapped_transport_answers_a_location_under_its_frozen_targets() {
+        let mapped = RelayMappedFanout::new(scripted::ScriptedFanout::default(), |target| {
+            target.replace("frozen", "dialled")
+        });
+        let event =
+            SessionManager::transport_message_to_event(&fanout_message()).expect("an event");
+        let frozen = ["wss://frozen.example.com".to_owned()];
+
+        let sent = (mapped.publish_location(&event, &frozen).await).expect("accepted");
+
+        assert_eq!(sent.accepted_by, frozen);
+        assert_eq!(
+            mapped.inner.location_calls()[0].targets,
+            ["wss://dialled.example.com"],
+        );
     }
 
     fn endpoint(url: &str) -> TransportEndpoint {
