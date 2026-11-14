@@ -3291,6 +3291,80 @@ item 6, that address rotation is the build's; §7.1 carries a note now.
   The UUIDs have been seen by no second implementation. `haven-core/
   SECURITY.md`, the privacy manifest and `CLAUDE.md` are unchanged:
   nothing here is in force in a build.
+- **M3g unit 3**, `MeshNative` and the manifest gate
+  (`docs/BLUETOOTH_MESH_M3_DESIGN.md` §N.2.1, §N.3, §N.4, and §N.7 for
+  what was read, where the code differs and which CI job proves what;
+  `…/mesh/MeshNative.kt`; `haven/android/app/build.gradle.kts`;
+  `haven/android/app/src/mesh/AndroidManifest.xml`;
+  `scripts/ci/check_mesh_manifest.sh`, `check_mesh_radio_constants.sh`,
+  `check_mesh_radio.sh`; `build-check.yml`, `repo-guards.yml`). One
+  Kotlin object, one manifest, one Gradle switch, two scripts, one CI
+  job and documents: no adapter, no service, no channel, no Dart, no
+  Rust. **Nothing references `MeshNative`, so no native method is
+  called in any build, and a build without the flag — every build a
+  script or a release makes — declares and does what it did before.
+  Nothing of this unit has been compiled for Android: this machine has
+  no Android SDK, and its first build is CI's.**
+  **What is built.** `MeshNative`: the eleven native methods of the
+  fixture as overrides of the two pure interfaces, and the library
+  loaded by the class, since JNI looks a method up in what the class's
+  own loader loaded. The mesh's manifest: the three Android 12
+  permissions with `BLUETOOTH_SCAN` flagged `neverForLocation`, the two
+  legacy ones up to API 30 — Android 11, where the radio starts, has no
+  other — the connected-device foreground-service permission, and
+  Bluetooth LE as a feature that is not required; the service and the
+  receiver come with their unit. The switch: `app/build.gradle.kts`
+  reads `HAVEN_MESH` from the `dart-defines` property the Flutter tool
+  hands Gradle, once; with it the mesh's manifest is added to every
+  variant and `BuildConfig.HAVEN_MESH` is true, without it neither, and
+  a property that is absent or does not decode is off. In
+  `build-check.yml`: on each of the three ABI legs' APK, that the merged
+  manifest holds nothing of the mesh; and a fourth job, the only build
+  with the flag, whose manifest must hold every entry with its
+  attributes, whose library must export the eleven symbols, and against
+  whose `android.jar` the four radio modes `MeshRadioConstants.kt`
+  holds as integers are compared.
+  **Proved here.** The class compiles against the two interfaces under
+  the JVM build's own options, in a scratch copy of that build, and the
+  class file's eleven `native` methods are the fixture's names and
+  descriptors. The switch's expression, under the Gradle the app pins,
+  is on for exactly a last `HAVEN_MESH=true` among fourteen values of
+  the property, and its two blocks take the overloads meant, against
+  stand-ins with the signatures of AGP 9.3's reference. The manifest
+  check, beyond its 34 self-test fixtures, was run with a real `aapt2`
+  on two APKs linked from the mesh's own manifest and from none, in
+  both modes; the constants check, beyond its 19, with a real `javap`
+  on two real `android.jar`s. **The guard**, `check_mesh_radio.sh`:
+  check 4 gains its Kotlin side — the class a symbol names, each native
+  method's name and descriptor against the fixture, the library, and no
+  native method in another file — and check 14 is new, the switch
+  written once and used twice; 198 self-test fixtures (170, and 28).
+  **Mutation pass**, 32 changes to the three scripts, each silencing or
+  loosening one clause or moving one pin — in the manifest check, each
+  of *off*'s four things not looked for, a missing, doubled or
+  re-attributed entry passing, the positive control gone, a dump that
+  fails read as empty, each pinned attribute; in the constants check,
+  the comparison, the comment, a class that cannot be read, another
+  platform's jar; in the guard, each new clause of checks 4 and 14 —
+  all fail a self-test fixture.
+  **Only CI proves, and has not run** (design §N.7 has the job, the
+  claim and what a failure reads for each): that the Gradle script
+  evaluates under AGP 9.3 and `addStaticManifestFile` merges the file;
+  that `MeshNative.kt` compiles for Android; what a default build's
+  merged manifest holds once every dependency's is in it; that the SDK's
+  `aapt2` prints the shape read here and is where the check looks for
+  it; the four integers against the platform as Google ships it.
+  **Not proved, by anything.** That JNI finds the eleven methods: no
+  call is made. `BuildConfig.HAVEN_MESH` has no reader until the
+  channel. That a release build's shrinker drops the class now and
+  keeps it once something calls it. The rule of unit 1's review — no
+  landing without an emulator lane for the unit that first calls
+  `leverInstall` — still falls on a later unit: `LogLever` has its
+  implementation, and nothing constructs anything with it.
+  `haven-core/SECURITY.md`, the privacy manifest and
+  `haven/DEVELOPMENT.md` change by one sentence each, where they said
+  that no Kotlin declares an export and that no workflow passes the
+  flag; `CLAUDE.md` is unchanged.
 
 ### Proposed CLAUDE.md wording (owner to approve)
 

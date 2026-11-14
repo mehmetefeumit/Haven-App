@@ -29,7 +29,8 @@
 #
 # It reads names and nothing else: not a symbol's type, not what an export
 # does. Which lane runs it: `build-check.yml`, on the library of each of the
-# three ABIs' debug APK. A release build's library is not read.
+# three ABIs' debug APK and of the one built with the mesh's flag. A release
+# build's library is not read.
 #
 # Usage:
 #   bash scripts/ci/check_mesh_radio_symbols.sh <file or directory>...

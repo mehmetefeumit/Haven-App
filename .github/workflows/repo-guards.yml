@@ -1420,7 +1420,11 @@ jobs:
       # (§B) logs nothing and holds no UUID, names its platform modes in
       # MeshRadioConstants.kt alone, has no row in the native log allowlist,
       # keeps its pinned JVM tests and takes the engine's signal floor; no
-      # manifest but the mesh's own names Bluetooth.
+      # manifest but the mesh's own names Bluetooth. MeshNative.kt is the
+      # class the exports' symbols name, and its native methods are the
+      # fixture's names and descriptors, the Kotlin side of the same pin; and
+      # the app's Gradle script reads the mesh's build flag once, for the
+      # manifest and BuildConfig both (§N.3).
       - name: Mesh radio
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_mesh_radio.sh
@@ -1448,7 +1452,12 @@ jobs:
       # radio's Kotlin: a log call, one under an import alias, a UUID, a mode named in
       # an adapter, an allowlist row, Bluetooth in a manifest of the flag-off
       # build, a test gone, renamed or ignored, and a floor that is not the
-      # engine's.
+      # engine's. In MeshNative.kt: a method given a Kotlin body, added,
+      # renamed or retyped, one renamed for the JVM, the class renamed, moved
+      # or nested, the library not loaded or another one, and a native method
+      # in another file. In the Gradle script: the manifest merged whatever
+      # the flag, BuildConfig given its own value, the flag read from
+      # elsewhere or failing open, and a second place that reads it.
       - name: Mesh radio guard self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_mesh_radio.sh --self-test
@@ -1464,6 +1473,29 @@ jobs:
       - name: Mesh radio symbols guard self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_mesh_radio_symbols.sh --self-test
+
+      # The check itself runs in build-check.yml, on built APKs: `off` on
+      # each ABI's, `on` on the one built with HAVEN_MESH. Here, against
+      # dumps in the shape aapt2 prints: with the flag off, a Bluetooth
+      # permission old or new, the feature, a Bluetooth broadcast, the
+      # connected-device permission or service type, a component of the
+      # mesh; with it on, an entry missing or twice, BLUETOOTH_SCAN without
+      # neverForLocation, a legacy permission past API 30, a feature that is
+      # required; and no aapt2, a dump that fails, is empty or is in a shape
+      # the check does not read — each a misconfiguration, never a pass.
+      - name: Mesh manifest guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_mesh_manifest.sh --self-test
+
+      # The check itself runs in build-check.yml's flag-on job, against the
+      # android.jar the app compiles with. Here, against classes a stand-in
+      # for javap prints: an integer of MeshRadioConstants.kt that is not its
+      # constant's, a comment that names another constant, a constant the
+      # SDK lacks; and no jar, no javap, a platform that is not installed —
+      # each a misconfiguration.
+      - name: Mesh radio constants guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_mesh_radio_constants.sh --self-test
 
       - name: SQLCipher logger omitted
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}

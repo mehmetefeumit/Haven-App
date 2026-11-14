@@ -1,0 +1,30 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Everything the Bluetooth mesh declares, and in no build without
+         HAVEN_MESH: app/build.gradle.kts merges this file only when the
+         build's Dart defines carry the flag
+         (docs/BLUETOOTH_MESH_M3_DESIGN.md §B.8, §N.3). -->
+
+    <!-- Android 12 and later: one "Nearby devices" dialog. Mesh never derives
+         a location from a scan, and says so, which is what lets it search
+         without the location permission there. -->
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- Android 11 (API 30), the oldest release the radio starts on (§M.3),
+         has none of the three above. -->
+    <uses-permission
+        android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_ADMIN"
+        android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+
+    <!-- Not required: Haven installs and runs on a phone without Bluetooth LE,
+         and the mesh is not offered there. -->
+    <uses-feature
+        android:name="android.hardware.bluetooth_le"
+        android:required="false" />
+</manifest>

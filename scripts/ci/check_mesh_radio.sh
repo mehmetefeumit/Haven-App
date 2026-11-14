@@ -2,8 +2,9 @@
 # CI guard: the Bluetooth mesh's radio reaches Rust through a fixed list of JNI
 # exports that decide nothing, and the bridge crate writes `unsafe` in three
 # files (docs/BLUETOOTH_MESH_M3_DESIGN.md §A.6, F-8, F-14, §N.1.1); and the
-# radio's Kotlin logs nothing, names its modes at one site and keeps its JVM
-# tests (§B.1, §B.8–B.10).
+# radio's Kotlin logs nothing, names its modes at one site, declares its
+# native methods as that list has them and keeps its JVM tests (§B.1,
+# §B.8–B.10, §N.2.1); and the mesh's build flag is read by Gradle once (§N.3).
 #
 # Android's radio service drives the mesh engine through two files of
 # `haven/rust_builder/src`:
@@ -109,7 +110,17 @@
 #      file is the `"system"` of an export's header.
 #   4. The exports — name, Rust parameter types after the environment and the
 #      receiver, Rust return type, and the JNI descriptor those types make —
-#      are the lines of the fixture, in whatever order, and no others.
+#      are the lines of the fixture, in whatever order, and no others. And
+#      the other side of each: `MeshNative.kt` is the package
+#      `com.oblivioustech.haven.mesh` and the one declaration
+#      `object MeshNative : MeshEngineApi, LogLever {` — the class a symbol
+#      names — with no other class, object or interface in the file and no
+#      `JvmName`; its native methods, each one line
+#      `external override fun <name>(<parameters>)[: <type>]`, make the
+#      fixture's names and descriptors and no others (`ByteArray?` as an
+#      answer is `[B`); it loads `rust_lib_haven`, the library
+#      `check_mesh_radio_symbols.sh` reads, once and nothing else; and no
+#      other file of the radio's Kotlin declares anything `external`.
 #   5. `mesh_radio.rs`, up to its tests: for every pinned method, one
 #      `pub(crate) fn <name in snake case>(` that names `radio_guarded(` once,
 #      no `radio_*` before it, and under the guard `radio_<that name>` alone —
@@ -178,6 +189,18 @@
 #      nothing follows them. No file of the crate names `android_log_sys`,
 #      and none but this one names any of the five functions.
 #
+# And over the app's Gradle scripts:
+#  14. `haven/android/app/build.gradle.kts` reads the mesh's flag once — the
+#      pinned `val meshOn = …`, from the `dart-defines` property the Flutter
+#      tool hands Gradle, off for a property that is absent or does not
+#      decode — and uses it twice and nowhere else: the one
+#      `buildConfigField("boolean", "HAVEN_MESH", "$meshOn")` and the one
+#      `if (meshOn) variant.sources.manifests.addStaticManifestFile(…)` of
+#      the mesh's own manifest. No other Gradle script under `haven/android`
+#      names the flag, that call or that manifest. So the Dart flag, the
+#      manifest and `BuildConfig.HAVEN_MESH` cannot disagree. What the merged
+#      manifest then holds is `check_mesh_manifest.sh`'s, on the built APK.
+#
 # The Kotlin is read with the lexer made for Rust: comments and plain strings
 # as above, not Kotlin's string templates or raw strings.
 #
@@ -206,17 +229,16 @@
 # `the_levers_two_calls_answer_no_lever_off_android_and_nothing_else_reaches_it`,
 # `the_lever_holds_nothing_that_panics_allocates_or_locks`.
 #
+# `MeshNative.kt` is not compiled by the JVM build, whose sources are the pure
+# package: that it overrides the two interfaces — which the JVM test
+# `theTwoNativeInterfacesAreTheElevenExportsOfTheFixture` holds to the
+# fixture — with their own types is the app's compile, in `build-check.yml`.
+#
 # Not here yet, each with the change that makes it checkable:
-#   * The Kotlin half of check 4 — the `external fun`s of `MeshNative.kt`
-#     against the same fixture — lands with that file, which does not exist:
-#     a check with nothing to read would report a parity it has not seen. The
-#     two interfaces `MeshNative` will implement, `MeshEngineApi` and
-#     `LogLever`, are held to the fixture by the JVM test
-#     `theTwoNativeInterfacesAreTheElevenExportsOfTheFixture`.
-#   * The mesh's own manifest (no `android:process`, `connectedDevice`, the
-#     receiver not exported, `neverForLocation`), that every adapter callback
-#     runs inside `MeshThread.run`, and what an advertisement may not carry:
-#     with the adapters.
+#   * The shape of the mesh's own manifest once it has components (no
+#     `android:process`, `connectedDevice`, the receiver not exported), that
+#     every adapter callback runs inside `MeshThread.run`, and what an
+#     advertisement may not carry: with the adapters and the service.
 #
 # Usage:
 #   bash scripts/ci/check_mesh_radio.sh
@@ -225,9 +247,9 @@
 # Exit codes:
 #   0  all checks pass (or the self-test passed)
 #   1  a check failed (or the self-test failed)
-#   2  an expected file or directory is missing, or the exports' file or the
-#      fixture lists no export — the scan would be reading nothing
-#      (misconfiguration)
+#   2  an expected file or directory is missing, or the exports' file, the
+#      fixture or `MeshNative.kt` lists no method — the scan would be reading
+#      nothing (misconfiguration)
 
 set -euo pipefail
 
@@ -265,13 +287,24 @@ readonly -a LEVER_STRINGS=(
 
 # How many fixtures the self-test runs. Pinned, because a fixture that stops
 # running is the one way a deleted check reports success.
-readonly SELF_TEST_FIXTURES=170
+readonly SELF_TEST_FIXTURES=198
 
 # The Kotlin of the radio (design §B): the app's mesh packages, whatever the
 # source set, and the JVM build of the pure one with its tests.
 readonly APP_SRC='haven/android/app/src'
 readonly CORE="${APP_SRC}/main/kotlin/com/oblivioustech/haven/mesh/core"
 readonly CONSTANTS="${CORE}/MeshRadioConstants.kt"
+readonly NATIVE="${CORE%/core}/MeshNative.kt"
+# The library `MeshNative` loads: `librust_lib_haven.so`, which
+# `check_mesh_radio_symbols.sh` reads.
+readonly NATIVE_LIBRARY='rust_lib_haven'
+readonly ANDROID='haven/android'
+readonly APP_GRADLE="${ANDROID}/app/build.gradle.kts"
+# The mesh's build switch, as APP_GRADLE writes it, without whitespace.
+# shellcheck disable=SC2016
+readonly SWITCH='valmeshOn=runCatching{(findProperty("dart-defines")?.toString()).orEmpty().split(",").map{String(java.util.Base64.getDecoder().decode(it),Charsets.UTF_8)}.lastOrNull{it.startsWith("HAVEN_MESH=")}=="HAVEN_MESH=true"}.getOrDefault(false)'
+readonly SWITCH_FIELD='buildConfigField("boolean","HAVEN_MESH","$meshOn")'
+readonly SWITCH_MANIFEST='if(meshOn)variant.sources.manifests.addStaticManifestFile("src/mesh/AndroidManifest.xml")'
 readonly JVM_TESTS='haven/android/mesh-jvm/src/test'
 readonly LOG_ALLOWLIST='scripts/ci/native_log_allowlist.txt'
 readonly ENGINE='haven-core/src/mesh/engine.rs'
@@ -498,6 +531,44 @@ export_rows() {
     }'
 }
 
+# For each line of a view on stdin that declares something `external`: the
+# first two fields of the fixture's row for it — name and JNI descriptor — or
+# `? <what it is>` for a declaration that is not one line
+# `external override fun <name>(<parameters>)[: <type>]` of the types JNI is
+# handed.
+native_rows() {
+  awk '
+    function letter(type) {
+      if (type == "Long") return "J"
+      if (type == "Int") return "I"
+      if (type == "Boolean") return "Z"
+      if (type == "ByteArray") return "[B"
+      if (type == "LongArray") return "[J"
+      return ""
+    }
+    /(^|[^A-Za-z0-9_])external([^A-Za-z0-9_]|$)/ {
+      line = $0; gsub(/[[:space:]]+/, " ", line); sub(/^ /, "", line); sub(/ $/, "", line)
+      if (line !~ /^external override fun [A-Za-z0-9_]+\([^()]*\)( ?: ?[A-Za-z0-9_?]+)?$/) { print "? " line; next }
+      sub(/^external override fun /, "", line)
+      name = substr(line, 1, index(line, "(") - 1)
+      params = substr(line, index(line, "(") + 1)
+      answer = substr(params, index(params, ")") + 1)
+      params = substr(params, 1, index(params, ")") - 1)
+      gsub(/[ :]/, "", answer); gsub(/ /, "", params)
+      taken = ""; ok = 1
+      count = split(params, each, ",")
+      for (i = 1; i <= count; i++) {
+        type = each[i]; sub(/^[^:]*:/, "", type)
+        if (letter(type) == "") ok = 0
+        taken = taken letter(type)
+      }
+      # Null for no bytes, as an answer alone.
+      given = (answer == "") ? "V" : (answer == "ByteArray?") ? "[B" : letter(answer)
+      if (given == "") ok = 0
+      print ok ? name " (" taken ")" given : "? " name
+    }'
+}
+
 # The line of the `#[cfg(test)]` directly above `mod tests {` in a view on
 # stdin, or 0.
 tests_at() {
@@ -517,10 +588,10 @@ beyond_tests() { # <the tests' line>
 run_check() {
   local file rel view hits shim calls shipped rows pinned names name row forward body first last
   local guards before after entries called alone outside tests want range method may ok
-  local kotlin jvm found floor lever
+  local kotlin jvm found floor lever native flat
 
   [[ -d "${REPO_ROOT}/${SRC}" ]] || { echo "ERROR: ${REPO_ROOT}/${SRC} not found" >&2; exit 2; }
-  for file in "${LIB}" "${SHIM}" "${CALLS}" "${LEVER}" "${GENERATED}" "${EXPORTS}" "${CONSTANTS}" "${LOG_ALLOWLIST}" "${APP_SRC}/main/AndroidManifest.xml" "${ENGINE}"; do
+  for file in "${LIB}" "${SHIM}" "${CALLS}" "${LEVER}" "${GENERATED}" "${EXPORTS}" "${CONSTANTS}" "${NATIVE}" "${APP_GRADLE}" "${LOG_ALLOWLIST}" "${APP_SRC}/main/AndroidManifest.xml" "${ENGINE}"; do
     [[ -f "${REPO_ROOT}/${file}" ]] || { echo "ERROR: ${REPO_ROOT}/${file} not found" >&2; exit 2; }
   done
   [[ -d "${REPO_ROOT}/${JVM_TESTS}" ]] || { echo "ERROR: ${REPO_ROOT}/${JVM_TESTS} not found" >&2; exit 2; }
@@ -530,6 +601,11 @@ run_check() {
   pinned="$(grep -vE '^[[:space:]]*(#|$)' "${REPO_ROOT}/${EXPORTS}" || true)"
   if [[ -z "${rows}" || -z "${pinned}" ]]; then
     echo "ERROR: ${SHIM} declares no '${HEADER}…', or ${EXPORTS} lists none — the checks would be reading nothing. If the shim moved, move this guard with it." >&2
+    exit 2
+  fi
+  native="$(code_view "${REPO_ROOT}/${NATIVE}")"
+  if ! grep -qE "${B}external${E}" <<<"${native}"; then
+    echo "ERROR: ${NATIVE} declares nothing external — the check of its native methods would be reading nothing. If the class moved, move this guard with it." >&2
     exit 2
   fi
 
@@ -611,6 +687,31 @@ run_check() {
     names="$(diff <(LC_ALL=C sort <<<"${pinned}") <(printf '%s\n' "${rows}") | grep -E '^[<>]' | tr '\n' ';' || true)"
     fail "the exports of ${SHIM} are not the lines of ${EXPORTS} ('<' pinned, '>' exported, '?' a signature that is no export's: ${names}). Kotlin finds a native method by name and passes what its own declaration says; a name or a type that differs is found when the method is first called. Change the fixture, the shim and MeshNative.kt together."
   fi
+
+  # Check 4, the Kotlin side: the class a symbol names, and its native methods.
+  found="$(native_rows <<<"${native}" | LC_ALL=C sort)"
+  want="$(awk '{ print $1, $2 }' <<<"${pinned}" | LC_ALL=C sort)"
+  if [[ "${found}" != "${want}" ]]; then
+    names="$(diff <(printf '%s\n' "${want}") <(printf '%s\n' "${found}") | grep -E '^[<>]' | tr '\n' ';' || true)"
+    fail "the native methods of ${NATIVE} are not the names and JNI descriptors of ${EXPORTS} ('<' pinned, '>' declared, '?' a declaration that is not one line 'external override fun <name>(<parameters>)[: <type>]' of Long, Int, Boolean, LongArray and ByteArray: ${names}). JNI finds a method by its name and hands over what Kotlin declared; a method that is not external never reaches Rust, and one Rust does not export, or exports with other types, fails when it is first called. Change the fixture, the shim and MeshNative.kt together."
+  fi
+  hits="$(grep -nE "${B}(class|interface|companion|JvmName)${E}" <<<"${native}" | cut -d: -f1 | tr '\n' ' ' || true)"
+  if [[ -n "${hits}" || "$(grep -cxF 'package com.oblivioustech.haven.mesh' <<<"${native}" || true)" != 1 \
+    || "$(grep -cxF 'object MeshNative : MeshEngineApi, LogLever {' <<<"${native}" || true)" != 1 \
+    || "$(grep -oE "${B}object${E}" <<<"${native}" | wc -l | tr -d ' ' || true)" != 1 ]]; then
+    fail "${NATIVE} is not the package 'com.oblivioustech.haven.mesh' and the one declaration 'object MeshNative : MeshEngineApi, LogLever {', with no other class, object or interface and no JvmName (line(s): ${hits:-none}). Every export is the symbol ${HEADER##* }<name>: a native method of a class under another name, in another package, nested, or renamed for the JVM has no symbol, and fails when it is first called."
+  fi
+  if [[ "$(tr -d '[:space:]' <<<"${native}" | grep -oE 'System\.load[A-Za-z]*\([^)]*\)' | tr '\n' ' ' || true)" != "System.loadLibrary(\"${NATIVE_LIBRARY}\") " ]]; then
+    fail "${NATIVE} does not load the library as the one call System.loadLibrary(\"${NATIVE_LIBRARY}\"). JNI looks a native method up in the libraries the class's loader loaded — the bridge's own opening of the file, from Dart, is not that — and lib${NATIVE_LIBRARY}.so is the one whose exports check_mesh_radio_symbols.sh holds."
+  fi
+  while IFS= read -r file; do
+    rel="${file#"${REPO_ROOT}/"}"
+    [[ "${rel}" == "${NATIVE}" ]] && continue
+    hits="$(code_view "${file}" | grep -nE "${B}external${E}" | cut -d: -f1 | tr '\n' ' ' || true)"
+    if [[ -n "${hits}" ]]; then
+      fail "${rel} declares something external (line(s) ${hits}). The radio's native methods are the pinned ones of ${NATIVE##*/}, each with an export this guard has read: one declared anywhere else has no symbol."
+    fi
+  done < <(find "${REPO_ROOT}/${APP_SRC}" -type f -name '*.kt' -path '*/mesh/*' | LC_ALL=C sort)
 
   # Check 5: what the exports forward to. Its tests are not read, so nothing
   # that ships may sit in or behind them.
@@ -849,10 +950,33 @@ run_check() {
     fi
   done < <(find "${REPO_ROOT}/${SRC}" -type f -name '*.rs' | LC_ALL=C sort)
 
+  # Check 14: the mesh's build flag is read once, and decides both the
+  # manifest and BuildConfig.
+  flat="$(code_view "${REPO_ROOT}/${APP_GRADLE}" | tr -d '[:space:]')"
+  hits=''
+  for want in "${SWITCH}" "${SWITCH_FIELD}" "${SWITCH_MANIFEST}"; do
+    [[ "$(grep -oF -- "${want}" <<<"${flat}" | wc -l | tr -d ' ' || true)" == 1 ]] || hits+="not once: ${want}; "
+  done
+  for want in meshOn:3 HAVEN_MESH:3 dart-defines:1 buildConfigField:1 addStaticManifestFile:1 src/mesh:1; do
+    found="$(grep -oF -- "${want%:*}" <<<"${flat}" | wc -l | tr -d ' ' || true)"
+    [[ "${found}" == "${want#*:}" ]] || hits+="${want%:*} named ${found} time(s), not ${want#*:}; "
+  done
+  if [[ -n "${hits}" ]]; then
+    fail "${APP_GRADLE} does not read the mesh's flag once and use it twice — the pinned 'val meshOn = …', one buildConfigField of HAVEN_MESH from it, and one addStaticManifestFile of the mesh's manifest under 'if (meshOn)' (${hits}). One switch, so that the Dart flag, the manifest and BuildConfig.HAVEN_MESH cannot disagree: a manifest merged without it puts the mesh's Bluetooth permissions in every build, a field of its own value registers a channel in a build that has no radio's manifest, and a property that fails to decode must read as off."
+  fi
+  while IFS= read -r file; do
+    rel="${file#"${REPO_ROOT}/"}"
+    [[ "${rel}" == "${APP_GRADLE}" ]] && continue
+    hits="$(code_view "${file}" | grep -nE 'HAVEN_MESH|addStaticManifestFile|src/mesh' | cut -d: -f1 | tr '\n' ' ' || true)"
+    if [[ -n "${hits}" ]]; then
+      fail "${rel} names the mesh's flag, its manifest or addStaticManifestFile (line(s) ${hits}). The switch is written once, in ${APP_GRADLE}: a second place that merges the manifest or reads the flag can disagree with it."
+    fi
+  done < <(find "${REPO_ROOT}/${ANDROID}" -type f \( -name '*.gradle.kts' -o -name '*.gradle' \) -not -path '*/build/*' -not -path '*/.gradle/*' | LC_ALL=C sort)
+
   if (( FAILED )); then
     exit 1
   fi
-  log "OK: unsafe is written in the generated bridge, the exports' file and the log lever alone, under the crate's deny; the exports' file is uses and the $(grep -c . <<<"${pinned}") pinned exports, each one call into ${CALLS##*/}; each of those is one guarded call of its radio entry, and calls nothing of Java's; the lever is its ${LEVER_UNSAFE_BLOCKS} unsafe blocks and one logger, looks up five functions by name and names nothing it could log, lock or panic with. The radio's Kotlin logs nothing and holds no UUID written out, names its modes and builds its UUIDs at one site, takes the engine's signal floor, and has its ${#JVM_TEST_NAMES[@]} JVM tests; no manifest outside the mesh's own names Bluetooth."
+  log "OK: unsafe is written in the generated bridge, the exports' file and the log lever alone, under the crate's deny; the exports' file is uses and the $(grep -c . <<<"${pinned}") pinned exports, each one call into ${CALLS##*/}; each of those is one guarded call of its radio entry, and calls nothing of Java's; the lever is its ${LEVER_UNSAFE_BLOCKS} unsafe blocks and one logger, looks up five functions by name and names nothing it could log, lock or panic with. The radio's Kotlin logs nothing and holds no UUID written out, names its modes and builds its UUIDs at one site, takes the engine's signal floor, has its ${#JVM_TEST_NAMES[@]} JVM tests, and declares the pinned native methods in ${NATIVE##*/} alone; no manifest outside the mesh's own names Bluetooth, and the mesh's build flag is read once in ${APP_GRADLE##*/}."
 }
 
 # ---------------------------------------------------------------------------
@@ -1209,6 +1333,62 @@ object MeshRadioConstants {
     const val RSSI_FLOOR = -85
 }
 KT
+    cat >"${t}/${NATIVE}" <<'KT'
+package com.oblivioustech.haven.mesh
+
+import com.oblivioustech.haven.mesh.core.LogLever
+import com.oblivioustech.haven.mesh.core.MeshEngineApi
+
+// Never `external fun reset()` here, nor a companion object: a comment
+// declares nothing.
+object MeshNative : MeshEngineApi, LogLever {
+    init {
+        System.loadLibrary("rust_lib_haven")
+    }
+
+    external override fun leftMs(): Long
+
+    external override fun receive(link: Long, frame: ByteArray)
+
+    external override fun poll(ready: LongArray): ByteArray?
+}
+KT
+    cat >"${t}/${APP_GRADLE}" <<'KTS'
+plugins {
+    id("com.android.application")
+}
+
+android {
+    compileSdk = 36
+    buildFeatures {
+        buildConfig = true
+    }
+}
+
+// Never buildConfigField("boolean", "HAVEN_MESH", "true") or an
+// addStaticManifestFile outside the switch: read once, from dart-defines.
+val meshOn = runCatching {
+    (findProperty("dart-defines")?.toString()).orEmpty()
+        .split(",")
+        .map { String(java.util.Base64.getDecoder().decode(it), Charsets.UTF_8) }
+        .lastOrNull { it.startsWith("HAVEN_MESH=") } == "HAVEN_MESH=true"
+}.getOrDefault(false)
+
+android {
+    defaultConfig {
+        buildConfigField("boolean", "HAVEN_MESH", "$meshOn")
+    }
+}
+
+androidComponents {
+    onVariants { variant ->
+        if (meshOn) variant.sources.manifests.addStaticManifestFile("src/mesh/AndroidManifest.xml")
+    }
+}
+KTS
+    mkdir -p "${t}/${ANDROID}/mesh-jvm"
+    printf '// Not the app: no HAVEN_MESH here.\nallprojects {\n    repositories {\n        google()\n    }\n}\n' >"${t}/${ANDROID}/build.gradle.kts"
+    printf 'kotlin {\n    sourceSets["main"].kotlin.setSrcDirs(listOf("../app/src/main/kotlin/com/oblivioustech/haven/mesh/core"))\n}\n' >"${t}/${ANDROID}/mesh-jvm/build.gradle.kts"
     cat >"${t}/${CORE%/core}/ScannerAdapter.kt" <<'KT'
 package com.oblivioustech.haven.mesh
 
@@ -1299,7 +1479,7 @@ TXT
 
   echo "check_mesh_radio.sh --self-test"
   local t="${tmp}/ok"; _tree "${t}"
-  _case "the tree shape passes: three exports each one forward, comments and strings that only mention what is banned, a static in the calls' tests, a Vec and a format! in the lever's; an adapter and a mesh manifest beside the pure package" 0 '' "${t}"
+  _case "the tree shape passes: three exports each one forward, comments and strings that only mention what is banned, a static in the calls' tests, a Vec and a format! in the lever's; an adapter, the native methods' class and a mesh manifest beside the pure package; the build switch written once" 0 '' "${t}"
 
   # Check 1: where unsafe, extern and an exported symbol are written.
   t="${tmp}/unsafe-block"; _tree "${t}"
@@ -1586,6 +1766,79 @@ RS
   t="${tmp}/pinned-order"; _tree "${t}"
   printf 'poll ([J)[B JLongArray jbyteArray\nleftMs ()J - jlong\nreceive (J[B)V jlong,JByteArray -\n' >"${t}/${EXPORTS}"
   _case "the fixture's lines in another order are the same exports" 0 '' "${t}"
+
+  # Check 4, the Kotlin side.
+  t="${tmp}/native-in-kotlin"; _tree "${t}"
+  _line "${t}/${NATIVE}" 'fun leftMs()' '    override fun leftMs(): Long = 0'
+  _case "a pinned method implemented in Kotlin fails: it never reaches Rust" 1 '< leftMs ()J' "${t}"
+
+  t="${tmp}/native-extra"; _tree "${t}"
+  _line "${t}/${NATIVE}" 'fun leftMs()' '    external override fun leftMs(): Long\n\n    external override fun reset()'
+  _case "a native method the fixture does not list fails: Rust exports no such symbol" 1 '> reset ()V' "${t}"
+
+  t="${tmp}/native-renamed"; _tree "${t}"
+  sed -i 's/external override fun leftMs()/external override fun left()/' "${t}/${NATIVE}"
+  _case "a native method under another name fails both ways" 1 '> left ()J' "${t}"
+
+  t="${tmp}/native-parameter"; _tree "${t}"
+  sed -i 's/fun receive(link: Long, frame: ByteArray)/fun receive(link: Int, frame: ByteArray)/' "${t}/${NATIVE}"
+  _case "a native method's parameter of another type fails" 1 '> receive (I[B)V' "${t}"
+
+  t="${tmp}/native-order"; _tree "${t}"
+  sed -i 's/fun receive(link: Long, frame: ByteArray)/fun receive(frame: ByteArray, link: Long)/' "${t}/${NATIVE}"
+  _case "a native method's parameters in the other order fail" 1 '> receive ([BJ)V' "${t}"
+
+  t="${tmp}/native-answer"; _tree "${t}"
+  sed -i 's/fun leftMs(): Long/fun leftMs(): Int/' "${t}/${NATIVE}"
+  _case "a native method's answer of another type fails" 1 '> leftMs ()I' "${t}"
+
+  t="${tmp}/native-unknown-type"; _tree "${t}"
+  sed -i 's/fun receive(link: Long, frame: ByteArray)/fun receive(link: Long, frame: String)/' "${t}/${NATIVE}"
+  _case "a parameter of a type JNI is not handed here fails" 1 '> ? receive' "${t}"
+
+  t="${tmp}/native-nullable-parameter"; _tree "${t}"
+  sed -i 's/fun receive(link: Long, frame: ByteArray)/fun receive(link: Long, frame: ByteArray?)/' "${t}/${NATIVE}"
+  _case "a parameter that may be null fails: only an answer is" 1 '> ? receive' "${t}"
+
+  t="${tmp}/native-two-lines"; _tree "${t}"
+  _line "${t}/${NATIVE}" 'fun receive(' '    external override fun receive(\n        link: Long, frame: ByteArray)'
+  _case "a native method declared over two lines fails: this guard reads one" 1 '> ? external override fun receive(' "${t}"
+
+  t="${tmp}/native-not-override"; _tree "${t}"
+  sed -i 's/external override fun poll(/external fun poll(/' "${t}/${NATIVE}"
+  _case "a native method that overrides nothing of the two interfaces fails" 1 '> ? external fun poll(' "${t}"
+
+  t="${tmp}/native-jvm-name"; _tree "${t}"
+  _line "${t}/${NATIVE}" 'fun leftMs()' '    @JvmName("left") external override fun leftMs(): Long'
+  _case "a native method renamed for the JVM fails: its symbol is the other name" 1 "${NATIVE} is not the package" "${t}"
+
+  t="${tmp}/native-class-name"; _tree "${t}"
+  sed -i 's/^object MeshNative : /object MeshRadioNative : /' "${t}/${NATIVE}"
+  _case "the class under another name fails: no symbol names it" 1 "${NATIVE} is not the package" "${t}"
+
+  t="${tmp}/native-package"; _tree "${t}"
+  sed -i 's/^package com.oblivioustech.haven.mesh$/package com.oblivioustech.haven.mesh.radio/' "${t}/${NATIVE}"
+  _case "the class in another package fails" 1 "${NATIVE} is not the package" "${t}"
+
+  t="${tmp}/native-nested"; _tree "${t}"
+  sed -i 's/^    init {$/    object Lever {\n        external fun leverHolds(): Boolean\n    }\n\n    init {/' "${t}/${NATIVE}"
+  _case "a native method of a nested object fails" 1 "${NATIVE} is not the package" "${t}"
+
+  t="${tmp}/native-no-library"; _tree "${t}"
+  sed -i '/System.loadLibrary/d' "${t}/${NATIVE}"
+  _case "the library not loaded by the class fails" 1 "${NATIVE} does not load the library" "${t}"
+
+  t="${tmp}/native-other-library"; _tree "${t}"
+  sed -i 's/System.loadLibrary("rust_lib_haven")/System.loadLibrary("haven_mesh")/' "${t}/${NATIVE}"
+  _case "another library loaded fails: its exports nobody checked" 1 "${NATIVE} does not load the library" "${t}"
+
+  t="${tmp}/native-second-load"; _tree "${t}"
+  sed -i 's|^        System.loadLibrary("rust_lib_haven")$|        System.loadLibrary("rust_lib_haven")\n        System.load("/data/local/tmp/libprobe.so")|' "${t}/${NATIVE}"
+  _case "a second library loaded by path fails" 1 "${NATIVE} does not load the library" "${t}"
+
+  t="${tmp}/native-elsewhere"; _tree "${t}"
+  printf 'object Probe {\n    external fun leftMs(): Long\n}\n' >>"${t}/${CORE%/core}/ScannerAdapter.kt"
+  _case "a native method declared in another file of the radio fails" 1 "ScannerAdapter.kt declares something external" "${t}"
 
   # Check 5: what the exports forward to.
   t="${tmp}/bare"; _tree "${t}"
@@ -2001,7 +2254,48 @@ RS
   printf 'const FLOOR: &str = "__android_log_set_minimum_priority";\n' >>"${t}/${CALLS}"
   _case "one of the five functions named outside the lever fails, in a string too" 1 "${CALLS} names android_log_sys" "${t}"
 
+  # Check 14: the mesh's build flag is read once.
+  t="${tmp}/switch-unconditional"; _tree "${t}"
+  sed -i 's/^        if (meshOn) variant\.sources/        variant.sources/' "${t}/${APP_GRADLE}"
+  _case "the mesh's manifest merged whatever the flag fails: Bluetooth permissions in every build" 1 "${APP_GRADLE} does not read the mesh's flag once" "${t}"
+
+  t="${tmp}/switch-field-literal"; _tree "${t}"
+  sed -i 's/buildConfigField("boolean", "HAVEN_MESH", "$meshOn")/buildConfigField("boolean", "HAVEN_MESH", "true")/' "${t}/${APP_GRADLE}"
+  _case "BuildConfig.HAVEN_MESH given a value of its own fails" 1 "${APP_GRADLE} does not read the mesh's flag once" "${t}"
+
+  t="${tmp}/switch-other-source"; _tree "${t}"
+  sed -i '/^val meshOn = runCatching {$/,/^}\.getOrDefault(false)$/c val meshOn = System.getenv("HAVEN_MESH") == "true"' "${t}/${APP_GRADLE}"
+  _case "the switch read from somewhere that is not the Dart defines fails" 1 'not once: valmeshOn=runCatching' "${t}"
+
+  t="${tmp}/switch-fails-open"; _tree "${t}"
+  sed -i 's/^}\.getOrDefault(false)$/}.getOrDefault(true)/' "${t}/${APP_GRADLE}"
+  _case "a property that does not decode read as on fails" 1 'not once: valmeshOn=runCatching' "${t}"
+
+  t="${tmp}/switch-second-field"; _tree "${t}"
+  sed -i 's/^        buildConfigField("boolean", "HAVEN_MESH", "$meshOn")$/        buildConfigField("boolean", "HAVEN_MESH", "$meshOn")\n        buildConfigField("boolean", "HAVEN_MESH_RADIO", "true")/' "${t}/${APP_GRADLE}"
+  _case "a second field for the mesh, with its own value, fails" 1 'buildConfigField named 2 time(s), not 1' "${t}"
+
+  t="${tmp}/switch-second-manifest"; _tree "${t}"
+  sed -i 's|^    onVariants { variant ->$|    onVariants { variant ->\n        if (variant.name == "debug") variant.sources.manifests.addStaticManifestFile("src/mesh/AndroidManifest.xml")|' "${t}/${APP_GRADLE}"
+  _case "the mesh's manifest merged a second time, under another condition, fails" 1 'addStaticManifestFile named 2 time(s), not 1' "${t}"
+
+  t="${tmp}/switch-elsewhere"; _tree "${t}"
+  printf 'subprojects {\n    extra["mesh"] = providers.gradleProperty("HAVEN_MESH").isPresent\n}\n' >>"${t}/${ANDROID}/build.gradle.kts"
+  _case "the flag read in another Gradle script fails" 1 "${ANDROID}/build.gradle.kts names the mesh's flag" "${t}"
+
   # Misconfiguration.
+  t="${tmp}/no-native"; _tree "${t}"
+  rm "${t}/${NATIVE}"
+  _case "a radio with no class of native methods is a misconfiguration" 2 '' "${t}"
+
+  t="${tmp}/native-vacuous"; _tree "${t}"
+  sed -i '/external override fun/d' "${t}/${NATIVE}"
+  _case "a class that declares nothing external is a misconfiguration, not a set of missing methods" 2 'would be reading nothing' "${t}"
+
+  t="${tmp}/no-gradle"; _tree "${t}"
+  rm "${t}/${APP_GRADLE}"
+  _case "an app with no Gradle script to read the switch from is a misconfiguration" 2 '' "${t}"
+
   t="${tmp}/no-lever"; _tree "${t}"
   rm "${t}/${LEVER}"
   _case "a missing lever is a misconfiguration" 2 '' "${t}"

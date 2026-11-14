@@ -412,6 +412,10 @@ poll(ready: LongArray): ByteArray?   wakeInMs(): Long      // −1: none
   which also holds the keyring's one `Java_*` symbol (N-3) and the
   library's `liblog` imports; and the Android step of `cross-check.yml`
   is clippy with warnings denied. Neither step has run on a runner.
+  **As built (M3g, unit 3; §N.7):** `MeshNative.kt` exists, and the
+  guard's parity check has its Kotlin side — the class's name and
+  package, and each `external` method's name and descriptor, against the
+  same fixture. Nothing calls the class.
 - **`jni` logs** (found in M3b): its wrappers write a `trace` line naming
   the JNI function they call — a fixed word, no value. The bridge's logger
   admits Haven's two targets alone and caps the level below `trace`, so none
@@ -949,7 +953,11 @@ the guard reads every `AndroidManifest.xml` under `app/src` but
 `src/mesh/`'s — main, debug and profile today — and fails the words
 `bluetooth`, `connectedDevice` and `mesh` in any case, a comment
 included. The mesh's own manifest, the Gradle switch and the [C] half are
-M3g's.
+M3g's. **As built (M3g unit 3; §N.7):** the mesh's manifest holds the
+permissions and the feature, and the two components come with the
+service; the switch is in `app/build.gradle.kts`; the [C] half is
+`scripts/ci/check_mesh_manifest.sh` in `build-check.yml`, which has run
+on no built APK yet.
 
 Play requires each foreground-service type to be declared in the Console
 with a description and a video [A13 — **[U]**, the page could not be
@@ -2792,7 +2800,7 @@ mapping to `unsupported` and `failed` (§M.3).
 ## N. M3g as it will be built
 
 > **Drafted by one agent and confirmed with changes by an independent
-> review, both 2026-11-12.** Paper only when written; units 1 and 2
+> review, both 2026-11-12.** Paper only when written; units 1, 2 and 3
 > have been built since (N.7), and nothing of this section has run on
 > Android.
 > It settles what §M.2 left to M3g, orders the unit into six that CI can
@@ -3001,8 +3009,9 @@ back.** It replaces §M.2's item 5 and settles the "how often" of item 6.
   calls libbase's `SetLogger` or `InitLogging`, which install their own
   ([V1]: `base/logging.cpp:400-405` @11). That is what the check is for.
 - **When.** At every start (N.1.5), and as the first thing every input
-  of `MeshRadioCore` does, before the time left (`MeshRadioCore.kt:137`):
-  one JNI call, no timer. A check that fails puts the lever back —
+  of `MeshRadioCore` does, before the time left (`left()`,
+  `MeshRadioCore.kt:137-149`, which every input reaches through `input`,
+  `:131-134`): one JNI call, no timer. A check that fails puts the lever back —
   callbacks still arrive after a stop (§M.2 item 4) — and stops the
   radio as a stop the user did not make. **As built (unit 2, after its
   review):** not in the core. The core's inputs are not the only bodies
@@ -3464,6 +3473,9 @@ androidComponents {
 confirmed). The last
 define of the name decides, as the command line's does over a file's
 (**[U]** that Dart reads a repeated define the same way).
+**As built (unit 3; N.7):** read again for Flutter 3.50.0 and AGP 9.3,
+which the build has moved to; the switch is this one in a `runCatching`
+that answers off, and `check_mesh_radio.sh` (check 14) holds it.
 
 **What proves each half**, both in `build-check.yml`, by
 `scripts/ci/check_mesh_manifest.sh <apk> on|off`, which reads `aapt2
@@ -3952,6 +3964,26 @@ list).**
   `started`. Every other body, the user's stop among them, is
   `MeshThread.run`. Its stop's steps are `MeshThread.steps`.
 
+Three more, from the re-review of unit 2 (of `eafa393`; no code):
+
+- **In the stop's `closeAdapters` step each close is in a `try` of its
+  own, or `GattClientSteps.stop()` comes last.** It throws again, after
+  closing every client, what was thrown first: written as a plain
+  sequence ahead of the server's, it would skip `ServerLinks.stop()` and
+  the server's own close.
+- **`MeshThread.start` has one call site, the service's start, and a
+  direct `MeshThread.stop` one, the `Refused` stop inside it** — unit
+  4's guard pins both. And no `run` body is posted on a new thread
+  before its start: in a fresh process it would find no lever, stop the
+  thread, and the start behind it would be dropped — a service started
+  with `startForegroundService` that never reaches `startForeground`
+  (N-5).
+- **A GATT server's callback object stays bound to the `ServerLinks` it
+  was made with**, as a client's stays with its connection's number.
+  `stop` is final for that instance only: a callback of a closed server
+  handed to the next radio's `ServerLinks` would be a device that one
+  never saw.
+
 **Review of unit 2 (independent, read-only, of `9609128`).** No blocker
 and no high finding. Fixed:
 
@@ -3993,3 +4025,159 @@ ends anything; whether ending a link stops a pairing; what callbacks
 still arrive after a close; how late a handler's timer comes on a
 phone that sleeps; whether a write without response is paced by its
 callback.
+
+**Unit 3, `MeshNative` and the gate (2026-11-14).** Built as N.2.1, N.3
+and N.4 say. **Nothing references `MeshNative`, no build script passes
+the flag, and nothing of this unit has been compiled for Android or run
+on a runner**: this machine has no Android SDK and cannot reach Google's
+Maven, so the app's Gradle script, the merged manifest, `BuildConfig` and
+the flag-on build are CI's to prove, and the list below says which job
+proves what. Plan §16 has what is proved here and how. Since this
+section was written the build moved to Gradle 9.5.0, AGP 9.3.1, Kotlin
+2.4.20 and Flutter 3.50, with AGP's new DSL and built-in Kotlin switched
+off (`haven/android/gradle.properties`), and `minSdk` to 24: "Android 6
+to 10" above is Android 7 to 10 now.
+
+*What was read for it* (2026-11-13 and -14; **[V1]**):
+
+- **AGP 9.3**, `developer.android.com/reference/tools/gradle-api/9.3/…`:
+  `com/android/build/api/variant/ManifestFiles` —
+  `addStaticManifestFile(relativeFilePath: String)`, added in 8.3.1,
+  the path "resolved using the `Directory.file` API relative to the
+  Gradle project directory", the file "added last in the list" and so
+  the one "with the highest priority"; `…/variant/Sources` —
+  `val manifests: ManifestFiles`, added in 8.3.1;
+  `…/variant/AndroidComponentsExtension` — `onVariants` with a selector
+  that defaults to all, once taking a function and once an `Action`, and
+  the page's own `androidComponents { onVariants { } }`;
+  `…/dsl/VariantDimension` — `buildConfigField(type, name, value)`,
+  "generated as: `<type> <name> = <value>;`"; `…/dsl/BuildFeatures` —
+  `buildConfig`, default false, which the app already sets.
+- **Flutter 3.50.0**, the tag's files from
+  `raw.githubusercontent.com/flutter/flutter/3.50.0/packages/flutter_tools/…`:
+  the tool still passes `-Pdart-defines=` (`lib/src/build_info.dart:448`),
+  each define the base64 of its UTF-8 text, joined by commas
+  (`:1152`, `:1166-1167`), a file's defines ahead of the command line's
+  (`lib/src/runner/flutter_command.dart:1307-1320`); the plugin reads
+  the property `dart-defines` with `findProperty(…)?.toString()`
+  (`gradle/src/main/kotlin/FlutterCompileOptions.kt:49`, `:89` — no
+  longer `FlutterPlugin.kt:645`), and itself registers
+  `androidComponents.onVariants` on the app (`FlutterPlugin.kt:325`).
+- **The runner**, from the last build of this branch before the unit
+  (`Debug Builds / Android (x64)`, job 132247624980 of run 43528650889,
+  on `eafa393`) and the README of its image (`ubuntu-26.04`,
+  20261111.196.1): `channel: stable` was Flutter 3.50.0; `ANDROID_HOME`
+  is `/usr/local/lib/android/sdk`; the image has build-tools 34.0.0 to
+  37.0.0 and the platform `android-36`, so the `aapt2` and the
+  `android.jar` the two checks look for are there without a download.
+- **Not read, [U]:** AGP's source, at any version; whether the legacy
+  DSL changes any of the above; what the manifest merger does with the
+  file beyond the reference's sentence; what `aapt2` 37.0.0 prints —
+  the shape was taken from 2.19; that Dart, given a define twice, takes
+  the last.
+
+*Where the code differs from this section, or settles what it left
+open:*
+
+- **The switch (N.3)** is N.3's expression inside `runCatching { … }
+  .getOrDefault(false)`: N.3's would have failed every build's
+  configuration on a property that does not decode, and a property that
+  is absent or malformed is to read as off. The property is taken with
+  `?.toString()`, as the plugin takes it, the bytes are read as UTF-8,
+  and an empty entry needs no filter. The field and the manifest are
+  beside it, in a second `android { defaultConfig { … } }` block.
+  **Run here:** the expression, under Gradle 9.5.0's Kotlin DSL, over
+  fourteen values of the property — absent, empty, on, off, on among
+  others, a define given twice in each order, `TRUE`, a name that only
+  begins or only ends with the flag's, a value with a space behind it,
+  and three that do not decode — on only where the last `HAVEN_MESH=`
+  is `true`; and the two blocks against stand-ins that
+  have the reference's signatures, where `onVariants { variant -> … }`
+  takes the function's overload and the file is added to each variant
+  with the flag and to none without. **Not run:** any of it against
+  AGP.
+- **`MeshNative` (N.2.1)** is as written. It is not in the JVM build,
+  whose sources are the pure package, and has no JVM test: a test that
+  loaded it would run `System.loadLibrary`. **Compiled here** in a
+  scratch copy of that build with the source directory widened to
+  `mesh/`, under the same compiler options: it overrides the two
+  interfaces, and `javap` of the class file shows eleven `native`
+  methods whose names and descriptors are the fixture's. For Android
+  that is the app's compile [C].
+- **Guard check 4, the Kotlin side.** Read as text: the package, the
+  one declaration `object MeshNative : MeshEngineApi, LogLever {`, no
+  other class, object or interface and no `JvmName`; each native method
+  one line `external override fun <name>(<parameters>)[: <type>]`,
+  whose name and descriptor are a line of the fixture, and no other —
+  `ByteArray?` is `[B` as an answer only; `System.loadLibrary` once,
+  of the library the symbols check reads; nothing `external` in any
+  other file of the radio. What it adds to the compiler and the JVM
+  test, which between them hold the types: that a method is `external`
+  at all — one given a Kotlin body compiles and never reaches Rust —
+  and the class's name, which is half of every symbol.
+- **Guard check 14, "the Gradle switch named once".** The switch's
+  whole expression is pinned, with the one `buildConfigField` and the
+  one `addStaticManifestFile` under `if (meshOn)`; `meshOn` is named
+  three times and no other Gradle script under `haven/android` names
+  the flag, the call or the manifest.
+- **`check_mesh_manifest.sh` (N.3, N.4).** `aapt2 dump xmltree`, the
+  `aapt2` of the newest build-tools under the SDK. *Off* is wider than
+  N.3's three clauses: no attribute value of the manifest names
+  Bluetooth — a permission under either tag, a feature, a broadcast a
+  receiver filters for — none names the connected-device permission, no
+  service's type has that bit, and no component is of the mesh's
+  package. *On* is this unit's seven entries, each exactly once and
+  with exactly its attributes; the two components are not asked for
+  until unit 5 declares them. A dump without the `INTERNET` permission
+  every build declares is a misconfiguration, so a printer that changes
+  its shape cannot pass *off* by showing nothing. **Run here against a
+  real `aapt2`** (2.19, the distribution's package): two APKs linked
+  from the mesh's own manifest and from one without it, each checked in
+  both modes — the shape the self-test's dumps have is the one it
+  printed, `usesPermissionFlags(0x01010644)=0x00010000` among it.
+  **Not run:** on a manifest AGP merged, or with the SDK's `aapt2`.
+- **In the three legs the *off* check is behind the Gradle cache's
+  save** (N.4 has it after the symbols step): it reads the APK, and what
+  it finds — a dependency that declares Bluetooth, or a tool that is
+  not where this unit expects it — is no reason to leave every other
+  lane a colder cache.
+- **The `javap` step (N.4, "3; 4") is built now**, as
+  `scripts/ci/check_mesh_radio_constants.sh`: the four integers against
+  `platforms/android-<compileSdk>/android.jar`, and for each that the
+  comment directly above it names the constant it is compared with.
+  **Run here against two real `android.jar`s** — API 23, the
+  distribution's package, and a copy of API 36 from a third-party
+  mirror: 0, 0, 2, 2 in both.
+- **`android-mesh` (N.3)** also runs the symbols check, on the library
+  of the one build whose Kotlin declares the native methods; it restores
+  the Gradle cache and does not write it, and writes a cargo cache of
+  its own, as each leg does.
+- **`repo-guards.yml`** gains two steps, not one: the self-tests of the
+  manifest check and of the constants check.
+- **The legacy permissions (§B.8, §M.3).** Kept as §B.8 has them:
+  Android 11 is where the radio starts and has none of the three new
+  permissions, and `maxSdkVersion` has no lower counterpart — so a
+  flag-on build is also granted the two install-time permissions on
+  Android 7 to 10, where the radio never starts.
+- **Documents N.4 leaves to M3i, touched in one sentence each**, where
+  this unit made a sentence false: `haven-core/SECURITY.md` and the
+  privacy manifest said that no Kotlin declares an export and that no
+  workflow passes the flag, and `haven/DEVELOPMENT.md` the second. One
+  class declares them and nothing calls it; one CI job passes the flag,
+  to an APK that is checked and not kept.
+
+*What only CI proves, and has not yet:*
+
+| Job (`build-check.yml`, under "Debug Builds") | What it proves | A failure reads |
+|---|---|---|
+| `Android (arm64)`, `(arm)`, `(x64)` — the build | the Gradle script evaluates under AGP 9.3 with the flag off: the `androidComponents` block, `buildConfigField` in a second `defaultConfig`; `MeshNative.kt` compiles for Android | at configuration, `build.gradle.kts` and a line of the switch: "Unresolved reference" or an overload ambiguity at `onVariants`; at `compileDebugKotlin`, `MeshNative.kt` |
+| the same — "Check the manifest declares nothing of the mesh" | a default build's merged manifest, dependencies' included, has nothing of the mesh | rc 1, `names Bluetooth with the mesh's flag off: <tag> name=…` — a dependency's manifest, or the switch on by mistake; rc 2, `does not hold the INTERNET permission` (the SDK's `aapt2` prints another shape than 2.19's) or `no aapt2 to read the manifest with` (an image without build-tools) |
+| `Android (x64, mesh on)` — the build | the flag reaches Gradle as `dart-defines`; the flag-on shape compiles | as the first row |
+| the same — "Check the manifest declares the mesh's entries" | `addStaticManifestFile` merged the file, whole, into the debug variant | rc 1, `has no <uses-permission> android.permission.BLUETOOTH_SCAN` and six more: the switch read off, or the file was not merged; one entry `carries '…'`: the merger changed an attribute |
+| the same — "Probe the library's JNI exports and liblog imports" | the eleven symbols, in the flag-on build | as in the legs (N.4) |
+| the same — "Check the radio's modes are the SDK's" | the four integers, against API 36 as Google ships it | rc 1, `holds SCAN_MODE = 0, and ScanSettings.SCAN_MODE_LOW_POWER is …`; rc 2, `platforms/android-36/android.jar not found` |
+
+`BuildConfig.HAVEN_MESH` has no reader until unit 6, so its value is
+proved by nothing until then: a build in which the field's line is
+wrong still fails to compile, and that is all. That a release build
+keeps or drops `MeshNative` as intended stays **[U]** (N.5).

@@ -3392,11 +3392,13 @@ twelve hours later.
 (`haven/rust_builder/src/api.rs`, "Bluetooth mesh FFI") are built and tested.
 The radio is not. The entries a radio drives the engine through are built
 and tested, and so is the JNI shim that exports them to an Android build
-("The radio's entries" below); no Kotlin declares or calls an export, and no
+("The radio's entries" below); one Kotlin object declares the exports as its
+native methods (`MeshNative`) and nothing calls it, and no
 platform code scans, advertises or connects, so no packet leaves or reaches a
 device in any build. The Dart side is built behind the
-compile-time define `HAVEN_MESH`, which is off unless a build passes it and
-which no build script or workflow passes ("The Dart side" below): in a
+compile-time define `HAVEN_MESH`, which is off unless a build passes it. No
+build script passes it; one CI job does (`build-check.yml`, `android-mesh`),
+for an APK that is checked and not kept ("The Dart side" below): in a
 shipped build no Dart code calls a mesh entry, so mesh cannot be turned on,
 no key below is ever stored and member bridging passes nothing on. In a
 build with the define the mesh button is on the map on Android alone ("On
