@@ -3396,6 +3396,108 @@ item 6, that address rotation is the build's; §7.1 carries a note now.
   project with no such plugin. Fixed with an import, and run again in a
   project that applies the `java` plugin, where the failing spelling
   fails with CI's message (design N.7).
+- **M3g unit 4**, the radio adapters
+  (`docs/BLUETOOTH_MESH_M3_DESIGN.md` §B.1, §B.3, §N.2.2 to §N.2.6, and
+  §N.7 for what was read, where the code differs, what the service owes
+  it and what only an emulator proves; `…/mesh/MeshLoop.kt`,
+  `GattServerAdapter.kt`, `GattClientAdapter.kt`, `AdvertiserAdapter.kt`,
+  `ScannerAdapter.kt`; `scripts/ci/check_mesh_radio.sh`). Five Kotlin
+  files, the guard and documents: no service, no channel, no manifest
+  entry, no Gradle line, no Dart, no Rust, no dependency, no JVM test.
+  **Nothing makes an adapter and nothing calls `MeshNative`, so no radio
+  starts in any build, with the flag or without. Nothing of this unit
+  has been compiled for Android or run on Android: this machine has no
+  Android SDK, and its first Android compile is CI's.**
+  **What is built.** `MeshLoop`: the one thread of a start and its
+  handler; the service's start posted inside `MeshThread.start`, every
+  other body — a callback's, a timer's — inside `MeshThread.run`,
+  through one function. The GATT server: Haven's one service, one
+  characteristic (write without response, notify) and its descriptor,
+  none of them readable, none asking for encryption; each callback one
+  input of the `ServerLinks` made with it; a request answered success
+  or the plain failure. The GATT client: one platform client and one
+  callback object for each connection `GattClientSteps` makes, over LE,
+  no auto-connect; each callback one input, each step one call. The
+  advertisement: the service UUID, the constants' mode and power,
+  connectable, no timeout, no name, no power level, no data, no scan
+  response, and "not discoverable" from Android 14. The scan: one
+  filter on the service UUID in the constants' mode, started when the
+  core says and only where a scan would be given results. Where
+  Android 13 gave a call or a callback a form that carries the value,
+  both forms are there, each for its own levels.
+  **Proved here** — by a compiler and a class-file reader, nothing
+  more. The radio's whole Kotlin (the pure package, `MeshNative`, the
+  five files) compiles with no warning, warnings being errors and the
+  extended ones on, in a scratch Gradle build with the JVM build's
+  Kotlin (2.4.20) and options whose compile classpath is a copy of API
+  36's `android.jar`; the same against copies of 34 and 35. Against API
+  23's — the distribution's package — it fails on exactly the seven
+  members that are newer, each of which the code calls behind
+  `SDK_INT`, names for a constant the compiler inlines, or overrides:
+  so every other member exists on every level Haven installs on. The
+  class files name thirty platform classes, all in API 23's jar. With
+  the four suppressions taken out the compile fails on the eight
+  deprecation warnings they cover and nothing else. The level each newer
+  member came at, and five things the code rests on — which
+  notification callback the platform calls on which release, what
+  throws with Bluetooth off, that a dial by address finds its type,
+  what a refusal goes out as, that an unreadable attribute is refused
+  by the stack — were read on the reference pages and in mirrors of
+  the platform's source (design §N.7 has the files and lines); none of
+  it was run.
+  **The guard**, `check_mesh_radio.sh`, three new checks. 15: the loop
+  is held to its four uses of the handler and its one wrapper; no other
+  adapter names a thread, a handler or the wrapper; every platform
+  callback outside the pure package is one post through the loop, the
+  notification callback of before Android 13 excepted, pinned whole and
+  required once. 16: no name that could start a pairing, in any file of
+  the radio; the one dial and the one answer pinned. 17: the
+  advertisement's three statements pinned, each of its calls written
+  once, and no name of a field it must not carry. 276 self-test
+  fixtures (198, and 78), one of them a misconfiguration: adapters that
+  declare no callback.
+  **Mutation pass**, 69 changes to the guard, each dropping one pin,
+  allowing one name, or silencing or loosening one clause: the loop's
+  five pins and three counts; each of the nine words an adapter may not
+  name; the callbacks' comparison, any expression body passing, a body
+  that only begins with its post; the older callback absent, or there
+  twice; a radio with no callback read as a pass; another source set, or
+  the pure package, left unread; check 16's twelve names and three
+  patterns, its two pins and two counts; the advertisement's three
+  pins, nine calls and seven names. All fail a named fixture. Two
+  things the pass changed on the way: one alternative of check 16's
+  pattern that no platform name reaches alone was taken out; and ten
+  failures of the first run were the fixture count's or a script
+  error's, not a fixture's — check 17's fixtures were reading the lists
+  they test, and no longer do.
+  **Only CI proves, and has not run**: that the five files compile
+  under the Android plugin against Google's own `android.jar`, in the
+  three legs and in the flag-on job. No job lints them or builds a
+  release with them.
+  **Not proved, by anything**: every behaviour. No adapter has met a
+  Bluetooth stack: that a server opens and a peer finds its service,
+  that an advertisement starts and is found, that a dial connects and
+  its steps complete, that a frame crosses in either direction, that a
+  close ends anything — design §N.7 lists what each rests on and
+  whether it was read. The lever's two calls still run nowhere:
+  nothing reaches `MeshThread.run` in a build.
+  **Found and not fixed — for the owner** (design §N.7): on Android 11
+  to 12L the platform keeps a notification's value and a frame about to
+  be written in the same object, on two threads, so a frame on a link
+  this phone dialled can be lost or replaced by the peer's own bytes;
+  the engine closes such a link and it is dialled again. Ending it
+  means the platform running a client's callbacks on the mesh thread —
+  a `Handler` in an adapter, which §N.2.2 rules out. And with
+  Bluetooth off two of the adapters' closes throw, as read: the
+  service must close each in a `try` of its own, or §B.6's pause is a
+  stop with the notice. Also for the owner or the review: a GATT server
+  that does not open is a stop with the notice, not a phone that only
+  dials; the refusal Haven answers is the platform's `GATT_FAILURE`,
+  which goes out as ATT 0x01; no attribute of Haven's can be read.
+  `haven-core/SECURITY.md` changes by one sentence, where it said that
+  no platform code scans, advertises or connects: the classes are
+  written and nothing makes one. The privacy manifest,
+  `haven/DEVELOPMENT.md` and `CLAUDE.md` are unchanged.
 
 ### Proposed CLAUDE.md wording (owner to approve)
 

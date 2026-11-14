@@ -1424,7 +1424,10 @@ jobs:
       # class the exports' symbols name, and its native methods are the
       # fixture's names and descriptors, the Kotlin side of the same pin; and
       # the app's Gradle script reads the mesh's build flag once, for the
-      # manifest and BuildConfig both (§N.3).
+      # manifest and BuildConfig both (§N.3). The radio's adapters post every
+      # platform callback through MeshLoop.kt, inside MeshThread.run, name
+      # nothing that could start a pairing, and advertise the service UUID
+      # alone (§N.2.2, §M.4, §M.3).
       - name: Mesh radio
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_mesh_radio.sh
@@ -1457,7 +1460,12 @@ jobs:
       # or nested, the library not loaded or another one, and a native method
       # in another file. In the Gradle script: the manifest merged whatever
       # the flag, BuildConfig given its own value, the flag read from
-      # elsewhere or failing open, and a second place that reads it.
+      # elsewhere or failing open, and a second place that reads it. In the
+      # adapters: a callback that does anything but post through the loop, a
+      # body the loop posts bare, a thread or a handler of an adapter's own,
+      # each name that could start a pairing, a dial or an answer that is not
+      # the pinned one, and a field, a setting or a second start beside the
+      # pinned advertisement.
       - name: Mesh radio guard self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_mesh_radio.sh --self-test

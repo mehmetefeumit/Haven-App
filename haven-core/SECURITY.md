@@ -3393,8 +3393,10 @@ twelve hours later.
 The radio is not. The entries a radio drives the engine through are built
 and tested, and so is the JNI shim that exports them to an Android build
 ("The radio's entries" below); one Kotlin object declares the exports as its
-native methods (`MeshNative`) and nothing calls it, and no
-platform code scans, advertises or connects, so no packet leaves or reaches a
+native methods (`MeshNative`) and nothing calls it; the Android classes that
+would scan, advertise and connect are written
+(`haven/android/app/src/main/kotlin/com/oblivioustech/haven/mesh/`) and
+nothing makes one — there is no service — so no packet leaves or reaches a
 device in any build. The Dart side is built behind the
 compile-time define `HAVEN_MESH`, which is off unless a build passes it. No
 build script passes it; one CI job does (`build-check.yml`, `android-mesh`),

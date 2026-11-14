@@ -4,7 +4,10 @@
 # files (docs/BLUETOOTH_MESH_M3_DESIGN.md §A.6, F-8, F-14, §N.1.1); and the
 # radio's Kotlin logs nothing, names its modes at one site, declares its
 # native methods as that list has them and keeps its JVM tests (§B.1,
-# §B.8–B.10, §N.2.1); and the mesh's build flag is read by Gradle once (§N.3).
+# §B.8–B.10, §N.2.1); and the mesh's build flag is read by Gradle once (§N.3);
+# and the radio's adapters run every platform callback on the mesh thread,
+# can start no pairing and advertise the service UUID alone (§B.1, §B.3,
+# §M.3, §M.4, §N.2.2, §N.2.5).
 #
 # Android's radio service drives the mesh engine through two files of
 # `haven/rust_builder/src`:
@@ -201,6 +204,36 @@
 #      manifest and `BuildConfig.HAVEN_MESH` cannot disagree. What the merged
 #      manifest then holds is `check_mesh_manifest.sh`'s, on the built APK.
 #
+# And over the radio's adapters — the same Kotlin, outside the pure package
+# `mesh/core/` for check 15 and all of it for 16 and 17 — read with no
+# whitespace, so that a call broken over lines is one call:
+#  15. One thread (§B.1, §N.2.2). `MeshLoop.kt` hands its one handler a body
+#      in the pinned ways and no other — the start's inside `mesh.start(body)`,
+#      every other inside `mesh.run(body)`, which is written once — makes one
+#      `Handler` and names its `MeshThread` twice. No other adapter names a
+#      `Handler`, a `Looper`, an `Executor`, a `Thread`, a `Timer` or
+#      `MeshThread`. And every platform callback of an adapter — each
+#      `override fun on…(…)` — is `= loop.post {`: nothing of it runs on the
+#      platform's thread, or outside the wrapper that asks the log lever and
+#      catches what is thrown. One callback is pinned whole instead, and must
+#      be there once: the notification of before Android 13, whose value is
+#      read before the post, because the next notification overwrites it.
+#  16. Never bond (§M.4, §N.2.5). No file names a call that creates a bond or
+#      answers a pairing, one that reads a characteristic or a descriptor, a
+#      write type or a property that has a response, an attribute permission
+#      that asks for encryption or a signature, an "insufficient …" status,
+#      or a transport that is not LE. The one dial is
+#      `connectGatt(context, false, Callback(link), BluetoothDevice.TRANSPORT_LE)`
+#      and the one answer to a peer's request `sendResponse` with success or
+#      the plain failure: each pinned, each call named once.
+#  17. The advertisement (§B.3, §M.3, §M.7) is built once, as pinned: its
+#      settings the constants' mode, power, connectable and timeout, and "not
+#      discoverable" from the API level the constants name; its data the
+#      constants' no name and no power level and the service UUID; started
+#      with no scan response. No file names service, manufacturer,
+#      solicitation or transport-discovery data, an advertising set, or the
+#      call that renames the phone.
+#
 # The Kotlin is read with the lexer made for Rust: comments and plain strings
 # as above, not Kotlin's string templates or raw strings.
 #
@@ -215,7 +248,13 @@
 # `JNIEnv` handed to a function that calls Java, nor what an entry does once
 # called. Of the lever it cannot see an index that could panic, nor that an
 # `unsafe` block's argument is true: the count is pinned so that a new block
-# is a change to this file, which a reviewer reads. What each call does with
+# is a change to this file, which a reviewer reads. Of the adapters it reads
+# the shape of a callback's declaration and pinned text, never what a body
+# does: a posted body that calls nothing passes, and so does a callback handed
+# over as a lambda or under a name that does not begin with `on`; the bans of
+# 16 and 17 are names, and a constant written as its integer is not one. That
+# the adapters call the platform as it is, on every API level, is the app's
+# compile and then an emulator's. What each call does with
 # its arguments is held by tests in
 # `haven/rust_builder/src`: `mesh_radio::tests` (the conversions),
 # `the_calls_a_jni_export_forwards_reach_their_entries_each_argument_in_its_place`
@@ -236,9 +275,12 @@
 #
 # Not here yet, each with the change that makes it checkable:
 #   * The shape of the mesh's own manifest once it has components (no
-#     `android:process`, `connectedDevice`, the receiver not exported), that
-#     every adapter callback runs inside `MeshThread.run`, and what an
-#     advertisement may not carry: with the adapters and the service.
+#     `android:process`, `connectedDevice`, the receiver not exported); that
+#     the service's own lifecycle methods and its receivers run inside the
+#     wrapper; and that `MeshLoop.start` has one caller, the service's start,
+#     and `MeshThread.stop` one direct one, the refusal inside it: with the
+#     service, which is also the first file but `MeshLoop.kt` to name a
+#     `MeshThread`.
 #
 # Usage:
 #   bash scripts/ci/check_mesh_radio.sh
@@ -287,7 +329,7 @@ readonly -a LEVER_STRINGS=(
 
 # How many fixtures the self-test runs. Pinned, because a fixture that stops
 # running is the one way a deleted check reports success.
-readonly SELF_TEST_FIXTURES=198
+readonly SELF_TEST_FIXTURES=276
 
 # The Kotlin of the radio (design §B): the app's mesh packages, whatever the
 # source set, and the JVM build of the pure one with its tests.
@@ -312,6 +354,42 @@ readonly ENGINE='haven-core/src/mesh/engine.rs'
 readonly RADIO_CFG='#[cfg(any(target_os = "android", test))]'
 # The platform's radio modes: named in CONSTANTS, used by no other file.
 readonly MODES='(SCAN_MODE|ADVERTISE_MODE|ADVERTISE_TX_POWER|CONNECTION_PRIORITY)_[A-Z]'
+# The mesh thread's loop (design §N.2.2), and every way it hands its handler
+# something, without whitespace: the start's body inside the thread's `start`,
+# every other inside its `run`.
+readonly LOOP="${CORE%/core}/MeshLoop.kt"
+readonly -a LOOP_POSTS=(
+  'handler.post{mesh.start(body)}'
+  'handler.post(inside(body))'
+  'handler.removeCallbacksAndMessages(slot)'
+  'handler.postAtTime(inside(body),slot,SystemClock.uptimeMillis()+inMs)'
+  'privatefuninside(body:()->Unit)=Runnable{mesh.run(body)}'
+)
+# What no adapter but LOOP names: a thread, or a way onto one, of its own.
+readonly OFF_THE_LOOP='(Handler|HandlerThread|Looper|Executor|Executors|Thread|Timer|TimerTask|MeshThread)'
+# The one callback that does something before its post (design §N.2.2).
+readonly OLDER_FORM='overridefunonCharacteristicChanged(gatt:BluetoothGatt,characteristic:BluetoothGattCharacteristic){valvalue=characteristic.valueloop.post{steps.onFrame(link,value)}}'
+# What could start a pairing (design §M.4, §N.2.5), and the one dial and the
+# one answer, without whitespace.
+readonly BONDS='(createBond|setPairingConfirmation|setPin|ACTION_PAIRING_REQUEST|readCharacteristic|readDescriptor|WRITE_TYPE_DEFAULT|WRITE_TYPE_SIGNED|PROPERTY_WRITE|PROPERTY_SIGNED_WRITE|TRANSPORT_AUTO|TRANSPORT_BREDR)'
+# Every attribute permission that asks for authentication asks for one of these two.
+readonly BOND_BITS='PERMISSION_[A-Z_]*(ENCRYPTED|SIGNED)|GATT_INSUFFICIENT'
+readonly DIAL='connectGatt(context,false,Callback(link),BluetoothDevice.TRANSPORT_LE)'
+readonly ANSWER='valstatus=if(ok)BluetoothGatt.GATT_SUCCESSelseBluetoothGatt.GATT_FAILUREserver.sendResponse(device(address),request,status,0,null)'
+# The advertisement, without whitespace (design §B.3, §M.3), and what none
+# carries.
+readonly -a ADVERTISEMENT=(
+  'AdvertiseSettings.Builder().setAdvertiseMode(MeshRadioConstants.ADVERTISE_MODE).setTxPowerLevel(MeshRadioConstants.ADVERTISE_TX_POWER).setConnectable(MeshRadioConstants.ADVERTISE_CONNECTABLE).setTimeout(MeshRadioConstants.ADVERTISE_TIMEOUT_MS)if(Build.VERSION.SDK_INT>=MeshRadioConstants.ADVERTISE_DISCOVERABLE_FROM_API){settings.setDiscoverable(MeshRadioConstants.ADVERTISE_DISCOVERABLE)}'
+  'AdvertiseData.Builder().setIncludeDeviceName(MeshRadioConstants.ADVERTISE_DEVICE_NAME).setIncludeTxPowerLevel(MeshRadioConstants.ADVERTISE_POWER_LEVEL).addServiceUuid(ParcelUuid(MeshRadioConstants.SERVICE_UUID)).build()'
+  'advertiser?.startAdvertising(settings.build(),data,callback)'
+)
+# Each call that makes it, written once: a second, anywhere, is a field or a
+# setting the pin does not hold.
+readonly -a ADVERTISE_CALLS=(
+  setAdvertiseMode setTxPowerLevel setConnectable setTimeout setDiscoverable
+  setIncludeDeviceName setIncludeTxPowerLevel addServiceUuid startAdvertising
+)
+readonly ADVERTISED='(addServiceData|addManufacturerData|addServiceSolicitationUuid|addTransportDiscoveryData|setScanResponse|setName)'
 # The JVM tests, by name: design §B.10's, the ones M3f added, and from
 # `aLeverThatStopsHoldingIsPutBackAndStopsTheRadio` on those of M3g's second
 # unit (§N.2). Pinned, because a test that is deleted, renamed or ignored
@@ -569,6 +647,14 @@ native_rows() {
     }'
 }
 
+# COUNT: how many times <text> holds <needle>, read as it is written. No
+# process is started: the pins of checks 15 to 17 are counted in every run of
+# the self-test.
+count_of() { # <needle> <text>
+  local rest="${2//"$1"/}"
+  COUNT=$(( (${#2} - ${#rest}) / ${#1} ))
+}
+
 # The line of the `#[cfg(test)]` directly above `mod tests {` in a view on
 # stdin, or 0.
 tests_at() {
@@ -588,10 +674,11 @@ beyond_tests() { # <the tests' line>
 run_check() {
   local file rel view hits shim calls shipped rows pinned names name row forward body first last
   local guards before after entries called alone outside tests want range method may ok
-  local kotlin jvm found floor lever native flat
+  local kotlin jvm found floor lever native flat radio older declared posted COUNT=0
+  local -A views=()
 
   [[ -d "${REPO_ROOT}/${SRC}" ]] || { echo "ERROR: ${REPO_ROOT}/${SRC} not found" >&2; exit 2; }
-  for file in "${LIB}" "${SHIM}" "${CALLS}" "${LEVER}" "${GENERATED}" "${EXPORTS}" "${CONSTANTS}" "${NATIVE}" "${APP_GRADLE}" "${LOG_ALLOWLIST}" "${APP_SRC}/main/AndroidManifest.xml" "${ENGINE}"; do
+  for file in "${LIB}" "${SHIM}" "${CALLS}" "${LEVER}" "${GENERATED}" "${EXPORTS}" "${CONSTANTS}" "${NATIVE}" "${LOOP}" "${APP_GRADLE}" "${LOG_ALLOWLIST}" "${APP_SRC}/main/AndroidManifest.xml" "${ENGINE}"; do
     [[ -f "${REPO_ROOT}/${file}" ]] || { echo "ERROR: ${REPO_ROOT}/${file} not found" >&2; exit 2; }
   done
   [[ -d "${REPO_ROOT}/${JVM_TESTS}" ]] || { echo "ERROR: ${REPO_ROOT}/${JVM_TESTS} not found" >&2; exit 2; }
@@ -606,6 +693,15 @@ run_check() {
   native="$(code_view "${REPO_ROOT}/${NATIVE}")"
   if ! grep -qE "${B}external${E}" <<<"${native}"; then
     echo "ERROR: ${NATIVE} declares nothing external — the check of its native methods would be reading nothing. If the class moved, move this guard with it." >&2
+    exit 2
+  fi
+  kotlin="$(find "${REPO_ROOT}/${APP_SRC}" -type f -name '*.kt' -path '*/mesh/*' | LC_ALL=C sort)"
+  # The comment-stripped view of each, taken once: seven checks read it.
+  while IFS= read -r file; do
+    views["${file}"]="$(code_view "${file}")"
+  done <<<"${kotlin}"
+  if ! grep -qE 'override[[:space:]]+fun[[:space:]]+on[A-Z]' <<<"$(while IFS= read -r file; do [[ "${file}" == */mesh/core/* ]] || printf '%s\n' "${views["${file}"]}"; done <<<"${kotlin}")"; then
+    echo "ERROR: no adapter of the radio declares a platform callback — the check that each posts through the loop would be reading nothing. If the adapters moved, move this guard with them." >&2
     exit 2
   fi
 
@@ -707,11 +803,11 @@ run_check() {
   while IFS= read -r file; do
     rel="${file#"${REPO_ROOT}/"}"
     [[ "${rel}" == "${NATIVE}" ]] && continue
-    hits="$(code_view "${file}" | grep -nE "${B}external${E}" | cut -d: -f1 | tr '\n' ' ' || true)"
+    hits="$(grep -nE "${B}external${E}" <<<"${views["${file}"]}" | cut -d: -f1 | tr '\n' ' ' || true)"
     if [[ -n "${hits}" ]]; then
       fail "${rel} declares something external (line(s) ${hits}). The radio's native methods are the pinned ones of ${NATIVE##*/}, each with an export this guard has read: one declared anywhere else has no symbol."
     fi
-  done < <(find "${REPO_ROOT}/${APP_SRC}" -type f -name '*.kt' -path '*/mesh/*' | LC_ALL=C sort)
+  done <<<"${kotlin}"
 
   # Check 5: what the exports forward to. Its tests are not read, so nothing
   # that ships may sit in or behind them.
@@ -809,11 +905,10 @@ run_check() {
   fi
 
   # Check 7: the radio's Kotlin writes no log line and holds no UUID.
-  kotlin="$(find "${REPO_ROOT}/${APP_SRC}" -type f -name '*.kt' -path '*/mesh/*' | LC_ALL=C sort)"
   jvm="$(find "${REPO_ROOT}/${JVM_TESTS}" -type f -name '*.kt' | LC_ALL=C sort)"
   while IFS= read -r file; do
     rel="${file#"${REPO_ROOT}/"}"
-    view="$(code_view "${file}")"
+    view="${views["${file}"]}"
     hits="$(grep -nE "${B}(Log|Timber)[[:space:]]*(\\.|::)|${B}(println|print|printStackTrace)[[:space:]]*\\(|System[[:space:]]*\\.[[:space:]]*(out|err)${E}|${B}(Logger|logging)${E}|^[[:space:]]*import[[:space:]]+(android\\.util\\.Log|timber\\.|java\\.util\\.logging)${E}" <<<"${view}" | cut -d: -f1 | tr '\n' ' ' || true)"
     if [[ -n "${hits}" ]]; then
       fail "${rel} writes a log line, names a logger or a standard stream, or imports one — under whatever name (line(s) ${hits}). The radio's Kotlin logs nothing, in any build (Security Rule 15): what it could say is a Bluetooth address, or a throwable that renders one."
@@ -836,7 +931,7 @@ run_check() {
   while IFS= read -r file; do
     rel="${file#"${REPO_ROOT}/"}"
     [[ "${rel}" == "${CONSTANTS}" ]] && continue
-    view="$(code_view "${file}")"
+    view="${views["${file}"]}"
     hits="$(grep -nE "${B}${MODES}" <<<"${view}" | cut -d: -f1 | tr '\n' ' ' || true)"
     if [[ -n "${hits}" ]]; then
       fail "${rel} names a scan, advertise or connection-priority constant of the platform (line(s) ${hits}). An adapter passes on the value ${CONSTANTS##*/} holds: a mode chosen anywhere else is one the power table does not have."
@@ -973,10 +1068,88 @@ run_check() {
     fi
   done < <(find "${REPO_ROOT}/${ANDROID}" -type f \( -name '*.gradle.kts' -o -name '*.gradle' \) -not -path '*/build/*' -not -path '*/.gradle/*' | LC_ALL=C sort)
 
+  # Check 15: one thread. The loop hands its handler a body in the pinned ways
+  # alone, and every platform callback of an adapter is one post through it.
+  flat="$(grep -vE '^[[:space:]]*(package|import)[[:space:]]' <<<"${views["${REPO_ROOT}/${LOOP}"]}" || true)"
+  flat="${flat//[[:space:]]/}"
+  hits=''
+  for want in "${LOOP_POSTS[@]}" handler.:4 mesh.:2 'Handler(:1'; do
+    [[ "${want}" =~ :[0-9]$ ]] || want+=':1'
+    count_of "${want%:*}" "${flat}"
+    (( COUNT == ${want##*:} )) || hits+="'${want%:*}' written ${COUNT} time(s), not ${want##*:}; "
+  done
+  if [[ -n "${hits}" ]]; then
+    fail "${LOOP} does not hand its one handler a body in the pinned ways and no other — the service's start inside mesh.start(body), every other inside mesh.run(body), written once (${hits}). MeshThread.run is what asks the log lever before a body and turns what the body throws into a stop: a body posted bare runs with the platform's log lines unchecked, and its exception ends the process that also publishes to relays. A second handler is a second thread."
+  fi
+  older=0
+  while IFS= read -r file; do
+    rel="${file#"${REPO_ROOT}/"}"
+    [[ "${rel}" == */mesh/core/* || "${rel}" == "${LOOP}" ]] && continue
+    view="${views["${file}"]}"
+    if [[ "${view}" =~ ${B}${OFF_THE_LOOP}${E} ]]; then
+      hits="$(grep -nE "${B}${OFF_THE_LOOP}${E}" <<<"${view}" | cut -d: -f1 | tr '\n' ' ' || true)"
+      fail "${rel} names a Handler, a Looper, an Executor, a Thread, a Timer or MeshThread (line(s) ${hits}). An adapter is given the loop and posts through it: with a thread of its own, or the wrapper in its own hands, a body can run beside the mesh thread or outside MeshThread.run."
+    fi
+    flat="${view//[[:space:]]/}"
+    count_of "${OLDER_FORM}" "${flat}"
+    older=$(( older + COUNT ))
+    flat="${flat//"${OLDER_FORM}"/}"
+    [[ "${flat}" == *overridefunon* ]] || continue
+    declared="$(grep -oE 'overridefunon[A-Z][A-Za-z0-9_]*' <<<"${flat}" | sed 's/^overridefun//' | tr '\n' ' ' || true)"
+    posted="$(grep -oE 'overridefunon[A-Z][A-Za-z0-9_]*\([^()]*\)=loop\.post\{' <<<"${flat}" | sed -E 's/^overridefun//; s/\(.*$//' | tr '\n' ' ' || true)"
+    if [[ "${declared}" != "${posted}" ]]; then
+      fail "a platform callback of ${rel} is not one post through the loop — 'override fun on…(…) = loop.post {' (declared: ${declared:-none}; posting: ${posted:-none}). A callback arrives on a binder thread or the main one: whatever it does before the post runs beside the mesh thread, outside the wrapper that asks the log lever and catches what is thrown."
+    fi
+  done <<<"${kotlin}"
+  if (( older != 1 )); then
+    fail "the adapters hold the notification callback of before Android 13 ${older} time(s), not once, as pinned: 'override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) { val value = characteristic.value; loop.post { steps.onFrame(link, value) } }'. It is the one callback that does anything before its post — there the value lives in the characteristic and the next notification overwrites it — and without it a phone on Android 11 or 12 is told no frame of a peer it dialled."
+  fi
+
+  # Checks 16 and 17 read all of the radio's Kotlin, the pure package too:
+  # as it is for the names, and with no whitespace for the pins.
+  radio="$(while IFS= read -r file; do printf '%s\n' "${views["${file}"]}"; done <<<"${kotlin}")"
+  flat="${radio//[[:space:]]/}"
+
+  # Check 16: nothing that could start a pairing.
+  if [[ "${radio}" =~ ${B}${BONDS}${E}|${BOND_BITS} ]]; then
+    while IFS= read -r file; do
+      hits="$(grep -nE "${B}${BONDS}${E}|${BOND_BITS}" <<<"${views["${file}"]}" | cut -d: -f1 | tr '\n' ' ' || true)"
+      if [[ -n "${hits}" ]]; then
+        fail "${file#"${REPO_ROOT}/"} names what could start a pairing (line(s) ${hits}): a call that creates a bond or answers one, a read of a characteristic or a descriptor, a write that has a response, an attribute permission that asks for encryption or a signature, an 'insufficient …' status, or a transport that is not LE. Haven never bonds: a bond hands a stranger this phone's identity address and the key to every address it rotates to, and the platform asks for one by itself when a peer refuses a read or an answered write."
+      fi
+    done <<<"${kotlin}"
+  fi
+  hits=''
+  for want in "${DIAL}" "${ANSWER}" connectGatt sendResponse; do
+    count_of "${want}" "${flat}"
+    (( COUNT == 1 )) || hits+="'${want}' written ${COUNT} time(s), not 1; "
+  done
+  if [[ -n "${hits}" ]]; then
+    fail "the radio does not dial once, as 'connectGatt(context, false, Callback(link), BluetoothDevice.TRANSPORT_LE)', and answer a peer's request once, as sendResponse with success or the plain failure (${hits}). A dial over another transport or left to the platform to repeat, and an answer that names authentication or encryption, are each a way to a pairing dialog a stranger can raise."
+  fi
+
+  # Check 17: the advertisement is the service UUID alone.
+  hits=''
+  for want in "${ADVERTISEMENT[@]}" "${ADVERTISE_CALLS[@]}"; do
+    count_of "${want}" "${flat}"
+    (( COUNT == 1 )) || hits+="'${want}' written ${COUNT} time(s), not 1; "
+  done
+  if [[ -n "${hits}" ]]; then
+    fail "the radio's advertisement is not built once, as pinned — settings from the constants and 'not discoverable' from the API level they name, data that is no name, no power level and the service UUID, started with no scan response (${hits}). The phone's Bluetooth name is the user's own words, and every field beyond the UUID narrows who is in range: the values are ${CONSTANTS##*/}'s, which a JVM test holds."
+  fi
+  if [[ "${radio}" =~ ${B}${ADVERTISED}${E}|AdvertisingSet ]]; then
+    while IFS= read -r file; do
+      hits="$(grep -nE "${B}${ADVERTISED}${E}|AdvertisingSet" <<<"${views["${file}"]}" | cut -d: -f1 | tr '\n' ' ' || true)"
+      if [[ -n "${hits}" ]]; then
+        fail "${file#"${REPO_ROOT}/"} names service, manufacturer, solicitation or transport-discovery data, a scan response, an advertising set, or the call that renames the phone (line(s) ${hits}). The advertisement is Haven's service UUID and nothing else, and the phone's name is not Haven's to change."
+      fi
+    done <<<"${kotlin}"
+  fi
+
   if (( FAILED )); then
     exit 1
   fi
-  log "OK: unsafe is written in the generated bridge, the exports' file and the log lever alone, under the crate's deny; the exports' file is uses and the $(grep -c . <<<"${pinned}") pinned exports, each one call into ${CALLS##*/}; each of those is one guarded call of its radio entry, and calls nothing of Java's; the lever is its ${LEVER_UNSAFE_BLOCKS} unsafe blocks and one logger, looks up five functions by name and names nothing it could log, lock or panic with. The radio's Kotlin logs nothing and holds no UUID written out, names its modes and builds its UUIDs at one site, takes the engine's signal floor, has its ${#JVM_TEST_NAMES[@]} JVM tests, and declares the pinned native methods in ${NATIVE##*/} alone; no manifest outside the mesh's own names Bluetooth, and the mesh's build flag is read once in ${APP_GRADLE##*/}."
+  log "OK: unsafe is written in the generated bridge, the exports' file and the log lever alone, under the crate's deny; the exports' file is uses and the $(grep -c . <<<"${pinned}") pinned exports, each one call into ${CALLS##*/}; each of those is one guarded call of its radio entry, and calls nothing of Java's; the lever is its ${LEVER_UNSAFE_BLOCKS} unsafe blocks and one logger, looks up five functions by name and names nothing it could log, lock or panic with. The radio's Kotlin logs nothing and holds no UUID written out, names its modes and builds its UUIDs at one site, takes the engine's signal floor, has its ${#JVM_TEST_NAMES[@]} JVM tests, and declares the pinned native methods in ${NATIVE##*/} alone; its adapters post every platform callback through ${LOOP##*/}, inside MeshThread.run, name nothing that could start a pairing, and advertise the service UUID alone; no manifest outside the mesh's own names Bluetooth, and the mesh's build flag is read once in ${APP_GRADLE##*/}."
 }
 
 # ---------------------------------------------------------------------------
@@ -1403,6 +1576,140 @@ class ScannerAdapter {
 
     // Never UUID.fromString(…) here: the filter is the one the constants built.
     fun filter(found: java.util.UUID): Boolean = ParcelUuid(MeshRadioConstants.SERVICE_UUID).uuid == found
+
+    // Never `override fun onScanFailed(errorCode: Int) { core.onWake() }`, and
+    // no Handler: a comment declares no callback and names no thread.
+    private val callback = object : ScanCallback() {
+        override fun onScanResult(callbackType: Int, result: ScanResult) = loop.post {
+            core.onSighting(result.device.address, result.rssi)
+        }
+    }
+}
+KT
+    cat >"${t}/${LOOP}" <<'KT'
+package com.oblivioustech.haven.mesh
+
+import android.os.Handler
+import com.oblivioustech.haven.mesh.core.MeshThread
+
+// Never handler.post(body) here: a body outside mesh.run(body) is unchecked.
+class MeshLoop(private val mesh: MeshThread) {
+    private val thread = HandlerThread(NAME).apply { start() }
+    private val handler = Handler(thread.looper)
+
+    fun start(body: () -> Unit) {
+        handler.post { mesh.start(body) }
+    }
+
+    fun post(body: () -> Unit) {
+        handler.post(inside(body))
+    }
+
+    fun timer(slot: Any, inMs: Long, body: () -> Unit) {
+        handler.removeCallbacksAndMessages(slot)
+        handler.postAtTime(inside(body), slot, SystemClock.uptimeMillis() + inMs)
+    }
+
+    fun quit() {
+        thread.quit()
+    }
+
+    private fun inside(body: () -> Unit) = Runnable { mesh.run(body) }
+}
+KT
+    cat >"${t}/${CORE%/core}/GattClientAdapter.kt" <<'KT'
+package com.oblivioustech.haven.mesh
+
+// Never createBond() or readCharacteristic(…) here, and never TRANSPORT_AUTO.
+class GattClientAdapter(private val loop: MeshLoop) : GattClientPort {
+    private inner class Callback(private val link: Long) : BluetoothGattCallback() {
+        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) = loop.post {
+            steps.onMtu(link, mtu, status == BluetoothGatt.GATT_SUCCESS)
+        }
+
+        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) = loop.post {
+            steps.onFrame(link, value)
+        }
+
+        // Read on the platform's thread, before the post.
+        @Suppress("OVERRIDE_DEPRECATION", "DEPRECATION")
+        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+            val value = characteristic.value
+            loop.post { steps.onFrame(link, value) }
+        }
+    }
+
+    override fun connect(link: Long, address: String): Boolean {
+        clients[link] = adapter.getRemoteDevice(address).connectGatt(context, false, Callback(link), BluetoothDevice.TRANSPORT_LE)
+            ?: return false
+        return true
+    }
+
+    override fun write(link: Long, frame: ByteArray): Boolean =
+        clients.getValue(link).writeCharacteristic(characteristic, frame, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE) == 0
+}
+KT
+    cat >"${t}/${CORE%/core}/GattServerAdapter.kt" <<'KT'
+package com.oblivioustech.haven.mesh
+
+class GattServerAdapter(private val loop: MeshLoop) : ServerPort {
+    // Never PERMISSION_WRITE_ENCRYPTED, and never PROPERTY_WRITE alone.
+    private val characteristic = BluetoothGattCharacteristic(
+        MeshRadioConstants.CHARACTERISTIC_UUID,
+        BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE or BluetoothGattCharacteristic.PROPERTY_NOTIFY,
+        BluetoothGattCharacteristic.PERMISSION_WRITE,
+    )
+
+    private val callback = object : BluetoothGattServerCallback() {
+        override fun onDescriptorWriteRequest(
+            device: BluetoothDevice,
+            requestId: Int,
+            descriptor: BluetoothGattDescriptor,
+            preparedWrite: Boolean,
+            responseNeeded: Boolean,
+            offset: Int,
+            value: ByteArray,
+        ) = loop.post {
+            links.onDescriptorWrite(device.address, requestId, preparedWrite, responseNeeded, offset, value)
+        }
+    }
+
+    // Never GATT_INSUFFICIENT_AUTHENTICATION: it starts the peer's pairing.
+    override fun answer(address: String, request: Int, ok: Boolean) {
+        val status = if (ok) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_FAILURE
+        server.sendResponse(device(address), request, status, 0, null)
+    }
+}
+KT
+    cat >"${t}/${CORE%/core}/AdvertiserAdapter.kt" <<'KT'
+package com.oblivioustech.haven.mesh
+
+// Never addServiceData(…), setIncludeDeviceName(true) or a scan response.
+class AdvertiserAdapter(adapter: BluetoothAdapter) {
+    private val advertiser = adapter.bluetoothLeAdvertiser
+    private val callback = object : AdvertiseCallback() {}
+
+    init {
+        val settings = AdvertiseSettings.Builder()
+            .setAdvertiseMode(MeshRadioConstants.ADVERTISE_MODE)
+            .setTxPowerLevel(MeshRadioConstants.ADVERTISE_TX_POWER)
+            .setConnectable(MeshRadioConstants.ADVERTISE_CONNECTABLE)
+            .setTimeout(MeshRadioConstants.ADVERTISE_TIMEOUT_MS)
+        // The setting is Android 14's.
+        if (Build.VERSION.SDK_INT >= MeshRadioConstants.ADVERTISE_DISCOVERABLE_FROM_API) {
+            settings.setDiscoverable(MeshRadioConstants.ADVERTISE_DISCOVERABLE)
+        }
+        val data = AdvertiseData.Builder()
+            .setIncludeDeviceName(MeshRadioConstants.ADVERTISE_DEVICE_NAME)
+            .setIncludeTxPowerLevel(MeshRadioConstants.ADVERTISE_POWER_LEVEL)
+            .addServiceUuid(ParcelUuid(MeshRadioConstants.SERVICE_UUID))
+            .build()
+        advertiser?.startAdvertising(settings.build(), data, callback)
+    }
+
+    fun stop() {
+        advertiser?.stopAdvertising(callback)
+    }
 }
 KT
     {
@@ -1479,7 +1786,7 @@ TXT
 
   echo "check_mesh_radio.sh --self-test"
   local t="${tmp}/ok"; _tree "${t}"
-  _case "the tree shape passes: three exports each one forward, comments and strings that only mention what is banned, a static in the calls' tests, a Vec and a format! in the lever's; an adapter, the native methods' class and a mesh manifest beside the pure package; the build switch written once" 0 '' "${t}"
+  _case "the tree shape passes: three exports each one forward, comments and strings that only mention what is banned, a static in the calls' tests, a Vec and a format! in the lever's; the loop, four adapters whose callbacks post through it, the native methods' class and a mesh manifest beside the pure package; the build switch written once" 0 '' "${t}"
 
   # Check 1: where unsafe, extern and an exported symbol are written.
   t="${tmp}/unsafe-block"; _tree "${t}"
@@ -2283,7 +2590,186 @@ RS
   printf 'subprojects {\n    extra["mesh"] = providers.gradleProperty("HAVEN_MESH").isPresent\n}\n' >>"${t}/${ANDROID}/build.gradle.kts"
   _case "the flag read in another Gradle script fails" 1 "${ANDROID}/build.gradle.kts names the mesh's flag" "${t}"
 
+  # Check 15: one thread — the loop, and every callback one post through it.
+  local client="${CORE%/core}/GattClientAdapter.kt" server="${CORE%/core}/GattServerAdapter.kt" advertiser="${CORE%/core}/AdvertiserAdapter.kt"
+  local radio_debug="${APP_SRC}/debug/kotlin/com/oblivioustech/haven/mesh" name
+  t="${tmp}/callback-on-its-thread"; _tree "${t}"
+  _line "${t}/${adapter}" 'override fun onScanResult(' '        override fun onScanResult(callbackType: Int, result: ScanResult) {'
+  _case "a callback that tells the core on the platform's thread fails" 1 "a platform callback of ${adapter} is not one post through the loop" "${t}"
+
+  t="${tmp}/callback-posts-second"; _tree "${t}"
+  _line "${t}/${client}" 'override fun onMtuChanged(' '        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {\n            links.onMtu(gatt.device.address, mtu)\n            loop.post { steps.onMtu(link, mtu, true) }\n        }\n\n        private fun unused() {'
+  _case "a callback that does something before its post fails: only the pinned one may" 1 "a platform callback of ${client} is not one post through the loop" "${t}"
+
+  t="${tmp}/callback-posts-then-more"; _tree "${t}"
+  _line "${t}/${client}" 'override fun onMtuChanged(' '        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {\n            loop.post { steps.onMtu(link, mtu, true) }\n            links.onMtu(gatt.device.address, mtu)\n        }\n\n        private fun unused() {'
+  _case "a callback that posts and then does more on the platform's thread fails: its body is the post" 1 "a platform callback of ${client} is not one post through the loop" "${t}"
+
+  t="${tmp}/callback-long-signature"; _tree "${t}"
+  _line "${t}/${server}" ') = loop.post {' '        ) {'
+  _case "a callback whose parameters run over several lines, and that does not post, fails" 1 "a platform callback of ${server} is not one post through the loop" "${t}"
+
+  t="${tmp}/callback-other-thread"; _tree "${t}"
+  _line "${t}/${adapter}" 'override fun onScanResult(' '        override fun onScanResult(callbackType: Int, result: ScanResult) = executor.execute {'
+  _case "a callback run on something that is not the loop fails" 1 "a platform callback of ${adapter} is not one post through the loop" "${t}"
+
+  t="${tmp}/callback-second-reader"; _tree "${t}"
+  _line "${t}/${client}" 'override fun onMtuChanged(' '        override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {\n            val value = characteristic.value\n            loop.post { steps.onFrame(link, value) }\n        }\n\n        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) = loop.post {'
+  _case "a second callback that reads before its post fails: the exception is one callback, pinned whole" 1 "a platform callback of ${client} is not one post through the loop" "${t}"
+
+  t="${tmp}/older-form-gone"; _tree "${t}"
+  sed -i '/@Suppress("OVERRIDE_DEPRECATION", "DEPRECATION")/,/^        }$/d' "${t}/${client}"
+  _case "the notification callback of before Android 13 gone fails: no frame on Android 11 and 12" 1 'the notification callback of before Android 13 0 time(s), not once' "${t}"
+
+  t="${tmp}/older-form-more"; _tree "${t}"
+  _line "${t}/${client}" 'val value = characteristic.value' '            val value = characteristic.value.also { steps.onFrame(link, it) }'
+  _case "the pinned callback made to tell the steps on the platform's thread fails" 1 "a platform callback of ${client} is not one post through the loop" "${t}"
+
+  t="${tmp}/older-form-twice"; _tree "${t}"
+  printf 'class Second(private val loop: MeshLoop, private val steps: GattClientSteps, private val link: Long) : BluetoothGattCallback() {\n    override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {\n        val value = characteristic.value\n        loop.post { steps.onFrame(link, value) }\n    }\n}\n' >>"${t}/${server}"
+  _case "the pinned callback written a second time fails: the exception is one callback" 1 'the notification callback of before Android 13 2 time(s), not once' "${t}"
+
+  for name in Handler HandlerThread Looper Executor Executors Thread Timer TimerTask MeshThread; do
+    t="${tmp}/adapter-${name}"; _tree "${t}"
+    printf 'val own: %s? = null\n' "${name}" >>"${t}/${adapter}"
+    _case "an adapter that names ${name} fails: a thread, or the wrapper, in its own hands" 1 "${adapter} names a Handler" "${t}"
+  done
+
+  t="${tmp}/other-set-callback"; _tree "${t}"
+  mkdir -p "${t}/${radio_debug}"
+  printf 'package com.oblivioustech.haven.mesh\n\nclass LoopbackRadio(private val core: MeshRadioCore) : ScanCallback() {\n    override fun onScanResult(callbackType: Int, result: ScanResult) {\n        core.onSighting(result.device.address, result.rssi)\n    }\n}\n' >"${t}/${radio_debug}/LoopbackRadio.kt"
+  _case "a callback off the loop in a mesh file of another source set fails" 1 "LoopbackRadio.kt is not one post through the loop" "${t}"
+
+  t="${tmp}/loop-bare-post"; _tree "${t}"
+  _line "${t}/${LOOP}" 'handler.post(inside(body))' '        handler.post(body)'
+  _case "a body the loop posts bare fails: no lever asked, nothing caught" 1 "'handler.post(inside(body))' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/loop-bare-timer"; _tree "${t}"
+  _line "${t}/${LOOP}" 'handler.postAtTime(' '        handler.postAtTime(body, slot, SystemClock.uptimeMillis() + inMs)'
+  _case "a timer's body posted bare fails" 1 "'handler.postAtTime(inside(body),slot,SystemClock.uptimeMillis()+inMs)' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/loop-timer-unreplaced"; _tree "${t}"
+  _line "${t}/${LOOP}" 'handler.removeCallbacksAndMessages(slot)' '        handler.post(body)'
+  _case "a timer that no longer takes the place of the one before, and posts a body bare instead, fails" 1 "'handler.removeCallbacksAndMessages(slot)' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/loop-unwrapped"; _tree "${t}"
+  _line "${t}/${LOOP}" 'private fun inside(' '    private fun inside(body: () -> Unit) = Runnable { body() }'
+  _case "the loop's wrapper that no longer runs a body inside MeshThread.run fails" 1 "'privatefuninside(body:()->Unit)=Runnable{mesh.run(body)}' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/loop-direct-run"; _tree "${t}"
+  _line "${t}/${LOOP}" 'private fun inside(' '    fun now(body: () -> Unit) = mesh.run(body)\n\n    private fun inside(body: () -> Unit) = Runnable { mesh.run(body) }'
+  _case "a body the loop runs on its caller's thread fails: every pin is there, and the thread is not" 1 "'mesh.' written 3 time(s), not 2" "${t}"
+
+  t="${tmp}/loop-second-start"; _tree "${t}"
+  _line "${t}/${LOOP}" 'handler.post(inside(body))' '        handler.post { mesh.start(body) }'
+  _case "a second body run by MeshThread.start fails: that one is not asked the lever" 1 "'handler.post{mesh.start(body)}' written 2 time(s), not 1" "${t}"
+
+  t="${tmp}/loop-start-asked"; _tree "${t}"
+  _line "${t}/${LOOP}" 'handler.post { mesh.start(body) }' '        handler.post(inside(body))'
+  _case "the service's start run inside MeshThread.run fails: with no lever yet it would never reach the foreground" 1 "'handler.post{mesh.start(body)}' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/loop-second-handler"; _tree "${t}"
+  _line "${t}/${LOOP}" 'private val handler' '    private val handler = Handler(thread.looper)\n    private val main = Handler(context.mainLooper)'
+  _case "a second handler in the loop fails: a second thread" 1 "'Handler(' written 2 time(s), not 1" "${t}"
+
+  t="${tmp}/loop-fifth-post"; _tree "${t}"
+  _line "${t}/${LOOP}" 'thread.quit()' '        handler.postAtFrontOfQueue(thread::quit)'
+  _case "a fifth thing handed to the handler fails, whatever it is" 1 "'handler.' written 5 time(s), not 4" "${t}"
+
+  # Check 16: nothing that could start a pairing.
+  for name in createBond setPairingConfirmation setPin ACTION_PAIRING_REQUEST readCharacteristic readDescriptor \
+    WRITE_TYPE_DEFAULT WRITE_TYPE_SIGNED PROPERTY_WRITE PROPERTY_SIGNED_WRITE TRANSPORT_AUTO TRANSPORT_BREDR \
+    PERMISSION_READ_ENCRYPTED PERMISSION_WRITE_SIGNED PERMISSION_WRITE_ENCRYPTED_MITM GATT_INSUFFICIENT_AUTHENTICATION; do
+    t="${tmp}/bond-${name}"; _tree "${t}"
+    printf 'val named = Platform.%s\n' "${name}" >>"${t}/${adapter}"
+    _case "the name ${name} in an adapter fails" 1 "${adapter} names what could start a pairing" "${t}"
+  done
+
+  t="${tmp}/bond-in-pure"; _tree "${t}"
+  printf 'fun pair(device: Bondable): Boolean = device.createBond()\n' >>"${t}/${CONSTANTS}"
+  _case "a bond created in the pure package fails: all of the radio's Kotlin is read" 1 "${CONSTANTS} names what could start a pairing" "${t}"
+
+  t="${tmp}/answered-property"; _tree "${t}"
+  sed -i 's/PROPERTY_WRITE_NO_RESPONSE or/PROPERTY_WRITE or/' "${t}/${server}"
+  _case "a characteristic that offers an answered write fails; the write without response beside it does not" 1 "${server} names what could start a pairing" "${t}"
+
+  t="${tmp}/integer-answer"; _tree "${t}"
+  sed -i 's/else BluetoothGatt.GATT_FAILURE/else 5/' "${t}/${server}"
+  _case "'insufficient authentication' answered as a bare integer fails the pin, which names both answers" 1 "'${ANSWER}' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/second-answer"; _tree "${t}"
+  printf 'fun refuse(server: BluetoothGattServer, device: BluetoothDevice, request: Int) = server.sendResponse(device, request, 15, 0, null)\n' >>"${t}/${server}"
+  _case "a second place that answers a request fails" 1 "'sendResponse' written 2 time(s), not 1" "${t}"
+
+  t="${tmp}/auto-connect"; _tree "${t}"
+  sed -i 's/connectGatt(context, false,/connectGatt(context, true,/' "${t}/${client}"
+  _case "a dial left to the platform to repeat fails" 1 "'${DIAL}' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/transport-unsaid"; _tree "${t}"
+  sed -i 's/, Callback(link), BluetoothDevice.TRANSPORT_LE)/, Callback(link))/' "${t}/${client}"
+  _case "a dial that does not say LE fails" 1 "'${DIAL}' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/second-dial"; _tree "${t}"
+  printf 'fun redial(device: BluetoothDevice, context: Context, callback: BluetoothGattCallback) = device.connectGatt(context, false, callback, 2)\n' >>"${t}/${adapter}"
+  _case "a second dial, its transport a bare integer, fails" 1 "'connectGatt' written 2 time(s), not 1" "${t}"
+
+  # Check 17: the advertisement is the service UUID alone.
+  t="${tmp}/advertised-name"; _tree "${t}"
+  sed -i 's/setIncludeDeviceName(MeshRadioConstants.ADVERTISE_DEVICE_NAME)/setIncludeDeviceName(true)/' "${t}/${advertiser}"
+  _case "the phone's name in the advertisement fails" 1 "'${ADVERTISEMENT[1]}' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/advertised-power"; _tree "${t}"
+  sed -i 's/setIncludeTxPowerLevel(MeshRadioConstants.ADVERTISE_POWER_LEVEL)/setIncludeTxPowerLevel(true)/' "${t}/${advertiser}"
+  _case "a power level in the advertisement fails" 1 "'${ADVERTISEMENT[1]}' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/discoverable"; _tree "${t}"
+  sed -i 's/settings.setDiscoverable(MeshRadioConstants.ADVERTISE_DISCOVERABLE)/settings.setDiscoverable(true)/' "${t}/${advertiser}"
+  _case "an advertisement left discoverable fails: a peer that connects in reads the phone's name" 1 "'${ADVERTISEMENT[0]}' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/discoverable-every-level"; _tree "${t}"
+  sed -i 's/if (Build.VERSION.SDK_INT >= MeshRadioConstants.ADVERTISE_DISCOVERABLE_FROM_API) {/run {/' "${t}/${advertiser}"
+  _case "the setting asked on every level fails: below Android 14 the call does not exist" 1 "'${ADVERTISEMENT[0]}' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/discoverable-unasked"; _tree "${t}"
+  sed -i '/if (Build.VERSION.SDK_INT >= MeshRadioConstants.ADVERTISE_DISCOVERABLE_FROM_API) {/,/^        }$/d' "${t}/${advertiser}"
+  _case "the setting gone fails" 1 "'setDiscoverable' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/scan-response"; _tree "${t}"
+  sed -i 's/startAdvertising(settings.build(), data, callback)/startAdvertising(settings.build(), data, named, callback)/' "${t}/${advertiser}"
+  _case "a scan response fails" 1 "'advertiser?.startAdvertising(settings.build(),data,callback)' written 0 time(s), not 1" "${t}"
+
+  for name in setAdvertiseMode setTxPowerLevel setConnectable setTimeout setDiscoverable \
+    setIncludeDeviceName setIncludeTxPowerLevel addServiceUuid startAdvertising; do
+    t="${tmp}/second-${name}"; _tree "${t}"
+    printf 'fun again(builder: Builder, other: Other) = builder.%s(other)\n' "${name}" >>"${t}/${adapter}"
+    _case "a second ${name}, with a value of its own, fails" 1 "'${name}' written 2 time(s), not 1" "${t}"
+  done
+
+  for name in addServiceData addManufacturerData addServiceSolicitationUuid addTransportDiscoveryData setScanResponse setName \
+    startAdvertisingSet AdvertisingSetParameters; do
+    t="${tmp}/advertised-${name}"; _tree "${t}"
+    printf 'val named = Platform::%s\n' "${name}" >>"${t}/${advertiser}"
+    _case "the name ${name} beside the advertisement fails" 1 "${advertiser} names service, manufacturer" "${t}"
+  done
+
+  t="${tmp}/manufacturer-data"; _tree "${t}"
+  mkdir -p "${t}/${radio_debug}"
+  printf 'package com.oblivioustech.haven.mesh\n\nfun marked(data: AdvertiseData.Builder, peer: ByteArray) = data.addManufacturerData(0xFFFF, peer)\n' >"${t}/${radio_debug}/LoopbackRadio.kt"
+  _case "manufacturer data added from a mesh file of another source set fails" 1 "LoopbackRadio.kt names service, manufacturer" "${t}"
+
+  t="${tmp}/no-advertiser"; _tree "${t}"
+  rm "${t:?}/${advertiser:?}"
+  _case "a radio with no advertisement fails: the pin has to be there" 1 "the radio's advertisement is not built once" "${t}"
+
   # Misconfiguration.
+  t="${tmp}/no-loop"; _tree "${t}"
+  rm "${t:?}/${LOOP:?}"
+  _case "a radio with no loop is a misconfiguration" 2 '' "${t}"
+
+  t="${tmp}/no-callbacks"; _tree "${t}"
+  sed -i 's/override fun on/fun on/' "${t}/${adapter}" "${t}/${client}" "${t}/${server}"
+  _case "adapters that declare no platform callback are a misconfiguration, not callbacks that all post" 2 'would be reading nothing' "${t}"
+
   t="${tmp}/no-native"; _tree "${t}"
   rm "${t}/${NATIVE}"
   _case "a radio with no class of native methods is a misconfiguration" 2 '' "${t}"
