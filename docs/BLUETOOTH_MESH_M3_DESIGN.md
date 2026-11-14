@@ -4410,8 +4410,10 @@ none of it run):
   -22.2:74-88`). One release.
 - **A callback that throws** is caught by the platform and logged, in the
   server's callbacks at Android 11 already (`fw/BluetoothGattServer.java:92-97`
-  @11, twelve sites; §M.1 has them from a later release) as in the
-  client's.
+  @11, twelve sites; §M.1 has them from a later release). In the
+  client's it was, as this unit first stood; given a handler, as the
+  dial now gives one, the platform catches nothing, and the loop does
+  (the review below).
 - **A post to a thread that has quit** answers false and the platform
   writes one warning with fixed text, the handler's identity hash and a
   stack (`core/java/android/os/MessageQueue.java:559-564` @11).
@@ -4679,7 +4681,13 @@ run on Android either.
   (`fw/BluetoothDevice.java:2072-2098` @11, `:2450-2478` @12.1). So
   with the mesh thread's handler the platform's write of the value,
   Haven's read of it and Haven's write of a frame are all on one
-  thread, and cannot cross. The value is still read before the post:
+  thread, and cannot cross. One read of the value stays on the
+  platform's thread, on a path a frame is not on: the platform's own
+  retry of a write refused for want of authentication or encryption
+  (`fw/BluetoothGatt.java:437-446` @12.1). A frame is a write without
+  response, which a peer cannot answer with an error; that the local
+  stack never reports one for it is **[U]**, the stack's client unread.
+  The value is still read before the post:
   the next notification's runnable may run first. (The reference has
   every `connectGatt` of today deprecated at API 37, for one that takes
   an executor; `compileSdk` is 36.)
