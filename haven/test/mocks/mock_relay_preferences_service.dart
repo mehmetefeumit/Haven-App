@@ -95,6 +95,10 @@ class MockRelayPreferencesService implements RelayPreferencesService {
 
   bool _profileListRelaysGateConsumed = false;
 
+  /// Categories whose [listRelays] throws, as a read of a disposed or
+  /// unopenable manager does. Mutable so a test can let a later read succeed.
+  final Set<RelayCategory> listThrowsFor = {};
+
   /// Throws, matching the real `NostrRelayPreferencesService`/Rust
   /// fail-closed behavior: [`RelayCategory.profile`] has no publishable
   /// form, so none of the publish-oriented methods below
@@ -131,6 +135,9 @@ class MockRelayPreferencesService implements RelayPreferencesService {
   @override
   Future<List<String>> listRelays(RelayCategory category) async {
     log.add('list:${category.name}');
+    if (listThrowsFor.contains(category)) {
+      throw const RelayPreferencesException('Failed to load relay list.');
+    }
     final snapshot = List<String>.from(_relays[category] ?? const <String>[]);
     final gate = profileListRelaysGate;
     if (gate != null &&

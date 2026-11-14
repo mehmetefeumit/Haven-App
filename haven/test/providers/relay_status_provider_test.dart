@@ -248,6 +248,44 @@ void main() {
       }
       expect(relay.methodCalls, isEmpty);
     });
+
+    test('checkAllRelays checks rows that are still being built', () async {
+      // The Relays page calls it on its first frame, long before the rows
+      // have been read from storage.
+      final relay = MockRelayService()
+        ..ownPresence = [
+          _row(_inbox, inboxRelayList: OwnEventPresenceFfi.current),
+          _row(_kp, keyPackage: OwnEventPresenceFfi.current),
+        ];
+      final container = _container(relay);
+
+      await container.read(relayStatusProvider.notifier).checkAllRelays();
+
+      final state = await container.read(relayStatusProvider.future);
+      expect(relay.ownPresenceAsks, [_testIdentity.pubkeyHex]);
+      expect(state.relays.map((r) => r.relayUrl), [_inbox, _kp]);
+      expect(state.lastChecked, isNotNull);
+    });
+
+    test('checkAllRelays on rows that failed to build checks nothing and '
+        'does not throw', () async {
+      final relay = MockRelayService();
+      final prefs = MockRelayPreferencesService()
+        ..listThrowsFor.add(RelayCategory.keyPackage);
+      final container = ProviderContainer(
+        overrides: [
+          identityProvider.overrideWith((_) async => _testIdentity),
+          relayServiceProvider.overrideWithValue(relay),
+          relayPreferencesServiceProvider.overrideWith((ref) async => prefs),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(relayStatusProvider.notifier).checkAllRelays();
+
+      expect(container.read(relayStatusProvider).hasError, isTrue);
+      expect(relay.ownPresenceAsks, isEmpty);
+    });
   });
 
   group('summarizePresence (the ring and every row dot)', () {
