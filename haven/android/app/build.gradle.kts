@@ -1,4 +1,5 @@
 import java.io.FileInputStream
+import java.util.Base64
 import java.util.Properties
 
 plugins {
@@ -109,7 +110,7 @@ flutter {
 val meshOn = runCatching {
     (findProperty("dart-defines")?.toString()).orEmpty()
         .split(",")
-        .map { String(java.util.Base64.getDecoder().decode(it), Charsets.UTF_8) }
+        .map { String(Base64.getDecoder().decode(it), Charsets.UTF_8) }
         .lastOrNull { it.startsWith("HAVEN_MESH=") } == "HAVEN_MESH=true"
 }.getOrDefault(false)
 

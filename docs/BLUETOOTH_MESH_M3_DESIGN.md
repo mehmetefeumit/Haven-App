@@ -4138,6 +4138,18 @@ open:*
   takes the function's overload and the file is added to each variant
   with the flag and to none without. **Not run:** any of it against
   AGP.
+  **What the first build found (2026-11-14).** Every Android build
+  failed at this script: `Unresolved reference 'util'` at
+  `java.util.Base64`. In a build script the bare name `java` is the
+  project's `java` extension wherever a plugin has added one, as the
+  Android plugin does, and no longer the JDK's package; the run above
+  was in a project with no such plugin, where the name was still the
+  package. The class is now imported, as the file's two others are,
+  and the expression was run again over the same kinds of value in a
+  project that applies the `java` plugin: the spelling that failed in
+  CI fails there with the same message, and the imported one is on
+  only for a last `HAVEN_MESH=true`. A stand-in project stands for the
+  app's only as far as it applies what the app applies.
 - **`MeshNative` (N.2.1)** is as written. It is not in the JVM build,
   whose sources are the pure package, and has no JVM test: a test that
   loaded it would run `System.loadLibrary`. **Compiled here** in a

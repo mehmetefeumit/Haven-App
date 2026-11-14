@@ -3389,6 +3389,13 @@ item 6, that address rotation is the build's; §7.1 carries a note now.
   pass, 26 changes to the manifest check, twelve of them to the new
   clauses: all fail a fixture. The badging step, like the rest, has run
   on no APK a build made.
+  **The first Android build of the unit (2026-11-14) failed, in every
+  lane that builds an APK:** the switch wrote `java.util.Base64` in
+  full, and in a build script `java` is the project's extension once a
+  plugin adds one. The local run of the expression had been in a
+  project with no such plugin. Fixed with an import, and run again in a
+  project that applies the `java` plugin, where the failing spelling
+  fails with CI's message (design N.7).
 
 ### Proposed CLAUDE.md wording (owner to approve)
 

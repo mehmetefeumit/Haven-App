@@ -302,7 +302,7 @@ readonly ANDROID='haven/android'
 readonly APP_GRADLE="${ANDROID}/app/build.gradle.kts"
 # The mesh's build switch, as APP_GRADLE writes it, without whitespace.
 # shellcheck disable=SC2016
-readonly SWITCH='valmeshOn=runCatching{(findProperty("dart-defines")?.toString()).orEmpty().split(",").map{String(java.util.Base64.getDecoder().decode(it),Charsets.UTF_8)}.lastOrNull{it.startsWith("HAVEN_MESH=")}=="HAVEN_MESH=true"}.getOrDefault(false)'
+readonly SWITCH='valmeshOn=runCatching{(findProperty("dart-defines")?.toString()).orEmpty().split(",").map{String(Base64.getDecoder().decode(it),Charsets.UTF_8)}.lastOrNull{it.startsWith("HAVEN_MESH=")}=="HAVEN_MESH=true"}.getOrDefault(false)'
 readonly SWITCH_FIELD='buildConfigField("boolean","HAVEN_MESH","$meshOn")'
 readonly SWITCH_MANIFEST='if(meshOn)variant.sources.manifests.addStaticManifestFile("src/mesh/AndroidManifest.xml")'
 readonly JVM_TESTS='haven/android/mesh-jvm/src/test'
@@ -1370,7 +1370,7 @@ android {
 val meshOn = runCatching {
     (findProperty("dart-defines")?.toString()).orEmpty()
         .split(",")
-        .map { String(java.util.Base64.getDecoder().decode(it), Charsets.UTF_8) }
+        .map { String(Base64.getDecoder().decode(it), Charsets.UTF_8) }
         .lastOrNull { it.startsWith("HAVEN_MESH=") } == "HAVEN_MESH=true"
 }.getOrDefault(false)
 
