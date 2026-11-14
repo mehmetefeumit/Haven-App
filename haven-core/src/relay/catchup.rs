@@ -116,6 +116,8 @@
 //! holds: there is no un-applied message to come back for, and one forged event
 //! must not be able to stall the sweep.
 
+#![deny(clippy::wildcard_enum_match_arm)]
+
 /// The catch-up classification of a single ingested group event.
 ///
 /// Fieldless (Copy) — carries no coordinates, pubkey, group id, or commit JSON,
@@ -366,9 +368,10 @@ use nostr::{Event, EventId, Filter, Kind, Timestamp};
 
 use crate::circle::{CircleManager, DirectoryReconcile};
 use crate::nostr::mls::types::{
-    EpochState, FanoutId, GroupId, IngestOutcome, PublishWork, ScreenedIngest, SessionEffects,
+    EpochState, FanoutId, GroupEvent, GroupId, IngestOutcome, PublishWork, ScreenedIngest,
+    SessionEffects,
 };
-use crate::nostr::mls::{IngestClass, RangePass, SessionManager};
+use crate::nostr::mls::{ingest_disposition, Disposition, IngestClass, RangePass, SessionManager};
 use crate::relay::cursor::{since_for_stream, SubscribePhase};
 use crate::relay::fanout::{
     DriveMode, FanoutClock, FanoutSend, Publishing, ResumeOutcome, Still, WallClock, BUSY_RETRY_MS,
@@ -986,7 +989,6 @@ pub(crate) fn cursor_advance_ms(
 /// both skipped, for different reasons — see their docs. Neither can raise the
 /// advance, because nothing here can.
 #[must_use]
-#[deny(clippy::wildcard_enum_match_arm)]
 pub(crate) fn hold_backs(classified: &[(i64, ReceiveOnlyOutcome)]) -> Vec<i64> {
     classified
         .iter()
@@ -1200,7 +1202,6 @@ enum Left {
 /// kept apart from an error and a hold: the engine was not short of room in
 /// either, and a refetch that read them as "no room" would wait on a store
 /// that was never asked. A parked event is the engine's.
-#[deny(clippy::wildcard_enum_match_arm)]
 async fn ingest_judged(
     circle_mgr: &CircleManager,
     plane: &Plane<'_>,
@@ -1231,13 +1232,9 @@ async fn ingest_judged(
         }
         ScreenedIngest::Ingested(effects) => effects,
     };
-    let left = if matches!(ingest.outcome, IngestOutcome::ResourceRefused { .. })
-        || (ingest.left_object_unpersisted
-            && !matches!(ingest.outcome, IngestOutcome::Ignored { .. }))
-    {
-        Left::NoRoom
-    } else {
-        Left::WithTheEngine
+    let left = match ingest_disposition(&ingest.outcome, ingest.left_object_unpersisted) {
+        Disposition::TakenIn => Left::WithTheEngine,
+        Disposition::NoRoom | Disposition::Unpersisted => Left::NoRoom,
     };
 
     circle_mgr
@@ -1290,15 +1287,15 @@ async fn ingest_judged(
 /// unless the verdict is an `Ignored` exclusion (an unknown route is dropped
 /// without a trace by design, mdk#740), which no redelivery can change here.
 /// `TransportDeferred` is retained and retried by the engine itself.
-#[deny(clippy::wildcard_enum_match_arm)]
 pub(crate) async fn cursor_verdict(
     circle_mgr: &CircleManager,
     id: &nostr::EventId,
     outcome: IngestOutcome,
     left_object_unpersisted: bool,
 ) -> ReceiveOnlyOutcome {
-    if left_object_unpersisted && !matches!(outcome, IngestOutcome::Ignored { .. }) {
-        return ReceiveOnlyOutcome::Deferred;
+    match ingest_disposition(&outcome, left_object_unpersisted) {
+        Disposition::Unpersisted => return ReceiveOnlyOutcome::Deferred,
+        Disposition::TakenIn | Disposition::NoRoom => {}
     }
     match outcome {
         // Answered from a stranded row: the same answer at every
@@ -1402,14 +1399,29 @@ async fn drain_convergence(
 async fn refetch_at_a_new_epoch(
     circle_mgr: &CircleManager,
     plane: &Plane<'_>,
-    events: &[crate::nostr::mls::types::GroupEvent],
+    events: &[GroupEvent],
 ) {
     let mut moved: Vec<&GroupId> = Vec::new();
     for event in events {
-        if let crate::nostr::mls::types::GroupEvent::EpochChanged { group_id, .. } = event {
-            if !moved.contains(&group_id) {
-                moved.push(group_id);
+        match event {
+            GroupEvent::EpochChanged { group_id, .. } => {
+                if !moved.contains(&group_id) {
+                    moved.push(group_id);
+                }
             }
+            GroupEvent::GroupCreated { .. }
+            | GroupEvent::GroupJoined { .. }
+            | GroupEvent::TransportObjectResourceRefused { .. }
+            | GroupEvent::MessageReceived { .. }
+            | GroupEvent::AppMessageInvalidated { .. }
+            | GroupEvent::GroupStateChanged { .. }
+            | GroupEvent::GroupHydrationQuarantined { .. }
+            | GroupEvent::CommitRolledBack { .. }
+            | GroupEvent::GroupStateInvalidated { .. }
+            | GroupEvent::GroupStateRevalidated { .. }
+            | GroupEvent::GroupUnrecoverable { .. }
+            | GroupEvent::PendingCommitRecovered { .. }
+            | GroupEvent::GroupHydrationRecovered { .. } => {}
         }
     }
     for group_id in moved {
@@ -1711,7 +1723,6 @@ impl CatchupSink<'_, '_> {
 
 #[async_trait::async_trait]
 impl NegSink for CatchupSink<'_, '_> {
-    #[deny(clippy::wildcard_enum_match_arm)]
     async fn take_in(&self, route: &NegRoute, events: Vec<(IngestClass, Event)>) -> bool {
         let group_id = &route.group_id;
         let sweep = self.sweep;
@@ -2460,7 +2471,6 @@ impl CircleSweep<'_> {
     /// current-epoch commits until a later page has brought something;
     /// they are taken in at the chase's end, and at a halt they stay unread
     /// and hold the cursor instead.
-    #[deny(clippy::wildcard_enum_match_arm)]
     #[allow(clippy::too_many_lines)]
     async fn fetch_and_ingest(
         &self,
@@ -2660,7 +2670,6 @@ impl CircleSweep<'_> {
     /// tick to save a re-fetch that costs one round; leaving a stale hold-back
     /// in place costs one sweep of delay and can never advance the cursor over
     /// something un-applied, which is the direction that matters.
-    #[deny(clippy::wildcard_enum_match_arm)]
     async fn ingest_page(
         &self,
         mut page: Vec<Event>,

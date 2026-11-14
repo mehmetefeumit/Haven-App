@@ -51,6 +51,8 @@
 //! engine ingest and any foreground send serialize automatically — no per-circle
 //! write gate is needed anymore (plan §5.4).
 
+#![deny(clippy::wildcard_enum_match_arm)]
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -230,7 +232,12 @@ pub const fn notification_disposition(n: &RelayPoolNotification) -> NotifDisposi
             RelayMessage::Event { .. } => NotifDisposition::Forward,
             RelayMessage::EndOfStoredEvents(_) => NotifDisposition::ForwardEose,
             RelayMessage::Closed { .. } => NotifDisposition::ForwardClosed,
-            _ => NotifDisposition::Ignore,
+            RelayMessage::Ok { .. }
+            | RelayMessage::Notice(_)
+            | RelayMessage::Auth { .. }
+            | RelayMessage::Count { .. }
+            | RelayMessage::NegMsg { .. }
+            | RelayMessage::NegErr { .. } => NotifDisposition::Ignore,
         },
     }
 }

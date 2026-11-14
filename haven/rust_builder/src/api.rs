@@ -1,5 +1,7 @@
 //! API bridging layer that exposes haven-core functionality.
 
+#![deny(clippy::wildcard_enum_match_arm)]
+
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -7095,6 +7097,10 @@ pub enum PublishRefusalFfi {
 }
 
 impl From<haven_core::relay::RelayError> for PublishFailureFfi {
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "Haven's own error: every variant no arm names is a generic failure"
+    )]
     fn from(error: haven_core::relay::RelayError) -> Self {
         use haven_core::relay::RelayError as E;
         match error {
@@ -7271,6 +7277,10 @@ pub enum RefusalFfi {
 }
 
 /// The typed refusal `error` is, if the UI must tell it apart.
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "Haven's own error: every variant no arm names is a generic failure"
+)]
 fn refusal_of(error: &haven_core::circle::CircleError) -> Option<RefusalFfi> {
     use haven_core::circle::CircleError as E;
     match error {
@@ -7863,6 +7873,10 @@ impl LeaveOutcomeFfi {
     /// no leave intent stands for the circle afterwards (`intent_stands`):
     /// while one does, the leave goes on, and the press is told so —
     /// [`LeaveStatusFfi::Pending`], with no hint — never "failed".
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "Haven's own error: every variant no arm names is a generic failure"
+    )]
     fn answer_standing(
         result: Result<haven_core::relay::fanout::LeaveOutcome, haven_core::circle::CircleError>,
         intent_stands: impl FnOnce() -> bool,
@@ -16036,7 +16050,11 @@ mod maintenance_real_ffi_tests {
                     .iter()
                     .find_map(|work| match work {
                         PublishWork::FoundingGroupCreated { welcomes } => Some(welcomes),
-                        _ => None,
+                        PublishWork::ApplicationMessage { .. }
+                        | PublishWork::Proposal { .. }
+                        | PublishWork::GroupEvolution { .. }
+                        | PublishWork::GroupCreated { .. }
+                        | PublishWork::AutoPublish { .. } => None,
                     })
                     .expect("a founding create");
                 haven_core::nostr::mls::SessionManager::transport_message_to_event(&welcomes[0])
@@ -16235,7 +16253,11 @@ mod maintenance_real_ffi_tests {
             .iter()
             .find_map(|work| match work {
                 PublishWork::FoundingGroupCreated { welcomes } => welcomes.first(),
-                _ => None,
+                PublishWork::ApplicationMessage { .. }
+                | PublishWork::Proposal { .. }
+                | PublishWork::GroupEvolution { .. }
+                | PublishWork::GroupCreated { .. }
+                | PublishWork::AutoPublish { .. } => None,
             })
             .map(haven_core::nostr::mls::SessionManager::transport_message_to_event)
             .expect("a founding create carries a welcome")
@@ -16322,7 +16344,11 @@ mod maintenance_real_ffi_tests {
             .iter()
             .find_map(|work| match work {
                 PublishWork::FoundingGroupCreated { welcomes } => welcomes.first(),
-                _ => None,
+                PublishWork::ApplicationMessage { .. }
+                | PublishWork::Proposal { .. }
+                | PublishWork::GroupEvolution { .. }
+                | PublishWork::GroupCreated { .. }
+                | PublishWork::AutoPublish { .. } => None,
             })
             .map(haven_core::nostr::mls::SessionManager::transport_message_to_event)
             .expect("a founding create carries a welcome")
@@ -16647,7 +16673,9 @@ mod maintenance_real_ffi_tests {
 
         let lifetime = |bytes: &[u8]| match read_kp_lifetime(bytes) {
             TrackedKpLifetime::Known(lifetime) => lifetime,
-            _ => panic!("a minted package has a readable lifetime"),
+            TrackedKpLifetime::Absent
+            | TrackedKpLifetime::NotCurrent
+            | TrackedKpLifetime::Unreadable => panic!("a minted package has a readable lifetime"),
         };
         let first = lifetime(&tracked_row(world.circle()).await.expect("row").key_package);
         super::MAINTENANCE_CLOCK_OVERRIDE_SECS.store(first.rotate_at(), Ordering::Relaxed);

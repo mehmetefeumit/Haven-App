@@ -291,14 +291,19 @@ in both. No `#[expect]` exception is therefore needed for a foreign
    exhaustive match. A `Result`/`Option` wildcard that also swallows `Err`
    (`manager.rs:4113`, `:8270`) gets an explicit `Err(_)` arm whose current
    meaning is stated.
-4. **`if let` / `let … else` (16 sites) and `==` / `!=` / `.contains(&…)`
-   (17 product sites) over MDK enums.** These are listed with their Rule in
-   Appendix B.2 and B.3.
-   - The ones on a Security-Rule decision are converted by hand to exhaustive
-     `match` (or routed through the two classifiers).
-   - The rest carry `// mdk-enum-reviewed: <reason>`.
-   - `clippy::wildcard_enum_match_arm` does not see these forms, nor
-     `matches!`, whose expansion is an external macro.
+4. **Uses of MDK and rust-nostr enums outside `match` arms**: `matches!`,
+   `if let` / `let … else`, `==` / `!=`, `.contains(&…)`.
+   `clippy::wildcard_enum_match_arm` sees none of these forms. Appendix B lists
+   the 33 found when this step was written; a scan of `haven-core/src` and
+   `haven/rust_builder/src` finds about 200. Each is triaged by one question:
+   could a new variant, silently taking the default branch here, change a
+   Security-Rule or privacy outcome?
+   - Yes: the site becomes an exhaustive `match`, or goes through a classifier
+     that is one (18 decisions).
+   - No: the code is left untouched and carries no marker. The enum-variant
+     inventory of S0.3 (I6) is what protects these sites: any variant added,
+     removed or renamed fails that test and names the enum, so its uses are
+     reviewed at the bump.
 5. **The lint.** Add `#![deny(clippy::wildcard_enum_match_arm)]` at the top of:
    - `nostr/mls/manager.rs`
    - `relay/fanout.rs`
@@ -307,21 +312,18 @@ in both. No `#[expect]` exception is therefore needed for a foreign
    - `relay/manager.rs`
    - `relay/live_sync/processor.rs`
    - `relay/live_sync/supervisor.rs`
+   - `relay/live_sync/session.rs`
    - `haven/rust_builder/src/api.rs` (not `frb_generated.rs`)
 
    It is a restriction lint, outside pedantic/nursery. The existing clippy steps
-   run it at no extra CI time.
-6. **The scope test** `mdk_enums_are_matched_exhaustively`, in
-   `haven-core/tests/dependency_surface.rs` (S0.3):
-   - The enum names are computed from the resolved MDK and nostr sources (all
-     `pub enum` items, parsed with `syn`).
-   - Every file under `haven-core/src` and `haven/rust_builder/src` (excluding
-     `frb_generated.rs`) that names `<MdkEnum>::<Variant>` in a `=>` arm must
-     carry the deny attribute.
-   - Every `matches!(…, <MdkEnum>::…)`, `if let`/`let … else` pattern, `==`/`!=`
-     comparison or `.contains(&<MdkEnum>::…)` must be on a line carrying
-     `// mdk-enum-reviewed: <reason>`, with a non-empty reason, or the test
-     fails.
+   run it at no extra CI time. It fires only when the matched value is the enum
+   itself: a `_` arm over an `Option`, a `Result` or a tuple that wraps an MDK
+   enum passes it. Those sites are triaged like the ones in item 4, and the
+   variant inventory (I6) covers the ones left alone.
+6. **No per-site scope test.** Marking some 190 sites that affect no security
+   outcome would add an annotation scheme weaker than the inventory: a marker
+   says a site was read once, the inventory fails whenever an enum changes.
+   The variant inventory (S0.3, I6) replaces it.
 
 **Interface with Stage 1.** Exhaustive arms will name `StepDownAndLeave`,
 `EnableAccountDevices` and `RecoverMembers`. Stage 1's guard therefore bans
@@ -337,12 +339,11 @@ ten legitimate atomic `.swap(` calls.
   `haven/rust_builder`.
 - The full suite runs unchanged. This is a refactor-only commit series, with no
   behaviour change and no test weakened.
-- Planted negatives: a `_ =>` on `IngestOutcome` in a scoped module fails
-  clippy; an unmarked `if let SendIntent::Leave{..}` fails the scope test.
+- Planted negative: a `_ =>` on `IngestOutcome` in a scoped module fails
+  clippy.
 - CI: the existing clippy steps and `haven-core-suite`.
 
-**Exit.** Clippy is clean, the scope test is green, and both planted negatives
-are red.
+**Exit.** Clippy is clean and the planted negative is red.
 
 **Cost.** 4 C (clippy iterations over two roots) + 1 T.
 
@@ -468,9 +469,11 @@ grep ERE and Rust `regex` differ.
 | I4 | `pub fn` / fields matching `recorder` in every MDK-sourced crate | `check_no_forensic_recorder.sh` `TOKENS` (`:32`) | P0 |
 | I3 | Methods of `NostrRelayClient` / `TransportAdapter` / `NostrTransportAdapter` | `check_publish_client_no_subscription.sh` | P1 |
 | I5 | `pub fn (open\|in_memory)…` in `storage-sqlite` and `cgka-session` | `check_sqlcipher_first_use_gate.sh` | P1 |
+| I6 | The variant list, in declaration order, of every MDK and rust-nostr enum that `haven-core/src` or `haven/rust_builder/src` names (64 today; each resolved through its `use` path, since `Error` is ambiguous across crates) | S0.5: every use of those enums outside an exhaustive `match` | P0 |
 
-The enum list S0.5 uses is computed by the same parser. It is not a reviewed
-set. The test runs offline, in seconds, in `haven-core-suite` and coverage.
+I6 is a reviewed set like the others: a variant added, removed or renamed fails
+the test and names the enum. The test runs offline, in seconds, in
+`haven-core-suite` and coverage.
 
 ### Per-guard changes
 
@@ -1472,7 +1475,7 @@ release.
 |---|---|---|
 | Guards and self-tests (S0.3, `--locked`, lockfile guard) | `repo-guards.yml` steps (every step runs even after a failure) | release (`Repo Guards / Static checks`) |
 | `--nostr-features` | `rust-check.yml` beside `--adapter-features` | release |
-| `dependency_surface.rs`, S0.4, S0.9 W-scenarios, S0.5 scope test, S0.6, S0.10, the early gate, the round-trip test | `haven-core-suite` and coverage | release |
+| `dependency_surface.rs`, S0.4, S0.9 W-scenarios, S0.6, S0.10, the early gate, the round-trip test | `haven-core-suite` and coverage | release |
 | `pool_constants.rs` | `soak-tooling` `cargo test` | release |
 | S0.1 committed-fixture checks, chains and writer self-check; S0.2 runs A–D | **new job `upgrade` in `soak-core.yml`**, `if: inputs.profile == 'pr'` | release (below) |
 
@@ -1722,9 +1725,12 @@ Store-writing code paths, checked hunk by hunk:
 
 ## Appendix B — MDK-enum decision sites outside `match` arms
 
+The sites known when this step was written. The scan made during the work found
+about 200 in all; S0.5 item 4 says how each was decided.
+
 ### B.1 Wildcard and `matches!` sites converted in S0.5
 
-**Rule 12 ingest disposition (four spellings, one classifier):**
+**Rule 12 ingest disposition (five spellings, one classifier; the fifth, `hand_back`'s `let refused = matches!(…)` in `nostr/mls/manager.rs`, was found during the work):**
 - `nostr/mls/manager.rs:3961-3965`
 - `relay/catchup.rs:1234-1236`, `:1300`
 - `relay/live_sync/processor.rs:1281`
@@ -1832,7 +1838,7 @@ review finding to the change it caused in this part.
 | T/CI M3 | old peer not durable; not what users run | release asset; `v0.1.13` peer |
 | T/CI M4 | gate too late | early gate |
 | T/CI M5 | shape-level criterion | shapes list replaces table criterion |
-| T/CI M6 | `if let` / `==` missed | S0.5 item 4, scope test, Appendix B |
+| T/CI M6 | `if let` / `==` missed | S0.5 item 4 (triage of every non-arm use; the Security-Rule ones converted), the I6 variant inventory, Appendix B |
 | T/CI M7 | seam self-probes | G14 P0 for Rule 12/13 seams |
 | T/CI M8 | two timing sites | as R3.h |
 | T/CI M9 | Stage 1 exit checklist; flake baseline | checklist belongs to Stage 1 (R4.m); pass-rate baseline captured here as P0, because Stage 1's exit compares against it |

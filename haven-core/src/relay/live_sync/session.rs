@@ -12,6 +12,8 @@
 //! notification channel (so a slow decrypt cannot lag the pool), a `Monitor`
 //! (for reconnect re-anchoring), and **no** gossip (own-relays-only, PSI-8).
 
+#![deny(clippy::wildcard_enum_match_arm)]
+
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -62,6 +64,22 @@ use super::supervisor::{flush_stored, intake_queue, run_receiver, run_worker, Ra
 /// `now − SEED_LOOKBACK_SECS` so the engine backfills the recent past without
 /// re-fetching the circle's entire history.
 const SEED_LOOKBACK_SECS: i64 = 86_400; // 24h
+
+/// Whether the pool holds a relay `status` as connected: a REQ it takes then
+/// reaches the relay, and one it takes otherwise was only queued (Security
+/// Rule 12's floors and re-issue read this).
+const fn pool_connected(status: RelayStatus) -> bool {
+    match status {
+        RelayStatus::Connected => true,
+        RelayStatus::Initialized
+        | RelayStatus::Pending
+        | RelayStatus::Connecting
+        | RelayStatus::Disconnected
+        | RelayStatus::Terminated
+        | RelayStatus::Banned
+        | RelayStatus::Sleeping => false,
+    }
+}
 
 /// The cold-start cursor a stream is seeded with at `now` (seconds), in ms.
 const fn seed_ms(now: i64) -> i64 {
@@ -771,7 +789,7 @@ impl SubscribeCtx<'_> {
         self.client
             .relay(relay_url)
             .await
-            .is_ok_and(|relay| relay.status() == RelayStatus::Connected)
+            .is_ok_and(|relay| pool_connected(relay.status()))
     }
 
     /// Records that `relay_url` owes each of `group_ids_hex` its history from
@@ -3190,7 +3208,7 @@ impl LiveSyncCore {
             .relays()
             .await
             .into_iter()
-            .filter(|(_, relay)| relay.status() == RelayStatus::Connected)
+            .filter(|(_, relay)| pool_connected(relay.status()))
             .map(|(url, _)| url)
             .collect();
         let now = chrono::Utc::now().timestamp();
@@ -4257,7 +4275,7 @@ impl RepairPlane {
             .client
             .relay(&key.relay_url)
             .await
-            .is_ok_and(|relay| relay.status() == RelayStatus::Connected)
+            .is_ok_and(|relay| pool_connected(relay.status()))
         {
             return;
         }
@@ -5006,6 +5024,24 @@ mod tests {
     use nostr::{Alphabet, Keys, SingleLetterTag};
     use std::sync::atomic::AtomicUsize;
     use tempfile::TempDir;
+
+    /// Security Rule 12: only a connected relay is one a REQ reaches; every
+    /// other pool status leaves the REQ queued, so its history stays owed.
+    #[test]
+    fn only_a_connected_relay_takes_a_req() {
+        for (status, connected) in [
+            (RelayStatus::Initialized, false),
+            (RelayStatus::Pending, false),
+            (RelayStatus::Connecting, false),
+            (RelayStatus::Connected, true),
+            (RelayStatus::Disconnected, false),
+            (RelayStatus::Terminated, false),
+            (RelayStatus::Banned, false),
+            (RelayStatus::Sleeping, false),
+        ] {
+            assert_eq!(pool_connected(status), connected, "{status:?}");
+        }
+    }
 
     /// A relay url for the retry tests' "a relay accepted" fixture.
     fn accepting_relay() -> RelayUrl {
@@ -9247,7 +9283,16 @@ mod tests {
                 Ok(Ok(LiveSyncEvent::Status { reason })) => match reason {
                     SyncStatusReason::Paused => paused += 1,
                     SyncStatusReason::Disconnected => disconnected += 1,
-                    _ => {}
+                    SyncStatusReason::Connecting
+                    | SyncStatusReason::Connected
+                    | SyncStatusReason::Reconnecting
+                    | SyncStatusReason::Unprocessable
+                    | SyncStatusReason::InboxError
+                    | SyncStatusReason::RelayError
+                    | SyncStatusReason::SessionStarted
+                    | SyncStatusReason::SessionStopped
+                    | SyncStatusReason::BackgroundResumed
+                    | SyncStatusReason::RefetchOwed => {}
                 },
                 Ok(Ok(_)) => {}
                 Ok(Err(_)) => break,

@@ -25,6 +25,8 @@
 //! relay's acknowledgement and rolls it back when every relay proved it
 //! refused it.
 
+#![deny(clippy::wildcard_enum_match_arm)]
+
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -117,7 +119,7 @@ use crate::relay::maintenance::KIND_MARMOT_KEY_PACKAGE;
 use cgka_session::PublishWork;
 use cgka_traits::group_context::GroupContextSnapshot;
 use cgka_traits::ingest::PeeledContent;
-use cgka_traits::ingest::{IngestOutcome, LocalIngestState};
+use cgka_traits::ingest::{IngestOutcome, InputRejectionCategory, LocalIngestState};
 #[cfg(any(test, feature = "test-utils"))]
 use cgka_traits::peeler::GroupMessageMetadata;
 #[cfg(any(test, feature = "test-utils"))]
@@ -152,6 +154,10 @@ impl MdkErrorKind for EngineError {
     /// MDK's own `privacy_safe_kind` (`traits/src/error.rs:252-289`), unwrapped
     /// one layer further for storage, as MDK's app runtime does, so a busy
     /// database stays distinguishable from a durable fault.
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "every other kind is MDK's own exhaustive `privacy_safe_kind`"
+    )]
     fn kind(&self) -> &'static str {
         match self {
             Self::Storage(e) => e.kind(),
@@ -329,6 +335,82 @@ const fn epoch_state_refusal(state: Option<&EpochState>) -> Option<NostrError> {
     }
 }
 
+/// What the engine holds of an event once it answered the event's ingest:
+/// the one Security Rule 12 reading every receive plane makes of an answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Disposition {
+    /// The event, or its verdict: a redelivery brings back the same answer.
+    TakenIn,
+    /// Nothing: refused for a local resource bound, so a refetch is owed.
+    NoRoom,
+    /// Nothing: the engine kept no trace, so relay redelivery is its only way
+    /// back.
+    Unpersisted,
+}
+
+/// [`Disposition`] of an ingest answered `outcome`. An `Ignored` exclusion is
+/// taken in even untraced: an unknown route is dropped without a trace by
+/// design (mdk#740), which no redelivery can change.
+pub const fn ingest_disposition(
+    outcome: &IngestOutcome,
+    left_object_unpersisted: bool,
+) -> Disposition {
+    match outcome {
+        IngestOutcome::Ignored { .. } => Disposition::TakenIn,
+        IngestOutcome::ResourceRefused { .. } => Disposition::NoRoom,
+        IngestOutcome::Processed
+        | IngestOutcome::Buffered { .. }
+        | IngestOutcome::LocalState { .. }
+        | IngestOutcome::TransportDeferred { .. }
+        | IngestOutcome::Stale { .. }
+        | IngestOutcome::Rejected { .. } => {
+            if left_object_unpersisted {
+                Disposition::Unpersisted
+            } else {
+                Disposition::TakenIn
+            }
+        }
+    }
+}
+
+/// What one frozen target's status says of its relay and the event: the one
+/// reading every Security Rule 13 decision makes of MDK's
+/// [`FanoutTargetStatus`], so a status MDK adds is decided here first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Exposure {
+    /// Never attempted: nothing was sent to it.
+    Unsent,
+    /// Begun and never returned: it may hold the event.
+    Begun,
+    /// It acknowledged the event.
+    Held,
+    /// It answered without an acknowledgement and may hold the event.
+    MayHold,
+    /// Transiently unavailable, with no claim of exposure.
+    Unreached,
+    /// A proven non-acceptance.
+    Refused,
+}
+
+pub const fn status_exposure(status: FanoutTargetStatus) -> Exposure {
+    match status {
+        FanoutTargetStatus::NotAttempted => Exposure::Unsent,
+        FanoutTargetStatus::Attempting => Exposure::Begun,
+        FanoutTargetStatus::Accepted => Exposure::Held,
+        FanoutTargetStatus::PossiblyExposed => Exposure::MayHold,
+        FanoutTargetStatus::RetryableUnavailable => Exposure::Unreached,
+        FanoutTargetStatus::Failed => Exposure::Refused,
+    }
+}
+
+/// Whether no target of `fanout` was ever attempted.
+pub fn no_target_attempted(fanout: &OutboundFanout) -> bool {
+    fanout
+        .target_statuses()
+        .iter()
+        .all(|status| status_exposure(*status) == Exposure::Unsent)
+}
+
 /// What one ingest answer tells the epoch-stall detector.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StallInput {
@@ -351,7 +433,11 @@ const fn stall_input(outcome: &IngestOutcome) -> Option<(&GroupId, StallInput)> 
         }
         IngestOutcome::ResourceRefused { group_id, .. } => Some((group_id, StallInput::Refused)),
         IngestOutcome::Buffered { group_id, .. } => Some((group_id, StallInput::Landing)),
-        _ => None,
+        IngestOutcome::Processed
+        | IngestOutcome::Ignored { .. }
+        | IngestOutcome::LocalState { .. }
+        | IngestOutcome::Stale { .. }
+        | IngestOutcome::Rejected { .. } => None,
     }
 }
 
@@ -1647,13 +1733,11 @@ impl SessionManager {
     fn still_staged(session: &AccountDeviceSession, origin: &MessageId) -> bool {
         session.live_group_ids().is_ok_and(|ids| {
             ids.iter().any(|group_id| {
-                matches!(
-                    session.epoch_state(group_id),
-                    Some(EpochState::PendingPublish(staged))
-                        if session
-                            .pending_origin_message_id(staged.pending_ref())
-                            .is_ok_and(|staged| &staged == origin)
-                )
+                Self::staged_ref_of(session, group_id).is_some_and(|pending| {
+                    session
+                        .pending_origin_message_id(pending)
+                        .is_ok_and(|staged| &staged == origin)
+                })
             })
         })
     }
@@ -1796,14 +1880,19 @@ impl SessionManager {
     pub fn proposal_events(work: &[PublishWork]) -> Vec<Event> {
         let mut events = Vec::new();
         for item in work {
-            if let PublishWork::Proposal { msg, .. } = item {
-                match Self::transport_message_to_event(msg) {
+            match item {
+                PublishWork::Proposal { msg, .. } => match Self::transport_message_to_event(msg) {
                     Ok(event) => events.push(event),
                     Err(e) => log::warn!(
                         "receive path: dropping an unserializable proposal: {}",
                         e.code()
                     ),
-                }
+                },
+                PublishWork::ApplicationMessage { .. }
+                | PublishWork::GroupEvolution { .. }
+                | PublishWork::GroupCreated { .. }
+                | PublishWork::FoundingGroupCreated { .. }
+                | PublishWork::AutoPublish { .. } => {}
             }
         }
         events
@@ -2290,7 +2379,7 @@ impl SessionManager {
                 SessionError::Engine(EngineError::InvalidTransition(_)) => {
                     NostrError::EpochNotStable
                 }
-                other => map_mls_err(other),
+                other @ (SessionError::Storage(_) | SessionError::Engine(_)) => map_mls_err(other),
             });
         let result = self.noted(session, result);
         if result.as_ref().is_ok_and(|effects| {
@@ -2431,7 +2520,7 @@ impl SessionManager {
                 SessionError::Engine(EngineError::GroupUnrecoverableRepairRequired { .. }) => {
                     NostrError::EpochUnrecoverable
                 }
-                other => map_mls_err(other),
+                other @ (SessionError::Storage(_) | SessionError::Engine(_)) => map_mls_err(other),
             });
         self.noted(session, result)
     }
@@ -2510,7 +2599,14 @@ impl SessionManager {
         }
         let sealing_for = match &intent {
             SendIntent::AppMessage { group_id, .. } => Some(group_id.clone()),
-            _ => None,
+            SendIntent::Invite { .. }
+            | SendIntent::RemoveMembers { .. }
+            | SendIntent::Leave { .. }
+            | SendIntent::SelfUpdate { .. }
+            | SendIntent::UpdateAppComponents { .. }
+            | SendIntent::UpdateGroupData { .. }
+            | SendIntent::EnableDisbanding { .. }
+            | SendIntent::Disband { .. } => None,
         };
         if sealing_for
             .as_ref()
@@ -3201,7 +3297,8 @@ impl SessionManager {
                 | OpenMlsContentKind::Welcome
                 | OpenMlsContentKind::Other => IngestClass::Other,
             },
-            _ => IngestClass::Other,
+            // Another epoch's, or what does not parse.
+            Ok(_) | Err(_) => IngestClass::Other,
         }
     }
 
@@ -3336,10 +3433,25 @@ impl SessionManager {
     pub fn groups_owing_advance(effects: &SessionEffects) -> Vec<GroupId> {
         let mut groups = effects.pending_convergence.clone();
         for event in &effects.events {
-            if let GroupEvent::EpochChanged { group_id, .. } = event {
-                if !groups.contains(group_id) {
-                    groups.push(group_id.clone());
+            match event {
+                GroupEvent::EpochChanged { group_id, .. } => {
+                    if !groups.contains(group_id) {
+                        groups.push(group_id.clone());
+                    }
                 }
+                GroupEvent::GroupCreated { .. }
+                | GroupEvent::GroupJoined { .. }
+                | GroupEvent::TransportObjectResourceRefused { .. }
+                | GroupEvent::MessageReceived { .. }
+                | GroupEvent::AppMessageInvalidated { .. }
+                | GroupEvent::GroupStateChanged { .. }
+                | GroupEvent::GroupHydrationQuarantined { .. }
+                | GroupEvent::CommitRolledBack { .. }
+                | GroupEvent::GroupStateInvalidated { .. }
+                | GroupEvent::GroupStateRevalidated { .. }
+                | GroupEvent::GroupUnrecoverable { .. }
+                | GroupEvent::PendingCommitRecovered { .. }
+                | GroupEvent::GroupHydrationRecovered { .. } => {}
             }
         }
         groups
@@ -3545,12 +3657,19 @@ impl SessionManager {
     #[must_use]
     pub fn groups_owing_service(ingest: &IngestEffects) -> Vec<GroupId> {
         let mut groups = Self::groups_owing_advance(&ingest.effects);
-        if let IngestOutcome::Buffered { group_id, .. }
-        | IngestOutcome::TransportDeferred { group_id, .. } = &ingest.outcome
-        {
-            if !groups.contains(group_id) {
-                groups.push(group_id.clone());
+        match &ingest.outcome {
+            IngestOutcome::Buffered { group_id, .. }
+            | IngestOutcome::TransportDeferred { group_id, .. } => {
+                if !groups.contains(group_id) {
+                    groups.push(group_id.clone());
+                }
             }
+            IngestOutcome::Processed
+            | IngestOutcome::Ignored { .. }
+            | IngestOutcome::LocalState { .. }
+            | IngestOutcome::ResourceRefused { .. }
+            | IngestOutcome::Stale { .. }
+            | IngestOutcome::Rejected { .. } => {}
         }
         groups
     }
@@ -3958,10 +4077,10 @@ impl SessionManager {
                     .has_processed_transport_id(id)
                     .unwrap_or(false)
             },
-            |ingested| match ingested.outcome {
-                IngestOutcome::ResourceRefused { .. } => false,
-                IngestOutcome::Ignored { .. } => true,
-                _ => !ingested.left_object_unpersisted,
+            |ingested| match ingest_disposition(&ingested.outcome, ingested.left_object_unpersisted)
+            {
+                Disposition::TakenIn => true,
+                Disposition::NoRoom | Disposition::Unpersisted => false,
             },
         )
     }
@@ -3989,14 +4108,28 @@ impl SessionManager {
         if observe {
             self.observe_stall(session, event.created_at.as_secs(), id, result);
         }
-        let unknown_route = result.as_ref().is_ok_and(|ingested| {
-            matches!(
-                ingested.outcome,
-                IngestOutcome::Ignored {
-                    category: cgka_traits::ingest::InputRejectionCategory::UnknownGroup
-                }
-            )
-        });
+        let unknown_route = result
+            .as_ref()
+            .is_ok_and(|ingested| match &ingested.outcome {
+                IngestOutcome::Ignored { category } => match category {
+                    InputRejectionCategory::UnknownGroup => true,
+                    InputRejectionCategory::Duplicate
+                    | InputRejectionCategory::OwnEcho
+                    | InputRejectionCategory::WrongRecipient
+                    | InputRejectionCategory::InvalidEncoding
+                    | InputRejectionCategory::InvalidSignature
+                    | InputRejectionCategory::UnsupportedRequiredFeature
+                    | InputRejectionCategory::AuthorizationFailed
+                    | InputRejectionCategory::MissingWelcomeKeyPackage => false,
+                },
+                IngestOutcome::Processed
+                | IngestOutcome::Buffered { .. }
+                | IngestOutcome::LocalState { .. }
+                | IngestOutcome::TransportDeferred { .. }
+                | IngestOutcome::ResourceRefused { .. }
+                | IngestOutcome::Stale { .. }
+                | IngestOutcome::Rejected { .. } => false,
+            });
         let Some(route) = route.filter(|_| !unknown_route && self.took_in(id, result)) else {
             return;
         };
@@ -4110,7 +4243,8 @@ impl SessionManager {
         drop(session);
         match cursor {
             Ok(Some(TransportReconciliationRoute::Group(routing_id))) => Some(routing_id),
-            _ => None,
+            // A cursor that cannot be read is read as none.
+            Ok(Some(TransportReconciliationRoute::Inbox) | None) | Err(_) => None,
         }
     }
 
@@ -4265,7 +4399,19 @@ impl SessionManager {
                         via_welcome,
                         welcomer,
                     }),
-                    _ => None,
+                    GroupEvent::GroupCreated { .. }
+                    | GroupEvent::TransportObjectResourceRefused { .. }
+                    | GroupEvent::MessageReceived { .. }
+                    | GroupEvent::AppMessageInvalidated { .. }
+                    | GroupEvent::GroupStateChanged { .. }
+                    | GroupEvent::GroupHydrationQuarantined { .. }
+                    | GroupEvent::EpochChanged { .. }
+                    | GroupEvent::CommitRolledBack { .. }
+                    | GroupEvent::GroupStateInvalidated { .. }
+                    | GroupEvent::GroupStateRevalidated { .. }
+                    | GroupEvent::GroupUnrecoverable { .. }
+                    | GroupEvent::PendingCommitRecovered { .. }
+                    | GroupEvent::GroupHydrationRecovered { .. } => None,
                 })
                 .collect(),
         )
@@ -4342,10 +4488,7 @@ impl SessionManager {
         hold_eviction_retick: bool,
     ) -> Result<SessionEffects> {
         let staged_in = |session: &AccountDeviceSession, group_id: &GroupId| {
-            matches!(
-                session.epoch_state(group_id),
-                Some(EpochState::PendingPublish(staged)) if staged.pending_ref() == pending
-            )
+            Self::staged_ref_of(session, group_id) == Some(pending)
         };
         let group_id = session
             .live_group_ids()
@@ -4643,17 +4786,30 @@ impl SessionManager {
         work: &PublishWork,
         now_ms: u64,
     ) -> Result<RecordedLocation> {
-        let PublishWork::ApplicationMessage {
-            msg,
-            group_id,
-            app_event_id,
-            source_epoch,
-            retention,
-            authority,
-            ..
-        } = work
-        else {
-            return Err(NostrError::MdkError("not a sealed application message"));
+        let (msg, group_id, app_event_id, source_epoch, retention, authority) = match work {
+            PublishWork::ApplicationMessage {
+                msg,
+                group_id,
+                app_event_id,
+                source_epoch,
+                retention,
+                authority,
+                ..
+            } => (
+                msg,
+                group_id,
+                app_event_id,
+                source_epoch,
+                retention,
+                authority,
+            ),
+            PublishWork::Proposal { .. }
+            | PublishWork::GroupEvolution { .. }
+            | PublishWork::GroupCreated { .. }
+            | PublishWork::FoundingGroupCreated { .. }
+            | PublishWork::AutoPublish { .. } => {
+                return Err(NostrError::MdkError("not a sealed application message"));
+            }
         };
         let TransportEnvelope::GroupMessage { transport_group_id } = &msg.envelope else {
             return Err(NostrError::MdkError("a location is not a group message"));
@@ -5241,7 +5397,14 @@ impl SessionManager {
     ) -> Option<PendingStateRef> {
         match session.epoch_state(group_id) {
             Some(EpochState::PendingPublish(staged)) => Some(staged.pending_ref()),
-            _ => None,
+            Some(
+                EpochState::Stable { .. }
+                | EpochState::Merging(_)
+                | EpochState::Recovering(_)
+                | EpochState::Unrecoverable(_)
+                | EpochState::Disbanded(_),
+            )
+            | None => None,
         }
     }
 
@@ -5436,6 +5599,7 @@ impl SessionManager {
     /// It stops at a change it could not retire or could not tell its circle
     /// of: that one is still queued, and whatever follows it would be judged
     /// against a circle it may yet change.
+    #[allow(clippy::too_many_lines)]
     fn retire_unmakeable_queued_changes(
         &self,
         session: &mut AccountDeviceSession,
@@ -5471,7 +5635,15 @@ impl SessionManager {
                 SendIntent::RemoveMembers { members, .. } if applied => {
                     members.iter().filter(|member| !listed(member)).collect()
                 }
-                _ => Vec::new(),
+                SendIntent::AppMessage { .. }
+                | SendIntent::Invite { .. }
+                | SendIntent::RemoveMembers { .. }
+                | SendIntent::Leave { .. }
+                | SendIntent::SelfUpdate { .. }
+                | SendIntent::UpdateAppComponents { .. }
+                | SendIntent::UpdateGroupData { .. }
+                | SendIntent::EnableDisbanding { .. }
+                | SendIntent::Disband { .. } => Vec::new(),
             };
             if !changes_group(&queued.intent) {
                 continue;
@@ -5488,7 +5660,14 @@ impl SessionManager {
                     .filter(|member| !applied || listed(member))
                     .cloned()
                     .collect(),
-                _ => Vec::new(),
+                SendIntent::AppMessage { .. }
+                | SendIntent::Invite { .. }
+                | SendIntent::Leave { .. }
+                | SendIntent::SelfUpdate { .. }
+                | SendIntent::UpdateAppComponents { .. }
+                | SendIntent::UpdateGroupData { .. }
+                | SendIntent::EnableDisbanding { .. }
+                | SendIntent::Disband { .. } => Vec::new(),
             };
             let dropped = if still_listed.is_empty() {
                 ChangeNote::QueuedChangeDropped
@@ -5930,7 +6109,18 @@ impl SessionManager {
             // it named (T-REISSUE ask 4). One whose members are all gone is
             // already so and goes unsaid; any other is dropped as an offer,
             // its members held, and the user decides from the notice.
-            if let SendIntent::RemoveMembers { members, .. } = &record.intent {
+            let removal = match &record.intent {
+                SendIntent::RemoveMembers { members, .. } => Some(members),
+                SendIntent::AppMessage { .. }
+                | SendIntent::Invite { .. }
+                | SendIntent::Leave { .. }
+                | SendIntent::SelfUpdate { .. }
+                | SendIntent::UpdateAppComponents { .. }
+                | SendIntent::UpdateGroupData { .. }
+                | SendIntent::EnableDisbanding { .. }
+                | SendIntent::Disband { .. } => None,
+            };
+            if let Some(members) = removal {
                 let epoch = session.epoch(group_id).map_or(0, |epoch| epoch.0);
                 let dropping = self.held_for(group_id).map(|held| {
                     if !held {
@@ -6154,8 +6344,16 @@ impl SessionManager {
             .clone();
         let mut owed = Vec::new();
         for record in records {
-            let SendIntent::Invite { key_packages, .. } = &record.intent else {
-                continue;
+            let key_packages = match &record.intent {
+                SendIntent::Invite { key_packages, .. } => key_packages,
+                SendIntent::AppMessage { .. }
+                | SendIntent::RemoveMembers { .. }
+                | SendIntent::Leave { .. }
+                | SendIntent::SelfUpdate { .. }
+                | SendIntent::UpdateAppComponents { .. }
+                | SendIntent::UpdateGroupData { .. }
+                | SendIntent::EnableDisbanding { .. }
+                | SendIntent::Disband { .. } => continue,
             };
             let listed: Vec<String> = match self.message_store.get_group(&record.group_id) {
                 Ok(group) if !group.is_terminal() => group
@@ -6873,6 +7071,7 @@ impl SessionManager {
     /// to nobody, and it is undone in the hold exactly as inside a wait: the
     /// engine arms an eviction again, and keeps a released change queued. A
     /// proposal is recorded in either mode.
+    #[allow(clippy::too_many_lines)]
     async fn stage_commits(
         &self,
         session: &mut AccountDeviceSession,
@@ -6948,7 +7147,10 @@ impl SessionManager {
                 PublishWork::AutoPublish { msg, .. } => {
                     Some(self.put_commit_fanout_marked(session, msg, &[], pending, now_ms, None))
                 }
-                _ => continue,
+                PublishWork::ApplicationMessage { .. }
+                | PublishWork::Proposal { .. }
+                | PublishWork::GroupCreated { .. }
+                | PublishWork::FoundingGroupCreated { .. } => continue,
             };
             let held_back = recorded.is_none() && matches!(item, PublishWork::AutoPublish { .. });
             let failed = match recorded {
@@ -7390,20 +7592,27 @@ impl SessionManager {
         let (Some(pending), Some(group_id)) = (fanout.pending_ref(), fanout.group_id()) else {
             return false;
         };
-        matches!(
-            session.epoch_state(group_id),
-            Some(EpochState::PendingPublish(staged)) if staged.pending_ref() == pending
-        ) && session.pending_origin_message_id(pending).ok().as_ref()
-            == fanout.pending_origin_message_id()
+        Self::staged_ref_of(session, group_id) == Some(pending)
+            && session.pending_origin_message_id(pending).ok().as_ref()
+                == fanout.pending_origin_message_id()
     }
 
     /// Whether `fanout`'s commit is still stored as sent and unresolved.
     fn origin_is_sent(session: &AccountDeviceSession, fanout: &OutboundFanout) -> Result<bool> {
         Ok(match fanout.pending_origin_message_id() {
-            Some(origin) => {
-                session.stored_message_state(origin).map_err(map_mls_err)?
-                    == Some(MessageState::Sent)
-            }
+            Some(origin) => match session.stored_message_state(origin).map_err(map_mls_err)? {
+                Some(MessageState::Sent) => true,
+                Some(
+                    MessageState::Created
+                    | MessageState::Processed
+                    | MessageState::Failed
+                    | MessageState::Retryable
+                    | MessageState::ConvergenceDeferred
+                    | MessageState::PeelDeferred
+                    | MessageState::EpochInvalidated,
+                )
+                | None => false,
+            },
             None => false,
         })
     }
@@ -7417,11 +7626,7 @@ impl SessionManager {
         session: &AccountDeviceSession,
         fanout: &OutboundFanout,
     ) -> Option<PendingStateRef> {
-        let Some(EpochState::PendingPublish(staged)) = session.epoch_state(fanout.group_id()?)
-        else {
-            return None;
-        };
-        let pending = staged.pending_ref();
+        let pending = Self::staged_ref_of(session, fanout.group_id()?)?;
         (fanout.mls_state() == FanoutMlsState::Confirmed
             && session.pending_origin_message_id(pending).ok().as_ref()
                 == fanout.pending_origin_message_id())
@@ -7449,14 +7654,13 @@ impl SessionManager {
             Some(origin) => session.stored_message_state(origin).map_err(map_mls_err)?,
             None => None,
         };
-        let applied = state == Some(MessageState::Processed);
-        if let Some(confirmed) = confirmed_copy(row).filter(|_| applied) {
+        let standing = commit_standing(state);
+        if let Some(confirmed) =
+            confirmed_copy(row).filter(|_| standing == AppliedCommit::Canonical)
+        {
             return session.put_outbound_fanout(&confirmed).map_err(map_mls_err);
         }
-        let ended_for_good = matches!(
-            state,
-            Some(MessageState::EpochInvalidated | MessageState::Failed)
-        );
+        let ended_for_good = standing == AppliedCommit::Lost;
         if ended_for_good && !never_attempted(row) {
             // Said before the row goes: the row is the only other trace.
             if let Some(group_id) = row.group_id() {
@@ -7664,13 +7868,9 @@ impl SessionManager {
         let Some(origin) = fanout.pending_origin_message_id() else {
             return Ok(AppliedCommit::Provisional);
         };
-        Ok(
-            match session.stored_message_state(origin).map_err(map_mls_err)? {
-                Some(MessageState::Processed) => AppliedCommit::Canonical,
-                Some(MessageState::EpochInvalidated | MessageState::Failed) => AppliedCommit::Lost,
-                _ => AppliedCommit::Provisional,
-            },
-        )
+        Ok(commit_standing(
+            session.stored_message_state(origin).map_err(map_mls_err)?,
+        ))
     }
 
     /// Stores `fanout`'s target states. MDK's storage refuses an update that
@@ -7771,7 +7971,8 @@ impl SessionManager {
         // staging order holds wherever that does not decide.
         let (first, mut again): (Vec<_>, Vec<_>) = rows.into_iter().partition(|row| {
             row.target_statuses()
-                .contains(&FanoutTargetStatus::NotAttempted)
+                .iter()
+                .any(|status| status_exposure(*status) == Exposure::Unsent)
         });
         again.sort_by_key(|row| {
             (0..row.target_statuses().len())
@@ -7878,13 +8079,24 @@ impl SessionManager {
                 // restart says only that the epoch moved. The intent the
                 // engine keeps for the commit outlives its confirm and names
                 // them.
-                if let Some(SendIntent::RemoveMembers { members, .. }) =
-                    self.retire_released_change(&mut session, &id)
-                {
-                    self.dropped_removals
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .extend(members.iter().map(|member| hex::encode(member.as_slice())));
+                match self.retire_released_change(&mut session, &id) {
+                    Some(SendIntent::RemoveMembers { members, .. }) => {
+                        self.dropped_removals
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .extend(members.iter().map(|member| hex::encode(member.as_slice())));
+                    }
+                    Some(
+                        SendIntent::AppMessage { .. }
+                        | SendIntent::Invite { .. }
+                        | SendIntent::Leave { .. }
+                        | SendIntent::SelfUpdate { .. }
+                        | SendIntent::UpdateAppComponents { .. }
+                        | SendIntent::UpdateGroupData { .. }
+                        | SendIntent::EnableDisbanding { .. }
+                        | SendIntent::Disband { .. },
+                    )
+                    | None => {}
                 }
             }
         }
@@ -8267,7 +8479,15 @@ impl SessionManager {
                 Ok(Some(MessageState::EpochInvalidated | MessageState::Failed) | None) => {
                     return WelcomeFate::Lost;
                 }
-                _ => return WelcomeFate::Waiting,
+                Ok(Some(
+                    MessageState::Sent
+                    | MessageState::Created
+                    | MessageState::Retryable
+                    | MessageState::ConvergenceDeferred
+                    | MessageState::PeelDeferred,
+                ))
+                // An unread state is not proof the commit is lost.
+                | Err(_) => return WelcomeFate::Waiting,
             }
         }
         match welcome_still_wanted(&session, &record.0) {
@@ -8484,7 +8704,14 @@ impl SessionManager {
                     cgka_engine::key_package_metadata(package)
                         .is_ok_and(|metadata| metadata.credential_identity_hex == recipient)
                 }),
-                _ => false,
+                SendIntent::AppMessage { .. }
+                | SendIntent::RemoveMembers { .. }
+                | SendIntent::Leave { .. }
+                | SendIntent::SelfUpdate { .. }
+                | SendIntent::UpdateAppComponents { .. }
+                | SendIntent::UpdateGroupData { .. }
+                | SendIntent::EnableDisbanding { .. }
+                | SendIntent::Disband { .. } => false,
             })
     }
 
@@ -8519,7 +8746,7 @@ impl SessionManager {
         let session = self.reading().await;
         for mut fanout in session.outbound_fanouts().map_err(map_mls_err)? {
             let rate_limited = (0..fanout.target_statuses().len()).any(|index| {
-                fanout.target_status(index) == Some(FanoutTargetStatus::RetryableUnavailable)
+                fanout.target_status(index).map(status_exposure) == Some(Exposure::Unreached)
                     && fanout
                         .target_failure(index)
                         .is_some_and(|failure| failure.rejection_category.is_some())
@@ -8780,10 +9007,8 @@ impl SessionManager {
     /// and never replaced). It ends when the engine's own convergence has
     /// disposed of the commit, after which the record reads stale.
     fn blocked_by_unheld_fanout(session: &AccountDeviceSession, group_id: &GroupId) -> bool {
-        !matches!(
-            session.epoch_state(group_id),
-            Some(EpochState::PendingPublish(_))
-        ) && Self::has_unresolved_fanout(session, group_id)
+        Self::staged_ref_of(session, group_id).is_none()
+            && Self::has_unresolved_fanout(session, group_id)
     }
 
     /// Whether `group_id` has a pending commit record whose commit is still
@@ -8829,7 +9054,10 @@ impl SessionManager {
                         || Self::has_unresolved_fanout(session, group_id)
                 })
                 .map(|group_id| (*pending, Self::has_unresolved_fanout(session, &group_id))),
-            _ => None,
+            PublishWork::ApplicationMessage { .. }
+            | PublishWork::Proposal { .. }
+            | PublishWork::GroupCreated { .. }
+            | PublishWork::FoundingGroupCreated { .. } => None,
         };
         if !effects
             .publish
@@ -9603,13 +9831,25 @@ impl SessionManager {
         self.note_state_inputs(batch.events(), batch.proposals());
         self.note_stall_evidence(held, batch.events());
         for event in batch.events() {
-            if let GroupEvent::GroupStateRevalidated {
-                group_id,
-                revalidated_commit_id,
-                ..
-            } = event
-            {
-                self.note_revalidated_removal(held, group_id, revalidated_commit_id);
+            match event {
+                GroupEvent::GroupStateRevalidated {
+                    group_id,
+                    revalidated_commit_id,
+                    ..
+                } => self.note_revalidated_removal(held, group_id, revalidated_commit_id),
+                GroupEvent::GroupCreated { .. }
+                | GroupEvent::GroupJoined { .. }
+                | GroupEvent::TransportObjectResourceRefused { .. }
+                | GroupEvent::MessageReceived { .. }
+                | GroupEvent::AppMessageInvalidated { .. }
+                | GroupEvent::GroupStateChanged { .. }
+                | GroupEvent::GroupHydrationQuarantined { .. }
+                | GroupEvent::EpochChanged { .. }
+                | GroupEvent::CommitRolledBack { .. }
+                | GroupEvent::GroupStateInvalidated { .. }
+                | GroupEvent::GroupUnrecoverable { .. }
+                | GroupEvent::PendingCommitRecovered { .. }
+                | GroupEvent::GroupHydrationRecovered { .. } => {}
             }
         }
     }
@@ -9620,7 +9860,19 @@ impl SessionManager {
     fn note_state_inputs(&self, events: &[GroupEvent], proposals: &[GroupId]) {
         let moved = events.iter().filter_map(|event| match event {
             GroupEvent::EpochChanged { group_id, .. } => Some(group_id),
-            _ => None,
+            GroupEvent::GroupCreated { .. }
+            | GroupEvent::GroupJoined { .. }
+            | GroupEvent::TransportObjectResourceRefused { .. }
+            | GroupEvent::MessageReceived { .. }
+            | GroupEvent::AppMessageInvalidated { .. }
+            | GroupEvent::GroupStateChanged { .. }
+            | GroupEvent::GroupHydrationQuarantined { .. }
+            | GroupEvent::CommitRolledBack { .. }
+            | GroupEvent::GroupStateInvalidated { .. }
+            | GroupEvent::GroupStateRevalidated { .. }
+            | GroupEvent::GroupUnrecoverable { .. }
+            | GroupEvent::PendingCommitRecovered { .. }
+            | GroupEvent::GroupHydrationRecovered { .. } => None,
         });
         let mut inputs = moved.chain(proposals).peekable();
         if inputs.peek().is_none() {
@@ -9640,6 +9892,7 @@ impl SessionManager {
     /// the refused objects it must refetch, an end to the wait a circle
     /// whose epoch has moved was serving ([`Self::restaging_held`]), and
     /// another try at what it keeps of that circle's stranded input.
+    #[allow(clippy::too_many_lines)]
     fn note_batch(&self, _held: &AccountDeviceSession, events: &[GroupEvent]) {
         // A member the convergence diff announces as added because this
         // batch withdraws the commit that had taken them out is restored, not
@@ -9651,7 +9904,19 @@ impl SessionManager {
                     invalidated_commit_id,
                     ..
                 } => Some(invalidated_commit_id),
-                _ => None,
+                GroupEvent::GroupCreated { .. }
+                | GroupEvent::GroupJoined { .. }
+                | GroupEvent::TransportObjectResourceRefused { .. }
+                | GroupEvent::MessageReceived { .. }
+                | GroupEvent::AppMessageInvalidated { .. }
+                | GroupEvent::GroupStateChanged { .. }
+                | GroupEvent::GroupHydrationQuarantined { .. }
+                | GroupEvent::EpochChanged { .. }
+                | GroupEvent::CommitRolledBack { .. }
+                | GroupEvent::GroupStateRevalidated { .. }
+                | GroupEvent::GroupUnrecoverable { .. }
+                | GroupEvent::PendingCommitRecovered { .. }
+                | GroupEvent::GroupHydrationRecovered { .. } => None,
             })
             .collect();
         let mut refused: HashMap<GroupId, Vec<nostr::EventId>> = HashMap::new();
@@ -9707,12 +9972,40 @@ impl SessionManager {
                     invalidated_commit_id,
                     ..
                 } => self.note_withdrawn_removal(group_id, invalidated_commit_id),
-                _ => {}
+                GroupEvent::GroupCreated { .. }
+                | GroupEvent::GroupJoined { .. }
+                | GroupEvent::TransportObjectResourceRefused { .. }
+                | GroupEvent::MessageReceived { .. }
+                | GroupEvent::AppMessageInvalidated { .. }
+                | GroupEvent::GroupStateChanged { .. }
+                | GroupEvent::GroupHydrationQuarantined { .. }
+                | GroupEvent::EpochChanged { .. }
+                | GroupEvent::CommitRolledBack { .. }
+                | GroupEvent::GroupStateRevalidated { .. }
+                | GroupEvent::GroupUnrecoverable { .. }
+                | GroupEvent::PendingCommitRecovered { .. }
+                | GroupEvent::GroupHydrationRecovered { .. } => {}
             }
             // A circle whose epoch has moved may now open, or have room for,
             // what the engine erred on or refused when Haven last handed it
             // back: a look, at which each is tried once more.
-            if let GroupEvent::EpochChanged { group_id, from, .. } = event {
+            let moved = match event {
+                GroupEvent::EpochChanged { group_id, from, .. } => Some((group_id, from)),
+                GroupEvent::GroupCreated { .. }
+                | GroupEvent::GroupJoined { .. }
+                | GroupEvent::TransportObjectResourceRefused { .. }
+                | GroupEvent::MessageReceived { .. }
+                | GroupEvent::AppMessageInvalidated { .. }
+                | GroupEvent::GroupStateChanged { .. }
+                | GroupEvent::GroupHydrationQuarantined { .. }
+                | GroupEvent::CommitRolledBack { .. }
+                | GroupEvent::GroupStateInvalidated { .. }
+                | GroupEvent::GroupStateRevalidated { .. }
+                | GroupEvent::GroupUnrecoverable { .. }
+                | GroupEvent::PendingCommitRecovered { .. }
+                | GroupEvent::GroupHydrationRecovered { .. } => None,
+            };
+            if let Some((group_id, from)) = moved {
                 // From the tip before the pass: one that rewinds announces
                 // its withdrawals after this, and may bring back a target
                 // taken out at any epoch it rewound.
@@ -9734,17 +10027,31 @@ impl SessionManager {
                     self.flag_stranded(group_id);
                 }
             }
-            if let GroupEvent::TransportObjectResourceRefused {
-                group_id,
-                message_id,
-                ..
-            } = event
-            {
-                // A transport message id is the Nostr event id's bytes
-                // (MDK v0.10.4 `transport-nostr-peeler/src/event.rs:40`).
-                if let Ok(id) = nostr::EventId::from_slice(message_id.as_slice()) {
-                    refused.entry(group_id.clone()).or_default().push(id);
+            match event {
+                GroupEvent::TransportObjectResourceRefused {
+                    group_id,
+                    message_id,
+                    ..
+                } => {
+                    // A transport message id is the Nostr event id's bytes
+                    // (MDK v0.10.4 `transport-nostr-peeler/src/event.rs:40`).
+                    if let Ok(id) = nostr::EventId::from_slice(message_id.as_slice()) {
+                        refused.entry(group_id.clone()).or_default().push(id);
+                    }
                 }
+                GroupEvent::GroupCreated { .. }
+                | GroupEvent::GroupJoined { .. }
+                | GroupEvent::MessageReceived { .. }
+                | GroupEvent::AppMessageInvalidated { .. }
+                | GroupEvent::GroupStateChanged { .. }
+                | GroupEvent::GroupHydrationQuarantined { .. }
+                | GroupEvent::EpochChanged { .. }
+                | GroupEvent::CommitRolledBack { .. }
+                | GroupEvent::GroupStateInvalidated { .. }
+                | GroupEvent::GroupStateRevalidated { .. }
+                | GroupEvent::GroupUnrecoverable { .. }
+                | GroupEvent::PendingCommitRecovered { .. }
+                | GroupEvent::GroupHydrationRecovered { .. } => {}
             }
         }
         // After the fold above: a target this same batch brought back is
@@ -9786,7 +10093,17 @@ impl SessionManager {
                 } if held.epoch(group_id).is_ok_and(|current| current == *epoch) => {
                     self.peer_heard(group_id);
                 }
-                _ => {}
+                GroupEvent::GroupCreated { .. }
+                | GroupEvent::TransportObjectResourceRefused { .. }
+                | GroupEvent::MessageReceived { .. }
+                | GroupEvent::AppMessageInvalidated { .. }
+                | GroupEvent::GroupStateChanged { .. }
+                | GroupEvent::GroupHydrationQuarantined { .. }
+                | GroupEvent::CommitRolledBack { .. }
+                | GroupEvent::GroupStateRevalidated { .. }
+                | GroupEvent::GroupUnrecoverable { .. }
+                | GroupEvent::PendingCommitRecovered { .. }
+                | GroupEvent::GroupHydrationRecovered { .. } => {}
             }
         }
     }
@@ -10459,11 +10776,11 @@ impl SessionManager {
             self.commit_notes.unanswered(id);
             return HandedBack::Unanswered;
         };
-        // An unknown route is dropped without a trace by design, and no
-        // redelivery changes that: nothing is owed for it.
-        let refused = matches!(ingested.outcome, IngestOutcome::ResourceRefused { .. })
-            || (ingested.left_object_unpersisted
-                && !matches!(ingested.outcome, IngestOutcome::Ignored { .. }));
+        let refused = match ingest_disposition(&ingested.outcome, ingested.left_object_unpersisted)
+        {
+            Disposition::TakenIn => false,
+            Disposition::NoRoom | Disposition::Unpersisted => true,
+        };
         #[cfg(any(test, feature = "test-utils"))]
         let unrecorded = self.unless_faulted(StoreFault::Ledger, Some(())).is_none();
         #[cfg(not(any(test, feature = "test-utils")))]
@@ -10483,7 +10800,13 @@ impl SessionManager {
                             .has_processed_transport_id(id)
                             .unwrap_or(false)
                 }
-                _ => true,
+                IngestOutcome::Processed
+                | IngestOutcome::Ignored { .. }
+                | IngestOutcome::LocalState { .. }
+                | IngestOutcome::TransportDeferred { .. }
+                | IngestOutcome::ResourceRefused { .. }
+                | IngestOutcome::Stale { .. }
+                | IngestOutcome::Rejected { .. } => true,
             }
         };
         if taken {
@@ -10759,8 +11082,23 @@ impl SessionManager {
             .into_iter()
             .collect();
         for event in &ingested.effects.events {
-            if let GroupEvent::TransportObjectResourceRefused { group_id, .. } = event {
-                observed.push((group_id.clone(), StallInput::Refused));
+            match event {
+                GroupEvent::TransportObjectResourceRefused { group_id, .. } => {
+                    observed.push((group_id.clone(), StallInput::Refused));
+                }
+                GroupEvent::GroupCreated { .. }
+                | GroupEvent::GroupJoined { .. }
+                | GroupEvent::MessageReceived { .. }
+                | GroupEvent::AppMessageInvalidated { .. }
+                | GroupEvent::GroupStateChanged { .. }
+                | GroupEvent::GroupHydrationQuarantined { .. }
+                | GroupEvent::EpochChanged { .. }
+                | GroupEvent::CommitRolledBack { .. }
+                | GroupEvent::GroupStateInvalidated { .. }
+                | GroupEvent::GroupStateRevalidated { .. }
+                | GroupEvent::GroupUnrecoverable { .. }
+                | GroupEvent::PendingCommitRecovered { .. }
+                | GroupEvent::GroupHydrationRecovered { .. } => {}
             }
         }
         let now_ms = self.legacy_now_ms();
@@ -11569,12 +11907,22 @@ impl SessionManager {
             .list_queued_outbound_intents(group_id)
             .map_err(map_storage_err)?
         {
-            if let SendIntent::UpdateAppComponents { updates, .. } = &queued.intent {
-                for update in updates {
-                    if update.component_id == GROUP_ADMIN_POLICY_COMPONENT_ID {
-                        out.push(update.data.clone());
+            match &queued.intent {
+                SendIntent::UpdateAppComponents { updates, .. } => {
+                    for update in updates {
+                        if update.component_id == GROUP_ADMIN_POLICY_COMPONENT_ID {
+                            out.push(update.data.clone());
+                        }
                     }
                 }
+                SendIntent::AppMessage { .. }
+                | SendIntent::Invite { .. }
+                | SendIntent::RemoveMembers { .. }
+                | SendIntent::Leave { .. }
+                | SendIntent::SelfUpdate { .. }
+                | SendIntent::UpdateGroupData { .. }
+                | SendIntent::EnableDisbanding { .. }
+                | SendIntent::Disband { .. } => {}
             }
         }
         Ok(out)
@@ -11931,7 +12279,23 @@ impl SessionManager {
         if let Ok(ingest) = &accepted {
             self.note_effects(&session, ingest);
             for event in &ingest.effects.events {
-                if let GroupEvent::GroupJoined { group_id, .. } = event {
+                let joined = match event {
+                    GroupEvent::GroupJoined { group_id, .. } => Some(group_id),
+                    GroupEvent::GroupCreated { .. }
+                    | GroupEvent::TransportObjectResourceRefused { .. }
+                    | GroupEvent::MessageReceived { .. }
+                    | GroupEvent::AppMessageInvalidated { .. }
+                    | GroupEvent::GroupStateChanged { .. }
+                    | GroupEvent::GroupHydrationQuarantined { .. }
+                    | GroupEvent::EpochChanged { .. }
+                    | GroupEvent::CommitRolledBack { .. }
+                    | GroupEvent::GroupStateInvalidated { .. }
+                    | GroupEvent::GroupStateRevalidated { .. }
+                    | GroupEvent::GroupUnrecoverable { .. }
+                    | GroupEvent::PendingCommitRecovered { .. }
+                    | GroupEvent::GroupHydrationRecovered { .. } => None,
+                };
+                if let Some(group_id) = joined {
                     self.drop_rows_of_replaced_copy(&session, group_id, &before.0, &before.1);
                     // A group joined anew starts at the epoch its Welcome
                     // names: a commit the pager held back for an earlier copy
@@ -11958,7 +12322,7 @@ impl SessionManager {
         match accepted {
             Ok(ingest) => Ok(match ingest.outcome {
                 IngestOutcome::Ignored {
-                    category: cgka_traits::ingest::InputRejectionCategory::Duplicate,
+                    category: InputRejectionCategory::Duplicate,
                 } => match self.live_group_joined_by(&gift_wrap.id).await {
                     Some(group_id) => WelcomeAcceptance::AlreadyJoined {
                         group_id,
@@ -11970,7 +12334,13 @@ impl SessionManager {
                 IngestOutcome::LocalState {
                     state: LocalIngestState::RejoinConfirmationRequired,
                 } => WelcomeAcceptance::RejoinConfirmationRequired,
-                _ => WelcomeAcceptance::Ingested(ingest),
+                IngestOutcome::Processed
+                | IngestOutcome::Buffered { .. }
+                | IngestOutcome::LocalState { .. }
+                | IngestOutcome::TransportDeferred { .. }
+                | IngestOutcome::ResourceRefused { .. }
+                | IngestOutcome::Stale { .. }
+                | IngestOutcome::Rejected { .. } => WelcomeAcceptance::Ingested(ingest),
             }),
             Err(e) => Err(map_mls_err(e)),
         }
@@ -12615,7 +12985,12 @@ impl SessionManager {
             .any(|row| {
                 row.group_id() == Some(group_id)
                     && (row.pending_ref().is_some()
-                        || row.mls_state() == FanoutMlsState::RolledBack)
+                        || match row.mls_state() {
+                            FanoutMlsState::RolledBack => true,
+                            FanoutMlsState::NotApplicable
+                            | FanoutMlsState::Pending(_)
+                            | FanoutMlsState::Confirmed => false,
+                        })
             });
         if pending {
             return Ok(false);
@@ -12955,7 +13330,11 @@ impl SessionManager {
             .into_iter()
             .find_map(|work| match work {
                 PublishWork::ApplicationMessage { msg, .. } => Some(msg),
-                _ => None,
+                PublishWork::Proposal { .. }
+                | PublishWork::GroupEvolution { .. }
+                | PublishWork::GroupCreated { .. }
+                | PublishWork::FoundingGroupCreated { .. }
+                | PublishWork::AutoPublish { .. } => None,
             })
             .ok_or(NostrError::MdkError(
                 "send produced no application message to reseal",
@@ -13238,29 +13617,26 @@ fn scan_group_inputs(
     for record in store.list_messages(group_id, anchor)? {
         // The engine builds its commit-edge context from every retained state
         // it classifies (`GATE_CLASSIFIER_STATES`), not only the gating ones.
-        let classified = matches!(
-            record.state,
-            MessageState::Sent
-                | MessageState::Created
-                | MessageState::Retryable
-                | MessageState::ConvergenceDeferred
-                | MessageState::Processed
-        );
-        if !classified {
-            continue;
-        }
+        let may_gate = match record.state {
+            MessageState::Created | MessageState::Retryable => true,
+            MessageState::Sent | MessageState::ConvergenceDeferred | MessageState::Processed => {
+                false
+            }
+            MessageState::Failed | MessageState::PeelDeferred | MessageState::EpochInvalidated => {
+                continue
+            }
+        };
         let Some((created_at, projection)) = gating_projection(&record.payload) else {
             continue;
         };
-        let may_gate = matches!(
-            record.state,
-            MessageState::Created | MessageState::Retryable
-        );
-        if retiring
-            && may_gate
-            && projection.kind == OpenMlsContentKind::Application
-            && beyond_relay_retention(created_at, now_secs)
-        {
+        let (application, commit) = match projection.kind {
+            OpenMlsContentKind::Application => (true, false),
+            OpenMlsContentKind::Commit => (false, true),
+            OpenMlsContentKind::Proposal
+            | OpenMlsContentKind::Welcome
+            | OpenMlsContentKind::Other => (false, false),
+        };
+        if retiring && may_gate && application && beyond_relay_retention(created_at, now_secs) {
             // Retired regardless of where the row sits relative to the future
             // horizon: an application message the relay has deleted can never
             // become applicable, so keeping it "in case the tip advances into
@@ -13272,7 +13648,7 @@ fn scan_group_inputs(
         let Some(source_epoch) = projection.source_epoch.filter(|epoch| *epoch <= ceiling) else {
             continue;
         };
-        if projection.kind == OpenMlsContentKind::Commit {
+        if commit {
             commit_edges
                 .entry(source_epoch)
                 .or_default()
@@ -13289,7 +13665,9 @@ fn scan_group_inputs(
             OpenMlsContentKind::Application => commit_edges
                 .range(..*source_epoch)
                 .any(|(_, edges)| edges.len() > 1),
-            _ => false,
+            OpenMlsContentKind::Proposal
+            | OpenMlsContentKind::Welcome
+            | OpenMlsContentKind::Other => false,
         })
         .count();
 
@@ -13476,8 +13854,15 @@ fn replays_nothing(
 /// nobody opened (`cgka-engine/src/message_processor/store.rs` 560-561), in
 /// the one state it writes such a row in. One decode, and no read.
 fn unopened_event(record: &MessageRecord) -> Option<cgka_traits::transport::TransportMessage> {
-    if record.state != MessageState::Retryable {
-        return None;
+    match record.state {
+        MessageState::Retryable => {}
+        MessageState::Sent
+        | MessageState::Created
+        | MessageState::Processed
+        | MessageState::Failed
+        | MessageState::ConvergenceDeferred
+        | MessageState::PeelDeferred
+        | MessageState::EpochInvalidated => return None,
     }
     StoredMessagePayload::decode(&record.payload)
         .ok()
@@ -13682,16 +14067,40 @@ fn find_stranded(
     stranded
 }
 
+/// Where a commit stands by the state its row is stored in: applied, set
+/// aside for good (`Failed` is Haven's own retirement), or neither yet.
+const fn commit_standing(state: Option<MessageState>) -> AppliedCommit {
+    match state {
+        Some(MessageState::Processed) => AppliedCommit::Canonical,
+        Some(MessageState::EpochInvalidated | MessageState::Failed) => AppliedCommit::Lost,
+        Some(
+            MessageState::Sent
+            | MessageState::Created
+            | MessageState::Retryable
+            | MessageState::ConvergenceDeferred
+            | MessageState::PeelDeferred,
+        )
+        | None => AppliedCommit::Provisional,
+    }
+}
+
 /// Marks this device's own commit `origin` `Failed` if it is still stored as
 /// sent, so no convergence pass selects it (T-ROLLBACK-RESURRECT). That row
 /// and no other: a second unresolved own commit of the same epoch may be one
 /// a relay holds.
 fn retire_commit(store: &SqliteAccountStorage, origin: &MessageId) -> StorageResult<()> {
     match store.get_message(origin) {
-        Ok(record) if record.state == MessageState::Sent => {
-            store.update_message_state(origin, MessageState::Failed)
-        }
-        Ok(_) | Err(StorageError::NotFound) => Ok(()),
+        Ok(record) => match record.state {
+            MessageState::Sent => store.update_message_state(origin, MessageState::Failed),
+            MessageState::Created
+            | MessageState::Processed
+            | MessageState::Failed
+            | MessageState::Retryable
+            | MessageState::ConvergenceDeferred
+            | MessageState::PeelDeferred
+            | MessageState::EpochInvalidated => Ok(()),
+        },
+        Err(StorageError::NotFound) => Ok(()),
         Err(e) => Err(e),
     }
 }
@@ -13801,8 +14210,15 @@ fn own_sent_commits(
     let floor = group.epoch.0.saturating_sub(1);
     let mut commits = Vec::new();
     for record in store.list_messages(&group.id, EpochId(floor))? {
-        if record.state != MessageState::Sent {
-            continue;
+        match record.state {
+            MessageState::Sent => {}
+            MessageState::Created
+            | MessageState::Processed
+            | MessageState::Failed
+            | MessageState::Retryable
+            | MessageState::ConvergenceDeferred
+            | MessageState::PeelDeferred
+            | MessageState::EpochInvalidated => continue,
         }
         let Ok(payload) = StoredMessagePayload::decode(&record.payload) else {
             continue;
@@ -13810,7 +14226,13 @@ fn own_sent_commits(
         let source = payload
             .as_openmls_wire()
             .and_then(|wire| project_mls_message(&wire.payload).ok())
-            .filter(|projection| projection.kind == OpenMlsContentKind::Commit)
+            .filter(|projection| match projection.kind {
+                OpenMlsContentKind::Commit => true,
+                OpenMlsContentKind::Application
+                | OpenMlsContentKind::Proposal
+                | OpenMlsContentKind::Welcome
+                | OpenMlsContentKind::Other => false,
+            })
             .and_then(|projection| projection.source_epoch);
         if let Some(source) = source.filter(|source| *source >= floor) {
             commits.push((record.id, source, payload.as_exact_transport().cloned()));
@@ -13925,13 +14347,11 @@ fn settle_fanouts_before_open(
                     },
                     None => None,
                 };
-                let applied = state == Some(MessageState::Processed);
+                let standing = commit_standing(state);
+                let applied = standing == AppliedCommit::Canonical;
                 // As `SessionManager::settle_stale_row` says it: a commit a
                 // relay may hold that ended for good without being applied.
-                let ended_for_good = matches!(
-                    state,
-                    Some(MessageState::EpochInvalidated | MessageState::Failed)
-                );
+                let ended_for_good = standing == AppliedCommit::Lost;
                 if ended_for_good && !never_attempted(fanout) {
                     if !notes.note(group_id, ChangeNote::MayBeOutOfStep) {
                         return Err(unnoted());
@@ -14001,17 +14421,24 @@ fn clear_unrecorded_self_updates(
     let recorded: HashSet<MessageId> = store
         .list_outbound_fanouts()?
         .iter()
-        .filter(|fanout| matches!(fanout.mls_state(), FanoutMlsState::Pending(_)))
+        .filter(|fanout| match fanout.mls_state() {
+            FanoutMlsState::Pending(_) => true,
+            FanoutMlsState::NotApplicable
+            | FanoutMlsState::Confirmed
+            | FanoutMlsState::RolledBack => false,
+        })
         .filter_map(|fanout| fanout.pending_origin_message_id().cloned())
         .collect();
     for evolution in store.list_group_evolutions()? {
         let orphan = matches!(
             evolution.semantic,
             GroupEvolutionSemantic::SelfUpdate { .. }
-        ) && !matches!(
-            evolution.phase,
-            GroupEvolutionPhase::Confirmed | GroupEvolutionPhase::SupersededByConvergence
-        ) && evolution
+        ) && match evolution.phase {
+            GroupEvolutionPhase::Confirmed | GroupEvolutionPhase::SupersededByConvergence => false,
+            GroupEvolutionPhase::Preparing
+            | GroupEvolutionPhase::Prepared
+            | GroupEvolutionPhase::Attempting => true,
+        } && evolution
             .signed_message_id
             .as_ref()
             .is_none_or(|signed| !recorded.contains(signed));
@@ -14055,15 +14482,17 @@ fn reservation_held<E>(
 /// (`cgka-engine/src/message_processor/mod.rs` 3766-3776). Haven sends the
 /// first three.
 const fn changes_group(intent: &SendIntent) -> bool {
-    matches!(
-        intent,
+    match intent {
         SendIntent::Invite { .. }
-            | SendIntent::RemoveMembers { .. }
-            | SendIntent::UpdateAppComponents { .. }
-            | SendIntent::UpdateGroupData { .. }
-            | SendIntent::EnableDisbanding { .. }
-            | SendIntent::Disband { .. }
-    )
+        | SendIntent::RemoveMembers { .. }
+        | SendIntent::UpdateAppComponents { .. }
+        | SendIntent::UpdateGroupData { .. }
+        | SendIntent::EnableDisbanding { .. }
+        | SendIntent::Disband { .. } => true,
+        SendIntent::AppMessage { .. }
+        | SendIntent::Leave { .. }
+        | SendIntent::SelfUpdate { .. } => false,
+    }
 }
 
 /// `group_id`'s queued changes of the group, oldest first; none when the
@@ -14128,7 +14557,18 @@ fn retire_queued_group_changes(
         // are all gone takes its note back at the open by itself
         // ([`removal_unmade`]).
         for own in store.list_own_commit_intents(Some(&group_id))? {
-            if !matches!(own.intent, SendIntent::RemoveMembers { .. })
+            let removal = match own.intent {
+                SendIntent::RemoveMembers { .. } => true,
+                SendIntent::AppMessage { .. }
+                | SendIntent::Invite { .. }
+                | SendIntent::Leave { .. }
+                | SendIntent::SelfUpdate { .. }
+                | SendIntent::UpdateAppComponents { .. }
+                | SendIntent::UpdateGroupData { .. }
+                | SendIntent::EnableDisbanding { .. }
+                | SendIntent::Disband { .. } => false,
+            };
+            if !removal
                 && matches!(
                     store.get_message(&own.commit_id).map(|stored| stored.state),
                     Ok(MessageState::Processed)
@@ -14142,7 +14582,14 @@ fn retire_queued_group_changes(
             let told = !being_made.contains(&queued.intent);
             let named: &[MemberId] = match &queued.intent {
                 SendIntent::RemoveMembers { members, .. } => members,
-                _ => &[],
+                SendIntent::AppMessage { .. }
+                | SendIntent::Invite { .. }
+                | SendIntent::Leave { .. }
+                | SendIntent::SelfUpdate { .. }
+                | SendIntent::UpdateAppComponents { .. }
+                | SendIntent::UpdateGroupData { .. }
+                | SendIntent::EnableDisbanding { .. }
+                | SendIntent::Disband { .. } => &[],
             };
             let dropped = if named.is_empty() {
                 ChangeNote::QueuedChangeDropped
@@ -14173,12 +14620,23 @@ fn retire_queued_group_changes(
                 return Err(e);
             }
             // A retired invite stages no Welcome: the routes kept for it go.
-            if let SendIntent::Invite { key_packages, .. } = &queued.intent {
-                for package in key_packages {
-                    if let Ok(metadata) = cgka_engine::key_package_metadata(package) {
-                        notes.forget_welcome_route(&group_id, &metadata.credential_identity_hex);
+            match &queued.intent {
+                SendIntent::Invite { key_packages, .. } => {
+                    for package in key_packages {
+                        if let Ok(metadata) = cgka_engine::key_package_metadata(package) {
+                            notes
+                                .forget_welcome_route(&group_id, &metadata.credential_identity_hex);
+                        }
                     }
                 }
+                SendIntent::AppMessage { .. }
+                | SendIntent::RemoveMembers { .. }
+                | SendIntent::Leave { .. }
+                | SendIntent::SelfUpdate { .. }
+                | SendIntent::UpdateAppComponents { .. }
+                | SendIntent::UpdateGroupData { .. }
+                | SendIntent::EnableDisbanding { .. }
+                | SendIntent::Disband { .. } => {}
             }
         }
     }
@@ -14250,7 +14708,18 @@ fn passes_of_several_commits(events: &[GroupEvent]) -> Vec<GroupId> {
                     None => passes.push((group_id.clone(), 1)),
                 }
             }
-            _ => {}
+            GroupEvent::GroupCreated { .. }
+            | GroupEvent::GroupJoined { .. }
+            | GroupEvent::TransportObjectResourceRefused { .. }
+            | GroupEvent::MessageReceived { .. }
+            | GroupEvent::AppMessageInvalidated { .. }
+            | GroupEvent::GroupStateChanged { .. }
+            | GroupEvent::GroupHydrationQuarantined { .. }
+            | GroupEvent::CommitRolledBack { .. }
+            | GroupEvent::GroupStateRevalidated { .. }
+            | GroupEvent::GroupUnrecoverable { .. }
+            | GroupEvent::PendingCommitRecovered { .. }
+            | GroupEvent::GroupHydrationRecovered { .. } => {}
         }
     }
     let mut several: Vec<GroupId> = Vec::new();
@@ -14291,15 +14760,23 @@ fn welcome_standing(
         return WelcomeStanding::Owed(welcome);
     }
     match store.get_message(id) {
-        Ok(row) if row.state == MessageState::Processed => WelcomeStanding::Done,
-        Ok(row) if row.state != MessageState::Sent => WelcomeStanding::Undeliverable,
-        Ok(row)
-            if StoredMessagePayload::decode(&row.payload)
-                .is_ok_and(|payload| payload.as_staged_invite_welcome().is_some()) =>
-        {
-            WelcomeStanding::Undeliverable
-        }
-        _ => WelcomeStanding::Unknown,
+        Ok(row) => match row.state {
+            MessageState::Processed => WelcomeStanding::Done,
+            MessageState::Created
+            | MessageState::Failed
+            | MessageState::Retryable
+            | MessageState::ConvergenceDeferred
+            | MessageState::PeelDeferred
+            | MessageState::EpochInvalidated => WelcomeStanding::Undeliverable,
+            MessageState::Sent
+                if StoredMessagePayload::decode(&row.payload)
+                    .is_ok_and(|payload| payload.as_staged_invite_welcome().is_some()) =>
+            {
+                WelcomeStanding::Undeliverable
+            }
+            MessageState::Sent => WelcomeStanding::Unknown,
+        },
+        Err(_) => WelcomeStanding::Unknown,
     }
 }
 
@@ -14323,16 +14800,15 @@ fn welcome_still_wanted(
     if group.is_terminal() {
         return Some(false);
     }
-    if matches!(
-        session.epoch_state(group_id),
-        Some(EpochState::PendingPublish(_))
-    ) {
+    if SessionManager::staged_ref_of(session, group_id).is_some() {
         return None;
     }
-    let TransportPublishTarget::Inbox { recipient, .. } = &record.target else {
-        return Some(true);
-    };
-    Some(group.members.iter().any(|member| &member.id == recipient))
+    match &record.target {
+        TransportPublishTarget::Inbox { recipient, .. } => {
+            Some(group.members.iter().any(|member| &member.id == recipient))
+        }
+        TransportPublishTarget::Group { .. } => Some(true),
+    }
 }
 
 /// The circles holding fetched input not yet taken in
@@ -14645,7 +15121,17 @@ fn try_recordless_removals(
         let removes = source == group.epoch.0
             && store
                 .own_commit_intent(&origin)?
-                .is_some_and(|intent| matches!(intent.intent, SendIntent::RemoveMembers { .. }));
+                .is_some_and(|intent| match intent.intent {
+                    SendIntent::RemoveMembers { .. } => true,
+                    SendIntent::AppMessage { .. }
+                    | SendIntent::Invite { .. }
+                    | SendIntent::Leave { .. }
+                    | SendIntent::SelfUpdate { .. }
+                    | SendIntent::UpdateAppComponents { .. }
+                    | SendIntent::UpdateGroupData { .. }
+                    | SendIntent::EnableDisbanding { .. }
+                    | SendIntent::Disband { .. } => false,
+                });
         if !removes {
             // A change of this device's own that removes nobody: the engine
             // is about to clear it, and its row is retired once it has
@@ -14909,10 +15395,17 @@ fn proposal_stands(
         read += 1;
         stands = read > cap
             || (record.epoch == group.epoch
-                && gating_projection(&record.payload).is_some_and(|(_, projection)| {
-                    projection.kind == OpenMlsContentKind::Proposal
-                        && projection.source_epoch == Some(group.epoch.0)
-                }));
+                && gating_projection(&record.payload).is_some_and(
+                    |(_, projection)| match projection.kind {
+                        OpenMlsContentKind::Proposal => {
+                            projection.source_epoch == Some(group.epoch.0)
+                        }
+                        OpenMlsContentKind::Application
+                        | OpenMlsContentKind::Commit
+                        | OpenMlsContentKind::Welcome
+                        | OpenMlsContentKind::Other => false,
+                    },
+                ));
         !stands
     })?;
     Ok(stands)
@@ -14957,17 +15450,24 @@ fn pending_proposal_in_window(
     let ceiling = group.epoch.0.saturating_add(rewind);
 
     for record in store.list_messages(group_id, anchor)? {
-        if !matches!(
-            record.state,
-            MessageState::Created | MessageState::Retryable
-        ) {
-            continue;
+        match record.state {
+            MessageState::Created | MessageState::Retryable => {}
+            MessageState::Sent
+            | MessageState::Processed
+            | MessageState::Failed
+            | MessageState::ConvergenceDeferred
+            | MessageState::PeelDeferred
+            | MessageState::EpochInvalidated => continue,
         }
         let Some((_created_at, projection)) = gating_projection(&record.payload) else {
             continue;
         };
-        if projection.kind != OpenMlsContentKind::Proposal {
-            continue;
+        match projection.kind {
+            OpenMlsContentKind::Proposal => {}
+            OpenMlsContentKind::Application
+            | OpenMlsContentKind::Commit
+            | OpenMlsContentKind::Welcome
+            | OpenMlsContentKind::Other => continue,
         }
         // No source epoch is not "harmless": an undatable proposal cannot be
         // shown to be superseded, so it counts. Production always carries one
@@ -15309,11 +15809,7 @@ fn is_proposal_record(fanout: &OutboundFanout) -> bool {
 /// Whether no attempt was ever begun under `fanout` and nothing says a relay
 /// may hold its event: nothing was sent under this record.
 fn never_attempted(fanout: &OutboundFanout) -> bool {
-    !fanout.possible_exposure()
-        && fanout
-            .target_statuses()
-            .iter()
-            .all(|status| *status == FanoutTargetStatus::NotAttempted)
+    !fanout.possible_exposure() && no_target_attempted(fanout)
 }
 
 /// The circle a send is for.
@@ -15501,6 +15997,114 @@ mod tests {
             Some((&group, StallInput::Landing))
         );
         assert_eq!(stall_input(&IngestOutcome::Processed), None);
+    }
+
+    /// Security Rule 12, one row per engine answer: a want of room is owed a
+    /// refetch whatever was persisted, an `Ignored` exclusion is the engine's
+    /// even untraced, and any other answer is the engine's unless it kept no
+    /// trace.
+    #[test]
+    fn every_ingest_answer_has_one_disposition() {
+        use super::{ingest_disposition, Disposition};
+        use cgka_traits::ingest::{
+            DeferralLineage, InboundResourceLimit, ProposalRejectionCategory, StaleReason,
+        };
+        let group = GroupId::new(vec![7; 16]);
+        // (answer, disposition when persisted, disposition when untraced)
+        let rows = [
+            (
+                IngestOutcome::Processed,
+                Disposition::TakenIn,
+                Disposition::Unpersisted,
+            ),
+            (
+                IngestOutcome::Buffered {
+                    group_id: group.clone(),
+                    epoch: EpochId(3),
+                },
+                Disposition::TakenIn,
+                Disposition::Unpersisted,
+            ),
+            (
+                IngestOutcome::Ignored {
+                    category: InputRejectionCategory::UnknownGroup,
+                },
+                Disposition::TakenIn,
+                Disposition::TakenIn,
+            ),
+            (
+                IngestOutcome::LocalState {
+                    state: LocalIngestState::RejoinConfirmationRequired,
+                },
+                Disposition::TakenIn,
+                Disposition::Unpersisted,
+            ),
+            (
+                IngestOutcome::TransportDeferred {
+                    group_id: group.clone(),
+                    lineage: DeferralLineage::Uncontested,
+                },
+                Disposition::TakenIn,
+                Disposition::Unpersisted,
+            ),
+            (
+                IngestOutcome::ResourceRefused {
+                    group_id: group,
+                    resource: InboundResourceLimit::TransportDeferredCapacity,
+                },
+                Disposition::NoRoom,
+                Disposition::NoRoom,
+            ),
+            (
+                IngestOutcome::Stale {
+                    reason: StaleReason::AlreadyAtEpoch {
+                        current: EpochId(4),
+                        msg_epoch: EpochId(3),
+                    },
+                },
+                Disposition::TakenIn,
+                Disposition::Unpersisted,
+            ),
+            (
+                IngestOutcome::Rejected {
+                    category: ProposalRejectionCategory::AuthorizationFailed,
+                },
+                Disposition::TakenIn,
+                Disposition::Unpersisted,
+            ),
+        ];
+        for (outcome, persisted, untraced) in rows {
+            assert_eq!(
+                ingest_disposition(&outcome, false),
+                persisted,
+                "{outcome:?}"
+            );
+            assert_eq!(ingest_disposition(&outcome, true), untraced, "{outcome:?}");
+        }
+    }
+
+    /// Security Rule 13: only a processed commit is applied, and only an
+    /// invalidated or retired one is set aside for good.
+    #[test]
+    fn a_commit_stands_by_its_stored_state() {
+        use super::commit_standing;
+        let rows = [
+            (Some(MessageState::Processed), AppliedCommit::Canonical),
+            (Some(MessageState::EpochInvalidated), AppliedCommit::Lost),
+            (Some(MessageState::Failed), AppliedCommit::Lost),
+            (Some(MessageState::Sent), AppliedCommit::Provisional),
+            (Some(MessageState::Created), AppliedCommit::Provisional),
+            (Some(MessageState::Retryable), AppliedCommit::Provisional),
+            (
+                Some(MessageState::ConvergenceDeferred),
+                AppliedCommit::Provisional,
+            ),
+            (Some(MessageState::PeelDeferred), AppliedCommit::Provisional),
+            (None, AppliedCommit::Provisional),
+        ];
+        for (state, standing) in rows {
+            assert_eq!(commit_standing(state), standing, "{state:?}");
+        }
     }
 
     #[test]

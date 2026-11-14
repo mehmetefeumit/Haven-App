@@ -61,7 +61,8 @@ pub use manager::{
     REFETCH_SPACING_CAP_SECS, REQUEUE_SET_ASIDE_REMOVALS,
 };
 pub(crate) use manager::{
-    AwayHold, IngestClass, PlaneStanding, RemovalRequeue, SEND_PEEL_DRAIN_ADVANCES,
+    ingest_disposition, no_target_attempted, status_exposure, AwayHold, Disposition, Exposure,
+    IngestClass, PlaneStanding, RemovalRequeue, SEND_PEEL_DRAIN_ADVANCES,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use manager::{HandBackStop, StoreFault, ORDER_PANIC_FOR_TEST};

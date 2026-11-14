@@ -126,6 +126,8 @@
 //! After its first day a pending commit a relay may hold asks for no wake of
 //! its own and goes to a relay once an hour at most ([`hourly_floor`]).
 
+#![deny(clippy::wildcard_enum_match_arm)]
+
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
@@ -160,6 +162,7 @@ use crate::nostr::mls::AwayHold;
 use crate::nostr::mls::ChangeNote;
 use crate::nostr::mls::RemovalRequeue;
 use crate::nostr::mls::SessionManager;
+use crate::nostr::mls::{no_target_attempted, status_exposure, Exposure};
 use crate::relay::catchup::ReceiveOnlyOutcome;
 use crate::relay::{PublishResult, RelayResult};
 
@@ -937,6 +940,11 @@ impl FanoutClock for WallClock {
     }
 }
 
+/// The [`Exposure`] of `fanout`'s target `index`; `None` past its targets.
+fn exposure_at(fanout: &OutboundFanout, index: usize) -> Option<Exposure> {
+    fanout.target_status(index).map(status_exposure)
+}
+
 // ── Pacing: when a relay may be sent to again ────────────────────────────────
 
 /// The first wait before an event is sent again to a relay whose answer left
@@ -1127,8 +1135,7 @@ fn relay_due(
                 .iter()
                 .enumerate()
                 .filter(|(index, endpoint)| {
-                    names_relay(endpoint)
-                        && row.target_status(*index) == Some(FanoutTargetStatus::Accepted)
+                    names_relay(endpoint) && exposure_at(row, *index) == Some(Exposure::Held)
                 })
                 .filter_map(|(index, _)| row.target_last_attempt_at_ms(index))
                 .collect::<Vec<_>>()
@@ -1153,16 +1160,16 @@ fn relay_due(
             if !readable(began) {
                 continue;
             }
-            let backoff = match row.target_status(index) {
-                Some(FanoutTargetStatus::Attempting) if !is_driven => {
+            let backoff = match exposure_at(row, index) {
+                Some(Exposure::Begun) if !is_driven => {
                     if Driving::under_way(row.message_id()) {
                         return RelayDue::Busy;
                     }
                     // Left by a call that never returned.
                     Backoff::Ambiguous
                 }
-                Some(FanoutTargetStatus::PossiblyExposed) => Backoff::Ambiguous,
-                Some(FanoutTargetStatus::RetryableUnavailable) => {
+                Some(Exposure::MayHold) => Backoff::Ambiguous,
+                Some(Exposure::Unreached) => {
                     if row
                         .target_failure(index)
                         .is_some_and(|failure| failure.rejection_category.is_some())
@@ -1172,7 +1179,9 @@ fn relay_due(
                         Backoff::Unreachable
                     }
                 }
-                _ => continue,
+                // The driven row's own `Begun` is this drive's call.
+                Some(Exposure::Begun | Exposure::Unsent | Exposure::Held | Exposure::Refused)
+                | None => continue,
             };
             // Failed before the relay last took something: over.
             if acknowledged.is_some_and(|at| at > began) {
@@ -1459,11 +1468,8 @@ fn due_or_busy(
     // reaches, and any member can move the epoch: a first call that ignored
     // the relay's wait would be a call per epoch to a relay that is backing
     // off.
-    let a_commit_nothing_was_sent_for = fanout.mls_state() != FanoutMlsState::NotApplicable
-        && fanout
-            .target_statuses()
-            .iter()
-            .all(|status| *status == FanoutTargetStatus::NotAttempted);
+    let a_commit_nothing_was_sent_for =
+        fanout.mls_state() != FanoutMlsState::NotApplicable && no_target_attempted(fanout);
     if due.is_empty() && a_commit_nothing_was_sent_for {
         due.extend(soonest.map(|(_, attempt)| attempt));
     }
@@ -1512,7 +1518,7 @@ fn record_interrupted(fanout: &mut OutboundFanout) -> Result<bool, CircleError> 
     let endpoints = fanout.request().target.endpoints().to_vec();
     let mut any = false;
     for (index, endpoint) in endpoints.iter().enumerate() {
-        if fanout.target_status(index) == Some(FanoutTargetStatus::Attempting) {
+        if exposure_at(fanout, index) == Some(Exposure::Begun) {
             fanout
                 .record_target_failure(index, interrupted(endpoint))
                 .map_err(refused)?;
@@ -1559,7 +1565,7 @@ fn record(
 fn accepted_relays(fanout: &OutboundFanout) -> usize {
     let mut relays: Vec<RelayUrl> = Vec::new();
     for (index, endpoint) in fanout.request().target.endpoints().iter().enumerate() {
-        if fanout.target_status(index) != Some(FanoutTargetStatus::Accepted) {
+        if exposure_at(fanout, index) != Some(Exposure::Held) {
             continue;
         }
         if let Ok(relay) = RelayUrl::parse(endpoint.as_str()) {
@@ -1576,12 +1582,14 @@ fn accepted_relays(fanout: &OutboundFanout) -> usize {
 /// whatever else is true of the record (`transports/nostr.md`, "Publish
 /// targets and acknowledgements": every snapshotted relay is attempted).
 fn owes_an_attempt(fanout: &OutboundFanout) -> bool {
-    (0..fanout.target_statuses().len()).any(|index| match fanout.target_status(index) {
-        Some(FanoutTargetStatus::NotAttempted) => true,
-        Some(FanoutTargetStatus::PossiblyExposed) => fanout
+    (0..fanout.target_statuses().len()).any(|index| match exposure_at(fanout, index) {
+        Some(Exposure::Unsent) => true,
+        Some(Exposure::MayHold) => fanout
             .target_failure(index)
             .is_some_and(|failure| failure.reason == INTERRUPTED),
-        _ => false,
+        Some(Exposure::Begun | Exposure::Held | Exposure::Unreached | Exposure::Refused) | None => {
+            false
+        }
     })
 }
 
@@ -1591,7 +1599,7 @@ fn owes_an_attempt(fanout: &OutboundFanout) -> bool {
 /// end in the pass that applied it, held by that one relay.
 fn retried_since_ms(fanout: &OutboundFanout) -> u64 {
     let first_held = (0..fanout.target_statuses().len())
-        .filter(|index| fanout.target_status(*index) == Some(FanoutTargetStatus::Accepted))
+        .filter(|index| exposure_at(fanout, *index) == Some(Exposure::Held))
         .filter_map(|index| fanout.target_last_attempt_at_ms(index))
         .min();
     fanout.created_at_ms().max(first_held.unwrap_or(0))
@@ -1667,15 +1675,12 @@ fn changes_a_wait(all: &[OutboundFanout], fanout: &OutboundFanout, now_ms: u64) 
         .collect();
     let mut relays: Vec<RelayUrl> = Vec::new();
     for (index, endpoint) in fanout.request().target.endpoints().iter().enumerate() {
-        let on_record = matches!(
-            fanout.target_status(index),
-            Some(
-                FanoutTargetStatus::Accepted
-                    | FanoutTargetStatus::PossiblyExposed
-                    | FanoutTargetStatus::RetryableUnavailable
-                    | FanoutTargetStatus::Attempting
-            )
-        );
+        let on_record = match exposure_at(fanout, index) {
+            Some(Exposure::Held | Exposure::MayHold | Exposure::Unreached | Exposure::Begun) => {
+                true
+            }
+            Some(Exposure::Unsent | Exposure::Refused) | None => false,
+        };
         if let Some(relay) = RelayUrl::parse(endpoint.as_str())
             .ok()
             .filter(|relay| on_record && !relays.contains(relay))
@@ -1730,9 +1735,9 @@ fn unreachable_past_the_bound(fanout: &OutboundFanout, now_ms: u64) -> bool {
         && now_ms
             .checked_sub(fanout.created_at_ms())
             .is_some_and(|age| age >= FANOUT_BOUND_MS)
-        && outstanding.iter().all(|index| {
-            fanout.target_status(*index) == Some(FanoutTargetStatus::RetryableUnavailable)
-        })
+        && outstanding
+            .iter()
+            .all(|index| exposure_at(fanout, *index) == Some(Exposure::Unreached))
 }
 
 /// How long until `fanout`'s driver has something to do for it: the soonest
@@ -2026,7 +2031,8 @@ fn a_relay_may_hold(fanout: &OutboundFanout) -> bool {
         || fanout.possible_exposure()
         || fanout
             .target_statuses()
-            .contains(&FanoutTargetStatus::Attempting)
+            .iter()
+            .any(|status| status_exposure(*status) == Exposure::Begun)
 }
 
 /// Whether no spelling of the relay `attempt` names has had an attempt.
@@ -2034,7 +2040,7 @@ fn never_attempted(fanout: &OutboundFanout, attempt: &Attempt) -> bool {
     attempt
         .spellings
         .iter()
-        .all(|index| fanout.target_status(*index) == Some(FanoutTargetStatus::NotAttempted))
+        .all(|index| exposure_at(fanout, *index) == Some(Exposure::Unsent))
 }
 
 /// [`take_up`] for a drive that only finishes. One record alone is taken
@@ -2110,7 +2116,13 @@ async fn take_up_to_finish(
         }
         // Local, and nothing sent: a background drive may end it too.
         FanoutStanding::GroupGone(fanout) => end_dead(circle.session(), &fanout, clock, out).await,
-        _ => Ok(None),
+        FanoutStanding::Absent
+        | FanoutStanding::Staged(_)
+        | FanoutStanding::NoCommit
+        | FanoutStanding::Unread
+        | FanoutStanding::RolledBack(_)
+        | FanoutStanding::Stale { .. }
+        | FanoutStanding::Unheld { .. } => Ok(None),
     }
 }
 
@@ -2484,7 +2496,9 @@ async fn unsent_and_set_aside(
             out.status = FanoutStatus::Stale;
             Ok(None)
         }
-        _ => Ok(Some(fanout)),
+        AppliedCommit::Canonical | AppliedCommit::Provisional | AppliedCommit::Lost => {
+            Ok(Some(fanout))
+        }
     }
 }
 
@@ -2527,11 +2541,7 @@ async fn send_what_is_due<T: FanoutSend + ?Sized>(
     fanout: &mut StoredFanout,
 ) -> Result<(Sent, Option<crate::relay::clock_skew::DeviceClockComplaint>), CircleError> {
     let session = circle.session();
-    let first_send = fanout
-        .as_mdk_fanout()
-        .target_statuses()
-        .iter()
-        .all(|status| *status == FanoutTargetStatus::NotAttempted);
+    let first_send = no_target_attempted(fanout.as_mdk_fanout());
     // A leave's proposal is the user's own act: any drive may begin it.
     let a_leave = fanout.as_mdk_fanout().mls_state() == FanoutMlsState::NotApplicable;
     let may_begin = || a_leave || !first_send || mode.mode() == DriveMode::Full;
@@ -3170,7 +3180,15 @@ pub const fn worst_recovery(facts: RecoveryFacts) -> Option<RecoveryCause> {
     match facts.held {
         SendHeld::RoutingCollision => return Some(RecoveryCause::RoutingCollision),
         SendHeld::Leaving => return Some(RecoveryCause::Leaving),
-        _ => {}
+        SendHeld::AwaitingRelays
+        | SendHeld::Acknowledged
+        | SendHeld::StagedWithoutRecord
+        | SendHeld::DepartureDue
+        | SendHeld::AwaitsForeground
+        | SendHeld::RemovalUnmade
+        | SendHeld::Disbanded
+        | SendHeld::StoredInput
+        | SendHeld::Nothing => {}
     }
     if facts.stalled {
         return Some(RecoveryCause::Stalled);
@@ -5805,6 +5823,26 @@ mod tests {
     use transport_nostr_adapter::{NostrPublishOutcome, NostrSubscription};
 
     use super::*;
+
+    /// Security Rule 13, one row per MDK target status: what each says a
+    /// relay may hold of the event.
+    #[test]
+    fn every_target_status_has_one_exposure() {
+        let rows = [
+            (FanoutTargetStatus::NotAttempted, Exposure::Unsent),
+            (FanoutTargetStatus::Attempting, Exposure::Begun),
+            (FanoutTargetStatus::Accepted, Exposure::Held),
+            (FanoutTargetStatus::PossiblyExposed, Exposure::MayHold),
+            (
+                FanoutTargetStatus::RetryableUnavailable,
+                Exposure::Unreached,
+            ),
+            (FanoutTargetStatus::Failed, Exposure::Refused),
+        ];
+        for (status, exposure) in rows {
+            assert_eq!(status_exposure(status), exposure, "{status:?}");
+        }
+    }
 
     /// The recovery read's order, exhaustively over its facts: the cause
     /// whose remedy comes first wins, and nothing holds a healthy circle.

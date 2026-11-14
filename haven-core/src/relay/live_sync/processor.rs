@@ -54,6 +54,8 @@
 //! so a busy circle's cursor advance cannot bury a quiet co-multiplexed
 //! circle's un-applied commit.
 
+#![deny(clippy::wildcard_enum_match_arm)]
+
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -66,10 +68,10 @@ use tokio::time::Instant;
 use crate::circle::{CircleManager, DecryptedIngest, DirectoryReconcile};
 use crate::log_alias::bucket;
 use crate::nostr::mls::types::{
-    EpochState, FanoutId, GroupId, IngestOutcome, LocationMessageResult, PublishWork,
+    EpochState, FanoutId, GroupEvent, GroupId, IngestOutcome, LocationMessageResult, PublishWork,
     ScreenedIngest, SessionEffects,
 };
-use crate::nostr::mls::{PlaneStanding, SessionManager};
+use crate::nostr::mls::{ingest_disposition, Disposition, PlaneStanding, SessionManager};
 use crate::nostr::NostrError;
 pub(super) use crate::relay::fanout::BurstEnd;
 use crate::relay::fanout::{
@@ -1167,13 +1169,13 @@ impl EngineProcessor {
     /// outcome is cursor-inert. See the module docs for why no ingest outcome —
     /// `Processed` included — vouches for the outer `created_at`.
     ///
-    /// `#[deny(clippy::wildcard_enum_match_arm)]`: the two matches below are the
-    /// hold-back gate. A wildcard arm here is how a future variant — of
+    /// The two matches below are the hold-back gate, under this module's
+    /// `#![deny(clippy::wildcard_enum_match_arm)]`. A wildcard arm here is how a
+    /// future variant — of
     /// [`ScreenedIngest`] or of the upstream `IngestOutcome` — silently inherits
     /// "nothing outstanding here", so making one a hard error (clippy runs with
     /// `-D warnings` in CI) forces the decision to be written down.
     #[cfg_attr(test, allow(clippy::missing_panics_doc))]
-    #[deny(clippy::wildcard_enum_match_arm)]
     pub async fn process_group_event(
         &self,
         event: &Event,
@@ -1274,14 +1276,13 @@ impl EngineProcessor {
         // authenticated. `Buffered` is the one un-applied verdict, so it — and
         // only it — pins this generation's EOSE advance at or below the event.
         // An object the engine kept no trace of is Rule 12's case: relay
-        // redelivery is its only way back, so it holds — unless the engine's
-        // verdict is an `Ignored` exclusion (an unknown route is dropped without
-        // a trace by design, mdk#740), which no redelivery can change here.
-        if ingest.left_object_unpersisted
-            && !matches!(ingest.outcome, IngestOutcome::Ignored { .. })
-        {
-            self.anchors.note_unapplied(&group_hex, created_at_secs);
-            return GroupProcessOutcome::Refused;
+        // redelivery is its only way back, so it holds.
+        match ingest_disposition(&ingest.outcome, ingest.left_object_unpersisted) {
+            Disposition::Unpersisted => {
+                self.anchors.note_unapplied(&group_hex, created_at_secs);
+                return GroupProcessOutcome::Refused;
+            }
+            Disposition::TakenIn | Disposition::NoRoom => {}
         }
         match ingest.outcome {
             // Answered from a stranded row: the same answer at every
@@ -1445,11 +1446,7 @@ impl EngineProcessor {
     /// Persists an engine batch's locations (which also acknowledges them to
     /// the engine), routes the batch onto the bus, and asks for a catch-up when
     /// the engine refused an object only a refetch by id can bring back.
-    async fn deliver_events(
-        &self,
-        events: &[crate::nostr::mls::types::GroupEvent],
-        event_created_at_secs: i64,
-    ) {
+    async fn deliver_events(&self, events: &[GroupEvent], event_created_at_secs: i64) {
         let results = self.circle.persist_for_routing(events).await;
         self.route_results(results, event_created_at_secs);
         // A circle that has just reached a new epoch may now open what the
@@ -1464,11 +1461,22 @@ impl EngineProcessor {
         let stall_armed = self.circle.session().take_stall_armed();
         if stall_armed
             || events.iter().any(|event| match event {
-                crate::nostr::mls::types::GroupEvent::TransportObjectResourceRefused { .. } => true,
-                crate::nostr::mls::types::GroupEvent::EpochChanged { group_id, .. } => {
+                GroupEvent::TransportObjectResourceRefused { .. } => true,
+                GroupEvent::EpochChanged { group_id, .. } => {
                     self.circle.session().owes_refetch(group_id)
                 }
-                _ => false,
+                GroupEvent::GroupCreated { .. }
+                | GroupEvent::GroupJoined { .. }
+                | GroupEvent::MessageReceived { .. }
+                | GroupEvent::AppMessageInvalidated { .. }
+                | GroupEvent::GroupStateChanged { .. }
+                | GroupEvent::GroupHydrationQuarantined { .. }
+                | GroupEvent::CommitRolledBack { .. }
+                | GroupEvent::GroupStateInvalidated { .. }
+                | GroupEvent::GroupStateRevalidated { .. }
+                | GroupEvent::GroupUnrecoverable { .. }
+                | GroupEvent::PendingCommitRecovered { .. }
+                | GroupEvent::GroupHydrationRecovered { .. } => false,
             })
         {
             self.emit_status(SyncStatusReason::RefetchOwed);

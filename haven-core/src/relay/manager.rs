@@ -7,6 +7,8 @@
 //!
 //! - **WSS Only**: Plaintext ws:// connections are rejected
 
+#![deny(clippy::wildcard_enum_match_arm)]
+
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
@@ -2172,7 +2174,15 @@ impl RelayManager {
                         RelayMessage::Closed {
                             subscription_id, ..
                         } if subscription_id.as_ref() == &id => return false,
-                        _ => {}
+                        RelayMessage::Event { .. }
+                        | RelayMessage::Ok { .. }
+                        | RelayMessage::EndOfStoredEvents(_)
+                        | RelayMessage::Notice(_)
+                        | RelayMessage::Closed { .. }
+                        | RelayMessage::Auth { .. }
+                        | RelayMessage::Count { .. }
+                        | RelayMessage::NegMsg { .. }
+                        | RelayMessage::NegErr { .. } => {}
                     },
                     // The socket went away mid-delivery, the pool shut down, or a
                     // lagged broadcast dropped deliveries we will never see —
@@ -2501,9 +2511,16 @@ impl FanoutTransport {
         // (`sdk_client.rs` 1254-1275); on one with no connection task that
         // leaves a permit ending every later dial (see `RelayManager::shutdown`).
         // This relay's gate is held, so no other fanout call is cut.
-        if matches!(&outcome, FanoutTargetOutcome::Failed(failure)
-            if failure.kind() == TransportEndpointFailureKind::PossiblyExposed)
-        {
+        let ambiguous = match &outcome {
+            FanoutTargetOutcome::Failed(failure) => match failure.kind() {
+                TransportEndpointFailureKind::PossiblyExposed => true,
+                TransportEndpointFailureKind::TerminalRejected
+                | TransportEndpointFailureKind::NotExposed
+                | TransportEndpointFailureKind::RetryableUnavailable => false,
+            },
+            FanoutTargetOutcome::Accepted => false,
+        };
+        if ambiguous {
             let _ = self.client.force_remove_relay(relay_urls[0].as_str()).await;
         }
         recover_wedged_publish_sockets(&self.client, &relay_urls).await;

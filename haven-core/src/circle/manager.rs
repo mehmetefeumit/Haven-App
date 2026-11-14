@@ -24,6 +24,8 @@
 //!
 //! [`SessionManager`]: crate::nostr::mls::SessionManager
 
+#![deny(clippy::wildcard_enum_match_arm)]
+
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -2485,6 +2487,10 @@ impl CircleManager {
     /// retry changes — an admin who must demote first, a circle the engine
     /// does not hold — end the intent, and the circle shares again; any
     /// other leaves it standing, sharing off, for the next attempt.
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "Haven's own error: every other variant converts through `CircleError::from`"
+    )]
     fn refused_leave(&self, mls_group_id: &GroupId, e: crate::nostr::NostrError) -> CircleError {
         let permanent = matches!(
             e,
@@ -3216,7 +3222,20 @@ impl CircleManager {
                     change: GroupStateChange::MemberRemoved { member },
                     ..
                 } if actor.as_slice() == own.as_slice() => Some(hex::encode(member.as_slice())),
-                _ => None,
+                GroupEvent::GroupCreated { .. }
+                | GroupEvent::GroupJoined { .. }
+                | GroupEvent::TransportObjectResourceRefused { .. }
+                | GroupEvent::MessageReceived { .. }
+                | GroupEvent::AppMessageInvalidated { .. }
+                | GroupEvent::GroupStateChanged { .. }
+                | GroupEvent::GroupHydrationQuarantined { .. }
+                | GroupEvent::EpochChanged { .. }
+                | GroupEvent::CommitRolledBack { .. }
+                | GroupEvent::GroupStateInvalidated { .. }
+                | GroupEvent::GroupStateRevalidated { .. }
+                | GroupEvent::GroupUnrecoverable { .. }
+                | GroupEvent::PendingCommitRecovered { .. }
+                | GroupEvent::GroupHydrationRecovered { .. } => None,
             })
             .collect();
         if removed.is_empty() {
@@ -3272,7 +3291,6 @@ impl CircleManager {
     }
 
     /// One [`PublishWork`] item's disposition inside the fold.
-    #[deny(clippy::wildcard_enum_match_arm)]
     async fn dispose_publish_work(&self, item: PublishWork, out: &mut DecryptedIngest) {
         match item {
             // A commit in a batch is one its hold could neither record nor
@@ -4046,8 +4064,21 @@ impl CircleManager {
     fn note_epoch_changes(&self, events: &[GroupEvent]) {
         let now_ms = chrono::Utc::now().timestamp_millis();
         for event in events {
-            let GroupEvent::EpochChanged { group_id, .. } = event else {
-                continue;
+            let group_id = match event {
+                GroupEvent::EpochChanged { group_id, .. } => group_id,
+                GroupEvent::GroupCreated { .. }
+                | GroupEvent::GroupJoined { .. }
+                | GroupEvent::TransportObjectResourceRefused { .. }
+                | GroupEvent::MessageReceived { .. }
+                | GroupEvent::AppMessageInvalidated { .. }
+                | GroupEvent::GroupStateChanged { .. }
+                | GroupEvent::GroupHydrationQuarantined { .. }
+                | GroupEvent::CommitRolledBack { .. }
+                | GroupEvent::GroupStateInvalidated { .. }
+                | GroupEvent::GroupStateRevalidated { .. }
+                | GroupEvent::GroupUnrecoverable { .. }
+                | GroupEvent::PendingCommitRecovered { .. }
+                | GroupEvent::GroupHydrationRecovered { .. } => continue,
             };
             match self.storage.get_circle(group_id) {
                 Ok(Some(circle)) => {
@@ -4236,7 +4267,19 @@ impl CircleManager {
                         GroupEvent::GroupJoined {
                             group_id, welcomer, ..
                         } => Some((group_id.clone(), Some(welcomer.clone()))),
-                        _ => None,
+                        GroupEvent::GroupCreated { .. }
+                        | GroupEvent::TransportObjectResourceRefused { .. }
+                        | GroupEvent::MessageReceived { .. }
+                        | GroupEvent::AppMessageInvalidated { .. }
+                        | GroupEvent::GroupStateChanged { .. }
+                        | GroupEvent::GroupHydrationQuarantined { .. }
+                        | GroupEvent::EpochChanged { .. }
+                        | GroupEvent::CommitRolledBack { .. }
+                        | GroupEvent::GroupStateInvalidated { .. }
+                        | GroupEvent::GroupStateRevalidated { .. }
+                        | GroupEvent::GroupUnrecoverable { .. }
+                        | GroupEvent::PendingCommitRecovered { .. }
+                        | GroupEvent::GroupHydrationRecovered { .. } => None,
                     })
                     .ok_or_else(|| {
                         CircleError::Mls("welcome accept did not yield a joined group".to_string())
@@ -5221,7 +5264,18 @@ impl CircleManager {
                     change: GroupStateChange::GroupDisbanded,
                     ..
                 } => self.reconcile_disbanded(group_id).await,
-                _ => {}
+                GroupEvent::GroupCreated { .. }
+                | GroupEvent::TransportObjectResourceRefused { .. }
+                | GroupEvent::AppMessageInvalidated { .. }
+                | GroupEvent::GroupStateChanged { .. }
+                | GroupEvent::GroupHydrationQuarantined { .. }
+                | GroupEvent::EpochChanged { .. }
+                | GroupEvent::CommitRolledBack { .. }
+                | GroupEvent::GroupStateInvalidated { .. }
+                | GroupEvent::GroupStateRevalidated { .. }
+                | GroupEvent::GroupUnrecoverable { .. }
+                | GroupEvent::PendingCommitRecovered { .. }
+                | GroupEvent::GroupHydrationRecovered { .. } => {}
             }
         }
         // Only now, with the rows committed: an output whose row failed stays
@@ -6453,8 +6507,13 @@ impl CircleManager {
     async fn take_group_created(&self, effects: SessionEffects) -> Result<Vec<TransportMessage>> {
         self.note_send_drain(&effects.events).await;
         for work in effects.publish {
-            if let PublishWork::FoundingGroupCreated { welcomes } = work {
-                return Ok(welcomes);
+            match work {
+                PublishWork::FoundingGroupCreated { welcomes } => return Ok(welcomes),
+                PublishWork::ApplicationMessage { .. }
+                | PublishWork::Proposal { .. }
+                | PublishWork::GroupEvolution { .. }
+                | PublishWork::GroupCreated { .. }
+                | PublishWork::AutoPublish { .. } => {}
             }
         }
         Err(CircleError::Mls(
@@ -6466,9 +6525,16 @@ impl CircleManager {
     async fn take_proposal(&self, effects: SessionEffects) -> Result<Event> {
         self.note_send_drain(&effects.events).await;
         for work in effects.publish {
-            if let PublishWork::Proposal { msg, .. } = work {
-                return SessionManager::transport_message_to_event(&msg)
-                    .map_err(CircleError::from_session);
+            match work {
+                PublishWork::Proposal { msg, .. } => {
+                    return SessionManager::transport_message_to_event(&msg)
+                        .map_err(CircleError::from_session);
+                }
+                PublishWork::ApplicationMessage { .. }
+                | PublishWork::GroupEvolution { .. }
+                | PublishWork::GroupCreated { .. }
+                | PublishWork::FoundingGroupCreated { .. }
+                | PublishWork::AutoPublish { .. } => {}
             }
         }
         Err(CircleError::Mls(
@@ -9805,7 +9871,11 @@ mod tests {
                 .iter()
                 .find_map(|work| match work {
                     PublishWork::GroupEvolution { pending, .. } => Some(*pending),
-                    _ => None,
+                    PublishWork::ApplicationMessage { .. }
+                    | PublishWork::Proposal { .. }
+                    | PublishWork::GroupCreated { .. }
+                    | PublishWork::FoundingGroupCreated { .. }
+                    | PublishWork::AutoPublish { .. } => None,
                 })
                 .expect("the commit is staged");
             tp.alice
@@ -9901,7 +9971,11 @@ mod tests {
             .iter()
             .find_map(|work| match work {
                 PublishWork::GroupEvolution { msg, pending, .. } => Some((msg, *pending)),
-                _ => None,
+                PublishWork::ApplicationMessage { .. }
+                | PublishWork::Proposal { .. }
+                | PublishWork::GroupCreated { .. }
+                | PublishWork::FoundingGroupCreated { .. }
+                | PublishWork::AutoPublish { .. } => None,
             })
             .expect("a commit");
         tp.alice.session().confirm_published(pending).await.unwrap();
@@ -10205,7 +10279,11 @@ mod tests {
             .iter()
             .find_map(|work| match work {
                 PublishWork::GroupEvolution { msg, pending, .. } => Some((msg.clone(), *pending)),
-                _ => None,
+                PublishWork::ApplicationMessage { .. }
+                | PublishWork::Proposal { .. }
+                | PublishWork::GroupCreated { .. }
+                | PublishWork::FoundingGroupCreated { .. }
+                | PublishWork::AutoPublish { .. } => None,
             })
             .expect("staged");
         tp.alice.session().confirm_published(pending).await.unwrap();
@@ -11151,7 +11229,11 @@ mod tests {
             .iter()
             .find_map(|work| match work {
                 PublishWork::GroupEvolution { msg, pending, .. } => Some((msg.clone(), *pending)),
-                _ => None,
+                PublishWork::ApplicationMessage { .. }
+                | PublishWork::Proposal { .. }
+                | PublishWork::GroupCreated { .. }
+                | PublishWork::FoundingGroupCreated { .. }
+                | PublishWork::AutoPublish { .. } => None,
             })
             .expect("a self-update stages one group evolution");
         tp.bob
@@ -12489,7 +12571,11 @@ mod tests {
             .into_iter()
             .find_map(|work| match work {
                 PublishWork::FoundingGroupCreated { welcomes } => Some(welcomes),
-                _ => None,
+                PublishWork::ApplicationMessage { .. }
+                | PublishWork::Proposal { .. }
+                | PublishWork::GroupEvolution { .. }
+                | PublishWork::GroupCreated { .. }
+                | PublishWork::AutoPublish { .. } => None,
             })
             .expect("create_group returns FoundingGroupCreated")
     }
@@ -12504,7 +12590,11 @@ mod tests {
                     SessionManager::transport_message_to_event(&msg).expect("commit event"),
                     pending,
                 )),
-                _ => None,
+                PublishWork::ApplicationMessage { .. }
+                | PublishWork::Proposal { .. }
+                | PublishWork::GroupCreated { .. }
+                | PublishWork::FoundingGroupCreated { .. }
+                | PublishWork::AutoPublish { .. } => None,
             })
             .expect("an evolution stages a GroupEvolution")
     }
@@ -15004,11 +15094,10 @@ mod tests {
             ) && answered.contains(
                 "if taken{self.commit_notes.end(id);}else{self.commit_notes.unanswered(id);}"
             ) && answered.contains(
-                // An unknown route is dropped without a trace by design: no
-                // redelivery changes that, and nothing is owed for it.
-                "let refused=matches!(ingested.outcome,IngestOutcome::ResourceRefused{..})\
-                 ||(ingested.left_object_unpersisted\
-                 &&!matches!(ingested.outcome,IngestOutcome::Ignored{..}));"
+                // Rule 12's one reading of an answer (`ingest_disposition`).
+                "let refused=match ingest_disposition(&ingested.outcome,\
+                 ingested.left_object_unpersisted){Disposition::TakenIn=>false,\
+                 Disposition::NoRoom|Disposition::Unpersisted=>true,};"
             ),
             "an event the engine erred on ends without the engine's own record of it, or one \
              it refused ends without its id on record in the ledger: it would be in neither \
@@ -15031,8 +15120,12 @@ mod tests {
             body("stranded_rows"),
         );
         assert!(
-            unopened.contains("if record.state!=MessageState::Retryable{return None;}")
-                && unopened.contains("payload.as_raw_transport().cloned()")
+            unopened.contains(
+                "match record.state{MessageState::Retryable=>{}MessageState::Sent\
+                 |MessageState::Created|MessageState::Processed|MessageState::Failed\
+                 |MessageState::ConvergenceDeferred|MessageState::PeelDeferred\
+                 |MessageState::EpochInvalidated=>return None,}"
+            ) && unopened.contains("payload.as_raw_transport().cloned()")
                 && unopened.contains("TransportEnvelope::GroupMessage{..}")
                 && row.contains("let Some(message)=unopened_event(&record)else{")
                 && row.contains(

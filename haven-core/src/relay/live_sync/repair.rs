@@ -83,14 +83,20 @@ impl ClosedKind {
     /// Classifies a `CLOSED` message by its NIP-01 machine-readable prefix.
     #[must_use]
     pub fn classify(message: &str) -> Self {
-        match MachineReadablePrefix::parse(message) {
-            Some(MachineReadablePrefix::RateLimited | MachineReadablePrefix::AuthRequired) => {
+        // No prefix at all is the default a plain relay sends.
+        MachineReadablePrefix::parse(message).map_or(Self::Dropped, |prefix| match prefix {
+            MachineReadablePrefix::RateLimited | MachineReadablePrefix::AuthRequired => {
                 Self::Throttled
             }
-            // Every `Remove` prefix, and — the default a plain relay sends — no
-            // prefix at all.
-            _ => Self::Dropped,
-        }
+            // Every `Remove` prefix.
+            MachineReadablePrefix::Duplicate
+            | MachineReadablePrefix::Pow
+            | MachineReadablePrefix::Blocked
+            | MachineReadablePrefix::Invalid
+            | MachineReadablePrefix::Error
+            | MachineReadablePrefix::Unsupported
+            | MachineReadablePrefix::Restricted => Self::Dropped,
+        })
     }
 }
 

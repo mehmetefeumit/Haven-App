@@ -1808,7 +1808,11 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
     assert!(
         repair.contains(
             "letremoves=source==group.epoch.0&&store.own_commit_intent(&origin)?\
-             .is_some_and(|intent|matches!(intent.intent,SendIntent::RemoveMembers{..}));\
+             .is_some_and(|intent|matchintent.intent{SendIntent::RemoveMembers{..}=>true,\
+             SendIntent::AppMessage{..}|SendIntent::Invite{..}|SendIntent::Leave{..}\
+             |SendIntent::SelfUpdate{..}|SendIntent::UpdateAppComponents{..}\
+             |SendIntent::UpdateGroupData{..}|SendIntent::EnableDisbanding{..}\
+             |SendIntent::Disband{..}=>false,});\
              if!removes{ifstore.own_commit_intent(&origin)?.is_some(){let_=notes.note(\
              &group_id,ChangeNote::ChangeUndone);}continue;}"
         ) && repair.find("if!removes{") < repair.find("commit_fanout(")
@@ -4211,7 +4215,11 @@ fn no_product_path_leaves_a_group_change_queued() {
             // before the change is deleted.
             && sweep.contains(
                 "letnamed:&[MemberId]=match&queued.intent{\
-                 SendIntent::RemoveMembers{members,..}=>members,_=>&[],};\
+                 SendIntent::RemoveMembers{members,..}=>members,\
+                 SendIntent::AppMessage{..}|SendIntent::Invite{..}|SendIntent::Leave{..}\
+                 |SendIntent::SelfUpdate{..}|SendIntent::UpdateAppComponents{..}\
+                 |SendIntent::UpdateGroupData{..}|SendIntent::EnableDisbanding{..}\
+                 |SendIntent::Disband{..}=>&[],};\
                  letdropped=ifnamed.is_empty(){ChangeNote::QueuedChangeDropped}\
                  else{ChangeNote::QueuedRemovalDropped};"
             )
@@ -5381,10 +5389,27 @@ fn mdks_reservation_is_still_the_two_conditions_haven_reads() {
         ],
         "MDK reserves a circle's next pass for other kinds of change than it did",
     );
+    // Haven's `changes_group` is an exhaustive match: the kinds before its
+    // `=> true` are the ones that hold a pass, and the compiler sees the rest.
+    let haven_changes = squash(
+        fn_body(&haven, "const fn changes_group(").expect("`const fn changes_group(` is gone"),
+    );
+    let (holding, rest) = haven_changes
+        .split_once("=>true,")
+        .expect("`changes_group` answers true for the kinds that hold a pass");
     assert_eq!(
-        kinds(&haven, "const fn changes_group("),
+        holding
+            .split("SendIntent::")
+            .skip(1)
+            .map(|rest| rest.split('{').next().unwrap_or_default().to_owned())
+            .collect::<Vec<_>>(),
         reserved,
         "Haven's list of the changes that hold a pass is no longer MDK's",
+    );
+    assert!(
+        rest.ends_with("=>false,}}") && rest.matches("=>").count() == 1 && !rest.contains("_=>"),
+        "`changes_group` answers false by a wildcard, or other than false, for a kind \
+         that holds no pass",
     );
 
     // Where the reservation is held: a completed pass whose fairness slot is
