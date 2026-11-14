@@ -194,7 +194,7 @@ weakened, and every precondition is kept.
 
 | Site | Today | Fence |
 |---|---|---|
-| `haven-core/tests/live_sync_cursor_replay_e2e.rs:255` | `sleep(3 s)`, so the live event is dated above the cursor | Publish with an explicit `created_at` (`publish_kind445_at(…, advanced/1000 + 2)`); keep the precondition assert |
+| `haven-core/tests/live_sync_cursor_replay_e2e.rs:255` | `sleep(3 s)`, so a per-event advance lands visibly above the anchor | Wait for the wall clock to pass `advanced/1000 + 1` (`wait_until_after`, a condition that must become true, so its expiry never changes the verdict), then publish; keep the precondition assert. Dating the event higher is not enough: the per-event rule this test guards against clamps to `now` (`cursor_ms_for_event`, `haven-core/src/relay/cursor.rs`), and without the wait `now` and the anchor share a second, so the test passes with the defect present. The inbox live-wrap test (`inbox_cursor_poisoning_e2e.rs`) takes the same wait for the same reason |
 | same file `:265` | `sleep(3 s)`, then "cursor unchanged" | Bounded wait until `group_events_taken_in_for_test()` (`haven-core/src/relay/live_sync/processor.rs:2494`) holds the event, **then** assert the cursor. A drop before ingest now fails loudly instead of passing vacuously |
 | same file `:304` | `sleep(500 ms)` after restart | Use the file's `wait_cursor_at_least(…, opened_at2*1000, …)`, with `opened_at2` sampled before `engine2.start` |
 | `inbox_cursor_poisoning_e2e.rs:389, :397, :483` | the same pattern on the inbox plane | Use the wrap's explicit `created_at` (`routed_giftwrap_at`). Fence on the inbox wrap being processed (add `inbox_events_taken_in_for_test` beside `note_taken_in_for_test`, `processor.rs:2483`, if no inbox record exists) |
