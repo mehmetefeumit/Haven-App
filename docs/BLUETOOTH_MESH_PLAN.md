@@ -3543,6 +3543,26 @@ item 6, that address rotation is the build's; §7.1 carries a note now.
   that nothing crosses on Android 11 to 12L — both read in the
   platform's source, neither run. The contract the review set for the
   service is design §N.7.
+- **M3g units 5 and 6, and M3h's first slices — designed, not built**
+  (`docs/BLUETOOTH_MESH_M3_DESIGN.md` §O, drafted 2026-11-14 and **not
+  yet confirmed**). Paper only: no file but that section and this
+  entry changed, and nothing was compiled or run for it. What it
+  settles for the confirmation to attack: the service's start, pause,
+  alarm, wake lock, stored copy and stop, with five new pure classes
+  and their JVM tests (§O.1); that nothing but the Dart channel can
+  start a service that runs a radio, so units 5 and 6 and the lane
+  land in one commit, the first in which anything can reach
+  `leverInstall` (§O.1.9, §O.3); the lane's slices in order of
+  certainty — a flag-off control, the lever by lines planted from the
+  drive target on an API 34 image, the refusal on an API 29 image —
+  none of which needs a virtual Bluetooth radio, and the two that do,
+  gated on what the first run and one dispatched experiment show
+  (§O.2). **What it found outside the tree**: one open-source project
+  runs two emulators on one virtual Bluetooth medium on a
+  GitHub-hosted runner, on the image Haven's lanes boot; no primary
+  source read names the API levels whose image has a virtual
+  controller. Seven questions are the owner's, Q-17 to Q-23 (§O.4):
+  none is decided there.
 
 ### Proposed CLAUDE.md wording (owner to approve)
 
