@@ -3544,25 +3544,31 @@ item 6, that address rotation is the build's; §7.1 carries a note now.
   platform's source, neither run. The contract the review set for the
   service is design §N.7.
 - **M3g units 5 and 6, and M3h's first slices — designed, not built**
-  (`docs/BLUETOOTH_MESH_M3_DESIGN.md` §O, drafted 2026-11-14 and **not
-  yet confirmed**). Paper only: no file but that section and this
-  entry changed, and nothing was compiled or run for it. What it
-  settles for the confirmation to attack: the service's start, pause,
-  alarm, wake lock, stored copy and stop, with five new pure classes
-  and their JVM tests (§O.1); that nothing but the Dart channel can
-  start a service that runs a radio, so units 5 and 6 and the lane
-  land in one commit, the first in which anything can reach
-  `leverInstall` (§O.1.9, §O.3); the lane's slices in order of
-  certainty — a flag-off control, the lever by lines planted from the
-  drive target on an API 34 image, the refusal on an API 29 image —
-  none of which needs a virtual Bluetooth radio, and the two that do,
-  gated on what the first run and one dispatched experiment show
-  (§O.2). **What it found outside the tree**: one open-source project
-  runs two emulators on one virtual Bluetooth medium on a
-  GitHub-hosted runner, on the image Haven's lanes boot; no primary
-  source read names the API levels whose image has a virtual
-  controller. Seven questions are the owner's, Q-17 to Q-23 (§O.4):
-  none is decided there.
+  (`docs/BLUETOOTH_MESH_M3_DESIGN.md` §O; drafted and **confirmed with
+  changes by an independent review, both 2026-11-14**, and revised in
+  place for it: §O.5 has each finding and what it changed). Paper
+  only: no file but that section and this entry changed, and nothing
+  was compiled or run for it. What it settles: the service's start,
+  pause, alarm, wake lock, stored copy and stop, with the pure classes
+  and JVM tests that hold each decision (§O.1) — among them, from the
+  review, that nothing is evaluated before the foreground start and
+  that a stop cannot bring down a start it did not see (a service
+  ended while it owes its foreground ends the relay path's process),
+  that the registered receivers are exported, and that a notice's tap
+  goes through an activity alias no other app can start; that nothing
+  but the Dart channel starts a service that runs a radio (§O.1.9);
+  and the order of landing, **two pushes** (§O.3): first everything
+  that cannot reach `leverInstall` — the service's classes in no
+  manifest, the channel without its three lever-gated methods, and a
+  lane with a flag-off control, an API 29 leg and a probe that
+  measures what no source could settle — then the manifest's entries,
+  the three methods and the lever's own slice, which needs an adapter
+  that enables and no peer (§O.2). **Found outside the tree**: one
+  open-source project runs two emulators on one virtual Bluetooth
+  medium on a GitHub-hosted runner, on the image Haven's lanes boot,
+  cold-booted on a pinned emulator; no primary source read names the
+  API levels whose image has a virtual controller. Seven questions
+  are the owner's, Q-17 to Q-23 (§O.4): none is decided there.
 
 ### Proposed CLAUDE.md wording (owner to approve)
 
