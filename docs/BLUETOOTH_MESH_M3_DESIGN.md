@@ -4764,9 +4764,10 @@ them side by side now: 73 s here, where it took three minutes.
 > review, both 2026-11-14; revised in place for that review (O.5).**
 > Paper only when written: nothing was compiled or run for it. Push A's
 > pure classes, unit 5's four classes and the channel without its three
-> lever-gated methods have been built since (O.6), with where they
-> differ; the lane has not, and nothing of this section has run on
-> Android. It makes §N.2's unit-5 row concrete, settles how a lane
+> lever-gated methods have been built since (O.6), and push A's lane —
+> S0, the probe and S2 — after them (O.7), each with where it differs;
+> nothing of this section has run on Android, the lane included. It
+> makes §N.2's unit-5 row concrete, settles how a lane
 > reaches the service, and designs M3h's first slices — the lane the
 > rule of unit 1's review (§N.7) makes a condition of the first
 > reachable `leverInstall`. Where it departs from §B, §F or §N it says
@@ -5438,6 +5439,37 @@ which the user grants in Settings and is denied by default from
 Android 14, or `USE_EXACT_ALARM`, which Play restricts (**[U]**) — a
 new permission in every release with the flag.
 
+**Q-24. What the alarm wakes the phone for (O.6, *Power*; asked with
+the security review of push A, part 1).** Every figure is ESTIMATED
+from the code's constants; none is measured. The engine reports one
+wake, in which its five-second tick — run whenever a link, a dial or a
+recent peer exists — hides the emission slot, the one engine timer
+that must keep its time on a phone that sleeps: slot times independent
+of the relays' are what D-2 bought. *(a) As built now*: the alarm
+follows the engine's wake whole, and holds the phone only while its
+two bodies run. Slots are on time; near another mesh phone the alarm
+comes as often as the platform allows, up to 720 an hour, and 30 to 60
+an hour alone. *(b) The engine names its slot* (recommended): one
+more entry in Rust and its JNI export, as O.6 specifies it; the alarm
+is armed for the slot, the scan's restart and the reminder — 30 to 60
+an hour with or without peers — the slot on time, the tick served by
+whatever woke the phone. A change to the bridge, its fixture and the
+twelve pinned exports, with its own review. *(c) No alarm sooner than
+the shortest slot, sixty seconds, with no change to Rust*: about as
+few alarms as (b), but a slot may be up to a minute late whenever a
+peer is near and the phone asleep, and the later a slot may be, the
+likelier it is served by the location service's own wake, next to a
+relay send — a weakening of D-2's property, which only the owner can
+accept (Security Rule 10). *(d) As first built*: five seconds held at
+every alarm — the processor awake without a break near any peer.
+Whichever is chosen, an alarm at every slot is more than ten wakes an
+hour, which Play's vitals are remembered to count as excessive
+(**[U]**, not fetched): plan §7.3 already has the slot served by the
+alarm. And one thing no option changes, recorded: the platform
+delivers an inexact alarm late — by up to three quarters of its wait,
+and in Doze by minutes — so a slot can be overdue under every one of
+them, and is then served by whatever wakes the phone first.
+
 **Q-19. Mesh resumes by itself after a reboot or an update (O.1.8).**
 Decided on paper (§B.5, Q-2); asked again for what §M added: the
 process that resumes at boot puts the lever in, so a release build
@@ -5557,7 +5589,7 @@ engine past its deadline answers no wake at all (`mesh_run`,
   `ChannelWords.tapOf` with the alias's name and the extra's;
   `DeadlinePolicy.reworded` and `MeshRadioCore.onSync`. Fourteen JVM
   tests under O.1.10's names, and clauses in two that were there: 73 in
-  all.
+  all; three more with the security review below, 76.
 - **`MeshService`** — `onBind` null; `onStartCommand` is
   `starts.command(startId) { Live() }` and `START_STICKY`; `onDestroy`
   posts the user's stop to the live start. `Live`, one start, is the
@@ -5572,10 +5604,11 @@ engine past its deadline answers no wake at all (`mesh_run`,
   `PendingIntent.getActivity` on the alias, immutable, with the extra.
 - **`MeshPrefs`** — the file `haven_mesh`: `wanted`, `deadline`, the six
   strings under `ChannelWords.COPY`'s keys; `commit()`.
-- **`MeshReceiver`** — boot and package replaced: `ReceiverPolicy.startsAtBoot`,
-  then `startForegroundService` inside `RadioEnd.each`; an intent with
-  no action is the alarm: the live start takes it, or
-  `ReceiverPolicy.endsAtAlarm` ends a mesh whose time is up.
+- **`MeshReceiver`** — all of `onReceive` inside `RadioEnd.each` (since
+  the security review, below): `ReceiverPolicy.step` answers *start*,
+  at a boot or a package replaced alone; *end*, for a mesh whose time
+  is up — flag and copy cleared, the stopped notice; or nothing. An
+  intent with no action is the alarm, which the live start takes.
 - **`MeshChannel`**, made in `MainActivity.configureFlutterEngine` under
   `BuildConfig.HAVEN_MESH`: `permission`, `requestPermission`,
   `openBluetoothSettings`, `sync`, `stop`, `status`, `supported`,
@@ -5596,18 +5629,36 @@ open.*
   service the class is named once, `private val native = { MeshNative }`,
   and that lambda is what the thread, the policy and — called, behind
   `Run` — the core are handed.
-- **`ServiceStarts` does one thing §O did not have: `idle`.** O.1.8
-  reasons about a start command that is owed a foreground start, which
-  can arrive only once the service has left the foreground. One that
-  arrives between `detach` and `unpost` is owed nothing — the service is
-  still in the foreground — but it is fresh all the same, and the old
-  stop's `stopForeground` behind it would take the foreground from the
-  new start's radio: a radio with no notice. So `unpost`, and the
-  stopped notice, run through `idle`: only where no start was made
-  since, under the lock a start command takes. `command` makes the fresh
-  start under that lock too, so the start's own stop — a refusal, on
-  the mesh thread — cannot let go of a start the main thread has not
-  yet kept. Held by `theStopNamesTheLastStartThatJoined`.
+- **`ServiceStarts` does two things §O did not have.** O.1.8 reasons
+  about a start command that is owed a foreground start, which can
+  arrive only once the service has left the foreground. One that
+  arrives earlier in a stop — the service still in the foreground — is
+  owed nothing, but it is fresh all the same, and everything the old
+  stop still does to what the phone has one of would be done to the new
+  start: its `stopForeground` would leave that radio with no notice,
+  its alarm's cancel would leave it with no alarm, its stopped notice
+  would say what is not true. *`idle`*: the stop cancels the alarm,
+  leaves the foreground and posts the stopped notice only where no
+  start was made since, under the lock a start command takes; and a
+  start that has been let go of arms no alarm
+  (`starts.live() !== this`, in `wakeAt`). *`detach(forget)`*: the
+  stored flag is cleared in the very step that lets go, under that
+  lock. As first built it was cleared four steps later, and the
+  security review found what that left open (its M1): `status` read
+  "no service" beside "wanted" in between, which is the Dart
+  reconcile's cue to start the radio again — undoing a stop the
+  service made, which §C.4 calls final — and that start's alarm and
+  flag were then taken by the rest of the stop. **A start command
+  cannot be refused**: it may be owed its foreground start. So what
+  makes a service-made stop final is that nothing asks for one — from
+  the instant its start is let go of, no mesh reads as wanted — and a
+  start the user asks for in the middle of a stop is the user's, and
+  runs with its own flag, alarm, foreground and notices. `command`
+  makes the fresh start under the same lock, so the start's own stop —
+  a refusal, on the mesh thread — cannot let go of a start the main
+  thread has not yet kept. Held by
+  `theStopNamesTheLastStartThatJoined` and
+  `aStartMadeBehindAStopKeepsItsFlagItsAlarmAndTheForeground`.
 - **`WakePlan` (O.1.5), three points.** *The slack is on both sides.*
   O.1.5 arms for any wake earlier than the one armed; but what is asked
   for is "in so many milliseconds", counted from a reading of the clock
@@ -5618,16 +5669,23 @@ open.*
   alarm, with none armed ahead, arms one at the minimum*: left to the
   timer alone, a start's first wake — or the wake just behind an alarm
   that came — would leave a phone that sleeps with no alarm at all, and
-  its deadline unwoken. *The lock is taken inside `hold`, under one
-  monitor*: the alarm's hold is the main thread's, and a timed acquire
-  on a lock that does not count replaces a longer hold. The five
+  its deadline unwoken. *The lock is taken and released inside the
+  plan, under one monitor*: a frame's hold (`hold`), an alarm's
+  (`wakeHold`, the main thread's), its end (`wakeDone`) and a radio's
+  end (`release`) — a timed acquire on a lock that does not count
+  replaces a longer hold, and a release that is not one step with its
+  bookkeeping leaves a hold counted on a lock that is not held (the
+  review's L3: as first built the release was outside). The five
   values: no alarm further ahead than 15 minutes — at three quarters
   late and a doze's quarter of an hour on top, a reminder is still
   ahead of the deadline it announces, which 20 minutes would not give;
-  none sooner than 5 s, the platform's own minimum as remembered
-  (**[U]**); 5 s of slack; a hold retaken only where it outlasts the one
-  held by more than 100 ms, less than the 250 ms margin; 5 s held at an
-  alarm. Guesses until a phone (§G).
+  none sooner than 5 s, the platform's own minimum
+  — `DEFAULT_MIN_FUTURITY`, 5 s, applied to every caller that is not
+  the system's (`AlarmManagerService.java:754`, `:2320-2324` at Android
+  14, **[V]**, the review's copy); 5 s of slack; a hold retaken only
+  where it outlasts the one held by more than 100 ms, less than the
+  250 ms margin; at an alarm, held until its bodies have run and 5 s
+  at most (*Power*, below). Guesses until a phone (§G).
 - **`NoticePlan` answers the ongoing notice alone.** O.1.6 has it take
   "a reminder owed" and "stopped": those are not states the service
   holds but events — the core's `remind()`, the stop's notice step — and
@@ -5645,17 +5703,43 @@ open.*
   second half a language changed in the last half hour would lose the
   reminder and its Keep on. A clause of
   `theReminderComesOnceAtThirtyMinutesAndTheStopAtZero`.
-- **`ReceiverPolicy`** is two questions with a yes or no each; the
+- **`ReceiverPolicy`** is one question, `step`, with three answers; the
   refusal is a function asked last, and only for a mesh that is owed —
   it puts the lever in (Q-19). **A boot that finds the deadline passed
-  does nothing**, as O.1.8 has it: the flag stays set until the next
-  start or stop, and nothing tells the user that the mesh ended while
-  the phone was off. Not built round; for the owner, with Q-19.
-- **The channel's `stop` answers once the service has stopped and its
-  flag is cleared**, or at once where none is live (§N.2.8 does not say
-  when). The Dart side turns the engine off behind that answer; an
-  engine turned off under a body still running would be a stop the
-  service makes, with the notice of a stop the user made.
+  ends the mesh as an alarm that finds no service does**: flag and
+  copy cleared, the stopped notice. O.1.8 had a boot start the service
+  or do nothing, and as first built the flag stayed set; the review's
+  L1: with the wall clock later set behind the deadline — or lost — a
+  boot or a sticky restart would then bring the mesh back with nobody
+  asking, for up to twelve hours. The notice is §B.5's, "by anything
+  else … the stopped notice": the mesh ended while the phone was off,
+  and nothing else says so.
+- **Everything the receiver does is inside `RadioEnd.each`** (the
+  review's M3). O.1.8 has the start alone there; but the refusal names
+  `MeshNative`, whose initializer loads the library, and calls the
+  lever, on the main thread at boot — and a library that does not load
+  throws an error, not an exception, in the process the relay path's
+  own boot restart is in. `RadioEnd.each` catches every `Throwable`;
+  its test now throws `UnsatisfiedLinkError` and
+  `ExceptionInInitializerError` too.
+- **The channel's `stop` answers once the radio is down and the flag
+  cleared** — the stop's `tell` step, before the service has left the
+  foreground and before `stopSelfResult` — or at once where no start
+  is live (§N.2.8 does not say when). The Dart side turns the engine
+  off behind that answer; an engine turned off under a body still
+  running would be a stop the service makes, with the notice of a stop
+  the user made.
+- **A permission request the platform cancelled is nobody asked** (the
+  review's L4). With another dialog open — a plugin's — the platform
+  answers a request at once with no results: "It is possible that
+  the permissions request interaction with the user is interrupted. In
+  this case you will receive empty permissions and results arrays
+  which should be treated as a cancellation"
+  (`Activity.onRequestPermissionsResult`, the reference, fetched
+  2026-11-14).
+  `asked` is set by an answer that carries results
+  (`ChannelWords.answered`), not by the asking, so such a request
+  reads "denied" — may be asked again — and no new word was needed.
 - **Two hooks, and what push B's `start` can rest on.**
   `MeshService.onStatus` is told the status at every change — the
   channel, while an engine has one. `MeshService.onStarted` is told a
@@ -5700,13 +5784,150 @@ open.*
   `pending_mls_wipe_service.dart` names it (§N.2.7); no class of the
   mesh is named outside its package but the channel in `MainActivity`.
 
+- **Waits on the main thread, recorded** (the review's L5). The
+  channel's `stop` and `sync` each write the stored copy with
+  `commit()`; `starts.live()` and a start command wait on
+  `ServiceStarts`' lock while a stop, under it, clears the flag,
+  cancels the alarm, leaves the foreground or posts a notice — binder
+  calls and one small write, milliseconds, and under the lock on
+  purpose: it is what keeps a start from being made in the middle of
+  them. One was taken out: the status is no longer read under `Live`'s
+  monitor.
+
+*Power — what the alarm is for, and how long it holds the phone* (the
+security review's M2; requirement F3). **Every figure below is
+ESTIMATED: counted from the code's constants and the engine's
+configuration. Nothing in this tree is measured, on any phone, and
+none of it is an acceptance claim** (`docs/POWER_EFFICIENCY_PLAN.md`
+§2.5, §6.5a).
+
+As first built an alarm's arrival held the processor for five seconds;
+the engine asks for a wake within five seconds whenever it has a link,
+a dial or a peer sighted in the last half minute — its tick
+(`haven-core/src/mesh/engine.rs:828-840`, `settle`; `tick_ms: 5000`) —
+and an alarm that has come is armed again at the platform's minimum,
+five seconds on. Near any other mesh phone that is a processor awake
+without a break for up to twelve hours; alone, five seconds at every
+emission slot. Plan §7.3 has "no continuous wake lock" for the mesh.
+
+*What stands behind the wake the engine reports, and what each loses
+by coming late on a phone that sleeps.* A frame that arrives, a
+connection that changes and an advertisement the scan matches each
+wake the host by themselves, through the Bluetooth controller, and
+reach the engine as an input; the question is only what must happen
+with none of them.
+
+| Timer | When | What it does | Late, with the phone asleep |
+|---|---|---|---|
+| The deadline — `until_ms`, the bridge's (`api.rs:13518-13525`) | twelve hours | the engine ends; the service stops | **must come**: the advertisement and the scan end, the notice changes (Q-18) |
+| The reminder — the core's | 30 minutes before | the reminder notice | **must come**, before the deadline it announces |
+| The scan's restart — the core's | 25 minutes | a scan the platform would take down a step is started again | **must come**; it is never the earliest term while slots are served |
+| An emission slot — `next_emit_ms` (`engine.rs:818-820`, `:890`) | every 60 to 120 s, drawn | one packet, a location or a cover packet, into the store | **must keep its time.** Plan §5.1 and D-2: slot times are "independent of the times the relays see", which is what keeps a neighbour who also watches the relays from tying a phone to its circle. A slot that is overdue is served by whatever wakes the phone next — and on a phone that shares, that may be the location service's own publish |
+| The tick — `next_tick_ms` (`engine.rs:822-825`, `:927-950`) | every 5 s while there is a link, a dial or a recent peer | announces what is new to every link, reviews requests, forgets peers, rotates and plans links | **nothing is lost.** What it would act on arrives as an input that woke the phone — a frame, which holds it through the next tick; a sighting; a link's change — or is an emission, and the call that runs an overdue slot runs the overdue tick behind it (`clock`, `:811-826`), so the packet is announced in the same pump |
+| The greeting — `hello_ms` (`engine.rs:864-880`) | 7.5 to 22.5 minutes, with a link | a new `HELLO` value | the old value stands until the next wake, a slot at most; what is drawn does not depend on when (T-PRIV-4) |
+| A stalled link (`engine.rs:914-925`) | 30 s after a link with no greeting | the link is closed | it keeps its place until the next wake |
+| The core's own: a frame in flight (10 s) or refused (50 ms), a connection not yet a link (10 s) | after an input | the link is closed, or the frame offered again | the link keeps its place until the next wake |
+| A dial's steps (`GattClientSteps`, its own timer) | 300 ms, 25 s | the dial is made again, or given up | asked at every alarm; a dial is given up at its next callback too |
+
+*Decided, and built.*
+
+- **The alarm is armed for what must come though nothing else wakes
+  the phone, and for nothing else**: the engine's wake, the scan's
+  restart, the reminder. The core's own times of a frame and of a
+  connection are the thread's timer's alone (`RadioPort.wakeAt(inMs,
+  asleepInMs)`; `onlyWhatMustComeWhileThePhoneSleepsIsATermOfTheAlarm`).
+- **An alarm holds the phone until its two bodies have run, not for a
+  time.** `WakePlan.wakeHold` at the alarm, `wakeDone` at the end of
+  the second body: the lock goes back to what a frame's hold still
+  owes, or is released; five seconds is now only the bound for a mesh
+  thread that is blocked. Two alarms whose bodies overlap are counted;
+  a radio's end under an alarm releases the lock itself
+  (`anAlarmHoldsThePhoneOnlyUntilItsBodiesHaveRun`). No sleep and no
+  timer says "the pump has run": the release is the last statement of
+  the last body.
+- **The engine's wake stays a term of the alarm whole — its tick with
+  it.** The bridge hands the radio one number, the earliest of the
+  slot, the tick, the greeting, a stall and the deadline, and the pure
+  side cannot take it apart: the slot's time is drawn inside the
+  engine, and whether a tick runs depends on the engine's own table of
+  peers. Leaving short wakes to the timer would leave the slot late
+  whenever a tick masks it; the slot's time is the privacy property
+  (D-2), so it is not traded here (Security Rule 10). What the alarm
+  costs for it — ESTIMATED: alone, one alarm a slot, 30 to 60 an hour;
+  with a link or a recent peer, up to one every five seconds, 720 an
+  hour, each now a wake for the length of two bodies where it was five
+  seconds. In Doze the platform spaces them out whatever is asked
+  (plan §7.3). A scan that matches a peer's advertisement wakes the
+  host for each match in any case, so near a peer the alarm adds to
+  wakes that already come (**[U]**: how often, on which controller).
+- **What would take the tick out — a change to Rust, not made here.**
+  One more entry beside `radio_wake_in_ms`:
+  `radio_slot_in_ms() -> Option<u64>`, "milliseconds until the engine's
+  next emission slot or its deadline, whichever is first; `None` when
+  no engine runs" —
+  `with_mesh(None, |slot, now| slot.engine.next_emit_ms().min(slot.until_ms).saturating_sub(now))`,
+  with `Engine::next_emit_ms()` a read of the field — exported as a
+  twelfth pinned method, `slotInMs()J`, in the fixture, `MeshNative`
+  and `MeshEngineApi`. The core then asks the alarm for the earliest
+  of that, the scan's restart and the reminder, and the timer for
+  everything as now: one alarm a slot with or without peers, 30 to 60
+  an hour (ESTIMATED), the slot on time, the tick served by whatever
+  woke the phone. Q-24.
+
+*What push B must do* — the security review's list, each point read
+again in the source it cites.
+
+- **The service**: `exported="false"`;
+  `foregroundServiceType="connectedDevice"`, exactly — the type handed
+  to `startForeground` must be a subset of the manifest's, and where it
+  is not the platform throws `IllegalArgumentException` *before* it
+  takes the foreground start as made
+  (`ActiveServices.java:2040-2055` ahead of `:2070-2078`, Android
+  14.0.0, [S15]), so the stop that follows brings the service down
+  still owing it: the process's end (`:5599-5618`). No
+  `android:process`, no intent filter, not `directBootAware`.
+- **The receiver**: `exported="false"`; filters exactly
+  `BOOT_COMPLETED` and `MY_PACKAGE_REPLACED`; never
+  `LOCKED_BOOT_COMPLETED`, never `directBootAware` — `onReceive` reads
+  `MeshPrefs`, credential-encrypted storage, on the main thread.
+- **The alias**: `<activity-alias>` named exactly
+  `ChannelWords.TAP_ALIAS`, `targetActivity=".MainActivity"`,
+  `exported="false"`, no filter, merged after `MainActivity`.
+- **The channel's `start` answers only from `MeshService.onStarted`** —
+  and from the status where a start threw behind `Run`, or joined a
+  live one (above). **And its `stop` must not answer at once while a
+  `start` of its own is unanswered.** A start command is delivered
+  later than it is sent: a `stop` in between — the Dart side's bound
+  ran out — finds no live start, clears the copy and answers; the
+  command then runs against a deadline that was forgotten and an
+  engine the Dart side has since turned off, is refused, and posts a
+  stopped notice for a turn-on that had already failed. Closed by the
+  channel keeping the one fact only it has — a start asked for and not
+  yet heard of — and posting such a stop behind that start, answered
+  when the start's own stop is over: a decision for `core/`, with its
+  JVM test, as `ServiceStarts` is.
+- **Check 19 is turned round**, `ENTRIES` goes to eleven, and S1's
+  oracle is written against the probe's fixtures (O.3).
+- **What the lane must prove before the flag flips**: a foreground
+  start from the mesh thread on API 30 to 36; a start behind a stop the
+  service made keeps the foreground, its alarm and its flag; the
+  adapter's, the screen's and the bond's broadcasts delivered; a tap
+  through the alias taken once, and not from an intent replayed;
+  `notImplemented` ending a turn-on at `failed` (push A's probe); the
+  twelve-hour stop reached with the screen off and no peer.
+
 *API levels.* Every platform member the six files call is in API 36's
 `android.jar` under the signature used (`javap`, the copy named below).
 Newer than API 30, as `developer.android.com/reference` has them
-(fetched 2026-11-14): `Context.RECEIVER_EXPORTED`, the typed
-`Intent.getParcelableExtra(String, Class)` and `Build.VERSION_CODES.TIRAMISU`,
-all API 33 — the first two each behind `SDK_INT >= TIRAMISU`, with the
-older form below it; the third a constant the compiler inlines. Above
+(fetched 2026-11-14): `Context.RECEIVER_EXPORTED` (API 33), behind
+`SDK_INT >= TIRAMISU` with the two-argument call below it; the typed
+`Intent.getParcelableExtra(String, Class)` (API 33), **called from API
+34 only**, the untyped form below — on Android 13 the typed form has a
+platform fault, and androidx's own wrapper does not call it there
+("Don't call this API on SDK 33 due to b/232589966",
+`IntentCompat.java`, gate `SDK_INT >= 34`; the review's L2, its copy);
+and the two constants `Build.VERSION_CODES.TIRAMISU` and
+`UPSIDE_DOWN_CAKE`, which the compiler inlines. Above
 Haven's floor of 24 and at or below 30, reached only where a service
 runs or behind a comparison: the three-argument `startForeground` and
 the connected-device type (29), `isLocationEnabled` (28),
@@ -5715,7 +5936,7 @@ notification channels (26).
 
 *Proved here* — by a compiler, tests and a reader of text.
 
-- The 73 JVM tests (`run_mesh_jvm_tests.sh`).
+- The 76 JVM tests (`run_mesh_jvm_tests.sh`).
 - The mesh's Kotlin and `MainActivity.kt` type-check with no warning,
   warnings being errors and the extended ones on, in a scratch Gradle
   build with the JVM build's Kotlin: against copies of API 36's, 35's
@@ -5727,13 +5948,15 @@ notification channels (26).
   `mesh_radio_test.dart`, which now reads `ChannelWords.kt` and holds
   both channels, the eleven methods, the six keys and every word of an
   answer to what the Dart side asks and reads (§N.2's unit-6 row).
-- `check_mesh_radio.sh`: check 15 widened, checks 18 and 19 new, 431
-  self-test fixtures (280, and 151). **Mutation passes**: 143 changes
-  to the new clauses, each dropping a pin, a count, a name or a file —
-  137 fail a named fixture with the unchanged tree still passing, six
-  fail the unchanged tree (an equality moved alone); 68 changes to the
-  new pure code, each failing a named JVM test; eight to the Dart seam
-  and to `ChannelWords.kt`'s words, each failing a named Dart test.
+- `check_mesh_radio.sh`: check 15 widened, checks 18 and 19 new, 445
+  self-test fixtures (280, 151 with the push and fourteen with its
+  security review). **Mutation passes**, as the code stands after that
+  review: 151 changes to the new clauses, each dropping a pin, a count,
+  a name or a file — 145 fail a named fixture with the unchanged tree
+  still passing, six fail the unchanged tree (an equality moved alone);
+  93 changes to the new pure code, each failing a named JVM test;
+  eight to the Dart seam and to `ChannelWords.kt`'s words, each failing
+  a named Dart test (run with the push; that code is unchanged).
 
 *What only CI's compile proves, and has not yet* (`build-check.yml`, at
 `compileDebugKotlin`, the three legs and `android-mesh`): that the six
@@ -5749,12 +5972,274 @@ unchanged and still expects no component.
 |---|---|
 | Nothing in a flag-on build makes the service (S0, S2; text here) | the lever reachable ahead of its proof |
 | `startForeground` from the mesh thread, with the connected-device type, on API 30 to 36; nothing thrown before it | the process ends: O-9 |
-| A start command behind a stop is fresh and keeps the foreground; `stopSelfResult` leaves the service to it | a radio with no notice, or a service down owing its foreground |
+| A start command behind a stop is fresh and keeps the foreground, its alarm and its flag; `stopSelfResult` leaves the service to it | a radio with no notice or no alarm, or a service down owing its foreground |
 | Receivers registered `RECEIVER_EXPORTED` hear the adapter's, the screen's and the bond's broadcasts on API 33 to 36 | no pause, no notice put back, no pairing ended |
 | `setAndAllowWhileIdle` comes within the plan's lateness; an explicit immutable broadcast reaches a receiver that is not exported | a stop or a reminder later than O.1.5 says |
 | The lock held from `onReceive` covers the two bodies | an alarm that wakes nothing |
 | A notice with the app's launcher icon posts; the channel is hidden on the lock screen | no foreground notice: the start throws |
 | The alias's three points (O.1.6), and that a replayed intent reads as above | no tap, or one taken twice |
 | `notImplemented` reads on the Dart side as no native end | a turn-on that does not end at `failed` |
-| A dialog asked for under a dialog is answered by the first | a permission read as refused for good |
+| A dialog asked for under a dialog is answered by the first; a request cancelled under another plugin's dialog comes back with no results | a permission read as refused for good |
+| An alarm's two bodies run within its bound, and a lock released behind them lets the phone sleep | the phone held five seconds an alarm, or a body cut short |
+| On Android 13 the untyped `getParcelableExtra` hands back the device of a bond-state broadcast | no pairing ended there |
 | Lint, the shrinker and a release build take the files | the tag's build fails |
+
+### O.7 As built — push A, part 2: the lane (2026-11-14)
+
+O.3's push A, its lane: S0, the probe and S2, the runner and its
+self-test, `HAVEN_MESH` in the build script, and O.2.7's rows. **Nothing
+of it has run on an emulator**: this machine has none. What is proved
+here is the runner's reading and judging of text, by fixtures; what the
+first CI run proves is listed last. No product code changed: nothing
+under `haven/lib`, `haven/android/app/src/main`, `haven-core` or
+`haven/rust_builder`. Plan §16 has the same in short.
+
+*What is built.*
+
+- **`ci/build-integration-apks.sh`** — an optional `HAVEN_MESH`,
+  `true` or `false`, anything else refused (rc 2). `false` and unset
+  pass **no** define, so that APK is byte for byte every other lane's;
+  `true` passes `--dart-define=HAVEN_MESH=true` and stages the APK as
+  `<target>.mesh.apk`, so one target is built both ways.
+- **`it/mesh_lever_test.dart`** — one target for all three legs. It
+  does not know its leg: it mounts the app past onboarding as
+  `it/app_test.dart` does, and prints one `[mesh] …` line a fact — its
+  own `debugPrint`s (Q-20 (a)). In order: the build's flag and its pid;
+  the tree (the map shell, the count of `MeshButton`), counted once
+  `meshSupportedProvider` has answered; the channel, by a
+  `MethodChannel` of its own on `haven.app/mesh_radio` — all eleven
+  methods in a build without the flag, and in one with it the four
+  that answer and touch nothing (`permission`, `status`, `supported`,
+  `takeAction`) and the three behind the lever; three plants; the
+  turn-on a user makes (`MeshNotifier.turnOn`), timed; the status
+  after; then it stays alive until the runner makes a file in the app's
+  data directory, or 240 s. The plants are `dart:ffi` to `liblog.so`:
+  `__android_log_buf_write` for a DEBUG line under `BluetoothGatt`
+  (P1) and an INFO line under `flutter` (P2), `__android_log_bswrite`
+  for a string event (P3), each found with `providesSymbol` first.
+- **`ci/run-mesh-lever.sh <leg>…`** — legs `s0`, `probe`, `s2`,
+  `adapter`. Per leg: a fresh install; the two device logs (`adb
+  logcat -v threadtime`, and `-b events`); the drive in the background;
+  at the target's `READY` the host reads the device, then releases the
+  target with `run-as … touch`; the oracle over complete captures.
+  Exit codes 0 pass, 1 a promise broken or a leak, 2 the lane drove the
+  wrong thing, 3 unusable, 4 the scanner's meta floor, folded
+  1 > 2 > 3 > 4 > 0.
+- **`wf/e2e-mesh.yml`**, called from `ci.yml` stage 4 as `e2e-mesh`,
+  `needs: [rust]`: `e2e_mesh_lever` (API 34: `s0 probe`, then — only
+  where the probe answers that Bluetooth did not come on — a second
+  boot with `-no-snapshot-load` and the leg `adapter`), and
+  `e2e_mesh_refusal` (API 29: `s2`). Both run `check_mesh_manifest.sh`
+  over the APKs they are about to install.
+
+*The oracle.* A miss of a **control** is unusable (rc 3), never a pass:
+the target's `PHASE` line under the `flutter` tag, written by the pid it
+names; that pid equal to the host's `pidof`; `RELEASED` and `DONE`, no
+`HOLD_EXPIRED`; **P2 present under that pid**; every dump with its
+heading (`Package [<pkg>]` and the launcher activity; `ACTIVITY MANAGER
+SERVICES`; `Current Notification Manager state`; `Bluetooth Status` or
+a `state:` line); `am` with an answer; `run-as`'s listing behind a
+sentinel; the map on screen before a count of buttons means anything.
+**Red** (rc 1), in every leg: a turn-on that does not end `failed`; a
+status that is not `stopped`, not wanted, before or after it; a line
+of `dumpsys package` naming a component under `.mesh.`; `am
+start-foreground-service`, `am startservice` or `am start` of the
+alias answering anything but that no such component exists; a
+`MeshService` in `dumpsys activity services`; the mesh's channel id in
+`dumpsys notification`; Haven's package in `dumpsys bluetooth_manager`;
+the stored copy `haven_mesh.xml`; **a line under a tag opening
+`Bluetooth`, from Haven's pid, that is not the plant** — judged only
+where P1 is present, which is what shows such a line would be in the
+capture; the platform's record of Haven's process dying; a drive that
+failed after the target started. S0 besides: all eleven methods
+missing, nothing answered, no button, no Bluetooth permission
+requested, P1 present. S2: `supported` false, no button, P1 present,
+the three methods missing and the four answering. The probe: the three
+missing and the four answering, `supported` equal to the image's LE
+feature, one button where supported, the turn-on under 60 s (past it
+the permission question, not the missing method, is what ended it).
+
+*The probe's answers.* In the job `e2e_mesh_lever`, step "Run the
+flag-off control and the probe on the emulator", as `  mesh-answer:
+probe.<key>=<value>`; and in the artifact `e2e-mesh-lever-<run id>`,
+`verdict.s0-probe.log`, one `<leg>.<key>=<value>` a line. Every value
+is a number or one of a fixed list of words; anything else is written
+`other`.
+
+| O.2.3's row | Key | Read by |
+|---|---|---|
+| The image declares Bluetooth LE | `probe.le_feature` | `pm list features` |
+| Bluetooth comes on after the snapshot boot | `probe.bt_on`, `probe.bt_state`, `probe.bt_on_after_s`; and after the cold boot `adapter.bt_on` in `verdict.adapter.log` | `cmd bluetooth_manager enable`, then the first `state:` line of `dumpsys bluetooth_manager`, every 2 s for 60 s |
+| P1 | `probe.p1`, `probe.p1_call` | the token as a whole message under `BluetoothGatt` and Haven's pid, in the main capture |
+| (the control) | `probe.p2` | the same under `flutter` |
+| P3 | `probe.p3`, `probe.p3_call` (`nosym`: the look-up failed) | the token under Haven's pid in the events capture |
+| Which buffers a shell reads | `probe.buffer_<name>_kib` for eight, `probe.buffers_readable` of the five | `logcat -g -b <name>` |
+| The adapter's address and name | `probe.adapter_address_readable`, `probe.adapter_address_shape`, `probe.adapter_label_readable` | `settings get secure …`; never printed |
+| A shell can set a log property | `probe.setprop_log_tag` | `setprop log.tag.BluetoothGatt VERBOSE`, read back, cleared — after the plants, so P1 was written with no property |
+| API 29 under the action | the job `e2e_mesh_refusal` itself, `s2.verdict` | — |
+| The text of three dumps | `probe.dump_services`, `…_notification`, `…_bluetooth`; the artifact's `dump-*.probe.skel.log` | below |
+| Wall time | `<leg>.wall_s` | the runner's clock |
+
+*Where it differs from this section, and why.*
+
+- **The tokens are not declared to the scanner; the lane's oracle
+  judges them** (O-4, O.2.4 step 2: "a token of the scanner's plant
+  alphabet"). A declared needle must be absent from every line of
+  every sink, and these must be present. The scanner's declared
+  plants are two, named open and close, and reach it only over the
+  recording proxy's channel; a lane without one seals
+  `--declared-plants none`. The token is random a run, names nothing,
+  and is printed by the target itself.
+- **The adapter's address and name are not declared either.** Declared,
+  they are searched on the Bluetooth process's own lines, where they
+  belong: rc 1 on every run with Bluetooth on. They are read over
+  `adb`, held in two shell variables, never printed, and used to
+  **redact**. The class that searches them under Haven's pid alone is
+  still the two-emulator slice's to add (O.2.6).
+- **What is uploaded is not what is captured.** An emulator's address
+  and adapter name are identifiers all the same (Rule 15). The raw
+  captures and dumps stay in a directory the workflow never uploads
+  and the gate is never handed; the copies in the artifact have every
+  address shape — six pairs, the platform's own `XX:XX:XX:XX:…` — and
+  this adapter's name and address, bare and in both cases, replaced
+  by `<bt-addr>` and `<bt-name>`. The oracle reads the raw ones.
+- **A dump is kept as a skeleton** (O.2.3 has "kept as the runner's
+  parser fixtures"). As text, a platform dump fails the scanner on
+  platform furniture — a synthetic `dumpsys bluetooth_manager` gave
+  seven structural hits under the real scanner here (S2, S6, S7, S8,
+  S10 twice, S12) — and holds the address. The skeleton keeps each
+  line's indentation, punctuation and the platform's own words, and
+  masks every value: a word with a digit, a URI, a path, a run of 24
+  or more base64 characters, and the rest of a line after a key that
+  names what a user or a device chose. It is what a parser is written
+  against; three synthetic skeletons and a verdict file passed the
+  real scanner and the key-material floor. The services dump kept is
+  the whole device's: Haven has no service to show a record's shape.
+- **S0's host half asks `am`, not only `dumpsys package`** (O.2.5).
+  That dump lists a component only where it has an intent filter: the
+  receiver would be there, the service and the alias would not. So
+  the service is asked of `am start-foreground-service` and `am
+  startservice`, the alias of `am start`, and the same three are
+  asked in the probe and S2: no build of push A may declare one.
+- **"No Bluetooth API is touched" has a second witness**, beyond
+  O.2.5's three dumps: no line from Haven's pid under a tag opening
+  `Bluetooth` but the plant. Its positive control is P1 itself.
+- **P1 is one line, at DEBUG; P3 is reported in S0 and S2, not
+  required.** O.2.4's further tags and priorities are S1's. O.2.5 has
+  "every plant present" in S0 and S2; P3 is itself unsettled until
+  the probe (O-12), so there it is an answer. P1 absent beside P2
+  present is red in S0 and S2 — a lever, or a platform that drops the
+  line; the same run's `probe.p1` says which.
+- **The turn-on is asked in every leg, and timed.** In S0 it ends
+  `failed` with no mesh service to ask; in S2 at the unanswered
+  method, as in the probe — Android 10 has no permission to ask
+  first. In the probe the runner grants the three Bluetooth
+  permissions with `pm grant`, and the target asks for nothing where
+  `permission` does not read `granted`: under the system's dialog the
+  answer would be the dialog's two minutes.
+- **The target is released by a file, not by a wait.** `flutter drive`
+  removes the app when the target ends, so everything the host reads
+  must be read while it runs. The file is made with `run-as`, which a
+  debug build allows; no product code reads it. A hold that ran out
+  is unusable.
+- **The legs are the runner's positional arguments**, where O.2 names
+  one runner and no interface. `check_e2e_lane_budget.sh` reads the
+  runner once for every job and cannot see which branch a mode takes;
+  a loop over the arguments is what it counts. Two legs are
+  over-charged for it, on the safe side: `s0` and `s2` for the
+  adapter's 60 s, and `adapter` for a whole drive it does not make
+  (an 18-minute deadline on a leg its own wait bounds at 60 s).
+- **The second fall-back, a pinned emulator, is not built.** The SDK
+  step verifies the emulator binary it installed, and
+  `check_android_sdk_provisioned.sh` exists so that no lane boots
+  another; a build pinned through the action's `emulator-build` would
+  be one nothing verified, and this section has 36.4.9's version, not
+  its build number. If both boots answer no, that is next.
+- **S2 does not switch Bluetooth on.** Whether an API 29 image has a
+  controller at all is not known; the claim made is that the manager
+  does not name Haven, with the adapter in whatever state it boots.
+- **The lane starts a relay**, as its neighbours do, so that the app
+  mounts as it does in `e2e-integration.yml`; it is listed in
+  `KNOWN_UNWIRED_LANES` with that reason.
+- **Q-22, not answered: built as (a).** Each job is a required-shaped
+  check from this push. S0 and the probe share a job (O.2.7), so a
+  probe that could not measure — rc 3 — reddens the job S0 is in. An
+  answer the next push will not like (`probe.bt_on=no`) does not.
+- **The job caps' uncapped term is borrowed**: neither job has run, so
+  each declares `e2e_permission_revocation`'s measured 4.1 minutes,
+  whose uncapped steps these are, one for one.
+
+*O.2.7's rows, as met.* `check_logscan_wired_everywhere.sh`: a
+`RUNNER_PINS` row and its fixture; both jobs declare `HAVEN_LOGSCAN`
+and the `host` profile, build the scanner, rotate and discard.
+`check_wire_oracle_lane_reachable.sh`: the runner in
+`LOGSCAN_RUNNER_RE`, both jobs in `KNOWN_UNWIRED_LANES`.
+`cli_contract.rs`: the runner in the shared-fake list.
+`check_android_sdk_provisioned.sh`, `check_gradle_build_hardened.sh`,
+`check_live_sync_define_declared.sh`: by the workflow's shape.
+`check_e2e_step_timeout_ordering.sh`, `check_e2e_lane_budget.sh`: the
+three drive steps and nine claims in `e2e_lane_budget.manifest`; the
+check's own sums are 1887 s under a 32-minute deadline and 1065 s
+under 18. The harness self-tests: a step in `repo-guards.yml`, about
+seven seconds. `check_wire_proxy_test_only.sh`: nothing but `.log`
+files in the upload. `docs/E2E_TROUBLESHOOTING.md`: the lane's row and
+failure mode 26. **One row O.2.7 did not have**:
+`haven/test/e2e/app_lifecycle_test.dart`, which holds every target that
+mounts the app to one of three tables. The mesh target is in the one
+that is true of it — its lane compiles the live-sync engine out, so
+there is no session to claim the foreground for — and so does not take
+the lifecycle helper, as that table requires. The table's check read
+one `HAVEN_LIVE_SYNC` line a workflow; this lane has two jobs and says
+it in each, so the check now holds every declaration to `"false"` and
+requires one — a `"true"` in either job, or none, still fails it (both
+tried). **Also changed for it**: the guards job's cap, 20 to 30
+minutes — it took 17 min 04 s on `1b5fa0e`; no guard pins that number.
+
+*Proved here.*
+
+- The runner's `--self-test`: 373 checks. The three legs' passing
+  captures; for each leg, one fixture a clause, each required to fail
+  with the finding that names its cause; the probe answering rather
+  than judging (Bluetooth not on, P1 absent, the event's symbol
+  missing, no LE feature: each rc 0 with its word); every unusable
+  branch, among them an empty capture, markers and plants under
+  another pid, a dump with no heading, a hold that ran out; the
+  redaction and the skeleton over planted values; the markers, the
+  hold and the release file read out of the target's source and held
+  to the runner's; the gate ahead of the one echo of a drive log.
+  Under `gawk` and `mawk`.
+- **A mutation pass**: 100 changes to the readers and the oracle,
+  each silencing or loosening one check. 97 failed a fixture; three,
+  all in the skeleton — a digit-free blob, the word a cell is found
+  by, the redaction ahead of the masking — did not, were each given
+  one, and fail it.
+- Every lane-policing guard and its self-test, the 67 source guards,
+  `check_privacy_invariants.sh`, every workflow parsed as YAML,
+  `flutter analyze` with no error and no warning, the whole Dart
+  suite (6201 passed, 5 skipped, none failed), and `cli_contract.rs`'s
+  test of the shared fake.
+- The skeleton and the target's own lines under the real scanner, as
+  above. **Not** a device log: the scanner's `logcat` class wants a
+  whole capture.
+
+*What only the first CI run proves* — everything that is Android's:
+
+| It rests on | If it is false, the run shows |
+|---|---|
+| The flag-on and flag-off APKs of one target build in one step, and `check_mesh_manifest.sh` passes on an integration-test APK | the build step red, before any emulator |
+| An API 29 `google_apis` image provisions, boots under the action and completes a `flutter drive` | `e2e_mesh_refusal` red at provisioning or boot, or `s2` unusable: "never reported" |
+| The app mounts the map with a stand-in identity and no permission granted, as in `app_test.dart`, on both images | `UNUSABLE: the map was not on screen`, or a drive that failed |
+| `liblog.so` opens from Dart and `__android_log_buf_write` writes under a tag of the caller's choosing | `p2=absent`, rc 3 in every leg |
+| A DEBUG line under `BluetoothGatt` is written with no property set (O-11) | `probe.p1=absent`; S0 and S2 red on P1 |
+| `__android_log_bswrite` answers a look-up from an app (O-12) | `probe.p3_call=nosym` — an answer |
+| `run-as` runs for the debug build, in its data directory, and Dart sees the file | `HOLD_EXPIRED`, rc 3, four minutes a leg |
+| The words of `am` for a component that does not exist, and the four dumps' headings, on API 29 and 34 | `am_…=unread` or `…_dump=unread`, rc 3 |
+| `pm grant` of the three Bluetooth permissions takes, and a request for permissions already held answers at once | `the turn-on was not asked`, or `ms to fail`, rc 3 |
+| `cmd bluetooth_manager enable` exists, and the manager's dump has a `state:` line | `probe.bt_on=unread`, rc 3 |
+| A capture of a short drive clears the scanner's floors (2 000 lines of device log, the two shape plants) | the scanner's rc 4 or rc 3 |
+| A real dump's skeleton passes the scanner | rc 1, `LEAK: …skel.log` — a value the masking missed |
+| The step that reads `probe.bt_on` out of the verdict file hands it to the cold-boot step's condition | the cold-boot step does not run though `probe.bt_on=no` |
+
+*Still unproved after it* (O.2.8 stands): everything of the service on
+Android, the lever, and whatever a second boot or a pinned emulator
+would answer if the first says no.

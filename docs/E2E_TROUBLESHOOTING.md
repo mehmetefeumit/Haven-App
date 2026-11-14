@@ -29,6 +29,7 @@ what keeps that true).
 | `soak-core.yml` | the Tier-1 soak rig (`tooling/soak`): several whole Haven devices in one process against hermetic relays broken on a seeded schedule, grading haven-core's invariants; no app, no emulator. Every capture is scanned twice before the upload — against the manifest the rig sealed from its own declarations and against the host needles (failure mode 14) | `run-soak-core.sh` under `run-with-deadline.sh`, on a plain ubuntu runner | in-process `nostr-relay-builder` relays, ws:// loopback |
 | `soak-nightly.yml` | the same rig at the `nightly` profile on four matrix slots (`Soak Core (nightly, s1)` … `s4`), each with its own seed from `scripts/ci/soak_seed.sh` (the run's `created_at`, never the local clock); the three expected-red arms (C7/C8/C9) are deliberately NOT in the nightly — `verdict.log` keeps a run's first violation only, so they would mask every later defect — and are asserted red by `cargo test` instead, so a red night is a finding. A red night files one issue per key (`docs/SOAK_LANE.md`, "When a night goes red") | cron `23 0 * * 1-6`, or `workflow_dispatch` with a pinned `seed` and 1–4 `slots`; each slot calls `soak-core.yml` | as `soak-core.yml` |
 | `e2e-integration.yml` | seven component targets (`smoke_test`, `app_test`, `keyring_test`, …), one after another; the lane's one manifest is sealed from the host needles before the first target, and every target's captures and the aggregate go through `scan-logs.sh` (failure mode 13) | `run-integration-tests.sh` → `run-single-avd-scenario.sh` per target, on one AVD | strfry container reset per target, `ws://10.0.2.2:7777` |
+| `e2e-mesh.yml` | the Bluetooth mesh lane, push A: `mesh_lever_test.dart` on API 34 without the mesh flag (S0) and with it (the probe), and with it on API 29 (S2) — the first lane below API 34. Captures are kept raw off the artifact, published with every Bluetooth address and the adapter's name replaced, platform dumps as skeletons only, all of it through `scan-logs.sh` (failure mode 26) | `run-mesh-lever.sh <leg>…` under `reactivecircus/android-emulator-runner`; the target reports and holds, the runner reads the device (`dumpsys`, `am`, `pm`, the log buffers) and releases it | strfry container, `ws://10.0.2.2:7777` (the app mounts against it; the lane publishes nothing) |
 
 `e2e-android.yml` / `e2e-ios.yml` take a `live_sync` boolean input (default
 **false**) and always pass `--dart-define=HAVEN_LIVE_SYNC=<input>`, so a lane
@@ -1761,6 +1762,62 @@ download is an empty night (`--assert-no-artifacts`, D1–D5). And in any jq tha
 remains: **a bound expression that is not a simple term is parenthesised** —
 `(if … end) as $x | …`, never `if … end as $x`. A step red at exit 3 with a jq
 compile error is this class; re-running cannot help.
+
+## Failure mode 26 — the mesh lane (`E2E Mesh`): reading its verdict, and its probe
+
+`e2e_mesh_lever` (API 34: legs `s0`, then `probe`) and `e2e_mesh_refusal` (API
+29: leg `s2`) end on one of five codes, the runner's own
+(`tooling/e2e/ci/run-mesh-lever.sh`), folded 1 > 2 > 3 > 4 > 0:
+
+| rc | The step log ends with | It means | Who fixes it |
+|---|---|---|---|
+| 0 | `MESH LANE PASS` | every promise of push A held and every measurement was taken | — |
+| 1 | `MESH LANE RED`, with `RED (<leg>): …` lines; or `log-privacy gate tripped` | a promise is broken — a turn-on that did not end `failed`, a mesh component the platform knows, a method behind the log lever that answers, a stored copy, a Bluetooth-tagged line from Haven's process that is no plant, Haven's process dying, a drive that failed after the target started — or the scanner found a leak (failure mode 13) | the app |
+| 2 | `MESH LANE BROKEN`, `BROKEN (<leg>): …`; or `MESH-LANE-FAIL (rc 2)` | the lane drove the wrong build, or an APK was never staged | the workflow |
+| 3 | `MESH LANE UNUSABLE`, `UNUSABLE (<leg>): …`; or `MESH-LANE-FAIL (rc 3)` | the platform, the emulator or the capture would not answer: the target never reported, a dump had no heading, `am` said nothing, `run-as` did not list, the planted `flutter` line (P2) is missing, the target's hold ran out, a probe measurement could not be taken. **Nothing was proved either way.** | the lane, not the app |
+| 4 | the scanner's `META-FLOOR` | a capture proves too little (failure mode 13) | the lane |
+
+**Do not open a product issue from an rc 3**, and do not make a control
+optional to turn it green: each UNUSABLE line names the one reading that failed,
+and the raw capture it was made over is deliberately not in the artifact (it
+holds the emulator's Bluetooth address). Reproduce on an emulator instead:
+`bash tooling/e2e/ci/run-mesh-lever.sh s0` with both APKs staged under
+`/tmp/integration-apks`, and read `/tmp/mesh-raw/`.
+
+**The answers.** Every leg prints `  mesh-answer: <leg>.<key>=<value>` lines in
+the drive step, and writes the same lines to `verdict.<legs>.log` in the
+artifact (`verdict.s0-probe.log`, `verdict.s2.log`, `verdict.adapter.log`).
+Values are fixed words and numbers; a value the runner does not know is written
+`other`. The probe's, and what each decides for the push that makes the log
+lever reachable (`docs/BLUETOOTH_MESH_M3_DESIGN.md` §O.2.3, §O.7):
+
+| Key | Values | Decides |
+|---|---|---|
+| `probe.le_feature` | `yes` `no` | `no`: the mesh is unsupported on this image; the lever's slice needs another |
+| `probe.bt_on`, `probe.bt_state`, `probe.bt_on_after_s` | `yes` `no`; the manager's word; seconds | `no` after the lanes' snapshot boot sends the job through a cold boot: read `adapter.bt_on` in `verdict.adapter.log`. `no` there too: no adapter on a hosted runner yet, and the lever's slice is unusable until one enables |
+| `probe.p1`, `probe.p1_call` | `present` `absent` `foreign`; `ok` `nolib` `nosym` `refused` | `absent`: a DEBUG line under a platform Bluetooth tag is not written with no lever at all — the lever's "absent afterwards" would prove nothing, and the plant is redesigned first |
+| `probe.p2` | `present` | anything else is rc 3: the plant call or the capture is dead |
+| `probe.p3`, `probe.p3_call` | as P1 | `absent` or `nosym`: the events buffer has no control; the lever's slice reports it "not read" |
+| `probe.buffer_<name>_kib`, `probe.buffers_readable` | KiB or `unread`; a count | the buffers the lever's slice captures; fewer than five of main, system, crash, radio, events is rc 3 |
+| `probe.adapter_address_readable`, `probe.adapter_address_shape`, `probe.adapter_label_readable` | `yes` `no`; `mac` `other` `none` | `no`: that class of identifier is reported "not searched" in the events buffer, never silently skipped |
+| `probe.setprop_log_tag` | `yes` `no` | `no`: the lever's slice drops its `log.tag` clause and says so |
+| `probe.dump_services`, `probe.dump_notification`, `probe.dump_bluetooth` | `kept` | the skeletons `dump-*.probe.skel.log`: what the lever's parsers are written against |
+| `probe.supported`, `probe.ui_button`, `probe.turn_on`, `probe.turn_on_ms`, `probe.bt_tag_lines` | `true`; 1; `failed`; ms; 0 | what Haven promises of push A on this image; a different value is rc 1 or rc 3, named in the log |
+| `<leg>.wall_s` | seconds | the lane's deadlines (`e2e-mesh.yml`), which are worst cases until this has history |
+
+**`P1: a DEBUG line … is not in the log` (rc 1 on `s0` or `s2`).** Either a log
+lever is in a process that must have none, or the platform drops the line. Read
+`probe.p1` of the same run: `absent` there too means the platform, and the
+plant — not the app — is what has to change.
+
+**`the turn-on was not asked` / `ms to fail` (rc 3 on `probe`).** `pm grant` of
+the three Bluetooth permissions did not take, so the system's dialog would have
+answered; the target does not ask under a dialog.
+
+**A skeleton tripped the scanner (rc 1, `LEAK: …dump-…skel.log`).** A value
+survived `mesh_skeleton`'s masking. The dump is the platform's, not Haven's, but
+the gate is right to refuse it: add the shape to the skeleton with a fixture,
+never an allowlist entry.
 
 ## What these lanes do NOT cover
 

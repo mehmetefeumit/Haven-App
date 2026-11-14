@@ -226,6 +226,7 @@ declare -A RUNNER_PINS=(
   ['run-b8-clock-skew.sh']='SELF-TEST FAIL (19): the drive log must be echoed exactly once, after the'
   ['run-b9-network-reconnect.sh']='_case "the drive log is echoed only after the log-privacy gate"'
   ['run-kp-rotation.sh']='_case "the drive log is echoed only after the log-privacy gate"'
+  ['run-mesh-lever.sh']='_case "the drive log is echoed only after the log-privacy gate"'
   # The soak runner echoes NO captured log at all — it has no device log to
   # tail and no drive transcript to show — so its pin asserts the stronger
   # property directly: the gate call exists at a command position AND no

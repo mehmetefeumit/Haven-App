@@ -904,10 +904,13 @@ jobs:
   guards:
     name: Static checks
     runs-on: ubuntu-latest
-    # Generous against the measured few minutes, but far below GitHub's 6-hour
-    # default: a hung guard (or a baseline fetch that never returns) should
-    # surface as a bounded red, not burn a runner for the afternoon.
-    timeout-minutes: 20
+    # Far below GitHub's 6-hour default: a hung guard (or a baseline fetch that
+    # never returns) should surface as a bounded red, not burn a runner for the
+    # afternoon. 30, because the job took 17 min 04 s of a 20-minute cap on
+    # 1b5fa0e (2026-11-14) and every guard added since is a self-test more:
+    # the margin has to outlast a slow runner, or a healthy run reds at the cap
+    # with every later guard unreported.
+    timeout-minutes: 30
     steps:
       - name: Checkout
         id: checkout
@@ -2173,6 +2176,26 @@ jobs:
       - name: E2E harness self-test (permission-revocation oracle)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/run-b5-permission-revocation.sh --self-test
+
+      # Guards the Bluetooth mesh lane's oracle (docs/BLUETOOTH_MESH_M3_DESIGN.md
+      # §O.7), which is where that lane is tested at all before it has run: the
+      # three legs' passing captures, then one fixture per clause, each
+      # required to fail BY NAME — a turn-on that succeeds, a mesh component
+      # the platform knows, a method behind the log lever that answers, a
+      # Bluetooth-tagged line of Haven's that is no plant. The ones that rot
+      # silently are the UNUSABLE ones: a dump with no heading, an `am` that
+      # said nothing, markers written by another pid, a planted line under
+      # another pid, a hold that ran out — each must be rc 3, never a zero
+      # count read as a pass. And the probe must ANSWER rather than judge:
+      # Bluetooth that does not come on is rc 0 with `probe.bt_on=no`. Also
+      # pinned: the redaction that takes every Bluetooth address and the
+      # adapter's name out of what is uploaded, the dump skeleton that keeps
+      # no value, the markers the drive target and the runner share, and the
+      # gate ahead of the one echo of a drive log. About 7 s: the three legs'
+      # suites run side by side.
+      - name: E2E harness self-test (mesh lane oracle)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/run-mesh-lever.sh --self-test
 
       # Guards the B8 clock-skew lane's ANTI-VACUITY parsers. The critical
       # fixture is a servo record whose read-back drift equals the full

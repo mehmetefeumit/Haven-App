@@ -3612,8 +3612,9 @@ item 6, that address rotation is the build's; §7.1 carries a note now.
   wake that differs by more than a slack either way, and one is always
   armed ahead; the foreground start says "on" and is put right once the
   adapter is read; a `sync` takes the reminder down and one still owed
-  is given again; the channel's `stop` answers when the service has
-  stopped; a tap is not read from an intent the system replays.
+  is given again; the channel's `stop` answers when the radio is down
+  and the flag cleared; a tap is not read from an intent the system
+  replays.
   **Proved here**: the 73 JVM tests; the mesh's Kotlin and
   `MainActivity` type-checked with no warning against copies of API
   36's, 35's and 34's `android.jar` and Flutter's own embedding jar,
@@ -3635,8 +3636,107 @@ item 6, that address rotation is the build's; §7.1 carries a note now.
   manifest and `haven/DEVELOPMENT.md` change where they said the radio's
   channels have no native end and that there is no service: a channel
   answers what touches no Bluetooth, and the service is written and in
-  no manifest. For the owner, beside Q-17 to Q-23: a boot that finds
-  the twelve hours passed leaves the flag set and tells nobody.
+  no manifest.
+  **Security review** (independent, read-only, of `1b5fa0e`): no
+  blocker and no high finding, and the push-A promise holds — nothing
+  reaches the log lever. Three medium and seven low, fixed (design
+  §O.6 has each). *A start made while a stop the service made was
+  still running could lose its alarm and its flag*, and the status in
+  between read "stopped, and wanted", which is the Dart side's cue to
+  bring the radio back: the flag is now cleared in the very step that
+  lets go of the start, a stop cancels the alarm only where no start
+  was made since, and a start that has been let go of arms none.
+  *Power*: an alarm held the processor five seconds, and the engine's
+  five-second tick re-armed it — a processor awake without a break
+  near any other mesh phone. The alarm now holds the phone only until
+  its two bodies have run, and is armed only for what must come while
+  the phone sleeps; what the engine's one merged wake still costs, the
+  change to Rust that would end it, and the choice are §O.6's *Power*
+  and Q-24 — every figure there ESTIMATED, none measured. *At boot the
+  native library was named outside any catch*, on the main thread of
+  the process the relay path restarts in: all of the receiver is now
+  inside `RadioEnd.each`. Low: a boot that finds the twelve hours gone
+  ends the mesh, flag cleared and the stopped notice posted, where it
+  left the flag set; the typed `getParcelableExtra` is called from
+  Android 14 only; the lock is released under the plan's own monitor;
+  a permission request the platform cancelled reads as not asked, not
+  as refused for good; the channel may name nothing that binds the
+  service or makes a pending intent; and the channel's `stop` answers
+  once the radio is down and the flag cleared — not, as this entry
+  said, once the service has stopped. 76 JVM tests; 445 guard fixtures;
+  mutation passes over the code as it now stands: 151 to the guard's
+  new clauses, 93 to the pure code, each failing a named fixture or
+  test (six of the guard's by failing the unchanged tree). §O.6 also lists
+  what push B must do. For the owner: Q-24.
+- **M3h, push A, part 2 — the lane** (`docs/BLUETOOTH_MESH_M3_DESIGN.md`
+  §O.2's slices S0, the probe and S2; §O.7 for what was built, each
+  difference from §O, the probe's answers and where to read them;
+  `.github/workflows/e2e-mesh.yml`, `tooling/e2e/ci/run-mesh-lever.sh`,
+  `haven/integration_test/mesh_lever_test.dart`,
+  `tooling/e2e/ci/build-integration-apks.sh`). No product code: nothing
+  under `haven/lib`, the app's Android sources, `haven-core` or the
+  bridge crate. **Nothing of it has run on an emulator**; the first CI
+  run is its first.
+  **What is built.** One drive target for three legs, which reports
+  facts as its own `debugPrint`s and holds while the host reads the
+  device: on API 34 a build without the flag (**S0**: every one of the
+  radio's eleven methods has no native end, no mesh button, no
+  component, no permission, nothing for `am` to start) and a build
+  with it (**the probe**: each measurement of §O.2.3 taken and written
+  as a fixed word or a number, and the turn-on a user makes ending
+  `failed` with nothing stored); on API 29 the build with the flag
+  (**S2**: Haven starts on Android 10, `supported` is false, nothing of
+  the mesh is offered). Three lines are planted from Haven's process
+  through `liblog` — under a platform Bluetooth tag, under `flutter`
+  by the same call, and a string event — and read back by pid and
+  tag. The build script takes an optional `HAVEN_MESH`. Verdicts: 0, 1
+  a promise broken, 2 the wrong build driven, 3 unusable — the
+  platform would not answer, never green — 4 the scanner's floor.
+  **The probe answers; it does not judge**: Bluetooth that does not
+  come on after the lanes' snapshot boot is `probe.bt_on=no`, rc 0,
+  and sends the job through a second, cold boot that asks the adapter
+  alone.
+  **Log anonymity.** An emulator's Bluetooth address and adapter name
+  are identifiers all the same: raw captures are never uploaded, the
+  published copies have every address shape and the adapter's own name
+  and address replaced, a platform dump is kept only as a skeleton of
+  its lines with every value masked, and all of it goes through the
+  gate. The planted tokens and the adapter's identity are **not**
+  declared to the scanner — a declared needle must be absent
+  everywhere, and the first must be present and the second is the
+  Bluetooth process's to print — so the lane's own oracle judges them
+  (§O-4).
+  **Where it differs from §O** (§O.7 has each with its reason): the
+  legs are the runner's positional arguments; the service and the
+  alias are asked of `am`, since `dumpsys package` lists only a
+  component with a filter; a second witness that Haven touched no
+  Bluetooth API, by the tags of its own lines; the event plant is
+  reported, not required, outside the probe; the turn-on is asked and
+  timed in every leg; the pinned-emulator fall-back is not built — it
+  would boot a binary the SDK step did not verify; S2 leaves
+  Bluetooth as it boots. Q-22 is built as (a), and S0 and the probe
+  share a job, so a probe that could not measure reddens it.
+  **Proved here**: the runner's self-test, 373 checks under `gawk` and
+  `mawk` — the three passing legs, one fixture a clause each failing
+  by name, every unusable branch, the redaction, the skeleton, the
+  target's markers held to the runner's; a mutation pass, 100 changes
+  to the readers and the oracle, 97 failing a fixture and the three
+  that did not — all in the skeleton — each given one; three synthetic
+  skeletons, a verdict file and the target's own lines clean under
+  the real scanner, and the raw dump they came from seven structural
+  hits; every lane-policing guard and its self-test, the 67 source
+  guards, the privacy invariants, `flutter analyze` and the whole Dart
+  suite (6201 passed, 5 skipped) — in which
+  `test/e2e/app_lifecycle_test.dart` now lists the target among those
+  whose lane compiles the live-sync engine out, and holds each job of a
+  two-job lane to that.
+  **Only CI proves, and has not run**: everything that is Android's
+  (§O.7's table) — that both APKs build, that an API 29 image boots
+  and completes a drive, that `liblog` opens from Dart, the words of
+  `am` and the dumps' headings, `run-as`, that a short drive's capture
+  clears the scanner's floors, that a real dump's skeleton passes it.
+  **Also changed**: the guards job's cap, 20 to 30 minutes (17 min 04 s
+  on `1b5fa0e`); `docs/E2E_TROUBLESHOOTING.md` failure mode 26.
 
 ### Proposed CLAUDE.md wording (owner to approve)
 
@@ -3782,6 +3882,26 @@ New:
 >   lookup, a C callback and calls through function pointers, whose
 >   decisions are `api.rs`'s, under the deny
 >   (`scripts/ci/check_mesh_radio.sh`)
+
+**8. "CI Pipeline", Stage 4.** The mesh lane is a stage-4 lane and the
+list does not have it. Appended to the Stage 4 entry, before its
+closing "plus further scenario lanes" clause.
+
+New, added:
+
+> `e2e-mesh.yml` (the Bluetooth mesh lane, push A: no build can turn the
+> mesh on yet, so it holds the two controls that are true today and
+> measures what the log lever's own lane will rest on — `e2e_mesh_lever`
+> on API 34, a build without `HAVEN_MESH` with no mesh channel, button
+> or component (S0) and a build with it probed for what the emulator
+> gives — the LE feature, an adapter that enables after the lanes'
+> snapshot boot, a line planted under a platform Bluetooth tag read
+> back — each answer a fixed word in `verdict.s0-probe.log`;
+> `e2e_mesh_refusal` on API 29, the first lane below API 34: the flag-on
+> build starts and offers nothing of the mesh; rc 3 is UNUSABLE — the
+> platform would not answer — never green and not a finding about Haven;
+> its raw captures hold the emulator's Bluetooth address and are never
+> uploaded: `docs/E2E_TROUBLESHOOTING.md` failure mode 26),
 
 Next: M3, the radio, and with it everything on screen, as
 `docs/BLUETOOTH_MESH_M3_DESIGN.md` has it; and, if Android is to pass

@@ -1,0 +1,632 @@
+# Reusable workflow: the Bluetooth mesh lane, push A
+# (docs/BLUETOOTH_MESH_M3_DESIGN.md §O.2; as built, §O.7).
+#
+# # What it is for
+#
+# The mesh's radio puts a log lever into Haven's process: from then on the
+# platform's own Bluetooth lines, which carry addresses, are kept out of the
+# device log. The rule of unit 1's review (§N.7) is that the push which first
+# makes that lever REACHABLE lands only on a lane that proves it holds. This is
+# that lane, before the lever: in push A no manifest declares the mesh's
+# service and the radio's channel does not answer the three methods behind the
+# lever, so nothing can turn the mesh on. What can be proved now is proved, and
+# what push B's oracle will rest on is measured:
+#
+#   e2e_mesh_lever    API 34   S0     a build WITHOUT the flag: no channel, no
+#                                     button, no component, no service to start
+#                              probe  a build WITH the flag: every measurement
+#                                     of §O.2.3, each TAKEN and written down as
+#                                     a fixed word or a number — whether the
+#                                     image has Bluetooth LE, whether the
+#                                     adapter comes on after this lane's
+#                                     snapshot boot, whether a line planted
+#                                     under a platform Bluetooth tag and a
+#                                     planted string event are read back, which
+#                                     buffers and settings a shell reads, the
+#                                     shape of three dumps. And what Haven
+#                                     promises of push A whatever the platform
+#                                     says: the turn-on a user makes ends
+#                                     `failed`, with nothing stored
+#   e2e_mesh_refusal  API 29   S2     the flag-on build STARTS on Android 10 —
+#                                     the first lane below API 34 — and offers
+#                                     nothing of the mesh
+#
+# # Reading the probe
+#
+# The answers are in the job log of `e2e_mesh_lever`, step "Run the flag-off
+# control and the probe on the emulator", as lines `  mesh-answer: probe.<key>=<value>`,
+# and in the artifact `e2e-mesh-lever-<run id>`, file `verdict.s0-probe.log`,
+# one `<leg>.<key>=<value>` a line. The dumps' skeletons are the artifact's
+# `dump-*.probe.skel.log`. docs/E2E_TROUBLESHOOTING.md ("The mesh lane") has
+# each key and what it decides for push B.
+#
+# A probe that could not TAKE a measurement is rc 3, UNUSABLE: not green, and
+# not a finding about Haven. An answer push B will not like — `probe.bt_on=no`
+# — is rc 0: the probe measured.
+#
+# # The fall-back boot
+#
+# The lanes boot a cached snapshot. Whether an adapter comes on after one was
+# found nowhere (§O-6), so when the probe answers `probe.bt_on=no` the job
+# boots the same AVD again WITHOUT loading the snapshot and asks the adapter
+# alone (`adapter.bt_on` in `verdict.adapter.log`). §O.2.3's second fall-back,
+# a pinned older emulator, is NOT built here: this tree's SDK step verifies the
+# emulator binary it installed, and a pinned build would be a binary nothing
+# verified (check_android_sdk_provisioned.sh). If both boots answer no, that is
+# the next thing to build, and S1 is unusable until an adapter enables.
+#
+# # Log anonymity
+#
+# An emulator's Bluetooth address and adapter name are identifiers all the
+# same. The runner keeps its raw captures in a directory that is never
+# uploaded, publishes copies with every address shape and the adapter's own
+# name and address replaced by a fixed word, keeps a platform dump only as a
+# skeleton of its lines, and runs everything it publishes through the gate
+# (run-mesh-lever.sh header).
+#
+# # Architecture mirrors e2e-permission-revocation.yml
+#
+# Same single-AVD, build-before-boot design, step for step.
+
+name: E2E Mesh
+
+on:
+  workflow_call:
+
+jobs:
+  e2e_mesh_lever:
+    name: e2e_mesh_lever
+    runs-on: ubuntu-latest
+    # Two APK builds of one target + boot + a step that runs two drives. The
+    # job cap must clear the SUM of the step caps (e2e-android.yml states the
+    # rule): Build the runtime log scanner 10 + Restore Gradle dependency cache
+    # 2 + Build mesh test APKs 30 + Provision the Android SDK 11 (derived in
+    # that script) + Create AVD snapshot (on an AVD-cache miss) 15 + the drive
+    # step 42 (derived there) + the cold-boot step 28 (derived there; it runs
+    # only when the probe answers that Bluetooth did not come on) = 138, + the
+    # most the work no step cap bounds has taken. THIS job has no history: its
+    # uncapped steps are e2e-permission-revocation.yml's, one for one
+    # (checkout, free disk space, Java, Rust, the cargo cache, Flutter, pub
+    # get, KVM, the AVD cache, strfry, the uploads), so that job's figure is
+    # declared until this one has runs of its own: 4.1, taken as 5 = 143 -> 145.
+    # job-uncapped-minutes: 4.1 (33 runs of e2e_permission_revocation whose uncapped steps these are, worst 32646436116)
+    timeout-minutes: 145
+    env:
+      HAVEN_E2E_RELAY: ws://10.0.2.2:7777
+      # The runtime identifier scanner (Security Rule 15). `host`: this lane
+      # runs no recording proxy, so the host needles are the whole declaration.
+      # What the lane itself plants is judged by its own oracle, by pid and
+      # tag — a planted line must be PRESENT, which no declared needle may be
+      # (run-mesh-lever.sh header).
+      HAVEN_LOGSCAN: "true"
+      HAVEN_LOGSCAN_PROFILE: host
+
+      # Declared EXPLICITLY rather than inherited (CI_HARDENING_BACKLOG.md A7).
+      # `false` is a choice: nothing this lane proves is on the receive path,
+      # and the live engine would only add relay traffic and log lines to
+      # captures whose subject is what a process writes about Bluetooth.
+      HAVEN_LIVE_SYNC: "false"
+
+      FLUTTER_SUPPRESS_ANALYTICS: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Free disk space
+        run: bash tooling/e2e/ci/free-disk-space.sh
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            haven-core
+            tooling/logscan
+          # Distinct cache key from the other E2E jobs so they don't race on
+          # one entry; all build the same x86_64-linux-android target.
+          key: e2e-mesh-lever-x64
+
+      # The runtime log scanner, release-built ONCE, before Flutter and the
+      # emulator are resident. Capped so a cargo stall fails fast; the cap is a
+      # term of the job cap's sum above.
+      - name: Build the runtime log scanner
+        timeout-minutes: 10
+        run: cargo build --release --manifest-path tooling/logscan/Cargo.toml
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Get Flutter dependencies
+        working-directory: haven
+        run: flutter pub get
+
+      # Restore-only: build-check.yml is the single writer of this key
+      # (e2e-permission-revocation.yml has why, and why `continue-on-error`).
+      - name: Restore Gradle dependency cache
+        uses: actions/cache/restore@v4
+        timeout-minutes: 2
+        continue-on-error: true
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/wrapper
+          key: gradle-deps-${{ runner.os }}-${{ hashFiles('haven/android/**/*.gradle*', 'haven/rust_builder/**/*.gradle*', 'haven/android/gradle/wrapper/gradle-wrapper.properties', 'haven/pubspec.lock') }}
+          restore-keys: |
+            gradle-deps-${{ runner.os }}-
+
+      # ONE target, built twice, BEFORE the emulator boots (build-before-boot
+      # discipline): without the flag — the APK every other lane's build is,
+      # staged as mesh_lever_test.apk — and with it (HAVEN_MESH=true: the one
+      # define, the mesh's manifest merged, staged as mesh_lever_test.mesh.apk).
+      # The Rust library is the same for both, so the second build is Dart and
+      # Gradle alone; eight APKs fit e2e-integration.yml's 35-minute cap.
+      # Both build trees go before the SDK is provisioned (CI run 41322563075).
+      #
+      # Then the manifest of each APK the emulator is about to be handed, read
+      # as build-check.yml reads its own: nothing of the mesh in the one, the
+      # mesh's entries and no component in the other. The lane's legs read the
+      # INSTALLED package; this reads what was built, so a leg that is red on a
+      # component has the file that declared it one step up.
+      - name: Build mesh test APKs
+        working-directory: haven
+        timeout-minutes: 30
+        run: |
+          bash ../tooling/e2e/ci/build-integration-apks.sh integration_test/mesh_lever_test.dart
+          HAVEN_MESH=true bash ../tooling/e2e/ci/build-integration-apks.sh integration_test/mesh_lever_test.dart
+          bash ../tooling/e2e/ci/release-apk-build-outputs.sh /tmp/integration-apks
+          bash ../scripts/ci/check_mesh_manifest.sh /tmp/integration-apks/mesh_lever_test.apk off
+          bash ../scripts/ci/check_mesh_manifest.sh /tmp/integration-apks/mesh_lever_test.mesh.apk on
+
+      - name: Enable KVM group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      # Unconditional, before the FIRST emulator step; its arguments MUST equal
+      # the api-level/target/arch of every emulator step in this job
+      # (check_android_sdk_provisioned.sh). The cap is the script's worst case.
+      - name: Provision the Android SDK
+        timeout-minutes: 11
+        run: bash tooling/e2e/ci/provision-android-sdk.sh 34 google_apis x86_64
+
+      - name: AVD cache
+        uses: actions/cache@v4
+        id: avd-cache
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          # Shared with the other Android E2E lanes: the AVD snapshot is
+          # byte-identical (same api/arch/target/profile). That the probe runs
+          # on the very snapshot the lanes boot is the point of its first
+          # measurement (§O-6).
+          key: avd-api34-x86_64-google_apis-single-v1
+
+      - name: Create AVD snapshot
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 15
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none
+          disable-animations: false
+          emulator-boot-timeout: 420
+          script: echo "Generated AVD snapshot for caching."
+
+      # The target mounts the map with the app's own providers, as
+      # app_test.dart does in e2e-integration.yml, so it gets the relay that
+      # lane has: a dial that fails is a line this lane has no use for.
+      - name: Start strfry relay
+        env:
+          STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
+        run: bash tooling/e2e/ci/start-strfry.sh
+
+      # Rotated before anything can write to it: a manifest left by an earlier
+      # run on a reused runner would be scanned against in this run's place.
+      - name: Rotate the needle directory
+        run: |
+          mkdir -m 0700 -p /tmp/haven-soak/needles
+          rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
+
+      # All real logic lives in the checked-in runner. Two legs, one after the
+      # other, on one boot: `s0` drives the flag-off APK, `probe` the flag-on.
+      #
+      # BOUNDS, innermost first:
+      #   10m  EACH `flutter drive` (the runner's DRIVE_TIMEOUT; the target
+      #        bounds itself at eight minutes, so its own timeout fires first).
+      #   32m  this step's inner deadline (run-with-deadline.sh below).
+      #   42m  this step's timeout-minutes = 32 + 1 (kill grace) + 7
+      #        (emulator-boot-timeout) + 2 (the action's own setup and
+      #        teardown, as e2e-permission-revocation.yml measures it).
+      #
+      # DEADLINE, from run-mesh-lever.sh's bounded waits at their bounds, in
+      # seconds, as scripts/ci/check_e2e_lane_budget.sh sums them:
+      #   start-strfry.sh READY_TIMEOUT, the ready loop's last 1 s tick
+      #     and READY_CONFIRM_SECS                             60 + 1 + 2 =   63
+      #   per leg, two legs:
+      #     the adapter asked on, BT_ON_TIMEOUT_SECS (charged to both legs;
+      #       only the probe asks)                                            60
+      #     app-install-lib.sh INSTALL_BARRIER_SECS                          120
+      #     DRIVE_TIMEOUT + DRIVE_KILL_AFTER_SECS              600 + 30 =    630
+      #     the cue's last MARKER_POLL_SECS tick once the drive has ended      2
+      #     the device log's last line, SETTLE_TIMEOUT_SECS                   10
+      #                                                        2 x 822 =   1644
+      #                                                      = 1707 s = 28m27s
+      #   + the unbounded relay, adb, install, dump, scan and oracle work,
+      #     3 min: the check's one allowance                 = 31m27s -> 32m.
+      # A healthy leg is far inside it: the target reports, holds while the
+      # runner reads the device, and ends — a minute or two (ESTIMATED from the
+      # neighbours' launch times; this lane has not run). Revise against p95
+      # once it has green history; each leg's wall time is in its answers
+      # (`<leg>.wall_s`).
+      #
+      # -memory 6144 matches the sibling Android lanes.
+      - name: Run the flag-off control and the probe on the emulator
+        timeout-minutes: 42
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none -memory 6144
+          disable-animations: true
+          emulator-boot-timeout: 420
+          script: bash tooling/e2e/ci/run-with-deadline.sh 32m "e2e-mesh lever drive" -- bash tooling/e2e/ci/run-mesh-lever.sh s0 probe
+
+      # What the probe answered about the adapter, read from its scanned
+      # verdict file: `no` is what sends the job through the cold boot below.
+      # An answer that is neither word leaves the output empty, and no boot
+      # follows a probe that did not measure.
+      - name: Read the probe's answer on the adapter
+        id: adapter
+        run: |
+          answer="$(grep -m 1 -oE '^probe\.bt_on=(yes|no)$' /tmp/mesh-logs/verdict.s0-probe.log || true)"
+          echo "bt_on=${answer#probe.bt_on=}" >> "${GITHUB_OUTPUT}"
+
+      # §O.2.3's first fall-back: the same AVD, booted WITHOUT its snapshot,
+      # and the adapter asked on again. No app and no device log: the answer
+      # (`adapter.bt_on`) and the Bluetooth dump's skeleton.
+      #
+      # BOUNDS: 18m inner deadline; 28m = 18 + 1 + 7 + 2. The deadline is one
+      # whole leg's (63 + 822 + 180 = 1065 s -> 18m), though this leg drives
+      # nothing and is bounded in fact by its 60 s adapter wait: the budget
+      # check reads the runner once for every job and charges each positional
+      # leg alike (scripts/ci/e2e_lane_budget.manifest).
+      - name: Ask the adapter again after a cold boot
+        if: steps.adapter.outputs.bt_on == 'no'
+        timeout-minutes: 28
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-load -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none -memory 6144
+          disable-animations: true
+          emulator-boot-timeout: 420
+          script: bash tooling/e2e/ci/run-with-deadline.sh 18m "e2e-mesh adapter after a cold boot" -- bash tooling/e2e/ci/run-mesh-lever.sh adapter
+
+      - name: Capture host + emulator diagnostics
+        if: failure()
+        run: |
+          mkdir -p /tmp/mesh-logs
+          # `adb` reaches PATH only through the emulator action; resolve it
+          # from the SDK and say in fixed words which case this diag is
+          # (e2e-permission-revocation.yml, run 35536892150).
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [ -n "${sdk}" ]; then PATH="${sdk}/platform-tools:${PATH}"; fi
+          if command -v adb >/dev/null 2>&1; then adb_state=resolved; else adb_state=absent; fi
+          devices=""
+          if [ "${adb_state}" = resolved ]; then
+            adb reconnect offline || true
+            devices="$(adb devices 2>/dev/null || true)"
+          fi
+          if grep -qE '^[^[:space:]]+[[:space:]]+[a-z]+$' <<<"${devices}"; then
+            device_state=present
+            timeout 60 adb wait-for-device || true
+          else
+            device_state=none
+          fi
+          {
+            echo "adb: ${adb_state}"
+            echo "device: ${device_state}"
+            echo
+            echo "=== df -h ==="
+            df -h || true
+            echo
+            echo "=== free -h ==="
+            free -h || true
+            echo
+            echo "=== the Bluetooth switch (0 or 1; never the adapter's name or address) ==="
+            adb shell settings get global bluetooth_on || true
+          # `.log`, not `.txt`: the scanner's directory walk types `*.log` only.
+          } > /tmp/mesh-logs/diag.lever.log 2>&1 || true
+          # Scanned with the wrapper the runner uses; rc 1 (a leak) withholds
+          # the diag, rc 2/3/4 keeps it and still fails the step.
+          diag_scan_rc=0
+          mkdir -p /tmp/mesh-logscan
+          bash tooling/e2e/ci/scan-logs.sh \
+            --manifest-dir /tmp/haven-soak/needles \
+            --sink diag=/tmp/mesh-logs/diag.lever.log \
+            --report /tmp/mesh-logscan/diag.ndjson || diag_scan_rc=$?
+          if [ "${diag_scan_rc}" -eq 1 ]; then
+            echo "diag withheld: log-privacy gate tripped" > /tmp/mesh-logs/DIAG_LEAK.txt
+            exit 1
+          elif [ "${diag_scan_rc}" -ne 0 ]; then
+            echo "diag uncertified (rc=${diag_scan_rc}): absent, unreadable, empty, or no manifest to scan against" \
+              > /tmp/mesh-logs/DIAG_UNSCANNABLE.txt
+            echo "ERROR: diag log could not be scanned (rc=${diag_scan_rc})." >&2
+            exit "${diag_scan_rc}"
+          fi
+
+      # if: always() — the probe's answers are the point of a green run.
+      - name: Upload mesh lever artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-mesh-lever-${{ github.run_id }}
+          path: |
+            /tmp/mesh-logs/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      # Never uploaded, and removed on EVERY outcome after every upload step.
+      - name: Discard needle manifests
+        if: always()
+        run: rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
+
+      - name: Tear down strfry relay
+        if: always()
+        run: bash tooling/e2e/ci/stop-strfry.sh
+
+  e2e_mesh_refusal:
+    name: e2e_mesh_refusal
+    runs-on: ubuntu-latest
+    # One APK build + boot + one drive. The sum of the step caps: Build the
+    # runtime log scanner 10 + Restore Gradle dependency cache 2 + Build mesh
+    # test APK 30 + Provision the Android SDK 11 + Create AVD snapshot 15 + the
+    # drive step 28 (derived there) = 96, + the uncapped work, declared from
+    # e2e-permission-revocation.yml's steps as in the job above: 4.1, taken as
+    # 5 = 101 -> 103.
+    # job-uncapped-minutes: 4.1 (33 runs of e2e_permission_revocation whose uncapped steps these are, worst 32646436116)
+    timeout-minutes: 103
+    env:
+      HAVEN_E2E_RELAY: ws://10.0.2.2:7777
+      HAVEN_LOGSCAN: "true"
+      HAVEN_LOGSCAN_PROFILE: host
+      # As in the job above: a choice, stated.
+      HAVEN_LIVE_SYNC: "false"
+      FLUTTER_SUPPRESS_ANALYTICS: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Free disk space
+        run: bash tooling/e2e/ci/free-disk-space.sh
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            haven-core
+            tooling/logscan
+          key: e2e-mesh-refusal-x64
+
+      - name: Build the runtime log scanner
+        timeout-minutes: 10
+        run: cargo build --release --manifest-path tooling/logscan/Cargo.toml
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Get Flutter dependencies
+        working-directory: haven
+        run: flutter pub get
+
+      - name: Restore Gradle dependency cache
+        uses: actions/cache/restore@v4
+        timeout-minutes: 2
+        continue-on-error: true
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/wrapper
+          key: gradle-deps-${{ runner.os }}-${{ hashFiles('haven/android/**/*.gradle*', 'haven/rust_builder/**/*.gradle*', 'haven/android/gradle/wrapper/gradle-wrapper.properties', 'haven/pubspec.lock') }}
+          restore-keys: |
+            gradle-deps-${{ runner.os }}-
+
+      # The flag-on APK alone: what this job shows is that THAT build starts
+      # below Android 11, where the mesh never runs.
+      - name: Build mesh test APK
+        working-directory: haven
+        timeout-minutes: 30
+        run: |
+          HAVEN_MESH=true bash ../tooling/e2e/ci/build-integration-apks.sh integration_test/mesh_lever_test.dart
+          bash ../tooling/e2e/ci/release-apk-build-outputs.sh /tmp/integration-apks
+          bash ../scripts/ci/check_mesh_manifest.sh /tmp/integration-apks/mesh_lever_test.mesh.apk on
+
+      - name: Enable KVM group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      # API 29: Android 10, the last release below the one the mesh starts on.
+      # The first image in this tree that is not API 34; whether it boots
+      # under the action is itself one of the probe's questions (§O.2.3).
+      - name: Provision the Android SDK
+        timeout-minutes: 11
+        run: bash tooling/e2e/ci/provision-android-sdk.sh 29 google_apis x86_64
+
+      - name: AVD cache
+        uses: actions/cache@v4
+        id: avd-cache
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          # This job's own: no other lane boots this image, so it is the one
+          # writer and the one reader of the key.
+          key: avd-api29-x86_64-google_apis-single-v1
+
+      - name: Create AVD snapshot
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 15
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 29
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none
+          disable-animations: false
+          emulator-boot-timeout: 420
+          script: echo "Generated AVD snapshot for caching."
+
+      - name: Start strfry relay
+        env:
+          STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
+        run: bash tooling/e2e/ci/start-strfry.sh
+
+      - name: Rotate the needle directory
+        run: |
+          mkdir -m 0700 -p /tmp/haven-soak/needles
+          rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
+
+      # One leg. BOUNDS: 10m the drive; 18m the inner deadline; 28m this
+      # step's timeout-minutes = 18 + 1 + 7 + 2.
+      #
+      # DEADLINE, as the job above derives it, for one leg:
+      #   63 + 822 = 885 s, + the 3-minute allowance = 1065 s = 17m45s -> 18m.
+      - name: Run the below-Android-11 proof on the emulator
+        timeout-minutes: 28
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
+        with:
+          api-level: 29
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none -memory 6144
+          disable-animations: true
+          emulator-boot-timeout: 420
+          script: bash tooling/e2e/ci/run-with-deadline.sh 18m "e2e-mesh refusal drive" -- bash tooling/e2e/ci/run-mesh-lever.sh s2
+
+      - name: Capture host + emulator diagnostics
+        if: failure()
+        run: |
+          mkdir -p /tmp/mesh-logs
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [ -n "${sdk}" ]; then PATH="${sdk}/platform-tools:${PATH}"; fi
+          if command -v adb >/dev/null 2>&1; then adb_state=resolved; else adb_state=absent; fi
+          devices=""
+          if [ "${adb_state}" = resolved ]; then
+            adb reconnect offline || true
+            devices="$(adb devices 2>/dev/null || true)"
+          fi
+          if grep -qE '^[^[:space:]]+[[:space:]]+[a-z]+$' <<<"${devices}"; then
+            device_state=present
+            timeout 60 adb wait-for-device || true
+          else
+            device_state=none
+          fi
+          {
+            echo "adb: ${adb_state}"
+            echo "device: ${device_state}"
+            echo
+            echo "=== df -h ==="
+            df -h || true
+            echo
+            echo "=== free -h ==="
+            free -h || true
+            echo
+            echo "=== the platform's API level ==="
+            adb shell getprop ro.build.version.sdk || true
+          } > /tmp/mesh-logs/diag.refusal.log 2>&1 || true
+          diag_scan_rc=0
+          mkdir -p /tmp/mesh-logscan
+          bash tooling/e2e/ci/scan-logs.sh \
+            --manifest-dir /tmp/haven-soak/needles \
+            --sink diag=/tmp/mesh-logs/diag.refusal.log \
+            --report /tmp/mesh-logscan/diag.ndjson || diag_scan_rc=$?
+          if [ "${diag_scan_rc}" -eq 1 ]; then
+            echo "diag withheld: log-privacy gate tripped" > /tmp/mesh-logs/DIAG_LEAK.txt
+            exit 1
+          elif [ "${diag_scan_rc}" -ne 0 ]; then
+            echo "diag uncertified (rc=${diag_scan_rc}): absent, unreadable, empty, or no manifest to scan against" \
+              > /tmp/mesh-logs/DIAG_UNSCANNABLE.txt
+            echo "ERROR: diag log could not be scanned (rc=${diag_scan_rc})." >&2
+            exit "${diag_scan_rc}"
+          fi
+
+      - name: Upload mesh refusal artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-mesh-refusal-${{ github.run_id }}
+          path: |
+            /tmp/mesh-logs/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Discard needle manifests
+        if: always()
+        run: rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
+
+      - name: Tear down strfry relay
+        if: always()
+        run: bash tooling/e2e/ci/stop-strfry.sh
