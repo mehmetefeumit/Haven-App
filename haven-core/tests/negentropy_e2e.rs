@@ -1684,7 +1684,13 @@ async fn a_stop_during_a_foreground_pass_drains_and_dials_nothing() {
 /// stretch between the pass's dial and its fetch where it reads no fence —
 /// ends the pass there: the stop drains every task, and no session is opened
 /// after it, even once the slow relay answers the dial.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+///
+/// On one thread, so the stop is raised between two polls of the drive task.
+/// Raised inside a poll of the dialling pass, it is read only at the next,
+/// and its teardown closes the drive pool under that poll, which then runs
+/// the pass out against a closed pool: no session either, but by the pool's
+/// closing and not by the stop's cancel, which is what this test holds.
+#[tokio::test(flavor = "current_thread")]
 async fn a_stop_while_a_foreground_pass_dials_opens_no_session_after_it() {
     let (open, held) = tokio::sync::watch::channel(true);
     let relay = SeededRelay::held(held).await;
@@ -1696,14 +1702,19 @@ async fn a_stop_while_a_foreground_pass_dials_opens_no_session_after_it() {
     let core = entry_waiting_for_its_replay(&pair, &circle, &urls, &open).await;
     wire.hold_new_connections();
     open.send(true).expect("the entry's replay comes in");
+    let processor = core.processor();
     assert!(
-        poll_until(|| wire.held() == 1).await,
+        poll_until(|| {
+            wire.held() == 1
+                && core.in_flight_publishes() == 1
+                && processor.for_test().negentropy_steps() == (1, 0)
+        })
+        .await,
         "premise: the pass is dialling the relay"
     );
 
     let stopped = core.stop().await;
     wire.release_connections();
-    let processor = core.processor();
     assert!(
         poll_until(|| wire.held() == 0).await,
         "premise: the slow relay answered the dial"
