@@ -3456,7 +3456,7 @@ still on it is not read over mesh. A process that owns the session and never
 runs the engine (a catch-up worker) keeps the keys current until the deadline
 and hands nothing off.
 
-Proof: `haven-core/tests/mesh_keys_e2e.rs` (T-SEC-6);
+Proof: `haven-core/tests/mesh_ring_e2e.rs` (T-SEC-6);
 `mesh_ffi_tests::mesh_is_started_once_kept_on_and_stopped_with_its_engine_and_keys`
 and
 `the_first_entry_after_the_deadline_turns_mesh_off_with_its_engine_and_keys`

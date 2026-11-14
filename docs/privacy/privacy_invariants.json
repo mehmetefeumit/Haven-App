@@ -7774,31 +7774,31 @@
       ],
       "tests": [
         {
-          "file": "haven-core/tests/mesh_keys_e2e.rs",
+          "file": "haven-core/tests/mesh_ring_e2e.rs",
           "name": "keys_are_pruned_in_step_with_the_engines_window_in_memory_and_in_the_table"
         },
         {
-          "file": "haven-core/tests/mesh_keys_e2e.rs",
+          "file": "haven-core/tests/mesh_ring_e2e.rs",
           "name": "a_staged_epochs_key_is_installed_at_its_confirm_and_never_at_a_rollback"
         },
         {
-          "file": "haven-core/tests/mesh_keys_e2e.rs",
+          "file": "haven-core/tests/mesh_ring_e2e.rs",
           "name": "the_open_deletes_stored_keys_unless_a_deadline_still_stands"
         },
         {
-          "file": "haven-core/tests/mesh_keys_e2e.rs",
+          "file": "haven-core/tests/mesh_ring_e2e.rs",
           "name": "with_mesh_off_nothing_is_derived_or_stored_and_what_was_stored_is_deleted"
         },
         {
-          "file": "haven-core/tests/mesh_keys_e2e.rs",
+          "file": "haven-core/tests/mesh_ring_e2e.rs",
           "name": "leaving_disbanding_or_forgetting_a_circle_leaves_no_row_of_it"
         },
         {
-          "file": "haven-core/tests/mesh_keys_e2e.rs",
+          "file": "haven-core/tests/mesh_ring_e2e.rs",
           "name": "a_deadline_that_passes_with_no_engine_batch_ends_the_keys_at_the_maintenance_tick"
         },
         {
-          "file": "haven-core/tests/mesh_keys_e2e.rs",
+          "file": "haven-core/tests/mesh_ring_e2e.rs",
           "name": "how_long_mesh_stays_on_is_read_off_the_deadline_and_a_clock_set_back_adds_nothing"
         },
         {
