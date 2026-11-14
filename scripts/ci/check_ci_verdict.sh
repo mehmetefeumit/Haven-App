@@ -12,16 +12,19 @@
 #
 # The verdict comes from the newest ci.yml `push` run on main for the commit,
 # read through the Actions API, whose runs only GitHub Actions can create. Every
-# job under the four gate workflows must end `success` or `skipped`, where a
+# job under the gate workflows must end `success` or `skipped`, where a
 # `skipped` job is another `group` call's copy. Each job in REQUIRED_JOBS must
-# have at least one `success`. The E2E lanes stay out of the gate, as before:
-# their device nondeterminism must never block a release of a green commit.
+# have at least one `success`. The functional E2E lanes stay out of the gate:
+# they drive debug builds with peers and relays. The iOS launch gate is in it:
+# it is offline and peerless by design, so a red one on main is a real reason
+# not to tag (docs/LAUNCH_GATE.md). Android's launch gate is not:
+# release-build.yml launches the tag's exact APKs itself.
 # While a gate job is still running the gate waits, so a tag may be pushed
 # right after main.
 #
 # REQUIRED_JOBS is pinned, because a job that silently left the list would be
 # a deleted check that reports success. The no-argument mode derives the same
-# set from the four reusable workflows and ci.yml's callers, and fails when the
+# set from the gate's reusable workflows and ci.yml's callers, and fails when the
 # two differ.
 #
 # Usage:
@@ -41,7 +44,7 @@ set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT_OVERRIDE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 readonly CI_YML_REL='.github/workflows/ci.yml'
-readonly GATE_WORKFLOWS=(rust-check.yml cross-check.yml coverage.yml repo-guards.yml)
+readonly GATE_WORKFLOWS=(rust-check.yml cross-check.yml coverage.yml repo-guards.yml launch-gate-ios.yml)
 # <workflow>:<job key> that no good run executes. rust-check's `group` job
 # fails a call whose group input is unknown, so it is skipped on every good
 # run; the "nothing failed" rule still holds it.
@@ -52,6 +55,7 @@ readonly REQUIRED_JOBS=(
   'Cross-Platform Compile / Android (arm64)'
   'Cross-Platform Compile / Apple (macOS + iOS)'
   'Cross-Platform Compile / Windows (x64)'
+  'Launch Gate (iOS) / Simulator launch, relaunch and upgrade'
   'Repo Guards / Static checks'
   'Rust Checks / e2e tooling (hermetic relay + wire proxy)'
   'Rust Checks / haven-core'
@@ -63,10 +67,12 @@ readonly REQUIRED_JOBS=(
 POLL_SECS="${CI_VERDICT_POLL_SECS:-60}"
 # A tag pushed with main can arrive before GitHub has created main's run.
 NO_RUN_GRACE_SECS="${CI_VERDICT_NO_RUN_GRACE_SECS:-300}"
-# ci.yml's slowest gate job, cold, has taken 50 minutes.
-DEADLINE_SECS="${CI_VERDICT_DEADLINE_SECS:-5400}"
+# The slowest gate job is the iOS launch gate, which starts only after the rust
+# stage and builds the app cold; the other gate jobs, cold, have taken 50
+# minutes. Two hours covers both with a margin for macOS queueing.
+DEADLINE_SECS="${CI_VERDICT_DEADLINE_SECS:-7200}"
 # Consecutive API calls that may fail before the gate gives up: one blip in
-# 90 minutes of polling must not fail a release.
+# two hours of polling must not fail a release.
 readonly API_MISS_LIMIT=3
 # How many fixtures the self-test runs. Pinned, because a fixture that stops
 # running is the one way a deleted check reports success.

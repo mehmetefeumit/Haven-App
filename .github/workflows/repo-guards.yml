@@ -426,10 +426,32 @@
 #
 #   Release gate names CI's jobs      scripts/ci/check_ci_verdict.sh
 #     release-build.yml ships a tag only once ci.yml's push run has passed
-#     every job of rust-check, cross-check, coverage and repo-guards on that
-#     commit. The jobs it requires are pinned; this holds the list equal to
-#     the jobs those workflows and ci.yml's callers define, so a job added or
-#     renamed cannot silently leave the release gate.
+#     every job of rust-check, cross-check, coverage, repo-guards and the iOS
+#     launch gate on that commit. The jobs it requires are pinned; this holds
+#     the list equal to the jobs those workflows and ci.yml's callers define,
+#     so a job added or renamed cannot silently leave the release gate.
+#
+#   Release is launch-gated           scripts/ci/check_release_launch_gated.sh
+#     v0.1.14 published APKs that died at every process start, because nothing
+#     launched a release build before it shipped. This holds the wiring that
+#     now prevents it: the GitHub Release, Zapstore and TestFlight wait for the
+#     launch gates, publish only the bytes the Android gate tested, the IPA
+#     load check runs before upload, and ci.yml and the verdict gate keep both
+#     gates (docs/LAUNCH_GATE.md).
+#
+#   Release APK loads                 scripts/ci/check_apk_loadable.sh
+#     v0.1.14's R8 deleted the constructor WorkManager's database is created
+#     through, and ML Kit's registrars' with it. Every class Android or a
+#     library instantiates by reflection must keep the constructor it is
+#     instantiated through. Self-test here, on real dexdump excerpts of
+#     v0.1.13 (passes) and v0.1.14 (fails); the real run is on every APK the
+#     Android launch gate tests.
+#
+#   iOS archive loads                 scripts/ci/check_ios_app_loadable.sh
+#     The release-only load failures no simulator shows: every dylib the app
+#     links resolves inside the bundle or the OS, and the Rust framework Dart
+#     opens exports every symbol the bridge looks up. Self-test here; the real
+#     run is on the archive before TestFlight and on the gate's simulator app.
 #
 #   Session-busy marker is log-only   scripts/ci/check_session_busy_marker_not_routed.sh
 #     The Rule-14 "an MLS session is already open" marker must never drive a
@@ -1423,6 +1445,27 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_ci_verdict.sh --self-test
 
+      - name: Release is launch-gated
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_release_launch_gated.sh
+
+      # Mutates copies of the real workflows: each removed wire must fail.
+      - name: Release is launch-gated self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_release_launch_gated.sh --self-test
+
+      # otool/nm text fixtures: an unresolvable dylib, a Rust framework missing
+      # one bridge export, and a vacuous bundle each fail; the load check runs
+      # for real on the archive in release-build.yml and on the simulator app
+      # in launch-gate-ios.yml.
+      - name: iOS archive loadable self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_ios_app_loadable.sh --self-test
+
+      - name: Release APK loadable self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_apk_loadable.sh --self-test
+
       # The Rule-14 busy marker is a LOG token. Routing on it would be
       # remotely influenceable: a circle admin controls the group's routing
       # relays, the live-sync relay gate interpolates a rejected URL into its
@@ -2159,6 +2202,37 @@ jobs:
       - name: E2E harness self-test (iOS background-publish handshake)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/run-ios-bg-publish.sh --self-test
+
+      # The iOS launch gate's runner, against stubbed simctl/xcodebuild/pf/gh:
+      # each verdict keeps its own exit code (a crash, a hung test, a corrupt
+      # or yanked predecessor, egress that is not blocked, no test started),
+      # and nothing reaches the output before the log-privacy gate.
+      - name: E2E harness self-test (iOS launch gate)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/run-launch-gate-ios.sh --self-test
+
+      # The Android launch gate's runner against a stubbed adb: a crash at
+      # launch, a restart or ANR mid-journey, Intro after a relaunch, a name
+      # that did not survive, an unusable upgrade source and an offline device
+      # each get their own verdict, crash evidence is read before anything else
+      # is blamed, and the pseudonym never reaches a transcript.
+      - name: E2E harness self-test (Android launch gate)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/run-launch-gate-android.sh --self-test
+
+      # The screen reader the Android gate decides on: exact-line matching,
+      # entity and apostrophe folding, and an empty or label-less dump read as
+      # no observation rather than a verdict.
+      - name: E2E harness self-test (launch-gate screen reader)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: python3 -I tooling/e2e/ci/ui-dump.py --self-test
+
+      # Which release the upgrade leg starts from and whether it can replace it:
+      # drafts, pre-releases, yanked and later tags excluded; a bad checksum,
+      # a second signer or a versionCode that is not higher refused.
+      - name: E2E harness self-test (launch-gate previous release)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/launch-gate-previous-apk.sh --self-test
 
       # The relay-side liveness grader for the owner-run power measurements
       # (docs/POWER_MEASUREMENT.md §3). Unlike every other oracle in this job it

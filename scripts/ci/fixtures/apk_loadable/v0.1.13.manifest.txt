@@ -1,0 +1,88 @@
+# Fixture for scripts/ci/check_apk_loadable.sh --self-test. Lines starting with
+# '#' are this header; the self-test strips them, nothing else is changed.
+#
+# REAL aapt2 output, not an emulation: `aapt2 dump xmltree --file
+# AndroidManifest.xml <apk>` (build-tools 36.1.0 for Linux, aapt2 2.20-14042983)
+# run on the published v0.1.13 app-arm64-v8a-release.apk (sha256
+# 4768831c361f67f79d325948359a237a8cd53da9e31e2a5cf0b2ec9efa7a2f53).
+#
+# Excerpted, never edited: the namespace line, the manifest element's own
+# attributes, the application element's own attributes, and the whole subtree
+# of four application children — MainActivity, the disabled
+# com.google.android.gms.metadata.ModuleDependencies service (no class in the
+# dex: the one shape E1 exempts), androidx.startup.InitializationProvider with
+# its initializer meta-data, and ML Kit's MlKitComponentDiscoveryService with
+# its ComponentRegistrar meta-data.
+N: android=http://schemas.android.com/apk/res/android (line=2)
+  E: manifest (line=2)
+    A: http://schemas.android.com/apk/res/android:versionCode(0x0101021b)=2020
+    A: http://schemas.android.com/apk/res/android:versionName(0x0101021c)="0.1.13" (Raw: "0.1.13")
+    A: http://schemas.android.com/apk/res/android:compileSdkVersion(0x01010572)=36
+    A: http://schemas.android.com/apk/res/android:compileSdkVersionCodename(0x01010573)="16" (Raw: "16")
+    A: package="com.oblivioustech.haven" (Raw: "com.oblivioustech.haven")
+    A: platformBuildVersionCode=36
+    A: platformBuildVersionName=16
+      E: application (line=109)
+        A: http://schemas.android.com/apk/res/android:label(0x01010001)="Haven" (Raw: "Haven")
+        A: http://schemas.android.com/apk/res/android:icon(0x01010002)=@0x7f0d0000
+        A: http://schemas.android.com/apk/res/android:name(0x01010003)="com.oblivioustech.haven.HavenApplication" (Raw: "com.oblivioustech.haven.HavenApplication")
+        A: http://schemas.android.com/apk/res/android:allowBackup(0x01010280)=false
+        A: http://schemas.android.com/apk/res/android:supportsRtl(0x010103af)=true
+        A: http://schemas.android.com/apk/res/android:extractNativeLibs(0x010104ea)=false
+        A: http://schemas.android.com/apk/res/android:networkSecurityConfig(0x01010527)=@0x7f110002
+        A: http://schemas.android.com/apk/res/android:appComponentFactory(0x0101057a)="androidx.core.app.CoreComponentFactory" (Raw: "androidx.core.app.CoreComponentFactory")
+          E: activity (line=118)
+            A: http://schemas.android.com/apk/res/android:theme(0x01010000)=@0x7f0f00a2
+            A: http://schemas.android.com/apk/res/android:name(0x01010003)="com.oblivioustech.haven.MainActivity" (Raw: "com.oblivioustech.haven.MainActivity")
+            A: http://schemas.android.com/apk/res/android:exported(0x01010010)=true
+            A: http://schemas.android.com/apk/res/android:launchMode(0x0101001d)=1
+            A: http://schemas.android.com/apk/res/android:configChanges(0x0101001f)=0x40003fb4
+            A: http://schemas.android.com/apk/res/android:windowSoftInputMode(0x0101022b)=0x00000010
+            A: http://schemas.android.com/apk/res/android:hardwareAccelerated(0x010102d3)=true
+              E: meta-data (line=133)
+                A: http://schemas.android.com/apk/res/android:name(0x01010003)="io.flutter.embedding.android.NormalTheme" (Raw: "io.flutter.embedding.android.NormalTheme")
+                A: http://schemas.android.com/apk/res/android:resource(0x01010025)=@0x7f0f00a3
+              E: intent-filter (line=137)
+                  E: action (line=138)
+                    A: http://schemas.android.com/apk/res/android:name(0x01010003)="android.intent.action.MAIN" (Raw: "android.intent.action.MAIN")
+                  E: category (line=140)
+                    A: http://schemas.android.com/apk/res/android:name(0x01010003)="android.intent.category.LAUNCHER" (Raw: "android.intent.category.LAUNCHER")
+          E: service (line=228)
+            A: http://schemas.android.com/apk/res/android:name(0x01010003)="com.google.android.gms.metadata.ModuleDependencies" (Raw: "com.google.android.gms.metadata.ModuleDependencies")
+            A: http://schemas.android.com/apk/res/android:enabled(0x0101000e)=false
+            A: http://schemas.android.com/apk/res/android:exported(0x01010010)=false
+              E: intent-filter (line=232)
+                  E: action (line=233)
+                    A: http://schemas.android.com/apk/res/android:name(0x01010003)="com.google.android.gms.metadata.MODULE_DEPENDENCIES" (Raw: "com.google.android.gms.metadata.MODULE_DEPENDENCIES")
+              E: meta-data (line=236)
+                A: http://schemas.android.com/apk/res/android:name(0x01010003)="photopicker_activity:0:required" (Raw: "photopicker_activity:0:required")
+                A: http://schemas.android.com/apk/res/android:value(0x01010024)=""
+          E: provider (line=263)
+            A: http://schemas.android.com/apk/res/android:name(0x01010003)="androidx.startup.InitializationProvider" (Raw: "androidx.startup.InitializationProvider")
+            A: http://schemas.android.com/apk/res/android:exported(0x01010010)=false
+            A: http://schemas.android.com/apk/res/android:authorities(0x01010018)="com.oblivioustech.haven.androidx-startup" (Raw: "com.oblivioustech.haven.androidx-startup")
+              E: meta-data (line=267)
+                A: http://schemas.android.com/apk/res/android:name(0x01010003)="androidx.work.WorkManagerInitializer" (Raw: "androidx.work.WorkManagerInitializer")
+                A: http://schemas.android.com/apk/res/android:value(0x01010024)="androidx.startup" (Raw: "androidx.startup")
+              E: meta-data (line=270)
+                A: http://schemas.android.com/apk/res/android:name(0x01010003)="androidx.emoji2.text.EmojiCompatInitializer" (Raw: "androidx.emoji2.text.EmojiCompatInitializer")
+                A: http://schemas.android.com/apk/res/android:value(0x01010024)="androidx.startup" (Raw: "androidx.startup")
+              E: meta-data (line=273)
+                A: http://schemas.android.com/apk/res/android:name(0x01010003)="androidx.lifecycle.ProcessLifecycleInitializer" (Raw: "androidx.lifecycle.ProcessLifecycleInitializer")
+                A: http://schemas.android.com/apk/res/android:value(0x01010024)="androidx.startup" (Raw: "androidx.startup")
+              E: meta-data (line=276)
+                A: http://schemas.android.com/apk/res/android:name(0x01010003)="androidx.profileinstaller.ProfileInstallerInitializer" (Raw: "androidx.profileinstaller.ProfileInstallerInitializer")
+                A: http://schemas.android.com/apk/res/android:value(0x01010024)="androidx.startup" (Raw: "androidx.startup")
+          E: service (line=380)
+            A: http://schemas.android.com/apk/res/android:name(0x01010003)="com.google.mlkit.common.internal.MlKitComponentDiscoveryService" (Raw: "com.google.mlkit.common.internal.MlKitComponentDiscoveryService")
+            A: http://schemas.android.com/apk/res/android:exported(0x01010010)=false
+            A: http://schemas.android.com/apk/res/android:directBootAware(0x01010505)=true
+              E: meta-data (line=384)
+                A: http://schemas.android.com/apk/res/android:name(0x01010003)="com.google.firebase.components:com.google.mlkit.vision.barcode.internal.BarcodeRegistrar" (Raw: "com.google.firebase.components:com.google.mlkit.vision.barcode.internal.BarcodeRegistrar")
+                A: http://schemas.android.com/apk/res/android:value(0x01010024)="com.google.firebase.components.ComponentRegistrar" (Raw: "com.google.firebase.components.ComponentRegistrar")
+              E: meta-data (line=387)
+                A: http://schemas.android.com/apk/res/android:name(0x01010003)="com.google.firebase.components:com.google.mlkit.vision.common.internal.VisionCommonRegistrar" (Raw: "com.google.firebase.components:com.google.mlkit.vision.common.internal.VisionCommonRegistrar")
+                A: http://schemas.android.com/apk/res/android:value(0x01010024)="com.google.firebase.components.ComponentRegistrar" (Raw: "com.google.firebase.components.ComponentRegistrar")
+              E: meta-data (line=390)
+                A: http://schemas.android.com/apk/res/android:name(0x01010003)="com.google.firebase.components:com.google.mlkit.common.internal.CommonComponentRegistrar" (Raw: "com.google.firebase.components:com.google.mlkit.common.internal.CommonComponentRegistrar")
+                A: http://schemas.android.com/apk/res/android:value(0x01010024)="com.google.firebase.components.ComponentRegistrar" (Raw: "com.google.firebase.components.ComponentRegistrar")

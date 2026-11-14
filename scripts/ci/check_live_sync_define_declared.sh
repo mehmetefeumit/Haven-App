@@ -54,7 +54,9 @@
 #
 #   HAVEN_LIVE_SYNC-INTENT: production-default
 #
-# and the ALLOWLIST below names the only two files where that token counts. A
+# and the ALLOWLIST below names the only files where that token counts: the two
+# that build what ships, and the two launch gates, which build the shipped
+# artifact the same way (build_release.sh / Release native) to start it. A
 # new lane cannot reach for it without editing this script — which is the point:
 # the escape hatch is a reviewable act, not an omission.
 #
@@ -123,6 +125,8 @@ readonly INTENT_TOKEN='HAVEN_LIVE_SYNC-INTENT: production-default'
 readonly INTENT_ALLOWLIST=(
   "build-check.yml"
   "release-build.yml"
+  "launch-gate-ios.yml"
+  "launch-gate-android.yml"
 )
 
 # Lines that name a build command without performing one. Both classes are

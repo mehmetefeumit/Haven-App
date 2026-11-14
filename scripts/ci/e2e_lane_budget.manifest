@@ -272,6 +272,19 @@ unbudgeted e2e-ios-real-gps.yml::e2e_ios_real_gps the attempt timeout is the onl
 unbudgeted e2e-profile.yml::e2e_profile_ios the attempt timeout is the only bound on flutter test's build and run
 
 # ---------------------------------------------------------------------------
+# The iOS launch gate. macOS has no coreutils `timeout`, so the runner bounds
+# each xcodebuild run itself (run_bounded, a wall-clock poll released when the
+# process exits) and a failed leg's crash-report wait the same way.
+# ---------------------------------------------------------------------------
+
+unit tooling/e2e/ci/run-launch-gate-ios.sh
+# The log-privacy gate over the summary already on disk: the wrapper's budget.
+logscan main#1/on_exit#1/finish#1/lib:logscan_gate#1 charge @
+test */run_test#*/run_bounded#1/sleep:1#1 charge TEST_SECS + 1
+kill-grace */run_test#*/run_bounded#1/sleep:1#2 charge KILL_GRACE_SECS + 1
+crash-report */run_test#*/sleep:1#1 charge IPS_SETTLE_SECS + 1
+
+# ---------------------------------------------------------------------------
 # The Tier-1 soak lane. No emulator, no app: the rig is a cargo binary this
 # runner launches under the lane's inner deadline.
 #
@@ -302,3 +315,35 @@ unit tooling/e2e/ci/run-soak-core.sh
 # two calls, at the same cost.
 rig-scan */bash:scan-logs.sh#1 charge @
 logscan */lib:logscan_gate#1 charge @
+
+# ---------------------------------------------------------------------------
+# The Android release launch gate: three legs of install, cold launches and
+# screen polls on one AVD, no drive. Every wait is a bounded adb read inside a
+# wall-clock loop (SECONDS < deadline), so each loop is charged its bound plus
+# the one read that can start just before it, and the reads that share a loop
+# with the dump are within the dump's charge.
+# ---------------------------------------------------------------------------
+
+unit tooling/e2e/ci/run-launch-gate-android.sh
+device main#1/preconditions#1/timeout:BOOT_SECS#1 charge BOOT_SECS
+boot main#1/preconditions#1/timeout:ADB_SECS#1 charge BOOT_SECS + ADB_SECS
+offline main#1/preconditions#1/timeout:ADB_SECS#2 charge OFFLINE_SECS + ADB_SECS + ADB_SECS
+offline-net main#1/preconditions#1/timeout:ADB_SECS#3 within offline both reads of one pass are in offline's charge
+install */lib:install_fresh#1 charge @
+upgrade-install */lib:install_app#1 charge @
+launch */launch_app#*/timeout:LAUNCH_SECS#1 charge LAUNCH_SECS
+launch-pid */launch_app#*/pid_now#1/timeout:ADB_SECS#1 charge PROCESS_SECS + ADB_SECS
+journey */journey#1/observe#1/timeout:DUMP_SECS#1 charge JOURNEY_SECS + DUMP_SECS + ADB_SECS
+journey-alive */journey#1/alive#1/pid_now#1/timeout:ADB_SECS#1 within journey each pass's pid read is in the journey's charge
+reopen */expect_reopened#1/observe#1/timeout:DUMP_SECS#1 charge REOPEN_SECS + DUMP_SECS + ADB_SECS
+reopen-alive */expect_reopened#1/alive#1/pid_now#1/timeout:ADB_SECS#1 within reopen each pass's pid read is in the reopen's charge
+stop */stop_app#1/pid_now#1/timeout:ADB_SECS#1 charge PROCESS_SECS + ADB_SECS
+# The settle watch after a candidate's terminal screen: one dump and one pid
+# read per pass, within its wall-clock window.
+settle-watch */settle_watch#*/observe#1/timeout:DUMP_SECS#1 charge SETTLE_SECS + DUMP_SECS + ADB_SECS
+settle-alive */settle_watch#*/alive#1/pid_now#1/timeout:ADB_SECS#1 within settle-watch each pass's pid read is in the watch's charge
+crash-read */crash_evidence#1/timeout:ADB_SECS#* charge ADB_SECS
+device-state main#1/finish#1/timeout:ADB_SECS#1 charge ADB_SECS
+# The log-privacy gate over the summaries in the EXIT trap: files already on
+# disk, no wait of its own (logscan-gate.sh).
+logscan main#1/finish#1/lib:logscan_gate#1 charge @
