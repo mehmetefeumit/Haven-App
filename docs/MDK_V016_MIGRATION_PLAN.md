@@ -12,13 +12,12 @@ review record. The detail lives in four parts:
 | [`mdk-v0.16/stage1b_mdk.md`](mdk-v0.16/stage1b_mdk.md) | MDK API and behaviour changes on the session side, the database upgrade, tracker and docs |
 | [`mdk-v0.16/stage2_runtime.md`](mdk-v0.16/stage2_runtime.md) | Onto `AccountDeviceRuntime`, with the concession list |
 
-**Status:** plan confirmed; implementation not started. Nothing in this file
-describes shipped behaviour until the stage that delivers it is marked done
-below.
+**Status:** plan confirmed; Stage 0 in progress. Nothing in this file describes
+shipped behaviour until the stage that delivers it is marked done below.
 
 | Stage | State |
 |---|---|
-| 0 — safety net | not started |
+| 0 — safety net | in progress: steps 2 (timing-dependent tests) and 3 (exhaustive decisions over MDK enums) done; steps 4–10 not started |
 | 1 — dependency move | not started |
 | 2 — onto the runtime | not started; needs owner rulings R0, C1, C2 first |
 
