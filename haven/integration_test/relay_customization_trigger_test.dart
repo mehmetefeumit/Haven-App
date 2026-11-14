@@ -1,47 +1,18 @@
 /// Provider-level regression test for the relay-customization publish trigger.
 ///
-/// This test exercises the production trigger: adding a KeyPackage relay must
-/// cause the app to republish the KeyPackage to the new relay.  It is
-/// EXPECTED TO FAIL until the add path drives [keyPackagePublisherProvider]
-/// (see `relay_preferences_provider.dart` `_invalidateDownstream`, which
-/// currently only invalidates a marker with no live listener in this
-/// `ProviderContainer` -- no side-effecting re-evaluation is scheduled).
-///
-/// Do NOT force-read the publisher here -- that would mask the gap.
-///
-/// ## What the test proves
-///
-/// The `addRelay` production path in [KeyPackageRelaysNotifier]:
-///
-/// ```dart
-/// await service.addRelay(RelayCategory.keyPackage, url);
-/// state = AsyncValue.data(...);
-/// _invalidateDownstream();
-/// ```
-///
-/// The `_invalidateDownstream` marker exists so [keyPackagePublisherProvider]
-/// -- which `ref.watch(keyPackagePublisherInvalidatorProvider)` -- re-runs
-/// whenever a KP relay is added or removed.  But a non-autoDispose
+/// Adding a KeyPackage relay must republish the KeyPackage to the new relay,
+/// driven by the production add path alone: `_invalidateDownstream` in
+/// `relay_preferences_provider.dart` bumps
+/// [keyPackagePublisherInvalidatorProvider] and then `read`s
+/// [keyPackagePublisherProvider]. Both halves are needed: a non-autoDispose
 /// `FutureProvider` that is merely marked dirty does NOT re-execute unless
-/// something `read`s or `watch`es it.  Every OTHER republish call site pairs
-/// `invalidate(keyPackagePublisherProvider)` with a follow-up
-/// `read(keyPackagePublisherProvider)` -- the `read` is what forces the
-/// rebuild.  The relay-settings add/remove
-/// path invalidates only the MARKER and never reads the publisher, so on the
-/// settings route (where nothing listens to the publisher) the republish
-/// never fires.
+/// something reads or watches it, and a marker that is invalidated rather
+/// than bumped rebuilds to the same value and marks nothing dirty at all.
 ///
-/// This test replicates that production state FAITHFULLY: it establishes NO
-/// listener and NO read on [keyPackagePublisherProvider].  It drives the real
+/// This test replicates the settings route FAITHFULLY: it establishes NO
+/// listener and NO read on [keyPackagePublisherProvider]. It drives the real
 /// `addRelay` path and asserts ONLY that R2 receives the republished kind
-/// 30443.
-///
-///   * Against the BUG: `addRelay` invalidates the marker, nothing drives the
-///     publisher, R2 receives nothing -> the firstWhere times out -> RED.
-///   * Against the FIX (the add path also `read`s keyPackagePublisherProvider,
-///     matching every other call site): the publisher rebuilds, signs a new
-///     30443 over the updated KP relay list [R1, R2], and publishes it to R2
-///     -> GREEN.
+/// 30443, signed over the updated KP relay list [R1, R2].
 ///
 /// ## CRITICAL: do NOT `read`, `watch`, or `listen` keyPackagePublisherProvider
 /// anywhere in this test.  ANY of those would supply the very subscription

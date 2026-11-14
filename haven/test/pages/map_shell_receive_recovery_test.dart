@@ -987,8 +987,10 @@ void main() {
             'and caches it as a successful answer, so a poisoned read is '
             'undetectable after the fact',
       );
-      expect(body.contains('inboxRelaysProvider'), isTrue);
-      expect(body.contains('relayPreferencesServiceProvider'), isTrue);
+      // What it drops is proved on the helper itself
+      // (relay_preferences_provider_test.dart): every relay list, not only
+      // the inbox one.
+      expect(body.contains('retryFailedRelayLoads(ref);'), isTrue);
     });
   });
 

@@ -579,7 +579,7 @@ class NostrCircleService implements CircleService {
   /// can share one handle. Holding two managers against the same
   /// SQLCipher DB would split MLS state across two in-memory engine
   /// sessions and risk SQLite contention; consumers MUST go through this
-  /// getter.
+  /// getter, at each use: [releaseForHandoff] disposes the handle it returned.
   Future<CircleManagerFfi> getCircleManagerFfi() => _ensureInitialized();
 
   /// Converts a Rust timestamp to DateTime.
