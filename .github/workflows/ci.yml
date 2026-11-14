@@ -113,6 +113,27 @@ jobs:
   # Blossom server where profiles are involved) and drives a full user flow.
   # ---------------------------------------------------------------------------
 
+  # The launch gates (docs/LAUNCH_GATE.md): the app as it ships, started from
+  # the OS. v0.1.14 died at every process start because every lane here drives
+  # a debug build through integration_test, so R8, AOT and production main()
+  # never ran on a device. Android builds the RELEASE APKs through
+  # scripts/build_release.sh and launches them fresh, after a cold relaunch,
+  # and over the previous release with its data kept; iOS launches the
+  # production main() in the Release native configuration on a simulator and
+  # over the previous release's simulator build. Offline on purpose: a release
+  # build knows only production relays. The iOS gate is a release gate job
+  # (scripts/ci/check_ci_verdict.sh); before publishing, release-build.yml
+  # launches the tag's exact APKs, and a simulator build of the tag's tree.
+  launch-gate-android:
+    name: Launch Gate (Android)
+    needs: [rust]
+    uses: ./.github/workflows/launch-gate-android.yml
+
+  launch-gate-ios:
+    name: Launch Gate (iOS)
+    needs: [rust]
+    uses: ./.github/workflows/launch-gate-ios.yml
+
   # The consolidated three-user core flow (onboarding, circle creation,
   # invitation, location sharing, leave) on Android. This lane forces the POLL
   # receive path. That is no longer the production default — `liveSyncEnabled`
