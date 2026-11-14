@@ -3731,7 +3731,7 @@ export yet, and on no other target does anything call an entry.
   build, and it has run on no Android.** What the code does: `leverInstall`
   finds five functions of `liblog` by name (`dlopen`, `dlsym`) — they exist
   from API 30, and an import of one would stop the library, and so all of
-  Haven, loading on Android 6 to 10 — hands `liblog` the logger and, in a
+  Haven, loading on Android 7 to 10 — hands `liblog` the logger and, in a
   release build, raises the process's minimum priority to FATAL behind it;
   it answers `false` where a function is missing. The logger counts every
   line it is handed. In a release build that is all it does: it reads

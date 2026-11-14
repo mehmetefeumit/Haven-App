@@ -22,9 +22,22 @@
 #     Android 12 would want the location permission for a scan, and the mesh
 #     never asks for it); `BLUETOOTH_ADVERTISE` and `BLUETOOTH_CONNECT`;
 #     `BLUETOOTH` and `BLUETOOTH_ADMIN` up to API 30 and no further;
-#     `FOREGROUND_SERVICE_CONNECTED_DEVICE`; and `android.hardware.bluetooth_le`
-#     not required. The mesh's two components are not in the manifest yet
-#     (§N.2, unit 5) and are not asked for.
+#     `FOREGROUND_SERVICE_CONNECTED_DEVICE`; and `android.hardware.bluetooth`
+#     and `android.hardware.bluetooth_le`, neither required. And nothing more
+#     of the mesh: what `off` looks for fails here too in any element that is
+#     not one of those entries — another manifest's Bluetooth permission,
+#     feature or broadcast. The mesh's two components are not in the manifest
+#     yet (§N.2, unit 5): until the unit that declares them lists them here,
+#     one would fail.
+#
+#     Then what Play reads, which is not the manifest's text: the two legacy
+#     permissions each IMPLY `android.hardware.bluetooth` as a required
+#     feature, whatever their `maxSdkVersion`, and only a `<uses-feature>` of
+#     that same name takes it back — Bluetooth LE declared not required does
+#     not. Implied, it would hide Haven from every phone without Bluetooth.
+#     So `aapt2 dump badging`, which applies those rules, must list both
+#     Bluetooth features as `uses-feature-not-required`, and no Bluetooth
+#     feature as `uses-feature` or `uses-implied-feature`.
 #
 # How it reads: `aapt2 dump xmltree --file AndroidManifest.xml <apk>`, one
 # record an element — its tag and its attributes, a string as written and a
@@ -37,7 +50,13 @@
 #
 # A dump that does not hold the INTERNET permission every build of Haven
 # declares was not read as Haven's manifest, and is a misconfiguration: a
-# printer that changed its shape must not pass `off` by finding nothing.
+# printer that changed its shape must not pass `off` by finding nothing. So
+# is a badging that names no feature in the shape 2.19 printed:
+#
+#       feature-group: label=''
+#         uses-feature-not-required: name='android.hardware.bluetooth_le'
+#         uses-feature: name='android.hardware.bluetooth'
+#         uses-implied-feature: name='android.hardware.bluetooth' reason='requested android.permission.BLUETOOTH permission, requested android.permission.BLUETOOTH_ADMIN permission, and targetSdkVersion > 4'
 #
 # Which lane runs it: `build-check.yml` — `off` on each of the three ABIs'
 # debug APK, `on` on the flag-on APK of its `android-mesh` job. A release
@@ -53,9 +72,12 @@
 # Exit codes:
 #   0  the manifest declares what the mode says (or the self-test passed)
 #   1  `off`: something of the mesh is declared; `on`: an entry is missing,
-#      declared twice, or carries other attributes
+#      declared twice, or carries other attributes, something of the mesh is
+#      declared beside the entries, or Play would read a Bluetooth feature as
+#      required
 #   2  no aapt2, an APK it cannot read, an empty dump or one that is not
-#      Haven's manifest, or wrong arguments (misconfiguration)
+#      Haven's manifest, a badging that names no feature, or wrong arguments
+#      (misconfiguration)
 
 set -euo pipefail
 
@@ -66,6 +88,8 @@ readonly CONNECTED_DEVICE_TYPE=16
 # `<tag> <name> <the entry's other attributes, sorted>` for each entry of the
 # mesh's manifest. 65536 is `neverForLocation`, the one flag of
 # `usesPermissionFlags`.
+# A line of `aapt2 dump badging` for a Bluetooth feature: its kind, its name.
+readonly BLUETOOTH_FEATURE="^[[:space:]]*(uses-[a-z0-9-]+): name='(android\.hardware\.bluetooth[^']*)'"
 readonly -a ENTRIES=(
   'uses-permission android.permission.BLUETOOTH_SCAN usesPermissionFlags=65536'
   'uses-permission android.permission.BLUETOOTH_ADVERTISE'
@@ -73,6 +97,7 @@ readonly -a ENTRIES=(
   'uses-permission android.permission.BLUETOOTH maxSdkVersion=30'
   'uses-permission android.permission.BLUETOOTH_ADMIN maxSdkVersion=30'
   'uses-permission android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE'
+  'uses-feature android.hardware.bluetooth required=false'
   'uses-feature android.hardware.bluetooth_le required=false'
 )
 
@@ -138,6 +163,7 @@ others() { # <record>
 
 run_check() { # <apk> <on|off>
   local apk="$1" mode="$2" aapt2 dump all record field value entry tag name want found type
+  local beside why badging features
   FAILED=0
 
   [[ "${mode}" == on || "${mode}" == off ]] || misconfigured "the mode is 'on' or 'off', not '${mode}'"
@@ -151,27 +177,40 @@ run_check() { # <apk> <on|off>
   fi
 
   if [[ "${mode}" == off ]]; then
-    while IFS= read -r record; do
-      tag="${record%%$'\t'*}"
-      while IFS= read -r field; do
-        value="${field#*=}"
-        if grep -qi 'bluetooth' <<<"${value}"; then
-          fail "the manifest of ${apk} names Bluetooth with the mesh's flag off: <${tag}> ${field}. A build without HAVEN_MESH declares no Bluetooth permission, feature or broadcast: the user is asked for nothing new, and Play has nothing to review. If a dependency's own manifest brought it, that dependency is the finding."
-        elif grep -qi 'connected_device' <<<"${value}"; then
-          fail "the manifest of ${apk} names the connected-device foreground-service permission with the mesh's flag off: <${tag}> ${field}."
-        elif [[ "${field}" == "name=${MESH_PACKAGE}"* ]]; then
-          fail "the manifest of ${apk} declares a component of the mesh with its flag off: <${tag}> ${field}. A component that is declared can be started — by the system at boot, or by an intent."
-        elif [[ "${field}" == foregroundServiceType=* ]]; then
-          type="${value}"
-          if [[ "${type}" =~ ^(0x[0-9a-fA-F]+|0|[1-9][0-9]*)$ ]]; then
-            (( (type & CONNECTED_DEVICE_TYPE) == 0 )) || type=connectedDevice
-          fi
-          if grep -qi 'connectedDevice' <<<"${type}"; then
-            fail "the manifest of ${apk} declares a foreground service of the connectedDevice type with the mesh's flag off: <${tag}> ${field}."
-          fi
+    beside="with the mesh's flag off"
+    why="A build without HAVEN_MESH declares nothing of the mesh: the user is asked for nothing new, and Play has nothing to review. If a dependency's own manifest brought it, that dependency is the finding."
+  else
+    beside="beside the mesh's own entries"
+    why="A build with HAVEN_MESH declares the entries of haven/android/app/src/mesh/AndroidManifest.xml and nothing more of the mesh: this is another manifest's, which nobody here chose, or an entry this check has not been told of."
+  fi
+  while IFS= read -r record; do
+    tag="${record%%$'\t'*}"
+    if [[ "${mode}" == on ]]; then
+      name="$(cut -sf2- <<<"${record}" | tr '\t' '\n' | sed -n 's/^name=//p')"
+      for entry in "${ENTRIES[@]}"; do
+        [[ "${entry} " == "${tag} ${name} "* ]] && continue 2
+      done
+    fi
+    while IFS= read -r field; do
+      value="${field#*=}"
+      if grep -qi 'bluetooth' <<<"${value}"; then
+        fail "the manifest of ${apk} names Bluetooth ${beside}: <${tag}> ${field}. ${why}"
+      elif grep -qi 'connected_device' <<<"${value}"; then
+        fail "the manifest of ${apk} names the connected-device foreground-service permission ${beside}: <${tag}> ${field}. ${why}"
+      elif [[ "${field}" == "name=${MESH_PACKAGE}"* ]]; then
+        fail "the manifest of ${apk} declares a component of the mesh ${beside}: <${tag}> ${field}. A component that is declared can be started — by the system at boot, or by an intent. ${why}"
+      elif [[ "${field}" == foregroundServiceType=* ]]; then
+        type="${value}"
+        if [[ "${type}" =~ ^(0x[0-9a-fA-F]+|0|[1-9][0-9]*)$ ]]; then
+          (( (type & CONNECTED_DEVICE_TYPE) == 0 )) || type=connectedDevice
         fi
-      done < <(cut -sf2- <<<"${record}" | tr '\t' '\n')
-    done <<<"${all}"
+        if grep -qi 'connectedDevice' <<<"${type}"; then
+          fail "the manifest of ${apk} declares a foreground service of the connectedDevice type ${beside}: <${tag}> ${field}. ${why}"
+        fi
+      fi
+    done < <(cut -sf2- <<<"${record}" | tr '\t' '\n')
+  done <<<"${all}"
+  if [[ "${mode}" == off ]]; then
     (( FAILED )) && exit 1
     log "OK: ${apk}, built without the flag, declares nothing of the mesh — no attribute names Bluetooth or the connected-device permission, no service has that type, and no component is the mesh's."
     return
@@ -188,8 +227,24 @@ run_check() { # <apk> <on|off>
       fail "<${tag}> ${name} in the manifest of ${apk} carries '$(others "${found}")' beside its name, and the mesh's entry is '${want}' (a number in decimal; 65536 is neverForLocation). BLUETOOTH_SCAN without that flag makes Android 12 ask for the location permission, which the mesh never requests; a legacy permission without maxSdkVersion=30 stays on every later release; a feature that is required hides Haven from phones without it."
     fi
   done
+
+  # What Play reads: the features aapt2 derives, the implied ones among them.
+  badging="$("${aapt2}" dump badging "${apk}")" || misconfigured "'${aapt2} dump badging ${apk}' failed — is it an APK?"
+  features="$(grep -E "^[[:space:]]*uses-(implied-)?feature(-not-required)?(-sdk-23)?: name='[^']+'" <<<"${badging}" || true)"
+  [[ -n "${features}" ]] || misconfigured "the badging of ${apk} names no feature as 'uses-feature…: name=…': it is empty, or printed in a shape this check does not read. What Play would require was not checked."
+  while IFS= read -r field; do
+    [[ "${field}" =~ ${BLUETOOTH_FEATURE} ]] || continue
+    [[ "${BASH_REMATCH[1]}" == uses-feature-not-required ]] && continue
+    fail "aapt2 dump badging of ${apk} lists '${BASH_REMATCH[1]}: ${BASH_REMATCH[2]}': Play reads a Bluetooth feature as required, and hides Haven from every phone without it. BLUETOOTH and BLUETOOTH_ADMIN each imply android.hardware.bluetooth, whatever their maxSdkVersion, and only a <uses-feature android:required=\"false\"> of that same name takes it back."
+  done <<<"${features}"
+  for entry in "${ENTRIES[@]}"; do
+    read -r tag name want <<<"${entry}"
+    [[ "${tag}" == uses-feature ]] || continue
+    grep -qE "^[[:space:]]*uses-feature-not-required: name='${name//./\\.}'" <<<"${features}" \
+      || fail "aapt2 dump badging of ${apk} does not list 'uses-feature-not-required: ${name}'. That line is what tells Play the feature may be missing."
+  done
   (( FAILED )) && exit 1
-  log "OK: ${apk}, built with the flag, declares the mesh's ${#ENTRIES[@]} entries, each once and with its own attributes."
+  log "OK: ${apk}, built with the flag, declares the mesh's ${#ENTRIES[@]} entries, each once and with its own attributes, and nothing else of the mesh; Play reads no Bluetooth feature as required."
 }
 
 # ---------------------------------------------------------------------------
@@ -205,8 +260,11 @@ self_test() {
 
   cat >"${tmp}/aapt2" <<'SH'
 #!/usr/bin/env bash
-[[ "$1 $2 $3 $4" == "dump xmltree --file AndroidManifest.xml" ]] || exit 64
-cat "$5.xmltree"
+case "$1 $2 $3 $4" in
+  'dump xmltree --file AndroidManifest.xml') cat "$5.xmltree" ;;
+  "dump badging $3 ") cat "$3.badging" ;;
+  *) exit 64 ;;
+esac
 SH
   chmod +x "${tmp}/aapt2"
 
@@ -239,7 +297,10 @@ TXT
         _permission BLUETOOTH_ADMIN 'maxSdkVersion(0x01010271)=30'
         _permission FOREGROUND_SERVICE_CONNECTED_DEVICE
         cat <<TXT
-      E: uses-feature (line=31)
+      E: uses-feature (line=30)
+        A: ${ANDROID}:name(0x01010003)="android.hardware.bluetooth" (Raw: "android.hardware.bluetooth")
+        A: ${ANDROID}:required(0x0101028e)=false
+      E: uses-feature (line=33)
         A: ${ANDROID}:name(0x01010003)="android.hardware.bluetooth_le" (Raw: "android.hardware.bluetooth_le")
         A: ${ANDROID}:required(0x0101028e)=false
 TXT
@@ -262,6 +323,29 @@ TXT
                     A: ${ANDROID}:name(0x01010003)="android.intent.action.BOOT_COMPLETED" (Raw: "android.intent.action.BOOT_COMPLETED")
 TXT
     } >"$1.xmltree"
+    cat >"$1.badging" <<'TXT'
+package: name='com.oblivioustech.haven' versionCode='1' versionName='1.0.0' platformBuildVersionName='16' platformBuildVersionCode='36' compileSdkVersion='36' compileSdkVersionCodename='16'
+sdkVersion:'24'
+targetSdkVersion:'35'
+uses-permission: name='android.permission.INTERNET'
+uses-permission: name='android.permission.BLUETOOTH_SCAN' usesPermissionFlags='neverForLocation'
+uses-permission: name='android.permission.BLUETOOTH' maxSdkVersion='30'
+uses-permission: name='android.permission.BLUETOOTH_ADMIN' maxSdkVersion='30'
+application: label='Haven' icon=''
+feature-group: label=''
+  uses-feature-not-required: name='android.hardware.bluetooth'
+  uses-feature-not-required: name='android.hardware.bluetooth_le'
+  uses-feature: name='android.hardware.faketouch'
+  uses-implied-feature: name='android.hardware.faketouch' reason='default feature for all apps'
+supports-screens: 'small' 'normal' 'large' 'xlarge'
+TXT
+    [[ "$2" == on ]] || sed -i '/bluetooth/Id' "$1.badging"
+  }
+  # Replaces the one line of a badging that contains <text> by <replacement>
+  # — `\n` a line break; an empty one deletes the line.
+  _badge() { # <apk> <text> <replacement>
+    awk -v text="$2" -v with="$3" 'index($0, text) { if (with != "") print with; next } { print }' "$1.badging" >"$1.new"
+    mv "$1.new" "$1.badging"
   }
   # Replaces the lines of a dump from the one that contains <text> — and the
   # <more> lines after it — by <replacement>, in which awk reads `\n` as a
@@ -301,7 +385,7 @@ TXT
   _case "the feature among them" 1 'has no <uses-feature> android.hardware.bluetooth_le' "${apk}" on
 
   apk="${tmp}/on.apk"; _dump "${apk}" on
-  _case "a flag-on manifest with the mesh's seven entries passes on" 0 "declares the mesh's 7 entries" "${apk}" on
+  _case "a flag-on manifest with the mesh's eight entries, whose badging has both Bluetooth features not required, passes on" 0 "declares the mesh's 8 entries" "${apk}" on
   _case "and fails off: a Bluetooth permission is declared" 1 '<uses-permission> name=android.permission.BLUETOOTH_SCAN' "${apk}" off
   _case "the feature too" 1 '<uses-feature> name=android.hardware.bluetooth_le' "${apk}" off
   _case "and the connected-device permission" 1 'names the connected-device foreground-service permission' "${apk}" off
@@ -367,11 +451,55 @@ TXT
 
   apk="${tmp}/on-required.apk"; _dump "${apk}" on
   _edit "${apk}" 'required(' 0 "        A: ${a}:required(0x0101028e)=true"
-  _case "the feature required fails on" 1 "carries 'required=true'" "${apk}" on
+  _case "a feature required fails on" 1 "android.hardware.bluetooth in the manifest of ${apk} carries 'required=true'" "${apk}" on
 
   apk="${tmp}/on-required-by-default.apk"; _dump "${apk}" on
   _edit "${apk}" 'required(' 0 ''
-  _case "the feature with no word on whether it is required fails on: the default is required" 1 "bluetooth_le in the manifest of ${apk} carries ''" "${apk}" on
+  _case "a feature with no word on whether it is required fails on: the default is required" 1 "android.hardware.bluetooth in the manifest of ${apk} carries ''" "${apk}" on
+
+  # On: what Play reads. Without the entry of its own name, the two legacy
+  # permissions make classic Bluetooth required.
+  apk="${tmp}/on-implied.apk"; _dump "${apk}" on
+  _edit "${apk}" '"android.hardware.bluetooth"' 1 ''
+  sed -i '/E: uses-feature (line=30)/d' "${apk}.xmltree"
+  _badge "${apk}" "uses-feature-not-required: name='android.hardware.bluetooth'" "  uses-feature: name='android.hardware.bluetooth'\n  uses-implied-feature: name='android.hardware.bluetooth' reason='requested android.permission.BLUETOOTH permission, requested android.permission.BLUETOOTH_ADMIN permission, and targetSdkVersion > 4'"
+  _case "the manifest without classic Bluetooth's own entry fails on: Bluetooth LE not required does not stand in for it" 1 'has no <uses-feature> android.hardware.bluetooth. ' "${apk}" on
+  _case "and its badging fails: the legacy permissions imply the feature as required" 1 "lists 'uses-implied-feature: android.hardware.bluetooth'" "${apk}" on
+  _case "under both of the lines aapt2 prints for it" 1 "lists 'uses-feature: android.hardware.bluetooth'" "${apk}" on
+
+  apk="${tmp}/on-badged-required.apk"; _dump "${apk}" on
+  _badge "${apk}" "uses-feature-not-required: name='android.hardware.bluetooth_le'" "  uses-feature: name='android.hardware.bluetooth_le'"
+  _case "a badging that lists Bluetooth LE as required fails on, whatever the manifest's text" 1 "lists 'uses-feature: android.hardware.bluetooth_le'" "${apk}" on
+  _case "and does not list it as not required" 1 "does not list 'uses-feature-not-required: android.hardware.bluetooth_le'" "${apk}" on
+
+  apk="${tmp}/on-implied-sdk-23.apk"; _dump "${apk}" on
+  _badge "${apk}" "uses-feature: name='android.hardware.faketouch'" "  uses-feature-sdk-23: name='android.hardware.bluetooth_le.extended'\n  uses-implied-feature-sdk-23: name='android.hardware.bluetooth_le.extended' reason='requested a permission'\n  uses-feature: name='android.hardware.faketouch'"
+  _case "another Bluetooth feature implied, under the sdk-23 spelling, fails on" 1 "lists 'uses-implied-feature-sdk-23: android.hardware.bluetooth_le.extended'" "${apk}" on
+
+  apk="${tmp}/on-unbadged.apk"; _dump "${apk}" on
+  _badge "${apk}" "uses-feature-not-required: name='android.hardware.bluetooth'" ''
+  _case "a badging that says nothing of classic Bluetooth fails on: nothing tells Play it may be missing" 1 "does not list 'uses-feature-not-required: android.hardware.bluetooth'" "${apk}" on
+
+  # On: nothing of the mesh beside its entries.
+  apk="${tmp}/on-extra-permission.apk"; _dump "${apk}" on
+  _add "${apk}" "$(_permission BLUETOOTH_PRIVILEGED)"
+  _case "a Bluetooth permission that is none of the mesh's fails on" 1 "names Bluetooth beside the mesh's own entries: <uses-permission> name=android.permission.BLUETOOTH_PRIVILEGED" "${apk}" on
+
+  apk="${tmp}/on-extra-sdk23.apk"; _dump "${apk}" on
+  _add "${apk}" "$(_permission BLUETOOTH_CONNECT | sed 's/uses-permission/uses-permission-sdk-23/')"
+  _case "one of the mesh's permissions asked again under the other tag fails on" 1 '<uses-permission-sdk-23> name=android.permission.BLUETOOTH_CONNECT' "${apk}" on
+
+  apk="${tmp}/on-extra-broadcast.apk"; _dump "${apk}" on
+  _edit "${apk}" 'android.intent.action.BOOT_COMPLETED' 0 "                    A: ${a}:name(0x01010003)=\"android.bluetooth.adapter.action.STATE_CHANGED\" (Raw: \"android.bluetooth.adapter.action.STATE_CHANGED\")"
+  _case "a dependency's receiver of a Bluetooth broadcast fails on" 1 '<action> name=android.bluetooth.adapter.action.STATE_CHANGED' "${apk}" on
+
+  apk="${tmp}/on-extra-type.apk"; _dump "${apk}" on
+  _edit "${apk}" 'foregroundServiceType' 0 "            A: ${a}:foregroundServiceType(0x01010599)=0x00000018"
+  _case "a service of the connectedDevice type fails on until the mesh's own is listed here" 1 "of the connectedDevice type beside the mesh's own entries" "${apk}" on
+
+  apk="${tmp}/on-extra-component.apk"; _dump "${apk}" on
+  _edit "${apk}" 'E: receiver ' 0 "          E: receiver (line=88)\n            A: ${a}:name(0x01010003)=\"com.oblivioustech.haven.mesh.MeshReceiver\" (Raw: \"com.oblivioustech.haven.mesh.MeshReceiver\")\n          E: receiver (line=90)"
+  _case "a component of the mesh fails on until it is listed here" 1 "declares a component of the mesh beside the mesh's own entries" "${apk}" on
 
   apk="${tmp}/on-twice.apk"; _dump "${apk}" on
   _add "${apk}" "$(_permission BLUETOOTH_ADVERTISE)"
@@ -401,17 +529,24 @@ TXT
   apk="${tmp}/reshaped.apk"; _dump "${apk}" on
   sed -i 's/^\( *\)A: /\1Attribute: /' "${apk}.xmltree"
   _case "a dump in a shape this check does not read is a misconfiguration, not a pass" 2 'does not hold the INTERNET permission' "${apk}" off
+  apk="${tmp}/no-badging.apk"; _dump "${apk}" on; rm "${apk}.badging"
+  _case "a badging that fails is a misconfiguration" 2 'dump badging' "${apk}" on
+  apk="${tmp}/empty-badging.apk"; _dump "${apk}" on; : >"${apk}.badging"
+  _case "an empty badging is a misconfiguration: it would list nothing as required" 2 'names no feature' "${apk}" on
+  apk="${tmp}/reshaped-badging.apk"; _dump "${apk}" on
+  sed -i "s/uses-\(implied-\)\{0,1\}feature\(-not-required\)\{0,1\}: name='\([^']*\)'/feature '\3'/" "${apk}.badging"
+  _case "a badging in a shape this check does not read is a misconfiguration, not a pass" 2 'names no feature' "${apk}" on
   _case "a mode that is neither on nor off is a misconfiguration" 2 "not 'maybe'" "${tmp}/on.apk" maybe
 
   if (( fails )); then
     echo "self-test: FAILED" >&2
     return 1
   fi
-  if (( checked != 34 )); then
-    echo "self-test: ran ${checked} fixture(s), expected exactly 34. A fixture was added or removed without moving the pin." >&2
+  if (( checked != 49 )); then
+    echo "self-test: ran ${checked} fixture(s), expected exactly 49. A fixture was added or removed without moving the pin." >&2
     return 1
   fi
-  echo "self-test: OK (${checked}/34 fixtures)"
+  echo "self-test: OK (${checked}/49 fixtures)"
 }
 
 case "${1:-}" in

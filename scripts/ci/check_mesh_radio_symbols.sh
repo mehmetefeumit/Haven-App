@@ -16,8 +16,9 @@
 #
 #   * IMPORTS. An undefined symbol the device's `liblog` does not have stops
 #     the library loading — all of Haven, on that Android. The log lever's
-#     five functions exist from API 30 and Haven runs from API 23, which is
-#     why `log_lever.rs` finds them with `dlsym`; and a dependency's feature
+#     five functions exist from API 30 and Haven runs from below it — its
+#     `minSdk` is Flutter's default, 24 at Flutter 3.50.0, which nothing in
+#     Haven pins — which is why `log_lever.rs` finds them with `dlsym`; and a dependency's feature
 #     can import another (`android_logger`'s `android-api-30` imports
 #     `__android_log_is_loggable_len`). So every undefined `__android_log_*`
 #     symbol must be one of OLD_LIBLOG: the six functions `android/log.h`
@@ -227,7 +228,7 @@ NM
   # Imports.
   t="${tmp}/api-30"; _tree "${t}"; arm="${t}/lib/armeabi-v7a/${LIBRARY}"
   printf '                 U __android_log_set_logger\n' >>"${arm}.undefined"
-  _case "one of the lever's five imported fails: Android 6 to 10 cannot bind it" 1 'imports __android_log_set_logger,' "${t}"
+  _case "one of the lever's five imported fails: an Android below 11 cannot bind it" 1 'imports __android_log_set_logger,' "${t}"
 
   t="${tmp}/api-30-feature"; _tree "${t}"; arm="${t}/lib/armeabi-v7a/${LIBRARY}"
   printf '                 U __android_log_is_loggable_len@LIBLOG_R\n' >>"${arm}.undefined"

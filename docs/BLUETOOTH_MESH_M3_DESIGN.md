@@ -916,8 +916,13 @@ fixed copy and a time; nothing identifying.
 it nothing lets a process keep the platform's Bluetooth lines out of its
 own log (§M.2), so under the owner's condition (Q-10) the radio is not
 started: `start` answers `unsupported`, before a foreground start and
-before any Bluetooth object. Phones on Android 6 to 10 cannot use the
-mesh; the rest of Haven runs there as before (`minSdk` 23). The draft
+before any Bluetooth object. Phones on Android 7 to 10 cannot use the
+mesh; the rest of Haven runs there as before. Haven's floor is
+`flutter.minSdkVersion` (`haven/android/app/build.gradle.kts:40`),
+Flutter's default: 24 at Flutter 3.50.0
+(`packages/flutter_tools/gradle/src/main/kotlin/FlutterExtension.kt:26`
+at the tag), 23 when this was written, and pinned by nothing in Haven
+(§M.3, Q-16). The draft
 had the mesh on every level from 23; `PermissionMatrix` (M3f) still
 answers for 23–29, which no start reaches.
 
@@ -929,16 +934,25 @@ entry of the mesh — the three Android 12 permissions (`BLUETOOTH_SCAN` with
 `usesPermissionFlags="neverForLocation"`), `BLUETOOTH` and
 `BLUETOOTH_ADMIN` with `maxSdkVersion="30"`,
 `FOREGROUND_SERVICE_CONNECTED_DEVICE`, `<uses-feature
+android.hardware.bluetooth required="false">` and `<uses-feature
 android.hardware.bluetooth_le required="false">`, `<service
 .mesh.MeshService foregroundServiceType="connectedDevice"
 exported="false">`, `<receiver .mesh.MeshReceiver exported="false">` with
 the two boot actions — is in `app/src/mesh/AndroidManifest.xml`, and the
-main manifest gains nothing. `build.gradle.kts` merges that file into a
+main manifest gains nothing. The first of the two features was not in
+this list as designed: `BLUETOOTH` and `BLUETOOTH_ADMIN` each imply it
+as required, whatever their `maxSdkVersion`, and Bluetooth LE declared
+not required does not take that back (the review of M3g unit 3; §N.7).
+`build.gradle.kts` merges that file into a
 variant only when the build's defines carry `HAVEN_MESH=true`, read from
-the `dart-defines` project property the Flutter tool hands Gradle
-(base64, comma-separated — **[U]**, not read in the Flutter tool's source
-today) and added through AGP's per-variant manifest sources (**[U]**, API
-from memory; AGP is 8.11.1, `settings.gradle.kts`). One switch, so the
+the `dart-defines` project property the Flutter tool hands Gradle —
+each define the base64 of its UTF-8 text, joined by commas
+(`packages/flutter_tools/lib/src/build_info.dart:448`, `:1152`,
+`:1166-1167` at Flutter 3.50.0) — and added through AGP's per-variant
+manifest sources (`variant.sources.manifests.addStaticManifestFile`, as
+the reference for AGP 9.3 has it, §N.7; AGP is 9.3.1,
+`haven/android/settings.gradle.kts`; **[U]** until a build runs it). One
+switch, so the
 Dart flag and the manifest cannot disagree. The Kotlin of the package
 still compiles into a flag-off build and is inert there: no component, no
 permission, and no Dart code that calls the channel. `WAKE_LOCK`,
@@ -954,7 +968,7 @@ the guard reads every `AndroidManifest.xml` under `app/src` but
 `bluetooth`, `connectedDevice` and `mesh` in any case, a comment
 included. The mesh's own manifest, the Gradle switch and the [C] half are
 M3g's. **As built (M3g unit 3; §N.7):** the mesh's manifest holds the
-permissions and the feature, and the two components come with the
+permissions and the two features, and the two components come with the
 service; the switch is in `app/build.gradle.kts`; the [C] half is
 `scripts/ci/check_mesh_manifest.sh` in `build-check.yml`, which has run
 on no built APK yet.
@@ -1648,7 +1662,7 @@ as read in source, and unproved on a device.
 - `plan` §0.4 item 6 (identity; and "after its Bluetooth address
   rotates", which is the build's to do and not every build's, §M.5) and
   item 3 (after a reboot, after the first unlock); a new item there, that
-  phones on Android 6 to 10 cannot use the mesh (§M.3); §7.1, which has
+  phones on Android 7 to 10 cannot use the mesh (§M.3); §7.1, which has
   the radio on every level from 23; §16: M3's status, each "not as the
   plan has it" of §0.
 - `haven/lib/src/providers/mesh_provider.dart`'s "No radio is built yet"
@@ -1720,8 +1734,9 @@ record of what was weighed.
      in force none of the platform's Bluetooth lines is written from
      Haven's process at all. "All of them or the radio is not started"
      becomes the rule of §M.3: API 30 or later, the lever in force and
-     checked, never bonded — or no radio. Its price: phones on Android 6
-     to 10 cannot use the mesh.
+     checked, never bonded — or no radio. Its price: phones on Android 7
+     to 10 cannot use the mesh (Android 6 too when this was decided;
+     §M.3).
   4. What is left is §M.8, stated there and in none of the three
      documents yet: they describe what is built. Under Haven's pid
      nothing of the platform's is left to scope a scanner rule to; the
@@ -2321,8 +2336,9 @@ of the write to `logd` ([V]: `liblog/logger_write.cpp -24.0:358-377`,
 
 Below API 30 neither exists: Android 10's `__android_log_buf_write` has
 no check, and there is no setter ([V]: `liblog/logger_write.cpp`
-@10.0.0_r1); `DBG` is a constant and the write is unconditional. With
-`minSdk` 23 (`haven/android/app/build.gradle.kts:43`) the two symbols
+@10.0.0_r1); `DBG` is a constant and the write is unconditional. With a
+`minSdk` below 30 (`flutter.minSdkVersion`,
+`haven/android/app/build.gradle.kts:40`: 24 today, §M.3) the two symbols
 are looked up at run time — weak references under `__builtin_available`,
 or `dlopen` and `dlsym`; `liblog` is on every release ([V]: [A24]).
 
@@ -2440,8 +2456,14 @@ reads. The radio is started only where every one of these holds:
 4. The advertisement of §B.3: the service UUID, no name, no data, and
    not discoverable from API 34.
 
-**What it costs: phones on Android 6 to 10 (API 23–29) cannot use the
-mesh.** Haven's `minSdk` stays 23 and the rest of Haven runs there. The
+**What it costs: phones on Android 7 to 10 (API 24–29) cannot use the
+mesh.** The rest of Haven runs there. The lower end is not a number of
+Haven's: `minSdk = flutter.minSdkVersion`
+(`haven/android/app/build.gradle.kts:40`), Flutter's default, which is
+24 at Flutter 3.50.0 (`FlutterExtension.kt:26` at the tag) and was 23
+when this section was written — the range began at Android 6 then, and
+moves again when Flutter's default does. Nothing in Haven pins it;
+whether something should is the owner's (Q-16). The
 research weighed one other route, for API 29 alone — L2CAP channels,
 whose classes print no full address at the default level ([V1];
 spot-checked by the confirmation at 15 QPR2) — and it is not taken: a
@@ -2472,7 +2494,7 @@ reword. So:
 **Not as the Dart side is built.** `unsupported` is learned at step 5 of
 turning on (§C.2): after the intro sheet and the name step, and after
 `mesh.start()` stored the deadline and the keys, which the unwind then
-deletes. On an Android 6–10 phone with the flag on, the button is there
+deletes. On an Android 7–10 phone with the flag on, the button is there
 until its first tap in each process. Answering before the button is
 drawn is a change to the seam of §C.1 — M3g's, with its [D] test.
 
@@ -2691,7 +2713,7 @@ own name.
    where it could be read, its name.
 8. A packet capture the user switched on in Developer options holds
    everything on the air (**[U]**, memory).
-9. **Android 6 to 10: no mesh.**
+9. **Android 7 to 10: no mesh.**
 
 Not on this list, and not ruled out: lines in the event and statistics
 buffers, which never pass through the logger and which the lever
@@ -2849,7 +2871,7 @@ N-7, and the source of N-5.
 | # | Finding | Consequence |
 |---|---|---|
 | N-1 | **The event, statistics and security buffers never reach the logger.** Each ends in `write_to_log` ([V1]: `liblog/logger_write.cpp:416-518` @11, `-22.2:487-579`); the logger is called from `__android_log_write_log_message` alone, and only for the main, system, radio and crash buffers (`:295-315` @11, `-23.2:363-383`). | Settles §M.2's **[U]**. The lever does not cover those buffers. Whether Android's Bluetooth classes write to them from an app's process is unread (N.5). |
-| N-2 | **Calling an API-30 symbol through an `extern` declaration would stop the library loading on Android 6 to 10** — an import the linker cannot bind there (**[U]** for the exact failure, memory). `android_log-sys 0.3.2`, in the lockfile (`Cargo.lock:89-93`), declares one ready to call (`src/lib.rs:99`). | Every one of the lever's symbols is found with `dlsym`, and the built library's `__android_log_*` imports are held to a list of old ones (N.4). All of Haven on those phones depends on it, not the mesh alone. |
+| N-2 | **Calling an API-30 symbol through an `extern` declaration would stop the library loading on Android 7 to 10** — an import the linker cannot bind there (**[U]** for the exact failure, memory). `android_log-sys 0.3.2`, in the lockfile (`Cargo.lock:89-93`), declares one ready to call (`src/lib.rs:99`). | Every one of the lever's symbols is found with `dlsym`, and the built library's `__android_log_*` imports are held to a list of old ones (N.4). All of Haven on those phones depends on it, not the mesh alone. |
 | N-3 | **The library already exports a `Java_*` symbol that is not the radio's**: `Java_io_crates_keyring_Keyring_00024Companion_initializeNdkContext` (`android-native-keyring-store 0.5.0`, `src/lib.rs:36`; called at `kt/HavenApplication.kt:57`). | The `nm -D` step §A.6 owes cannot hold the library to "exactly the fixture": it holds it to the fixture and that one name. |
 | N-4 | **A tap on a notice that starts the app is lost.** The Dart side sets the state channel's handler when either stream is first listened to (`mesh_radio.dart:208-214`); the mesh's providers listen to `changes` (`mesh_provider.dart:164-167`), the button to `actions` only when it is built (`mesh_button.dart:73`), and a message with no listener of its kind is dropped (the contract test "with nobody listening…", `test/services/mesh_radio_test.dart:267`). The channel has no listen call the native end could wait for (`mesh_radio.dart:197-201`). | A pull, `takeAction` (N.2.8). |
 | N-5 | **A service started with `startForegroundService` that ends without `startForeground` takes its process down**: bringing it down while the foreground start is still owed posts a crash of the app ([V1]: the confirmation's copy of `ActiveServices.java`, a release before 14, `:4193-4212`, `:5279-5287`; later releases unread). The process is the relay path's (F-14). `StartPolicy.start` refuses before `foreground()` (`kt/mesh/core/StartPolicy.kt:22-23`). | Whoever would start the service asks first, and the service calls `startForeground` before it may refuse (N.1.5). |
@@ -3497,7 +3519,7 @@ dump xmltree` of the built APK and has a self-test:
 | Workflow | Change | Unit |
 |---|---|---|
 | `cross-check.yml` | the Android step (`:107-109`) becomes `cargo clippy --target aarch64-linux-android -- -D warnings`, the host's own rule (`rust-check.yml:267`) on the configuration that has the shim and the lookup; `clippy` among its components. Owed since M3b (plan §16). What it finds in Android-only code already there is **[U]** | 1 |
-| `build-check.yml`, the three legs | after the SQLCipher probe, on the library that step unpacks (`:162-165`): its defined `Java_*` symbols are the fixture's eleven and N-3's one; its undefined `__android_log_*` symbols are all in a list of symbols older than API 23 — as read, `__android_log_write` and `__android_log_buf_write`, the two `android_logger 0.15.1` calls (`src/lib.rs:100`, `:109`) without its feature `android-api-30` (`src/config.rs:34-69`, `Cargo.toml:51`; off by default, and named neither by `haven/rust_builder/Cargo.toml:101` nor by `flutter_rust_bridge 2.11.1`, `Cargo.toml:199-201`). A list and not the lever's five names: that feature, switched on by a dependency added later, imports `__android_log_is_loggable_len`, which stops the library loading on Android 6 to 10 (N-2) and names none of the five. What the built library imports today is the step's first run to say. Then the *off* manifest check | 1; 3 |
+| `build-check.yml`, the three legs | after the SQLCipher probe, on the library that step unpacks (`:162-165`): its defined `Java_*` symbols are the fixture's eleven and N-3's one; its undefined `__android_log_*` symbols are all in a list of symbols older than API 23 — as read, `__android_log_write` and `__android_log_buf_write`, the two `android_logger 0.15.1` calls (`src/lib.rs:100`, `:109`) without its feature `android-api-30` (`src/config.rs:34-69`, `Cargo.toml:51`; off by default, and named neither by `haven/rust_builder/Cargo.toml:101` nor by `flutter_rust_bridge 2.11.1`, `Cargo.toml:199-201`). A list and not the lever's five names: that feature, switched on by a dependency added later, imports `__android_log_is_loggable_len`, which stops the library loading on Android 7 to 10 (N-2) and names none of the five. What the built library imports today is the step's first run to say. Then the *off* manifest check | 1; 3 |
 | `build-check.yml`, `android-mesh` | N.3; and `javap -constants` on the SDK's `android.jar` against the four integers of `MeshRadioConstants` (§G: "proved by no compiler") | 3; 4 |
 | `android-unit.yml` | none: the script runs what the sources declare | — |
 | `repo-guards.yml` | none in shape for `check_mesh_radio.sh` (more checks, more fixtures); one step, the manifest script's self-test | 1–6; 3 |
@@ -3534,7 +3556,7 @@ radio can run.
 | A flag-off release build with the new Kotlin shrinks and passes release lint | no job builds one before a tag: `release-build.yml` is the first | 3–6 | the tag's build fails, not a pull request's |
 | The plugin's preferences file and key prefix | N.2.7, read at 2.4.23 | 2, 5 | the marker reads unset: the window of plan §16 (c) is open again |
 | The Flutter tool's `dart-defines`, on the `stable` CI floats on (read in 3.44.8, not in 3.50); AGP's `addStaticManifestFile`, in the version the build then pins | N.3, read | 3 | the build fails, or the *on* check does |
-| The library imports no `__android_log_*` symbol newer than API 23 | N-2; N.4 | 1 | the step fails; were it not there, Haven would not start on Android 6 to 10 |
+| The library imports no `__android_log_*` symbol newer than API 23 | N-2; N.4 | 1 | the step fails; were it not there, Haven would not start on Android 7 to 10 |
 | JNI resolves the eleven by name; a release build keeps `MeshNative` | §K; N.2.1 | 3 | the first call throws; `MeshThread` stops the radio |
 | The four integers are the SDK's | §G | 4 | the `javap` step fails |
 | An iPhone agrees its MTU as it connects, and the server is told of it | N.2.3 | — | M4 |
@@ -3599,6 +3621,22 @@ connection of the phone as Haven's.
   if any, ends it. If a device shows that (b) works, it comes back to
   the owner with what it breaks. Both are designed (N.2.5); the choice
   is the owner's.
+
+**Q-16. Should Haven pin its own `minSdk`?** Open; nothing here decides
+it. The app's floor is `flutter.minSdkVersion`
+(`haven/android/app/build.gradle.kts:40`), whatever the Flutter that
+builds it defaults to: 23 until Flutter 3.50, 24 since. So the oldest
+Android Haven installs on moved when `channel: stable` did, with no
+change in this repository, and with it the lower end of "cannot use the
+mesh" (§M.3), the level the library's `liblog` imports must load on
+(N.4) and the image an emulator lane below API 30 can use (N.7).
+
+- *Leave it to Flutter.* As today. The floor follows the toolchain;
+  the documents name the value with its source, and move when it does.
+- *Pin it.* A number of Haven's own in `build.gradle.kts`, at or above
+  Flutter's floor. The oldest supported Android is then decided here,
+  and a Flutter that raises its own default past the pin fails the
+  build, where a reviewer sees it.
 
 **For the owner to know: two kinds of log the lever cannot reach**
 (N-1). Lines in the event and statistics buffers never pass through
@@ -3694,7 +3732,8 @@ reachable from the logger can panic, allocate, lock or come back into
 
 Its recommendation, taken as a rule: **the unit that first calls
 `leverInstall` does not land without an emulator lane** — an API 30+ image
-and one of API 23 to 29 — that shows `install` and `holds` true, a planted
+and one below it that Haven installs on (API 24 to 29 today; 23 to 29
+when the review wrote it) — that shows `install` and `holds` true, a planted
 `BluetoothGatt`-tagged line absent from every buffer under Haven's pid,
 and the library loading below API 30. Until then the call order inside
 `install` and `holds`, the sentinel and the release floor have run
@@ -3890,7 +3929,8 @@ differs from this section, or settles what it left open:
   the review `aClientIsClosedThoughAPortCallThrows`,
   `theServicesStartRunsBeforeTheLeverIsAsked`,
   `aSecondConnectForAnAddressBeingDialledIsTheSameDial`. 57 in all.
-- **Android 6's JDK.** The classes load on every level from 23, so
+- **Android 6's JDK.** The classes were written to load on every level
+  from 23, Haven's floor then (24 now, §M.3), so
   they call nothing of the JDK that Android 6 lacks without desugaring
   — no `java.time`, no `Map.forEach`, `getOrDefault`, `putIfAbsent`,
   `computeIfAbsent` or `removeIf`, no stream; of the JDK they name
@@ -4035,8 +4075,10 @@ the flag-on build are CI's to prove, and the list below says which job
 proves what. Plan §16 has what is proved here and how. Since this
 section was written the build moved to Gradle 9.5.0, AGP 9.3.1, Kotlin
 2.4.20 and Flutter 3.50, with AGP's new DSL and built-in Kotlin switched
-off (`haven/android/gradle.properties`), and `minSdk` to 24: "Android 6
-to 10" above is Android 7 to 10 now.
+off (`haven/android/gradle.properties`), and `minSdk` to 24, Flutter
+3.50.0's default: the sentences above that gave Haven's range as
+Android 6 to 10 were corrected in place after this unit's review
+(§M.3, Q-16).
 
 *What was read for it* (2026-11-13 and -14; **[V1]**):
 
@@ -4126,9 +4168,11 @@ open:*
   Bluetooth — a permission under either tag, a feature, a broadcast a
   receiver filters for — none names the connected-device permission, no
   service's type has that bit, and no component is of the mesh's
-  package. *On* is this unit's seven entries, each exactly once and
-  with exactly its attributes; the two components are not asked for
-  until unit 5 declares them. A dump without the `INTERNET` permission
+  package. *On* is this unit's eight entries (seven before its review,
+  below), each exactly once and with exactly its attributes; the two
+  components are not among them until unit 5 declares them, and since
+  the review one that is there before then fails. A dump
+  without the `INTERNET` permission
   every build declares is a misconfiguration, so a printer that changes
   its shape cannot pass *off* by showing nothing. **Run here against a
   real `aapt2`** (2.19, the distribution's package): two APKs linked
@@ -4173,7 +4217,7 @@ open:*
 | `Android (arm64)`, `(arm)`, `(x64)` — the build | the Gradle script evaluates under AGP 9.3 with the flag off: the `androidComponents` block, `buildConfigField` in a second `defaultConfig`; `MeshNative.kt` compiles for Android | at configuration, `build.gradle.kts` and a line of the switch: "Unresolved reference" or an overload ambiguity at `onVariants`; at `compileDebugKotlin`, `MeshNative.kt` |
 | the same — "Check the manifest declares nothing of the mesh" | a default build's merged manifest, dependencies' included, has nothing of the mesh | rc 1, `names Bluetooth with the mesh's flag off: <tag> name=…` — a dependency's manifest, or the switch on by mistake; rc 2, `does not hold the INTERNET permission` (the SDK's `aapt2` prints another shape than 2.19's) or `no aapt2 to read the manifest with` (an image without build-tools) |
 | `Android (x64, mesh on)` — the build | the flag reaches Gradle as `dart-defines`; the flag-on shape compiles | as the first row |
-| the same — "Check the manifest declares the mesh's entries" | `addStaticManifestFile` merged the file, whole, into the debug variant | rc 1, `has no <uses-permission> android.permission.BLUETOOTH_SCAN` and six more: the switch read off, or the file was not merged; one entry `carries '…'`: the merger changed an attribute |
+| the same — "Check the manifest declares the mesh's entries" | `addStaticManifestFile` merged the file, whole, into the debug variant; nothing else of the mesh is in the merged manifest; Play would read neither Bluetooth feature as required | rc 1, `has no <uses-permission> android.permission.BLUETOOTH_SCAN` and seven more: the switch read off, or the file was not merged; one entry `carries '…'`: the merger changed an attribute; `names Bluetooth beside the mesh's own entries`: a dependency's manifest; `aapt2 dump badging … lists 'uses-implied-feature: android.hardware.bluetooth'`: the feature's own entry is gone. rc 2, `dump badging … failed` or `names no feature`: `aapt2` 37.0.0 cannot badge the APK, or prints features in another shape than 2.19's |
 | the same — "Probe the library's JNI exports and liblog imports" | the eleven symbols, in the flag-on build | as in the legs (N.4) |
 | the same — "Check the radio's modes are the SDK's" | the four integers, against API 36 as Google ships it | rc 1, `holds SCAN_MODE = 0, and ScanSettings.SCAN_MODE_LOW_POWER is …`; rc 2, `platforms/android-36/android.jar not found` |
 
@@ -4181,3 +4225,53 @@ open:*
 proved by nothing until then: a build in which the field's line is
 wrong still fails to compile, and that is all. That a release build
 keeps or drops `MeshNative` as intended stays **[U]** (N.5).
+
+**Review of unit 3 (independent, read-only, of `fd72c67`).** No blocker
+and no high finding; one medium and two low, fixed.
+
+- **Medium: the flag-on manifest made Play require classic Bluetooth.**
+  `BLUETOOTH` and `BLUETOOTH_ADMIN` each imply the feature
+  `android.hardware.bluetooth`, and as required. Read again for the
+  fix: `developer.android.com/guide/topics/manifest/uses-feature-element`
+  (2026-09-01) — table 2, "Device permissions that imply device
+  hardware use", has both permissions and none of `BLUETOOTH_SCAN`,
+  `BLUETOOTH_ADVERTISE`, `BLUETOOTH_CONNECT` or the connected-device
+  permission; "Special handling for Bluetooth feature": an app whose
+  target is API 5 or later is filtered from every device without the
+  feature unless it declares the feature with `required="false"` — and
+  `aapt2`'s `tools/aapt2/dump/DumpManifest.cpp`, in the reviewer's
+  copy: the implied feature is added for either permission whenever
+  the target is above 4, `maxSdkVersion` is read and exempts nothing,
+  and it is printed unless a feature of the same name is declared, so
+  Bluetooth LE not required did not cancel it. **Shown with the real
+  `aapt2`** (2.19) on the manifest as committed: `uses-feature:
+  name='android.hardware.bluetooth'` and `uses-implied-feature: … reason='requested
+  android.permission.BLUETOOTH permission, requested
+  android.permission.BLUETOOTH_ADMIN permission, and targetSdkVersion >
+  4'`. A flag-on release would have been hidden from every phone
+  without Bluetooth, for a feature the app does not need. Fixed in
+  three places: the manifest declares `android.hardware.bluetooth`
+  with `required="false"`; it is the eighth of the entries the *on*
+  check holds; and *on* now also reads `aapt2 dump badging`, which
+  applies Play's rules — both Bluetooth features must be listed
+  `uses-feature-not-required`, and none `uses-feature` or
+  `uses-implied-feature`, under either spelling. A badging that fails,
+  is empty or names no feature in the shape read is a
+  misconfiguration. With the real `aapt2`: the manifest as committed
+  fails *on* (rc 1), the corrected one passes (rc 0).
+- **Low: *on* looked for nothing beside the entries.** A dependency's
+  Bluetooth permission, feature or broadcast in a flag-on build passed.
+  *On* now runs *off*'s scan over every element that is not one of the
+  entries — so a component of the mesh or a `connectedDevice` service
+  fails it too, until the unit that declares them lists them there.
+- **Low: sentences this section's own move had made false.** §B.8's
+  "AGP is 8.11.1" and its two **[U]** on the `dart-defines` encoding
+  and the manifest API, and every sentence that gave Haven's floor as
+  API 23 or its range without mesh as Android 6 to 10: corrected in
+  place to what is built, with where the floor comes from (§M.3),
+  `log_lever.rs`'s header comment among them. Not touched: what is said
+  of an API level in general. Whether Haven pins the floor is Q-16.
+
+49 self-test fixtures in the manifest check (34, and fifteen); a second
+mutation pass, 26 changes to it — the first pass's fourteen again and
+twelve to the new clauses — each failing a fixture.

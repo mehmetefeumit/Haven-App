@@ -15,7 +15,7 @@
 //! `scripts/ci/check_mesh_radio.sh` (check 13) reads this file's text.
 //!
 //! The five are "available since API level 30" and are found by name at run
-//! time: declared `extern`, they would be imports no Android 6 to 10 can
+//! time: declared `extern`, they would be imports no Android before 11 can
 //! bind, and the library would not load there.
 //!
 //! [`logger`] runs inside `liblog`, on whichever thread logs. It and what it

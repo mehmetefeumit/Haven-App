@@ -3022,8 +3022,10 @@ checked at every start and while the radio runs; and never bonded: no
 permission or call that could pair, and a link dropped the moment its
 device starts to bond. Below API 30 `start` answers `unsupported`, which
 widens (e) of "Owed by the native unit" above: hardware that can never
-run the mesh, or an Android release below 11. **Phones on Android 6 to
-10 cannot use the mesh.** The name stays accepted and disclosed; the
+run the mesh, or an Android release below 11. **Phones on Android 7 to
+10 cannot use the mesh** (Android 6 too when this was written: Haven's
+floor is Flutter's default `minSdkVersion`, 23 then and 24 at Flutter
+3.50.0, pinned by nothing in Haven; design §M.3, Q-16). The name stays accepted and disclosed; the
 phone is not renamed; a peer's address type is not judged (design §M.6,
 §M.7); and nothing may claim that every identifier is random.
 **Left, and owed.** What stays exposed is design §M.8. The lever costs
@@ -3034,7 +3036,7 @@ Haven's own lines too — stays as the second line, are M3g's first
 decisions, the last the owner's if it must give. Nine things are to be
 proved before the flag flips (design §M.9). `haven-core/SECURITY.md`,
 the privacy manifest and `CLAUDE.md` are unchanged: they describe what
-is built. §0.4 owes, with M3g, an item for Android 6 to 10 and, in
+is built. §0.4 owes, with M3g, an item for Android 7 to 10 and, in
 item 6, that address rotation is the build's; §7.1 carries a note now.
 
 - **M3g unit 1**, the log lever (`docs/BLUETOOTH_MESH_M3_DESIGN.md` §N.1,
@@ -3053,7 +3055,7 @@ item 6, that address rotation is the build's; §7.1 carries a note now.
   name — `__android_log_set_logger`, `_logd_logger`, `_write_log_message`,
   `_set_minimum_priority`, `_get_minimum_priority`, each from API 30 — with
   `dlopen("liblog.so")` and `dlsym`, never an `extern` declaration, which
-  would be an import Android 6 to 10 cannot bind; hands `liblog` a logger
+  would be an import Android 7 to 10 cannot bind; hands `liblog` a logger
   of Haven's own; and, in a release build, raises the minimum priority to
   FATAL behind it. `false` where a function is missing. `leverHolds` hands
   the logger in force one empty line for the main buffer at ERROR and
@@ -3153,7 +3155,7 @@ item 6, that address rotation is the build's; §7.1 carries a note now.
   row is not built). So it is not shown that the logger is the one in
   force after the call, that a platform line is dropped, that a property
   set over `adb` brings none back, or that the library still loads on
-  Android 6 to 10 — that last is what the artifact step is for. The event,
+  Android 7 to 10 — that last is what the artifact step is for. The event,
   statistics and security buffers never reach a logger (design N-1).
   Everything [E] and [H] of design N.1.6 stands as it was. `haven-core/
   SECURITY.md` has the lever under "The radio's entries"; the privacy
@@ -3234,9 +3236,10 @@ item 6, that address rotation is the build's; §7.1 carries a note now.
   told twice or lost. 130 fail a named test, two of them only after
   the test was made to: a prepared write that wants no answer, and a
   third connection. An Android import does not compile. **One stands:**
-  a call of the JDK that Android 6 does not have (`java.time`) compiles
-  and passes — the JVM build reads JDK 17's API, and nothing here holds
-  the pure package to Android 6's. None is used; a reviewer holds it.
+  a call of the JDK that the oldest Android Haven runs on does not have
+  (`java.time`) compiles and passes — the JVM build reads JDK 17's API,
+  and nothing here holds the pure package to that Android's. None is
+  used; a reviewer holds it.
   **Review** (independent, read-only, of `9609128`): no blocker and no
   high finding. Two medium, fixed. **The lever was asked by the core's
   inputs alone**, and a dial's steps and the server's answers are made
@@ -3312,8 +3315,8 @@ item 6, that address rotation is the build's; §7.1 carries a note now.
   permissions with `BLUETOOTH_SCAN` flagged `neverForLocation`, the two
   legacy ones up to API 30 — Android 11, where the radio starts, has no
   other — the connected-device foreground-service permission, and
-  Bluetooth LE as a feature that is not required; the service and the
-  receiver come with their unit. The switch: `app/build.gradle.kts`
+  classic Bluetooth and Bluetooth LE as features that are not required;
+  the service and the receiver come with their unit. The switch: `app/build.gradle.kts`
   reads `HAVEN_MESH` from the `dart-defines` property the Flutter tool
   hands Gradle, once; with it the mesh's manifest is added to every
   variant and `BuildConfig.HAVEN_MESH` is true, without it neither, and
@@ -3331,7 +3334,8 @@ item 6, that address rotation is the build's; §7.1 carries a note now.
   is on for exactly a last `HAVEN_MESH=true` among fourteen values of
   the property, and its two blocks take the overloads meant, against
   stand-ins with the signatures of AGP 9.3's reference. The manifest
-  check, beyond its 34 self-test fixtures, was run with a real `aapt2`
+  check, beyond its self-test fixtures (34, and 49 after the review), was
+  run with a real `aapt2`
   on two APKs linked from the mesh's own manifest and from none, in
   both modes; the constants check, beyond its 19, with a real `javap`
   on two real `android.jar`s. **The guard**, `check_mesh_radio.sh`:
@@ -3365,6 +3369,26 @@ item 6, that address rotation is the build's; §7.1 carries a note now.
   `haven/DEVELOPMENT.md` change by one sentence each, where they said
   that no Kotlin declares an export and that no workflow passes the
   flag; `CLAUDE.md` is unchanged.
+  **Review** (independent, read-only, of `fd72c67`): no blocker and no
+  high finding. One medium, fixed. **A release with the flag would have
+  been hidden by Play from every phone without Bluetooth**: the two
+  legacy permissions each imply `android.hardware.bluetooth` as a
+  required feature, whatever their `maxSdkVersion`, and declaring
+  Bluetooth LE not required does not take that back — shown with a real
+  `aapt2` on the manifest as committed. The manifest now declares that
+  feature not required; it is the eighth entry the flag-on check holds;
+  and that check also reads `aapt2 dump badging`, which applies Play's
+  rules, and fails on any Bluetooth feature listed as required or
+  implied. Two low, fixed: the flag-on check now fails anything of the
+  mesh that is not one of the entries — another manifest's Bluetooth
+  permission, feature or broadcast; and the sentences that still gave
+  Haven's floor as API 23, and its range without mesh as Android 6 to
+  10, say what is built — Android 7 to 10, the floor being Flutter's
+  default (24 at Flutter 3.50.0), which nothing in Haven pins; whether
+  it should be pinned is the owner's (design Q-16). A second mutation
+  pass, 26 changes to the manifest check, twelve of them to the new
+  clauses: all fail a fixture. The badging step, like the rest, has run
+  on no APK a build made.
 
 ### Proposed CLAUDE.md wording (owner to approve)
 

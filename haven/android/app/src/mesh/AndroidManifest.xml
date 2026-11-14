@@ -22,8 +22,14 @@
         android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
 
-    <!-- Not required: Haven installs and runs on a phone without Bluetooth LE,
-         and the mesh is not offered there. -->
+    <!-- Neither is required: Haven installs and runs on a phone without
+         Bluetooth, and the mesh is not offered there. The first has to be
+         said: the two legacy permissions imply it as required, whatever
+         their maxSdkVersion, and only an entry of the same name takes that
+         back. -->
+    <uses-feature
+        android:name="android.hardware.bluetooth"
+        android:required="false" />
     <uses-feature
         android:name="android.hardware.bluetooth_le"
         android:required="false" />

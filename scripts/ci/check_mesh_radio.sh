@@ -56,7 +56,7 @@
 #     three modules: the generated bridge, the exports' file and the log
 #     lever. An allowance moved to the crate, or to `api.rs`, would compile.
 #
-#   * AN API-30 SYMBOL IMPORTED STOPS THE LIBRARY LOADING ON ANDROID 6 TO 10 —
+#   * AN API-30 SYMBOL IMPORTED STOPS THE LIBRARY LOADING BELOW ANDROID 11 —
 #     all of Haven there, not the mesh. The lever's five functions are
 #     therefore looked up with `dlsym`, never declared `extern`, and named in
 #     no other file; `android_log_sys`, which declares one ready to call, is
@@ -946,7 +946,7 @@ run_check() {
     view="$(code_view "${file}")"
     hits="$(grep -nE "android_log_sys$([[ "${rel}" == "${LEVER}" ]] || printf '|__android_log_(%s)' "$(printf '%s\n' "${LEVER_STRINGS[@]:1}" | sed 's/^__android_log_//' | paste -sd '|' -)")" <<<"${view}" | cut -d: -f1 | head -n 5 | tr '\n' ' ' || true)"
     if [[ -n "${hits}" ]]; then
-      fail "${rel} names android_log_sys, or — outside ${LEVER} — one of liblog's five API-30 functions (line(s) ${hits}; a string counts). Declared or imported, such a function is a symbol the linker of Android 6 to 10 cannot bind, and the library — all of Haven — would not load there: the lever finds them with dlsym, in its own file."
+      fail "${rel} names android_log_sys, or — outside ${LEVER} — one of liblog's five API-30 functions (line(s) ${hits}; a string counts). Declared or imported, such a function is a symbol the linker of an Android below 11 cannot bind, and the library — all of Haven — would not load there: the lever finds them with dlsym, in its own file."
     fi
   done < <(find "${REPO_ROOT}/${SRC}" -type f -name '*.rs' | LC_ALL=C sort)
 

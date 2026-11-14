@@ -299,7 +299,9 @@ jobs:
       # Every entry of app/src/mesh/AndroidManifest.xml, once, with its
       # attributes — BLUETOOTH_SCAN flagged neverForLocation, the two legacy
       # permissions up to API 30 — so the switch merged the file, and merged
-      # it whole.
+      # it whole; nothing else of the mesh, from any manifest; and, by
+      # aapt2's badging, no Bluetooth feature Play would read as required:
+      # the legacy permissions imply one unless it is declared not required.
       - name: Check the manifest declares the mesh's entries
         run: bash ../scripts/ci/check_mesh_manifest.sh build/app/outputs/flutter-apk/app-debug.apk on
 

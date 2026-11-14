@@ -1481,8 +1481,10 @@ jobs:
       # connected-device permission or service type, a component of the
       # mesh; with it on, an entry missing or twice, BLUETOOTH_SCAN without
       # neverForLocation, a legacy permission past API 30, a feature that is
-      # required; and no aapt2, a dump that fails, is empty or is in a shape
-      # the check does not read — each a misconfiguration, never a pass.
+      # required, anything of the mesh beside the entries, and a badging in
+      # which a Bluetooth feature is required or implied; and no aapt2, a
+      # dump or a badging that fails, is empty or is in a shape the check
+      # does not read — each a misconfiguration, never a pass.
       - name: Mesh manifest guard self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_mesh_manifest.sh --self-test
