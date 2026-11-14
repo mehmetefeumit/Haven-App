@@ -28,9 +28,9 @@ export 'package:haven/src/services/mesh_service.dart' show kMeshIntroSeenKey;
 /// Off unless a build passes `--dart-define=HAVEN_MESH=true`. With it off no
 /// Dart code calls a mesh entry, so mesh cannot be turned on, no mesh key is
 /// stored, nothing is passed on to a relay, and the map has no mesh button,
-/// sheet or aura. The radio has no native end yet: with it on, an Android
-/// build's turn-on fails and stores nothing, and no packet moves between
-/// phones in any build.
+/// sheet or aura. The radio's native end does not yet answer whether
+/// Bluetooth is on, nor start: with the flag on, an Android build's turn-on
+/// fails and stores nothing, and no packet moves between phones in any build.
 const meshEnabled = bool.fromEnvironment('HAVEN_MESH');
 
 /// [meshEnabled], read through a provider so the default test run executes
@@ -124,7 +124,7 @@ enum MeshTurnOn {
   /// Bluetooth is switched off.
   bluetoothOff,
 
-  /// This phone has no radio the mesh can use.
+  /// This phone cannot run the mesh.
   unsupported,
 
   /// It could not be turned on.
@@ -480,17 +480,34 @@ class MeshNotifier extends AsyncNotifier<MeshStatsFfi?> implements BurstMesh {
   }
 }
 
-/// Whether this phone's radio answered that it cannot run the mesh. Held
-/// for the life of the process and stored nowhere: a phone does not grow the
-/// hardware, and a process that forgets asks once more.
+/// Whether this phone's radio answered a start that it cannot run the mesh.
+/// Held for the life of the process and stored nowhere: a phone grows
+/// neither the hardware nor another Android release under a running
+/// process, and a process that forgets asks once more.
 final meshUnsupportedProvider = StateProvider<bool>((ref) => false);
 
-/// Whether the mesh is on screen: this build, on this platform, has a radio,
-/// and the radio has not answered that this phone cannot use it. Where the
-/// mesh button, its sheets, the Settings row and the aura exist.
+/// Whether the radio says this phone can run the mesh: asked once, before
+/// anything of the mesh is drawn. `false` where there is no radio and where
+/// the question fails — a phone that cannot be asked is shown nothing it
+/// could not use.
+final meshSupportedProvider = FutureProvider<bool>((ref) async {
+  final radio = ref.watch(meshRadioProvider);
+  if (radio == null) return false;
+  try {
+    return await radio.supported();
+  } on Object {
+    return false;
+  }
+});
+
+/// Whether the mesh is on screen: this build, on this platform, has a radio
+/// that has answered that this phone can run the mesh, and has not said
+/// otherwise at a start since. Where the mesh button, its sheets, the
+/// Settings row and the aura exist. `false` until the radio has answered, so
+/// that no button is drawn and then taken away.
 final meshAvailableProvider = Provider<bool>(
   (ref) =>
-      ref.watch(meshRadioProvider) != null &&
+      (ref.watch(meshSupportedProvider).valueOrNull ?? false) &&
       !ref.watch(meshUnsupportedProvider),
 );
 

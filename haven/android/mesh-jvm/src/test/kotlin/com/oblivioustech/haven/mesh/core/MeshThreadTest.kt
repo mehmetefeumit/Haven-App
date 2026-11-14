@@ -5,6 +5,7 @@ import java.io.PrintStream
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class MeshThreadTest {
@@ -13,7 +14,7 @@ class MeshThreadTest {
         var flag = true
         var stoppedNotices = 0
         val thread = MeshThread(
-            lever = rig.lever,
+            lever = { rig.lever },
             running = { rig.core.running },
             steps = listOf({ rig.core.stopRadio() }, { flag = false }),
             notice = { stoppedNotices++ },
@@ -115,9 +116,10 @@ class MeshThreadTest {
             rig.core.onLinkUp(1, central = false, attMtu = 517, address = null)
             val done = mutableListOf<String>()
             val thread = MeshThread(
-                lever = rig.lever,
+                lever = { rig.lever },
                 running = { rig.core.running },
                 steps = MeshThread.steps(
+                    detach = { done += "detach" },
                     stopRadio = { rig.core.stopRadio() },
                     closeAdapters = {
                         assertEquals(listOf("linkDown(1)"), rig.engine.called("linkDown"), "an adapter was closed before the engine was told")
@@ -135,8 +137,133 @@ class MeshThreadTest {
             thread.stop(notice)
             val alarm = rig.port.calls.filter { it.startsWith("wakeAt(") || it == "cancelAlarm()" }
             assertTrue(alarm.size == 2 && alarm.last() == "cancelAlarm()", "the alarm was left armed behind the stop: $alarm")
-            assertEquals(listOf("close", "forget", "unpost", "end") + if (notice) listOf("notice") else emptyList(), done)
+            assertEquals(listOf("detach", "close", "forget", "unpost", "end") + if (notice) listOf("notice") else emptyList(), done)
         }
+    }
+
+    /**
+     * §O.1.8: a service brought down while a start command still owes its foreground start takes the process down.
+     * A command can arrive at any step of a stop; it is owed a foreground once the service has left it. So the stop
+     * lets go of the service before anything else: a command from then on finds no live start and makes its own,
+     * which makes the foreground start itself — whatever a later step of the old one throws.
+     */
+    @Test
+    fun aStopLetsGoOfTheServiceBeforeAnythingElse() {
+        for (thrower in listOf(null, "stopRadio", "closeAdapters", "cancelAlarm", "forget", "unpost", "end")) {
+            val starts = ServiceStarts<String>()
+            starts.command(1) { "first" }
+            val done = mutableListOf<String>()
+            fun step(name: String): () -> Unit = {
+                // What a command arriving now would find.
+                done += "$name:${starts.live()}"
+                if (name == thrower) throw Thrown()
+            }
+            val thread = MeshThread(
+                lever = { FakeLever() },
+                running = { true },
+                steps = MeshThread.steps(
+                    detach = { starts.detach() },
+                    stopRadio = step("stopRadio"),
+                    closeAdapters = step("closeAdapters"),
+                    cancelAlarm = step("cancelAlarm"),
+                    forget = step("forget"),
+                    unpost = step("unpost"),
+                    end = step("end"),
+                ),
+                notice = step("notice"),
+            )
+            thread.stop(notice = true)
+            assertEquals(
+                listOf("stopRadio", "closeAdapters", "cancelAlarm", "forget", "unpost", "end", "notice").map { "$it:null" },
+                done,
+                "a step of the stop still saw the start it was stopping (thrown in: $thrower)",
+            )
+            // The command that arrives behind it is a start of its own.
+            var made = false
+            starts.command(2) { "second".also { made = true } }
+            assertTrue(made && starts.live() == "second")
+        }
+    }
+
+    /**
+     * §O.1.2: one thread and one radio a service. A start command that finds a live start joins it — a service in
+     * the foreground owes a second command nothing — and one that finds none makes the live start, after a stop too.
+     */
+    @Test
+    fun aStartThatFindsALiveOneJoinsItAndOneThatFindsNoneIsFresh() {
+        val starts = ServiceStarts<String>()
+        val made = mutableListOf<String>()
+        fun command(id: Int, name: String) = starts.command(id) { name.also { made += it } }
+        assertNull(starts.live())
+        command(1, "first")
+        assertEquals("first", starts.live())
+        // The sticky restart's, the boot's, a second turn-on's: no second thread beside the live one.
+        command(2, "second")
+        command(3, "third")
+        assertEquals(listOf("first"), made)
+        assertEquals("first", starts.live())
+        // After the stop the next command is not dropped: it is the fresh start.
+        starts.detach()
+        assertNull(starts.live())
+        command(4, "fourth")
+        assertEquals(listOf("first", "fourth"), made)
+        assertEquals("fourth", starts.live())
+    }
+
+    /**
+     * §O.1.8: the platform leaves a service up when it is ended by a command older than its last. So a stop ends
+     * the service by the last command that joined the start it stops — not by none, which ends it whatever came
+     * since, nor by the first, which never would — and a start made behind the stop keeps the service, the
+     * foreground and the notices.
+     */
+    @Test
+    fun theStopNamesTheLastStartThatJoined() {
+        val starts = ServiceStarts<String>()
+        starts.command(7) { "first" }
+        assertEquals(7, starts.detach())
+
+        starts.command(8) { "second" }
+        starts.command(9) { error("a second start beside a live one") }
+        starts.command(12) { error("a second start beside a live one") }
+        assertEquals(12, starts.detach(), "not the last command that joined")
+
+        // A command behind the stop is the next start's: the stop that is still running names the one before it,
+        // and leaves the foreground and the notices alone.
+        var left = 0
+        starts.idle { left++ }
+        assertEquals(1, left, "a stop with no start behind it did not leave the foreground")
+        starts.command(13) { "third" }
+        starts.idle { left++ }
+        assertEquals(1, left, "a stop took the foreground from the start made behind it")
+        assertEquals(13, starts.detach())
+        starts.idle { left++ }
+        assertEquals(2, left)
+    }
+
+    /**
+     * §N.7, §O.1.3: with Bluetooth off the platform throws from the calls that close a radio. Each close runs
+     * whatever the one before it threw, and nothing is thrown on: a pause must not become a stop.
+     */
+    @Test
+    fun everyCloseOfARadiosEndRunsThoughOneThrows() {
+        val closes = listOf("client", "server", "advertiser", "scanner", "lock")
+        for (throwers in listOf(emptySet(), setOf("client"), setOf("server", "scanner"), closes.toSet())) {
+            val ran = mutableListOf<String>()
+            val output = written {
+                RadioEnd.each(
+                    *closes.map { name ->
+                        {
+                            ran += name
+                            if (name in throwers) throw Thrown()
+                            if (name == "lock" && "scanner" in throwers) throw OutOfMemoryError()
+                        }
+                    }.toTypedArray(),
+                )
+            }
+            assertEquals(closes, ran, "a close was skipped behind one that threw ($throwers)")
+            assertEquals("", output, "something was written of what a close threw")
+        }
+        RadioEnd.each()
     }
 
     /**
@@ -188,7 +315,7 @@ class MeshThreadTest {
                 radios.fresh()
                 val lever = FakeLever().apply { this.holds = holds }
                 val done = mutableListOf<String>()
-                val thread = MeshThread(lever, { true }, listOf({ done += "steps" })) { done += "notice" }
+                val thread = MeshThread({ lever }, { true }, listOf({ done += "steps" })) { done += "notice" }
                 var ran = false
                 lever.onCall = { assertFalse(ran, "the lever was asked after the body began") }
                 thread.run {

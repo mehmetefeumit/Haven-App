@@ -308,6 +308,7 @@ void main() {
       'off the screen for as long as the process lives', () async {
     final t = _Mesh()..radio.startAnswer = MeshRadioStart.unsupported;
     await t.read(on: false, state: MeshRadioState.stopped);
+    expect(await t.container.read(meshSupportedProvider.future), isTrue);
     expect(t.container.read(meshAvailableProvider), isTrue);
 
     expect(
@@ -319,6 +320,53 @@ void main() {
     // Not the identity's: a logout does not ask the phone again.
     t.container.invalidate(meshProvider);
     expect(t.container.read(meshAvailableProvider), isFalse);
+  });
+
+  group('nothing of the mesh is on screen until the radio says this phone '
+      'can run it', () {
+    test('not while the question is open, and from its "yes" on; asked '
+        'once', () async {
+      final t = _Mesh();
+      final answer = Completer<void>();
+      t.radio.held['supported'] = answer.future;
+      final shown = <bool>[];
+      t.container.listen(
+        meshAvailableProvider,
+        (_, now) => shown.add(now),
+        fireImmediately: true,
+      );
+
+      await pumpEventQueue();
+      expect(shown, [false]);
+
+      answer.complete();
+      await pumpEventQueue();
+      expect(shown, [false, true]);
+
+      // What reads it later asks nothing again.
+      t.container.read(meshAvailableProvider);
+      await t.read();
+      expect(t.radio.supportedAsked, 1);
+      expect(shown, [false, true]);
+    });
+
+    test('never for a "no", nor for a question that fails', () async {
+      final refused = _Mesh()..radio.supportedAnswer = false;
+      final deaf = _Mesh()..radio.throws['supported'] = StateError('deaf');
+      for (final t in [refused, deaf]) {
+        final shown = <bool>[];
+        t.container.listen(
+          meshAvailableProvider,
+          (_, now) => shown.add(now),
+          fireImmediately: true,
+        );
+
+        expect(await t.container.read(meshSupportedProvider.future), isFalse);
+        await pumpEventQueue();
+
+        expect(shown, [false]);
+      }
+    });
   });
 
   test('with no radio there is nothing on the map, and nothing is asked of '

@@ -118,9 +118,17 @@ mixin _Asked {
   Future<void> reached(String call) =>
       (_reached[call] ??= Completer<void>()).future;
 
-  Future<T> _called<T>(String call, T Function() answer) async {
-    calls.add(call);
-    journal?.add('$_who.$call');
+  /// [recorded]: `false` for a question every test's set-up asks, which is
+  /// no part of what a test reads in [calls] or [journal].
+  Future<T> _called<T>(
+    String call,
+    T Function() answer, {
+    bool recorded = true,
+  }) async {
+    if (recorded) {
+      calls.add(call);
+      journal?.add('$_who.$call');
+    }
     final reached = _reached[call] ??= Completer<void>();
     if (!reached.isCompleted) reached.complete();
     final hold = held[call];
@@ -221,6 +229,12 @@ class FakeMeshRadio with _Asked implements MeshRadio {
   @override
   String get _who => 'radio';
 
+  /// What [supported] answers.
+  bool supportedAnswer = true;
+
+  /// How often [supported] was asked.
+  int supportedAsked = 0;
+
   /// What [permission] and [requestPermission] answer.
   MeshRadioPermission permissionAnswer = MeshRadioPermission.granted;
 
@@ -251,6 +265,12 @@ class FakeMeshRadio with _Asked implements MeshRadio {
 
   /// A notice was tapped.
   void tap(MeshRadioAction action) => _actions.add(action);
+
+  @override
+  Future<bool> supported() => _called('supported', () {
+    supportedAsked++;
+    return supportedAnswer;
+  }, recorded: false);
 
   @override
   Future<MeshRadioPermission> permission() =>

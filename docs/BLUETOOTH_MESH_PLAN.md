@@ -3569,6 +3569,74 @@ item 6, that address rotation is the build's; §7.1 carries a note now.
   cold-booted on a pinned emulator; no primary source read names the
   API levels whose image has a virtual controller. Seven questions
   are the owner's, Q-17 to Q-23 (§O.4): none is decided there.
+- **M3g units 5 and 6, push A, part 1** — the service's classes in no
+  manifest, and the channel without the three methods behind the log
+  lever (`docs/BLUETOOTH_MESH_M3_DESIGN.md` §O.3's push A without its
+  lane; §O.6 for what was built, each difference from §O, and what is
+  proved by what; `…/mesh/MeshService.kt`, `MeshNotices.kt`,
+  `MeshPrefs.kt`, `MeshReceiver.kt`, `MeshChannel.kt`, `MainActivity.kt`,
+  eleven files of `…/mesh/core/`, `haven/lib/src/services/mesh_radio.dart`,
+  `haven/lib/src/providers/mesh_provider.dart`,
+  `scripts/ci/check_mesh_radio.sh`). No manifest entry, no permission,
+  no Gradle line, no Rust, no dependency. **No manifest declares the
+  service, the receiver or the alias, and the channel answers neither
+  `bluetoothOn`, `bluetoothName` nor `start`: in no build, with the
+  flag or without, is the service made or the log lever reached, and a
+  guard says so. Nothing of it has been compiled for Android or run on
+  Android. The lane (S0, the probe, S2) is not part of this entry.**
+  **What is built.** In the pure package: the start's inputs handed
+  over unread, the foreground start first; a stop that lets go of the
+  service before anything else and ends it by the last start command
+  that joined; which start command makes a start; what boot and the
+  alarm do with no service; when the alarm and the wake lock are asked
+  of the platform, and how far ahead; a radio's closes, each run
+  whatever the one before threw; Bluetooth's switch as a pause; which
+  notice goes under which id; a tap read only through the alias, once.
+  Fourteen JVM tests, 73 in all. The service, its notices, its stored
+  copy and its receiver as §O.1 has them, adapters over those answers.
+  The channel: eight methods answered, the three behind the lever
+  answered by nobody, so a turn-on in a build with the flag still ends
+  at `failed` with nothing stored — now behind the system's permission
+  dialog, which the channel does ask. The Dart seam: `supported()`,
+  asked before anything of the mesh is drawn — no button on a phone
+  that cannot run it — and `actions` asking for the tap that opened the
+  app.
+  **Read for it**: the engine's wake is never later than its deadline
+  (`haven/rust_builder/src/api.rs:13518-13525`, `:13393-13395`;
+  `haven-core/src/mesh/engine.rs:759-768`) — §O's open point; the pure
+  side takes it as it is.
+  **Where it differs from §O** (§O.6 has each with its reason): the
+  thread's lever is a function too, so that the native class is first
+  named behind the foreground start; a stop leaves the foreground only
+  where no start was made since it let go; the alarm is moved for a
+  wake that differs by more than a slack either way, and one is always
+  armed ahead; the foreground start says "on" and is put right once the
+  adapter is read; a `sync` takes the reminder down and one still owed
+  is given again; the channel's `stop` answers when the service has
+  stopped; a tap is not read from an intent the system replays.
+  **Proved here**: the 73 JVM tests; the mesh's Kotlin and
+  `MainActivity` type-checked with no warning against copies of API
+  36's, 35's and 34's `android.jar` and Flutter's own embedding jar,
+  with stand-ins for `BuildConfig` and two `androidx` types; every
+  platform member used found in API 36's jar, and the three newer than
+  API 30 — all Android 13's — each behind its level; `flutter analyze`
+  and the Dart tests, among them one that reads the Kotlin side's words
+  and holds them to the Dart side's; `check_mesh_radio.sh`, 431
+  self-test fixtures (280, and 151). **Mutation passes**: 143 changes
+  to the guard's new clauses, 68 to the new pure code, eight to the
+  Dart seam and the channel's words — each failing a named fixture or
+  test (six of the guard's by failing the unchanged tree).
+  **Only CI proves, and has not run**: the Android compile of the six
+  files in the three legs and the flag-on job.
+  **Not proved, by anything**: every behaviour of the service on
+  Android — a foreground start from the mesh thread, a start command
+  behind a stop, the receivers' delivery, the alarm's lateness, a
+  notice's tap (§O.6's table). `haven-core/SECURITY.md`, the privacy
+  manifest and `haven/DEVELOPMENT.md` change where they said the radio's
+  channels have no native end and that there is no service: a channel
+  answers what touches no Bluetooth, and the service is written and in
+  no manifest. For the owner, beside Q-17 to Q-23: a boot that finds
+  the twelve hours passed leaves the flag set and tells nobody.
 
 ### Proposed CLAUDE.md wording (owner to approve)
 

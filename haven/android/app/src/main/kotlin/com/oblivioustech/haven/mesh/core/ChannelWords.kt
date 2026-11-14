@@ -49,6 +49,16 @@ object ChannelWords {
     const val OPEN_STATS = "openStats"
     const val KEEP_ON = "keepOn"
 
+    /**
+     * The activity alias a notice's tap is sent through, and the extra that
+     * says which tap: [OPEN_STATS] or [KEEP_ON]. Declared not exported, with
+     * the service, so that only a notice of Haven's own reaches the activity
+     * under its name; until it is declared no intent does, and no tap is
+     * read.
+     */
+    const val TAP_ALIAS = "com.oblivioustech.haven.mesh.MeshTap"
+    const val TAP_EXTRA = "com.oblivioustech.haven.mesh.TAP"
+
     /** The code of every failure. The platform's own text never crosses: it can name a device. */
     const val ERROR = "failed"
 
@@ -69,6 +79,24 @@ object ChannelWords {
         granted -> "granted"
         !asked || rationale -> "denied"
         else -> "deniedForGood"
+    }
+
+    /**
+     * A tap read from the intent an activity was handed: whether it is Keep
+     * on, or null — no tap. Only [viaAlias]: `MainActivity` is exported, and
+     * the same extra sent to it under its own name, by any app, would
+     * restart the twelve hours for ever. Off the alias [extra] is not read
+     * at all: a stranger's extras need not unpack. And not [replayed]: an
+     * activity the system makes again is handed the intent that first made
+     * it, and a tap is the user's once.
+     */
+    fun tapOf(viaAlias: Boolean, replayed: Boolean, extra: () -> String?): Boolean? {
+        if (!viaAlias || replayed) return null
+        return when (extra()) {
+            KEEP_ON -> true
+            OPEN_STATS -> false
+            else -> null
+        }
     }
 
     /**

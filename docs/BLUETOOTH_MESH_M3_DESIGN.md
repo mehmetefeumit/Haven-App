@@ -4762,8 +4762,11 @@ them side by side now: 73 s here, where it took three minutes.
 
 > **Drafted by one agent and confirmed with changes by an independent
 > review, both 2026-11-14; revised in place for that review (O.5).**
-> Paper only: nothing of it is built, and nothing was compiled or run
-> for it. It makes §N.2's unit-5 row concrete, settles how a lane
+> Paper only when written: nothing was compiled or run for it. Push A's
+> pure classes, unit 5's four classes and the channel without its three
+> lever-gated methods have been built since (O.6), with where they
+> differ; the lane has not, and nothing of this section has run on
+> Android. It makes §N.2's unit-5 row concrete, settles how a lane
 > reaches the service, and designs M3h's first slices — the lane the
 > rule of unit 1's review (§N.7) makes a condition of the first
 > reachable `leverInstall`. Where it departs from §B, §F or §N it says
@@ -5514,3 +5517,244 @@ that the engine's wake never passes its deadline (`eng`, unread);
 API 29; that a `# systemapi` symbol answers a look-up from an app;
 `USE_EXACT_ALARM`'s policy; [S5]'s and [S6]'s own reports; everything
 of §O on a release other than the one read.
+
+### O.6 As built — push A, part 1 (2026-11-14)
+
+O.3's push A without its lane: the pure additions of O.1.10, unit 5's
+four classes in no manifest, unit 6 without the three methods behind
+the lever, and the guard. **No manifest declares the service, the
+receiver or the alias, and the channel answers neither `bluetoothOn`,
+`bluetoothName` nor `start`: nothing in any build, with the flag or
+without, makes the service or reaches `leverInstall`, and
+`check_mesh_radio.sh` check 19 says so. Nothing of it has been compiled
+for Android or run on Android**: this machine has no Android SDK. The
+lane — S0, the probe, S2, its runner and every row of O.2.7 — is not
+built here. Plan §16 has the same in short.
+
+**The engine's wake and its deadline — O.1.5's and O.5's [U], read.**
+`radio_wake_in_ms` (`haven/rust_builder/src/api.rs:13518-13525`) answers
+`min(next_wake_ms, until_ms) − now`, or `until_ms − now` where the
+engine names no wake, saturating at zero; `radio_left_ms` (`:13393-13395`)
+answers `until_ms − now`; the engine's `next_wake_ms`
+(`haven-core/src/mesh/engine.rs:759-768`) is the earliest of its emit,
+tick, greeting and stall timers and knows no deadline. So **the wake the
+radio is handed never passes the engine's deadline as it stands at that
+call**: the term the core takes (`MeshRadioCore.kt`, `pump`) needs no
+`min(wake, left)`, and none was added. It can exceed the `left` the
+same input read a moment earlier only where a session moved the
+deadline later in between (`api.rs:13125`, a Keep on under the engine's
+lock) — which is the deadline moving, not the wake passing it. An
+engine past its deadline answers no wake at all (`mesh_run`,
+`:13020-13024`), which the core reads as an engine gone.
+
+*What is built* (`kt/mesh/` unless a path is given).
+
+- **`core/`.** `StartPolicy.start` with every input but the level a
+  function and `foreground` called before any; `MeshThread` with its
+  lever a function and `steps` led by `detach`; `ServiceStarts`;
+  `ReceiverPolicy`; `WakePlan` and five constants; `RadioEnd`;
+  `BluetoothSwitch`; `NoticePlan` and the four `Notice`s;
+  `ChannelWords.tapOf` with the alias's name and the extra's;
+  `DeadlinePolicy.reworded` and `MeshRadioCore.onSync`. Fourteen JVM
+  tests under O.1.10's names, and clauses in two that were there: 73 in
+  all.
+- **`MeshService`** — `onBind` null; `onStartCommand` is
+  `starts.command(startId) { Live() }` and `START_STICKY`; `onDestroy`
+  posts the user's stop to the live start. `Live`, one start, is the
+  `RadioPort`: its `MeshThread`, `MeshLoop`, `WakePlan`, lock, core,
+  the four adapters each held from the moment it is made, three
+  receivers. Its start is O.1.2's steps 4 to 7 as written; its stop is
+  `MeshThread.steps` with O.1.8's seven.
+- **`MeshNotices`** — the channel (`haven_mesh_v1`, low importance,
+  secret on the lock screen, named by the stored string) and a notice:
+  title "Haven", the app's icon, text one stored string, ongoing under
+  the ongoing id, Keep on where `Notice.keepOn`; both taps
+  `PendingIntent.getActivity` on the alias, immutable, with the extra.
+- **`MeshPrefs`** — the file `haven_mesh`: `wanted`, `deadline`, the six
+  strings under `ChannelWords.COPY`'s keys; `commit()`.
+- **`MeshReceiver`** — boot and package replaced: `ReceiverPolicy.startsAtBoot`,
+  then `startForegroundService` inside `RadioEnd.each`; an intent with
+  no action is the alarm: the live start takes it, or
+  `ReceiverPolicy.endsAtAlarm` ends a mesh whose time is up.
+- **`MeshChannel`**, made in `MainActivity.configureFlutterEngine` under
+  `BuildConfig.HAVEN_MESH`: `permission`, `requestPermission`,
+  `openBluetoothSettings`, `sync`, `stop`, `status`, `supported`,
+  `takeAction`; anything else is `notImplemented`, which the Dart side
+  reads as it read no native end. One `try` round the handler; a
+  failure is the code `failed` and nothing else.
+- **Dart.** `MeshRadio.supported()`; `actions` asks `takeAction` at each
+  listen, behind its subscription; `meshSupportedProvider`, and
+  `meshAvailableProvider` false until it has answered true.
+
+*Where the code differs from this section, or settles what it left
+open.*
+
+- **`MeshThread`'s lever is a function too (O.1.2 step 3).** The thread
+  is made in `onStartCommand`, ahead of the foreground start, and was
+  handed `MeshNative` as a value: naming the class is what loads the
+  library. `run` asks for it at each body, `start` never. In the
+  service the class is named once, `private val native = { MeshNative }`,
+  and that lambda is what the thread, the policy and — called, behind
+  `Run` — the core are handed.
+- **`ServiceStarts` does one thing §O did not have: `idle`.** O.1.8
+  reasons about a start command that is owed a foreground start, which
+  can arrive only once the service has left the foreground. One that
+  arrives between `detach` and `unpost` is owed nothing — the service is
+  still in the foreground — but it is fresh all the same, and the old
+  stop's `stopForeground` behind it would take the foreground from the
+  new start's radio: a radio with no notice. So `unpost`, and the
+  stopped notice, run through `idle`: only where no start was made
+  since, under the lock a start command takes. `command` makes the fresh
+  start under that lock too, so the start's own stop — a refusal, on
+  the mesh thread — cannot let go of a start the main thread has not
+  yet kept. Held by `theStopNamesTheLastStartThatJoined`.
+- **`WakePlan` (O.1.5), three points.** *The slack is on both sides.*
+  O.1.5 arms for any wake earlier than the one armed; but what is asked
+  for is "in so many milliseconds", counted from a reading of the clock
+  a moment old, so the same wake comes out a little earlier or later at
+  every input, and "earlier by a millisecond" would be an alarm set at
+  every sighting. An alarm is moved for a wake that differs from it by
+  more than `ALARM_SLACK_MS`, either way. *A wake too soon for an
+  alarm, with none armed ahead, arms one at the minimum*: left to the
+  timer alone, a start's first wake — or the wake just behind an alarm
+  that came — would leave a phone that sleeps with no alarm at all, and
+  its deadline unwoken. *The lock is taken inside `hold`, under one
+  monitor*: the alarm's hold is the main thread's, and a timed acquire
+  on a lock that does not count replaces a longer hold. The five
+  values: no alarm further ahead than 15 minutes — at three quarters
+  late and a doze's quarter of an hour on top, a reminder is still
+  ahead of the deadline it announces, which 20 minutes would not give;
+  none sooner than 5 s, the platform's own minimum as remembered
+  (**[U]**); 5 s of slack; a hold retaken only where it outlasts the one
+  held by more than 100 ms, less than the 250 ms margin; 5 s held at an
+  alarm. Guesses until a phone (§G).
+- **`NoticePlan` answers the ongoing notice alone.** O.1.6 has it take
+  "a reminder owed" and "stopped": those are not states the service
+  holds but events — the core's `remind()`, the stop's notice step — and
+  each posts its own `Notice`. What is a decision is which id and which
+  string a notice has, and whether it carries Keep on: the enum, held
+  by the test.
+- **The foreground start says "on"** (O.1.2 step 4 has "the stored `on`
+  or `paused` string"): nothing of Bluetooth is known there, and a
+  turn-on asked that it be on. The notice is put right — paused — in
+  the same body, once the adapter has been read.
+- **A `sync` takes the reminder down, and the core asks for it again
+  where it is owed** (`MeshRadioCore.onSync`, `DeadlinePolicy.reworded`;
+  §N.2.8 has "re-words its notice"). After a Keep on the reminder's time
+  is false; after a change of language its words are. Without the
+  second half a language changed in the last half hour would lose the
+  reminder and its Keep on. A clause of
+  `theReminderComesOnceAtThirtyMinutesAndTheStopAtZero`.
+- **`ReceiverPolicy`** is two questions with a yes or no each; the
+  refusal is a function asked last, and only for a mesh that is owed —
+  it puts the lever in (Q-19). **A boot that finds the deadline passed
+  does nothing**, as O.1.8 has it: the flag stays set until the next
+  start or stop, and nothing tells the user that the mesh ended while
+  the phone was off. Not built round; for the owner, with Q-19.
+- **The channel's `stop` answers once the service has stopped and its
+  flag is cleared**, or at once where none is live (§N.2.8 does not say
+  when). The Dart side turns the engine off behind that answer; an
+  engine turned off under a body still running would be a stop the
+  service makes, with the notice of a stop the user made.
+- **Two hooks, and what push B's `start` can rest on.**
+  `MeshService.onStatus` is told the status at every change — the
+  channel, while an engine has one. `MeshService.onStarted` is told a
+  refusal's word or `started`; nothing sets it yet. Not told: a start
+  command that joined a live start, and a start that threw behind `Run`
+  (the status then says stopped).
+- **`tapOf` has a third input, and reads the extra only through the
+  alias** (O.1.6). An activity the system makes again — after the
+  process died, or from the recents list — is handed the intent that
+  first made it: a Keep on would be taken again, by nobody.
+  `MainActivity` notes a restored instance before the engine is
+  configured, the channel adds `FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY`,
+  and `tapOf` answers no tap for either. That these two are how a
+  replayed intent reads on every release is **[U]**, with O.1.6's
+  three. And the extra is a function: off the alias a stranger's
+  extras are not unpacked.
+- **The reads three files share are the service's companion's**:
+  `bluetoothLe`, `permitted`, `canSearch`. The last reads whether
+  Location is on only from Android 9, where that call exists — the
+  channel answers `status` on every level Haven installs on.
+- **`MeshPrefs.forget` leaves the six strings**: the stopped notice is
+  posted behind it, and they are fixed copy and a clock time.
+- **What `onStartCommand` evaluates** (O.1.2 step 3, "nothing that can
+  throw"): a `MeshThread`, a `HandlerThread` started, a `WakePlan`, the
+  power service and a wake lock made, not taken. Short of memory none
+  throws; nothing is read and no library named.
+- **Lint.** `@TargetApi(R)` on `Live`, `MeshNotices` and `MeshReceiver`,
+  with the reason, and not on the service's class: the channel calls
+  its companion below Android 11. Three suppressions, each on one
+  function or expression: the adapter's state (`MissingPermission`),
+  the two-argument `registerReceiver` (`UnspecifiedRegisterReceiverFlag`),
+  the untyped `getParcelableExtra` (`DEPRECATION`). No job runs lint.
+- **The guard, against O.1.11.** "Every argument but the level is a
+  lambda" is held by pinning the whole call, where the lever and the
+  engine are the one lambda above. O.1.11 has the channel name no
+  `StartPolicy`, and §N.2.8 has `supported` be `StartPolicy.supported`:
+  the channel names that one member, pinned. `startForegroundService`
+  is at one site, not two: the channel's is push B's. Added to O.1.11:
+  the three whole lifecycle methods include the channel's handler; the
+  strings of the service, the stored copy and the notices are pinned
+  sets, the service's holding the logout marker's key as
+  `pending_mls_wipe_service.dart` names it (§N.2.7); no class of the
+  mesh is named outside its package but the channel in `MainActivity`.
+
+*API levels.* Every platform member the six files call is in API 36's
+`android.jar` under the signature used (`javap`, the copy named below).
+Newer than API 30, as `developer.android.com/reference` has them
+(fetched 2026-11-14): `Context.RECEIVER_EXPORTED`, the typed
+`Intent.getParcelableExtra(String, Class)` and `Build.VERSION_CODES.TIRAMISU`,
+all API 33 — the first two each behind `SDK_INT >= TIRAMISU`, with the
+older form below it; the third a constant the compiler inlines. Above
+Haven's floor of 24 and at or below 30, reached only where a service
+runs or behind a comparison: the three-argument `startForeground` and
+the connected-device type (29), `isLocationEnabled` (28),
+`startForegroundService`, the flagged `registerReceiver` and
+notification channels (26).
+
+*Proved here* — by a compiler, tests and a reader of text.
+
+- The 73 JVM tests (`run_mesh_jvm_tests.sh`).
+- The mesh's Kotlin and `MainActivity.kt` type-check with no warning,
+  warnings being errors and the extended ones on, in a scratch Gradle
+  build with the JVM build's Kotlin: against copies of API 36's, 35's
+  and 34's `android.jar` and Flutter 3.50's own `flutter.jar`, with
+  stand-ins for `BuildConfig` and for the two `androidx.lifecycle`
+  types `FlutterActivity`'s declaration names (Google's Maven is not
+  reachable here).
+- `flutter analyze`, no error and no warning; the Dart tests, among them
+  `mesh_radio_test.dart`, which now reads `ChannelWords.kt` and holds
+  both channels, the eleven methods, the six keys and every word of an
+  answer to what the Dart side asks and reads (§N.2's unit-6 row).
+- `check_mesh_radio.sh`: check 15 widened, checks 18 and 19 new, 431
+  self-test fixtures (280, and 151). **Mutation passes**: 143 changes
+  to the new clauses, each dropping a pin, a count, a name or a file —
+  137 fail a named fixture with the unchanged tree still passing, six
+  fail the unchanged tree (an equality moved alone); 68 changes to the
+  new pure code, each failing a named JVM test; eight to the Dart seam
+  and to `ChannelWords.kt`'s words, each failing a named Dart test.
+
+*What only CI's compile proves, and has not yet* (`build-check.yml`, at
+`compileDebugKotlin`, the three legs and `android-mesh`): that the six
+files compile under the Android plugin against Google's `android.jar`
+and the real `androidx` — `MainActivity`'s overrides among them — that
+`BuildConfig.HAVEN_MESH` reads as the switch wrote it, and that the
+dexer takes them at `minSdk` 24. `check_mesh_manifest.sh … on` is
+unchanged and still expects no component.
+
+*What only the lane, an emulator or a phone proves.*
+
+| Claim the code rests on | If it is false |
+|---|---|
+| Nothing in a flag-on build makes the service (S0, S2; text here) | the lever reachable ahead of its proof |
+| `startForeground` from the mesh thread, with the connected-device type, on API 30 to 36; nothing thrown before it | the process ends: O-9 |
+| A start command behind a stop is fresh and keeps the foreground; `stopSelfResult` leaves the service to it | a radio with no notice, or a service down owing its foreground |
+| Receivers registered `RECEIVER_EXPORTED` hear the adapter's, the screen's and the bond's broadcasts on API 33 to 36 | no pause, no notice put back, no pairing ended |
+| `setAndAllowWhileIdle` comes within the plan's lateness; an explicit immutable broadcast reaches a receiver that is not exported | a stop or a reminder later than O.1.5 says |
+| The lock held from `onReceive` covers the two bodies | an alarm that wakes nothing |
+| A notice with the app's launcher icon posts; the channel is hidden on the lock screen | no foreground notice: the start throws |
+| The alias's three points (O.1.6), and that a replayed intent reads as above | no tap, or one taken twice |
+| `notImplemented` reads on the Dart side as no native end | a turn-on that does not end at `failed` |
+| A dialog asked for under a dialog is answered by the first | a permission read as refused for good |
+| Lint, the shrinker and a release build take the files | the tag's build fails |

@@ -127,6 +127,16 @@ class MeshRadioCore(
 
     fun onWake() = input { null }
 
+    /**
+     * The channel's `sync`: the deadline moved, or the notices' words did,
+     * and the service has taken the reminder down. Read again like a wake;
+     * a reminder still owed is asked of the port again.
+     */
+    fun onSync() {
+        deadline.reworded()
+        onWake()
+    }
+
     /** [act] answers the link the phone is held awake for: one that came up, or brought a frame. */
     private fun input(act: () -> Long?) {
         val left = left() ?: return

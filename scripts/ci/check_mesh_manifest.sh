@@ -26,9 +26,10 @@
 #     and `android.hardware.bluetooth_le`, neither required. And nothing more
 #     of the mesh: what `off` looks for fails here too in any element that is
 #     not one of those entries — another manifest's Bluetooth permission,
-#     feature or broadcast. The mesh's two components are not in the manifest
-#     yet (§N.2, unit 5): until the unit that declares them lists them here,
-#     one would fail.
+#     feature or broadcast. The mesh's service, its receiver and the alias
+#     its notices' taps go through are written and in no manifest yet
+#     (§O.3): until the push that declares them lists them here, one would
+#     fail.
 #
 #     Then what Play reads, which is not the manifest's text: the two legacy
 #     permissions each IMPLY `android.hardware.bluetooth` as a required

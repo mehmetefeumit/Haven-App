@@ -921,6 +921,27 @@ void main() {
     expect(logs.joined, isNot(contains(_address)));
   });
 
+  testWidgets('the button is not drawn until the radio has said this phone '
+      'can run the mesh, and never where it says it cannot', (tester) async {
+    final mesh = MeshHarness();
+    final answer = Completer<void>();
+    mesh.radio.held['supported'] = answer.future;
+    await _pump(tester, mesh);
+
+    expect(_face, findsNothing);
+
+    answer.complete();
+    await settleMesh(tester);
+    expect(_face, findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox());
+    final refused = MeshHarness()..radio.supportedAnswer = false;
+    await _pump(tester, refused);
+    await tester.pumpAndSettle();
+
+    expect(_face, findsNothing);
+  });
+
   testWidgets("a phone that can't use mesh is told so once, and the button "
       'that could never work is gone for as long as the app runs', (
     tester,

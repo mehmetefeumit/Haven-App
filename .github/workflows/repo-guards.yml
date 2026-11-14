@@ -1425,9 +1425,15 @@ jobs:
       # fixture's names and descriptors, the Kotlin side of the same pin; and
       # the app's Gradle script reads the mesh's build flag once, for the
       # manifest and BuildConfig both (§N.3). The radio's adapters post every
-      # platform callback through MeshLoop.kt, inside MeshThread.run, name
-      # nothing that could start a pairing, and advertise the service UUID
-      # alone (§N.2.2, §M.4, §M.3).
+      # platform callback through MeshLoop.kt, inside MeshThread.run — but
+      # the service's three lifecycle methods, its receiver's entry and the
+      # channel's handler, each pinned whole — name nothing that could start
+      # a pairing, and advertise the service UUID alone (§N.2.2, §M.4,
+      # §M.3). The service's start, stop, receivers, lock, alarm and taps are
+      # the pinned ones, and what it stores and shows holds no text of its
+      # own (§O.1); and, for as long as no lane proves the log lever, the
+      # channel answers none of the three methods behind it, starts no
+      # service, and no manifest declares a component of the mesh (§O.3).
       - name: Mesh radio
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_mesh_radio.sh
@@ -1466,7 +1472,19 @@ jobs:
       # outside the wrapper, a thread or a handler of an adapter's own, each
       # name that could start a pairing or make an attribute readable, a dial
       # or an answer that is not the pinned one, and a field, a setting or a
-      # second start beside the pinned advertisement.
+      # second start beside the pinned advertisement. In the service: a
+      # start command, an end or a receiver's entry that is not the pinned
+      # one, a try or a lever call of its own, an input read ahead of the
+      # foreground start, the native class named outside its lambda, a stop
+      # that does not let go first or ends by another start command, a
+      # receiver not exported or registered elsewhere, a second lock, alarm,
+      # foreground start or pending intent, an exact alarm, a tap on the
+      # exported activity, a ninth stored key, the logout's marker under
+      # another key, and a notice built from anything but its stored string.
+      # For push A: the channel answering or naming a method behind the
+      # lever, reaching a service, a broadcast or a Bluetooth class, a
+      # component in the mesh's manifest, and a channel made outside the
+      # flag or a class of the mesh named outside its package.
       - name: Mesh radio guard self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_mesh_radio.sh --self-test

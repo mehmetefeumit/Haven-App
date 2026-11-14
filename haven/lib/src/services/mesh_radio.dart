@@ -29,7 +29,8 @@ enum MeshRadioStart {
   /// The system does not let it run.
   noPermission,
 
-  /// This phone has no radio the mesh can use.
+  /// This phone cannot run the mesh: it has no radio the mesh can use, or
+  /// its Android release is one the mesh does not start on.
   unsupported,
 
   /// It did not start.
@@ -135,6 +136,10 @@ const Duration kMeshRadioPermissionBound = Duration(minutes: 2);
 /// Every entry but [start] throws [MeshRadioException] when it could not be
 /// made.
 abstract interface class MeshRadio {
+  /// Whether this phone can ever run the mesh: asked before anything of the
+  /// mesh is drawn, and answered without touching Bluetooth.
+  Future<bool> supported();
+
   /// Whether the system lets the radio run, without asking the user.
   Future<MeshRadioPermission> permission();
 
@@ -169,7 +174,9 @@ abstract interface class MeshRadio {
   /// Every change of [status], as it happens.
   Stream<MeshRadioStatus> get changes;
 
-  /// Every tap on a notice.
+  /// Every tap on a notice, from the one that opened the app on: the service
+  /// holds a tap until it is first listened for here, and hands it to that
+  /// listener alone.
   Stream<MeshRadioAction> get actions;
 }
 
@@ -225,6 +232,9 @@ class AndroidMeshRadio implements MeshRadio {
     );
   }
 
+  static MeshRadioAction _action(Object? answer) =>
+      MeshRadioAction.values.byName(answer! as String);
+
   static Map<String, String> _copy(MeshNoticeCopy copy) => {
     'channel': copy.channel,
     'on': copy.on,
@@ -260,6 +270,9 @@ class AndroidMeshRadio implements MeshRadio {
       throw const MeshRadioException();
     }
   }
+
+  @override
+  Future<bool> supported() => _ask('supported', (can) => can! as bool);
 
   @override
   Future<MeshRadioPermission> permission() => _ask('permission', _permission);
@@ -306,10 +319,22 @@ class AndroidMeshRadio implements MeshRadio {
       _events.stream.expand((event) => _event(event, _status));
 
   @override
-  Stream<MeshRadioAction> get actions => _events.stream.expand(
-    (event) => _event(
-      event,
-      (action) => MeshRadioAction.values.byName(action! as String),
-    ),
-  );
+  Stream<MeshRadioAction> get actions => Stream.multi((listener) {
+    // Listening first: a tap made while the question below is on its way is
+    // sent, not held, and arrives behind its answer.
+    final taps = _events.stream
+        .expand((event) => _event(event, _action))
+        .listen(listener.addSync);
+    listener.onCancel = taps.cancel;
+    unawaited(
+      _ask('takeAction', (held) => held == null ? null : _action(held)).then(
+        (held) {
+          if (held != null) listener.add(held);
+        },
+        // No tap is told for a question that failed: the app opens as it
+        // would have from its icon.
+        onError: (Object _) {},
+      ),
+    );
+  });
 }

@@ -120,6 +120,29 @@ object MeshRadioConstants {
     const val HOLD_MARGIN_MS = 250L
     const val HOLD_CAP_MS = 10_000L
 
+    /**
+     * The service's alarm and its hold at one (design §O.1.5), each a guess
+     * until a phone has measured it. The platform may deliver an inexact
+     * alarm three quarters of its wait late, so none is armed further ahead
+     * than [ALARM_AHEAD_MAX_MS]: a later wake is served by an alarm at the
+     * cap, whose arrival arms the next. A quarter of an hour keeps the
+     * reminder, due [REMINDER_MS] before the deadline, ahead of the deadline
+     * it announces even at that lateness and a doze's spacing on top.
+     *
+     * An alarm is armed no sooner than [ALARM_MIN_MS] — a wake before that
+     * is the thread's timer's — and left as it is for a wake that differs
+     * from it by [ALARM_SLACK_MS] or less. A hold is taken only where it
+     * outlasts the one held by more than [HOLD_SLACK_MS], less than
+     * [HOLD_MARGIN_MS] or the margin would be the slack's to give away. At
+     * an alarm the phone is held awake [WAKE_HOLD_MS], never past
+     * [HOLD_CAP_MS], for the bodies the alarm posts.
+     */
+    const val ALARM_AHEAD_MAX_MS = 15 * 60_000L
+    const val ALARM_MIN_MS = 5_000L
+    const val ALARM_SLACK_MS = 5_000L
+    const val HOLD_SLACK_MS = 100L
+    const val WAKE_HOLD_MS = 5_000L
+
     /** The reminder notice comes when this much or less is left. */
     const val REMINDER_MS = 30 * 60_000L
 

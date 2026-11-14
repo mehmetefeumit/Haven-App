@@ -1,16 +1,21 @@
 // The Android mesh radio's platform channels
 // (`docs/BLUETOOTH_MESH_M3_DESIGN.md` §C.1).
 //
-// Three promises:
+// Four promises:
 //
 //  * each entry asks the method the native end answers, with the notices'
 //    words where it takes them, and reads the answer as its own type;
+//  * the channels' names, the methods and the words of every answer are the
+//    native end's own, read from its source (`ChannelWords.kt`): one side
+//    renamed alone is a call nobody answers;
 //  * whatever the platform does instead of answering — no native end, an
 //    exception, an answer of another shape — is `failed` for a start and one
 //    fixed-text exception for everything else, with nothing of it shown or
 //    logged (Security Rules 8 and 15);
 //  * the one state channel carries statuses and notice taps, and a message
 //    that is neither reaches nobody.
+import 'dart:io';
+
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/services/mesh_radio.dart';
@@ -54,7 +59,104 @@ void main() {
     expect(AndroidMeshRadio.stateChannel.name, 'haven.app/mesh_radio_state');
   });
 
+  group("the native end's words are this side's", () {
+    final words = File(
+      'android/app/src/main/kotlin/com/oblivioustech/haven/mesh/core/'
+      'ChannelWords.kt',
+    ).readAsStringSync();
+
+    /// The value of the Kotlin constant [name].
+    String constant(String name) =>
+        RegExp('const val $name = "([^"]+)"').firstMatch(words)!.group(1)!;
+
+    /// The strings of the Kotlin list or set [name], or of the enum's
+    /// entries where [name] is a class.
+    List<String> strings(String name) {
+      final body = RegExp(
+        '(?:val $name = (?:listOf|setOf)\\(|enum class $name\\b[^{]*\\{)'
+        r'([^;]*?)[)}]\s*\n',
+        dotAll: true,
+      ).firstMatch(words)!.group(1)!;
+      return [
+        for (final word in RegExp(
+          r'"([^"]+)"|\b([A-Z_]{2,})\b(?!\()',
+        ).allMatches(body))
+          word.group(1) ?? constant(word.group(2)!),
+      ];
+    }
+
+    test('both channels, and every method the Dart side asks: each is one '
+        'the native end lists, and it lists no other', () async {
+      expect(constant('METHOD_CHANNEL'), AndroidMeshRadio.channel.name);
+      expect(constant('STATE_CHANNEL'), AndroidMeshRadio.stateChannel.name);
+
+      native(
+        (call) => switch (call.method) {
+          'status' => {'state': 'stopped', 'wanted': false, 'canSearch': true},
+          'permission' || 'requestPermission' => 'granted',
+          'bluetoothOn' || 'supported' => true,
+          'start' => 'started',
+          _ => null,
+        },
+      );
+      await radio.supported();
+      await radio.permission();
+      await radio.requestPermission();
+      await radio.bluetoothOn();
+      await radio.bluetoothName();
+      await radio.openBluetoothSettings();
+      await radio.start(meshCopy(Duration.zero));
+      await radio.sync(meshCopy(Duration.zero));
+      await radio.stop();
+      await radio.status();
+      final listening = radio.actions.listen((_) {});
+      await pumpEventQueue();
+      await listening.cancel();
+
+      expect(
+        asked.map((call) => call.method).toSet(),
+        strings('METHODS').toSet(),
+      );
+      expect(strings('METHODS'), hasLength(11));
+      // The six strings of a start and a sync, by the native end's keys.
+      expect(
+        (asked.firstWhere((call) => call.method == 'start').arguments as Map)
+            .keys,
+        unorderedEquals(strings('COPY')),
+      );
+    });
+
+    test('every word of an answer and of a tap', () {
+      expect(
+        strings('MeshStart'),
+        MeshRadioStart.values.map((start) => start.name),
+      );
+      expect([
+        constant('OPEN_STATS'),
+        constant('KEEP_ON'),
+      ], MeshRadioAction.values.map((action) => action.name));
+      for (final permission in MeshRadioPermission.values) {
+        expect(words, contains('"${permission.name}"'));
+      }
+      for (final state in MeshRadioState.values) {
+        expect(words, contains('"${state.name}"'));
+      }
+      for (final key in ['state', 'wanted', 'canSearch']) {
+        expect(words, contains('"$key" to'));
+      }
+    });
+  });
+
   group('each entry asks its method and reads its answer', () {
+    test('whether this phone can run the mesh', () async {
+      for (final can in [true, false]) {
+        native((_) => can);
+
+        expect(await radio.supported(), can);
+      }
+      expect(asked.map((call) => call.method).toSet(), {'supported'});
+    });
+
     test('the permission, asked for and not', () async {
       for (final permission in MeshRadioPermission.values) {
         native((_) => permission.name);
@@ -141,6 +243,7 @@ void main() {
   group('a platform that does not answer', () {
     /// Every entry but `start`, each made once.
     Map<String, Future<Object?> Function()> entries() => {
+      'supported': radio.supported,
       'permission': radio.permission,
       'requestPermission': radio.requestPermission,
       'bluetoothOn': radio.bluetoothOn,
@@ -199,6 +302,7 @@ void main() {
       Future<void> unread(Object? Function(MethodCall call) answer) async {
         native(answer);
         for (final entry in [
+          radio.supported,
           radio.permission,
           radio.requestPermission,
           radio.bluetoothOn,
@@ -221,7 +325,7 @@ void main() {
       await unread(
         (call) => switch (call.method) {
           'status' => {'state': 'sideways', 'wanted': true, 'canSearch': true},
-          'bluetoothOn' => null,
+          'bluetoothOn' || 'supported' => null,
           _ => 'sideways',
         },
       );
@@ -263,6 +367,69 @@ void main() {
       expect(actions, [MeshRadioAction.keepOn, MeshRadioAction.openStats]);
       expect(logs.lines, isEmpty);
     });
+
+    test('a tap that opened the app reaches the first listener, once, '
+        'ahead of the taps that follow', () async {
+      final logs = LogCapture.install();
+      // The native end: what it holds is handed over once.
+      Object? held = 'keepOn';
+      native((call) {
+        if (call.method != 'takeAction') return null;
+        final handed = held;
+        held = null;
+        return handed;
+      });
+
+      final first = <MeshRadioAction>[];
+      final listening = [radio.actions.listen(first.add)];
+      addTearDown(() => Future.wait([for (final l in listening) l.cancel()]));
+      // Sent while the question is still on its way: behind its answer.
+      await emit('openStats');
+      await pumpEventQueue();
+
+      expect(first, [MeshRadioAction.keepOn, MeshRadioAction.openStats]);
+
+      final second = <MeshRadioAction>[];
+      listening.add(radio.actions.listen(second.add));
+      await pumpEventQueue();
+      await emit('keepOn');
+      await pumpEventQueue();
+
+      expect(second, [MeshRadioAction.keepOn]);
+      expect(first, [
+        MeshRadioAction.keepOn,
+        MeshRadioAction.openStats,
+        MeshRadioAction.keepOn,
+      ]);
+      expect(asked.map((call) => call.method), ['takeAction', 'takeAction']);
+      expect(logs.lines, isEmpty);
+    });
+
+    test(
+      'a held tap that cannot be asked for, or is no tap, is none: the '
+      'taps that follow still arrive, and nothing is thrown or logged',
+      () async {
+        for (final answer in <Object? Function(MethodCall)>[
+          (_) => throw PlatformException(code: _address, message: _address),
+          (_) => 'sideways',
+          (_) => 7,
+        ]) {
+          final logs = LogCapture.install();
+          native(answer);
+          final actions = <MeshRadioAction>[];
+          final listening = radio.actions.listen(actions.add);
+
+          await pumpEventQueue();
+          await emit('openStats');
+          await pumpEventQueue();
+
+          expect(actions, [MeshRadioAction.openStats]);
+          expect(logs.lines, isEmpty);
+          await listening.cancel();
+          logs.restore();
+        }
+      },
+    );
 
     test('with nobody listening a message is dropped, and reaches no later '
         'listener', () async {

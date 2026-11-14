@@ -66,6 +66,34 @@ class ChannelWordsTest {
     }
 
     /**
+     * §O.1.6: `MainActivity` is exported, and Keep on restarts the twelve hours: read from any intent, a tap could
+     * be made by every app on the phone, for ever. A notice's tap comes through an alias that is not exported, and
+     * is read from nowhere else — off the alias the extra is not even looked at. And it is read once: an activity
+     * the system makes again is handed the intent that first made it.
+     */
+    @Test
+    fun aTapIsReadOnlyFromTheAlias() {
+        fun tap(viaAlias: Boolean, extra: String?, replayed: Boolean = false) = ChannelWords.tapOf(viaAlias, replayed) { extra }
+        assertEquals(true, tap(viaAlias = true, extra = "keepOn"))
+        assertEquals(false, tap(viaAlias = true, extra = "openStats"))
+        // Through the alias and no tap: Haven opened by something else of its own.
+        for (extra in listOf(null, "", "KEEPON", "keepOn ", "stop")) assertNull(tap(viaAlias = true, extra = extra), "read as a tap: '$extra'")
+        // The same extra on the activity's own name.
+        for (extra in listOf("keepOn", "openStats")) {
+            assertNull(tap(viaAlias = false, extra = extra), "the extra was honoured off the alias")
+            assertNull(tap(viaAlias = true, extra = extra, replayed = true), "a tap was taken twice")
+            assertNull(tap(viaAlias = false, extra = extra, replayed = true))
+        }
+        for ((viaAlias, replayed) in listOf(false to false, false to true, true to true)) {
+            ChannelWords.tapOf(viaAlias, replayed) { error("the extra was read where no tap can be") }
+        }
+        // The two words are the state channel's own, and the alias is of the mesh's package.
+        assertEquals(listOf("openStats", "keepOn"), listOf(ChannelWords.OPEN_STATS, ChannelWords.KEEP_ON))
+        assertEquals("com.oblivioustech.haven.mesh.MeshTap", ChannelWords.TAP_ALIAS)
+        assertEquals("com.oblivioustech.haven.mesh.TAP", ChannelWords.TAP_EXTRA)
+    }
+
+    /**
      * N-4: the Dart side drops a message nobody listens for, and the tap may be what started the app. So a tap is
      * held until that engine asks, and what it is then told stands for all of them: Keep on opens the statistics too.
      */

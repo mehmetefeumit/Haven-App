@@ -42,6 +42,13 @@ object StartPolicy {
      * between the caller's [refusal] and here the lever can stop holding or a
      * permission go, and a refusal is then a stop from the foreground.
      *
+     * And before anything is read. Every input but the level is a function,
+     * none called until [foreground] has returned: a service ended while it
+     * still owes its foreground start takes the process down, so a stored
+     * copy that does not read, or a native library that does not load — the
+     * first naming of the class [lever] and [engine] answer loads it — must
+     * throw behind it, where it is a stop like any other.
+     *
      * [permission] is the service's own reading of the Bluetooth runtime
      * permissions: the platform cannot be trusted to refuse a
      * `connectedDevice` start without them. [wipePending] is the logout's
@@ -51,27 +58,30 @@ object StartPolicy {
      */
     fun start(
         api: Int,
-        bluetoothLe: Boolean,
-        lever: LogLever,
-        wipePending: Boolean,
-        permission: Boolean,
-        engine: MeshEngineApi,
-        storedDeadlineMs: Long,
-        wallClockMs: Long,
         foreground: () -> Unit,
+        bluetoothLe: () -> Boolean,
+        lever: () -> LogLever,
+        wipePending: () -> Boolean,
+        permission: () -> Boolean,
+        engine: () -> MeshEngineApi,
+        storedDeadlineMs: () -> Long,
+        wallClockMs: () -> Long,
     ): Start {
         foreground()
         // The user who logged out is told nothing, whatever refuses.
-        refusal(api, bluetoothLe, lever, permission)?.let { return Start.Refused(it, notice = !wipePending) }
-        if (wipePending) return Start.Refused(MeshStart.FAILED, notice = false)
+        val behindLogout = wipePending()
+        refusal(api, bluetoothLe(), lever(), permission())?.let { return Start.Refused(it, notice = !behindLogout) }
+        if (behindLogout) return Start.Refused(MeshStart.FAILED, notice = false)
         // No engine in this process — after boot, or a restart — and the copy
         // is ahead: a keyless engine until then, twelve hours at most. The
         // first session entry overrules it.
-        val ahead = storedDeadlineMs - wallClockMs
-        if (engine.leftMs() == 0L && ahead > 0) {
-            engine.resume(minOf(ahead, MeshRadioConstants.MESH_ON_MAX_MS))
+        val radio = engine()
+        val now = wallClockMs()
+        val ahead = storedDeadlineMs() - now
+        if (radio.leftMs() == 0L && ahead > 0) {
+            radio.resume(minOf(ahead, MeshRadioConstants.MESH_ON_MAX_MS))
         }
-        val left = engine.leftMs()
-        return if (left == 0L) Start.Refused(MeshStart.FAILED, notice = true) else Start.Run(wallClockMs + left)
+        val left = radio.leftMs()
+        return if (left == 0L) Start.Refused(MeshStart.FAILED, notice = true) else Start.Run(now + left)
     }
 }

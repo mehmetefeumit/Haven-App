@@ -17,10 +17,12 @@ package com.oblivioustech.haven.mesh.core
  * [steps] are what any stop does — the radio down, the on flag and the
  * deadline copy cleared, the notification removed, the service ended —
  * [notice] the stopped notice, which only the user's own stop leaves out.
- * [running] is false once the engine is gone.
+ * [running] is false once the engine is gone. [lever] is asked for at the
+ * first [run], never by [start]: naming the class that answers it loads the
+ * native library, and that must come behind the service's foreground start.
  */
 class MeshThread(
-    private val lever: LogLever,
+    private val lever: () -> LogLever,
     private val running: () -> Boolean,
     private val steps: List<() -> Unit>,
     private val notice: () -> Unit,
@@ -36,11 +38,11 @@ class MeshThread(
      * outlive the stop — and the radio stops.
      */
     fun run(body: () -> Unit) = guarded {
-        if (lever.leverHolds()) {
+        if (lever().leverHolds()) {
             body()
             running()
         } else {
-            lever.leverInstall()
+            lever().leverInstall()
             false
         }
     }
@@ -80,19 +82,26 @@ class MeshThread(
 
     companion object {
         /**
-         * A stop's steps, in their order. [stopRadio] is
-         * [MeshRadioCore.stopRadio], a step of its own before the adapters
-         * are closed: a close that throws must not leave the engine links
-         * nobody tells it are down. It asks for the deadline's wake, so an
-         * alarm cancelled before it would be armed again behind it.
+         * A stop's steps, in their order. [detach] comes first: the service
+         * lets go of this start before anything of it is taken down, so that
+         * a start command arriving from here on finds none and makes its own
+         * — it may be owed a foreground start, which a start that is
+         * stopping would never make.
+         *
+         * [stopRadio] is [MeshRadioCore.stopRadio], a step of its own before
+         * the adapters are closed: a close that throws must not leave the
+         * engine links nobody tells it are down. It asks for the deadline's
+         * wake, so an alarm cancelled before it would be armed again behind
+         * it.
          */
         fun steps(
+            detach: () -> Unit,
             stopRadio: () -> Unit,
             closeAdapters: () -> Unit,
             cancelAlarm: () -> Unit,
             forget: () -> Unit,
             unpost: () -> Unit,
             end: () -> Unit,
-        ): List<() -> Unit> = listOf(stopRadio, closeAdapters, cancelAlarm, forget, unpost, end)
+        ): List<() -> Unit> = listOf(detach, stopRadio, closeAdapters, cancelAlarm, forget, unpost, end)
     }
 }

@@ -3393,20 +3393,21 @@ twelve hours later.
 The radio is not. The entries a radio drives the engine through are built
 and tested, and so is the JNI shim that exports them to an Android build
 ("The radio's entries" below); one Kotlin object declares the exports as its
-native methods (`MeshNative`) and nothing calls it; the Android classes that
-would scan, advertise and connect are written
-(`haven/android/app/src/main/kotlin/com/oblivioustech/haven/mesh/`) and
-nothing makes one — there is no service — so no packet leaves or reaches a
-device in any build. The Dart side is built behind the
+native methods (`MeshNative`); the Android classes that would scan,
+advertise and connect are written
+(`haven/android/app/src/main/kotlin/com/oblivioustech/haven/mesh/`), and so
+is the foreground service that would make them — in no manifest, so the
+system makes none and nothing calls `MeshNative` — so no packet leaves or
+reaches a device in any build. The Dart side is built behind the
 compile-time define `HAVEN_MESH`, which is off unless a build passes it. No
 build script passes it; one CI job does (`build-check.yml`, `android-mesh`),
 for an APK that is checked and not kept ("The Dart side" below): in a
 shipped build no Dart code calls a mesh entry, so mesh cannot be turned on,
 no key below is ever stored and member bridging passes nothing on. In a
 build with the define the mesh button is on the map on Android alone ("On
-screen" below), and its turn-on asks a radio that has no native end: it
-fails with fixed words and stores nothing, so the same holds there until
-the radio lands. This section states what the built parts guarantee when
+screen" below), and its turn-on asks a radio whose native end does not
+answer whether Bluetooth is on, nor start: it fails with fixed words and
+stores nothing, so the same holds there until the radio lands. This section states what the built parts guarantee when
 they are driven; the privacy cost of the radio itself is the plan's §0.4 and
 §8.1, and is owed here when the radio lands.
 
@@ -4005,11 +4006,14 @@ the mesh calls no mesh entry").
   touched whatever is asked of the mesh";
   `mesh_entries_behind_flag_test.dart`, "the radio's channels are named in
   the radio's file alone, and the radio is built only behind the build flag
-  and the platform"). **The channels have no native end in this tree**:
-  every call fails — a start as `failed`, anything else as one fixed-text
-  exception carrying nothing the platform threw (`mesh_radio_test.dart`) —
-  so an Android build with the flag cannot turn mesh on either, and stores
-  nothing trying. Every call is bounded where it is made — five seconds, and
+  and the platform"). **The channels' native end, made only in a build
+  with the flag, answers nothing that touches Bluetooth and starts no
+  service in this tree** (`MeshChannel.kt`; `check_mesh_radio.sh`, check
+  19): whether Bluetooth is on, its name and the start are answered by
+  nobody, and a call nobody answers fails — a start as `failed`, anything
+  else as one fixed-text exception carrying nothing the platform threw
+  (`mesh_radio_test.dart`) — so an Android build with the flag cannot turn
+  mesh on either, and stores nothing trying. Every call is bounded where it is made — five seconds, and
   two minutes for the permission dialog, which waits on a person — and one
   the service has not answered by then failed as one the platform refused
   ("fails each entry at its bound as a platform error would, and not
@@ -4097,9 +4101,10 @@ it drives the mesh at none: what it carried is counted as passed on only at
 its next drive. The state the provider holds is read when it is built and
 after each of its own entries; a deadline that passes is seen at the next
 read, not pushed; the map's own clock comparison is what takes the hue and
-the button's state away at the deadline. The radio's channels have no
-native end, so no radio is started in any build: a turn-on where there is a
-radio fails at its first question, before anything is stored. An engine
+the button's state away at the deadline. The radio's native end starts no
+service, so no radio is started in any build: a turn-on where there is a
+radio fails where it asks whether Bluetooth is on, behind the system's
+permission dialog and before anything is stored. An engine
 that would not stop keeps its keys until a later reconcile stops it, or the
 deadline. Nothing asks the notification permission: the radio's seam has no
 entry for it, so on Android 13 and later a stop may be told by the in-app

@@ -14,6 +14,11 @@ class DeadlinePolicy {
         else -> DeadlineStep.REMINDER.also { reminded = true }
     }
 
+    /** The notices' words changed and the service took the reminder down: one still owed is given again, in the new words. */
+    fun reworded() {
+        reminded = false
+    }
+
     /** Milliseconds until the reminder is due; null when it is due already — given by [at] or not — or past. */
     fun reminderIn(leftMs: Long): Long? = (leftMs - MeshRadioConstants.REMINDER_MS).takeIf { it > 0 }
 }

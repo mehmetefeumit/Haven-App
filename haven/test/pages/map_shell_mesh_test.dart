@@ -76,7 +76,9 @@ void main() {
       }
     });
 
-    test('with the flag on, only Android has one', () {
+    test('with the flag on, only Android has one, and nothing of the mesh '
+        'is on screen for a radio that cannot be asked', () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
       for (final android in [true, false]) {
         final container = ProviderContainer(
           overrides: [
@@ -86,7 +88,10 @@ void main() {
         );
         addTearDown(container.dispose);
 
-        expect(container.read(meshAvailableProvider), android);
+        expect(container.read(meshRadioProvider) != null, android);
+        // No native end answers here: the question fails, and that is "no".
+        expect(await container.read(meshSupportedProvider.future), isFalse);
+        expect(container.read(meshAvailableProvider), isFalse);
       }
     });
 

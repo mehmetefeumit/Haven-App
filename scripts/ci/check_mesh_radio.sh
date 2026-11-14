@@ -7,7 +7,9 @@
 # §B.8–B.10, §N.2.1); and the mesh's build flag is read by Gradle once (§N.3);
 # and the radio's adapters run every platform callback on the mesh thread,
 # can start no pairing and advertise the service UUID alone (§B.1, §B.3,
-# §M.3, §M.4, §N.2.2, §N.2.5).
+# §M.3, §M.4, §N.2.2, §N.2.5); and the service is started, stopped, woken and
+# tapped as pinned, keeps and shows no text of its own, and — until the lane
+# that proves the log lever exists — can be reached by nothing (§O.1, §O.3).
 #
 # Android's radio service drives the mesh engine through two files of
 # `haven/rust_builder/src`:
@@ -220,7 +222,15 @@
 #      behind it, outside the wrapper that asks the log lever and catches
 #      what is thrown. One callback is pinned whole instead, and must be
 #      there once: the notification of before Android 13, whose value is read
-#      before the post, because the next notification overwrites it.
+#      before the post, because the next notification overwrites it. So are
+#      the five that are the platform's own entries on the main thread, each
+#      in its file and once: the service's `onBind`, `onStartCommand` and
+#      `onDestroy`, `MeshReceiver.onReceive`, and the channel's
+#      `onMethodCall`. `MeshService.kt` alone names `MeshThread`, for the one
+#      it makes at a start. None of `MeshService.kt`, `MeshReceiver.kt`,
+#      `MeshNotices.kt` and `MeshPrefs.kt` writes `try`, `catch`, `finally`
+#      or `runCatching`, or names `leverInstall` or `leverHolds`; the channel
+#      has one `try` and one `catch`, its handler's.
 #  16. Never bond, and nothing to read (§M.4, §N.2.5). No file names a call
 #      that creates a bond or answers a pairing, one that reads a
 #      characteristic or a descriptor, a write type or a property that has a
@@ -239,6 +249,53 @@
 #      with no scan response. No file names service, manufacturer,
 #      solicitation or transport-discovery data, an advertising set, or the
 #      call that renames the phone.
+#
+#  18. The service (§O.1), each pin written once in the radio's Kotlin and
+#      each call counted. Its start is `loop.start { StartPolicy.start(…) }`
+#      with the level and then every input a function — the foreground's
+#      three calls first, `MeshNative` named once in the file, as
+#      `private val native = { MeshNative }` — and a refusal is the one
+#      direct `mesh.stop`; the user's stop is posted. A stop lets go of the
+#      service first (`starts.detach()`), leaves the foreground only where
+#      no start was made since, and ends the service by
+#      `stopSelfResult(joined)`: `stopSelf` is written nowhere else. One
+#      `MeshThread` and one `MeshLoop` are made, `loop.start` has one caller,
+#      and `startForeground(` is written once. The receivers are registered
+#      in one function — `RECEIVER_EXPORTED` from Android 13, the
+#      two-argument call below — and never `RECEIVER_NOT_EXPORTED`; three
+#      are unregistered. One wake lock, not counted, taken only through
+#      `WakePlan.hold`; one `setAndAllowWhileIdle`, through `WakePlan.alarm`,
+#      to `MeshReceiver` by an immutable broadcast intent; a notice's tap an
+#      immutable activity intent on the alias; two pending intents in all,
+#      none mutable. A radio's five closes are `RadioEnd.each`'s. A
+#      foreground service is started at one site — the receiver's, at boot —
+#      and nothing calls `startService` or `sendBroadcast`. No Kotlin or
+#      Java file, manifest or Gradle script under `haven/android` names an
+#      exact alarm (`setExact…`, `setAlarmClock`, `SCHEDULE_EXACT_ALARM`,
+#      `USE_EXACT_ALARM`; a comment counts). The service's strings are its
+#      lock's tag, the three warnings it silences, the `shared_preferences`
+#      plugin's file and `flutter.` with the key
+#      `pending_mls_wipe_service.dart` names `kPendingMlsWipeKey`.
+#      `MeshPrefs.kt` opens one file and reads and writes `wanted`,
+#      `deadline` and the six strings under `ChannelWords.COPY`'s keys,
+#      nothing else. `MeshNotices.kt` sets a notice's title to the app's
+#      name and its text to one stored string, holds no other string and no
+#      `$`, and names no second text.
+#  19. PUSH A (§O.3) — to be turned round by the push that makes the lever
+#      reachable. `MeshChannel.kt` names of `ChannelWords` the eight methods
+#      it answers, the two channels, the failure's code and the tap's two
+#      names, and no other — not `BLUETOOTH_ON`, `BLUETOOTH_NAME`, `START`
+#      or `BEHIND_THE_LEVER`; holds no string of its own; answers
+#      `notImplemented` for whatever it does not know; names of
+#      `MeshService` only `bluetoothLe`, `onStatus`, `permitted`, `status`,
+#      `stop` and `sync`, and of `StartPolicy` only `supported`; and names
+#      nothing that starts a service, sends a broadcast, asks the lever or
+#      is a Bluetooth class. The mesh's manifest declares no application,
+#      service, receiver, activity, alias or provider (its comments apart).
+#      `MainActivity.kt` makes the channel once, as pinned, under
+#      `BuildConfig.HAVEN_MESH`, and names no other class of the mesh; no
+#      other Kotlin or Java file of the app outside the mesh's package names
+#      one at all.
 #
 # The Kotlin is read with the lexer made for Rust: comments and plain strings
 # as above, not Kotlin's string templates or raw strings.
@@ -261,7 +318,17 @@
 # follow a callback is the end of its class, the next `override`, an
 # annotation or a `private` member, and anything else there is a change to
 # this file; the bans of 16 and 17 are names, and a constant written as its
-# integer is not one. That
+# integer is not one. Of the service it reads pinned text and counts of
+# names: that a pin stands where it is run — the order of a start's branch,
+# of the stop's steps, which of them a lambda is handed to — is
+# `StartPolicy`'s, `MeshThread.steps`' and `ServiceStarts`' JVM tests for the
+# order and a reviewer's for the wiring; `native()` called ahead of the
+# foreground start, a Bluetooth object made ahead of `Run`, a value read
+# from a preference through a property (`file.all`) and a second text put
+# into a notice through a method this file does not list all pass. Check 19
+# reads the channel's names: a method answered through a helper in another
+# file, or a service started by reflection, passes it, and what holds then is
+# that no manifest declares the service. That
 # the adapters call the platform as it is, on every API level, is the app's
 # compile and then an emulator's. What each call does with
 # its arguments is held by tests in
@@ -282,14 +349,18 @@
 # `theTwoNativeInterfacesAreTheElevenExportsOfTheFixture` holds to the
 # fixture — with their own types is the app's compile, in `build-check.yml`.
 #
+# That the channel's words are the Dart side's is not checked here either:
+# `haven/test/services/mesh_radio_test.dart` reads `ChannelWords.kt` and holds
+# the two channels, the eleven methods, the six keys and every word of an
+# answer to what `mesh_radio.dart` asks and reads.
+#
 # Not here yet, each with the change that makes it checkable:
 #   * The shape of the mesh's own manifest once it has components (no
-#     `android:process`, `connectedDevice`, the receiver not exported); that
-#     the service's own lifecycle methods and its receivers run inside the
-#     wrapper; and that `MeshLoop.start` has one caller, the service's start,
-#     and `MeshThread.stop` one direct one, the refusal inside it: with the
-#     service, which is also the first file but `MeshLoop.kt` to name a
-#     `MeshThread`.
+#     `android:process`, `connectedDevice`, the receiver and the alias not
+#     exported): `check_mesh_manifest.sh`'s entries, on the built APK, with
+#     the push that declares them — which also turns check 19 round: the
+#     three methods answered, each behind `StartPolicy.refusal`, and
+#     `startForegroundService` at two sites.
 #
 # Usage:
 #   bash scripts/ci/check_mesh_radio.sh
@@ -338,7 +409,7 @@ readonly -a LEVER_STRINGS=(
 
 # How many fixtures the self-test runs. Pinned, because a fixture that stops
 # running is the one way a deleted check reports success.
-readonly SELF_TEST_FIXTURES=280
+readonly SELF_TEST_FIXTURES=431
 
 # The Kotlin of the radio (design §B): the app's mesh packages, whatever the
 # source set, and the JVM build of the pure one with its tests.
@@ -400,10 +471,105 @@ readonly -a ADVERTISE_CALLS=(
   setIncludeDeviceName setIncludeTxPowerLevel addServiceUuid startAdvertising
 )
 readonly ADVERTISED='(addServiceData|addManufacturerData|addServiceSolicitationUuid|addTransportDiscoveryData|setScanResponse|setName)'
-# The JVM tests, by name: design §B.10's, the ones M3f added, and from
+# The service and what stands round it (design §O.1): unit 5's four classes,
+# the channel, and the activity that makes the channel.
+readonly SERVICE="${CORE%/core}/MeshService.kt"
+readonly RECEIVER="${CORE%/core}/MeshReceiver.kt"
+readonly NOTICES="${CORE%/core}/MeshNotices.kt"
+readonly PREFS="${CORE%/core}/MeshPrefs.kt"
+readonly CHANNEL="${CORE%/core}/MeshChannel.kt"
+readonly ACTIVITY="${CORE%/mesh/core}/MainActivity.kt"
+readonly MESH_MANIFEST="${APP_SRC}/mesh/AndroidManifest.xml"
+# Where the Dart side names the logout's marker the service reads.
+readonly WIPE_DART='haven/lib/src/services/pending_mls_wipe_service.dart'
+# As OFF_THE_LOOP, for the one file that makes a start's `MeshThread`.
+readonly OFF_THE_LOOP_SERVICE='(Handler|HandlerThread|Looper|Executor|Executors|Thread|Timer|TimerTask)'
+# The callbacks that are no post through the loop, each pinned whole, without
+# whitespace, in the file named beside it: the service's three lifecycle
+# methods, the receiver's one entry and the channel's one handler.
+readonly -a WHOLE_IN=("${SERVICE}" "${SERVICE}" "${SERVICE}" "${RECEIVER}" "${CHANNEL}")
+readonly -a WHOLE_NAME=(onBind onStartCommand onDestroy onReceive onMethodCall)
+readonly -a WHOLE_TEXT=(
+  'overridefunonBind(intent:Intent?):IBinder?=null'
+  'overridefunonStartCommand(intent:Intent?,flags:Int,startId:Int):Int{starts.command(startId){Live()}returnSTART_STICKY}'
+  'overridefunonDestroy(){starts.live()?.stop()}'
+  'overridefunonReceive(context:Context,intent:Intent){valprefs=MeshPrefs(context)valnow=System.currentTimeMillis()when(intent.action){Intent.ACTION_BOOT_COMPLETED,Intent.ACTION_MY_PACKAGE_REPLACED->{valstarts=ReceiverPolicy.startsAtBoot(prefs.wanted,prefs.deadlineMs,now){StartPolicy.refusal(Build.VERSION.SDK_INT,MeshService.bluetoothLe(context),MeshNative,MeshService.permitted(context))}if(starts)RadioEnd.each({context.startForegroundService(Intent(context,MeshService::class.java))})}null->if(!MeshService.alarm()&&ReceiverPolicy.endsAtAlarm(prefs.wanted,prefs.deadlineMs,now)){prefs.forget()MeshNotices(context,prefs).post(Notice.STOPPED)}}}'
+  'overridefunonMethodCall(call:MethodCall,result:MethodChannel.Result){try{answer(call,result)}catch(_:Throwable){result.error(ChannelWords.ERROR,null,null)}}'
+)
+# What none of unit 5's four files writes: a `try` of its own — what is thrown
+# is `MeshThread`'s and `RadioEnd`'s to catch — and the lever's two calls,
+# which are `StartPolicy`'s and `MeshThread`'s to make.
+readonly UNCAUGHT='(try|catch|finally|runCatching|leverInstall|leverHolds)'
+# The service, without whitespace (design §O.1.2 to §O.1.8), each written
+# once in the radio's Kotlin: its start — the level, and then every input
+# unread, the foreground's three calls first among them; the one naming of
+# the class that loads the native library; the stop's first and last steps
+# and its leaving of the foreground; the receivers' one registration; the
+# lock; the alarm and its intent; a notice's tap; a radio's end.
+readonly -a SERVICE_PINS=(
+  'privatefunbegin()=loop.start{valstart=StartPolicy.start(Build.VERSION.SDK_INT,foreground={notices.channel()startForeground(NoticePlan.ONGOING,notices.notice(Notice.ON),ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)},bluetoothLe={bluetoothLe(this@MeshService)},lever=native,wipePending={getSharedPreferences(FLUTTER_PREFS,MODE_PRIVATE).getBoolean(WIPE_PENDING,false)},permission={permitted(this@MeshService)},engine=native,storedDeadlineMs={prefs.deadlineMs},wallClockMs={System.currentTimeMillis()},)'
+  'privatevalnative={MeshNative}'
+  'isStart.Refused->{mesh.stop(start.notice)onStarted?.invoke(start.word)}'
+  'funstop()=loop.post{mesh.stop(notice=false)}'
+  'detach={joined=starts.detach()}'
+  'unpost={starts.idle{stopForeground(STOP_FOREGROUND_REMOVE)notices.cancel(NoticePlan.ONGOING)notices.cancel(NoticePlan.ALERT)}}'
+  'end={stopSelfResult(joined)loop.quit()}'
+  'if(Build.VERSION.SDK_INT>=Build.VERSION_CODES.TIRAMISU){registerReceiver(receiver,IntentFilter(action),Context.RECEIVER_EXPORTED)}else{registerReceiver(receiver,IntentFilter(action))}'
+  'newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,LOCK).apply{setReferenceCounted(false)}'
+  'overridefunholdAwake(ms:Long)=wake.hold(ms,lock::acquire)'
+  'wake.alarm(inMs)?.let{alarms.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP,it,alarm)}'
+  'PendingIntent.getBroadcast(this@MeshService,0,Intent(this@MeshService,MeshReceiver::class.java),PendingIntent.FLAG_IMMUTABLE)'
+  'valintent=Intent().setComponent(ComponentName(context,ChannelWords.TAP_ALIAS)).putExtra(ChannelWords.TAP_EXTRA,word).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)'
+  'PendingIntent.getActivity(context,request,intent,PendingIntent.FLAG_IMMUTABLEorPendingIntent.FLAG_UPDATE_CURRENT)'
+  'RadioEnd.each({client?.stop()},{server?.stop()},{advertiser?.stop()},{scanner?.stop()},{lock.release()})'
+)
+# How often the radio's Kotlin names each of these, the pins above included: a
+# second is a start, a registration, a lock or an intent no pin holds.
+readonly -a SERVICE_COUNTS=(
+  'StartPolicy.start(:1' 'StartPolicy.refusal(:1' 'loop.start{:1' '=MeshThread(:1' '=MeshLoop(:1'
+  'startForeground(:1' 'startForegroundService:1' 'startService:0' 'sendBroadcast:0' 'stopSelf:1'
+  'registerReceiver(:5' 'unregisterReceiver(:3' 'RECEIVER_NOT_EXPORTED:0' 'PendingIntent.get:2' 'FLAG_MUTABLE:0'
+  'newWakeLock:1' 'acquire:1' 'setAndAllowWhileIdle:1' 'getSharedPreferences(:2' 'MeshNative:3'
+)
+# An exact alarm, by any of its names (design §O.1.5, Q-18): under ANDROID,
+# in a Kotlin or Java file, a manifest or a Gradle script.
+readonly EXACT_ALARMS='(setExact|setAlarmClock|SCHEDULE_EXACT_ALARM|USE_EXACT_ALARM)'
+# The strings of the service — the three warnings it silences among them, each
+# with its reason beside it — of its stored copy and of its notices, each as
+# the file's code holds them; and the stored copy's one file and its writes.
+readonly SERVICE_STRINGS='"DEPRECATION" "FlutterSharedPreferences" "Haven:mesh" "MissingPermission" "UnspecifiedRegisterReceiverFlag" "flutter.<the Dart key>" '
+readonly PREFS_STRINGS='"deadline" "haven_mesh" "wanted" '
+readonly NOTICES_STRINGS='"Haven" "haven_mesh_v1" '
+readonly -a PREFS_PINS=(
+  'privatevalfile=context.getSharedPreferences(FILE,Context.MODE_PRIVATE):1'
+  'ChannelWords.COPY.forEachIndexed{at,key->edit.putString(key,copy[at])}:1'
+  'putBoolean(WANTED,:2' 'putLong(DEADLINE,:2' '.put:5'
+  'getBoolean(WANTED,false):1' 'getLong(DEADLINE,0):1' 'getString(key,null):1' '.get:4'
+)
+readonly -a NOTICES_PINS=(
+  '.setContentTitle(TITLE):1' '.setContentText(prefs.copy(notice.copy)):1'
+  'Notification.Action.Builder(icon,prefs.copy(NoticePlan.KEEP_ON),tap(ChannelWords.KEEP_ON)):1'
+  'NotificationChannel(CHANNEL,prefs.copy(NoticePlan.CHANNEL)?:TITLE,NotificationManager.IMPORTANCE_LOW):1'
+  'setContent:3' 'addAction:1'
+)
+# Text a notice could carry beside its title and its one string.
+readonly NOTICE_TEXTS='(setSubText|setContentInfo|setTicker|setStyle|setNumber|setSettingsText|addPerson|setRemoteInputHistory)'
+# PUSH A (design §O.3): the channel as it stands while nothing may reach the
+# log lever. What of `ChannelWords` it names — the eight methods it answers
+# and no other, the two channels, the failure's code, the tap's two names —
+# what of the service it calls, and the one place a channel is made.
+readonly CHANNEL_WORDS='ERROR METHOD_CHANNEL OPEN_BLUETOOTH_SETTINGS PERMISSION REQUEST_PERMISSION STATE_CHANNEL STATUS STOP SUPPORTED SYNC TAKE_ACTION TAP_ALIAS TAP_EXTRA '
+readonly CHANNEL_CALLS='bluetoothLe onStatus permitted status stop sync '
+readonly CHANNEL_REACH='(MeshNative|MeshReceiver|MeshNotices|MeshLoop|start[A-Za-z]*Service|sendBroadcast|refusal|leverInstall|leverHolds|Bluetooth(Adapter|Manager|Device|Gatt))'
+readonly CHANNEL_MADE='if(BuildConfig.HAVEN_MESH){mesh=MeshChannel(this,flutterEngine.dartExecutor.binaryMessenger).also{it.intent(intent,replayed=restored)}}'
+# The mesh's classes, which no file outside its package names but ACTIVITY,
+# the channel alone: a build without the flag reaches none of them.
+readonly MESH_CLASSES='Mesh(Service|Receiver|Notices|Prefs|Native|Loop|Channel)'
+# The JVM tests, by name: design §B.10's, the ones M3f added, from
 # `aLeverThatStopsHoldingIsPutBackAndStopsTheRadio` on those of M3g's second
-# unit (§N.2). Pinned, because a test that is deleted, renamed or ignored
-# fails nothing.
+# unit (§N.2), and from `nothingIsReadAndNoLibraryNamedBeforeTheForegroundStart`
+# on those of the service's pure half (§O.1.10). Pinned, because a test that
+# is deleted, renamed or ignored fails nothing.
 readonly -a JVM_TEST_NAMES=(
   aPolledFrameIsSentOrItsLinkIsClosed
   aLinkWithAFrameInFlightIsNotReady
@@ -464,6 +630,20 @@ readonly -a JVM_TEST_NAMES=(
   aClientIsClosedThoughAPortCallThrows
   aCallbackPastADialsTimeGivesItUpAsTheTimerWould
   aConnectionLostPastADialsTimeIsNotMadeAgain
+  nothingIsReadAndNoLibraryNamedBeforeTheForegroundStart
+  aStartThatFindsALiveOneJoinsItAndOneThatFindsNoneIsFresh
+  theStopNamesTheLastStartThatJoined
+  aStopLetsGoOfTheServiceBeforeAnythingElse
+  afterBootTheServiceIsStartedOnlyWithTheFlagADeadlineAheadAndNoRefusal
+  anAlarmThatFindsNoServiceStartsNoneAndEndsAMeshWhoseTimeIsUp
+  theAlarmIsArmedOnlyForAChangeThatMatters
+  theAlarmIsNeverArmedFurtherAheadThanItsCap
+  aHoldIsTakenOnlyWhenItOutlastsTheOneHeld
+  aWakeTooSoonForAnAlarmIsTheTimersAlone
+  everyCloseOfARadiosEndRunsThoughOneThrows
+  bluetoothOffPausesAndOnResumesAndNothingElseMovesTheRadio
+  theOngoingNoticeIsOnOrPausedAndTheStoppedNoticeTakesTheRemindersId
+  aTapIsReadOnlyFromTheAlias
 )
 
 readonly B='(^|[^A-Za-z0-9_])'
@@ -717,10 +897,11 @@ run_check() {
   local file rel view hits shim calls shipped rows pinned names name row forward body first last
   local guards before after entries called alone outside tests want range method may ok
   local kotlin jvm found floor lever native flat radio older declared posted COUNT=0
+  local off at key other
   local -A views=()
 
   [[ -d "${REPO_ROOT}/${SRC}" ]] || { echo "ERROR: ${REPO_ROOT}/${SRC} not found" >&2; exit 2; }
-  for file in "${LIB}" "${SHIM}" "${CALLS}" "${LEVER}" "${GENERATED}" "${EXPORTS}" "${CONSTANTS}" "${NATIVE}" "${LOOP}" "${APP_GRADLE}" "${LOG_ALLOWLIST}" "${APP_SRC}/main/AndroidManifest.xml" "${ENGINE}"; do
+  for file in "${LIB}" "${SHIM}" "${CALLS}" "${LEVER}" "${GENERATED}" "${EXPORTS}" "${CONSTANTS}" "${NATIVE}" "${LOOP}" "${SERVICE}" "${RECEIVER}" "${NOTICES}" "${PREFS}" "${CHANNEL}" "${ACTIVITY}" "${MESH_MANIFEST}" "${WIPE_DART}" "${APP_GRADLE}" "${LOG_ALLOWLIST}" "${APP_SRC}/main/AndroidManifest.xml" "${ENGINE}"; do
     [[ -f "${REPO_ROOT}/${file}" ]] || { echo "ERROR: ${REPO_ROOT}/${file} not found" >&2; exit 2; }
   done
   [[ -d "${REPO_ROOT}/${JVM_TESTS}" ]] || { echo "ERROR: ${REPO_ROOT}/${JVM_TESTS} not found" >&2; exit 2; }
@@ -1128,14 +1309,24 @@ run_check() {
     rel="${file#"${REPO_ROOT}/"}"
     [[ "${rel}" == */mesh/core/* || "${rel}" == "${LOOP}" ]] && continue
     view="${views["${file}"]}"
-    if [[ "${view}" =~ ${B}${OFF_THE_LOOP}${E} ]]; then
-      hits="$(grep -nE "${B}${OFF_THE_LOOP}${E}" <<<"${view}" | cut -d: -f1 | tr '\n' ' ' || true)"
-      fail "${rel} names a Handler, a Looper, an Executor, a Thread, a Timer or MeshThread (line(s) ${hits}). An adapter is given the loop and posts through it: with a thread of its own, or the wrapper in its own hands, a body can run beside the mesh thread or outside MeshThread.run."
+    off="${OFF_THE_LOOP}"
+    [[ "${rel}" == "${SERVICE}" ]] && off="${OFF_THE_LOOP_SERVICE}"
+    if [[ "${view}" =~ ${B}${off}${E} ]]; then
+      hits="$(grep -nE "${B}${off}${E}" <<<"${view}" | cut -d: -f1 | tr '\n' ' ' || true)"
+      fail "${rel} names a Handler, a Looper, an Executor, a Thread, a Timer or MeshThread (line(s) ${hits}). An adapter is given the loop and posts through it: with a thread of its own, or the wrapper in its own hands, a body can run beside the mesh thread or outside MeshThread.run. Only ${SERVICE##*/} names MeshThread, for the one it makes at a start."
     fi
     flat="${view//[[:space:]]/}"
     count_of "${OLDER_FORM}" "${flat}"
     older=$(( older + COUNT ))
     flat="${flat//"${OLDER_FORM}"/}"
+    for at in "${!WHOLE_IN[@]}"; do
+      [[ "${WHOLE_IN[at]}" == "${rel}" ]] || continue
+      count_of "${WHOLE_TEXT[at]}" "${flat}"
+      if (( COUNT != 1 )); then
+        fail "${rel} does not hold ${WHOLE_NAME[at]} as pinned (written ${COUNT} time(s), not once; without whitespace: ${WHOLE_TEXT[at]}). It is a callback the platform makes on the main thread, outside the wrapper that catches what is thrown, and each word of it was weighed: the service's start command evaluates nothing that can throw before the foreground start it owes, its end posts the stop and takes nothing down itself, the receiver asks before it starts a service and starts none at an alarm, and the channel answers every call, a failure with a fixed code. A change to it is a change to this file, in the same commit."
+      fi
+      flat="${flat//"${WHOLE_TEXT[at]}"/}"
+    done
     [[ "${flat}" == *overridefunon* ]] || continue
     IFS=$'\t' read -r declared posted <<<"$(callbacks <<<"${flat}")"
     if [[ "${declared}" != "${posted}" ]]; then
@@ -1146,7 +1337,18 @@ run_check() {
     fail "the adapters hold the notification callback of before Android 13 ${older} time(s), not once, as pinned: 'override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) { val value = characteristic.value; loop.post { steps.onFrame(link, value) } }'. It is the one callback that does anything before its post — there the value lives in the characteristic and the next notification overwrites it — and without it a phone on Android 11 or 12 is told no frame of a peer it dialled."
   fi
 
-  # Checks 16 and 17 read all of the radio's Kotlin, the pure package too:
+  for rel in "${SERVICE}" "${RECEIVER}" "${NOTICES}" "${PREFS}"; do
+    hits="$(grep -nE "${B}${UNCAUGHT}${E}" <<<"${views["${REPO_ROOT}/${rel}"]}" | cut -d: -f1 | tr '\n' ' ' || true)"
+    if [[ -n "${hits}" ]]; then
+      fail "${rel} writes a try, a catch, a finally or runCatching, or names leverInstall or leverHolds (line(s) ${hits}). The service catches nothing itself: what a body throws is MeshThread's to turn into a stop, and what a close throws is RadioEnd.each's to drop — a try of its own is a decision about a throw that no JVM test holds. And the lever is put in and asked by StartPolicy and MeshThread.run, nowhere else."
+    fi
+  done
+  hits="$(grep -oE "${B}${UNCAUGHT}${E}" <<<"${views["${REPO_ROOT}/${CHANNEL}"]}" | grep -oE "${UNCAUGHT}" | LC_ALL=C sort | tr '\n' ' ' || true)"
+  if [[ "${hits}" != 'catch try ' ]]; then
+    fail "${CHANNEL} does not hold exactly one try and one catch — the pinned one round its handler — and no finally, runCatching, leverInstall or leverHolds (found: ${hits:-none}). Every method is answered on every path through that one try, a failure with a fixed code; a second is a failure read for what it means, or one that is not answered."
+  fi
+
+  # Checks 16 to 18 read all of the radio's Kotlin, the pure package too:
   # as it is for the names, and with no whitespace for the pins.
   radio="$(while IFS= read -r file; do printf '%s\n' "${views["${file}"]}"; done <<<"${kotlin}")"
   flat="${radio//[[:space:]]/}"
@@ -1187,10 +1389,107 @@ run_check() {
     done <<<"${kotlin}"
   fi
 
+  # Check 18: the service's start, stop, receivers, lock, alarm and taps are
+  # the pinned ones, and what it stores and shows holds no text of its own.
+  hits=''
+  for want in "${SERVICE_PINS[@]}"; do
+    count_of "${want}" "${flat}"
+    (( COUNT == 1 )) || hits+="'${want}' written ${COUNT} time(s), not 1; "
+  done
+  for want in "${SERVICE_COUNTS[@]}"; do
+    count_of "${want%:*}" "${flat}"
+    (( COUNT == ${want##*:} )) || hits+="'${want%:*}' written ${COUNT} time(s), not ${want##*:}; "
+  done
+  if [[ -n "${hits}" ]]; then
+    fail "the service is not started, stopped, woken and tapped as pinned (${hits}). Its start hands StartPolicy.start the level and then every input unread — the foreground's three calls first, the class that loads the native library named once, inside a lambda — because a service ended while it still owes its foreground start takes down the process that also publishes to relays; for the same reason a stop lets go of the service first and ends it by stopSelfResult with the last start command that joined, never by a plain stopSelf. Its three receivers are registered in one function, exported from Android 13: not exported, the bond watch hears nothing. Its lock is one, timed and not counted; its alarm is setAndAllowWhileIdle to the receiver by an immutable intent; a notice's tap is an immutable activity intent on the alias no other app can start; a radio's closes each run whatever the one before threw. And a foreground service is started at one site, the receiver's at boot: the channel starts none until the lever's lane exists."
+  fi
+  hits="$(while IFS= read -r file; do
+    grep -lE "${EXACT_ALARMS}" "${file}" || true
+  done < <(find "${REPO_ROOT}/${ANDROID}" -type f \( -name '*.kt' -o -name '*.java' -o -name '*.xml' -o -name '*.gradle.kts' -o -name '*.gradle' \) -not -path '*/build/*' -not -path '*/.gradle/*' | LC_ALL=C sort) | sed "s|^${REPO_ROOT}/||" | tr '\n' ' ')"
+  if [[ -n "${hits}" ]]; then
+    fail "an exact alarm is named under ${ANDROID} — setExact…, setAlarmClock, SCHEDULE_EXACT_ALARM or USE_EXACT_ALARM, a comment included (${hits}). The mesh's alarm is inexact: an exact one needs a permission the user grants in Settings and is denied by default from Android 14, or one Play restricts, in every release with the flag (design Q-18)."
+  fi
+  key="$(code_view "${REPO_ROOT}/${WIPE_DART}" | sed -nE "s/^const String kPendingMlsWipeKey = '([^']+)';[[:space:]]*\$/\1/p" | tr '\n' ' ')"
+  found="$(grep -oE '"[^"]*"' <<<"${views["${REPO_ROOT}/${SERVICE}"]}" | LC_ALL=C sort -u | tr '\n' ' ' || true)"
+  if [[ "${found}" != "${SERVICE_STRINGS/<the Dart key>/${key% }}" ]]; then
+    fail "${SERVICE} holds a string that is not its lock's tag, the shared_preferences plugin's file or 'flutter.' and the key ${WIPE_DART} names kPendingMlsWipeKey ('${key% }') — or lacks one (found: ${found:-none}). The service reads the logout's marker where the Dart side writes it: under another key a process that died in the middle of a logout comes back with a keyless engine for up to twelve hours. And it writes no text of its own: any other string is a file, a key or a word nobody pinned."
+  fi
+  view="${views["${REPO_ROOT}/${PREFS}"]}"
+  hits=''
+  found="$(grep -oE '"[^"]*"' <<<"${view}" | LC_ALL=C sort -u | tr '\n' ' ' || true)"
+  [[ "${found}" == "${PREFS_STRINGS}" ]] || hits+="its strings are ${found:-none}; "
+  other="${view//[[:space:]]/}"
+  for want in "${PREFS_PINS[@]}"; do
+    count_of "${want%:*}" "${other}"
+    (( COUNT == ${want##*:} )) || hits+="'${want%:*}' written ${COUNT} time(s), not ${want##*:}; "
+  done
+  if [[ -n "${hits}" ]]; then
+    fail "${PREFS} does not keep exactly eight things in one file — the flag 'wanted', the time 'deadline', and the six strings under ChannelWords.COPY's keys (${hits}). Its inputs are a Boolean, a time and the Dart side's fixed copy, so it can hold no identifier (Security Rule 15): a ninth key, a second file or a value of another kind is where an address, a name or a count would be kept at rest."
+  fi
+  view="${views["${REPO_ROOT}/${NOTICES}"]}"
+  hits=''
+  found="$(grep -oE '"[^"]*"' <<<"${view}" | LC_ALL=C sort -u | tr '\n' ' ' || true)"
+  [[ "${found}" == "${NOTICES_STRINGS}" ]] || hits+="its strings are ${found:-none}; "
+  [[ "${view}" != *'$'* ]] || hits+="it writes a '\$'; "
+  [[ ! "${view}" =~ ${B}${NOTICE_TEXTS}${E} ]] || hits+="it names a second text of a notice; "
+  other="${view//[[:space:]]/}"
+  for want in "${NOTICES_PINS[@]}"; do
+    count_of "${want%:*}" "${other}"
+    (( COUNT == ${want##*:} )) || hits+="'${want%:*}' written ${COUNT} time(s), not ${want##*:}; "
+  done
+  if [[ -n "${hits}" ]]; then
+    fail "${NOTICES} builds a notice from something other than the app's name and one of the six stored strings (${hits}). A notice says that the mesh is on, paused, about to turn off or off, and nothing else: no string template, no second line, no count — text built here is where a peer's address or a number of phones would reach the lock screen."
+  fi
+
+  # Check 19, PUSH A: nothing can reach the log lever. The channel answers
+  # none of the three methods behind it and starts no service; no manifest
+  # declares a component of the mesh; and a channel is made in one place,
+  # under the build's flag.
+  view="${views["${REPO_ROOT}/${CHANNEL}"]}"
+  other="${view//[[:space:]]/}"
+  hits=''
+  found="$(grep -oE "${B}ChannelWords\\.[A-Z_]+" <<<"${view}" | sed -E 's/^.*ChannelWords\.//' | LC_ALL=C sort -u | tr '\n' ' ' || true)"
+  [[ "${found}" == "${CHANNEL_WORDS}" ]] || hits+="of ChannelWords it names ${found:-nothing}; "
+  found="$(grep -oE "${B}MeshService\\.[A-Za-z]+" <<<"${view}" | sed -E 's/^.*MeshService\.//' | LC_ALL=C sort -u | tr '\n' ' ' || true)"
+  [[ "${found}" == "${CHANNEL_CALLS}" ]] || hits+="of MeshService it names ${found:-nothing}; "
+  [[ "${view}" != *'"'* ]] || hits+="it holds a string of its own; "
+  if [[ "${view}" =~ ${B}${CHANNEL_REACH}${E} ]]; then
+    hits+="it names $(grep -oE "${B}${CHANNEL_REACH}${E}" <<<"${view}" | grep -oE "${CHANNEL_REACH}" | LC_ALL=C sort -u | tr '\n' ' '); "
+  fi
+  for want in 'else->result.notImplemented():1' 'StartPolicy:2' 'StartPolicy.supported(:1' 'android.bluetooth:0'; do
+    count_of "${want%:*}" "${other}"
+    (( COUNT == ${want##*:} )) || hits+="'${want%:*}' written ${COUNT} time(s), not ${want##*:}; "
+  done
+  if [[ -n "${hits}" ]]; then
+    fail "${CHANNEL} can reach the log lever, or answers a method it is not to answer yet (${hits}). PUSH A: the three methods of ChannelWords.BEHIND_THE_LEVER — bluetoothOn, bluetoothName, start — are answered by nobody, every method it does not know is notImplemented, and it names of ChannelWords only the eight it answers, of MeshService only its status, stop, sync and two reads, of StartPolicy — beside its import — only 'supported', and nothing that starts a service or makes a Bluetooth object. The first reachable leverInstall lands with the lane that proves it (design §O.3): turning this check round is that push's."
+  fi
+  hits="$(sed -e ':a' -e 's/<!--[^-]*\(-[^-][^-]*\)*-->//g' -e '/<!--/{N;ba' -e '}' "${REPO_ROOT}/${MESH_MANIFEST}" | grep -oE '<(application|service|receiver|activity|activity-alias|provider)([[:space:]>/]|$)' | sed -E 's/^<//; s/[[:space:]>/]*$//' | LC_ALL=C sort -u | tr '\n' ' ' || true)"
+  if [[ -n "${hits}" ]]; then
+    fail "${MESH_MANIFEST} declares a component (${hits}). PUSH A: the service, the receiver and the tap's alias are compiled and in no manifest, so the system makes none of them and nothing reaches the log lever; they are declared in the push that proves the lever on an emulator (design §O.3), with check_mesh_manifest.sh's entries."
+  fi
+  flat="$(code_view "${REPO_ROOT}/${ACTIVITY}" | tr -d '[:space:]')"
+  hits=''
+  for want in "${CHANNEL_MADE}:1" 'MeshChannel(:1'; do
+    count_of "${want%:*}" "${flat}"
+    (( COUNT == ${want##*:} )) || hits+="'${want%:*}' written ${COUNT} time(s), not ${want##*:}; "
+  done
+  [[ ! "${flat}" =~ Mesh(Service|Receiver|Notices|Prefs|Native|Loop)([^A-Za-z0-9_]|$) ]] || hits+="it names a class of the mesh that is not its channel; "
+  if [[ -n "${hits}" ]]; then
+    fail "${ACTIVITY} does not make the mesh's channel once, under the build's flag, as pinned: 'if (BuildConfig.HAVEN_MESH) { mesh = MeshChannel(this, flutterEngine.dartExecutor.binaryMessenger).also { it.intent(intent, replayed = restored) } }' (${hits}). In a build without HAVEN_MESH nothing of the mesh is made: no channel answers, so no Dart call has a native end and no class of the mesh's is reached."
+  fi
+  while IFS= read -r file; do
+    rel="${file#"${REPO_ROOT}/"}"
+    [[ "${rel}" == "${ACTIVITY}" ]] && continue
+    hits="$(code_view "${file}" | grep -nE "${B}${MESH_CLASSES}${E}" | cut -d: -f1 | tr '\n' ' ' || true)"
+    if [[ -n "${hits}" ]]; then
+      fail "${rel} names a class of the mesh (line(s) ${hits}). Outside the mesh's own package only ${ACTIVITY##*/} names one, the channel, under the build's flag: named from the application class or anywhere else that runs in every build, the mesh is reachable with the flag off."
+    fi
+  done < <(find "${REPO_ROOT}/${APP_SRC}" -type f \( -name '*.kt' -o -name '*.java' \) -not -path '*/mesh/*' | LC_ALL=C sort)
+
   if (( FAILED )); then
     exit 1
   fi
-  log "OK: unsafe is written in the generated bridge, the exports' file and the log lever alone, under the crate's deny; the exports' file is uses and the $(grep -c . <<<"${pinned}") pinned exports, each one call into ${CALLS##*/}; each of those is one guarded call of its radio entry, and calls nothing of Java's; the lever is its ${LEVER_UNSAFE_BLOCKS} unsafe blocks and one logger, looks up five functions by name and names nothing it could log, lock or panic with. The radio's Kotlin logs nothing and holds no UUID written out, names its modes and builds its UUIDs at one site, takes the engine's signal floor, has its ${#JVM_TEST_NAMES[@]} JVM tests, and declares the pinned native methods in ${NATIVE##*/} alone; its adapters post every platform callback through ${LOOP##*/}, inside MeshThread.run, name nothing that could start a pairing, and advertise the service UUID alone; no manifest outside the mesh's own names Bluetooth, and the mesh's build flag is read once in ${APP_GRADLE##*/}."
+  log "OK: unsafe is written in the generated bridge, the exports' file and the log lever alone, under the crate's deny; the exports' file is uses and the $(grep -c . <<<"${pinned}") pinned exports, each one call into ${CALLS##*/}; each of those is one guarded call of its radio entry, and calls nothing of Java's; the lever is its ${LEVER_UNSAFE_BLOCKS} unsafe blocks and one logger, looks up five functions by name and names nothing it could log, lock or panic with. The radio's Kotlin logs nothing and holds no UUID written out, names its modes and builds its UUIDs at one site, takes the engine's signal floor, has its ${#JVM_TEST_NAMES[@]} JVM tests, and declares the pinned native methods in ${NATIVE##*/} alone; its adapters post every platform callback through ${LOOP##*/}, inside MeshThread.run, name nothing that could start a pairing, and advertise the service UUID alone; the service's start, stop, receivers, lock, alarm and taps are the pinned ones, and what it stores and shows holds no text of its own; the channel answers none of the three methods behind the log lever and starts no service, and no manifest declares a component of the mesh (push A); no manifest outside the mesh's own names Bluetooth, and the mesh's build flag is read once in ${APP_GRADLE##*/}."
 }
 
 # ---------------------------------------------------------------------------
@@ -1766,14 +2065,359 @@ KT
     } >"${t}/${JVM_TESTS}/kotlin/RadioTest.kt"
     printf '<manifest>\n    <uses-permission android:name="android.permission.INTERNET"/>\n</manifest>\n' \
       | tee "${t}/${APP_SRC}/main/AndroidManifest.xml" >"${t}/${APP_SRC}/debug/AndroidManifest.xml"
-    cat >"${t}/${APP_SRC}/mesh/AndroidManifest.xml" <<'XML'
+    cat >"${t}/${MESH_MANIFEST}" <<'XML'
 <manifest>
+    <!-- Not yet: <service android:name=".mesh.MeshService"
+         android:foregroundServiceType="connectedDevice"/> and its
+         <receiver> come with the lane - a comment declares nothing. -->
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation"/>
-    <application>
-        <service android:name=".mesh.MeshService" android:foregroundServiceType="connectedDevice" android:exported="false"/>
-    </application>
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="false"/>
 </manifest>
 XML
+    cat >"${t}/${SERVICE}" <<'KT'
+package com.oblivioustech.haven.mesh
+
+import com.oblivioustech.haven.mesh.core.MeshThread
+
+// Never a try here, never stopSelf() and never MeshNative.leverInstall(): a
+// comment catches, stops and names nothing.
+class MeshService : Service() {
+    private val prefs by lazy { MeshPrefs(this) }
+    private val notices by lazy { MeshNotices(this, prefs) }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        starts.command(startId) { Live() }
+        return START_STICKY
+    }
+
+    override fun onDestroy() {
+        starts.live()?.stop()
+    }
+
+    @TargetApi(Build.VERSION_CODES.R)
+    private inner class Live : RadioPort {
+        private val mesh: MeshThread = MeshThread(
+            lever = native,
+            running = { ::core.isInitialized && core.running },
+            steps = MeshThread.steps(
+                detach = { joined = starts.detach() },
+                stopRadio = { if (::core.isInitialized) core.stopRadio() },
+                closeAdapters = {
+                    closeRadio()
+                    RadioEnd.each({ unregisterReceiver(bluetooth) }, { unregisterReceiver(screenOff) }, { unregisterReceiver(bond) })
+                },
+                cancelAlarm = { alarms.cancel(alarm) },
+                forget = {
+                    prefs.forget()
+                    over()
+                },
+                unpost = {
+                    starts.idle {
+                        stopForeground(STOP_FOREGROUND_REMOVE)
+                        notices.cancel(NoticePlan.ONGOING)
+                        notices.cancel(NoticePlan.ALERT)
+                    }
+                },
+                end = {
+                    stopSelfResult(joined)
+                    loop.quit()
+                },
+            ),
+            notice = { starts.idle { notices.post(Notice.STOPPED) } },
+        )
+        private val loop: MeshLoop = MeshLoop(mesh)
+        private val wake = WakePlan(SystemClock::elapsedRealtime)
+
+        // Never lock.acquire() with no time.
+        private val lock = getSystemService(PowerManager::class.java).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, LOCK)
+            .apply { setReferenceCounted(false) }
+        private val alarm by lazy {
+            PendingIntent.getBroadcast(this@MeshService, 0, Intent(this@MeshService, MeshReceiver::class.java), PendingIntent.FLAG_IMMUTABLE)
+        }
+        private lateinit var core: MeshRadioCore
+
+        private val bluetooth = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) = loop.post {
+                switched(intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR))
+            }
+        }
+
+        private val screenOff = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) = loop.post {
+                notices.post(NoticePlan.ongoing(up))
+            }
+        }
+
+        private val bond = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) = loop.post {
+                val address = bonding(intent) ?: return@post
+                server?.links?.onBond(address)
+                loop.post { client?.steps?.onBond(address) }
+            }
+        }
+
+        @SuppressLint("MissingPermission")
+        private fun begin() = loop.start {
+            val start = StartPolicy.start(
+                Build.VERSION.SDK_INT,
+                foreground = {
+                    // Said to be on.
+                    notices.channel()
+                    startForeground(NoticePlan.ONGOING, notices.notice(Notice.ON), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+                },
+                bluetoothLe = { bluetoothLe(this@MeshService) },
+                lever = native,
+                wipePending = { getSharedPreferences(FLUTTER_PREFS, MODE_PRIVATE).getBoolean(WIPE_PENDING, false) },
+                permission = { permitted(this@MeshService) },
+                engine = native,
+                storedDeadlineMs = { prefs.deadlineMs },
+                wallClockMs = { System.currentTimeMillis() },
+            )
+            when (start) {
+                is Start.Refused -> {
+                    mesh.stop(start.notice)
+                    onStarted?.invoke(start.word)
+                }
+                is Start.Run -> {
+                    prefs.run(start.deadlineMs)
+                    core = MeshRadioCore(native(), this, SystemClock::elapsedRealtime)
+                    listen(bluetooth, BluetoothAdapter.ACTION_STATE_CHANGED)
+                    switched(manager.adapter.state)
+                }
+            }
+        }
+
+        // Never RECEIVER_NOT_EXPORTED: the bond watch would hear nothing.
+        @SuppressLint("UnspecifiedRegisterReceiverFlag")
+        private fun listen(receiver: BroadcastReceiver, action: String) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(receiver, IntentFilter(action), Context.RECEIVER_EXPORTED)
+            } else {
+                registerReceiver(receiver, IntentFilter(action))
+            }
+        }
+
+        private fun closeRadio() {
+            RadioEnd.each({ client?.stop() }, { server?.stop() }, { advertiser?.stop() }, { scanner?.stop() }, { lock.release() })
+            wake.released()
+        }
+
+        private fun bonding(intent: Intent): String? {
+            @Suppress("DEPRECATION")
+            return intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE)?.address
+        }
+
+        fun stop() = loop.post { mesh.stop(notice = false) }
+
+        override fun holdAwake(ms: Long) = wake.hold(ms, lock::acquire)
+
+        override fun wakeAt(inMs: Long) {
+            loop.timer(this, inMs) { core.onWake() }
+            wake.alarm(inMs)?.let { alarms.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, it, alarm) }
+        }
+
+        init {
+            begin()
+        }
+    }
+
+    companion object {
+        private const val LOCK = "Haven:mesh"
+        private const val FLUTTER_PREFS = "FlutterSharedPreferences"
+        private const val WIPE_PENDING = "flutter.haven.security.pending_mls_wipe"
+
+        private val starts = ServiceStarts<Live>()
+
+        // Named here alone, unevaluated: never MeshRadioCore(MeshNative, …).
+        private val native = { MeshNative }
+    }
+}
+KT
+    cat >"${t}/${RECEIVER}" <<'KT'
+package com.oblivioustech.haven.mesh
+
+// Never a start at the alarm, and never a try round the one start.
+@TargetApi(Build.VERSION_CODES.R)
+class MeshReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        val prefs = MeshPrefs(context)
+        val now = System.currentTimeMillis()
+        when (intent.action) {
+            Intent.ACTION_BOOT_COMPLETED, Intent.ACTION_MY_PACKAGE_REPLACED -> {
+                val starts = ReceiverPolicy.startsAtBoot(prefs.wanted, prefs.deadlineMs, now) {
+                    StartPolicy.refusal(Build.VERSION.SDK_INT, MeshService.bluetoothLe(context), MeshNative, MeshService.permitted(context))
+                }
+                if (starts) RadioEnd.each({ context.startForegroundService(Intent(context, MeshService::class.java)) })
+            }
+            null -> if (!MeshService.alarm() && ReceiverPolicy.endsAtAlarm(prefs.wanted, prefs.deadlineMs, now)) {
+                prefs.forget()
+                MeshNotices(context, prefs).post(Notice.STOPPED)
+            }
+        }
+    }
+}
+KT
+    cat >"${t}/${NOTICES}" <<'KT'
+package com.oblivioustech.haven.mesh
+
+// Never "$count phones" here, and never setSubText(…): a comment shows nothing.
+class MeshNotices(private val context: Context, private val prefs: MeshPrefs) {
+    private val manager = context.getSystemService(NotificationManager::class.java)
+
+    fun channel() {
+        val channel = NotificationChannel(CHANNEL, prefs.copy(NoticePlan.CHANNEL) ?: TITLE, NotificationManager.IMPORTANCE_LOW)
+        manager.createNotificationChannel(channel)
+    }
+
+    fun notice(notice: Notice): Notification {
+        val builder = Notification.Builder(context, CHANNEL)
+            .setContentTitle(TITLE)
+            .setContentText(prefs.copy(notice.copy))
+            .setContentIntent(tap(ChannelWords.OPEN_STATS))
+        if (notice.keepOn) {
+            val icon: Icon? = null
+            builder.addAction(Notification.Action.Builder(icon, prefs.copy(NoticePlan.KEEP_ON), tap(ChannelWords.KEEP_ON)).build())
+        }
+        return builder.build()
+    }
+
+    // Never Intent(context, MainActivity::class.java): the alias, and immutable.
+    private fun tap(word: String): PendingIntent {
+        val intent = Intent()
+            .setComponent(ComponentName(context, ChannelWords.TAP_ALIAS))
+            .putExtra(ChannelWords.TAP_EXTRA, word)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val request = if (word == ChannelWords.KEEP_ON) 1 else 0
+        return PendingIntent.getActivity(context, request, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+    }
+
+    private companion object {
+        const val CHANNEL = "haven_mesh_v1"
+        const val TITLE = "Haven"
+    }
+}
+KT
+    cat >"${t}/${PREFS}" <<'KT'
+package com.oblivioustech.haven.mesh
+
+// Never putString("peer", address) here: eight keys, one file.
+class MeshPrefs(context: Context) {
+    private val file = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+
+    val wanted: Boolean get() = file.getBoolean(WANTED, false)
+
+    val deadlineMs: Long get() = file.getLong(DEADLINE, 0)
+
+    fun copy(key: String): String? = file.getString(key, null)
+
+    fun words(copy: List<String>) {
+        val edit = file.edit()
+        ChannelWords.COPY.forEachIndexed { at, key -> edit.putString(key, copy[at]) }
+        edit.commit()
+    }
+
+    fun run(deadlineMs: Long) {
+        file.edit().putBoolean(WANTED, true).putLong(DEADLINE, deadlineMs).commit()
+    }
+
+    fun forget() {
+        file.edit().putBoolean(WANTED, false).putLong(DEADLINE, 0).commit()
+    }
+
+    private companion object {
+        const val FILE = "haven_mesh"
+        const val WANTED = "wanted"
+        const val DEADLINE = "deadline"
+    }
+}
+KT
+    cat >"${t}/${CHANNEL}" <<'KT'
+package com.oblivioustech.haven.mesh
+
+import com.oblivioustech.haven.mesh.core.StartPolicy
+
+// Not yet ChannelWords.START, "bluetoothOn" or startForegroundService(…), and
+// never MeshNative: a comment answers and starts nothing.
+class MeshChannel(private val activity: Activity, messenger: BinaryMessenger) : MethodChannel.MethodCallHandler {
+    private val state = BasicMessageChannel(messenger, ChannelWords.STATE_CHANNEL, StandardMessageCodec.INSTANCE)
+    private val told: (Map<String, Any>) -> Unit = { status -> activity.runOnUiThread { state.send(status) } }
+
+    init {
+        MethodChannel(messenger, ChannelWords.METHOD_CHANNEL).setMethodCallHandler(this)
+        MeshService.onStatus = told
+    }
+
+    override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
+        try {
+            answer(call, result)
+        } catch (_: Throwable) {
+            result.error(ChannelWords.ERROR, null, null)
+        }
+    }
+
+    private fun answer(call: MethodCall, result: MethodChannel.Result) {
+        when (call.method) {
+            ChannelWords.PERMISSION -> result.success(permission())
+            ChannelWords.REQUEST_PERMISSION -> request(result)
+            ChannelWords.OPEN_BLUETOOTH_SETTINGS -> {
+                activity.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
+                result.success(null)
+            }
+            ChannelWords.SYNC -> {
+                MeshPrefs(activity).words(checkNotNull(ChannelWords.copy(call.arguments)))
+                MeshService.sync()
+                result.success(null)
+            }
+            ChannelWords.STOP -> MeshService.stop(activity) { activity.runOnUiThread { result.success(null) } }
+            ChannelWords.STATUS -> result.success(MeshService.status(activity))
+            ChannelWords.SUPPORTED -> result.success(StartPolicy.supported(Build.VERSION.SDK_INT, MeshService.bluetoothLe(activity)))
+            ChannelWords.TAKE_ACTION -> result.success(taps.take())
+            else -> result.notImplemented()
+        }
+    }
+
+    private fun permission(): String = ChannelWords.permission(MeshService.permitted(activity), asked, false)
+
+    fun intent(intent: Intent, replayed: Boolean) {
+        val keepOn = ChannelWords.tapOf(
+            viaAlias = intent.component?.className == ChannelWords.TAP_ALIAS,
+            replayed = replayed,
+        ) { intent.getStringExtra(ChannelWords.TAP_EXTRA) } ?: return
+        taps.tap(keepOn)?.let(state::send)
+    }
+}
+KT
+    cat >"${t}/${ACTIVITY}" <<'KT'
+package com.oblivioustech.haven
+
+import com.oblivioustech.haven.mesh.MeshChannel
+
+// Never MeshChannel(this, messenger) outside the flag, and no MeshService here.
+class MainActivity : FlutterActivity() {
+    private var mesh: MeshChannel? = null
+    private var restored = false
+
+    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+        super.configureFlutterEngine(flutterEngine)
+        if (BuildConfig.HAVEN_MESH) {
+            mesh = MeshChannel(this, flutterEngine.dartExecutor.binaryMessenger).also { it.intent(intent, replayed = restored) }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        mesh?.intent(intent, replayed = false)
+    }
+}
+KT
+    printf 'package com.oblivioustech.haven\n\n// No MeshService and no MeshChannel here.\nclass HavenApplication : Application()\n' >"${t}/${ACTIVITY%/*}/HavenApplication.kt"
+    mkdir -p "${t}/${WIPE_DART%/*}"
+    cat >"${t}/${WIPE_DART}" <<'DART'
+/// Not const String kPendingMlsWipeKey = 'haven.other';
+const String kPendingMlsWipeKey = 'haven.security.pending_mls_wipe';
+DART
     mkdir -p "${t}/${ENGINE%/*}"
     cat >"${t}/${ENGINE}" <<'RS'
 pub struct Config {
@@ -1852,7 +2496,7 @@ TXT
 
   echo "check_mesh_radio.sh --self-test"
   local t="${tmp}/ok"; _tree "${t}"
-  _case "the tree shape passes: three exports each one forward, comments and strings that only mention what is banned, a static in the calls' tests, a Vec and a format! in the lever's; the loop, four adapters whose callbacks post through it, the native methods' class and a mesh manifest beside the pure package; the build switch written once" 0 '' "${t}"
+  _case "the tree shape passes: three exports each one forward, comments and strings that only mention what is banned, a static in the calls' tests, a Vec and a format! in the lever's; the loop, four adapters whose callbacks post through it, the native methods' class and a mesh manifest beside the pure package; the service, its receiver, notices and stored copy, a channel that answers eight methods and an activity that makes it under the flag; the build switch written once" 0 '' "${t}"
 
   # Check 1: where unsafe, extern and an exported symbol are written.
   t="${tmp}/unsafe-block"; _tree "${t}"
@@ -2835,13 +3479,454 @@ RS
   rm "${t:?}/${advertiser:?}"
   _case "a radio with no advertisement fails: the pin has to be there" 1 "the radio's advertisement is not built once" "${t}"
 
+  # Check 15, the service's own callbacks: three lifecycle methods, the
+  # receiver's entry and the channel's handler, each pinned whole.
+  local activity_dir="${ACTIVITY%/*}" word
+  t="${tmp}/start-command-reads"; _tree "${t}"
+  _line "${t}/${SERVICE}" 'starts.command(startId) { Live() }' '        prefs.run(0)\n        starts.command(startId) { Live() }'
+  _case "a start command that reads the stored copy before its start is posted fails: a throw there ends the service owing its foreground" 1 "${SERVICE} does not hold onStartCommand as pinned" "${t}"
+
+  t="${tmp}/start-command-not-sticky"; _tree "${t}"
+  sed -i 's/return START_STICKY/return START_NOT_STICKY/' "${t}/${SERVICE}"
+  _case "a service the platform does not bring back after the process died fails" 1 "${SERVICE} does not hold onStartCommand as pinned" "${t}"
+
+  t="${tmp}/destroy-takes-down"; _tree "${t}"
+  _line "${t}/${SERVICE}" 'starts.live()?.stop()' '        starts.detach()'
+  _case "an end of the service that takes the start down on the main thread fails: the stop is a body of the mesh thread" 1 "${SERVICE} does not hold onDestroy as pinned" "${t}"
+
+  t="${tmp}/bind-binder"; _tree "${t}"
+  _line "${t}/${SERVICE}" 'override fun onBind(' '    override fun onBind(intent: Intent?): IBinder? = binder'
+  _case "a service that can be bound fails" 1 "${SERVICE} does not hold onBind as pinned" "${t}"
+
+  t="${tmp}/receiver-ends-with-time-left"; _tree "${t}"
+  sed -i 's/if (!MeshService.alarm() \&\& ReceiverPolicy.endsAtAlarm/if (!MeshService.alarm() || ReceiverPolicy.endsAtAlarm/' "${t}/${RECEIVER}"
+  _case "an alarm that ends the mesh whatever the policy says fails" 1 "${RECEIVER} does not hold onReceive as pinned" "${t}"
+
+  t="${tmp}/receiver-starts-at-alarm"; _tree "${t}"
+  _line "${t}/${RECEIVER}" 'prefs.forget()' '                context.startForegroundService(Intent(context, MeshService::class.java))'
+  _case "a foreground service started from the alarm fails: the platform gives an alarm no licence to" 1 "${RECEIVER} does not hold onReceive as pinned" "${t}"
+
+  t="${tmp}/receiver-unasked"; _tree "${t}"
+  sed -i 's/if (starts) RadioEnd/RadioEnd/' "${t}/${RECEIVER}"
+  _case "a boot that starts the service without asking the policy fails" 1 "${RECEIVER} does not hold onReceive as pinned" "${t}"
+
+  t="${tmp}/receiver-bare-start"; _tree "${t}"
+  sed -i 's/RadioEnd.each({ context.startForegroundService(Intent(context, MeshService::class.java)) })/context.startForegroundService(Intent(context, MeshService::class.java))/' "${t}/${RECEIVER}"
+  _case "a start at boot outside RadioEnd.each fails: the platform's refusal is an exception on the main thread" 1 "${RECEIVER} does not hold onReceive as pinned" "${t}"
+
+  t="${tmp}/handler-renders"; _tree "${t}"
+  sed -i 's/} catch (_: Throwable) {/} catch (thrown: Throwable) {/; s/result.error(ChannelWords.ERROR, null, null)/result.error(ChannelWords.ERROR, thrown.message, null)/' "${t}/${CHANNEL}"
+  _case "a handler that answers a failure with the exception's text fails: it can name a device" 1 "${CHANNEL} does not hold onMethodCall as pinned" "${t}"
+
+  t="${tmp}/handler-untried"; _tree "${t}"
+  sed -i -z 's/        try {\n            answer(call, result)\n        } catch (_: Throwable) {\n            result.error(ChannelWords.ERROR, null, null)\n        }\n/        answer(call, result)\n/' "${t}/${CHANNEL}"
+  _case "a handler with no try fails: a method that throws is not answered" 1 "${CHANNEL} does not hold onMethodCall as pinned" "${t}"
+
+  t="${tmp}/service-Handler"; _tree "${t}"
+  printf 'val main: Handler? = null\n' >>"${t}/${SERVICE}"
+  _case "the service naming a Handler fails: it may name MeshThread, and no thread of its own" 1 "${SERVICE} names a Handler" "${t}"
+
+  t="${tmp}/receiver-MeshThread"; _tree "${t}"
+  printf 'val own: MeshThread? = null\n' >>"${t}/${RECEIVER}"
+  _case "the receiver naming MeshThread fails: only the service makes one" 1 "${RECEIVER} names a Handler" "${t}"
+
+  for word in "${SERVICE}:try" "${NOTICES}:runCatching" "${PREFS}:catch" "${RECEIVER}:finally" "${SERVICE}:leverHolds" "${RECEIVER}:leverInstall"; do
+    t="${tmp}/uncaught-${word##*:}"; _tree "${t}"
+    printf 'fun more(act: Act) = act.%s { }\n' "${word##*:}" >>"${t}/${word%:*}"
+    _case "'${word##*:}' in ${word%:*} fails: the service catches nothing itself and asks no lever" 1 "${word%:*} writes a try" "${t}"
+  done
+
+  t="${tmp}/channel-second-try"; _tree "${t}"
+  printf 'fun quiet(act: () -> Unit) {\n    try {\n        act()\n    } catch (_: Exception) {\n    }\n}\n' >>"${t}/${CHANNEL}"
+  _case "a second try in the channel fails: a failure read for what it means, or not answered" 1 "${CHANNEL} does not hold exactly one try and one catch" "${t}"
+
+  # Check 18: the service's start, stop, receivers, lock, alarm and taps.
+  for word in 'bluetoothLe = { bluetoothLe(this@MeshService) }:bluetoothLe = bluetoothLe(this@MeshService)' \
+    'wipePending = { getSharedPreferences(FLUTTER_PREFS, MODE_PRIVATE).getBoolean(WIPE_PENDING, false) }:wipePending = getSharedPreferences(FLUTTER_PREFS, MODE_PRIVATE).getBoolean(WIPE_PENDING, false)' \
+    'permission = { permitted(this@MeshService) }:permission = permitted(this@MeshService)' \
+    'storedDeadlineMs = { prefs.deadlineMs }:storedDeadlineMs = prefs.deadlineMs' \
+    'lever = native:lever = native()'; do
+    t="${tmp}/start-reads-${word%% *}"; _tree "${t}"
+    sed -i "s/                ${word%%:*},/                ${word#*:},/" "${t}/${SERVICE}"
+    _case "'${word%% *}' handed to the start as a value fails: read before the foreground start, where a throw ends the process" 1 "'${SERVICE_PINS[0]}' written 0 time(s), not 1" "${t}"
+  done
+
+  t="${tmp}/foreground-fourth-call"; _tree "${t}"
+  _line "${t}/${SERVICE}" 'notices.channel()' '                    prefs.run(0)\n                    notices.channel()'
+  _case "a fourth call ahead of the foreground start fails" 1 "'${SERVICE_PINS[0]}' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/foreground-untyped"; _tree "${t}"
+  sed -i 's/, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)/)/' "${t}/${SERVICE}"
+  _case "a foreground start that names no type fails" 1 "'${SERVICE_PINS[0]}' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/start-asked-the-lever"; _tree "${t}"
+  sed -i 's/private fun begin() = loop.start {/private fun begin() = loop.post {/' "${t}/${SERVICE}"
+  _case "the start posted as any other body fails: asked the lever in a fresh process, it never reaches the foreground" 1 "'loop.start{' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/second-start"; _tree "${t}"
+  printf 'fun again(loop: MeshLoop) = loop.start { }\n' >>"${t}/${RECEIVER}"
+  _case "a second caller of the loop's start fails: a body the lever is not asked for" 1 "'loop.start{' written 2 time(s), not 1" "${t}"
+
+  t="${tmp}/second-policy-start"; _tree "${t}"
+  printf 'fun again() = StartPolicy.start(30)\n' >>"${t}/${RECEIVER}"
+  _case "a second start of the policy's fails: one that is not the pinned one" 1 "'StartPolicy.start(' written 2 time(s), not 1" "${t}"
+
+  t="${tmp}/second-refusal"; _tree "${t}"
+  printf 'fun may(lever: LogLever) = StartPolicy.refusal(30, true, lever, true)\n' >>"${t}/${SERVICE}"
+  _case "a second asker of the refusal fails: it puts the log lever in" 1 "'StartPolicy.refusal(' written 2 time(s), not 1" "${t}"
+
+  t="${tmp}/second-thread"; _tree "${t}"
+  printf 'val spare = MeshThread(lever, running, steps, notice)\n' >>"${t}/${SERVICE}"
+  _case "a second MeshThread in the service fails: one a start" 1 "'=MeshThread(' written 2 time(s), not 1" "${t}"
+
+  t="${tmp}/second-loop"; _tree "${t}"
+  printf 'val spare = MeshLoop(mesh)\n' >>"${t}/${SERVICE}"
+  _case "a second loop fails: one thread a start" 1 "'=MeshLoop(' written 2 time(s), not 1" "${t}"
+
+  t="${tmp}/native-named-direct"; _tree "${t}"
+  sed -i 's/MeshRadioCore(native(), this/MeshRadioCore(MeshNative, this/' "${t}/${SERVICE}"
+  _case "the native class named outside its one lambda fails" 1 "'MeshNative' written 4 time(s), not 3" "${t}"
+
+  t="${tmp}/native-eager"; _tree "${t}"
+  sed -i 's/private val native = { MeshNative }/private val native = MeshNative/' "${t}/${SERVICE}"
+  _case "the native class named unwrapped fails: the library is loaded when the service's class is" 1 "'privatevalnative={MeshNative}' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/refusal-unstopped"; _tree "${t}"
+  sed -i '/mesh.stop(start.notice)/d' "${t}/${SERVICE}"
+  _case "a refused start that is not stopped fails: a service in the foreground with no radio and no end" 1 "'isStart.Refused->{mesh.stop(start.notice)onStarted?.invoke(start.word)}' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/stop-outside-wrapper"; _tree "${t}"
+  sed -i 's/fun stop() = loop.post { mesh.stop(notice = false) }/fun stop() = mesh.stop(notice = false)/' "${t}/${SERVICE}"
+  _case "the user's stop made on the caller's thread fails: it is a body like any other" 1 "'funstop()=loop.post{mesh.stop(notice=false)}' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/detach-gone"; _tree "${t}"
+  sed -i 's/detach = { joined = starts.detach() },/detach = { },/' "${t}/${SERVICE}"
+  _case "a stop that does not let go of the service fails" 1 "'detach={joined=starts.detach()}' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/stop-self"; _tree "${t}"
+  sed -i 's/stopSelfResult(joined)/stopSelf()/' "${t}/${SERVICE}"
+  _case "a stop that ends the service whatever start came since fails" 1 "'end={stopSelfResult(joined)loop.quit()}' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/stop-first-id"; _tree "${t}"
+  sed -i 's/stopSelfResult(joined)/stopSelfResult(first)/' "${t}/${SERVICE}"
+  _case "a stop that ends the service by another start command than the last that joined fails" 1 "'end={stopSelfResult(joined)loop.quit()}' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/second-stop-self"; _tree "${t}"
+  printf 'fun end(service: Service) = service.stopSelf()\n' >>"${t}/${NOTICES}"
+  _case "a second way of ending the service fails" 1 "'stopSelf' written 2 time(s), not 1" "${t}"
+
+  t="${tmp}/unpost-unasked"; _tree "${t}"
+  sed -i 's/^                    starts.idle {$/                    run {/' "${t}/${SERVICE}"
+  _case "a stop that leaves the foreground whatever start came since fails" 1 "'unpost={starts.idle{stopForeground(STOP_FOREGROUND_REMOVE)" "${t}"
+
+  t="${tmp}/second-foreground"; _tree "${t}"
+  printf 'fun again(service: Service, notice: Notification) = service.startForeground(1, notice)\n' >>"${t}/${NOTICES}"
+  _case "a second foreground start fails" 1 "'startForeground(' written 2 time(s), not 1" "${t}"
+
+  t="${tmp}/second-service-start"; _tree "${t}"
+  printf 'fun start(context: Context) = context.startForegroundService(Intent(context, MeshService::class.java))\n' >>"${t}/${SERVICE}"
+  _case "a second site that starts the foreground service fails" 1 "'startForegroundService' written 2 time(s), not 1" "${t}"
+
+  t="${tmp}/plain-service-start"; _tree "${t}"
+  printf 'fun start(context: Context) = context.startService(Intent())\n' >>"${t}/${PREFS}"
+  _case "the service started as a plain one fails" 1 "'startService' written 1 time(s), not 0" "${t}"
+
+  t="${tmp}/own-broadcast"; _tree "${t}"
+  printf 'fun wake(context: Context) = context.sendBroadcast(Intent())\n' >>"${t}/${NOTICES}"
+  _case "a broadcast of the mesh's own fails: a way to the receiver that is not the system's or the alarm's" 1 "'sendBroadcast' written 1 time(s), not 0" "${t}"
+
+  t="${tmp}/receivers-not-exported"; _tree "${t}"
+  sed -i 's/Context.RECEIVER_EXPORTED/Context.RECEIVER_NOT_EXPORTED/' "${t}/${SERVICE}"
+  _case "the registered receivers not exported fails: the bond watch hears nothing of the Bluetooth app" 1 "'RECEIVER_NOT_EXPORTED' written 1 time(s), not 0" "${t}"
+
+  t="${tmp}/receivers-unsplit"; _tree "${t}"
+  sed -i 's/if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {/run {/' "${t}/${SERVICE}"
+  _case "the flag given on every level fails: below Android 13 it does not exist" 1 "Context.RECEIVER_EXPORTED)}else{registerReceiver(receiver,IntentFilter(action))}' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/third-register"; _tree "${t}"
+  printf 'fun also(context: Context, receiver: BroadcastReceiver) = context.registerReceiver(receiver, IntentFilter())\n' >>"${t}/${RECEIVER}"
+  _case "a receiver registered outside the one function fails" 1 "'registerReceiver(' written 6 time(s), not 5" "${t}"
+
+  t="${tmp}/receiver-left-registered"; _tree "${t}"
+  sed -i 's/, { unregisterReceiver(bond) })/)/' "${t}/${SERVICE}"
+  _case "a receiver the stop does not unregister fails" 1 "'unregisterReceiver(' written 2 time(s), not 3" "${t}"
+
+  t="${tmp}/tap-on-the-activity"; _tree "${t}"
+  sed -i 's/.setComponent(ComponentName(context, ChannelWords.TAP_ALIAS))/.setClass(context, MainActivity::class.java)/' "${t}/${NOTICES}"
+  _case "a tap sent to the exported activity fails: any app could press Keep on" 1 "'valintent=Intent().setComponent(ComponentName(context,ChannelWords.TAP_ALIAS))" "${t}"
+
+  t="${tmp}/tap-mutable"; _tree "${t}"
+  sed -i 's/PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT/PendingIntent.FLAG_MUTABLE/' "${t}/${NOTICES}"
+  _case "a tap whose intent can be filled in fails" 1 "'FLAG_MUTABLE' written 1 time(s), not 0" "${t}"
+
+  t="${tmp}/tap-unflagged"; _tree "${t}"
+  sed -i 's/PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT/PendingIntent.FLAG_UPDATE_CURRENT/' "${t}/${NOTICES}"
+  _case "a tap that does not say it is immutable fails" 1 "'PendingIntent.getActivity(context,request,intent,PendingIntent.FLAG_IMMUTABLEorPendingIntent.FLAG_UPDATE_CURRENT)' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/alarm-mutable"; _tree "${t}"
+  sed -i 's/MeshReceiver::class.java), PendingIntent.FLAG_IMMUTABLE)/MeshReceiver::class.java), 0)/' "${t}/${SERVICE}"
+  _case "an alarm whose intent is not immutable fails" 1 "'PendingIntent.getBroadcast(this@MeshService,0,Intent(this@MeshService,MeshReceiver::class.java),PendingIntent.FLAG_IMMUTABLE)' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/alarm-implicit"; _tree "${t}"
+  sed -i 's/Intent(this@MeshService, MeshReceiver::class.java), PendingIntent.FLAG_IMMUTABLE)/Intent(ACTION), PendingIntent.FLAG_IMMUTABLE)/' "${t}/${SERVICE}"
+  _case "an alarm sent by an action, not to the receiver by name, fails: it would need an exported receiver" 1 "'PendingIntent.getBroadcast(this@MeshService,0,Intent(this@MeshService,MeshReceiver::class.java),PendingIntent.FLAG_IMMUTABLE)' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/third-pending"; _tree "${t}"
+  printf 'fun also(context: Context) = PendingIntent.getService(context, 0, Intent(), PendingIntent.FLAG_IMMUTABLE)\n' >>"${t}/${NOTICES}"
+  _case "a third pending intent fails, whatever it is for" 1 "'PendingIntent.get' written 3 time(s), not 2" "${t}"
+
+  t="${tmp}/lock-counted"; _tree "${t}"
+  sed -i 's/setReferenceCounted(false)/setReferenceCounted(true)/' "${t}/${SERVICE}"
+  _case "a wake lock that counts fails: a timed hold would not replace the one before" 1 "'newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,LOCK).apply{setReferenceCounted(false)}' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/second-lock"; _tree "${t}"
+  printf 'fun other(power: PowerManager, tag: String) = power.newWakeLock(1, tag)\n' >>"${t}/${RECEIVER}"
+  _case "a second wake lock fails" 1 "'newWakeLock' written 2 time(s), not 1" "${t}"
+
+  t="${tmp}/hold-unplanned"; _tree "${t}"
+  sed -i 's/wake.hold(ms, lock::acquire)/lock.acquire(ms)/' "${t}/${SERVICE}"
+  _case "a lock taken at every frame, past the plan, fails" 1 "'overridefunholdAwake(ms:Long)=wake.hold(ms,lock::acquire)' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/hold-untimed"; _tree "${t}"
+  printf 'fun hold(lock: PowerManager.WakeLock) = lock.acquire()\n' >>"${t}/${SERVICE}"
+  _case "a lock held with no time fails: nothing would let the phone sleep again" 1 "'acquire' written 2 time(s), not 1" "${t}"
+
+  t="${tmp}/alarm-at-every-input"; _tree "${t}"
+  sed -i 's/wake.alarm(inMs)?.let { alarms.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, it, alarm) }/alarms.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, now + inMs, alarm)/' "${t}/${SERVICE}"
+  _case "an alarm armed past the plan, at every input and as far ahead as asked, fails" 1 "'wake.alarm(inMs)?.let{alarms.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP,it,alarm)}' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/second-alarm"; _tree "${t}"
+  printf 'fun also(alarms: AlarmManager, at: Long, intent: PendingIntent) = alarms.setAndAllowWhileIdle(0, at, intent)\n' >>"${t}/${RECEIVER}"
+  _case "a second alarm fails" 1 "'setAndAllowWhileIdle' written 2 time(s), not 1" "${t}"
+
+  t="${tmp}/exact-alarm-call"; _tree "${t}"
+  sed -i 's/alarms.setAndAllowWhileIdle(/alarms.setExactAndAllowWhileIdle(/' "${t}/${SERVICE}"
+  _case "an exact alarm for the wake fails" 1 "an exact alarm is named under ${ANDROID}" "${t}"
+
+  t="${tmp}/exact-alarm-clock"; _tree "${t}"
+  printf 'fun ring(alarms: AlarmManager, info: AlarmManager.AlarmClockInfo, intent: PendingIntent) = alarms.setAlarmClock(info, intent)\n' >>"${t}/${activity_dir}/HavenApplication.kt"
+  _case "an alarm clock anywhere in the app fails" 1 "an exact alarm is named under ${ANDROID} — setExact…, setAlarmClock, SCHEDULE_EXACT_ALARM or USE_EXACT_ALARM, a comment included (${activity_dir}/HavenApplication.kt" "${t}"
+
+  t="${tmp}/exact-alarm-permission"; _tree "${t}"
+  sed -i 's|</manifest>|    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>\n</manifest>|' "${t}/${APP_SRC}/main/AndroidManifest.xml"
+  _case "the exact-alarm permission in a manifest fails" 1 "a comment included (${APP_SRC}/main/AndroidManifest.xml" "${t}"
+
+  t="${tmp}/exact-alarm-java"; _tree "${t}"
+  mkdir -p "${t}/${APP_SRC}/main/java/com/oblivioustech/haven"
+  printf 'class Ring { void ring(AlarmManager alarms, long at, PendingIntent intent) { alarms.setExact(0, at, intent); } }\n' >"${t}/${APP_SRC}/main/java/com/oblivioustech/haven/Ring.java"
+  _case "an exact alarm in a Java file fails" 1 "a comment included (${APP_SRC}/main/java/com/oblivioustech/haven/Ring.java" "${t}"
+
+  t="${tmp}/exact-alarm-groovy"; _tree "${t}"
+  printf '// android.permission.USE_EXACT_ALARM\n' >"${t}/${ANDROID}/extra.gradle"
+  _case "an exact alarm named in a Groovy Gradle script fails" 1 "a comment included (${ANDROID}/extra.gradle" "${t}"
+
+  t="${tmp}/exact-alarm-use"; _tree "${t}"
+  printf '// manifestPlaceholders["alarm"] = "android.permission.USE_EXACT_ALARM"\n' >>"${t}/${ANDROID}/build.gradle.kts"
+  _case "the other exact-alarm permission in a Gradle script fails, in a comment too" 1 "a comment included (${ANDROID}/build.gradle.kts" "${t}"
+
+  t="${tmp}/closes-in-sequence"; _tree "${t}"
+  sed -i 's/RadioEnd.each({ client?.stop() }, { server?.stop() }, { advertiser?.stop() }, { scanner?.stop() }, { lock.release() })/client?.stop(); server?.stop(); advertiser?.stop(); scanner?.stop(); lock.release()/' "${t}/${SERVICE}"
+  _case "a radio's closes written as a plain sequence fail: with Bluetooth off the first that throws skips the rest, and a pause becomes a stop" 1 "'RadioEnd.each({client?.stop()},{server?.stop()},{advertiser?.stop()},{scanner?.stop()},{lock.release()})' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/wipe-key-other"; _tree "${t}"
+  sed -i 's/"flutter.haven.security.pending_mls_wipe"/"flutter.haven.pending_wipe"/' "${t}/${SERVICE}"
+  _case "the logout's marker read under a key the Dart side does not write fails" 1 "${SERVICE} holds a string that is not its lock's tag" "${t}"
+
+  t="${tmp}/wipe-key-moved"; _tree "${t}"
+  sed -i "s/^const String kPendingMlsWipeKey = 'haven.security.pending_mls_wipe';/const String kPendingMlsWipeKey = 'haven.security.wipe_pending';/" "${t}/${WIPE_DART}"
+  _case "the Dart side's key moved alone fails: the service reads the old one" 1 "names kPendingMlsWipeKey ('haven.security.wipe_pending')" "${t}"
+
+  t="${tmp}/wipe-key-unread"; _tree "${t}"
+  sed -i '/^const String kPendingMlsWipeKey/d' "${t}/${WIPE_DART}"
+  _case "a Dart file that no longer names the key fails, not a key that matches nothing" 1 "names kPendingMlsWipeKey ('')" "${t}"
+
+  t="${tmp}/wipe-file-other"; _tree "${t}"
+  sed -i 's/"FlutterSharedPreferences"/"FlutterSecurePreferences"/' "${t}/${SERVICE}"
+  _case "the logout's marker read in another file than the plugin's fails" 1 "${SERVICE} holds a string that is not its lock's tag" "${t}"
+
+  t="${tmp}/service-string"; _tree "${t}"
+  printf 'const val PEERS = "haven_mesh_peers"\n' >>"${t}/${SERVICE}"
+  _case "a string of the service's own fails: a file, a key or a word nobody pinned" 1 "${SERVICE} holds a string that is not its lock's tag" "${t}"
+
+  t="${tmp}/service-suppression"; _tree "${t}"
+  sed -i 's/private inner class Live : RadioPort {/@Suppress("UNCHECKED_CAST")\n    private inner class Live : RadioPort {/' "${t}/${SERVICE}"
+  _case "a warning the service silences beside the three pinned fails" 1 "${SERVICE} holds a string that is not its lock's tag" "${t}"
+
+  t="${tmp}/prefs-ninth-key"; _tree "${t}"
+  sed -i 's/file.edit().putBoolean(WANTED, true).putLong(DEADLINE, deadlineMs).commit()/file.edit().putBoolean(WANTED, true).putLong(DEADLINE, deadlineMs).putString("peer", peer).commit()/' "${t}/${PREFS}"
+  _case "a ninth key in the stored copy fails: where an address would be kept at rest" 1 "${PREFS} does not keep exactly eight things in one file — the flag 'wanted', the time 'deadline', and the six strings under ChannelWords.COPY's keys (its strings are \"deadline\" \"haven_mesh\" \"peer\" \"wanted\"" "${t}"
+
+  t="${tmp}/prefs-other-write"; _tree "${t}"
+  sed -i 's/putLong(DEADLINE, deadlineMs)/putLong(DEADLINE, deadlineMs).putStringSet(DEADLINE, peers)/' "${t}/${PREFS}"
+  _case "a write of another kind under a pinned key fails" 1 "'.put' written 6 time(s), not 5" "${t}"
+
+  t="${tmp}/prefs-flag-under-other-key"; _tree "${t}"
+  sed -i 's/file.edit().putBoolean(WANTED, false)/file.edit().putBoolean(DEADLINE, false)/' "${t}/${PREFS}"
+  _case "the flag cleared under another key fails: a stop that is not final" 1 "'putBoolean(WANTED,' written 1 time(s), not 2" "${t}"
+
+  t="${tmp}/prefs-world-readable"; _tree "${t}"
+  sed -i 's/context.getSharedPreferences(FILE, Context.MODE_PRIVATE)/context.getSharedPreferences(FILE, Context.MODE_WORLD_READABLE)/' "${t}/${PREFS}"
+  _case "the stored copy opened in a mode that is not private fails" 1 "'privatevalfile=context.getSharedPreferences(FILE,Context.MODE_PRIVATE)' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/prefs-words-as-keys"; _tree "${t}"
+  sed -i 's/edit.putString(key, copy\[at\])/edit.putString(copy[at], key)/' "${t}/${PREFS}"
+  _case "the six strings kept under keys that are not the pinned six fails" 1 "'ChannelWords.COPY.forEachIndexed{at,key->edit.putString(key,copy[at])}' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/prefs-deadline-under-other-key"; _tree "${t}"
+  sed -i 's/putLong(DEADLINE, 0)/putLong(WANTED, 0)/' "${t}/${PREFS}"
+  _case "the deadline cleared under another key fails: a copy that outlives the stop" 1 "'putLong(DEADLINE,' written 1 time(s), not 2" "${t}"
+
+  t="${tmp}/prefs-wanted-by-default"; _tree "${t}"
+  sed -i 's/file.getBoolean(WANTED, false)/file.getBoolean(WANTED, true)/' "${t}/${PREFS}"
+  _case "a flag that reads as set where none was stored fails" 1 "'getBoolean(WANTED,false)' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/prefs-deadline-by-default"; _tree "${t}"
+  sed -i 's/file.getLong(DEADLINE, 0)/file.getLong(DEADLINE, Long.MAX_VALUE)/' "${t}/${PREFS}"
+  _case "a deadline that reads as ahead where none was stored fails" 1 "'getLong(DEADLINE,0)' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/prefs-copy-by-default"; _tree "${t}"
+  sed -i 's/file.getString(key, null)/file.getString(key, key)/' "${t}/${PREFS}"
+  _case "a string that reads as something where none was stored fails" 1 "'getString(key,null)' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/prefs-second-file"; _tree "${t}"
+  printf 'fun peers(context: Context) = context.getSharedPreferences(FILE, 0)\n' >>"${t}/${PREFS}"
+  _case "a second file fails" 1 "'getSharedPreferences(' written 3 time(s), not 2" "${t}"
+
+  t="${tmp}/prefs-other-read"; _tree "${t}"
+  printf 'fun peer(file: SharedPreferences) = file.getStringSet(WANTED, null)\n' >>"${t}/${PREFS}"
+  _case "a read of another kind fails" 1 "'.get' written 5 time(s), not 4" "${t}"
+
+  t="${tmp}/notice-template"; _tree "${t}"
+  sed -i 's/.setContentText(prefs.copy(notice.copy))/.setContentText("${prefs.copy(notice.copy)} · $linked")/' "${t}/${NOTICES}"
+  _case "a notice's text built from a template fails: where a count or an address reaches the lock screen" 1 "it writes a '\$'" "${t}"
+
+  t="${tmp}/notice-string"; _tree "${t}"
+  printf 'const val MORE = "phones linked"\n' >>"${t}/${NOTICES}"
+  _case "a word of the notices' own beside the title fails" 1 "its strings are \"Haven\" \"haven_mesh_v1\" \"phones linked\"" "${t}"
+
+  for name in setSubText setContentInfo setTicker setStyle setNumber setSettingsText addPerson setRemoteInputHistory; do
+    t="${tmp}/notice-${name}"; _tree "${t}"
+    sed -i "s/.setContentTitle(TITLE)/.setContentTitle(TITLE).${name}(linked)/" "${t}/${NOTICES}"
+    _case "a notice with ${name} fails: a second text" 1 "it names a second text of a notice" "${t}"
+  done
+
+  t="${tmp}/notice-action-label"; _tree "${t}"
+  sed -i 's/Notification.Action.Builder(icon, prefs.copy(NoticePlan.KEEP_ON), tap(ChannelWords.KEEP_ON))/Notification.Action.Builder(icon, label, tap(ChannelWords.KEEP_ON))/' "${t}/${NOTICES}"
+  _case "an action whose label is not the stored one fails" 1 "'Notification.Action.Builder(icon,prefs.copy(NoticePlan.KEEP_ON),tap(ChannelWords.KEEP_ON))' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/notice-channel-loud"; _tree "${t}"
+  sed -i 's/NotificationManager.IMPORTANCE_LOW/NotificationManager.IMPORTANCE_HIGH/' "${t}/${NOTICES}"
+  _case "a channel that is not of low importance, or not named by the stored string, fails" 1 "'NotificationChannel(CHANNEL,prefs.copy(NoticePlan.CHANNEL)?:TITLE,NotificationManager.IMPORTANCE_LOW)' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/notice-fourth-content"; _tree "${t}"
+  printf 'fun more(builder: Notification.Builder, intent: PendingIntent) = builder.setContentIntent(intent)\n' >>"${t}/${NOTICES}"
+  _case "a fourth content setter fails" 1 "'setContent' written 4 time(s), not 3" "${t}"
+
+  t="${tmp}/notice-other-text"; _tree "${t}"
+  sed -i 's/.setContentText(prefs.copy(notice.copy))/.setContentText(address)/' "${t}/${NOTICES}"
+  _case "a notice's text that is not one of the six stored strings fails" 1 "'.setContentText(prefs.copy(notice.copy))' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/notice-other-title"; _tree "${t}"
+  sed -i 's/.setContentTitle(TITLE)/.setContentTitle(name)/' "${t}/${NOTICES}"
+  _case "a notice's title that is not the app's name fails" 1 "'.setContentTitle(TITLE)' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/notice-second-action"; _tree "${t}"
+  printf 'fun more(builder: Notification.Builder, action: Notification.Action) = builder.addAction(action)\n' >>"${t}/${NOTICES}"
+  _case "a second action on a notice fails" 1 "'addAction' written 2 time(s), not 1" "${t}"
+
+  # Check 19, PUSH A: nothing reaches the log lever.
+  for name in BLUETOOTH_ON BLUETOOTH_NAME START; do
+    t="${tmp}/channel-answers-${name}"; _tree "${t}"
+    _line "${t}/${CHANNEL}" 'ChannelWords.TAKE_ACTION ->' "            ChannelWords.TAKE_ACTION -> result.success(taps.take())\n            ChannelWords.${name} -> result.success(false)"
+    _case "the channel answering ${name} fails: a method behind the lever, before the lane that proves the lever" 1 "of ChannelWords it names" "${t}"
+  done
+
+  t="${tmp}/channel-answers-by-word"; _tree "${t}"
+  _line "${t}/${CHANNEL}" 'ChannelWords.TAKE_ACTION ->' '            ChannelWords.TAKE_ACTION -> result.success(taps.take())\n            "bluetoothOn" -> result.success(false)'
+  _case "the channel answering a method by its word fails: it holds no string of its own" 1 "it holds a string of its own" "${t}"
+
+  t="${tmp}/channel-asks-the-set"; _tree "${t}"
+  printf 'fun gated(method: String) = method in ChannelWords.BEHIND_THE_LEVER\n' >>"${t}/${CHANNEL}"
+  _case "the channel asking which methods are behind the lever fails: it answers none of them yet" 1 "of ChannelWords it names BEHIND_THE_LEVER" "${t}"
+
+  t="${tmp}/channel-answers-all"; _tree "${t}"
+  sed -i 's/else -> result.notImplemented()/else -> result.success(null)/' "${t}/${CHANNEL}"
+  _case "a channel that answers a method it does not know fails: bluetoothOn would read as an answer" 1 "'else->result.notImplemented()' written 0 time(s), not 1" "${t}"
+
+  for name in MeshNative MeshReceiver MeshNotices MeshLoop startForegroundService startService sendBroadcast refusal leverInstall leverHolds \
+    BluetoothAdapter BluetoothManager BluetoothDevice BluetoothGatt; do
+    t="${tmp}/channel-reaches-${name}"; _tree "${t}"
+    printf 'val reach = Other::%s\n' "${name}" >>"${t}/${CHANNEL}"
+    _case "the channel naming ${name} fails: a way to the lever, to a service or to a Bluetooth object" 1 "${CHANNEL} can reach the log lever" "${t}"
+  done
+
+  t="${tmp}/channel-other-member"; _tree "${t}"
+  printf 'fun wake() = MeshService.alarm()\n' >>"${t}/${CHANNEL}"
+  _case "the channel calling something of the service beside its status, stop, sync and reads fails" 1 "of MeshService it names alarm" "${t}"
+
+  t="${tmp}/channel-policy"; _tree "${t}"
+  printf 'fun may() = StartPolicy.supported(30, true)\n' >>"${t}/${CHANNEL}"
+  _case "the channel naming StartPolicy a second time fails, whatever it asks of it" 1 "'StartPolicy' written 3 time(s), not 2" "${t}"
+
+  t="${tmp}/channel-policy-other"; _tree "${t}"
+  sed -i 's/StartPolicy.supported(/StartPolicy.start(/' "${t}/${CHANNEL}"
+  _case "the channel asking StartPolicy something that is not 'supported' fails" 1 "'StartPolicy.supported(' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/channel-bluetooth-import"; _tree "${t}"
+  sed -i 's/^import com.oblivioustech.haven.mesh.core.StartPolicy$/&\nimport android.bluetooth.le.ScanResult/' "${t}/${CHANNEL}"
+  _case "the channel importing a class of the platform's Bluetooth fails" 1 "'android.bluetooth' written 1 time(s), not 0" "${t}"
+
+  for name in service receiver activity activity-alias provider; do
+    t="${tmp}/manifest-${name}"; _tree "${t}"
+    sed -i "s|</manifest>|    <application>\n        <${name} android:name=\".mesh.Mesh\" android:exported=\"false\"/>\n    </application>\n</manifest>|" "${t}/${MESH_MANIFEST}"
+    _case "the mesh's manifest declaring a ${name} fails: the system could make it, and with it reach the lever" 1 "${MESH_MANIFEST} declares a component ($(printf '%s\n' application "${name}" | LC_ALL=C sort | tr '\n' ' '))" "${t}"
+  done
+
+  t="${tmp}/manifest-behind-comment"; _tree "${t}"
+  sed -i 's|</manifest>|    <!-- one --> <application><service android:name=".mesh.MeshService"/></application> <!-- two -->\n</manifest>|' "${t}/${MESH_MANIFEST}"
+  _case "a component declared between two comments on one line fails: only the comments are taken out" 1 "${MESH_MANIFEST} declares a component" "${t}"
+
+  t="${tmp}/channel-unflagged"; _tree "${t}"
+  sed -i 's/if (BuildConfig.HAVEN_MESH) {/run {/' "${t}/${ACTIVITY}"
+  _case "the channel made in every build fails: a build without the flag would have a native end" 1 "${ACTIVITY} does not make the mesh's channel once" "${t}"
+
+  t="${tmp}/channel-made-twice"; _tree "${t}"
+  _line "${t}/${ACTIVITY}" 'mesh?.intent(intent, replayed = false)' '        mesh = MeshChannel(this, messenger)'
+  _case "a second channel made outside the flag fails" 1 "'MeshChannel(' written 2 time(s), not 1" "${t}"
+
+  t="${tmp}/activity-names-service"; _tree "${t}"
+  printf 'fun live() = MeshService.alarm()\n' >>"${t}/${ACTIVITY}"
+  _case "the activity naming the service fails: only the channel, under the flag" 1 "it names a class of the mesh that is not its channel" "${t}"
+
+  for name in MeshService MeshReceiver MeshNotices MeshPrefs MeshNative MeshLoop MeshChannel; do
+    t="${tmp}/application-names-${name}"; _tree "${t}"
+    printf 'val early = %s::class\n' "${name}" >>"${t}/${activity_dir}/HavenApplication.kt"
+    _case "the application class naming ${name} fails: it runs in every build" 1 "${activity_dir}/HavenApplication.kt names a class of the mesh" "${t}"
+  done
+
+  t="${tmp}/java-names-mesh"; _tree "${t}"
+  mkdir -p "${t}/${APP_SRC}/main/java/com/oblivioustech/haven"
+  printf 'class Hook { Object hook = com.oblivioustech.haven.mesh.MeshService.class; }\n' >"${t}/${APP_SRC}/main/java/com/oblivioustech/haven/Hook.java"
+  _case "a Java file naming a class of the mesh fails" 1 "Hook.java names a class of the mesh" "${t}"
+
+  t="${tmp}/other-set-names-mesh"; _tree "${t}"
+  mkdir -p "${t}/${APP_SRC}/debug/kotlin/com/oblivioustech/haven"
+  printf 'package com.oblivioustech.haven\n\nfun hook(context: Context) = context.startForegroundService(Intent(context, com.oblivioustech.haven.mesh.MeshService::class.java))\n' >"${t}/${APP_SRC}/debug/kotlin/com/oblivioustech/haven/DebugHook.kt"
+  _case "a debug source set that starts the service fails: a way in that is not what ships" 1 "DebugHook.kt names a class of the mesh" "${t}"
+
   # Misconfiguration.
+  for name in "${SERVICE}" "${RECEIVER}" "${NOTICES}" "${PREFS}" "${CHANNEL}" "${ACTIVITY}" "${MESH_MANIFEST}" "${WIPE_DART}"; do
+    t="${tmp}/no-${name##*/}"; _tree "${t}"
+    rm "${t:?}/${name:?}"
+    _case "a tree without ${name##*/} is a misconfiguration" 2 "${name} not found" "${t}"
+  done
+
   t="${tmp}/no-loop"; _tree "${t}"
   rm "${t:?}/${LOOP:?}"
   _case "a radio with no loop is a misconfiguration" 2 '' "${t}"
 
   t="${tmp}/no-callbacks"; _tree "${t}"
-  sed -i 's/override fun on/fun on/' "${t}/${adapter}" "${t}/${client}" "${t}/${server}"
+  sed -i 's/override fun on/fun on/' "${t}/${adapter}" "${t}/${client}" "${t}/${server}" "${t}/${SERVICE}" "${t}/${RECEIVER}" "${t}/${CHANNEL}"
   _case "adapters that declare no platform callback are a misconfiguration, not callbacks that all post" 2 'would be reading nothing' "${t}"
 
   t="${tmp}/no-native"; _tree "${t}"

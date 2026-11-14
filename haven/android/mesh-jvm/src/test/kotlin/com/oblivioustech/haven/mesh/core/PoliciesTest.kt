@@ -38,10 +38,20 @@ class PoliciesTest {
         }
         var inForeground = false
         lever.onCall = { assertTrue(inForeground, "the lever was asked before the service was in the foreground") }
-        val start = StartPolicy.start(api, bluetoothLe, lever, wipePending, permission, engine, stored, wallClock) {
-            assertTrue(engine.calls.isEmpty(), "the engine was touched before the service was in the foreground")
-            inForeground = true
-        }
+        val start = StartPolicy.start(
+            api,
+            foreground = {
+                assertTrue(engine.calls.isEmpty(), "the engine was touched before the service was in the foreground")
+                inForeground = true
+            },
+            bluetoothLe = { bluetoothLe },
+            lever = { lever },
+            wipePending = { wipePending },
+            permission = { permission },
+            engine = { engine },
+            storedDeadlineMs = { stored },
+            wallClockMs = { wallClock },
+        )
         return Started(start, inForeground, engine, lever)
     }
 
@@ -108,6 +118,141 @@ class PoliciesTest {
         )
         // What the caller asked just before is asked again here: a lever can stop holding in between.
         assertEquals(listOf("leverInstall()", "leverHolds()"), start(left = 5 * HOUR, stored = 0).lever.calls)
+    }
+
+    /**
+     * §O.1.2: a service ended while it still owes its foreground start takes the process down. What the start
+     * reads — the stored copy, the logout's marker, a permission — and the class whose first naming loads the
+     * native library can each throw, so each is handed over as a function and none is called before the
+     * foreground start has returned: thrown behind it, it is a stop like any other.
+     */
+    @Test
+    fun nothingIsReadAndNoLibraryNamedBeforeTheForegroundStart() {
+        val inputs = listOf("bluetoothLe", "lever", "wipePending", "permission", "engine", "storedDeadlineMs", "wallClockMs")
+        fun started(api: Int, throwing: String?): Pair<Boolean, List<String>> {
+            var inForeground = false
+            val read = mutableListOf<String>()
+            fun <T> input(name: String, value: T): () -> T = {
+                assertTrue(inForeground, "$name was read before the service was in the foreground")
+                read += name
+                if (name == throwing) throw Thrown()
+                value
+            }
+            val engine = FakeEngine().apply { left = 0 }
+            try {
+                StartPolicy.start(
+                    api,
+                    foreground = {
+                        assertTrue(read.isEmpty(), "read before the foreground start: $read")
+                        inForeground = true
+                    },
+                    bluetoothLe = input("bluetoothLe", true),
+                    lever = input("lever", FakeLever()),
+                    wipePending = input("wipePending", false),
+                    permission = input("permission", true),
+                    engine = input("engine", engine),
+                    storedDeadlineMs = input("storedDeadlineMs", wallClock + HOUR),
+                    wallClockMs = input("wallClockMs", wallClock),
+                )
+            } catch (_: Thrown) {
+            }
+            return inForeground to read
+        }
+        // A start that runs reads every one of them, each once, and each behind the foreground start.
+        val (inForeground, read) = started(api = 34, throwing = null)
+        assertTrue(inForeground)
+        assertEquals(inputs.sorted(), read.sorted())
+        // Whichever of them throws, the service is in the foreground by then.
+        for (input in inputs) assertTrue(started(api = 34, input).first, "$input threw ahead of the foreground start")
+        // And on a level the radio never starts on: the foreground start all the same.
+        assertTrue(started(api = 29, throwing = null).first)
+    }
+
+    /**
+     * §B.5, §O.1.8: after a reboot or an update the mesh comes back by itself only while the user's turn-on still
+     * stands. And the refusal — which puts the log lever in — is asked only then: a boot is no reason for a process
+     * nobody turned the mesh on in to lose its log.
+     */
+    @Test
+    fun afterBootTheServiceIsStartedOnlyWithTheFlagADeadlineAheadAndNoRefusal() {
+        fun boots(wanted: Boolean, deadline: Long, refusal: MeshStart?): Pair<Boolean, Int> {
+            var asked = 0
+            val starts = ReceiverPolicy.startsAtBoot(wanted, deadline, wallClock) {
+                asked++
+                refusal
+            }
+            return starts to asked
+        }
+        assertEquals(true to 1, boots(wanted = true, deadline = wallClock + 1, refusal = null))
+        assertEquals(true to 1, boots(wanted = true, deadline = wallClock + 12 * HOUR, refusal = null))
+        // The flag clear: a stop the service or the user made is final.
+        assertEquals(false to 0, boots(wanted = false, deadline = wallClock + HOUR, refusal = null))
+        // The twelve hours ran out while the phone was off.
+        for (deadline in listOf(0, wallClock - 1, wallClock)) {
+            assertEquals(false to 0, boots(wanted = true, deadline = deadline, refusal = null), "deadline $deadline")
+        }
+        // Whatever would refuse the start refuses it here, before a service exists to end without its foreground.
+        for (refusal in listOf(MeshStart.UNSUPPORTED, MeshStart.FAILED, MeshStart.NO_PERMISSION)) {
+            assertEquals(false to 1, boots(wanted = true, deadline = wallClock + HOUR, refusal = refusal), "$refusal")
+        }
+    }
+
+    /**
+     * §O.1.5: the alarm outlives the process. One that finds no service starts none — an alarm is no licence for a
+     * foreground service, and the one answer here is whether to end — and where the twelve hours are up it ends the
+     * mesh the dead process left: flag and copy cleared, the stopped notice.
+     */
+    @Test
+    fun anAlarmThatFindsNoServiceStartsNoneAndEndsAMeshWhoseTimeIsUp() {
+        assertTrue(ReceiverPolicy.endsAtAlarm(wanted = true, deadlineMs = wallClock, wallClockMs = wallClock))
+        assertTrue(ReceiverPolicy.endsAtAlarm(wanted = true, deadlineMs = wallClock - HOUR, wallClockMs = wallClock))
+        // Time left: the restart the platform owes a sticky service finds the copy and goes on. Nothing is done here.
+        assertFalse(ReceiverPolicy.endsAtAlarm(wanted = true, deadlineMs = wallClock + 1, wallClockMs = wallClock))
+        // No mesh was left on: nothing to end, and no notice of a stop that was told already.
+        for (deadline in listOf(0, wallClock - 1, wallClock + HOUR)) {
+            assertFalse(ReceiverPolicy.endsAtAlarm(wanted = false, deadlineMs = deadline, wallClockMs = wallClock))
+        }
+    }
+
+    /**
+     * §B.6, §O.1.3: Bluetooth switched off is a pause — the radio down, the service and its twelve hours going on —
+     * and switched on again a radio. Down at "turning off" already: two of the closes throw once LE is off.
+     */
+    @Test
+    fun bluetoothOffPausesAndOnResumesAndNothingElseMovesTheRadio() {
+        fun at(state: BluetoothState, radioUp: Boolean) = BluetoothSwitch.at(state, radioUp)
+        assertEquals(RadioMove.DOWN, at(BluetoothState.TURNING_OFF, radioUp = true))
+        assertEquals(RadioMove.DOWN, at(BluetoothState.OFF, radioUp = true))
+        assertEquals(RadioMove.UP, at(BluetoothState.ON, radioUp = false))
+        // Told twice, or told of a radio that is already as asked: nothing. A radio is never made beside one.
+        assertEquals(RadioMove.NONE, at(BluetoothState.ON, radioUp = true))
+        assertEquals(RadioMove.NONE, at(BluetoothState.TURNING_OFF, radioUp = false))
+        assertEquals(RadioMove.NONE, at(BluetoothState.OFF, radioUp = false))
+        // "Turning on" and whatever else the platform has: no radio yet, and none taken down.
+        for (radioUp in listOf(true, false)) assertEquals(RadioMove.NONE, at(BluetoothState.OTHER, radioUp))
+        // Three moves and no fourth: nothing here is a stop.
+        assertEquals(listOf(RadioMove.UP, RadioMove.DOWN, RadioMove.NONE), RadioMove.entries)
+    }
+
+    /**
+     * §B.5, §O.1.6: two ids. The service is in the foreground under one, on or paused; the reminder is under the
+     * other, and the stopped notice takes its place there, so that no Keep on outlives the stop.
+     */
+    @Test
+    fun theOngoingNoticeIsOnOrPausedAndTheStoppedNoticeTakesTheRemindersId() {
+        assertEquals(Notice.ON, NoticePlan.ongoing(radioUp = true))
+        assertEquals(Notice.PAUSED, NoticePlan.ongoing(radioUp = false))
+        assertEquals(listOf(NoticePlan.ONGOING, NoticePlan.ONGOING), listOf(Notice.ON.id, Notice.PAUSED.id))
+        assertEquals(listOf(NoticePlan.ALERT, NoticePlan.ALERT), listOf(Notice.REMINDER.id, Notice.STOPPED.id))
+        assertNotEquals(NoticePlan.ONGOING, NoticePlan.ALERT)
+        // The location service's notice is 4831: the mesh's are not that one.
+        assertTrue(4831 !in listOf(NoticePlan.ONGOING, NoticePlan.ALERT))
+        // Keep on is the reminder's alone.
+        assertEquals(listOf(Notice.REMINDER), Notice.entries.filter { it.keepOn })
+        // Each text is one of the six strings, by its key, and no two notices share one.
+        assertEquals(listOf("on", "paused", "reminder", "stopped"), Notice.entries.map { it.copy })
+        assertTrue((Notice.entries.map { it.copy } + NoticePlan.CHANNEL + NoticePlan.KEEP_ON).all { it in ChannelWords.COPY })
+        assertEquals(ChannelWords.COPY.sorted(), (Notice.entries.map { it.copy } + NoticePlan.CHANNEL + NoticePlan.KEEP_ON).sorted())
     }
 
     /** §M.3: below Android 11 no process can keep the platform's Bluetooth lines out of its own log. */
@@ -215,6 +360,11 @@ class PoliciesTest {
         )
         // Kept on, and the half hour comes round again.
         assertEquals(listOf(DeadlineStep.NOTHING, DeadlineStep.REMINDER), listOf(12 * HOUR, 10 * MINUTE).map(deadline::at))
+        // Its words changed: given again while it is owed, and not past the stop.
+        deadline.reworded()
+        assertEquals(listOf(DeadlineStep.REMINDER, DeadlineStep.NOTHING), listOf(9 * MINUTE, 8 * MINUTE).map(deadline::at))
+        deadline.reworded()
+        assertEquals(DeadlineStep.STOP, deadline.at(0))
         assertEquals(HOUR, deadline.reminderIn(90 * MINUTE))
         assertNull(deadline.reminderIn(30 * MINUTE))
 
@@ -233,9 +383,17 @@ class PoliciesTest {
             assertEquals(1, rig.port.called("remind").size, "Bluetooth on: $bluetooth")
             // Then the deadline itself wakes a phone with no radio.
             if (!bluetooth) assertEquals(30 * MINUTE, rig.port.wakes.last())
+            // A sync is a wake that asks for the reminder again where it is still owed: the service took it down,
+            // for the words or the time it tells are no longer true. Kept on, none is owed, and none is asked for.
+            rig.core.onSync()
+            assertEquals(2, rig.port.called("remind").size, "Bluetooth on: $bluetooth")
+            rig.engine.left = 12 * HOUR
+            rig.core.onSync()
+            assertEquals(2, rig.port.called("remind").size, "a mesh kept on was reminded")
+            if (!bluetooth) assertEquals(12 * HOUR - 30 * MINUTE, rig.port.wakes.last())
             rig.engine.left = 0
-            rig.core.onWake()
-            assertTrue(!rig.core.running && rig.port.called("remind").size == 1)
+            rig.core.onSync()
+            assertTrue(!rig.core.running && rig.port.called("remind").size == 2)
         }
     }
 
