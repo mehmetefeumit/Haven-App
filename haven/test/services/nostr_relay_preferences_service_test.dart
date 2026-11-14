@@ -22,6 +22,7 @@
 ///     where the caller MUST NOT publish anything.
 library;
 
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -280,6 +281,10 @@ class _FakeCircleManager implements CircleManagerFfi {
       throw UnimplementedError('unexpected call: ${invocation.memberName}');
 }
 
+/// The service as production builds it: the manager is asked for at each call.
+NostrRelayPreferencesService _serviceOver(CircleManagerFfi manager) =>
+    NostrRelayPreferencesService(circleManagerFactory: () async => manager);
+
 /// A raw FFI error string shaped like the redacted-but-still-internal detail
 /// Rust can surface — carries an MLS-group-id-looking hex run. No promise
 /// under test here is about WHAT Rust redacts (that's `redact_hex_sequences`,
@@ -295,7 +300,7 @@ void main() {
       'kind-10002 migration)',
       () async {
         final manager = _FakeCircleManager();
-        final service = NostrRelayPreferencesService(manager: manager);
+        final service = _serviceOver(manager);
         await service.listRelays(RelayCategory.keyPackage);
         expect(manager.lastRelayType, RelayTypeFfi.nip65);
       },
@@ -309,7 +314,7 @@ void main() {
       };
       for (final category in RelayCategory.values) {
         final manager = _FakeCircleManager();
-        final service = NostrRelayPreferencesService(manager: manager);
+        final service = _serviceOver(manager);
         await service.listRelays(category);
         expect(
           manager.lastRelayType,
@@ -324,7 +329,7 @@ void main() {
     test('returns the relays the manager reports', () async {
       final manager = _FakeCircleManager()
         ..listUserRelaysResult = const ['wss://a.example', 'wss://b.example'];
-      final service = NostrRelayPreferencesService(manager: manager);
+      final service = _serviceOver(manager);
       final relays = await service.listRelays(RelayCategory.inbox);
       expect(relays, ['wss://a.example', 'wss://b.example']);
     });
@@ -335,7 +340,7 @@ void main() {
       () async {
         final manager = _FakeCircleManager()
           ..listUserRelaysThrows = Exception(_sensitiveRawError);
-        final service = NostrRelayPreferencesService(manager: manager);
+        final service = _serviceOver(manager);
         await expectLater(
           service.listRelays(RelayCategory.inbox),
           throwsA(
@@ -359,7 +364,7 @@ void main() {
   group('NostrRelayPreferencesService — addRelay', () {
     test('forwards the url and category to the manager', () async {
       final manager = _FakeCircleManager();
-      final service = NostrRelayPreferencesService(manager: manager);
+      final service = _serviceOver(manager);
       await service.addRelay(RelayCategory.keyPackage, 'wss://new.example');
       expect(manager.lastAddUrl, 'wss://new.example');
       expect(manager.lastRelayType, RelayTypeFfi.nip65);
@@ -405,7 +410,7 @@ void main() {
         () async {
           final manager = _FakeCircleManager()
             ..addUserRelayThrows = Exception(case_.raw);
-          final service = NostrRelayPreferencesService(manager: manager);
+          final service = _serviceOver(manager);
           await expectLater(
             service.addRelay(RelayCategory.inbox, 'ws://bad'),
             throwsA(
@@ -426,7 +431,7 @@ void main() {
       () async {
         final manager = _FakeCircleManager()
           ..addUserRelayThrows = Exception(_sensitiveRawError);
-        final service = NostrRelayPreferencesService(manager: manager);
+        final service = _serviceOver(manager);
         await expectLater(
           service.addRelay(RelayCategory.inbox, 'wss://ok.example'),
           throwsA(
@@ -446,7 +451,7 @@ void main() {
   group('NostrRelayPreferencesService — removeRelay', () {
     test("returns the manager's removal result", () async {
       final manager = _FakeCircleManager()..removeUserRelayResult = false;
-      final service = NostrRelayPreferencesService(manager: manager);
+      final service = _serviceOver(manager);
       final removed = await service.removeRelay(
         RelayCategory.inbox,
         'wss://gone.example',
@@ -463,7 +468,7 @@ void main() {
           ..removeUserRelayThrows = Exception(
             'At least one relay is required per category',
           );
-        final service = NostrRelayPreferencesService(manager: manager);
+        final service = _serviceOver(manager);
         await expectLater(
           service.removeRelay(RelayCategory.inbox, 'wss://only.example'),
           throwsA(
@@ -483,7 +488,7 @@ void main() {
       () async {
         final manager = _FakeCircleManager()
           ..removeUserRelayThrows = Exception('Invalid relay URL');
-        final service = NostrRelayPreferencesService(manager: manager);
+        final service = _serviceOver(manager);
         await expectLater(
           service.removeRelay(RelayCategory.inbox, 'not-a-url'),
           throwsA(
@@ -503,7 +508,7 @@ void main() {
       () async {
         final manager = _FakeCircleManager()
           ..removeUserRelayThrows = Exception(_sensitiveRawError);
-        final service = NostrRelayPreferencesService(manager: manager);
+        final service = _serviceOver(manager);
         await expectLater(
           service.removeRelay(RelayCategory.inbox, 'wss://ok.example'),
           throwsA(
@@ -523,7 +528,7 @@ void main() {
   group('NostrRelayPreferencesService — defaults + seeding', () {
     test('restoreDefaults delegates to restoreDefaultsFor', () async {
       final manager = _FakeCircleManager();
-      final service = NostrRelayPreferencesService(manager: manager);
+      final service = _serviceOver(manager);
       await service.restoreDefaults(RelayCategory.profile);
       expect(manager.calls, contains('restoreDefaultsFor'));
       expect(manager.lastRelayType, RelayTypeFfi.profile);
@@ -532,7 +537,7 @@ void main() {
     test('a restoreDefaults failure is generic and never leaks', () async {
       final manager = _FakeCircleManager()
         ..restoreDefaultsForThrows = Exception(_sensitiveRawError);
-      final service = NostrRelayPreferencesService(manager: manager);
+      final service = _serviceOver(manager);
       await expectLater(
         service.restoreDefaults(RelayCategory.inbox),
         throwsA(
@@ -553,7 +558,7 @@ void main() {
 
     test('wipeAndResetDefaults delegates to wipeAndResetDefaultsFor', () async {
       final manager = _FakeCircleManager();
-      final service = NostrRelayPreferencesService(manager: manager);
+      final service = _serviceOver(manager);
       await service.wipeAndResetDefaults(RelayCategory.keyPackage);
       expect(manager.calls, contains('wipeAndResetDefaultsFor'));
       expect(manager.lastRelayType, RelayTypeFfi.nip65);
@@ -562,7 +567,7 @@ void main() {
     test('a wipeAndResetDefaults failure is generic and never leaks', () async {
       final manager = _FakeCircleManager()
         ..wipeAndResetDefaultsForThrows = Exception(_sensitiveRawError);
-      final service = NostrRelayPreferencesService(manager: manager);
+      final service = _serviceOver(manager);
       await expectLater(
         service.wipeAndResetDefaults(RelayCategory.inbox),
         throwsA(
@@ -581,7 +586,7 @@ void main() {
       'seedDefaultsIfUnseeded delegates and discards the FFI bool',
       () async {
         final manager = _FakeCircleManager();
-        final service = NostrRelayPreferencesService(manager: manager);
+        final service = _serviceOver(manager);
         // The FFI reports whether it actually seeded (bool); the service's
         // contract is `Future<void>` — this proves the wrapper never
         // surfaces that value as its own return, matching the interface
@@ -596,7 +601,7 @@ void main() {
       () async {
         final manager = _FakeCircleManager()
           ..seedRelayDefaultsIfUnseededThrows = Exception(_sensitiveRawError);
-        final service = NostrRelayPreferencesService(manager: manager);
+        final service = _serviceOver(manager);
         await expectLater(
           service.seedDefaultsIfUnseeded(),
           throwsA(
@@ -620,14 +625,14 @@ void main() {
   group('NostrRelayPreferencesService — publish toggle', () {
     test('getPublishRelayList returns the manager value', () async {
       final manager = _FakeCircleManager()..getPublishRelayListResult = false;
-      final service = NostrRelayPreferencesService(manager: manager);
+      final service = _serviceOver(manager);
       expect(await service.getPublishRelayList(RelayCategory.inbox), isFalse);
     });
 
     test('a getPublishRelayList failure is generic and never leaks', () async {
       final manager = _FakeCircleManager()
         ..getPublishRelayListThrows = Exception(_sensitiveRawError);
-      final service = NostrRelayPreferencesService(manager: manager);
+      final service = _serviceOver(manager);
       await expectLater(
         service.getPublishRelayList(RelayCategory.inbox),
         throwsA(
@@ -648,7 +653,7 @@ void main() {
 
     test('setPublishRelayList forwards the category and value', () async {
       final manager = _FakeCircleManager();
-      final service = NostrRelayPreferencesService(manager: manager);
+      final service = _serviceOver(manager);
       await service.setPublishRelayList(RelayCategory.keyPackage, value: false);
       expect(manager.lastRelayType, RelayTypeFfi.nip65);
       expect(manager.lastSetPublishValue, isFalse);
@@ -657,7 +662,7 @@ void main() {
     test('a setPublishRelayList failure is generic and never leaks', () async {
       final manager = _FakeCircleManager()
         ..setPublishRelayListThrows = Exception(_sensitiveRawError);
-      final service = NostrRelayPreferencesService(manager: manager);
+      final service = _serviceOver(manager);
       await expectLater(
         service.setPublishRelayList(RelayCategory.inbox, value: true),
         throwsA(
@@ -684,7 +689,7 @@ void main() {
       () async {
         final manager = _FakeCircleManager()
           ..relayPublishTargetsResult = const ['wss://only-mine.example'];
-        final service = NostrRelayPreferencesService(manager: manager);
+        final service = _serviceOver(manager);
         final targets = await service.publishTargets(RelayCategory.inbox);
         expect(targets, ['wss://only-mine.example']);
       },
@@ -693,7 +698,7 @@ void main() {
     test('a publishTargets failure is generic and never leaks', () async {
       final manager = _FakeCircleManager()
         ..relayPublishTargetsThrows = Exception(_sensitiveRawError);
-      final service = NostrRelayPreferencesService(manager: manager);
+      final service = _serviceOver(manager);
       await expectLater(
         service.publishTargets(RelayCategory.inbox),
         throwsA(
@@ -721,7 +726,7 @@ void main() {
           kind: 10002,
           createdAtSecs: 1700000000,
         );
-      final service = NostrRelayPreferencesService(manager: manager);
+      final service = _serviceOver(manager);
       final secret = Uint8List.fromList(List<int>.filled(32, 9));
       final result = await service.buildRelayListPublish(
         identitySecretBytes: secret,
@@ -747,7 +752,7 @@ void main() {
             awaitingResetAcknowledgement: false,
             targets: [],
           );
-        final service = NostrRelayPreferencesService(manager: manager);
+        final service = _serviceOver(manager);
         final result = await service.buildRelayListPublish(
           identitySecretBytes: Uint8List(32),
           category: RelayCategory.inbox,
@@ -769,7 +774,7 @@ void main() {
             awaitingResetAcknowledgement: true,
             targets: [],
           );
-        final service = NostrRelayPreferencesService(manager: manager);
+        final service = _serviceOver(manager);
         final result = await service.buildRelayListPublish(
           identitySecretBytes: Uint8List(32),
           category: RelayCategory.keyPackage,
@@ -786,7 +791,7 @@ void main() {
       () async {
         final manager = _FakeCircleManager()
           ..buildRelayListPublishThrows = Exception(_sensitiveRawError);
-        final service = NostrRelayPreferencesService(manager: manager);
+        final service = _serviceOver(manager);
         await expectLater(
           service.buildRelayListPublish(
             identitySecretBytes: Uint8List(32),
@@ -813,7 +818,7 @@ void main() {
   group('NostrRelayPreferencesService — recordPublishedRelayList', () {
     test('forwards every field unchanged to the manager', () async {
       final manager = _FakeCircleManager();
-      final service = NostrRelayPreferencesService(manager: manager);
+      final service = _serviceOver(manager);
       await service.recordPublishedRelayList(
         identityPubkeyHex: 'deadbeef' * 8,
         kind: 10050,
@@ -831,7 +836,7 @@ void main() {
       () async {
         final manager = _FakeCircleManager()
           ..recordPublishedRelayListThrows = Exception(_sensitiveRawError);
-        final service = NostrRelayPreferencesService(manager: manager);
+        final service = _serviceOver(manager);
         await expectLater(
           service.recordPublishedRelayList(
             identityPubkeyHex: 'pk',
@@ -866,7 +871,7 @@ void main() {
           deletionEventJson: '{"kind":5}',
           targets: ['wss://kept.example'],
         );
-      final service = NostrRelayPreferencesService(manager: manager);
+      final service = _serviceOver(manager);
       final result = await service.buildUnpublishRelayList(
         identitySecretBytes: Uint8List(32),
         category: RelayCategory.inbox,
@@ -882,7 +887,7 @@ void main() {
       () async {
         final manager = _FakeCircleManager()
           ..buildUnpublishRelayListThrows = Exception(_sensitiveRawError);
-        final service = NostrRelayPreferencesService(manager: manager);
+        final service = _serviceOver(manager);
         await expectLater(
           service.buildUnpublishRelayList(
             identitySecretBytes: Uint8List(32),
@@ -917,7 +922,7 @@ void main() {
             deletionEventJson: '{"kind":5,"scrub":true}',
             targets: ['wss://dropped.example'],
           );
-        final service = NostrRelayPreferencesService(manager: manager);
+        final service = _serviceOver(manager);
         final result = await service.buildRelayRemovalScrub(
           identitySecretBytes: Uint8List(32),
           category: RelayCategory.inbox,
@@ -936,7 +941,7 @@ void main() {
       () async {
         final manager = _FakeCircleManager()
           ..buildRelayRemovalScrubThrows = Exception(_sensitiveRawError);
-        final service = NostrRelayPreferencesService(manager: manager);
+        final service = _serviceOver(manager);
         await expectLater(
           service.buildRelayRemovalScrub(
             identitySecretBytes: Uint8List(32),
@@ -970,7 +975,7 @@ void main() {
           usable: 5,
           isUnderflow: false,
         );
-      final service = NostrRelayPreferencesService(manager: manager);
+      final service = _serviceOver(manager);
       final status = await service.profilePoolStatus();
       expect(status.configured, 8);
       expect(status.excluded, 3);
@@ -981,7 +986,7 @@ void main() {
     test('a profilePoolStatus failure is generic and never leaks', () async {
       final manager = _FakeCircleManager()
         ..profilePoolStatusThrows = Exception(_sensitiveRawError);
-      final service = NostrRelayPreferencesService(manager: manager);
+      final service = _serviceOver(manager);
       await expectLater(
         service.profilePoolStatus(),
         throwsA(
@@ -1002,7 +1007,7 @@ void main() {
 
     test('restoreDefaultProfileRelays delegates to the manager', () async {
       final manager = _FakeCircleManager();
-      final service = NostrRelayPreferencesService(manager: manager);
+      final service = _serviceOver(manager);
       await service.restoreDefaultProfileRelays();
       expect(manager.calls, contains('restoreDefaultProfileRelays'));
     });
@@ -1012,7 +1017,7 @@ void main() {
       () async {
         final manager = _FakeCircleManager()
           ..restoreDefaultProfileRelaysThrows = Exception(_sensitiveRawError);
-        final service = NostrRelayPreferencesService(manager: manager);
+        final service = _serviceOver(manager);
         await expectLater(
           service.restoreDefaultProfileRelays(),
           throwsA(
@@ -1022,6 +1027,121 @@ void main() {
                   'message',
                   'Failed to restore defaults.',
                 )
+                .having(
+                  (e) => e.toString(),
+                  'toString()',
+                  isNot(contains('deadbeef')),
+                ),
+          ),
+        );
+      },
+    );
+  });
+
+  group('NostrRelayPreferencesService — the manager handle', () {
+    // The circle service disposes its handle at every Android background
+    // handoff and opens a new one on resume. A service that kept the first
+    // handle failed every later call — the Relays page's "Failed to load
+    // relays." for any list not already read before the pause.
+    final calls = <String, Future<Object?> Function(RelayPreferencesService)>{
+      'listRelays': (s) => s.listRelays(RelayCategory.keyPackage),
+      'addRelay': (s) => s.addRelay(RelayCategory.profile, 'wss://a.example'),
+      'removeRelay': (s) =>
+          s.removeRelay(RelayCategory.profile, 'wss://a.example'),
+      'restoreDefaults': (s) => s.restoreDefaults(RelayCategory.profile),
+      'wipeAndResetDefaults': (s) =>
+          s.wipeAndResetDefaults(RelayCategory.keyPackage),
+      'seedDefaultsIfUnseeded': (s) => s.seedDefaultsIfUnseeded(),
+      'getPublishRelayList': (s) =>
+          s.getPublishRelayList(RelayCategory.keyPackage),
+      'setPublishRelayList': (s) =>
+          s.setPublishRelayList(RelayCategory.keyPackage, value: true),
+      'publishTargets': (s) => s.publishTargets(RelayCategory.keyPackage),
+      'buildRelayListPublish': (s) => s.buildRelayListPublish(
+        identitySecretBytes: Uint8List(32),
+        category: RelayCategory.keyPackage,
+      ),
+      'recordPublishedRelayList': (s) => s.recordPublishedRelayList(
+        identityPubkeyHex: 'aa',
+        kind: 10002,
+        eventIdHex: 'bb',
+        publishedAtSecs: 1,
+      ),
+      'buildUnpublishRelayList': (s) => s.buildUnpublishRelayList(
+        identitySecretBytes: Uint8List(32),
+        category: RelayCategory.keyPackage,
+      ),
+      'buildRelayRemovalScrub': (s) => s.buildRelayRemovalScrub(
+        identitySecretBytes: Uint8List(32),
+        category: RelayCategory.keyPackage,
+        droppedRelays: const ['wss://a.example'],
+      ),
+      'profilePoolStatus': (s) => s.profilePoolStatus(),
+      'restoreDefaultProfileRelays': (s) => s.restoreDefaultProfileRelays(),
+    };
+
+    test('covers every method of the service interface', () {
+      // A method added to the interface but missing here would be the one
+      // place a held handle could hide.
+      final source = File(
+        'lib/src/services/relay_preferences_service.dart',
+      ).readAsStringSync();
+      final body = source.substring(
+        source.indexOf('abstract class RelayPreferencesService {'),
+      );
+      final declared = RegExp('^  Future<', multiLine: true).allMatches(body);
+      expect(calls, hasLength(declared.length));
+    });
+
+    for (final MapEntry(key: name, value: call) in calls.entries) {
+      test('$name uses the handle that is current when it is called', () async {
+        final beforePause = _FakeCircleManager();
+        final afterResume = _FakeCircleManager();
+        var current = beforePause;
+        final service = NostrRelayPreferencesService(
+          circleManagerFactory: () async => current,
+        );
+        await call(service);
+        // The handoff disposes the first handle; the circle service answers
+        // with a new one from now on.
+        current = afterResume;
+        await call(service);
+        expect(beforePause.calls, hasLength(1));
+        expect(afterResume.calls, hasLength(1));
+      });
+    }
+
+    test(
+      'a manager that cannot be opened fails as the same generic, typed '
+      'exception as a failed call, never carrying its text (Rule 8)',
+      () async {
+        final service = NostrRelayPreferencesService(
+          circleManagerFactory: () async =>
+              throw Exception(_sensitiveRawError),
+        );
+        await expectLater(
+          service.listRelays(RelayCategory.keyPackage),
+          throwsA(
+            isA<RelayPreferencesException>()
+                .having(
+                  (e) => e.message,
+                  'message',
+                  'Failed to load relay list.',
+                )
+                .having(
+                  (e) => e.toString(),
+                  'toString()',
+                  isNot(contains('deadbeef')),
+                ),
+          ),
+        );
+        // A mutation is never misreported as a validation problem the user
+        // could fix by retyping the URL.
+        await expectLater(
+          service.addRelay(RelayCategory.profile, 'wss://a.example'),
+          throwsA(
+            isA<RelayPreferencesException>()
+                .having((e) => e.message, 'message', 'Relay update failed.')
                 .having(
                   (e) => e.toString(),
                   'toString()',
