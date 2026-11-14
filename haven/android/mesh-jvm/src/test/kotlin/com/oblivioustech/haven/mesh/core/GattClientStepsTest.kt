@@ -240,6 +240,74 @@ class GattClientStepsTest {
         for (radios in listOf(late, lateAgain)) assertEquals(listOf("connectFailed($ADDRESS)"), radios.events.calls)
     }
 
+    /**
+     * The dial's timer is the thread's, which stops counting while the phone sleeps; the clock does not. A peer that
+     * answers each step only just in time must not hold a dial, and its client, past the dial's twenty-five seconds.
+     */
+    @Test
+    fun aCallbackPastADialsTimeGivesItUpAsTheTimerWould() {
+        val goesOn = listOf(
+            listOf("requestMtu(0,517)"),
+            listOf("discover(0)"),
+            listOf("subscribe(0)"),
+            listOf("linkUp(0,true,517,$ADDRESS)", "lowPower(0)"),
+        )
+        for (steps in 0..3) {
+            /** A dial taken through [steps] callbacks at once, and its next one at [at] with no timer between. */
+            fun next(at: Long): Radios {
+                val radios = Radios()
+                radios.dials(ADDRESS)
+                callbacksOf(radios).take(steps).forEach { it(0) }
+                radios.now = at
+                radios.fresh()
+                callbacksOf(radios)[steps](0)
+                return radios
+            }
+            // The last millisecond is the dial's still.
+            assertEquals(goesOn[steps], next(24_999).order, "after $steps step(s)")
+
+            // At its time the callback is where the dial ends: closed once, told once, and the step not begun.
+            val late = next(25_000)
+            assertEquals(listOf("disconnect(0)", "close(0)", "connectFailed($ADDRESS)"), late.order, "after $steps step(s)")
+            assertTrue(late.client.open.isEmpty(), "a client was left open")
+            // The timer that comes afterwards, and whatever else still arrives, finds nothing to give up.
+            callbacksOf(late).forEach { it(0) }
+            late.steps.onConnection(0, connected = false)
+            late.pass(60_000)
+            assertEquals(listOf("connectFailed($ADDRESS)"), late.events.calls, "after $steps step(s)")
+            assertEquals(3, late.order.filterNot { it.startsWith("timer(") }.size, "a dial given up went on: ${late.order}")
+        }
+    }
+
+    /** The same for a connection that ends: its second is the timer's to make, and past the dial's time there is none. */
+    @Test
+    fun aConnectionLostPastADialsTimeIsNotMadeAgain() {
+        /** A dial whose connection ends at [at], after [steps] callbacks and with no timer between. */
+        fun lost(steps: Int, at: Long): Radios {
+            val radios = Radios()
+            radios.dials(ADDRESS)
+            callbacksOf(radios).take(steps).forEach { it(0) }
+            radios.now = at
+            radios.fresh()
+            radios.steps.onConnection(0, connected = false)
+            return radios
+        }
+        for (steps in 0..3) {
+            // In time, the second connection is still owed: nobody is told yet.
+            assertEquals(listOf("close(0)", "timer(1)"), lost(steps, 24_999).order, "after $steps step(s)")
+
+            // Past it the dial is answered there and then, not when a timer next runs.
+            val late = lost(steps, 25_000)
+            assertEquals(listOf("close(0)", "connectFailed($ADDRESS)"), late.order, "after $steps step(s)")
+            late.pass(60_000)
+            assertTrue(late.client.called("connect").isEmpty() && late.events.calls.size == 1, "a dial given up went on: ${late.order}")
+        }
+
+        // A link is no dial: lost however late, it is told down and never as a failed connect.
+        val link = lost(4, 3_600_000)
+        assertEquals(listOf("linkDown(0)", "close(0)"), link.order)
+    }
+
     private fun callbacksOf(radios: Radios) = listOf<(Long) -> Unit>(
         { radios.steps.onConnection(it, connected = true) },
         { radios.steps.onMtu(it, 517, ok = true) },

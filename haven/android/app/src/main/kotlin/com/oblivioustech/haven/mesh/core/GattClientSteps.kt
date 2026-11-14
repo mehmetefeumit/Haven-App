@@ -42,8 +42,8 @@ interface GattClientPort {
 /**
  * This phone's dials, step by step (`docs/BLUETOOTH_MESH_M3_DESIGN.md` §B.3,
  * §N.2.4): connect, the MTU, discovery, the subscription, and only then a
- * link. Each step waits for its callback. A dial is answered once: by its
- * link, or as failed.
+ * link. Each step waits for its callback, and none is begun past the dial's
+ * time. A dial is answered once: by its link, or as failed.
  *
  * Every connection made has a number of its own — the link's, once it is
  * one — and every callback comes back under it: one that arrives after its
@@ -111,7 +111,7 @@ class GattClientSteps(
     fun onConnection(link: Long, connected: Boolean) {
         val dial = dials[link] ?: return
         if (connected) {
-            if (dial.step == Step.CONNECTING) begin(link, dial, Step.MTU, port.requestMtu(link, REQUEST_MTU))
+            if (dial.step == Step.CONNECTING) begin(link, dial, Step.MTU, !late(dial) && port.requestMtu(link, REQUEST_MTU))
             return
         }
         dials.remove(link)
@@ -125,7 +125,7 @@ class GattClientSteps(
         links.onDialDown(dial.address)
         when {
             linked -> {}
-            dial.retried -> events.onConnectFailed(dial.address)
+            dial.retried || late(dial) -> events.onConnectFailed(dial.address)
             else -> {
                 dials[number()] = Dial(dial.address, dial.giveUpAt, opensAt = clock() + DIAL_RETRY_MS, retried = true)
                 arm()
@@ -139,18 +139,18 @@ class GattClientSteps(
         if (ok) links.onMtu(dial.address, mtu)
         if (dial.step != Step.MTU) return
         dial.mtu = mtu
-        begin(link, dial, Step.DISCOVERING, ok && mtu >= MIN_ATT_MTU && port.discover(link))
+        begin(link, dial, Step.DISCOVERING, ok && mtu >= MIN_ATT_MTU && !late(dial) && port.discover(link))
     }
 
     fun onDiscovered(link: Long, ok: Boolean) {
         val dial = dials[link]?.takeIf { it.step == Step.DISCOVERING } ?: return
-        begin(link, dial, Step.SUBSCRIBING, ok && port.subscribe(link))
+        begin(link, dial, Step.SUBSCRIBING, ok && !late(dial) && port.subscribe(link))
     }
 
     /** The descriptor's write completed. */
     fun onSubscribed(link: Long, ok: Boolean) {
         val dial = dials[link]?.takeIf { it.step == Step.SUBSCRIBING } ?: return
-        if (!ok) return fail(link, dial)
+        if (!ok || late(dial)) return fail(link, dial)
         dial.step = Step.LINKED
         events.onLinkUp(link, central = true, attMtu = dial.mtu, address = dial.address)
         // The core may have closed it as it came up.
@@ -212,6 +212,14 @@ class GattClientSteps(
     }
 
     private fun linked(link: Long) = dials[link]?.step == Step.LINKED
+
+    /**
+     * Past its time, a dial is given up by whichever comes first: its timer
+     * or its next callback. The timer does not count while the phone sleeps
+     * and the clock does, so a peer that answers each step only just in time
+     * could otherwise hold a dial, and its client, for as long as it liked.
+     */
+    private fun late(dial: Dial) = dial.giveUpAt <= clock()
 
     /** The step that was [begun] is waited for, or the dial is given up. */
     private fun begin(link: Long, dial: Dial, step: Step, begun: Boolean) {

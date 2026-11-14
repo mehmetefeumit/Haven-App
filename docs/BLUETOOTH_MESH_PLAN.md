@@ -3411,11 +3411,12 @@ item 6, that address rotation is the build's; §7.1 carries a note now.
   **What is built.** `MeshLoop`: the one thread of a start and its
   handler; the service's start posted inside `MeshThread.start`, every
   other body — a callback's, a timer's — inside `MeshThread.run`,
-  through one function. The GATT server: Haven's one service, one
+  through one function (since the review, below: by the handler itself,
+  which a dial also hands the platform). The GATT server: Haven's one service, one
   characteristic (write without response, notify) and its descriptor,
   none of them readable, none asking for encryption; each callback one
   input of the `ServerLinks` made with it; a request answered success
-  or the plain failure. The GATT client: one platform client and one
+  or a plain refusal (since the review, ATT's "request not supported"). The GATT client: one platform client and one
   callback object for each connection `GattClientSteps` makes, over LE,
   no auto-connect; each callback one input, each step one call. The
   advertisement: the service UUID, the constants' mode and power,
@@ -3481,23 +3482,67 @@ item 6, that address rotation is the build's; §7.1 carries a note now.
   close ends anything — design §N.7 lists what each rests on and
   whether it was read. The lever's two calls still run nowhere:
   nothing reaches `MeshThread.run` in a build.
-  **Found and not fixed — for the owner** (design §N.7): on Android 11
-  to 12L the platform keeps a notification's value and a frame about to
-  be written in the same object, on two threads, so a frame on a link
-  this phone dialled can be lost or replaced by the peer's own bytes;
-  the engine closes such a link and it is dialled again. Ending it
-  means the platform running a client's callbacks on the mesh thread —
-  a `Handler` in an adapter, which §N.2.2 rules out. And with
-  Bluetooth off two of the adapters' closes throw, as read: the
-  service must close each in a `try` of its own, or §B.6's pause is a
-  stop with the notice. Also for the owner or the review: a GATT server
-  that does not open is a stop with the notice, not a phone that only
-  dials; the refusal Haven answers is the platform's `GATT_FAILURE`,
-  which goes out as ATT 0x01; no attribute of Haven's can be read.
+  **Found, and put to the owner** (design §N.7): on Android 11 to 12L
+  the platform keeps a notification's value and a frame about to be
+  written in the same object, on two threads, so a frame on a link this
+  phone dialled could be lost or replaced by the peer's own bytes —
+  fixed with the review, below. With Bluetooth off two of the adapters'
+  closes throw, as read: the service must close each in a `try` of its
+  own, or §B.6's pause is a stop with the notice. Still for the owner:
+  a GATT server that does not open is a stop with the notice, not a
+  phone that only dials; no attribute of Haven's can be read.
   `haven-core/SECURITY.md` changes by one sentence, where it said that
   no platform code scans, advertises or connects: the classes are
   written and nothing makes one. The privacy manifest,
   `haven/DEVELOPMENT.md` and `CLAUDE.md` are unchanged.
+  **Review** (independent, read-only, of `f2e55ec`): no blocker and no
+  high finding. One medium, fixed. **Before Android 13 a frame this
+  phone wrote on a link it dialled could cross a notification** — the
+  defect above. The dial now uses `connectGatt`'s form that takes a
+  handler, the mesh thread's, so the platform's own write of a
+  notification's value runs on the thread a frame is written from. A
+  handler takes the platform's `try` away from its runnables, and a
+  throw on the mesh thread would end the process the relay path runs
+  in: so the handler handed over is the loop's own, which runs every
+  message it dispatches inside `MeshThread.run`, the platform's
+  included; the service's start alone goes through a second one, since
+  it must not be asked the lever. Six low, fixed: the two adapters'
+  comments said nothing there could start a pairing, where a peer can
+  make the platform ask — by a refused descriptor write, by a Security
+  Request, or as a central — and only the bond receiver ends it
+  (design §M.4 gains the second); a refusal is now ATT 0x06, "request
+  not supported", a code that rests on no cast; a server whose service
+  the platform will not begin to add is closed before the throw; **a
+  dial is given up at its next callback past its 25 s as well as at
+  its timer**, which stops counting while the phone sleeps — in
+  `GattClientSteps`, with two JVM tests, 59 in all; design §M.5 says
+  that an Android scan is an active one, and what its requests and a
+  Haven phone's empty responses tell someone in range — nothing that
+  names Haven or the user; and the guard follows a callback's lambda to
+  its closing brace, so that work chained behind the post fails, and
+  fails `PROPERTY_READ` and `PERMISSION_READ`.
+  **Proved here**, as before by a compiler and tests alone: the scratch
+  type-check against API 36's, 35's and 34's jars, no warning; against
+  API 23's it now fails on ten members, the three more being the dial's
+  form, its PHY constant (API 26, as the reference has them) and the
+  level named to lint; the 59 JVM tests. `check_mesh_radio.sh`: 280
+  self-test fixtures (276, and four), run side by side, as many as
+  there are processors — 73 s here where the 276 took three
+  minutes, every fixture still the whole guard on a tree of its own.
+  **Mutation passes.** 72 changes to checks 15 to 17 as they
+  stand — the first pass's again where the text is the same, and for
+  what is new: each of the loop's five pins and three counts, what may
+  follow a callback's lambda, the two names of a readable attribute,
+  the dial's and the answer's new pins — each failing a named fixture.
+  Nine changes to `GattClientSteps`: the rule taken out of each
+  of its five places in turn, its bound moved a millisecond either way,
+  a lost link read as a failed dial, and the rule never true — each
+  failing one of the two new tests by name.
+  **Not proved, by anything**: as above, and that with a handler the
+  platform runs nothing of a client's outside the loop's wrapper, and
+  that nothing crosses on Android 11 to 12L — both read in the
+  platform's source, neither run. The contract the review set for the
+  service is design §N.7.
 
 ### Proposed CLAUDE.md wording (owner to approve)
 

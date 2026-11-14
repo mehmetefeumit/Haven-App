@@ -1,6 +1,7 @@
 package com.oblivioustech.haven.mesh
 
 import android.annotation.SuppressLint
+import android.annotation.TargetApi
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
@@ -24,12 +25,20 @@ import com.oblivioustech.haven.mesh.core.ServerLinks
  * its `close`. What comes next in a dial is [steps]' to say; this maps each
  * callback to one of its inputs and each of its asks to one call.
  *
- * Nothing here can start a pairing (§M.4): the transport is LE, no
- * characteristic is read, and a frame is a write that has no answer. The one
- * write that has one is the descriptor's.
+ * Haven asks for no security here (§M.4): the transport is LE, nothing is
+ * read, and a frame is a write that has no answer. A peer can still make the
+ * platform ask — by refusing the one write that has an answer, the
+ * descriptor's, or by asking for security itself — and the user may then be
+ * shown the system's pairing dialog: what ends that is the bond receiver,
+ * which tells [steps] of a device that starts to bond.
+ *
+ * The platform runs a client's callbacks on the handler a dial hands it: the
+ * loop's, so on the mesh thread and inside `MeshThread.run`.
  */
 // As the scanner: the service holds the permissions, and a refusal throws into `MeshThread.run`.
 @SuppressLint("MissingPermission")
+// The radio starts on Android 11 and later (`StartPolicy`): the dial's form that takes a handler is Android 8's.
+@TargetApi(Build.VERSION_CODES.R)
 class GattClientAdapter(
     private val context: Context,
     private val adapter: BluetoothAdapter,
@@ -72,8 +81,8 @@ class GattClientAdapter(
         }
 
         // Before it the value lives in the characteristic, and the next
-        // notification overwrites it: read here, on the platform's thread,
-        // before the post. The one thing an adapter does outside the loop.
+        // notification overwrites it: read here, in the platform's own
+        // runnable, before the post. The one callback that is more than its post.
         @Suppress("OVERRIDE_DEPRECATION", "DEPRECATION")
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
             val value = characteristic.value
@@ -82,7 +91,9 @@ class GattClientAdapter(
     }
 
     override fun connect(link: Long, address: String): Boolean {
-        clients[link] = adapter.getRemoteDevice(address).connectGatt(context, false, Callback(link), BluetoothDevice.TRANSPORT_LE)
+        // With the loop's handler, not the platform's own thread: see `MeshLoop.handler`.
+        clients[link] = adapter.getRemoteDevice(address)
+            .connectGatt(context, false, Callback(link), BluetoothDevice.TRANSPORT_LE, BluetoothDevice.PHY_LE_1M_MASK, loop.handler)
             ?: return false
         return true
     }
@@ -116,10 +127,6 @@ class GattClientAdapter(
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             client.writeCharacteristic(characteristic, frame, noAnswer) == BluetoothStatusCodes.SUCCESS
         } else {
-            // Before Android 13 the platform reads the frame back out of the
-            // characteristic, where a notification that arrives on its own
-            // thread puts its value too: the two can cross, and nothing here
-            // can keep them apart (design §N.7).
             characteristic.writeType = noAnswer
             @Suppress("DEPRECATION")
             characteristic.setValue(frame) && client.writeCharacteristic(characteristic)

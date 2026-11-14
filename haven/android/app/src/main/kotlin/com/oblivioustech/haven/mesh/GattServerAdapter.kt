@@ -24,10 +24,13 @@ import com.oblivioustech.haven.mesh.core.ServerPort
  * the descriptor it subscribes by. What a callback means is [links]' to say;
  * this maps each to one of its inputs and each of its asks to one call.
  *
- * Nothing here can start a pairing (§M.4): no attribute asks for encryption
- * or authentication, and a request is answered success or the plain failure.
- * No attribute can be read, so the platform refuses a read itself and none is
- * left waiting for an answer.
+ * Haven asks for no security here (§M.4): no attribute asks for encryption
+ * or authentication, and a request is answered success or "request not
+ * supported", never a status that names either. A central can still ask to
+ * pair. The bond receiver tells [links] of a device that starts to bond, and
+ * [links] ends one that has subscribed; one that has not is left to the
+ * system's dialog (owner question Q-15). No attribute can be read, so the
+ * platform refuses a read itself and none is left waiting for an answer.
  *
  * A server the platform does not open, or a service it will not begin to
  * add, is thrown like anything else it throws: into `MeshThread.run`.
@@ -93,14 +96,21 @@ class GattServerAdapter(
         }
     }
 
-    private val server = checkNotNull(manager.openGattServer(context, callback)).also {
+    private val server = checkNotNull(manager.openGattServer(context, callback))
+
+    init {
         val service = BluetoothGattService(MeshRadioConstants.SERVICE_UUID, BluetoothGattService.SERVICE_TYPE_PRIMARY)
         service.addCharacteristic(characteristic)
-        check(it.addService(service))
+        if (!server.addService(service)) {
+            // This adapter is never made, so nobody else would close what it opened.
+            server.close()
+            throw IllegalStateException()
+        }
     }
 
     override fun answer(address: String, request: Int, ok: Boolean) {
-        val status = if (ok) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_FAILURE
+        // A code of ATT's own, 0x06: the platform's "failure" is 257, and what goes out for it is a cast's doing.
+        val status = if (ok) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED
         server.sendResponse(device(address), request, status, 0, null)
     }
 

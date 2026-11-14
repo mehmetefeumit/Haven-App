@@ -1461,11 +1461,12 @@ jobs:
       # in another file. In the Gradle script: the manifest merged whatever
       # the flag, BuildConfig given its own value, the flag read from
       # elsewhere or failing open, and a second place that reads it. In the
-      # adapters: a callback that does anything but post through the loop, a
-      # body the loop posts bare, a thread or a handler of an adapter's own,
-      # each name that could start a pairing, a dial or an answer that is not
-      # the pinned one, and a field, a setting or a second start beside the
-      # pinned advertisement.
+      # adapters: a callback that does anything but post through the loop, or
+      # chains work behind its post, a handler of the loop's that dispatches
+      # outside the wrapper, a thread or a handler of an adapter's own, each
+      # name that could start a pairing or make an attribute readable, a dial
+      # or an answer that is not the pinned one, and a field, a setting or a
+      # second start beside the pinned advertisement.
       - name: Mesh radio guard self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_mesh_radio.sh --self-test

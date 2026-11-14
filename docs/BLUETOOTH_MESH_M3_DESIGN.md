@@ -755,6 +755,8 @@ connection changes nothing for the peer, which sees the disconnect).
   die with no callback (`bc:BluetoothGattClientManager.kt:312-346`); the
   25-minute restart covers that, late.
 - **Outgoing link.** `connectGatt(context, false, callback, TRANSPORT_LE)`
+  (**as built, after the review of M3g unit 4:** the form that also takes
+  the PHY and a `Handler`, the mesh thread's — §N.7)
   → `requestMtu(517)` → on `onMtuChanged`, `discoverServices` → enable
   notifications and write the descriptor → on `onDescriptorWrite`,
   `onLinkUp(central = true, mtu)` → `requestConnectionPriority(LOW_POWER)`.
@@ -1064,7 +1066,8 @@ review of M3f: `aFloodOfAddressesDoesNotPushOutAPeerUnlessItIsPicked`,
 `aCompletionWhileARefusedFrameWaitsClosesItsLink` and
 `aLinkTheEngineClosesAtOnceHoldsNoLock`; the table's own test is now
 `thePeerTableHoldsSixtyFourAndForgetsOnePickedAmongThoseNotHeld`. With
-M3g's second unit: the twenty-four of §N.2.8 and §N.7, 57 in all.
+M3g's second unit: the twenty-four of §N.2.8 and §N.7, 57 in all; two
+more with the review of its fourth, 59.
 The script fails unless the tests that ran are the tests the sources
 declare, by name; it cannot tell a test whose body was emptied.
 
@@ -2534,7 +2537,13 @@ handshake is sealed by Haven (plan §6.7).
   writes without response, which have no answer to refuse. The
   descriptor write of §B.3 has one: a hostile peer that refuses it
   starts a pairing from this phone. And as a peripheral, any central
-  may ask to pair (**[U]**, memory).
+  may ask to pair (**[U]**, memory). The same holds the other way
+  round, with nothing refused: a peripheral this phone dialled may send
+  a Security Request, which the stack takes as the start of a pairing
+  (`sys/stack/smp/smp_act.cc -20.0:436-470`, `smp_proc_sec_req` — found by the
+  review of M3g unit 4; what the user is shown then was not read). In
+  each case nothing of Haven's asked, and what ends it is the same one
+  lever below.
 - **The user is asked first**, on a phone with a screen, on the Just
   Works path ([V]: `sys/stack/smp/smp_act.cc -22.2:1431-1438`). So the
   harm is a system dialog a stranger can raise, and a bond if the user
@@ -2588,6 +2597,21 @@ handshake is sealed by Haven (plan §6.7).
   did not look again).
 - That such an address cannot be traced to the phone without a bond is
   the specification's, from memory (**[U]**).
+- **A scan transmits.** Android's LE scan is an active one and no
+  public API asks for a passive one: the stack sets the scan type
+  itself (`btif/src/btif_ble_scanner.cc:295-296` at 12L, in
+  `LO/android_system_bt@lineage-19.1`; `sys/main/shim/le_scanning_manager.cc
+  -20.0:261-262`). So a phone that searches sends a scan request, from
+  its address of the moment, to scannable advertisers it hears — which
+  of them a filtered scan asks is **[U]** — and a legacy advertisement
+  is always scannable (`fw/le/BluetoothLeAdvertiser.java:131` @11,
+  `:140` @12.1), so a Haven phone answers one with a scan response,
+  which is empty: Haven sets none (§B.3). Read by the review of M3g
+  unit 4 and again for this entry; observed nowhere. What someone in
+  range learns from it: that a device under that address is searching,
+  and that an advertiser is there, which its advertisement said
+  already. Nothing in either names Haven or the user; the request
+  carries the same address a dial would, under the same rotation.
 
 **What Haven can and cannot say.** It can say that it never bonds, dials
 over LE only, and puts nothing in the advertisement but the service
@@ -4310,15 +4334,18 @@ copy of API 36's `android.jar`; the app's compile is CI's, and everything
 they do with a radio is an emulator's or a phone's. Plan §16 has what is
 proved here and how. The unit adds no manifest entry, no Gradle line, no
 Dart, no Rust, no dependency and no JVM test — unit 2 took what was
-testable, and no decision was found that had to move to `core/`.
+testable, and no decision was found that had to move to `core/` (its
+review found one, and two tests: below).
 
 *What is built.*
 
-- **`MeshLoop(mesh)`**: the `HandlerThread` of one start and its one
-  `Handler`. `start(body)` posts the service's start inside
-  `MeshThread.start`; `post(body)` and `timer(slot, inMs, body)` post
-  inside `MeshThread.run`, through one private function, the only place
-  `mesh.run` is written; `quit()` is the stop's last step.
+- **`MeshLoop(mesh)`**: the `HandlerThread` of one start. Its `handler`
+  runs every message it dispatches inside `MeshThread.run` — the one
+  place `mesh.run` is written — and `post(body)` and `timer(slot, inMs,
+  body)` post to it; `start(body)` posts the service's start through a
+  handler of its own, inside `MeshThread.start`; `quit()` is the stop's
+  last step. (As first built the loop had one plain handler and wrapped
+  each body it posted; the review below is why it changed.)
 - **An adapter is made with a radio and stopped with it.** Its
   constructor opens what it holds — the server and its service, the
   advertisement — and `stop()` closes it; the scanner starts when the
@@ -4396,11 +4423,12 @@ none of it run):
 *Where the code differs from this section, or settles what it left
 open:*
 
-- **The loop hands out two functions, not one (N.2.2).** The dial's
-  `timer(inMs)` and the core's `wakeAt` need a body that comes later, and
-  an adapter holds no `Handler`: `timer(slot, inMs, body)` replaces what
-  `slot` still waited for. Both run a body through the same private
-  wrapper. The wait is the handler's — it does not count while the phone
+- **The loop hands out two functions, not one (N.2.2), and its
+  handler.** The dial's `timer(inMs)` and the core's `wakeAt` need a
+  body that comes later, and an adapter makes no `Handler`:
+  `timer(slot, inMs, body)` replaces what `slot` still waited for. Both
+  post to the loop's handler, which is also what a dial hands the
+  platform (the review, below). The wait is the handler's — it does not count while the phone
   sleeps, as N.7 already has for the dial's — and whoever needs a body on
   time posts it from the alarm.
 - **`MeshLoop.start` is the one caller of `MeshThread.start`** (the
@@ -4416,8 +4444,9 @@ open:*
   throw"). What it refuses without throwing is read as follows, and the
   first two are this unit's reading, **for the owner to confirm**:
   - *a server it does not open* (`openGattServer` null) *or a service it
-    will not begin to add* (`addService` false): thrown
-    (`checkNotNull`, `check`), so a stop with the notice. The other
+    will not begin to add* (`addService` false): thrown, so a stop with
+    the notice — the server closed first in the second case, since the
+    adapter that opened it is never made (the review, below). The other
     reading was a phone that only dials, with an advertisement naming a
     service that is not there;
   - *a service it refuses later, by `onServiceAdded`*: not heard. Like an
@@ -4435,12 +4464,12 @@ open:*
   **the owner is asked** whether a Bluetooth switched off at the instant
   of some other platform call — a scan restart, a dial — may end the mesh
   with its notice, as F-14 has it, or must pause.
-- **The plain failure (N.2.3) is `BluetoothGatt.GATT_FAILURE`**, the
-  platform's name for it and bitchat's answer. As read, it goes out as
-  ATT 0x01. It is neither 0x05 nor 0x0F, which is what §M.4 needs; a
-  status that is an ATT error code in its own right — 0x06, "request not
-  supported" — would not rest on a cast. One word of `GattServerAdapter`
-  and one of the guard's pin; **for the owner or the review**.
+- **The plain failure (N.2.3) is "request not supported"**,
+  `BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED`, ATT 0x06. As first built
+  it was the platform's `GATT_FAILURE`, bitchat's answer: that is 257,
+  and as read it goes out as 0x01, "invalid handle", by a cast. Neither
+  is 0x05 or 0x0F, which is what §M.4 needs; the review had the one that
+  rests on no cast.
 - **No attribute of Haven's can be read**: the characteristic and its
   descriptor carry the write permission and no other (N.2.5 allows
   "read and write"). N.7 has "every read request: nothing"; with a
@@ -4473,55 +4502,39 @@ open:*
   a stack that does not, a dial of a random address fails, and the
   fix is a device kept from the sighting — a table this unit does not
   have.
-- **A defect of N.2.2 that this unit found, and did not fix: on
-  Android 11 to 12L a frame this phone writes on a link it dialled can
-  go out as the bytes of a notification.** Haven has one characteristic
-  for both directions. Before Android 13 a write takes its bytes from
-  the characteristic object at the call
-  (`fw/BluetoothGatt.java:1258`, `:1272-1274` @12.1), and a
-  notification's value is put into that same object on the platform's
-  thread, in the runnable that then calls Haven back (`:489-491`).
-  N.2.2 reads the value on that thread so that the next notification
-  does not replace it; nothing keeps a notification from landing
-  between this unit's `setValue(frame)` and the platform's read of it,
-  or this unit's `setValue` from landing between the platform's and
-  the callback's read. The frame is then lost and the peer is handed
-  its own bytes back, or the steps are handed this phone's own frame as
-  the peer's —
-  nothing of Haven's is disclosed, and the engine closes a link whose
-  frame it rejects (§B.2), so the cost is a link that falls and is
-  dialled again, on those three releases, at a rate nobody has
-  measured. No public call makes a second object for the
-  characteristic. **What would end it, for the owner or the review:**
-  `connectGatt`'s form that takes a `Handler` (API 26): the platform
-  then runs a client's callbacks, the value's write among them, on the
-  mesh thread itself (`:820-830` @12.1), where the frame's write runs
-  too. That is against N.2.2's "an adapter holds no `Handler`", makes
-  the client's callbacks a second shape for check 15 — run inside the
-  wrapper, not posted — and takes the value's read off the platform's
-  thread. Not built: it is a change to the thread rule two reviews
-  confirmed.
+- **The dial hands the platform the loop's handler** — against
+  N.2.2's "an adapter holds no `Handler`", and decided by the review
+  (below): `connectGatt(context, false, Callback(link), TRANSPORT_LE,
+  PHY_LE_1M_MASK, loop.handler)`. The adapter names the loop's
+  property, never the class.
 - **The API levels.** Three calls and one callback have a newer form
   from Android 13; each port method takes the newer where
   `SDK_INT >= 33` and the older below, the older under a
   `@Suppress("DEPRECATION")` on that expression alone. Both callbacks
   are overridden; each is the platform's on its own levels. "Not
   discoverable" is asked where `SDK_INT >=
-  MeshRadioConstants.ADVERTISE_DISCOVERABLE_FROM_API`. No class the five
-  files' class files name is newer than API 23: `BluetoothStatusCodes`
-  is named for one constant, which the compiler inlines.
+  MeshRadioConstants.ADVERTISE_DISCOVERABLE_FROM_API`. The dial's form
+  that takes a handler, and its PHY constant, are Android 8's (API 26),
+  above Haven's floor and below the radio's: `GattClientAdapter` says
+  so to lint with `@TargetApi(Build.VERSION_CODES.R)`. No class the
+  five files' class files name is newer than API 23:
+  `BluetoothStatusCodes` is named for one constant, which the compiler
+  inlines.
 - **Lint.** The four adapters carry `@SuppressLint("MissingPermission")`
   with the reason: the service reads the permissions before a radio is
   made, and a call still refused throws into the wrapper. No CI job
   runs lint, and the app's script sets none: whether lint follows the
   `SDK_INT` comparison against a constant of Haven's own, and what a
   release's `lintVital` makes of the files, is **[U]**.
-- **What still runs on the platform's thread, in every callback**:
-  Kotlin's check that a parameter declared non-null is not null, and
-  the post itself. A null there would throw before the post, outside
-  the wrapper, and the platform would log it; that it hands none is
-  **[U]**, read only for the server's device and characteristic at
-  Android 11. And, once, the value's read of N.2.2.
+- **What a callback does besides its post**: Kotlin's check that a
+  parameter declared non-null is not null, and, once, the value's read
+  of N.2.2. For the server, the advertiser and the scanner that is on
+  the platform's thread, outside the wrapper: a null there would throw
+  before the post and the platform would catch and log it; that it
+  hands none is **[U]**, read only for the server's device and
+  characteristic at Android 11. For a client it is on the mesh thread,
+  inside the wrapper the loop's handler puts round the platform's own
+  runnable.
 - **After a stop**, a callback that still arrives posts to a thread
   that has quit: the platform writes its warning, as read — no
   identifier, and under the lever no line.
@@ -4531,18 +4544,22 @@ open:*
   and the priority are passed on as the integers the `javap` step
   holds.
 
-*The guard* (`check_mesh_radio.sh`, checks 15 to 17; 276 self-test
-fixtures, 198 and 78). **15, one thread:** `MeshLoop.kt` is held to
-five pinned lines — its four uses of the handler and the one wrapper —
-makes one `Handler` and names its `MeshThread` twice; no other adapter names a `Handler`, a
-`Looper`, an `Executor`, a `Thread`, a `Timer` or `MeshThread`; every
-`override fun on…(…)` outside `core/` is `= loop.post {`, the older
-notification callback excepted, pinned whole and required once; a
+*The guard* (`check_mesh_radio.sh`, checks 15 to 17; as it stands
+after the review, 280 self-test fixtures: 198, 78 with the unit and
+four with its review). **15, one thread:** `MeshLoop.kt` is held to
+five pinned lines — its handler, whose `dispatchMessage` is `mesh.run`
+round the platform's; the start's own; and the loop's three uses of
+the first — makes two `Handler`s and names its `MeshThread` twice; no
+other adapter names a `Handler`, a `Looper`, an `Executor`, a `Thread`,
+a `Timer` or `MeshThread`; every `override fun on…(…)` outside `core/`
+is `= loop.post { … }` and ends at that lambda's closing brace, the
+older notification callback excepted, pinned whole and required once; a
 radio whose adapters declare no callback is a misconfiguration. **16,
-never bond:** no file of the radio's Kotlin names `createBond`,
-`setPairingConfirmation`, `setPin`, `ACTION_PAIRING_REQUEST`,
-`readCharacteristic`, `readDescriptor`, `WRITE_TYPE_DEFAULT`,
-`WRITE_TYPE_SIGNED`, `PROPERTY_WRITE`, `PROPERTY_SIGNED_WRITE`,
+never bond, and nothing to read:** no file of the radio's Kotlin names
+`createBond`, `setPairingConfirmation`, `setPin`,
+`ACTION_PAIRING_REQUEST`, `readCharacteristic`, `readDescriptor`,
+`WRITE_TYPE_DEFAULT`, `WRITE_TYPE_SIGNED`, `PROPERTY_WRITE`,
+`PROPERTY_SIGNED_WRITE`, `PROPERTY_READ`, `PERMISSION_READ`,
 `TRANSPORT_AUTO`, `TRANSPORT_BREDR`, an encrypted or signed attribute
 permission or an "insufficient …" status; the dial and the answer are
 pinned, and `connectGatt` and `sendResponse` are each written once.
@@ -4552,10 +4569,9 @@ names service, manufacturer, solicitation or transport-discovery data,
 a scan response, an advertising set or `setName`. The guard reads
 text: a callback's shape and not its body, names and not integers
 (its header says what passes it). It reads each Kotlin file's
-comment-stripped view once now, where checks 4, 7 and 8 each lexed it
-again. **Mutation pass**: 69 changes to the three checks, each dropping
-one pin, allowing one name or loosening one clause; each fails a named
-fixture (plan §16).
+comment-stripped view once, where checks 4, 7 and 8 each lexed it
+again, and its self-test runs its fixtures side by side. **Mutation
+passes**: plan §16.
 
 - **Not in it, and unit 5's**: the service's lifecycle methods and its
   receivers, which are `override fun on…` and cannot be `= loop.post {`
@@ -4564,27 +4580,43 @@ fixture (plan §16).
   point: today no file but `MeshLoop.kt` names `MeshThread` at all).
   Check 15 fails the service until it lists it.
 
-*What the service owes the adapters (unit 5's brief, with the two
-lists above).*
+*What the service owes the adapters (unit 5's contract, with the two
+lists above; as the review of unit 4 has it).*
 
+- **The lever.** The service is the first caller of `leverInstall`: by
+  the rule of unit 1's review it lands only with the emulator lane.
 - **A start**: a `MeshThread`, a `MeshLoop(thread)`, a core; then
-  `loop.start { … }` and nothing posted before it.
+  `loop.start { … }`, and nothing posted before it. The loop's handler
+  is where a dial's callbacks come: the service makes none of its own
+  for the radio.
 - **A radio** (Bluetooth on, inside a body), in this order:
   `GattServerAdapter(context, manager, loop, core, number)`;
   `GattClientAdapter(context, adapter, loop, core, server.links, clock,
   number)`; `AdvertiserAdapter(adapter)`, after the server whose service
   it names; `ScannerAdapter(adapter, loop, core, canSearch)`; then
-  `core.startRadio()`. A constructor that throws has opened what it
-  opened: the server's, when its service is refused, is closed by
-  nobody — as read at Android 11 it is refused only where the server
-  is not registered or the Bluetooth process is gone
-  (`fw/BluetoothGattServer.java:713-727`).
+  `core.startRadio()`. A constructor that throws leaves nothing open:
+  the server's closes what it opened.
 - **`RadioPort`**: `connect` is `client.steps.connect`; `close` is
   `client.steps.close` and `server.links.close`; `send` is
   `client.steps.send` or else `server.links.send`; `scan` is
   `scanner.scan`; `wakeAt(inMs)` is `loop.timer(slot, inMs)
-  { core.onWake() }` beside the alarm, whose own arrival posts
-  `core.onWake()` and then `client.steps.onTimer()`, two bodies.
+  { core.onWake() }` and the alarm, whose own arrival posts
+  `core.onWake()` and then `client.steps.onTimer()`, two bodies. A
+  timer's slot is an object of its owner's, never null — a null one
+  would clear every message of the thread — and no two timers share
+  one; the dial's is its adapter.
+- **`wakeAt` and `holdAwake` are cheap.** Every sighting and every
+  frame is an input of the core, and each input ends by asking for the
+  wake and, for a frame, the lock: an alarm re-armed and a lock taken
+  over binder at each would cost more than the radio. The service keeps
+  what it last armed and asks the platform only for a change that
+  matters; how is its unit's, and it is a decision, so it is `core/`'s
+  with a test.
+- **The mesh thread may block.** `openGattServer` and, from Android 13,
+  a write are synchronous calls into the Bluetooth process, and a
+  client's callbacks now wait behind whatever the thread is doing:
+  nothing may assume a body runs promptly, and nothing else of the app
+  runs on that thread.
 - **A radio's end**, at Bluetooth off as in the stop's step:
   `core.stopRadio()`, then `client.stop()`, `server.stop()`,
   `advertiser.stop()`, `scanner.stop()` — **each in a `try` of its
@@ -4593,8 +4625,13 @@ lists above).*
   next. The pure package has such a sequence only inside
   `MeshThread.stop`; if the service needs one outside it, it is a
   function of `core/` with its JVM test, not a `try` in the service.
-- **The bond receiver**: two bodies, `server.links.onBond(address)` and
-  `client.steps.onBond(address)`.
+- **The bond receiver** is wired to both roles: for a bond state that
+  is not "none", two bodies, `server.links.onBond(address)` and
+  `client.steps.onBond(address)`. It is the only thing that ends a
+  pairing a peer began — by a refused descriptor write, by a Security
+  Request, or as a central that asks (§M.4) — and under Q-15's option
+  (a) it ends one only for a device Haven holds: one it dials, or a
+  subscriber.
 
 *What only CI's compile proves, and has not yet* (`build-check.yml`,
 the three legs and `android-mesh`, at `compileDebugKotlin`): that the
@@ -4613,10 +4650,100 @@ with the review's list above:
 | A dial of an address the scan sighted connects though the device is made from the address alone | read: the fallback at 13 to 16, the store at 15 QPR2 | no outgoing link; a device kept from the sighting |
 | The server's characteristic object is the one the platform notifies through, once its service is added | read at Android 11 (`fw/BluetoothGattServer.java:105-136`, `:713-727`) | no frame to a subscriber |
 | A read of an attribute with no read permission is refused by the stack, and nothing Haven needs reads one | read: 15 QPR2; iOS **[U]** | a peer that reads waits out its request, or an iPhone does not subscribe |
-| `GATT_FAILURE` goes out as an ATT error that starts no pairing | read: 15 QPR2 | §M.4's harm, by Haven's own answer |
+| The platform sends the status Haven answers as it is: 0x06 | the cast read at 15 QPR2 | another code on the air; §M.4's harm only if it is 0x05 or 0x0F |
 | The service is added before a peer that saw the advertisement discovers | not read; both are asked in one body | that peer's dial fails and comes again after the engine's back-off |
 | Closing with Bluetooth off throws only where read | read: 11, 15 QPR2, 16 | unit 5's `try` is what holds either way |
-| On Android 11 to 12L a notification does not land between a frame's `setValue` and its write | read at 12L: it can | a frame lost and the link closed by the engine: the defect above |
+| Given a handler, the platform runs every callback of a client on it, the value's write among them, and nothing else of its own | read: 11, 12L, 13 to 16 (`mHandler` is posted to, and nothing more) | on Android 11 to 12L a frame crossed by a notification; on any level, a runnable outside the wrapper |
+| A `Handler` whose `dispatchMessage` is overridden has it called for every runnable posted to it | read at Android 11 (`core/java/android/os/Looper.java:223`, `Handler.java:97-108`, `:426-428`) | the wrapper is not round the platform's runnables: a throw there ends the process |
 | A write without response and a notification are each paced by their callback, in both forms | §K | R-1's timeouts |
 | `cancelConnection`, a server's close and a client's close each end what §N.2.3 and N-7 say | N-7 | as N.5 |
 | Lint, the shrinker and a release build take the files | not run | the tag's build fails |
+
+**Review of unit 4 (independent, read-only, of `f2e55ec`).** No blocker
+and no high finding; one medium and six low, fixed. Nothing of it has
+run on Android either.
+
+- **Medium: before Android 13 a frame and a notification shared one
+  object across two threads** — the defect this unit had found and left
+  to the owner. Decided: the dial takes `connectGatt`'s form with a
+  `Handler`. Read again for the fix, in the review's copies and this
+  unit's (**[V1]**): at Android 11 and 12L the notification's
+  `characteristic.setValue(value)` is inside the runnable that calls
+  Haven back (`fw/BluetoothGatt.java:472-479` @11, `:484-491` @12.1);
+  that runnable is run where it stands with no handler and posted to
+  the handler with one (`:777-787` @11, `:820-830` @12.1; the same at
+  13 to 16, where `mHandler` is assigned once and posted to, nothing
+  more); the older write reads the value at the call (`:1258`,
+  `:1272-1274` @12.1); the four-argument `connectGatt` is the
+  six-argument one with `PHY_LE_1M_MASK` and no handler
+  (`fw/BluetoothDevice.java:2072-2098` @11, `:2450-2478` @12.1). So
+  with the mesh thread's handler the platform's write of the value,
+  Haven's read of it and Haven's write of a frame are all on one
+  thread, and cannot cross. The value is still read before the post:
+  the next notification's runnable may run first. (The reference has
+  every `connectGatt` of today deprecated at API 37, for one that takes
+  an executor; `compileSdk` is 36.)
+  - **What a handler costs, and how it is met.** Posted to a handler,
+    the platform's runnable is no longer inside the platform's `try`:
+    what it threw on the mesh thread would end the thread's loop and
+    the process, the relay path's with it (F-14). So the handler the
+    platform is given is the loop's own, whose `dispatchMessage` is
+    `mesh.run` round the platform's (`MeshLoop.handler`): whatever is
+    posted to it — a body of the loop's, a runnable of the platform's —
+    is asked the lever first and is a stop if it throws. The loop no
+    longer wraps each body it posts; the service's start, which must
+    not be asked the lever (§N.1.3), goes through a second, plain
+    handler on the same thread, the only message that does. One cost:
+    a client's callback is two messages, the platform's runnable and
+    the body it posts, and the lever is asked for each.
+  - Unrun: that nothing crosses, and that nothing of the platform's
+    runs outside the wrapper, wait for an emulator or a phone on
+    Android 11 to 12L.
+- **Low: "nothing here can start a pairing" was false** by §M.4's own
+  reading, in both adapters' comments: a peer this phone dialled can
+  refuse the descriptor's write and the platform asks again with
+  authentication before Haven's callback (`fw/BluetoothGatt.java:573-583`
+  @12.1), or can send a Security Request; a central can ask. The
+  comments now say what is true — Haven asks for no security, a peer
+  can make the platform ask, the bond receiver ends it — and §M.4 has
+  the Security Request.
+- **Low: the refusal is ATT 0x06**, "request not supported", not the
+  platform's `GATT_FAILURE`: a code of its own, on no cast.
+- **Low: a service the platform will not begin to add** left the
+  server it was for open. Closed before the throw. As read at Android
+  11 the refusal is a server not registered or a Bluetooth process
+  gone, where there is little to leak; other releases were not read.
+- **Low: a dial could be held past its 25 s while the phone slept**,
+  its timer being the thread's. Fixed in the pure package:
+  `GattClientSteps` gives a dial up at whichever comes first past its
+  time, the timer or its next callback — no step is begun, a
+  subscription is no link, and a connection that ends is not owed its
+  second. Two JVM tests, `aCallbackPastADialsTimeGivesItUpAsTheTimerWould`
+  and `aConnectionLostPastADialsTimeIsNotMadeAgain`; 59 in all. What is
+  left: a peer that answers nothing at all holds the dial until the
+  platform's own timeout or the next wake, as before.
+- **Low: a scan transmits** — recorded in §M.5.
+- **Low: the guard said more than it held.** A callback written
+  `= loop.post { … }.also { work() }` passed while `work()` ran outside
+  the wrapper. Check 15 now follows the lambda to its closing brace and
+  takes only the end of the class, the next `override`, an annotation
+  or a `private` member behind it. Check 16 also fails `PROPERTY_READ`
+  and `PERMISSION_READ`: no attribute of Haven's is readable.
+
+*Where this unit differs from the review, or adds to it.* The handler
+is the loop's one handler for everything, not a second one for the
+client: one wrapper, in one place, and nothing an adapter could post to
+that is outside it. Closing check 15's hole needed a list of what may
+follow a callback, which its header now names as a limit. The leak of
+the fourth point is not reachable as read at Android 11; it is fixed
+because one release is all that was read. Of the scan, which
+advertisers a filtered scan asks, and what a controller answers for a
+legacy advertisement with no scan response set, were read by neither.
+
+*Proved here, as before by a compiler and tests alone:* the scratch
+type-check against API 36's jar, and 34's and 35's, with no warning;
+the 59 JVM tests; a mutation pass of 72 changes over checks
+15 to 17 as they stand, each failing a named fixture, and of
+nine changes to the dial's new rule, each failing one of the
+two new tests (plan §16). The guard's self-test, 280 fixtures, runs
+them side by side now: 73 s here, where it took three minutes.

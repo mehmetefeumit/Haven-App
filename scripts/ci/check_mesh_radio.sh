@@ -207,25 +207,31 @@
 # And over the radio's adapters — the same Kotlin, outside the pure package
 # `mesh/core/` for check 15 and all of it for 16 and 17 — read with no
 # whitespace, so that a call broken over lines is one call:
-#  15. One thread (§B.1, §N.2.2). `MeshLoop.kt` hands its one handler a body
-#      in the pinned ways and no other — the start's inside `mesh.start(body)`,
-#      every other inside `mesh.run(body)`, which is written once — makes one
-#      `Handler` and names its `MeshThread` twice. No other adapter names a
-#      `Handler`, a `Looper`, an `Executor`, a `Thread`, a `Timer` or
-#      `MeshThread`. And every platform callback of an adapter — each
-#      `override fun on…(…)` — is `= loop.post {`: nothing of it runs on the
-#      platform's thread, or outside the wrapper that asks the log lever and
-#      catches what is thrown. One callback is pinned whole instead, and must
-#      be there once: the notification of before Android 13, whose value is
-#      read before the post, because the next notification overwrites it.
-#  16. Never bond (§M.4, §N.2.5). No file names a call that creates a bond or
-#      answers a pairing, one that reads a characteristic or a descriptor, a
-#      write type or a property that has a response, an attribute permission
-#      that asks for encryption or a signature, an "insufficient …" status,
-#      or a transport that is not LE. The one dial is
-#      `connectGatt(context, false, Callback(link), BluetoothDevice.TRANSPORT_LE)`
-#      and the one answer to a peer's request `sendResponse` with success or
-#      the plain failure: each pinned, each call named once.
+#  15. One thread (§B.1, §N.2.2). `MeshLoop.kt` makes two handlers on its
+#      thread and no other: the one everything is posted to — the loop's
+#      bodies and, for a dial's client, the platform's own runnables — whose
+#      `dispatchMessage` runs each message inside `mesh.run`; and the one the
+#      service's start alone is posted to, inside `mesh.start`. Both, and the
+#      loop's three uses of the first, are pinned and counted. No other
+#      adapter names a `Handler`, a `Looper`, an `Executor`, a `Thread`, a
+#      `Timer` or `MeshThread`. And every platform callback of an adapter —
+#      each `override fun on…(…)` — is `= loop.post { … }` and ends at that
+#      lambda's closing brace: nothing of it runs before the post or chained
+#      behind it, outside the wrapper that asks the log lever and catches
+#      what is thrown. One callback is pinned whole instead, and must be
+#      there once: the notification of before Android 13, whose value is read
+#      before the post, because the next notification overwrites it.
+#  16. Never bond, and nothing to read (§M.4, §N.2.5). No file names a call
+#      that creates a bond or answers a pairing, one that reads a
+#      characteristic or a descriptor, a write type or a property that has a
+#      response, a property or a permission that lets an attribute be read,
+#      an attribute permission that asks for encryption or a signature, an
+#      "insufficient …" status, or a transport that is not LE. The one dial is
+#      `connectGatt(context, false, Callback(link), BluetoothDevice.TRANSPORT_LE,
+#      BluetoothDevice.PHY_LE_1M_MASK, loop.handler)` — the form that has the
+#      platform run the client's callbacks on the loop's handler — and the one
+#      answer to a peer's request `sendResponse` with success or "request not
+#      supported": each pinned, each call named once.
 #  17. The advertisement (§B.3, §M.3, §M.7) is built once, as pinned: its
 #      settings the constants' mode, power, connectable and timeout, and "not
 #      discoverable" from the API level the constants name; its data the
@@ -251,8 +257,11 @@
 # is a change to this file, which a reviewer reads. Of the adapters it reads
 # the shape of a callback's declaration and pinned text, never what a body
 # does: a posted body that calls nothing passes, and so does a callback handed
-# over as a lambda or under a name that does not begin with `on`; the bans of
-# 16 and 17 are names, and a constant written as its integer is not one. That
+# over as a lambda or under a name that does not begin with `on`; what may
+# follow a callback is the end of its class, the next `override`, an
+# annotation or a `private` member, and anything else there is a change to
+# this file; the bans of 16 and 17 are names, and a constant written as its
+# integer is not one. That
 # the adapters call the platform as it is, on every API level, is the app's
 # compile and then an emulator's. What each call does with
 # its arguments is held by tests in
@@ -329,7 +338,7 @@ readonly -a LEVER_STRINGS=(
 
 # How many fixtures the self-test runs. Pinned, because a fixture that stops
 # running is the one way a deleted check reports success.
-readonly SELF_TEST_FIXTURES=276
+readonly SELF_TEST_FIXTURES=280
 
 # The Kotlin of the radio (design §B): the app's mesh packages, whatever the
 # source set, and the JVM build of the pure one with its tests.
@@ -354,28 +363,29 @@ readonly ENGINE='haven-core/src/mesh/engine.rs'
 readonly RADIO_CFG='#[cfg(any(target_os = "android", test))]'
 # The platform's radio modes: named in CONSTANTS, used by no other file.
 readonly MODES='(SCAN_MODE|ADVERTISE_MODE|ADVERTISE_TX_POWER|CONNECTION_PRIORITY)_[A-Z]'
-# The mesh thread's loop (design §N.2.2), and every way it hands its handler
-# something, without whitespace: the start's body inside the thread's `start`,
-# every other inside its `run`.
+# The mesh thread's loop (design §N.2.2), without whitespace: its handler,
+# which runs whatever it is handed inside the thread's `run`; the start's own,
+# inside the thread's `start`; and the three things the loop hands the first.
 readonly LOOP="${CORE%/core}/MeshLoop.kt"
 readonly -a LOOP_POSTS=(
-  'handler.post{mesh.start(body)}'
-  'handler.post(inside(body))'
+  'valhandler:Handler=object:Handler(thread.looper){overridefundispatchMessage(message:Message)=mesh.run{super.dispatchMessage(message)}}'
+  'Handler(thread.looper).post{mesh.start(body)}'
+  'handler.post(body)'
   'handler.removeCallbacksAndMessages(slot)'
-  'handler.postAtTime(inside(body),slot,SystemClock.uptimeMillis()+inMs)'
-  'privatefuninside(body:()->Unit)=Runnable{mesh.run(body)}'
+  'handler.postAtTime(body,slot,SystemClock.uptimeMillis()+inMs)'
 )
 # What no adapter but LOOP names: a thread, or a way onto one, of its own.
 readonly OFF_THE_LOOP='(Handler|HandlerThread|Looper|Executor|Executors|Thread|Timer|TimerTask|MeshThread)'
 # The one callback that does something before its post (design §N.2.2).
 readonly OLDER_FORM='overridefunonCharacteristicChanged(gatt:BluetoothGatt,characteristic:BluetoothGattCharacteristic){valvalue=characteristic.valueloop.post{steps.onFrame(link,value)}}'
-# What could start a pairing (design §M.4, §N.2.5), and the one dial and the
-# one answer, without whitespace.
-readonly BONDS='(createBond|setPairingConfirmation|setPin|ACTION_PAIRING_REQUEST|readCharacteristic|readDescriptor|WRITE_TYPE_DEFAULT|WRITE_TYPE_SIGNED|PROPERTY_WRITE|PROPERTY_SIGNED_WRITE|TRANSPORT_AUTO|TRANSPORT_BREDR)'
+# What could start a pairing, and what would make an attribute readable
+# (design §M.4, §N.2.5, §N.7); and the one dial and the one answer, without
+# whitespace.
+readonly BONDS='(createBond|setPairingConfirmation|setPin|ACTION_PAIRING_REQUEST|readCharacteristic|readDescriptor|WRITE_TYPE_DEFAULT|WRITE_TYPE_SIGNED|PROPERTY_WRITE|PROPERTY_SIGNED_WRITE|PROPERTY_READ|PERMISSION_READ|TRANSPORT_AUTO|TRANSPORT_BREDR)'
 # Every attribute permission that asks for authentication asks for one of these two.
 readonly BOND_BITS='PERMISSION_[A-Z_]*(ENCRYPTED|SIGNED)|GATT_INSUFFICIENT'
-readonly DIAL='connectGatt(context,false,Callback(link),BluetoothDevice.TRANSPORT_LE)'
-readonly ANSWER='valstatus=if(ok)BluetoothGatt.GATT_SUCCESSelseBluetoothGatt.GATT_FAILUREserver.sendResponse(device(address),request,status,0,null)'
+readonly DIAL='connectGatt(context,false,Callback(link),BluetoothDevice.TRANSPORT_LE,BluetoothDevice.PHY_LE_1M_MASK,loop.handler)'
+readonly ANSWER='valstatus=if(ok)BluetoothGatt.GATT_SUCCESSelseBluetoothGatt.GATT_REQUEST_NOT_SUPPORTEDserver.sendResponse(device(address),request,status,0,null)'
 # The advertisement, without whitespace (design §B.3, §M.3), and what none
 # carries.
 readonly -a ADVERTISEMENT=(
@@ -452,6 +462,8 @@ readonly -a JVM_TEST_NAMES=(
   aSecondConnectForAnAddressBeingDialledIsTheSameDial
   theServicesStartRunsBeforeTheLeverIsAsked
   aClientIsClosedThoughAPortCallThrows
+  aCallbackPastADialsTimeGivesItUpAsTheTimerWould
+  aConnectionLostPastADialsTimeIsNotMadeAgain
 )
 
 readonly B='(^|[^A-Za-z0-9_])'
@@ -653,6 +665,36 @@ native_rows() {
 count_of() { # <needle> <text>
   local rest="${2//"$1"/}"
   COUNT=$(( (${#2} - ${#rest}) / ${#1} ))
+}
+
+# From a Kotlin view on stdin with no whitespace: the names of the callbacks
+# it declares — every `override fun on…` — then a tab, then the names of those
+# that are one post through the loop and nothing more: `(…) = loop.post {`,
+# and after the brace that closes that lambda the end of the class, the next
+# `override`, an annotation or a `private` member.
+callbacks() {
+  awk '{
+    text = $0; declared = ""; posted = ""
+    while ((at = index(text, "overridefunon")) > 0) {
+      text = substr(text, at + 11)
+      if (substr(text, 3, 1) !~ /[A-Z]/) continue
+      name = text; sub(/[^A-Za-z0-9_].*$/, "", name)
+      declared = declared name " "
+      rest = substr(text, length(name) + 1)
+      shut = index(rest, ")")
+      if (substr(rest, 1, 1) != "(" || shut == 0 || index(substr(rest, 2, shut - 2), "(") > 0) continue
+      rest = substr(rest, shut + 1)
+      if (index(rest, "=loop.post{") != 1) continue
+      depth = 0; last = 0
+      for (i = 11; i <= length(rest) && !last; i++) {
+        c = substr(rest, i, 1)
+        if (c == "{") depth++
+        else if (c == "}" && --depth == 0) last = i
+      }
+      if (last && substr(rest, last + 1) ~ /^(\}|override|@|private|$)/) posted = posted name " "
+    }
+    print declared "\t" posted
+  }'
 }
 
 # The line of the `#[cfg(test)]` directly above `mod tests {` in a view on
@@ -1073,13 +1115,13 @@ run_check() {
   flat="$(grep -vE '^[[:space:]]*(package|import)[[:space:]]' <<<"${views["${REPO_ROOT}/${LOOP}"]}" || true)"
   flat="${flat//[[:space:]]/}"
   hits=''
-  for want in "${LOOP_POSTS[@]}" handler.:4 mesh.:2 'Handler(:1'; do
+  for want in "${LOOP_POSTS[@]}" handler.:3 mesh.:2 'Handler(:2'; do
     [[ "${want}" =~ :[0-9]$ ]] || want+=':1'
     count_of "${want%:*}" "${flat}"
     (( COUNT == ${want##*:} )) || hits+="'${want%:*}' written ${COUNT} time(s), not ${want##*:}; "
   done
   if [[ -n "${hits}" ]]; then
-    fail "${LOOP} does not hand its one handler a body in the pinned ways and no other — the service's start inside mesh.start(body), every other inside mesh.run(body), written once (${hits}). MeshThread.run is what asks the log lever before a body and turns what the body throws into a stop: a body posted bare runs with the platform's log lines unchecked, and its exception ends the process that also publishes to relays. A second handler is a second thread."
+    fail "${LOOP} is not its two pinned handlers and its three pinned uses of the first — a handler whose dispatchMessage runs every message inside mesh.run, and one for the service's start alone, inside mesh.start (${hits}). MeshThread.run is what asks the log lever before a body and turns what the body throws into a stop: a message dispatched outside it — a body of the loop's, or a runnable the platform posts for a dial's client — runs with the platform's log lines unchecked, and its exception ends the process that also publishes to relays. A third handler is a way round both."
   fi
   older=0
   while IFS= read -r file; do
@@ -1095,10 +1137,9 @@ run_check() {
     older=$(( older + COUNT ))
     flat="${flat//"${OLDER_FORM}"/}"
     [[ "${flat}" == *overridefunon* ]] || continue
-    declared="$(grep -oE 'overridefunon[A-Z][A-Za-z0-9_]*' <<<"${flat}" | sed 's/^overridefun//' | tr '\n' ' ' || true)"
-    posted="$(grep -oE 'overridefunon[A-Z][A-Za-z0-9_]*\([^()]*\)=loop\.post\{' <<<"${flat}" | sed -E 's/^overridefun//; s/\(.*$//' | tr '\n' ' ' || true)"
+    IFS=$'\t' read -r declared posted <<<"$(callbacks <<<"${flat}")"
     if [[ "${declared}" != "${posted}" ]]; then
-      fail "a platform callback of ${rel} is not one post through the loop — 'override fun on…(…) = loop.post {' (declared: ${declared:-none}; posting: ${posted:-none}). A callback arrives on a binder thread or the main one: whatever it does before the post runs beside the mesh thread, outside the wrapper that asks the log lever and catches what is thrown."
+      fail "a platform callback of ${rel} is not one post through the loop — 'override fun on…(…) = loop.post { … }', and nothing behind the lambda (declared: ${declared:-none}; posting: ${posted:-none}). Whatever a callback does before its post, or chained after it, runs outside the wrapper that asks the log lever and catches what is thrown — on a binder thread or the main one, or for a dial's client on the mesh thread, where an exception ends the process that also publishes to relays."
     fi
   done <<<"${kotlin}"
   if (( older != 1 )); then
@@ -1115,7 +1156,7 @@ run_check() {
     while IFS= read -r file; do
       hits="$(grep -nE "${B}${BONDS}${E}|${BOND_BITS}" <<<"${views["${file}"]}" | cut -d: -f1 | tr '\n' ' ' || true)"
       if [[ -n "${hits}" ]]; then
-        fail "${file#"${REPO_ROOT}/"} names what could start a pairing (line(s) ${hits}): a call that creates a bond or answers one, a read of a characteristic or a descriptor, a write that has a response, an attribute permission that asks for encryption or a signature, an 'insufficient …' status, or a transport that is not LE. Haven never bonds: a bond hands a stranger this phone's identity address and the key to every address it rotates to, and the platform asks for one by itself when a peer refuses a read or an answered write."
+        fail "${file#"${REPO_ROOT}/"} names what could start a pairing, or an attribute that can be read (line(s) ${hits}): a call that creates a bond or answers one, a read of a characteristic or a descriptor, a write that has a response, a readable property or permission, an attribute permission that asks for encryption or a signature, an 'insufficient …' status, or a transport that is not LE. No attribute of Haven's is read, so the platform refuses a read itself and none waits for an answer Haven never gives. Haven never bonds: a bond hands a stranger this phone's identity address and the key to every address it rotates to, and the platform asks for one by itself when a peer refuses a read or an answered write."
       fi
     done <<<"${kotlin}"
   fi
@@ -1125,7 +1166,7 @@ run_check() {
     (( COUNT == 1 )) || hits+="'${want}' written ${COUNT} time(s), not 1; "
   done
   if [[ -n "${hits}" ]]; then
-    fail "the radio does not dial once, as 'connectGatt(context, false, Callback(link), BluetoothDevice.TRANSPORT_LE)', and answer a peer's request once, as sendResponse with success or the plain failure (${hits}). A dial over another transport or left to the platform to repeat, and an answer that names authentication or encryption, are each a way to a pairing dialog a stranger can raise."
+    fail "the radio does not dial once, as 'connectGatt(context, false, Callback(link), BluetoothDevice.TRANSPORT_LE, BluetoothDevice.PHY_LE_1M_MASK, loop.handler)', and answer a peer's request once, as sendResponse with success or 'request not supported' (${hits}). A dial over another transport or left to the platform to repeat, and an answer that names authentication or encryption, are each a way to a pairing dialog a stranger can raise; and a dial without the loop's handler has its callbacks run on the platform's thread, where before Android 13 a notification's value and a frame about to be written share one object."
   fi
 
   # Check 17: the advertisement is the service UUID alone.
@@ -1157,7 +1198,8 @@ run_check() {
 # must fail with the message of the check it breaks.
 # ---------------------------------------------------------------------------
 self_test() {
-  local tmp fails=0 checked=0
+  local tmp fails=0 checked=0 shown=0 jobs
+  jobs="$(nproc 2>/dev/null || echo 2)"
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
@@ -1592,29 +1634,30 @@ package com.oblivioustech.haven.mesh
 import android.os.Handler
 import com.oblivioustech.haven.mesh.core.MeshThread
 
-// Never handler.post(body) here: a body outside mesh.run(body) is unchecked.
+// Never Handler(Looper.getMainLooper()) here: a comment makes no handler.
 class MeshLoop(private val mesh: MeshThread) {
     private val thread = HandlerThread(NAME).apply { start() }
-    private val handler = Handler(thread.looper)
+
+    val handler: Handler = object : Handler(thread.looper) {
+        override fun dispatchMessage(message: Message) = mesh.run { super.dispatchMessage(message) }
+    }
 
     fun start(body: () -> Unit) {
-        handler.post { mesh.start(body) }
+        Handler(thread.looper).post { mesh.start(body) }
     }
 
     fun post(body: () -> Unit) {
-        handler.post(inside(body))
+        handler.post(body)
     }
 
     fun timer(slot: Any, inMs: Long, body: () -> Unit) {
         handler.removeCallbacksAndMessages(slot)
-        handler.postAtTime(inside(body), slot, SystemClock.uptimeMillis() + inMs)
+        handler.postAtTime(body, slot, SystemClock.uptimeMillis() + inMs)
     }
 
     fun quit() {
         thread.quit()
     }
-
-    private fun inside(body: () -> Unit) = Runnable { mesh.run(body) }
 }
 KT
     cat >"${t}/${CORE%/core}/GattClientAdapter.kt" <<'KT'
@@ -1640,7 +1683,8 @@ class GattClientAdapter(private val loop: MeshLoop) : GattClientPort {
     }
 
     override fun connect(link: Long, address: String): Boolean {
-        clients[link] = adapter.getRemoteDevice(address).connectGatt(context, false, Callback(link), BluetoothDevice.TRANSPORT_LE)
+        clients[link] = adapter.getRemoteDevice(address)
+            .connectGatt(context, false, Callback(link), BluetoothDevice.TRANSPORT_LE, BluetoothDevice.PHY_LE_1M_MASK, loop.handler)
             ?: return false
         return true
     }
@@ -1653,7 +1697,7 @@ KT
 package com.oblivioustech.haven.mesh
 
 class GattServerAdapter(private val loop: MeshLoop) : ServerPort {
-    // Never PERMISSION_WRITE_ENCRYPTED, and never PROPERTY_WRITE alone.
+    // Never PERMISSION_WRITE_ENCRYPTED, never PROPERTY_WRITE alone, never PERMISSION_READ.
     private val characteristic = BluetoothGattCharacteristic(
         MeshRadioConstants.CHARACTERISTIC_UUID,
         BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE or BluetoothGattCharacteristic.PROPERTY_NOTIFY,
@@ -1676,7 +1720,8 @@ class GattServerAdapter(private val loop: MeshLoop) : ServerPort {
 
     // Never GATT_INSUFFICIENT_AUTHENTICATION: it starts the peer's pairing.
     override fun answer(address: String, request: Int, ok: Boolean) {
-        val status = if (ok) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_FAILURE
+        // A code of ATT's own.
+        val status = if (ok) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED
         server.sendResponse(device(address), request, status, 0, null)
     }
 }
@@ -1758,19 +1803,40 @@ RS
 haven/android/app/src/main/kotlin/com/oblivioustech/haven/HavenApplication.kt|Log.i(TAG, "started")|a fixed word|owner
 TXT
   }
+  # Each fixture is the whole guard run on a tree of its own that nothing
+  # touches again, so as many run side by side as there are processors; the
+  # verdicts are shown in the order written.
   _case() { # <label> <want-rc> <want-msg-substring> <tree>
-    local label="$1" want="$2" msg="$3" got=0 out
     checked=$(( checked + 1 ))
+    _verdict "$@" >"${tmp}/verdict.${checked}" 2>&1 &
+    if (( checked % jobs == 0 )); then
+      _show
+    fi
+  }
+  _verdict() { # <label> <want-rc> <want-msg-substring> <tree>
+    local label="$1" want="$2" msg="$3" got=0 out
     out="$(REPO_ROOT_OVERRIDE="$4" bash "${BASH_SOURCE[0]}" 2>&1)" || got=$?
     if [[ "${got}" -ne "${want}" ]]; then
-      printf '  \033[1;31mFAIL\033[0m %s (want rc=%d, got rc=%d)\n%s\n' "${label}" "${want}" "${got}" "${out}" >&2
-      fails=1
+      printf '  \033[1;31mFAIL\033[0m %s (want rc=%d, got rc=%d)\n%s\n' "${label}" "${want}" "${got}" "${out}"
     elif [[ -n "${msg}" && "${out}" != *"${msg}"* ]]; then
-      printf '  \033[1;31mFAIL\033[0m %s (rc=%d, but no message matched %q)\n%s\n' "${label}" "${got}" "${msg}" "${out}" >&2
-      fails=1
+      printf '  \033[1;31mFAIL\033[0m %s (rc=%d, but no message matched %q)\n%s\n' "${label}" "${got}" "${msg}" "${out}"
     else
       printf '  \033[1;32mPASS\033[0m %s\n' "${label}"
     fi
+  }
+  # Waits for the fixtures started, and shows the verdicts not yet shown. A
+  # verdict that is not one line `PASS …` is a failure, an empty one too.
+  _show() {
+    wait
+    while (( shown < checked )); do
+      shown=$(( shown + 1 ))
+      if [[ "$(wc -l <"${tmp}/verdict.${shown}" | tr -d ' ')" == 1 ]] && grep -q '^  .\[1;32mPASS' "${tmp}/verdict.${shown}"; then
+        cat "${tmp}/verdict.${shown}"
+      else
+        cat "${tmp}/verdict.${shown}" >&2
+        fails=1
+      fi
+    done
   }
   # Replaces the one line of <file> that contains <text> by <replacement>, in
   # which awk reads `\n` as a line break.
@@ -2605,6 +2671,10 @@ RS
   _line "${t}/${client}" 'override fun onMtuChanged(' '        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {\n            loop.post { steps.onMtu(link, mtu, true) }\n            links.onMtu(gatt.device.address, mtu)\n        }\n\n        private fun unused() {'
   _case "a callback that posts and then does more on the platform's thread fails: its body is the post" 1 "a platform callback of ${client} is not one post through the loop" "${t}"
 
+  t="${tmp}/callback-chained"; _tree "${t}"
+  sed -i -z 's/            core.onSighting(result.device.address, result.rssi)\n        }\n/            core.onSighting(result.device.address, result.rssi)\n        }.also { core.onWake() }\n/' "${t}/${adapter}"
+  _case "a callback that chains work behind its post fails: the declaration ends at the lambda" 1 "a platform callback of ${adapter} is not one post through the loop" "${t}"
+
   t="${tmp}/callback-long-signature"; _tree "${t}"
   _line "${t}/${server}" ') = loop.post {' '        ) {'
   _case "a callback whose parameters run over several lines, and that does not post, fails" 1 "a platform callback of ${server} is not one post through the loop" "${t}"
@@ -2640,46 +2710,46 @@ RS
   printf 'package com.oblivioustech.haven.mesh\n\nclass LoopbackRadio(private val core: MeshRadioCore) : ScanCallback() {\n    override fun onScanResult(callbackType: Int, result: ScanResult) {\n        core.onSighting(result.device.address, result.rssi)\n    }\n}\n' >"${t}/${radio_debug}/LoopbackRadio.kt"
   _case "a callback off the loop in a mesh file of another source set fails" 1 "LoopbackRadio.kt is not one post through the loop" "${t}"
 
-  t="${tmp}/loop-bare-post"; _tree "${t}"
-  _line "${t}/${LOOP}" 'handler.post(inside(body))' '        handler.post(body)'
-  _case "a body the loop posts bare fails: no lever asked, nothing caught" 1 "'handler.post(inside(body))' written 0 time(s), not 1" "${t}"
-
-  t="${tmp}/loop-bare-timer"; _tree "${t}"
-  _line "${t}/${LOOP}" 'handler.postAtTime(' '        handler.postAtTime(body, slot, SystemClock.uptimeMillis() + inMs)'
-  _case "a timer's body posted bare fails" 1 "'handler.postAtTime(inside(body),slot,SystemClock.uptimeMillis()+inMs)' written 0 time(s), not 1" "${t}"
-
-  t="${tmp}/loop-timer-unreplaced"; _tree "${t}"
-  _line "${t}/${LOOP}" 'handler.removeCallbacksAndMessages(slot)' '        handler.post(body)'
-  _case "a timer that no longer takes the place of the one before, and posts a body bare instead, fails" 1 "'handler.removeCallbacksAndMessages(slot)' written 0 time(s), not 1" "${t}"
+  t="${tmp}/loop-other-thread"; _tree "${t}"
+  sed -i 's/val handler: Handler = object : Handler(thread.looper) {/val handler: Handler = object : Handler(main) {/' "${t}/${LOOP}"
+  _case "the loop's handler made on another thread's looper fails" 1 "'valhandler:Handler=object:Handler(thread.looper){" "${t}"
 
   t="${tmp}/loop-unwrapped"; _tree "${t}"
-  _line "${t}/${LOOP}" 'private fun inside(' '    private fun inside(body: () -> Unit) = Runnable { body() }'
-  _case "the loop's wrapper that no longer runs a body inside MeshThread.run fails" 1 "'privatefuninside(body:()->Unit)=Runnable{mesh.run(body)}' written 0 time(s), not 1" "${t}"
+  _line "${t}/${LOOP}" 'override fun dispatchMessage(' '        override fun dispatchMessage(message: Message) = super.dispatchMessage(message)'
+  _case "a handler that dispatches outside MeshThread.run fails: no lever asked, and a throw ends the process" 1 "'valhandler:Handler=object:Handler(thread.looper){" "${t}"
+
+  t="${tmp}/loop-start-in-run"; _tree "${t}"
+  _line "${t}/${LOOP}" 'Handler(thread.looper).post {' '        Handler(thread.looper).post { mesh.run(body) }'
+  _case "the service's start run inside MeshThread.run fails: with no lever yet it would never reach the foreground" 1 "'Handler(thread.looper).post{mesh.start(body)}' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/loop-post-ahead"; _tree "${t}"
+  _line "${t}/${LOOP}" 'handler.post(body)' '        handler.postAtFrontOfQueue(body)'
+  _case "a body posted ahead of what is queued fails: the pinned post is the one in order" 1 "'handler.post(body)' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/loop-timer-unreplaced"; _tree "${t}"
+  _line "${t}/${LOOP}" 'handler.removeCallbacksAndMessages(slot)' '        handler.removeCallbacks(body)'
+  _case "a timer that no longer takes the place of the one before fails" 1 "'handler.removeCallbacksAndMessages(slot)' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/loop-timer-unslotted"; _tree "${t}"
+  _line "${t}/${LOOP}" 'handler.postAtTime(' '        handler.postDelayed(body, inMs)'
+  _case "a timer posted under no slot fails: nothing could take its place" 1 "'handler.postAtTime(body,slot,SystemClock.uptimeMillis()+inMs)' written 0 time(s), not 1" "${t}"
 
   t="${tmp}/loop-direct-run"; _tree "${t}"
-  _line "${t}/${LOOP}" 'private fun inside(' '    fun now(body: () -> Unit) = mesh.run(body)\n\n    private fun inside(body: () -> Unit) = Runnable { mesh.run(body) }'
+  _line "${t}/${LOOP}" 'fun quit() {' '    fun now(body: () -> Unit) = mesh.run(body)\n\n    fun quit() {'
   _case "a body the loop runs on its caller's thread fails: every pin is there, and the thread is not" 1 "'mesh.' written 3 time(s), not 2" "${t}"
 
-  t="${tmp}/loop-second-start"; _tree "${t}"
-  _line "${t}/${LOOP}" 'handler.post(inside(body))' '        handler.post { mesh.start(body) }'
-  _case "a second body run by MeshThread.start fails: that one is not asked the lever" 1 "'handler.post{mesh.start(body)}' written 2 time(s), not 1" "${t}"
+  t="${tmp}/loop-third-handler"; _tree "${t}"
+  _line "${t}/${LOOP}" 'fun quit() {' '    val main = Handler(context.mainLooper)\n\n    fun quit() {'
+  _case "a third handler in the loop fails: a way round the wrapper" 1 "'Handler(' written 3 time(s), not 2" "${t}"
 
-  t="${tmp}/loop-start-asked"; _tree "${t}"
-  _line "${t}/${LOOP}" 'handler.post { mesh.start(body) }' '        handler.post(inside(body))'
-  _case "the service's start run inside MeshThread.run fails: with no lever yet it would never reach the foreground" 1 "'handler.post{mesh.start(body)}' written 0 time(s), not 1" "${t}"
-
-  t="${tmp}/loop-second-handler"; _tree "${t}"
-  _line "${t}/${LOOP}" 'private val handler' '    private val handler = Handler(thread.looper)\n    private val main = Handler(context.mainLooper)'
-  _case "a second handler in the loop fails: a second thread" 1 "'Handler(' written 2 time(s), not 1" "${t}"
-
-  t="${tmp}/loop-fifth-post"; _tree "${t}"
+  t="${tmp}/loop-fourth-use"; _tree "${t}"
   _line "${t}/${LOOP}" 'thread.quit()' '        handler.postAtFrontOfQueue(thread::quit)'
-  _case "a fifth thing handed to the handler fails, whatever it is" 1 "'handler.' written 5 time(s), not 4" "${t}"
+  _case "a fourth thing handed to the handler fails, whatever it is" 1 "'handler.' written 4 time(s), not 3" "${t}"
 
   # Check 16: nothing that could start a pairing.
   for name in createBond setPairingConfirmation setPin ACTION_PAIRING_REQUEST readCharacteristic readDescriptor \
-    WRITE_TYPE_DEFAULT WRITE_TYPE_SIGNED PROPERTY_WRITE PROPERTY_SIGNED_WRITE TRANSPORT_AUTO TRANSPORT_BREDR \
-    PERMISSION_READ_ENCRYPTED PERMISSION_WRITE_SIGNED PERMISSION_WRITE_ENCRYPTED_MITM GATT_INSUFFICIENT_AUTHENTICATION; do
+    WRITE_TYPE_DEFAULT WRITE_TYPE_SIGNED PROPERTY_WRITE PROPERTY_SIGNED_WRITE PROPERTY_READ PERMISSION_READ \
+    TRANSPORT_AUTO TRANSPORT_BREDR PERMISSION_READ_ENCRYPTED PERMISSION_WRITE_SIGNED PERMISSION_WRITE_ENCRYPTED_MITM GATT_INSUFFICIENT_AUTHENTICATION; do
     t="${tmp}/bond-${name}"; _tree "${t}"
     printf 'val named = Platform.%s\n' "${name}" >>"${t}/${adapter}"
     _case "the name ${name} in an adapter fails" 1 "${adapter} names what could start a pairing" "${t}"
@@ -2694,8 +2764,12 @@ RS
   _case "a characteristic that offers an answered write fails; the write without response beside it does not" 1 "${server} names what could start a pairing" "${t}"
 
   t="${tmp}/integer-answer"; _tree "${t}"
-  sed -i 's/else BluetoothGatt.GATT_FAILURE/else 5/' "${t}/${server}"
+  sed -i 's/else BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED/else 5/' "${t}/${server}"
   _case "'insufficient authentication' answered as a bare integer fails the pin, which names both answers" 1 "'${ANSWER}' written 0 time(s), not 1" "${t}"
+
+  t="${tmp}/failure-answer"; _tree "${t}"
+  sed -i 's/else BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED/else BluetoothGatt.GATT_FAILURE/' "${t}/${server}"
+  _case "the platform's GATT_FAILURE as the refusal fails: it is 257, and what goes out for it is a cast's doing" 1 "'${ANSWER}' written 0 time(s), not 1" "${t}"
 
   t="${tmp}/second-answer"; _tree "${t}"
   printf 'fun refuse(server: BluetoothGattServer, device: BluetoothDevice, request: Int) = server.sendResponse(device, request, 15, 0, null)\n' >>"${t}/${server}"
@@ -2705,9 +2779,9 @@ RS
   sed -i 's/connectGatt(context, false,/connectGatt(context, true,/' "${t}/${client}"
   _case "a dial left to the platform to repeat fails" 1 "'${DIAL}' written 0 time(s), not 1" "${t}"
 
-  t="${tmp}/transport-unsaid"; _tree "${t}"
-  sed -i 's/, Callback(link), BluetoothDevice.TRANSPORT_LE)/, Callback(link))/' "${t}/${client}"
-  _case "a dial that does not say LE fails" 1 "'${DIAL}' written 0 time(s), not 1" "${t}"
+  t="${tmp}/dial-own-thread"; _tree "${t}"
+  sed -i 's/, BluetoothDevice.PHY_LE_1M_MASK, loop.handler)/)/' "${t}/${client}"
+  _case "a dial without the loop's handler fails: its callbacks run on the platform's thread" 1 "'${DIAL}' written 0 time(s), not 1" "${t}"
 
   t="${tmp}/second-dial"; _tree "${t}"
   printf 'fun redial(device: BluetoothDevice, context: Context, callback: BluetoothGattCallback) = device.connectGatt(context, false, callback, 2)\n' >>"${t}/${adapter}"
@@ -2814,6 +2888,7 @@ RS
   sed -i '/^[a-zA-Z]/d' "${t}/${EXPORTS}"
   _case "a fixture that lists no method is a misconfiguration, not a pass" 2 'would be reading nothing' "${t}"
 
+  _show
   if (( fails )); then
     echo "self-test: FAILED" >&2
     return 1
