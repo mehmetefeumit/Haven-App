@@ -270,7 +270,7 @@ legs; no predecessor asset yet).
 | Where | What |
 |---|---|
 | `ci.yml` → `launch-gate-ios` (every PR and push to main) | `.github/workflows/launch-gate-ios.yml`, job `Simulator launch, relaunch and upgrade`: builds the candidate from the checked-out tree, launches it on a simulator, offline. A release gate job: `scripts/ci/check_ci_verdict.sh` requires it on the tagged commit. |
-| `release-build.yml` → `ios-launch-gate` | The same workflow on the tag's tree. TestFlight waits for it; on a tag (only) it uploads the simulator app it launched as `haven-ios-simulator-app`, which `ios-simulator-asset` attaches to the GitHub Release. |
+| `release-build.yml` → `ios-launch-gate` | The same workflow on the tag's tree. TestFlight waits for it; on a tag (only) it uploads the simulator app it launched as `haven-ios-simulator-app`, which `publish` attaches to the GitHub Release with the APKs: every asset goes onto a draft that is published last, because releases are immutable here and a published one takes no new asset (v0.1.16 lost its simulator asset that way). |
 | `release-build.yml` → `ios` | `scripts/ci/check_ios_app_loadable.sh` on the signed archive's `Runner.app`, before the TestFlight upload. |
 
 The gate must run green at least ten times on `ci.yml` before it is relied on as

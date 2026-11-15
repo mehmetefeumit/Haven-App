@@ -13,12 +13,17 @@
 #      the artifact `android` uploads (haven-release-android).
 #   G2 every job that publishes APKs to the GitHub Release needs
 #      android-launch-gate and checks the gate's tested_sha256.
-#   G3 Zapstore, which pulls the APK from the Release, needs android-publish.
+#   G3 Zapstore, which pulls the APK from the Release, needs publish.
 #   G4 ios-launch-gate calls launch-gate-ios.yml, the TestFlight job needs it,
 #      and that job runs check_ios_app_loadable.sh before uploading.
 #   G5 the job attaching the iOS simulator build needs ios-launch-gate.
 #   G6 ci.yml calls both launch-gate workflows.
 #   G7 check_ci_verdict.sh holds launch-gate-ios.yml among its gate workflows.
+#   G8 the Release is written whole before it is published, because a
+#      published Release is immutable here: one job writes it, its upload sets
+#      `draft: true` (a prerelease would otherwise be created published), and
+#      that job publishes it after the upload. v0.1.16's simulator asset was
+#      refused because a second job attached it after the first had published.
 #
 # Usage:
 #   bash scripts/ci/check_release_launch_gated.sh             # check the tree
@@ -33,7 +38,7 @@ readonly RELEASE_REL='.github/workflows/release-build.yml'
 readonly CI_REL='.github/workflows/ci.yml'
 readonly VERDICT_REL='scripts/ci/check_ci_verdict.sh'
 # Pinned, because a mutation that stops running is a deleted check.
-readonly SELF_TEST_MUTATIONS=11
+readonly SELF_TEST_MUTATIONS=14
 
 # The block of one top-level job (`  <key>:` up to the next one).
 job_block() { # <workflow> <job key>
@@ -64,7 +69,7 @@ needs_has() { # <workflow> <job key> <needed>
 
 check() { # <root>
   local root="$1" rel="$1/${RELEASE_REL}" ci="$1/${CI_REL}" verdict="$1/${VERDICT_REL}"
-  local f errs=0 key publishers ios_jobs
+  local f errs=0 key publishers ios_jobs writers
   for f in "${rel}" "${ci}" "${verdict}"; do
     [[ -r "${f}" ]] || { echo "ERROR: ${f#"${root}"/} not found" >&2; return 2; }
   done
@@ -75,7 +80,7 @@ check() { # <root>
     || err "G1: android-launch-gate must call launch-gate-android.yml on haven-release-android"
 
   publishers="$(jobs_matching "${rel}" 'softprops/action-gh-release' 'app-\*-release\.apk')"
-  [[ -n "${publishers}" ]] || err "G2: no job publishes the APKs (expected android-publish)"
+  [[ -n "${publishers}" ]] || err "G2: no job publishes the APKs (expected publish)"
   for key in ${publishers}; do
     needs_has "${rel}" "${key}" android-launch-gate \
       || err "G2: ${key} publishes APKs without needing android-launch-gate"
@@ -83,7 +88,7 @@ check() { # <root>
       || err "G2: ${key} publishes APKs without checking the gate's tested_sha256"
   done
 
-  needs_has "${rel}" zapstore android-publish || err "G3: zapstore must need android-publish"
+  needs_has "${rel}" zapstore publish || err "G3: zapstore must need publish"
 
   job_block "${rel}" ios-launch-gate | grep -q 'uses: ./.github/workflows/launch-gate-ios.yml' \
     || err "G4: ios-launch-gate must call launch-gate-ios.yml"
@@ -108,8 +113,20 @@ check() { # <root>
   grep -Eq '^readonly GATE_WORKFLOWS=\(.*\blaunch-gate-ios\.yml\b' "${verdict}" \
     || err "G7: check_ci_verdict.sh GATE_WORKFLOWS must include launch-gate-ios.yml"
 
+  writers="$(jobs_matching "${rel}" 'softprops/action-gh-release')"
+  if [[ "$(wc -w <<<"${writers}")" -ne 1 ]]; then
+    err "G8: exactly one job may write the GitHub Release (found: ${writers//$'\n'/ })"
+  else
+    job_block "${rel}" "${writers}" | awk '
+      /uses: softprops\/action-gh-release/ { up = 1 }
+      up && /^          draft: true$/ { draft = 1 }
+      up && /-F draft=false/ { published = 1 }
+      END { exit !(draft && published) }' \
+      || err "G8: ${writers} must upload with draft: true and only then publish (-F draft=false)"
+  fi
+
   (( errs == 0 )) || return 1
-  echo "release launch gates wired (G1-G7)"
+  echo "release launch gates wired (G1-G8)"
 }
 
 self_test() {
@@ -129,15 +146,18 @@ self_test() {
     ran=$((ran + 1))
   }
   expect "the tree as committed" 0 "${RELEASE_REL}" ''
-  expect "publish no longer needs the gate" 1 "${RELEASE_REL}" 's/needs: \[android, android-launch-gate\]/needs: [android]/'
+  expect "publish no longer needs the gate" 1 "${RELEASE_REL}" 's/needs: \[android, android-launch-gate, ios-launch-gate\]/needs: [android, ios-launch-gate]/'
   expect "publish skips the digest check" 1 "${RELEASE_REL}" '/needs\.android-launch-gate\.outputs\.tested_sha256/d'
   expect "the gate tests another artifact" 1 "${RELEASE_REL}" 's/candidate_artifact: haven-release-android/candidate_artifact: something-else/'
-  expect "zapstore runs off the build" 1 "${RELEASE_REL}" 's/needs: \[android-publish\]$/needs: [android]/'
+  expect "zapstore runs off the build" 1 "${RELEASE_REL}" 's/needs: \[publish\]$/needs: [android]/'
   expect "TestFlight no longer waits for iOS" 1 "${RELEASE_REL}" 's/needs: \[gate, ios-launch-gate\]/needs: [gate]/'
   expect "the IPA load check is dropped" 1 "${RELEASE_REL}" '/check_ios_app_loadable\.sh/d'
   expect "ci.yml drops the iOS gate" 1 "${CI_REL}" '/uses: \.\/\.github\/workflows\/launch-gate-ios\.yml/d'
   expect "ci.yml drops the Android gate" 1 "${CI_REL}" '/uses: \.\/\.github\/workflows\/launch-gate-android\.yml/d'
-  expect "the simulator build is attached untested" 1 "${RELEASE_REL}" 's/needs: \[android-publish, ios-launch-gate\]/needs: [android-publish]/'
+  expect "the simulator build is attached untested" 1 "${RELEASE_REL}" 's/needs: \[android, android-launch-gate, ios-launch-gate\]/needs: [android, android-launch-gate]/'
+  expect "the release is created published" 1 "${RELEASE_REL}" '/^          draft: true$/d'
+  expect "the draft is never published" 1 "${RELEASE_REL}" 's/-F draft=false/-F draft=true/'
+  expect "a second job writes the release" 1 "${RELEASE_REL}" 's/^(      - name: Skipped \(no Zapstore secret\))$/      - uses: softprops\/action-gh-release@v2\n\1/'
   expect "the verdict gate drops iOS" 1 "${VERDICT_REL}" 's/ launch-gate-ios\.yml\)/)/'
   # A mutation whose sed matches nothing leaves rc 0 and fails above; this
   # catches a case that stopped running at all.
