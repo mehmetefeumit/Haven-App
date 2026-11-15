@@ -439,6 +439,13 @@
 #     load check runs before upload, and ci.yml and the verdict gate keep both
 #     gates (docs/LAUNCH_GATE.md).
 #
+#   Network retry is classified       scripts/ci/retry_on_network_failure.sh
+#     The iOS builds on the release path (the launch gate's config pass and
+#     TestFlight's IPA build) run again only when they failed on the network:
+#     v0.1.15's iOS gate died on one lost DNS lookup in `pod install`. Its self-test holds that a real pod or
+#     compile error is never retried and keeps its rc, and that a network
+#     failure gives up after three attempts.
+#
 #   Release APK loads                 scripts/ci/check_apk_loadable.sh
 #     v0.1.14's R8 deleted the constructor WorkManager's database is created
 #     through, and ML Kit's registrars' with it. Every class Android or a
@@ -1465,6 +1472,10 @@ jobs:
       - name: Release APK loadable self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_apk_loadable.sh --self-test
+
+      - name: Network retry is classified self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/retry_on_network_failure.sh --self-test
 
       # The Rule-14 busy marker is a LOG token. Routing on it would be
       # remotely influenceable: a circle admin controls the group's routing

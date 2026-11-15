@@ -444,13 +444,15 @@ jobs:
       # forces --obfuscate/--split-debug-info, runs the secret guard, compiles the
       # haven-core Rust pod for aarch64-apple-ios, and exports a SIGNED .ipa via
       # ios/ExportOptions.plist. BUILD_NUMBER = the run number -> unique & monotonic.
+      # Its `pod install` does not retry adding CocoaPods' trunk source on a
+      # fresh runner, so a network-level failure, and only that, runs it again.
       - name: Build signed IPA (release wrapper)
         env:
           STADIA_API_KEY: ${{ secrets.STADIA_API_KEY }}
           BUILD_NUMBER: ${{ github.run_number }}
         run: |
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then export BUILD_NAME="${GITHUB_REF_NAME#v}"; fi
-          bash ../scripts/build_release.sh ipa
+          bash ../scripts/ci/retry_on_network_failure.sh -- bash ../scripts/build_release.sh ipa
 
       # Security Rule 15: nothing reaches TestFlight with SQLCipher's native
       # logger compiled in.
