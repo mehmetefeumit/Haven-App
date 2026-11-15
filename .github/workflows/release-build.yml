@@ -444,8 +444,8 @@ jobs:
       # forces --obfuscate/--split-debug-info, runs the secret guard, compiles the
       # haven-core Rust pod for aarch64-apple-ios, and exports a SIGNED .ipa via
       # ios/ExportOptions.plist. BUILD_NUMBER = the run number -> unique & monotonic.
-      # Its `pod install` fetches from the CocoaPods CDN with no retry of its
-      # own, so a network-level failure, and only that, is tried again.
+      # Its `pod install` does not retry adding CocoaPods' trunk source on a
+      # fresh runner, so a network-level failure, and only that, runs it again.
       - name: Build signed IPA (release wrapper)
         env:
           STADIA_API_KEY: ${{ secrets.STADIA_API_KEY }}

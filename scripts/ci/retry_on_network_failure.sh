@@ -4,10 +4,12 @@
 # v0.1.15's iOS launch gate died in `pod install`: "Could not resolve host:
 # cdn.cocoapods.org" (release run 43688120017). The same macOS runner had lost
 # DNS four minutes earlier, and cargo's own retry carried the logscan build
-# through it; CocoaPods has none, so one lost lookup failed the release.
+# through it. CocoaPods retries CDN downloads, but not adding the trunk source
+# on a fresh runner: a failed lookup sends it to a single `git clone`, so one
+# lost lookup failed the release.
 #
-# Only a failure whose output names a network-level cause is retried, at most
-# ATTEMPTS times with a growing wait. Anything else, a real `pod install` or
+# Only a failure whose output names a network-level cause is retried, in at
+# most ATTEMPTS attempts with a growing wait. Anything else, a real `pod install` or
 # compile error included, fails at once with its own rc: retrying a
 # deterministic failure would hide it behind more minutes, and an output that
 # shows a recovered network warning beside a real error only costs the retries,
@@ -23,8 +25,10 @@ set -uo pipefail
 
 readonly ATTEMPTS=3
 BACKOFF_SECS=(30 90)
-readonly NETWORK_RE='Could not resolve host|Couldn.t resolve host|Temporary failure in name resolution|nodename nor servname provided|Failed to connect to|Connection timed out|Connection reset by peer|Operation timed out|SSL_ERROR_SYSCALL|Recv failure|The requested URL returned error: 5[0-9][0-9]'
-readonly SELF_TEST_CASES=6
+# Every way CocoaPods' trunk setup fails is caught by its own line, since a
+# lookup it swallows can recover in time for the clone to fail differently.
+readonly NETWORK_RE='Could not resolve host|Couldn.t resolve host|Temporary failure in name resolution|nodename nor servname provided|Failed host lookup|Failed to connect to|Couldn.t connect to server|Failed to open TCP connection|Network is unreachable|Connection timed out|Connection reset by peer|Operation timed out|Timeout was reached|Empty reply from server|SSL_ERROR_SYSCALL|SSL connect error|Recv failure|The requested URL returned error: 5[0-9][0-9]|The Internet connection appears to be offline|A server with the specified hostname could not be found|Unable to add a source with url `https://cdn\.cocoapods\.org/`'
+readonly SELF_TEST_CASES=7
 
 note() { printf '[retry_on_network_failure] %s\n' "$*"; }
 
@@ -42,6 +46,7 @@ run() { # <command> [args...]
       rm -f "${log}"; return "${rc}"
     fi
     note "attempt ${attempt}/${ATTEMPTS} failed on the network (rc ${rc}); retrying in ${BACKOFF_SECS[attempt-1]} s."
+    echo "::warning::attempt ${attempt}/${ATTEMPTS} failed on the network (infrastructure); retrying"
     ${RETRY_ON_NETWORK_SLEEP:-sleep} "${BACKOFF_SECS[attempt-1]}"
     attempt=$(( attempt + 1 ))
   done
@@ -68,6 +73,7 @@ EOF
   }
   expect "a success runs once" 0 1 0 "" 0
   expect "a lost DNS lookup is retried, then passes" 0 2 1 "fatal: unable to access 'https://cdn.cocoapods.org/': Could not resolve host: cdn.cocoapods.org" 1
+  expect "a trunk setup whose clone fails without a host error is retried" 0 2 1 "[!] Unable to add a source with url \`https://cdn.cocoapods.org/\` named \`trunk\`." 1
   expect "a real pod install error is not retried" 1 1 9 "[!] CocoaPods could not find compatible versions for pod \"Foo\"" 1
   expect "a compile error keeps its own rc, once" 65 1 9 "error: cannot find 'x' in scope" 65
   expect "a network failure on every attempt gives up after three" 7 3 9 "curl: (7) Failed to connect to example port 443" 7

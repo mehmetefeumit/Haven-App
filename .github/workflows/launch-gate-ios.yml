@@ -107,10 +107,10 @@ jobs:
         run: flutter pub get
 
       # Before the simulator boots, so the build's peak never meets it. The
-      # config pass runs `pod install`, which fetches specs from the CocoaPods
-      # CDN with no retry of its own; a runner that loses DNS for a moment
-      # failed v0.1.15's gate there (run 43688120017), so a network-level
-      # failure of that pass, and only that, is tried again.
+      # config pass runs `pod install`, and CocoaPods does not retry adding its
+      # trunk source; a runner that lost DNS for a moment failed v0.1.15's gate
+      # there (run 43688120017), so a network-level failure of that pass, and
+      # only that, is run again.
       - name: Build the candidate simulator app
         timeout-minutes: 45
         working-directory: haven
