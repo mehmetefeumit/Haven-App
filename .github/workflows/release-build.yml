@@ -277,7 +277,9 @@ jobs:
   # Releases are immutable in this repository: once published, no asset can be
   # added, replaced or removed. v0.1.16 published the APKs, and the later
   # attach of the simulator app was refused. So every asset goes onto a draft,
-  # and the draft is published last, in this job.
+  # and the draft is published last, in this job. The APKs therefore wait for
+  # the iOS launch gate too; a red iOS gate holds the whole Release until it
+  # is re-run.
   #
   # NOTE: the app-*-release.apk glob is contractually tied to
   # scripts/build_release.sh apk producing --split-per-abi outputs; changing the
