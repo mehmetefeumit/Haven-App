@@ -288,6 +288,12 @@ xcodebuild -workspace ios/Runner.xcworkspace -scheme Runner -configuration Relea
   -sdk iphonesimulator FLUTTER_BUILD_MODE=debug SUPPORTED_PLATFORMS="iphoneos iphonesimulator" ...
 ```
 
+The config pass runs `pod install`, which fetches specs from the CocoaPods CDN
+with no retry of its own, so it goes through `scripts/ci/retry_on_network_failure.sh`:
+a failure whose output names a network-level cause (a lost DNS lookup failed
+v0.1.15's gate, run 43688120017) is tried again, at most three times; any other
+failure fails at once. TestFlight's `build_release.sh ipa` goes through the same.
+
 So the Rust core is built by cargokit's release profile, Swift with `-O`, and
 the Release Info.plist and settings apply; the Dart is JIT. No `--dart-define`
 is passed: the receive path is `live_sync_provider.dart`'s `defaultValue`, as in

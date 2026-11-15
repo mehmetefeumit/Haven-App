@@ -106,13 +106,17 @@ jobs:
         working-directory: haven
         run: flutter pub get
 
-      # Before the simulator boots, so the build's peak never meets it.
+      # Before the simulator boots, so the build's peak never meets it. The
+      # config pass runs `pod install`, which fetches specs from the CocoaPods
+      # CDN with no retry of its own; a runner that loses DNS for a moment
+      # failed v0.1.15's gate there (run 43688120017), so a network-level
+      # failure of that pass, and only that, is tried again.
       - name: Build the candidate simulator app
         timeout-minutes: 45
         working-directory: haven
         run: |
           set -euo pipefail
-          flutter build ios --simulator --debug --config-only
+          bash ../scripts/ci/retry_on_network_failure.sh -- flutter build ios --simulator --debug --config-only
           (cd ios && xcodebuild -workspace Runner.xcworkspace -scheme Runner \
             -configuration Release -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \
