@@ -230,6 +230,8 @@ declare -A RUNNER_PINS=(
   # property directly: the gate call exists at a command position AND no
   # reading command names a `.log` anywhere in the file. That is the same
   # invariant the ordering pins above express, at its limit.
+  ['run-launch-gate-ios.sh']='the summary is echoed only after the log-privacy gate'
+  ['run-launch-gate-android.sh']='the crash summary is echoed only after the log-privacy gate'
   ['run-soak-core.sh']='_case "the log-privacy gate runs and no captured log is ever echoed"'
 )
 

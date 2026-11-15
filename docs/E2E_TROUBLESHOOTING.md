@@ -28,6 +28,8 @@ what keeps that true).
 | `e2e-live-sync.yml` | The SAME two lanes, flag-ON (`HAVEN_LIVE_SYNC=true`) — a manual re-run of what `ci.yml` already gates on | `workflow_dispatch` only | — |
 | `soak-core.yml` | the Tier-1 soak rig (`tooling/soak`): several whole Haven devices in one process against hermetic relays broken on a seeded schedule, grading haven-core's invariants; no app, no emulator. Every capture is scanned twice before the upload — against the manifest the rig sealed from its own declarations and against the host needles (failure mode 14) | `run-soak-core.sh` under `run-with-deadline.sh`, on a plain ubuntu runner | in-process `nostr-relay-builder` relays, ws:// loopback |
 | `soak-nightly.yml` | the same rig at the `nightly` profile on four matrix slots (`Soak Core (nightly, s1)` … `s4`), each with its own seed from `scripts/ci/soak_seed.sh` (the run's `created_at`, never the local clock); the three expected-red arms (C7/C8/C9) are deliberately NOT in the nightly — `verdict.log` keeps a run's first violation only, so they would mask every later defect — and are asserted red by `cargo test` instead, so a red night is a finding. A red night files one issue per key (`docs/SOAK_LANE.md`, "When a night goes red") | cron `23 0 * * 1-6`, or `workflow_dispatch` with a pinned `seed` and 1–4 `slots`; each slot calls `soak-core.yml` | as `soak-core.yml` |
+| `launch-gate-android.yml` | the RELEASE APKs built by `scripts/build_release.sh apk` (R8, AOT, obfuscated) — or, in `release-build.yml`, the tag's exact signed artifacts — cold-launched from the launcher: fresh, after a cold relaunch, and installed over the previous non-yanked release and v0.1.13 with their data kept; `check_apk_loadable.sh` on all three APKs. Only the log-privacy-gated summaries are uploaded, never logcat or a UI dump (failure mode 26) | `run-launch-gate-android.sh` under `run-with-deadline.sh` on an api-34 x86_64 AVD in airplane mode, behind the host egress guard | none — offline by design: a release build knows only production relays |
+| `launch-gate-ios.yml` | the production `main()` in the Release native configuration (debug Dart: the simulator runs nothing else) on a simulator: fresh, cold relaunch, and installed over the previous release's simulator build; `check_ios_app_loadable.sh` on the app (failure mode 27) | `run-launch-gate-ios.sh` driving a standalone XCUITest bundle (`tooling/e2e/ios-launch-gate`) | none — egress blocked by pf (or a hosts sinkhole) |
 | `e2e-integration.yml` | seven component targets (`smoke_test`, `app_test`, `keyring_test`, …), one after another; the lane's one manifest is sealed from the host needles before the first target, and every target's captures and the aggregate go through `scan-logs.sh` (failure mode 13) | `run-integration-tests.sh` → `run-single-avd-scenario.sh` per target, on one AVD | strfry container reset per target, `ws://10.0.2.2:7777` |
 
 `e2e-android.yml` / `e2e-ios.yml` take a `live_sync` boolean input (default
@@ -1761,6 +1763,60 @@ download is an empty night (`--assert-no-artifacts`, D1–D5). And in any jq tha
 remains: **a bound expression that is not a simple term is parenthesised** —
 `(if … end) as $x | …`, never `if … end as $x`. A step red at exit 3 with a jq
 compile error is this class; re-running cannot help.
+
+## Failure mode 26 — `launch-gate-android` is red
+
+`Release APK: launch, relaunch and upgrade` (`.github/workflows/launch-gate-android.yml`,
+docs/LAUNCH_GATE.md) runs the RELEASE APK the way a user does. Read the one
+`::error::launch-gate-android <class>: …` line first: it names the leg
+(`fresh`, `upgrade (from vX)`, `baseline (from v0.1.13)`), the state reached,
+the last observation (visible label keys, foreground package, EditText count)
+and the class. The uploaded artifact holds `launch-gate-summary.log` and, only
+when the device held crash evidence, `crash-summary.log` — never logcat, never
+a UI dump.
+
+| Class (rc) | Typical line | Meaning | Action |
+|---|---|---|---|
+| product (1) | `the app crashed (…); Caused by: java.lang.NoSuchMethodException: …_Impl.<init> []` | a class lost the constructor it is created through — the v0.1.14 shape; the dex-check step names it too | fix the keep rules / R8 config; never re-run |
+| product (1) | `did not progress: the screen did not change in the window after onboardingWelcomeCta was tapped` | a tap had no effect on a screen two dumps agreed on, for the whole window (60 s, 120 s for the create tap) | a real responsiveness defect |
+| product (1) | `a cold launch after onboarding showed the intro again` / `a cold launch did not show the display name the first launch saved` | onboarding state was lost, or (SETUP_HELD's create screen, or after an upgrade into MAP the Settings › Identity page, state `after settingsIdentityTitle`) the keystore identity or the SharedPreferences name keyed by it was lost across a restart or upgrade | product |
+| product (1) | `state: …, settling` | the app died or ANRed within 30 s of reaching a terminal screen | product |
+| product (1) | `com.android.permissioncontroller held the foreground …` | a system window the app opened covered it until the deadline | product (a permission the flow should not request offline) |
+| product (1) | `a debug-only log plant (logscan-plant-*) reached logcat` | the APK logs like a debug build | product |
+| product (1) | `the create screen never showed exactly one non-empty name field` | the gate cannot read the name it must later compare | check Flutter's EditText semantics in release; product until shown otherwise |
+| usage (2) | `'<dir>' has no app_en.arb` / `… has no usable commonSettings` | a launch-gate input is missing, or a required ARB key was renamed | fix the workflow, or the key list in run-launch-gate-android.sh |
+| infrastructure (3) | `emulator-5554 went offline (…)`, `the device locale is …`, `did not go offline within 30 s` | nothing about the app is known | re-run the job |
+| infrastructure (no rc: the `Build release APKs` step is red) | Gradle: `Could not resolve all artifacts for configuration 'classpath'` / `Could not find …` / `Received status code 429` | dependency resolution failed on this runner's egress before anything compiled; seen once on this lane (a plugin-portal `Could not find org.jetbrains.kotlin:kotlin-stdlib:2.3.20` with a cold dependency cache) and gone on the next runner | re-run the job; an in-job retry has never cleared this class (`scripts/ci/build_apk_with_retry.sh` header), a warm Gradle cache removes it |
+| upgrade source unusable (4) | any failure while the PREVIOUS release was running | the release users would upgrade from is itself broken | add `<tag> android <reason>` to `scripts/ci/launch_gate_yanked_releases.txt` |
+
+`check_apk_loadable.sh` red without a launch red is the ML Kit shape: a
+registrar created only when a QR scan starts — or `FAIL N1/N2/N3`: a native
+library stored compressed, off a 16 KB boundary, or with a segment aligned
+below 16 KB, which devices with 16 KB pages refuse to load (product: packaging
+or NDK flags; the arm64 APK is never launched here). `launch-gate-previous-apk.sh`
+reds before the emulator starts: rc 1 is a real upgrade break (certificates
+differ, versionCode not above the previous release's); rc 2 is an input it
+cannot vouch for (no eligible release, a sidecar mismatch, a yanked-list line
+that is not `<vMAJOR.MINOR.PATCH> <android|ios|all> <reason>`).
+
+## Failure mode 27 — `launch-gate-ios` is red (or green with a notice)
+
+`Simulator launch, relaunch and upgrade` (`.github/workflows/launch-gate-ios.yml`,
+docs/LAUNCH_GATE.md) starts the production `main()` in the Release native
+configuration on a simulator, offline. The Verdict step names the class; the
+uploaded `launch-gate-ios-summary` holds only the summary the runner's
+log-privacy gate vouched for and the workflow scanned again — never the
+`.xcresult`, which carries UI hierarchies with the pseudonym.
+
+| Class (rc) | Meaning | Action |
+|---|---|---|
+| product (1) | the app crashed (the summary's crash frames come from `~/Library/Logs/DiagnosticReports/Runner*.ips`), a CTA did not progress, the relaunch or the upgrade lost the saved name, the installed executable is not the candidate, or the log-privacy gate found a leak in the summary | product; reproduce with the same build commands as the workflow |
+| misuse (2) | a runner argument is wrong, or `scripts/ci/launch_gate_yanked_releases.txt` is missing or has a line that is not `<vMAJOR.MINOR.PATCH> <android\|ios\|all> <reason>` | fix the list or the workflow |
+| infrastructure (3), no test case started | the XCUITest runner never began (a simulator launch/attach stall); one automatic retry runs only in this case | re-run the job |
+| infrastructure (3), before the legs | the release list could not be read, the predecessor's download did not match its checksum, its ARB could not be fetched, the simulator would not install it, or the keychain could not be reset | re-run the job |
+| infrastructure (3), egress | pf could not be armed (no enable token, the `com.apple/*` anchor is not evaluated) or a probe connected, before the first leg or after the last | re-run; if it repeats, the runner image changed pf — read the summary's egress line |
+| upgrade source unusable (4) | the previous release's simulator asset does not unpack to one simulator `Runner.app`, its ARB lacks a journey label, or it installs but does not onboard offline | yank the tag for `ios` in `scripts/ci/launch_gate_yanked_releases.txt` with a reason |
+| no predecessor (5, job GREEN with a `::notice::`) | no eligible release carries `app-ios-simulator.zip` and its `.sha256` yet | expected until the first release that attaches them; the fresh and relaunch legs still ran |
 
 ## What these lanes do NOT cover
 

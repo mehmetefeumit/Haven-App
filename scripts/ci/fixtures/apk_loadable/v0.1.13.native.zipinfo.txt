@@ -1,0 +1,16 @@
+# Fixture for scripts/ci/check_apk_loadable.sh --self-test. Lines starting with
+# '#' are this header; the self-test strips them, nothing else is changed.
+#
+# REAL output, not an emulation: `unzip -Z <apk> 'lib/*'` (UnZip 6.00)
+# run on the published v0.1.13 app-arm64-v8a-release.apk (sha256
+# 4768831c361f67f79d325948359a237a8cd53da9e31e2a5cf0b2ec9efa7a2f53).
+#
+# Whole, every native library the APK carries.
+-rw-r--r--  0.0 unx  8192904 b- stor 81-Jan-01 01:01 lib/arm64-v8a/libapp.so
+-rw-r--r--  0.0 unx  4946720 b- stor 81-Jan-01 01:01 lib/arm64-v8a/libbarhopper_v3.so
+-rw-r--r--  0.0 unx   124592 b- stor 81-Jan-01 01:01 lib/arm64-v8a/libdartjni.so
+-rw-r--r--  0.0 unx     7112 b- stor 81-Jan-01 01:01 lib/arm64-v8a/libdatastore_shared_counter.so
+-rw-r--r--  0.0 unx 11763360 b- stor 81-Jan-01 01:01 lib/arm64-v8a/libflutter.so
+-rw-r--r--  0.0 unx    32544 b- stor 81-Jan-01 01:01 lib/arm64-v8a/libimage_processing_util_jni.so
+-rw-r--r--  0.0 unx 41476120 b- stor 81-Jan-01 01:01 lib/arm64-v8a/librust_lib_haven.so
+-rw-r--r--  0.0 unx     4896 b- stor 81-Jan-01 01:01 lib/arm64-v8a/libsurface_util_jni.so

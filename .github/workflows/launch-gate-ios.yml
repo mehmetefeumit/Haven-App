@@ -1,0 +1,253 @@
+# Reusable workflow: the iOS launch gate (docs/LAUNCH_GATE.md).
+#
+# v0.1.14 shipped an app that died at every process start, because no lane
+# ever started what ships: every iOS lane drives a debug build through
+# integration_test. This one builds the production lib/main.dart from the
+# checked-out tree and lets the OS start it on a simulator, offline:
+#
+#   fresh    a clean install (simulator keychain reset) onboards to a
+#            terminal screen; a cold relaunch returns to it with the display
+#            name kept, which is restored through the Keychain identity;
+#   upgrade  the previous release's simulator build (its GitHub Release asset)
+#            onboards in its own words, the candidate is installed over it with
+#            its data kept, and starts on the same screen with the same name.
+#
+# tooling/e2e/ci/run-launch-gate-ios.sh runs the legs and the XCUITest bundle
+# in tooling/e2e/ios-launch-gate drives them; neither is part of the app.
+#
+# # What is built
+#
+# A simulator cannot run Release Dart (AOT); Flutter supports only debug there.
+# The NATIVE side is built in the Release configuration anyway — the Rust core
+# by cargokit's release profile, Swift with -O, the Release Info.plist and
+# entitlements — with debug Dart: `flutter build ios --config-only` writes the
+# Flutter settings, then xcodebuild builds Release with FLUTTER_BUILD_MODE=debug
+# (flutter_tools' xcode_backend.dart reads the mode from there). No
+# --dart-define is passed: the receive path is live_sync_provider.dart's
+# defaultValue, as in what ships.
+#
+# What the simulator build cannot show — Release Dart, a device, provisioning,
+# the App Store upgrade path, SQLCipher (offline onboarding never reads the
+# encrypted store back) — is listed in docs/LAUNCH_GATE.md; the IPA's own load
+# check (scripts/ci/check_ios_app_loadable.sh) runs in release-build.yml.
+#
+# # The candidate artifact
+#
+# On a tag the job uploads the simulator app it launched as
+# `haven-ios-simulator-app` (app-ios-simulator.zip + a sha256sum-format
+# .sha256). release-build.yml attaches both to the GitHub Release, and the next
+# release's gate upgrades from them.
+
+name: Launch Gate (iOS)
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  ios-launch:
+    name: Simulator launch, relaunch and upgrade
+    # HAVEN_LIVE_SYNC-INTENT: production-default — the gate starts the app as
+    # it ships, so it compiles live_sync_provider.dart's defaultValue and
+    # passes no define (scripts/ci/check_live_sync_define_declared.sh).
+    runs-on: macos-15
+    # The job cap clears every step cap it can run plus the uncapped work:
+    #   scanner 10 + app 45 + UI tests 15 + load check 5 + SQLCipher probe 5
+    #   + package 5 + boot 15 + drive 115 + egress release 5 + verdict 5
+    #   + scan 5 = 230 + uncapped 6 = 236 -> 240.
+    # The uncapped work (job set-up, checkout, Xcode/Rust/Flutter set-up, pub
+    # get, uploads, post steps) is not yet measured on this job. The figure is
+    # release-build.yml's iOS job, which runs the same set-up steps on the same
+    # image: 2.9 minutes outside its build, probe and upload in run
+    # 43585389047, doubled. Re-measure from this job's own runs.
+    # job-uncapped-minutes: 6 (1 runs of release-build.yml's iOS job with the same set-up steps, worst 43585389047)
+    timeout-minutes: 240
+    env:
+      FLUTTER_SUPPRESS_ANALYTICS: "true"
+      # The runner gates its summary through logscan-gate.sh with the scanner.
+      HAVEN_LOGSCAN: "true"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # Same Xcode as release-build.yml's TestFlight build.
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios-sim
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            haven-core
+            tooling/logscan
+          key: launch-gate-ios
+          save-if: ${{ github.ref_type != 'tag' }}
+
+      - name: Build the runtime log scanner
+        timeout-minutes: 10
+        run: cargo build --release --manifest-path tooling/logscan/Cargo.toml
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Get Flutter dependencies
+        working-directory: haven
+        run: flutter pub get
+
+      # Before the simulator boots, so the build's peak never meets it.
+      - name: Build the candidate simulator app
+        timeout-minutes: 45
+        working-directory: haven
+        run: |
+          set -euo pipefail
+          flutter build ios --simulator --debug --config-only
+          (cd ios && xcodebuild -workspace Runner.xcworkspace -scheme Runner \
+            -configuration Release -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            FLUTTER_BUILD_MODE=debug SUPPORTED_PLATFORMS="iphoneos iphonesimulator" \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=YES COMPILER_INDEX_STORE_ENABLE=NO \
+            SYMROOT="${PWD}/../build/ios" build)
+          app="${PWD}/build/ios/Release-iphonesimulator/Runner.app"
+          test -x "${app}/Runner"
+          echo "CANDIDATE_APP=${app}" >> "${GITHUB_ENV}"
+
+      - name: Build the launch-gate UI tests
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          xcodebuild build-for-testing \
+            -project tooling/e2e/ios-launch-gate/LaunchGate.xcodeproj -scheme LaunchGate \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "${RUNNER_TEMP}/launch-gate-dd" COMPILER_INDEX_STORE_ENABLE=NO
+          shopt -s nullglob
+          runs=("${RUNNER_TEMP}"/launch-gate-dd/Build/Products/*.xctestrun)
+          if (( ${#runs[@]} != 1 )); then
+            echo "::error::expected one .xctestrun, found ${#runs[@]}"
+            exit 1
+          fi
+          echo "XCTESTRUN=${runs[0]}" >> "${GITHUB_ENV}"
+
+      # The load failures a simulator start would also show, named before it.
+      - name: Check the candidate can load
+        timeout-minutes: 5
+        run: bash scripts/ci/check_ios_app_loadable.sh "${CANDIDATE_APP}"
+
+      # Security Rule 15: this build becomes a public release asset.
+      - name: Probe the candidate for SQLCipher's logger
+        timeout-minutes: 5
+        run: bash scripts/ci/check_sqlcipher_logger_omitted.sh "${CANDIDATE_APP}"
+
+      # The release's iOS asset; release-build.yml is its only consumer.
+      - name: Package the candidate simulator app
+        if: github.ref_type == 'tag'
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/ios-simulator-app"
+          mkdir -p "${out}"
+          ditto -c -k --norsrc --noextattr --keepParent "${CANDIDATE_APP}" "${out}/app-ios-simulator.zip"
+          (cd "${out}" && shasum -a 256 app-ios-simulator.zip > app-ios-simulator.zip.sha256)
+
+      # Before the first capture: the seal writes this run's manifest here.
+      - name: Rotate the needle directory
+        run: |
+          mkdir -m 0700 -p /tmp/haven-soak/needles
+          rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
+
+      - name: Boot iOS simulator
+        id: sim
+        timeout-minutes: 15
+        run: bash tooling/e2e/ci/boot-ios-sim.sh "iPhone 16"
+
+      # One attempt is three xcodebuild runs of at most 900 s each, their
+      # kill grace and crash-report settle, the probes and the unbounded-work
+      # allowance: 3 x (900 + 30 + 30 + 10) + 180 = 3090 s, under 55 minutes.
+      # A second attempt runs only on rc 3 (retry_on_exit_code), and the runner
+      # itself refuses it unless the first attempt started no test case.
+      # continue-on-error: rc 5 (no iOS predecessor build yet) is a pass with
+      # a notice; the Verdict step decides from the runner's recorded verdict.
+      - name: Launch the candidate offline
+        id: drive
+        timeout-minutes: 115
+        continue-on-error: true
+        env:
+          HAVEN_LAUNCH_GATE_CANDIDATE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          GH_TOKEN: ${{ github.token }}
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 55
+          max_attempts: 2
+          retry_on_exit_code: 3
+          command: bash tooling/e2e/ci/run-launch-gate-ios.sh ${{ steps.sim.outputs.udid }} "${CANDIDATE_APP}" "${XCTESTRUN}"
+
+      # The runner releases the block on every exit it sees; this covers one it
+      # never saw (a killed attempt). Before any upload.
+      - name: Release the egress block
+        if: always()
+        timeout-minutes: 5
+        run: bash tooling/e2e/ci/run-launch-gate-ios.sh --release-egress
+
+      - name: Verdict
+        if: always()
+        timeout-minutes: 5
+        env:
+          DRIVE_OUTCOME: ${{ steps.drive.outcome }}
+        run: |
+          set -euo pipefail
+          verdict=/tmp/haven-launch-gate-ios-state/verdict
+          if [[ ! -f "${verdict}" ]]; then
+            echo "::error::iOS launch gate: the runner recorded no verdict (outcome ${DRIVE_OUTCOME})"
+            exit 1
+          fi
+          rc="$(sed -n 's/^rc=\([0-9]*\) .*/\1/p' "${verdict}")"
+          case "${rc}" in
+            0) [[ "${DRIVE_OUTCOME}" == success ]] || { echo "::error::iOS launch gate: rc 0 recorded but the drive step ended ${DRIVE_OUTCOME}"; exit 1; } ;;
+            5) echo "No iOS predecessor build to upgrade from; the fresh and relaunch legs passed." ;;
+            *) echo "::error::iOS launch gate failed with rc ${rc} (1 product, 2 misuse or a malformed yanked list, 3 infrastructure, 4 upgrade source unusable)"; exit 1 ;;
+          esac
+
+      # Scanned again here because a drive the retry action killed may have
+      # left the summary before the runner's own gate finished with it.
+      - name: Scan the launch-gate summary before upload
+        id: scan
+        if: ${{ !cancelled() && steps.drive.outcome != 'skipped' }}
+        timeout-minutes: 5
+        run: bash tooling/e2e/ci/scan-logs.sh --manifest-dir /tmp/haven-soak/needles --sink diag=/tmp/launch-gate-ios/launch-gate-summary.log --report /tmp/ios-logscan/launch-gate-upload.ndjson
+
+      # The runner's summary only: never a result bundle, a transcript or a
+      # crash report, which hold the screen and the display name.
+      - name: Upload the launch-gate summary
+        if: ${{ !cancelled() && steps.scan.outcome == 'success' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: launch-gate-ios-summary
+          path: /tmp/launch-gate-ios/launch-gate-summary.log
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Upload the candidate simulator app
+        if: success() && github.ref_type == 'tag'
+        uses: actions/upload-artifact@v6
+        with:
+          name: haven-ios-simulator-app
+          path: |
+            ${{ runner.temp }}/ios-simulator-app/app-ios-simulator.zip
+            ${{ runner.temp }}/ios-simulator-app/app-ios-simulator.zip.sha256
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Discard needle manifests
+        if: always()
+        run: rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
