@@ -37,5 +37,12 @@ if [[ ! "${HAVEN_LIVE_SYNC:-}" =~ ^(true|false)$ ]]; then
 fi
 
 cd "$(dirname "$0")/../../../haven"
+# The config pass runs `pod install`, and CocoaPods does not retry adding its
+# trunk source on a fresh runner: a lost DNS lookup failed e2e_ios there (run
+# 43740289712), as it did v0.1.15's launch gate. A network-level failure of
+# that pass, and only that, runs it again; the build after it fetches nothing
+# CocoaPods would, and cargo retries its own fetches.
+bash ../scripts/ci/retry_on_network_failure.sh -- flutter build ios --simulator --debug --config-only --target "$1" \
+  --dart-define=HAVEN_LIVE_SYNC="${HAVEN_LIVE_SYNC}"
 flutter build ios --simulator --debug --target "$1" \
   --dart-define=HAVEN_LIVE_SYNC="${HAVEN_LIVE_SYNC}"
