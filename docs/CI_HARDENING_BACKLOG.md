@@ -3025,7 +3025,9 @@ plus a self-declaration — not argued away in a header comment.
 
 Also: `haven/rust_builder/clippy.toml` now carries `haven-core`'s `thread_rng`
 ban, so the crate that mints both SQLCipher keys (`api.rs:832`, `:1171`) sits
-under the same `disallowed-methods` lint as the core.
+under the same `disallowed-methods` lint as the core. *(2026-11-16: rand 0.10
+renamed `thread_rng` to `rand::rng`, which the old row no longer matched;
+rust_builder's ban now names `rand::rng`.)*
 
 ### What writing the gates FOUND, 2026-08-12
 
