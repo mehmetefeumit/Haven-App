@@ -1,7 +1,9 @@
 //! The `KeyPackage` lifecycle on MDK's durable record: one signed event per
-//! package, republished byte for byte; private material deleted when a relay
-//! acknowledges its replacement, and at `Lifetime.not_after` whether or not
-//! anything can be published (`foundation/key-packages.md:86-106`).
+//! package, republished byte for byte; a superseded package's private material
+//! kept for the replacement grace after a relay acknowledges its replacement
+//! (at once when a Welcome consumed it), and deleted at `Lifetime.not_after`
+//! whether or not anything can be published
+//! (`foundation/key-packages.md:86-106`).
 //!
 //! Every test drives a real `AccountDeviceSession` over a real `SQLCipher`
 //! file. "Is the private material still there?" is read off the store itself
@@ -14,8 +16,12 @@ mod helpers;
 use cgka_traits::maintenance::KeyPackageLifecycleState;
 use cgka_traits::storage::StorageProvider as _;
 use cgka_traits::transport::Timestamp as MdkTimestamp;
-use haven_core::nostr::mls::types::{KeyPackage, LocationGroupConfig, MessageId, ProtocolProfile};
-use haven_core::nostr::mls::{SessionManager, StorageConfig, TrackedKeyPackage};
+use haven_core::nostr::mls::types::{
+    KeyPackage, LocationGroupConfig, MessageId, ProtocolProfile, WelcomeAcceptance,
+};
+use haven_core::nostr::mls::{
+    SessionManager, StorageConfig, TrackedKeyPackage, KEY_PACKAGE_REPLACEMENT_GRACE_SECS,
+};
 use haven_core::relay::maintenance::{
     build_kp_maintenance_events, decide_kp_maintenance, now_secs, read_kp_lifetime,
     KpMaintenanceDecision, KpMaintenanceEvents, RelayKpEntry, RelayKpPerRelay, RelayKpSnapshot,
@@ -23,7 +29,7 @@ use haven_core::relay::maintenance::{
 };
 use helpers::twin_key_packages::{expired_lifetime, mint_like, pre_migration, Minted, Twin};
 use nostr::{JsonUtil as _, Keys};
-use openmls::prelude::OpenMlsProvider;
+use openmls::prelude::{Lifetime, OpenMlsProvider};
 use openmls_rust_crypto::RustCrypto;
 use storage_sqlite::SqliteAccountStorage;
 use tempfile::TempDir;
@@ -53,13 +59,36 @@ impl Device {
 
     /// A staged package a relay acknowledged.
     async fn publish(&self, slot: Option<&str>) -> KpMaintenanceEvents {
+        self.publish_acked_at(slot, now_secs()).await
+    }
+
+    /// A staged package a relay acknowledged at `acked_at`.
+    async fn publish_acked_at(&self, slot: Option<&str>, acked_at: u64) -> KpMaintenanceEvents {
         let staged = self.stage(slot).await;
         assert!(self
             .session
-            .promote_key_package(&staged.event.id)
+            .promote_key_package(&staged.event.id, acked_at)
             .await
             .expect("promote"));
         staged
+    }
+
+    async fn groups(&self) -> usize {
+        self.session
+            .live_group_ids()
+            .await
+            .expect("list the groups")
+            .len()
+    }
+
+    /// The device's consumption record, read off the store.
+    fn last_consumed(&self) -> Option<Vec<u8>> {
+        self.store()
+            .maintenance_storage()
+            .expect("the store keeps maintenance records")
+            .key_package_lifecycle()
+            .expect("read the record")
+            .and_then(|state| state.last_consumed_key_package_ref)
     }
 
     async fn tracked(&self) -> TrackedKeyPackage {
@@ -102,8 +131,12 @@ impl Device {
     /// replacement already staged in the slot stays staged. Returns the
     /// package and its `not_after`.
     fn plant_expired_current(&self, template: &[u8], slot: &str) -> (Minted, u64) {
+        self.plant_current(template, slot, expired_lifetime())
+    }
+
+    /// [`Self::plant_expired_current`] for any `lifetime`.
+    fn plant_current(&self, template: &[u8], slot: &str, lifetime: Lifetime) -> (Minted, u64) {
         let store = self.store();
-        let lifetime = expired_lifetime();
         let expired = mint_like(
             &Planting {
                 crypto: RustCrypto::default(),
@@ -187,7 +220,7 @@ async fn a_kp_republish_is_byte_identical_to_the_frozen_signed_event() {
 
     assert!(device
         .session
-        .promote_key_package(&staged.event.id)
+        .promote_key_package(&staged.event.id, now_secs())
         .await
         .expect("promote"));
     let current = device.tracked().await;
@@ -233,16 +266,25 @@ async fn a_replacement_staged_before_a_kill_is_promoted_after_the_reopen() {
     );
     assert_eq!(reopened.bundles().await, 2);
 
+    let acked_at = now_secs();
     assert!(reopened
         .session
-        .promote_key_package(&staged.event.id)
+        .promote_key_package(&staged.event.id, acked_at)
         .await
         .expect("promote"));
     let current = reopened.tracked().await;
     assert_eq!(current.published.map(|e| e.as_json()), Some(signed));
     assert_eq!(current.package, staged.key_package.bytes());
     assert_eq!(current.slot, first.d_tag);
-    assert_eq!(reopened.bundles().await, 1, "the superseded key is gone");
+    assert_eq!(
+        reopened.bundles().await,
+        2,
+        "the superseded key is kept for its replacement grace"
+    );
+    reopened
+        .sweep(acked_at + KEY_PACKAGE_REPLACEMENT_GRACE_SECS)
+        .await;
+    assert_eq!(reopened.bundles().await, 1, "and goes when it ends");
 }
 
 /// A replacement whose signing never completed (a kill between MDK's stage
@@ -268,12 +310,15 @@ async fn a_replacement_a_kill_left_unsigned_is_signed_not_reminted() {
     );
 }
 
-/// `foundation/key-packages.md:89-106`: a superseded package's private
-/// material goes when a relay acknowledges its replacement — not before, and
-/// not at some later `not_after`. A replacement that was staged and then
-/// re-staged goes with it.
+/// `foundation/key-packages.md`: a superseded package no Welcome consumed keeps
+/// its private material for the replacement grace after a relay acknowledges
+/// its replacement — an inviter that fetched it just before still reaches this
+/// device — up to the second, and not one second more. A replacement that was
+/// staged and then re-staged keeps the grace MDK's stage gave it, from its
+/// re-staging; the promotion does not extend it.
 #[tokio::test]
-async fn superseded_kp_material_deleted_on_confirmed_replacement_not_at_not_after() {
+async fn superseded_kp_material_is_kept_for_the_grace_after_its_confirmed_replacement_and_no_longer(
+) {
     let device = Device::new();
     let first = device.publish(None).await;
     assert_eq!(device.bundles().await, 1);
@@ -283,24 +328,52 @@ async fn superseded_kp_material_deleted_on_confirmed_replacement_not_at_not_afte
     assert_eq!(device.bundles().await, 2);
     assert_eq!(device.tracked().await.package, first.key_package.bytes());
 
-    // Re-staged before any acknowledgement: MDK keeps the earlier one too.
+    // Re-staged before any acknowledgement: MDK retains the earlier one from
+    // the re-staging.
     let replacement = device.stage(Some(&first.d_tag)).await;
+    let restaged_at = replacement.event.created_at.as_secs();
     assert_eq!(device.bundles().await, 3);
     assert!(
         !device
             .session
-            .promote_key_package(&unacked.event.id)
+            .promote_key_package(&unacked.event.id, now_secs())
             .await
             .expect("promote"),
         "an event that is no longer the staged one promotes nothing"
     );
     assert_eq!(device.bundles().await, 3);
 
+    let acked_at = restaged_at + 100;
     assert!(device
         .session
-        .promote_key_package(&replacement.event.id)
+        .promote_key_package(&replacement.event.id, acked_at)
         .await
         .expect("promote"));
+    let tracked = device.tracked().await;
+    assert_eq!(tracked.package, replacement.key_package.bytes());
+    assert_eq!(tracked.slot, first.d_tag, "the slot is reused");
+    assert_eq!(
+        device.bundles().await,
+        3,
+        "both superseded packages are kept through the acknowledgement"
+    );
+
+    let grace = KEY_PACKAGE_REPLACEMENT_GRACE_SECS;
+    assert!(!device.sweep(restaged_at + grace - 1).await);
+    assert_eq!(device.bundles().await, 3);
+    assert!(!device.sweep(restaged_at + grace).await);
+    assert_eq!(
+        device.bundles().await,
+        2,
+        "the re-staged package's grace ran from its re-staging, unextended"
+    );
+    assert!(!device.sweep(acked_at + grace - 1).await);
+    assert_eq!(
+        device.bundles().await,
+        2,
+        "the superseded package is still held one second short of the grace"
+    );
+    assert!(!device.sweep(acked_at + grace).await);
     assert_eq!(
         device.bundles().await,
         1,
@@ -310,12 +383,252 @@ async fn superseded_kp_material_deleted_on_confirmed_replacement_not_at_not_afte
         panic!("a freshly minted package has a readable lifetime");
     };
     assert!(
-        now_secs() < lifetime.not_after,
+        acked_at + grace < lifetime.not_after,
         "and that happened long before the superseded package's `not_after`"
     );
-    let tracked = device.tracked().await;
-    assert_eq!(tracked.package, replacement.key_package.bytes());
-    assert_eq!(tracked.slot, first.d_tag, "the slot is reused");
+    assert_eq!(
+        device.tracked().await.package,
+        replacement.key_package.bytes(),
+        "the current package is untouched by the grace"
+    );
+}
+
+/// The grace never outlives the package: a superseded package whose
+/// `not_after` comes first goes at its `not_after`.
+#[tokio::test]
+async fn a_superseded_package_goes_at_its_not_after_when_that_ends_the_grace_first() {
+    let device = Device::new();
+    let template = device.stage(None).await;
+    let slot = template.d_tag.clone();
+    let now = now_secs();
+    let (_, not_after) = device.plant_current(
+        template.key_package.bytes(),
+        &slot,
+        Lifetime::init(now - 3_600, now + 3_600),
+    );
+    let replacement = device.stage(Some(&slot)).await;
+    assert_eq!(
+        device.bundles().await,
+        3,
+        "the re-staged template, the short-lived package and the replacement"
+    );
+    assert!(device
+        .session
+        .promote_key_package(&replacement.event.id, now)
+        .await
+        .expect("promote"));
+    assert_eq!(
+        device.bundles().await,
+        3,
+        "the short-lived package is retained"
+    );
+    assert!(not_after < now + KEY_PACKAGE_REPLACEMENT_GRACE_SECS);
+
+    assert!(!device.sweep(not_after - 1).await);
+    assert_eq!(device.bundles().await, 3);
+    assert!(
+        !device.sweep(not_after).await,
+        "a retained package is not the current one"
+    );
+    assert_eq!(
+        device.bundles().await,
+        2,
+        "the short-lived package went at its `not_after`, inside the grace"
+    );
+    assert_eq!(
+        device.tracked().await.package,
+        replacement.key_package.bytes()
+    );
+}
+
+/// "Local retention policy MUST NOT extend" the grace: a later promotion
+/// leaves an earlier superseded package's grace where it was.
+#[tokio::test]
+async fn a_second_promotion_never_extends_a_retained_packages_grace() {
+    let device = Device::new();
+    let first = device.publish(None).await;
+    // The first package is superseded at the second acknowledgement, the
+    // second at the third.
+    let second_acked = now_secs();
+    let third_acked = second_acked + 1_000;
+    device
+        .publish_acked_at(Some(&first.d_tag), second_acked)
+        .await;
+    device
+        .publish_acked_at(Some(&first.d_tag), third_acked)
+        .await;
+    assert_eq!(
+        device.bundles().await,
+        3,
+        "two superseded packages retained"
+    );
+
+    let grace = KEY_PACKAGE_REPLACEMENT_GRACE_SECS;
+    assert!(!device.sweep(second_acked + grace - 1).await);
+    assert_eq!(device.bundles().await, 3);
+    assert!(!device.sweep(second_acked + grace).await);
+    assert_eq!(
+        device.bundles().await,
+        2,
+        "the first package's grace ran from its own replacement's \
+         acknowledgement, not the later one"
+    );
+    assert!(!device.sweep(third_acked + grace).await);
+    assert_eq!(device.bundles().await, 1);
+    assert!(
+        device.sweep(u64::MAX).await,
+        "control: the current package is the one left"
+    );
+    assert_eq!(device.bundles().await, 0);
+}
+
+/// A clock set back below a retained package's grace start ends the grace: a
+/// clock read earlier than the moment it began cannot be trusted to measure
+/// it, and holding the key on such a clock would extend it by the regression.
+#[tokio::test]
+async fn a_clock_set_back_below_a_retained_packages_grace_start_ends_it() {
+    let device = Device::new();
+    let acked_at = now_secs() + 3_600;
+    let first = device.publish(None).await;
+    device.publish_acked_at(Some(&first.d_tag), acked_at).await;
+    assert_eq!(device.bundles().await, 2);
+
+    assert!(!device.sweep(acked_at).await);
+    assert_eq!(device.bundles().await, 2, "kept at the grace start itself");
+    assert!(!device.sweep(acked_at - 1).await);
+    assert_eq!(
+        device.bundles().await,
+        1,
+        "a clock reading earlier than the acknowledgement ends the grace"
+    );
+}
+
+/// A Welcome built on the superseded package joins within the grace, and the
+/// package it consumed has nothing left to wait for: the next sweep deletes it
+/// and its consumption record, which named it.
+#[tokio::test]
+async fn a_welcome_built_on_the_superseded_package_joins_within_the_grace_and_the_next_sweep_deletes_it(
+) {
+    let alice = Device::new();
+    let bob = Device::new();
+    let superseded = bob.publish(None).await;
+    let acked_at = now_secs();
+    let current = bob
+        .publish_acked_at(Some(&superseded.d_tag), acked_at)
+        .await;
+    assert_eq!(bob.bundles().await, 2);
+
+    let config = LocationGroupConfig::new("WithinGrace")
+        .with_relay(RELAY)
+        .with_admin(alice.keys.public_key().to_hex());
+    let created = alice
+        .session
+        .create_group(
+            vec![SessionManager::key_package_from_event(&superseded.event).expect("parse")],
+            config,
+        )
+        .await
+        .expect("create");
+    let joined = bob
+        .session
+        .accept_welcome(&helpers::first_welcome_event(&created.effects))
+        .await
+        .expect("accept");
+    assert!(
+        matches!(joined, WelcomeAcceptance::Ingested(_)),
+        "a Welcome to the superseded package opens within the grace"
+    );
+    assert_eq!(bob.groups().await, 1, "and joined");
+    assert!(
+        !bob.tracked().await.replacement_owed,
+        "the current package was not the one consumed"
+    );
+
+    assert!(!bob.sweep(acked_at).await, "the current package stays");
+    assert_eq!(
+        bob.bundles().await,
+        1,
+        "the consumed superseded package went at the next sweep"
+    );
+    assert!(
+        bob.last_consumed().is_none(),
+        "with the record that named it"
+    );
+    assert_eq!(bob.tracked().await.package, current.key_package.bytes());
+}
+
+/// After the grace, a Welcome built on the superseded package can no longer be
+/// opened: only a new invitation reaches this device.
+#[tokio::test]
+async fn a_welcome_built_on_the_superseded_package_needs_a_new_invite_after_the_grace() {
+    let alice = Device::new();
+    let bob = Device::new();
+    let superseded = bob.publish(None).await;
+    let config = LocationGroupConfig::new("AfterGrace")
+        .with_relay(RELAY)
+        .with_admin(alice.keys.public_key().to_hex());
+    let created = alice
+        .session
+        .create_group(
+            vec![SessionManager::key_package_from_event(&superseded.event).expect("parse")],
+            config,
+        )
+        .await
+        .expect("create");
+    let welcome = helpers::first_welcome_event(&created.effects);
+
+    let acked_at = now_secs();
+    bob.publish_acked_at(Some(&superseded.d_tag), acked_at)
+        .await;
+    bob.sweep(acked_at + KEY_PACKAGE_REPLACEMENT_GRACE_SECS)
+        .await;
+    assert_eq!(bob.bundles().await, 1);
+    assert!(matches!(
+        bob.session.accept_welcome(&welcome).await.expect("accept"),
+        WelcomeAcceptance::NeedsNewInvite
+    ));
+    assert_eq!(bob.groups().await, 0);
+}
+
+/// A sweep that deletes a retained package leaves the consumption record of
+/// the current package alone: that replacement is still owed.
+#[tokio::test]
+async fn a_grace_sweep_keeps_the_current_packages_consumption_record() {
+    let alice = Device::new();
+    let bob = Device::new();
+    let superseded = bob.publish(None).await;
+    let acked_at = now_secs();
+    let current = bob
+        .publish_acked_at(Some(&superseded.d_tag), acked_at)
+        .await;
+    let config = LocationGroupConfig::new("CurrentConsumed")
+        .with_relay(RELAY)
+        .with_admin(alice.keys.public_key().to_hex());
+    let created = alice
+        .session
+        .create_group(
+            vec![SessionManager::key_package_from_event(&current.event).expect("parse")],
+            config,
+        )
+        .await
+        .expect("create");
+    bob.session
+        .accept_welcome(&helpers::first_welcome_event(&created.effects))
+        .await
+        .expect("join");
+    assert!(bob.tracked().await.replacement_owed);
+
+    bob.sweep(acked_at + KEY_PACKAGE_REPLACEMENT_GRACE_SECS)
+        .await;
+    assert_eq!(
+        bob.bundles().await,
+        1,
+        "the superseded package's grace ended"
+    );
+    assert!(
+        bob.tracked().await.replacement_owed,
+        "the consumed current package still owes its replacement"
+    );
 }
 
 /// V16, as predicted from source: MDK's own delete validates the lifetime
@@ -437,18 +750,26 @@ async fn an_acked_replacement_is_promoted_even_when_a_retired_bundle_has_expired
     );
     assert!(device
         .session
-        .promote_key_package(&replacement.event.id)
+        .promote_key_package(&replacement.event.id, now_secs())
         .await
         .expect("the promotion must not abort on the expired package"));
 
     assert_eq!(
         device.bundles().await,
-        1,
-        "the expired package and the re-staged template are both gone"
+        2,
+        "the expired package is gone; the re-staged template keeps its grace"
     );
     assert_eq!(
         device.tracked().await.package,
         replacement.key_package.bytes()
+    );
+    device
+        .sweep(replacement.event.created_at.as_secs() + KEY_PACKAGE_REPLACEMENT_GRACE_SECS)
+        .await;
+    assert_eq!(
+        device.bundles().await,
+        1,
+        "and the template goes at its end"
     );
 }
 
@@ -515,7 +836,7 @@ async fn a_package_consumed_before_its_acknowledgement_still_owes_a_replacement(
 
     assert!(bob
         .session
-        .promote_key_package(&staged.event.id)
+        .promote_key_package(&staged.event.id, now_secs())
         .await
         .expect("promote"));
     assert!(bob.tracked().await.replacement_owed);

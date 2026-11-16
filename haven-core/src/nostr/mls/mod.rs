@@ -57,8 +57,8 @@ pub use manager::{
     app_message_past_epoch_limit, chain_effects, max_rewind_commits, refetch_spacing_secs,
     OwedRange, RangePass, RefusedRedeliveryLedger, SessionManager, TrackedKeyPackage,
     DEFAULT_EXPORTER_LABEL, DEFAULT_MAX_PAST_EPOCHS, HAND_BACK_SLICE, HAND_BACK_WHOLE,
-    MAX_REFUSED_IDS_PER_GROUP, MAX_REQUEUE_ATTEMPTS, REFETCH_SPACING_BASE_SECS,
-    REFETCH_SPACING_CAP_SECS, REQUEUE_SET_ASIDE_REMOVALS,
+    KEY_PACKAGE_REPLACEMENT_GRACE_SECS, MAX_REFUSED_IDS_PER_GROUP, MAX_REQUEUE_ATTEMPTS,
+    REFETCH_SPACING_BASE_SECS, REFETCH_SPACING_CAP_SECS, REQUEUE_SET_ASIDE_REMOVALS,
 };
 pub(crate) use manager::{
     AwayHold, IngestClass, PlaneStanding, RemovalRequeue, SEND_PEEL_DRAIN_ADVANCES,

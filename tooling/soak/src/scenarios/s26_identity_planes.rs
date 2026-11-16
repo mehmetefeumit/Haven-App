@@ -385,9 +385,10 @@ async fn key_package_found<T: TimelineSink, L: LogDrain>(
     {
         return Ok(false);
     }
+    let acked_at = device.policy_now(crate::clock::WallNow::now())?.secs();
     device
         .session()?
-        .promote_key_package(&built.id)
+        .promote_key_package(&built.id, acked_at)
         .await
         .map_err(|_| RigError::Core(Step::MintKeyPackage))?;
     let looking = world.device(admin)?;
