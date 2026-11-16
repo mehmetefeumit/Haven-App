@@ -181,6 +181,10 @@ class AppLocalizationsAr extends AppLocalizations {
       'تعذّر حفظ هذا الاسم. يُرجى إعادة المحاولة.';
 
   @override
+  String get onboardingPhotoNotSaved =>
+      'Your photo couldn’t be saved. You can add it later in Settings, under Identity.';
+
+  @override
   String get onboardingAddPhotoOptional => 'إضافة صورة (اختياري)';
 
   @override

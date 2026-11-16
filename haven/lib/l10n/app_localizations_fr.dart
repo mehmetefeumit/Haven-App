@@ -180,6 +180,10 @@ class AppLocalizationsFr extends AppLocalizations {
       'Impossible d\'enregistrer ce nom. Veuillez réessayer.';
 
   @override
+  String get onboardingPhotoNotSaved =>
+      'Your photo couldn’t be saved. You can add it later in Settings, under Identity.';
+
+  @override
   String get onboardingAddPhotoOptional => 'Ajouter une photo (facultatif)';
 
   @override

@@ -172,6 +172,10 @@ class AppLocalizationsJa extends AppLocalizations {
   String get onboardingDisplayNameError => 'その名前を保存できませんでした。もう一度お試しください。';
 
   @override
+  String get onboardingPhotoNotSaved =>
+      'Your photo couldn’t be saved. You can add it later in Settings, under Identity.';
+
+  @override
   String get onboardingAddPhotoOptional => '写真を追加（任意）';
 
   @override

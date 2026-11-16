@@ -180,6 +180,10 @@ class AppLocalizationsRu extends AppLocalizations {
       'Не удалось сохранить имя. Пожалуйста, повторите попытку.';
 
   @override
+  String get onboardingPhotoNotSaved =>
+      'Your photo couldn’t be saved. You can add it later in Settings, under Identity.';
+
+  @override
   String get onboardingAddPhotoOptional => 'Добавить фото (необязательно)';
 
   @override

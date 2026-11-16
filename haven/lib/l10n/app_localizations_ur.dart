@@ -179,6 +179,10 @@ class AppLocalizationsUr extends AppLocalizations {
       'وہ نام محفوظ نہ ہو سکا۔ براہِ کرم دوبارہ کوشش کریں۔';
 
   @override
+  String get onboardingPhotoNotSaved =>
+      'Your photo couldn’t be saved. You can add it later in Settings, under Identity.';
+
+  @override
   String get onboardingAddPhotoOptional => 'تصویر شامل کریں (اختیاری)';
 
   @override

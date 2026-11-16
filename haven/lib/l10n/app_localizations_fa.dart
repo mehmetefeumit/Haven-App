@@ -179,6 +179,10 @@ class AppLocalizationsFa extends AppLocalizations {
       'نتوانستیم آن نام را ذخیره کنیم. لطفاً دوباره تلاش کن.';
 
   @override
+  String get onboardingPhotoNotSaved =>
+      'Your photo couldn’t be saved. You can add it later in Settings, under Identity.';
+
+  @override
   String get onboardingAddPhotoOptional => 'افزودن عکس (اختیاری)';
 
   @override

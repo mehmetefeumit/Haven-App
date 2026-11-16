@@ -9,6 +9,10 @@ import 'package:flutter/foundation.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+/// How long the resume waits for the background isolate to go idle before it
+/// takes the MLS session back regardless.
+const Duration kBackgroundIdleMaxWait = Duration(seconds: 5);
+
 /// Polls `SharedPreferences` until [kBackgroundIdleKey] is `true`.
 ///
 /// Inject the `clock` and `prefsGetter` parameters in tests to control time
@@ -26,7 +30,7 @@ class BackgroundIdleWaiter {
   /// The [clock] and [prefsGetter] parameters exist as test seams; production
   /// callers may omit them and receive the real-time defaults.
   Future<bool> waitUntilIdle({
-    Duration maxWait = const Duration(seconds: 5),
+    Duration maxWait = kBackgroundIdleMaxWait,
     Duration pollInterval = const Duration(milliseconds: 250),
     DateTime Function()? clock,
     Future<SharedPreferences> Function()? prefsGetter,

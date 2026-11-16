@@ -40,6 +40,11 @@ import '../../mocks/mock_relay_service.dart';
 
 final _namePattern = RegExp(r'^[A-Z][a-z]+ [A-Z][a-z]+$');
 
+/// `onboardingPhotoNotSaved`, in English.
+const _photoNotSaved =
+    'Your photo couldn’t be saved. You can add it later in Settings, under '
+    'Identity.';
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -869,7 +874,50 @@ void main() {
         (c) => c.method == 'setOwnAvatar',
       );
       expect(avatarCall.args['raw'], photoBytes);
+      expect(find.text(_photoNotSaved), findsNothing);
 
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getBool(kOnboardingCompletedKey), isTrue);
+    },
+  );
+
+  testWidgets(
+    'a picked photo that cannot be saved is reported in fixed copy, and '
+    'onboarding still completes',
+    (tester) async {
+      final profile = MockProfileService();
+      await pumpLocalized(
+        tester,
+        CreateIdentityScreen(pickPhoto: (_) async => Uint8List(3)),
+        overrides: buildOverrides(
+          service: _RecordingIdentityService(),
+          profileService: profile,
+        ),
+        settle: false,
+      );
+      await tester.pump();
+      final name = prefilledName(tester);
+      // Rule 15: the user's own name, planted in the error the save throws.
+      profile.setOwnAvatarError = StateError('no space for $name');
+      final log = LogCapture.install();
+
+      await tester.tap(find.byType(HavenAvatar));
+      await tester.pump();
+      await tester.pump();
+      await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+      await pumpFrames(tester);
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+      await pumpFrames(tester);
+
+      expect(
+        find.text(_photoNotSaved),
+        findsOneWidget,
+        reason: 'a photo the user chose must not vanish silently',
+      );
+      expect(find.textContaining('no space'), findsNothing);
+      log
+        ..assertContains('[Onboarding] profile photo save failed: StateError')
+        ..assertNoNeedles([name]);
       final prefs = await SharedPreferences.getInstance();
       expect(prefs.getBool(kOnboardingCompletedKey), isTrue);
     },
@@ -901,6 +949,7 @@ void main() {
       profile.methodCalls.map((c) => c.method),
       isNot(contains('setOwnAvatar')),
     );
+    expect(find.text(_photoNotSaved), findsNothing);
   });
 
   testWidgets('removing a picked photo publishes the profile without one', (
@@ -965,8 +1014,7 @@ void main() {
     'if the name LOCAL SAVE fails, the picked photo is NOT saved either',
     (tester) async {
       final service = _RecordingIdentityService();
-      final profile = MockProfileService()
-        ..shouldThrowOnUpdateOwnProfile = true;
+      final profile = MockProfileService();
       final photoBytes = Uint8List.fromList([4, 2]);
 
       await pumpLocalized(
@@ -976,6 +1024,10 @@ void main() {
         settle: false,
       );
       await tester.pump();
+      final name = prefilledName(tester);
+      // Rule 15: the user's own name, planted in the error the save throws.
+      profile.updateOwnProfileError = StateError('cannot store $name');
+      final log = LogCapture.install();
 
       await tester.tap(find.byType(HavenAvatar));
       await tester.pump();
@@ -991,8 +1043,13 @@ void main() {
       final methods = profile.methodCalls.map((c) => c.method);
       expect(methods, contains('updateOwnProfile'));
       expect(methods, isNot(contains('setOwnAvatar')));
-      // Onboarding still completes: the local-save failure is logged and
-      // swallowed by `_saveOnboardingProfileLocally`, and the background
+      // The picked photo was lost with it, and the user is told so.
+      expect(find.text(_photoNotSaved), findsOneWidget);
+      log
+        ..assertContains('[Onboarding] profile name save failed: StateError')
+        ..assertNoNeedles([name]);
+      // Onboarding still completes: the local-save failure is logged by
+      // `_saveOnboardingProfileLocally` and reported, and the background
       // publish trigger is unconditional (there is nothing to publish, but
       // triggering it is harmless — see `ProfileSyncOutcome.nothingPending`).
       final prefs = await SharedPreferences.getInstance();

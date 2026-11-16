@@ -182,6 +182,10 @@ class AppLocalizationsNe extends AppLocalizations {
       'त्यो नाम सुरक्षित गर्न सकिएन। कृपया फेरि प्रयास गर्नुहोस्।';
 
   @override
+  String get onboardingPhotoNotSaved =>
+      'Your photo couldn’t be saved. You can add it later in Settings, under Identity.';
+
+  @override
   String get onboardingAddPhotoOptional => 'फोटो थप्नुहोस् (वैकल्पिक)';
 
   @override

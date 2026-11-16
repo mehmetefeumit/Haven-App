@@ -180,6 +180,10 @@ class AppLocalizationsTr extends AppLocalizations {
       'Bu ad kaydedilemedi. Lütfen tekrar deneyin.';
 
   @override
+  String get onboardingPhotoNotSaved =>
+      'Your photo couldn’t be saved. You can add it later in Settings, under Identity.';
+
+  @override
   String get onboardingAddPhotoOptional => 'Fotoğraf ekle (isteğe bağlı)';
 
   @override
