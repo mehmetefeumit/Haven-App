@@ -1553,7 +1553,10 @@ mod tests {
         assert_eq!(storage.retire_gated_inbox_seed().unwrap(), 0);
         let inbox = storage.list_user_relays(RelayType::Inbox).unwrap();
         assert!(inbox.iter().any(|u| u == READ_GATED_INBOX_SEED_RELAY));
-        assert_eq!(inbox.len(), crate::circle::PRODUCTION_INBOX_RELAYS.len() + 1);
+        assert_eq!(
+            inbox.len(),
+            crate::circle::PRODUCTION_INBOX_RELAYS.len() + 1
+        );
     }
 
     #[test]
