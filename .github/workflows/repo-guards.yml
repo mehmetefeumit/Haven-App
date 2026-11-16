@@ -1015,6 +1015,15 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_flag_secure_app_wide.sh
 
+      # uCrop's JitPack POM declares no dependencies, so the crop editor runs on
+      # whatever AndroidX the app pins; the release manifest half runs in the
+      # Android launch gate, on the APK it launched.
+      - name: uCrop runtime dependencies (static + self-test)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: |
+          bash scripts/ci/check_ucrop_runtime_deps.sh --self-test
+          bash scripts/ci/check_ucrop_runtime_deps.sh
+
       # The guard above is four greps and a brace-slicer over Kotlin, so its
       # fixtures pin one mutation per link — a registration moved out of
       # onCreate, a registration left only in the KDoc, a callback that stopped
@@ -2226,17 +2235,41 @@ jobs:
       # launch, a restart or ANR mid-journey, Intro after a relaunch, a name
       # that did not survive, an unusable upgrade source and an offline device
       # each get their own verdict, crash evidence is read before anything else
-      # is blamed, and the pseudonym never reaches a transcript.
+      # is blamed, and the pseudonym never reaches a transcript. Its photo
+      # rounds too: a save refused after the crop, a uCrop crash, a picker the
+      # selectors do not know (rc 2) or that is not the Photo Picker (rc 1), a
+      # photo that is late or lost after a restart, background sharing that
+      # will not turn on, no leg reaching MapShell (rc 2), an unindexed gallery
+      # (rc 3) — and no picker description ever reaches a transcript.
       - name: E2E harness self-test (Android launch gate)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/run-launch-gate-android.sh --self-test
 
       # The screen reader the Android gate decides on: exact-line matching,
       # entity and apostrophe folding, and an empty or label-less dump read as
-      # no observation rather than a verdict.
+      # no observation rather than a verdict; the system-screen finder (anchored
+      # ids, sorted matches, nothing a node says printed) and the resumed
+      # activity read from dumpsys.
       - name: E2E harness self-test (launch-gate screen reader)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: python3 -I tooling/e2e/ci/ui-dump.py --self-test
+
+      # The gallery fixtures the photo rounds pick: the same bytes every run,
+      # two different pictures, valid PNGs with no metadata chunk.
+      - name: E2E harness self-test (photo fixtures)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: python3 -I tooling/e2e/ci/make-avatar-fixture.py --self-test
+
+      # The debug photo UI lane's runner and its host sidecar against a stubbed
+      # adb and a stubbed drive: rounds played in marker order, the pause
+      # branch required on a pick, an early-expired grace a product failure, a
+      # broken marker sequence or an unknown picker a harness failure, a
+      # sidecar failure red even under a passing drive, the sidecar log gated
+      # before it is echoed, and the bounds and markers it shares with the Dart
+      # target and system_activity_excursions.dart pinned.
+      - name: E2E harness self-test (photo UI lane)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/run-photo-ui-scenario.sh --self-test
 
       # Which release the upgrade leg starts from and whether it can replace it:
       # drafts, pre-releases, yanked and later tags excluded; a bad checksum,

@@ -6835,7 +6835,7 @@ pub fn allow_private_blossom_for_test() -> Result<(), String> {
 /// reads the effective servers via `haven_core::profile::blossom_servers`, so
 /// installing this override before the first upload points A's picture at the
 /// hermetic Blossom and never at a production server. Intended to be called
-/// once from a scenario's `setUpAll` with the `HAVEN_E2E_BLOSSOM_URL`
+/// once from a scenario's `setUpAll` with the `HAVEN_E2E_BLOSSOM_URLS`
 /// dart-define value.
 ///
 /// # Errors

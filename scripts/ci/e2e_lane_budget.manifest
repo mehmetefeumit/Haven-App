@@ -54,6 +54,22 @@ probe-send main#1/do_install#1/send_probe#*/nc-w:1#1 charge 1
 lib tooling/e2e/ci/app-install-lib.sh
 barrier */timeout:INSTALL_BARRIER_SECS#1 charge INSTALL_BARRIER_SECS
 
+lib tooling/e2e/ci/photo-picker-lib.sh
+# The gallery: each poll is one bounded adb read inside the wall-clock window.
+seed pp_seed_gallery/timeout:PP_ADB_SECS#1 charge PP_MEDIA_SECS + PP_ADB_SECS
+# A round is five wall-clock windows in a row, each charged its bound, the
+# read that can start just before it, and one PP_ADB_SECS more for the
+# caller's per-tick liveness read (pp_hook_alive, which this analysis cannot
+# follow into the caller).
+round-picker pp_round/_pp_await_picker#1/pp_resumed#1/timeout:PP_ADB_SECS#1 charge PP_PICKER_SECS + PP_ADB_SECS + PP_ADB_SECS
+round-thumb pp_round/_pp_pick_thumbnail#1/pp_find#1/timeout:PP_DUMP_SECS#1 charge PP_PICKER_SECS + PP_DUMP_SECS + PP_ADB_SECS
+round-cancel pp_round/_pp_cancel#1/pp_find#1/timeout:PP_DUMP_SECS#1 within round-thumb a round either cancels or picks, and the cancel window is the thumbnail window's size
+round-ucrop pp_round/_pp_await_ucrop#1/pp_resumed#1/timeout:PP_ADB_SECS#1 charge PP_UCROP_SECS + PP_ADB_SECS + PP_DUMP_SECS + PP_ADB_SECS
+round-confirm pp_round/_pp_await_ucrop#1/pp_find#1/timeout:PP_DUMP_SECS#1 within round-ucrop both reads of one pass are in round-ucrop's charge
+round-crop pp_round/_pp_crop#1/pp_find#1/timeout:PP_DUMP_SECS#1 charge PP_UCROP_SECS + PP_DUMP_SECS + PP_ADB_SECS
+round-return pp_round/_pp_await_main#2/pp_resumed#1/timeout:PP_ADB_SECS#1 charge PP_RETURN_SECS + PP_ADB_SECS + PP_ADB_SECS
+round-return-cancel pp_round/_pp_await_main#1/pp_resumed#1/timeout:PP_ADB_SECS#1 within round-return a round either cancels or picks, and both wait for MainActivity in the same window
+
 lib tooling/e2e/ci/logscan-gate.sh
 # The log-privacy gate: the key-material floor and the identifier scanner over
 # files already on disk — no wait of its own, so its budget is the wrapper's,
@@ -83,6 +99,24 @@ watchdog drive_with_connect_watchdog#1/sleep:WATCHDOG_POLL_SECS#1 charge CONNECT
 watchdog-grace drive_with_connect_watchdog#1/sleep:WATCHDOG_KILL_GRACE_SECS#1 charge WATCHDOG_KILL_GRACE_SECS times DRIVE_MAX_ATTEMPTS - 1
 restore lib:install_app#1 charge @ times DRIVE_MAX_ATTEMPTS - 1
 settle sleep:DRIVE_RETRY_SETTLE_SECS#1 charge DRIVE_RETRY_SETTLE_SECS times DRIVE_MAX_ATTEMPTS - 1
+
+unit tooling/e2e/ci/run-photo-ui-scenario.sh
+device main#1/timeout:DEVICE_SECS#1 charge DEVICE_SECS
+seed main#1/lib:pp_seed_gallery#1 charge @
+# The sidecar plays the picker and uCrop beside the drive, in a background job
+# never joined with `wait`: the main shell polls it to a stop below, after the
+# drive, and kills what is left at the join's bound.
+sidecar-poll main#1/watch#1/sleep:MARKER_POLL_SECS#1 concurrent
+sidecar-round main#1/watch#1/play_round#1/lib:pp_round#1 concurrent
+sidecar-grace main#1/watch#1/play_round#1/grace_cause#1/sleep:1#1 concurrent
+drive main#1/bash:run-single-avd-scenario.sh#1 charge @
+# The join after the drive, and the EXIT trap's (which spends its bound only
+# when the main shell never reached its own): one tick past each bound.
+join main#1/sleep:1#1 charge JOIN_SECS + 1
+join-exit main#1/finish#1/sleep:1#1 charge JOIN_SECS + 1
+# The log-privacy gate over the sidecar log in the EXIT trap: a file already on
+# disk, no wait of its own (logscan-gate.sh).
+logscan main#1/finish#1/lib:logscan_gate#1 charge @
 
 unit tooling/e2e/ci/run-b3-real-gps.sh
 strfry bash:start-strfry.sh#1 charge @
@@ -325,6 +359,11 @@ logscan */lib:logscan_gate#1 charge @
 # ---------------------------------------------------------------------------
 
 unit tooling/e2e/ci/run-launch-gate-android.sh
+# The MapShell photo round runs in the FIRST leg that reaches MAP only
+# (PHOTO_AT_MAP_DONE), so of the two upgrade legs that can reach it, one pays.
+photo-once main#1/leg_upgrade#2/photo_at_map#1/*/timeout:* excluded the first upgrade leg's photo_at_map is charged below and the round runs in one leg only
+photo-once-lib main#1/leg_upgrade#2/photo_at_map#1/*/lib:* excluded the first upgrade leg's photo_at_map is charged below and the round runs in one leg only
+seed */gallery#1/lib:pp_seed_gallery#1 charge @ once the offline loop calls it on the pass that returns
 device main#1/preconditions#1/timeout:BOOT_SECS#1 charge BOOT_SECS
 boot main#1/preconditions#1/timeout:ADB_SECS#1 charge BOOT_SECS + ADB_SECS
 offline main#1/preconditions#1/timeout:ADB_SECS#2 charge OFFLINE_SECS + ADB_SECS + ADB_SECS
@@ -344,6 +383,22 @@ settle-watch */settle_watch#*/observe#1/timeout:DUMP_SECS#1 charge SETTLE_SECS +
 settle-alive */settle_watch#*/alive#1/pid_now#1/timeout:ADB_SECS#1 within settle-watch each pass's pid read is in the watch's charge
 crash-read */crash_evidence#1/timeout:ADB_SECS#* charge ADB_SECS
 device-state main#1/finish#1/timeout:ADB_SECS#1 charge ADB_SECS
+# The photo rounds: two (the onboarding one and the MapShell one), each the
+# system trip (photo-picker-lib.sh) then the wall-clock window for the photo to
+# show; and on the MapShell leg the way there (Settings > Location, then
+# Identity) and, after the cold restart expect_reopened and launch_app above
+# already charge, the window for the kept photo.
+onb-photo */onboarding_photo#1/observe#1/timeout:DUMP_SECS#1 charge CREATE_SECS + DUMP_SECS + ADB_SECS
+onb-photo-alive */onboarding_photo#1/alive#1/pid_now#1/timeout:ADB_SECS#1 within onb-photo each pass's pid read is in the window's charge
+photo-trip */photo_round#1/lib:pp_round#1 charge @ once onboarding_photo returns right after its round
+photo-apply */photo_round#1/observe#1/timeout:DUMP_SECS#1 charge APPLY_SECS + DUMP_SECS + ADB_SECS once onboarding_photo returns right after its round
+photo-apply-alive */photo_round#1/alive#1/pid_now#1/timeout:ADB_SECS#1 within photo-apply each pass's pid read is in the window's charge
+bg-on */enable_background_sharing#1/observe#1/timeout:DUMP_SECS#1 charge SETTINGS_SECS + DUMP_SECS + ADB_SECS
+bg-on-alive */enable_background_sharing#1/alive#1/pid_now#1/timeout:ADB_SECS#1 within bg-on each pass's pid read is in the window's charge
+to-identity */identity_page#1/observe#1/timeout:DUMP_SECS#1 charge IDENTITY_SECS + DUMP_SECS + ADB_SECS
+to-identity-alive */identity_page#1/alive#1/pid_now#1/timeout:ADB_SECS#1 within to-identity each pass's pid read is in the window's charge
+photo-kept */expect_photo_kept#1/observe#1/timeout:DUMP_SECS#1 charge SCREEN_SECS + DUMP_SECS + ADB_SECS
+photo-kept-alive */expect_photo_kept#1/alive#1/pid_now#1/timeout:ADB_SECS#1 within photo-kept each pass's pid read is in the window's charge
 # The log-privacy gate over the summaries in the EXIT trap: files already on
 # disk, no wait of its own (logscan-gate.sh).
 logscan main#1/finish#1/lib:logscan_gate#1 charge @

@@ -21,8 +21,14 @@ closes that gap.
 
 ### What runs, and where
 
-`.github/workflows/launch-gate-android.yml` is one job,
-`Release APK: launch, relaunch and upgrade`, called from:
+`.github/workflows/launch-gate-android.yml` is four jobs: `Release APK:
+build or fetch the candidate` (the build, the upgrade sources, one
+short-lived artifact of the run carrying the APKs and the prepared
+directories — no log), `Release APK: launch, relaunch and upgrade (API 34)`
+and `(API 35)` in parallel (35 is Haven's targetSdk on Android 15, where
+edge-to-edge is enforced; `check_android_sdk_provisioned.sh` allows one API
+level per job), and `Release APK: tested digests`, which needs both. It is
+called from:
 
 | Caller | Candidate | Signing | Previous release |
 |---|---|---|---|
@@ -30,7 +36,8 @@ closes that gap.
 | `release-build.yml` | `candidate_artifact`: the exact signed APKs about to be published | release key | as published; certificates must be equal |
 | a validation run | `candidate_release_tag`: a published release's APKs | release key | as published |
 
-On success the job outputs `tested_sha256`: `sha256sum app-*-release.apk`
+When both launch jobs pass, the workflow outputs `tested_sha256` (from the
+`tested` job): `sha256sum app-*-release.apk`
 run inside the candidate directory (`<sha256>  <basename>` per line), sorted,
 joined with `;`. `release-build.yml`'s publish job compares its own download
 of the artifact against it, so the bytes published are the bytes tested.
@@ -84,13 +91,19 @@ shipped v0.1.13 and v0.1.14 APKs (arm64-v8a and x86_64, build-tools 36.1 and
 
 ### 2. The launch — `tooling/e2e/ci/run-launch-gate-android.sh`
 
-On an api-34 `google_apis` x86_64 emulator, under `run-with-deadline.sh` and
-the host egress guard, the x86_64 APK is started the way a user starts it: the
-launcher activity, cold (`am start -W`), production `main()`.
+On an api-34 and an api-35 `google_apis` x86_64 emulator (one job each),
+under `run-with-deadline.sh` and the host egress guard, the x86_64 APK is
+started the way a user starts it: the launcher activity, cold (`am start -W`),
+production `main()`.
 
 **Preconditions** (rc 3 when unmet): the device boots, its locale is en-US
-(asserted, never set), airplane mode is on with no default network, and
-system error dialogs are hidden.
+(asserted, never set), airplane mode is on with no default network, system
+error dialogs are hidden, `ro.build.version.sdk` reads as a number, and the two
+gallery fixtures (`make-avatar-fixture.py`: 800x600 PNGs, the same bytes every
+run, no metadata chunk) are pushed to `/sdcard/Pictures` and listed by the
+media store within 60 s (`content query`, its WHERE clause sent as one device
+command string; `scan_volume` reports nothing either way, so the query
+decides).
 
 **Legs:**
 
@@ -101,6 +114,46 @@ system error dialogs are hidden.
   to the map offline, so the candidate opens MapShell in release mode. Skipped
   when v0.1.13 *is* the previous release (true until a fixed release ships,
   since v0.1.14 is yanked).
+
+**The photo rounds** (`tooling/e2e/ci/photo-picker-lib.sh`, shared with the
+debug photo UI lane). Each round taps Haven's own control, then plays the user
+in the system screens, judging every step by the RESUMED activity
+(`dumpsys activity activities`, read by `ui-dump.py resumed`) and the screen
+(`ui-dump.py find`, by anchored resource id, never by anything a node says):
+the Photo Picker (`.photopicker.PhotoPickerActivity`; on API 33+ any other
+picker — DocumentsUI, the GET_CONTENT alias — is a product failure, because
+`main()` promises the scoped Photo Picker through `configureImagePicker()`),
+one thumbnail (`icon_thumbnail`, a `Photo…` description as the Compose
+picker's fallback), uCrop (`com.yalantis.ucrop.UCropActivity`, its
+`menu_crop` action polled until the image has loaded, its `Crop` description
+as fallback), and MainActivity again. Then Haven must show the photo within
+`APPLY_SECS` and never `avatarPickerUpdateError`.
+
+- **onboarding** (fresh leg): on the create screen, before "Create My
+  Identity": Add profile photo → pick → crop → *Change profile photo* and
+  *Remove* shown. Proves picker → uCrop → result on the shipped build: R8, the
+  androidx classes uCrop needs (a `NoClassDefFoundError` in uCrop is crash
+  evidence in Haven's own process), edge-to-edge on API 35.
+- **MapShell** (the first leg that reaches MAP, the baseline leg today):
+  notifications and location granted and read back from `dumpsys package`
+  (`pm grant` exits 0 when it refuses), the app exempted from battery
+  optimisation and read back (`dumpsys deviceidle whitelist`), so the enable
+  path raises no system dialog; then Settings › Location › *Share in
+  background* › Agree, as a user turns it on, done when Settings says
+  *Background sharing on*; then Settings › Identity › Edit Photo. uCrop stops
+  MainActivity, MapShell takes its Android pause branch with background
+  sharing on, and the crop result arrives before the app is resumed — root
+  cause A of the 2026-11-16 photo bug, on the release build. The photo must
+  show (*View profile photo* and *Remove*), and still show after a cold restart
+  (read back from SQLCipher by `ownProfileProvider`).
+
+A run in which no leg reached MAP is rc 2: the hand-off path went untested.
+The labels are the candidate's own ARB values (C7: `photoHeader*`,
+`avatarPickerUpdateError`, `settingsLocation*`, `locationSettingsToggleTitle`,
+`locationDisclosureAgree`), required in the candidate's ARB (rc 2 without) and
+read only on the candidate's screens. `onboardingPhotoNotSaved`, the create
+screen's report of a picked photo it could not save, is fatal wherever it
+shows.
 
 **Offline, deliberately.** A release build trusts only its bundled roots and
 production relays, so the alternative would be publishing to production from
@@ -152,15 +205,17 @@ running). That is why a v0.1.14-shaped candidate's red names
 | rc | Class | Meaning | What to do |
 |---|---|---|---|
 | 0 | pass | every leg passed | — |
-| 1 | product | the candidate crashed, stalled, lost data, showed the intro after onboarding, kept a debug log plant, or did not replace the previous release | fix the app; never re-run to green |
-| 2 | usage | a missing input (directory, ARB key) | fix the workflow |
-| 3 | infrastructure | the device went away, never booted, is not en-US, or would not go offline | re-run the job |
+| 1 | product | the candidate crashed, stalled, lost data, showed the intro after onboarding, kept a debug log plant, or did not replace the previous release; a photo tap opened no picker, or (API 33+) a picker other than the Photo Picker; uCrop did not return; the photo save was refused after the crop (`avatarPickerUpdateError`: root cause A's class), did not show within `APPLY_SECS`, or was gone after a cold restart; background sharing did not turn on with everything granted | fix the app; never re-run to green |
+| 2 | usage or harness | a missing input (directory, ARB key); a picker or uCrop screen no selector knows (the summary lists the resource ids it does have: update the selectors for that system image); background sharing held off while Android showed the battery or notification snack the grants were meant to prevent; no leg reached MapShell | fix the workflow or the selectors; never re-run to green |
+| 3 | infrastructure | the device went away, never booted, is not en-US, would not go offline, never indexed the gallery fixtures, or would not take a permission grant or the battery exemption | re-run the job |
 | 4 | upgrade source unusable | the previous release itself failed before the candidate was installed | add it to `scripts/ci/launch_gate_yanked_releases.txt` with the reason |
 
 The step prints one `::error::` line naming the leg, the state reached, the
 last observation (visible label keys, foreground package, EditText count) and
 the class, plus the root cause of a crash. The summary
-(`launch-gate-summary.log`) and, only when there is crash evidence, the crash
+(`launch-gate-summary.log`, with a `photo:` line naming which rounds applied
+and which picker and uCrop selector matched) and, only when there is crash
+evidence, the crash
 summary (`crash-summary.log`: exception lines, `at` frames, native frames as
 `#nn pc <offset> <library>`, random install paths removed) are the only files
 uploaded.
@@ -190,8 +245,11 @@ every later release whose build number is a run number.
 
 ### Privacy
 
-Nothing the app or the device prints is uploaded raw: no logcat, no UI dump,
-no APK. Dumps live in a 0700 directory and are deleted after each read. The
+Nothing the app or the device prints is uploaded raw: no logcat, no UI dump;
+the APKs travel between the run's own jobs as one artifact kept for a day.
+Dumps live in a 0700 directory and are deleted after each read; nothing a
+picker node says (a thumbnail's description can carry a date) is printed, only
+resource ids and component names. The
 display name onboarding generates is read from the screen into that directory,
 compared there, declared to the log-privacy gate
 (`--host-decl display_name=…`) so the scanner proves it absent from both
@@ -202,9 +260,10 @@ debug logging.
 
 ### What it does not cover
 
-- Runtime coverage is API 34, x86_64 only. The arm64-v8a and armeabi-v7a APKs
-  get the dex and native-library checks; their AOT code and API levels 24–33
-  are not run.
+- Runtime coverage is API 34 and 35, x86_64 only. The arm64-v8a and
+  armeabi-v7a APKs get the dex and native-library checks; their AOT code and
+  API levels 24–33 are not run, nor is the picker of a device with Google
+  Play's newer Photo Picker module.
 - SQLCipher. Every value a user can see offline that an encrypted database
   holds has a fallback that hides a failed open: the circle list reads empty on
   any failure (`circles_provider.dart:36-49`), and the Identity page's name
@@ -212,7 +271,19 @@ debug logging.
   A database the update cannot open is caught only if it crashes the app or
   shows an unexpected screen.
 - MapShell on a fresh install (onboarding stops at SETUP_HELD offline); it is
-  reached only through the baseline leg and the debug E2E lanes.
+  reached only through the baseline leg and the debug E2E lanes. That makes
+  the baseline leg the ONLY offline route to the MapShell photo round on a
+  release build: if a migration ever stops supporting v0.1.13's data, the gate
+  goes rc 2 rather than silently losing root cause A, and the debug photo UI
+  lane (`e2e-profile.yml` `e2e_profile_android_ui`) still catches it.
+- The onboarding photo is not checked after a restart: offline, SETUP_HELD
+  never shows it again.
+- Whether the photo is published: offline there is nothing to publish to; the
+  debug lanes prove the kind-0 and the blob.
+- **Accepted operational risk.** `sdkmanager` installs the newest revision of
+  each system image, so an upstream picker UI change can turn the gate
+  harness-red (rc 2, the resource ids listed) and block tags until the
+  selectors are updated. That is fail-closed by design.
 - Map tiles (the build carries a placeholder Stadia key) and anything that
   needs a relay.
 - Reflection the five dex checks do not name (for example ML Kit's
@@ -223,10 +294,18 @@ debug logging.
 Every wait polls a condition under a readonly bound in the runner (boot 60 s,
 offline 30 s, `am start -W` 60 s, each screen 60 s, the finish wait 120 s, the
 settle watch 30 s, a dump 15 s, a definite process read after a launch or a
-stop 20 s, an adb read 10 s); nothing sleeps.
+stop 20 s, an adb read 10 s) or in `photo-picker-lib.sh` (the gallery 60 s;
+tap → picker, picker → thumbnail, thumbnail → uCrop, uCrop → crop, crop →
+MainActivity 60 s each); nothing sleeps. After the crop the photo has
+`APPLY_SECS` = 40 s: the product's worst case, not its usual one — a crop that
+outlasts the 20 s excursion grace hands the session over, and the save then
+waits up to `kHandoffEndWait` (10 s) and the open up to `handoverTimeout`
+(20 s) — plus 10 s; the self-test pins the sum to
+`mls_session_handover.dart`. A shorter bound would race a correct build's slow
+path; the no-stall promise inside the grace is the Flutter fake_async tests'.
 `scripts/ci/check_e2e_lane_budget.sh --explain` sums them with the install
-barriers into the step's 66-minute deadline. A healthy run spends a few
-minutes in the emulator step.
+barriers into each emulator step's 102-minute deadline (6079 s with the
+allowance). A healthy run spends a few minutes in the emulator step.
 
 ### Running the pieces locally
 
@@ -234,11 +313,21 @@ minutes in the emulator step.
 bash scripts/ci/check_apk_loadable.sh --self-test
 bash scripts/ci/check_apk_loadable.sh path/to/app-*-release.apk   # needs ANDROID_HOME
 python3 -I tooling/e2e/ci/ui-dump.py --self-test
+python3 -I tooling/e2e/ci/make-avatar-fixture.py --self-test
 bash tooling/e2e/ci/launch-gate-previous-apk.sh --self-test
 bash tooling/e2e/ci/run-launch-gate-android.sh --self-test
 ```
 
 ### Proving the gate
+
+**The photo rounds (2026-11-16, not yet run).** Dispatch the workflow on a
+branch holding only the gate change over the unfixed app: the MapShell round
+must end rc 1 "the photo save was refused after the crop
+(avatarPickerUpdateError)" on both API levels; then green on the fixed tree.
+One residual: if the foreground service's bounded stop outlasts the whole
+uCrop phase, the resume supersedes the hand-off and the unfixed build passes
+by luck — the Flutter fake_async test of the same ordering is the
+deterministic catch. Record both runs here.
 
 Run it with `candidate_release_tag: v0.1.14`: it must be red twice over — the
 launch's crash summary naming `WorkDatabase_Impl`, and the dex check (which

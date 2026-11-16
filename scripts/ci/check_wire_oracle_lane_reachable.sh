@@ -230,6 +230,11 @@ readonly KNOWN_UNWIRED_LANES=(
   # containment needs a recorder and is proved by the Rust layers.
   'e2e-profile.yml:e2e_profile_android'
   'e2e-profile.yml:e2e_profile_ios'
+  # The photo UI job of the same lane: the same hosts, the same exemption. Its
+  # subject is the device-side trip through the picker and uCrop, which no
+  # wire journal can see; its kind-0 plane is asserted per edit on every
+  # profile relay and as zero kind-0 on the circle relay.
+  'e2e-profile.yml:e2e_profile_android_ui'
 )
 
 VIOLATIONS=0

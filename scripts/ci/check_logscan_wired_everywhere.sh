@@ -232,6 +232,7 @@ declare -A RUNNER_PINS=(
   # invariant the ordering pins above express, at its limit.
   ['run-launch-gate-ios.sh']='the summary is echoed only after the log-privacy gate'
   ['run-launch-gate-android.sh']='the crash summary is echoed only after the log-privacy gate'
+  ['run-photo-ui-scenario.sh']='_case "the sidecar log is echoed only after the log-privacy gate"'
   ['run-soak-core.sh']='_case "the log-privacy gate runs and no captured log is ever echoed"'
 )
 
@@ -389,7 +390,23 @@ sink_paths() { # sink_paths <lines>
 
 # The `.log` paths a listed runner hands to the gate, from its gate-call
 # lines with continuations joined.
-runner_gate_paths() { # runner_gate_paths <runner-file>
+# A gated runner that runs another one (`readonly VAR="${dir}/run-x.sh"`,
+# then `bash "${VAR}"` at the start of a line — the delegation spelling
+# drive-log-lib.sh also reads) hands the gate what that one's gate takes too,
+# one level deep, and only when that one sources the gate itself:
+# run-photo-ui-scenario.sh wraps run-single-avd-scenario.sh this way.
+runner_gate_paths() { # runner_gate_paths <runner-file> [nested]
+  local nested var line
+  if [[ -z "${2:-}" ]]; then
+    for nested in $(grep -vE '^[[:space:]]*#' "$1" | grep -E '^[[:space:]]*(readonly[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*="[^"]*/run-[a-z0-9-]+\.sh"[[:space:]]*$' | while IFS= read -r line; do
+        var="${line%%=*}"; var="${var##* }"
+        grep -qE "^[[:space:]]*bash[[:space:]]+\"\\\$\{${var}\}\"" "$1" && grep -oE 'run-[a-z0-9-]+\.sh' <<<"${line}" | tail -1
+      done | sort -u); do
+      [[ -f "$(dirname "$1")/${nested}" ]] || continue
+      grep -qE -- "${GATE_SOURCE_RE}" "$(dirname "$1")/${nested}" || continue
+      runner_gate_paths "$(dirname "$1")/${nested}" nested
+    done
+  fi
   awk '
     /^[[:space:]]*#/ { next }
     {
@@ -1047,7 +1064,7 @@ YAML
 }
 
 self_test() {
-  local -r SELF_TEST_CASES=65
+  local -r SELF_TEST_CASES=67
   local tmp cases=0 failures=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -1121,6 +1138,32 @@ self_test() {
   _expect "(a) a pin for a runner that is gone is stale" "${d}" 1 "which does not exist"
   d="${tmp}/a9"; mut "${b}" "${d}" 'wf/repo-guards.yml' 's|run-good.sh --self-test|run-good.sh x.dart|'
   _expect "(a) a runner invocation that is not a --self-test IS a capture (a fourth capturing job appears, wired by its gated runner)" "${d}" 0 "4 capturing job(s)"
+  # A gated runner that wraps another gated runner by its literal path: the
+  # wrapped runner's gated logs are credited to the job that ran the wrapper,
+  # and only when the wrapped runner sources the gate itself.
+  _wrap_tree() { # _wrap_tree <dir> <wrapped runner>
+    rm -rf "$1"; cp -r "${b}" "$1"
+    {
+      echo '#!/usr/bin/env bash'
+      echo 'SCRIPT_DIR="$(dirname "${BASH_SOURCE[0]}")"'
+      echo 'source "${SCRIPT_DIR}/logscan-gate.sh"'
+      echo "readonly WRAPPED=\"\${SCRIPT_DIR}/$2\""
+      echo 'bash "${WRAPPED}" x.dart'
+      echo 'logscan_gate host /tmp/haven-soak/needles -- --sink diag=/tmp/photo-sidecar.log'
+      echo 'if [[ "${1:-}" == "--self-test" ]]; then'
+      echo "  echo \"${FAKE_PIN}\" >&2"
+      echo '  exit 0'
+      echo 'fi'
+    } > "$1/harness/run-wrap.sh"
+    sed -i 's|run-good.sh x.dart|run-wrap.sh x.dart|' "$1/wf/e2e-android.yml"
+  }
+  RUNNER_PINS['run-wrap.sh']="${FAKE_PIN}"
+  d="${tmp}/b-wrap"; _wrap_tree "${d}" run-good.sh
+  _expect "(b) a gated runner wrapping a gated runner credits the wrapped runner's logs" "${d}" 0
+  d="${tmp}/b-wrap-plain"; _wrap_tree "${d}" run-plain.sh
+  write_runner "${d}/harness" run-plain.sh unsourced
+  _expect "(b) a wrapped runner that does not source the gate credits nothing" "${d}" 1 "names /tmp/adb-logcat.log"
+  unset 'RUNNER_PINS[run-wrap.sh]'
   d="${tmp}/a10"; mut "${b}" "${d}" 'wf/e2e-ios.yml' 's|bash tooling/e2e/ci/run-good.sh|bash tooling/e2e/ci/run-other.sh|'
   _expect "(a) \`test -f …/run-x.sh\` is not an invocation (the iOS lane still has its wrapper step, so it passes)" "${d}" 0
 

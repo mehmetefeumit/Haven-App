@@ -121,8 +121,10 @@ jobs:
   # and over the previous release with its data kept; iOS launches the
   # production main() in the Release native configuration on a simulator and
   # over the previous release's simulator build. Offline on purpose: a release
-  # build knows only production relays. The iOS gate is a release gate job
-  # (scripts/ci/check_ci_verdict.sh); before publishing, release-build.yml
+  # build knows only production relays. The Android gate also picks a photo
+  # through the real Photo Picker and uCrop at onboarding and, with background
+  # sharing on, at MapShell, on API 34 and 35. The iOS gate is a release gate
+  # job (scripts/ci/check_ci_verdict.sh); before publishing, release-build.yml
   # launches the tag's exact APKs, and a simulator build of the tag's tree.
   launch-gate-android:
     name: Launch Gate (Android)
@@ -369,8 +371,11 @@ jobs:
     uses: ./.github/workflows/e2e-network-reconnect.yml
 
   # The public-profile flow (kind-0 + Blossom photo) on BOTH platforms:
-  # publish, resolve, merge-preserving edit, and delete→npub-fallback against
-  # a real hermetic relay + Blossom server.
+  # publish, resolve through a Primal-mimicking server's 302, merge-preserving
+  # edit, fallback to the next server, clock skew, delete→npub-fallback; and on
+  # Android the Identity-page photo trip through the real Photo Picker and
+  # uCrop with background sharing on. Hermetic relays and Blossom servers only.
+  # A release gate job (scripts/ci/check_ci_verdict.sh).
   e2e-profile:
     name: E2E Public Profile (Android + iOS)
     needs: [rust]

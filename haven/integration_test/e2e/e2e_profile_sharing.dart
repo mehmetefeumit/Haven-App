@@ -56,13 +56,21 @@
 ///     lists off `discovery_relays()` (haven-core `relay/manager.rs`), so
 ///     without the override step 0 cannot find his KeyPackage.
 ///     `setDiscoveryRelaysForTest` is INERT for kind-0.
-///   * **Blossom.** A's picture upload targets the server returned by
-///     `blossom_server()`; `setBlossomServerForTest` redirects it from the
-///     production default to the hermetic Blossom. B's DOWNLOAD path applies a
-///     connect-time anti-SSRF IP filter that rejects loopback/private
-///     addresses; `allowPrivateBlossomForTest` relaxes it for the
-///     loopback/emulator allowlist only (debug builds only) so B can fetch the
-///     blob whose URL points at `http://10.0.2.2:3000` / `http://localhost:3000`.
+///   * **Blossom (two servers, tried in order).** A's picture upload tries
+///     the ordered list `blossom_servers()` returns; the harness installs
+///     `HAVEN_E2E_BLOSSOM_URLS` as that list (`ScenarioHarness.bootstrap(
+///     blossomServers: ...)`, the single install site), REPLACING the
+///     production servers. The PRIMARY is `tooling/e2e/local-blossom` in its
+///     `primal` profile: it verifies the kind-24242 token as Primal's server
+///     does (padded standard base64, id and signature, expiration, `x`) and
+///     answers `GET /<sha256>` with a 302 to a second "CDN" port, as
+///     blossom.primal.net does — the answer Haven once refused, so no Primal
+///     photo ever loaded on another device. The FALLBACK is the hzrd149
+///     container (Android) or the stub's `reference` profile (iOS). B's
+///     DOWNLOAD path applies a connect-time anti-SSRF filter that rejects
+///     loopback/private addresses; the harness's `allowPrivateBlossomForTest`
+///     relaxes it for the loopback/emulator allowlist only (debug builds
+///     only).
 ///
 /// ## Scenario steps (plan §7.3)
 ///
@@ -87,6 +95,18 @@
 ///    `syncOwnProfile`, B's forced re-fetch shows the NEW name AND the SAME
 ///    photo — the on-relay kind-0 still carries the original `picture` URL,
 ///    proving the fetch-merge-publish did not clobber it.
+/// 3b. **The download followed Primal's redirect.** Across Bob's download the
+///    primary's counters show a 302 served and a CDN fetch made.
+/// 6. **A refused primary falls over.** With the primary answering 503, a new
+///    photo lands on the FALLBACK (the published `picture` names it), the
+///    primary saw exactly one refused attempt, and Bob downloads it.
+/// 7. **A device clock behind the server's still uploads.** With the
+///    primary's clock 90 s ahead, a new photo lands on the PRIMARY: the
+///    token's expiration (10 min) outlives the skew; a 60 s token would not.
+/// 8. **One kind-0 per edit.** Each pool relay saw exactly one distinct
+///    kind-0 per edit made (2, 4, 6, 7, then 5), and the primary refused
+///    nothing it was not told to. (A pass whose upload FAILS on every server
+///    is the Rust sync tests' to prove: no device step can make one.)
 /// 5. **A deletes the public profile.** B's forced re-fetch falls back to a
 ///    blank profile (no stale name), i.e. the member tile would render the
 ///    npub prefix + initials. No crash, no stale data.
@@ -94,7 +114,7 @@
 /// ## Acceptance hooks
 ///
 /// Reverting any of the following to a no-op turns this scenario red:
-/// - `save_my_profile_picture_local` / `sync_my_profile` / `blossom_server()`
+/// - `save_my_profile_picture_local` / `sync_my_profile` / `blossom_servers()`
 ///   — step 2's Blossom GET 404s / connection-refuses; conversely, a local
 ///   save that uploads EAGERLY makes step 2a's inverse GET find a blob.
 /// - `sync_my_profile` / `publish_metadata` / `resolve_write_relays` — step
@@ -112,8 +132,8 @@ library;
 
 import 'dart:async' show StreamSubscription;
 import 'dart:convert' show jsonDecode;
-import 'dart:io' show HttpClient;
-import 'dart:typed_data' show Uint8List;
+import 'dart:io' show HttpClient, ZLibEncoder;
+import 'dart:typed_data' show ByteData, Uint8List;
 
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -129,8 +149,6 @@ import 'package:haven/src/rust/api.dart'
         MemberKeyPackageFfi,
         ProfilePoolStatusFfi,
         RelayManagerFfi,
-        allowPrivateBlossomForTest,
-        setBlossomServerForTest,
         setDiscoveryRelaysForTest;
 import 'package:haven/src/services/nostr_circle_service.dart'
     show NostrCircleService;
@@ -159,15 +177,23 @@ import '_lib/throw_time_error_capture.dart';
 // Constants
 // =============================================================================
 
-/// Blossom base URL the scenario points A's uploads at and reads the blob
-/// back from. Baked into the APK / test binary via `--dart-define`; CI passes
-/// `http://10.0.2.2:3000` (Android emulator host-loopback alias) or
-/// `http://localhost:3000` (iOS simulator / host). The default keeps a local
-/// `flutter test` run pointed at a host-native `local-blossom`.
-const String _blossomUrl = String.fromEnvironment(
-  'HAVEN_E2E_BLOSSOM_URL',
-  defaultValue: 'http://localhost:3000',
+/// The Blossom upload servers, in the order Haven tries them, comma-separated.
+/// Baked into the APK / test binary via `--dart-define`; CI passes
+/// `http://10.0.2.2:3000,http://10.0.2.2:3002` (Android emulator) or
+/// `http://localhost:3000,http://localhost:3002` (iOS simulator / host). The
+/// default keeps a local run pointed at two host-native `local-blossom`s.
+const String _blossomUrlsRaw = String.fromEnvironment(
+  'HAVEN_E2E_BLOSSOM_URLS',
+  defaultValue: 'http://localhost:3000,http://localhost:3002',
 );
+
+/// The parsed list: the primary (the Primal mimic, with its test-only
+/// `/__haven-e2e/` control surface) and the fallback. Exactly two, or
+/// `setUpAll` refuses — steps 6 and 7 are about which of the two a photo
+/// landed on.
+final List<String> _blossomUrls = _parseBlossomUrls(_blossomUrlsRaw);
+String get _blossomUrl => _blossomUrls[0];
+String get _fallbackBlossomUrl => _blossomUrls[1];
 
 /// The hermetic profile-plane relay pool, comma-separated. Baked into the APK /
 /// test binary via `--dart-define` by `e2e-profile.yml`; CI passes
@@ -235,46 +261,475 @@ const Duration _teardownTimeout = Duration(seconds: 15);
 /// correct CRCs), so no runtime rasterization (`dart:ui`) is needed on a
 /// headless emulator.
 final Uint8List _testPng = Uint8List.fromList(const <int>[
-  0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
-  0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x10,
-  0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x91, 0x68, 0x36, 0x00, 0x00, 0x01,
-  0x96, 0x49, 0x44, 0x41, 0x54, 0x78, 0xDA, 0x0D, 0xCB, 0x41, 0x01, 0x00,
-  0x21, 0x08, 0x00, 0x41, 0x1B, 0xD0, 0xC0, 0x06, 0x34, 0xB0, 0x81, 0x0D,
-  0x68, 0x40, 0x03, 0x9E, 0xFB, 0xB3, 0x01, 0x0D, 0x6C, 0x60, 0x03, 0x1B,
-  0xD0, 0xC0, 0x26, 0x77, 0xF3, 0x9F, 0xD6, 0x1A, 0xD2, 0xE8, 0x0D, 0x6D,
-  0x8C, 0xC6, 0x6C, 0x58, 0xC3, 0x1B, 0xD1, 0x58, 0x8D, 0x6C, 0xEC, 0xC6,
-  0x69, 0xDC, 0x46, 0x35, 0x5E, 0xA3, 0x35, 0x41, 0x84, 0x2E, 0xA8, 0x30,
-  0x84, 0x29, 0x98, 0xE0, 0x42, 0x08, 0x4B, 0x48, 0x61, 0x0B, 0x47, 0xB8,
-  0x42, 0x09, 0x4F, 0xFE, 0xD0, 0x91, 0x4E, 0xEF, 0x68, 0x67, 0x74, 0x66,
-  0xC7, 0x3A, 0xDE, 0x89, 0xCE, 0xEA, 0x64, 0x67, 0x77, 0x4E, 0xE7, 0x76,
-  0xAA, 0xF3, 0xFA, 0x1F, 0x14, 0x51, 0xBA, 0xA2, 0xCA, 0x50, 0xA6, 0x62,
-  0x8A, 0x2B, 0xA1, 0x2C, 0x25, 0x95, 0xAD, 0x1C, 0xE5, 0x2A, 0xA5, 0x3C,
-  0xFD, 0xC3, 0x40, 0x06, 0x7D, 0xA0, 0x83, 0x31, 0x98, 0x03, 0x1B, 0xF8,
-  0x20, 0x06, 0x6B, 0x90, 0x83, 0x3D, 0x38, 0x83, 0x3B, 0xA8, 0xC1, 0x1B,
-  0x7F, 0x98, 0xC8, 0xA4, 0x4F, 0x74, 0x32, 0x26, 0x73, 0x62, 0x13, 0x9F,
-  0xC4, 0x64, 0x4D, 0x72, 0xB2, 0x27, 0x67, 0x72, 0x27, 0x35, 0x79, 0xF3,
-  0x0F, 0x86, 0x18, 0xDD, 0x50, 0x63, 0x18, 0xD3, 0x30, 0xC3, 0x8D, 0x30,
-  0x96, 0x91, 0xC6, 0x36, 0x8E, 0x71, 0x8D, 0x32, 0x9E, 0xFD, 0xC1, 0x11,
-  0xA7, 0x3B, 0xEA, 0x0C, 0x67, 0x3A, 0xE6, 0xB8, 0x13, 0xCE, 0x72, 0xD2,
-  0xD9, 0xCE, 0x71, 0xAE, 0x53, 0xCE, 0xF3, 0x3F, 0x04, 0x12, 0xF4, 0x40,
-  0x83, 0x11, 0xCC, 0xC0, 0x02, 0x0F, 0x22, 0x58, 0x41, 0x06, 0x3B, 0x38,
-  0xC1, 0x0D, 0x2A, 0x78, 0xF1, 0x87, 0x85, 0x2C, 0xFA, 0x42, 0x17, 0x63,
-  0x31, 0x17, 0xB6, 0xF0, 0x45, 0x2C, 0xD6, 0x22, 0x17, 0x7B, 0x71, 0x16,
-  0x77, 0x51, 0x8B, 0xB7, 0xFE, 0x90, 0x48, 0xD2, 0x13, 0x4D, 0x46, 0x32,
-  0x13, 0x4B, 0x3C, 0x89, 0x64, 0x25, 0x99, 0xEC, 0xE4, 0x24, 0x37, 0xA9,
-  0xE4, 0xE5, 0x1F, 0x36, 0xB2, 0xE9, 0x1B, 0xDD, 0x8C, 0xCD, 0xDC, 0xD8,
-  0xC6, 0x37, 0xB1, 0x59, 0x9B, 0xDC, 0xEC, 0xCD, 0xD9, 0xDC, 0x4D, 0x6D,
-  0xDE, 0xFE, 0xC3, 0x41, 0x0E, 0xFD, 0xA0, 0x87, 0x71, 0x98, 0x07, 0x3B,
-  0xF8, 0x21, 0x0E, 0xEB, 0x90, 0x87, 0x7D, 0x38, 0x87, 0x7B, 0xA8, 0xC3,
-  0x3B, 0x7F, 0xB8, 0xC8, 0xA5, 0x5F, 0xF4, 0x32, 0x2E, 0xF3, 0x62, 0x17,
-  0xBF, 0xC4, 0x65, 0x5D, 0xF2, 0xB2, 0x2F, 0xE7, 0x72, 0x2F, 0x75, 0x79,
-  0xF7, 0x0F, 0x85, 0x14, 0xBD, 0xD0, 0x62, 0x14, 0xB3, 0xB0, 0xC2, 0x8B,
-  0x28, 0x56, 0x91, 0xC5, 0x2E, 0x4E, 0x71, 0x8B, 0x2A, 0x5E, 0xFD, 0xE1,
-  0x21, 0x8F, 0xFE, 0xD0, 0xC7, 0x78, 0xCC, 0x87, 0x3D, 0xFC, 0x11, 0x8F,
-  0xF5, 0xC8, 0xC7, 0x7E, 0x9C, 0xC7, 0x7D, 0xD4, 0xE3, 0x3D, 0x3E, 0xD8,
-  0x65, 0x61, 0x10, 0xB7, 0x98, 0x5E, 0x07, 0x00, 0x00, 0x00, 0x00, 0x49,
-  0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+  0x89,
+  0x50,
+  0x4E,
+  0x47,
+  0x0D,
+  0x0A,
+  0x1A,
+  0x0A,
+  0x00,
+  0x00,
+  0x00,
+  0x0D,
+  0x49,
+  0x48,
+  0x44,
+  0x52,
+  0x00,
+  0x00,
+  0x00,
+  0x10,
+  0x00,
+  0x00,
+  0x00,
+  0x10,
+  0x08,
+  0x02,
+  0x00,
+  0x00,
+  0x00,
+  0x90,
+  0x91,
+  0x68,
+  0x36,
+  0x00,
+  0x00,
+  0x01,
+  0x96,
+  0x49,
+  0x44,
+  0x41,
+  0x54,
+  0x78,
+  0xDA,
+  0x0D,
+  0xCB,
+  0x41,
+  0x01,
+  0x00,
+  0x21,
+  0x08,
+  0x00,
+  0x41,
+  0x1B,
+  0xD0,
+  0xC0,
+  0x06,
+  0x34,
+  0xB0,
+  0x81,
+  0x0D,
+  0x68,
+  0x40,
+  0x03,
+  0x9E,
+  0xFB,
+  0xB3,
+  0x01,
+  0x0D,
+  0x6C,
+  0x60,
+  0x03,
+  0x1B,
+  0xD0,
+  0xC0,
+  0x26,
+  0x77,
+  0xF3,
+  0x9F,
+  0xD6,
+  0x1A,
+  0xD2,
+  0xE8,
+  0x0D,
+  0x6D,
+  0x8C,
+  0xC6,
+  0x6C,
+  0x58,
+  0xC3,
+  0x1B,
+  0xD1,
+  0x58,
+  0x8D,
+  0x6C,
+  0xEC,
+  0xC6,
+  0x69,
+  0xDC,
+  0x46,
+  0x35,
+  0x5E,
+  0xA3,
+  0x35,
+  0x41,
+  0x84,
+  0x2E,
+  0xA8,
+  0x30,
+  0x84,
+  0x29,
+  0x98,
+  0xE0,
+  0x42,
+  0x08,
+  0x4B,
+  0x48,
+  0x61,
+  0x0B,
+  0x47,
+  0xB8,
+  0x42,
+  0x09,
+  0x4F,
+  0xFE,
+  0xD0,
+  0x91,
+  0x4E,
+  0xEF,
+  0x68,
+  0x67,
+  0x74,
+  0x66,
+  0xC7,
+  0x3A,
+  0xDE,
+  0x89,
+  0xCE,
+  0xEA,
+  0x64,
+  0x67,
+  0x77,
+  0x4E,
+  0xE7,
+  0x76,
+  0xAA,
+  0xF3,
+  0xFA,
+  0x1F,
+  0x14,
+  0x51,
+  0xBA,
+  0xA2,
+  0xCA,
+  0x50,
+  0xA6,
+  0x62,
+  0x8A,
+  0x2B,
+  0xA1,
+  0x2C,
+  0x25,
+  0x95,
+  0xAD,
+  0x1C,
+  0xE5,
+  0x2A,
+  0xA5,
+  0x3C,
+  0xFD,
+  0xC3,
+  0x40,
+  0x06,
+  0x7D,
+  0xA0,
+  0x83,
+  0x31,
+  0x98,
+  0x03,
+  0x1B,
+  0xF8,
+  0x20,
+  0x06,
+  0x6B,
+  0x90,
+  0x83,
+  0x3D,
+  0x38,
+  0x83,
+  0x3B,
+  0xA8,
+  0xC1,
+  0x1B,
+  0x7F,
+  0x98,
+  0xC8,
+  0xA4,
+  0x4F,
+  0x74,
+  0x32,
+  0x26,
+  0x73,
+  0x62,
+  0x13,
+  0x9F,
+  0xC4,
+  0x64,
+  0x4D,
+  0x72,
+  0xB2,
+  0x27,
+  0x67,
+  0x72,
+  0x27,
+  0x35,
+  0x79,
+  0xF3,
+  0x0F,
+  0x86,
+  0x18,
+  0xDD,
+  0x50,
+  0x63,
+  0x18,
+  0xD3,
+  0x30,
+  0xC3,
+  0x8D,
+  0x30,
+  0x96,
+  0x91,
+  0xC6,
+  0x36,
+  0x8E,
+  0x71,
+  0x8D,
+  0x32,
+  0x9E,
+  0xFD,
+  0xC1,
+  0x11,
+  0xA7,
+  0x3B,
+  0xEA,
+  0x0C,
+  0x67,
+  0x3A,
+  0xE6,
+  0xB8,
+  0x13,
+  0xCE,
+  0x72,
+  0xD2,
+  0xD9,
+  0xCE,
+  0x71,
+  0xAE,
+  0x53,
+  0xCE,
+  0xF3,
+  0x3F,
+  0x04,
+  0x12,
+  0xF4,
+  0x40,
+  0x83,
+  0x11,
+  0xCC,
+  0xC0,
+  0x02,
+  0x0F,
+  0x22,
+  0x58,
+  0x41,
+  0x06,
+  0x3B,
+  0x38,
+  0xC1,
+  0x0D,
+  0x2A,
+  0x78,
+  0xF1,
+  0x87,
+  0x85,
+  0x2C,
+  0xFA,
+  0x42,
+  0x17,
+  0x63,
+  0x31,
+  0x17,
+  0xB6,
+  0xF0,
+  0x45,
+  0x2C,
+  0xD6,
+  0x22,
+  0x17,
+  0x7B,
+  0x71,
+  0x16,
+  0x77,
+  0x51,
+  0x8B,
+  0xB7,
+  0xFE,
+  0x90,
+  0x48,
+  0xD2,
+  0x13,
+  0x4D,
+  0x46,
+  0x32,
+  0x13,
+  0x4B,
+  0x3C,
+  0x89,
+  0x64,
+  0x25,
+  0x99,
+  0xEC,
+  0xE4,
+  0x24,
+  0x37,
+  0xA9,
+  0xE4,
+  0xE5,
+  0x1F,
+  0x36,
+  0xB2,
+  0xE9,
+  0x1B,
+  0xDD,
+  0x8C,
+  0xCD,
+  0xDC,
+  0xD8,
+  0xC6,
+  0x37,
+  0xB1,
+  0x59,
+  0x9B,
+  0xDC,
+  0xEC,
+  0xCD,
+  0xD9,
+  0xDC,
+  0x4D,
+  0x6D,
+  0xDE,
+  0xFE,
+  0xC3,
+  0x41,
+  0x0E,
+  0xFD,
+  0xA0,
+  0x87,
+  0x71,
+  0x98,
+  0x07,
+  0x3B,
+  0xF8,
+  0x21,
+  0x0E,
+  0xEB,
+  0x90,
+  0x87,
+  0x7D,
+  0x38,
+  0x87,
+  0x7B,
+  0xA8,
+  0xC3,
+  0x3B,
+  0x7F,
+  0xB8,
+  0xC8,
+  0xA5,
+  0x5F,
+  0xF4,
+  0x32,
+  0x2E,
+  0xF3,
+  0x62,
+  0x17,
+  0xBF,
+  0xC4,
+  0x65,
+  0x5D,
+  0xF2,
+  0xB2,
+  0x2F,
+  0xE7,
+  0x72,
+  0x2F,
+  0x75,
+  0x79,
+  0xF7,
+  0x0F,
+  0x85,
+  0x14,
+  0xBD,
+  0xD0,
+  0x62,
+  0x14,
+  0xB3,
+  0xB0,
+  0xC2,
+  0x8B,
+  0x28,
+  0x56,
+  0x91,
+  0xC5,
+  0x2E,
+  0x4E,
+  0x71,
+  0x8B,
+  0x2A,
+  0x5E,
+  0xFD,
+  0xE1,
+  0x21,
+  0x8F,
+  0xFE,
+  0xD0,
+  0xC7,
+  0x78,
+  0xCC,
+  0x87,
+  0x3D,
+  0xFC,
+  0x11,
+  0x8F,
+  0xF5,
+  0xC8,
+  0xC7,
+  0x7E,
+  0x9C,
+  0xC7,
+  0x7D,
+  0xD4,
+  0xE3,
+  0x3D,
+  0x3E,
+  0xD8,
+  0x65,
+  0x61,
+  0x10,
+  0xB7,
+  0x98,
+  0x5E,
+  0x07,
+  0x00,
+  0x00,
+  0x00,
+  0x00,
+  0x49,
+  0x45,
+  0x4E,
+  0x44,
+  0xAE,
+  0x42,
+  0x60,
+  0x82,
 ]);
+
+/// A second and third real PNG for the fallback (step 6) and clock-skew
+/// (step 7) photos: distinct pixels, so each is a different blob.
+final Uint8List _testPng2 = _solidPng(0x20, 0x90, 0xD0);
+final Uint8List _testPng3 = _solidPng(0xC0, 0x40, 0x30);
 
 // =============================================================================
 // Shared ProviderScope overrides
@@ -318,8 +773,9 @@ Future<void> _boundedTeardown(
 ///
 /// Lazily initialised on first read, which is `setUpAll` — so a bad
 /// `--dart-define` surfaces there, before anything can publish.
-final List<String> _profileRelayUrls =
-    _parseProfileRelayPool(_profileRelaysRaw);
+final List<String> _profileRelayUrls = _parseProfileRelayPool(
+  _profileRelaysRaw,
+);
 
 /// Splits, trims and validates [_profileRelaysRaw] into the pool this scenario
 /// hands to `ScenarioHarness.bootstrap(profileRelays: ...)`, which owns the one
@@ -477,10 +933,7 @@ Future<List<TestRelayEvent>> _awaitKind0AcrossPool(
   String authorHex,
   bool Function(TestRelayEvent event) matcher,
   String step,
-) =>
-    Future.wait(
-      pool.map((r) => _awaitKind0(r, authorHex, matcher, step)),
-    );
+) => Future.wait(pool.map((r) => _awaitKind0(r, authorHex, matcher, step)));
 
 // =============================================================================
 // Entry point
@@ -497,6 +950,7 @@ void main() {
   late ScenarioContext ctx;
   late SyntheticUser bob;
   late String aliceHex;
+
   /// Profile-pool counts sampled in `setUpAll` immediately after the FIRST
   /// `CircleManagerFfi` is constructed, and asserted in the first test below.
   /// See the sampling site for why the verdict cannot live in `setUpAll`.
@@ -544,7 +998,10 @@ void main() {
     // contamination headroom: if any of these three ever also carried circle
     // traffic the ledger would subtract it and the plane would fail closed. The
     // disjointness check above is what keeps that from happening silently.
-    ctx = await ScenarioHarness.bootstrap(profileRelays: _profileRelayUrls);
+    ctx = await ScenarioHarness.bootstrap(
+      profileRelays: _profileRelayUrls,
+      blossomServers: _blossomUrls,
+    );
     didInitCtx = true;
 
     // The discovery plane still serves the CIRCLE plane:
@@ -552,11 +1009,6 @@ void main() {
     // through `discovery_relays()`, so step 0 cannot find his KeyPackage
     // without this. It is INERT for kind-0 — kept for what it still does.
     setDiscoveryRelaysForTest(relays: <String>[defaultStrfryUrl]);
-
-    // Relax the two Blossom debug opt-ins so A's upload targets — and B's
-    // download reaches — the local Blossom. Both install-once, called once.
-    allowPrivateBlossomForTest();
-    setBlossomServerForTest(url: _blossomUrl);
 
     // Probe sockets on every pool member. Step 1 asserts all three are clean
     // for a fresh Alice; steps 2/4/5 wait for her kind-0 on ALL of them, which
@@ -612,6 +1064,7 @@ void main() {
       '[e2e_profile:setUpAll] alice=${logAliasHandle(LogAliasClass.peer, aliceHex)} '
       'bob=${logAliasHandle(LogAliasClass.peer, bob.pubkeyHex)} '
       'blossom=${logAliasHandle(LogAliasClass.relay, _blossomUrl)} '
+      'fallback=${logAliasHandle(LogAliasClass.relay, _fallbackBlossomUrl)} '
       'circleRelay=${logAliasHandle(LogAliasClass.relay, defaultStrfryUrl)} '
       'profilePool=${magnitudeBucket(_profileRelayUrls.length)} relays',
     );
@@ -654,7 +1107,8 @@ void main() {
     expect(
       poolStatusAtFirstManager.configured,
       _profileRelayUrls.length,
-      reason: 'the profile pool should hold exactly '
+      reason:
+          'the profile pool should hold exactly '
           '${magnitudeBucket(_profileRelayUrls.length)} hermetic relays '
           '(this scenario\'s installed pool size). A larger count means the '
           'curated PUBLIC pool was seeded into the fresh DB before the '
@@ -664,14 +1118,16 @@ void main() {
     expect(
       poolStatusAtFirstManager.excluded,
       0,
-      reason: 'the hermetic profile pool is disjoint from the circle relay, so '
+      reason:
+          'the hermetic profile pool is disjoint from the circle relay, so '
           'the contamination ledger must exclude none of it. A non-zero count '
           'means a profile relay also carried location traffic.',
     );
     expect(
       poolStatusAtFirstManager.isUnderflow,
       isFalse,
-      reason: 'an underflowing pool is TERMINAL by design (no fallback), so '
+      reason:
+          'an underflowing pool is TERMINAL by design (no fallback), so '
           'every kind-0 read and write in this scenario would fail closed.',
     );
   });
@@ -725,8 +1181,9 @@ void main() {
         await tester.pumpWidget(
           ProviderScope(
             overrides: [
-              maintenanceSchedulerProvider
-                  .overrideWith(_InertMaintenanceScheduler.new),
+              maintenanceSchedulerProvider.overrideWith(
+                _InertMaintenanceScheduler.new,
+              ),
               onboardingControllerProvider.overrideWith(
                 (ref) => OnboardingController(flags),
               ),
@@ -811,7 +1268,8 @@ void main() {
           expect(
             aliceKind0OnPool[i],
             isEmpty,
-            reason: 'Profile relay '
+            reason:
+                'Profile relay '
                 '${logAliasHandle(LogAliasClass.relay, profilePool[i].url)} '
                 'must observe ZERO kind-0 for a fresh Alice who has not yet '
                 'set a name or photo (so ZERO blob can exist on Blossom).',
@@ -820,7 +1278,8 @@ void main() {
         expect(
           kind0OnCircleRelay,
           isEmpty,
-          reason: 'The circle relay must observe ZERO kind-0 — ever, but '
+          reason:
+              'The circle relay must observe ZERO kind-0 — ever, but '
               'especially before anyone has published one.',
         );
         debugPrint(
@@ -841,7 +1300,8 @@ void main() {
         expect(
           pictureHash,
           isNotNull,
-          reason: "setOwnAvatar must return the sanitized bytes' sha256 "
+          reason:
+              "setOwnAvatar must return the sanitized bytes' sha256 "
               'immediately — a LOCAL content hash, not a network response.',
         );
 
@@ -862,7 +1322,8 @@ void main() {
           expect(
             aliceKind0OnPool[i],
             isEmpty,
-            reason: 'a LOCAL save (updateOwnProfile/setOwnAvatar) must '
+            reason:
+                'a LOCAL save (updateOwnProfile/setOwnAvatar) must '
                 'publish NOTHING — '
                 '${logAliasHandle(LogAliasClass.relay, profilePool[i].url)} '
                 'must still see zero kind-0 for Alice until syncOwnProfile '
@@ -878,14 +1339,14 @@ void main() {
         // the cache rather than the promise.
         final aliceBeforeSync = beforeSync
             .where(
-              (row) =>
-                  row.pubkeyHex.toLowerCase() == aliceHex.toLowerCase(),
+              (row) => row.pubkeyHex.toLowerCase() == aliceHex.toLowerCase(),
             )
             .toList();
         expect(
           aliceBeforeSync,
           hasLength(1),
-          reason: 'Bob must actually have LOOKED. A pubkey the cycle never '
+          reason:
+              'Bob must actually have LOOKED. A pubkey the cycle never '
               'reached is stamped in neither list and seeds no row, so an '
               'empty result here would let the assertions below pass by '
               'proving nothing — on a hermetic pool whose relays setUpAll '
@@ -895,20 +1356,23 @@ void main() {
         expect(
           p.isKnown,
           isFalse,
-          reason: '[e2e_profile] Bob resolved a kind-0 for Alice before '
+          reason:
+              '[e2e_profile] Bob resolved a kind-0 for Alice before '
               'syncOwnProfile ran — a local save must not be observable by '
               'another client.',
         );
         expect(
           p.displayName,
           isNull,
-          reason: "[e2e_profile] Alice's locally-saved display name reached "
+          reason:
+              "[e2e_profile] Alice's locally-saved display name reached "
               'Bob before syncOwnProfile ran.',
         );
         expect(
           p.name,
           isNull,
-          reason: "[e2e_profile] Alice's locally-saved name reached Bob "
+          reason:
+              "[e2e_profile] Alice's locally-saved name reached Bob "
               'before syncOwnProfile ran.',
         );
         // The PHOTO half of the same promise, asserted where an upload would
@@ -918,9 +1382,7 @@ void main() {
         // so the hash `setOwnAvatar` just returned locally is the exact URL a
         // premature upload would occupy.
         await _assertBlobAbsent(_blossomUrl, pictureHash!);
-        debugPrint(
-          '[e2e_profile] STEP 2a — local save observed by NO ONE yet',
-        );
+        debugPrint('[e2e_profile] STEP 2a — local save observed by NO ONE yet');
 
         // Now actually publish (the trigger a real UI fires right after a
         // local save — see utils/profile_sync_trigger.dart).
@@ -933,7 +1395,8 @@ void main() {
         expect(
           syncResult.stillPending,
           isFalse,
-          reason: 'the hermetic pool is fully reachable, so the sync must '
+          reason:
+              'the hermetic pool is fully reachable, so the sync must '
               'fully acknowledge, not leave a partial edit behind.',
         );
 
@@ -995,9 +1458,28 @@ void main() {
           _aliceName,
           reason: "Bob must see Alice's published display name.",
         );
+        final statsBeforeDownload = await _blossomStats(_blossomUrl);
         await bob.user.circleManager.downloadMemberPicture(pubkeyHex: aliceHex);
         final bobPhotoBefore = await bob.user.circleManager.getProfilePicture(
           pubkeyHex: aliceHex,
+        );
+        // STEP 3b — the bytes came the way blossom.primal.net serves them: a
+        // 302 from the upload host, then the media host. A server that answered
+        // 200 directly would not move these two counters.
+        final statsAfterDownload = await _blossomStats(_blossomUrl);
+        expect(
+          statsAfterDownload['redirects'] as int,
+          greaterThan(statsBeforeDownload['redirects'] as int),
+          reason:
+              "Bob's download must have been answered with the primary's "
+              '302 (the Primal shape).',
+        );
+        expect(
+          statsAfterDownload['cdn_gets'] as int,
+          greaterThan(statsBeforeDownload['cdn_gets'] as int),
+          reason:
+              "Bob's download must have FOLLOWED the 302 to the media "
+              'host — a download that refuses redirects never gets there.',
         );
         expect(
           bobPhotoBefore,
@@ -1036,8 +1518,10 @@ void main() {
         // STRENGTHENED (profile-latency migration): Bob's forced re-fetch
         // right after the LOCAL edit still resolves the ORIGINAL name — the
         // relay has not seen the edit yet, only syncOwnProfile publishes it.
-        final beforeEditSync = await bob.user.circleManager
-            .fetchMemberProfiles(pubkeysHex: <String>[aliceHex], maxAgeSecs: 0);
+        final beforeEditSync = await bob.user.circleManager.fetchMemberProfiles(
+          pubkeysHex: <String>[aliceHex],
+          maxAgeSecs: 0,
+        );
         final aliceBeforeEditSync = beforeEditSync.firstWhere(
           (p) => p.pubkeyHex.toLowerCase() == aliceHex.toLowerCase(),
           orElse: () => throw StateError(
@@ -1047,13 +1531,12 @@ void main() {
         expect(
           aliceBeforeEditSync.displayName,
           _aliceName,
-          reason: 'a LOCAL edit must not be observable by Bob until '
+          reason:
+              'a LOCAL edit must not be observable by Bob until '
               'syncOwnProfile publishes it — he must still see the '
               'ORIGINAL (pre-edit) name.',
         );
-        debugPrint(
-          '[e2e_profile] STEP 4a — local edit observed by NO ONE yet',
-        );
+        debugPrint('[e2e_profile] STEP 4a — local edit observed by NO ONE yet');
 
         final editSyncResult = await profileService.syncOwnProfile();
         expect(editSyncResult.outcome, ProfileSyncOutcome.published);
@@ -1072,7 +1555,8 @@ void main() {
           expect(
             _contentJson(editedKind0s[i])['picture'],
             originalPictureUrl,
-            reason: 'Name-only edit must not clobber the picture URL (merge) '
+            reason:
+                'Name-only edit must not clobber the picture URL (merge) '
                 '— violated on '
                 '${logAliasHandle(LogAliasClass.relay, profilePool[i].url)}.',
           );
@@ -1110,6 +1594,118 @@ void main() {
         debugPrint('[e2e_profile] STEP 4 — new name + preserved photo OK');
 
         // -------------------------------------------------------------------
+        // STEP 6 — the primary refuses every upload: the next server takes it.
+        // -------------------------------------------------------------------
+        final refusedBeforeFault =
+            (await _blossomStats(_blossomUrl))['refused']
+                as Map<String, dynamic>;
+        await _blossomControl(_blossomUrl, 'fault?upload=503');
+        try {
+          await profileService.setOwnAvatar(_testPng2);
+          final faultSync = await profileService.syncOwnProfile();
+          expect(
+            faultSync.outcome,
+            ProfileSyncOutcome.published,
+            reason:
+                'a primary answering 503 must not keep the photo from '
+                'publishing while a fallback server accepts it.',
+          );
+        } finally {
+          await _blossomControl(_blossomUrl, 'fault?upload=none');
+        }
+        final fallbackKind0s = await _awaitKind0AcrossPool(
+          profilePool,
+          aliceHex,
+          (e) {
+            final picture = _contentJson(e)['picture'] as String?;
+            return picture != null &&
+                Uri.parse(picture).authority ==
+                    Uri.parse(_fallbackBlossomUrl).authority;
+          },
+          'STEP 6 (fallback upload)',
+        );
+        expect(
+          fallbackKind0s.map((e) => e.id).toSet(),
+          hasLength(1),
+          reason: 'one signed kind-0 for the fallback photo, on every relay.',
+        );
+        final refusedAfterFault =
+            (await _blossomStats(_blossomUrl))['refused']
+                as Map<String, dynamic>;
+        expect(
+          (refusedAfterFault['fault'] as int) -
+              (refusedBeforeFault['fault'] as int),
+          1,
+          reason:
+              'the primary must have been asked exactly once: a refusal '
+              'moves on to the next server, it does not retry the same one.',
+        );
+        await bob.user.circleManager.fetchMemberProfiles(
+          pubkeysHex: <String>[aliceHex],
+          maxAgeSecs: 0,
+        );
+        await bob.user.circleManager.downloadMemberPicture(pubkeyHex: aliceHex);
+        final bobFallbackPhoto = await bob.user.circleManager.getProfilePicture(
+          pubkeyHex: aliceHex,
+        );
+        expect(bobFallbackPhoto, isNotNull);
+        expect(
+          bobFallbackPhoto,
+          isNot(bobPhotoBefore),
+          reason: 'Bob must hold the NEW photo, fetched from the fallback.',
+        );
+        debugPrint(
+          '[e2e_profile] STEP 6 — refused primary, fallback upload OK',
+        );
+
+        // -------------------------------------------------------------------
+        // STEP 7 — the device's clock is 90 s behind the primary's.
+        // -------------------------------------------------------------------
+        final okBeforeSkew =
+            (await _blossomStats(_blossomUrl))['uploads_ok'] as int;
+        await _blossomControl(_blossomUrl, 'clock?skew=90');
+        try {
+          await profileService.setOwnAvatar(_testPng3);
+          final skewSync = await profileService.syncOwnProfile();
+          expect(skewSync.outcome, ProfileSyncOutcome.published);
+        } finally {
+          await _blossomControl(_blossomUrl, 'clock?skew=0');
+        }
+        await _awaitKind0AcrossPool(profilePool, aliceHex, (e) {
+          final picture = _contentJson(e)['picture'] as String?;
+          return picture != null &&
+              Uri.parse(picture).authority ==
+                  Uri.parse(_blossomUrl).authority &&
+              picture != originalPictureUrl;
+        }, 'STEP 7 (upload under a 90 s clock skew)');
+        final statsAfterSkew = await _blossomStats(_blossomUrl);
+        expect(
+          (statsAfterSkew['uploads_ok'] as int) - okBeforeSkew,
+          1,
+          reason:
+              'the photo must land on the PRIMARY: a token that outlives '
+              'a 90 s skew is accepted where a 60 s one is refused.',
+        );
+        debugPrint('[e2e_profile] STEP 7 — upload under clock skew OK');
+
+        // -------------------------------------------------------------------
+        // STEP 8 — one kind-0 per edit, and no refusal nobody asked for.
+        // -------------------------------------------------------------------
+        _expectKind0PerEdit(aliceKind0OnPool, profilePool, edits: 4);
+        final refusedAfterSkew =
+            statsAfterSkew['refused'] as Map<String, dynamic>;
+        for (final entry in refusedAfterSkew.entries) {
+          expect(
+            entry.value,
+            entry.key == 'fault' ? 1 : 0,
+            reason:
+                'the primary refused an upload for "${entry.key}" — only '
+                "step 6's injected fault may refuse one.",
+          );
+        }
+        debugPrint('[e2e_profile] STEP 8 — one kind-0 per edit OK');
+
+        // -------------------------------------------------------------------
         // STEP 5 — Alice deletes the public profile; B falls back to npub.
         // -------------------------------------------------------------------
         await aliceManager.deleteMyPublicProfile(
@@ -1122,17 +1718,12 @@ void main() {
         // would leave the deleted profile live on precisely the relays some
         // peers are assigned to read from — and here it would make the
         // assertion below a coin flip on Bob's salt.
-        await _awaitKind0AcrossPool(
-          profilePool,
-          aliceHex,
-          (e) {
-            final c = _contentJson(e);
-            return c['display_name'] == null &&
-                c['name'] == null &&
-                c['picture'] == null;
-          },
-          'STEP 5 (blank retraction republish)',
-        );
+        await _awaitKind0AcrossPool(profilePool, aliceHex, (e) {
+          final c = _contentJson(e);
+          return c['display_name'] == null &&
+              c['name'] == null &&
+              c['picture'] == null;
+        }, 'STEP 5 (blank retraction republish)');
 
         final afterDelete = await bob.user.circleManager.fetchMemberProfiles(
           pubkeysHex: <String>[aliceHex],
@@ -1152,6 +1743,7 @@ void main() {
             expect(p.name, isNull, reason: 'No stale name after delete.');
           }
         }
+        _expectKind0PerEdit(aliceKind0OnPool, profilePool, edits: 5);
         debugPrint('[e2e_profile] STEP 5 — delete → npub fallback OK');
 
         // -------------------------------------------------------------------
@@ -1165,7 +1757,8 @@ void main() {
         expect(
           kind0OnCircleRelay,
           isEmpty,
-          reason: 'The circle relay must NEVER observe a kind-0, from anyone: '
+          reason:
+              'The circle relay must NEVER observe a kind-0, from anyone: '
               'the profile plane is disjoint from every relay carrying '
               'kind-445 / kind-1059 traffic, and the contamination ledger '
               'subtracts it from the pool.',
@@ -1229,10 +1822,7 @@ Map<String, dynamic> _contentJson(TestRelayEvent event) {
 /// different Blossom implementations (a container on Android, the host-native
 /// stub on iOS); what the promise is about is whether the bytes are SERVED,
 /// not which flavour of miss the server reports.
-Future<void> _assertBlobAbsent(
-  String blossomBase,
-  String sha256Hex,
-) async {
+Future<void> _assertBlobAbsent(String blossomBase, String sha256Hex) async {
   final base = blossomBase.endsWith('/')
       ? blossomBase.substring(0, blossomBase.length - 1)
       : blossomBase;
@@ -1245,7 +1835,8 @@ Future<void> _assertBlobAbsent(
     expect(
       response.statusCode,
       isNot(200),
-      reason: 'Blossom GET '
+      reason:
+          'Blossom GET '
           '${logAliasHandle(LogAliasClass.relay, uri.toString())} must NOT '
           'serve a blob before syncOwnProfile — a LOCAL photo save must '
           'upload nothing.',
@@ -1277,7 +1868,8 @@ Future<void> _assertBlobRetrievable(
     expect(
       response.statusCode,
       200,
-      reason: 'Blossom GET '
+      reason:
+          'Blossom GET '
           '${logAliasHandle(LogAliasClass.relay, uri.toString())} must '
           'return 200 (blob present).',
     );
@@ -1293,4 +1885,134 @@ Future<void> _assertBlobRetrievable(
   } finally {
     client.close(force: true);
   }
+}
+
+/// Splits [raw] into exactly two loopback Blossom base URLs (primary,
+/// fallback); anything else is refused before a byte is uploaded.
+List<String> _parseBlossomUrls(String raw) {
+  final urls = raw
+      .split(',')
+      .map((s) => s.trim())
+      .where((s) => s.isNotEmpty)
+      .toList(growable: false);
+  if (urls.length != 2 || urls.any((u) => !_isLoopbackUrl(u))) {
+    throw StateError(
+      '[e2e_profile] HAVEN_E2E_BLOSSOM_URLS must name exactly two '
+      'loopback / emulator-host servers (primary, fallback); it names '
+      '${magnitudeBucket(urls.length)}.',
+    );
+  }
+  return urls;
+}
+
+/// The primary's counts-only stats (`GET /__haven-e2e/stats`).
+Future<Map<String, dynamic>> _blossomStats(String base) async {
+  final client = HttpClient()..connectionTimeout = _blossomHttpTimeout;
+  try {
+    final request = await client
+        .getUrl(Uri.parse('$base/__haven-e2e/stats'))
+        .timeout(_blossomHttpTimeout);
+    final response = await request.close().timeout(_blossomHttpTimeout);
+    final body = await response
+        .fold<List<int>>(<int>[], (all, chunk) => all..addAll(chunk))
+        .timeout(_blossomHttpTimeout);
+    expect(
+      response.statusCode,
+      200,
+      reason: 'the primary has no stats surface',
+    );
+    return jsonDecode(String.fromCharCodes(body)) as Map<String, dynamic>;
+  } finally {
+    client.close(force: true);
+  }
+}
+
+/// One control call on the primary (`POST /__haven-e2e/<path>`).
+Future<void> _blossomControl(String base, String path) async {
+  final client = HttpClient()..connectionTimeout = _blossomHttpTimeout;
+  try {
+    final request = await client
+        .postUrl(Uri.parse('$base/__haven-e2e/$path'))
+        .timeout(_blossomHttpTimeout);
+    final response = await request.close().timeout(_blossomHttpTimeout);
+    await response.drain<void>();
+    expect(
+      response.statusCode,
+      200,
+      reason: 'the primary refused a control call',
+    );
+  } finally {
+    client.close(force: true);
+  }
+}
+
+/// Each pool relay saw exactly [edits] distinct kind-0 events from Alice: an
+/// edit signs one event, and a re-send of it carries the same id.
+void _expectKind0PerEdit(
+  Map<int, List<TestRelayEvent>> seen,
+  List<TestRelay> pool, {
+  required int edits,
+}) {
+  for (var i = 0; i < pool.length; i++) {
+    expect(
+      seen[i]!.map((e) => e.id).toSet(),
+      hasLength(edits),
+      reason:
+          '${logAliasHandle(LogAliasClass.relay, pool[i].url)} must hold '
+          'one distinct kind-0 per edit made so far — more means a pass '
+          'signed a new event for an edit already published.',
+    );
+  }
+}
+
+/// A 16x16 single-colour RGB PNG, encoded here so the scenario carries no
+/// binary: the pipeline decodes it like any picked photo.
+Uint8List _solidPng(int r, int g, int b) {
+  final rows = <int>[];
+  for (var y = 0; y < 16; y++) {
+    rows.add(0);
+    for (var x = 0; x < 16; x++) {
+      rows.addAll(<int>[r, g, b]);
+    }
+  }
+  final ihdr = ByteData(13)
+    ..setUint32(0, 16)
+    ..setUint32(4, 16)
+    ..setUint8(8, 8)
+    ..setUint8(9, 2);
+  return Uint8List.fromList(<int>[
+    0x89,
+    0x50,
+    0x4E,
+    0x47,
+    0x0D,
+    0x0A,
+    0x1A,
+    0x0A,
+    ..._pngChunk('IHDR', ihdr.buffer.asUint8List()),
+    ..._pngChunk('IDAT', ZLibEncoder().convert(rows)),
+    ..._pngChunk('IEND', const <int>[]),
+  ]);
+}
+
+List<int> _pngChunk(String kind, List<int> data) {
+  final body = <int>[...kind.codeUnits, ...data];
+  final length = ByteData(4)..setUint32(0, data.length);
+  final crc = ByteData(4)..setUint32(0, _crc32(body));
+  return <int>[
+    ...length.buffer.asUint8List(),
+    ...body,
+    ...crc.buffer.asUint8List(),
+  ];
+}
+
+int _crc32(List<int> bytes) {
+  var crc = 0xFFFFFFFF;
+  for (final byte in bytes) {
+    crc ^= byte;
+    for (var k = 0; k < 8; k++) {
+      crc = (crc & 1) != 0 ? (crc >> 1) ^ 0xEDB88320 : crc >> 1;
+    }
+  }
+  return crc ^ 0xFFFFFFFF;
 }

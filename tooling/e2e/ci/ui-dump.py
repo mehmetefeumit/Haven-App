@@ -37,6 +37,32 @@ reaches the screen per string. Element-tree parsing decodes `&apos;` and every
 other entity. A node is on screen when its bounds have area and lie at least
 partly inside the root's.
 
+  ui-dump.py find --dump <file> --package-regex <regex> --select <spec>
+                  [--select <spec> ...] [--list-rids] [--digest-out <file>]
+      Finds a system UI's nodes — the Photo Picker's thumbnails, uCrop's crop
+      action — that no ARB labels, among the on-screen nodes whose package
+      fully matches --package-regex:
+          observation ok
+          foreground <package of the first root node>
+          selector <n>|none     the first spec (1-based) with a match
+          match <x> <y>         that spec's matches, at their centres, sorted
+                                by top then left
+          rids <id,...>         with --list-rids: the resource-id entry names
+                                (after `:id/`) in the foreground window
+      A spec is `rid:<regex>` (the whole resource-id), `desc-prefix:<text>` or
+      `text:<line>` (one whole line of the text). Nothing a node says is ever
+      printed: a picker thumbnail's description can carry a date, and resource
+      ids are developer names. --digest-out (0600) receives the foreground
+      window's digest — its nodes' ids, classes, bounds and text, hashed —
+      so the runner can tell a settled foreign screen from one still moving.
+      `observation none <reason>` and rc 3 as for observe.
+
+  ui-dump.py resumed --dumpsys <file>
+      The resumed activity from `dumpsys activity activities`:
+      `resumed <package>/<class>` (a `.Short` class expanded), read from
+      `topResumedActivity=` (API 29+) or `mResumedActivity:` /
+      `ResumedActivity:`; `resumed none` and rc 3 when no line names one.
+
   ui-dump.py --self-test
 
 Exit: 0 ok, 2 usage, 3 no observation.
@@ -153,6 +179,10 @@ def write_private(path, value):
         handle.write(value)
 
 
+REPEATABLE = {"select"}
+FLAGS = {"list-rids"}
+
+
 def parse_args(argv):
     if not argv:
         raise Usage("no command")
@@ -160,10 +190,110 @@ def parse_args(argv):
     opts = {}
     while rest:
         flag = rest.pop(0)
+        if flag.startswith("--") and flag[2:] in FLAGS:
+            opts[flag[2:]] = True
+            continue
         if not flag.startswith("--") or not rest:
             raise Usage(f"bad argument {flag!r}")
-        opts[flag[2:]] = rest.pop(0)
+        name = flag[2:]
+        if name in REPEATABLE:
+            opts.setdefault(name, []).append(rest.pop(0))
+        elif name in opts:
+            raise Usage(f"{flag} given twice")
+        else:
+            opts[name] = rest.pop(0)
     return command, opts
+
+
+def parse_dump(dump_text):
+    """(root, None) or (None, reason) for a uiautomator dump."""
+    if not dump_text.strip():
+        return None, "the dump is empty"
+    try:
+        root = ET.fromstring(dump_text)
+    except ET.ParseError:
+        return None, "the dump is not a complete XML document"
+    if root.tag != "hierarchy":
+        return None, "the dump has no hierarchy root"
+    if not [child for child in root if child.tag == "node"]:
+        return None, "the dump holds no node"
+    return root, None
+
+
+def parse_spec(spec):
+    kind, sep, arg = spec.partition(":")
+    if not sep or not arg or kind not in ("rid", "desc-prefix", "text"):
+        raise Usage("a --select spec is rid:<regex>, desc-prefix:<text> or text:<line>")
+    if kind == "rid":
+        try:
+            return kind, re.compile(arg)
+        except re.error:
+            raise Usage("a rid: spec is not a valid regex") from None
+    return kind, arg
+
+
+def spec_matches(spec, node):
+    kind, arg = spec
+    if kind == "rid":
+        return arg.fullmatch(node.get("resource-id", "")) is not None
+    if kind == "desc-prefix":
+        return node.get("content-desc", "").startswith(arg)
+    return arg in node.get("text", "").split("\n")
+
+
+def find(dump_text, package_regex, specs, list_rids):
+    """(stdout lines, None, foreground digest) or (None, reason, None)."""
+    root, reason = parse_dump(dump_text)
+    if root is None:
+        return None, reason, None
+    roots = [child for child in root if child.tag == "node"]
+    foreground = roots[0].get("package", "")
+    screen = bounds(roots[0])
+    candidates = []
+    rids = set()
+    window = []
+    for node in root.iter("node"):
+        if node.get("package") == foreground:
+            rid = node.get("resource-id", "")
+            if ":id/" in rid:
+                rids.add(rid.split(":id/", 1)[1])
+            window.append("\x1f".join(node.get(attr, "") for attr in
+                                      ("class", "resource-id", "bounds", "text", "content-desc")))
+        box = bounds(node)
+        if package_regex.fullmatch(node.get("package", "")) and on_screen(box, screen):
+            candidates.append((box, node))
+    out = ["observation ok", f"foreground {foreground or '<none>'}"]
+    chosen = None
+    for index, spec in enumerate(specs, start=1):
+        hits = sorted((box[1], box[0], box) for box, node in candidates if spec_matches(spec, node))
+        if hits:
+            chosen = index
+            out.append(f"selector {index}")
+            out += [f"match {(b[0] + b[2]) // 2} {(b[1] + b[3]) // 2}" for _, _, b in hits]
+            break
+    if chosen is None:
+        out.append("selector none")
+    if list_rids:
+        out.append("rids " + ",".join(sorted(rids)))
+    digest = hashlib.sha256("\n".join(sorted(window)).encode("utf-8")).hexdigest()
+    return out, None, digest
+
+
+RESUMED_RES = (
+    re.compile(r"topResumedActivity=ActivityRecord\{\S+ u\d+ ([\w.]+)/([\w.$]+)"),
+    re.compile(r"\bm?ResumedActivity: ?ActivityRecord\{\S+ u\d+ ([\w.]+)/([\w.$]+)"),
+)
+
+
+def resumed(dumpsys_text):
+    for pattern in RESUMED_RES:
+        match = pattern.search(dumpsys_text)
+        if match:
+            package, cls = match.groups()
+            if cls.startswith("."):
+                cls = package + cls
+            return f"{package}/{cls}"
+    return None
 
 
 def main(argv, stdout=sys.stdout):
@@ -198,6 +328,39 @@ def main(argv, stdout=sys.stdout):
             write_private(opts["digest-out"], digest)
         print("\n".join(out), file=stdout)
         return 0
+    if command == "find":
+        required = {"dump", "package-regex", "select"}
+        if not required <= set(opts) or not set(opts) <= required | {"list-rids", "digest-out"}:
+            raise Usage("find needs --dump, --package-regex and --select")
+        try:
+            package_regex = re.compile(opts["package-regex"])
+        except re.error:
+            raise Usage("--package-regex is not a valid regex") from None
+        specs = [parse_spec(spec) for spec in opts["select"]]
+        try:
+            with open(opts["dump"], encoding="utf-8", errors="replace") as handle:
+                dump_text = handle.read()
+        except OSError:
+            dump_text = ""
+        out, reason, digest = find(dump_text, package_regex, specs, opts.get("list-rids", False))
+        if out is None:
+            print(f"observation none {reason}", file=stdout)
+            return 3
+        if "digest-out" in opts:
+            write_private(opts["digest-out"], digest)
+        print("\n".join(out), file=stdout)
+        return 0
+    if command == "resumed":
+        if set(opts) != {"dumpsys"}:
+            raise Usage("resumed needs --dumpsys")
+        try:
+            with open(opts["dumpsys"], encoding="utf-8", errors="replace") as handle:
+                text = handle.read()
+        except OSError:
+            text = ""
+        component = resumed(text)
+        print(f"resumed {component or 'none'}", file=stdout)
+        return 0 if component else 3
     raise Usage(f"unknown command {command!r}")
 
 
@@ -205,14 +368,14 @@ def main(argv, stdout=sys.stdout):
 # Self-test: hermetic dumps in the shape uiautomator writes, run through main()
 # exactly as the runner calls it.
 # ---------------------------------------------------------------------------
-SELF_TEST_CASES = 22
+SELF_TEST_CASES = 36
 PKG = "com.oblivioustech.haven"
 SECRET_NAME = "Quiet Wanderer"
 
 
-def node(cls="android.view.View", text="", desc="", pkg=PKG, box="[0,0][100,100]", children=""):
+def node(cls="android.view.View", text="", desc="", pkg=PKG, box="[0,0][100,100]", children="", rid=""):
     return (
-        f'<node index="0" text="{text}" resource-id="" class="{cls}" package="{pkg}" '
+        f'<node index="0" text="{text}" resource-id="{rid}" class="{cls}" package="{pkg}" '
         f'content-desc="{desc}" checkable="false" checked="false" clickable="true" '
         f'enabled="true" focusable="true" focused="false" scrollable="false" '
         f'long-clickable="false" password="false" selected="false" bounds="{box}">{children}</node>'
@@ -336,6 +499,94 @@ def self_test():
         case("(21) a second dialog with the same button and other text has another digest", other != first)
         _, _, foreign = digest_of(dump(node(box=screen, children=dialog_a), node(pkg="com.android.systemui", desc="12:01", box=screen)))
         case("(22) another package's nodes do not move the digest", foreign == first)
+
+        # find: the system picker and uCrop, read by resource id or prefix.
+        picker_pkg = "com.google.android.providers.media.module"
+        picker_regex = r"^com(\.google)?\.android\.providers\.media(\.module)?$"
+        thumb_rid = r"rid:^com(\.google)?\.android\.providers\.media(\.module)?:id/icon_thumbnail$"
+        planted_desc = "Photo taken on Nov 16, 2026 12:01"
+
+        def thumb(box, pkg=picker_pkg, rid_pkg=picker_pkg, desc=planted_desc):
+            return node(pkg=pkg, rid=f"{rid_pkg}:id/icon_thumbnail", desc=desc, box=box)
+
+        grid = dump(node(pkg=picker_pkg, box=screen, rid=f"{picker_pkg}:id/picker_tab_layout", children=(
+            thumb("[400,600][700,900]") + thumb("[40,600][340,900]") + thumb("[40,950][340,1250]")
+            + node(pkg=picker_pkg, rid=f"{picker_pkg}:id/icon_thumbnail_long", box="[40,1300][340,1600]")
+            + thumb("[40,2500][340,2800]"))))
+
+        def find_run(dump_text, specs, regex=picker_regex, extra=()):
+            path = os.path.join(tmp, "find.xml")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(dump_text)
+            captured = io.StringIO()
+            argv = ["find", "--dump", path, "--package-regex", regex]
+            for spec in specs:
+                argv += ["--select", spec]
+            try:
+                rc = main([*argv, *extra], captured)
+            except Usage:
+                rc = 2
+            return rc, captured.getvalue().rstrip("\n").split("\n")
+
+        rc, lines = find_run(grid, [thumb_rid])
+        case("(23) thumbnails match by anchored id, sorted by top then left, off-screen excluded",
+             rc == 0 and lines[2:] == ["selector 1", "match 190 750", "match 550 750", "match 190 1100"])
+        aosp = dump(node(pkg="com.android.providers.media", box=screen,
+                         children=thumb("[0,0][10,10]", pkg="com.android.providers.media", rid_pkg="com.android.providers.media")))
+        rc, lines = find_run(aosp, [thumb_rid], regex=picker_regex)
+        case("(24) the AOSP picker package matches the same selector", rc == 0 and "selector 1" in lines)
+        rc, lines = find_run(grid, ["rid:^com\\.example:id/none$", "desc-prefix:Photo taken"])
+        case("(25) a later spec answers when an earlier one has no match", rc == 0 and lines[2] == "selector 2")
+        rc, lines = find_run(grid, ["rid:^com\\.example:id/none$", "text:Add"])
+        case("(26) no spec matching is `selector none`, rc 0", rc == 0 and lines[2:] == ["selector none"])
+        rc, lines = find_run(grid, ["text:Add"], extra=("--list-rids",))
+        out_text = "\n".join(lines)
+        case("(27) --list-rids prints entry names and never a description or text",
+             rc == 0 and "rids icon_thumbnail,icon_thumbnail_long,picker_tab_layout" in lines
+             and "Photo taken" not in out_text and "Nov 16" not in out_text)
+        rc, lines = find_run(grid, [thumb_rid], regex=r"^com\.oblivioustech\.haven$")
+        case("(28) nodes of a package the regex does not name never match", rc == 0 and "selector none" in lines)
+        ucrop = dump(node(box=screen, children=node(rid=f"{PKG}:id/menu_crop", desc="Crop", box="[900,100][1040,240]")))
+        rc, lines = find_run(ucrop, [f"rid:^com\\.oblivioustech\\.haven:id/menu_crop$", "desc-prefix:Crop"],
+                             regex=r"^com\.oblivioustech\.haven$")
+        case("(29) uCrop's crop action is found by its id first", rc == 0 and lines[2:] == ["selector 1", "match 970 170"])
+        fg_digest = os.path.join(tmp, "fg-digest")
+
+        def fg_digest_of(dump_text):
+            find_run(dump_text, ["text:Add"], extra=("--digest-out", fg_digest))
+            with open(fg_digest, encoding="utf-8") as handle:
+                return handle.read()
+
+        moved = grid.replace("[400,600][700,900]", "[400,620][700,920]")
+        case("(30) the foreground digest moves with a foreign node's bounds and is stable otherwise",
+             fg_digest_of(grid) == fg_digest_of(grid) != fg_digest_of(moved)
+             and (os.stat(fg_digest).st_mode & 0o777) == 0o600)
+        rc, lines = find_run("", [thumb_rid])
+        case("(31) find over an empty dump is no observation, rc 3", rc == 3 and lines[0].startswith("observation none"))
+        rc, _ = find_run(grid, ["bogus:x"])
+        case("(32) an unknown spec kind is a usage error", rc == 2)
+
+        def resumed_run(text):
+            path = os.path.join(tmp, "dumpsys.txt")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(text)
+            captured = io.StringIO()
+            rc = main(["resumed", "--dumpsys", path], captured)
+            return rc, captured.getvalue().strip()
+
+        api34 = ("  Display #0 (activities from top to bottom):\n"
+                 "  topResumedActivity=ActivityRecord{2b2a1e5 u0 com.oblivioustech.haven/com.yalantis.ucrop.UCropActivity t42}\n"
+                 "  ResumedActivity:ActivityRecord{9f1 u0 com.oblivioustech.haven/.MainActivity t42}\n")
+        case("(33) resumed reads API 34's topResumedActivity line",
+             resumed_run(api34) == (0, "resumed com.oblivioustech.haven/com.yalantis.ucrop.UCropActivity"))
+        api29 = "    mResumedActivity: ActivityRecord{7c0d u0 com.google.android.providers.media.module/com.android.providers.media.photopicker.PhotoPickerActivity t9}\n"
+        case("(34) resumed reads the older mResumedActivity line",
+             resumed_run(api29) == (0, "resumed com.google.android.providers.media.module/com.android.providers.media.photopicker.PhotoPickerActivity"))
+        case("(35) a .Short class is expanded with its package",
+             resumed_run("topResumedActivity=ActivityRecord{1 u0 com.oblivioustech.haven/.MainActivity t1}") ==
+             (0, "resumed com.oblivioustech.haven/com.oblivioustech.haven.MainActivity"))
+        case("(36) dumpsys output naming no resumed activity is rc 3",
+             resumed_run("ACTIVITY MANAGER ACTIVITIES (dumpsys activity activities)\nnothing here") == (3, "resumed none"))
     if ran != SELF_TEST_CASES:
         print(f"SELF-TEST FAIL: ran {ran} cases, expected {SELF_TEST_CASES}", file=sys.stderr)
         failed += 1

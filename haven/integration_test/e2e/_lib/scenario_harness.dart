@@ -8,6 +8,7 @@ library;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/src/utils/image_picker_config.dart';
 import 'package:integration_test/integration_test.dart';
 
 import 'test_relay.dart';
@@ -77,15 +78,25 @@ abstract final class ScenarioHarness {
   ///
   /// Pass it here rather than calling `setProfileRelaysForTest` after
   /// bootstrapping: the Rust override is install-once, so a second install site
-  /// throws "already installed" (CI run 30753193231).
+  /// throws "already installed" (CI run 30753193231). [blossomServers] — the
+  /// ordered upload servers — follows the same rule (see
+  /// [TestUser.bootstrapProcess]).
+  ///
+  /// The image picker is configured as production's `main()` configures it
+  /// (`configureImagePicker`), which no integration target runs: without it a
+  /// target that opens the picker would get image_picker's default document
+  /// browser instead of the Photo Picker users get.
   static Future<ScenarioContext> bootstrap({
     String relayUrl = defaultStrfryUrl,
     List<String>? profileRelays,
+    List<String>? blossomServers,
   }) async {
     IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+    configureImagePicker();
     await TestUser.bootstrapProcess(
       relays: <String>[relayUrl],
       profileRelays: profileRelays,
+      blossomServers: blossomServers,
     );
     final relay = await connectProbeRelay(relayUrl);
     final role = ScenarioRole.fromEnvironment();

@@ -1,18 +1,48 @@
 # Reusable workflow: public-profile (kind-0 + Blossom) E2E lane.
 #
-# Drives the public-profile picture-sharing scenario against a hermetic CIRCLE
-# relay, a hermetic DISJOINT profile-plane relay pool, AND a hermetic Blossom
-# media server, on two platforms:
+# Drives the public-profile picture-sharing scenarios against a hermetic CIRCLE
+# relay, a hermetic DISJOINT profile-plane relay pool, AND two hermetic Blossom
+# media servers tried in order, on two platforms, in three jobs:
 #
-#   Android job — Docker: strfry container (circle) + three strfry containers
-#                 (profile pool) + blossom container. The emulator reaches them
-#                 at ws://10.0.2.2:7777, ws://10.0.2.2:{7778,7779,7780} and
-#                 http://10.0.2.2:3000.
+#   e2e_profile_android     the API-level scenario (e2e_profile_sharing.dart).
+#   e2e_profile_android_ui  the Identity-page photo trip through the REAL
+#                           Photo Picker and uCrop, background sharing ON
+#                           (e2e_profile_ui_photo.dart, driven with its host
+#                           sidecar by run-photo-ui-scenario.sh): root cause A
+#                           of the 2026-11-16 photo bug on a debug build.
+#   e2e_profile_ios         the API-level scenario on the simulator.
+#
+#   Android jobs — Docker: strfry container (circle) + three strfry containers
+#                 (profile pool) + the hzrd149 blossom container as the
+#                 FALLBACK on :3002; tooling/e2e/local-blossom in its `primal`
+#                 profile as the PRIMARY on :3000 (its media "CDN" on :3001).
+#                 The emulator reaches them at ws://10.0.2.2:7777,
+#                 ws://10.0.2.2:{7778,7779,7780}, http://10.0.2.2:3000 and
+#                 http://10.0.2.2:3002.
 #   iOS job     — native binaries (macOS runners have no Linux Docker):
 #                 tooling/e2e/local-relay (one process per relay, four in total)
-#                 + tooling/e2e/local-blossom. The simulator reaches them at
-#                 ws://localhost:7777, ws://localhost:{7778,7779,7780} and
-#                 http://localhost:3000.
+#                 + tooling/e2e/local-blossom twice: `primal` on :3000 (+3001)
+#                 and `reference` on :3002. The simulator reaches them at
+#                 ws://localhost:7777, ws://localhost:{7778,7779,7780},
+#                 http://localhost:3000 and http://localhost:3002.
+#
+# # Why the primary mimics Primal
+#
+# blossom.primal.net is the first server production uploads to. Its published
+# source (PrimalHQ/primal-blossom-server rev 7e595c9) decodes the auth token as
+# padded standard base64 only, verifies the kind-24242 event and its
+# expiration, and answers `GET /<sha256>` with a 302 to its media host — the
+# answer Haven's download once refused, so no Primal-hosted photo ever loaded
+# on another device while every lane here, served 200 directly, stayed green.
+# The mimic is that shape (tooling/e2e/local-blossom/src/main.rs cites each
+# rule), with a test-only `/__haven-e2e/` surface for fault injection, a server
+# clock skew and counts-only stats the scenarios read. No lane contacts a
+# production server: the debug-only list override REPLACES the production
+# list (C1), and the egress guard refuses :443.
+#
+# This lane is a release gate (scripts/check_ci_verdict.sh): it is hermetic and
+# peer-free on the device, and it is the only lane that sees the download path
+# a redirecting server takes.
 #
 # # Why the profile plane needs its OWN relays
 #
@@ -32,15 +62,18 @@
 # container name / port / data dir (or PID file / process marker) distinct so
 # starting one cannot kill another.
 #
-# The scenario (PUBLIC_PROFILE_MIGRATION_PLAN.md §7.3): consent default-off
-# asserted → A opts in, sets name + photo → kind-0 on the relay + blob on
-# Blossom asserted → B resolves and displays → A edits the name → B refresh
-# shows the new name AND the same photo (merge didn't clobber `picture`) →
-# A deletes the profile → B falls back to npub + initials, no crash.
+# The API-level scenario (PUBLIC_PROFILE_MIGRATION_PLAN.md §7.3): a fresh A
+# has published nothing (publishing is unconditional; there is no consent
+# step) → A sets name + photo locally, then syncs → kind-0 on the relays + blob
+# on Blossom asserted → B resolves and displays, his download following the
+# primary's 302 → A edits the name → B refresh shows the new name AND the same
+# photo → a primary answering 503 hands the next photo to the fallback → a
+# 90 s server clock skew still lets the primary take one → one kind-0 per edit
+# → A deletes the profile → B falls back to npub + initials, no crash.
 #
 # The scenario driver is haven/integration_test/e2e/e2e_profile_sharing.dart;
 # ci.yml wires this lane alongside the other E2E lanes (`needs: [rust]`). On
-# iOS, the shared run-ios-sim-scenario.sh forwards the HAVEN_E2E_BLOSSOM_URL /
+# iOS, the shared run-ios-sim-scenario.sh forwards the HAVEN_E2E_BLOSSOM_URLS /
 # HAVEN_E2E_PROFILE_RELAY / HAVEN_E2E_PROFILE_RELAYS dart-defines when (and only
 # when) those env vars are set — this is the only lane that sets them, so every
 # other iOS lane's compiled build stays byte-identical. On Android the APK is
@@ -119,9 +152,12 @@ jobs:
       # time and are not re-derived at drive time.
       HAVEN_E2E_PROFILE_RELAY: ws://10.0.2.2:7778
       HAVEN_E2E_PROFILE_RELAYS: ws://10.0.2.2:7778,ws://10.0.2.2:7779,ws://10.0.2.2:7780
-      # Blossom is published on the host at :3000; the emulator reaches it via
-      # the host-loopback alias 10.0.2.2. Baked into the APK below.
-      HAVEN_E2E_BLOSSOM_URL: http://10.0.2.2:3000
+      # The Blossom upload servers, in the order Haven tries them: the Primal
+      # mimic on the host's :3000, then the hzrd149 container on :3002; the
+      # emulator reaches both via the host-loopback alias 10.0.2.2. Baked into
+      # the APK below, and installed by the harness as the list that REPLACES
+      # the production servers.
+      HAVEN_E2E_BLOSSOM_URLS: http://10.0.2.2:3000,http://10.0.2.2:3002
       # Receive path, DECLARED — not inherited. `liveSyncEnabled` is
       # `bool.fromEnvironment('HAVEN_LIVE_SYNC', defaultValue: true)`, so this
       # job was compiling the engine ON without ever saying so, while its iOS
@@ -170,6 +206,7 @@ jobs:
         with:
           workspaces: |
             haven-core
+            tooling/e2e/local-blossom
             tooling/logscan
           # Distinct cache key so this lane doesn't race the other Android e2e
           # jobs on the same cache entry.
@@ -256,7 +293,7 @@ jobs:
             --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}" \
             --dart-define=HAVEN_E2E_PROFILE_RELAY="${HAVEN_E2E_PROFILE_RELAY}" \
             --dart-define=HAVEN_E2E_PROFILE_RELAYS="${HAVEN_E2E_PROFILE_RELAYS}" \
-            --dart-define=HAVEN_E2E_BLOSSOM_URL="${HAVEN_E2E_BLOSSOM_URL}" \
+            --dart-define=HAVEN_E2E_BLOSSOM_URLS="${HAVEN_E2E_BLOSSOM_URLS}" \
             --dart-define=HAVEN_LIVE_SYNC="${HAVEN_LIVE_SYNC}" \
             --dart-define=HAVEN_E2E_NO_BACKGROUND=true
           cp build/app/outputs/flutter-apk/app-debug.apk /tmp/scenario.apk
@@ -351,12 +388,20 @@ jobs:
           STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
         run: bash tooling/e2e/ci/start-profile-relays.sh docker 7778 7779 7780
 
-      - name: Start blossom server
+      # The PRIMARY: the Primal mimic, with its media host on :3001 and the
+      # test-only control surface the scenario injects a fault and a clock
+      # skew through.
+      - name: Start the primary blossom server (Primal mimic)
+        run: bash tooling/e2e/ci/start-local-blossom.sh 3000 --profile primal --cdn-port 3001 --control
+
+      # The FALLBACK: a real third-party implementation on the fallback path.
+      - name: Start the fallback blossom server
         env:
           # Immutable digest pin taken verbatim from whitenoise-rs's
           # docker-compose.yml (the `blossom:` service); the BLOSSOM_IMAGE repo
           # variable wins when set.
           BLOSSOM_IMAGE: ${{ vars.BLOSSOM_IMAGE || 'ghcr.io/hzrd149/blossom-server@sha256:efef9fa3ef47934aff586dd2161f221bd9549f0ace4c3432f65e1afb5d3f4d0a' }}
+          BLOSSOM_PORT: "3002"
         run: bash tooling/e2e/ci/start-blossom.sh
 
       # Install + grant + drive ONLY — the APK was built above, so this step
@@ -487,6 +532,9 @@ jobs:
           source tooling/e2e/ci/logscan-gate.sh
           docker logs blossom 2>&1 \
             | logscan_http_log_summary > /tmp/blossom-summary.log || true
+          # The primary's own log: fixed phrases only (no hash, key, event or
+          # address), scanned as `diag` below all the same.
+          cp /tmp/haven-local-blossom-3000.log /tmp/blossom-primary.log 2>/dev/null || true
 
       # `if: always()` and `.log`, not `.txt`: the scan step below runs on every
       # outcome and refuses an absent file, and the scanner's directory walk
@@ -559,7 +607,7 @@ jobs:
           bash tooling/e2e/ci/scan-logs.sh \
             --manifest-dir /tmp/haven-soak/needles \
             --sink "relay=$(IFS=,; echo "${relays[*]}")" \
-            --sink diag=/tmp/diag.log,/tmp/blossom-summary.log \
+            --sink diag=/tmp/diag.log,/tmp/blossom-summary.log,/tmp/blossom-primary.log \
             --report /tmp/logscan-report-upload.ndjson || rc=$?
           exit "${rc}"
 
@@ -574,6 +622,7 @@ jobs:
             /tmp/strfry.log
             /tmp/strfry-profile-*.log
             /tmp/blossom-summary.log
+            /tmp/blossom-primary.log
             /tmp/diag.log
             /tmp/scenario.apk
           retention-days: 14
@@ -600,9 +649,525 @@ jobs:
         if: always()
         run: bash tooling/e2e/ci/stop-profile-relays.sh docker 7778 7779 7780
 
-      - name: Tear down blossom server
+      - name: Tear down the fallback blossom server
         if: always()
         run: bash tooling/e2e/ci/stop-blossom.sh
+
+      - name: Tear down the primary blossom server
+        if: always()
+        run: bash tooling/e2e/ci/stop-local-blossom.sh 3000
+
+  # ==========================================================================
+  # e2e_profile_android_ui — the Identity-page photo trip through the REAL
+  # system Photo Picker and uCrop with background sharing ON, on a debug build
+  # against the same hermetic hosts: the configuration in which a photo picked
+  # on Android could not be saved. The target is e2e_profile_ui_photo.dart; the
+  # runner is run-photo-ui-scenario.sh, whose host sidecar plays the user inside
+  # the system screens. A separate job, not a matrix leg, so the release gate
+  # can name it (check_ci_verdict.sh refuses a computed job name).
+  # ==========================================================================
+  e2e_profile_android_ui:
+    name: e2e_profile_android_ui
+    runs-on: ubuntu-latest
+    # The job cap clears the SUM of the step caps (e2e-android.yml states the
+    # rule): Build the runtime log scanner 10 + Build E2E test APK 25 +
+    # Restore Gradle dependency cache 2 + Provision the Android SDK 11 + AVD
+    # cache 10 + Create AVD snapshot 15 +
+    # the drive step 56 (derived there) + the uncapped work, taken
+    # from e2e_profile_android until this job has runs of its own: 12.9 min
+    # over 201 runs of that job and e2e-android.yml's (worst 30792258968), plus
+    # this job's two blossom starts, under a minute measured locally -> 14
+    # = 143.
+    # job-uncapped-minutes: 14 (201 runs of e2e_profile_android's family, worst 30792258968)
+    timeout-minutes: 143
+    env:
+      HAVEN_E2E_RELAY: ws://10.0.2.2:7777
+      # Profile plane. DISJOINT from HAVEN_E2E_RELAY above by construction —
+      # separate strfry containers with separate stores, so the circle relay
+      # (which the contamination ledger excludes) is never asked to serve
+      # kind-0. `_RELAY` is the first pool member alone; `_RELAYS` is the whole
+      # pool, which is what the profile-plane override needs (PROFILE_POOL_MIN
+      # = 3 → a shorter list is a terminal PoolUnderflow).
+      #
+      # These ports MUST match the ports passed to start-profile-relays.sh /
+      # stop-profile-relays.sh below: the URLs are baked into the APK at build
+      # time and are not re-derived at drive time.
+      HAVEN_E2E_PROFILE_RELAY: ws://10.0.2.2:7778
+      HAVEN_E2E_PROFILE_RELAYS: ws://10.0.2.2:7778,ws://10.0.2.2:7779,ws://10.0.2.2:7780
+      # The Blossom upload servers, in the order Haven tries them: the Primal
+      # mimic on the host's :3000, then the hzrd149 container on :3002; the
+      # emulator reaches both via the host-loopback alias 10.0.2.2. Baked into
+      # the APK below, and installed by the harness as the list that REPLACES
+      # the production servers.
+      HAVEN_E2E_BLOSSOM_URLS: http://10.0.2.2:3000,http://10.0.2.2:3002
+      # Receive path, declared (check_live_sync_define_declared.sh): the
+      # production default, live sync on, so the trip runs on the plane a
+      # user's app runs and the pause takes the hand-off it takes there.
+      HAVEN_LIVE_SYNC: "true"
+      FLUTTER_SUPPRESS_ANALYTICS: "true"
+      # The runtime log scanner (tooling/logscan) is wired into this lane. The
+      # runner reads the flag: it seals the run's needle manifest and runs every
+      # captured log through tooling/e2e/ci/scan-logs.sh before echoing or
+      # keeping any of it. No recording proxy runs here, so the needles are the
+      # host-known constants of tooling/e2e/ci/host-needles.sh (the `host`
+      # profile): the fixed role seeds, the role and canary coordinates and the
+      # canary name stems.
+      HAVEN_LOGSCAN: "true"
+      HAVEN_LOGSCAN_PROFILE: host
+
+    steps:
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@v6
+
+      # Reclaim runner disk BEFORE the Gradle/Rust build — the multi-GB debug
+      # build + NDK strip has run a default runner out of space.
+      - name: Free disk space
+        run: bash tooling/e2e/ci/free-disk-space.sh
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            haven-core
+            tooling/e2e/local-blossom
+            tooling/logscan
+          # Distinct cache key so this lane doesn't race the other Android e2e
+          # jobs on the same cache entry.
+          key: e2e-profile-android-x64
+
+      # The runtime log scanner, release-built ONCE, before Flutter and the
+      # emulator are resident (same reasoning as the APK build below). Capped
+      # so a cargo stall fails fast; the cap is a term of the job cap's sum
+      # above.
+      - name: Build the runtime log scanner
+        timeout-minutes: 10
+        run: cargo build --release --manifest-path tooling/logscan/Cargo.toml
+
+      # The needle directory is rotated BEFORE any drive: a manifest left by an
+      # earlier run on a reused runner would be reused as this run's (the
+      # host-profile gate reuses the manifest already at its out path).
+      # Owner-only, because what lands there is every identifier the run
+      # declares, verbatim.
+      - name: Rotate the needle directory
+        run: |
+          mkdir -m 0700 -p /tmp/haven-soak/needles
+          rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Get Flutter dependencies
+        working-directory: haven
+        run: flutter pub get
+
+      # Gradle resolves the buildscript classpath over the network BEFORE it
+      # compiles anything, so a cold ~/.gradle makes this lane fetch hundreds of
+      # POMs — and hosted runners share egress IPs, so Maven Central rate-limits
+      # a runner nobody here provoked. CI run 35622556197 job 106414462454 lost
+      # a whole lane to HTTP 429 on the classpath, with NO test run, while twelve
+      # sibling Android lanes built the same commit with zero 429s. A warm
+      # dependency cache REMOVES those requests; the classified retry in
+      # scripts/ci/build_apk_with_retry.sh is only the backstop for what is left.
+      #
+      # Restore-only. build-check.yml is the single writer of this key, so a lane
+      # that deletes or half-fills ~/.gradle cannot publish a cache the other
+      # lanes would then restore. The `restore-keys` prefix means a changed
+      # dependency set still starts from the last good cache instead of cold.
+      #
+      # `continue-on-error` because a cache is an optimisation, and a step that
+      # overruns its own `timeout-minutes` FAILS the job: without this, a slow
+      # or unavailable cache service reddens a lane that would otherwise have
+      # built cold and run every test.
+      - name: Restore Gradle dependency cache
+        uses: actions/cache/restore@v4
+        timeout-minutes: 2
+        continue-on-error: true
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/wrapper
+          key: gradle-deps-${{ runner.os }}-${{ hashFiles('haven/android/**/*.gradle*', 'haven/rust_builder/**/*.gradle*', 'haven/android/gradle/wrapper/gradle-wrapper.properties', 'haven/pubspec.lock') }}
+          restore-keys: |
+            gradle-deps-${{ runner.os }}-
+
+      # No HAVEN_E2E_NO_BACKGROUND: the foreground service must exist, or the
+      # pause a pick causes would not take MapShell's Android hand-off branch
+      # (B1 builds the same way and runs a real foreground service under
+      # `flutter drive`). Build the test APK BEFORE the emulator boots (the OOM rule — the
+      # Rust-NDK + Gradle peak must not coincide with a resident emulator +
+      # containers; see docs/E2E_TROUBLESHOOTING.md). Staged at /tmp/scenario.apk;
+      # run-single-avd-scenario.sh detects it and skips its own build.
+      #
+      # ALL FOUR dart-defines are baked here and MUST match the URLs the drive
+      # step uses (the values are compiled into the APK; the drive does not
+      # re-pass them). `--target-platform android-x64`: the AVD is x86_64, so
+      # x64 is the only ABI it runs — matches every other Android e2e lane.
+      #
+      # HAVEN_E2E_PROFILE_RELAY{,S} carry the DISJOINT profile-plane pool. The
+      # scenario parses and validates them into `_profileRelayUrls` and hands
+      # that to `ScenarioHarness.bootstrap(profileRelays: ...)`; they MUST be
+      # baked here because `flutter drive` does not re-pass dart-defines.
+      - name: Build E2E test APK
+        working-directory: haven
+        timeout-minutes: 25
+        run: |
+          ../scripts/ci/build_apk_with_retry.sh android-x64 \
+            --target=integration_test/e2e/e2e_profile_ui_photo.dart \
+            --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}" \
+            --dart-define=HAVEN_E2E_PROFILE_RELAY="${HAVEN_E2E_PROFILE_RELAY}" \
+            --dart-define=HAVEN_E2E_PROFILE_RELAYS="${HAVEN_E2E_PROFILE_RELAYS}" \
+            --dart-define=HAVEN_E2E_BLOSSOM_URLS="${HAVEN_E2E_BLOSSOM_URLS}" \
+            --dart-define=HAVEN_LIVE_SYNC="${HAVEN_LIVE_SYNC}"
+          cp build/app/outputs/flutter-apk/app-debug.apk /tmp/scenario.apk
+          ls -lh /tmp/scenario.apk
+          # One APK's build tree and cargokit's Rust target left 3.3 GB for the
+          # system image on a 72 GB runner (CI run 41322563075). The drive
+          # installs /tmp/scenario.apk and reads neither, so both go here,
+          # inside this step's cap, before the SDK is provisioned.
+          bash ../tooling/e2e/ci/release-apk-build-outputs.sh /tmp
+
+      - name: Enable KVM group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      # Install and VERIFY every SDK package the emulator action needs, before
+      # its FIRST use below. The action installs them itself, with bare
+      # `sdkmanager --install` calls tried once and checked by nothing: in CI
+      # run 35524002720 the emulator's download failed, the action stopped,
+      # and the last thing it printed was its teardown's "could not connect to
+      # TCP port 5554" — a message about the emulator, from a job that ran no
+      # test.
+      # Unconditional, deliberately — the AVD cache holds `~/.android/avd/*`
+      # only, so a cache HIT still needs the emulator binary and the system
+      # image. The arguments MUST equal the api-level/target/arch of every
+      # emulator step in this job (check_android_sdk_provisioned.sh). Once the
+      # packages are present the action's own installs are no-ops (5 s).
+      # The cap is the script's worst case, 9.5 min (its 360 s budget + the one
+      # 180 s attempt that can start inside it + that attempt's 30 s emulator
+      # probe), plus the step's own startup, rounded up.
+      - name: Provision the Android SDK
+        timeout-minutes: 11
+        run: bash tooling/e2e/ci/provision-android-sdk.sh 34 google_apis x86_64
+
+      # Restore-only: the photo rounds put two fixtures in the gallery (the
+      # runner deletes them again), and a saved snapshot must never carry them
+      # into another lane. A miss is created locally below.
+      - name: AVD cache
+        uses: actions/cache/restore@v4
+        id: avd-cache
+        timeout-minutes: 10
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          # Shared snapshot key with the other Android e2e lanes (same
+          # api/arch/target/profile), so this lane restores their snapshot.
+          key: avd-api34-x86_64-google_apis-single-v1
+
+      - name: Create AVD snapshot
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        # This step's entire job is booting an emulator, and until 2026-08-03 it
+        # had no bound of any kind — a wedged boot here ran to the JOB cap,
+        # which SIGKILLs the runner before any if: failure() step, so the lane
+        # died slow and with no artifacts. Measured across 23 successful runs
+        # (ci.yml, 2026-07/08) the snapshot takes 91-130 s; 15 min is ~7x the
+        # observed max, so it can only ever fire on a genuine wedge. The
+        # emulator-boot-timeout below is the action's own inner bound (7 min,
+        # matching the drive steps) and fires first with the action's message.
+        timeout-minutes: 15
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none
+          disable-animations: false
+          # Bound the boot itself (the only thing this step does) so a wedged
+          # emulator fails inside the step rather than at the step cap above.
+          emulator-boot-timeout: 420
+          script: echo "Generated AVD snapshot for caching."
+
+      # Start EVERY hermetic host (circle relay, profile-plane pool, blossom)
+      # BEFORE the emulator boots, so an image-pull/startup failure surfaces as
+      # a clean step failure early.
+      - name: Start strfry relay (circle plane)
+        env:
+          # Same immutable digest pin as the other Android e2e lanes; the
+          # STRFRY_IMAGE repo variable wins when set.
+          STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
+        run: bash tooling/e2e/ci/start-strfry.sh
+
+      # The profile-plane pool: three more strfry containers on 7778/7779/7780,
+      # each with its own container name and data dir (start-profile-relays.sh),
+      # so none of them can `docker rm -f` / `rm -rf` another — or the circle
+      # relay above. STRFRY_IMAGE is forwarded so the pool pulls the same pinned
+      # digest. The ports here MUST match HAVEN_E2E_PROFILE_RELAY{,S} in `env:`.
+      - name: Start strfry relays (profile plane)
+        env:
+          STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
+        run: bash tooling/e2e/ci/start-profile-relays.sh docker 7778 7779 7780
+
+      # The PRIMARY: the Primal mimic, with its media host on :3001 and the
+      # test-only control surface the scenario injects a fault and a clock
+      # skew through.
+      - name: Start the primary blossom server (Primal mimic)
+        run: bash tooling/e2e/ci/start-local-blossom.sh 3000 --profile primal --cdn-port 3001 --control
+
+      # The FALLBACK: a real third-party implementation on the fallback path.
+      - name: Start the fallback blossom server
+        env:
+          # Immutable digest pin taken verbatim from whitenoise-rs's
+          # docker-compose.yml (the `blossom:` service); the BLOSSOM_IMAGE repo
+          # variable wins when set.
+          BLOSSOM_IMAGE: ${{ vars.BLOSSOM_IMAGE || 'ghcr.io/hzrd149/blossom-server@sha256:efef9fa3ef47934aff586dd2161f221bd9549f0ace4c3432f65e1afb5d3f4d0a' }}
+          BLOSSOM_PORT: "3002"
+        run: bash tooling/e2e/ci/start-blossom.sh
+
+      # The photo UI drive: run-photo-ui-scenario.sh seeds two gallery
+      # fixtures, starts the host sidecar that plays the picker and uCrop, and
+      # runs run-single-avd-scenario.sh for the target under the egress guard
+      # (the same install, grant, connect-flake retry and log-privacy gate as
+      # every single-target lane), then joins the sidecar and judges the two
+      # verdicts together (its header: rc 1 product, 2 harness, 3
+      # infrastructure; a sidecar failure reds a passing drive).
+      #
+      # BOUNDS, innermost first:
+      #   20m  the `flutter drive` (HAVEN_DRIVE_TIMEOUT): four trips through
+      #        the picker and uCrop, six kind-0 round trips and Bob's
+      #        downloads. Not measured yet: the API-level drive's p95 is
+      #        2.7 min, and each trip a few seconds healthy; re-derive by the
+      #        lane's 4.4x rule once runs exist.
+      #   46m  this step's inner deadline: scripts/ci/check_e2e_lane_budget.sh's
+      #        sum over run-photo-ui-scenario.sh, photo-picker-lib.sh and
+      #        run-single-avd-scenario.sh with the drive timeout above
+      #        (`--explain` prints it: 2756 s, the 180 s allowance included).
+      #   56m  this step's timeout-minutes = deadline + 1 (kill grace) + 7
+      #        (emulator-boot-timeout) + 2 (the action's own setup/teardown).
+      - name: Run e2e_profile_ui_photo on the emulator
+        timeout-minutes: 56
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          emulator-boot-timeout: 420
+          script: bash tooling/e2e/ci/run-with-deadline.sh 46m "e2e-profile android photo UI" -- bash -c 'bash tooling/e2e/ci/setup-network-guard.sh install && HAVEN_DRIVE_TIMEOUT=20m bash tooling/e2e/ci/run-photo-ui-scenario.sh integration_test/e2e/e2e_profile_ui_photo.dart'
+
+      # Publish what the guard OBSERVED (CI_HARDENING_BACKLOG C7). Runs BEFORE
+      # the teardown: the report cross-checks its parse against the chain's own
+      # packet counters (gate G5), which a flushed chain no longer has. An
+      # absent or empty capture exits 3 and reddens the lane — "we recorded
+      # nothing" must never read as "nothing left the device" (backlog A4).
+      #
+      # This lane is the most interesting of the three to observe: it is the
+      # only one that exercises the Blossom upload/download path, i.e. the only
+      # HTTP client in the app that talks to something other than a relay.
+      - name: Report egress observations
+        if: always()
+        run: bash tooling/e2e/ci/setup-network-guard.sh report
+
+      # Tear the egress guard down BEFORE anything that needs outbound HTTPS
+      # (artifact upload + cache save both POST over :443). The teardown
+      # subcommand also stops the ring-buffer follower and removes the IPv6
+      # chain, neither of which the previous inline commands did.
+      - name: Remove network egress guard
+        if: always()
+        run: bash tooling/e2e/ci/setup-network-guard.sh teardown || true
+
+      # Every outcome, not just failure: observe mode builds its baseline from
+      # GREEN runs. IP/transport headers only; already secret-scanned by the
+      # report step.
+      - name: Upload egress observation
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: egress-profile-android-ui-${{ github.run_id }}
+          path: |
+            /tmp/haven-egress/egress-raw.log
+            /tmp/haven-egress/egress-summary.txt
+          retention-days: 14
+          if-no-files-found: ignore
+
+      # Collect EVERY relay container's log so triage can confirm the kind-0
+      # landed on a PROFILE-plane relay and never on the circle relay. The pool
+      # members are enumerated by name prefix so this step needs no port list.
+      #
+      # Blossom is the exception, and deliberately so. An HTTP blob server's
+      # access log is written from the server side ABOUT its client: in CI run
+      # 35280144455 `docker logs blossom` carried four 64-hex blob digests, the
+      # uploading npub — which the host needles caught as a needle, not merely
+      # as a shape — and the base64 kind-24242 Authorization event. That is the
+      # position strfry's log is in too, except that strfry has the rules-off
+      # `relay` sink class and an HTTP server must not be given one (its log
+      # carries the auth EVENTS the rules exist to see). So the raw log never
+      # becomes a file: it is piped straight into logscan_http_log_summary,
+      # which can emit nothing but counts, and the summary is scanned as `diag`
+      # below like any other file. That the blob landed is asserted by the
+      # drive target, which is where the claim belongs.
+      - name: Collect container logs
+        if: always()
+        run: |
+          docker logs strfry > /tmp/strfry.log 2>&1 || true
+          for c in $(docker ps -a --filter 'name=^strfry-profile-' --format '{{.Names}}'); do
+            docker logs "${c}" > "/tmp/${c}.log" 2>&1 || true
+          done
+          # shellcheck source=tooling/e2e/ci/logscan-gate.sh
+          source tooling/e2e/ci/logscan-gate.sh
+          docker logs blossom 2>&1 \
+            | logscan_http_log_summary > /tmp/blossom-summary.log || true
+          # The primary's own log: fixed phrases only (no hash, key, event or
+          # address), scanned as `diag` below all the same.
+          cp /tmp/haven-local-blossom-3000.log /tmp/blossom-primary.log 2>/dev/null || true
+
+      # `if: always()` and `.log`, not `.txt`: the scan step below runs on every
+      # outcome and refuses an absent file, and the scanner's directory walk
+      # only ever picks up `*.log` — a `.txt` here would be the one uploaded
+      # path the guard cannot see.
+      - name: Capture host + emulator diagnostics
+        if: always()
+        run: |
+          # `adb` reaches PATH only through the emulator action's
+          # core.addPath(<sdk>/platform-tools); when that action never ran the
+          # slices below were `command not found`, and `|| true` kept it silent
+          # (run 35536892150). Resolve it from the SDK instead, and say in
+          # fixed words which case this diag is.
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [ -n "${sdk}" ]; then PATH="${sdk}/platform-tools:${PATH}"; fi
+          if command -v adb >/dev/null 2>&1; then adb_state=resolved; else adb_state=absent; fi
+          devices=""
+          if [ "${adb_state}" = resolved ]; then devices="$(adb devices 2>/dev/null || true)"; fi
+          # Materialised: `adb devices | grep -q` reports the producer's
+          # SIGPIPE under pipefail, not the match.
+          if grep -qE '^[^[:space:]]+[[:space:]]+[a-z]+$' <<<"${devices}"; then device_state=present; else device_state=none; fi
+          {
+            echo "adb: ${adb_state}"
+            echo "device: ${device_state}"
+            echo
+            echo "=== df -h ==="
+            df -h || true
+            echo
+            echo "=== free -h ==="
+            free -h || true
+            echo
+            echo "=== adb devices -l ==="
+            adb devices -l || true
+            echo
+            echo "=== adb shell dumpsys meminfo com.oblivioustech.haven ==="
+            adb shell dumpsys meminfo com.oblivioustech.haven || true
+            echo
+            echo "=== top (1 sample) ==="
+            top -bn1 | head -40 || true
+          } > /tmp/diag.log 2>&1
+
+      # Where each uploaded log is scanned, and by what. The logcat and both
+      # drive logs go through the runner's log-privacy gate (HAVEN_LOGSCAN
+      # above): tooling/e2e/ci/scan-logs.sh — the key-material floor AND the
+      # identifier scanner, against the manifest sealed from the host needles —
+      # deleting them on a leak, before any drive log is echoed. What is left
+      # is scanned HERE, against the SAME manifest, by the same wrapper: the
+      # relay logs of both planes (`relay` class: structural rules off — a
+      # relay legitimately holds pubkeys and event ids) and, as `diag` sinks
+      # (a one-line floor, no plant requirement, every rule and every needle
+      # on), the host diagnostics and the blossom SUMMARY. The summary rather
+      # than the log, because an HTTP blob server is not a relay: its access
+      # log carries the kind-24242 auth events, the blob digests and the
+      # uploading pubkey, so it must neither be typed into the rules-off class
+      # nor kept (see the collection step). The summary is scanned here all the
+      # same — a reduction whose safety is only asserted is not a
+      # reduction. Scan-before-upload, as its OWN step on
+      # every outcome short of a cancellation: a leak (rc 1) deletes every
+      # scanned file and fails the lane even on an otherwise green run, so the
+      # upload finds nothing to publish; an unscannable log (rc 3), a broken
+      # guard (rc 2) or an unmet floor (rc 4) fails it and leaves the files as
+      # they are. The standard guard condition (not `always()`) is what lets
+      # docs/privacy/privacy_invariants.json cite this step as the runtime
+      # scanner's enforcing run.
+      - name: Scan captured logs for secrets before upload
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: |
+          relays=(/tmp/strfry.log /tmp/strfry-profile-*.log)
+          rc=0
+          bash tooling/e2e/ci/scan-logs.sh \
+            --manifest-dir /tmp/haven-soak/needles \
+            --sink "relay=$(IFS=,; echo "${relays[*]}")" \
+            --sink diag=/tmp/diag.log,/tmp/blossom-summary.log,/tmp/blossom-primary.log,/tmp/photo-sidecar.log \
+            --report /tmp/logscan-report-upload.ndjson || rc=$?
+          exit "${rc}"
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-profile-android-ui-${{ github.run_id }}
+          path: |
+            /tmp/photo-sidecar.log
+            /tmp/adb-logcat.log
+            /tmp/flutter-drive.log
+            /tmp/strfry.log
+            /tmp/strfry-profile-*.log
+            /tmp/blossom-summary.log
+            /tmp/blossom-primary.log
+            /tmp/diag.log
+            /tmp/scenario.apk
+          retention-days: 14
+          if-no-files-found: ignore
+
+      # The sealed manifest holds the run's identifiers verbatim. It is never
+      # uploaded (check_wire_proxy_test_only.sh) and does not outlive the job
+      # either: removed on EVERY outcome, after every upload step, so a reused
+      # runner never starts the next run holding the last run's needles.
+      - name: Discard needle manifests
+        if: always()
+        run: rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
+
+      # Teardown runs LAST and if: always() so every container + its host data
+      # dir is removed on every outcome, after the log-collection step read
+      # them. All three teardown scripts are best-effort (always exit 0), so
+      # teardown can't turn a green run red, and each runs as its OWN step so a
+      # surprise in one still leaves the others to run.
+      - name: Tear down strfry relay (circle plane)
+        if: always()
+        run: bash tooling/e2e/ci/stop-strfry.sh
+
+      - name: Tear down strfry relays (profile plane)
+        if: always()
+        run: bash tooling/e2e/ci/stop-profile-relays.sh docker 7778 7779 7780
+
+      - name: Tear down the fallback blossom server
+        if: always()
+        run: bash tooling/e2e/ci/stop-blossom.sh
+
+      - name: Tear down the primary blossom server
+        if: always()
+        run: bash tooling/e2e/ci/stop-local-blossom.sh 3000
 
   # ==========================================================================
   # e2e_profile_ios — booted iOS simulator; native circle relay + native
@@ -640,11 +1205,12 @@ jobs:
       HAVEN_E2E_PROFILE_RELAY: ws://localhost:7778
       HAVEN_E2E_PROFILE_RELAYS: ws://localhost:7778,ws://localhost:7779,ws://localhost:7780
       # The simulator shares the host network namespace, so it reaches the
-      # host-native blossom at localhost:3000 (no 10.0.2.2 alias). The shared
-      # run-ios-sim-scenario.sh forwards this — and the two profile-relay vars
-      # above — into its flutter-test build as dart-defines, but ONLY when they
-      # are set, so no other iOS lane's build changes.
-      HAVEN_E2E_BLOSSOM_URL: http://localhost:3000
+      # host-native blossom servers at localhost (no 10.0.2.2 alias): the
+      # Primal mimic on :3000, the reference shape on :3002, tried in that
+      # order. The shared run-ios-sim-scenario.sh forwards this — and the two
+      # profile-relay vars above — into its flutter-test build as dart-defines,
+      # but ONLY when they are set, so no other iOS lane's build changes.
+      HAVEN_E2E_BLOSSOM_URLS: http://localhost:3000,http://localhost:3002
       HAVEN_E2E_NO_BACKGROUND: "true"
       # Receive path, DECLARED — see the Android job's note above. This half was
       # taking run-ios-sim-scenario.sh's built-in default ("false") while the
@@ -736,8 +1302,10 @@ jobs:
       - name: Build and start host-native relays (profile plane)
         run: bash tooling/e2e/ci/start-profile-relays.sh native 7778 7779 7780
 
-      - name: Build and start host-native blossom server
-        run: bash tooling/e2e/ci/start-local-blossom.sh 3000
+      - name: Build and start the host-native blossom servers
+        run: |
+          bash tooling/e2e/ci/start-local-blossom.sh 3000 --profile primal --cdn-port 3001 --control
+          bash tooling/e2e/ci/start-local-blossom.sh 3002 --profile reference --control
 
       - name: Boot iOS simulator
         id: sim
@@ -783,7 +1351,8 @@ jobs:
           command: >-
             bash tooling/e2e/ci/start-local-relay.sh 7777 &&
             bash tooling/e2e/ci/start-profile-relays.sh native 7778 7779 7780 &&
-            bash tooling/e2e/ci/start-local-blossom.sh 3000 &&
+            bash tooling/e2e/ci/start-local-blossom.sh 3000 --profile primal --cdn-port 3001 --control &&
+            bash tooling/e2e/ci/start-local-blossom.sh 3002 --profile reference --control &&
             bash tooling/e2e/ci/run-ios-sim-scenario.sh
             integration_test/e2e/e2e_profile_sharing.dart
             ${{ steps.sim.outputs.udid }}
@@ -823,7 +1392,8 @@ jobs:
             [ -f "${f}" ] || continue
             cp "${f}" "/tmp/relay-$(basename "${f}" .log | sed 's/^haven-local-relay-//').log" || true
           done
-          cp /tmp/haven-local-blossom.log /tmp/blossom.log 2>/dev/null || true
+          cp /tmp/haven-local-blossom-3000.log /tmp/blossom-primary.log 2>/dev/null || true
+          cp /tmp/haven-local-blossom-3002.log /tmp/blossom-fallback.log 2>/dev/null || true
 
       # Scan-before-upload, as its OWN step: every `.log` the upload step names
       # goes through tooling/e2e/ci/scan-logs.sh here — the key-material floor
@@ -839,8 +1409,8 @@ jobs:
       # pubkeys and event ids, so the policy runs no structural rule over that
       # class and scopes those needle classes out; the group ids, secrets,
       # names and coordinates stay searched — and the blossom server's log is
-      # `diag`: an HTTP blob server, not a relay, whose log carries the
-      # kind-24242 auth events, so every rule and every needle runs over it
+      # `diag`: an HTTP blob server, not a relay (the stub logs fixed phrases
+      # only, never an auth event), so every rule and every needle runs over it
       # (a one-line floor, no plant). The pool's logs are collected by glob, so
       # the sink list is joined here; a member the diagnostics step could not
       # copy leaves the pattern unexpanded, a missing capture the scanner
@@ -856,7 +1426,7 @@ jobs:
             --sink ios=/tmp/sim-unified.log,/tmp/sim-unified-full.log \
             --sink drive=/tmp/flutter-ios-test.log \
             --sink "relay=${relays}" \
-            --sink diag=/tmp/blossom.log \
+            --sink diag=/tmp/blossom-primary.log,/tmp/blossom-fallback.log \
             --report /tmp/logscan-report-upload.ndjson || rc=$?
           exit "${rc}"
 
@@ -869,7 +1439,8 @@ jobs:
             /tmp/flutter-ios-test.log
             /tmp/relay.log
             /tmp/relay-profile-*.log
-            /tmp/blossom.log
+            /tmp/blossom-primary.log
+            /tmp/blossom-fallback.log
             /tmp/sim-unified.log
             /tmp/sim-unified-full.log
           retention-days: 14
@@ -894,6 +1465,6 @@ jobs:
         if: always()
         run: bash tooling/e2e/ci/stop-profile-relays.sh native 7778 7779 7780
 
-      - name: Tear down host-native blossom server
+      - name: Tear down the host-native blossom servers
         if: always()
-        run: bash tooling/e2e/ci/stop-local-blossom.sh
+        run: bash tooling/e2e/ci/stop-local-blossom.sh 3000 3002

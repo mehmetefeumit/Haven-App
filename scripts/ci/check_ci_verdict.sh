@@ -15,9 +15,16 @@
 # job under the gate workflows must end `success` or `skipped`, where a
 # `skipped` job is another `group` call's copy. Each job in REQUIRED_JOBS must
 # have at least one `success`. The functional E2E lanes stay out of the gate:
-# they drive debug builds with peers and relays. The iOS launch gate is in it:
-# it is offline and peerless by design, so a red one on main is a real reason
-# not to tag (docs/LAUNCH_GATE.md). Android's launch gate is not:
+# they drive debug builds with peers and relays. Two are in it. The iOS launch
+# gate: offline and peerless by design, so a red one on main is a real reason
+# not to tag (docs/LAUNCH_GATE.md). And the public-profile lane
+# (e2e-profile.yml), since 2026-11-16: hermetic (local relays, local Blossom
+# servers, no production host), peer-free on the device (Bob is in-process),
+# and the only lane that sees the picture DOWNLOAD path a redirecting server
+# takes and the photo trip through the real picker and uCrop with background
+# sharing on — the two halves of the photo bug no offline gate can see. Re-run
+# one of its jobs only when its verdict line says infrastructure or harness; a
+# product red blocks the tag. Android's launch gate is not in the list:
 # release-build.yml launches the tag's exact APKs itself.
 # While a gate job is still running the gate waits, so a tag may be pushed
 # right after main.
@@ -44,7 +51,7 @@ set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT_OVERRIDE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 readonly CI_YML_REL='.github/workflows/ci.yml'
-readonly GATE_WORKFLOWS=(rust-check.yml cross-check.yml coverage.yml repo-guards.yml launch-gate-ios.yml)
+readonly GATE_WORKFLOWS=(rust-check.yml cross-check.yml coverage.yml repo-guards.yml e2e-profile.yml launch-gate-ios.yml)
 # <workflow>:<job key> that no good run executes. rust-check's `group` job
 # fails a call whose group input is unknown, so it is skipped on every good
 # run; the "nothing failed" rule still holds it.
@@ -55,6 +62,9 @@ readonly REQUIRED_JOBS=(
   'Cross-Platform Compile / Android (arm64)'
   'Cross-Platform Compile / Apple (macOS + iOS)'
   'Cross-Platform Compile / Windows (x64)'
+  'E2E Public Profile (Android + iOS) / e2e_profile_android'
+  'E2E Public Profile (Android + iOS) / e2e_profile_android_ui'
+  'E2E Public Profile (Android + iOS) / e2e_profile_ios'
   'Launch Gate (iOS) / Simulator launch, relaunch and upgrade'
   'Repo Guards / Static checks'
   'Rust Checks / e2e tooling (hermetic relay + wire proxy)'
@@ -67,16 +77,17 @@ readonly REQUIRED_JOBS=(
 POLL_SECS="${CI_VERDICT_POLL_SECS:-60}"
 # A tag pushed with main can arrive before GitHub has created main's run.
 NO_RUN_GRACE_SECS="${CI_VERDICT_NO_RUN_GRACE_SECS:-300}"
-# The slowest gate job is the iOS launch gate, which starts only after the rust
-# stage and builds the app cold; the other gate jobs, cold, have taken 50
-# minutes. Two hours covers both with a margin for macOS queueing.
-DEADLINE_SECS="${CI_VERDICT_DEADLINE_SECS:-7200}"
+# The slowest gate job is e2e-profile.yml's iOS job (job cap 135 min), which
+# starts only after the rust stage; the iOS launch gate builds the app cold
+# after it too. Three hours covers the rust stage plus 135 minutes with a
+# margin for macOS queueing.
+DEADLINE_SECS="${CI_VERDICT_DEADLINE_SECS:-10800}"
 # Consecutive API calls that may fail before the gate gives up: one blip in
 # two hours of polling must not fail a release.
 readonly API_MISS_LIMIT=3
 # How many fixtures the self-test runs. Pinned, because a fixture that stops
 # running is the one way a deleted check reports success.
-readonly SELF_TEST_FIXTURES=18
+readonly SELF_TEST_FIXTURES=20
 
 log() {
   printf '\033[1;34m[check_ci_verdict]\033[0m %s\n' "$*"
@@ -290,6 +301,12 @@ self_test() {
   _edit cancelled.tsv 's#^(Coverage / Rust Coverage\tcompleted\t)success#\1cancelled#'
   _case "a cancelled gate job fails" 1 _gate "${tmp}/cancelled.tsv"
 
+  _edit profile-red.tsv 's#^(E2E Public Profile \(Android \+ iOS\) / e2e_profile_android_ui\tcompleted\t)success#\1failure#'
+  _case "a failed public-profile E2E job fails the gate" 1 _gate "${tmp}/profile-red.tsv"
+
+  _edit profile-running.tsv 's#^(E2E Public Profile \(Android \+ iOS\) / e2e_profile_ios\t)completed\tsuccess#\1in_progress\t#'
+  _case "a public-profile E2E job still running at the deadline fails" 1 _gate "${tmp}/profile-running.tsv"
+
   _edit skipped.tsv 's#^(Repo Guards / Static checks\tcompleted\t)success#\1skipped#'
   _case "a required job that only skipped fails" 1 _gate "${tmp}/skipped.tsv"
 
@@ -358,7 +375,7 @@ self_test() {
     fails=1
   fi
   (( fails == 0 )) || { echo "check_ci_verdict.sh --self-test: FAILED" >&2; return 1; }
-  log "OK: self-test passed — each way a gate job can fail, skip, go missing or never finish, a missing or bare run, an API blip and outage, both queries, and each way the pinned list can drift."
+  log "OK: self-test passed — each way a gate job can fail, skip, go missing or never finish (the public-profile E2E jobs among them), a missing or bare run, an API blip and outage, both queries, and each way the pinned list can drift."
 }
 
 case "${1:-}" in
