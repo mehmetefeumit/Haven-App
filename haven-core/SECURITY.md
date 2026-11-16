@@ -152,10 +152,13 @@ list, seeded from `PRODUCTION_INBOX_RELAYS` — the same relays less
 `relay.damus.io`, which takes a kind 1059 and then serves it only to a client
 that answers NIP-42 AUTH, which Haven never does (Rule 16; probed 2026-11-16,
 `tests/fixtures/relay_read_gating_2026-11-16.json`, pinned by
-`tests/inbox_seed_read_gating.rs`); an install whose stored inbox list was
-still exactly the old three-relay seed loses that one row once, at the circle
-manager's open (`CircleStorage::retire_gated_inbox_seed`), and a list the user
-changed is left alone: kinds 10050, 10002 and 30443, the inbound kind 1059 and
+`tests/inbox_seed_read_gating.rs`), then `relay.ditto.pub`, whose other relay
+software keeps one implementation's default config from gating every seeded
+inbox (owner-directed 2026-11-16; the same test holds that the seed spans two
+implementations); an install whose stored inbox list was still exactly the
+old three-relay seed becomes the current seed once, at the circle manager's
+open (`CircleStorage::retire_gated_inbox_seed`), and a list the user changed
+is left alone: kinds 10050, 10002 and 30443, the inbound kind 1059 and
 the inbox REQ — the user's pubkey is visible there by design), the discovery
 plane
 (`PRODUCTION_DISCOVERY_RELAYS`: other accounts' relay lists and KeyPackages

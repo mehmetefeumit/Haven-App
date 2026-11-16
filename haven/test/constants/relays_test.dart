@@ -34,12 +34,14 @@ void main() {
       expect(discoveryRelays, equals(fallbackDiscoveryRelays));
     });
 
-    test('inbox defaults are the account seed less the read-gated relay', () {
+    test('inbox defaults are the account seed less the read-gated relay, '
+        'then ditto', () {
       expect(
         fallbackDefaultInboxRelays,
-        fallbackDefaultRelays
-            .where((r) => r != 'wss://relay.damus.io')
-            .toList(),
+        [
+          ...fallbackDefaultRelays.where((r) => r != 'wss://relay.damus.io'),
+          'wss://relay.ditto.pub',
+        ],
       );
       expect(fallbackDefaultRelays, contains('wss://relay.damus.io'));
     });

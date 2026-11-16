@@ -390,9 +390,10 @@ impl CircleStorage {
         Ok(removed)
     }
 
-    /// Drops the read-gated relay from an inbox list that is still exactly the
-    /// seed every install got before the inbox seed left it out (startup
-    /// migration, once per install).
+    /// Turns an inbox list that is still exactly the seed every install got
+    /// before the inbox seed left the read-gated relay out into the current
+    /// inbox seed: that relay's row goes and any seed relay missing is added
+    /// (startup migration, once per install).
     ///
     /// A Welcome sent to that relay is acknowledged and then never served back
     /// to this device, which does not authenticate (Security Rule 16). The
@@ -401,7 +402,7 @@ impl CircleStorage {
     /// relay added or removed — is theirs and is left alone. The sentinel is
     /// written either way, in the same transaction, so the check never runs
     /// again and a user who adds the relay back keeps it. The next relay-list
-    /// heal republishes the shortened kind 10050.
+    /// heal republishes the new kind 10050.
     ///
     /// # Returns
     ///
@@ -453,6 +454,17 @@ impl CircleStorage {
                     "DELETE FROM user_relays WHERE url = ?1 AND relay_type = ?2",
                     params![url, RelayType::Inbox.as_str()],
                 )?;
+            }
+            // An untouched seed becomes the current one: a relay it lacks is
+            // added, compared canonically so a stored spelling is never doubled.
+            let now = Utc::now().timestamp();
+            for relay in default_relays_for(RelayType::Inbox) {
+                if !stored.contains(&crate::relay::url_norm::canonicalize(&relay)) {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO user_relays (url, relay_type, created_at) VALUES (?1, ?2, ?3)",
+                        params![relay, RelayType::Inbox.as_str(), now],
+                    )?;
+                }
             }
         }
         tx.execute(
@@ -1541,7 +1553,7 @@ mod tests {
         assert_eq!(storage.retire_gated_inbox_seed().unwrap(), 0);
         let inbox = storage.list_user_relays(RelayType::Inbox).unwrap();
         assert!(inbox.iter().any(|u| u == READ_GATED_INBOX_SEED_RELAY));
-        assert_eq!(inbox.len(), RETIRED_INBOX_SEED.len());
+        assert_eq!(inbox.len(), crate::circle::PRODUCTION_INBOX_RELAYS.len() + 1);
     }
 
     #[test]
@@ -1559,9 +1571,11 @@ mod tests {
             storage.list_user_relays(RelayType::Inbox).unwrap(),
             vec![
                 "wss://nos.lol/".to_owned(),
-                "wss://relay.primal.net".to_owned()
+                "wss://relay.primal.net".to_owned(),
+                "wss://relay.ditto.pub".to_owned(),
             ],
-            "only the gated relay's row went, whatever its spelling"
+            "the gated relay's row went whatever its spelling, no seed relay is \
+             doubled under another spelling, and the missing one was added"
         );
     }
 

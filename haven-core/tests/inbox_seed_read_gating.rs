@@ -74,6 +74,25 @@ fn every_inbox_seed_relay_was_probed_and_serves_gift_wrap_reads() {
     }
 }
 
+/// One relay implementation's default config must not be able to gate every
+/// seeded inbox at once: strfry's current default gates kind-1059 reads.
+#[test]
+fn the_inbox_seed_spans_more_than_one_relay_implementation() {
+    let record = record();
+    let software: std::collections::BTreeSet<&str> = PRODUCTION_INBOX_RELAYS
+        .iter()
+        .map(|url| {
+            observation(&record, url)
+                .and_then(|relay| relay["software"].as_str())
+                .unwrap_or_else(|| panic!("inbox seed relay {url} has no recorded software"))
+        })
+        .collect();
+    assert!(
+        software.len() >= 2,
+        "every inbox seed relay runs the same software: {software:?}"
+    );
+}
+
 #[test]
 fn every_account_seed_relay_was_probed_and_serves_the_account_plane() {
     let record = record();

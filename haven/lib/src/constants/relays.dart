@@ -29,13 +29,16 @@ const fallbackDefaultRelays = <String>[
 /// (`scripts/ci/check_profile_privacy_boundaries.sh` check 13). It is
 /// [`fallbackDefaultRelays`] less every relay that withholds gift-wrap
 /// (kind 1059) reads from a client that does not authenticate, as Haven never
-/// does: a Welcome delivered there is never read. Used by
+/// does: a Welcome delivered there is never read, then `relay.ditto.pub`, whose
+/// other relay software keeps one implementation's default from gating every
+/// seeded inbox. Used by
 /// `InboxRelaysNotifier` when the relay-preferences storage seed transiently
 /// fails, so that fallback never points the invitation poll at such a relay.
 /// Never [`defaultRelays`]: that is the KeyPackage (kind 10002) seed.
 const fallbackDefaultInboxRelays = <String>[
   'wss://relay.primal.net',
   'wss://nos.lol',
+  'wss://relay.ditto.pub',
 ];
 
 /// The canonical list of default relay URLs.
