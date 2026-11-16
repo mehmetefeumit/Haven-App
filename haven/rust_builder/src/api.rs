@@ -999,7 +999,7 @@ const MLS_SESSION_DB_KEY_ID: &str = "mls.session.key.v2";
 /// Returns an error string if the keyring cannot be accessed or if key
 /// generation fails.
 fn get_or_create_circle_db_key() -> Result<zeroize::Zeroizing<String>, String> {
-    use rand::Rng as _;
+    use rand::TryRng as _;
 
     let entry = keyring_core::Entry::new(CIRCLES_DB_SERVICE, CIRCLES_DB_KEY_ID)
         .map_err(|e| format!("Failed to create keyring entry for circles.db: {e}"))?;
@@ -1013,7 +1013,9 @@ fn get_or_create_circle_db_key() -> Result<zeroize::Zeroizing<String>, String> {
         Err(keyring_core::Error::NoEntry) => {
             // Key doesn't exist — generate and store a new one
             let mut key_bytes = zeroize::Zeroizing::new([0u8; 32]);
-            rand::rand_core::UnwrapErr(rand::rngs::SysRng).fill_bytes(key_bytes.as_mut());
+            rand::rngs::SysRng
+                .try_fill_bytes(key_bytes.as_mut())
+                .map_err(|_| "Failed to generate circles.db key".to_owned())?;
 
             entry
                 .set_secret(key_bytes.as_ref())
@@ -1401,7 +1403,7 @@ fn tile_err_to_string(err: &TileCacheError) -> String {
 /// Returns an error string if the keyring cannot be accessed or key generation
 /// fails.
 fn get_or_create_tiles_db_key() -> Result<zeroize::Zeroizing<String>, String> {
-    use rand::Rng as _;
+    use rand::TryRng as _;
 
     let entry = keyring_core::Entry::new(TILES_DB_SERVICE, TILES_DB_KEY_ID)
         .map_err(|e| format!("Failed to create keyring entry for tiles.db: {e}"))?;
@@ -1413,7 +1415,9 @@ fn get_or_create_tiles_db_key() -> Result<zeroize::Zeroizing<String>, String> {
         }
         Err(keyring_core::Error::NoEntry) => {
             let mut key_bytes = zeroize::Zeroizing::new([0u8; 32]);
-            rand::rand_core::UnwrapErr(rand::rngs::SysRng).fill_bytes(key_bytes.as_mut());
+            rand::rngs::SysRng
+                .try_fill_bytes(key_bytes.as_mut())
+                .map_err(|_| "Failed to generate tiles.db key".to_owned())?;
 
             entry
                 .set_secret(key_bytes.as_ref())
@@ -4946,7 +4950,7 @@ const PROFILE_PICTURE_BATCH_DEADLINE: std::time::Duration = std::time::Duration:
 /// Samples the pause between two consecutive profile-picture downloads.
 ///
 /// `SysRng` only — a thin `getrandom` wrapper with no seeded expansion, matching
-/// the profile module's CSPRNG-only rule (`rand::rng` is banned; a
+/// the profile module's CSPRNG-only rule (the thread-local `rand::rng` is banned; a
 /// predictable schedule is exactly what makes a burst legible as a roster).
 /// Reuses [`PROFILE_INTER_REQ_JITTER_MS`] so the picture plane is paced like the
 /// kind-0 plane rather than inventing a second, divergent tuning.
@@ -5809,7 +5813,7 @@ impl CircleManagerFfi {
     /// been pointless if the avatar fetch handed the same set over anyway.
     ///
     /// So this call:
-    /// * **shuffles** the order every cycle from the OS CSPRNG (`rand::rngs::SysRng`;
+    /// * **shuffles** the order every cycle from the OS CSPRNG (`SysRng`;
     ///   `rand::rng` is banned), so arrival order carries no roster ordering
     ///   and a newly added member does not appear at a stable position;
     /// * runs the downloads **one at a time**, never concurrently, so there is

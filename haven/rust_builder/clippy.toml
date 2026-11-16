@@ -1,3 +1,10 @@
 disallowed-methods = [
-    { path = "rand::rng", reason = "use rand::rngs::SysRng directly; rand::rng's ThreadRng is a userspace generator reseeded from the OS, not appropriate for jitter that must be unpredictable to relay observers" },
+    { path = "rand::rng", reason = "use rand::rngs::SysRng directly; the thread-local generator's reseeded StdRng is not appropriate for jitter that must be unpredictable to relay observers" },
+    { path = "rand::random", reason = "draws from the thread-local generator; use rand::rngs::SysRng" },
+    { path = "rand::random_iter", reason = "draws from the thread-local generator; use rand::rngs::SysRng" },
+    { path = "rand::random_range", reason = "draws from the thread-local generator; use rand::rngs::SysRng" },
+    { path = "rand::random_bool", reason = "draws from the thread-local generator; use rand::rngs::SysRng" },
+    { path = "rand::random_ratio", reason = "draws from the thread-local generator; use rand::rngs::SysRng" },
+    { path = "rand::fill", reason = "draws from the thread-local generator; use rand::rngs::SysRng" },
+    { path = "rand::make_rng", reason = "draws from the thread-local generator; use rand::rngs::SysRng" },
 ]

@@ -3024,10 +3024,11 @@ plus a self-declaration — not argued away in a header comment.
 | 1 key separation | **COVERED** — `mls_e2e_security_tests.rs::p3a_leaf_signature_key_differs_from_nostr_identity_key` reads both keys off every leaf through `SessionManager::members()`, the leaf-level source the deleted `get_ratchet_tree_info` walk provided: `Member::credential` carries the leaf SIGNATURE key and `Member::id` the 32-byte x-only account key — `cgka-traits`' doc comment has the two TRANSPOSED, so a reader who trusts it writes the assertion backwards and it still passes. Asserted over Alice's post-create AND Bob's post-welcome view, anchored on the harness's own keypairs so it cannot pass comparing two strangers' keys, with both lengths pinned at 32 so the inequality is a real byte difference and not a truncation artifact. It catches the mutation that reuses the Nostr secret as the MLS signer, which `account-identity-proof.v2` does NOT: the proof binds the account to the leaf, it never requires them to differ | `p3a_key_separation_identity_proof_enforced_and_identity_not_used_for_group_messages` keeps the complementary half no leaf read can give — key separation as observed BY A RELAY |
 
 Also: `haven/rust_builder/clippy.toml` now carries `haven-core`'s `thread_rng`
-ban, so the crate that mints both SQLCipher keys (`api.rs:832`, `:1171`) sits
-under the same `disallowed-methods` lint as the core. *(2026-11-16: rand 0.10
-renamed `thread_rng` to `rand::rng`, which the old row no longer matched;
-rust_builder's ban now names `rand::rng`.)*
+ban, so the crate that mints both SQLCipher keys (`get_or_create_circle_db_key`,
+`get_or_create_tiles_db_key`) sits under the same `disallowed-methods` lint as
+the core. *(2026-11-16: rust_builder moved to rand 0.10, where the thread-local
+generator is `rand::rng`; its `clippy.toml` bans that path and every `rand::`
+free function that draws from it, and the keys come from `SysRng`.)*
 
 ### What writing the gates FOUND, 2026-08-12
 

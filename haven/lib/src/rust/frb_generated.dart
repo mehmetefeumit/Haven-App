@@ -15560,7 +15560,7 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   /// been pointless if the avatar fetch handed the same set over anyway.
   ///
   /// So this call:
-  /// * **shuffles** the order every cycle from the OS CSPRNG (`rand::rngs::SysRng`;
+  /// * **shuffles** the order every cycle from the OS CSPRNG (`SysRng`;
   ///   `rand::rng` is banned), so arrival order carries no roster ordering
   ///   and a newly added member does not appear at a stable position;
   /// * runs the downloads **one at a time**, never concurrently, so there is
