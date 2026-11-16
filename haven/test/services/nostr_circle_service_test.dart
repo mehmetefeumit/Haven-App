@@ -92,14 +92,12 @@ class _StubRelayService implements RelayService {
 
   @override
   Future<List<String>> fetchGiftWraps({
-    required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
   }) => throw UnimplementedError();
 
   @override
   Future<List<RelayGiftWrapFetch>> fetchGiftWrapsPerRelay({
-    required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
   }) => throw UnimplementedError();
@@ -113,9 +111,7 @@ class _StubRelayService implements RelayService {
   }) => throw UnimplementedError();
 
   @override
-  Future<List<OwnRelayPresenceFfi>> checkOwnReachability({
-    required String ownPubkey,
-  }) => throw UnimplementedError();
+  Future<List<OwnRelayPresenceFfi>> checkOwnReachability() => throw UnimplementedError();
 
   @override
   Future<void> disconnectRelay(String url) async {}

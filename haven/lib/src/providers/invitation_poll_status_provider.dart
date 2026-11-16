@@ -235,7 +235,6 @@ class InvitationPollStatusNotifier extends Notifier<InvitationPollStatus> {
       List<Future<void>>.generate(relays.length, (i) async {
         try {
           final outcomes = await relayService.fetchGiftWrapsPerRelay(
-            recipientPubkey: identity.pubkeyHex,
             relays: [relays[i]],
             since: since,
           );

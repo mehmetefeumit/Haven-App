@@ -172,7 +172,7 @@ void main() {
         await container.read(relayStatusProvider.notifier).checkAllRelays();
 
         final state = container.read(relayStatusProvider).value!;
-        expect(relay.ownPresenceAsks, [_testIdentity.pubkeyHex]);
+        expect(relay.ownPresenceChecks, 1);
         expect(state.relays, hasLength(3));
         final kp = state.relays[1];
         expect(kp.keyPackage, KindPresence.outdated);
@@ -307,7 +307,7 @@ void main() {
       await container.read(relayStatusProvider.notifier).checkAllRelays();
 
       final state = await container.read(relayStatusProvider.future);
-      expect(relay.ownPresenceAsks, [_testIdentity.pubkeyHex]);
+      expect(relay.ownPresenceChecks, 1);
       expect(state.relays.map((r) => r.relayUrl), [_inbox, _kp]);
       expect(state.lastChecked, isNotNull);
     });
@@ -329,7 +329,7 @@ void main() {
       await container.read(relayStatusProvider.notifier).checkAllRelays();
 
       expect(container.read(relayStatusProvider).hasError, isTrue);
-      expect(relay.ownPresenceAsks, isEmpty);
+      expect(relay.ownPresenceChecks, 0);
     });
   });
 
@@ -457,7 +457,7 @@ void main() {
             .republish();
 
         expect(publishes, 1);
-        expect(relay.ownPresenceAsks, hasLength(2), reason: 'checked again');
+        expect(relay.ownPresenceChecks, 2, reason: 'checked again');
         expect(
           outcome,
           RepublishOutcome.allCurrent,

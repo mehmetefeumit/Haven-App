@@ -1,8 +1,9 @@
 //! An invitation crosses every plane it travels on, through the FFI's own
 //! orchestration, to an invitee whose first inbox relay takes gift wraps and
 //! serves them only to a client that authenticates — as `relay.damus.io` does
-//! under strfry's default `restrictedReadKinds` — while Haven never
-//! authenticates (Security Rule 16).
+//! under strfry's default `restrictedReadKinds`. The invitee's own inbox reads
+//! answer that relay's NIP-42 challenge with the identity key (owner-directed
+//! 2026-11-16); nothing else Haven sends ever does.
 //!
 //! The invitee's lists go in through the user path and out through the
 //! product's relay-list and `KeyPackage` maintenance; the inviter finds them
@@ -11,8 +12,8 @@
 //! reads its inbox over the list its store holds, by the page fetch and by the
 //! live engine's bus as `live_events` reads it, and takes each wrap in as Dart
 //! does. Every relay sits behind a recording front, so each arm also proves its
-//! own premise: the gate fired, the gated relay took the Welcome, and no client
-//! ever answered a challenge.
+//! own premise: the gate fired, the gated relay took the Welcome, and only an
+//! own inbox read's connection ever answered a challenge.
 //!
 //! One world serves every arm: this binary's tests gate the E2E lanes. No wait
 //! here is a sleep: each awaits a recorded frame or a product outcome, bounded
@@ -72,8 +73,10 @@ struct World {
     gated: FrontedRelay,
     /// The invitee's second inbox relay: it serves them.
     plain: FrontedRelay,
-    /// A second gating relay, for the inbox no relay of which serves them.
+    /// A second gating relay, for the inbox every relay of which gates them.
     gated_too: FrontedRelay,
+    /// A relay that refuses gift-wrap reads even once the reader authenticated.
+    refusing: FrontedRelay,
     /// Where the circles' group traffic goes.
     location: FrontedRelay,
     /// This binary's discovery relay: no account's relay.
@@ -95,6 +98,7 @@ impl World {
             gated: FrontedRelay::run_gating().await,
             plain: FrontedRelay::run().await,
             gated_too: FrontedRelay::run_gating().await,
+            refusing: FrontedRelay::run_refusing().await,
             location: FrontedRelay::run().await,
             discovery: discovery[0].clone(),
             relays: RelayManagerFfi::new_instance()
@@ -106,6 +110,7 @@ impl World {
             world.gated.front.url(),
             world.plain.front.url(),
             world.gated_too.front.url(),
+            world.refusing.front.url(),
             world.location.front.url(),
         ];
         assert!(
@@ -115,12 +120,13 @@ impl World {
         world
     }
 
-    fn fronts(&self) -> [&RecordingFront; 5] {
+    fn fronts(&self) -> [&RecordingFront; 6] {
         [
             &self.inviter_account.front,
             &self.gated.front,
             &self.plain.front,
             &self.gated_too.front,
+            &self.refusing.front,
             &self.location.front,
         ]
     }
@@ -368,41 +374,65 @@ fn refused_reads(front: &RecordingFront, pubkey: &str) -> usize {
 }
 
 /// Waits until this gating front has refused at least `n` of `pubkey`'s
-/// gift-wrap reads: every such read reaching a gating front is refused, and
-/// recorded as refused before it is recorded at all.
+/// gift-wrap reads, woken by each frame: a refused read is recorded as refused
+/// before it is recorded at all.
 async fn await_refused_reads(front: &RecordingFront, pubkey: &str, n: usize) {
     within(
         "the gate's refusal",
-        front.wait_for(|frames| {
-            frames
-                .iter()
-                .filter(|frame| inbox_req(frame, pubkey).is_some())
-                .count()
-                >= n
-        }),
+        front.wait_for(|_| refused_reads(front, pubkey) >= n),
     )
     .await;
-    assert!(
-        refused_reads(front, pubkey) >= n,
-        "premise: the gate refused the invitee's gift-wrap reads",
-    );
 }
 
-/// Haven authenticates to no relay yet: owner decision D1 is pending, and
-/// until it lands no client sends an `AUTH` frame, ever. The AUTH unit, if it
-/// lands, changes this assertion deliberately — to an `AUTH` answering a
-/// gift-wrap read's challenge on the inbox plane and nothing else.
-fn assert_haven_sent_no_auth_frame_yet(world: &World) {
+/// Haven answers a relay's challenge only on an own inbox read's connection
+/// (owner-directed 2026-11-16): every connection that sent an `AUTH` sent
+/// nothing but valid answers under one key, `CLOSE`s and `REQ`s for that
+/// key's gift wraps — no `EVENT` and no other `REQ` — so neither the publish
+/// client nor a group plane ever authenticated.
+fn assert_only_own_inbox_reads_authenticated(world: &World) {
     for front in world.fronts() {
-        assert!(
-            !front
-                .frames()
+        let frames = front.frames();
+        let answering: std::collections::BTreeSet<usize> = frames
+            .iter()
+            .filter(|frame| json(frame).is_some_and(|frame| frame[0] == "AUTH"))
+            .map(|frame| frame.conn)
+            .collect();
+        for conn in answering {
+            let on: Vec<&RecordedFrame> = frames.iter().filter(|f| f.conn == conn).collect();
+            let signers: std::collections::BTreeSet<String> = on
                 .iter()
-                .filter_map(json)
-                .any(|frame| frame[0] == "AUTH"),
-            "a client answered a relay's challenge",
-        );
+                .filter_map(|frame| json(frame))
+                .filter(|frame| frame[0] == "AUTH")
+                .map(|frame| {
+                    let answer: nostr::Event = nostr::JsonUtil::from_json(frame[1].to_string())
+                        .expect("an answer to a challenge is an event");
+                    assert!(answer.verify().is_ok(), "an answer to a challenge verifies");
+                    answer.pubkey.to_hex()
+                })
+                .collect();
+            let [signer] = <[_; 1]>::try_from(signers.into_iter().collect::<Vec<_>>())
+                .unwrap_or_else(|_| panic!("one connection answers under one key"));
+            for frame in on {
+                let verb = json(frame).and_then(|frame| frame[0].as_str().map(str::to_owned));
+                assert!(
+                    matches!(verb.as_deref(), Some("AUTH" | "CLOSE"))
+                        || inbox_req(frame, &signer).is_some(),
+                    "a connection that answered a challenge carried more than \
+                     the answering key's own gift-wrap reads",
+                );
+            }
+        }
     }
+}
+
+/// How many challenges `pubkey` answered on this front.
+fn answers_from(front: &RecordingFront, pubkey: &str) -> usize {
+    front
+        .frames()
+        .iter()
+        .filter_map(json)
+        .filter(|frame| frame[0] == "AUTH" && frame[1]["pubkey"].as_str() == Some(pubkey))
+        .count()
 }
 
 fn wrap_id(wrap_json: &str) -> String {
@@ -421,24 +451,28 @@ async fn read_inbox(world: &World, bob: &Account) -> Vec<RelayGiftWrapFetchFfi> 
         "the inbox read",
         world
             .relays
-            .fetch_gift_wraps_per_relay(bob.hex(), inbox, Some(since)),
+            .fetch_gift_wraps_per_relay(&bob.circle, inbox, Some(since)),
     )
     .await
     .expect("the inbox read runs")
 }
 
-/// The page fetch of an inbox whose first relay gates reads and whose second
-/// serves them: the one wrap the second relay holds.
-async fn read_inbox_past_its_gate(world: &World, bob: &Account) -> String {
+/// The page fetch of an inbox of two relays, the first or both gating reads:
+/// each read served once the invitee answered its challenge, and each the
+/// same one Welcome.
+async fn read_inbox_through_its_gate(world: &World, bob: &Account) -> String {
     let [first, second] = <[_; 2]>::try_from(read_inbox(world, bob).await)
         .unwrap_or_else(|_| panic!("one answer per inbox relay"));
     assert!(
-        first.read == InboxReadFfi::Refused && first.events.is_empty(),
-        "the gated relay's read is typed refused, and served nothing",
+        first.read == InboxReadFfi::Served && second.read == InboxReadFfi::Served,
+        "a gated inbox relay's read is served once the invitee authenticated",
     );
-    assert_eq!(second.read, InboxReadFfi::Served);
-    let [wrap] = <[_; 1]>::try_from(second.events)
-        .unwrap_or_else(|_| panic!("the readable inbox relay holds the one Welcome"));
+    let [wrap] = <[_; 1]>::try_from(first.events)
+        .unwrap_or_else(|_| panic!("the gated inbox relay serves the one Welcome"));
+    assert!(
+        second.events.len() == 1 && wrap_id(&second.events[0]) == wrap_id(&wrap),
+        "both inbox relays serve the same one Welcome",
+    );
     wrap
 }
 
@@ -602,14 +636,15 @@ async fn split_plane_invites_reach_an_invitee_whose_first_inbox_relay_gates_read
 
     let group = first_inbox_relay_gates_reads(&world, &alice).await;
     every_inbox_relay_gates_reads(&world, &alice).await;
+    an_inbox_relay_refusing_after_authentication_serves_nothing(&world, &alice).await;
     a_fresh_invitee_hears_a_welcome_live(&world, &alice, group).await;
     a_superseded_key_package_opens_only_within_its_grace(&world, &alice, &clock).await;
     a_welcome_stored_before_the_session_reaches_it(&world, &alice).await;
 }
 
-/// (a) The Welcome reaches the inbox relay the invitee can read, not only the
-/// first, which takes it and never serves it back: the page fetch finds it on
-/// the second relay, and so does the live engine. Returns the circle.
+/// (a) The Welcome reaches both inbox relays: the page fetch reads it from
+/// the first, which gates reads, once the invitee answered its challenge, and
+/// from the second; the live engine reads it too. Returns the circle.
 async fn first_inbox_relay_gates_reads(world: &World, alice: &Account) -> Vec<u8> {
     let gated = world.gated.front.url();
     let plain = world.plain.front.url();
@@ -626,7 +661,11 @@ async fn first_inbox_relay_gates_reads(world: &World, alice: &Account) -> Vec<u8
     );
     let group = created.circle.expect("the circle").mls_group_id;
 
-    let wrap = read_inbox_past_its_gate(world, &bob).await;
+    let wrap = read_inbox_through_its_gate(world, &bob).await;
+    assert!(
+        answers_from(&world.gated.front, &bob.hex()) >= 1,
+        "premise: the gated relay was read after the invitee's answer",
+    );
     // Compared, never rendered: a failure must not print an event id.
     assert!(
         published_wraps(&world.gated.front, &bob.hex()) == [wrap_id(&wrap)],
@@ -661,16 +700,16 @@ async fn first_inbox_relay_gates_reads(world: &World, alice: &Account) -> Vec<u8
     );
 
     join(alice, &bob, &invitation, &group).await;
-    // The page fetch's read, and the live session's REQ.
+    // The page fetch's read before its answer, and the live session's REQ.
     await_refused_reads(&world.gated.front, &bob.hex(), 2).await;
-    assert_haven_sent_no_auth_frame_yet(world);
+    assert_only_own_inbox_reads_authenticated(world);
     group
 }
 
-/// (b) An inbox no relay of which serves gift wraps: every relay of the page
-/// fetch reads refused, none served, and no invitation is held. The inviter
-/// still counts the Welcome sent — a gating relay acknowledges the write
-/// (strfry does), and Haven does not read its own Welcome back.
+/// (b) An inbox every relay of which gates gift-wrap reads: the page fetch
+/// answers each relay's challenge, every read is served, and the Welcome they
+/// hold opens. The inviter counted it sent: a gating relay acknowledges the
+/// write (strfry does).
 async fn every_inbox_relay_gates_reads(world: &World, alice: &Account) {
     let gated = world.gated.front.url();
     let gated_too = world.gated_too.front.url();
@@ -689,12 +728,45 @@ async fn every_inbox_relay_gates_reads(world: &World, alice: &Account) {
         );
     }
 
-    let read = read_inbox(world, &bob).await;
-    assert!(read.len() == 2, "one answer per inbox relay");
+    let wrap = read_inbox_through_its_gate(world, &bob).await;
+    take_in(alice, &bob, &wrap).await;
+    for front in [&world.gated.front, &world.gated_too.front] {
+        await_refused_reads(front, &bob.hex(), 1).await;
+        assert!(
+            answers_from(front, &bob.hex()) >= 1,
+            "premise: each gated relay was read after the invitee's answer",
+        );
+    }
+    assert_only_own_inbox_reads_authenticated(world);
+}
+
+/// (b') An inbox whose one relay refuses gift-wrap reads even once the reader
+/// authenticated: the page fetch answers its challenge, asks again, and reads
+/// it `Refused` with nothing served; no invitation is held. The inviter still
+/// counts the Welcome sent — the relay acknowledged the write.
+async fn an_inbox_relay_refusing_after_authentication_serves_nothing(
+    world: &World,
+    alice: &Account,
+) {
+    let refusing = world.refusing.front.url();
+    let plain = world.plain.front.url();
+    let bob = invitee(world, "split_plane_b2", &[refusing], &[plain, refusing]).await;
+    let member = look_up(world, alice, &bob, None).await;
+    let created = create(world, alice, vec![member], "Refused after auth").await;
     assert!(
-        read.iter()
-            .all(|relay| relay.read == InboxReadFfi::Refused && relay.events.is_empty()),
-        "every inbox relay reads refused, never served",
+        created.welcomes_sent == 1 && created.welcomes_total == 1,
+        "the refusing relay acknowledges the Welcome it will not serve",
+    );
+    assert!(
+        published_wraps(&world.refusing.front, &bob.hex()).len() == 1,
+        "premise: the refusing inbox relay took the Welcome",
+    );
+
+    let [read] = <[_; 1]>::try_from(read_inbox(world, &bob).await)
+        .unwrap_or_else(|_| panic!("one answer per inbox relay"));
+    assert!(
+        read.read == InboxReadFfi::Refused && read.events.is_empty(),
+        "a relay refusing an authenticated read is typed refused, and served nothing",
     );
     assert!(
         bob.circle
@@ -704,10 +776,13 @@ async fn every_inbox_relay_gates_reads(world: &World, alice: &Account) {
             .is_empty(),
         "no invitation came of an inbox nothing can be read from",
     );
-    for front in [&world.gated.front, &world.gated_too.front] {
-        await_refused_reads(front, &bob.hex(), 1).await;
-    }
-    assert_haven_sent_no_auth_frame_yet(world);
+    // The read before the answer, and the one after it.
+    await_refused_reads(&world.refusing.front, &bob.hex(), 2).await;
+    assert!(
+        answers_from(&world.refusing.front, &bob.hex()) == 1,
+        "the refusal came after the invitee answered the relay's challenge",
+    );
+    assert_only_own_inbox_reads_authenticated(world);
 }
 
 /// (c) An invitee that has never had a circle starts its session with none,
@@ -753,7 +828,7 @@ async fn a_fresh_invitee_hears_a_welcome_live(world: &World, alice: &Account, gr
     );
     let invitation = take_in(alice, &bob, &wrap).await;
     join(alice, &bob, &invitation, &group).await;
-    assert_haven_sent_no_auth_frame_yet(world);
+    assert_only_own_inbox_reads_authenticated(world);
 }
 
 /// (d) An inviter that fetched a `KeyPackage` just before the invitee's
@@ -833,7 +908,7 @@ async fn a_superseded_key_package_opens_only_within_its_grace(
     )
     .await
     .expect("the tick runs");
-    let wrap = read_inbox_past_its_gate(world, &within_grace).await;
+    let wrap = read_inbox_through_its_gate(world, &within_grace).await;
     let invitation = take_in(alice, &within_grace, &wrap).await;
     join(
         alice,
@@ -852,7 +927,7 @@ async fn a_superseded_key_package_opens_only_within_its_grace(
     )
     .await
     .expect("the tick runs");
-    let wrap = read_inbox_past_its_gate(world, &past_grace).await;
+    let wrap = read_inbox_through_its_gate(world, &past_grace).await;
     let invitation = take_in(alice, &past_grace, &wrap).await;
     let accepted = past_grace
         .circle
@@ -880,7 +955,7 @@ async fn a_superseded_key_package_opens_only_within_its_grace(
             "premise: the gated relay was sent the Welcome, and took it",
         );
     }
-    assert_haven_sent_no_auth_frame_yet(world);
+    assert_only_own_inbox_reads_authenticated(world);
 }
 
 /// (e) A Welcome stored before the invitee's session starts — sent while the
@@ -967,5 +1042,5 @@ async fn a_welcome_stored_before_the_session_reaches_it(world: &World, alice: &A
     );
     // Each session's inbox REQ.
     await_refused_reads(&world.gated.front, &pubkey, 2).await;
-    assert_haven_sent_no_auth_frame_yet(world);
+    assert_only_own_inbox_reads_authenticated(world);
 }

@@ -321,7 +321,6 @@ void main() {
             relayManager: bobRelayManager,
             invitee: bobManager,
             inviteeSecretBytes: bobSecretBytes,
-            inviteePubkeyHex: bobIdManager.pubkeyHex(),
             relays: const [_testRelayUrl],
             scenario: 'pipeline',
           );
@@ -769,7 +768,6 @@ void main() {
           relayManager: bobRelayManager,
           invitee: bobManager,
           inviteeSecretBytes: bobSecretBytes,
-          inviteePubkeyHex: bobIdManager.pubkeyHex(),
           relays: const [_testRelayUrl],
           scenario: 'pipeline',
         );

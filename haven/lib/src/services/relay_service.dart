@@ -743,16 +743,17 @@ abstract class RelayService {
     required List<String> relays,
   });
 
-  /// Fetches gift-wrapped events (kind 1059) for a recipient.
+  /// Fetches the gift-wrapped events (kind 1059) addressed to this account.
   ///
-  /// Queries relays for NIP-59 gift wrap events addressed to the given
-  /// public key. Use [since] to restrict results to events after a timestamp.
+  /// Queries relays for NIP-59 gift wrap events addressed to the identity of
+  /// the circle manager, answering a relay's NIP-42 challenge as that
+  /// identity, so a relay serving gift wraps only to their recipient is read
+  /// too. Use [since] to restrict results to events after a timestamp.
   ///
   /// Returns a list of gift-wrap event JSON strings.
   ///
   /// Throws [RelayServiceException] if fetching fails.
   Future<List<String>> fetchGiftWraps({
-    required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
   });
@@ -764,14 +765,13 @@ abstract class RelayService {
   /// attribution), this queries each relay on its own and returns a
   /// per-relay outcome, so callers can show an accurate tally. A relay that
   /// served the read with zero events is [InboxRead.served] with an empty
-  /// event list — distinct from one that refused it, did not finish or could
-  /// not be reached.
+  /// event list — distinct from one that refused it (even after this account
+  /// answered its NIP-42 challenge), did not finish or could not be reached.
   ///
   /// Throws [RelayServiceException] only if the call fails entirely (e.g.
   /// URL validation). Per-relay failures are reported in
   /// [RelayGiftWrapFetch.read], never thrown.
   Future<List<RelayGiftWrapFetch>> fetchGiftWrapsPerRelay({
-    required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
   });
@@ -913,9 +913,7 @@ abstract class RelayService {
   /// relay never answers; a caller shows that as checking, never as a block.
   ///
   /// Throws [RelayServiceException] if the check cannot run.
-  Future<List<OwnRelayPresenceFfi>> checkOwnReachability({
-    required String ownPubkey,
-  });
+  Future<List<OwnRelayPresenceFfi>> checkOwnReachability();
 
   /// Removes a single relay from the persistent connection pool by URL.
   ///

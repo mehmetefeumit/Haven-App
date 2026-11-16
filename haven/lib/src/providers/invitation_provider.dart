@@ -113,7 +113,6 @@ final invitationPollerProvider = FutureProvider<int>((ref) async {
     );
 
     final giftWraps = await relayService.fetchGiftWraps(
-      recipientPubkey: identity.pubkeyHex,
       relays: pollRelays,
       since: since,
     );

@@ -198,7 +198,6 @@ import '_lib/circle_creation.dart'
     show
         DeliveredCircle,
         createCircleDelivered,
-        giftWrapIdsFor,
         settleLiveSession;
 import '_lib/coordination.dart';
 import '_lib/diagnostics.dart';
@@ -2142,10 +2141,9 @@ void main() {
           // The wraps the relay already holds for Alice: earlier scenarios
           // invited her too, so the one this create sends is the one that is
           // new.
-          final heldWraps = await giftWrapIdsFor(
-            relayManager: relayManager,
-            recipientPubkeyHex: _alicePubkeyHex(),
-            relays: <String>[m11Relay.url],
+          final heldWraps = await _giftWrapIdSnapshot(
+            m11Relay,
+            _alicePubkeyHex(),
           );
           // Bob (a SyntheticUser, no engine) creates a circle inviting Alice;
           // the resulting Welcome carries the NIP-59 back-dated (±48 h)
@@ -2186,10 +2184,9 @@ void main() {
           // (the real MLS group id stays inside the still-encrypted welcome
           // until Accept), so match on the exact wrap just sent — a
           // stronger oracle than a group-id match, since it pins THE event.
-          final sent = (await giftWrapIdsFor(
-            relayManager: relayManager,
-            recipientPubkeyHex: _alicePubkeyHex(),
-            relays: <String>[m11Relay.url],
+          final sent = (await _giftWrapIdSnapshot(
+            m11Relay,
+            _alicePubkeyHex(),
           )).difference(heldWraps);
           if (sent.length != 1) {
             throw StateError(
@@ -2657,10 +2654,9 @@ void main() {
           // The wraps the relay already holds for Alice: earlier scenarios
           // invited her too, so the one this create sends is the one that is
           // new.
-          final heldWraps = await giftWrapIdsFor(
-            relayManager: relayManager,
-            recipientPubkeyHex: _alicePubkeyHex(),
-            relays: <String>[m11Relay.url],
+          final heldWraps = await _giftWrapIdSnapshot(
+            m11Relay,
+            _alicePubkeyHex(),
           );
           final bobSecret = await bob.user.getSecretBytes();
           final DeliveredCircle creation;
@@ -2692,10 +2688,9 @@ void main() {
 
           // DM-4: match on the gift-wrap event id — the stand-in key pending
           // invitations carry until Accept (see scenario f's doc).
-          final sent = (await giftWrapIdsFor(
-            relayManager: relayManager,
-            recipientPubkeyHex: _alicePubkeyHex(),
-            relays: <String>[m11Relay.url],
+          final sent = (await _giftWrapIdSnapshot(
+            m11Relay,
+            _alicePubkeyHex(),
           )).difference(heldWraps);
           if (sent.length != 1) {
             throw StateError(

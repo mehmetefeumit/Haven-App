@@ -3501,22 +3501,18 @@ class _MutableMockRelayService implements RelayService {
 
   @override
   Future<List<String>> fetchGiftWraps({
-    required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
   }) async => [];
 
   @override
   Future<List<RelayGiftWrapFetch>> fetchGiftWrapsPerRelay({
-    required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
   }) async => [];
 
   @override
-  Future<List<OwnRelayPresenceFfi>> checkOwnReachability({
-    required String ownPubkey,
-  }) async => const [];
+  Future<List<OwnRelayPresenceFfi>> checkOwnReachability() async => const [];
 
   @override
   Future<void> disconnectRelay(String url) async {}
@@ -3610,22 +3606,18 @@ class _PauseRacingRelayService implements RelayService {
 
   @override
   Future<List<String>> fetchGiftWraps({
-    required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
   }) async => [];
 
   @override
   Future<List<RelayGiftWrapFetch>> fetchGiftWrapsPerRelay({
-    required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
   }) async => [];
 
   @override
-  Future<List<OwnRelayPresenceFfi>> checkOwnReachability({
-    required String ownPubkey,
-  }) async => const [];
+  Future<List<OwnRelayPresenceFfi>> checkOwnReachability() async => const [];
 
   @override
   Future<void> disconnectRelay(String url) async {}
@@ -3709,22 +3701,18 @@ class _SinceCapturingRelayService implements RelayService {
 
   @override
   Future<List<String>> fetchGiftWraps({
-    required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
   }) async => [];
 
   @override
   Future<List<RelayGiftWrapFetch>> fetchGiftWrapsPerRelay({
-    required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
   }) async => [];
 
   @override
-  Future<List<OwnRelayPresenceFfi>> checkOwnReachability({
-    required String ownPubkey,
-  }) async => const [];
+  Future<List<OwnRelayPresenceFfi>> checkOwnReachability() async => const [];
 
   @override
   Future<void> disconnectRelay(String url) async {}

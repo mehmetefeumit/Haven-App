@@ -4,6 +4,8 @@
 //! maintenance sends and judged by maintenance's own rules, so the relay
 //! settings page can never call a relay healthy that the next tick would heal.
 
+use std::sync::Arc;
+
 use nostr::{Event, Filter, Kind, PublicKey, Timestamp};
 
 use super::key_package::{
@@ -14,7 +16,7 @@ use super::kp_lifetime::TrackedKpLifetime;
 use super::relay_list::list_relay_healthy;
 use crate::log_alias;
 use crate::nostr::mls::TrackedKeyPackage;
-use crate::relay::live_sync::planes::inbox::inbox_filter;
+use crate::relay::nip42::Nip42Signer;
 use crate::relay::publishers::dedup_key;
 use crate::relay::{InboxRead, RelayFetchOutcome, RelayManager};
 
@@ -94,19 +96,22 @@ pub struct OwnRelayLists<'a> {
 /// `KeyPackage` list, then the lookup relays.
 ///
 /// The probes are maintenance's (30443 `limit` 64, 10002 and 10050 `limit` 4),
-/// then, of inbox relays only, the live plane's gift-wrap read (`limit` 1,
-/// from now), one after another so a relay's handshake is never raced against
-/// itself, and only events `own` signed count. A 30443 is current exactly when
+/// then, of inbox relays only, the invitations page's gift-wrap read
+/// (`limit` 1, from now) on identity connections of its own
+/// ([`RelayManager::read_own_inbox_per_relay`]), one after another so a
+/// relay's handshake is never raced against itself. Everything is asked about
+/// `signer`'s key, and only events it signed count. A 30443 is current exactly when
 /// maintenance would count the relay as serving `tracked`
 /// ([`RelayKpSnapshot::serves_current_package`]); a relay list when its newest
 /// copy names exactly the configured list ([`list_relay_healthy`]).
 pub async fn own_presence<'a>(
     relay: &RelayManager,
-    own: &PublicKey,
+    signer: &Arc<Nip42Signer>,
     lists: &OwnRelayLists<'a>,
     tracked: Option<&TrackedKeyPackage>,
     tracked_lifetime: TrackedKpLifetime,
 ) -> Vec<OwnRelayPresence> {
+    let own = &signer.public_key();
     let on = |list: &[String], key: &str| list.iter().any(|url| dedup_key(url) == key);
     let expected = |yes: bool| {
         if yes {
@@ -206,14 +211,15 @@ pub async fn own_presence<'a>(
         }
     }
 
-    ask_inbox_reads(relay, own, &mut rows).await;
+    ask_inbox_reads(signer, &mut rows).await;
     rows
 }
 
-/// Asks every inbox row the live plane's own inbox REQ, from now so it
-/// normally brings nothing back: a relay gating gift-wrap reads behind NIP-42
-/// refuses it exactly as it refuses the invitee's subscription.
-async fn ask_inbox_reads(relay: &RelayManager, own: &PublicKey, rows: &mut [OwnRelayPresence]) {
+/// Asks every inbox row for this account's gift wraps from now, so it
+/// normally brings nothing back, on a connection that answers the relay's
+/// NIP-42 challenge as the invitee's own reads do: a relay that refuses it
+/// refuses them too.
+async fn ask_inbox_reads(signer: &Arc<Nip42Signer>, rows: &mut [OwnRelayPresence]) {
     let asked: Vec<usize> = rows
         .iter()
         .enumerate()
@@ -223,11 +229,13 @@ async fn ask_inbox_reads(relay: &RelayManager, own: &PublicKey, rows: &mut [OwnR
         return;
     }
     let urls: Vec<String> = asked.iter().map(|&i| rows[i].relay_url.clone()).collect();
-    let now = i64::try_from(Timestamp::now().as_secs()).unwrap_or(i64::MAX);
-    let filter = inbox_filter(*own, now).limit(1);
-    let answers = Box::pin(relay.fetch_events_per_relay(filter, &urls))
-        .await
-        .unwrap_or_default();
+    let answers = Box::pin(RelayManager::read_own_inbox_per_relay(
+        signer,
+        Some(Timestamp::now()),
+        1,
+        &urls,
+    ))
+    .await;
     for (&i, answer) in asked.iter().zip(&answers) {
         rows[i].reachable |= answer.responded;
         rows[i].inbox_read = Some(answer.inbox_read());
@@ -371,7 +379,7 @@ mod tests {
     ) -> Vec<OwnRelayPresence> {
         own_presence(
             &RelayManager::new(),
-            &own.public_key(),
+            &Arc::new(Nip42Signer::new(own)),
             &OwnRelayLists {
                 inbox,
                 key_package,
@@ -806,9 +814,10 @@ mod tests {
     }
 
     /// The relay settings page warns on exactly the relays that keep an
-    /// invitation out of this device's reach: one refusing the read until the
-    /// device authenticates, which it never does. A throttle or a plain error
-    /// is a read that did not finish, never a refusal.
+    /// invitation out of this device's reach: one refusing the read, here a
+    /// relay that asks for authentication and never issues the challenge the
+    /// device would answer. A throttle or a plain error is a read that did not
+    /// finish, never a refusal.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_inbox_relay_is_judged_by_how_it_answers_a_gift_wrap_read() {
         let own = Keys::generate();

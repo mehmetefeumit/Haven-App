@@ -397,13 +397,13 @@ async fn a_substituted_event_never_reads_as_published() {
     );
 
     let manager = RelayManager::new();
-    let own = account.public_key();
+    let (signer, _store) = helpers::nip42_signer_of(&account);
     let lists = OwnRelayLists {
         inbox: &inbox,
         key_package: &[],
         lookup: &[],
     };
-    let check = || own_presence(&manager, &own, &lists, None, TrackedKpLifetime::Absent);
+    let check = || own_presence(&manager, &signer, &lists, None, TrackedKpLifetime::Absent);
     assert_eq!(
         check().await[0].inbox_relay_list,
         OwnEventPresence::Missing,

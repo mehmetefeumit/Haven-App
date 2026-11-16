@@ -99,8 +99,8 @@ class MockRelayService implements RelayService {
   /// When set, [checkOwnReachability] parks on it before answering.
   Completer<void>? ownPresenceGate;
 
-  /// The pubkey each [checkOwnReachability] call asked about, in call order.
-  final List<String> ownPresenceAsks = [];
+  /// How many times [checkOwnReachability] was called.
+  int ownPresenceChecks = 0;
 
   /// Optional completer to control when fetchKeyPackage resolves.
   ///
@@ -239,7 +239,6 @@ class MockRelayService implements RelayService {
 
   @override
   Future<List<String>> fetchGiftWraps({
-    required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
   }) async {
@@ -249,7 +248,6 @@ class MockRelayService implements RelayService {
 
   @override
   Future<List<RelayGiftWrapFetch>> fetchGiftWrapsPerRelay({
-    required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
   }) async {
@@ -268,11 +266,9 @@ class MockRelayService implements RelayService {
   }
 
   @override
-  Future<List<OwnRelayPresenceFfi>> checkOwnReachability({
-    required String ownPubkey,
-  }) async {
+  Future<List<OwnRelayPresenceFfi>> checkOwnReachability() async {
     methodCalls.add('checkOwnReachability');
-    ownPresenceAsks.add(ownPubkey);
+    ownPresenceChecks++;
     await ownPresenceGate?.future;
     if (shouldThrowOnOwnPresence) {
       throw const RelayServiceException('Check failed');

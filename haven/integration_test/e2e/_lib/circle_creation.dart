@@ -12,8 +12,6 @@
 /// or roll back, and nothing here may try to.
 library;
 
-import 'dart:convert';
-
 import 'package:flutter_riverpod/flutter_riverpod.dart' show ProviderContainer;
 import 'package:flutter_test/flutter_test.dart' show WidgetTester;
 import 'package:haven/src/providers/live_sync_provider.dart'
@@ -154,12 +152,11 @@ Future<CircleWithMembersFfi> joinDeliveredWelcome({
   required RelayManagerFfi relayManager,
   required CircleManagerFfi invitee,
   required List<int> inviteeSecretBytes,
-  required String inviteePubkeyHex,
   required List<String> relays,
   String scenario = 'e2e',
 }) async {
   final wraps = await relayManager.fetchGiftWraps(
-    recipientPubkey: inviteePubkeyHex,
+    circle: invitee,
     relays: relays,
   );
   for (final wrap in wraps) {
@@ -181,17 +178,3 @@ Future<CircleWithMembersFfi> joinDeliveredWelcome({
   }
   throw StateError('[$scenario] no delivered Welcome could be accepted');
 }
-
-/// The ids of every gift wrap [relays] hold for [recipientPubkeyHex]: taken
-/// before and after a driven create, their difference is the wrap it sent.
-Future<Set<String>> giftWrapIdsFor({
-  required RelayManagerFfi relayManager,
-  required String recipientPubkeyHex,
-  required List<String> relays,
-}) async => {
-  for (final wrap in await relayManager.fetchGiftWraps(
-    recipientPubkey: recipientPubkeyHex,
-    relays: relays,
-  ))
-    (jsonDecode(wrap) as Map<String, dynamic>)['id'] as String,
-};

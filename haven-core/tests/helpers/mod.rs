@@ -62,6 +62,20 @@ pub fn cleanup_dir(dir: &PathBuf) {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The NIP-42 signer a circle manager built from `keys` hands out, the only
+/// way product code gets one; the directory holds that manager's store.
+pub fn nip42_signer_of(
+    keys: &Keys,
+) -> (
+    std::sync::Arc<haven_core::relay::nip42::Nip42Signer>,
+    tempfile::TempDir,
+) {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let circle = haven_core::circle::CircleManager::new_unencrypted(dir.path(), keys)
+        .expect("a circle manager");
+    (circle.nip42_signer(), dir)
+}
+
 /// Mints a signed kind-30443 `KeyPackage` event for a device.
 ///
 /// Uses the DM-2b maintenance builder — the real publish path — so a party's

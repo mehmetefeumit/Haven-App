@@ -6,7 +6,7 @@
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `acknowledged_by`, `answer_standing`, `answer`, `answer`, `answer`, `answer`, `build_relay_list_event_for`, `build_relay_list_unpublish_for`, `commit_event_to_json`, `convert_location_result`, `count`, `current_cache`, `current_picture_hash`, `delete_circles_db_files`, `delete_db_files`, `delete_mls_session_db_files`, `delete_tile_db_files`, `ensure_own_identity`, `failed`, `fetch_my_profile_at`, `foreground_claim`, `from_cached`, `from_report`, `from_state`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hex_to_npub`, `keys_from_secret_bytes`, `leave_intent_stands`, `lifecycle_in`, `live_event_to_ffi`, `live_lifecycle_of`, `live_session_core`, `logscan_plant_token`, `maintain_relay_list_category`, `maintenance_now_secs`, `mark_kp_slot_retirement_done`, `max_log_level`, `member_key_packages`, `mint_key_package`, `new`, `nip65_relay_list_urls`, `no_network`, `now_ms`, `now_secs`, `of`, `own_cached_view`, `own_profile_to_retract`, `own_relays_seeding_once`, `platform_init_keyring`, `profile_now_secs`, `profile_picture_delay`, `profile_stamp_lists`, `profile_view`, `pubkey_of`, `publish_and_promote`, `publishing`, `redact_directory_err`, `redact_profile_err`, `refusal_of`, `reinstall_after_timed_out_stop`, `relay_list_targets`, `relay_list_urls_for`, `relay_list_urls`, `relay_list_wire_kind`, `remove_circles_db_key`, `remove_file_strict`, `remove_keyring_entry`, `remove_keyring_key`, `remove_mls_session_db_key`, `remove_tiles_db_key`, `retain_own_events`, `retire_malformed_kp_slot`, `retract_kp_slots`, `run_blocking`, `start_session_as`, `sync_reason_to_ffi`, `tile_err_to_string`, `unknown`, `usable_profile_pool`
+// These functions are ignored because they are not marked as `pub`: `acknowledged_by`, `answer_standing`, `answer`, `answer`, `answer`, `answer`, `build_relay_list_event_for`, `build_relay_list_unpublish_for`, `commit_event_to_json`, `convert_location_result`, `count`, `current_cache`, `current_picture_hash`, `delete_circles_db_files`, `delete_db_files`, `delete_mls_session_db_files`, `delete_tile_db_files`, `ensure_own_identity`, `failed`, `fetch_my_profile_at`, `foreground_claim`, `from_cached`, `from_report`, `from_state`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hex_to_npub`, `keys_from_secret_bytes`, `leave_intent_stands`, `lifecycle_in`, `live_event_to_ffi`, `live_lifecycle_of`, `live_session_core`, `logscan_plant_token`, `maintain_relay_list_category`, `maintenance_now_secs`, `mark_kp_slot_retirement_done`, `max_log_level`, `member_key_packages`, `mint_key_package`, `new`, `nip65_relay_list_urls`, `no_network`, `now_ms`, `now_secs`, `of`, `own_cached_view`, `own_profile_to_retract`, `own_relays_seeding_once`, `platform_init_keyring`, `profile_now_secs`, `profile_picture_delay`, `profile_stamp_lists`, `profile_view`, `pubkey_of`, `publish_and_promote`, `publishing`, `redact_directory_err`, `redact_profile_err`, `refusal_of`, `reinstall_after_timed_out_stop`, `relay_list_targets`, `relay_list_urls_for`, `relay_list_urls`, `relay_list_wire_kind`, `remove_circles_db_key`, `remove_file_strict`, `remove_keyring_entry`, `remove_keyring_key`, `remove_mls_session_db_key`, `remove_tiles_db_key`, `retain_own_events`, `retire_malformed_kp_slot`, `retract_kp_slots`, `run_blocking`, `serialized_event`, `since_timestamp`, `start_session_as`, `sync_reason_to_ffi`, `tile_err_to_string`, `unknown`, `usable_profile_pool`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Driving`, `InMemoryStorage`, `KpMintPlan`, `KpRetirementInputs`, `KpRetirementTick`, `ProfileStampLists`, `StagedPublish`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`, `default`
@@ -943,8 +943,8 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// been pointless if the avatar fetch handed the same set over anyway.
   ///
   /// So this call:
-  /// * **shuffles** the order every cycle from the OS CSPRNG (`rand::OsRng`;
-  ///   `thread_rng` is banned), so arrival order carries no roster ordering
+  /// * **shuffles** the order every cycle from the OS CSPRNG (`SysRng`;
+  ///   `rand::rng` is banned), so arrival order carries no roster ordering
   ///   and a newly added member does not appear at a stable position;
   /// * runs the downloads **one at a time**, never concurrently, so there is
   ///   no burst to fingerprint;
@@ -2193,12 +2193,13 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
   /// `KeyPackage` list, then the lookup relays.
   ///
   /// Only reads: unlike maintenance it does not wait for the storage-reset
-  /// notice, which holds back what is published, not what is asked.
+  /// notice, which holds back what is published, not what is asked. Every
+  /// read is about `circle`'s own identity; the inbox read answers a relay's
+  /// NIP-42 challenge as that identity, on a connection of its own.
   ///
   /// [`own_presence`]: haven_core::relay::maintenance::own_presence
   Future<List<OwnRelayPresenceFfi>> checkOwnReachability({
     required CircleManagerFfi circle,
-    required String ownPubkey,
   });
 
   /// What the user needs to know first about the circle of
@@ -2253,48 +2254,61 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
   /// way.
   Future<void> disconnectRelay({required String url});
 
-  /// Fetches gift-wrapped events (kind 1059) addressed to a recipient.
+  /// Fetches the gift wraps (kind 1059) addressed to `circle`'s own
+  /// identity, merged across `relays`.
   ///
-  /// Queries the given relays for NIP-59 gift wrap events tagged with the
-  /// recipient's public key. An optional `since` timestamp restricts results
-  /// to events created after that point.
+  /// Each relay is read on a connection of its own that answers the relay's
+  /// NIP-42 challenge as that identity
+  /// (`RelayManager::read_own_inbox_per_relay`), so a relay serving gift
+  /// wraps only to their authenticated recipient is read too. An optional
+  /// `since` timestamp restricts results to events created after that point.
   ///
   /// # Arguments
   ///
-  /// * `recipient_pubkey` - The recipient's public key (hex or npub format)
+  /// * `circle` - The circle manager whose identity is the recipient
   /// * `relays` - Relay URLs to query
   /// * `since` - Optional Unix timestamp (seconds); only events after this time are returned
   ///
   /// # Returns
   ///
-  /// A list of gift-wrap events serialized as JSON strings.
+  /// The gift-wrap events every relay sent, each once, serialized as JSON
+  /// strings. A relay that is not reached or refuses the read adds nothing.
+  ///
+  /// # Errors
+  ///
+  /// A negative `since`, or an event that does not serialize.
   Future<List<String>> fetchGiftWraps({
-    required String recipientPubkey,
+    required CircleManagerFfi circle,
     required List<String> relays,
     PlatformInt64? since,
   });
 
-  /// Fetches gift-wrapped events (kind 1059) per relay, reporting how each
-  /// relay answered.
+  /// Fetches the gift wraps (kind 1059) addressed to `circle`'s own
+  /// identity from each relay, reporting how each relay answered.
   ///
   /// Like [`fetch_gift_wraps`](Self::fetch_gift_wraps), but instead of one
-  /// merged list it queries each relay independently and returns a per-relay
-  /// outcome: how the relay answered the read ([`InboxReadFfi`]) and the
-  /// events it returned. Only `Served` says the relay sent everything it
-  /// holds; a relay that refuses the read until this device authenticates is
-  /// `Refused`, never mistaken for an empty inbox.
+  /// merged list it returns a per-relay outcome: how the relay answered the
+  /// read ([`InboxReadFfi`]) and the events it returned. Only `Served` says
+  /// the relay sent everything it holds. A relay that refuses the read until
+  /// the reader authenticates is answered and asked again; it is `Refused`
+  /// only when it refuses that read too, or the answer to its challenge,
+  /// never mistaken for an empty inbox.
   ///
   /// # Arguments
   ///
-  /// * `recipient_pubkey` - The recipient's public key (hex or npub format)
+  /// * `circle` - The circle manager whose identity is the recipient
   /// * `relays` - Relay URLs to query, each independently
   /// * `since` - Optional Unix timestamp (seconds); only events after this time
   ///
   /// # Returns
   ///
   /// One [`RelayGiftWrapFetchFfi`] per relay, in input order.
+  ///
+  /// # Errors
+  ///
+  /// A negative `since`, or an event that does not serialize.
   Future<List<RelayGiftWrapFetchFfi>> fetchGiftWrapsPerRelay({
-    required String recipientPubkey,
+    required CircleManagerFfi circle,
     required List<String> relays,
     PlatformInt64? since,
   });
@@ -3701,8 +3715,9 @@ enum InboxReadFfi {
   /// It ended the read with `EOSE`: what it holds for this account, it sent.
   served,
 
-  /// It refused the read until this device authenticates, which it never
-  /// does: an invitation stored there is never read from it.
+  /// It refused the read: after this device answered its NIP-42 challenge,
+  /// or refused that answer, or asked for one and sent no challenge. An
+  /// invitation stored there is not read from it.
   refused,
 
   /// It was reached but did not finish its answer.

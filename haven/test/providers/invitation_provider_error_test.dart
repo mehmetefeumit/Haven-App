@@ -246,7 +246,6 @@ class _MockRelayService implements RelayService {
 
   @override
   Future<List<String>> fetchGiftWraps({
-    required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
   }) async {
@@ -255,7 +254,6 @@ class _MockRelayService implements RelayService {
 
   @override
   Future<List<RelayGiftWrapFetch>> fetchGiftWrapsPerRelay({
-    required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
   }) async => [];
@@ -286,9 +284,7 @@ class _MockRelayService implements RelayService {
   }) async => [];
 
   @override
-  Future<List<OwnRelayPresenceFfi>> checkOwnReachability({
-    required String ownPubkey,
-  }) async => const [];
+  Future<List<OwnRelayPresenceFfi>> checkOwnReachability() async => const [];
 
   @override
   Future<void> disconnectRelay(String url) async {}

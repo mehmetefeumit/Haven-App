@@ -15,10 +15,12 @@ use std::time::Duration;
 
 use cgka_traits::app_components::{is_loopback_host, is_public_ip};
 use cgka_traits::TransportEndpoint;
+use nostr::message::MachineReadablePrefix;
 #[cfg(debug_assertions)]
 use nostr::Url;
 use nostr::{
     ClientMessage, Event, EventId, Filter, Kind, PublicKey, RelayMessage, RelayUrl, SubscriptionId,
+    Timestamp,
 };
 use nostr_sdk::pool::relay::{RelayNotification, RelayServiceFlags, ReqExitPolicy};
 // The pool's own per-socket status, aliased because `super::types` exports a
@@ -34,9 +36,11 @@ use super::clock_skew;
 use super::discovery::discovery_relays;
 use super::error::{InvalidUrlReason, RelayError, RelayResult};
 use super::fanout::{self, FanoutTargetOutcome};
+use super::identity::{with_identity_relay, AuthTracker, AuthVerdict, IdentityUse, AUTH_WAIT};
 use super::maintenance::key_package::{
     is_pre_migration_key_package_of, kp_event_d_tag, KeyPackageCandidate,
 };
+use super::nip42::Nip42Signer;
 use super::types::{PublishResult, RelayConnectionStatus, RelayFetchOutcome, RelayStatus};
 use super::url_norm;
 use super::verified::verified_client;
@@ -1945,8 +1949,10 @@ impl RelayManager {
                     };
                 };
 
+                let notifications = handle.notifications();
                 let (drained, refused, events) =
-                    Self::read_one_relays_answer(&handle, filter, req_timeout).await;
+                    Self::read_one_relays_answer(&handle, notifications, None, filter, req_timeout)
+                        .await;
                 RelayFetchOutcome {
                     relay_url,
                     responded: true,
@@ -1958,6 +1964,87 @@ impl RelayManager {
         });
 
         Ok(futures::future::join_all(fetch_futures).await)
+    }
+
+    /// Reads the user's own inbox — kind 1059 addressed to `signer`'s key,
+    /// from `since`, at most `limit` events a relay — from each relay of
+    /// `relays`, as [`Self::fetch_events_per_relay`] reads a page, on an
+    /// identity connection of its own that answers the relay's NIP-42
+    /// challenge (`with_identity_relay`, read-only, shut down when its read
+    /// ends). Owner-directed (2026-11-16): White Noise reads an inbox so, and
+    /// a relay that serves gift wraps only to their authenticated recipient
+    /// (damus, strfry's `restrictedReadKinds`) holds invitations no anonymous
+    /// read can reach.
+    ///
+    /// The `#p` is the signer's own key, never one a caller names: such a
+    /// relay serves only the key that authenticated. A connection of its own
+    /// for every relay and every call, so no other read's challenge can be
+    /// answered twice on it (strfry refuses a second answer). `refused` is a
+    /// relay that refused an authenticated read, or the answer to its
+    /// challenge, or asked for one and sent none.
+    pub async fn read_own_inbox_per_relay(
+        signer: &Arc<Nip42Signer>,
+        since: Option<Timestamp>,
+        limit: usize,
+        relays: &[String],
+    ) -> Vec<RelayFetchOutcome> {
+        let mut filter = Filter::new()
+            .kind(Kind::GiftWrap)
+            .pubkey(signer.public_key())
+            .limit(limit);
+        if let Some(since) = since {
+            filter = filter.since(since);
+        }
+        let reads = relays.iter().map(|relay| {
+            let filter = filter.clone();
+            async move {
+                let unreached = |relay_url: String| RelayFetchOutcome {
+                    relay_url,
+                    responded: false,
+                    drained: false,
+                    refused: false,
+                    events: Vec::new(),
+                };
+                let Ok(url) = Self::validate_single_relay_url(relay) else {
+                    log::debug!("[RelayManager] own inbox: skipping one invalid relay url");
+                    return unreached(relay.clone());
+                };
+                let read = with_identity_relay(
+                    Arc::clone(signer),
+                    &url,
+                    IdentityUse::Read,
+                    |mut conn| async move {
+                        // A challenge answered before the REQ decides how its
+                        // refusal reads.
+                        let mut auth = AuthTracker::default();
+                        while let Ok(notification) = conn.notifications.try_recv() {
+                            auth.observe(&notification);
+                        }
+                        Self::read_one_relays_answer(
+                            &conn.relay,
+                            conn.notifications,
+                            Some(auth),
+                            filter,
+                            DEFAULT_TIMEOUT,
+                        )
+                        .await
+                    },
+                )
+                .await;
+                let Ok((drained, refused, events)) = read else {
+                    log::debug!("[RelayManager] own inbox: one relay did not respond");
+                    return unreached(url.as_str().to_string());
+                };
+                RelayFetchOutcome {
+                    relay_url: url.as_str().to_string(),
+                    responded: true,
+                    drained,
+                    refused,
+                    events,
+                }
+            }
+        });
+        futures::future::join_all(reads).await
     }
 
     /// Registers and dials every relay of `relays` that may be dialled, for a
@@ -2073,7 +2160,7 @@ impl RelayManager {
     ///
     /// # Ordering, and the two races that are closed by construction
     ///
-    /// The notification receiver is taken BEFORE the REQ goes out, because
+    /// The caller takes `notifications` BEFORE the REQ goes out, because
     /// `notifications()` yields nothing that arrived before the call and a relay
     /// can answer inside the subscribe. And the relay's socket reader handles
     /// messages strictly sequentially, so the `EOSE` notification cannot
@@ -2084,6 +2171,19 @@ impl RelayManager {
     /// BEFORE sending the REQ, so it is not exposed to the registration race
     /// that bars `verify_subscriptions`), and its handler sends the NIP-01
     /// `CLOSE` when it sees that `EOSE`.
+    ///
+    /// # On a connection that answers NIP-42 (`auth` is `Some`)
+    ///
+    /// A `CLOSED` asking for authentication is not the end while the relay's
+    /// verdict on the answer to its challenge is awaited (at most
+    /// [`AUTH_WAIT`]); the read then goes on as the pool's own does. A refusal
+    /// spelled exactly `auth-required:` is resent by the pool under the same id
+    /// once it authenticates, so the read keeps that id. strfry's
+    /// `ERROR: auth-required:` the pool drops, and a refusal arriving after
+    /// the connection authenticated it never resends, so the read sends its
+    /// REQ once more under a new id. One second chance in all: a second such
+    /// `CLOSED`, or a failed answer, is the relay's refusal, and a relay that
+    /// never challenges is one too. All of it within `req_timeout`.
     ///
     /// # Why an early exit sends its own `CLOSE`
     ///
@@ -2127,25 +2227,15 @@ impl RelayManager {
     /// `Events` collection this replaced.
     async fn read_one_relays_answer(
         relay: &Relay,
+        mut notifications: tokio::sync::broadcast::Receiver<RelayNotification>,
+        mut auth: Option<AuthTracker>,
         filter: Filter,
         req_timeout: Duration,
     ) -> (bool, bool, Vec<Event>) {
         let intake_cap = filter.limit.unwrap_or(MAX_EVENTS_PER_UNLIMITED_REQ);
-        let id = SubscriptionId::generate();
-        let mut notifications = relay.notifications();
-
-        let opts = SubscribeOptions::default().close_on(Some(
-            SubscribeAutoCloseOptions::default()
-                .exit_policy(ReqExitPolicy::ExitOnEOSE)
-                .timeout(Some(req_timeout)),
-        ));
-        // auto-closing REQ: `opts` exits on EOSE, so this registers nothing in
-        // the pool's long-lived subscription map and the socket can still sleep.
-        // The marker is what `check_engine_client_options.sh` check 7 allows it
-        // by; an unmarked subscribe anywhere in this file is a standing REQ.
-        // auto-closing REQ
-        let issued = relay.subscribe_with_id(id.clone(), filter, opts).await;
-        if issued.is_err() {
+        let deadline = tokio::time::Instant::now() + req_timeout;
+        let mut id = SubscriptionId::generate();
+        if !Self::issue_page_req(relay, &id, filter.clone(), deadline).await {
             // Presence-only: neither the own-relay URL nor the relay's own
             // words (Security Rule 15), matching the branches above.
             log::debug!("[RelayManager] per-relay REQ failed (one own relay)");
@@ -2156,57 +2246,91 @@ impl RelayManager {
         let mut events: Vec<Event> = Vec::new();
         let mut seen: HashSet<EventId> = HashSet::new();
         let mut arrivals: usize = 0;
-        let drained = tokio::time::timeout(req_timeout, async {
-            loop {
-                match notifications.recv().await {
-                    Ok(RelayNotification::Message { message }) => match message {
-                        RelayMessage::Event {
-                            subscription_id,
-                            event,
-                        } if subscription_id.as_ref() == &id => {
-                            if arrivals >= intake_cap {
-                                return false;
+        let mut chance = SecondChance::default();
+        let mut wait_until = deadline;
+        let drained = loop {
+            let Ok(received) = tokio::time::timeout_at(wait_until, notifications.recv()).await
+            else {
+                break false;
+            };
+            let verdict = auth
+                .as_mut()
+                .zip(received.as_ref().ok())
+                .and_then(|(auth, notification)| auth.observe(notification));
+            let mut reissue = false;
+            match received {
+                Ok(RelayNotification::Message { message }) => match message {
+                    RelayMessage::Event {
+                        subscription_id,
+                        event,
+                    } if subscription_id.as_ref() == &id => {
+                        if arrivals >= intake_cap {
+                            break false;
+                        }
+                        arrivals += 1;
+                        if seen.insert(event.id) {
+                            events.push(event.into_owned());
+                        }
+                    }
+                    RelayMessage::EndOfStoredEvents(sub) if sub.as_ref() == &id => break true,
+                    // The relay ended this subscription itself (rate limit,
+                    // auth required, refusal). Whatever it had not sent, it
+                    // is not going to — unless the connection can answer an
+                    // `auth-required:` it has not already been refused after.
+                    RelayMessage::Closed {
+                        subscription_id,
+                        message,
+                    } if subscription_id.as_ref() == &id => {
+                        refused = super::live_sync::repair::refuses_read(&message);
+                        match auth
+                            .as_ref()
+                            .map(|a| chance.on_closed(a.is_authenticated(), &message))
+                        {
+                            Some(AfterClosed::Reissue) => reissue = true,
+                            Some(AfterClosed::AwaitVerdict) => {
+                                wait_until = deadline.min(tokio::time::Instant::now() + AUTH_WAIT);
                             }
-                            arrivals += 1;
-                            if seen.insert(event.id) {
-                                events.push(event.into_owned());
-                            }
+                            Some(AfterClosed::End) | None => break false,
                         }
-                        RelayMessage::EndOfStoredEvents(sub) if sub.as_ref() == &id => return true,
-                        // The relay ended this subscription itself (rate limit,
-                        // auth required, refusal). Whatever it had not sent, it
-                        // is not going to.
-                        RelayMessage::Closed {
-                            subscription_id,
-                            message,
-                        } if subscription_id.as_ref() == &id => {
-                            refused = super::live_sync::repair::refuses_read(&message);
-                            return false;
-                        }
-                        _ => {}
-                    },
-                    // The socket went away mid-delivery, the pool shut down, or a
-                    // lagged broadcast dropped deliveries we will never see —
-                    // after which an `EOSE` would vouch for a page we did not
-                    // receive whole. None of them is the relay saying it is
-                    // done, which is the only thing that ends this read as
-                    // drained.
-                    Ok(
-                        RelayNotification::RelayStatus {
-                            status:
-                                nostr_sdk::RelayStatus::Disconnected
-                                | nostr_sdk::RelayStatus::Terminated
-                                | nostr_sdk::RelayStatus::Banned,
-                        }
-                        | RelayNotification::Shutdown,
-                    )
-                    | Err(_) => return false,
-                    Ok(_) => {}
-                }
+                    }
+                    _ => {}
+                },
+                // The socket went away mid-delivery, the pool shut down, or a
+                // lagged broadcast dropped deliveries we will never see —
+                // after which an `EOSE` would vouch for a page we did not
+                // receive whole. None of them is the relay saying it is
+                // done, which is the only thing that ends this read as
+                // drained.
+                Ok(
+                    RelayNotification::RelayStatus {
+                        status:
+                            nostr_sdk::RelayStatus::Disconnected
+                            | nostr_sdk::RelayStatus::Terminated
+                            | nostr_sdk::RelayStatus::Banned,
+                    }
+                    | RelayNotification::Shutdown,
+                )
+                | Err(_) => break false,
+                Ok(_) => {}
             }
-        })
-        .await
-        .unwrap_or(false);
+            match verdict.and_then(|verdict| chance.on_verdict(verdict)) {
+                Some(AfterVerdict::End) => break false,
+                Some(after) => {
+                    refused = false;
+                    wait_until = deadline;
+                    reissue = matches!(after, AfterVerdict::Reissue);
+                }
+                None => {}
+            }
+            if reissue {
+                refused = false;
+                id = SubscriptionId::generate();
+                if !Self::issue_page_req(relay, &id, filter.clone(), deadline).await {
+                    break false;
+                }
+                log::debug!("[RelayManager] per-relay REQ asked again after authentication");
+            }
+        };
 
         if !drained {
             // Nothing else closes this REQ until the auto-close handler spends
@@ -2220,6 +2344,31 @@ impl RelayManager {
                 .then_with(|| a.id.cmp(&b.id))
         });
         (drained, refused, events)
+    }
+
+    /// Sends [`Self::read_one_relays_answer`]'s REQ under `id`, closing itself
+    /// on `EOSE` or at `deadline`; `false` when it could not be handed to the
+    /// socket.
+    async fn issue_page_req(
+        relay: &Relay,
+        id: &SubscriptionId,
+        filter: Filter,
+        deadline: tokio::time::Instant,
+    ) -> bool {
+        let opts = SubscribeOptions::default().close_on(Some(
+            SubscribeAutoCloseOptions::default()
+                .exit_policy(ReqExitPolicy::ExitOnEOSE)
+                .timeout(Some(
+                    deadline.saturating_duration_since(tokio::time::Instant::now()),
+                )),
+        ));
+        // auto-closing REQ: `opts` exits on EOSE, so this registers nothing in
+        // the pool's long-lived subscription map and the socket can still sleep.
+        // The marker is what `check_engine_client_options.sh` check 7 allows it
+        // by; an unmarked subscribe anywhere in this file is a standing REQ.
+        // auto-closing REQ
+        let issued = relay.subscribe_with_id(id.clone(), filter, opts).await;
+        issued.is_ok()
     }
 
     /// Validates relay URLs and ensures they use wss://.
@@ -2612,6 +2761,81 @@ fn answered_whole(answers: &[RelayFetchOutcome]) -> bool {
         && answers
             .iter()
             .all(|answer| answer.drained || !answer.responded)
+}
+
+/// An authenticating page read's one second chance after `auth-required:`.
+#[derive(Default)]
+struct SecondChance {
+    /// Spent.
+    taken: bool,
+    /// While the relay's verdict on the answer to its challenge is awaited:
+    /// whether the pool resends the REQ itself once it authenticates.
+    pool_resends: Option<bool>,
+}
+
+/// What a read does once the relay's verdict on its answer is in.
+enum AfterVerdict {
+    /// Reads on under the same id: the pool resent the REQ.
+    Read,
+    /// Sends the REQ once more, under a new id.
+    Reissue,
+    /// Nothing more: the relay refused the answer, so the refusal stands.
+    End,
+}
+
+/// What a read does after its REQ's `CLOSED`.
+enum AfterClosed {
+    /// Nothing more: the refusal stands.
+    End,
+    /// Sends the REQ once more, under a new id.
+    Reissue,
+    /// Waits for the relay's verdict on the answer to its challenge.
+    AwaitVerdict,
+}
+
+impl SecondChance {
+    /// The step after a `CLOSED` saying `message`, on a connection that has
+    /// (`authenticated`) or has not authenticated.
+    fn on_closed(&mut self, authenticated: bool, message: &str) -> AfterClosed {
+        if self.taken || !asks_to_authenticate(message) {
+            return AfterClosed::End;
+        }
+        self.taken = true;
+        if authenticated {
+            // Authenticated before this answer: the pool resends nothing.
+            return AfterClosed::Reissue;
+        }
+        // The pool resends under the same id only a refusal spelled exactly
+        // `auth-required:` (strfry puts `ERROR: ` before its own).
+        self.pool_resends = Some(
+            MachineReadablePrefix::parse(message) == Some(MachineReadablePrefix::AuthRequired),
+        );
+        AfterClosed::AwaitVerdict
+    }
+
+    /// The step after `verdict`, when one is awaited.
+    fn on_verdict(&mut self, verdict: AuthVerdict) -> Option<AfterVerdict> {
+        match verdict {
+            AuthVerdict::Authenticated => self.pool_resends.take().map(|resent| {
+                if resent {
+                    AfterVerdict::Read
+                } else {
+                    AfterVerdict::Reissue
+                }
+            }),
+            AuthVerdict::Failed => self.pool_resends.is_some().then_some(AfterVerdict::End),
+        }
+    }
+}
+
+/// Whether a `CLOSED` asks for authentication, spelled `auth-required:` or
+/// with strfry's `ERROR: ` before it.
+fn asks_to_authenticate(message: &str) -> bool {
+    let message = message
+        .strip_prefix("ERROR:")
+        .or_else(|| message.strip_prefix("error:"))
+        .map_or(message, str::trim_start);
+    MachineReadablePrefix::parse(message) == Some(MachineReadablePrefix::AuthRequired)
 }
 
 /// Every event of every relay's answer.
@@ -6880,7 +7104,7 @@ mod tests {
 
         let presence = crate::relay::maintenance::own_presence(
             &manager,
-            &nostr::Keys::generate().public_key(),
+            &Arc::new(Nip42Signer::new(&nostr::Keys::generate())),
             &crate::relay::maintenance::OwnRelayLists {
                 inbox: &relays,
                 key_package: &relays,

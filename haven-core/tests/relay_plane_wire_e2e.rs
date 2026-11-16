@@ -757,7 +757,7 @@ async fn lifecycle_then_plants(watch: &DialWatch, needles: &mut Vec<String>) {
     let (inbox, key_packages, lookup) = ([w.url(R::AInbox)], [w.url(R::AKp)], [w.url(R::Disc)]);
     let rows = Box::pin(own_presence(
         &alice.pool,
-        &alice.keys.public_key(),
+        &alice.circle.nip42_signer(),
         &OwnRelayLists {
             inbox: &inbox,
             key_package: &key_packages,

@@ -84,9 +84,11 @@ pub struct RelayFetchOutcome {
     pub drained: bool,
     /// Whether the relay ended this REQ with a `CLOSED` refusing the read
     /// itself (`auth-required:` or `restricted:`): it serves the filter only
-    /// to a NIP-42-authenticated reader, and Haven never authenticates
-    /// (Security Rule 16). Never `true` with `drained`; the relay's text is
-    /// not kept.
+    /// to a NIP-42-authenticated reader. The publish client never
+    /// authenticates (Security Rule 16); an own-inbox read
+    /// (`RelayManager::read_own_inbox_per_relay`) does, and is `refused` only
+    /// when the relay still refused it. Never `true` with `drained`; the
+    /// relay's text is not kept.
     pub refused: bool,
     /// Events fetched from this relay (empty unless `responded`), each at most
     /// once and ordered NEWEST FIRST by `created_at`, ties broken by id.
@@ -102,8 +104,9 @@ pub struct RelayFetchOutcome {
 pub enum InboxRead {
     /// It ended the read with `EOSE`: what it holds for this account, it sent.
     Served,
-    /// It refused the read until this device authenticates, which it never
-    /// does: an invitation stored there is never read from it.
+    /// It refused the read: after this device answered its NIP-42 challenge,
+    /// or refused that answer, or asked for one and sent no challenge. An
+    /// invitation stored there is not read from it.
     Refused,
     /// It was reached but did not finish its answer.
     Incomplete,

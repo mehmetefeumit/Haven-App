@@ -281,9 +281,7 @@ class RelayStatusNotifier extends AsyncNotifier<RelayStatusState> {
 
     List<RelayPresence> checked;
     try {
-      final rows = await ref
-          .read(relayServiceProvider)
-          .checkOwnReachability(ownPubkey: identity.pubkeyHex);
+      final rows = await ref.read(relayServiceProvider).checkOwnReachability();
       checked = rows.map(_rowOf).toList();
     } on Object catch (e) {
       debugPrint('[RelayStatus] check failed: ${e.runtimeType}');

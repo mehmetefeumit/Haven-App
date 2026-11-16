@@ -699,7 +699,6 @@ abstract class RustLibApi extends BaseApi {
   crateApiRelayManagerFfiCheckOwnReachability({
     required RelayManagerFfi that,
     required CircleManagerFfi circle,
-    required String ownPubkey,
   });
 
   Future<RecoveryCauseFfi?> crateApiRelayManagerFfiCircleRecovery({
@@ -728,7 +727,7 @@ abstract class RustLibApi extends BaseApi {
 
   Future<List<String>> crateApiRelayManagerFfiFetchGiftWraps({
     required RelayManagerFfi that,
-    required String recipientPubkey,
+    required CircleManagerFfi circle,
     required List<String> relays,
     PlatformInt64? since,
   });
@@ -736,7 +735,7 @@ abstract class RustLibApi extends BaseApi {
   Future<List<RelayGiftWrapFetchFfi>>
   crateApiRelayManagerFfiFetchGiftWrapsPerRelay({
     required RelayManagerFfi that,
-    required String recipientPubkey,
+    required CircleManagerFfi circle,
     required List<String> relays,
     PlatformInt64? since,
   });
@@ -5978,7 +5977,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   crateApiRelayManagerFfiCheckOwnReachability({
     required RelayManagerFfi that,
     required CircleManagerFfi circle,
-    required String ownPubkey,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -5992,7 +5990,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             circle,
             serializer,
           );
-          sse_encode_String(ownPubkey, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -6005,7 +6002,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiRelayManagerFfiCheckOwnReachabilityConstMeta,
-        argValues: [that, circle, ownPubkey],
+        argValues: [that, circle],
         apiImpl: this,
       ),
     );
@@ -6014,7 +6011,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiRelayManagerFfiCheckOwnReachabilityConstMeta =>
       const TaskConstMeta(
         debugName: "RelayManagerFfi_check_own_reachability",
-        argNames: ["that", "circle", "ownPubkey"],
+        argNames: ["that", "circle"],
       );
 
   @override
@@ -6178,7 +6175,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   @override
   Future<List<String>> crateApiRelayManagerFfiFetchGiftWraps({
     required RelayManagerFfi that,
-    required String recipientPubkey,
+    required CircleManagerFfi circle,
     required List<String> relays,
     PlatformInt64? since,
   }) {
@@ -6190,7 +6187,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          sse_encode_String(recipientPubkey, serializer);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi(
+            circle,
+            serializer,
+          );
           sse_encode_list_String(relays, serializer);
           sse_encode_opt_box_autoadd_i_64(since, serializer);
           pdeCallFfi(
@@ -6205,7 +6205,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiRelayManagerFfiFetchGiftWrapsConstMeta,
-        argValues: [that, recipientPubkey, relays, since],
+        argValues: [that, circle, relays, since],
         apiImpl: this,
       ),
     );
@@ -6214,14 +6214,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiRelayManagerFfiFetchGiftWrapsConstMeta =>
       const TaskConstMeta(
         debugName: "RelayManagerFfi_fetch_gift_wraps",
-        argNames: ["that", "recipientPubkey", "relays", "since"],
+        argNames: ["that", "circle", "relays", "since"],
       );
 
   @override
   Future<List<RelayGiftWrapFetchFfi>>
   crateApiRelayManagerFfiFetchGiftWrapsPerRelay({
     required RelayManagerFfi that,
-    required String recipientPubkey,
+    required CircleManagerFfi circle,
     required List<String> relays,
     PlatformInt64? since,
   }) {
@@ -6233,7 +6233,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          sse_encode_String(recipientPubkey, serializer);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi(
+            circle,
+            serializer,
+          );
           sse_encode_list_String(relays, serializer);
           sse_encode_opt_box_autoadd_i_64(since, serializer);
           pdeCallFfi(
@@ -6248,7 +6251,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiRelayManagerFfiFetchGiftWrapsPerRelayConstMeta,
-        argValues: [that, recipientPubkey, relays, since],
+        argValues: [that, circle, relays, since],
         apiImpl: this,
       ),
     );
@@ -6257,7 +6260,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiRelayManagerFfiFetchGiftWrapsPerRelayConstMeta =>
       const TaskConstMeta(
         debugName: "RelayManagerFfi_fetch_gift_wraps_per_relay",
-        argNames: ["that", "recipientPubkey", "relays", "since"],
+        argNames: ["that", "circle", "relays", "since"],
       );
 
   @override
@@ -15675,8 +15678,8 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   /// been pointless if the avatar fetch handed the same set over anyway.
   ///
   /// So this call:
-  /// * **shuffles** the order every cycle from the OS CSPRNG (`rand::OsRng`;
-  ///   `thread_rng` is banned), so arrival order carries no roster ordering
+  /// * **shuffles** the order every cycle from the OS CSPRNG (`SysRng`;
+  ///   `rand::rng` is banned), so arrival order carries no roster ordering
   ///   and a newly added member does not appear at a stable position;
   /// * runs the downloads **one at a time**, never concurrently, so there is
   ///   no burst to fingerprint;
@@ -17255,16 +17258,16 @@ class RelayManagerFfiImpl extends RustOpaque implements RelayManagerFfi {
   /// `KeyPackage` list, then the lookup relays.
   ///
   /// Only reads: unlike maintenance it does not wait for the storage-reset
-  /// notice, which holds back what is published, not what is asked.
+  /// notice, which holds back what is published, not what is asked. Every
+  /// read is about `circle`'s own identity; the inbox read answers a relay's
+  /// NIP-42 challenge as that identity, on a connection of its own.
   ///
   /// [`own_presence`]: haven_core::relay::maintenance::own_presence
   Future<List<OwnRelayPresenceFfi>> checkOwnReachability({
     required CircleManagerFfi circle,
-    required String ownPubkey,
   }) => RustLib.instance.api.crateApiRelayManagerFfiCheckOwnReachability(
     that: this,
     circle: circle,
-    ownPubkey: ownPubkey,
   );
 
   /// What the user needs to know first about the circle of
@@ -17335,58 +17338,71 @@ class RelayManagerFfiImpl extends RustOpaque implements RelayManagerFfi {
   Future<void> disconnectRelay({required String url}) => RustLib.instance.api
       .crateApiRelayManagerFfiDisconnectRelay(that: this, url: url);
 
-  /// Fetches gift-wrapped events (kind 1059) addressed to a recipient.
+  /// Fetches the gift wraps (kind 1059) addressed to `circle`'s own
+  /// identity, merged across `relays`.
   ///
-  /// Queries the given relays for NIP-59 gift wrap events tagged with the
-  /// recipient's public key. An optional `since` timestamp restricts results
-  /// to events created after that point.
+  /// Each relay is read on a connection of its own that answers the relay's
+  /// NIP-42 challenge as that identity
+  /// (`RelayManager::read_own_inbox_per_relay`), so a relay serving gift
+  /// wraps only to their authenticated recipient is read too. An optional
+  /// `since` timestamp restricts results to events created after that point.
   ///
   /// # Arguments
   ///
-  /// * `recipient_pubkey` - The recipient's public key (hex or npub format)
+  /// * `circle` - The circle manager whose identity is the recipient
   /// * `relays` - Relay URLs to query
   /// * `since` - Optional Unix timestamp (seconds); only events after this time are returned
   ///
   /// # Returns
   ///
-  /// A list of gift-wrap events serialized as JSON strings.
+  /// The gift-wrap events every relay sent, each once, serialized as JSON
+  /// strings. A relay that is not reached or refuses the read adds nothing.
+  ///
+  /// # Errors
+  ///
+  /// A negative `since`, or an event that does not serialize.
   Future<List<String>> fetchGiftWraps({
-    required String recipientPubkey,
+    required CircleManagerFfi circle,
     required List<String> relays,
     PlatformInt64? since,
   }) => RustLib.instance.api.crateApiRelayManagerFfiFetchGiftWraps(
     that: this,
-    recipientPubkey: recipientPubkey,
+    circle: circle,
     relays: relays,
     since: since,
   );
 
-  /// Fetches gift-wrapped events (kind 1059) per relay, reporting how each
-  /// relay answered.
+  /// Fetches the gift wraps (kind 1059) addressed to `circle`'s own
+  /// identity from each relay, reporting how each relay answered.
   ///
   /// Like [`fetch_gift_wraps`](Self::fetch_gift_wraps), but instead of one
-  /// merged list it queries each relay independently and returns a per-relay
-  /// outcome: how the relay answered the read ([`InboxReadFfi`]) and the
-  /// events it returned. Only `Served` says the relay sent everything it
-  /// holds; a relay that refuses the read until this device authenticates is
-  /// `Refused`, never mistaken for an empty inbox.
+  /// merged list it returns a per-relay outcome: how the relay answered the
+  /// read ([`InboxReadFfi`]) and the events it returned. Only `Served` says
+  /// the relay sent everything it holds. A relay that refuses the read until
+  /// the reader authenticates is answered and asked again; it is `Refused`
+  /// only when it refuses that read too, or the answer to its challenge,
+  /// never mistaken for an empty inbox.
   ///
   /// # Arguments
   ///
-  /// * `recipient_pubkey` - The recipient's public key (hex or npub format)
+  /// * `circle` - The circle manager whose identity is the recipient
   /// * `relays` - Relay URLs to query, each independently
   /// * `since` - Optional Unix timestamp (seconds); only events after this time
   ///
   /// # Returns
   ///
   /// One [`RelayGiftWrapFetchFfi`] per relay, in input order.
+  ///
+  /// # Errors
+  ///
+  /// A negative `since`, or an event that does not serialize.
   Future<List<RelayGiftWrapFetchFfi>> fetchGiftWrapsPerRelay({
-    required String recipientPubkey,
+    required CircleManagerFfi circle,
     required List<String> relays,
     PlatformInt64? since,
   }) => RustLib.instance.api.crateApiRelayManagerFfiFetchGiftWrapsPerRelay(
     that: this,
-    recipientPubkey: recipientPubkey,
+    circle: circle,
     relays: relays,
     since: since,
   );

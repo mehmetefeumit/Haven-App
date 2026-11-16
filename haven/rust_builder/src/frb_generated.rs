@@ -7433,7 +7433,6 @@ fn wire__crate__api__RelayManagerFfi_check_own_reachability_impl(
             let api_circle = <RustOpaqueMoi<
                 flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>,
             >>::sse_decode(&mut deserializer);
-            let api_own_pubkey = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, String>(
@@ -7471,7 +7470,6 @@ fn wire__crate__api__RelayManagerFfi_check_own_reachability_impl(
                         let output_ok = crate::api::RelayManagerFfi::check_own_reachability(
                             &*api_that_guard,
                             &*api_circle_guard,
-                            api_own_pubkey,
                         )
                         .await?;
                         Ok(output_ok)
@@ -7735,7 +7733,9 @@ fn wire__crate__api__RelayManagerFfi_fetch_gift_wraps_impl(
             let api_that = <RustOpaqueMoi<
                 flutter_rust_bridge::for_generated::RustAutoOpaqueInner<RelayManagerFfi>,
             >>::sse_decode(&mut deserializer);
-            let api_recipient_pubkey = <String>::sse_decode(&mut deserializer);
+            let api_circle = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>,
+            >>::sse_decode(&mut deserializer);
             let api_relays = <Vec<String>>::sse_decode(&mut deserializer);
             let api_since = <Option<i64>>::sse_decode(&mut deserializer);
             deserializer.end();
@@ -7743,11 +7743,19 @@ fn wire__crate__api__RelayManagerFfi_fetch_gift_wraps_impl(
                 transform_result_sse::<_, String>(
                     (move || async move {
                         let mut api_that_guard = None;
+                        let mut api_circle_guard = None;
                         let decode_indices_ =
                             flutter_rust_bridge::for_generated::lockable_compute_decode_order(
-                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
-                                    &api_that, 0, false,
-                                )],
+                                vec![
+                                    flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                        &api_that, 0, false,
+                                    ),
+                                    flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                        &api_circle,
+                                        1,
+                                        false,
+                                    ),
+                                ],
                             );
                         for i in decode_indices_ {
                             match i {
@@ -7755,13 +7763,18 @@ fn wire__crate__api__RelayManagerFfi_fetch_gift_wraps_impl(
                                     api_that_guard =
                                         Some(api_that.lockable_decode_async_ref().await)
                                 }
+                                1 => {
+                                    api_circle_guard =
+                                        Some(api_circle.lockable_decode_async_ref().await)
+                                }
                                 _ => unreachable!(),
                             }
                         }
                         let api_that_guard = api_that_guard.unwrap();
+                        let api_circle_guard = api_circle_guard.unwrap();
                         let output_ok = crate::api::RelayManagerFfi::fetch_gift_wraps(
                             &*api_that_guard,
-                            api_recipient_pubkey,
+                            &*api_circle_guard,
                             api_relays,
                             api_since,
                         )
@@ -7799,7 +7812,9 @@ fn wire__crate__api__RelayManagerFfi_fetch_gift_wraps_per_relay_impl(
             let api_that = <RustOpaqueMoi<
                 flutter_rust_bridge::for_generated::RustAutoOpaqueInner<RelayManagerFfi>,
             >>::sse_decode(&mut deserializer);
-            let api_recipient_pubkey = <String>::sse_decode(&mut deserializer);
+            let api_circle = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>,
+            >>::sse_decode(&mut deserializer);
             let api_relays = <Vec<String>>::sse_decode(&mut deserializer);
             let api_since = <Option<i64>>::sse_decode(&mut deserializer);
             deserializer.end();
@@ -7807,11 +7822,19 @@ fn wire__crate__api__RelayManagerFfi_fetch_gift_wraps_per_relay_impl(
                 transform_result_sse::<_, String>(
                     (move || async move {
                         let mut api_that_guard = None;
+                        let mut api_circle_guard = None;
                         let decode_indices_ =
                             flutter_rust_bridge::for_generated::lockable_compute_decode_order(
-                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
-                                    &api_that, 0, false,
-                                )],
+                                vec![
+                                    flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                        &api_that, 0, false,
+                                    ),
+                                    flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                        &api_circle,
+                                        1,
+                                        false,
+                                    ),
+                                ],
                             );
                         for i in decode_indices_ {
                             match i {
@@ -7819,13 +7842,18 @@ fn wire__crate__api__RelayManagerFfi_fetch_gift_wraps_per_relay_impl(
                                     api_that_guard =
                                         Some(api_that.lockable_decode_async_ref().await)
                                 }
+                                1 => {
+                                    api_circle_guard =
+                                        Some(api_circle.lockable_decode_async_ref().await)
+                                }
                                 _ => unreachable!(),
                             }
                         }
                         let api_that_guard = api_that_guard.unwrap();
+                        let api_circle_guard = api_circle_guard.unwrap();
                         let output_ok = crate::api::RelayManagerFfi::fetch_gift_wraps_per_relay(
                             &*api_that_guard,
-                            api_recipient_pubkey,
+                            &*api_circle_guard,
                             api_relays,
                             api_since,
                         )

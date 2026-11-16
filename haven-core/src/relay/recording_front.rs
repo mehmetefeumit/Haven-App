@@ -7,13 +7,16 @@
 //! records what the client sent, byte for byte, before the relay acts on it.
 //! A gating front ([`RecordingFront::start_gating`]) also plays a relay that
 //! withholds gift wraps from a client that has not authenticated, as strfry's
-//! `restrictedReadKinds` does. It builds no client and logs nothing; the
+//! `restrictedReadKinds` does, and checks the NIP-42 answer a client gives
+//! its challenge before it serves that client. It builds no client and logs
+//! nothing; the
 //! frames hold identifiers, so no type here has `Debug` (Security Rule 15).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use futures::{SinkExt, StreamExt};
+use nostr::{Event, JsonUtil as _, Kind, PublicKey, RelayUrl};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{oneshot, Notify};
 use tokio_tungstenite::tungstenite::Message;
@@ -35,6 +38,9 @@ const RESTRICTED_KINDS: [u64; 2] = [4, 1059];
 
 /// strfry's refusal of a read only an authenticated client may make.
 const AUTH_REQUIRED: &str = "auth-required: requested filter requires authentication";
+
+/// A refusal an authenticated client gets from a relay that does not serve it.
+const NOT_SERVED: &str = "restricted: this relay does not serve this account";
 
 #[derive(Default)]
 struct Record {
@@ -74,7 +80,7 @@ impl RecordingFront {
     /// nothing to assert.
     #[must_use]
     pub fn start(upstream: &str) -> Self {
-        Self::start_with(upstream, false)
+        Self::start_with(upstream, Gate::Open)
     }
 
     /// [`Self::start`] for a front that answers as a relay restricting the
@@ -87,15 +93,39 @@ impl RecordingFront {
     /// relay serves for any other `REQ` is withheld. Everything else, every
     /// `EVENT` a client publishes among it, is handed on as by [`Self::start`].
     ///
+    /// A client that answers the challenge is checked as strfry checks it
+    /// (`RelayIngester.cpp` `handleAuth`), stricter on the relay tag: the
+    /// answer must be a kind-22242 event with valid id and signature carrying
+    /// the challenge this connection was sent and a `relay` tag naming this
+    /// front's own address. It is answered `OK true` and the `AUTH` frame is
+    /// never handed on; from then on that connection's frames are handed on,
+    /// and of the restricted kinds it is served only events naming its key in
+    /// a `p` tag or signed by it. Any other answer is `OK false`, and a second
+    /// answer on a connection already authenticated is `OK false` as strfry's
+    /// "already authenticated".
+    ///
     /// # Panics
     ///
     /// As [`Self::start`].
     #[must_use]
     pub fn start_gating(upstream: &str) -> Self {
-        Self::start_with(upstream, true)
+        Self::start_with(upstream, Gate::UntilAuthenticated)
     }
 
-    fn start_with(upstream: &str, gating: bool) -> Self {
+    /// [`Self::start_gating`] for a relay whose policy does not serve the
+    /// client even once it has authenticated: a restricted read from an
+    /// authenticated connection is refused too, with strfry's `ERROR:
+    /// restricted:` and no challenge.
+    ///
+    /// # Panics
+    ///
+    /// As [`Self::start`].
+    #[must_use]
+    pub fn start_refusing(upstream: &str) -> Self {
+        Self::start_with(upstream, Gate::Always)
+    }
+
+    fn start_with(upstream: &str, gate: Gate) -> Self {
         let _ = super::allow_ws_loopback_for_test();
         let record = Arc::new(Record::default());
         let serving = Arc::clone(&record);
@@ -115,7 +145,8 @@ impl RecordingFront {
                     url_tx
                         .send(format!("ws://127.0.0.1:{port}"))
                         .expect("hand the url over");
-                    tokio::spawn(accept(listener, upstream, gating, serving));
+                    let front = format!("ws://127.0.0.1:{port}");
+                    tokio::spawn(accept(listener, upstream, front, gate, serving));
                     // Resolves when the handle is stopped or dropped; the
                     // runtime and every connection task go with it.
                     let _ = stopped.await;
@@ -208,20 +239,62 @@ impl RecordingFront {
     }
 }
 
-async fn accept(listener: TcpListener, upstream: String, gating: bool, record: Arc<Record>) {
+async fn accept(
+    listener: TcpListener,
+    upstream: String,
+    front: String,
+    gate: Gate,
+    record: Arc<Record>,
+) {
     while let Ok((tcp, _)) = listener.accept().await {
         let conn = record.connections.fetch_add(1, Ordering::SeqCst);
         let serving = Arc::clone(&record);
-        let upstream = upstream.clone();
+        let (upstream, front) = (upstream.clone(), front.clone());
         tokio::spawn(async move {
-            serve(tcp, upstream, conn, gating, Arc::clone(&serving)).await;
+            let at = Connection {
+                upstream,
+                front,
+                conn,
+                gate,
+            };
+            serve(tcp, at, Arc::clone(&serving)).await;
             serving.closed.fetch_add(1, Ordering::SeqCst);
             serving.grew.notify_waiters();
         });
     }
 }
 
-async fn serve(tcp: TcpStream, upstream: String, conn: usize, gating: bool, record: Arc<Record>) {
+/// Which reads of the restricted kinds a front refuses.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Gate {
+    /// None.
+    Open,
+    /// Those of a connection that has not authenticated.
+    UntilAuthenticated,
+    /// Every one.
+    Always,
+}
+
+/// Where one client connection is served.
+struct Connection {
+    upstream: String,
+    front: String,
+    conn: usize,
+    gate: Gate,
+}
+
+async fn serve(tcp: TcpStream, at: Connection, record: Arc<Record>) {
+    let Connection {
+        upstream,
+        front,
+        conn,
+        gate,
+    } = at;
+    let gating = gate != Gate::Open;
+    // The key this connection authenticated as, once a gating front accepted
+    // its answer.
+    let authed: Arc<Mutex<Option<PublicKey>>> = Arc::default();
+    let serving_as = Arc::clone(&authed);
     let Ok(client) = tokio_tungstenite::accept_async(tcp).await else {
         return;
     };
@@ -243,7 +316,8 @@ async fn serve(tcp: TcpStream, upstream: String, conn: usize, gating: bool, reco
             .chain(futures::stream::iter([None]));
         let mut outgoing = futures::stream::select(answered.map(Some), relayed);
         while let Some(Some(message)) = outgoing.next().await {
-            if gating && withheld(&message) {
+            let reader = *serving_as.lock().unwrap_or_else(PoisonError::into_inner);
+            if gating && withheld(&message, reader) {
                 continue;
             }
             if to_client.send(message).await.is_err() {
@@ -260,10 +334,24 @@ async fn serve(tcp: TcpStream, upstream: String, conn: usize, gating: bool, reco
                     text: text.as_str().to_owned(),
                     binary: false,
                 };
-                let refusal = if gating {
-                    refusal(text.as_str(), conn)
-                } else {
-                    None
+                if gating && verb(text.as_str()).as_deref() == Some("AUTH") {
+                    record.push(frame);
+                    let answer = answer_auth(text.as_str(), conn, &front, &authed);
+                    if answers.unbounded_send(answer).is_err() {
+                        break;
+                    }
+                    continue;
+                }
+                let authenticated = authed
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .is_some();
+                let refusal = match gate {
+                    Gate::UntilAuthenticated | Gate::Always if !authenticated => {
+                        refusal(text.as_str(), Some(conn))
+                    }
+                    Gate::Always => refusal(text.as_str(), None),
+                    Gate::Open | Gate::UntilAuthenticated => None,
                 };
                 if let Some(refusal) = refusal {
                     record
@@ -299,9 +387,10 @@ async fn serve(tcp: TcpStream, upstream: String, conn: usize, gating: bool, reco
 }
 
 /// What a gating front answers a client frame strfry refuses a client that
-/// has not authenticated: an `AUTH` challenge, then the refusal. `None` for
-/// every frame it hands on.
-fn refusal(text: &str, conn: usize) -> Option<[Message; 2]> {
+/// has not authenticated — on connection `challenge` an `AUTH` challenge, then
+/// the refusal — or, with no challenge to send, an authenticated client it
+/// still refuses. `None` for every frame it hands on.
+fn refusal(text: &str, challenge: Option<usize>) -> Option<Vec<Message>> {
     let frame: serde_json::Value = serde_json::from_str(text).ok()?;
     let frame = frame.as_array()?;
     let verb = frame.first()?.as_str()?;
@@ -316,17 +405,27 @@ fn refusal(text: &str, conn: usize) -> Option<[Message; 2]> {
     if !refused {
         return None;
     }
+    let reason = if challenge.is_some() {
+        AUTH_REQUIRED
+    } else {
+        NOT_SERVED
+    };
     let refusal = if verb == "NEG-OPEN" {
-        serde_json::json!(["NEG-ERR", id, AUTH_REQUIRED])
+        serde_json::json!(["NEG-ERR", id, reason])
     } else {
         // strfry's `sendClosedError` puts `ERROR: ` before every `CLOSED`
         // reason it sends.
-        serde_json::json!(["CLOSED", id, format!("ERROR: {AUTH_REQUIRED}")])
+        serde_json::json!(["CLOSED", id, format!("ERROR: {reason}")])
     };
-    Some([
-        Message::text(serde_json::json!(["AUTH", format!("challenge-{conn}")]).to_string()),
-        Message::text(refusal.to_string()),
-    ])
+    let challenge = challenge.map(|conn| {
+        Message::text(serde_json::json!(["AUTH", format!("challenge-{conn}")]).to_string())
+    });
+    Some(
+        challenge
+            .into_iter()
+            .chain([Message::text(refusal.to_string())])
+            .collect(),
+    )
 }
 
 fn kinds(filter: &serde_json::Value) -> Option<impl Iterator<Item = Option<u64>> + '_> {
@@ -355,20 +454,88 @@ fn names_restricted(filter: &serde_json::Value) -> bool {
     })
 }
 
-/// strfry's `shouldSendToSubscriber` for a client that has not
-/// authenticated: no event of a restricted kind reaches it.
-fn withheld(message: &Message) -> bool {
+/// strfry's `shouldSendToSubscriber`: no event of a restricted kind reaches
+/// a client that has not authenticated, and one that has is sent only those
+/// naming its key in a `p` tag or signed by it.
+fn withheld(message: &Message, reader: Option<PublicKey>) -> bool {
     let Message::Text(text) = message else {
         return false;
     };
-    serde_json::from_str::<serde_json::Value>(text.as_str()).is_ok_and(|frame| {
-        frame.get(0).and_then(serde_json::Value::as_str) == Some("EVENT")
-            && frame
-                .get(2)
-                .and_then(|event| event.get("kind"))
-                .and_then(serde_json::Value::as_u64)
-                .is_some_and(|kind| RESTRICTED_KINDS.contains(&kind))
-    })
+    let Ok(frame) = serde_json::from_str::<serde_json::Value>(text.as_str()) else {
+        return false;
+    };
+    let Some(event) = frame.get(2) else {
+        return false;
+    };
+    let restricted = frame.get(0).and_then(serde_json::Value::as_str) == Some("EVENT")
+        && event
+            .get("kind")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|kind| RESTRICTED_KINDS.contains(&kind));
+    restricted
+        && !reader.is_some_and(|reader| {
+            let reader = reader.to_hex();
+            event.get("pubkey").and_then(serde_json::Value::as_str) == Some(reader.as_str())
+                || event
+                    .get("tags")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|tags| {
+                        tags.iter().any(|tag| {
+                            tag.get(0).and_then(serde_json::Value::as_str) == Some("p")
+                                && tag.get(1).and_then(serde_json::Value::as_str)
+                                    == Some(reader.as_str())
+                        })
+                    })
+        })
+}
+
+/// A client frame's verb.
+fn verb(text: &str) -> Option<String> {
+    let frame: serde_json::Value = serde_json::from_str(text).ok()?;
+    Some(frame.get(0)?.as_str()?.to_owned())
+}
+
+/// A gating front's `OK` to a client's `["AUTH", event]` on connection
+/// `conn` of the front at `front`, recording the key in `authed` when the
+/// answer is the one NIP-42 asks for.
+fn answer_auth(text: &str, conn: usize, front: &str, authed: &Mutex<Option<PublicKey>>) -> Message {
+    let event = serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|frame| Event::from_json(frame.get(1)?.to_string()).ok());
+    let Some(event) = event else {
+        return Message::text(r#"["NOTICE","invalid: AUTH"]"#);
+    };
+    let tag = |name: &str| {
+        event.tags.iter().find_map(|tag| {
+            let parts = tag.as_slice();
+            (parts.len() == 2 && parts[0] == name).then(|| parts[1].clone())
+        })
+    };
+    let names_this_front = tag("relay")
+        .is_some_and(|relay| RelayUrl::parse(&relay).ok() == RelayUrl::parse(front).ok());
+    let answers = event.kind == Kind::Authentication
+        && event.verify().is_ok()
+        && tag("challenge").as_deref() == Some(format!("challenge-{conn}").as_str())
+        && names_this_front;
+    // One connection's frames are read one at a time, so nothing else sets
+    // the key between the two locks.
+    let already = authed
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .is_some();
+    let verdict = if already {
+        Err("error: already authenticated")
+    } else if answers {
+        *authed.lock().unwrap_or_else(PoisonError::into_inner) = Some(event.pubkey);
+        Ok(())
+    } else {
+        Err("restricted: the answer does not answer this connection's challenge")
+    };
+    let (status, reason) = match verdict {
+        Ok(()) => (true, ""),
+        Err(reason) => (false, reason),
+    };
+    Message::text(serde_json::json!(["OK", event.id, status, reason]).to_string())
 }
 
 #[cfg(test)]

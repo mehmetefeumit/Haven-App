@@ -28,6 +28,8 @@ pub enum Frame {
     /// as this JSON text, byte for byte: a relay may spell a genuine event
     /// with its keys in another order, extra fields or other escapes.
     Raw(String),
+    /// This whole frame, byte for byte: an `AUTH` challenge among the answer.
+    Text(String),
     /// `EOSE` for the subscription the `REQ` opened.
     Eose,
     /// `CLOSED` for the subscription the `REQ` opened, with this text: the
@@ -325,6 +327,7 @@ impl Script {
                                 Frame::Raw(event) => {
                                     Reply::Text(format!(r#"["EVENT",{sub},{event}]"#))
                                 }
+                                Frame::Text(text) => Reply::Text(text.clone()),
                                 Frame::Eose => Reply::Text(eose()),
                                 Frame::Closed(text) => Reply::Text(
                                     serde_json::json!(["CLOSED", sub, text]).to_string(),

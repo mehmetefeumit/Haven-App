@@ -129,7 +129,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(relayService.ownPresenceAsks, [_stubIdentity().pubkeyHex]);
+      expect(relayService.ownPresenceChecks, 1);
     });
 
     testWidgets('uses the refresh ring, not a spinner', (tester) async {
@@ -996,7 +996,7 @@ void main() {
       published.complete();
       await tester.pumpAndSettle();
 
-      expect(relay.ownPresenceAsks, hasLength(2), reason: 'checked again');
+      expect(relay.ownPresenceChecks, 2, reason: 'checked again');
       expect(find.text('KeyPackage: Published'), findsOneWidget);
       expect(
         find.text(
@@ -1122,7 +1122,7 @@ void main() {
       await tester.pumpWidget(buildApp(mock: twoInbox(), relay: relay));
       await tester.pumpAndSettle();
       expect(find.text(refusedLine), findsOneWidget);
-      expect(relay.ownPresenceAsks, hasLength(1));
+      expect(relay.ownPresenceChecks, 1);
 
       relay.ownPresence = [
         inboxRow('wss://open.example.com', InboxReadFfi.served),
@@ -1130,7 +1130,7 @@ void main() {
       await tester.tap(find.byTooltip('Remove gated.example.com').first);
       await tester.pumpAndSettle();
 
-      expect(relay.ownPresenceAsks, hasLength(2), reason: 'checked again');
+      expect(relay.ownPresenceChecks, 2, reason: 'checked again');
       expect(find.text(refusedLine), findsNothing);
       expect(find.text('Inbox list: Published'), findsOneWidget);
     });
@@ -1164,7 +1164,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(mock.log, contains('wipe:inbox'));
-      expect(relay.ownPresenceAsks, hasLength(2), reason: 'checked again');
+      expect(relay.ownPresenceChecks, 2, reason: 'checked again');
       expect(find.text(allRefusedTitle), findsNothing);
       expect(find.text(refusedLine), findsNothing);
     });

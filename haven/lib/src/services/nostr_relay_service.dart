@@ -522,9 +522,19 @@ class NostrRelayService implements RelayService, CircleChangeDriver {
     }
   }
 
+  /// The circle manager whose identity an own inbox read is made as: Rust
+  /// reads that identity's gift wraps and answers a relay's challenge with
+  /// it, so no pubkey and no secret crosses the bridge for it.
+  Future<CircleManagerFfi> _inboxCircleManager() async {
+    final circleManagerFactory = _circleManagerFactory;
+    if (circleManagerFactory == null) {
+      throw StateError('no circle manager to read the inbox as');
+    }
+    return circleManagerFactory();
+  }
+
   @override
   Future<List<String>> fetchGiftWraps({
-    required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
   }) async {
@@ -536,7 +546,7 @@ class NostrRelayService implements RelayService, CircleChangeDriver {
           : null;
 
       return await manager.fetchGiftWraps(
-        recipientPubkey: recipientPubkey,
+        circle: await _inboxCircleManager(),
         relays: relays,
         since: sinceTimestamp,
       );
@@ -548,7 +558,6 @@ class NostrRelayService implements RelayService, CircleChangeDriver {
 
   @override
   Future<List<RelayGiftWrapFetch>> fetchGiftWrapsPerRelay({
-    required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
   }) async {
@@ -560,7 +569,7 @@ class NostrRelayService implements RelayService, CircleChangeDriver {
           : null;
 
       final ffiResults = await manager.fetchGiftWrapsPerRelay(
-        recipientPubkey: recipientPubkey,
+        circle: await _inboxCircleManager(),
         relays: relays,
         since: sinceTimestamp,
       );
@@ -764,9 +773,7 @@ class NostrRelayService implements RelayService, CircleChangeDriver {
   }
 
   @override
-  Future<List<OwnRelayPresenceFfi>> checkOwnReachability({
-    required String ownPubkey,
-  }) async {
+  Future<List<OwnRelayPresenceFfi>> checkOwnReachability() async {
     final manager = await _ensureInitialized();
 
     try {
@@ -776,7 +783,6 @@ class NostrRelayService implements RelayService, CircleChangeDriver {
       }
       return await manager.checkOwnReachability(
         circle: await circleManagerFactory(),
-        ownPubkey: ownPubkey,
       );
     } on Object catch (e) {
       debugPrint('Failed to check own reachability: ${e.runtimeType}');

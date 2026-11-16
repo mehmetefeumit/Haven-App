@@ -79,7 +79,7 @@
 ///
 /// // 3. Record carriers as the scenario observes them.
 /// canaries.nostrGroupIdHex = _hexLower(circle.nostrGroupId);
-/// for (final id in sentWrapIds) {               // e.g. `giftWrapIdsFor`
+/// for (final id in sentWrapIds) {               // e.g. a relay snapshot's
 ///   canaries.recordCircleNameCarrier(id);        // after minus before
 /// }
 /// canaries.recordCoordinateCarrier(evt.id);      // a peer decrypted it and
