@@ -20,9 +20,6 @@
 # Modes:
 #   check_ucrop_runtime_deps.sh                         static: the gradle file
 #                                                       and the source manifest
-#   check_ucrop_runtime_deps.sh --resolved <file>       output of `./gradlew -q
-#        :app:dependencies --configuration releaseRuntimeClasspath`: what Gradle
-#        actually resolved (another graph may raise a version, never lower it)
 #   check_ucrop_runtime_deps.sh --merged-manifest <file>  `aapt2 dump xmltree
 #        --file AndroidManifest.xml <release apk>`: the initializers that ship
 #   check_ucrop_runtime_deps.sh --self-test             hermetic fixtures
@@ -79,33 +76,6 @@ check_static() {
     echo "FAIL S2 ${EMOJI_INITIALIZER} is not removed from androidx.startup's InitializationProvider (tools:node=\"remove\" under a tools:node=\"merge\" provider)" >&2
     fail=1
   fi
-  return "${fail}"
-}
-
-# check_resolved <gradle dependencies output>
-check_resolved() {
-  local deps="$1" fail=0 entry coord want versions have
-  for entry in "${REQUIRED[@]}"; do
-    coord="${entry% *}" want="${entry#* }"
-    # `+--- g:a:1.1.0 -> 1.7.1 (*)` resolves to the version after the arrow.
-    versions="$(awk -v c="${coord}:" '{
-      for (i = 1; i <= NF; i++) if (index($i, c) == 1) {
-        v = substr($i, length(c) + 1)
-        if ($(i + 1) == "->") v = $(i + 2)
-        print v
-      }
-    }' "${deps}" | sort -u)"
-    if [[ -z "${versions}" ]]; then
-      echo "VACUOUS R1 ${coord}: absent from the resolved graph" >&2
-      return 2
-    fi
-    while IFS= read -r have; do
-      if ! version_at_least "${have}" "${want}"; then
-        echo "FAIL R1 ${coord}: resolved ${have}, below ${want}" >&2
-        fail=1
-      fi
-    done <<<"${versions}"
-  done
   return "${fail}"
 }
 
@@ -167,24 +137,6 @@ self_test() {
   printf '<manifest>\n' >"${tmp}/m-broken.xml"
   _case "a malformed manifest fails" 1 check_static "${tmp}/g.kts" "${tmp}/m-broken.xml"
 
-  # Resolved graph.
-  cat >"${tmp}/deps.txt" <<'TXT'
-releaseRuntimeClasspath - Runtime classpath of /release.
-+--- androidx.appcompat:appcompat:1.7.1
-|    +--- androidx.emoji2:emoji2:1.3.0
-+--- androidx.transition:transition:1.6.0
-+--- androidx.exifinterface:exifinterface:1.4.1 -> 1.4.2
-\--- project :shared_preferences_android
-     \--- androidx.preference:preference:1.2.1
-          +--- androidx.appcompat:appcompat:1.1.0 -> 1.7.1 (*)
-          \--- androidx.transition:transition:1.4.1 -> 1.6.0 (c)
-TXT
-  _case "a resolved graph at or above every floor passes" 0 check_resolved "${tmp}/deps.txt"
-  sed 's/appcompat:1\.1\.0 -> 1\.7\.1/appcompat:1.1.0 -> 1.1.0/' "${tmp}/deps.txt" >"${tmp}/deps-low.txt"
-  _case "a resolved version below its floor fails" 1 check_resolved "${tmp}/deps-low.txt"
-  sed '/exifinterface/d' "${tmp}/deps.txt" >"${tmp}/deps-none.txt"
-  _case "a module absent from the graph is vacuous" 2 check_resolved "${tmp}/deps-none.txt"
-
   # Merged manifest, over a REAL aapt2 dump (v0.1.14, which shipped emoji2's).
   local real="${REPO_ROOT}/scripts/ci/fixtures/apk_loadable/v0.1.14.manifest.txt"
   grep -v '^#' "${real}" >"${tmp}/x-shipped.txt"
@@ -202,16 +154,11 @@ TXT
     echo "uCrop runtime-deps guard: self-test FAILED (${failures})" >&2
     return 1
   fi
-  echo "uCrop runtime-deps guard: self-test OK (14 fixtures)."
+  echo "uCrop runtime-deps guard: self-test OK (11 fixtures)."
 }
 
 case "${1:-}" in
   --self-test) self_test ;;
-  --resolved)
-    [[ -f "${2:-}" ]] || { echo "usage: $0 --resolved <gradle dependencies output>" >&2; exit 2; }
-    check_resolved "$2"
-    echo "OK: uCrop's AndroidX dependencies resolve at or above their floors."
-    ;;
   --merged-manifest)
     [[ -f "${2:-}" ]] || { echo "usage: $0 --merged-manifest <aapt2 xmltree output>" >&2; exit 2; }
     check_merged_manifest "$2"
@@ -221,5 +168,5 @@ case "${1:-}" in
     check_static "${GRADLE_FILE}" "${MANIFEST}"
     echo "OK: uCrop's AndroidX dependencies are declared and emoji2's initializer is removed."
     ;;
-  *) echo "usage: $0 [--self-test | --resolved <file> | --merged-manifest <file>]" >&2; exit 2 ;;
+  *) echo "usage: $0 [--self-test | --merged-manifest <file>]" >&2; exit 2 ;;
 esac

@@ -39,6 +39,7 @@ const _targets = <String, int>{
   'integration_test/app_test.dart': 2,
   'integration_test/e2e/e2e_combined.dart': 2,
   'integration_test/e2e/e2e_profile_sharing.dart': 1,
+  'integration_test/e2e/e2e_profile_ui_photo.dart': 1,
   'integration_test/b1_fgs_live_foreground_test.dart': 1,
   'integration_test/b9_network_reconnect_test.dart': 1,
   'integration_test/ios_bg_publish_test.dart': 1,

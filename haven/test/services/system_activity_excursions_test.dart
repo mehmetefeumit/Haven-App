@@ -177,13 +177,18 @@ void main() {
     test('is in flight from the synchronous start of the save', () {
       // The handoff checks it and releases in one synchronous step, so a save
       // must count from the instant it is called, before its first await.
-      final excursions = SystemActivityExcursions();
-      final gate = Completer<void>();
-      unawaited(excursions.save(() => gate.future));
-      var settled = false;
-      unawaited(excursions.saved.then((_) => settled = true));
-      expect(settled, isFalse);
-      gate.complete();
+      fakeAsync((async) {
+        final excursions = SystemActivityExcursions();
+        final gate = Completer<void>();
+        unawaited(excursions.save(() => gate.future));
+        var settled = false;
+        unawaited(excursions.saved.then((_) => settled = true));
+        async.flushMicrotasks();
+        expect(settled, isFalse, reason: 'the save counted before it awaited');
+        gate.complete();
+        async.flushMicrotasks();
+        expect(settled, isTrue);
+      });
     });
   });
 
