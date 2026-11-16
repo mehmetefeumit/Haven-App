@@ -22,8 +22,9 @@
 #     a separate cacheable static-maps product whose images may be kept while
 #     a paid plan is held. Confirm on docs.stadiamaps.com (and the terms of
 #     service) WHICH endpoint permits storing the images inside a distributed
-#     app, that the account's plan covers it, and point STATIC_MAPS_ENDPOINT at
-#     that endpoint before committing any image.
+#     app and that the account's plan covers it, then pass that endpoint as
+#     STATIC_MAPS_ENDPOINT. There is deliberately no default: the script refuses
+#     to run until the endpoint has been chosen.
 #   * ZOOM: the scenes' zooms are the ones the page's old live FlutterMap used
 #     (256 px raster-tile convention). If the static renderer counts zoom the
 #     vector way (512 px tiles), its images come out one level wider; compare
@@ -45,8 +46,9 @@
 # fraction of a PNG's size (Flutter decodes WebP natively on every platform);
 # an image above BUDGET_KB is reported, not refused.
 #
-# Usage (from anywhere):
-#   scripts/generate_map_style_previews.sh
+# Usage (from anywhere), with the endpoint confirmed as above:
+#   STATIC_MAPS_ENDPOINT=https://tiles.stadiamaps.com/<path> \
+#     scripts/generate_map_style_previews.sh
 #
 # Key source (first match wins, the same order as scripts/build_release.sh):
 #   1. haven/dart_defines/secrets.json   (gitignored; local dev)
@@ -58,7 +60,8 @@
 # `apt install webp`).
 #
 # Exit codes: 0 ok | 1 render/convert/verify failure | 2 no usable key |
-#             3 key is empty/placeholder/malformed | 4 missing tool
+#             3 key is empty/placeholder/malformed | 4 missing tool |
+#             5 STATIC_MAPS_ENDPOINT unset or not a Stadia https URL
 
 set -euo pipefail
 
@@ -71,8 +74,9 @@ PLACEHOLDER='STADIA_API_KEY_PLACEHOLDER'
 # key to that shape also keeps it from breaking out of curl's config syntax.
 UUID_RE='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 
-# UNVERIFIED — see the header. The one place the endpoint is named.
-STATIC_MAPS_ENDPOINT='https://tiles.stadiamaps.com/static'
+# No default (see the header): whether an endpoint's images may be stored in
+# the app is a licensing decision the owner makes, not one this script assumes.
+STATIC_MAPS_ENDPOINT="${STATIC_MAPS_ENDPOINT:-}"
 
 LOGICAL_WIDTH=480
 LOGICAL_HEIGHT=180
@@ -110,6 +114,13 @@ SCENES=(
 
 log()  { printf '\033[1;34m[map_previews]\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31m[map_previews] FAIL:\033[0m %s\n' "$1" >&2; exit "${2:-1}"; }
+
+# --- 0. Endpoint, chosen by the owner --------------------------------------
+# Held to Stadia's tile host so the key is never sent anywhere else.
+[[ -n "${STATIC_MAPS_ENDPOINT}" ]] \
+  || fail "STATIC_MAPS_ENDPOINT is not set: confirm which Stadia endpoint permits storing the images in the app (see this script's header and haven/DEVELOPMENT.md), then pass it" 5
+[[ "${STATIC_MAPS_ENDPOINT}" =~ ^https://tiles\.stadiamaps\.com/[A-Za-z0-9_/-]*[A-Za-z0-9_-]$ ]] \
+  || fail "STATIC_MAPS_ENDPOINT must be an https://tiles.stadiamaps.com/<path> URL with no query string or trailing slash" 5
 
 # --- 1. Tools --------------------------------------------------------------
 for tool in curl cwebp webpinfo; do

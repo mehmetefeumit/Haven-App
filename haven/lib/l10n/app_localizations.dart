@@ -978,7 +978,7 @@ abstract class AppLocalizations {
   /// **'Shaded terrain with trails and parks'**
   String get mapStyleOutdoorsSubtitle;
 
-  /// Section header above the live map-style previews.
+  /// Section header above the bundled map-style preview images.
   ///
   /// In en, this message translates to:
   /// **'Preview'**
@@ -996,7 +996,7 @@ abstract class AppLocalizations {
   /// **'Nature'**
   String get mapStylePreviewNature;
 
-  /// Accessibility label for a live map preview image, naming the scene (City/Nature) and the style.
+  /// Accessibility label for a bundled map preview image, naming the scene (City/Nature) and the style.
   ///
   /// In en, this message translates to:
   /// **'Map preview ({scene}): {style}'**

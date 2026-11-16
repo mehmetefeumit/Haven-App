@@ -627,7 +627,7 @@
   },
   "mapStylePreviewHeader": "Preview",
   "@mapStylePreviewHeader": {
-    "description": "Section header above the live map-style previews."
+    "description": "Section header above the bundled map-style preview images."
   },
   "mapStylePreviewCity": "City",
   "@mapStylePreviewCity": {
@@ -639,7 +639,7 @@
   },
   "mapStylePreviewSemantics": "Map preview ({scene}): {style}",
   "@mapStylePreviewSemantics": {
-    "description": "Accessibility label for a live map preview image, naming the scene (City/Nature) and the style.",
+    "description": "Accessibility label for a bundled map preview image, naming the scene (City/Nature) and the style.",
     "placeholders": {
       "scene": { "type": "String" },
       "style": { "type": "String" }

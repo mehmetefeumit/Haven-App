@@ -152,7 +152,8 @@ credits. They are rendered once, with your Stadia key, and committed:
 ```bash
 # Needs curl + libwebp (cwebp, webpinfo): brew install webp | apt install webp.
 # Key: haven/dart_defines/secrets.json, else $STADIA_API_KEY.
-scripts/generate_map_style_previews.sh
+# Endpoint: required, no default — confirm it first (see below).
+STATIC_MAPS_ENDPOINT=https://tiles.stadiamaps.com/<path> scripts/generate_map_style_previews.sh
 ```
 
 The script renders each scene (its centre, zoom and rationale are defined at
@@ -169,7 +170,9 @@ written without access to Stadia, so its endpoint is unverified):
 - which Static Maps endpoint permits *storing* the images inside a distributed
   app — Stadia's standard static maps may not be stored; its cacheable static
   maps may be kept while a paid plan is held — and that your plan covers it.
-  Point `STATIC_MAPS_ENDPOINT` at that endpoint;
+  Pass that endpoint as `STATIC_MAPS_ENDPOINT` (the script has no default and
+  refuses to run without it, e.g.
+  `STATIC_MAPS_ENDPOINT=https://tiles.stadiamaps.com/<path> scripts/generate_map_style_previews.sh`);
 - that the request shape (`center`, `zoom`, `size=WxH@2x`, `api_key`) and the
   zoom convention match, by comparing each image with the map at the same
   place.
@@ -344,7 +347,7 @@ run number (unique + monotonic, CFBundleVersion / Android versionCode). You neve
 edit `pubspec.yaml` for a release, and nothing is pushed to `main`.
 
 ```bash
-git tag -a v1.2.3 -m "Haven 1.2.3"   # tag must be vMAJOR.MINOR.PATCH (digits only)
+git tag -a v1.2.3 -m "Haven 1.2.3"   # vMAJOR.MINOR.PATCH, optional -prerelease
 git push origin v1.2.3               # -> Release Build workflow -> Android + iOS/TestFlight
 ```
 
