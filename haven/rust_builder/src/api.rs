@@ -22888,14 +22888,24 @@ mod maintenance_real_ffi_tests {
 
     /// An in-process relay behind a recording front: the product is told the
     /// front's address and nothing else.
-    struct FrontedRelay {
+    pub(super) struct FrontedRelay {
         _server: nostr_relay_builder::LocalRelay,
         db: nostr_relay_builder::prelude::MemoryDatabase,
-        front: haven_core::relay::recording_front::RecordingFront,
+        pub(super) front: haven_core::relay::recording_front::RecordingFront,
     }
 
     impl FrontedRelay {
-        async fn run() -> Self {
+        pub(super) async fn run() -> Self {
+            Self::start(false).await
+        }
+
+        /// Behind a gating front: gift-wrap reads are refused as strfry
+        /// refuses them a client that has not authenticated.
+        pub(super) async fn run_gating() -> Self {
+            Self::start(true).await
+        }
+
+        async fn start(gating: bool) -> Self {
             let db = nostr_relay_builder::prelude::MemoryDatabase::with_opts(
                 nostr_relay_builder::prelude::MemoryDatabaseOptions {
                     events: true,
@@ -22919,9 +22929,12 @@ mod maintenance_real_ffi_tests {
                 assert!(started.is_ok(), "an in-process relay did not start");
                 break server;
             };
-            let front = haven_core::relay::recording_front::RecordingFront::start(
-                &server.url().await.to_string(),
-            );
+            let upstream = server.url().await.to_string();
+            let front = if gating {
+                haven_core::relay::recording_front::RecordingFront::start_gating(&upstream)
+            } else {
+                haven_core::relay::recording_front::RecordingFront::start(&upstream)
+            };
             Self {
                 _server: server,
                 db,
@@ -24956,6 +24969,11 @@ mod driver_real_ffi_tests {
         nostr::JsonUtil::as_json(&event)
     }
 }
+
+#[cfg(test)]
+#[cfg(debug_assertions)] // the ws:// loopback + in-memory-keyring seams are debug-only
+#[path = "split_plane_invite_tests.rs"]
+mod split_plane_invite_tests;
 
 #[cfg(test)]
 mod publish_event_ffi_tests {
