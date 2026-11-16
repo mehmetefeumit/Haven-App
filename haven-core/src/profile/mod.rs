@@ -54,10 +54,11 @@ pub use blossom::{
     allow_private_blossom_for_test, download_profile_picture, require_https, upload_profile_picture,
 };
 pub use config::{
-    blossom_server, set_blossom_server_for_test, AVATAR_MIME, BLOSSOM_AUTH_EXPIRY_SECS,
-    BLOSSOM_TIMEOUT, DEFAULT_BLOSSOM_SERVER, PROFILE_AUTHOR_FETCH_TIMEOUT, PROFILE_BATCH_DEADLINE,
-    PROFILE_INTER_REQ_JITTER_MS, PROFILE_MAX_INFLIGHT_RELAYS, PROFILE_OWN_READ_BOUND,
-    PROFILE_PER_AUTHOR_LIMIT, PROFILE_PICTURE_MAX_DOWNLOAD_BYTES, PROFILE_SYNC_BACKOFF_SECS,
+    blossom_servers, set_blossom_server_for_test, BlossomAuthEncoding, BlossomServer, UploadServer,
+    AVATAR_MIME, BLOSSOM_AUTH_EXPIRY_SECS, BLOSSOM_MAX_REDIRECTS, BLOSSOM_SERVERS, BLOSSOM_TIMEOUT,
+    PROFILE_AUTHOR_FETCH_TIMEOUT, PROFILE_BATCH_DEADLINE, PROFILE_INTER_REQ_JITTER_MS,
+    PROFILE_MAX_INFLIGHT_RELAYS, PROFILE_OWN_READ_BOUND, PROFILE_PER_AUTHOR_LIMIT,
+    PROFILE_PICTURE_MAX_DOWNLOAD_BYTES, PROFILE_SYNC_BACKOFF_SECS,
 };
 pub use consent::{has_published_profile, retraction_gate, OwnReadVerdict, RetractionGate};
 pub use error::{ProfileError, Result};

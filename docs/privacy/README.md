@@ -497,7 +497,10 @@ Recorded here rather than papered over:
   plane and false app-wide: the map has exactly one provider by CI
   enforcement, the eight profile relays cannot be removed by the user
   (`usable_profile_relays()` re-unions the pool), and the Blossom host is a
-  single hardcoded server. The app's own privacy copy
+  single hardcoded server (*2026-11-16:* a built-in list of three, tried in
+  order — `blossom.primal.net`, then `blossom.divine.video`, then
+  `blossom.ditto.pub` — still chosen by Haven, not the user;
+  `docs/BLOSSOM_SERVER_VETTING.md`). The app's own privacy copy
   (`privacyRelaysDetailIndexers`, `privacyPublicProfileDetailKindZero`)
   contradicts the onboarding claim, and onboarding is where a user forms their
   threat model. Recorded as `ratcheted` with the three exceptions named. Owner

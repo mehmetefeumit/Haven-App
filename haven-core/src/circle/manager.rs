@@ -5992,6 +5992,18 @@ impl CircleManager {
         self.storage.profile_publish_debt(own, version)
     }
 
+    /// See [`CircleStorage::discard_profile_publish_debt`]. For a test that
+    /// builds the outbox a build without the owed-event ledger left behind.
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn discard_profile_publish_debt(&self, pubkey_hex: &str, version: i64) -> Result<()> {
+        self.storage
+            .discard_profile_publish_debt(pubkey_hex, version)
+    }
+
     /// See [`CircleStorage::clear_profile_sync_state`].
     ///
     /// # Errors

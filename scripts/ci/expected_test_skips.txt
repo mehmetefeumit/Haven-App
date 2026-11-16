@@ -61,7 +61,7 @@
 
 
 # ---------------------------------------------------------------------------
-# haven-core — 9 skips (`cargo test --tests` and coverage.yml's `cargo llvm-cov`)
+# haven-core — 10 skips (`cargo test --tests` and coverage.yml's `cargo llvm-cov`)
 # ---------------------------------------------------------------------------
 
 # Blossom round-trips against a REAL server (BUD-01/02 upload + download +
@@ -71,7 +71,13 @@
 # is separately enforced statically by check_profile_privacy_boundaries.sh and
 # by the non-ignored unit tests alongside them in src/profile/blossom.rs, so
 # what is lost here is transport-level round-trip fidelity, not the invariant.
+# The probe of the built-in upload servers (docs/BLOSSOM_SERVER_VETTING.md)
+# writes a JPEG to third-party hosts, so only a maintainer runs it; the
+# functions it calls are proven hermetically in src/profile/blossom.rs and
+# tests/profile_blossom_redirect_e2e.rs, and what it alone can show — how the
+# production servers answer today — is recorded in that doc as not yet probed.
 haven-core|src/lib.rs::profile::blossom::tests::live_round_trip_against_local_blossom|needs a running Blossom server; set HAVEN_E2E_BLOSSOM=http://127.0.0.1:<port>
+haven-core|tests/profile_blossom_integration_test.rs::blossom_servers_accept_an_anonymous_avatar_and_serve_it_back|uploads to the production Blossom servers (HAVEN_PROBE_BLOSSOM_SERVERS=1)
 haven-core|tests/profile_blossom_integration_test.rs::download_of_absent_hash_errors_not_panics|requires a live Blossom server (HAVEN_E2E_BLOSSOM)
 haven-core|tests/profile_blossom_integration_test.rs::duplicate_upload_succeeds|requires a live Blossom server (HAVEN_E2E_BLOSSOM)
 haven-core|tests/profile_blossom_integration_test.rs::upload_then_download_byte_identical_after_revalidation|requires a live Blossom server (HAVEN_E2E_BLOSSOM)
