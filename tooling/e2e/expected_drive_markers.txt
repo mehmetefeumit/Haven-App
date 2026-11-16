@@ -1,0 +1,34 @@
+# End markers — the scenarios each lane must prove it RAN.
+#
+# `integrationDriver` names no test, and a body that is registered but never
+# executes (a flag guard at its top, a group registered on the wrong build)
+# reports as passed. So every scenario registered through a marker-printing
+# wrapper (`_scenarioTestWidgets` / `_m11ScenarioTestWidgets` in
+# e2e_combined.dart) prints `[e2e-done] <id>` as its last act — <id> is its
+# description up to ` — ` — and the runner that drove its target fails the lane
+# when the drive log lacks a marker declared here for the lane it ran.
+#
+# Enforced by tooling/e2e/ci/drive-log-lib.sh:
+#   RUNTIME  drive_log_missing_markers, called by run-single-avd-scenario.sh and
+#            run-ios-sim-scenario.sh after a passing drive, with the lane from
+#            HAVEN_LIVE_SYNC.
+#   STATIC   --check-manifest (repo-guards.yml): every registered scenario has a
+#            row, every row names a registered scenario, and every runner a
+#            workflow drives a marked target with consults the runtime check.
+#
+# Format, one row per scenario, no padding around the `|`:
+#
+#     <target>|<lane>|<id>
+#
+#   target  path relative to haven/
+#   lane    live (registered only on a HAVEN_LIVE_SYNC=true build), poll, or both
+
+integration_test/e2e/e2e_combined.dart|both|INV-ui
+integration_test/e2e/e2e_combined.dart|live|a
+integration_test/e2e/e2e_combined.dart|live|B0
+integration_test/e2e/e2e_combined.dart|live|H1
+integration_test/e2e/e2e_combined.dart|live|driver-2
+integration_test/e2e/e2e_combined.dart|live|f
+integration_test/e2e/e2e_combined.dart|live|d
+integration_test/e2e/e2e_combined.dart|live|e
+integration_test/e2e/e2e_combined.dart|live|g

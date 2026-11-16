@@ -239,8 +239,12 @@ async fn serve(args: &[String]) -> ExitCode {
     // stderr (not stdout) so it never pollutes a piped journal; the CI script
     // greps these lines to confirm readiness.
     for route in proxy.bound_routes() {
+        let gate = route.read_gate.as_ref().map_or(String::new(), |gate| {
+            let kinds: Vec<String> = gate.kinds().map(|kind| kind.to_string()).collect();
+            format!(" (reads of kind {} gated)", kinds.join("+"))
+        });
         eprintln!(
-            "[haven-wire-proxy] ws://{} -> {}",
+            "[haven-wire-proxy] ws://{} -> {}{gate}",
             route.listen, route.upstream
         );
     }

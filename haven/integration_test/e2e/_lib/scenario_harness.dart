@@ -83,9 +83,18 @@ abstract final class ScenarioHarness {
     List<String>? profileRelays,
   }) async {
     IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+    // The gated relay goes FIRST, the position `relay.damus.io` held in the
+    // production inbox seed: a Welcome sent to the first inbox relay alone is
+    // then stored where no read can reach it.
     await TestUser.bootstrapProcess(
-      relays: <String>[relayUrl],
+      relays: <String>[
+        if (gatedInboxConfigured) gatedInboxRelayUrl,
+        relayUrl,
+      ],
       profileRelays: profileRelays,
+      harnessOnlyRelays: <String>[
+        if (gatedInboxConfigured) gatedStoreProbeUrl,
+      ],
     );
     final relay = await connectProbeRelay(relayUrl);
     final role = ScenarioRole.fromEnvironment();

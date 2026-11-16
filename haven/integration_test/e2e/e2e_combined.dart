@@ -149,8 +149,9 @@ import 'dart:async';
 import 'dart:convert' show jsonEncode;
 import 'dart:typed_data' show Uint8List;
 
-import 'package:flutter/foundation.dart' show debugPrint, listEquals;
-import 'package:flutter/material.dart' show FilledButton, SizedBox;
+import 'package:flutter/foundation.dart'
+    show debugPrint, listEquals, setEquals;
+import 'package:flutter/material.dart' show FilledButton, SizedBox, ValueKey;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/main.dart';
@@ -161,6 +162,11 @@ import 'package:haven/src/pages/map_shell.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart'
     show identityNotifierProvider, identityProvider;
+import 'package:haven/src/providers/invitation_poll_status_provider.dart'
+    show
+        InvitationPollOutcome,
+        InvitationPollPhase,
+        invitationPollStatusProvider;
 import 'package:haven/src/providers/invitation_provider.dart'
     show pendingInvitationsProvider;
 import 'package:haven/src/providers/key_package_provider.dart'
@@ -209,7 +215,12 @@ import '_lib/sheet_helpers.dart';
 import '_lib/sqlcipher_wrong_key.dart' show provokeSqlcipherWrongKeyOpen;
 import '_lib/synthetic_user.dart' show DecryptedCoords, SyntheticUser;
 import '_lib/test_relay.dart'
-    show TestRelay, TestRelayEvent, locationRelayUrl, wireRecorderDeclared;
+    show
+        TestRelay,
+        TestRelayEvent,
+        gatedInboxConfigured,
+        locationRelayUrl,
+        wireRecorderDeclared;
 import '_lib/test_user.dart';
 import '_lib/wire_canaries.dart' show CanaryId, WireCanaryPlant;
 import '_lib/throw_time_error_capture.dart';
@@ -439,6 +450,15 @@ void main() {
     // ScenarioHarness initialises the Rust bridge, installs the in-
     // memory keyring, applies the loopback-only relay override, and
     // opens a TestRelay probe socket to strfry.
+    // This target proves invitations against an inbox list headed by a relay
+    // that refuses gift-wrap reads (`gatedInboxRelayUrl`); without one every
+    // invite below would pass whichever relays the Welcome reached.
+    if (!gatedInboxConfigured) {
+      throw StateError(
+        'e2e_combined needs HAVEN_E2E_GATED_INBOX_RELAY and '
+        'HAVEN_E2E_GATED_STORE_PROBE (e2e-android.yml / e2e-ios.yml).',
+      );
+    }
     ctx = await ScenarioHarness.bootstrap();
     didInitCtx = true;
 
@@ -1694,15 +1714,217 @@ void main() {
   });
 
   // ===========================================================================
+  // INV — the app as INVITEE, through its own UI, on both receive paths.
+  //
+  // Every other invitation in this file is received by a SyntheticUser; this
+  // one is received by the pumped app, from a store with no circle at all,
+  // through the trigger the shipped build uses: flag-on the live engine's
+  // inbox stream, started only after the Welcome is already stored (S1: a
+  // Welcome the engine finds at its start reaches the app); flag-off the
+  // Invitations page's own read on open. The inviter finds the app with the
+  // product lookup and invites it over the driven create. The lane heads
+  // every inbox list with the gated relay (`gatedInboxRelayUrl`), so the page
+  // reads one relay as refused and shows the invitation from the one that
+  // served it.
+  // ===========================================================================
+  group('INV: the app as invitee', () {
+    late TestRelay invRelay;
+    var invDidInitRelay = false;
+
+    setUpAll(() async {
+      invRelay = await TestRelay.connect();
+      invDidInitRelay = true;
+    });
+
+    tearDownAll(() async {
+      if (invDidInitRelay) {
+        await _boundedTeardown('invRelay.dispose', invRelay.dispose);
+      }
+    });
+
+    _scenarioTestWidgets(
+      'INV-ui — a fresh install with no circle is invited, sees the '
+      'invitation on its Invitations page and joins through it',
+      (tester, generation) async {
+        // seedOffset decouples this Bob from every other scenario's on the
+        // same un-reset relay — see SyntheticUser.bob's doc.
+        final bob = await SyntheticUser.bob(invRelay, seedOffset: 20);
+        ProviderContainer? container;
+        try {
+          // A store with no circle, then a KeyPackage minted from it.
+          container = await _m11PumpAliceLiveEngine(tester, generation);
+          await _m11StopEngine(container, generation);
+          await _m11WipeAliceMlsState(container, generation);
+          await _m11TeardownWidgetTree(tester, generation);
+          container = await _m11PumpAliceLiveEngine(tester, generation);
+          expect(
+            await container.read(circlesProvider.future),
+            isEmpty,
+            reason: '[INV] the invitee must start with no circle at all.',
+          );
+          if (liveSyncEnabled) await _m11StopEngine(container, generation);
+
+          await waitForKeyPackage(
+            relay: invRelay,
+            authorPubkeyHex: _alicePubkeyHex(),
+          );
+          await waitForInboxRelayList(
+            relay: invRelay,
+            authorPubkeyHex: _alicePubkeyHex(),
+          );
+          final relayManager = await RelayManagerFfi.newInstance();
+          final DeliveredCircle creation;
+          final Set<String> sent;
+          try {
+            final aliceKp = (await relayManager.fetchMemberKeypackage(
+              pubkey: _alicePubkeyHex(),
+              circle: bob.user.circleManager,
+            )).member;
+            if (aliceKp == null) {
+              throw StateError(
+                '[INV] the product lookup found no KeyPackage for the app.',
+              );
+            }
+            final held = await giftWrapIdsFor(
+              relayManager: relayManager,
+              recipientPubkeyHex: _alicePubkeyHex(),
+              relays: <String>[invRelay.url],
+            );
+            final bobSecret = await bob.user.getSecretBytes();
+            try {
+              creation = await createCircleDelivered(
+                manager: bob.user.circleManager,
+                relayManager: relayManager,
+                identitySecretBytes: bobSecret,
+                members: <MemberKeyPackageFfi>[aliceKp],
+                name: 'INV Circle',
+                circleType: 'location_sharing',
+                relays: const <String>[locationRelayUrl],
+                scenario: 'INV',
+              );
+            } finally {
+              bobSecret.fillRange(0, bobSecret.length, 0);
+            }
+            sent = (await giftWrapIdsFor(
+              relayManager: relayManager,
+              recipientPubkeyHex: _alicePubkeyHex(),
+              relays: <String>[invRelay.url],
+            )).difference(held);
+          } finally {
+            await relayManager.shutdown();
+          }
+          if (sent.length != 1) {
+            throw StateError(
+              '[INV] the create left no single new Welcome on the readable '
+              'inbox relay.',
+            );
+          }
+          await _announceMlsGroupId(
+            relay: invRelay,
+            mlsGroupId: creation.circle.mlsGroupId,
+            nostrGroupId: creation.circle.nostrGroupId,
+            routing: creation.circle.relays,
+            label: 'INV circle (Bob-created)',
+          );
+
+          if (liveSyncEnabled) {
+            // The engine starts with the Welcome already stored, and must
+            // hand it to the app before the page reads anything.
+            await _m11ForceResubscribe(container);
+            await _m11PumpUntilInvitation(
+              tester,
+              container,
+              generation,
+              invitationKey: hexToBytes(sent.single).toList(),
+            );
+          }
+
+          await pumpUntilFound(
+            tester,
+            find.byKey(WidgetKeys.invitationsFloatingButton),
+            description: 'the invitations button on the map',
+            shouldAbort: () => _m11Superseded(generation),
+          );
+          await tester.tap(find.byKey(WidgetKeys.invitationsFloatingButton));
+          final accept = find.byWidgetPredicate(
+            (w) =>
+                w is FilledButton &&
+                w.key is ValueKey<String> &&
+                (w.key! as ValueKey<String>).value.startsWith(
+                  'invitation_accept_${bob.pubkeyHex}_',
+                ),
+          );
+          await pumpUntilFound(
+            tester,
+            accept,
+            description: "the inviter's invitation card",
+            shouldAbort: () => _m11Superseded(generation),
+          );
+          final open = container;
+          await pumpUntilCondition(
+            tester,
+            () =>
+                open.read(invitationPollStatusProvider).phase ==
+                InvitationPollPhase.settled,
+            description: 'the Invitations refresh ring to settle',
+            shouldAbort: () => _m11Superseded(generation),
+          );
+          final read = open.read(invitationPollStatusProvider);
+          expect(
+            (read.outcome, read.refused),
+            (InvitationPollOutcome.refused, 1),
+            reason:
+                '[INV] the gated relay heads the inbox list: the page must '
+                'read it as refused, and only it.',
+          );
+          expect(
+            find.byKey(WidgetKeys.invitationsInboxNotice),
+            findsOneWidget,
+            reason: '[INV] a refused inbox relay must be told to the user.',
+          );
+
+          await tester.tap(accept);
+          final members = <String>{
+            _alicePubkeyHex().toLowerCase(),
+            bob.pubkeyHex.toLowerCase(),
+          };
+          final mlsGroupId = creation.circle.mlsGroupId.toList();
+          await _pollUntil<Set<String>>(
+            probe: () async {
+              if (_m11Superseded(generation)) {
+                throw const _M11ScenarioSuperseded();
+              }
+              await tester.pump(const Duration(milliseconds: 200));
+              try {
+                return await _m11AliceRoster(open, mlsGroupId);
+              } on Object {
+                return const <String>{};
+              }
+            },
+            satisfied: (roster) => setEquals(roster, members),
+            describe: '[INV] the app joined the circle it accepted',
+            budget: kUiAppearsTimeout,
+          );
+        } finally {
+          await _m11StopEngine(container, generation);
+          await _m11WipeAliceMlsState(container, generation);
+          await _m11TeardownWidgetTree(tester, generation);
+          await _m11Bounded('bob dispose (teardown)', bob.dispose);
+        }
+      },
+    );
+  });
+
+  // ===========================================================================
   // M11 — live-sync (persistent receive engine) scenarios.
   //
   // These prove the WIRED live path (Rust engine → FFI stream →
   // LiveEventRouter → providers → UI) that flipping `liveSyncEnabled`
-  // activates. They only do real work under a `--dart-define=HAVEN_LIVE_SYNC=
-  // true` build; each body self-guards with `if (!liveSyncEnabled) return;` so
-  // the SAME source is inert (and green) on the default poll-path build —
-  // including the plain `flutter test` unit run, which never compiles the flag
-  // on.
+  // activates. They exist only on a `--dart-define=HAVEN_LIVE_SYNC=true`
+  // build: `_m11ScenarioTestWidgets` registers nothing on the poll build, so
+  // a scenario that did not run is never reported as one that passed, and the
+  // live lane's runner requires each one's end marker
+  // (tooling/e2e/expected_drive_markers.txt).
   //
   // ONE live engine per process: the Rust live-sync SESSION is process-global,
   // so Alice (the pumped HavenApp) is the single live engine. Bob/Carol/Dave
@@ -1753,7 +1975,6 @@ void main() {
       'a — a peer location arrives over the live stream well under the 30s '
       'poll floor',
       (tester, generation) async {
-        if (!liveSyncEnabled) return;
         // seedOffset decouples this scenario's Bob from every other M11
         // scenario's Bob (and from setUpAll's) on the same shared m11Relay
         // — see SyntheticUser.bob's doc.
@@ -1842,7 +2063,6 @@ void main() {
       'B0 — a circle created mid-session receives live locations without a '
       'relaunch',
       (tester, generation) async {
-        if (!liveSyncEnabled) return;
         // seedOffset decouples this scenario's Carol — see SyntheticUser
         // .bob's doc.
         final carol = await SyntheticUser.carol(m11Relay, seedOffset: 2);
@@ -1923,7 +2143,6 @@ void main() {
       'H1 — remove-member converges under concurrent Location noise (no '
       'notApplied)',
       (tester, generation) async {
-        if (!liveSyncEnabled) return;
         // seedOffset decouples this scenario's Bob/Carol — see
         // SyntheticUser.bob's doc.
         final bob = await SyntheticUser.bob(m11Relay, seedOffset: 3);
@@ -2042,7 +2261,6 @@ void main() {
     _m11ScenarioTestWidgets(
       'driver-2 — a non-admin leave converges out of the roster live',
       (tester, generation) async {
-        if (!liveSyncEnabled) return;
         // seedOffset decouples this scenario's Bob — see SyntheticUser.bob's
         // doc.
         final bob = await SyntheticUser.bob(m11Relay, seedOffset: 4);
@@ -2107,7 +2325,6 @@ void main() {
     _m11ScenarioTestWidgets(
       'f — a back-dated gift-wrapped Welcome surfaces via the inbox stream',
       (tester, generation) async {
-        if (!liveSyncEnabled) return;
         // seedOffset decouples this scenario's Bob — see SyntheticUser.bob's
         // doc.
         final bob = await SyntheticUser.bob(m11Relay, seedOffset: 5);
@@ -2270,7 +2487,6 @@ void main() {
       'd — a location published while the engine is stopped surfaces after '
       'the engine restarts (cursor persisted, not lost)',
       (tester, generation) async {
-        if (!liveSyncEnabled) return;
         // seedOffset decouples this scenario's Bob — see SyntheticUser.bob's
         // doc.
         final bob = await SyntheticUser.bob(m11Relay, seedOffset: 8);
@@ -2393,7 +2609,6 @@ void main() {
       'e — Alice in two circles receives live locations from both via ONE '
       'engine session',
       (tester, generation) async {
-        if (!liveSyncEnabled) return;
         // seedOffset decouples this scenario's Bob/Carol — see
         // SyntheticUser.bob's doc.
         final bob = await SyntheticUser.bob(m11Relay, seedOffset: 9);
@@ -2561,7 +2776,6 @@ void main() {
       'g — redelivering the SAME location and the SAME welcome twice '
       'produces no duplicates',
       (tester, generation) async {
-        if (!liveSyncEnabled) return;
         // seedOffset decouples this scenario's Bob — see SyntheticUser.bob's
         // doc.
         final bob = await SyntheticUser.bob(m11Relay, seedOffset: 10);
@@ -5985,10 +6199,9 @@ Future<int> _aliceEpochForTest(
 // =============================================================================
 // M11 live-sync scenario helpers
 //
-// Support the `group('M11: live-sync (flag-on)')` block. They only run under a
-// `--dart-define=HAVEN_LIVE_SYNC=true` build — every M11 scenario self-guards
-// with `if (!liveSyncEnabled) return;`, so on the default poll build the
-// scenarios return early and never reach these.
+// Support the `group('M11: live-sync (flag-on)')` block, whose scenarios are
+// registered only under a `--dart-define=HAVEN_LIVE_SYNC=true` build, and the
+// INV group, which runs on both builds.
 // =============================================================================
 
 /// [testWidgets] with a per-test [Timeout] backstop.
@@ -5999,8 +6212,7 @@ Future<int> _aliceEpochForTest(
 /// outer SIGKILL with NO per-test attribution (the "blind hang" the first
 /// flag-on run hit). Routing the live scenarios (and FE-2) through this wrapper
 /// bounds each at 4 min — generous over each scenario's ≤90 s internal budget —
-/// so a stall fails as a clean, named test failure instead. On the poll build
-/// the M11 bodies self-skip in microseconds, so the bound is inert there.
+/// so a stall fails as a clean, named test failure instead.
 ///
 /// Installs [installThrowTimeErrorLogging] here, once, rather than at each
 /// call site: every caller (the direct FE-2 use and, transitively, every
@@ -6069,13 +6281,21 @@ class _M11ScenarioSuperseded implements Exception {
 /// [_m11Generation] in between).
 bool _m11Superseded(int generation) => generation != _m11Generation;
 
-/// [boundedTestWidgets] wrapper for the M11 group: bumps [_m11Generation]
-/// synchronously before [callback] starts (capturing this scenario's own
-/// generation) and swallows a superseded-abort cleanly instead of letting it
-/// surface as a stray "thrown after the test had completed" block. FE-2 (the
-/// OTHER `boundedTestWidgets` user) does not use the M11 helpers and is left
-/// on the plain wrapper.
-void _m11ScenarioTestWidgets(
+/// What a scenario prints as its last act, followed by its id: the part of
+/// its description before ` — `. `integrationDriver` names no test, so the
+/// lane's runner requires one marker per scenario it registers
+/// (tooling/e2e/expected_drive_markers.txt): a body that never ran cannot
+/// pass as one that did.
+const String _kScenarioDone = '[e2e-done]';
+
+/// [boundedTestWidgets] wrapper for the scenarios that use the M11 helpers:
+/// bumps [_m11Generation] synchronously before [callback] starts (capturing
+/// this scenario's own generation), swallows a superseded-abort cleanly
+/// instead of letting it surface as a stray "thrown after the test had
+/// completed" block, and prints the scenario's end marker once [callback]
+/// returned. FE-2 (the OTHER `boundedTestWidgets` user) does not use the M11
+/// helpers and is left on the plain wrapper.
+void _scenarioTestWidgets(
   String description,
   Future<void> Function(WidgetTester tester, int generation) callback,
 ) {
@@ -6085,8 +6305,22 @@ void _m11ScenarioTestWidgets(
       await callback(tester, generation);
     } on _M11ScenarioSuperseded catch (e) {
       debugPrint('[M11] ${e.runtimeType}');
+      return;
     }
+    // log-scan-ok: a scenario id, the head of a harness phrase
+    debugPrint('$_kScenarioDone ${description.split(' — ').first}');
   });
+}
+
+/// [_scenarioTestWidgets] for the M11 group, registered only on a live-sync
+/// build: on the poll build the scenario does not exist, rather than passing
+/// having done nothing.
+void _m11ScenarioTestWidgets(
+  String description,
+  Future<void> Function(WidgetTester tester, int generation) callback,
+) {
+  if (!liveSyncEnabled) return;
+  _scenarioTestWidgets(description, callback);
 }
 
 /// Runs [op] but never lets it hang past [timeout] — mirrors haven-core's own

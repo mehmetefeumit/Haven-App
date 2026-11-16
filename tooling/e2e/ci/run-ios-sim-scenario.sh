@@ -439,6 +439,15 @@ scan_log_or_contain() {
     [[ -z "${WIRE_UPSTREAM:-}" ]] \
       || lane+=(--exempt-endpoint "ws://127.0.0.1:${HAVEN_E2E_LOCATION_RELAY##*:}")
   fi
+  # The gated inbox relay's two routes, the same way, and on a proxy lane the
+  # store they forward to, which the recorder's log names as their upstream.
+  for endpoint in "${HAVEN_E2E_GATED_INBOX_RELAY:-}" "${HAVEN_E2E_GATED_STORE_PROBE:-}"; do
+    [[ -n "${endpoint}" ]] || continue
+    lane+=(--exempt-endpoint "${endpoint}")
+    [[ -z "${WIRE_UPSTREAM:-}" ]] \
+      || lane+=(--exempt-endpoint "ws://127.0.0.1:${endpoint##*:}")
+  done
+  [[ -z "${WIRE_GATED_UPSTREAM:-}" ]] || lane+=(--exempt-endpoint "${WIRE_GATED_UPSTREAM}")
   local rc=0
   logscan_gate "${profile}" /tmp/haven-soak/needles \
     ${lane[@]+"${lane[@]}"} -- \
@@ -494,7 +503,7 @@ scenario_transcript() {
 # over a case somebody deleted, which is how the floor cases added in
 # 2026-09 went in with nothing pinning them.
 # ---------------------------------------------------------------------------
-readonly IOS_SIM_SELF_TEST_FIXTURES=35
+readonly IOS_SIM_SELF_TEST_FIXTURES=36
 readonly IOS_SIM_WATCHDOG_CASES=12
 
 run_self_test() {
@@ -1238,6 +1247,29 @@ run_self_test() {
       fail=1
     fi
   done
+  # The gated inbox relay's two routes, each as the app and as the recorder
+  # spell it, and the store the recorder's log names as their upstream.
+  ran=$(( ran + 1 ))
+  want_argv=(host /tmp/haven-soak/needles
+    --exempt-endpoint ws://localhost:7790 --exempt-endpoint ws://127.0.0.1:7790
+    --exempt-endpoint ws://localhost:7791 --exempt-endpoint ws://127.0.0.1:7791
+    --exempt-endpoint ws://127.0.0.1:7778
+    -- --sink "drive=${gate_drive}" --report /tmp/ios-logscan/sim.ndjson)
+  rc=0
+  rm -f "${tmp}"/gate.*.log
+  SCENARIO_FILE=integration_test/e2e/e2e_combined.dart \
+    HAVEN_LOGSCAN=true HAVEN_LOGSCAN_PROFILE=host HAVEN_LOGSCAN_HOST_COORDINATE= \
+    HAVEN_LOGSCAN_DRIVE_FLOOR= HAVEN_E2E_PROFILE_RELAYS= HAVEN_E2E_BLOSSOM_URL= \
+    HAVEN_E2E_LOCATION_RELAY= WIRE_UPSTREAM=ws://127.0.0.1:7777 \
+    HAVEN_E2E_GATED_INBOX_RELAY=ws://localhost:7790 \
+    HAVEN_E2E_GATED_STORE_PROBE=ws://localhost:7791 \
+    WIRE_GATED_UPSTREAM=ws://127.0.0.1:7778 \
+    FAKE_GATE_RC=0 scan_log_or_contain "${gate_log}" || rc=$?
+  if (( rc != 0 )) || [[ "$(cat "${gate_argv}")" != "$(printf '%s\n' "${want_argv[@]}")" ]]; then
+    echo "SELF-TEST FAIL (S3): the gated inbox relay's exemptions; got rc" \
+         "${rc} with '$(tr '\n' ' ' < "${gate_argv}")'" >&2
+    fail=1
+  fi
 
   # A SECOND scenario in the same job: e2e-ios.yml drives e2e_combined and then
   # ios_bg_mirror_test through this script, which truncates the one fixed
@@ -1466,6 +1498,14 @@ fi
 if [[ -n "${HAVEN_E2E_LOCATION_RELAY:-}" ]]; then
   EXTRA_DART_DEFINES+=(--dart-define=HAVEN_E2E_LOCATION_RELAY="${HAVEN_E2E_LOCATION_RELAY}")
 fi
+# Optional gated-inbox-relay passthrough (e2e-ios.yml only), same opt-in shape;
+# e2e_combined.dart refuses to run with one of the pair and not the other.
+if [[ -n "${HAVEN_E2E_GATED_INBOX_RELAY:-}" ]]; then
+  EXTRA_DART_DEFINES+=(--dart-define=HAVEN_E2E_GATED_INBOX_RELAY="${HAVEN_E2E_GATED_INBOX_RELAY}")
+fi
+if [[ -n "${HAVEN_E2E_GATED_STORE_PROBE:-}" ]]; then
+  EXTRA_DART_DEFINES+=(--dart-define=HAVEN_E2E_GATED_STORE_PROBE="${HAVEN_E2E_GATED_STORE_PROBE}")
+fi
 if [[ -n "${HAVEN_E2E_PROFILE_RELAYS:-}" ]]; then
   EXTRA_DART_DEFINES+=(--dart-define=HAVEN_E2E_PROFILE_RELAYS="${HAVEN_E2E_PROFILE_RELAYS}")
   echo "iOS E2E — profile pool=${HAVEN_E2E_PROFILE_RELAYS}"
@@ -1624,6 +1664,20 @@ if [[ "${TEST_RC}" -ne 0 ]]; then
   fi
   echo "ERROR: iOS e2e scenario '${SCENARIO_FILE}' failed (rc=${TEST_RC})" >&2
   exit "${TEST_RC}"
+fi
+
+# A passing run must also show every scenario its lane registers ran to its end
+# (tooling/e2e/expected_drive_markers.txt): a body that never executed reports
+# nothing. Recorded as a failure verdict like any other, so it is never retried.
+marker_rc=0
+missing_markers=$(drive_log_missing_markers "${LOG_FILE}" "${SCENARIO_FILE}" "${LIVE_SYNC}") \
+  || marker_rc=$?
+if (( marker_rc != 0 )); then
+  ios_record_failure_verdict "${VERDICT_FILE}" "${LOG_FILE}" 1 || true
+  echo "ERROR: iOS e2e scenario '${SCENARIO_FILE}' passed, but the end marker of" \
+       "these scenario(s) is not in its log (rc=${marker_rc}; 2 = cannot judge):" \
+       "${missing_markers//$'\n'/ }" >&2
+  exit 1
 fi
 
 # Passed — leave no verdict behind for a later step or a re-run to trip over.

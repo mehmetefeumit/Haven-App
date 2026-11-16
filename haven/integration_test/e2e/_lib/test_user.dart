@@ -119,10 +119,15 @@ class TestUser {
   /// test seed pubkeys to a public relay. Override the guard by passing
   /// `allowPublicRelay: true`, only with explicit user authorization and
   /// non-sentinel seeds.
+  ///
+  /// [harnessOnlyRelays] are relays the harness alone dials (a probe of a
+  /// relay store behind the app's route) and nothing installs; they are held
+  /// to the same loopback floor.
   static Future<void> bootstrapProcess({
     required List<String> relays,
     bool allowPublicRelay = false,
     List<String>? profileRelays,
+    List<String> harnessOnlyRelays = const <String>[],
   }) async {
     if (!allowPublicRelay) {
       // Every plane, not just the circle plane: the location pool is where a
@@ -136,7 +141,12 @@ class TestUser {
       // `_parseProfileRelayPool` also enforces >= PROFILE_POOL_MIN distinct
       // entries and disjointness from the circle relay); this is the floor
       // every caller gets for free.
-      final allUrls = <String>[...relays, ...?profileRelays, locationRelayUrl];
+      final allUrls = <String>[
+        ...relays,
+        ...?profileRelays,
+        locationRelayUrl,
+        ...harnessOnlyRelays,
+      ];
       for (var i = 0; i < allUrls.length; i++) {
         if (!_isLoopback(allUrls[i])) {
           throw StateError(

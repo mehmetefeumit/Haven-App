@@ -35,7 +35,8 @@ import 'package:flutter_test/flutter_test.dart';
 ///   3. `_m11AliceCreatesCircle` (every Alice-created M11 circle)
 ///   4. M11:f — Bob-created
 ///   5. M11:g — Bob-created
-const int kExpectedAnnounceCallSites = 5;
+///   6. INV — Bob-created, the app the invitee
+const int kExpectedAnnounceCallSites = 6;
 
 void main() {
   test('every circle-creation path announces its MLS group id', () {

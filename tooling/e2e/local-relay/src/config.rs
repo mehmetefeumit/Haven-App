@@ -6,7 +6,10 @@
 //!   `<listen>=<upstream>`, e.g.
 //!   `7788=ws://127.0.0.1:7777,7789=ws://127.0.0.1:7778`. `<listen>` may be a
 //!   bare port (bound on 127.0.0.1) or an `ip:port` — an IP LITERAL, never a
-//!   hostname — and must be loopback either way.
+//!   hostname — and must be loopback either way. A route may end in
+//!   `;gate-read=<kind>[+<kind>…]`, which makes it answer as a relay gating
+//!   those kinds' reads (`crate::gate`), e.g.
+//!   `7790=ws://127.0.0.1:7778;gate-read=1059`.
 //! * `HAVEN_WIRE_PROXY_PORT` + `HAVEN_WIRE_PROXY_UPSTREAM` — the single-relay
 //!   shorthand every current lane needs.
 //!
@@ -16,6 +19,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
+use crate::gate::{self, ReadGate};
 use crate::proxy::{ProxyConfig, Route};
 use crate::{DEFAULT_LISTEN_PORT, DEFAULT_UPSTREAM, ENV_LISTEN_PORT, ENV_ROUTES, ENV_UPSTREAM};
 
@@ -65,6 +69,7 @@ pub fn resolve(
         routes: vec![Route {
             listen: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), listen),
             upstream: upstream.to_owned(),
+            read_gate: None,
         }],
     })
 }
@@ -76,9 +81,29 @@ fn parse_table(table: &str) -> Result<ProxyConfig, String> {
         if entry.is_empty() {
             continue;
         }
-        let (listen_raw, upstream_raw) = entry
+        let mut parts = entry.split(';');
+        let mapping = parts.next().unwrap_or_default();
+        let (listen_raw, upstream_raw) = mapping
             .split_once('=')
             .ok_or_else(|| format!("route '{entry}' is not '<listen>=<upstream>'"))?;
+        let mut read_gate = None;
+        for option in parts {
+            match option.trim().split_once('=') {
+                Some((gate::OPTION, value)) if read_gate.is_none() => {
+                    read_gate = Some(
+                        ReadGate::parse(value).map_err(|err| format!("route '{entry}': {err}"))?,
+                    );
+                }
+                _ => {
+                    return Err(format!(
+                        "route '{entry}' has an unknown or repeated option '{}': the one option \
+                         is '{}=<kind>[+<kind>...]'",
+                        option.trim(),
+                        gate::OPTION
+                    ))
+                }
+            }
+        }
         let listen = parse_listen(listen_raw.trim()).ok_or_else(|| {
             format!(
                 "route '{entry}' has an unparseable listen address: expected a bare port \
@@ -94,6 +119,7 @@ fn parse_table(table: &str) -> Result<ProxyConfig, String> {
         routes.push(Route {
             listen,
             upstream: upstream.to_owned(),
+            read_gate,
         });
     }
 
@@ -331,6 +357,39 @@ mod tests {
         // A table of only separators is a typo, not a request for defaults —
         // falling back would start a proxy that records the wrong topology.
         assert!(resolve(Some(",,"), None, None).is_err());
+    }
+
+    #[test]
+    fn a_gate_read_option_gates_its_route_alone() {
+        let config = resolve(
+            Some("7788=ws://127.0.0.1:7777,7790=ws://127.0.0.1:7778;gate-read=1059"),
+            None,
+            None,
+        )
+        .expect("table resolves");
+        assert!(config.routes[0].read_gate.is_none());
+        assert_eq!(config.routes[1].listen.port(), 7790);
+        assert_eq!(
+            config.routes[1].upstream, "ws://127.0.0.1:7778",
+            "the option is not part of the upstream URL"
+        );
+        let gate = config.routes[1].read_gate.as_ref().expect("gated");
+        assert_eq!(gate.kinds().collect::<Vec<_>>(), vec![1059]);
+    }
+
+    // A mistyped option must fail at startup like a mistyped route: a lane
+    // that meant to gate its inbox and silently did not would prove nothing.
+    #[test]
+    fn an_unknown_repeated_or_malformed_option_is_rejected_by_name() {
+        for bad in [
+            "7790=ws://127.0.0.1:7778;gate=1059",
+            "7790=ws://127.0.0.1:7778;gate-read=1059;gate-read=4",
+            "7790=ws://127.0.0.1:7778;gate-read=gift",
+            "7790=ws://127.0.0.1:7778;gate-read",
+        ] {
+            let err = resolve(Some(bad), None, None).expect_err("refused");
+            assert!(err.contains(bad), "the error must name the entry: {err}");
+        }
     }
 
     #[test]

@@ -215,14 +215,19 @@ log_privacy_gate() {
             --expect petname=1 --expect nostr_group_id=1 --expect mls_group_id=1
             --expect event_id=3)
   fi
-  IFS=',' read -r -a endpoints <<<"${HAVEN_E2E_RELAY_2:-},${HAVEN_E2E_BLOSSOM_URL:-},${HAVEN_E2E_PROFILE_RELAYS:-},${HAVEN_E2E_LOCATION_RELAY:-}"
+  IFS=',' read -r -a endpoints <<<"${HAVEN_E2E_RELAY_2:-},${HAVEN_E2E_BLOSSOM_URL:-},${HAVEN_E2E_PROFILE_RELAYS:-},${HAVEN_E2E_LOCATION_RELAY:-},${HAVEN_E2E_GATED_INBOX_RELAY:-},${HAVEN_E2E_GATED_STORE_PROBE:-}"
   for endpoint in "${endpoints[@]}"; do
     [[ -z "${endpoint}" ]] || extra+=(--exempt-endpoint "${endpoint}")
   done
   # The recorder's log, scanned before upload, names every route it binds as
-  # `ws://127.0.0.1:<port>`, and the location relay is a route of its own.
-  if [[ -n "${WIRE_UPSTREAM:-}" && -n "${HAVEN_E2E_LOCATION_RELAY:-}" ]]; then
-    extra+=(--exempt-endpoint "ws://127.0.0.1:${HAVEN_E2E_LOCATION_RELAY##*:}")
+  # `ws://127.0.0.1:<port>` and every upstream it forwards to, and the location
+  # relay and the gated inbox relay's two routes are routes of their own.
+  if [[ -n "${WIRE_UPSTREAM:-}" ]]; then
+    for endpoint in "${HAVEN_E2E_LOCATION_RELAY:-}" "${HAVEN_E2E_GATED_INBOX_RELAY:-}" \
+                    "${HAVEN_E2E_GATED_STORE_PROBE:-}"; do
+      [[ -z "${endpoint}" ]] || extra+=(--exempt-endpoint "ws://127.0.0.1:${endpoint##*:}")
+    done
+    [[ -z "${WIRE_GATED_UPSTREAM:-}" ]] || extra+=(--exempt-endpoint "${WIRE_GATED_UPSTREAM}")
   fi
   logscan_gate "${profile}" "${needle_dir}" ${extra[@]+"${extra[@]}"} -- \
     --sink "logcat=${logcat}" \
@@ -738,7 +743,8 @@ eth0	0000000A	00000000	0001	0	0	0	000000FF	0	0	0" 10.0.2.2 'wlan*'; then
     (
       export GITHUB_RUN_ID= GITHUB_RUN_ATTEMPT= \
         HAVEN_E2E_RELAY_2= HAVEN_E2E_BLOSSOM_URL= HAVEN_E2E_PROFILE_RELAYS= \
-        HAVEN_E2E_LOCATION_RELAY= \
+        HAVEN_E2E_LOCATION_RELAY= HAVEN_E2E_GATED_INBOX_RELAY= \
+        HAVEN_E2E_GATED_STORE_PROBE= WIRE_GATED_UPSTREAM= \
         WIRE_UPSTREAM="${upstream}" HAVEN_LOGSCAN_PROFILE="${profile_env}" \
         HAVEN_LOGSCAN=true HAVEN_LOGSCAN_BIN="${fake_bin}" RELAY_URL=ws://10.0.2.2:7788
       local kv
@@ -829,6 +835,20 @@ eth0	0000000A	00000000	0001	0	0	0	000000FF	0	0	0" 10.0.2.2 'wlan*'; then
     echo "SELF-TEST FAIL (9c location relay, host): only the app's spelling may be exempt; got '${got[*]}'" >&2
     fail=1
   fi
+  # The gated inbox relay's two routes as the app spells them and, on a proxy
+  # lane, as the recorder's log spells them, with the store they forward to.
+  reset_gate_logs
+  gate_run ws://127.0.0.1:7777 "" HAVEN_E2E_GATED_INBOX_RELAY=ws://10.0.2.2:7790 \
+    HAVEN_E2E_GATED_STORE_PROBE=ws://10.0.2.2:7791 WIRE_GATED_UPSTREAM=ws://127.0.0.1:7778
+  mapfile -t got < "${seal_argv}"
+  local gated_endpoint
+  for gated_endpoint in ws://10.0.2.2:7790 ws://10.0.2.2:7791 ws://127.0.0.1:7790 \
+                        ws://127.0.0.1:7791 ws://127.0.0.1:7778; do
+    if (( rc != 0 )) || [[ "${got[*]}" != *" --exempt-endpoint ${gated_endpoint} "* ]]; then
+      echo "SELF-TEST FAIL (9c gated inbox relay): ${gated_endpoint} must be exempt; got '${got[*]}'" >&2
+      fail=1
+    fi
+  done
   # The call site contains: a leak verdict deletes every one of its sinks.
   reset_gate_logs; gate_run "" "" FAKE_SCAN_RC=1
   if (( rc != 1 )) || [[ -e "${logcat}" || -e "${drive_final}" || -e "${drive_full}" ]]; then
@@ -1740,6 +1760,20 @@ if (( drive_rc == 0 )) && drive_log_reports_test_failure "${FINAL_ATTEMPT_LOG}";
   echo "---- app-side failure evidence (final attempt) ----" >&2
   drive_log_failure_evidence "${FINAL_ATTEMPT_LOG}" >&2
   exit 1
+fi
+# A passing drive must also show every scenario its lane registers ran to its
+# end (tooling/e2e/expected_drive_markers.txt): a body that never executed
+# reports nothing, and integrationDriver names no test.
+if (( drive_rc == 0 )); then
+  marker_rc=0
+  missing_markers=$(drive_log_missing_markers "${FINAL_ATTEMPT_LOG}" "${SCENARIO_FILE}" \
+    "${HAVEN_LIVE_SYNC:-}") || marker_rc=$?
+  if (( marker_rc != 0 )); then
+    echo "ERROR: flutter drive for ${SCENARIO_FILE} passed, but the end marker of" \
+         "these scenario(s) is not in its log (rc=${marker_rc}; 2 = cannot judge):" \
+         "${missing_markers//$'\n'/ }" >&2
+    exit 1
+  fi
 fi
 
 exit "${drive_rc}"

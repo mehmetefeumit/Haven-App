@@ -1915,6 +1915,59 @@ fn cases() -> Vec<Case> {
             &["C8.1-C8.8 hold"],
         ),
     ];
+    // A gated route (`gate-read=`): the REQ the proxy refused is still what
+    // the client sent, so it is judged like any other; the gate's own answers
+    // and the event it withheld are not client frames.
+    cases.push(case(
+        "P6 a gated route's refusal and withheld event",
+        &healthy(|j| {
+            let gated = "127.0.0.1:7788";
+            j.frame(
+                APP_INBOX,
+                "c2p",
+                gated,
+                json!(["REQ", "sub-gated", {"kinds": [1059], "#p": [alice()], "since": 1}]),
+            );
+            j.frame(APP_INBOX, "p2c", gated, json!(["AUTH", "challenge-c1"]));
+            j.frame(
+                APP_INBOX,
+                "p2c",
+                gated,
+                json!([
+                    "CLOSED",
+                    "sub-gated",
+                    "ERROR: auth-required: requested filter requires authentication"
+                ]),
+            );
+            j.frame(
+                APP_INBOX,
+                "r2p",
+                gated,
+                json!([
+                    "EVENT",
+                    "sub-mixed",
+                    event(&id(24), &eph(6), 1059, 1_000, &[&["p", &alice()]])
+                ]),
+            );
+        }),
+        &[],
+        RC_CLEAN,
+        &["C8.1-C8.8 hold"],
+    ));
+    cases.push(case(
+        "C8.2 a REQ a gated route refused, on a listen whose roles forbid it",
+        &healthy(|j| {
+            j.frame(
+                APP_LOC,
+                "c2p",
+                "127.0.0.1:7789",
+                json!(["REQ", "sub-gated", {"kinds": [1059], "#p": [alice()], "since": 1}]),
+            );
+        }),
+        &[],
+        RC_VIOLATION,
+        C82,
+    ));
     // C8.1 — EVENT placement.
     let c81: [Plant; 15] = [
         (
@@ -2590,7 +2643,7 @@ fn lane_args(journal: &Path, extra: &[String]) -> Vec<String> {
 }
 
 /// The number of C8 fixtures. Moving it is the only way to add or remove one.
-const CLI_CASES: usize = 80;
+const CLI_CASES: usize = 82;
 
 #[test]
 fn the_c8_fixture_suite() {

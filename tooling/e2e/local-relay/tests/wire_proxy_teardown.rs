@@ -192,6 +192,7 @@ async fn start_proxy(upstream: String, journal: Arc<WireJournal>) -> Proxy {
             routes: vec![Route {
                 listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
                 upstream,
+                read_gate: None,
             }],
         },
         journal,

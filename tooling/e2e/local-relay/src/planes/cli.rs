@@ -198,9 +198,12 @@ fn parse_line(text: &str, seq: usize) -> Option<Line> {
     }
     match object.get("type")?.as_str()? {
         TYPE_FRAME => {
+            // `c2p` is a frame the client sent that a gated route refused in
+            // the relay's place: still the client's, so judged. `p2c` (the
+            // gate's own answer) and `r2p` (an event it withheld) are not.
             let c2r = match object.get("dir")?.as_str()? {
-                "c2r" => true,
-                "r2c" => false,
+                "c2r" | "c2p" => true,
+                "r2c" | "p2c" | "r2p" => false,
                 _ => return None,
             };
             Some(Line {

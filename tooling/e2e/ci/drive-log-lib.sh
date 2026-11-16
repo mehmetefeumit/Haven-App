@@ -83,6 +83,8 @@
 #                                                           # (+ no static skip,
 #                                                           #  + --check-wiring)
 #   bash tooling/e2e/ci/drive-log-lib.sh --check-wiring     # runners <-> predicate
+#   (--check-manifest also reconciles tooling/e2e/expected_drive_markers.txt,
+#    the end markers a lane requires of each scenario it registers)
 #   bash tooling/e2e/ci/drive-log-lib.sh --scan <drive-log> # what did it skip?
 #
 # Deliberately does NOT `set` shell options at source time: a sourced library
@@ -901,6 +903,205 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# End markers — a scenario that never ran cannot pass as one that did.
+#
+# `integrationDriver` names no test, and a body registered but never executed —
+# a stray flag guard, a group that is not registered on the lane it was meant
+# for — reports nothing at all. So a scenario prints `[e2e-done] <id>` as its
+# last act, and the runner that drove its target requires every marker
+# tooling/e2e/expected_drive_markers.txt declares for that target on the lane
+# it ran (`HAVEN_LIVE_SYNC`). `--check-manifest` reconciles that file against
+# the source, and requires every runner a workflow drives such a target with to
+# consult drive_log_missing_markers.
+# ---------------------------------------------------------------------------
+
+drive_log_marker_manifest_path() {
+  printf '%s\n' \
+    "${HAVEN_DRIVE_MARKER_MANIFEST:-${_DRIVE_LOG_E2E_DIR}/expected_drive_markers.txt}"
+}
+
+# The manifest's rows as `<target>|<lane>|<id>`, validated. Returns 2 (with the
+# reason on stderr) when a row is malformed or repeated.
+_drive_log_marker_rows() {
+  awk -F'|' '
+    /^[[:space:]]*(#|$)/ { next }
+    {
+      sub(/\r$/, "")
+      if (NF != 3 || $1 == "" || $2 !~ /^(poll|live|both)$/ || $3 !~ /^[A-Za-z0-9-]+$/) {
+        printf "MARKER-MANIFEST-ERROR line %d: expected target|poll, live or both|id, got: %s\n", FNR, $0 > "/dev/stderr"
+        bad = 1
+        next
+      }
+      if (($1 "|" $3) in seen) {
+        printf "MARKER-MANIFEST-ERROR line %d: %s|%s is declared twice\n", FNR, $1, $3 > "/dev/stderr"
+        bad = 1
+        next
+      }
+      seen[$1 "|" $3] = 1
+      print
+    }
+    END { exit (bad ? 2 : 0) }
+  ' "$1"
+}
+
+# drive_log_missing_markers <log> <target> <live-sync> — prints each id the
+# manifest declares for <target> on that lane (`both`, plus `live` or `poll`)
+# whose end marker the log does not carry.
+#
+#   0  every declared marker is in the log, or <target> declares none
+#   1  one or more is missing
+#   2  cannot judge: no usable manifest, no log, or a <live-sync> that is not
+#      exactly `true` or `false` for a target that declares markers
+drive_log_missing_markers() {
+  local log="${1:-}" target="${2:-}" live="${3:-}" manifest rows lane missing=0 row_lane id
+  manifest="$(drive_log_marker_manifest_path)"
+  [[ -f "${manifest}" ]] || { echo "no end-marker manifest at ${manifest}" >&2; return 2; }
+  rows="$(_drive_log_marker_rows "${manifest}")" || return 2
+  rows="$(awk -F'|' -v t="${target}" '$1 == t' <<<"${rows}")"
+  [[ -n "${rows}" ]] || return 0
+  case "${live}" in
+    true) lane=live ;;
+    false) lane=poll ;;
+    *)
+      echo "HAVEN_LIVE_SYNC must be exactly true or false to judge the end markers of ${target} (got '${live}')" >&2
+      return 2
+      ;;
+  esac
+  [[ -f "${log}" ]] || { echo "no drive log at ${log}" >&2; return 2; }
+  while IFS='|' read -r _ row_lane id; do
+    [[ "${row_lane}" == both || "${row_lane}" == "${lane}" ]] || continue
+    if ! _drive_log_decolour "${log}" | tr -d '\r' \
+        | grep -aqE -- "(^|[[:space:]:])\\[e2e-done\\] ${id}[[:space:]]*\$"; then
+      printf '%s\n' "${id}"
+      missing=1
+    fi
+  done <<<"${rows}"
+  return "${missing}"
+}
+
+# `<target>|<id>` for every scenario the source registers through a
+# marker-printing wrapper (`_scenarioTestWidgets`, `_m11ScenarioTestWidgets`):
+# its id is the part of its description literal before ` — `.
+_drive_log_extract_markers() {
+  local root="$1" dir="${1}/haven/integration_test" f out rc=0
+  [[ -d "${dir}" ]] || { echo "PARSE-ERROR ${dir} does not exist" >&2; return 3; }
+  local files=()
+  while IFS= read -r f; do files+=("${f}"); done < <(find "${dir}" -name '*.dart' | sort)
+  (( ${#files[@]} > 0 )) || return 0
+  out="$(awk -v root="${root}/haven/" '
+    BEGIN { q = sprintf("%c", 39) }
+    function emit(text,   t, p, id, rel) {
+      t = text
+      sub(/^[[:space:]]*/, "", t)
+      p = index(t, " — ")
+      id = substr(t, 2, p - 2)
+      if (substr(t, 1, 1) != q || p == 0 || id !~ /^[A-Za-z0-9-]+$/) {
+        printf "PARSE-ERROR %s:%d: a marker wrapper whose description does not start with <id> and an em dash\n", FILENAME, FNR > "/dev/stderr"
+        bad = 1
+        return
+      }
+      rel = FILENAME
+      if (index(rel, root) == 1) rel = substr(rel, length(root) + 1)
+      print rel "|" id
+    }
+    pending { pending = 0; emit($0); next }
+    /^[[:space:]]*(\/\/|\*)/ { next }
+    /^[[:space:]]*void[[:space:]]/ { next }
+    /(^|[^A-Za-z0-9_])_(m11S|s)cenarioTestWidgets\(/ {
+      t = $0
+      sub(/^.*cenarioTestWidgets\(/, "", t)
+      if (t ~ /^[[:space:]]*$/) { pending = 1; next }
+      # A call forwarding a description it was handed registers nothing new.
+      if (substr(t, 1, 1) != q) next
+      emit(t)
+    }
+    END { exit (bad ? 3 : 0) }
+  ' "${files[@]}")" || rc=$?
+  (( rc == 0 )) || return "${rc}"
+  [[ -z "${out}" ]] || printf '%s\n' "${out}"
+}
+
+# The runners the workflows drive <target> with: `run-*.sh` followed by the
+# target, on one line or across a folded YAML scalar.
+_drive_log_marker_drivers() { # <root> <target>
+  local root="$1" target="$2" wf
+  for wf in "${root}"/.github/workflows/*.yml; do
+    [[ -f "${wf}" ]] || continue
+    grep -vE '^[[:space:]]*#' "${wf}" | tr '\n' ' ' \
+      | grep -oE "run-[A-Za-z0-9-]+\\.sh[[:space:]]+${target//./\\.}" \
+      | grep -oE '^run-[A-Za-z0-9-]+\.sh' || true
+  done | sort -u
+}
+
+# drive_log_check_markers [root] — the manifest against the source, and every
+# runner a workflow drives a marked target with against the runtime check.
+drive_log_check_markers() {
+  local root="${1:-${_DRIVE_LOG_LIB_DIR}/../../..}" manifest rows observed declared rc=0
+  root="$(cd "${root}" 2>/dev/null && pwd)" || {
+    echo "ERROR: repo root '${1:-}' is not a directory" >&2
+    return 2
+  }
+  manifest="$(drive_log_marker_manifest_path)"
+  if [[ ! -f "${manifest}" ]]; then
+    echo "ERROR: end-marker manifest not found: ${manifest}" >&2
+    return 2
+  fi
+  rows="$(_drive_log_marker_rows "${manifest}")" || return 2
+  observed="$(_drive_log_extract_markers "${root}")" || {
+    echo "ERROR: could not extract the scenarios' end markers (see above)" >&2
+    return 2
+  }
+  observed="$(sort -u <<<"${observed}" | grep -v '^$' || true)"
+  declared="$(awk -F'|' 'NF { print $1 "|" $3 }' <<<"${rows}" | sort -u)"
+  local undeclared stale
+  undeclared="$(comm -23 <(printf '%s\n' "${observed}" | grep -v '^$' || true) \
+                         <(printf '%s\n' "${declared}" | grep -v '^$' || true))"
+  stale="$(comm -13 <(printf '%s\n' "${observed}" | grep -v '^$' || true) \
+                    <(printf '%s\n' "${declared}" | grep -v '^$' || true))"
+  if [[ -n "${undeclared}" ]]; then
+    echo "UNDECLARED END MARKER — a scenario no lane would be held to:" >&2
+    sed 's/^/    * /' <<<"${undeclared}" >&2
+    rc=1
+  fi
+  if [[ -n "${stale}" ]]; then
+    echo "STALE END MARKER — the manifest requires a scenario the source no longer registers:" >&2
+    sed 's/^/    * /' <<<"${stale}" >&2
+    rc=1
+  fi
+
+  local target runner drivers
+  while IFS= read -r target; do
+    [[ -n "${target}" ]] || continue
+    drivers="$(_drive_log_marker_drivers "${root}" "${target}")"
+    if [[ -z "${drivers}" ]]; then
+      echo "END MARKERS FOR AN UNDRIVEN TARGET: no workflow drives ${target} through a run-*.sh, so nothing would require them." >&2
+      rc=1
+      continue
+    fi
+    local code
+    while IFS= read -r runner; do
+      # Materialised first: `grep -q` closing the pipe early would hand the
+      # producer a SIGPIPE that pipefail reports as the match failing.
+      code=""
+      [[ ! -f "${root}/tooling/e2e/ci/${runner}" ]] \
+        || code="$(_drive_log_strip_sh_prose "${root}/tooling/e2e/ci/${runner}" \
+                     | _drive_log_strip_sh_strings)"
+      if ! grep -qE -- '(^|[^A-Za-z0-9_])drive_log_missing_markers[[:space:]]' <<<"${code}"; then
+        echo "UNCHECKED END MARKERS: ${runner} drives ${target} and never consults drive_log_missing_markers." >&2
+        rc=1
+      fi
+    done <<<"${drivers}"
+  done < <(awk -F'|' 'NF { print $1 }' <<<"${rows}" | sort -u)
+
+  if (( rc == 0 )); then
+    echo "drive-log-lib.sh --check-manifest: OK —" \
+         "$(grep -c . <<<"${declared}" || true) end marker(s) declared, all of them" \
+         "registered, and every runner driving a marked target consults them."
+  fi
+  return "${rc}"
+}
+
+# ---------------------------------------------------------------------------
 # Self-test: one driver, one suite per guard.
 #
 # The suites and the `_dl_expect_*` assertions read `tmp`, `src`, `ran`, `fail`
@@ -915,7 +1116,7 @@ EOF
 # not by a floor: a floor lets a fixture be deleted and the suite stay green,
 # which is the same "reports coverage it does not have" shape this whole library
 # exists to catch. Change it only in the commit that adds or removes a fixture.
-readonly DRIVE_LOG_SELF_TEST_FIXTURES=77
+readonly DRIVE_LOG_SELF_TEST_FIXTURES=88
 
 # `ran=$(( ran + 1 ))`, never `(( ran++ ))`: the latter returns 1 when ran is
 # 0, which `set -e` on the direct-execution path would treat as a failure.
@@ -993,8 +1194,8 @@ _dl_expect_static_rc() { # <label> <want-rc> <repo-root>
 _dl_expect_gate_rc() { # <label> <want-rc> <manifest> <repo-root>
   local got=0
   ran=$(( ran + 1 ))
-  HAVEN_DRIVE_SKIP_MANIFEST="$3" bash "${BASH_SOURCE[0]}" --check-manifest "$4" \
-    >/dev/null 2>&1 || got=$?
+  HAVEN_DRIVE_SKIP_MANIFEST="$3" HAVEN_DRIVE_MARKER_MANIFEST="${tmp}/markers.none" \
+    bash "${BASH_SOURCE[0]}" --check-manifest "$4" >/dev/null 2>&1 || got=$?
   if [[ "${got}" -ne "$2" ]]; then
     echo "SELF-TEST FAIL ($1): --check-manifest gate want rc=$2, got rc=${got}" >&2
     fail=1
@@ -1976,6 +2177,129 @@ DART
   _dl_expect_gate_rc 47c 2 "${tmp}/manifest.unparsable" "${ftree}"
 }
 
+# ---------------------------------------------------------------------------
+# Suite 7: end markers — the runtime check and the manifest's reconciliation.
+# ---------------------------------------------------------------------------
+_dl_expect_markers_rc() { # <label> <want-rc> <log> <target> <live> [<want-out>]
+  local got=0 out
+  ran=$(( ran + 1 ))
+  out="$(drive_log_missing_markers "$3" "$4" "$5" 2>/dev/null)" || got=$?
+  if [[ "${got}" -ne "$2" ]] || [[ "${out}" != "${6:-}" ]]; then
+    echo "SELF-TEST FAIL ($1): missing markers want rc=$2 '${6:-}', got rc=${got} '${out}'" >&2
+    fail=1
+  fi
+}
+_dl_expect_check_markers_rc() { # <label> <want-rc> <repo-root>
+  local got=0
+  ran=$(( ran + 1 ))
+  drive_log_check_markers "$3" >/dev/null 2>&1 || got=$?
+  if [[ "${got}" -ne "$2" ]]; then
+    echo "SELF-TEST FAIL ($1): end-marker check want rc=$2, got rc=${got}" >&2
+    fail=1
+  fi
+}
+
+_dl_suite_markers() {
+  local mtree="${tmp}/markers" log="${tmp}/markers.log"
+  local HAVEN_DRIVE_MARKER_MANIFEST="${tmp}/markers.manifest"
+  local target=integration_test/e2e/combo.dart
+  cat > "${HAVEN_DRIVE_MARKER_MANIFEST}" <<'EOF'
+# comments and blank lines are ignored
+
+integration_test/e2e/combo.dart|both|INV-ui
+integration_test/e2e/combo.dart|live|a
+integration_test/e2e/combo.dart|poll|p1
+EOF
+  printf '%s\n' \
+    'I/flutter ( 4242): 00:10 +3: INV-ui — the app is invited' \
+    'I/flutter ( 4242): [e2e-done] INV-ui' \
+    '[e2e-done] a' \
+    'I/flutter ( 4242): [e2e-done] p1' > "${log}"
+
+  # (m1) Every marker the live lane owes is there.
+  _dl_expect_markers_rc m1 0 "${log}" "${target}" true
+  # (m2) A live scenario that never printed its marker is named, and fails.
+  grep -v 'done\] a$' "${log}" > "${log}.no-a"
+  _dl_expect_markers_rc m2 1 "${log}.no-a" "${target}" true a
+  # (m3) ...but the poll lane owes no live marker: the same log is clean there.
+  _dl_expect_markers_rc m3 0 "${log}.no-a" "${target}" false
+  # (m4) A marker for an id that merely starts with this one does not
+  #      discharge the row.
+  printf '%s\n' 'note: expected [e2e-done] INV-uix' '[e2e-done] a' \
+    'blah [e2e-done] p1 later' > "${log}.quoted"
+  _dl_expect_markers_rc m4 1 "${log}.quoted" "${target}" true INV-ui
+  # (m5) A lane that is neither true nor false cannot be judged for a marked
+  #      target, and is never read as clean.
+  _dl_expect_markers_rc m5 2 "${log}" "${target}" ""
+  # (m6) A target that declares no marker is clean on any lane, even unset.
+  _dl_expect_markers_rc m6 0 "${log}" integration_test/other_test.dart ""
+
+  # The static half, over a tree shaped like the repo.
+  mkdir -p "${mtree}/haven/integration_test/e2e" "${mtree}/tooling/e2e/ci" \
+    "${mtree}/.github/workflows"
+  cat > "${mtree}/haven/integration_test/e2e/combo.dart" <<'DART'
+void main() {
+  _scenarioTestWidgets(
+    'INV-ui — the app is invited',
+    (tester, generation) async {},
+  );
+  _m11ScenarioTestWidgets('a — a live scenario', (tester, generation) async {});
+  _scenarioTestWidgets(
+    'p1 — a poll scenario',
+    (tester, generation) async {},
+  );
+}
+void _m11ScenarioTestWidgets(
+  String description,
+  Future<void> Function(WidgetTester tester, int generation) callback,
+) {
+  if (!liveSyncEnabled) return;
+  _scenarioTestWidgets(description, callback);
+}
+DART
+  cat > "${mtree}/.github/workflows/lane.yml" <<'YAML'
+jobs:
+  drive:
+    steps:
+      - run: >-
+          bash tooling/e2e/ci/run-checked.sh
+          integration_test/e2e/combo.dart
+YAML
+  cat > "${mtree}/tooling/e2e/ci/run-checked.sh" <<'SH'
+#!/usr/bin/env bash
+missing=$(drive_log_missing_markers "${LOG}" "${TARGET}" "${HAVEN_LIVE_SYNC:-}") || exit 1
+SH
+
+  # (m7) Source, manifest and runner agree.
+  _dl_expect_check_markers_rc m7 0 "${mtree}"
+  # (m8) A registered scenario the manifest does not declare.
+  cat >> "${mtree}/haven/integration_test/e2e/combo.dart" <<'DART'
+void more() {
+  _m11ScenarioTestWidgets(
+    'b — an undeclared scenario',
+    (tester, generation) async {},
+  );
+}
+DART
+  _dl_expect_check_markers_rc m8 1 "${mtree}"
+  printf '%s\n' 'integration_test/e2e/combo.dart|live|b' >> "${HAVEN_DRIVE_MARKER_MANIFEST}"
+  # (m9) A manifest row whose scenario the source no longer registers.
+  printf '%s\n' 'integration_test/e2e/combo.dart|live|gone' >> "${HAVEN_DRIVE_MARKER_MANIFEST}"
+  _dl_expect_check_markers_rc m9 1 "${mtree}"
+  sed -i.bak '/|gone$/d' "${HAVEN_DRIVE_MARKER_MANIFEST}"
+  # (m10) The runner that drives the target never consults the check — a call
+  #       only in prose or inside a string does not count.
+  cat > "${mtree}/tooling/e2e/ci/run-checked.sh" <<'SH'
+#!/usr/bin/env bash
+# drive_log_missing_markers "${LOG}" is called by the caller
+echo "drive_log_missing_markers is consulted elsewhere"
+SH
+  _dl_expect_check_markers_rc m10 1 "${mtree}"
+  # (m11) A malformed manifest row is a broken guard, not a violation.
+  printf '%s\n' 'integration_test/e2e/combo.dart|sometimes|a b' >> "${HAVEN_DRIVE_MARKER_MANIFEST}"
+  _dl_expect_check_markers_rc m11 2 "${mtree}"
+}
+
 drive_log_lib_self_test() {
   local tmp fail=0 ran=0
   tmp="$(mktemp -d)"
@@ -1987,6 +2311,7 @@ drive_log_lib_self_test() {
   # can accidentally reconcile against the REAL manifest — the same trap
   # scripts/ci/check_no_undeclared_skips.sh documents for its own lookup.
   local HAVEN_DRIVE_SKIP_MANIFEST="${tmp}/manifest.ok"
+  printf '# no end markers declared\n' > "${tmp}/markers.none"
   cat > "${tmp}/manifest.ok" <<'EOF'
 # comments and blank lines are ignored
 
@@ -2005,6 +2330,7 @@ EOF
   _dl_suite_wiring
   _dl_suite_static
   _dl_suite_dispatcher
+  _dl_suite_markers
 
   if (( ran != DRIVE_LOG_SELF_TEST_FIXTURES )); then
     echo "SELF-TEST FAIL: ran ${ran} fixtures, expected ${DRIVE_LOG_SELF_TEST_FIXTURES}" >&2
@@ -2034,7 +2360,8 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       rc=0
       for _check in drive_log_check_manifest \
                     drive_log_check_static_skips \
-                    drive_log_check_wiring; do
+                    drive_log_check_wiring \
+                    drive_log_check_markers; do
         crc=0
         "${_check}" "${2:-}" || crc=$?
         if (( crc > rc )); then rc="${crc}"; fi

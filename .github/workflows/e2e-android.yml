@@ -102,6 +102,21 @@ jobs:
       # routed here, never to HAVEN_E2E_RELAY, and C8 holds each circle's
       # kind-445s, `#h` REQs and NEG-OPENs to this listen alone.
       HAVEN_E2E_LOCATION_RELAY: ws://10.0.2.2:7789
+      # The GATED inbox relay: the proxy's `gate-read=1059` route (7790), in
+      # front of a strfry store of its own (7778). It answers as relay.damus.io
+      # does — takes a gift wrap, refuses every unauthenticated read of kind
+      # 1059 with `auth-required:` — and the harness puts it FIRST in every
+      # account's inbox list, so a Welcome delivered to the first inbox relay
+      # alone is never read and every invite in the scenario turns red. Its
+      # own store, never 7777's: a gate in front of the store the plain route
+      # reads would let the plain route serve a Welcome only the gate took.
+      # C8 judges it as an inbox, key-package and discovery listen like 7788.
+      HAVEN_E2E_GATED_INBOX_RELAY: ws://10.0.2.2:7790
+      # The same store through an ungated route (7791), for the harness's own
+      # probe only: it proves the gated store holds the Welcome the invitee
+      # joined through (SyntheticUser.acceptInvitationViaRelay), so the gate
+      # was exercised. The app never learns it.
+      HAVEN_E2E_GATED_STORE_PROBE: ws://10.0.2.2:7791
       FLUTTER_SUPPRESS_ANALYTICS: "true"
       # The runtime log scanner is wired into THIS lane (the one that runs the
       # recording proxy, whose control channel carries the run's declared
@@ -253,6 +268,8 @@ jobs:
             --target=integration_test/e2e/e2e_combined.dart \
             --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}" \
             --dart-define=HAVEN_E2E_LOCATION_RELAY="${HAVEN_E2E_LOCATION_RELAY}" \
+            --dart-define=HAVEN_E2E_GATED_INBOX_RELAY="${HAVEN_E2E_GATED_INBOX_RELAY}" \
+            --dart-define=HAVEN_E2E_GATED_STORE_PROBE="${HAVEN_E2E_GATED_STORE_PROBE}" \
             --dart-define=HAVEN_LIVE_SYNC=${{ inputs.live_sync }} \
             --dart-define=HAVEN_E2E_NO_BACKGROUND=true \
             --dart-define=HAVEN_WIRE_SENTINEL="${WIRE_SENTINEL}"
@@ -341,6 +358,19 @@ jobs:
           STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
         run: bash tooling/e2e/ci/start-strfry.sh
 
+      # The gated inbox relay's own store (HAVEN_E2E_GATED_INBOX_RELAY above):
+      # a second strfry, same pinned image and config, its own container, port
+      # and data dir, so start-strfry.sh's `docker rm -f` of its container name
+      # cannot take the first one down. Ungated itself — the proxy plays the
+      # gate in front of it.
+      - name: Start gated-inbox strfry relay
+        env:
+          STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
+          STRFRY_CONTAINER: strfry-gated
+          STRFRY_PORT: "7778"
+          STRFRY_DATA_DIR: /tmp/strfry-gated-data
+        run: bash tooling/e2e/ci/start-strfry.sh
+
       # Put the RECORDING PROXY in front of the relay, before the drive.
       #
       # It must start HERE and not later: it builds (cargo, release) and runs
@@ -384,8 +414,9 @@ jobs:
           set -euo pipefail
           mkdir -m 0700 -p /tmp/haven-soak/needles
           rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
-          upstream=ws://127.0.0.1:7777; HAVEN_WIRE_PROXY_ROUTES='7788=ws://127.0.0.1:7777,7789=ws://127.0.0.1:7777' bash tooling/e2e/ci/start-wire-proxy.sh
+          upstream=ws://127.0.0.1:7777; gated=ws://127.0.0.1:7778; HAVEN_WIRE_PROXY_ROUTES='7788=ws://127.0.0.1:7777,7789=ws://127.0.0.1:7777,7790=ws://127.0.0.1:7778;gate-read=1059,7791=ws://127.0.0.1:7778' bash tooling/e2e/ci/start-wire-proxy.sh
           echo "WIRE_UPSTREAM=${upstream}" >> "${GITHUB_ENV}"
+          echo "WIRE_GATED_UPSTREAM=${gated}" >> "${GITHUB_ENV}"
           claim=/tmp/haven-wire-proxy.journalpath
           journal="$(head -n 1 "${claim}" 2>/dev/null || true)"
           if [[ -z "${journal}" ]]; then
@@ -529,7 +560,7 @@ jobs:
           # retry's restore: a failed attempt's `flutter drive` teardown
           # uninstalls the app, so each retry puts it back through install_app,
           # with its barrier.
-          script: bash tooling/e2e/ci/run-with-deadline.sh ${{ inputs.live_sync && '51m' || '35m' }} "e2e-android drive (${{ inputs.live_sync && 'live-sync' || 'poll' }})" -- bash -c 'bash tooling/e2e/ci/setup-network-guard.sh install && HAVEN_DRIVE_TIMEOUT=${{ inputs.live_sync && '28m' || '12m' }} bash tooling/e2e/ci/run-single-avd-scenario.sh integration_test/e2e/e2e_combined.dart'
+          script: bash tooling/e2e/ci/run-with-deadline.sh ${{ inputs.live_sync && '51m' || '35m' }} "e2e-android drive (${{ inputs.live_sync && 'live-sync' || 'poll' }})" -- bash -c 'bash tooling/e2e/ci/setup-network-guard.sh install && HAVEN_DRIVE_TIMEOUT=${{ inputs.live_sync && '28m' || '12m' }} HAVEN_LIVE_SYNC=${{ inputs.live_sync && 'true' || 'false' }} bash tooling/e2e/ci/run-single-avd-scenario.sh integration_test/e2e/e2e_combined.dart'
 
       # Publish what the guard OBSERVED (CI_HARDENING_BACKLOG C7). Must run
       # BEFORE the teardown below, because the report cross-checks its parse of
@@ -737,8 +768,12 @@ jobs:
           # is the account's inbox AND key-package relay, and discovery reads it
           # as well, because the default-relay override the harness installs is
           # discovery's fallback — the same overlap production has built in
-          # (its discovery pool contains the default relays). Both overlaps are
-          # DECLARED, never inferred. Values never reach this log: the binary
+          # (its discovery pool contains the default relays). 7790, the gated
+          # inbox relay, heads that same override and holds the same three
+          # roles; the REQs its gate refused are journalled `c2p` and judged as
+          # what Haven sent. 7791, the harness's ungated probe of that same store,
+          # declares its roles too: every route has one, and no client frame
+          # reaches it. Both overlaps are DECLARED, never inferred. Values never reach this log: the binary
           # prints role names, kinds, rule ids and buckets only.
           rc=0
           bash tooling/e2e/ci/check-wire-planes.sh \
@@ -747,6 +782,12 @@ jobs:
             --plane inbox=127.0.0.1:7788 \
             --plane keypackage=127.0.0.1:7788 \
             --plane discovery=127.0.0.1:7788 \
+            --plane inbox=127.0.0.1:7790 \
+            --plane keypackage=127.0.0.1:7790 \
+            --plane discovery=127.0.0.1:7790 \
+            --plane inbox=127.0.0.1:7791 \
+            --plane keypackage=127.0.0.1:7791 \
+            --plane discovery=127.0.0.1:7791 \
             --plane location=127.0.0.1:7789 \
             --declare-overlap inbox:discovery \
             --declare-overlap keypackage:discovery \
@@ -860,13 +901,13 @@ jobs:
           bash tooling/e2e/ci/check-wire-correlation.sh \
             --journal "${WIRE_JOURNAL}" \
             --sentinel "${WIRE_SENTINEL}" \
-            --pool "0=${WIRE_UPSTREAM}" \
-            --pool "5=${WIRE_UPSTREAM}" \
+            --pool "0=${WIRE_UPSTREAM},${WIRE_GATED_UPSTREAM}" \
+            --pool "5=${WIRE_UPSTREAM},${WIRE_GATED_UPSTREAM}" \
             --pool "445=${WIRE_UPSTREAM}" \
-            --pool "1059=${WIRE_UPSTREAM}" \
-            --pool "10002=${WIRE_UPSTREAM}" \
-            --pool "10050=${WIRE_UPSTREAM}" \
-            --pool "30443=${WIRE_UPSTREAM}" \
+            --pool "1059=${WIRE_UPSTREAM},${WIRE_GATED_UPSTREAM}" \
+            --pool "10002=${WIRE_UPSTREAM},${WIRE_GATED_UPSTREAM}" \
+            --pool "10050=${WIRE_UPSTREAM},${WIRE_GATED_UPSTREAM}" \
+            --pool "30443=${WIRE_UPSTREAM},${WIRE_GATED_UPSTREAM}" \
             ${excl[@]+"${excl[@]}"} \
             ${mls_args[@]+"${mls_args[@]}"} \
             ${expect[@]+"${expect[@]}"} || rc=$?
@@ -931,6 +972,7 @@ jobs:
         if: always()
         run: |
           docker logs strfry > /tmp/strfry.log 2>&1 || true
+          docker logs strfry-gated > /tmp/strfry-gated.log 2>&1 || true
 
       # Capture a snapshot of host + emulator state so a future "the
       # failure was caused by OOM at 22:17" hypothesis can be tested
@@ -1013,7 +1055,7 @@ jobs:
           rc=0
           bash tooling/e2e/ci/scan-logs.sh \
             --manifest-dir /tmp/haven-soak/needles \
-            --sink relay=/tmp/strfry.log \
+            --sink relay=/tmp/strfry.log,/tmp/strfry-gated.log \
             --sink diag=/tmp/diag.log \
             --sink proxy=/tmp/haven-wire-proxy.log \
             ${summary[@]+"${summary[@]}"} \
@@ -1038,6 +1080,7 @@ jobs:
             /tmp/adb-logcat.log
             /tmp/flutter-drive.log
             /tmp/strfry.log
+            /tmp/strfry-gated.log
             /tmp/diag.log
             /tmp/scenario.apk
             # Redacted wire-journal summary only. The raw transcript stays on
@@ -1066,4 +1109,7 @@ jobs:
       # never turn a green run red.
       - name: Tear down strfry relay
         if: always()
-        run: bash tooling/e2e/ci/stop-strfry.sh
+        run: |
+          bash tooling/e2e/ci/stop-strfry.sh
+          STRFRY_CONTAINER=strfry-gated STRFRY_DATA_DIR=/tmp/strfry-gated-data \
+            bash tooling/e2e/ci/stop-strfry.sh
