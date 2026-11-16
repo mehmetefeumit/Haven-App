@@ -2041,6 +2041,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn download_does_not_dial_a_redirect_to_a_hostname_resolving_to_a_private_address() {
+        // A hostname passes the redirect policy; the client's resolver is the
+        // only filter it meets. `localhost` is allowed plain http in a debug
+        // build and resolves to loopback, which this binary never exempts
+        // (only the ignored live test installs the opt-in, after its env var).
+        let bytes = tiny_jpeg();
+        let sha_hex = hex::encode(Sha256::digest(&bytes));
+        let mut target = mockito::Server::new_async().await;
+        let never = target
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_body(bytes)
+            .expect(0)
+            .create_async()
+            .await;
+        let port = target.socket_address().port();
+        let mut origin = mockito::Server::new_async().await;
+        let _r = origin
+            .mock("GET", format!("/{sha_hex}").as_str())
+            .with_status(302)
+            .with_header("location", &format!("http://localhost:{port}/{sha_hex}"))
+            .create_async()
+            .await;
+        let url = url::Url::parse(&format!("{}/{sha_hex}", origin.url())).unwrap();
+        let err = download_with_client(&download_client(true).unwrap(), &url)
+            .await
+            .expect_err("a hostname resolving to loopback is never dialled");
+        assert!(matches!(err, ProfileError::Http(_)), "got {err:?}");
+        never.assert_async().await;
+    }
+
+    #[tokio::test]
     async fn download_of_an_unaddressed_url_follows_no_redirect() {
         // Without a content address nothing binds the bytes a redirect would
         // fetch, so the 302 is a non-success status — not even judged by the
