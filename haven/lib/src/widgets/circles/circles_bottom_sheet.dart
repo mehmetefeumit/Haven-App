@@ -283,14 +283,21 @@ class CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet> {
     super.didChangeDependencies();
     final collapsed = collapsedSheetSize(context);
     if (collapsed == _collapsedSize) return;
+    // The dim's own "collapsed" test: an unsnapped nudge rests within it.
     final wasCollapsed =
-        _controller.isAttached && _controller.size <= _collapsedSize + 0.001;
+        _controller.isAttached &&
+        sheetExpansionForSize(
+              _controller.size,
+              collapsedSize: _collapsedSize,
+            ) ==
+            0;
     _collapsedSize = collapsed;
     // A raised snap clamps the sheet up by itself; a lowered one would leave
     // it resting above the new snap, under a dim the user never asked for.
+    // A finger on the sheet keeps it: its release snaps to the new detents.
     if (wasCollapsed) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted && _controller.isAttached) {
+        if (mounted && _controller.isAttached && _activePointer == null) {
           _controller.jumpTo(_collapsedSize);
         }
       });

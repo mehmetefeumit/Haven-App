@@ -1015,6 +1015,80 @@ void main() {
       },
     );
 
+    testWidgets(
+      'a sheet nudged within the no-snap band still follows its snap down',
+      (tester) async {
+        setScreen(tester, const Size(320, 400));
+        addTearDown(tester.view.reset);
+        final controller = DraggableScrollableController();
+        addTearDown(controller.dispose);
+        var expansion = -1.0;
+
+        await pumpSheet(
+          tester,
+          selected: null,
+          scale: 1,
+          controller: controller,
+          onExpansionChanged: (value) => expansion = value,
+        );
+        controller.jumpTo(0);
+        await tester.pumpAndSettle();
+        // Where a drag released short of the snap threshold leaves it: too
+        // little movement to snap, so it rests just above the detent.
+        controller.jumpTo(controller.size + 0.004);
+        await tester.pumpAndSettle();
+        expect(expansion, 0);
+
+        setScreen(tester, const Size(320, 800));
+        await tester.pumpAndSettle();
+
+        expect(controller.size, kSnapSizesForTesting.first);
+        expect(expansion, 0);
+      },
+    );
+
+    testWidgets(
+      'a finger on the collapsed sheet keeps it through a resize, and its '
+      'drag takes effect',
+      (tester) async {
+        setScreen(tester, const Size(320, 400));
+        addTearDown(tester.view.reset);
+        final controller = DraggableScrollableController();
+        addTearDown(controller.dispose);
+
+        await pumpSheet(
+          tester,
+          selected: null,
+          scale: 1,
+          controller: controller,
+        );
+        controller.jumpTo(0);
+        await tester.pumpAndSettle();
+        final heldSize = controller.size;
+
+        final gesture = await tester.startGesture(tester.getCenter(trigger()));
+        setScreen(tester, const Size(320, 800));
+        await tester.pump();
+        await tester.pump();
+
+        expect(controller.size, heldSize);
+
+        for (var i = 0; i < 20; i++) {
+          await gesture.moveBy(const Offset(0, -10));
+          await tester.pump(const Duration(milliseconds: 16));
+        }
+        expect(controller.size, greaterThan(heldSize));
+        // Held still before lifting: a slow release snaps to the nearest
+        // detent rather than flinging.
+        await tester.pump(const Duration(milliseconds: 300));
+        await gesture.up();
+        await tester.pumpAndSettle();
+
+        expect(kSnapSizesForTesting, contains(controller.size));
+        expect(controller.size, greaterThan(heldSize));
+      },
+    );
+
     test('a raised collapsed snap replaces the detents below it', () {
       const collapsed = 0.35;
       // Slow release just above the 0.30 peek: it is gone, so the nearest
