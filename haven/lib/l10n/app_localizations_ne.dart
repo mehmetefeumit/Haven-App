@@ -342,139 +342,139 @@ class AppLocalizationsNe extends AppLocalizations {
   String get relaySettingsStatusNotChecked => 'जाँचिएको छैन';
 
   @override
-  String get relaySettingsPresencePublishing => 'Publishing…';
+  String get relaySettingsPresencePublishing => 'प्रकाशित गर्दै…';
 
   @override
-  String get relaySettingsPresenceRefused => 'Relay refused it';
+  String get relaySettingsPresenceRefused => 'रिलेले अस्वीकार गर्‍यो';
 
   @override
-  String get relaySettingsPresenceUnconfirmed => 'Relay didn\'t confirm';
+  String get relaySettingsPresenceUnconfirmed => 'रिलेले पुष्टि गरेन';
 
   @override
-  String get relaySettingsPresenceNoAnswer => 'Couldn\'t check';
+  String get relaySettingsPresenceNoAnswer => 'जाँच्न सकिएन';
 
   @override
-  String get relaySettingsPresenceHeld => 'On hold';
+  String get relaySettingsPresenceHeld => 'रोकिएको';
 
   @override
   String relaySettingsInfoTooltip(String section) {
-    return 'About $section';
+    return '$section बारे जानकारी';
   }
 
   @override
   String get relaySettingsInboxInfoWhat =>
-      'When someone invites you to a circle, the invitation is delivered to these relays. Relays are independent servers that pass messages along. Haven checks them for new invitations.';
+      'कसैले तपाईंलाई कुनै सर्कलमा निमन्त्रणा गर्दा, त्यो निमन्त्रणा यी रिलेहरूमा आइपुग्छ। रिलेहरू सन्देश अगाडि पुर्‍याउने स्वतन्त्र सर्भरहरू हुन्। नयाँ निमन्त्रणा आए कि आएनन् भनेर Haven ले यी रिलेहरू जाँच्छ।';
 
   @override
   String get relaySettingsInboxInfoKeeps =>
-      'Haven keeps your inbox list here. It is a short public note that says which relays are your inbox, so people know where to send invitations. A copy also goes to the lookup relays further down this page. Invitations are sealed so that only you can open them.';
+      'Haven ले तपाईंको इनबक्स सूची यहाँ राख्छ। यो तपाईंको इनबक्स कुन-कुन रिले हुन् भनेर बताउने एउटा छोटो सार्वजनिक टिपोट हो, जसले गर्दा मानिसहरूलाई निमन्त्रणा कहाँ पठाउने भन्ने थाहा हुन्छ। यसको एउटा प्रतिलिपि यही पृष्ठमा तल रहेका खोजी रिलेहरूमा पनि जान्छ। निमन्त्रणाहरू यसरी सिल गरिन्छन् कि तिनलाई तपाईं मात्र खोल्न सक्नुहुन्छ।';
 
   @override
   String get relaySettingsInboxInfoMissing =>
-      'People using Haven look up your inbox list on the lookup relays, and other apps may look for it on your own relays, so Haven keeps a copy on both. Each row shows whether that relay has the current version.';
+      'Haven प्रयोग गर्ने मानिसहरूले तपाईंको इनबक्स सूची खोजी रिलेहरूमा खोज्छन्, र अन्य एपहरूले यसलाई तपाईंका आफ्नै रिलेहरूमा खोज्न सक्छन्, त्यसैले Haven ले दुवै ठाउँमा यसको प्रतिलिपि राख्छ। हरेक पङ्क्तिले त्यो रिलेमा हालको संस्करण छ कि छैन भनेर देखाउँछ।';
 
   @override
   String get relaySettingsInboxInfoActions =>
-      'You can add relays you trust and remove ones you no longer want. Haven won\'t let you remove the last relay on this list. Every relay on this list is public: anyone can see it in your inbox list. When you remove a relay, Haven asks it to delete your old list.';
+      'तपाईं आफूले भरोसा गर्ने रिलेहरू थप्न र अब नचाहेका रिलेहरू हटाउन सक्नुहुन्छ। यो सूचीको अन्तिम रिले हटाउन Haven ले दिँदैन। यो सूचीका सबै रिले सार्वजनिक छन्: तपाईंको इनबक्स सूचीमा जो कसैले पनि ती देख्न सक्छ। तपाईंले कुनै रिले हटाउँदा, Haven ले त्यस रिलेलाई तपाईंको पुरानो सूची मेटाउन अनुरोध गर्छ।';
 
   @override
   String get relaySettingsInboxInfoTechnical =>
-      'For the technically curious: your inbox list is a Nostr event of kind 10050, and invitations arrive as gift-wrapped events of kind 1059.';
+      'प्राविधिक कुरामा रुचि हुनेहरूका लागि: तपाईंको इनबक्स सूची kind 10050 को Nostr इभेन्ट हो, र निमन्त्रणाहरू kind 1059 का गिफ्ट-र्‍याप गरिएका इभेन्टका रूपमा आइपुग्छन्।';
 
   @override
   String get relaySettingsKeyPackageInfoWhat =>
-      'To add you to a circle, the person inviting you needs your invitation key, called a KeyPackage. Haven keeps it on these relays so people can invite you even while your phone is off.';
+      'तपाईंलाई कुनै सर्कलमा थप्न, निमन्त्रणा गर्ने व्यक्तिलाई तपाईंको निमन्त्रणा कुञ्जी चाहिन्छ, जसलाई KeyPackage भनिन्छ। तपाईंको फोन बन्द भएको बेलामा पनि मानिसहरूले तपाईंलाई निमन्त्रणा गर्न सकून् भनेर Haven ले यसलाई यी रिलेहरूमा राख्छ।';
 
   @override
   String get relaySettingsKeyPackageInfoKeeps =>
-      'Haven keeps two things here: your KeyPackage, and your relay list, a short public note that says which relays hold your KeyPackage. A copy of the relay list also goes to the lookup relays. Your KeyPackage goes only to the relays on this list. After it has been used, Haven replaces it with a fresh one, and it renews it from time to time.';
+      'Haven ले यहाँ दुई कुरा राख्छ: तपाईंको KeyPackage, र तपाईंको रिले सूची, जुन तपाईंको KeyPackage कुन-कुन रिलेमा छ भनेर बताउने एउटा छोटो सार्वजनिक टिपोट हो। रिले सूचीको एउटा प्रतिलिपि खोजी रिलेहरूमा पनि जान्छ। तपाईंको KeyPackage यो सूचीका रिलेहरूमा मात्र जान्छ। यो प्रयोग भइसकेपछि Haven ले यसको सट्टा नयाँ KeyPackage राख्छ, र समय-समयमा यसलाई नवीकरण पनि गर्छ।';
 
   @override
   String get relaySettingsKeyPackageInfoMissing =>
-      'Each row shows whether that relay has your current KeyPackage and relay list. If a relay is missing your KeyPackage, or holds an old one Haven has replaced, people who look for it there may not be able to invite you.';
+      'हरेक पङ्क्तिले त्यो रिलेमा तपाईंको हालको KeyPackage र रिले सूची छ कि छैन भनेर देखाउँछ। कुनै रिलेमा तपाईंको KeyPackage छैन भने, वा Haven ले बदलिसकेको पुरानो KeyPackage छ भने, त्यहाँ यसलाई खोज्ने मानिसहरूले तपाईंलाई निमन्त्रणा गर्न नसक्न पनि सक्छन्।';
 
   @override
   String get relaySettingsKeyPackageInfoActions =>
-      'You can add or remove relays. Haven won\'t let you remove the last relay on this list. Every relay on this list is public: anyone can see it in your relay list. When you remove a relay, Haven asks it to delete your old relay list.';
+      'तपाईं रिलेहरू थप्न वा हटाउन सक्नुहुन्छ। यो सूचीको अन्तिम रिले हटाउन Haven ले दिँदैन। यो सूचीका सबै रिले सार्वजनिक छन्: तपाईंको रिले सूचीमा जो कसैले पनि ती देख्न सक्छ। तपाईंले कुनै रिले हटाउँदा, Haven ले त्यस रिलेलाई तपाईंको पुरानो रिले सूची मेटाउन अनुरोध गर्छ।';
 
   @override
   String get relaySettingsKeyPackageInfoTechnical =>
-      'For the technically curious: the KeyPackage is a Marmot event of kind 30443, and the relay list is a NIP-65 event of kind 10002.';
+      'प्राविधिक कुरामा रुचि हुनेहरूका लागि: KeyPackage kind 30443 को Marmot इभेन्ट हो, र रिले सूची kind 10002 को NIP-65 इभेन्ट हो।';
 
   @override
   String get relaySettingsProfileInfoWhat =>
-      'When you save a name or photo, Haven sends your public profile to these relays. Haven also looks up other members\' names and photos here.';
+      'तपाईंले नाम वा फोटो सुरक्षित गर्दा, Haven ले तपाईंको सार्वजनिक प्रोफाइल यी रिलेहरूमा पठाउँछ। Haven ले अन्य सदस्यहरूका नाम र फोटो पनि यहीँ खोज्छ।';
 
   @override
   String get relaySettingsProfileInfoKeeps =>
-      'Anyone can look up your profile on these relays. Your photo itself is stored on a separate photo server, and your profile holds its web address.';
+      'यी रिलेहरूमा जो कसैले पनि तपाईंको प्रोफाइल खोजेर हेर्न सक्छ। तपाईंको फोटो चाहिँ छुट्टै फोटो सर्भरमा राखिन्छ, र तपाईंको प्रोफाइलमा त्यसको वेब ठेगाना हुन्छ।';
 
   @override
   String get relaySettingsProfileInfoPrivacy =>
-      'Haven sends your profile only to these relays, which it keeps apart from the relays that carry your invitations. Because your profile is public, other apps can copy it elsewhere. Haven keeps this list on your phone and never publishes it. A relay here that also carries your other Haven traffic is marked with a warning.';
+      'Haven ले तपाईंको प्रोफाइल यी रिलेहरूमा मात्र पठाउँछ, र यिनलाई तपाईंका निमन्त्रणा बोक्ने रिलेहरूबाट अलग राख्छ। तपाईंको प्रोफाइल सार्वजनिक भएकाले, अन्य एपहरूले यसलाई अन्यत्र प्रतिलिपि गर्न सक्छन्। Haven ले यो सूची तपाईंको फोनमै राख्छ र यसलाई कहिल्यै प्रकाशित गर्दैन। यहाँको कुनै रिलेले तपाईंको अन्य Haven ट्राफिक पनि बोक्छ भने, त्यसमा चेतावनी चिन्ह देखाइन्छ।';
 
   @override
   String get relaySettingsProfileInfoActions =>
-      'You can add relays. Haven\'s built-in profile relays can\'t be removed, because Haven always adds them back. This section shows no symbol for each relay; your Identity page shows the profile you saved.';
+      'तपाईं रिलेहरू थप्न सक्नुहुन्छ। Haven मा पहिल्यै समावेश प्रोफाइल रिलेहरू हटाउन सकिँदैन, किनकि Haven ले तिनलाई सधैँ फेरि थपिदिन्छ। यो खण्डमा रिलेहरूका लागि कुनै चिन्ह देखाइँदैन; तपाईंले सुरक्षित गरेको प्रोफाइल तपाईंको परिचय पृष्ठमा देखिन्छ।';
 
   @override
   String get relaySettingsProfileInfoTechnical =>
-      'For the technically curious: your profile is a Nostr event of kind 0, and the photo is stored on a Blossom server.';
+      'प्राविधिक कुरामा रुचि हुनेहरूका लागि: तपाईंको प्रोफाइल kind 0 को Nostr इभेन्ट हो, र फोटो Blossom सर्भरमा राखिन्छ।';
 
   @override
   String get relaySettingsLookupInfoWhat =>
-      'Lookup relays are well-known public relays where apps look for someone\'s relays when they know only that person\'s account. Haven chose them, and they are the same for everyone who uses Haven. Haven also uses them to find the people you invite.';
+      'खोजी रिलेहरू भनेका सुपरिचित सार्वजनिक रिलेहरू हुन्, जहाँ कुनै व्यक्तिको खाता मात्र थाहा हुँदा एपहरूले त्यो व्यक्तिका रिलेहरू खोज्छन्। Haven ले यिनलाई छानेको हो, र Haven प्रयोग गर्ने सबैका लागि यी उही हुन्। तपाईंले निमन्त्रणा गर्ने मानिसहरूलाई फेला पार्न पनि Haven ले यिनै रिलेहरू प्रयोग गर्छ।';
 
   @override
   String get relaySettingsLookupInfoKeeps =>
-      'So that someone who knows only your account can still invite you, Haven copies your inbox list and your relay list here, unchanged. If those lists name a private relay, that name is visible here too. In this role, Haven copies only those two lists here. Some lookup relays are also Haven\'s default inbox and KeyPackage relays; while they are on your lists, they also hold what those sections describe.';
+      'तपाईंको खाता मात्र थाहा भएको व्यक्तिले पनि तपाईंलाई निमन्त्रणा गर्न सकोस् भनेर, Haven ले तपाईंको इनबक्स सूची र रिले सूची कुनै परिवर्तन नगरी यहाँ प्रतिलिपि गर्छ। ती सूचीहरूमा कुनै निजी रिलेको नाम छ भने, त्यो नाम यहाँ पनि देखिन्छ। यस भूमिकामा, Haven ले यहाँ ती दुई सूची मात्र प्रतिलिपि गर्छ। केही खोजी रिलेहरू Haven का पूर्वनिर्धारित इनबक्स र KeyPackage रिले पनि हुन्; ती तपाईंका सूचीहरूमा रहेसम्म, ती खण्डहरूमा बताइएका कुराहरू पनि तिनमा रहन्छन्।';
 
   @override
   String get relaySettingsLookupInfoMissing =>
-      'Each row shows whether that relay has the current version of both lists. If a lookup relay is missing them or has old versions, people who search there may not find you. A relay can appear in more than one section; each section shows only what that role needs.';
+      'हरेक पङ्क्तिले त्यो रिलेमा दुवै सूचीको हालको संस्करण छ कि छैन भनेर देखाउँछ। कुनै खोजी रिलेमा ती सूची छैनन् वा पुराना संस्करण छन् भने, त्यहाँ खोज्ने मानिसहरूले तपाईंलाई फेला पार्न नसक्न पनि सक्छन्। एउटै रिले एकभन्दा बढी खण्डमा देखिन सक्छ; हरेक खण्डले त्यो भूमिकालाई चाहिने कुरा मात्र देखाउँछ।';
 
   @override
   String get relaySettingsLookupInfoActions =>
-      'This list is built into Haven, so you can\'t change it here. You control the inbox and KeyPackage lists above.';
+      'यो सूची Haven मै समावेश गरिएको छ, त्यसैले तपाईं यसलाई यहाँ बदल्न सक्नुहुन्न। माथिका इनबक्स र KeyPackage सूचीहरू तपाईंको नियन्त्रणमा छन्।';
 
   @override
   String get relaySettingsLookupInfoTechnical =>
-      'For the technically curious: Haven copies your kind 10050 and kind 10002 events to these relays; kind 30443 goes only to your KeyPackage relays.';
+      'प्राविधिक कुरामा रुचि हुनेहरूका लागि: Haven ले तपाईंका kind 10050 र kind 10002 इभेन्टहरू यी रिलेहरूमा प्रतिलिपि गर्छ; kind 30443 तपाईंका KeyPackage रिलेहरूमा मात्र जान्छ।';
 
   @override
-  String get relaySettingsLegendTitle => 'What the symbols mean';
+  String get relaySettingsLegendTitle => 'चिन्हहरूको अर्थ';
 
   @override
   String get relaySettingsLegendCurrent =>
-      'Published: this relay has the current version.';
+      'प्रकाशित: यो रिलेमा हालको संस्करण छ।';
 
   @override
   String get relaySettingsLegendPublishing =>
-      'Publishing: Haven has sent it and is waiting for the relay to confirm.';
+      'प्रकाशित गर्दै: Haven ले यो पठाइसकेको छ र रिलेले पुष्टि गर्ने प्रतीक्षा गर्दै छ।';
 
   @override
   String get relaySettingsLegendChecking =>
-      'Checking, or not checked yet: Haven is asking the relay what it has, or has not asked it yet.';
+      'जाँच्दै, वा अहिलेसम्म जाँचिएको छैन: Haven ले रिलेसँग त्यसमा के-के छ भनेर सोध्दै छ, वा अहिलेसम्म सोधेको छैन।';
 
   @override
   String get relaySettingsLegendNotOnRelay =>
-      'Not on this relay yet: it is missing, it is an old version, the relay refused it, or the relay didn\'t confirm. Tap a symbol to see which. Haven tries again at its next check: about every 10 minutes for your KeyPackage and every 30 minutes for your lists while Haven is open, and each time Haven starts. If one of your relays keeps showing this, you can replace it.';
+      'यो रिलेमा अहिलेसम्म छैन: यो रिलेमा यो छैन, यसको पुरानो संस्करण छ, रिलेले यसलाई अस्वीकार गर्‍यो, वा रिलेले पुष्टि गरेन। कुन कारण हो हेर्न चिन्हमा ट्याप गर्नुहोस्। Haven ले अर्को जाँचमा फेरि प्रयास गर्छ: Haven खुला रहेको बेला तपाईंको KeyPackage का लागि करिब हरेक १० मिनेटमा र तपाईंका सूचीहरूका लागि हरेक ३० मिनेटमा, र Haven सुरु हुँदा हरेक पटक। तपाईंका कुनै रिलेमा यो चिन्ह देखिइरहन्छ भने, तपाईं त्यो रिले बदल्न सक्नुहुन्छ।';
 
   @override
   String get relaySettingsLegendNoAnswer =>
-      'Couldn\'t check: the relay didn\'t answer, perhaps because you\'re offline or it\'s down. Haven asks again at its next check.';
+      'जाँच्न सकिएन: रिलेले जवाफ दिएन, सायद तपाईं अफलाइन हुनुहुन्छ वा रिले चलिरहेको छैन। Haven ले अर्को जाँचमा फेरि सोध्छ।';
 
   @override
   String get relaySettingsLegendHeld =>
-      'On hold: Haven isn\'t publishing this for now. A note on this page says why.';
+      'रोकिएको: Haven ले अहिलेलाई यो प्रकाशित गरिरहेको छैन। किन भन्ने कुरा यो पृष्ठको एउटा टिपोटमा लेखिएको छ।';
 
   @override
   String get relaySettingsHeldNoRelays =>
-      'Haven has nowhere to publish a list above that has no relays. Restore defaults on each empty list to publish it again.';
+      'माथिको जुन सूचीमा कुनै रिले छैन, त्यो सूची प्रकाशित गर्ने ठाउँ Haven सँग छैन। फेरि प्रकाशित गर्न, हरेक खाली सूचीमा पूर्वनिर्धारित रिलेहरू पुनर्स्थापना गर्नुहोस्।';
 
   @override
   String get relaySettingsHeldNotYetPublished =>
-      'Haven hasn\'t published one of your relay lists yet. It does so at its next check.';
+      'Haven ले तपाईंका रिले सूचीहरूमध्ये एउटा अहिलेसम्म प्रकाशित गरेको छैन। अर्को जाँचमा यसले त्यो प्रकाशित गर्छ।';
 
   @override
   String relaySettingsCheckSettled(int count) {
@@ -482,21 +482,21 @@ class AppLocalizationsNe extends AppLocalizations {
       count,
       locale: localeName,
       other:
-          'Relay check finished. $count relays aren\'t confirmed up to date.',
-      one: 'Relay check finished. 1 relay isn\'t confirmed up to date.',
-      zero: 'Relay check finished. Everything is up to date.',
+          'रिले जाँच सकियो। $count रिले अद्यावधिक छन् भन्ने पुष्टि भएको छैन।',
+      one: 'रिले जाँच सकियो। एउटा रिले अद्यावधिक छ भन्ने पुष्टि भएको छैन।',
+      zero: 'रिले जाँच सकियो। सबै कुरा अद्यावधिक छ।',
     );
     return '$_temp0';
   }
 
   @override
   String relaySettingsAddedRelayUpToDate(String relay) {
-    return '$relay is up to date.';
+    return '$relay अद्यावधिक छ।';
   }
 
   @override
   String relaySettingsAddedRelayNotUpToDate(String relay) {
-    return '$relay isn\'t confirmed up to date. Its row says why.';
+    return '$relay अद्यावधिक छ भन्ने पुष्टि भएको छैन। किन भन्ने कुरा यसको पङ्क्तिमा देखाइएको छ।';
   }
 
   @override

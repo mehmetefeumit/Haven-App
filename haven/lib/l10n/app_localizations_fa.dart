@@ -337,161 +337,160 @@ class AppLocalizationsFa extends AppLocalizations {
   String get relaySettingsStatusNotChecked => 'بررسی نشده';
 
   @override
-  String get relaySettingsPresencePublishing => 'Publishing…';
+  String get relaySettingsPresencePublishing => 'در حال انتشار…';
 
   @override
-  String get relaySettingsPresenceRefused => 'Relay refused it';
+  String get relaySettingsPresenceRefused => 'رله نپذیرفت';
 
   @override
-  String get relaySettingsPresenceUnconfirmed => 'Relay didn\'t confirm';
+  String get relaySettingsPresenceUnconfirmed => 'رله تأیید نکرد';
 
   @override
-  String get relaySettingsPresenceNoAnswer => 'Couldn\'t check';
+  String get relaySettingsPresenceNoAnswer => 'بررسی ممکن نشد';
 
   @override
-  String get relaySettingsPresenceHeld => 'On hold';
+  String get relaySettingsPresenceHeld => 'موقتاً متوقف';
 
   @override
   String relaySettingsInfoTooltip(String section) {
-    return 'About $section';
+    return 'دربارهٔ $section';
   }
 
   @override
   String get relaySettingsInboxInfoWhat =>
-      'When someone invites you to a circle, the invitation is delivered to these relays. Relays are independent servers that pass messages along. Haven checks them for new invitations.';
+      'وقتی کسی تو را به حلقه‌ای دعوت می‌کند، دعوت به این رله‌ها تحویل داده می‌شود. رله‌ها سرورهای مستقلی هستند که پیام‌ها را دست‌به‌دست می‌کنند. Haven این رله‌ها را برای یافتن دعوت‌های تازه بررسی می‌کند.';
 
   @override
   String get relaySettingsInboxInfoKeeps =>
-      'Haven keeps your inbox list here. It is a short public note that says which relays are your inbox, so people know where to send invitations. A copy also goes to the lookup relays further down this page. Invitations are sealed so that only you can open them.';
+      'Haven فهرست صندوق ورودی‌ات را اینجا نگه می‌دارد. این فهرست یادداشت عمومی کوتاهی است که می‌گوید کدام رله‌ها صندوق ورودی تو هستند، تا دیگران بدانند دعوت‌ها را کجا بفرستند. یک نسخه از آن به رله‌های جست‌وجو در پایین همین صفحه هم فرستاده می‌شود. دعوت‌ها طوری مهروموم می‌شوند که فقط خودت بتوانی بازشان کنی.';
 
   @override
   String get relaySettingsInboxInfoMissing =>
-      'People using Haven look up your inbox list on the lookup relays, and other apps may look for it on your own relays, so Haven keeps a copy on both. Each row shows whether that relay has the current version.';
+      'کسانی که از Haven استفاده می‌کنند، در رله‌های جست‌وجو دنبال فهرست صندوق ورودی‌ات می‌گردند و برنامه‌های دیگر ممکن است در رله‌های خودت دنبالش بگردند؛ برای همین Haven یک نسخه از آن را روی هر دو نگه می‌دارد. هر ردیف نشان می‌دهد که آیا آن رله نسخهٔ کنونی را دارد یا نه.';
 
   @override
   String get relaySettingsInboxInfoActions =>
-      'You can add relays you trust and remove ones you no longer want. Haven won\'t let you remove the last relay on this list. Every relay on this list is public: anyone can see it in your inbox list. When you remove a relay, Haven asks it to delete your old list.';
+      'می‌توانی رله‌هایی را که به آن‌ها اعتماد داری اضافه کنی و رله‌هایی را که دیگر نمی‌خواهی حذف کنی. Haven اجازه نمی‌دهد آخرین رلهٔ این فهرست را حذف کنی. همهٔ رله‌های این فهرست عمومی‌اند: هر کسی می‌تواند آن‌ها را در فهرست صندوق ورودی‌ات ببیند. وقتی رله‌ای را حذف می‌کنی، Haven از آن می‌خواهد فهرست قدیمی‌ات را پاک کند.';
 
   @override
   String get relaySettingsInboxInfoTechnical =>
-      'For the technically curious: your inbox list is a Nostr event of kind 10050, and invitations arrive as gift-wrapped events of kind 1059.';
+      'برای علاقه‌مندان به جزئیات فنی: فهرست صندوق ورودی‌ات یک رویداد Nostr با kind 10050 است و دعوت‌ها به‌شکل رویدادهای gift wrap با kind 1059 می‌رسند.';
 
   @override
   String get relaySettingsKeyPackageInfoWhat =>
-      'To add you to a circle, the person inviting you needs your invitation key, called a KeyPackage. Haven keeps it on these relays so people can invite you even while your phone is off.';
+      'کسی که تو را دعوت می‌کند، برای افزودنت به حلقه به کلید دعوتت نیاز دارد که KeyPackage نام دارد. Haven آن را روی این رله‌ها نگه می‌دارد تا دیگران حتی وقتی گوشی‌ات خاموش است هم بتوانند دعوتت کنند.';
 
   @override
   String get relaySettingsKeyPackageInfoKeeps =>
-      'Haven keeps two things here: your KeyPackage, and your relay list, a short public note that says which relays hold your KeyPackage. A copy of the relay list also goes to the lookup relays. Your KeyPackage goes only to the relays on this list. After it has been used, Haven replaces it with a fresh one, and it renews it from time to time.';
+      'Haven دو چیز را اینجا نگه می‌دارد: KeyPackage تو، و فهرست رله‌هایت، یعنی یادداشت عمومی کوتاهی که می‌گوید کدام رله‌ها KeyPackage تو را نگه می‌دارند. یک نسخه از فهرست رله‌ها به رله‌های جست‌وجو هم فرستاده می‌شود. KeyPackage تو فقط به رله‌های همین فهرست فرستاده می‌شود. Haven پس از استفاده‌شدن آن، یک KeyPackage تازه جایش می‌گذارد و هر از چندی هم آن را نو می‌کند.';
 
   @override
   String get relaySettingsKeyPackageInfoMissing =>
-      'Each row shows whether that relay has your current KeyPackage and relay list. If a relay is missing your KeyPackage, or holds an old one Haven has replaced, people who look for it there may not be able to invite you.';
+      'هر ردیف نشان می‌دهد که آیا آن رله نسخهٔ کنونی KeyPackage و فهرست رله‌هایت را دارد یا نه. اگر رله‌ای KeyPackage تو را نداشته باشد، یا KeyPackage قدیمی‌ای را نگه دارد که Haven جایگزینش کرده است، کسانی که آنجا دنبالش می‌گردند ممکن است نتوانند دعوتت کنند.';
 
   @override
   String get relaySettingsKeyPackageInfoActions =>
-      'You can add or remove relays. Haven won\'t let you remove the last relay on this list. Every relay on this list is public: anyone can see it in your relay list. When you remove a relay, Haven asks it to delete your old relay list.';
+      'می‌توانی رله اضافه یا حذف کنی. Haven اجازه نمی‌دهد آخرین رلهٔ این فهرست را حذف کنی. همهٔ رله‌های این فهرست عمومی‌اند: هر کسی می‌تواند آن‌ها را در فهرست رله‌هایت ببیند. وقتی رله‌ای را حذف می‌کنی، Haven از آن می‌خواهد نسخهٔ قدیمی فهرست رله‌هایت را پاک کند.';
 
   @override
   String get relaySettingsKeyPackageInfoTechnical =>
-      'For the technically curious: the KeyPackage is a Marmot event of kind 30443, and the relay list is a NIP-65 event of kind 10002.';
+      'برای علاقه‌مندان به جزئیات فنی: KeyPackage یک رویداد Marmot با kind 30443 است و فهرست رله‌ها یک رویداد NIP-65 با kind 10002 است.';
 
   @override
   String get relaySettingsProfileInfoWhat =>
-      'When you save a name or photo, Haven sends your public profile to these relays. Haven also looks up other members\' names and photos here.';
+      'وقتی نام یا عکسی ذخیره می‌کنی، Haven نمایهٔ عمومی‌ات را به این رله‌ها می‌فرستد. Haven نام و عکس اعضای دیگر را هم در همین رله‌ها جست‌وجو می‌کند.';
 
   @override
   String get relaySettingsProfileInfoKeeps =>
-      'Anyone can look up your profile on these relays. Your photo itself is stored on a separate photo server, and your profile holds its web address.';
+      'هر کسی می‌تواند نمایه‌ات را در این رله‌ها جست‌وجو کند. خود عکست روی یک سرور عکس جداگانه ذخیره می‌شود و نمایه‌ات نشانی وب آن را در خود دارد.';
 
   @override
   String get relaySettingsProfileInfoPrivacy =>
-      'Haven sends your profile only to these relays, which it keeps apart from the relays that carry your invitations. Because your profile is public, other apps can copy it elsewhere. Haven keeps this list on your phone and never publishes it. A relay here that also carries your other Haven traffic is marked with a warning.';
+      'Haven نمایه‌ات را فقط به این رله‌ها می‌فرستد و آن‌ها را از رله‌هایی که دعوت‌هایت را حمل می‌کنند جدا نگه می‌دارد. چون نمایه‌ات عمومی است، برنامه‌های دیگر می‌توانند آن را جای دیگری کپی کنند. Haven این فهرست را روی گوشی‌ات نگه می‌دارد و هرگز منتشرش نمی‌کند. رله‌ای در اینجا که بقیهٔ ترافیک تو در Haven را هم حمل می‌کند، با یک هشدار مشخص شده است.';
 
   @override
   String get relaySettingsProfileInfoActions =>
-      'You can add relays. Haven\'s built-in profile relays can\'t be removed, because Haven always adds them back. This section shows no symbol for each relay; your Identity page shows the profile you saved.';
+      'می‌توانی رله اضافه کنی. رله‌های نمایه‌ای را که در خود Haven گنجانده شده‌اند نمی‌توان حذف کرد، چون Haven همیشه دوباره اضافه‌شان می‌کند. این بخش برای هر رله نمادی نشان نمی‌دهد؛ صفحهٔ «هویت» نمایه‌ای را که ذخیره کرده‌ای نشان می‌دهد.';
 
   @override
   String get relaySettingsProfileInfoTechnical =>
-      'For the technically curious: your profile is a Nostr event of kind 0, and the photo is stored on a Blossom server.';
+      'برای علاقه‌مندان به جزئیات فنی: نمایه‌ات یک رویداد Nostr با kind 0 است و عکس روی یک سرور Blossom ذخیره می‌شود.';
 
   @override
   String get relaySettingsLookupInfoWhat =>
-      'Lookup relays are well-known public relays where apps look for someone\'s relays when they know only that person\'s account. Haven chose them, and they are the same for everyone who uses Haven. Haven also uses them to find the people you invite.';
+      'رله‌های جست‌وجو رله‌های عمومی شناخته‌شده‌ای هستند که برنامه‌ها، وقتی فقط حساب کسی را می‌شناسند، در آن‌ها دنبال رله‌های او می‌گردند. Haven آن‌ها را انتخاب کرده است و برای همهٔ کسانی که از Haven استفاده می‌کنند یکسان‌اند. Haven برای پیدا کردن کسانی که دعوتشان می‌کنی هم از آن‌ها استفاده می‌کند.';
 
   @override
   String get relaySettingsLookupInfoKeeps =>
-      'So that someone who knows only your account can still invite you, Haven copies your inbox list and your relay list here, unchanged. If those lists name a private relay, that name is visible here too. In this role, Haven copies only those two lists here. Some lookup relays are also Haven\'s default inbox and KeyPackage relays; while they are on your lists, they also hold what those sections describe.';
+      'برای اینکه کسی که فقط حساب تو را می‌شناسد هم بتواند دعوتت کند، Haven فهرست صندوق ورودی و فهرست رله‌هایت را بدون تغییر اینجا کپی می‌کند. اگر در این فهرست‌ها نام یک رلهٔ خصوصی آمده باشد، آن نام اینجا هم دیده می‌شود. Haven در این نقش فقط همین دو فهرست را اینجا کپی می‌کند. برخی از رله‌های جست‌وجو، رله‌های پیش‌فرض Haven برای صندوق ورودی و KeyPackage هم هستند؛ تا وقتی در فهرست‌های تو باشند، آنچه را آن بخش‌ها توضیح می‌دهند هم نگه می‌دارند.';
 
   @override
   String get relaySettingsLookupInfoMissing =>
-      'Each row shows whether that relay has the current version of both lists. If a lookup relay is missing them or has old versions, people who search there may not find you. A relay can appear in more than one section; each section shows only what that role needs.';
+      'هر ردیف نشان می‌دهد که آیا آن رله نسخهٔ کنونی هر دو فهرست را دارد یا نه. اگر یک رلهٔ جست‌وجو آن‌ها را نداشته باشد یا نسخه‌های قدیمی‌شان را داشته باشد، کسانی که آنجا جست‌وجو می‌کنند ممکن است تو را پیدا نکنند. یک رله می‌تواند در بیش از یک بخش دیده شود؛ هر بخش فقط چیزی را نشان می‌دهد که آن نقش لازم دارد.';
 
   @override
   String get relaySettingsLookupInfoActions =>
-      'This list is built into Haven, so you can\'t change it here. You control the inbox and KeyPackage lists above.';
+      'این فهرست در خود Haven گنجانده شده است، پس نمی‌توانی اینجا تغییرش دهی. فهرست‌های صندوق ورودی و KeyPackage در بالا در اختیار خودت هستند.';
 
   @override
   String get relaySettingsLookupInfoTechnical =>
-      'For the technically curious: Haven copies your kind 10050 and kind 10002 events to these relays; kind 30443 goes only to your KeyPackage relays.';
+      'برای علاقه‌مندان به جزئیات فنی: Haven رویدادهای kind 10050 و kind 10002 تو را روی این رله‌ها کپی می‌کند؛ kind 30443 فقط به رله‌های KeyPackage تو می‌رود.';
 
   @override
-  String get relaySettingsLegendTitle => 'What the symbols mean';
+  String get relaySettingsLegendTitle => 'معنای نمادها';
 
   @override
   String get relaySettingsLegendCurrent =>
-      'Published: this relay has the current version.';
+      'منتشر شده: این رله نسخهٔ کنونی را دارد.';
 
   @override
   String get relaySettingsLegendPublishing =>
-      'Publishing: Haven has sent it and is waiting for the relay to confirm.';
+      'در حال انتشار: Haven آن را فرستاده و منتظر است رله تأییدش کند.';
 
   @override
   String get relaySettingsLegendChecking =>
-      'Checking, or not checked yet: Haven is asking the relay what it has, or has not asked it yet.';
+      'در حال بررسی، یا هنوز بررسی نشده: Haven دارد از رله می‌پرسد چه چیزهایی دارد، یا هنوز از آن نپرسیده است.';
 
   @override
   String get relaySettingsLegendNotOnRelay =>
-      'Not on this relay yet: it is missing, it is an old version, the relay refused it, or the relay didn\'t confirm. Tap a symbol to see which. Haven tries again at its next check: about every 10 minutes for your KeyPackage and every 30 minutes for your lists while Haven is open, and each time Haven starts. If one of your relays keeps showing this, you can replace it.';
+      'هنوز روی این رله نیست: یا موجود نیست، یا نسخهٔ قدیمی است، یا رله آن را نپذیرفت، یا رله تأییدش نکرد. برای اینکه ببینی کدام است، روی نماد ضربه بزن. Haven در بررسی بعدی‌اش دوباره تلاش می‌کند: تا وقتی Haven باز است، تقریباً هر ۱۰ دقیقه یک بار برای KeyPackage تو و هر ۳۰ دقیقه یک بار برای فهرست‌هایت، و نیز هر بار که Haven اجرا می‌شود. اگر یکی از رله‌هایت مدام این را نشان می‌دهد، می‌توانی آن را با رلهٔ دیگری عوض کنی.';
 
   @override
   String get relaySettingsLegendNoAnswer =>
-      'Couldn\'t check: the relay didn\'t answer, perhaps because you\'re offline or it\'s down. Haven asks again at its next check.';
+      'بررسی ممکن نشد: رله پاسخ نداد، شاید چون آفلاین هستی یا رله از کار افتاده است. Haven در بررسی بعدی‌اش دوباره می‌پرسد.';
 
   @override
   String get relaySettingsLegendHeld =>
-      'On hold: Haven isn\'t publishing this for now. A note on this page says why.';
+      'موقتاً متوقف: Haven فعلاً این را منتشر نمی‌کند. یادداشتی در همین صفحه دلیلش را می‌گوید.';
 
   @override
   String get relaySettingsHeldNoRelays =>
-      'Haven has nowhere to publish a list above that has no relays. Restore defaults on each empty list to publish it again.';
+      'Haven برای فهرستی از فهرست‌های بالا که هیچ رله‌ای ندارد، جایی برای انتشار ندارد. در هر فهرست خالی «بازگرداندن پیش‌فرض‌ها» را بزن تا دوباره منتشر شود.';
 
   @override
   String get relaySettingsHeldNotYetPublished =>
-      'Haven hasn\'t published one of your relay lists yet. It does so at its next check.';
+      'Haven هنوز یکی از فهرست‌های رله‌ات را منتشر نکرده است. این کار را در بررسی بعدی‌اش انجام می‌دهد.';
 
   @override
   String relaySettingsCheckSettled(int count) {
     String _temp0 = intl.Intl.pluralLogic(
       count,
       locale: localeName,
-      other:
-          'Relay check finished. $count relays aren\'t confirmed up to date.',
-      one: 'Relay check finished. 1 relay isn\'t confirmed up to date.',
-      zero: 'Relay check finished. Everything is up to date.',
+      other: 'بررسی رله‌ها تمام شد. به‌روز بودن $count رله تأیید نشده است.',
+      one: 'بررسی رله‌ها تمام شد. به‌روز بودن یک رله تأیید نشده است.',
+      zero: 'بررسی رله‌ها تمام شد. همه‌چیز به‌روز است.',
     );
     return '$_temp0';
   }
 
   @override
   String relaySettingsAddedRelayUpToDate(String relay) {
-    return '$relay is up to date.';
+    return 'رلهٔ $relay به‌روز است.';
   }
 
   @override
   String relaySettingsAddedRelayNotUpToDate(String relay) {
-    return '$relay isn\'t confirmed up to date. Its row says why.';
+    return 'به‌روز بودن رلهٔ $relay تأیید نشده است. ردیف آن دلیلش را نشان می‌دهد.';
   }
 
   @override

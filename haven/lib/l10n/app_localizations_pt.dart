@@ -343,139 +343,139 @@ class AppLocalizationsPt extends AppLocalizations {
   String get relaySettingsStatusNotChecked => 'Não verificado';
 
   @override
-  String get relaySettingsPresencePublishing => 'Publishing…';
+  String get relaySettingsPresencePublishing => 'Publicando…';
 
   @override
-  String get relaySettingsPresenceRefused => 'Relay refused it';
+  String get relaySettingsPresenceRefused => 'O relay recusou';
 
   @override
-  String get relaySettingsPresenceUnconfirmed => 'Relay didn\'t confirm';
+  String get relaySettingsPresenceUnconfirmed => 'O relay não confirmou';
 
   @override
-  String get relaySettingsPresenceNoAnswer => 'Couldn\'t check';
+  String get relaySettingsPresenceNoAnswer => 'Não foi possível verificar';
 
   @override
-  String get relaySettingsPresenceHeld => 'On hold';
+  String get relaySettingsPresenceHeld => 'Em espera';
 
   @override
   String relaySettingsInfoTooltip(String section) {
-    return 'About $section';
+    return 'Sobre a seção $section';
   }
 
   @override
   String get relaySettingsInboxInfoWhat =>
-      'When someone invites you to a circle, the invitation is delivered to these relays. Relays are independent servers that pass messages along. Haven checks them for new invitations.';
+      'Quando alguém convida você para um círculo, o convite é entregue nesses relays. Relays são servidores independentes que repassam mensagens. O Haven verifica neles se há convites novos.';
 
   @override
   String get relaySettingsInboxInfoKeeps =>
-      'Haven keeps your inbox list here. It is a short public note that says which relays are your inbox, so people know where to send invitations. A copy also goes to the lookup relays further down this page. Invitations are sealed so that only you can open them.';
+      'O Haven guarda aqui sua lista de caixa de entrada. É uma nota pública curta que diz quais relays são sua caixa de entrada, para que as pessoas saibam para onde enviar convites. Uma cópia também vai para os relays de consulta, mais abaixo nesta página. Os convites são selados de modo que só você pode abri-los.';
 
   @override
   String get relaySettingsInboxInfoMissing =>
-      'People using Haven look up your inbox list on the lookup relays, and other apps may look for it on your own relays, so Haven keeps a copy on both. Each row shows whether that relay has the current version.';
+      'Quem usa o Haven procura sua lista de caixa de entrada nos relays de consulta, e outros apps podem procurá-la nos seus próprios relays, por isso o Haven mantém uma cópia nos dois. Cada linha mostra se aquele relay tem a versão atual.';
 
   @override
   String get relaySettingsInboxInfoActions =>
-      'You can add relays you trust and remove ones you no longer want. Haven won\'t let you remove the last relay on this list. Every relay on this list is public: anyone can see it in your inbox list. When you remove a relay, Haven asks it to delete your old list.';
+      'Você pode adicionar relays em que confia e remover os que não quer mais. O Haven não deixa você remover o último relay desta lista. Todos os relays desta lista são públicos: qualquer pessoa pode vê-los na sua lista de caixa de entrada. Quando você remove um relay, o Haven pede a ele que apague sua lista antiga.';
 
   @override
   String get relaySettingsInboxInfoTechnical =>
-      'For the technically curious: your inbox list is a Nostr event of kind 10050, and invitations arrive as gift-wrapped events of kind 1059.';
+      'Para quem se interessa pelos detalhes técnicos: sua lista de caixa de entrada é um evento Nostr de kind 10050, e os convites chegam como eventos gift wrap de kind 1059.';
 
   @override
   String get relaySettingsKeyPackageInfoWhat =>
-      'To add you to a circle, the person inviting you needs your invitation key, called a KeyPackage. Haven keeps it on these relays so people can invite you even while your phone is off.';
+      'Para adicionar você a um círculo, quem convida precisa da sua chave de convite, chamada KeyPackage. O Haven a guarda nesses relays para que as pessoas possam convidar você mesmo quando seu telefone estiver desligado.';
 
   @override
   String get relaySettingsKeyPackageInfoKeeps =>
-      'Haven keeps two things here: your KeyPackage, and your relay list, a short public note that says which relays hold your KeyPackage. A copy of the relay list also goes to the lookup relays. Your KeyPackage goes only to the relays on this list. After it has been used, Haven replaces it with a fresh one, and it renews it from time to time.';
+      'O Haven guarda duas coisas aqui: seu KeyPackage e sua lista de relays, uma nota pública curta que diz quais relays têm seu KeyPackage. Uma cópia da lista de relays também vai para os relays de consulta. Seu KeyPackage vai somente para os relays desta lista. Depois que ele é usado, o Haven o substitui por um novo e, de tempos em tempos, também o renova.';
 
   @override
   String get relaySettingsKeyPackageInfoMissing =>
-      'Each row shows whether that relay has your current KeyPackage and relay list. If a relay is missing your KeyPackage, or holds an old one Haven has replaced, people who look for it there may not be able to invite you.';
+      'Cada linha mostra se aquele relay tem seu KeyPackage e sua lista de relays atuais. Se um relay não tiver seu KeyPackage, ou tiver um antigo que o Haven já substituiu, quem procurar seu KeyPackage nesse relay talvez não consiga convidar você.';
 
   @override
   String get relaySettingsKeyPackageInfoActions =>
-      'You can add or remove relays. Haven won\'t let you remove the last relay on this list. Every relay on this list is public: anyone can see it in your relay list. When you remove a relay, Haven asks it to delete your old relay list.';
+      'Você pode adicionar ou remover relays. O Haven não deixa você remover o último relay desta lista. Todos os relays desta lista são públicos: qualquer pessoa pode vê-los na sua lista de relays. Quando você remove um relay, o Haven pede a ele que apague sua lista de relays antiga.';
 
   @override
   String get relaySettingsKeyPackageInfoTechnical =>
-      'For the technically curious: the KeyPackage is a Marmot event of kind 30443, and the relay list is a NIP-65 event of kind 10002.';
+      'Para quem se interessa pelos detalhes técnicos: o KeyPackage é um evento Marmot de kind 30443, e a lista de relays é um evento NIP-65 de kind 10002.';
 
   @override
   String get relaySettingsProfileInfoWhat =>
-      'When you save a name or photo, Haven sends your public profile to these relays. Haven also looks up other members\' names and photos here.';
+      'Quando você salva um nome ou uma foto, o Haven envia seu perfil público para esses relays. O Haven também consulta aqui os nomes e as fotos dos outros membros.';
 
   @override
   String get relaySettingsProfileInfoKeeps =>
-      'Anyone can look up your profile on these relays. Your photo itself is stored on a separate photo server, and your profile holds its web address.';
+      'Qualquer pessoa pode consultar seu perfil nesses relays. Sua foto em si fica guardada em um servidor de fotos separado, e seu perfil contém o endereço web dela.';
 
   @override
   String get relaySettingsProfileInfoPrivacy =>
-      'Haven sends your profile only to these relays, which it keeps apart from the relays that carry your invitations. Because your profile is public, other apps can copy it elsewhere. Haven keeps this list on your phone and never publishes it. A relay here that also carries your other Haven traffic is marked with a warning.';
+      'O Haven envia seu perfil somente para esses relays, que ele mantém separados dos relays que transportam seus convites. Como seu perfil é público, outros apps podem copiá-lo para outros lugares. O Haven guarda esta lista no seu telefone e nunca a publica. Um relay desta lista que também transporta o restante do seu tráfego do Haven é marcado com um aviso.';
 
   @override
   String get relaySettingsProfileInfoActions =>
-      'You can add relays. Haven\'s built-in profile relays can\'t be removed, because Haven always adds them back. This section shows no symbol for each relay; your Identity page shows the profile you saved.';
+      'Você pode adicionar relays. Os relays de perfil embutidos no Haven não podem ser removidos, porque o Haven sempre os adiciona de volta. Esta seção não mostra símbolos ao lado dos relays; sua página Identidade mostra o perfil que você salvou.';
 
   @override
   String get relaySettingsProfileInfoTechnical =>
-      'For the technically curious: your profile is a Nostr event of kind 0, and the photo is stored on a Blossom server.';
+      'Para quem se interessa pelos detalhes técnicos: seu perfil é um evento Nostr de kind 0, e a foto fica guardada em um servidor Blossom.';
 
   @override
   String get relaySettingsLookupInfoWhat =>
-      'Lookup relays are well-known public relays where apps look for someone\'s relays when they know only that person\'s account. Haven chose them, and they are the same for everyone who uses Haven. Haven also uses them to find the people you invite.';
+      'Relays de consulta são relays públicos bem conhecidos onde os apps procuram os relays de alguém quando conhecem apenas a conta dessa pessoa. O Haven os escolheu, e eles são os mesmos para todos que usam o Haven. O Haven também os usa para encontrar as pessoas que você convida.';
 
   @override
   String get relaySettingsLookupInfoKeeps =>
-      'So that someone who knows only your account can still invite you, Haven copies your inbox list and your relay list here, unchanged. If those lists name a private relay, that name is visible here too. In this role, Haven copies only those two lists here. Some lookup relays are also Haven\'s default inbox and KeyPackage relays; while they are on your lists, they also hold what those sections describe.';
+      'Para que alguém que conhece apenas sua conta ainda possa convidar você, o Haven copia para cá sua lista de caixa de entrada e sua lista de relays, sem alterações. Se essas listas citarem um relay privado, esse nome também fica visível aqui. Nesse papel, o Haven copia para cá apenas essas duas listas. Alguns relays de consulta também são relays padrão do Haven para caixa de entrada e KeyPackage; enquanto estiverem nas suas listas, eles também guardam o que essas seções descrevem.';
 
   @override
   String get relaySettingsLookupInfoMissing =>
-      'Each row shows whether that relay has the current version of both lists. If a lookup relay is missing them or has old versions, people who search there may not find you. A relay can appear in more than one section; each section shows only what that role needs.';
+      'Cada linha mostra se aquele relay tem a versão atual das duas listas. Se um relay de consulta não tiver as listas ou tiver versões antigas, quem procurar ali talvez não encontre você. Um relay pode aparecer em mais de uma seção; cada seção mostra apenas o que aquela função precisa.';
 
   @override
   String get relaySettingsLookupInfoActions =>
-      'This list is built into Haven, so you can\'t change it here. You control the inbox and KeyPackage lists above.';
+      'Esta lista vem embutida no Haven, então não é possível alterá-la aqui. Você controla as listas de caixa de entrada e de KeyPackage acima.';
 
   @override
   String get relaySettingsLookupInfoTechnical =>
-      'For the technically curious: Haven copies your kind 10050 and kind 10002 events to these relays; kind 30443 goes only to your KeyPackage relays.';
+      'Para quem se interessa pelos detalhes técnicos: o Haven copia seus eventos de kind 10050 e kind 10002 para esses relays; o kind 30443 vai somente para seus relays de KeyPackage.';
 
   @override
-  String get relaySettingsLegendTitle => 'What the symbols mean';
+  String get relaySettingsLegendTitle => 'O que os símbolos significam';
 
   @override
   String get relaySettingsLegendCurrent =>
-      'Published: this relay has the current version.';
+      'Disponível: este relay tem a versão atual.';
 
   @override
   String get relaySettingsLegendPublishing =>
-      'Publishing: Haven has sent it and is waiting for the relay to confirm.';
+      'Publicando: o Haven já enviou e está aguardando a confirmação do relay.';
 
   @override
   String get relaySettingsLegendChecking =>
-      'Checking, or not checked yet: Haven is asking the relay what it has, or has not asked it yet.';
+      'Verificando, ou ainda não verificado: o Haven está perguntando ao relay o que ele tem, ou ainda não perguntou.';
 
   @override
   String get relaySettingsLegendNotOnRelay =>
-      'Not on this relay yet: it is missing, it is an old version, the relay refused it, or the relay didn\'t confirm. Tap a symbol to see which. Haven tries again at its next check: about every 10 minutes for your KeyPackage and every 30 minutes for your lists while Haven is open, and each time Haven starts. If one of your relays keeps showing this, you can replace it.';
+      'Ainda não está neste relay: está ausente, é uma versão antiga, o relay recusou ou o relay não confirmou. Toque em um símbolo para ver qual é o caso. O Haven tenta de novo na próxima verificação: aproximadamente a cada 10 minutos para seu KeyPackage e a cada 30 minutos para suas listas enquanto o Haven está aberto, e sempre que o Haven é iniciado. Se um dos seus relays continuar mostrando isto, você pode substituí-lo.';
 
   @override
   String get relaySettingsLegendNoAnswer =>
-      'Couldn\'t check: the relay didn\'t answer, perhaps because you\'re offline or it\'s down. Haven asks again at its next check.';
+      'Não foi possível verificar: o relay não respondeu, talvez porque você esteja off-line ou ele esteja fora do ar. O Haven pergunta de novo na próxima verificação.';
 
   @override
   String get relaySettingsLegendHeld =>
-      'On hold: Haven isn\'t publishing this for now. A note on this page says why.';
+      'Em espera: o Haven não está publicando isto por enquanto. Um aviso nesta página explica o motivo.';
 
   @override
   String get relaySettingsHeldNoRelays =>
-      'Haven has nowhere to publish a list above that has no relays. Restore defaults on each empty list to publish it again.';
+      'O Haven não tem onde publicar uma lista acima que esteja sem relays. Toque em “Restaurar padrões” em cada lista vazia para voltar a publicá-la.';
 
   @override
   String get relaySettingsHeldNotYetPublished =>
-      'Haven hasn\'t published one of your relay lists yet. It does so at its next check.';
+      'O Haven ainda não publicou uma das suas listas de relays. Ele fará isso na próxima verificação.';
 
   @override
   String relaySettingsCheckSettled(int count) {
@@ -483,21 +483,24 @@ class AppLocalizationsPt extends AppLocalizations {
       count,
       locale: localeName,
       other:
-          'Relay check finished. $count relays aren\'t confirmed up to date.',
-      one: 'Relay check finished. 1 relay isn\'t confirmed up to date.',
-      zero: 'Relay check finished. Everything is up to date.',
+          'Verificação dos relays concluída. $count relays não têm confirmação de que estão atualizados.',
+      many:
+          'Verificação dos relays concluída. $count de relays não têm confirmação de que estão atualizados.',
+      one:
+          'Verificação dos relays concluída. Um relay não tem confirmação de que está atualizado.',
+      zero: 'Verificação dos relays concluída. Está tudo atualizado.',
     );
     return '$_temp0';
   }
 
   @override
   String relaySettingsAddedRelayUpToDate(String relay) {
-    return '$relay is up to date.';
+    return '$relay está atualizado.';
   }
 
   @override
   String relaySettingsAddedRelayNotUpToDate(String relay) {
-    return '$relay isn\'t confirmed up to date. Its row says why.';
+    return 'Não há confirmação de que $relay esteja atualizado. A linha dele explica por quê.';
   }
 
   @override

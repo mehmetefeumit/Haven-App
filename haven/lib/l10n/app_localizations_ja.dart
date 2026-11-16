@@ -324,161 +324,159 @@ class AppLocalizationsJa extends AppLocalizations {
   String get relaySettingsStatusNotChecked => '未確認';
 
   @override
-  String get relaySettingsPresencePublishing => 'Publishing…';
+  String get relaySettingsPresencePublishing => '公開中…';
 
   @override
-  String get relaySettingsPresenceRefused => 'Relay refused it';
+  String get relaySettingsPresenceRefused => 'リレーが保存を拒否しました';
 
   @override
-  String get relaySettingsPresenceUnconfirmed => 'Relay didn\'t confirm';
+  String get relaySettingsPresenceUnconfirmed => 'リレーが保存を確認しませんでした';
 
   @override
-  String get relaySettingsPresenceNoAnswer => 'Couldn\'t check';
+  String get relaySettingsPresenceNoAnswer => '確認できませんでした';
 
   @override
-  String get relaySettingsPresenceHeld => 'On hold';
+  String get relaySettingsPresenceHeld => '保留中';
 
   @override
   String relaySettingsInfoTooltip(String section) {
-    return 'About $section';
+    return '$sectionについて';
   }
 
   @override
   String get relaySettingsInboxInfoWhat =>
-      'When someone invites you to a circle, the invitation is delivered to these relays. Relays are independent servers that pass messages along. Haven checks them for new invitations.';
+      '誰かがあなたをサークルに招待すると、その招待はこれらのリレーに届けられます。リレーとは、メッセージを中継する独立したサーバーです。Haven は、新しい招待が届いていないか、これらのリレーを確認します。';
 
   @override
   String get relaySettingsInboxInfoKeeps =>
-      'Haven keeps your inbox list here. It is a short public note that says which relays are your inbox, so people know where to send invitations. A copy also goes to the lookup relays further down this page. Invitations are sealed so that only you can open them.';
+      'Haven は、ここにあなたの受信トレイのリストを保管します。これは、どのリレーがあなたの受信トレイなのかを示す短い公開メモで、ほかの人が招待の送り先を知るためのものです。そのコピーは、このページの下にある検索用リレーにも送られます。招待は、あなただけが開けられるように封がされています。';
 
   @override
   String get relaySettingsInboxInfoMissing =>
-      'People using Haven look up your inbox list on the lookup relays, and other apps may look for it on your own relays, so Haven keeps a copy on both. Each row shows whether that relay has the current version.';
+      'Haven を使う人は検索用リレーであなたの受信トレイのリストを探し、ほかのアプリはあなた自身のリレーで探すことがあるため、Haven は両方にコピーを置いています。各行には、そのリレーに最新のバージョンがあるかどうかが表示されます。';
 
   @override
   String get relaySettingsInboxInfoActions =>
-      'You can add relays you trust and remove ones you no longer want. Haven won\'t let you remove the last relay on this list. Every relay on this list is public: anyone can see it in your inbox list. When you remove a relay, Haven asks it to delete your old list.';
+      '信頼できるリレーを追加したり、不要になったリレーを削除したりできます。Haven では、このリストの最後のリレーは削除できません。このリストのリレーはすべて公開されており、あなたの受信トレイのリストで誰でも見ることができます。リレーを削除すると、Haven はそのリレーに、あなたの古いリストを削除するよう依頼します。';
 
   @override
   String get relaySettingsInboxInfoTechnical =>
-      'For the technically curious: your inbox list is a Nostr event of kind 10050, and invitations arrive as gift-wrapped events of kind 1059.';
+      '技術に興味のある方へ: あなたの受信トレイのリストは kind 10050 の Nostr イベントで、招待は kind 1059 のギフトラップされたイベントとして届きます。';
 
   @override
   String get relaySettingsKeyPackageInfoWhat =>
-      'To add you to a circle, the person inviting you needs your invitation key, called a KeyPackage. Haven keeps it on these relays so people can invite you even while your phone is off.';
+      'あなたをサークルに追加するには、招待する人があなたの招待用の鍵を必要とします。この鍵は KeyPackage と呼ばれます。Haven はこれをこれらのリレーに置いておくので、あなたの端末の電源が切れているときでも、ほかの人はあなたを招待できます。';
 
   @override
   String get relaySettingsKeyPackageInfoKeeps =>
-      'Haven keeps two things here: your KeyPackage, and your relay list, a short public note that says which relays hold your KeyPackage. A copy of the relay list also goes to the lookup relays. Your KeyPackage goes only to the relays on this list. After it has been used, Haven replaces it with a fresh one, and it renews it from time to time.';
+      'Haven は、ここに二つのものを保管します。あなたの KeyPackage と、あなたのリレーのリストです。リレーのリストは、どのリレーがあなたの KeyPackage を保管しているかを示す短い公開メモです。リレーのリストのコピーは、検索用リレーにも送られます。あなたの KeyPackage は、このリストのリレーにだけ送られます。KeyPackage が使われると、Haven は新しいものに置き換えます。また、ときどき更新もします。';
 
   @override
   String get relaySettingsKeyPackageInfoMissing =>
-      'Each row shows whether that relay has your current KeyPackage and relay list. If a relay is missing your KeyPackage, or holds an old one Haven has replaced, people who look for it there may not be able to invite you.';
+      '各行には、そのリレーに最新の KeyPackage とリレーのリストがあるかどうかが表示されます。リレーにあなたの KeyPackage がない場合や、Haven がすでに置き換えた古いものしかない場合、そこで KeyPackage を探す人は、あなたを招待できないことがあります。';
 
   @override
   String get relaySettingsKeyPackageInfoActions =>
-      'You can add or remove relays. Haven won\'t let you remove the last relay on this list. Every relay on this list is public: anyone can see it in your relay list. When you remove a relay, Haven asks it to delete your old relay list.';
+      'リレーを追加したり削除したりできます。Haven では、このリストの最後のリレーは削除できません。このリストのリレーはすべて公開されており、あなたのリレーのリストで誰でも見ることができます。リレーを削除すると、Haven はそのリレーに、あなたの古いリレーのリストを削除するよう依頼します。';
 
   @override
   String get relaySettingsKeyPackageInfoTechnical =>
-      'For the technically curious: the KeyPackage is a Marmot event of kind 30443, and the relay list is a NIP-65 event of kind 10002.';
+      '技術に興味のある方へ: KeyPackage は kind 30443 の Marmot イベントで、リレーのリストは kind 10002 の NIP-65 イベントです。';
 
   @override
   String get relaySettingsProfileInfoWhat =>
-      'When you save a name or photo, Haven sends your public profile to these relays. Haven also looks up other members\' names and photos here.';
+      '名前や写真を保存すると、Haven はあなたの公開プロフィールをこれらのリレーに送信します。Haven は、ほかのメンバーの名前と写真もここで調べます。';
 
   @override
   String get relaySettingsProfileInfoKeeps =>
-      'Anyone can look up your profile on these relays. Your photo itself is stored on a separate photo server, and your profile holds its web address.';
+      'これらのリレーでは、誰でもあなたのプロフィールを調べることができます。写真そのものは別の写真用サーバーに保存されていて、プロフィールにはその写真のウェブアドレスが含まれています。';
 
   @override
   String get relaySettingsProfileInfoPrivacy =>
-      'Haven sends your profile only to these relays, which it keeps apart from the relays that carry your invitations. Because your profile is public, other apps can copy it elsewhere. Haven keeps this list on your phone and never publishes it. A relay here that also carries your other Haven traffic is marked with a warning.';
+      'Haven は、あなたのプロフィールをこれらのリレーにだけ送信し、これらのリレーを、あなたの招待を中継するリレーとは分けています。プロフィールは公開されているため、ほかのアプリがそれを別の場所にコピーすることがあります。Haven はこのリストをあなたの端末に保存し、決して公開しません。ここにあるリレーのうち、Haven でのあなたのほかの通信も中継するものには、警告が表示されます。';
 
   @override
   String get relaySettingsProfileInfoActions =>
-      'You can add relays. Haven\'s built-in profile relays can\'t be removed, because Haven always adds them back. This section shows no symbol for each relay; your Identity page shows the profile you saved.';
+      'リレーを追加できます。Haven に組み込まれたプロフィールリレーは、Haven が必ず追加し直すため、削除できません。このセクションでは、リレーごとの記号は表示されません。保存したプロフィールは「識別情報」ページに表示されます。';
 
   @override
   String get relaySettingsProfileInfoTechnical =>
-      'For the technically curious: your profile is a Nostr event of kind 0, and the photo is stored on a Blossom server.';
+      '技術に興味のある方へ: あなたのプロフィールは kind 0 の Nostr イベントで、写真は Blossom サーバーに保存されています。';
 
   @override
   String get relaySettingsLookupInfoWhat =>
-      'Lookup relays are well-known public relays where apps look for someone\'s relays when they know only that person\'s account. Haven chose them, and they are the same for everyone who uses Haven. Haven also uses them to find the people you invite.';
+      '検索用リレーは、よく知られた公開リレーです。ある人の識別情報しかわからないとき、アプリはここでその人のリレーを探します。これらのリレーは Haven が選んだもので、Haven を使うすべての人に共通です。Haven は、あなたが招待する人を見つけるためにも、これらのリレーを使います。';
 
   @override
   String get relaySettingsLookupInfoKeeps =>
-      'So that someone who knows only your account can still invite you, Haven copies your inbox list and your relay list here, unchanged. If those lists name a private relay, that name is visible here too. In this role, Haven copies only those two lists here. Some lookup relays are also Haven\'s default inbox and KeyPackage relays; while they are on your lists, they also hold what those sections describe.';
+      'あなたの識別情報しか知らない人でもあなたを招待できるよう、Haven はあなたの受信トレイのリストとリレーのリストを、手を加えずにそのままここにコピーします。それらのリストに非公開のリレーが含まれている場合、その名前もここで見える状態になります。検索用リレーとしての役割で Haven がここにコピーするのは、この二つのリストだけです。一部の検索用リレーは、Haven のデフォルトの受信トレイのリレーや KeyPackage リレーでもあります。それらがあなたのリストに含まれている間は、それぞれのセクションで説明しているものも保管します。';
 
   @override
   String get relaySettingsLookupInfoMissing =>
-      'Each row shows whether that relay has the current version of both lists. If a lookup relay is missing them or has old versions, people who search there may not find you. A relay can appear in more than one section; each section shows only what that role needs.';
+      '各行には、そのリレーに両方のリストの最新バージョンがあるかどうかが表示されます。検索用リレーにそれらのリストがない場合や、古いバージョンしかない場合、そこで探す人はあなたを見つけられないことがあります。同じリレーが複数のセクションに表示されることがありますが、各セクションには、その役割に必要なものだけが表示されます。';
 
   @override
   String get relaySettingsLookupInfoActions =>
-      'This list is built into Haven, so you can\'t change it here. You control the inbox and KeyPackage lists above.';
+      'このリストは Haven に組み込まれているため、ここで変更することはできません。あなたが管理できるのは、上にある「受信トレイのリレー」と「KeyPackage リレー」のリストです。';
 
   @override
   String get relaySettingsLookupInfoTechnical =>
-      'For the technically curious: Haven copies your kind 10050 and kind 10002 events to these relays; kind 30443 goes only to your KeyPackage relays.';
+      '技術に興味のある方へ: Haven は、あなたの kind 10050 と kind 10002 のイベントをこれらのリレーにコピーします。kind 30443 は、あなたの KeyPackage リレーにだけ送られます。';
 
   @override
-  String get relaySettingsLegendTitle => 'What the symbols mean';
+  String get relaySettingsLegendTitle => '記号の意味';
 
   @override
-  String get relaySettingsLegendCurrent =>
-      'Published: this relay has the current version.';
+  String get relaySettingsLegendCurrent => '公開済み: このリレーには最新のバージョンがあります。';
 
   @override
   String get relaySettingsLegendPublishing =>
-      'Publishing: Haven has sent it and is waiting for the relay to confirm.';
+      '公開中: Haven は送信済みで、リレーが保存を確認するのを待っています。';
 
   @override
   String get relaySettingsLegendChecking =>
-      'Checking, or not checked yet: Haven is asking the relay what it has, or has not asked it yet.';
+      '確認中、または未確認: Haven がリレーに何があるかを問い合わせているか、まだ問い合わせていません。';
 
   @override
   String get relaySettingsLegendNotOnRelay =>
-      'Not on this relay yet: it is missing, it is an old version, the relay refused it, or the relay didn\'t confirm. Tap a symbol to see which. Haven tries again at its next check: about every 10 minutes for your KeyPackage and every 30 minutes for your lists while Haven is open, and each time Haven starts. If one of your relays keeps showing this, you can replace it.';
+      'このリレーにはまだありません: リレーにない、古いバージョンしかない、リレーが保存を拒否した、リレーが保存を確認しなかった、のいずれかです。どれに当たるかは、記号をタップすると表示されます。Haven は次の確認のときに再試行します。Haven を開いている間は、KeyPackage は約10分ごと、リストは約30分ごとに確認し、Haven を起動するたびにも確認します。あなたのリレーのどれかにこの表示が続く場合は、そのリレーを置き換えることができます。';
 
   @override
   String get relaySettingsLegendNoAnswer =>
-      'Couldn\'t check: the relay didn\'t answer, perhaps because you\'re offline or it\'s down. Haven asks again at its next check.';
+      '確認できませんでした: リレーが応答しませんでした。オフラインになっているか、リレーが停止しているのかもしれません。Haven は次の確認のときに、もう一度問い合わせます。';
 
   @override
   String get relaySettingsLegendHeld =>
-      'On hold: Haven isn\'t publishing this for now. A note on this page says why.';
+      '保留中: Haven はいま、これを公開していません。理由は、このページにあるお知らせで説明しています。';
 
   @override
   String get relaySettingsHeldNoRelays =>
-      'Haven has nowhere to publish a list above that has no relays. Restore defaults on each empty list to publish it again.';
+      '上のリストのうち、リレーが一つもないものは、Haven には公開先がありません。もう一度公開するには、空のリストごとに「デフォルトに戻す」を使ってください。';
 
   @override
   String get relaySettingsHeldNotYetPublished =>
-      'Haven hasn\'t published one of your relay lists yet. It does so at its next check.';
+      'Haven は、あなたのリレーに関するリストの一つを、まだ公開していません。次の確認のときに公開します。';
 
   @override
   String relaySettingsCheckSettled(int count) {
     String _temp0 = intl.Intl.pluralLogic(
       count,
       locale: localeName,
-      other:
-          'Relay check finished. $count relays aren\'t confirmed up to date.',
-      one: 'Relay check finished. 1 relay isn\'t confirmed up to date.',
-      zero: 'Relay check finished. Everything is up to date.',
+      other: 'リレーの確認が完了しました。$count件のリレーは、最新の状態であることを確認できていません。',
+      one: 'リレーの確認が完了しました。$count件のリレーは、最新の状態であることを確認できていません。',
+      zero: 'リレーの確認が完了しました。すべて最新の状態です。',
     );
     return '$_temp0';
   }
 
   @override
   String relaySettingsAddedRelayUpToDate(String relay) {
-    return '$relay is up to date.';
+    return '$relay は最新の状態です。';
   }
 
   @override
   String relaySettingsAddedRelayNotUpToDate(String relay) {
-    return '$relay isn\'t confirmed up to date. Its row says why.';
+    return '$relay は、最新の状態であることを確認できていません。理由は、そのリレーの行に表示されています。';
   }
 
   @override
