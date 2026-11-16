@@ -9611,6 +9611,11 @@ impl RelayManagerFfi {
     /// recorded Welcome* ever sent to it. The slot survives, so the
     /// replacement reuses it.
     ///
+    /// Writes the own-relay board as it goes ([`CircleManagerFfi::own_relay_board`]),
+    /// and sends each relay at most one offer of each event, settled by that
+    /// relay's own `OK`. It runs under the account's one maintenance lock, and
+    /// a request made while a pass of its kind waits for that lock joins it.
+    ///
     /// Returns a presence-only [`KpMaintenanceOutcomeFfi`] (counters + enum).
     ///
     /// [`decide_kp_maintenance`]: haven_core::relay::maintenance::decide_kp_maintenance
@@ -9740,7 +9745,6 @@ impl RelayManagerFfi {
             }
         };
         retain_own_events(&mut per_relay, &own_pk, nostr::Kind::Custom(30443));
-        let per_relay = per_relay;
         judge_key_packages(
             &mut pass,
             &per_relay,
@@ -10176,9 +10180,9 @@ impl RelayManagerFfi {
     /// # The ordering, which is the whole safety argument
     ///
     /// 1. Publish the replacement FIRST, into a fresh binding-shaped slot, and
-    ///    treat it as landed only when a relay OK-ACKED it (`publish_event`
-    ///    returns `Ok` on nothing less — Rule 13's discipline applied to the
-    ///    reachability plane).
+    ///    treat it as landed only when a relay OK-ACKED it (an `OK true` and
+    ///    nothing less — Rule 13's discipline applied to the reachability
+    ///    plane).
     /// 2. Only then record it and publish the NIP-09 retraction of the orphaned
     ///    coordinate.
     /// 3. Latch the sentinel only when both landed. Any earlier failure leaves
@@ -10495,6 +10499,11 @@ impl RelayManagerFfi {
     /// [`build_relay_list_event`] to the responders that lack it. No default
     /// union. When the toggle is off it skips (no publish).
     /// `record_published_event` after a successful publish.
+    ///
+    /// Writes the own-relay board as it goes ([`CircleManagerFfi::own_relay_board`]),
+    /// and sends each relay at most one offer of each event, settled by that
+    /// relay's own `OK`. It runs under the account's one maintenance lock, and
+    /// a request made while a pass of its kind waits for that lock joins it.
     ///
     /// Returns a presence-only [`RelayListMaintenanceOutcomeFfi`].
     ///
@@ -15682,18 +15691,25 @@ mod maintenance_real_ffi_tests {
             kp_packages_before,
             "a relay already serving the package is sent nothing"
         );
+        let mut configured = circle
+            .inner
+            .list_user_relays(RelayType::KeyPackage)
+            .expect("the stored list");
+        configured.sort();
         let names_both = |list: &nostr::Event| {
-            let named: Vec<&str> = list
+            let mut named: Vec<String> = list
                 .tags
                 .iter()
-                .filter_map(|tag| (tag.as_slice()[0] == "r").then(|| tag.as_slice()[1].as_str()))
+                .filter(|tag| tag.as_slice()[0] == "r")
+                .map(|tag| tag.as_slice()[1].clone())
                 .collect();
-            named.len() == 2
+            named.sort();
+            named == configured
         };
         for relay in [&kp_relay, &added] {
             assert!(
                 kept(relay, Kind::RelayList).last().is_some_and(names_both),
-                "every own KeyPackage relay serves the new 10002"
+                "every own KeyPackage relay serves the 10002 naming both"
             );
         }
         let on_lookup = fetch_by_kind(keys.public_key(), Kind::RelayList, &lookup[0]).await;
@@ -15705,6 +15721,33 @@ mod maintenance_real_ffi_tests {
             kept(&inbox_relay, Kind::InboxRelays).len(),
             inbox_lists_before,
             "an unchanged inbox list is sent nowhere"
+        );
+
+        // An inbox edit forgets every inbox-list cell and nothing else; a
+        // KeyPackage relay removed takes its KeyPackage cell with it.
+        let cells = |kind: &OwnKindBoardFfi| kind.cells.clone();
+        circle
+            .add_user_relay(dead_loopback_relay(), RelayTypeFfi::Inbox)
+            .await
+            .expect("the user adds an inbox relay");
+        let inbox_edit = circle.own_relay_board();
+        assert!(inbox_edit.inbox_relay_list.cells.is_empty());
+        assert_eq!(cells(&inbox_edit.relay_list), cells(&after.relay_list));
+        assert_eq!(cells(&inbox_edit.key_package), cells(&after.key_package));
+        circle
+            .remove_user_relay(added.url().to_owned(), RelayTypeFfi::Nip65)
+            .await
+            .expect("the user removes the relay again");
+        let removed = circle.own_relay_board();
+        assert!(removed.relay_list.cells.is_empty());
+        assert_eq!(
+            removed
+                .key_package
+                .cells
+                .iter()
+                .map(|cell| cell.relay_url.as_str())
+                .collect::<Vec<_>>(),
+            [kp_relay.url()]
         );
     }
 
@@ -15757,6 +15800,55 @@ mod maintenance_real_ffi_tests {
             assert_eq!(kind.hold, None);
             assert_eq!(cell(kind, relay.url()), Some(OwnRelayStatusFfi::Current));
         }
+    }
+
+    /// A list whose stored publish setting is off is held, and that list
+    /// alone: the other is checked as ever.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_list_stored_as_unpublished_is_held_and_the_other_checked_via_real_ffi() {
+        use haven_core::relay::scripted_relay::ScriptedRelay;
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let relay = ScriptedRelay::start();
+        relay.serve_kept();
+        let keys = Keys::generate();
+        let secret = secret_bytes(&keys);
+        let dir = DataDir::new("board_suppressed");
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        for relay_type in [RelayTypeFfi::Inbox, RelayTypeFfi::Nip65] {
+            circle
+                .add_user_relay(relay.url().to_owned(), relay_type)
+                .await
+                .expect("register an own relay");
+        }
+        circle
+            .set_publish_relay_list(RelayTypeFfi::Inbox, false)
+            .await
+            .expect("store the setting");
+
+        relay_mgr
+            .maintain_relay_list(&circle, secret)
+            .await
+            .expect("maintain_relay_list must not error");
+        let board = circle.own_relay_board();
+        assert_eq!(
+            board.inbox_relay_list.hold,
+            Some(OwnPublishHoldFfi::PublishingSuppressed)
+        );
+        assert!(board.inbox_relay_list.cells.is_empty());
+        assert_eq!(
+            (board.relay_list.hold, cell(&board.relay_list, relay.url())),
+            (None, Some(OwnRelayStatusFfi::Current))
+        );
+        assert!(
+            kept(&relay, Kind::InboxRelays).is_empty(),
+            "a held list is sent nowhere"
+        );
     }
 
     /// A relay that refuses the list reads refused while the others turn

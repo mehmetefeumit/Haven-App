@@ -158,6 +158,28 @@ async fn a_cell_waits_for_its_own_relays_ok_after_checking_and_judging() {
     );
 }
 
+/// What a scripted relay does with the event a pass offers it.
+#[derive(Clone, Copy, Debug)]
+enum Answer {
+    Keep,
+    Duplicate,
+    Refuse(&'static str),
+    Silence,
+    HangUp,
+}
+
+impl Answer {
+    fn verdict(self) -> Verdict {
+        match self {
+            Self::Keep => Verdict::Keep,
+            Self::Duplicate => Verdict::KeepSaying("duplicate: already have it".into()),
+            Self::Refuse(text) => Verdict::Refuse(text.into()),
+            Self::Silence => Verdict::KeepSilently,
+            Self::HangUp => Verdict::HangUp,
+        }
+    }
+}
+
 /// Every answer a relay can give, from every verdict the probe can reach:
 /// only an `OK true` reads current, only an `OK false` reads refused, and a
 /// relay that never answered keeps what the probe proved.
@@ -166,21 +188,6 @@ async fn every_answer_settles_its_cell_by_what_the_probe_proved() {
     let own = Keys::generate();
     let manager = RelayManager::new();
     let event = inbox_list(&own, &["wss://inbox.example.com".to_owned()]);
-    #[derive(Clone, Copy, Debug)]
-    enum Answer {
-        Keep,
-        Duplicate,
-        Refuse(&'static str),
-        Silence,
-        HangUp,
-    }
-    let verdict = |answer: Answer| match answer {
-        Answer::Keep => Verdict::Keep,
-        Answer::Duplicate => Verdict::KeepSaying("duplicate: already have it".into()),
-        Answer::Refuse(text) => Verdict::Refuse(text.into()),
-        Answer::Silence => Verdict::KeepSilently,
-        Answer::HangUp => Verdict::HangUp,
-    };
     let mut cases = vec![
         (Answer::Keep, Probed::Missing, Current),
         (Answer::Keep, Probed::Outdated, Current),
@@ -207,7 +214,7 @@ async fn every_answer_settles_its_cell_by_what_the_probe_proved() {
 
     for (case, probed, expected) in cases {
         let relay = ScriptedRelay::start();
-        relay.on_publish(move |_| verdict(case));
+        relay.on_publish(move |_| case.verdict());
         let board = OwnRelayBoard::default();
         let target = [relay.url().to_owned()];
         let mut pass = board.begin(OwnKind::InboxRelayList, &target);

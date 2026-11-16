@@ -65,7 +65,7 @@ pub enum Verdict {
     /// it sends — or hangs up — only once the switch reads `true`; the
     /// socket's next client message waits too. A relay whose `OK` a test
     /// releases.
-    HoldThen(tokio::sync::watch::Receiver<bool>, Box<Verdict>),
+    HoldThen(tokio::sync::watch::Receiver<bool>, Box<Self>),
 }
 
 type Asked = Box<dyn Fn(&Filter) -> bool + Send + Sync>;

@@ -15560,7 +15560,7 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   /// been pointless if the avatar fetch handed the same set over anyway.
   ///
   /// So this call:
-  /// * **shuffles** the order every cycle from the OS CSPRNG (`rand::OsRng`;
+  /// * **shuffles** the order every cycle from the OS CSPRNG (`rand::rngs::SysRng`;
   ///   `thread_rng` is banned), so arrival order carries no roster ordering
   ///   and a newly added member does not appear at a stable position;
   /// * runs the downloads **one at a time**, never concurrently, so there is
@@ -16881,7 +16881,7 @@ class LocationEventServiceImpl extends RustOpaque
   );
 
   /// Returns a jittered publish interval in seconds using the Rust-side
-  /// CSPRNG (`OsRng`), sampled uniformly in
+  /// CSPRNG (`SysRng`), sampled uniformly in
   /// `[nominal_secs * 0.6, nominal_secs * 1.4]` (40% spread).
   ///
   /// Callers pass the nominal interval (typically 120 s) and rearm their
@@ -17430,6 +17430,11 @@ class RelayManagerFfiImpl extends RustOpaque implements RelayManagerFfi {
   /// recorded Welcome* ever sent to it. The slot survives, so the
   /// replacement reuses it.
   ///
+  /// Writes the own-relay board as it goes ([`CircleManagerFfi::own_relay_board`]),
+  /// and sends each relay at most one offer of each event, settled by that
+  /// relay's own `OK`. It runs under the account's one maintenance lock, and
+  /// a request made while a pass of its kind waits for that lock joins it.
+  ///
   /// Returns a presence-only [`KpMaintenanceOutcomeFfi`] (counters + enum).
   ///
   /// [`decide_kp_maintenance`]: haven_core::relay::maintenance::decide_kp_maintenance
@@ -17463,6 +17468,11 @@ class RelayManagerFfiImpl extends RustOpaque implements RelayManagerFfi {
   /// [`build_relay_list_event`] to the responders that lack it. No default
   /// union. When the toggle is off it skips (no publish).
   /// `record_published_event` after a successful publish.
+  ///
+  /// Writes the own-relay board as it goes ([`CircleManagerFfi::own_relay_board`]),
+  /// and sends each relay at most one offer of each event, settled by that
+  /// relay's own `OK`. It runs under the account's one maintenance lock, and
+  /// a request made while a pass of its kind waits for that lock joins it.
   ///
   /// Returns a presence-only [`RelayListMaintenanceOutcomeFfi`].
   ///

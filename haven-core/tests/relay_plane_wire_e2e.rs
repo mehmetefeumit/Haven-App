@@ -727,7 +727,7 @@ async fn lifecycle_then_plants(watch: &DialWatch, needles: &mut Vec<String>) {
 
     // Step 1: each account's own traffic on its own lists. Bob's key package
     // to his key-package relay; Alice's key package and relay lists, and the
-    // relay settings check of her own relays and the lookup relay.
+    // maintenance passes' probes of her own relays and the lookup relay.
     w.next();
     let bob_kp = bob.key_package(&w.url(R::BWrite)).await;
     bob.pool

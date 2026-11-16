@@ -425,7 +425,7 @@ void main() {
 
       Future<void> pumpUntil(
         bool Function() condition, {
-        required String description,
+        required String what,
         required Duration timeout,
       }) async {
         final deadline = DateTime.now().add(timeout);
@@ -434,7 +434,7 @@ void main() {
           seen.record(tester);
           if (condition()) return;
         }
-        fail('"$description" did not hold within ${timeout.inSeconds}s.');
+        fail('"$what" did not hold within ${timeout.inSeconds}s.');
       }
 
       // The board as of this instant, joined to the lists the way the page
@@ -545,7 +545,7 @@ void main() {
         );
         await pumpUntil(
           () => container().read(identityProvider).valueOrNull != null,
-          description: '[$step] the pre-seeded identity resolved',
+          what: '[$step] the pre-seeded identity resolved',
           timeout: _kAppStart,
         );
         // Opening the page is what starts its board reads.
@@ -643,7 +643,7 @@ void main() {
         // out; an add landing now takes effect at once.
         await pumpUntil(
           () => seen.any(stall.role, KindPresence.checking),
-          description: '[B] the stalling relay rendered checking',
+          what: '[B] the stalling relay rendered checking',
           timeout: _kSettleBound,
         );
         await inbox.addRelay(closed.address);
@@ -651,7 +651,7 @@ void main() {
           () => tester
               .widgetList<RelayKindStatusCell>(find.byType(RelayKindStatusCell))
               .any((cell) => roleOf(cell.relayUrl) == closed.role),
-          description: '[B] a relay added mid-check is on the page at once',
+          what: '[B] a relay added mid-check is on the page at once',
           timeout: _kInputTakesEffect,
         );
         expect(
@@ -663,7 +663,7 @@ void main() {
         // waited for.
         await pumpUntil(
           () => seen.any(drop.role, KindPresence.publishing),
-          description: '[B] the dropping relay rendered publishing',
+          what: '[B] the dropping relay rendered publishing',
           timeout: _kSettleBound,
         );
         final inboxB = [
@@ -796,7 +796,7 @@ void main() {
         );
         await pumpUntil(
           () => rows(board())[green.role]?.inboxRelayList == null,
-          description: '[D] the removed inbox item left the row at once',
+          what: '[D] the removed inbox item left the row at once',
           timeout: _kInputTakesEffect,
         );
         final inboxD = [
@@ -841,7 +841,7 @@ void main() {
         );
         await pumpUntil(
           () => rows(board())[closed.role] == null,
-          description: '[E] the inbox list is back to its defaults at once',
+          what: '[E] the inbox list is back to its defaults at once',
           timeout: _kInputTakesEffect,
         );
         final restored = {

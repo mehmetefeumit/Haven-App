@@ -171,7 +171,8 @@ pub struct OwnBoardSnapshot {
 }
 
 struct Entry {
-    key: String,
+    /// The relay as [`dedup_key`] spells it, so two spellings are one cell.
+    canonical: String,
     relay_url: String,
     status: OwnCell,
     probed: Option<Probed>,
@@ -191,7 +192,7 @@ struct KindBoard {
 impl KindBoard {
     fn entry(&mut self, relay: &str) -> Option<&mut Entry> {
         let key = dedup_key(relay);
-        self.cells.iter_mut().find(|entry| entry.key == key)
+        self.cells.iter_mut().find(|entry| entry.canonical == key)
     }
 
     fn replace(&mut self, hold: Option<OwnHold>) {
@@ -230,6 +231,10 @@ impl OwnRelayBoard {
 
     fn kinds(&self) -> std::sync::MutexGuard<'_, [KindBoard; 3]> {
         self.kinds.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn with_kind<R>(&self, kind: OwnKind, write: impl FnOnce(&mut KindBoard) -> R) -> R {
+        write(&mut self.kinds()[kind.index()])
     }
 
     /// What the board holds now. No network, no wait on a pass.
@@ -273,49 +278,50 @@ impl OwnRelayBoard {
     /// Records that nothing of `kind` is published now, and why.
     pub fn hold(&self, kind: OwnKind, hold: OwnHold) {
         let now = (self.clock)();
-        let mut kinds = self.kinds();
-        let board = &mut kinds[kind.index()];
-        board.replace(Some(hold));
-        board.finished = Some(now);
+        self.with_kind(kind, |board| {
+            board.replace(Some(hold));
+            board.finished = Some(now);
+        });
     }
 
     /// Forgets every cell of `kind`: what they said was judged against a list
     /// that has changed, or by a pass that failed before it could judge.
     pub fn clear(&self, kind: OwnKind) {
-        self.kinds()[kind.index()].replace(None);
+        self.with_kind(kind, |board| board.replace(None));
     }
 
     /// Forgets `relay`'s cell of `kind` only.
     pub fn forget(&self, kind: OwnKind, relay: &str) {
         let key = dedup_key(relay);
-        self.kinds()[kind.index()]
-            .cells
-            .retain(|entry| entry.key != key);
+        self.with_kind(kind, |board| {
+            board.cells.retain(|entry| entry.canonical != key);
+        });
     }
 
     /// Begins a pass of `kind` over `targets`: each is `Checking`, every
     /// other cell and any hold is gone.
     #[must_use]
     pub fn begin(&self, kind: OwnKind, targets: &[String]) -> OwnPass<'_> {
-        let mut kinds = self.kinds();
-        let board = &mut kinds[kind.index()];
-        board.replace(None);
-        for target in targets {
-            let key = dedup_key(target);
-            if board.cells.iter().all(|entry| entry.key != key) {
-                board.cells.push(Entry {
-                    key,
-                    relay_url: target.clone(),
-                    status: OwnCell::Checking,
-                    probed: None,
-                    sent: None,
-                });
+        let generation = self.with_kind(kind, |board| {
+            board.replace(None);
+            for target in targets {
+                let key = dedup_key(target);
+                if board.cells.iter().all(|entry| entry.canonical != key) {
+                    board.cells.push(Entry {
+                        canonical: key,
+                        relay_url: target.clone(),
+                        status: OwnCell::Checking,
+                        probed: None,
+                        sent: None,
+                    });
+                }
             }
-        }
+            board.generation
+        });
         OwnPass {
             board: self,
             kind,
-            generation: board.generation,
+            generation,
         }
     }
 }
@@ -343,9 +349,9 @@ pub struct OwnPass<'a> {
 impl OwnPass<'_> {
     /// Runs `write` on this pass's kind unless a later write superseded it.
     fn write<R>(&self, write: impl FnOnce(&mut KindBoard) -> R) -> Option<R> {
-        let mut kinds = self.board.kinds();
-        let board = &mut kinds[self.kind.index()];
-        (board.generation == self.generation).then(|| write(board))
+        self.board.with_kind(self.kind, |board| {
+            (board.generation == self.generation).then(|| write(board))
+        })
     }
 
     /// Judges each relay's answer with `verdict` into its cell, returning
@@ -863,10 +869,7 @@ mod tests {
         let turn = tokio::sync::Mutex::new(());
         let passes: Coalesced<usize> = Coalesced::default();
         let ran = AtomicUsize::new(0);
-        let pass = || async {
-            let n = ran.fetch_add(1, Ordering::SeqCst) + 1;
-            n
-        };
+        let pass = || async { ran.fetch_add(1, Ordering::SeqCst) + 1 };
 
         let running = turn.lock().await;
         // The pass in flight began before these requests: none is served by it.
@@ -1032,23 +1035,6 @@ mod tests {
         let newer = key_package(&own, SLOT, 2_000);
         let older = key_package(&own, SLOT, 500);
         let other_slot = key_package(&own, &"b2".repeat(32), 2_000);
-        let consumed_not_held = TrackedKeyPackage {
-            replacement_owed: true,
-            ..record.clone()
-        };
-        let consumed_but_held = TrackedKeyPackage {
-            replacement_owed: true,
-            consumed_but_held: true,
-            ..record.clone()
-        };
-        let bundle_lost = TrackedKeyPackage {
-            package: Vec::new(),
-            ..record.clone()
-        };
-        let never_acknowledged = TrackedKeyPackage {
-            published: None,
-            ..record.clone()
-        };
         let cases = [
             (
                 "the tracked event",
@@ -1106,36 +1092,6 @@ mod tests {
                 VALID,
                 Probed::Outdated,
             ),
-            // Maintenance's own rule: a Welcome consumed the package and its
-            // key is gone, so it is owed a replacement and opens nothing.
-            (
-                "a consumed package whose key is not held",
-                &tracked_event,
-                Some(&consumed_not_held),
-                VALID,
-                Probed::Outdated,
-            ),
-            (
-                "a consumed package whose key is still held",
-                &tracked_event,
-                Some(&consumed_but_held),
-                VALID,
-                Probed::Current,
-            ),
-            (
-                "a package whose bundle is lost",
-                &tracked_event,
-                Some(&bundle_lost),
-                VALID,
-                Probed::Outdated,
-            ),
-            (
-                "a package no relay acknowledged",
-                &tracked_event,
-                Some(&never_acknowledged),
-                VALID,
-                Probed::Outdated,
-            ),
         ];
         for (case, event, tracked, lifetime, expected) in cases {
             answer(&relay, KP, served(vec![event.clone()]));
@@ -1153,6 +1109,67 @@ mod tests {
             [Probed::Missing],
             "nothing served"
         );
+    }
+
+    /// A package maintenance would replace never reads current, however the
+    /// relay serves it: the board and the pass share one rule.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_package_maintenance_would_replace_reads_outdated() {
+        let own = Keys::generate();
+        let relay = ScriptedRelay::start();
+        let kp_list = vec![relay.url().to_owned()];
+        let tracked_event = key_package(&own, SLOT, 1_000);
+        let record = tracked_in_slot(&tracked_event);
+        // Maintenance's own rule: a Welcome consumed the package and its key
+        // is gone, so it is owed a replacement and opens nothing.
+        let consumed_not_held = TrackedKeyPackage {
+            replacement_owed: true,
+            ..record.clone()
+        };
+        let consumed_but_held = TrackedKeyPackage {
+            replacement_owed: true,
+            consumed_but_held: true,
+            ..record.clone()
+        };
+        let bundle_lost = TrackedKeyPackage {
+            package: Vec::new(),
+            ..record.clone()
+        };
+        let never_acknowledged = TrackedKeyPackage {
+            published: None,
+            ..record
+        };
+        let cases = [
+            (
+                "a consumed package whose key is not held",
+                &consumed_not_held,
+                Probed::Outdated,
+            ),
+            (
+                "a consumed package whose key is still held",
+                &consumed_but_held,
+                Probed::Current,
+            ),
+            (
+                "a package whose bundle is lost",
+                &bundle_lost,
+                Probed::Outdated,
+            ),
+            (
+                "a package no relay acknowledged",
+                &never_acknowledged,
+                Probed::Outdated,
+            ),
+        ];
+        answer(&relay, KP, served(vec![tracked_event]));
+        for (case, tracked, expected) in cases {
+            let serves = |mine: &[&Event]| serves_tracked_package(mine, Some(tracked), VALID);
+            assert_eq!(
+                probed(&own, KP, &kp_list, &serves).await,
+                [expected],
+                "{case}"
+            );
+        }
     }
 
     /// A slot a conformant inviter rejects is retired by maintenance before

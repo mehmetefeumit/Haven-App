@@ -1072,11 +1072,11 @@ impl RelayManager {
     pub async fn offer_event_to(
         &self,
         event: &Event,
-        relay: &str,
+        target: &str,
         ack: Duration,
     ) -> RelayResult<SendAck> {
         Self::refuse_fanout_owned(event)?;
-        let url = [Self::validate_single_relay_url(relay)?];
+        let url = [Self::validate_single_relay_url(target)?];
         Self::register_publish_relays(&self.client, &url).await;
         let _no_fanout_call = hold_fanout_gates(&self.fanout_gates, &url).await;
         let answered = if self
@@ -1086,8 +1086,8 @@ impl RelayManager {
             .is_err()
         {
             SendAck::Unanswered
-        } else if let Ok(handle) = self.client.relay(url[0].as_str()).await {
-            match tokio::time::timeout(ack, handle.send_event(event)).await {
+        } else if let Ok(relay) = self.client.relay(url[0].as_str()).await {
+            match tokio::time::timeout(ack, relay.send_event(event)).await {
                 Ok(Ok(_)) => SendAck::Accepted,
                 Ok(Err(nostr_sdk::pool::relay::Error::RelayMessage(reason))) => SendAck::Refused {
                     clock: clock_skew::classify_clock_refusal(&reason).and_then(|complaint| {
@@ -7722,6 +7722,9 @@ mod tests {
 
     // ---- the own-event offer --------------------------------------------------
 
+    /// A case of the offer test: what it is, the relay's verdict, the answer.
+    type OfferCase = (&'static str, fn() -> Verdict, SendAck);
+
     /// Each relay's own answer, and only an `OK false` is a refusal: a relay
     /// that hung up, went silent or could not be reached never answered.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7744,7 +7747,7 @@ mod tests {
                 (sent, relay.offers())
             }
         };
-        let cases: [(&str, fn() -> Verdict, SendAck); 7] = [
+        let cases: [OfferCase; 7] = [
             ("OK true", || Verdict::Keep, SendAck::Accepted),
             (
                 "OK true, duplicate",
