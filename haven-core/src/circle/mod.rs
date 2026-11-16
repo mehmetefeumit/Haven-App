@@ -78,8 +78,8 @@ pub use storage_profile::{CachedProfileView, PROFILE_MISS_BACKOFF_SECS};
 pub use storage_profile_sync::{ProfileDebt, ProfilePendingState, ProfileSyncCommit};
 pub use storage_relay_prefs::{PublishedEventRecord, UserRelayRow};
 pub use types::{
-    default_relays, sanitize_circle_name, set_default_relays_for_test, Circle, CircleConfig,
-    CircleEngineState, CircleMember, CircleMembership, CircleType, CircleUiState,
-    CircleWithMembers, Contact, GiftWrappedWelcome, Invitation, LastKnownLocation,
-    MemberKeyPackage, MembershipStatus, PRODUCTION_DEFAULT_RELAYS,
+    default_inbox_relays, default_relays, sanitize_circle_name, set_default_relays_for_test,
+    Circle, CircleConfig, CircleEngineState, CircleMember, CircleMembership, CircleType,
+    CircleUiState, CircleWithMembers, Contact, GiftWrappedWelcome, Invitation, LastKnownLocation,
+    MemberKeyPackage, MembershipStatus, PRODUCTION_DEFAULT_RELAYS, PRODUCTION_INBOX_RELAYS,
 };

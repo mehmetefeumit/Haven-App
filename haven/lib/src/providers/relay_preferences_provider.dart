@@ -183,7 +183,7 @@ class InboxRelaysNotifier extends AsyncNotifier<List<String>>
         list = await service.listRelays(RelayCategory.inbox);
       } on Object catch (e) {
         debugPrint('Inbox seed failed (using fallback): ${e.runtimeType}');
-        list = List<String>.from(fallbackDefaultRelays);
+        list = List<String>.from(fallbackDefaultInboxRelays);
       }
     }
     return list;

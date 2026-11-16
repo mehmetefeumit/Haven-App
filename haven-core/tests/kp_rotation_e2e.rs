@@ -339,7 +339,7 @@ async fn a_heal_republishes_the_tracked_event_and_the_rotation_clock_does_not_mo
         .expect("publish to A");
     assert!(dev
         .session
-        .promote_key_package(&first.event.id)
+        .promote_key_package(&first.event.id, now_secs())
         .await
         .expect("promote"));
     settle().await;
@@ -592,7 +592,7 @@ async fn a_reset_account_replaces_its_old_slot_in_place() {
         .expect("publish the replacement");
     assert!(dev
         .session
-        .promote_key_package(&replacement.event.id)
+        .promote_key_package(&replacement.event.id, now_secs())
         .await
         .expect("promote"));
 

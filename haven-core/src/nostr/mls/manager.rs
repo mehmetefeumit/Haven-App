@@ -61,8 +61,9 @@ use cgka_traits::error::PeelerError;
 use cgka_traits::group::{Group, Member, ProtocolProfile};
 use cgka_traits::maintenance::{
     GroupEvolutionPhase, GroupEvolutionSemantic, KeyPackageLifecycleState, MaintenanceObligation,
-    MaintenancePhase, MaintenanceTrigger, PeriodicMaintenancePolicy, SignedPublicationArtifact,
-    TransportFanoutAttemptState, TransportFanoutTarget, POST_JOIN_CONTENTION_JITTER_MAX_MS,
+    MaintenancePhase, MaintenanceTrigger, PeriodicMaintenancePolicy,
+    RetainedKeyPackagePrivateMaterial, SignedPublicationArtifact, TransportFanoutAttemptState,
+    TransportFanoutTarget, POST_JOIN_CONTENTION_JITTER_MAX_MS,
 };
 use cgka_traits::message::{MessageRecord, MessageState, StoredMessagePayload};
 use cgka_traits::peeler::TransportPeeler;
@@ -211,6 +212,15 @@ const KIND_PRE_MIGRATION_KEY_PACKAGE: u16 = 443;
 /// reads off the package (`relay::maintenance::KP_ROTATE_AT_LIFETIME_FRACTION`).
 /// Haven schedules from the package, never from this stored value.
 const KEY_PACKAGE_REFRESH_LEAD_SECS: u64 = 7_261_200 / 4;
+
+/// How long a superseded, never-consumed `KeyPackage`'s private material is
+/// kept after its replacement was acknowledged.
+///
+/// A Welcome built on it by an inviter that fetched it just before the
+/// replacement landed still opens (`foundation/key-packages.md`'s replacement
+/// grace; MDK master's `KEY_PACKAGE_REPLACEMENT_GRACE_SECS`). Its `not_after`
+/// ends it sooner.
+pub const KEY_PACKAGE_REPLACEMENT_GRACE_SECS: u64 = 86_400;
 
 /// The `KeyPackage` this device tracks: Haven's view of MDK's durable
 /// lifecycle record (`KeyPackageLifecycleState`, v0.10.4
@@ -12311,19 +12321,25 @@ impl SessionManager {
     }
 
     /// Makes the staged replacement whose frozen event is `acked` the current
-    /// package — call it only once a relay acknowledged that event — and
-    /// deletes the private material of every package it supersedes.
+    /// package — call it only once a relay acknowledged that event, with
+    /// `now_secs` the acknowledgement's clock — and retires the package it
+    /// supersedes.
     ///
-    /// `foundation/key-packages.md:89-106`: a last-resort package's `init_key`
-    /// is deleted at confirmed publication of a replacement, and "local
-    /// retention policy MUST NOT extend" that. MDK's own runtime keeps the
-    /// superseded material until `not_after`
-    /// (`marmot-account/src/runtime.rs:1006-1023`) and its stage keeps a
-    /// re-staged one (`cgka-engine/src/maintenance.rs:58-70`); Haven hands
-    /// both to `promote_key_package_lifecycle` as retired
-    /// (`docs/MDK_UPSTREAM_TRACKER.md` T-KP-RETENTION). A superseded package
-    /// whose lifetime has already ended is deleted separately, because MDK's
-    /// promotion aborts on one (T-KP-EXPIRED-DELETE).
+    /// `foundation/key-packages.md`: a superseded package's `init_key` is kept
+    /// for the replacement grace, so a Welcome an inviter built on it just
+    /// before the replacement landed still opens, and "local retention policy
+    /// MUST NOT extend" that. A superseded package no Welcome consumed is
+    /// therefore retained with `replaced_at = now_secs`, and
+    /// [`Self::sweep_expired_key_packages`] deletes it
+    /// [`KEY_PACKAGE_REPLACEMENT_GRACE_SECS`] later or at its `not_after`,
+    /// whichever comes first. One a Welcome consumed — the current package or
+    /// a retained one — has nothing left to wait for and is deleted here.
+    /// Entries already retained keep their own `replaced_at`, MDK's re-staged
+    /// ones included (`cgka-engine/src/maintenance.rs:58-70`), so a later
+    /// promotion never extends a grace (`docs/MDK_UPSTREAM_TRACKER.md`
+    /// T-KP-RETENTION). A superseded package whose lifetime has already ended
+    /// is deleted separately, because MDK's promotion aborts on one
+    /// (T-KP-EXPIRED-DELETE).
     ///
     /// Returns whether a replacement was promoted: `false` when the staged
     /// replacement is no longer the one `acked` names.
@@ -12332,7 +12348,7 @@ impl SessionManager {
     ///
     /// Returns an error if the promotion or a deletion fails; nothing is
     /// promoted then.
-    pub async fn promote_key_package(&self, acked: &nostr::EventId) -> Result<bool> {
+    pub async fn promote_key_package(&self, acked: &nostr::EventId, now_secs: u64) -> Result<bool> {
         let mut session = self.engine().await?;
         let Some(mut state) = session.key_package_lifecycle().map_err(map_mls_err)? else {
             return Ok(false);
@@ -12346,17 +12362,38 @@ impl SessionManager {
             return Ok(false);
         };
 
+        // Read before `take()`: the current ref is what a Welcome's consumption
+        // is recorded against.
+        let consumed = state.last_consumed_key_package_ref.clone();
         let mut superseded = Vec::new();
         if let (Some(package), Some(key_package_ref)) = (
             state.current_key_package.take(),
             state.current_key_package_ref.take(),
         ) {
-            superseded.push((package, key_package_ref));
+            let not_after = cgka_engine::key_package_metadata(&package)
+                .ok()
+                .map(|meta| cgka_traits::transport::Timestamp(meta.not_after));
+            match not_after {
+                Some(not_after) if consumed.as_ref() != Some(&key_package_ref) => {
+                    state
+                        .retained_private_material
+                        .push(RetainedKeyPackagePrivateMaterial {
+                            key_package: package,
+                            key_package_ref,
+                            not_after,
+                            replaced_at: cgka_traits::transport::Timestamp(now_secs),
+                        });
+                }
+                _ => superseded.push((package, key_package_ref)),
+            }
         }
+        let (spent, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut state.retained_private_material)
+            .into_iter()
+            .partition(|kept| consumed.as_ref() == Some(&kept.key_package_ref));
+        state.retained_private_material = kept;
         superseded.extend(
-            state
-                .retained_private_material
-                .drain(..)
+            spent
+                .into_iter()
                 .map(|kept| (kept.key_package, kept.key_package_ref)),
         );
         let (retired, lapsed): (Vec<_>, Vec<_>) = superseded
@@ -12426,14 +12463,20 @@ impl SessionManager {
 
     /// Deletes the private material of every tracked `KeyPackage` whose
     /// `Lifetime.not_after` is at or before `now_secs` — the current package,
-    /// a staged replacement, anything retained — and reports whether the
-    /// current package was one of them.
+    /// a staged replacement, anything retained — and of every retained one
+    /// whose replacement grace has run out or that a Welcome consumed, and
+    /// reports whether the current package was one of them.
     ///
     /// `foundation/key-packages.md:89-94`: the second, transport-independent
     /// deletion bound. The slot is kept, so the replacement reuses it. MDK's
     /// own delete validates the lifetime first and so refuses exactly these
     /// packages (`cgka-engine/src/key_package.rs:412-435,516-525`); they are
-    /// deleted by reference instead (T-KP-EXPIRED-DELETE).
+    /// deleted by reference instead (T-KP-EXPIRED-DELETE). A retained package
+    /// is kept while the clock reads from `replaced_at` to `replaced_at` +
+    /// [`KEY_PACKAGE_REPLACEMENT_GRACE_SECS`] (see
+    /// [`Self::promote_key_package`]); one a Welcome consumed goes at
+    /// once, and the consumption record with it only when it names that
+    /// package (MDK's `marmot-account/src/runtime.rs:1248-1265`).
     ///
     /// # Errors
     ///
@@ -12464,15 +12507,31 @@ impl SessionManager {
         {
             lapsed.push(pending.key_package_ref);
         }
+        let consumed = state.last_consumed_key_package_ref.clone();
+        let mut consumed_deleted = false;
         state.retained_private_material.retain(|kept| {
-            let keep = kept.not_after.0 > now_secs;
+            let was_consumed = consumed.as_ref() == Some(&kept.key_package_ref);
+            // A clock reading earlier than the grace's start would extend the
+            // grace by however far it was set back.
+            let in_grace = (kept.replaced_at.0
+                ..kept
+                    .replaced_at
+                    .0
+                    .saturating_add(KEY_PACKAGE_REPLACEMENT_GRACE_SECS))
+                .contains(&now_secs);
+            let keep = !was_consumed && kept.not_after.0 > now_secs && in_grace;
             if !keep {
+                consumed_deleted |= was_consumed;
                 lapsed.push(kept.key_package_ref.clone());
             }
             keep
         });
         if lapsed.is_empty() {
             return Ok(false);
+        }
+        if consumed_deleted {
+            state.last_consumed_key_package_ref = None;
+            state.last_consumed_at = None;
         }
         for key_package_ref in &lapsed {
             delete_key_package_bundle(&self.message_store, key_package_ref)

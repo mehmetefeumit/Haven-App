@@ -49,7 +49,7 @@ use std::time::Duration;
 
 use std::collections::BTreeSet;
 
-use haven_core::circle::types::PRODUCTION_DEFAULT_RELAYS;
+use haven_core::circle::types::{PRODUCTION_DEFAULT_RELAYS, PRODUCTION_INBOX_RELAYS};
 use haven_core::circle::PRODUCTION_LOCATION_RELAYS;
 use haven_core::profile::{
     assigned_relay, build_metadata_event, fetch_profiles_assigned, production_profile_relays,
@@ -102,9 +102,12 @@ fn pool_is_disjoint_from_account_seed_defaults() {
     assert!(
         !share_a_domain(
             pool.iter().map(String::as_str),
-            PRODUCTION_DEFAULT_RELAYS.iter().copied(),
+            PRODUCTION_DEFAULT_RELAYS
+                .iter()
+                .chain(PRODUCTION_INBOX_RELAYS)
+                .copied(),
         ),
-        "profile pool shares a domain with the account seed — plane separation broken",
+        "profile pool shares a domain with the account or inbox seed — plane separation broken",
     );
 }
 
@@ -133,6 +136,7 @@ fn location_pool_is_host_disjoint_from_account_seed_and_discovery() {
     assert!(!PRODUCTION_LOCATION_RELAYS.is_empty(), "non-vacuity");
     let identity_planes = PRODUCTION_DEFAULT_RELAYS
         .iter()
+        .chain(PRODUCTION_INBOX_RELAYS)
         .chain(PRODUCTION_DISCOVERY_RELAYS)
         .copied();
     assert!(
@@ -175,6 +179,10 @@ fn contaminated_reference_sets_are_non_empty() {
     assert!(
         !PRODUCTION_DEFAULT_RELAYS.is_empty(),
         "account seed empty — the disjointness tests would pass vacuously",
+    );
+    assert!(
+        !PRODUCTION_INBOX_RELAYS.is_empty(),
+        "inbox seed empty — the disjointness tests would pass vacuously",
     );
     assert!(
         !PRODUCTION_DISCOVERY_RELAYS.is_empty(),

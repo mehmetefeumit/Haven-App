@@ -22,6 +22,22 @@ const fallbackDefaultRelays = <String>[
   'wss://nos.lol',
 ];
 
+/// Compile-time fallback list of default inbox (kind 10050) relay URLs.
+///
+/// MUST agree, entry for entry and in order, with `PRODUCTION_INBOX_RELAYS`
+/// in `haven-core/src/circle/types.rs` — a CHECKED invariant
+/// (`scripts/ci/check_profile_privacy_boundaries.sh` check 13). It is
+/// [`fallbackDefaultRelays`] less every relay that withholds gift-wrap
+/// (kind 1059) reads from a client that does not authenticate, as Haven never
+/// does: a Welcome delivered there is never read. Used by
+/// `InboxRelaysNotifier` when the relay-preferences storage seed transiently
+/// fails, so that fallback never points the invitation poll at such a relay.
+/// Never [`defaultRelays`]: that is the KeyPackage (kind 10002) seed.
+const fallbackDefaultInboxRelays = <String>[
+  'wss://relay.primal.net',
+  'wss://nos.lol',
+];
+
 /// The canonical list of default relay URLs.
 ///
 /// Calls the synchronous Rust FFI getter `default_relays()` so the value

@@ -10129,9 +10129,9 @@ impl RelayManagerFfi {
     }
 
     /// Publishes a staged replacement's frozen event to `targets` and, once a
-    /// relay acknowledged it, promotes it — which deletes the private material
-    /// of every package it supersedes (`foundation/key-packages.md`'s FIRST
-    /// deletion bound).
+    /// relay acknowledged it, promotes it — which starts the superseded
+    /// package's replacement grace, or deletes it when a Welcome consumed it
+    /// (`foundation/key-packages.md`'s FIRST deletion bound).
     ///
     /// `publish_event` returns `Ok` only when at least one relay OK-ACKED, so
     /// promotion means acked, never merely sent: the account is never left
@@ -10156,7 +10156,13 @@ impl RelayManagerFfi {
             };
         }
         let session = circle_mgr.session();
-        if matches!(session.promote_key_package(&event.id).await, Ok(true)) {
+        // Read at the acknowledgement, on the tick's clock: the grace runs from
+        // the instant a relay took the replacement.
+        let acked_at = maintenance_now_secs();
+        if matches!(
+            session.promote_key_package(&event.id, acked_at).await,
+            Ok(true)
+        ) {
             let replacement_consumed = matches!(
                 session.tracked_key_package().await,
                 Ok(Some(tracked)) if tracked.consumed_but_held
@@ -16252,7 +16258,10 @@ mod maintenance_real_ffi_tests {
         );
 
         // And only NOW is the superseded init key gone — the first deletion
-        // bound fires exactly on confirmed publication, not before.
+        // bound fires exactly on confirmed publication, not before. The
+        // Welcome accepted above consumed KeyPackage #1, so it gets no
+        // replacement grace: a superseded package no Welcome consumed would be
+        // kept for 24 hours (`kp_lifecycle_e2e`).
         assert!(
             matches!(
                 bob.inner
@@ -16261,9 +16270,10 @@ mod maintenance_real_ffi_tests {
                     .await,
                 Ok(haven_core::nostr::mls::types::WelcomeAcceptance::NeedsNewInvite)
             ),
-            "once the replacement is confirmed published, the superseded \
-             init key MUST be deleted — retaining it means a compromise of \
-             that one key decrypts every Welcome ever recorded to it"
+            "once the replacement is confirmed published, the consumed \
+             superseded init key MUST be deleted — retaining it means a \
+             compromise of that one key decrypts every Welcome ever recorded \
+             to it"
         );
 
         super::MAINTENANCE_CLOCK_OVERRIDE_SECS.store(0, Ordering::Relaxed);
@@ -17315,7 +17325,13 @@ mod maintenance_real_ffi_tests {
             .expect("tracked");
         assert!(tracked.pending.is_none());
         assert_eq!(tracked.published.map(|event| event.id), Some(served.id));
-        assert_eq!(bundles().await, 1, "the refused package's key went with it");
+        // D3: the refused package is a superseded one no Welcome consumed, so
+        // its key is kept for the replacement grace MDK's re-stage started.
+        assert_eq!(
+            bundles().await,
+            2,
+            "the refused package's key is in its grace"
+        );
         // The relay serves what it kept, so the next tick finds it there.
         let kept = served.clone();
         relay.answer(
@@ -17331,8 +17347,26 @@ mod maintenance_real_ffi_tests {
             ],
         );
         assert_eq!(
+            circle_maintain(&relay_mgr, &circle, secret.clone())
+                .await
+                .action,
+            KpMaintenanceActionFfi::AlreadyHealthy
+        );
+        assert_eq!(bundles().await, 2);
+        super::MAINTENANCE_CLOCK_OVERRIDE_SECS.store(
+            served.created_at.as_secs()
+                + haven_core::nostr::mls::KEY_PACKAGE_REPLACEMENT_GRACE_SECS,
+            Ordering::Relaxed,
+        );
+        assert_eq!(
             circle_maintain(&relay_mgr, &circle, secret).await.action,
             KpMaintenanceActionFfi::AlreadyHealthy
+        );
+        super::MAINTENANCE_CLOCK_OVERRIDE_SECS.store(0, Ordering::Relaxed);
+        assert_eq!(
+            bundles().await,
+            1,
+            "the refused package's key went at its end"
         );
     }
 

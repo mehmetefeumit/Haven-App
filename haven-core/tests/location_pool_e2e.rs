@@ -63,8 +63,8 @@ fn add(device: &CircleMember, relay: &str, category: RelayType) {
         .expect("the relay is stored");
 }
 
-/// A device seeded as a new install is: inbox and key-package relays from the
-/// account seed, profile relays from the profile pool.
+/// A device seeded as a new install is: inbox relays from the inbox seed,
+/// key-package relays from the account seed, profile relays from the profile pool.
 fn seeded() -> CircleMember {
     let device = CircleMember::new();
     device
