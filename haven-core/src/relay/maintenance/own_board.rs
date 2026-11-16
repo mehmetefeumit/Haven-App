@@ -455,14 +455,16 @@ impl OwnPass<'_> {
 }
 
 fn settle_publishing(board: &mut KindBoard, superseded: bool) {
-    for entry in &mut board.cells {
-        if entry.status == OwnCell::Publishing {
-            entry.status = settle(
-                entry.probed,
-                entry.sent.unwrap_or(SendAck::Unanswered),
-                superseded,
-            );
-        }
+    for entry in board
+        .cells
+        .iter_mut()
+        .filter(|entry| entry.status == OwnCell::Publishing)
+    {
+        entry.status = settle(
+            entry.probed,
+            entry.sent.unwrap_or(SendAck::Unanswered),
+            superseded,
+        );
     }
 }
 
