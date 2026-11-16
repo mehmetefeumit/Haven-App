@@ -179,8 +179,11 @@ extract_list_entries() {
   ' "${file}"
 }
 
-# Check 9's and 9b's ban: randomness a relay observer could predict.
-readonly CSPRNG_BAN='thread_rng|SmallRng|StdRng|ChaCha[0-9]*Rng|from_seed|seed_from_u64'
+# Check 9's and 9b's ban: randomness a relay observer could predict. The
+# thread-local generator is `thread_rng` in rand 0.8 (haven-core) and
+# `rand::rng` / `ThreadRng` in rand 0.10 (rust_builder), whose `rand::random*`,
+# `rand::fill` and `rand::make_rng` free functions also draw from it.
+readonly CSPRNG_BAN='thread_rng|ThreadRng|rand::(rng|random(_iter|_range|_bool|_ratio)?|fill|make_rng)([^_[:alnum:]]|$)|SmallRng|StdRng|Xoshiro[0-9]*PlusPlus|ChaCha[0-9]*Rng|from_seed|seed_from_u64'
 
 # Check 9b: emits every code line of $1 (whole-line comments dropped, test
 # modules included) that names a non-CSPRNG generator; empty = OK.
@@ -704,11 +707,16 @@ if [[ "${1:-}" == "--self-test" ]]; then
   # Check 9b: a seeded generator fails, in production or test code; OsRng and
   # prose do not.
   printf '%s\n' 'use rand::rngs::OsRng;' '// never StdRng::seed_from_u64 here' \
-    'pick(&pool, &mut rand::rngs::OsRng)' > "${st_tmp}/pool_clean.rs"
+    'pick(&pool, &mut rand::rngs::OsRng)' 'order.shuffle(&mut UnwrapErr(rand::rngs::SysRng));' \
+    'let ms = rng.random_range(JITTER); rng.fill_bytes(&mut buf);' \
+    > "${st_tmp}/pool_clean.rs"
   [[ -z "$(csprng_violations "${st_tmp}/pool_clean.rs")" ]] \
-    || fail "self-test: check 9b refuses OsRng or a comment"
+    || fail "self-test: check 9b refuses OsRng, SysRng or a comment"
   for line in 'let mut rng = StdRng::seed_from_u64(7);' 'let rng = rand::thread_rng();' \
-      'let rng = ChaCha20Rng::from_seed([0; 32]);' '    let rng = SmallRng::from_entropy();'; do
+      'let rng = ChaCha20Rng::from_seed([0; 32]);' '    let rng = SmallRng::from_entropy();' \
+      'let mut rng = rand::rng();' 'use rand::rng;' 'fn pick(rng: &mut ThreadRng) {}' \
+      'let ms = rand::random_range(JITTER);' 'rand::fill(&mut buf);' \
+      'let r: SmallRng = rand::make_rng();' 'let r = Xoshiro256PlusPlus::from_rng(&mut os);'; do
     printf '%s\n' 'use rand::rngs::OsRng;' "${line}" > "${st_tmp}/pool_seeded.rs"
     [[ -n "$(csprng_violations "${st_tmp}/pool_seeded.rs")" ]] \
       || fail "self-test: check 9b lets the location pool write: ${line}"
@@ -1436,12 +1444,13 @@ fi
 # within a relay, and the inter-request jitter. A seedable or non-crypto RNG
 # would make any of them predictable — and a predictable assignment lets a
 # relay compute which OTHER relays hold the rest of the user's roster.
-# Mirrors haven-core/clippy.toml's thread_rng ban, but covers the seeded
-# generators clippy does not name.
+# Mirrors the clippy.toml thread-local RNG bans (haven-core's `rand::thread_rng`,
+# rust_builder's `rand::rng`), but covers the seeded generators clippy does not
+# name.
 # ---------------------------------------------------------------------------
 log "Scanning all profile code paths (core + FFI) for non-CSPRNG randomness ..."
 scan_profile_paths \
-  "non-CSPRNG RNG in a profile code path (haven-core/src/profile or the api.rs profile block) — the relay-assignment salt, REQ shuffling and inter-request jitter must be unpredictable to a relay observer; use rand::rngs::OsRng (mirrors haven-core/clippy.toml's thread_rng ban)" \
+  "non-CSPRNG RNG in a profile code path (haven-core/src/profile or the api.rs profile block) — the relay-assignment salt, REQ shuffling and inter-request jitter must be unpredictable to a relay observer; use rand::rngs::OsRng (rand 0.10: SysRng; mirrors the clippy.toml thread-local RNG bans)" \
   "${CSPRNG_BAN}"
 
 # ---------------------------------------------------------------------------

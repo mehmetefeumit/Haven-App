@@ -113,7 +113,7 @@ pub fn init_app() {
 
 /// This process's `logscan` positive-control token.
 ///
-/// Random per process (`OsRng`, never `thread_rng`) so a STALE token left in a
+/// Random per process (`SysRng`, never `rand::rng`) so a STALE token left in a
 /// capture by an earlier run cannot satisfy this run's check, and interned so
 /// two isolates calling `init_app` do not mint two. Structurally inert by
 /// construction — no bech32 HRP, no hex run, no array, no coordinate — so it
@@ -134,9 +134,9 @@ fn logscan_plant_token() -> &'static str {
 
     static TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     TOKEN.get_or_init(|| {
-        use rand::RngCore;
+        use rand::Rng as _;
         let mut bytes = [0u8; LEN];
-        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        rand::rand_core::UnwrapErr(rand::rngs::SysRng).fill_bytes(&mut bytes);
         let suffix: String = bytes
             .iter()
             .map(|b| char::from(ALPHABET[usize::from(*b) & 0x1F]))
@@ -990,7 +990,7 @@ const MLS_SESSION_DB_KEY_ID: &str = "mls.session.key.v2";
 
 /// Retrieves or creates the circles.db encryption key from the system keyring.
 ///
-/// On first call, generates a cryptographically random 256-bit key using `OsRng`,
+/// On first call, generates a cryptographically random 256-bit key using `SysRng`,
 /// stores the raw bytes in the platform keyring, and returns the hex-encoded key.
 /// Subsequent calls retrieve and hex-encode the stored key.
 ///
@@ -999,7 +999,7 @@ const MLS_SESSION_DB_KEY_ID: &str = "mls.session.key.v2";
 /// Returns an error string if the keyring cannot be accessed or if key
 /// generation fails.
 fn get_or_create_circle_db_key() -> Result<zeroize::Zeroizing<String>, String> {
-    use rand::RngCore;
+    use rand::TryRng as _;
 
     let entry = keyring_core::Entry::new(CIRCLES_DB_SERVICE, CIRCLES_DB_KEY_ID)
         .map_err(|e| format!("Failed to create keyring entry for circles.db: {e}"))?;
@@ -1013,7 +1013,9 @@ fn get_or_create_circle_db_key() -> Result<zeroize::Zeroizing<String>, String> {
         Err(keyring_core::Error::NoEntry) => {
             // Key doesn't exist — generate and store a new one
             let mut key_bytes = zeroize::Zeroizing::new([0u8; 32]);
-            rand::rngs::OsRng.fill_bytes(key_bytes.as_mut());
+            rand::rngs::SysRng
+                .try_fill_bytes(key_bytes.as_mut())
+                .map_err(|_| "Failed to generate circles.db key".to_owned())?;
 
             entry
                 .set_secret(key_bytes.as_ref())
@@ -1393,7 +1395,7 @@ fn tile_err_to_string(err: &TileCacheError) -> String {
 /// Retrieves or creates the tiles.db encryption key from the system keyring.
 ///
 /// Near-copy of [`get_or_create_circle_db_key`]: on first call it generates a
-/// 256-bit `OsRng` key, stores the raw bytes in the platform keyring, and
+/// 256-bit `SysRng` key, stores the raw bytes in the platform keyring, and
 /// returns the hex-encoded key; subsequent calls retrieve and hex-encode it.
 ///
 /// # Errors
@@ -1401,7 +1403,7 @@ fn tile_err_to_string(err: &TileCacheError) -> String {
 /// Returns an error string if the keyring cannot be accessed or key generation
 /// fails.
 fn get_or_create_tiles_db_key() -> Result<zeroize::Zeroizing<String>, String> {
-    use rand::RngCore;
+    use rand::TryRng as _;
 
     let entry = keyring_core::Entry::new(TILES_DB_SERVICE, TILES_DB_KEY_ID)
         .map_err(|e| format!("Failed to create keyring entry for tiles.db: {e}"))?;
@@ -1413,7 +1415,9 @@ fn get_or_create_tiles_db_key() -> Result<zeroize::Zeroizing<String>, String> {
         }
         Err(keyring_core::Error::NoEntry) => {
             let mut key_bytes = zeroize::Zeroizing::new([0u8; 32]);
-            rand::rngs::OsRng.fill_bytes(key_bytes.as_mut());
+            rand::rngs::SysRng
+                .try_fill_bytes(key_bytes.as_mut())
+                .map_err(|_| "Failed to generate tiles.db key".to_owned())?;
 
             entry
                 .set_secret(key_bytes.as_ref())
@@ -4995,15 +4999,15 @@ const PROFILE_PICTURE_BATCH_DEADLINE: std::time::Duration = std::time::Duration:
 
 /// Samples the pause between two consecutive profile-picture downloads.
 ///
-/// `OsRng` only — a thin `getrandom` wrapper with no seeded expansion, matching
-/// the profile module's CSPRNG-only rule (`rand::thread_rng` is banned; a
+/// `SysRng` only — a thin `getrandom` wrapper with no seeded expansion, matching
+/// the profile module's CSPRNG-only rule (the thread-local `rand::rng` is banned; a
 /// predictable schedule is exactly what makes a burst legible as a roster).
 /// Reuses [`PROFILE_INTER_REQ_JITTER_MS`] so the picture plane is paced like the
 /// kind-0 plane rather than inventing a second, divergent tuning.
 fn profile_picture_delay() -> std::time::Duration {
-    use rand::Rng as _;
-    let mut rng = rand::rngs::OsRng;
-    std::time::Duration::from_millis(rng.gen_range(PROFILE_INTER_REQ_JITTER_MS))
+    use rand::RngExt as _;
+    let mut rng = rand::rand_core::UnwrapErr(rand::rngs::SysRng);
+    std::time::Duration::from_millis(rng.random_range(PROFILE_INTER_REQ_JITTER_MS))
 }
 
 /// Health of the profile-plane relay pool, as **counts only**.
@@ -5859,8 +5863,8 @@ impl CircleManagerFfi {
     /// been pointless if the avatar fetch handed the same set over anyway.
     ///
     /// So this call:
-    /// * **shuffles** the order every cycle from the OS CSPRNG (`rand::OsRng`;
-    ///   `thread_rng` is banned), so arrival order carries no roster ordering
+    /// * **shuffles** the order every cycle from the OS CSPRNG (`SysRng`;
+    ///   `rand::rng` is banned), so arrival order carries no roster ordering
     ///   and a newly added member does not appear at a stable position;
     /// * runs the downloads **one at a time**, never concurrently, so there is
     ///   no burst to fingerprint;
@@ -5897,7 +5901,7 @@ impl CircleManagerFfi {
         if order.is_empty() {
             return Ok(Vec::new());
         }
-        order.shuffle(&mut rand::rngs::OsRng);
+        order.shuffle(&mut rand::rand_core::UnwrapErr(rand::rngs::SysRng));
 
         let deadline = tokio::time::Instant::now() + PROFILE_PICTURE_BATCH_DEADLINE;
         let mut reconciled: Vec<String> = Vec::with_capacity(order.len());
