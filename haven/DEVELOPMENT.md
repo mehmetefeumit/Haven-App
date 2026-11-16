@@ -141,6 +141,44 @@ run: `flutter run --dart-define-from-file=dart_defines/secrets.json` (from `have
 > account, not in this repository. (This note used to cite
 > `docs/MAP_AND_PRIVACY_BACKLOG.md`, which does not exist in this tree.)
 
+### Map-style previews
+
+Settings → Map style previews each style over a city and a nature scene from
+WebP images bundled in `haven/assets/map_style_previews/`
+(`<TileProviderConfig.id>_<city|nature>.webp`, one per style in
+`kTileStyleCatalog`), so the page makes no network request and costs no tile
+credits. They are rendered once, with your Stadia key, and committed:
+
+```bash
+# Needs curl + libwebp (cwebp, webpinfo): brew install webp | apt install webp.
+# Key: haven/dart_defines/secrets.json, else $STADIA_API_KEY.
+scripts/generate_map_style_previews.sh
+```
+
+The script renders each scene (its centre, zoom and rationale are defined at
+the top of the script) at the preview box's 180 dp height, @2x (960×360 px),
+converts to lossy WebP, verifies each image's size, and replaces the committed
+set only when all of them succeed. Re-run it only to change a scene or a style;
+`test/pages/settings/map_style_preview_assets_test.dart` fails while any
+preview the page can show is missing or mis-sized, and when the script's
+styles or scenes drift from the app's.
+
+**Before committing images, confirm on docs.stadiamaps.com** (the script was
+written without access to Stadia, so its endpoint is unverified):
+
+- which Static Maps endpoint permits *storing* the images inside a distributed
+  app — Stadia's standard static maps may not be stored; its cacheable static
+  maps may be kept while a paid plan is held — and that your plan covers it.
+  Point `STATIC_MAPS_ENDPOINT` at that endpoint;
+- that the request shape (`center`, `zoom`, `size=WxH@2x`, `api_key`) and the
+  zoom convention match, by comparing each image with the map at the same
+  place.
+
+The images are a Produced Work of OpenStreetMap data (ODbL) in Stadia /
+OpenMapTiles styles, so the page shows the same credits and Open Database
+License link as the map (`StaticMapAttribution`). Keep them whenever the
+previews are shown.
+
 Output: `build/app/outputs/flutter-apk/app-debug.apk` (debug) /
 `app-{arm64-v8a,armeabi-v7a,x86_64}-release.apk` (release, per-ABI splits — see
 "Cutting a release" below).

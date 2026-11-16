@@ -604,23 +604,26 @@ void main() {
   // KeyPackage, mark it valid, and carry it into circle creation (§9.5).
   // -------------------------------------------------------------------------
   group('CreateCirclePage — you cannot invite yourself', () {
-    testWidgets('C6. entering your own ID is refused by name, and staged '
-        'nowhere', (tester) async {
-      final mock = MockRelayService(keyPackageResult: _makeKeyPackage('hex'));
-      await tester.pumpWidget(_buildApp(mock));
-      await tester.pumpAndSettle();
+    testWidgets(
+      'C6. entering your own public key is refused by name, and staged '
+      'nowhere',
+      (tester) async {
+        final mock = MockRelayService(keyPackageResult: _makeKeyPackage('hex'));
+        await tester.pumpWidget(_buildApp(mock));
+        await tester.pumpAndSettle();
 
-      await _addMember(tester, _selfNpub);
-      await tester.pumpAndSettle();
+        await _addMember(tester, _selfNpub);
+        await tester.pumpAndSettle();
 
-      final l10n = l10nOf(tester, CreateCirclePage);
-      expect(find.text(l10n.memberPickerReasonSelf), findsOneWidget);
-      expect(find.byType(PendingMemberTile), findsNothing);
-      final button = tester.widget<FilledButton>(
-        find.widgetWithText(FilledButton, 'Continue'),
-      );
-      expect(button.onPressed, isNull);
-    });
+        final l10n = l10nOf(tester, CreateCirclePage);
+        expect(find.text(l10n.memberPickerReasonSelf), findsOneWidget);
+        expect(find.byType(PendingMemberTile), findsNothing);
+        final button = tester.widget<FilledButton>(
+          find.widgetWithText(FilledButton, 'Continue'),
+        );
+        expect(button.onPressed, isNull);
+      },
+    );
 
     testWidgets('C7. the refusal costs no relay lookup, so it holds offline', (
       tester,
@@ -936,17 +939,11 @@ void main() {
         findsOneWidget,
       );
       expect(resolves(profiles), 0);
-      expect(
-        onStagedRow(
-          l10nOf(tester, CreateCirclePage).memberPickerStrangerLookupNote,
-        ),
-        findsNothing,
-        reason: 'nothing was asked, so there is nothing to disclose',
-      );
     });
 
-    testWidgets('CS10. a stranger staged by the paste button carries the '
-        'lookup note under their row, as the typed row does', (tester) async {
+    testWidgets('CS10. a stranger staged by the paste button is looked up '
+        'once, and their row shows the person and status with no note under '
+        'it', (tester) async {
       final handle = tester.ensureSemantics();
       final profiles = cousinProfiles();
       mockClipboard(tester, _testNpub1);
@@ -962,45 +959,31 @@ void main() {
       await tester.tap(find.byIcon(LucideIcons.clipboard));
       await tester.pumpAndSettle();
 
-      final note = l10nOf(
-        tester,
-        CreateCirclePage,
-      ).memberPickerStrangerLookupNote;
+      final ready = l10nOf(tester, CreateCirclePage).pendingMemberReadyToInvite;
       expectStagedPerson('Distant Cousin', _testNpub1);
-      expect(onStagedRow(note), findsOneWidget);
+      // Owner-directed 2026-11-16: the lookup note is gone from the row,
+      // shown and spoken.
+      expect(
+        tester
+            .widgetList<Text>(
+              find.descendant(
+                of: find.byType(PendingMemberTile),
+                matching: find.byType(Text),
+              ),
+            )
+            .map((t) => t.data)
+            .skip(1),
+        ['Distant Cousin', NpubValidator.shortenForDisplay(_testNpub1), ready],
+        reason: 'after the avatar initial: name, key, status, and no more',
+      );
       expect(
         tester
             .getSemantics(find.bySemanticsLabel(RegExp('Distant Cousin')))
             .label,
-        endsWith(', $note'),
-        reason: 'the disclosure is spoken in the row label, not a hint',
+        '\u2068Distant Cousin\u2069, $ready',
       );
       expect(resolves(profiles), 1);
       handle.dispose();
-    });
-
-    testWidgets('CS11. a co-member staged by the paste button carries no '
-        'lookup note', (tester) async {
-      mockClipboard(tester, _aliceNpub);
-      await tester.pumpWidget(
-        _buildApp(
-          MockRelayService(keyPackageResult: _makeKeyPackage('hex')),
-          directory: _aliceDirectory(),
-          profileService: cousinProfiles(),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      await tester.tap(find.byIcon(LucideIcons.clipboard));
-      await tester.pumpAndSettle();
-
-      expectStagedPerson('Alice Aardvark', _aliceNpub);
-      expect(
-        find.text(
-          l10nOf(tester, CreateCirclePage).memberPickerStrangerLookupNote,
-        ),
-        findsNothing,
-      );
     });
 
     testWidgets('CS7. a staged row scrolled out of view and back asks no '
@@ -1044,8 +1027,6 @@ void main() {
       // More rows after it: a sliver list always keeps its last child, so
       // the stranger must not be the last.
       for (final name in ['Member 0', 'Member 1']) {
-        // The stranger's row carries the lookup note, which pushes the
-        // suggestions below the fold of this short view.
         await tester.scrollUntilVisible(
           find.text(name),
           100,

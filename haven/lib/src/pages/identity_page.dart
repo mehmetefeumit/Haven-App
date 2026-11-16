@@ -194,9 +194,9 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
             title: Text(l10n.identityPublicKeyQrTitle),
             subtitle: Text(l10n.identityPublicKeyQrSubtitle),
             trailing: const DisclosureChevron(),
-            onTap: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(builder: (_) => const QrCodePage()),
-            ),
+            onTap: () => Navigator.of(
+              context,
+            ).push(MaterialPageRoute<void>(builder: (_) => const QrCodePage())),
           ),
         ),
 

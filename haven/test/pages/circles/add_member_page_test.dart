@@ -1522,29 +1522,30 @@ void main() {
   // failed open and the self-add was never identified (§9.5).
   // -------------------------------------------------------------------------
   group('AddMemberPage — you cannot invite yourself', () {
-    testWidgets('A6. entering your own ID is refused as YOU, not as a member', (
-      tester,
-    ) async {
-      final mockRelay = MockRelayService(
-        keyPackageResult: _makeKp(_existingMemberHex),
-      );
-      await tester.pumpWidget(
-        _buildApp(
-          circle: _makeCircle(),
-          mockRelay: mockRelay,
-          mockCircle: MockCircleService(),
-        ),
-      );
-      await tester.pumpAndSettle();
+    testWidgets(
+      'A6. entering your own public key is refused as YOU, not as a member',
+      (tester) async {
+        final mockRelay = MockRelayService(
+          keyPackageResult: _makeKp(_existingMemberHex),
+        );
+        await tester.pumpWidget(
+          _buildApp(
+            circle: _makeCircle(),
+            mockRelay: mockRelay,
+            mockCircle: MockCircleService(),
+          ),
+        );
+        await tester.pumpAndSettle();
 
-      await _addMember(tester, _existingMemberNpub);
-      await tester.pumpAndSettle();
+        await _addMember(tester, _existingMemberNpub);
+        await tester.pumpAndSettle();
 
-      final l10n = l10nOf(tester, AddMemberPage);
-      expect(find.text(l10n.memberPickerReasonSelf), findsOneWidget);
-      expect(find.text(l10n.addMemberAlreadyInCircle), findsNothing);
-      expect(find.byType(PendingMemberTile), findsNothing);
-    });
+        final l10n = l10nOf(tester, AddMemberPage);
+        expect(find.text(l10n.memberPickerReasonSelf), findsOneWidget);
+        expect(find.text(l10n.addMemberAlreadyInCircle), findsNothing);
+        expect(find.byType(PendingMemberTile), findsNothing);
+      },
+    );
 
     testWidgets('A7. the refusal costs no relay lookup, so it holds offline', (
       tester,
@@ -1818,30 +1819,35 @@ void main() {
       await tester.pumpAndSettle();
     }
 
-    String lookupNote(WidgetTester tester) =>
-        l10nOf(tester, AddMemberPage).memberPickerStrangerLookupNote;
-
-    testWidgets('S7. a stranger staged by the paste button carries the lookup '
-        'note under their row, even when no profile resolves', (tester) async {
+    testWidgets('S7. a stranger staged by the paste button is looked up once, '
+        'even when no profile resolves, and their row carries no note', (
+      tester,
+    ) async {
       final handle = tester.ensureSemantics();
       final profiles = MockProfileService();
       await pasteStaging(tester, _newMemberNpub, profiles);
 
-      final note = lookupNote(tester);
-      expect(
-        find.descendant(
-          of: find.byType(PendingMemberTile),
-          matching: find.text(note),
-        ),
-        findsOneWidget,
-      );
+      final l10n = l10nOf(tester, AddMemberPage);
+      // Owner-directed 2026-11-16: the lookup note is gone from the row,
+      // shown and spoken.
       expect(
         tester
-            .getSemantics(find.bySemanticsLabel(RegExp('^\u2068npub ')))
-            .label,
-        endsWith(', $note'),
-        reason: 'the disclosure is spoken in the row label, not a hint',
+            .widgetList<Text>(
+              find.descendant(
+                of: find.byType(PendingMemberTile),
+                matching: find.byType(Text),
+              ),
+            )
+            .map((t) => t.data),
+        [
+          NpubValidator.shortenForDisplay(_newMemberNpub),
+          l10n.pendingMemberReadyToInvite,
+        ],
       );
+      final label = tester
+          .getSemantics(find.bySemanticsLabel(RegExp('^\u2068npub ')))
+          .label;
+      expect(label, endsWith('\u2069, ${l10n.pendingMemberReadyToInvite}'));
       expect(
         profiles.methodCalls.where(
           (c) => c.method == 'resolveTypedStrangerProfile',
@@ -1851,8 +1857,8 @@ void main() {
       handle.dispose();
     });
 
-    testWidgets('S8. a co-member staged by the paste button carries no lookup '
-        'note', (tester) async {
+    testWidgets('S8. a co-member staged by the paste button is named from the '
+        'directory and no relay is asked about them', (tester) async {
       final profiles = MockProfileService();
       await pasteStaging(tester, _aliceNpub, profiles);
 
@@ -1863,7 +1869,6 @@ void main() {
         ),
         findsOneWidget,
       );
-      expect(find.text(lookupNote(tester)), findsNothing);
       expect(
         profiles.methodCalls.where(
           (c) => c.method == 'resolveTypedStrangerProfile',

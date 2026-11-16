@@ -6,6 +6,7 @@
 library;
 
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
@@ -48,6 +49,8 @@ const Cubic _kCollapseCurve = Cubic(0.3, 0, 0.8, 0.15);
 /// contents follow — reads as "the surface produced the contents."
 const Interval _kContentFadeInterval = Interval(0.4, 1, curve: Curves.easeOut);
 
+const double _kTriggerVerticalPadding = HavenSpacing.md;
+
 /// On collapse, fade content out faster than the surface contracts so
 /// items disappear before the bottom edge passes through them.
 const Interval _kContentFadeReverseInterval = Interval(
@@ -64,6 +67,20 @@ const Interval _kContentFadeReverseInterval = Interval(
 class CircleSelector extends ConsumerWidget {
   /// Creates a circle selector dropdown.
   const CircleSelector({super.key});
+
+  /// The collapsed trigger row's height, the same with or without a
+  /// selection, at the current text scale: what the collapsed sheet must fit.
+  static double triggerHeight(BuildContext context) {
+    final line = TextPainter(
+      text: TextSpan(text: ' ', style: Theme.of(context).textTheme.titleSmall),
+      textScaler: MediaQuery.textScalerOf(context),
+      textDirection: Directionality.of(context),
+    )..layout();
+    final height = line.height;
+    line.dispose();
+    return 2 * _kTriggerVerticalPadding +
+        math.max(_CircleAvatar.diameter, height);
+  }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -448,7 +465,7 @@ class _TriggerRow extends StatelessWidget {
               child: Padding(
                 padding: const EdgeInsets.symmetric(
                   horizontal: HavenSpacing.base,
-                  vertical: HavenSpacing.md,
+                  vertical: _kTriggerVerticalPadding,
                 ),
                 child: Row(
                   children: [

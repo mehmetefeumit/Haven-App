@@ -31,10 +31,10 @@ import 'package:haven/src/widgets/identity/display_name_card.dart';
 import 'package:haven/src/widgets/identity/identity_photo_header.dart';
 import 'package:haven/src/widgets/identity/npub_qr_code.dart';
 import 'package:haven/src/widgets/identity/public_profile_notice.dart';
-import 'package:haven/src/widgets/identity/reachability_status_row.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../helpers/accessibility_announcements.dart';
+import '../helpers/no_readiness_row.dart';
 import '../mocks/mock_profile_service.dart';
 
 class _FakeIdentityService implements IdentityService {
@@ -135,16 +135,15 @@ void main() {
       expect(find.byType(DisplayNameCard), findsOneWidget);
     });
 
-    testWidgets(
-      'shows the combined public-profile disclosure notice',
-      (tester) async {
-        await tester.pumpWidget(build());
-        await tester.pumpAndSettle();
+    testWidgets('shows the combined public-profile disclosure notice', (
+      tester,
+    ) async {
+      await tester.pumpWidget(build());
+      await tester.pumpAndSettle();
 
-        expect(find.byType(PublicProfileNotice), findsOneWidget);
-        expect(find.text('Profile is public'), findsOneWidget);
-      },
-    );
+      expect(find.byType(PublicProfileNotice), findsOneWidget);
+      expect(find.text('Profile is public'), findsOneWidget);
+    });
 
     testWidgets(
       'never shows a Public Profile toggle — publishing is unconditional',
@@ -157,9 +156,7 @@ void main() {
       },
     );
 
-    testWidgets('lists the Public Key QR and Advanced entries', (
-      tester,
-    ) async {
+    testWidgets('lists the Public Key QR and Advanced entries', (tester) async {
       await tester.pumpWidget(build());
       await tester.pumpAndSettle();
 
@@ -172,22 +169,13 @@ void main() {
       expect(find.text('Advanced'), findsOneWidget);
     });
 
-    testWidgets('the Public Key QR entry says whether others can invite you', (
-      tester,
-    ) async {
-      await tester.pumpWidget(build());
-      await tester.pumpAndSettle();
-
-      expect(
-        find.descendant(
-          of: find.ancestor(
-            of: find.text('Public Key QR'),
-            matching: find.byType(Card),
-          ),
-          matching: find.byType(ReachabilityStatusRow),
-        ),
-        findsOneWidget,
+    testWidgets('shows no readiness row, Retry or Relay settings link in any '
+        'readiness state', (tester) async {
+      await expectNoReadinessRow(
+        tester,
+        (overrides) => build(extraOverrides: overrides),
       );
+      expect(find.text('Public Key QR'), findsOneWidget);
     });
 
     testWidgets('shows the refresh action in the app bar', (tester) async {
@@ -240,9 +228,7 @@ void main() {
         // Removal is in flight (gated) — the photo header is busy.
         expect(
           tester
-              .widget<TextButton>(
-                find.widgetWithText(TextButton, 'Edit Photo'),
-              )
+              .widget<TextButton>(find.widgetWithText(TextButton, 'Edit Photo'))
               .onPressed,
           isNull,
           reason: '_busy must disable the picker actions while removing',
@@ -371,7 +357,8 @@ void main() {
                 )
                 .onPressed,
             isNotNull,
-            reason: 'a publish state ($name) must never disable picking a '
+            reason:
+                'a publish state ($name) must never disable picking a '
                 'new photo',
           );
 
@@ -380,7 +367,8 @@ void main() {
           expect(
             announcements,
             isEmpty,
-            reason: 'a publish state ($name), or a sync finishing, must '
+            reason:
+                'a publish state ($name), or a sync finishing, must '
                 'never be spoken',
           );
           await tester.pumpWidget(const SizedBox());
@@ -397,13 +385,15 @@ void main() {
           expect(
             visible[name],
             visible[baseline],
-            reason: 'what the page shows differs between "$baseline" and '
+            reason:
+                'what the page shows differs between "$baseline" and '
                 '"$name"',
           );
           expect(
             semantics[name],
             semantics[baseline],
-            reason: 'what a screen reader hears differs between "$baseline" '
+            reason:
+                'what a screen reader hears differs between "$baseline" '
                 'and "$name"',
           );
         }

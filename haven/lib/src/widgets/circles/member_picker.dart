@@ -602,7 +602,6 @@ class _TypedStrangerRow extends ConsumerWidget {
     }
     final name = _nameOf(profile);
     final shortNpub = NpubValidator.shortenForDisplay(npub);
-    final lookupNote = l10n.memberPickerStrangerLookupNote;
     final status = name != null
         ? null
         : isLoading
@@ -643,12 +642,9 @@ class _TypedStrangerRow extends ConsumerWidget {
       button: true,
       excludeSemantics: true,
       onTap: () => onSelected(npub),
-      // The note stays in the LABEL, not a hint: hints can be switched off,
-      // and it is a privacy disclosure.
       label: [
         bidiIsolate(name ?? chunkNpubForSpeech(shortNpub)),
         ?status,
-        lookupNote,
       ].join(', '),
       customSemanticsActions: {
         // Same reasoning as `MemberCandidateTile`: a resolved name keeps the
@@ -676,7 +672,6 @@ class _TypedStrangerRow extends ConsumerWidget {
                 ),
               ),
             if (status != null) Text(status, style: secondaryStyle),
-            Text(lookupNote, style: secondaryStyle),
           ],
         ),
         onTap: () => onSelected(npub),
