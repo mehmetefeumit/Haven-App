@@ -681,7 +681,16 @@
 #     runners; this static half is what stops a hatch being added quietly. It
 #     also rejects any static `skip:` there, because the ABSENCE of one is the
 #     premise that lets a lane read a non-zero `~N` column as a lost proof —
-#     asserted here rather than argued in prose.
+#     asserted here rather than argued in prose. The same step reconciles
+#     tooling/e2e/expected_drive_markers.txt, the end markers a lane requires
+#     of every scenario it registers, and holds every runner that drives a
+#     marked target to the runtime check.
+#
+#   Flag-guarded test bodies          scripts/ci/check_no_flag_guarded_test_bodies.sh
+#     Enforcing, plus a fixture --self-test: no test body under
+#     haven/integration_test begins with `if (!flag) return;` — on every build
+#     where the flag is off such a test does nothing and is reported PASSED.
+#     A build-specific scenario is registered only on its build instead.
 #
 #   Fresh-install broadcast barrier   tooling/e2e/ci/app-install-lib.sh
 #     A fresh install's PACKAGE_ADDED can relaunch MainActivity under
@@ -2042,6 +2051,16 @@ jobs:
       - name: Integration-test skip hatches are declared
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/drive-log-lib.sh --check-manifest
+
+      # A body that begins `if (!flag) return;` passes, having done nothing, on
+      # every build where the flag is off — e2e_combined.dart carried eight.
+      # The fixtures cover the M11 wrappers and keep helper early returns and a
+      # wrapper's own registration gate out of it.
+      - name: No integration-test body returns on a flag
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: |
+          bash scripts/ci/check_no_flag_guarded_test_bodies.sh --self-test
+          bash scripts/ci/check_no_flag_guarded_test_bodies.sh
 
       # Guards the B1 lane's publish-count PARSER. Its critical fixture is the
       # `Published to 0/1` line — P0-1's own signature, which a substring grep
