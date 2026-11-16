@@ -21,7 +21,7 @@ use haven_core::relay::scripted_relay::{Frame, ScriptedRelay, Verdict};
 use haven_core::relay::{DeviceClockComplaint, RelayManager, OFFER_ACK_TIMEOUT};
 use helpers::{assert_no_needles, assert_some_line_from, capture_haven_log_here, haven_core_lines};
 use nostr::nips::nip19::ToBech32 as _;
-use nostr::{Event, EventBuilder, Filter, JsonUtil as _, Keys, Kind, Tag};
+use nostr::{Event, EventBuilder, Filter, JsonUtil as _, Keys, Kind, Tag, Timestamp};
 use OwnCell::{Checking, Current, Missing, NoAnswer, Outdated, Publishing, Refused, Unconfirmed};
 
 /// Bounds the wait for an `OK` only where none can come.
@@ -100,7 +100,11 @@ async fn a_cell_waits_for_its_own_relays_ok_after_checking_and_judging() {
     let board = OwnRelayBoard::default();
     let [a, b, c] = [0, 1, 2].map(|i| configured[i].clone());
 
-    let mut pass = board.begin(OwnKind::InboxRelayList, &configured);
+    let mut pass = board.begin(
+        OwnKind::InboxRelayList,
+        board.generation(OwnKind::InboxRelayList),
+        &configured,
+    );
     assert_eq!(
         inbox_cells(&board),
         [
@@ -217,7 +221,11 @@ async fn every_answer_settles_its_cell_by_what_the_probe_proved() {
         relay.on_publish(move |_| case.verdict());
         let board = OwnRelayBoard::default();
         let target = [relay.url().to_owned()];
-        let mut pass = board.begin(OwnKind::InboxRelayList, &target);
+        let mut pass = board.begin(
+            OwnKind::InboxRelayList,
+            board.generation(OwnKind::InboxRelayList),
+            &target,
+        );
         pass.judge(&[relay_answer(relay.url())], |_| probed);
         let offered = pass
             .offer(&manager, &event, &target, OfferMode::Heal, NEVER)
@@ -244,7 +252,11 @@ async fn every_answer_settles_its_cell_by_what_the_probe_proved() {
     )];
     drop(listener);
     let board = OwnRelayBoard::default();
-    let mut pass = board.begin(OwnKind::InboxRelayList, &dead);
+    let mut pass = board.begin(
+        OwnKind::InboxRelayList,
+        board.generation(OwnKind::InboxRelayList),
+        &dead,
+    );
     pass.judge(&[relay_answer(&dead[0])], |_| Probed::Missing);
     pass.offer(&manager, &event, &dead, OfferMode::Heal, NEVER)
         .await;
@@ -275,7 +287,11 @@ async fn a_replacement_settles_what_turns_on_the_promotion_only_after_it() {
         lacking.on_publish(|_| Verdict::Refuse("blocked: no".into()));
         let targets = urls(&[&serving, &lacking]);
         let board = OwnRelayBoard::default();
-        let mut pass = board.begin(OwnKind::KeyPackage, &targets);
+        let mut pass = board.begin(
+            OwnKind::KeyPackage,
+            board.generation(OwnKind::KeyPackage),
+            &targets,
+        );
         pass.judge(
             &[relay_answer(&targets[0]), relay_answer(&targets[1])],
             |answer| {
@@ -323,7 +339,11 @@ async fn a_pass_dropped_mid_offer_leaves_nothing_checking_or_publishing() {
     let event = inbox_list(&own, &targets);
     let board = OwnRelayBoard::default();
     {
-        let mut pass = board.begin(OwnKind::KeyPackage, &targets);
+        let mut pass = board.begin(
+            OwnKind::KeyPackage,
+            board.generation(OwnKind::KeyPackage),
+            &targets,
+        );
         pass.judge(&[relay_answer(&targets[0])], |_| Probed::Current);
         let offer = pass.offer(
             &manager,
@@ -371,7 +391,11 @@ async fn a_clock_refusal_is_reported_only_when_no_relay_accepted() {
     ] {
         let targets = urls(&relays);
         let board = OwnRelayBoard::default();
-        let mut pass = board.begin(OwnKind::KeyPackage, &targets);
+        let mut pass = board.begin(
+            OwnKind::KeyPackage,
+            board.generation(OwnKind::KeyPackage),
+            &targets,
+        );
         let offered = pass
             .offer(&manager, &event, &targets, OfferMode::Mint, NEVER)
             .await;
@@ -393,7 +417,11 @@ async fn a_healed_relay_reads_current_at_the_next_pass_and_is_sent_nothing() {
     let board = OwnRelayBoard::default();
     // Two passes, each as the relay-list pass runs one.
     for pass_number in 0..2 {
-        let mut pass = board.begin(OwnKind::InboxRelayList, &configured);
+        let mut pass = board.begin(
+            OwnKind::InboxRelayList,
+            board.generation(OwnKind::InboxRelayList),
+            &configured,
+        );
         probe(&mut pass, &manager, &own, &configured).await;
         let judged = inbox_cells(&board);
         let lacking: Vec<String> = judged
@@ -455,7 +483,11 @@ async fn a_pass_logs_no_relay_no_account_and_no_relay_prose() {
     let board = OwnRelayBoard::default();
 
     let lines = capture_haven_log_here(async {
-        let mut pass = board.begin(OwnKind::InboxRelayList, &configured);
+        let mut pass = board.begin(
+            OwnKind::InboxRelayList,
+            board.generation(OwnKind::InboxRelayList),
+            &configured,
+        );
         probe(&mut pass, &manager, &own, &configured).await;
         assert_eq!(
             inbox_cells(&board)
@@ -495,6 +527,208 @@ async fn a_pass_logs_no_relay_no_account_and_no_relay_prose() {
         assert!(
             !rendered.contains(needle.as_str()),
             "the board renders a relay: {rendered}"
+        );
+    }
+}
+
+fn kind_cells(board: &OwnRelayBoard, kind: OwnKind) -> Vec<OwnCell> {
+    let snapshot = board.snapshot();
+    let cells = match kind {
+        OwnKind::KeyPackage => snapshot.key_package.cells,
+        OwnKind::RelayList => snapshot.relay_list.cells,
+        OwnKind::InboxRelayList => snapshot.inbox_relay_list.cells,
+    };
+    cells.into_iter().map(|cell| cell.status).collect()
+}
+
+/// An own event of `kind` dated `at`, carrying `tags`.
+fn signed_at(keys: &Keys, kind: Kind, tags: Vec<Tag>, at: u64) -> Event {
+    EventBuilder::new(kind, "")
+        .tags(tags)
+        .custom_created_at(Timestamp::from_secs(at))
+        .sign_with_keys(keys)
+        .expect("a locally built event signs")
+}
+
+/// A relay serving an older copy of the user's own event reads outdated
+/// once judged, publishing while the replacement's `OK` is held, and current
+/// only once that `OK` comes: for the inbox list (an older list naming another
+/// relay) and for the `KeyPackage` (an older package in the tracked slot).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_outdated_copy_reads_outdated_then_publishing_until_its_relays_ok() {
+    use haven_core::nostr::mls::TrackedKeyPackage;
+    use haven_core::relay::maintenance::{
+        serves_tracked_package, KeyPackageLifetime, TrackedKpLifetime, KIND_MARMOT_KEY_PACKAGE,
+    };
+    const SLOT: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
+    let own = Keys::generate();
+    let manager = RelayManager::new();
+    let kp = Kind::Custom(KIND_MARMOT_KEY_PACKAGE);
+    let slot = || vec![Tag::parse(["d", SLOT]).expect("a d tag")];
+    let older_package = signed_at(&own, kp, slot(), 1_000);
+    let tracked_package = signed_at(&own, kp, slot(), 2_000);
+    let tracked = TrackedKeyPackage {
+        slot: SLOT.to_owned(),
+        published: Some(tracked_package.clone()),
+        created_at: Some(tracked_package.created_at.as_secs()),
+        package: vec![1],
+        pending: None,
+        adopted: false,
+        replacement_owed: false,
+        consumed_but_held: false,
+    };
+    let lifetime = TrackedKpLifetime::Known(KeyPackageLifetime::new(0, u64::MAX));
+
+    for kind in [OwnKind::InboxRelayList, OwnKind::KeyPackage] {
+        let relay = ScriptedRelay::start();
+        let configured = urls(&[&relay]);
+        let (wire_kind, served, offered, limit) = if kind == OwnKind::KeyPackage {
+            (kp, older_package.clone(), tracked_package.clone(), 64)
+        } else {
+            let other = Tag::parse(["relay", "wss://other.example.com"]).expect("a relay tag");
+            let older = signed_at(&own, Kind::InboxRelays, vec![other], 1_000);
+            (Kind::InboxRelays, older, inbox_list(&own, &configured), 4)
+        };
+        relay.answer(|_| true, vec![Frame::Event(served), Frame::Eose]);
+        let (release, released) = tokio::sync::watch::channel(false);
+        relay.on_publish(move |_| Verdict::HoldThen(released.clone(), Box::new(Verdict::Keep)));
+        let current = |mine: &[&Event]| {
+            if kind == OwnKind::KeyPackage {
+                serves_tracked_package(mine, Some(&tracked), lifetime)
+            } else {
+                names_configured_list(mine, &configured)
+            }
+        };
+        let board = OwnRelayBoard::default();
+
+        let mut pass = board.begin(kind, board.generation(kind), &configured);
+        let answers = manager
+            .fetch_events_per_relay(
+                Filter::new()
+                    .kind(wire_kind)
+                    .author(own.public_key())
+                    .limit(limit),
+                &configured,
+            )
+            .await
+            .expect("the per-relay read never fails as a whole");
+        pass.judge(&answers, |answer| {
+            probe_verdict(answer, &own.public_key(), wire_kind, &current)
+        });
+        assert_eq!(kind_cells(&board, kind), [Outdated], "{kind:?}");
+
+        let offer = pass.offer(
+            &manager,
+            &offered,
+            &configured,
+            OfferMode::Heal,
+            OFFER_ACK_TIMEOUT,
+        );
+        let watch = async {
+            while !relay.published().iter().any(|event| event.id == offered.id) {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                kind_cells(&board, kind),
+                [Publishing],
+                "{kind:?}: the relay holds the event; its OK is all that is missing"
+            );
+            release.send(true).expect("the relay listens");
+        };
+        let (sent, ()) = tokio::join!(offer, watch);
+        drop(pass);
+        assert_eq!(kind_cells(&board, kind), [Current], "{kind:?}");
+        assert_eq!(sent.accepted, configured, "{kind:?}");
+    }
+}
+
+/// A relay that took the probe's `REQ` and never ended it proved nothing of
+/// what it holds: the pass's own decision offers it the list, and its cell
+/// reads current only on its `OK`; silence leaves it unknown, never green. A
+/// relay proven current is offered nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_relay_that_never_ends_its_req_is_offered_and_reads_current_only_on_its_ok() {
+    use haven_core::relay::maintenance::{
+        decide_relay_list, RelayListDecision, RelayListPerRelay, RelayListSnapshot,
+    };
+    let own = Keys::generate();
+    let manager = RelayManager::new();
+    for (answer, expected) in [(Answer::Silence, NoAnswer), (Answer::Keep, Current)] {
+        let (served, stalled) = (ScriptedRelay::start(), ScriptedRelay::start());
+        let configured = urls(&[&served, &stalled]);
+        let list = inbox_list(&own, &configured);
+        served.answer(|_| true, vec![Frame::Event(list.clone()), Frame::Eose]);
+        stalled.answer(|_| true, Vec::new());
+        stalled.on_publish(move |_| answer.verdict());
+        let board = OwnRelayBoard::default();
+
+        let mut pass = board.begin(
+            OwnKind::InboxRelayList,
+            board.generation(OwnKind::InboxRelayList),
+            &configured,
+        );
+        // Only the stalled relay's REQ can run into this bound.
+        let answers = manager
+            .fetch_events_per_relay_within(
+                Filter::new()
+                    .kind(Kind::InboxRelays)
+                    .author(own.public_key())
+                    .limit(4),
+                &configured,
+                NEVER,
+            )
+            .await
+            .expect("the per-relay read never fails as a whole");
+        assert!(answers[1].responded && !answers[1].drained, "premise");
+        let verdicts = pass.judge(&answers, |answer| {
+            probe_verdict(answer, &own.public_key(), Kind::InboxRelays, &|mine| {
+                names_configured_list(mine, &configured)
+            })
+        });
+        assert_eq!(
+            inbox_cells(&board),
+            [
+                (configured[0].clone(), Current),
+                (configured[1].clone(), NoAnswer)
+            ]
+        );
+
+        let snapshot = RelayListSnapshot {
+            reset_acknowledged: true,
+            publish_enabled: true,
+            responders: answers
+                .iter()
+                .zip(&verdicts)
+                .filter(|(answer, _)| answer.responded)
+                .map(|(answer, verdict)| RelayListPerRelay {
+                    relay_url: answer.relay_url.clone(),
+                    own: true,
+                    healthy: *verdict == Probed::Current,
+                })
+                .collect(),
+            configured_relays: configured.clone(),
+        };
+        let RelayListDecision::Republish { targets } = decide_relay_list(&snapshot) else {
+            panic!("a relay not proven current is a target");
+        };
+        assert_eq!(targets, [answers[1].relay_url.clone()], "{answer:?}");
+        pass.offer(&manager, &list, &targets, OfferMode::Heal, NEVER)
+            .await;
+        drop(pass);
+
+        assert_eq!(
+            inbox_cells(&board),
+            [
+                (configured[0].clone(), Current),
+                (configured[1].clone(), expected)
+            ],
+            "{answer:?}"
+        );
+        assert_eq!(stalled.offers(), 1, "{answer:?}");
+        assert_eq!(
+            served.offers(),
+            0,
+            "the relay proven current is sent nothing"
         );
     }
 }

@@ -551,8 +551,6 @@ fn junk(h: &str, count: usize, secs: u64) -> Vec<Event> {
         .collect()
 }
 
-/// What the relay-list heal sends `relay` for `lists`: the probe of the
-/// author's own list, then the list.
 /// What the maintenance passes' probe of `kind` reads from each of `relays`.
 async fn own_probe(
     pool: &RelayManager,
@@ -566,6 +564,8 @@ async fn own_probe(
         .expect("the per-relay read never fails as a whole")
 }
 
+/// What the relay-list heal sends `relay` for `lists`: the probe of the
+/// author's own list, then the list.
 async fn heal_onto(device: &Device, relay: &str, lists: &[&Event]) {
     for event in lists {
         let probe = Filter::new()

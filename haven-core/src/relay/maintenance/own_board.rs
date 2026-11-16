@@ -115,8 +115,8 @@ pub enum OfferMode {
     Mint,
 }
 
-/// What an offer's relays did.
-#[derive(Debug, Default)]
+/// What an offer's relays did. No `Debug`: it holds relay URLs (Rule 15).
+#[derive(Default)]
 pub struct Offered {
     /// The targets that returned `OK true`, as they were given.
     pub accepted: Vec<String>,
@@ -275,12 +275,23 @@ impl OwnRelayBoard {
         Running(&self.running)
     }
 
-    /// Records that nothing of `kind` is published now, and why.
-    pub fn hold(&self, kind: OwnKind, hold: OwnHold) {
+    /// Where `kind` stands: a pass takes it before it reads the list it acts
+    /// on and hands it to [`Self::hold`] or [`Self::begin`], so a list edit
+    /// landing after that read leaves the pass writing nothing.
+    #[must_use]
+    pub fn generation(&self, kind: OwnKind) -> u64 {
+        self.with_kind(kind, |board| board.generation)
+    }
+
+    /// Records that nothing of `kind` is published now, and why, unless a
+    /// write since `seen` superseded the pass.
+    pub fn hold(&self, kind: OwnKind, seen: u64, hold: OwnHold) {
         let now = (self.clock)();
         self.with_kind(kind, |board| {
-            board.replace(Some(hold));
-            board.finished = Some(now);
+            if board.generation == seen {
+                board.replace(Some(hold));
+                board.finished = Some(now);
+            }
         });
     }
 
@@ -299,10 +310,15 @@ impl OwnRelayBoard {
     }
 
     /// Begins a pass of `kind` over `targets`: each is `Checking`, every
-    /// other cell and any hold is gone.
+    /// other cell and any hold is gone. A pass a write since `seen`
+    /// superseded writes nothing at all.
     #[must_use]
-    pub fn begin(&self, kind: OwnKind, targets: &[String]) -> OwnPass<'_> {
+    pub fn begin(&self, kind: OwnKind, seen: u64, targets: &[String]) -> OwnPass<'_> {
         let generation = self.with_kind(kind, |board| {
+            if board.generation != seen {
+                // Generations only grow, so `seen` never matches again.
+                return seen;
+            }
             board.replace(None);
             for target in targets {
                 let key = dedup_key(target);
@@ -701,7 +717,11 @@ mod tests {
             "wss://b.example.com".to_owned(),
             "wss://c.example.com".to_owned(),
         ];
-        let mut pass = board.begin(OwnKind::RelayList, &targets);
+        let mut pass = board.begin(
+            OwnKind::RelayList,
+            board.generation(OwnKind::RelayList),
+            &targets,
+        );
         assert_eq!(
             cells(&board.snapshot().relay_list),
             [
@@ -751,8 +771,16 @@ mod tests {
     #[test]
     fn a_hold_empties_its_kind_and_the_next_pass_lifts_it() {
         let (board, secs) = board_at();
-        drop(board.begin(OwnKind::KeyPackage, &[GONE.to_owned()]));
-        board.hold(OwnKind::KeyPackage, OwnHold::AwaitingResetAcknowledgement);
+        drop(board.begin(
+            OwnKind::KeyPackage,
+            board.generation(OwnKind::KeyPackage),
+            &[GONE.to_owned()],
+        ));
+        board.hold(
+            OwnKind::KeyPackage,
+            board.generation(OwnKind::KeyPackage),
+            OwnHold::AwaitingResetAcknowledgement,
+        );
         secs.store(30, Ordering::SeqCst);
         let held = board.snapshot().key_package;
         assert_eq!(held.hold, Some(OwnHold::AwaitingResetAcknowledgement));
@@ -763,7 +791,11 @@ mod tests {
             "a held pass is a finished one"
         );
 
-        let pass = board.begin(OwnKind::KeyPackage, &[GONE.to_owned()]);
+        let pass = board.begin(
+            OwnKind::KeyPackage,
+            board.generation(OwnKind::KeyPackage),
+            &[GONE.to_owned()],
+        );
         assert_eq!(board.snapshot().key_package.hold, None);
         drop(pass);
         assert_eq!(board.snapshot().key_package.checked_secs_ago, Some(0));
@@ -772,7 +804,11 @@ mod tests {
     #[test]
     fn checked_secs_ago_reads_the_monotonic_clock_from_the_end_of_the_last_pass() {
         let (board, secs) = board_at();
-        let pass = board.begin(OwnKind::InboxRelayList, &[]);
+        let pass = board.begin(
+            OwnKind::InboxRelayList,
+            board.generation(OwnKind::InboxRelayList),
+            &[],
+        );
         secs.store(5, Ordering::SeqCst);
         drop(pass);
         secs.store(605, Ordering::SeqCst);
@@ -790,7 +826,11 @@ mod tests {
     #[test]
     fn a_list_edit_supersedes_the_pass_in_flight_and_it_writes_nothing_more() {
         let (board, secs) = board_at();
-        let mut pass = board.begin(OwnKind::RelayList, &[GONE.to_owned()]);
+        let mut pass = board.begin(
+            OwnKind::RelayList,
+            board.generation(OwnKind::RelayList),
+            &[GONE.to_owned()],
+        );
         board.clear(OwnKind::RelayList);
         pass.judge(&[answered(GONE, true)], |_| Probed::Current);
         secs.store(9, Ordering::SeqCst);
@@ -806,6 +846,30 @@ mod tests {
         );
     }
 
+    /// A list edit that lands after a pass read the list, before it began,
+    /// leaves that pass writing nothing: no cell, no hold, no finish.
+    #[test]
+    fn a_list_edit_before_the_pass_begins_leaves_it_writing_nothing() {
+        let (board, _) = board_at();
+        let seen = board.generation(OwnKind::InboxRelayList);
+        board.clear(OwnKind::InboxRelayList);
+        let mut pass = board.begin(OwnKind::InboxRelayList, seen, &[GONE.to_owned()]);
+        assert!(board.snapshot().inbox_relay_list.cells.is_empty());
+        pass.judge(&[answered(GONE, true)], |_| Probed::Current);
+        drop(pass);
+        board.hold(OwnKind::InboxRelayList, seen, OwnHold::NoRelaysConfigured);
+        let kind = board.snapshot().inbox_relay_list;
+        assert!(
+            kind.cells.is_empty(),
+            "judged against the old list: {kind:?}"
+        );
+        assert_eq!(kind.hold, None, "held for the old list");
+        assert_eq!(
+            kind.checked_secs_ago, None,
+            "a superseded pass finished nothing"
+        );
+    }
+
     #[test]
     fn forgetting_one_relay_keeps_the_pass_writing_the_others() {
         let (board, _) = board_at();
@@ -813,7 +877,11 @@ mod tests {
             "wss://a.example.com".to_owned(),
             "wss://b.example.com".to_owned(),
         );
-        let mut pass = board.begin(OwnKind::KeyPackage, &[a.clone(), b.clone()]);
+        let mut pass = board.begin(
+            OwnKind::KeyPackage,
+            board.generation(OwnKind::KeyPackage),
+            &[a.clone(), b.clone()],
+        );
         board.forget(OwnKind::KeyPackage, "WSS://A.example.com");
         pass.judge(&[answered(&a, true), answered(&b, true)], |_| {
             Probed::Missing
@@ -849,10 +917,18 @@ mod tests {
         };
         crate::assert_debug_redacted!(&cell, "OwnRelayCell", &[RELAY, "private.relay.example.com"]);
         let board = OwnRelayBoard::default();
-        let mut pass = board.begin(OwnKind::RelayList, &[RELAY.to_owned()]);
+        let mut pass = board.begin(
+            OwnKind::RelayList,
+            board.generation(OwnKind::RelayList),
+            &[RELAY.to_owned()],
+        );
         pass.judge(&[answered(RELAY, true)], |_| Probed::Missing);
         drop(pass);
-        board.hold(OwnKind::KeyPackage, OwnHold::NoRelaysConfigured);
+        board.hold(
+            OwnKind::KeyPackage,
+            board.generation(OwnKind::KeyPackage),
+            OwnHold::NoRelaysConfigured,
+        );
         crate::assert_debug_redacted!(
             &board.snapshot(),
             "OwnBoardSnapshot",

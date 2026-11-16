@@ -8656,6 +8656,53 @@ mod tests {
         );
     }
 
+    /// A restore or a wipe may change every entry of the list it resets, so
+    /// it forgets every cell of that list's kinds, the `KeyPackage` cells of a
+    /// `KeyPackage`-list reset included, and nothing of the other list.
+    #[tokio::test]
+    async fn a_restore_or_a_wipe_forgets_every_cell_of_the_kinds_its_list_carries() {
+        use crate::circle::relay_prefs::RelayType;
+        use crate::relay::maintenance::{OwnKind, Probed};
+        let relays = [
+            "wss://a.example.com".to_owned(),
+            "wss://b.example.com".to_owned(),
+        ];
+        let answers: Vec<_> = relays
+            .iter()
+            .map(|relay_url| crate::relay::RelayFetchOutcome {
+                relay_url: relay_url.clone(),
+                responded: true,
+                drained: true,
+                events: Vec::new(),
+            })
+            .collect();
+        let resets: [fn(&CircleManager, RelayType) -> Result<()>; 2] = [
+            CircleManager::restore_relay_defaults_for,
+            CircleManager::wipe_and_reset_relay_defaults_for,
+        ];
+        for reset in resets {
+            let (manager, _keys, _dir) = create_test_manager();
+            let board = manager.own_relay_board();
+            for kind in [
+                OwnKind::KeyPackage,
+                OwnKind::RelayList,
+                OwnKind::InboxRelayList,
+            ] {
+                let mut pass = board.begin(kind, board.generation(kind), &relays);
+                pass.judge(&answers, |_| Probed::Current);
+            }
+
+            reset(&manager, RelayType::KeyPackage).expect("reset the KeyPackage list");
+            let after = board.snapshot();
+            assert!(after.key_package.cells.is_empty(), "{after:?}");
+            assert!(after.relay_list.cells.is_empty(), "{after:?}");
+            assert_eq!(after.inbox_relay_list.cells.len(), 2, "{after:?}");
+
+            reset(&manager, RelayType::Inbox).expect("reset the inbox list");
+            assert!(board.snapshot().inbox_relay_list.cells.is_empty());
+        }
+    }
+
     // ── Welcome-delivery cascade ─────────────────────────────────────────────
 
     #[tokio::test]

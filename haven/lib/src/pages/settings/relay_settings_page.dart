@@ -64,9 +64,6 @@ class _RelaySettingsPageState extends ConsumerState<RelaySettingsPage> {
   /// The relay the user just added, normalized, until its check settles.
   String? _added;
 
-  /// Whether [_added] has been seen checking or publishing.
-  bool _addedSeenBusy = false;
-
   @override
   void initState() {
     super.initState();
@@ -114,10 +111,8 @@ class _RelaySettingsPageState extends ConsumerState<RelaySettingsPage> {
     }
   }
 
-  void _onRelayAdded(String url) {
-    _added = normalizeRelayUrlForComparison(url);
-    _addedSeenBusy = false;
-  }
+  void _onRelayAdded(String url) =>
+      _added = normalizeRelayUrlForComparison(url);
 
   /// One announcement when a pass settles, and one for a relay the user just
   /// added once its own check settles — never one per symbol.
@@ -126,27 +121,29 @@ class _RelaySettingsPageState extends ConsumerState<RelaySettingsPage> {
     final l10n = AppLocalizations.of(context);
     final messages = <String>[];
     final added = _added;
-    if (added != null) {
-      final row = _rowFor(next, added);
-      if (row != null) {
-        if (row.expected.any(_unsettled)) {
-          _addedSeenBusy |= row.expected.any(_busy);
-        } else if (_addedSeenBusy) {
-          final host = row.relayUrl.replaceFirst('wss://', '');
-          messages.add(
-            row.expected.every((k) => k == KindPresence.current)
-                ? l10n.relaySettingsAddedRelayUpToDate(host)
-                : l10n.relaySettingsAddedRelayNotUpToDate(host),
-          );
-          _added = null;
-        }
-      }
+    // The add cleared the new row's cells in the same call as the write, so a
+    // settled row now is a pass's verdict on it, however fast that pass was.
+    final row = added == null ? null : _rowFor(next, added);
+    if (row != null && !next.running && !row.expected.any(_unsettled)) {
+      final host = row.relayUrl.replaceFirst('wss://', '');
+      messages.add(
+        row.expected.every((k) => k == KindPresence.current)
+            ? l10n.relaySettingsAddedRelayUpToDate(host)
+            : l10n.relaySettingsAddedRelayNotUpToDate(host),
+      );
+      _added = null;
     }
-    if ((previous?.busy ?? false) && !next.busy) {
+    // A pass has stretches where no symbol moves — a KeyPackage being made,
+    // the next kind not begun — so only the board's own flag says it ended.
+    final wasActive = previous != null && (previous.busy || previous.running);
+    if (wasActive && !next.busy && !next.running) {
       final notCurrent = next.relays
           .where((r) => r.expected.any((k) => k != KindPresence.current))
           .length;
       messages.add(l10n.relaySettingsCheckSettled(notCurrent));
+      // A pass that ended without judging the added relay (it failed first,
+      // or the relay is gone) leaves its outcome to this count.
+      _added = null;
     }
     final view = View.of(context);
     final direction = Directionality.of(context);
@@ -219,10 +216,10 @@ class _RelaySettingsPageState extends ConsumerState<RelaySettingsPage> {
   }
 }
 
-bool _busy(KindPresence k) =>
-    k == KindPresence.checking || k == KindPresence.publishing;
-
-bool _unsettled(KindPresence k) => _busy(k) || k == KindPresence.notChecked;
+bool _unsettled(KindPresence k) =>
+    k == KindPresence.checking ||
+    k == KindPresence.publishing ||
+    k == KindPresence.notChecked;
 
 /// Curated profile-pool URLs (normalized), computed once rather than on
 /// every rebuild of [_RelaySection]. Haven re-admits these regardless of the

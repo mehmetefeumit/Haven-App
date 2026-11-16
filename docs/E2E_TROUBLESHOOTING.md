@@ -1824,9 +1824,11 @@ log-privacy gate vouched for and the workflow scanned again — never the
 ## Failure mode 28 — `e2e-relay-management`'s status target is red
 
 The last runner invocation of `Run relay-management tests on the emulator`
-drives `integration_test/relay_management_status_test.dart` alone (its own 25m
-drive bound, evidence under `relay-mgmt-logs/status/`). It runs the real app
-against R1, R2 and the `haven-fault-relay` processes
+drives `integration_test/relay_management_status_test.dart` alone (its own 27m
+drive bound, evidence under `relay-mgmt-logs/status/`). It runs whatever the
+four customization targets before it ended on, and the step is red if either
+invocation was. It runs the real app against R1, R2 and the `haven-fault-relay`
+processes
 (`tooling/e2e/local-relay/src/fault.rs`), named by `HAVEN_E2E_FAULT_RELAYS` as
 `<role>=<mode>@<port>` on host loopback, which the emulator dials at
 `10.0.2.2`:
@@ -1836,9 +1838,15 @@ against R1, R2 and the `haven-fault-relay` processes
 | `green`, `lookup` | `store` — keeps and serves what it is sent | current; `lookup` is never offered a kind 30443 |
 | `refuse` | answers every event `OK false "blocked: …"`, keeps none | refused |
 | `drop` | swallows every event (no `OK`), keeps none | unconfirmed, after rendering publishing for the 6 s `OK` wait |
-| `stall` | swallows every frame, so no `REQ` ends | no answer, after rendering checking for the 10 s `REQ` wait; offered nothing |
-| `hole` | accepts TCP, never completes the handshake | no answer |
-| `closed` | nothing listens (the runner checks the port is free) | no answer |
+| `stall` | swallows every frame, so no `REQ` ends and no event is answered | no answer, after rendering checking for the 10 s `REQ` wait; never current. It took the connection, so it is offered every kind it lacks (kinds 10050, 10002, 30443), keeps none, and only its `OK` could make it current (L1: `haven-core/tests/relay_management_e2e.rs` `a_relay_that_never_ends_its_req_is_offered_and_reads_current_only_on_its_ok`) |
+| `hole` | accepts TCP, never completes the handshake | no answer; no frame can reach it |
+| `closed` | nothing listens (the runner checks the port is free) | no answer; no frame can reach it |
+
+Haven skips only a relay proven current; every other relay it reaches is
+offered what it lacks. So the test expects no new offer only of relays proven
+current (`green` after its removal from the inbox list, the removal scrub
+aside, and `green` and `lookup` across the relaunch), and at least one of each
+kind for `refuse`, `drop` and `stall`.
 
 The test reads each fault relay over its own socket with control verbs
 (`HAVEN_FAULT_OFFERS`: events offered per kind, the app's sockets only;
@@ -1855,12 +1863,21 @@ Reading a red:
   whose bound was not met; a row `unknown` is a relay the test did not add.
 - `the page never rendered <state>` — the board reached a state the page never
   drew, or never reached it; the step lines before it say which.
+- `fault relay <role> …` — the test's control socket to that relay could not
+  be opened, closed, or did not answer a verb within 15 s (after which that
+  socket is retired, so a late reply cannot answer a later verb).
+- `the stopped app still held the session after 104s` — at the relaunch, the
+  first app's database session (Security Rule 14) was still registered after
+  the pass running and the one queued behind it could have returned; the
+  second app would have failed to open it.
 - `fault relay(s) <roles> did not report listening` in the runner — the
   binary was not built (`Build the fault relay`) or its port was taken.
 - Steps A–E and C are the launch, the adds (healthy first, the slow relays
   last), the removal of `green` from the inbox list, the inbox restore, and a
   relaunch. Each waits at most one settle bound (three maintenance passes of
-  at most 52 s each).
+  at most 52 s each). The relaunch first waits for no pass to be running,
+  then for the session registry to read the database free, each at most two
+  passes.
 
 ## What these lanes do NOT cover
 

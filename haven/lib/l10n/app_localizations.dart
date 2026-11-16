@@ -720,10 +720,10 @@ abstract class AppLocalizations {
   /// **'People using Haven look up your inbox list on the lookup relays, and other apps may look for it on your own relays, so Haven keeps a copy on both. Each row shows whether that relay has the current version.'**
   String get relaySettingsInboxInfoMissing;
 
-  /// Inbox relays info panel, paragraph 4 of 5: what the user can do, plus the disclosure that every relay on this list is public and linked to their account (privacy manifest disclosure). 'asks it to delete' is deliberate: a relay may ignore the request, so never translate it as 'deletes'.
+  /// Inbox relays info panel, paragraph 4 of 5: what the user can do (removing the last relay on the list is refused, so the list never becomes empty through a removal), plus the disclosure that every relay on this list is public and linked to their account (privacy manifest disclosure). 'asks it to delete' is deliberate: a relay may ignore the request, so never translate it as 'deletes'.
   ///
   /// In en, this message translates to:
-  /// **'You can add relays you trust and remove ones you no longer want. Haven always keeps at least one. Every relay on this list is public: anyone can see it in your inbox list. When you remove a relay, Haven asks it to delete your old list.'**
+  /// **'You can add relays you trust and remove ones you no longer want. Haven won\'t let you remove the last relay on this list. Every relay on this list is public: anyone can see it in your inbox list. When you remove a relay, Haven asks it to delete your old list.'**
   String get relaySettingsInboxInfoActions;
 
   /// Inbox relays info panel, paragraph 5 of 5, shown in smaller type for experts. 'Nostr', 'kind 10050' and 'kind 1059' are intentionally English identifiers: keep them in Latin script.
@@ -750,10 +750,10 @@ abstract class AppLocalizations {
   /// **'Each row shows whether that relay has your current KeyPackage and relay list. If a relay is missing your KeyPackage, or holds an old one Haven has replaced, people who look for it there may not be able to invite you.'**
   String get relaySettingsKeyPackageInfoMissing;
 
-  /// KeyPackage relays info panel, paragraph 4 of 5: user actions plus the disclosure that the list is public (privacy manifest disclosure). 'asks it to delete' is deliberate: a relay may ignore the request, so never translate it as 'deletes'.
+  /// KeyPackage relays info panel, paragraph 4 of 5: user actions (removing the last relay on the list is refused, so the list never becomes empty through a removal) plus the disclosure that the list is public (privacy manifest disclosure). 'asks it to delete' is deliberate: a relay may ignore the request, so never translate it as 'deletes'.
   ///
   /// In en, this message translates to:
-  /// **'You can add or remove relays. Haven always keeps at least one. Every relay on this list is public: anyone can see it in your relay list. When you remove a relay, Haven asks it to delete your old relay list.'**
+  /// **'You can add or remove relays. Haven won\'t let you remove the last relay on this list. Every relay on this list is public: anyone can see it in your relay list. When you remove a relay, Haven asks it to delete your old relay list.'**
   String get relaySettingsKeyPackageInfoActions;
 
   /// KeyPackage relays info panel, paragraph 5 of 5, smaller type. 'Marmot', 'NIP-65', 'kind 30443' and 'kind 10002' are intentionally English identifiers: keep them in Latin script.
@@ -864,10 +864,10 @@ abstract class AppLocalizations {
   /// **'On hold: Haven isn\'t publishing this for now. A note on this page says why.'**
   String get relaySettingsLegendHeld;
 
-  /// Note on the Relay settings page while one of the user's relay lists (Inbox or KeyPackage) is empty, so Haven publishes nothing for it. Its section offers 'Restore defaults' (relaySettingsRestoreDefaults).
+  /// Note on the Relay settings page, shown once, while one or both of the user's relay lists (Inbox, KeyPackage) are empty, so Haven publishes nothing for them; it must read true whether one list or both are empty. Each section offers 'Restore defaults' (relaySettingsRestoreDefaults).
   ///
   /// In en, this message translates to:
-  /// **'One of your lists above has no relays, so Haven has nowhere to publish it. Restore its defaults to publish it again.'**
+  /// **'Haven has nowhere to publish a list above that has no relays. Restore defaults on each empty list to publish it again.'**
   String get relaySettingsHeldNoRelays;
 
   /// Note on the Relay settings page while one of the user's relay lists is held back by a setting stored by an older version of Haven, which opening this page turns on. Neutral: there is nothing for the user to switch or do.

@@ -384,12 +384,14 @@ jobs:
       # BOUNDS. Three of them, innermost first:
       #   10m  per-target `flutter drive` (HAVEN_DRIVE_TIMEOUT, set in
       #        run-relay-management.sh) — names the target that hung. The
-      #        status target alone gets 25m, in a second invocation of the
-      #        runner after the four others pass (`&&`: a red there is already
-      #        the lane's verdict): its own test Timeout (22 min, every wait in
-      #        it sized from the production pass bounds) plus install and
-      #        attach. Its evidence lands under /tmp/relay-mgmt-logs/status, so
-      #        each invocation's gate claims exactly the transcripts it drove.
+      #        status target alone gets 27m, in a second invocation of the
+      #        runner after the four others, which runs whatever they ended on
+      #        (a red customization target must not hide the status verdict);
+      #        the step fails if either invocation failed. 27m is its own test
+      #        Timeout (24 min, every wait in it sized from the production pass
+      #        bounds) plus install and attach. Its evidence lands under
+      #        /tmp/relay-mgmt-logs/status, so each invocation's gate claims
+      #        exactly the transcripts it drove.
       #   34m  this step's inner deadline (run-with-deadline.sh below) — the
       #        AGGREGATE bound across all five targets, and the one that
       #        actually reaps.
@@ -410,7 +412,9 @@ jobs:
       # status target runs LAST (so the cold-attach retry lands on a 10m
       # target) and is unmeasured until its first green runs; its estimate is
       # ~8-10 min — a handful of maintenance passes, each at most ~52 s with
-      # the stalling relays on the lists — so 34 holds that shape with margin.
+      # the stalling relays on the lists. Both invocations always run, so the
+      # step is their sum: p95 6.5 + ~10 = ~17 min, and the cold-attach shape
+      # ~19 + ~10 = ~29 min; 34 holds both.
       # Measure the first green runs and re-derive this from their p95. It is
       # not a worst case: one invocation's own is 1750 s = 29m10s
       # (run-single-avd-scenario.sh's sum at the 10m drive and the default
@@ -437,7 +441,7 @@ jobs:
           # multi-line script: in its own sh -c, which would drop the
           # loop's shell state. All real logic is in the checked-in
           # script.
-          script: bash tooling/e2e/ci/run-with-deadline.sh 34m "e2e-relay-management drive (5 targets)" -- bash -c 'bash tooling/e2e/ci/run-relay-management.sh integration_test/relay_customization_publish_test.dart=/tmp/relay-mgmt-apks/relay_customization_publish_test.apk integration_test/relay_customization_trigger_test.dart=/tmp/relay-mgmt-apks/relay_customization_trigger_test.apk integration_test/relay_resync_convergence_test.dart=/tmp/relay-mgmt-apks/relay_resync_convergence_test.apk integration_test/relay_two_plane_privacy_test.dart=/tmp/relay-mgmt-apks/relay_two_plane_privacy_test.apk && HAVEN_DRIVE_TIMEOUT=25m HAVEN_RELAY_MGMT_LOG_DIR=/tmp/relay-mgmt-logs/status bash tooling/e2e/ci/run-relay-management.sh integration_test/relay_management_status_test.dart=/tmp/relay-mgmt-apks/relay_management_status_test.apk'
+          script: bash tooling/e2e/ci/run-with-deadline.sh 34m "e2e-relay-management drive (5 targets)" -- bash -c 'bash tooling/e2e/ci/run-relay-management.sh integration_test/relay_customization_publish_test.dart=/tmp/relay-mgmt-apks/relay_customization_publish_test.apk integration_test/relay_customization_trigger_test.dart=/tmp/relay-mgmt-apks/relay_customization_trigger_test.apk integration_test/relay_resync_convergence_test.dart=/tmp/relay-mgmt-apks/relay_resync_convergence_test.apk integration_test/relay_two_plane_privacy_test.dart=/tmp/relay-mgmt-apks/relay_two_plane_privacy_test.apk; customization=$?; HAVEN_DRIVE_TIMEOUT=27m HAVEN_RELAY_MGMT_LOG_DIR=/tmp/relay-mgmt-logs/status bash tooling/e2e/ci/run-relay-management.sh integration_test/relay_management_status_test.dart=/tmp/relay-mgmt-apks/relay_management_status_test.apk; status=$?; test "${customization}" = 0 && test "${status}" = 0'
 
       # `if: always()` and `.log`, not `.txt`: the scan step below runs on every
       # outcome short of a cancellation and refuses an absent file, and the

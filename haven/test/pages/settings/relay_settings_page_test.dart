@@ -420,7 +420,8 @@ void main() {
         expect(
           fallbackDefaultProfileRelays,
           isNotEmpty,
-          reason: 'non-vacuity: an empty curated pool would make the '
+          reason:
+              'non-vacuity: an empty curated pool would make the '
               'suppressed-control assertion below unreachable',
         );
         final curated = fallbackDefaultProfileRelays.first;
@@ -487,29 +488,28 @@ void main() {
       },
     );
 
-    testWidgets(
-      'still offers removal for the same URL in the Inbox category',
-      (tester) async {
-        useTallSurface(tester);
-        // The rule is about the profile plane's curated pool, not about the
-        // URL: the Inbox list is genuinely user-owned, and removal there
-        // really does take effect. Scoping the suppression to the Profile
-        // section is what keeps this true.
-        final curated = fallbackDefaultProfileRelays.first;
-        final curatedHost = curated.replaceFirst('wss://', '');
-        final mock = MockRelayPreferencesService(
-          initialRelays: {
-            RelayCategory.inbox: [curated, 'wss://second.example.com'],
-            RelayCategory.keyPackage: const ['wss://kp.example.com'],
-            RelayCategory.profile: const ['wss://mine.example.com'],
-          },
-        );
-        await tester.pumpWidget(buildApp(mock: mock));
-        await tester.pumpAndSettle();
+    testWidgets('still offers removal for the same URL in the Inbox category', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      // The rule is about the profile plane's curated pool, not about the
+      // URL: the Inbox list is genuinely user-owned, and removal there
+      // really does take effect. Scoping the suppression to the Profile
+      // section is what keeps this true.
+      final curated = fallbackDefaultProfileRelays.first;
+      final curatedHost = curated.replaceFirst('wss://', '');
+      final mock = MockRelayPreferencesService(
+        initialRelays: {
+          RelayCategory.inbox: [curated, 'wss://second.example.com'],
+          RelayCategory.keyPackage: const ['wss://kp.example.com'],
+          RelayCategory.profile: const ['wss://mine.example.com'],
+        },
+      );
+      await tester.pumpWidget(buildApp(mock: mock));
+      await tester.pumpAndSettle();
 
-        expect(find.byTooltip('Remove $curatedHost'), findsOneWidget);
-      },
-    );
+      expect(find.byTooltip('Remove $curatedHost'), findsOneWidget);
+    });
 
     testWidgets(
       'tops the Profile list back up on open, and only that category',
@@ -544,7 +544,8 @@ void main() {
         expect(
           find.text('default-a'),
           findsNothing,
-          reason: 'the generic (non-profile) default must never land in the '
+          reason:
+              'the generic (non-profile) default must never land in the '
               'Profile pool — that is the plane-crossing this test exists '
               'to catch',
         );
@@ -597,7 +598,8 @@ void main() {
         expect(
           find.text('profile-default-a'),
           findsOneWidget,
-          reason: "the top-up must win even when the notifier's own "
+          reason:
+              "the top-up must win even when the notifier's own "
               'initial read is slow to resolve',
         );
       },
@@ -648,9 +650,7 @@ void main() {
           ProviderScope(
             overrides: [
               identityProvider.overrideWith((ref) async => _stubIdentity()),
-              relayPreferencesServiceProvider.overrideWith(
-                (ref) async => mock,
-              ),
+              relayPreferencesServiceProvider.overrideWith((ref) async => mock),
               relayServiceProvider.overrideWithValue(MockRelayService()),
               circleServiceProvider.overrideWithValue(
                 MockCircleService(
@@ -721,7 +721,8 @@ void main() {
         expect(
           discoveryRelays,
           isNotEmpty,
-          reason: 'non-vacuity: an empty discovery plane would make the '
+          reason:
+              'non-vacuity: an empty discovery plane would make the '
               'warning assertion below unreachable',
         );
         final mock = MockRelayPreferencesService(
@@ -848,34 +849,31 @@ void main() {
       isUnderflow: true,
     );
 
-    testWidgets(
-      'shows the profile-pool-underflow banner when the pool has '
-      'underflowed',
-      (tester) async {
-        final mock = MockRelayPreferencesService(
-          initialRelays: const {
-            RelayCategory.inbox: ['wss://inbox.example.com'],
-            RelayCategory.keyPackage: ['wss://kp.example.com'],
-            RelayCategory.profile: ['wss://profile.example.com'],
-          },
-          poolStatus: underflowedStatus(),
-        );
-        await tester.pumpWidget(buildApp(mock: mock));
-        await tester.pumpAndSettle();
+    testWidgets('shows the profile-pool-underflow banner when the pool has '
+        'underflowed', (tester) async {
+      final mock = MockRelayPreferencesService(
+        initialRelays: const {
+          RelayCategory.inbox: ['wss://inbox.example.com'],
+          RelayCategory.keyPackage: ['wss://kp.example.com'],
+          RelayCategory.profile: ['wss://profile.example.com'],
+        },
+        poolStatus: underflowedStatus(),
+      );
+      await tester.pumpWidget(buildApp(mock: mock));
+      await tester.pumpAndSettle();
 
-        final title = find.text('Profile lookups paused');
-        await tester.scrollUntilVisible(title, 300);
-        expect(title, findsOneWidget);
-        expect(
-          find.text(
-            "Too few Profile relays remain, so members' names and photos "
-            'will stop updating.',
-          ),
-          findsOneWidget,
-        );
-        expect(find.text('Restore default profile relays'), findsOneWidget);
-      },
-    );
+      final title = find.text('Profile lookups paused');
+      await tester.scrollUntilVisible(title, 300);
+      expect(title, findsOneWidget);
+      expect(
+        find.text(
+          "Too few Profile relays remain, so members' names and photos "
+          'will stop updating.',
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('Restore default profile relays'), findsOneWidget);
+    });
 
     testWidgets(
       'hides the profile-pool-underflow banner when the pool is healthy',
@@ -1761,6 +1759,27 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byKey(WidgetKeys.relaySettingsHeldNote), findsNothing);
     });
+
+    testWidgets('both lists empty show the no-relays note once', (
+      tester,
+    ) async {
+      tallSurface(tester);
+      const empty = OwnKindBoard(hold: OwnPublishHold.noRelaysConfigured);
+      await tester.pumpWidget(
+        buildApp(
+          mock: seededMock(),
+          board: FakeBoardSource(
+            board: const OwnRelayBoard(
+              keyPackage: empty,
+              relayList: empty,
+              inboxRelayList: empty,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text(l10n.relaySettingsHeldNoRelays), findsOneWidget);
+    });
   });
 
   group('RelaySettingsPage — input while something moves', () {
@@ -1916,6 +1935,59 @@ void main() {
   });
 
   group('RelaySettingsPage — announcements', () {
+    OwnRelayBoard running(OwnRelayBoard board, {bool running = true}) =>
+        OwnRelayBoard(
+          running: running,
+          lookupRelays: board.lookupRelays,
+          keyPackage: board.keyPackage,
+          relayList: board.relayList,
+          inboxRelayList: board.inboxRelayList,
+        );
+
+    /// Every item current, plus the inbox item of `added.example.com` in
+    /// [status] (absent, so not checked, when `null`).
+    OwnRelayBoard withAdded(OwnRelayStatus? status, {bool running = false}) {
+      final base = boardAll(KindPresence.current);
+      return OwnRelayBoard(
+        running: running,
+        lookupRelays: base.lookupRelays,
+        keyPackage: base.keyPackage,
+        relayList: base.relayList,
+        inboxRelayList: OwnKindBoard(
+          cells: [
+            ...base.inboxRelayList.cells,
+            if (status != null)
+              OwnRelayCell(relayUrl: 'wss://added.example.com', status: status),
+          ],
+        ),
+      );
+    }
+
+    /// Adds `wss://added.example.com` to the Inbox list through the sheet,
+    /// on a board with nothing moving, and clears what was said meanwhile.
+    Future<void> addInboxRelay(WidgetTester tester) async {
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async => call.method == 'Clipboard.getData'
+            ? <String, dynamic>{'text': 'wss://added.example.com'}
+            : null,
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+      await tester.tap(find.byKey(WidgetKeys.relaySettingsAddRelay('inbox')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Paste from clipboard'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Add'));
+      await tester.pumpAndSettle();
+      expect(textIn('inbox', 'added.example.com'), findsOneWidget);
+      tester.takeAnnouncements();
+    }
+
     testWidgets('one announcement when a pass settles, however many symbols '
         'changed on the way', (tester) async {
       tallSurface(tester);
@@ -1931,6 +2003,42 @@ void main() {
       await tester.pump(const Duration(milliseconds: 500));
       await tester.pump(const Duration(milliseconds: 500));
 
+      expect(tester.takeAnnouncements().map((a) => a.message), [
+        l10n.relaySettingsCheckSettled(0),
+      ]);
+    });
+
+    testWidgets('a pass with no symbol moving is not announced until the '
+        'board says it ended, and then once', (tester) async {
+      tallSurface(tester);
+      final board = FakeBoardSource(
+        board: running(boardAll(KindPresence.checking)),
+      );
+      await tester.pumpWidget(buildApp(mock: seededMock(), board: board));
+      await tester.pump();
+      await tester.pump();
+      tester.takeAnnouncements();
+
+      // Judged missing, the KeyPackage being made: nothing checks or
+      // publishes, but the pass goes on.
+      board.board = running(boardWithKeyPackage(KindPresence.missing));
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(
+        tester.takeAnnouncements(),
+        isEmpty,
+        reason: 'the pass has not ended',
+      );
+
+      board.board = running(boardWithKeyPackage(KindPresence.publishing));
+      await tester.pump(const Duration(milliseconds: 500));
+      // Every item settled, the pass still winding up.
+      board.board = running(boardAll(KindPresence.current));
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(tester.takeAnnouncements(), isEmpty);
+
+      board.board = boardAll(KindPresence.current);
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pump(const Duration(milliseconds: 500));
       expect(tester.takeAnnouncements().map((a) => a.message), [
         l10n.relaySettingsCheckSettled(0),
       ]);
@@ -1962,40 +2070,7 @@ void main() {
       final board = FakeBoardSource(board: boardAll(KindPresence.current));
       await tester.pumpWidget(buildApp(mock: mock, board: board));
       await tester.pumpAndSettle();
-      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-        SystemChannels.platform,
-        (call) async => call.method == 'Clipboard.getData'
-            ? <String, dynamic>{'text': 'wss://added.example.com'}
-            : null,
-      );
-      addTearDown(
-        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-          SystemChannels.platform,
-          null,
-        ),
-      );
-      await tester.tap(find.byKey(WidgetKeys.relaySettingsAddRelay('inbox')));
-      await tester.pumpAndSettle();
-      await tester.tap(find.byTooltip('Paste from clipboard'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Add'));
-      await tester.pumpAndSettle();
-      tester.takeAnnouncements();
-
-      OwnRelayBoard withAdded(OwnRelayStatus status) {
-        final base = boardAll(KindPresence.current);
-        return OwnRelayBoard(
-          lookupRelays: base.lookupRelays,
-          keyPackage: base.keyPackage,
-          relayList: base.relayList,
-          inboxRelayList: OwnKindBoard(
-            cells: [
-              ...base.inboxRelayList.cells,
-              OwnRelayCell(relayUrl: 'wss://added.example.com', status: status),
-            ],
-          ),
-        );
-      }
+      await addInboxRelay(tester);
 
       board.board = withAdded(OwnRelayStatus.checking);
       await tester.pump(const Duration(milliseconds: 500));
@@ -2006,6 +2081,63 @@ void main() {
         tester.takeAnnouncements().map((a) => a.message),
         contains(l10n.relaySettingsAddedRelayUpToDate('added.example.com')),
       );
+    });
+
+    testWidgets('an added relay whose check ends between two reads is still '
+        'announced, once, when the pass ends', (tester) async {
+      tallSurface(tester);
+      final board = FakeBoardSource(board: boardAll(KindPresence.current));
+      await tester.pumpWidget(buildApp(mock: seededMock(), board: board));
+      await tester.pumpAndSettle();
+      await addInboxRelay(tester);
+
+      // No read saw it checking: the wrong address failed at once. The other
+      // kind's pass is still going.
+      board.board = withAdded(OwnRelayStatus.noAnswer, running: true);
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(tester.takeAnnouncements(), isEmpty);
+
+      board.board = withAdded(OwnRelayStatus.noAnswer);
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(
+        tester.takeAnnouncements().map((a) => a.message),
+        contains(l10n.relaySettingsAddedRelayNotUpToDate('added.example.com')),
+      );
+
+      // A later pass over it says nothing more of the added relay.
+      board.board = withAdded(OwnRelayStatus.checking, running: true);
+      await tester.pump(const Duration(milliseconds: 500));
+      board.board = withAdded(OwnRelayStatus.current);
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(tester.takeAnnouncements().map((a) => a.message), [
+        l10n.relaySettingsCheckSettled(0),
+      ]);
+    });
+
+    testWidgets('a pass that ends without judging the added relay leaves it '
+        'to the count, and no later pass names it', (tester) async {
+      tallSurface(tester);
+      final board = FakeBoardSource(board: boardAll(KindPresence.current));
+      await tester.pumpWidget(buildApp(mock: seededMock(), board: board));
+      await tester.pumpAndSettle();
+      await addInboxRelay(tester);
+
+      // The pass failed before it judged the added relay.
+      board.board = withAdded(null, running: true);
+      await tester.pump(const Duration(milliseconds: 500));
+      board.board = withAdded(null);
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(tester.takeAnnouncements().map((a) => a.message), [
+        l10n.relaySettingsCheckSettled(1),
+      ]);
+
+      board.board = withAdded(OwnRelayStatus.checking, running: true);
+      await tester.pump(const Duration(milliseconds: 500));
+      board.board = withAdded(OwnRelayStatus.current);
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(tester.takeAnnouncements().map((a) => a.message), [
+        l10n.relaySettingsCheckSettled(0),
+      ]);
     });
   });
 

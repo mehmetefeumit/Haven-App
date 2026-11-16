@@ -51,6 +51,8 @@ import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/relay_status_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/rust/api.dart' show isSessionLive;
+import 'package:haven/src/services/data_directory_provider.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -97,11 +99,16 @@ const Duration _kInputTakesEffect = Duration(seconds: 2);
 /// A control verb or a store read on a hermetic relay.
 const Duration _kRelayAnswer = Duration(seconds: 15);
 
+/// A pass in flight when the app stops, and the one queued behind it: each
+/// holds the session (Security Rule 14) until it returns.
+final Duration _kPassesInFlight = _kPassBound * 2;
+
 /// Two app starts, seven waits bounded by [_kSettleBound] (A, the two
-/// transients and the end of B, D, E, C) and the reads between them: 2 + 18.2
-/// min, rounded up. The runner's drive bound for this target covers it plus
-/// the install and attach (its self-test holds the two together).
-const Duration _kTestTimeout = Duration(minutes: 22);
+/// transients and the end of B, D, E, C), the two waits of the stop bounded by
+/// [_kPassesInFlight] and the reads between them: 2 + 18.2 + 3.5 min, rounded
+/// up. The runner's drive bound for this target covers it plus the install and
+/// attach (its self-test holds the two together).
+const Duration _kTestTimeout = Duration(minutes: 24);
 
 const String _r1 = 'R1';
 const String _r2 = 'R2';
@@ -186,51 +193,85 @@ Map<String, _Fault> _parseFaults() {
   return faults;
 }
 
-/// The test's own socket to one fault relay. Its replies come back in the
-/// order its verbs were sent.
+/// The test's own socket to one fault relay. One verb is asked at a time, so
+/// a reply belongs to the verb at the head of the queue; once a reply is late
+/// the socket is retired, since nothing could tell its reply from the next.
+/// Failures name the role and the verb, never the address (Rule 15).
 final class _FaultControl {
-  _FaultControl._(this._socket) {
+  _FaultControl._(this._role, this._socket) {
     _socket.listen(
       _onFrame,
-      onDone: _failPending,
-      onError: (Object _) => _failPending(),
+      onDone: () => _retire('closed its control socket'),
+      onError: (Object _) => _retire('dropped its control socket'),
       cancelOnError: true,
     );
   }
 
-  static Future<_FaultControl> connect(_Fault fault) async =>
-      _FaultControl._(await WebSocket.connect(fault.address));
-
-  final WebSocket _socket;
-  final List<Completer<List<dynamic>>> _pending = [];
-
-  void _onFrame(dynamic data) {
-    if (data is! String) return;
-    final frame = jsonDecode(data);
-    if (frame is! List || frame.isEmpty || _pending.isEmpty) return;
-    final verb = frame.first;
-    if (verb is String && verb.startsWith('HAVEN_FAULT_')) {
-      _pending.removeAt(0).complete(frame);
+  static Future<_FaultControl> connect(_Fault fault) async {
+    try {
+      return _FaultControl._(
+        fault.role,
+        await WebSocket.connect(fault.address),
+      );
+    } on Object catch (e) {
+      throw StateError(
+        'the control socket to fault relay ${fault.role} could not be '
+        'opened (${e.runtimeType})',
+      );
     }
   }
 
-  void _failPending() {
-    for (final pending in _pending) {
-      pending.completeError(StateError('a fault relay closed its socket'));
+  final String _role;
+  final WebSocket _socket;
+  final List<(String, Completer<List<dynamic>>)> _pending = [];
+  String? _retired;
+
+  void _onFrame(dynamic data) {
+    if (data is! String || _pending.isEmpty) return;
+    final frame = jsonDecode(data);
+    if (frame is! List || frame.isEmpty) return;
+    final verb = frame.first;
+    if (verb is! String || !verb.startsWith('HAVEN_FAULT_')) return;
+    final (ack, reply) = _pending.removeAt(0);
+    if (verb == ack) {
+      reply.complete(frame);
+    } else {
+      reply.completeError(
+        StateError('fault relay $_role answered $verb where $ack was due'),
+      );
+    }
+  }
+
+  void _retire(String why) {
+    _retired ??= why;
+    for (final (_, reply) in _pending) {
+      reply.completeError(StateError('fault relay $_role $why'));
     }
     _pending.clear();
   }
 
-  Future<List<dynamic>> _ask(List<Object> frame) {
+  Future<List<dynamic>> _ask(String verb) {
+    if (_retired case final why?) {
+      return Future.error(StateError('fault relay $_role $why'));
+    }
     final reply = Completer<List<dynamic>>();
-    _pending.add(reply);
-    _socket.add(jsonEncode(frame));
-    return reply.future.timeout(_kRelayAnswer);
+    _pending.add(('${verb}_ACK', reply));
+    _socket.add(jsonEncode([verb]));
+    return reply.future.timeout(
+      _kRelayAnswer,
+      onTimeout: () {
+        _retire(
+          'did not answer $verb within ${_kRelayAnswer.inSeconds}s; its '
+          'control socket is retired',
+        );
+        throw StateError('fault relay $_role did not answer $verb');
+      },
+    );
   }
 
   /// Events offered to the relay so far, by kind — the app's sockets only.
   Future<Map<int, int>> offers() async {
-    final reply = await _ask(['HAVEN_FAULT_OFFERS']);
+    final reply = await _ask('HAVEN_FAULT_OFFERS');
     return {
       for (final entry in (reply[1] as Map<String, dynamic>).entries)
         int.parse(entry.key): entry.value as int,
@@ -239,7 +280,7 @@ final class _FaultControl {
 
   /// Every event the relay stores.
   Future<List<Map<String, dynamic>>> kept() async {
-    final reply = await _ask(['HAVEN_FAULT_KEPT']);
+    final reply = await _ask('HAVEN_FAULT_KEPT');
     return [
       for (final e in reply[1] as List<dynamic>) e as Map<String, dynamic>,
     ];
@@ -423,12 +464,14 @@ void main() {
         listen: false,
       );
 
+      // [from] starts the clock at the input, not at this call.
       Future<void> pumpUntil(
         bool Function() condition, {
         required String what,
         required Duration timeout,
+        DateTime? from,
       }) async {
-        final deadline = DateTime.now().add(timeout);
+        final deadline = (from ?? DateTime.now()).add(timeout);
         while (DateTime.now().isBefore(deadline)) {
           await tester.pump(const Duration(milliseconds: 100));
           seen.record(tester);
@@ -561,14 +604,33 @@ void main() {
         );
       }
 
-      // The engine holds its own handle on the session, so it stops first;
-      // then the circle service hands the database's single session back
-      // (Security Rule 14), or the next app cannot open it.
+      // The database's single session (Security Rule 14) must be free before
+      // the next app opens it. The engine holds its own handle, so it stops
+      // first; then the circle service drops the app's. A pass still running
+      // holds one more until it returns, so the stop starts between passes and
+      // ends only when the session registry reads the database free.
       Future<void> stopApp() async {
+        final dataDir = await const PathProviderDataDirectory()
+            .getDataDirectory();
+        await pumpUntil(
+          () => !board().running,
+          what: 'no maintenance pass is running as the app stops',
+          timeout: _kPassesInFlight,
+        );
         final c = container();
         if (liveSyncEnabled) await c.read(subscriptionServiceProvider).stop();
         await c.read(circleServiceProvider).closeAndInvalidate();
         await tester.pumpWidget(const SizedBox.shrink());
+        final deadline = DateTime.now().add(_kPassesInFlight);
+        while (await isSessionLive(dataDir: dataDir)) {
+          if (!DateTime.now().isBefore(deadline)) {
+            fail(
+              'the stopped app still held the session after '
+              '${_kPassesInFlight.inSeconds}s.',
+            );
+          }
+          await tester.pump(const Duration(milliseconds: 100));
+        }
       }
 
       AppLocalizations l10n() =>
@@ -646,6 +708,7 @@ void main() {
           what: '[B] the stalling relay rendered checking',
           timeout: _kSettleBound,
         );
+        final addedAt = DateTime.now();
         await inbox.addRelay(closed.address);
         await pumpUntil(
           () => tester
@@ -653,6 +716,7 @@ void main() {
               .any((cell) => roleOf(cell.relayUrl) == closed.role),
           what: '[B] a relay added mid-check is on the page at once',
           timeout: _kInputTakesEffect,
+          from: addedAt,
         );
         expect(
           seen.history[(closed.role, RelayKind.inboxRelayList)]!.first,
@@ -749,7 +813,13 @@ void main() {
           isNotNull,
           reason: '[B] green serves the KeyPackage',
         );
-        for (final f in [refuse, drop]) {
+        // Every relay not proven current is offered what it lacks, the
+        // stalling one included: it took the connection, so only its OK could
+        // prove it current. Only `hole` and `closed`, which never complete a
+        // handshake, can receive nothing. L1, in relay_management_e2e.rs (one
+        // name, split for width): a_relay_that_never_ends_its_req_is_offered_
+        // and_reads_current_only_on_its_ok.
+        for (final f in [refuse, drop, stall]) {
           // Booleans, never the events: a failure must not print an id.
           expect(
             (await control[f.role]!.kept()).isEmpty,
@@ -765,11 +835,6 @@ void main() {
             );
           }
         }
-        expect(
-          await control[stall.role]!.offers(),
-          isEmpty,
-          reason: '[B] a relay that never answered is offered nothing',
-        );
 
         // ---------------------------------------------------------------
         // D. Remove green from the inbox list, tapped by key.

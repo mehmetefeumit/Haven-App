@@ -475,16 +475,17 @@ run_self_test() {
     echo "SELF-TEST FAIL (wiring): each fault relay's log must be dumped after the strfry dumps and before the aggregate gate, under a name logscan_gate_dir types as a relay sink (dump line ${fault_dump:-none})" >&2
     fail=1
   fi
-  # The workflow drives the status target alone, in a second invocation whose
-  # bound covers the target's own test Timeout plus the install and attach (so
-  # the test's named deadline fires first) and whose evidence lands in a
-  # directory of its own; the first invocation keeps the lane's 10m and never
-  # names the status target.
+  # The workflow drives the status target alone, in a second invocation that
+  # runs whatever the first ended on, whose bound covers the target's own test
+  # Timeout plus the install and attach (so the test's named deadline fires
+  # first) and whose evidence lands in a directory of its own; the step fails
+  # if either invocation failed. The first invocation keeps the lane's 10m and
+  # never names the status target.
   local test_minutes drive_cmd status_minutes first_inv
   test_minutes="$(tr '\n' ' ' < "${repo}/haven/${STATUS_TARGET}" | grep -oE '_kTestTimeout = Duration\(minutes: *[0-9]+\)' | grep -oE '[0-9]+' || true)"
   drive_cmd="$(grep -E '^          script: bash tooling/e2e/ci/run-with-deadline\.sh ' "${repo}/.github/workflows/e2e-relay-management.yml" || true)"
-  status_minutes="$(sed -n -E "s@.* && HAVEN_DRIVE_TIMEOUT=([0-9]+)m HAVEN_RELAY_MGMT_LOG_DIR=[^ ]+ bash tooling/e2e/ci/run-relay-management\.sh ${STATUS_TARGET}=[^ ']+'\$@\1@p" <<<"${drive_cmd}")"
-  first_inv="${drive_cmd%% && *}"
+  status_minutes="$(sed -n -E "s@.*; customization=\\\$\?; HAVEN_DRIVE_TIMEOUT=([0-9]+)m HAVEN_RELAY_MGMT_LOG_DIR=[^ ]+ bash tooling/e2e/ci/run-relay-management\.sh ${STATUS_TARGET}=[^ ;']+; status=\\\$\?; test \"\\\$\{customization\}\" = 0 && test \"\\\$\{status\}\" = 0'\$@\1@p" <<<"${drive_cmd}")"
+  first_inv="${drive_cmd%%; customization=*}"
   local built driven
   built="$(sed -n -E 's@^            (integration_test/[a-z_]+\.dart)( \\)?$@\1@p' "${repo}/.github/workflows/e2e-relay-management.yml" | LC_ALL=C sort)"
   driven="$(grep -oE 'integration_test/[a-z_]+\.dart=' <<<"${drive_cmd}" | tr -d '=' | LC_ALL=C sort)"
@@ -494,8 +495,9 @@ run_self_test() {
   fi
   if [[ -z "${test_minutes}" || -z "${status_minutes}" ]] \
      || (( test_minutes + STATUS_DRIVE_OVERHEAD_MINUTES > status_minutes )) \
-     || [[ "${first_inv}" == *"${STATUS_TARGET}"* || "${first_inv}" == *HAVEN_DRIVE_TIMEOUT* ]]; then
-    echo "SELF-TEST FAIL (drive bound): the workflow must drive the status target alone after the others, with HAVEN_DRIVE_TIMEOUT (${status_minutes:-unread} min) covering its _kTestTimeout (${test_minutes:-unread} min) plus ${STATUS_DRIVE_OVERHEAD_MINUTES} min of install and attach and a log directory of its own, and only that invocation may raise the bound" >&2
+     || [[ "${first_inv}" == *"${STATUS_TARGET}"* || "${first_inv}" == *HAVEN_DRIVE_TIMEOUT* ]] \
+     || [[ "${first_inv}" == *'&&'* || "${first_inv}" == *'||'* ]]; then
+    echo "SELF-TEST FAIL (drive bound): the workflow must drive the status target alone after the others, whatever they ended on, failing if either failed (\`a; customization=\$?; b; status=\$?; test \"\${customization}\" = 0 && test \"\${status}\" = 0\`), with HAVEN_DRIVE_TIMEOUT (${status_minutes:-unread} min) covering its _kTestTimeout (${test_minutes:-unread} min) plus ${STATUS_DRIVE_OVERHEAD_MINUTES} min of install and attach and a log directory of its own, and only that invocation may raise the bound" >&2
     fail=1
   fi
   if grep -qE '(^|[;&|][[:space:]]*)[[:space:]]*(cat|head|tail|less|more)[[:space:]]+[^|]*\.log' <<<"${real_run}"; then

@@ -113,7 +113,7 @@ pub fn init_app() {
 
 /// This process's `logscan` positive-control token.
 ///
-/// Random per process (`SysRng`, never `thread_rng`) so a STALE token left in a
+/// Random per process (`SysRng`, never `rand::rng`) so a STALE token left in a
 /// capture by an earlier run cannot satisfy this run's check, and interned so
 /// two isolates calling `init_app` do not mint two. Structurally inert by
 /// construction — no bech32 HRP, no hex run, no array, no coordinate — so it
@@ -792,8 +792,8 @@ impl LocationEventService {
         }
     }
 
-    /// Returns a jittered publish interval in seconds using the Rust-side
-    /// CSPRNG (`SysRng`), sampled uniformly in
+    /// Returns a jittered publish interval in seconds from the OS CSPRNG
+    /// (`OsRng`, drawn in `haven_core::location`), sampled uniformly in
     /// `[nominal_secs * 0.6, nominal_secs * 1.4]` (40% spread).
     ///
     /// Callers pass the nominal interval (typically 120 s) and rearm their
@@ -4946,7 +4946,7 @@ const PROFILE_PICTURE_BATCH_DEADLINE: std::time::Duration = std::time::Duration:
 /// Samples the pause between two consecutive profile-picture downloads.
 ///
 /// `SysRng` only — a thin `getrandom` wrapper with no seeded expansion, matching
-/// the profile module's CSPRNG-only rule (`rand::thread_rng` is banned; a
+/// the profile module's CSPRNG-only rule (`rand::rng` is banned; a
 /// predictable schedule is exactly what makes a burst legible as a roster).
 /// Reuses [`PROFILE_INTER_REQ_JITTER_MS`] so the picture plane is paced like the
 /// kind-0 plane rather than inventing a second, divergent tuning.
@@ -5810,7 +5810,7 @@ impl CircleManagerFfi {
     ///
     /// So this call:
     /// * **shuffles** the order every cycle from the OS CSPRNG (`rand::rngs::SysRng`;
-    ///   `thread_rng` is banned), so arrival order carries no roster ordering
+    ///   `rand::rng` is banned), so arrival order carries no roster ordering
     ///   and a newly added member does not appear at a stable position;
     /// * runs the downloads **one at a time**, never concurrently, so there is
     ///   no burst to fingerprint;
@@ -9656,6 +9656,9 @@ impl RelayManagerFfi {
         let circle_mgr = circle.inner.clone();
         let session = circle_mgr.session();
         let board = circle_mgr.own_relay_board();
+        // Before the list is read: an edit landing after the read supersedes
+        // this pass's every write.
+        let seen = board.generation(OwnKind::KeyPackage);
 
         // ── Step 4a: the transport-INDEPENDENT half, first ───────────────────
         //
@@ -9695,7 +9698,11 @@ impl RelayManagerFfi {
         // waits for the storage-reset notice; so does this tick's relay work.
         // The `not_after` purge above never waits.
         if !circle_mgr.storage_reset_acknowledged() {
-            board.hold(OwnKind::KeyPackage, OwnHold::AwaitingResetAcknowledgement);
+            board.hold(
+                OwnKind::KeyPackage,
+                seen,
+                OwnHold::AwaitingResetAcknowledgement,
+            );
             return Ok(KpMaintenanceOutcomeFfi::from(KpMaintenanceOutcome {
                 action: KpMaintenanceAction::AwaitingResetAcknowledgement,
                 expired_init_key_purged,
@@ -9713,7 +9720,7 @@ impl RelayManagerFfi {
         .inspect_err(|_| board.clear(OwnKind::KeyPackage))?;
 
         if own_relays.is_empty() {
-            board.hold(OwnKind::KeyPackage, OwnHold::NoRelaysConfigured);
+            board.hold(OwnKind::KeyPackage, seen, OwnHold::NoRelaysConfigured);
             // Reached only when the seed failed. `relays_targeted: 0` is what
             // tells the caller this is the await-user-action case and NOT
             // "every relay was unreachable" — both otherwise land on
@@ -9725,7 +9732,7 @@ impl RelayManagerFfi {
             }));
         }
         let relays_targeted = own_relays.len();
-        let mut pass = board.begin(OwnKind::KeyPackage, &own_relays);
+        let mut pass = board.begin(OwnKind::KeyPackage, seen, &own_relays);
 
         // PER-RELAY probe of OWN relays for kind-30443 authored by self, so a
         // PARTIAL drop (present on A, dropped from B) is visible + healed on B.
@@ -10574,6 +10581,9 @@ impl RelayManagerFfi {
 
         let own_pk = &keys.public_key();
         let board = circle_mgr.own_relay_board();
+        // Before the list is read: an edit landing after the read supersedes
+        // this pass's every write.
+        let seen = board.generation(own_kind);
         let mut relay_errors: usize = 0;
 
         // No relay list (10050/10002) is published before the reset notice is
@@ -10581,7 +10591,7 @@ impl RelayManagerFfi {
         // user's choice.
         let reset_acknowledged = circle_mgr.storage_reset_acknowledged();
         if !reset_acknowledged {
-            board.hold(own_kind, OwnHold::AwaitingResetAcknowledgement);
+            board.hold(own_kind, seen, OwnHold::AwaitingResetAcknowledgement);
             return RelayListCategoryOutcome::no_publish(
                 RelayListAction::AwaitingResetAcknowledgement,
             );
@@ -10621,11 +10631,11 @@ impl RelayManagerFfi {
 
         // Fast paths before any network probe.
         if !publish_enabled {
-            board.hold(own_kind, OwnHold::PublishingSuppressed);
+            board.hold(own_kind, seen, OwnHold::PublishingSuppressed);
             return RelayListCategoryOutcome::no_publish(RelayListAction::Suppressed);
         }
         if configured.is_empty() {
-            board.hold(own_kind, OwnHold::NoRelaysConfigured);
+            board.hold(own_kind, seen, OwnHold::NoRelaysConfigured);
             return RelayListCategoryOutcome::no_publish(RelayListAction::NothingConfigured);
         }
 
@@ -10644,7 +10654,7 @@ impl RelayManagerFfi {
         // B only. The own relays lead the targets, so a position below
         // `configured.len()` is an own relay.
         let targets = relay_list_targets(&configured);
-        let mut pass = board.begin(own_kind, &targets);
+        let mut pass = board.begin(own_kind, seen, &targets);
         let filter = nostr::Filter::new().kind(kind).author(*own_pk).limit(4);
         let mut per_relay = match self.inner.fetch_events_per_relay(filter, &targets).await {
             Ok(v) => v,

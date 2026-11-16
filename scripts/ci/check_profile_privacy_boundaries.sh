@@ -180,7 +180,8 @@ extract_list_entries() {
 }
 
 # Check 9's and 9b's ban: randomness a relay observer could predict.
-readonly CSPRNG_BAN='thread_rng|SmallRng|StdRng|ChaCha[0-9]*Rng|from_seed|seed_from_u64'
+# rand 0.10 renamed `thread_rng` to `rand::rng`; both stay banned.
+readonly CSPRNG_BAN='thread_rng|\brand::rng\(|SmallRng|StdRng|ChaCha[0-9]*Rng|from_seed|seed_from_u64'
 
 # Check 9b: emits every code line of $1 (whole-line comments dropped, test
 # modules included) that names a non-CSPRNG generator; empty = OK.
@@ -701,13 +702,14 @@ if [[ "${1:-}" == "--self-test" ]]; then
   st_tmp="$(mktemp -d)"
   trap 'rm -rf "${st_tmp}"' EXIT
 
-  # Check 9b: a seeded generator fails, in production or test code; OsRng and
-  # prose do not.
+  # Check 9b: a seeded or thread-local generator fails, in production or test
+  # code; OsRng, SysRng and prose do not.
   printf '%s\n' 'use rand::rngs::OsRng;' '// never StdRng::seed_from_u64 here' \
-    'pick(&pool, &mut rand::rngs::OsRng)' > "${st_tmp}/pool_clean.rs"
+    'pick(&pool, &mut rand::rngs::OsRng)' 'UnwrapErr(rand::rngs::SysRng)' > "${st_tmp}/pool_clean.rs"
   [[ -z "$(csprng_violations "${st_tmp}/pool_clean.rs")" ]] \
-    || fail "self-test: check 9b refuses OsRng or a comment"
+    || fail "self-test: check 9b refuses OsRng, SysRng or a comment"
   for line in 'let mut rng = StdRng::seed_from_u64(7);' 'let rng = rand::thread_rng();' \
+      'let jitter = rand::rng().random_range(1..9);' \
       'let rng = ChaCha20Rng::from_seed([0; 32]);' '    let rng = SmallRng::from_entropy();'; do
     printf '%s\n' 'use rand::rngs::OsRng;' "${line}" > "${st_tmp}/pool_seeded.rs"
     [[ -n "$(csprng_violations "${st_tmp}/pool_seeded.rs")" ]] \
