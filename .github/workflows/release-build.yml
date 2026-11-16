@@ -52,11 +52,10 @@ concurrency:
   cancel-in-progress: false
 
 # Least-privilege default: every job gets a read-only GITHUB_TOKEN; only the
-# two jobs that write the GitHub Release (android-publish, ios-simulator-asset)
-# override to `contents: write`. This pins downstream token scope (notably the
-# zapstore job, which holds the Nostr publisher key, and the emulator job, which
-# runs third-party actions) independent of the repo's default-permissions
-# setting.
+# job that writes the GitHub Release (publish) overrides to `contents: write`.
+# This pins downstream token scope (notably the zapstore job, which holds the
+# Nostr publisher key, and the emulator job, which runs third-party actions)
+# independent of the repo's default-permissions setting.
 permissions:
   contents: read
 
@@ -125,7 +124,7 @@ jobs:
     # checksums are pinned and verified.
     needs: [gate]
     runs-on: ubuntu-latest
-    # Builds and uploads only; android-publish releases the bytes once
+    # Builds and uploads only; publish releases the bytes once
     # android-launch-gate has launched them.
     permissions:
       contents: read
@@ -267,18 +266,27 @@ jobs:
     with:
       candidate_artifact: haven-release-android
 
-  # The linchpin: attach the signed per-ABI APKs (+ checksums) to a real GitHub
-  # Release so Obtainium and Zapstore can pull them. The de-obfuscation symbols
-  # are NOT attached publicly (a separate private artifact) so the obfuscation
-  # map is never handed to attackers. Tag pushes only — a manual
-  # workflow_dispatch has no tag and must not publish a Release.
+  # The linchpin: the one job that writes the GitHub Release. It carries the
+  # signed per-ABI APKs (+ checksums), which Obtainium and Zapstore pull, and
+  # the simulator app the iOS launch gate tested, which the NEXT release's iOS
+  # gate upgrades from (simulator-only: it cannot run on a device). The
+  # de-obfuscation symbols are NOT attached publicly (a separate private
+  # artifact) so the obfuscation map is never handed to attackers. Tag pushes
+  # only — a manual workflow_dispatch has no tag and must not publish a Release.
+  #
+  # Releases are immutable in this repository: once published, no asset can be
+  # added, replaced or removed. v0.1.16 published the APKs, and the later
+  # attach of the simulator app was refused. So every asset goes onto a draft,
+  # and the draft is published last, in this job. The APKs therefore wait for
+  # the iOS launch gate too; a red iOS gate holds the whole Release until it
+  # is re-run.
   #
   # NOTE: the app-*-release.apk glob is contractually tied to
   # scripts/build_release.sh apk producing --split-per-abi outputs; changing the
   # ABI-split scheme means updating this glob AND zapstore.yaml's `match` together.
-  android-publish:
+  publish:
     name: Publish GitHub Release
-    needs: [android, android-launch-gate]
+    needs: [android, android-launch-gate, ios-launch-gate]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     # contents: write lets the built-in GITHUB_TOKEN create the GitHub Release.
@@ -305,40 +313,6 @@ jobs:
           diff <(sha256sum app-*-release.apk | sort) <(printf '%s\n' "${TESTED_SHA256}" | tr ';' '\n' | sed '/^$/d' | sort) \
             || { echo "::error::The APKs to publish are not the ones the launch gate tested."; exit 1; }
 
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          name: Haven ${{ github.ref_name }}
-          generate_release_notes: true
-          # v*-beta.N / v*-rc.N (any tag containing '-') -> pre-release, never "Latest".
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          make_latest: ${{ !contains(github.ref_name, '-') }}
-          fail_on_unmatched_files: true
-          files: |
-            apks/app-*-release.apk
-            apks/app-*-release.apk.sha256
-
-  # The simulator app built from this tag is launched fresh, relaunched, and
-  # installed over the previous release's simulator app with its data kept.
-  # TestFlight waits for it; its artifact becomes the next release's upgrade
-  # source (ios-simulator-asset).
-  ios-launch-gate:
-    name: iOS launch gate
-    needs: [gate]
-    uses: ./.github/workflows/launch-gate-ios.yml
-
-  # Attaches the simulator app the iOS launch gate tested, so the NEXT
-  # release's iOS gate can upgrade over this one. Simulator-only: it cannot run
-  # on a device.
-  ios-simulator-asset:
-    name: Attach iOS simulator build
-    needs: [android-publish, ios-launch-gate]
-    if: github.ref_type == 'tag'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
       - name: Download the launched simulator app
         uses: actions/download-artifact@v6
         with:
@@ -349,14 +323,46 @@ jobs:
         working-directory: sim
         run: sha256sum -c app-ios-simulator.zip.sha256
 
-      - name: Attach it to the GitHub Release
+      # draft: true for every tag: the action creates a non-prerelease as a
+      # draft by itself, but a prerelease as already published, which an
+      # immutable release then refuses every asset for. A draft left by a
+      # failed attempt is reused (same-name assets replaced).
+      - name: Upload every asset to a draft release
+        id: draft
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
+          name: Haven ${{ github.ref_name }}
+          generate_release_notes: true
+          # v*-beta.N / v*-rc.N (any tag containing '-') -> pre-release, never "Latest".
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          draft: true
           fail_on_unmatched_files: true
           files: |
+            apks/app-*-release.apk
+            apks/app-*-release.apk.sha256
             sim/app-ios-simulator.zip
             sim/app-ios-simulator.zip.sha256
+
+      # The only step that publishes; nothing can be attached after it.
+      # "Latest" is set here because a draft cannot be latest.
+      - name: Publish the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.draft.outputs.id }}
+          MAKE_LATEST: ${{ !contains(github.ref_name, '-') }}
+        run: |
+          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            -F draft=false -f make_latest="${MAKE_LATEST}" --jq '.html_url'
+
+  # The simulator app built from this tag is launched fresh, relaunched, and
+  # installed over the previous release's simulator app with its data kept.
+  # TestFlight waits for it; publish attaches the app it launched, which
+  # becomes the next release's upgrade source.
+  ios-launch-gate:
+    name: iOS launch gate
+    needs: [gate]
+    uses: ./.github/workflows/launch-gate-ios.yml
 
   ios:
     name: iOS release (TestFlight)
@@ -488,7 +494,7 @@ jobs:
           retention-days: 90
 
   # ===========================================================================
-  # PUSH fan-out. The Zapstore job depends ONLY on `android-publish`, so a
+  # PUSH fan-out. The Zapstore job depends ONLY on `publish`, so a
   # Zapstore failure never blocks the iOS/TestFlight job, and the GitHub Release
   # is already published regardless. It skips cleanly when its
   # secret is absent (forks / before the publisher key exists) by gating every
@@ -497,7 +503,7 @@ jobs:
   # NO job here; they read the GitHub Release on their own cadence.
   # ===========================================================================
 
-  # Zapstore (Nostr app store) — runs after android-publish so the GitHub Release
+  # Zapstore (Nostr app store) — runs after publish so the GitHub Release
   # exists; `zsp` pulls the arm64-v8a APK straight from the Release (zapstore.yaml
   # metadata_sources: github + match) and signs the Nostr events with SIGN_WITH.
   # It does NOT re-sign the APK, so Zapstore stays in Haven's single signing
@@ -505,7 +511,7 @@ jobs:
   # in scripts/ci/publish_zapstore.sh).
   zapstore:
     name: Publish to Zapstore
-    needs: [android-publish]
+    needs: [publish]
     if: ${{ github.ref_type == 'tag' }}
     runs-on: ubuntu-latest
     env:
