@@ -182,7 +182,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get onboardingPhotoNotSaved =>
-      'Your photo couldn’t be saved. You can add it later in Settings, under Identity.';
+      'تعذّر حفظ صورتك. يمكنك إضافتها لاحقًا من صفحة الهوية في الإعدادات.';
 
   @override
   String get onboardingAddPhotoOptional => 'إضافة صورة (اختياري)';
@@ -1111,7 +1111,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get memberPickerStrangerLookupNote =>
-      'طلب Haven من أحد المُرحِّلات، أو من اثنين على الأكثر، الملف الشخصي الذي نشره هذا الشخص. ويستطيع كل مُرحِّل سأله Haven أن يرى أن هذا الجهاز سأل للتو عن هذا المفتاح، لكن الطلب لا يحمل أي توقيع تشفيري، فهو غير مرتبط بهويتك في Haven. وإن كان في الملف الشخصي صورة، نزّلها Haven من الخادم الذي اختاره هذا الشخص، ويستطيع ذلك الخادم أن يرى عنوان هذا الجهاز على الشبكة.';
+      'طلب Haven من أحد المُرحِّلات، أو من اثنين على الأكثر، الملف الشخصي الذي نشره هذا الشخص. ويستطيع كل مُرحِّل سأله Haven أن يرى أن هذا الجهاز سأل للتو عن هذا المفتاح، لكن الطلب لا يحمل أي توقيع تشفيري، فهو غير مرتبط بهويتك في Haven. وإن كان في الملف الشخصي صورة، نزّلها Haven من الخادم الذي اختاره هذا الشخص، وقد يُعيد ذلك الخادم توجيه التنزيل إلى خادم آخر. ويستطيع كل خادم يمرّ به التنزيل أن يرى عنوان هذا الجهاز على الشبكة (عنوان IP).';
 
   @override
   String get memberPickerStrangerLookingUp =>
@@ -1652,7 +1652,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get identityAdvancedDeleteBody =>
-      'يحذف هذا هويتك وكل بيانات دوائرك من هذا الهاتف. أما ما نُشِر تحتها بالفعل فيبقى مكانه: اسمك ومفاتيحك على المُرحِّلات التي لديها نسخة منها، وصورتك على مستضيف الصور الذي يخزّنها. وتأكّد من أنك نسخت مفتاحك السري احتياطيًا إن أردت استعادة هويتك.';
+      'يحذف هذا هويتك وكل بيانات دوائرك من هذا الهاتف. أما ما نُشِر تحتها بالفعل فيبقى مكانه: اسمك ومفاتيحك على المُرحِّلات التي لديها نسخة منها، وصورتك على أي مستضيف صور رُفِعت إليه. وتأكّد من أنك نسخت مفتاحك السري احتياطيًا إن أردت استعادة هويتك.';
 
   @override
   String get identityAdvancedDeleteConfirm => 'حذف';
@@ -1836,7 +1836,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get photoHeaderRemoveBody =>
-      'يؤدي هذا إلى إزالة صورتك من ملفك الشخصي العام. ويبقى ملف الصورة على الخادم الذي يستضيفه، وتبقى النسخ التي نزّلها آخرون بالفعل عندهم.';
+      'يؤدي هذا إلى إزالة صورتك من ملفك الشخصي العام. ويبقى ملف الصورة على أي خادم رُفِع إليه، وتبقى النسخ التي نزّلها آخرون بالفعل عندهم.';
 
   @override
   String get photoHeaderEditPhoto => 'تعديل الصورة';

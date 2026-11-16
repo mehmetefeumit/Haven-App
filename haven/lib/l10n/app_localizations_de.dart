@@ -181,7 +181,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get onboardingPhotoNotSaved =>
-      'Your photo couldn’t be saved. You can add it later in Settings, under Identity.';
+      'Dein Foto konnte nicht gespeichert werden. Du kannst es später unter Einstellungen → Identität hinzufügen.';
 
   @override
   String get onboardingAddPhotoOptional => 'Foto hinzufügen (optional)';
@@ -1077,7 +1077,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get memberPickerStrangerLookupNote =>
-      'Haven hat ein Relay – höchstens zwei – nach dem veröffentlichten Profil dieser Person gefragt. Jedes gefragte Relay kann sehen, dass dieses Gerät gerade eben nach diesem Schlüssel gefragt hat. Die Anfrage trägt aber keine kryptografische Signatur und ist deshalb nicht mit deiner Haven-Identität verknüpft. Wenn das Profil ein Foto hat, lädt Haven dieses Foto von dem Server herunter, den diese Person gewählt hat. Dieser Server kann die Netzwerkadresse dieses Geräts sehen.';
+      'Haven hat ein Relay – höchstens zwei – nach dem veröffentlichten Profil dieser Person gefragt. Jedes gefragte Relay kann sehen, dass dieses Gerät gerade eben nach diesem Schlüssel gefragt hat. Die Anfrage trägt aber keine kryptografische Signatur und ist deshalb nicht mit deiner Haven-Identität verknüpft. Wenn das Profil ein Foto hat, lädt Haven dieses Foto von dem Server herunter, den diese Person gewählt hat. Dieser Server leitet den Download möglicherweise an einen anderen Server weiter. Jeder dieser Server kann die IP-Adresse dieses Geräts sehen.';
 
   @override
   String get memberPickerStrangerLookingUp =>
@@ -1592,7 +1592,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get identityAdvancedDeleteBody =>
-      'Dadurch werden deine Identität und alle Kreisdaten von diesem Handy gelöscht. Alles, was bereits unter dieser Identität veröffentlicht wurde, bleibt dort, wo es ist: dein Name und deine Schlüssel auf den Relays, die sie haben, dein Foto auf dem Bild-Host, der es speichert. Stelle sicher, dass du deinen geheimen Schlüssel gesichert hast, falls du die Identität später wiederherstellen möchtest.';
+      'Dadurch werden deine Identität und alle Kreisdaten von diesem Handy gelöscht. Alles, was bereits unter dieser Identität veröffentlicht wurde, bleibt dort, wo es ist: dein Name und deine Schlüssel auf den Relays, die sie haben, dein Foto auf jedem Bild-Host, auf den es hochgeladen wurde. Stelle sicher, dass du deinen geheimen Schlüssel gesichert hast, falls du die Identität später wiederherstellen möchtest.';
 
   @override
   String get identityAdvancedDeleteConfirm => 'Löschen';
@@ -1788,7 +1788,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get photoHeaderRemoveBody =>
-      'Dadurch wird dein Foto aus deinem öffentlichen Profil entfernt. Die Bilddatei bleibt auf dem Server, der sie hostet, und bereits heruntergeladene Kopien bleiben bei denen, die sie haben.';
+      'Dadurch wird dein Foto aus deinem öffentlichen Profil entfernt. Die Bilddatei bleibt auf jedem Server, auf den sie hochgeladen wurde, und bereits heruntergeladene Kopien bleiben bei denen, die sie haben.';
 
   @override
   String get photoHeaderEditPhoto => 'Foto bearbeiten';

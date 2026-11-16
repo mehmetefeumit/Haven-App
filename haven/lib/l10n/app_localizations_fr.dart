@@ -181,7 +181,7 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get onboardingPhotoNotSaved =>
-      'Your photo couldn’t be saved. You can add it later in Settings, under Identity.';
+      'Votre photo n\'a pas pu être enregistrée. Vous pourrez l\'ajouter plus tard dans Réglages, rubrique Identité.';
 
   @override
   String get onboardingAddPhotoOptional => 'Ajouter une photo (facultatif)';
@@ -1086,7 +1086,7 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get memberPickerStrangerLookupNote =>
-      'Haven a demandé à un relais (deux au plus) le profil publié par cette personne. Chaque relais interrogé peut voir que cet appareil vient de se renseigner sur cette clé, mais la demande ne porte aucune signature : elle n\'est donc pas associée à votre identité Haven. Si le profil comporte une photo, Haven la télécharge depuis le serveur choisi par cette personne, et ce serveur peut voir l\'adresse réseau de cet appareil.';
+      'Haven a demandé à un relais (deux au plus) le profil publié par cette personne. Chaque relais interrogé peut voir que cet appareil vient de se renseigner sur cette clé, mais la demande ne porte aucune signature : elle n\'est donc pas associée à votre identité Haven. Si le profil comporte une photo, Haven la télécharge depuis le serveur choisi par cette personne ; ce serveur peut rediriger le téléchargement vers un autre. Chacun de ces serveurs peut voir l\'adresse réseau (IP) de cet appareil.';
 
   @override
   String get memberPickerStrangerLookingUp => 'Recherche du profil publié…';
@@ -1611,7 +1611,7 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get identityAdvancedDeleteBody =>
-      'Cela supprime votre identité et toutes les données de vos cercles de ce téléphone. Tout ce qui a déjà été publié sous cette identité reste là où cela se trouve : votre nom et vos clés sur les relais qui les détiennent, votre photo sur l\'hébergeur d\'images qui la stocke. Assurez-vous d\'avoir sauvegardé votre clé secrète si vous souhaitez pouvoir récupérer cette identité.';
+      'Cela supprime votre identité et toutes les données de vos cercles de ce téléphone. Tout ce qui a déjà été publié sous cette identité reste là où cela se trouve : votre nom et vos clés sur les relais qui les détiennent, votre photo sur tout hébergeur d\'images où elle a été envoyée. Assurez-vous d\'avoir sauvegardé votre clé secrète si vous souhaitez pouvoir récupérer cette identité.';
 
   @override
   String get identityAdvancedDeleteConfirm => 'Supprimer';
@@ -1803,7 +1803,7 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get photoHeaderRemoveBody =>
-      'Cela retire votre photo de votre profil public. Le fichier image reste sur le serveur qui l\'héberge, et les copies que d\'autres ont déjà téléchargées restent chez elles.';
+      'Cela retire votre photo de votre profil public. Le fichier image reste sur tout serveur où il a été envoyé, et les copies que d\'autres ont déjà téléchargées restent chez elles.';
 
   @override
   String get photoHeaderEditPhoto => 'Modifier la photo';
