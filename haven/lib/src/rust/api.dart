@@ -937,7 +937,7 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   ///
   /// So this call:
   /// * **shuffles** the order every cycle from the OS CSPRNG (`rand::rngs::SysRng`;
-  ///   `thread_rng` is banned), so arrival order carries no roster ordering
+  ///   `rand::rng` is banned), so arrival order carries no roster ordering
   ///   and a newly added member does not appear at a stable position;
   /// * runs the downloads **one at a time**, never concurrently, so there is
   ///   no burst to fingerprint;
@@ -2030,8 +2030,8 @@ abstract class LocationEventService implements RustOpaqueInterface {
   static Future<LocationEventService> default_() =>
       RustLib.instance.api.crateApiLocationEventServiceDefault();
 
-  /// Returns a jittered publish interval in seconds using the Rust-side
-  /// CSPRNG (`SysRng`), sampled uniformly in
+  /// Returns a jittered publish interval in seconds from the OS CSPRNG
+  /// (`OsRng`, drawn in `haven_core::location`), sampled uniformly in
   /// `[nominal_secs * 0.6, nominal_secs * 1.4]` (40% spread).
   ///
   /// Callers pass the nominal interval (typically 120 s) and rearm their
