@@ -670,7 +670,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get createCircleEmptyMessage =>
-      'Suche per öffentlichem Schlüssel oder scanne den QR-Code, um Mitglieder hinzuzufügen.';
+      'Suche nach öffentlichem Schlüssel oder scanne den QR-Code, um Mitglieder hinzuzufügen.';
 
   @override
   String get createCircleNoValidMembers =>

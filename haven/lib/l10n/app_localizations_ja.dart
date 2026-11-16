@@ -955,7 +955,7 @@ class AppLocalizationsJa extends AppLocalizations {
   String get memberSearchScanTooltip => 'QRコードをスキャン';
 
   @override
-  String get memberSearchHelper => '連絡先に公開鍵またはQRコードを聞いてください';
+  String get memberSearchHelper => '連絡先に公開鍵またはQRコードを教えてもらってください';
 
   @override
   String get memberSearchNoValidId => '有効な公開鍵が見つかりませんでした';

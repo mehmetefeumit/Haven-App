@@ -253,7 +253,7 @@
   "memberSearchPasteTooltip": "クリップボードから貼り付け",
   "memberSearchAddTooltip": "メンバーを追加",
   "memberSearchScanTooltip": "QRコードをスキャン",
-  "memberSearchHelper": "連絡先に公開鍵またはQRコードを聞いてください",
+  "memberSearchHelper": "連絡先に公開鍵またはQRコードを教えてもらってください",
   "memberSearchNoValidId": "有効な公開鍵が見つかりませんでした",
   "memberSearchAlreadyAdded": "このメンバーはすでに追加されています",
   "memberPickerSectionRoster": "あなたのサークルのメンバー",
