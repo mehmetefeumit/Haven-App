@@ -22,7 +22,12 @@ jobs:
     # block, which was inert template boilerplate (it filtered to
     # specific usernames / first-time contributors that don't apply to
     # this repo) and left a confusing dead `if:` in the file.
-    if: github.event.pull_request.draft == false
+    #
+    # Skip runs Dependabot triggers: GitHub gives them no Actions secrets (the
+    # OAuth token arrives empty) and the action refuses bot actors anyway. Such
+    # PRs are gated by CI and a human merge; a human push to the branch makes
+    # the actor that human, so the code they add is still reviewed.
+    if: github.event.pull_request.draft == false && github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     permissions:
       contents: read
