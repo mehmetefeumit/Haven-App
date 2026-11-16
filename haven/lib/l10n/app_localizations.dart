@@ -744,6 +744,36 @@ abstract class AppLocalizations {
   /// **'Warning: {url} also carries your other Haven traffic, so this relay could link your profile to that traffic'**
   String relaySettingsProfileContaminationSemantics(String url);
 
+  /// Warning line under an inbox relay's address on the Relay settings page when, at the last check, that relay refused to let Haven read the user's invitations (it answered, but would not hand them over). Stay neutral about why: never say the relay is broken, never mention signing in or passwords. Read together with the address and the row's other lines as one sentence by a screen reader.
+  ///
+  /// In en, this message translates to:
+  /// **'This relay didn\'t let Haven read your invitations. Remove it, or add another relay.'**
+  String get relaySettingsInboxRefused;
+
+  /// Short tooltip on the warning icon next to an inbox relay that refused to let Haven read the user's invitations at the last check.
+  ///
+  /// In en, this message translates to:
+  /// **'Didn\'t let Haven read invitations'**
+  String get relaySettingsInboxRefusedTooltip;
+
+  /// Full screen-reader label for the warning icon next to an inbox relay that refused to let Haven read the user's invitations, naming the relay so the warning reads sensibly out of visual context. {url} is the relay host (a technical address, intentionally English).
+  ///
+  /// In en, this message translates to:
+  /// **'Warning: {url} didn\'t let Haven read your invitations'**
+  String relaySettingsInboxRefusedSemantics(String url);
+
+  /// Title of the warning banner at the top of the Inbox relays section when, at the last check, every inbox relay refused to let Haven read the user's invitations. Past tense: it reports the last check. Never mention signing in or passwords.
+  ///
+  /// In en, this message translates to:
+  /// **'None of your inbox relays let Haven read your invitations'**
+  String get relaySettingsInboxAllRefusedTitle;
+
+  /// Body of the banner titled relaySettingsInboxAllRefusedTitle. A 'Restore defaults' button follows (relaySettingsRestoreDefaults), which replaces the inbox list with Haven's default inbox relays after a confirmation.
+  ///
+  /// In en, this message translates to:
+  /// **'Invitations sent to you won\'t reach you until one of your inbox relays lets Haven read them. Restore the defaults, or add another relay.'**
+  String get relaySettingsInboxAllRefusedMessage;
+
   /// Title of the location settings page (AppBar).
   ///
   /// In en, this message translates to:
@@ -2106,6 +2136,36 @@ abstract class AppLocalizations {
   /// **'Could not load invitations'**
   String get invitationsLoadError;
 
+  /// Notice above the Invitations list after a refresh in which at least one of the user's inbox relays refused to let Haven read the user's invitations (it answered, but would not hand them over). {count} is how many refused, at least 1. Stay neutral about why: never say the relay is broken, never mention signing in or passwords. 'Relay settings' names the button under this notice (invitationsNoticeOpenRelaySettings); keep the two in the same words.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{1 inbox relay didn\'t let Haven read your invitations, so an invitation sent only there won\'t reach you. In Relay settings, remove it or add another relay.} other{{count} inbox relays didn\'t let Haven read your invitations, so an invitation sent only there won\'t reach you. In Relay settings, remove them or add another relay.}}'**
+  String invitationsNoticeRefused(int count);
+
+  /// Notice above the Invitations list after a refresh in which an invitation was received and opened but could not be stored on this phone, so it is not listed. A 'Try Again' button follows (commonTryAgain), which fetches it again. {count} is how many, at least 1.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{An invitation arrived but couldn\'t be saved on this device.} other{{count} invitations arrived but couldn\'t be saved on this device.}}'**
+  String invitationsNoticeNotSaved(int count);
+
+  /// Notice above the Invitations list after a refresh in which none of the user's inbox relays could be reached (no connection, or every relay down). A 'Try Again' button follows (commonTryAgain).
+  ///
+  /// In en, this message translates to:
+  /// **'Haven couldn\'t reach your inbox relays, so new invitations can\'t show up yet.'**
+  String get invitationsNoticeOffline;
+
+  /// Notice above the Invitations list after a refresh in which at least one inbox relay was not read in full — it did not finish, or could not be reached while others could. A 'Relay settings' button follows (invitationsNoticeOpenRelaySettings). 'may' is deliberate: nothing shows that an invitation is missing.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven couldn\'t finish checking all your inbox relays, so some invitations may not show up yet.'**
+  String get invitationsNoticeIncomplete;
+
+  /// Button under an Invitations notice that opens the relay settings page, where the user can remove an inbox relay or add another. Same words as the relay settings page's own name in this locale's navigation.
+  ///
+  /// In en, this message translates to:
+  /// **'Relay settings'**
+  String get invitationsNoticeOpenRelaySettings;
+
   /// Title of the empty state on the Invitations page when there are no pending invitations.
   ///
   /// In en, this message translates to:
@@ -2130,23 +2190,23 @@ abstract class AppLocalizations {
   /// **'{total, plural, =1{{checked} of 1 relay checked} other{{checked} of {total} relays checked}}'**
   String refreshRingSemanticChecking(int checked, int total);
 
-  /// Accessibility label on the refresh ring when every relay responded successfully.
+  /// Accessibility label on the Invitations refresh ring when every inbox relay let Haven read the user's invitations and sent all of them ('checked' = read in full). Never say 'responded': a relay that answered but refused the read or did not finish is NOT checked.
   ///
   /// In en, this message translates to:
-  /// **'{total, plural, =1{The relay responded} other{All {total} relays responded}}'**
-  String refreshRingSemanticAllOk(int total);
+  /// **'{total, plural, =1{Invitations checked on the relay} other{Invitations checked on all {total} relays}}'**
+  String refreshRingSemanticInboxAll(int total);
 
-  /// Accessibility label on the refresh ring when no relay could be reached. The count is omitted because zero responded makes a number redundant.
+  /// Accessibility label on the Invitations refresh ring when no inbox relay could be read in full: each refused the read, did not finish, or could not be reached. Do not say 'could not be reached': some may have been reached and refused.
   ///
   /// In en, this message translates to:
-  /// **'No relays responded'**
-  String get refreshRingSemanticAllError;
+  /// **'Couldn\'t check invitations on any relay'**
+  String get refreshRingSemanticInboxNone;
 
-  /// Accessibility label on the refresh ring when only some relays responded, e.g. '2 of 3 relays responded'. A partial result always has at least two relays, so no singular form is needed.
+  /// Accessibility label on the Invitations refresh ring when only some inbox relays were read in full, e.g. 'Invitations checked on 2 of 3 relays'. A partial result always has at least two relays, so no singular form is needed for {total}; {ok} must not govern inflection.
   ///
   /// In en, this message translates to:
-  /// **'{ok} of {total} relays responded'**
-  String refreshRingSemanticPartial(int ok, int total);
+  /// **'Invitations checked on {ok} of {total} relays'**
+  String refreshRingSemanticInboxPartial(int ok, int total);
 
   /// Screen-reader announcement when a relay refresh starts (sent via SemanticsService, not a live region).
   ///
@@ -2154,23 +2214,23 @@ abstract class AppLocalizations {
   /// **'Checking relays'**
   String get refreshRingAnnouncementChecking;
 
-  /// Screen-reader announcement when every relay responded successfully at the end of a refresh.
+  /// Screen-reader announcement at the end of an Invitations refresh when every inbox relay was read in full ('checked' = Haven read all of the user's invitations there). Never say 'responded'.
   ///
   /// In en, this message translates to:
-  /// **'All relays responded'**
-  String get refreshRingAnnouncementAllOk;
+  /// **'Invitations checked on every relay'**
+  String get refreshRingAnnouncementInboxAll;
 
-  /// Screen-reader announcement when only some relays responded at the end of a refresh, e.g. '2 of 3 relays responded'. A partial result always has at least two relays, so no singular form is needed.
+  /// Screen-reader announcement at the end of an Invitations refresh when only some inbox relays were read in full, e.g. 'Invitations checked on 2 of 3 relays'. A partial result always has at least two relays, so no singular form is needed for {total}; {ok} must not govern inflection.
   ///
   /// In en, this message translates to:
-  /// **'{ok} of {total} relays responded'**
-  String refreshRingAnnouncementPartial(int ok, int total);
+  /// **'Invitations checked on {ok} of {total} relays'**
+  String refreshRingAnnouncementInboxPartial(int ok, int total);
 
-  /// Screen-reader announcement when no relay could be reached at the end of a refresh.
+  /// Screen-reader announcement at the end of an Invitations refresh when no inbox relay was read in full: each refused the read, did not finish, or could not be reached.
   ///
   /// In en, this message translates to:
-  /// **'No relays could be reached'**
-  String get refreshRingAnnouncementAllError;
+  /// **'Couldn\'t check invitations on any relay'**
+  String get refreshRingAnnouncementInboxNone;
 
   /// Screen-reader announcement when the user taps the refresh ring with no inbox relay configured, which routes to relay settings.
   ///
@@ -2178,7 +2238,7 @@ abstract class AppLocalizations {
   /// **'No inbox configured'**
   String get refreshRingAnnouncementNoInbox;
 
-  /// Accessibility label on the Relay Settings refresh ring when every relay holds the user's published data (KeyPackage / relay lists). The 'hasData' vocabulary, distinct from the Invitations 'responded' wording, because on this page a relay can answer yet still be missing the data.
+  /// Accessibility label on the Relay Settings refresh ring when every relay holds the user's published data (KeyPackage / relay lists). The 'hasData' vocabulary, distinct from the Invitations 'checked' wording, because on this page a relay can answer yet still be missing the data.
   ///
   /// In en, this message translates to:
   /// **'{total, plural, =1{The relay has your data} other{All {total} relays have your data}}'**

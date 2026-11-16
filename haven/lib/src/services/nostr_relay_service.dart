@@ -569,7 +569,7 @@ class NostrRelayService implements RelayService, CircleChangeDriver {
           .map(
             (r) => RelayGiftWrapFetch(
               relayUrl: r.relayUrl,
-              responded: r.read == InboxReadFfi.served,
+              read: inboxReadOf(r.read),
               events: r.events,
             ),
           )

@@ -391,6 +391,27 @@ class AppLocalizationsNe extends AppLocalizations {
   }
 
   @override
+  String get relaySettingsInboxRefused =>
+      'This relay didn\'t let Haven read your invitations. Remove it, or add another relay.';
+
+  @override
+  String get relaySettingsInboxRefusedTooltip =>
+      'Didn\'t let Haven read invitations';
+
+  @override
+  String relaySettingsInboxRefusedSemantics(String url) {
+    return 'Warning: $url didn\'t let Haven read your invitations';
+  }
+
+  @override
+  String get relaySettingsInboxAllRefusedTitle =>
+      'None of your inbox relays let Haven read your invitations';
+
+  @override
+  String get relaySettingsInboxAllRefusedMessage =>
+      'Invitations sent to you won\'t reach you until one of your inbox relays lets Haven read them. Restore the defaults, or add another relay.';
+
+  @override
   String get locationSettingsTitle => 'स्थान';
 
   @override
@@ -1391,6 +1412,50 @@ class AppLocalizationsNe extends AppLocalizations {
   String get invitationsLoadError => 'निमन्त्रणाहरू लोड गर्न सकिएन';
 
   @override
+  String invitationsNoticeRefused(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other:
+          '$countString inbox relays didn\'t let Haven read your invitations, so an invitation sent only there won\'t reach you. In Relay settings, remove them or add another relay.',
+      one:
+          '1 inbox relay didn\'t let Haven read your invitations, so an invitation sent only there won\'t reach you. In Relay settings, remove it or add another relay.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String invitationsNoticeNotSaved(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other:
+          '$countString invitations arrived but couldn\'t be saved on this device.',
+      one: 'An invitation arrived but couldn\'t be saved on this device.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get invitationsNoticeOffline =>
+      'Haven couldn\'t reach your inbox relays, so new invitations can\'t show up yet.';
+
+  @override
+  String get invitationsNoticeIncomplete =>
+      'Haven couldn\'t finish checking all your inbox relays, so some invitations may not show up yet.';
+
+  @override
+  String get invitationsNoticeOpenRelaySettings => 'Relay settings';
+
+  @override
   String get invitationsEmptyTitle => 'कुनै निमन्त्रणा छैन';
 
   @override
@@ -1420,7 +1485,7 @@ class AppLocalizationsNe extends AppLocalizations {
   }
 
   @override
-  String refreshRingSemanticAllOk(int total) {
+  String refreshRingSemanticInboxAll(int total) {
     final intl.NumberFormat totalNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
@@ -1428,17 +1493,18 @@ class AppLocalizationsNe extends AppLocalizations {
     String _temp0 = intl.Intl.pluralLogic(
       total,
       locale: localeName,
-      other: 'सबै $totalString रिलेले जवाफ दिए',
-      one: 'रिलेले जवाफ दियो',
+      other: 'Invitations checked on all $totalString relays',
+      one: 'Invitations checked on the relay',
     );
     return '$_temp0';
   }
 
   @override
-  String get refreshRingSemanticAllError => 'कुनै रिलेले जवाफ दिएन';
+  String get refreshRingSemanticInboxNone =>
+      'Couldn\'t check invitations on any relay';
 
   @override
-  String refreshRingSemanticPartial(int ok, int total) {
+  String refreshRingSemanticInboxPartial(int ok, int total) {
     final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -1447,17 +1513,18 @@ class AppLocalizationsNe extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return '$totalString मध्ये $okString रिलेले जवाफ दिए';
+    return 'Invitations checked on $okString of $totalString relays';
   }
 
   @override
   String get refreshRingAnnouncementChecking => 'रिलेहरू जाँच्दै';
 
   @override
-  String get refreshRingAnnouncementAllOk => 'सबै रिलेले जवाफ दिए';
+  String get refreshRingAnnouncementInboxAll =>
+      'Invitations checked on every relay';
 
   @override
-  String refreshRingAnnouncementPartial(int ok, int total) {
+  String refreshRingAnnouncementInboxPartial(int ok, int total) {
     final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -1466,11 +1533,12 @@ class AppLocalizationsNe extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return '$totalString मध्ये $okString रिलेले जवाफ दिए';
+    return 'Invitations checked on $okString of $totalString relays';
   }
 
   @override
-  String get refreshRingAnnouncementAllError => 'कुनै पनि रिलेमा पुग्न सकिएन';
+  String get refreshRingAnnouncementInboxNone =>
+      'Couldn\'t check invitations on any relay';
 
   @override
   String get refreshRingAnnouncementNoInbox => 'कुनै इनबक्स कन्फिगर गरिएको छैन';

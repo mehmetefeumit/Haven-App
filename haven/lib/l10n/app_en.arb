@@ -462,6 +462,30 @@
     }
   },
 
+  "relaySettingsInboxRefused": "This relay didn't let Haven read your invitations. Remove it, or add another relay.",
+  "@relaySettingsInboxRefused": {
+    "description": "Warning line under an inbox relay's address on the Relay settings page when, at the last check, that relay refused to let Haven read the user's invitations (it answered, but would not hand them over). Stay neutral about why: never say the relay is broken, never mention signing in or passwords. Read together with the address and the row's other lines as one sentence by a screen reader."
+  },
+  "relaySettingsInboxRefusedTooltip": "Didn't let Haven read invitations",
+  "@relaySettingsInboxRefusedTooltip": {
+    "description": "Short tooltip on the warning icon next to an inbox relay that refused to let Haven read the user's invitations at the last check."
+  },
+  "relaySettingsInboxRefusedSemantics": "Warning: {url} didn't let Haven read your invitations",
+  "@relaySettingsInboxRefusedSemantics": {
+    "description": "Full screen-reader label for the warning icon next to an inbox relay that refused to let Haven read the user's invitations, naming the relay so the warning reads sensibly out of visual context. {url} is the relay host (a technical address, intentionally English).",
+    "placeholders": {
+      "url": { "type": "String" }
+    }
+  },
+  "relaySettingsInboxAllRefusedTitle": "None of your inbox relays let Haven read your invitations",
+  "@relaySettingsInboxAllRefusedTitle": {
+    "description": "Title of the warning banner at the top of the Inbox relays section when, at the last check, every inbox relay refused to let Haven read the user's invitations. Past tense: it reports the last check. Never mention signing in or passwords."
+  },
+  "relaySettingsInboxAllRefusedMessage": "Invitations sent to you won't reach you until one of your inbox relays lets Haven read them. Restore the defaults, or add another relay.",
+  "@relaySettingsInboxAllRefusedMessage": {
+    "description": "Body of the banner titled relaySettingsInboxAllRefusedTitle. A 'Restore defaults' button follows (relaySettingsRestoreDefaults), which replaces the inbox list with Haven's default inbox relays after a confirmation."
+  },
+
   "locationSettingsTitle": "Location",
   "@locationSettingsTitle": {
     "description": "Title of the location settings page (AppBar)."
@@ -1592,6 +1616,32 @@
   "@invitationsLoadError": {
     "description": "Message shown on the Invitations page when the pending-invitations list fails to load."
   },
+  "invitationsNoticeRefused": "{count, plural, =1{1 inbox relay didn't let Haven read your invitations, so an invitation sent only there won't reach you. In Relay settings, remove it or add another relay.} other{{count} inbox relays didn't let Haven read your invitations, so an invitation sent only there won't reach you. In Relay settings, remove them or add another relay.}}",
+  "@invitationsNoticeRefused": {
+    "description": "Notice above the Invitations list after a refresh in which at least one of the user's inbox relays refused to let Haven read the user's invitations (it answered, but would not hand them over). {count} is how many refused, at least 1. Stay neutral about why: never say the relay is broken, never mention signing in or passwords. 'Relay settings' names the button under this notice (invitationsNoticeOpenRelaySettings); keep the two in the same words.",
+    "placeholders": {
+      "count": { "type": "int", "format": "decimalPattern" }
+    }
+  },
+  "invitationsNoticeNotSaved": "{count, plural, =1{An invitation arrived but couldn't be saved on this device.} other{{count} invitations arrived but couldn't be saved on this device.}}",
+  "@invitationsNoticeNotSaved": {
+    "description": "Notice above the Invitations list after a refresh in which an invitation was received and opened but could not be stored on this phone, so it is not listed. A 'Try Again' button follows (commonTryAgain), which fetches it again. {count} is how many, at least 1.",
+    "placeholders": {
+      "count": { "type": "int", "format": "decimalPattern" }
+    }
+  },
+  "invitationsNoticeOffline": "Haven couldn't reach your inbox relays, so new invitations can't show up yet.",
+  "@invitationsNoticeOffline": {
+    "description": "Notice above the Invitations list after a refresh in which none of the user's inbox relays could be reached (no connection, or every relay down). A 'Try Again' button follows (commonTryAgain)."
+  },
+  "invitationsNoticeIncomplete": "Haven couldn't finish checking all your inbox relays, so some invitations may not show up yet.",
+  "@invitationsNoticeIncomplete": {
+    "description": "Notice above the Invitations list after a refresh in which at least one inbox relay was not read in full — it did not finish, or could not be reached while others could. A 'Relay settings' button follows (invitationsNoticeOpenRelaySettings). 'may' is deliberate: nothing shows that an invitation is missing."
+  },
+  "invitationsNoticeOpenRelaySettings": "Relay settings",
+  "@invitationsNoticeOpenRelaySettings": {
+    "description": "Button under an Invitations notice that opens the relay settings page, where the user can remove an inbox relay or add another. Same words as the relay settings page's own name in this locale's navigation."
+  },
   "invitationsEmptyTitle": "No Invitations",
   "@invitationsEmptyTitle": {
     "description": "Title of the empty state on the Invitations page when there are no pending invitations."
@@ -1613,20 +1663,20 @@
       "total": { "type": "int", "format": "decimalPattern" }
     }
   },
-  "refreshRingSemanticAllOk": "{total, plural, =1{The relay responded} other{All {total} relays responded}}",
-  "@refreshRingSemanticAllOk": {
-    "description": "Accessibility label on the refresh ring when every relay responded successfully.",
+  "refreshRingSemanticInboxAll": "{total, plural, =1{Invitations checked on the relay} other{Invitations checked on all {total} relays}}",
+  "@refreshRingSemanticInboxAll": {
+    "description": "Accessibility label on the Invitations refresh ring when every inbox relay let Haven read the user's invitations and sent all of them ('checked' = read in full). Never say 'responded': a relay that answered but refused the read or did not finish is NOT checked.",
     "placeholders": {
       "total": { "type": "int", "format": "decimalPattern" }
     }
   },
-  "refreshRingSemanticAllError": "No relays responded",
-  "@refreshRingSemanticAllError": {
-    "description": "Accessibility label on the refresh ring when no relay could be reached. The count is omitted because zero responded makes a number redundant."
+  "refreshRingSemanticInboxNone": "Couldn't check invitations on any relay",
+  "@refreshRingSemanticInboxNone": {
+    "description": "Accessibility label on the Invitations refresh ring when no inbox relay could be read in full: each refused the read, did not finish, or could not be reached. Do not say 'could not be reached': some may have been reached and refused."
   },
-  "refreshRingSemanticPartial": "{ok} of {total} relays responded",
-  "@refreshRingSemanticPartial": {
-    "description": "Accessibility label on the refresh ring when only some relays responded, e.g. '2 of 3 relays responded'. A partial result always has at least two relays, so no singular form is needed.",
+  "refreshRingSemanticInboxPartial": "Invitations checked on {ok} of {total} relays",
+  "@refreshRingSemanticInboxPartial": {
+    "description": "Accessibility label on the Invitations refresh ring when only some inbox relays were read in full, e.g. 'Invitations checked on 2 of 3 relays'. A partial result always has at least two relays, so no singular form is needed for {total}; {ok} must not govern inflection.",
     "placeholders": {
       "ok": { "type": "int", "format": "decimalPattern" },
       "total": { "type": "int", "format": "decimalPattern" }
@@ -1636,21 +1686,21 @@
   "@refreshRingAnnouncementChecking": {
     "description": "Screen-reader announcement when a relay refresh starts (sent via SemanticsService, not a live region)."
   },
-  "refreshRingAnnouncementAllOk": "All relays responded",
-  "@refreshRingAnnouncementAllOk": {
-    "description": "Screen-reader announcement when every relay responded successfully at the end of a refresh."
+  "refreshRingAnnouncementInboxAll": "Invitations checked on every relay",
+  "@refreshRingAnnouncementInboxAll": {
+    "description": "Screen-reader announcement at the end of an Invitations refresh when every inbox relay was read in full ('checked' = Haven read all of the user's invitations there). Never say 'responded'."
   },
-  "refreshRingAnnouncementPartial": "{ok} of {total} relays responded",
-  "@refreshRingAnnouncementPartial": {
-    "description": "Screen-reader announcement when only some relays responded at the end of a refresh, e.g. '2 of 3 relays responded'. A partial result always has at least two relays, so no singular form is needed.",
+  "refreshRingAnnouncementInboxPartial": "Invitations checked on {ok} of {total} relays",
+  "@refreshRingAnnouncementInboxPartial": {
+    "description": "Screen-reader announcement at the end of an Invitations refresh when only some inbox relays were read in full, e.g. 'Invitations checked on 2 of 3 relays'. A partial result always has at least two relays, so no singular form is needed for {total}; {ok} must not govern inflection.",
     "placeholders": {
       "ok": { "type": "int", "format": "decimalPattern" },
       "total": { "type": "int", "format": "decimalPattern" }
     }
   },
-  "refreshRingAnnouncementAllError": "No relays could be reached",
-  "@refreshRingAnnouncementAllError": {
-    "description": "Screen-reader announcement when no relay could be reached at the end of a refresh."
+  "refreshRingAnnouncementInboxNone": "Couldn't check invitations on any relay",
+  "@refreshRingAnnouncementInboxNone": {
+    "description": "Screen-reader announcement at the end of an Invitations refresh when no inbox relay was read in full: each refused the read, did not finish, or could not be reached."
   },
   "refreshRingAnnouncementNoInbox": "No inbox configured",
   "@refreshRingAnnouncementNoInbox": {
@@ -1659,7 +1709,7 @@
 
   "refreshRingSemanticAllFound": "{total, plural, =1{The relay has your data} other{All {total} relays have your data}}",
   "@refreshRingSemanticAllFound": {
-    "description": "Accessibility label on the Relay Settings refresh ring when every relay holds the user's published data (KeyPackage / relay lists). The 'hasData' vocabulary, distinct from the Invitations 'responded' wording, because on this page a relay can answer yet still be missing the data.",
+    "description": "Accessibility label on the Relay Settings refresh ring when every relay holds the user's published data (KeyPackage / relay lists). The 'hasData' vocabulary, distinct from the Invitations 'checked' wording, because on this page a relay can answer yet still be missing the data.",
     "placeholders": {
       "total": { "type": "int", "format": "decimalPattern" }
     }

@@ -4,7 +4,8 @@
 /// relay, what it serves of the kinds expected there — kind 30443 on an own
 /// `KeyPackage` relay, kind 10002 there and on a lookup relay, kind 10050 on
 /// an own inbox relay and on a lookup relay — judged as maintenance judges
-/// them (`RelayService.checkOwnReachability`).
+/// them (`RelayService.checkOwnReachability`) — and, per own inbox relay,
+/// whether it lets Haven read this account's gift wraps.
 library;
 
 import 'package:flutter/foundation.dart';
@@ -17,6 +18,8 @@ import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/rust/api.dart'
     show OwnEventPresenceFfi, OwnRelayPresenceFfi;
+import 'package:haven/src/services/relay_service.dart'
+    show InboxRead, inboxReadOf;
 
 /// What one relay serves of one expected kind.
 enum KindPresence {
@@ -52,6 +55,7 @@ class RelayPresence {
     this.keyPackage,
     this.relayList,
     this.inboxRelayList,
+    this.inboxRead,
   });
 
   /// The configured or lookup entry, verbatim.
@@ -72,10 +76,18 @@ class RelayPresence {
   /// Kind 10050, if expected here.
   final KindPresence? inboxRelayList;
 
+  /// How it answered a read of this account's gift wraps, at the last check;
+  /// `null` for a relay off the inbox list, and while not yet checked.
+  ///
+  /// Never one of [expected]: a Republish cannot change whether a relay lets
+  /// Haven read the inbox, so a refused read must not offer one.
+  final InboxRead? inboxRead;
+
   /// Every expected kind's presence.
   List<KindPresence> get expected => [?keyPackage, ?relayList, ?inboxRelayList];
 
-  /// This row with every expected kind set to [presence].
+  /// This row with every expected kind set to [presence], and no inbox
+  /// verdict: whatever this sets, the last check's verdict no longer stands.
   RelayPresence withEvery(KindPresence presence) => RelayPresence(
     relayUrl: relayUrl,
     own: own,
@@ -196,6 +208,10 @@ RelayPresence _rowOf(OwnRelayPresenceFfi r) => RelayPresence(
   keyPackage: _presenceOf(r.keyPackage),
   relayList: _presenceOf(r.relayList),
   inboxRelayList: _presenceOf(r.inboxRelayList),
+  inboxRead: switch (r.inboxRead) {
+    final read? => inboxReadOf(read),
+    null => null,
+  },
 );
 
 /// Notifier for relay event publication status.

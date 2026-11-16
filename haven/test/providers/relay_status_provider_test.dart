@@ -9,7 +9,9 @@
 /// - every expected kind reads checking while the one answer is awaited;
 /// - a failed check reads as "Can't reach", never as missing;
 /// - Republish runs the publisher, then checks again, and reports in three
-///   fixed outcomes.
+///   fixed outcomes;
+/// - an inbox relay's read verdict is carried beside its kinds, cleared while
+///   a check runs, and never offers a Republish.
 library;
 
 import 'dart:async';
@@ -25,7 +27,7 @@ import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/relay_status_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/rust/api.dart'
-    show OwnEventPresenceFfi, OwnRelayPresenceFfi;
+    show InboxReadFfi, OwnEventPresenceFfi, OwnRelayPresenceFfi;
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/relay_preferences_service.dart';
 import 'package:haven/src/services/relay_service.dart';
@@ -50,6 +52,7 @@ OwnRelayPresenceFfi _row(
   OwnEventPresenceFfi keyPackage = OwnEventPresenceFfi.notExpected,
   OwnEventPresenceFfi relayList = OwnEventPresenceFfi.notExpected,
   OwnEventPresenceFfi inboxRelayList = OwnEventPresenceFfi.notExpected,
+  InboxReadFfi? inboxRead,
 }) => OwnRelayPresenceFfi(
   relayUrl: url,
   own: own,
@@ -58,6 +61,7 @@ OwnRelayPresenceFfi _row(
   keyPackage: keyPackage,
   relayList: relayList,
   inboxRelayList: inboxRelayList,
+  inboxRead: inboxRead,
 );
 
 ProviderContainer _container(
@@ -233,6 +237,47 @@ void main() {
       logs
         ..assertContains('[RelayStatus] check failed')
         ..assertNoNeedles([_inbox, _kp, _testIdentity.pubkeyHex]);
+    });
+
+    test("an inbox relay's read verdict is carried beside its kinds, "
+        'cleared while a check runs, and never needs a Republish', () async {
+      final gate = Completer<void>();
+      final relay = MockRelayService()
+        ..ownPresence = [
+          _row(
+            _inbox,
+            inboxRelayList: OwnEventPresenceFfi.current,
+            inboxRead: InboxReadFfi.refused,
+          ),
+          _row(_kp, keyPackage: OwnEventPresenceFfi.current),
+        ];
+      final container = _container(relay);
+      await container.read(relayStatusProvider.future);
+      final notifier = container.read(relayStatusProvider.notifier);
+
+      await notifier.checkAllRelays();
+      var state = container.read(relayStatusProvider).value!;
+      expect(state.relays[0].inboxRead, InboxRead.refused);
+      expect(state.relays[1].inboxRead, isNull, reason: 'not an inbox row');
+      expect(
+        state.relays[0].expected,
+        [KindPresence.current],
+        reason: 'the verdict is never one of the kinds a Republish fixes',
+      );
+      expect(state.needsRepublish, isFalse);
+      expect(state.ringSlots.first, RelayRingSlotState.ok);
+
+      relay.ownPresenceGate = gate;
+      final again = notifier.checkAllRelays();
+      await pumpEventQueue();
+      state = container.read(relayStatusProvider).value!;
+      expect(
+        state.relays[0].inboxRead,
+        isNull,
+        reason: 'a stale warning must not stand while the check runs',
+      );
+      gate.complete();
+      await again;
     });
 
     test('checkAllRelays is a no-op with no identity', () async {

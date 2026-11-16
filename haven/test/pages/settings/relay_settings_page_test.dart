@@ -22,7 +22,7 @@ import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/rust/api.dart'
-    show OwnEventPresenceFfi, OwnRelayPresenceFfi;
+    show InboxReadFfi, OwnEventPresenceFfi, OwnRelayPresenceFfi;
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/relay_preferences_service.dart';
 import 'package:haven/src/services/relay_service.dart';
@@ -837,6 +837,7 @@ void main() {
       OwnEventPresenceFfi keyPackage = OwnEventPresenceFfi.notExpected,
       OwnEventPresenceFfi relayList = OwnEventPresenceFfi.notExpected,
       OwnEventPresenceFfi inboxRelayList = OwnEventPresenceFfi.notExpected,
+      InboxReadFfi? inboxRead,
     }) => OwnRelayPresenceFfi(
       relayUrl: url,
       own: own,
@@ -845,6 +846,7 @@ void main() {
       keyPackage: keyPackage,
       relayList: relayList,
       inboxRelayList: inboxRelayList,
+      inboxRead: inboxRead,
     );
 
     void growSurface(WidgetTester tester) {
@@ -1003,6 +1005,168 @@ void main() {
         findsOneWidget,
       );
       expect(find.byKey(WidgetKeys.relaySettingsRepublish), findsNothing);
+    });
+  });
+
+  group('RelaySettingsPage — an inbox relay that refuses the read', () {
+    const refusedLine =
+        "This relay didn't let Haven read your invitations. Remove it, or "
+        'add another relay.';
+    const allRefusedTitle =
+        'None of your inbox relays let Haven read your invitations';
+
+    OwnRelayPresenceFfi inboxRow(String url, InboxReadFfi read) =>
+        OwnRelayPresenceFfi(
+          relayUrl: url,
+          own: true,
+          lookup: false,
+          reachable: true,
+          keyPackage: OwnEventPresenceFfi.notExpected,
+          relayList: OwnEventPresenceFfi.notExpected,
+          inboxRelayList: OwnEventPresenceFfi.current,
+          inboxRead: read,
+        );
+
+    void growSurface(WidgetTester tester) {
+      tester.view.physicalSize = const Size(800, 3200);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+    }
+
+    MockRelayPreferencesService twoInbox() => MockRelayPreferencesService(
+      initialRelays: const {
+        RelayCategory.inbox: [
+          'wss://gated.example.com',
+          'wss://open.example.com',
+        ],
+        RelayCategory.keyPackage: ['wss://gated.example.com'],
+        RelayCategory.profile: ['wss://profile.example.com'],
+      },
+    );
+
+    testWidgets('a refused row says so in words, with an icon whose label '
+        'names the relay, in the Inbox section only — and never offers '
+        'Republish', (tester) async {
+      growSurface(tester);
+      final semantics = tester.ensureSemantics();
+      final relay = MockRelayService()
+        ..ownPresence = [
+          inboxRow('wss://gated.example.com', InboxReadFfi.refused),
+          inboxRow('wss://open.example.com', InboxReadFfi.served),
+        ];
+      await tester.pumpWidget(buildApp(mock: twoInbox(), relay: relay));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text(refusedLine),
+        findsOneWidget,
+        reason: 'the KeyPackage row of the same relay carries no warning',
+      );
+      expect(
+        find.bySemanticsLabel(
+          "Warning: gated.example.com didn't let Haven read your invitations",
+        ),
+        findsOneWidget,
+      );
+      expect(find.byTooltip("Didn't let Haven read invitations"), findsOne);
+      final row = tester.getSemantics(find.text('gated.example.com').first);
+      expect(row.label, contains(refusedLine));
+      expect(
+        find.byKey(WidgetKeys.relaySettingsRepublish),
+        findsNothing,
+        reason: 'a Republish cannot change whether a relay lets Haven read',
+      );
+      expect(find.text(allRefusedTitle), findsNothing);
+      semantics.dispose();
+    });
+
+    testWidgets('a served, unfinished or unreached read raises no warning', (
+      tester,
+    ) async {
+      growSurface(tester);
+      for (final read in [
+        InboxReadFfi.served,
+        InboxReadFfi.incomplete,
+        InboxReadFfi.unreached,
+      ]) {
+        final relay = MockRelayService()
+          ..ownPresence = [
+            inboxRow('wss://gated.example.com', read),
+            inboxRow('wss://open.example.com', read),
+          ];
+        await tester.pumpWidget(
+          buildApp(mock: twoInbox(), relay: relay),
+          duration: Duration.zero,
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.text(refusedLine), findsNothing, reason: read.name);
+        expect(
+          find.byTooltip("Didn't let Haven read invitations"),
+          findsNothing,
+          reason: read.name,
+        );
+        await tester.pumpWidget(const SizedBox());
+      }
+    });
+
+    testWidgets('removing the refused relay checks again, and its warning '
+        'goes with it', (tester) async {
+      growSurface(tester);
+      final relay = MockRelayService()
+        ..ownPresence = [
+          inboxRow('wss://gated.example.com', InboxReadFfi.refused),
+          inboxRow('wss://open.example.com', InboxReadFfi.served),
+        ];
+      await tester.pumpWidget(buildApp(mock: twoInbox(), relay: relay));
+      await tester.pumpAndSettle();
+      expect(find.text(refusedLine), findsOneWidget);
+      expect(relay.ownPresenceAsks, hasLength(1));
+
+      relay.ownPresence = [
+        inboxRow('wss://open.example.com', InboxReadFfi.served),
+      ];
+      await tester.tap(find.byTooltip('Remove gated.example.com').first);
+      await tester.pumpAndSettle();
+
+      expect(relay.ownPresenceAsks, hasLength(2), reason: 'checked again');
+      expect(find.text(refusedLine), findsNothing);
+      expect(find.text('Inbox list: Published'), findsOneWidget);
+    });
+
+    testWidgets('every inbox relay refusing shows a banner whose Restore '
+        'defaults resets the list after confirmation, then checks again', (
+      tester,
+    ) async {
+      growSurface(tester);
+      final mock = twoInbox();
+      final relay = MockRelayService()
+        ..ownPresence = [
+          inboxRow('wss://gated.example.com', InboxReadFfi.refused),
+          inboxRow('wss://open.example.com', InboxReadFfi.refused),
+        ];
+      await tester.pumpWidget(buildApp(mock: mock, relay: relay));
+      await tester.pumpAndSettle();
+
+      expect(find.text(allRefusedTitle), findsOneWidget);
+      expect(find.text(refusedLine), findsNWidgets(2));
+
+      relay.ownPresence = [
+        inboxRow('wss://default-a', InboxReadFfi.served),
+        inboxRow('wss://default-b', InboxReadFfi.served),
+        inboxRow('wss://default-c', InboxReadFfi.served),
+      ];
+      // The banner's button sits right under it, above the section's own.
+      await tester.tap(find.text('Restore defaults').first);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Restore'));
+      await tester.pumpAndSettle();
+
+      expect(mock.log, contains('wipe:inbox'));
+      expect(relay.ownPresenceAsks, hasLength(2), reason: 'checked again');
+      expect(find.text(allRefusedTitle), findsNothing);
+      expect(find.text(refusedLine), findsNothing);
     });
   });
 

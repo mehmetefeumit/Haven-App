@@ -68,6 +68,10 @@ abstract final class WidgetKeys {
   /// `RefreshRingButton`).
   static const Key invitationsRefresh = Key('invitations_refresh');
 
+  /// The notice above the invitations list when the last refresh did not
+  /// read every inbox relay in full.
+  static const Key invitationsInboxNotice = Key('invitations_inbox_notice');
+
   /// The segmented-ring `CustomPaint` inside a `RefreshRingButton`, so a
   /// recording-canvas test can target the painter to assert arc geometry and
   /// per-segment colors.

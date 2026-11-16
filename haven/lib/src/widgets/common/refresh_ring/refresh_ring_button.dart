@@ -3,8 +3,8 @@
 ///
 /// Tapping the control morphs the refresh icon into a ring of independent arc
 /// segments, one per relay being contacted. Each arc animates gray (not yet
-/// contacted) → amber (in flight) → green (responded with its data) / red
-/// (unreachable or missing data), so the user watches the refresh fill in,
+/// contacted) → amber (in flight) → green (it gave what the refresh needed) /
+/// red (anything else), so the user watches the refresh fill in,
 /// relay by relay. A successful all-green result holds briefly, then fades
 /// back to the calm icon; a result with any problem stays put until the next
 /// refresh so it is never missed.
@@ -87,8 +87,9 @@ const double _kPendingStrokeWidth = 2;
 /// labelled meaning of a green vs red segment differs, so each call site picks
 /// the wording that is factually correct for it.
 enum RefreshRingVocabulary {
-  /// Invitations inbox poll: green = the relay answered, red = unreachable.
-  responded,
+  /// Invitations inbox read: green = the relay served the read of the inbox
+  /// in full, red = it refused, did not finish or could not be reached.
+  inbox,
 
   /// Relay-event check: green = the relay holds the user's data, red = it does
   /// not (missing events) or could not be reached.
@@ -105,7 +106,7 @@ class RefreshRingButton extends StatefulWidget {
     required this.tooltip,
     this.noInbox = false,
     this.onNoInbox,
-    this.vocabulary = RefreshRingVocabulary.responded,
+    this.vocabulary = RefreshRingVocabulary.inbox,
     super.key,
   });
 
@@ -348,20 +349,20 @@ class _RefreshRingButtonState extends State<RefreshRingButton>
       _announce(
         hasData
             ? l10n.refreshRingAnnouncementAllFound
-            : l10n.refreshRingAnnouncementAllOk,
+            : l10n.refreshRingAnnouncementInboxAll,
       );
     } else if (newSlots.every((s) => s == RelayRingSlotState.error)) {
       _announce(
         hasData
             ? l10n.refreshRingAnnouncementNoneFound
-            : l10n.refreshRingAnnouncementAllError,
+            : l10n.refreshRingAnnouncementInboxNone,
       );
     } else {
       final ok = newSlots.where((s) => s == RelayRingSlotState.ok).length;
       _announce(
         hasData
             ? l10n.refreshRingAnnouncementPartialFound(ok, newSlots.length)
-            : l10n.refreshRingAnnouncementPartial(ok, newSlots.length),
+            : l10n.refreshRingAnnouncementInboxPartial(ok, newSlots.length),
       );
     }
   }
@@ -396,17 +397,17 @@ class _RefreshRingButtonState extends State<RefreshRingButton>
     if (_allOk(slots)) {
       return hasData
           ? l10n.refreshRingSemanticAllFound(slots.length)
-          : l10n.refreshRingSemanticAllOk(slots.length);
+          : l10n.refreshRingSemanticInboxAll(slots.length);
     }
     if (slots.every((s) => s == RelayRingSlotState.error)) {
       return hasData
           ? l10n.refreshRingSemanticNoneFound
-          : l10n.refreshRingSemanticAllError;
+          : l10n.refreshRingSemanticInboxNone;
     }
     final ok = slots.where((s) => s == RelayRingSlotState.ok).length;
     return hasData
         ? l10n.refreshRingSemanticPartialFound(ok, slots.length)
-        : l10n.refreshRingSemanticPartial(ok, slots.length);
+        : l10n.refreshRingSemanticInboxPartial(ok, slots.length);
   }
 
   _RingGlyph _settledGlyph() {

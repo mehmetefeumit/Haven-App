@@ -1,15 +1,15 @@
-/// Status of an inbox refresh, surfaced by the Invitations "Settle Pill".
+/// Status of an inbox refresh, shown by the Invitations page.
 ///
-/// Drives the small pill under the Invitations app bar that tells the user
-/// whether tapping refresh actually reached their inbox relays: how many
-/// were pinged, how many answered, and whether anything new arrived.
+/// Drives the app-bar refresh ring (one segment per inbox relay) and the
+/// notice above the list: whether a tap actually read the user's inbox
+/// relays, and whether anything new arrived.
 ///
 /// Unlike [invitationPollerProvider] (one merged fetch with no per-relay
 /// attribution, used for silent background polling), this notifier fans a
-/// fetch out to each inbox relay independently so the counts shown are exact:
-/// a relay that completes the WebSocket handshake is counted as answered
-/// (even with zero events), and one that cannot be reached is counted as not
-/// answered.
+/// fetch out to each inbox relay independently so the counts are exact. Only
+/// a relay that served the read in full ([InboxRead.served], an `EOSE`) is
+/// counted as read: one that refused it, did not finish, or could not be
+/// reached is not, whatever it handed back.
 library;
 
 import 'dart:convert';
@@ -23,58 +23,63 @@ import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/fresh_secret.dart';
 import 'package:haven/src/services/relay_service.dart';
 
-/// The poller's window ([invitationPollerProvider]): NIP-59 backdates a wrap
-/// up to 2 days, and a Welcome is re-sent for up to a day after its hand-over.
-/// Re-fetching old wraps is harmless — Rust dedups already-processed ones.
-const _giftWrapLookback = Duration(hours: 96);
-
 /// Lifecycle phase of an inbox refresh.
 enum InvitationPollPhase {
-  /// No refresh has run yet; the pill is hidden.
+  /// No refresh has run yet; the ring shows its idle icon.
   idle,
 
-  /// A refresh is in flight (pinging inbox relays).
+  /// A refresh is in flight (reading inbox relays).
   checking,
 
-  /// Every relay has settled (answered or not).
+  /// Every relay has settled, however it answered.
   settled,
 }
 
-/// The settled outcome of an inbox refresh, chosen for the pill's copy.
+/// The settled outcome of an inbox refresh.
 ///
-/// Exactly one applies once [InvitationPollPhase.settled] is reached. The
-/// ordering is deliberate (see
-/// [InvitationPollStatusNotifier.categorizeOutcome]): reaching nobody is the
-/// headline, then new invitations, then a partial result, then the calm
-/// "nothing new" case.
+/// Exactly one applies once [InvitationPollPhase.settled] is reached, in the
+/// order [InvitationPollStatusNotifier.categorizeOutcome] checks them: what
+/// the user can fix comes first, and "up to date" only when every relay
+/// served the read in full and nothing failed.
 enum InvitationPollOutcome {
-  /// Every relay answered and at least one new invitation arrived.
-  newInvites,
-
-  /// Every relay answered; nothing new.
-  upToDate,
-
-  /// Some relays answered, some did not.
-  partial,
-
-  /// No relay answered (offline / all unreachable).
-  offline,
-
   /// No inbox relays are configured.
   noInbox,
+
+  /// At least one relay refused the read: an invitation held only there is
+  /// never read.
+  refused,
+
+  /// At least one invitation opened but could not be saved on this device.
+  notSaved,
+
+  /// No relay could be reached.
+  offline,
+
+  /// Some relay was not read in full (not finished, or not reached).
+  incomplete,
+
+  /// Every relay served the read and at least one new invitation arrived.
+  newInvites,
+
+  /// Every relay served the read; nothing new, nothing failed.
+  upToDate,
 }
 
-/// Immutable snapshot of an inbox refresh, shown by the Settle Pill.
+/// Immutable snapshot of an inbox refresh.
 @immutable
 class InvitationPollStatus {
   /// Creates an [InvitationPollStatus].
   const InvitationPollStatus({
     required this.phase,
     this.total = 0,
-    this.responded = 0,
+    this.served = 0,
+    this.refused = 0,
+    this.unreached = 0,
+    this.notSaved = 0,
     this.newCount = 0,
     this.slots = const [],
     this.outcome,
@@ -88,16 +93,25 @@ class InvitationPollStatus {
   /// Empty while idle. During [InvitationPollPhase.checking] each element
   /// corresponds, by index, to one inbox relay (in the order read from
   /// [inboxRelaysProvider]) and transitions
-  /// [RelayRingSlotState.checking] → [RelayRingSlotState.ok] /
-  /// [RelayRingSlotState.error] as that relay resolves. Relay URLs are never
-  /// stored here (two-plane privacy).
+  /// [RelayRingSlotState.checking] → [RelayRingSlotState.ok] (served in
+  /// full) / [RelayRingSlotState.error] (anything else) as that relay
+  /// resolves. Relay URLs are never stored here (two-plane privacy).
   final List<RelayRingSlotState> slots;
 
-  /// Number of inbox relays pinged this refresh.
+  /// Number of inbox relays asked this refresh.
   final int total;
 
-  /// Number of relays that answered.
-  final int responded;
+  /// Relays that served the read in full.
+  final int served;
+
+  /// Relays that refused the read.
+  final int refused;
+
+  /// Relays that could not be reached.
+  final int unreached;
+
+  /// Invitations that opened but could not be saved on this device.
+  final int notSaved;
 
   /// Number of genuinely new invitations processed this refresh.
   final int newCount;
@@ -106,20 +120,17 @@ class InvitationPollStatus {
   /// [InvitationPollPhase.settled].
   final InvitationPollOutcome? outcome;
 
-  /// Relays that did not answer.
-  int get notReturned => total - responded;
-
-  /// The idle (hidden) status.
+  /// The idle status.
   static const idle = InvitationPollStatus(phase: InvitationPollPhase.idle);
 }
 
-/// Provider for the Invitations refresh status (Settle Pill state).
+/// Provider for the Invitations refresh status.
 final invitationPollStatusProvider =
     NotifierProvider<InvitationPollStatusNotifier, InvitationPollStatus>(
       InvitationPollStatusNotifier.new,
     );
 
-/// Notifier that pings inbox relays per-relay and reports an accurate tally.
+/// Notifier that reads inbox relays per-relay and reports an accurate tally.
 class InvitationPollStatusNotifier extends Notifier<InvitationPollStatus> {
   /// Incremented on every [refresh]; an in-flight refresh discards its final
   /// state write if a newer refresh has superseded it. This keeps rapid
@@ -132,25 +143,29 @@ class InvitationPollStatusNotifier extends Notifier<InvitationPollStatus> {
   /// Maps the raw tally to a single settled [InvitationPollOutcome].
   ///
   /// Pure and total so the accuracy-critical categorisation can be tested
-  /// directly. Order matters: no inbox configured, then nobody reached, then
-  /// new invitations, then a partial answer, else everyone answered with
-  /// nothing new.
+  /// directly. [upToDate](InvitationPollOutcome.upToDate) only when every
+  /// relay served the read, nothing failed to save and nothing is new.
   static InvitationPollOutcome categorizeOutcome({
     required int total,
-    required int responded,
+    required int served,
+    required int refused,
+    required int unreached,
+    required int notSaved,
     required int newCount,
   }) {
     if (total == 0) return InvitationPollOutcome.noInbox;
-    if (responded == 0) return InvitationPollOutcome.offline;
+    if (refused > 0) return InvitationPollOutcome.refused;
+    if (notSaved > 0) return InvitationPollOutcome.notSaved;
+    if (unreached == total) return InvitationPollOutcome.offline;
+    if (served < total) return InvitationPollOutcome.incomplete;
     if (newCount > 0) return InvitationPollOutcome.newInvites;
-    if (responded < total) return InvitationPollOutcome.partial;
     return InvitationPollOutcome.upToDate;
   }
 
-  /// Pings the user's inbox relays and updates [state] with the result.
+  /// Reads the user's inbox relays and updates [state] with the result.
   ///
   /// Sets [InvitationPollPhase.checking] while in flight, then
-  /// [InvitationPollPhase.settled] with exact answered/total counts and the
+  /// [InvitationPollPhase.settled] with exact per-verdict counts and the
   /// number of new invitations discovered. Never throws.
   Future<void> refresh() async {
     final myGeneration = ++_generation;
@@ -158,16 +173,16 @@ class InvitationPollStatusNotifier extends Notifier<InvitationPollStatus> {
     final identity = await ref.read(identityProvider.future);
     if (myGeneration != _generation) return;
     if (identity == null) {
-      // No identity yet — nothing to poll; leave the pill as-is.
+      // No identity yet — nothing to read; leave the status as-is.
       return;
     }
 
-    // Two-plane model: ping ONLY the user's own inbox relays. Never fall back
+    // Two-plane model: read ONLY the user's own inbox relays. Never fall back
     // to public/discovery relays for the count display — that would broadcast
     // the user's pubkey to the discovery plane. In practice the inbox list
     // self-heals to the user's own default inbox relays, so `noInbox` is a
     // defensive state; the invariant that matters is that an empty list must
-    // NOT trigger a ping of public defaults.
+    // NOT trigger a read of public defaults.
     final relays = await ref.read(inboxRelaysProvider.future);
     if (myGeneration != _generation) return;
 
@@ -185,7 +200,6 @@ class InvitationPollStatusNotifier extends Notifier<InvitationPollStatus> {
       relays.length,
       RelayRingSlotState.checking,
     );
-    var responded = 0;
     state = InvitationPollStatus(
       phase: InvitationPollPhase.checking,
       total: relays.length,
@@ -200,21 +214,22 @@ class InvitationPollStatusNotifier extends Notifier<InvitationPollStatus> {
       state = InvitationPollStatus(
         phase: InvitationPollPhase.checking,
         total: relays.length,
-        responded: responded,
         slots: List<RelayRingSlotState>.unmodifiable(slots),
       );
     }
 
     // Per-relay fan-out: each inbox relay is queried independently so its ring
     // segment flips to ok/error the instant it resolves. Dart is
-    // single-threaded, so the index-based mutation of `slots`/`responded`
-    // inside these closures is race-free (one microtask runs at a time).
+    // single-threaded, so the index-based mutation of `slots`/`reads` inside
+    // these closures is race-free (one microtask runs at a time).
     final since = ref.read(invitationClockProvider)().subtract(
-      _giftWrapLookback,
+      inboxGiftWrapLookback,
     );
-    // Only responding relays carry events to de-duplicate; an unreachable
-    // relay yields nothing, so there is no reason to collect it here.
-    final responding = <RelayGiftWrapFetch>[];
+    final reads = List<InboxRead>.filled(relays.length, InboxRead.unreached);
+    // Every wrap that arrived, whatever its relay's verdict: each passed
+    // Haven's id-and-signature check, and a refused or unfinished read can
+    // still carry the invitation the user is waiting for.
+    final fetched = <RelayGiftWrapFetch>[];
 
     await Future.wait(
       List<Future<void>>.generate(relays.length, (i) async {
@@ -227,16 +242,16 @@ class InvitationPollStatusNotifier extends Notifier<InvitationPollStatus> {
           // Guard before every state write: a superseded refresh must not
           // touch state.
           if (myGeneration != _generation) return;
-          // A single-URL query returns exactly one outcome by contract; guard
-          // defensively against a stub/mock that violates it.
+          // A single-URL query returns exactly one outcome by contract; a
+          // stub/mock that violates it reads as unreached.
           final fetch = outcomes.isEmpty ? null : outcomes.first;
-          if (fetch != null && fetch.responded) {
-            responding.add(fetch);
-            responded++;
-            slots[i] = RelayRingSlotState.ok;
-          } else {
-            slots[i] = RelayRingSlotState.error;
+          if (fetch != null) {
+            fetched.add(fetch);
+            reads[i] = fetch.read;
           }
+          slots[i] = reads[i] == InboxRead.served
+              ? RelayRingSlotState.ok
+              : RelayRingSlotState.error;
           writeChecking();
         } on Object catch (e) {
           if (myGeneration != _generation) return;
@@ -253,15 +268,18 @@ class InvitationPollStatusNotifier extends Notifier<InvitationPollStatus> {
     // secret bytes for a stale generation (Rule #9).
     if (myGeneration != _generation) return;
 
-    // Union events across every answering relay and de-duplicate by event id:
-    // the same gift wrap commonly arrives on multiple inbox relays, and
-    // processing one twice concurrently could race the Rust dedup table.
+    // Union events across every relay and de-duplicate by event id: the same
+    // gift wrap commonly arrives on multiple inbox relays, and processing one
+    // twice concurrently could race the Rust dedup table.
     // `processGiftWrappedInvitation` returns null for an already-processed
-    // wrap, so newCount is the count of genuinely new invitations.
+    // wrap and for one that is no invitation this device can open (anyone who
+    // knows the npub can send one, so it never raises a notice); only a wrap
+    // that opened and could not be saved is counted as a failure.
     var newCount = 0;
+    var notSaved = 0;
     final seen = <String>{};
     final uniqueEvents = <String>[];
-    for (final fetch in responding) {
+    for (final fetch in fetched) {
       for (final eventJson in fetch.events) {
         if (seen.add(_dedupKey(eventJson))) uniqueEvents.add(eventJson);
       }
@@ -284,16 +302,19 @@ class InvitationPollStatusNotifier extends Notifier<InvitationPollStatus> {
                     identitySecretBytes: secretBytes,
                     giftWrapEventJson: eventJson,
                   );
-              return invitation == null ? 0 : 1;
+              return invitation == null ? _Intake.skipped : _Intake.added;
+            } on InvitationNotSavedException {
+              return _Intake.notSaved;
             } on Object catch (e) {
               debugPrint(
                 '[InvitationPollStatus] skipped gift-wrap: ${e.runtimeType}',
               );
-              return 0;
+              return _Intake.skipped;
             }
           }),
         );
-        newCount = results.fold(0, (sum, v) => sum + v);
+        newCount = results.where((r) => r == _Intake.added).length;
+        notSaved = results.where((r) => r == _Intake.notSaved).length;
       } finally {
         secretBytes.fillRange(0, secretBytes.length, 0);
       }
@@ -310,15 +331,25 @@ class InvitationPollStatusNotifier extends Notifier<InvitationPollStatus> {
         ..invalidate(circlesProvider);
     }
 
+    int count(InboxRead read) => reads.where((r) => r == read).length;
+    final served = count(InboxRead.served);
+    final refused = count(InboxRead.refused);
+    final unreached = count(InboxRead.unreached);
     state = InvitationPollStatus(
       phase: InvitationPollPhase.settled,
       total: relays.length,
-      responded: responded,
+      served: served,
+      refused: refused,
+      unreached: unreached,
+      notSaved: notSaved,
       newCount: newCount,
       slots: List<RelayRingSlotState>.unmodifiable(slots),
       outcome: categorizeOutcome(
         total: relays.length,
-        responded: responded,
+        served: served,
+        refused: refused,
+        unreached: unreached,
+        notSaved: notSaved,
         newCount: newCount,
       ),
     );
@@ -340,3 +371,6 @@ class InvitationPollStatusNotifier extends Notifier<InvitationPollStatus> {
     return eventJson;
   }
 }
+
+/// What processing one gift wrap came to.
+enum _Intake { added, skipped, notSaved }

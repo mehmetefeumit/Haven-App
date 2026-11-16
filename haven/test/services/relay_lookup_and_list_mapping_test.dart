@@ -1,7 +1,8 @@
 // The FFI-to-service mappings the discoverability fix depends on: an invite
 // lookup that could not finish never reads as "no account", a relay-list
 // tick never reads as current unless an own relay confirmed it, and a
-// KeyPackage tick carries whether this device's package is what is served.
+// KeyPackage tick carries whether this device's package is what is served;
+// and an inbox read is served only when the relay said so.
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
@@ -29,6 +30,21 @@ RelayListCategoryOutcomeFfi _category(
 );
 
 void main() {
+  group('inboxReadOf', () {
+    test('maps every FFI verdict to its own value, and only served to '
+        'served', () {
+      expect(
+        {for (final r in InboxReadFfi.values) r.name: inboxReadOf(r).name},
+        {
+          'served': 'served',
+          'refused': 'refused',
+          'incomplete': 'incomplete',
+          'unreached': 'unreached',
+        },
+      );
+    });
+  });
+
   group('keyPackageDataOf', () {
     test('found carries the verified author and every relay list', () {
       final data = keyPackageDataOf(

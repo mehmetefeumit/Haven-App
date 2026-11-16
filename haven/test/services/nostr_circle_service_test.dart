@@ -1147,6 +1147,7 @@ void main() {
 
   _publishResolutionTests();
   _rejoinAndDisbandTests();
+  _giftWrapIntakeTests();
   _recoveryTests();
 }
 
@@ -2734,7 +2735,106 @@ void _rejoinAndDisbandTests() {
   });
 }
 
+/// A gift wrap's intake at the FFI boundary: classified by its typed field
+/// only, an unusable wrap silent, and every failure in fixed text (Rules 8
+/// and 15).
+void _giftWrapIntakeTests() {
+  // A wrap names this account and its relay; neither may reach a log line.
+  final wrapJson =
+      '{"id":"${'cd' * 32}","pubkey":"${'ab' * 32}","kind":1059,'
+      '"relay":"wss://planted.example"}';
+  final needles = ['cd' * 32, 'ab' * 32, 'wss://planted.example'];
+
+  NostrCircleService serviceOver(_RejoinManager manager) =>
+      NostrCircleService.withInjectedManager(
+        relayService: _StubRelayService(),
+        injectedManager: manager,
+      );
+
+  Future<Invitation?> process(NostrCircleService service) =>
+      service.processGiftWrappedInvitation(
+        identitySecretBytes: List<int>.filled(32, 1),
+        giftWrapEventJson: wrapJson,
+      );
+
+  group('gift-wrap intake', () {
+    test('a new invitation is returned', () async {
+      final manager = _RejoinManager()
+        ..intake = GiftWrapIntakeFfi(
+          invitation: InvitationFfi(
+            mlsGroupId: Uint8List.fromList(const [7, 7]),
+            circleName: 'New Circle',
+            inviterPubkey: 'ab' * 32,
+            inviterNpub: 'npub1x',
+            invitedAt: 1700000000,
+          ),
+        );
+
+      final invitation = await process(serviceOver(manager));
+
+      expect(invitation?.mlsGroupId, const [7, 7]);
+    });
+
+    test('an already-processed wrap is a silent null', () async {
+      expect(await process(serviceOver(_RejoinManager())), isNull);
+    });
+
+    test('a wrap that is no invitation this device can open is a silent null '
+        '— anyone who knows the npub can send one — and logs nothing it '
+        'carried', () async {
+      final capture = LogCapture.install();
+      final manager = _RejoinManager()
+        ..intake = const GiftWrapIntakeFfi(
+          failure: GiftWrapIntakeFailureFfi.unusable,
+        );
+
+      expect(await process(serviceOver(manager)), isNull);
+      capture.assertNoNeedles(needles);
+    });
+
+    test('an invitation that could not be saved is its own type, and logs '
+        'nothing it carried', () async {
+      final capture = LogCapture.install();
+      final manager = _RejoinManager()
+        ..intake = const GiftWrapIntakeFfi(
+          failure: GiftWrapIntakeFailureFfi.storeFailed,
+        );
+
+      await expectLater(
+        process(serviceOver(manager)),
+        throwsA(isA<InvitationNotSavedException>()),
+      );
+      capture.assertNoNeedles(needles);
+    });
+
+    test('an FFI error is a plain CircleServiceException in fixed text, never '
+        'read as not saved, and logs nothing it carried', () async {
+      final capture = LogCapture.install();
+      final manager = _RejoinManager()..throws = true;
+
+      await expectLater(
+        process(serviceOver(manager)),
+        throwsA(
+          isA<CircleServiceException>()
+              .having(
+                (e) => e.message,
+                'message',
+                'Failed to process gift-wrapped invitation',
+              )
+              .having(
+                (e) => e is InvitationNotSavedException,
+                'is not saved',
+                isFalse,
+              ),
+        ),
+      );
+      capture.assertNoNeedles([...needles, '09' * 3]);
+    });
+  });
+}
+
 class _RejoinManager implements CircleManagerFfi {
+  GiftWrapIntakeFfi intake = const GiftWrapIntakeFfi();
   RejoinOffersOutcomeFfi offers = const RejoinOffersOutcomeFfi(offers: []);
   AcceptInvitationOutcomeFfi confirm = const AcceptInvitationOutcomeFfi();
   List<CircleWithMembersFfi> visible = const [];
@@ -2751,6 +2851,15 @@ class _RejoinManager implements CircleManagerFfi {
   static final planted = StateError(
     'group ${'09' * 3} welcomer ${'ab' * 32} at wss://planted.example',
   );
+
+  @override
+  Future<GiftWrapIntakeFfi> processGiftWrappedInvitation({
+    required List<int> identitySecretBytes,
+    required String giftWrapEventJson,
+  }) async {
+    if (throws) throw planted;
+    return intake;
+  }
 
   @override
   Future<RejoinOffersOutcomeFfi> rejoinOffersForInvitation({

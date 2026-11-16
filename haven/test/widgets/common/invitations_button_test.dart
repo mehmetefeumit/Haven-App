@@ -24,7 +24,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../../mocks/mock_circle_service.dart';
 import '../../mocks/mock_profile_service.dart';
 
-/// No-op Settle Pill notifier so the navigated-to InvitationsPage's initState
+/// No-op refresh-status notifier so the navigated-to InvitationsPage's initState
 /// refresh never touches the real identity/relay stack here.
 class _NoopPollStatus extends InvitationPollStatusNotifier {
   @override
