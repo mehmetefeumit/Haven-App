@@ -132,8 +132,6 @@
   "mapStylePreviewCity": "شہر",
   "mapStylePreviewNature": "فطرت",
   "mapStylePreviewSemantics": "نقشے کا پیش منظر ({scene}): {style}",
-  "mapStylePreviewUnavailableSemantics": "اس بلڈ میں نقشے کا پیش منظر دستیاب نہیں",
-  "mapStylePreviewUnavailableLabel": "لائیو پیش منظر ریلیز بلڈز میں ظاہر ہوتا ہے",
   "aboutTitle": "تعارف",
   "aboutHeroName": "Haven",
   "aboutHeroTagline": "نجی اور سنسرشپ سے محفوظ مقام شیئرنگ۔",

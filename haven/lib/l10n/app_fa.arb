@@ -147,8 +147,6 @@
   "mapStylePreviewCity": "شهر",
   "mapStylePreviewNature": "طبیعت",
   "mapStylePreviewSemantics": "پیش‌نمایش نقشه ({scene}): {style}",
-  "mapStylePreviewUnavailableSemantics": "پیش‌نمایش نقشه در این نسخه در دسترس نیست",
-  "mapStylePreviewUnavailableLabel": "پیش‌نمایش زنده در نسخه‌های انتشار نمایش داده می‌شود",
   "aboutTitle": "درباره",
   "aboutHeroName": "Haven",
   "aboutHeroTagline": "اشتراک موقعیت مکانی خصوصی و مقاوم در برابر سانسور.",

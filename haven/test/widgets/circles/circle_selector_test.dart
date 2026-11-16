@@ -172,6 +172,13 @@ void main() {
 
             expect(placeholder.height, selected.height);
             expect(placeholder.height, greaterThanOrEqualTo(48));
+            // The collapsed sheet sizes itself from this derivation.
+            expect(
+              CircleSelector.triggerHeight(
+                tester.element(find.byType(CircleSelector)),
+              ),
+              selected.height,
+            );
           });
         }
       }

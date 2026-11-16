@@ -132,8 +132,6 @@
   "mapStylePreviewCity": "Ville",
   "mapStylePreviewNature": "Nature",
   "mapStylePreviewSemantics": "Aperçu de la carte ({scene}) : {style}",
-  "mapStylePreviewUnavailableSemantics": "Aperçu de la carte indisponible dans cette version",
-  "mapStylePreviewUnavailableLabel": "L'aperçu en direct apparaît dans les versions de production",
   "aboutTitle": "À propos",
   "aboutHeroName": "Haven",
   "aboutHeroTagline": "Partage de position privé et résistant à la censure.",

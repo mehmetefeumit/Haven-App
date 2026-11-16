@@ -645,14 +645,6 @@
       "style": { "type": "String" }
     }
   },
-  "mapStylePreviewUnavailableSemantics": "Map preview unavailable in this build",
-  "@mapStylePreviewUnavailableSemantics": {
-    "description": "Accessibility label for the placeholder shown when no map API key is configured (debug/test builds)."
-  },
-  "mapStylePreviewUnavailableLabel": "Live preview appears in release builds",
-  "@mapStylePreviewUnavailableLabel": {
-    "description": "Caption inside the placeholder shown when no map API key is configured (debug/test builds)."
-  },
 
   "aboutTitle": "About",
   "@aboutTitle": {

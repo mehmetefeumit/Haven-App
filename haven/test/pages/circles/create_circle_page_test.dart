@@ -123,7 +123,8 @@ Future<void> _addMember(WidgetTester tester, String npub) async {
 
 /// The copy for a lookup that could not finish: absence is unproven.
 const _incomplete =
-    "Couldn't finish checking this ID. Check your connection and try again.";
+    "Couldn't finish checking this public key. Check your connection and try "
+    'again.';
 
 void main() {
   group('CreateCirclePage KeyPackage validation', () {
@@ -164,8 +165,8 @@ void main() {
       expect(find.byIcon(LucideIcons.triangleAlert), findsOneWidget);
       expect(
         find.text(
-          'No Haven account found for this ID yet. If they just set up '
-          'Haven, try again in a minute.',
+          'No Haven account found for this public key yet. If they just set '
+          'up Haven, try again in a minute.',
         ),
         findsOneWidget,
       );
@@ -604,26 +605,23 @@ void main() {
   // KeyPackage, mark it valid, and carry it into circle creation (§9.5).
   // -------------------------------------------------------------------------
   group('CreateCirclePage — you cannot invite yourself', () {
-    testWidgets(
-      'C6. entering your own public key is refused by name, and staged '
-      'nowhere',
-      (tester) async {
-        final mock = MockRelayService(keyPackageResult: _makeKeyPackage('hex'));
-        await tester.pumpWidget(_buildApp(mock));
-        await tester.pumpAndSettle();
+    testWidgets('C6. entering your own public key is refused by name, and '
+        'staged nowhere', (tester) async {
+      final mock = MockRelayService(keyPackageResult: _makeKeyPackage('hex'));
+      await tester.pumpWidget(_buildApp(mock));
+      await tester.pumpAndSettle();
 
-        await _addMember(tester, _selfNpub);
-        await tester.pumpAndSettle();
+      await _addMember(tester, _selfNpub);
+      await tester.pumpAndSettle();
 
-        final l10n = l10nOf(tester, CreateCirclePage);
-        expect(find.text(l10n.memberPickerReasonSelf), findsOneWidget);
-        expect(find.byType(PendingMemberTile), findsNothing);
-        final button = tester.widget<FilledButton>(
-          find.widgetWithText(FilledButton, 'Continue'),
-        );
-        expect(button.onPressed, isNull);
-      },
-    );
+      final l10n = l10nOf(tester, CreateCirclePage);
+      expect(find.text(l10n.memberPickerReasonSelf), findsOneWidget);
+      expect(find.byType(PendingMemberTile), findsNothing);
+      final button = tester.widget<FilledButton>(
+        find.widgetWithText(FilledButton, 'Continue'),
+      );
+      expect(button.onPressed, isNull);
+    });
 
     testWidgets('C7. the refusal costs no relay lookup, so it holds offline', (
       tester,

@@ -68,7 +68,7 @@ void main() {
 
       expect(
         find.text(
-          'That doesn’t look like a valid backup key. '
+          'That doesn’t look like a valid secret key. '
           'Please check and try again.',
         ),
         findsOneWidget,
@@ -94,7 +94,7 @@ void main() {
 
       expect(
         find.text(
-          'That doesn’t look like a valid backup key. '
+          'That doesn’t look like a valid secret key. '
           'Please check and try again.',
         ),
         findsOneWidget,

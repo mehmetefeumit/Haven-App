@@ -147,8 +147,6 @@
   "mapStylePreviewCity": "शहर",
   "mapStylePreviewNature": "प्रकृति",
   "mapStylePreviewSemantics": "मानचित्र पूर्वावलोकन ({scene}): {style}",
-  "mapStylePreviewUnavailableSemantics": "इस बिल्ड में मानचित्र पूर्वावलोकन उपलब्ध नहीं है",
-  "mapStylePreviewUnavailableLabel": "लाइव पूर्वावलोकन रिलीज़ बिल्ड में दिखता है",
   "aboutTitle": "परिचय",
   "aboutHeroName": "Haven",
   "aboutHeroTagline": "निजी और सेंसरशिप-प्रतिरोधी स्थान साझाकरण।",

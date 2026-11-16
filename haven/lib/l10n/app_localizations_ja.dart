@@ -518,12 +518,6 @@ class AppLocalizationsJa extends AppLocalizations {
   }
 
   @override
-  String get mapStylePreviewUnavailableSemantics => 'このビルドでは地図のプレビューを利用できません';
-
-  @override
-  String get mapStylePreviewUnavailableLabel => 'ライブプレビューはリリースビルドで表示されます';
-
-  @override
   String get aboutTitle => 'このアプリについて';
 
   @override

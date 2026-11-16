@@ -147,8 +147,6 @@
   "mapStylePreviewCity": "都市",
   "mapStylePreviewNature": "自然",
   "mapStylePreviewSemantics": "地図のプレビュー（{scene}）: {style}",
-  "mapStylePreviewUnavailableSemantics": "このビルドでは地図のプレビューを利用できません",
-  "mapStylePreviewUnavailableLabel": "ライブプレビューはリリースビルドで表示されます",
   "aboutTitle": "このアプリについて",
   "aboutHeroName": "Haven",
   "aboutHeroTagline": "プライベートで、検閲に強い位置情報共有。",

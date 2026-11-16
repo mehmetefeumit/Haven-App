@@ -544,14 +544,6 @@ class AppLocalizationsTr extends AppLocalizations {
   }
 
   @override
-  String get mapStylePreviewUnavailableSemantics =>
-      'Harita önizlemesi bu sürümde kullanılamaz';
-
-  @override
-  String get mapStylePreviewUnavailableLabel =>
-      'Anlık önizleme yayın sürümlerinde görünür';
-
-  @override
   String get aboutTitle => 'Hakkında';
 
   @override

@@ -545,14 +545,6 @@ class AppLocalizationsNe extends AppLocalizations {
   }
 
   @override
-  String get mapStylePreviewUnavailableSemantics =>
-      'यो बिल्डमा नक्सा पूर्वावलोकन उपलब्ध छैन';
-
-  @override
-  String get mapStylePreviewUnavailableLabel =>
-      'लाइभ पूर्वावलोकन रिलिज बिल्डहरूमा देखिन्छ';
-
-  @override
   String get aboutTitle => 'बारेमा';
 
   @override

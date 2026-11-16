@@ -147,8 +147,6 @@
   "mapStylePreviewCity": "Cidade",
   "mapStylePreviewNature": "Natureza",
   "mapStylePreviewSemantics": "Prévia do mapa ({scene}): {style}",
-  "mapStylePreviewUnavailableSemantics": "Prévia do mapa indisponível nesta versão",
-  "mapStylePreviewUnavailableLabel": "A prévia ao vivo aparece nas versões de lançamento",
   "aboutTitle": "Sobre",
   "aboutHeroName": "Haven",
   "aboutHeroTagline": "Compartilhamento de localização privado e resistente à censura.",

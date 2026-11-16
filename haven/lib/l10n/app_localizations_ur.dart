@@ -539,14 +539,6 @@ class AppLocalizationsUr extends AppLocalizations {
   }
 
   @override
-  String get mapStylePreviewUnavailableSemantics =>
-      'اس بلڈ میں نقشے کا پیش منظر دستیاب نہیں';
-
-  @override
-  String get mapStylePreviewUnavailableLabel =>
-      'لائیو پیش منظر ریلیز بلڈز میں ظاہر ہوتا ہے';
-
-  @override
   String get aboutTitle => 'تعارف';
 
   @override

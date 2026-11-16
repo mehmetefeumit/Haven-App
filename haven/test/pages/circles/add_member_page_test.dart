@@ -413,8 +413,8 @@ void main() {
         expect(find.byIcon(LucideIcons.triangleAlert), findsOneWidget);
         expect(
           find.text(
-            'No Haven account found for this ID yet. If they just set up '
-            'Haven, try again in a minute.',
+            'No Haven account found for this public key yet. If they just '
+            'set up Haven, try again in a minute.',
           ),
           findsOneWidget,
         );
@@ -1093,8 +1093,8 @@ void main() {
         expect(find.byIcon(LucideIcons.triangleAlert), findsOneWidget);
         expect(
           find.text(
-            "Couldn't finish checking this ID. Check your connection and try "
-            'again.',
+            "Couldn't finish checking this public key. Check your connection "
+            'and try again.',
           ),
           findsOneWidget,
         );
@@ -1522,30 +1522,28 @@ void main() {
   // failed open and the self-add was never identified (§9.5).
   // -------------------------------------------------------------------------
   group('AddMemberPage — you cannot invite yourself', () {
-    testWidgets(
-      'A6. entering your own public key is refused as YOU, not as a member',
-      (tester) async {
-        final mockRelay = MockRelayService(
-          keyPackageResult: _makeKp(_existingMemberHex),
-        );
-        await tester.pumpWidget(
-          _buildApp(
-            circle: _makeCircle(),
-            mockRelay: mockRelay,
-            mockCircle: MockCircleService(),
-          ),
-        );
-        await tester.pumpAndSettle();
+    testWidgets('A6. entering your own public key is refused as YOU, not as '
+        'a member', (tester) async {
+      final mockRelay = MockRelayService(
+        keyPackageResult: _makeKp(_existingMemberHex),
+      );
+      await tester.pumpWidget(
+        _buildApp(
+          circle: _makeCircle(),
+          mockRelay: mockRelay,
+          mockCircle: MockCircleService(),
+        ),
+      );
+      await tester.pumpAndSettle();
 
-        await _addMember(tester, _existingMemberNpub);
-        await tester.pumpAndSettle();
+      await _addMember(tester, _existingMemberNpub);
+      await tester.pumpAndSettle();
 
-        final l10n = l10nOf(tester, AddMemberPage);
-        expect(find.text(l10n.memberPickerReasonSelf), findsOneWidget);
-        expect(find.text(l10n.addMemberAlreadyInCircle), findsNothing);
-        expect(find.byType(PendingMemberTile), findsNothing);
-      },
-    );
+      final l10n = l10nOf(tester, AddMemberPage);
+      expect(find.text(l10n.memberPickerReasonSelf), findsOneWidget);
+      expect(find.text(l10n.addMemberAlreadyInCircle), findsNothing);
+      expect(find.byType(PendingMemberTile), findsNothing);
+    });
 
     testWidgets('A7. the refusal costs no relay lookup, so it holds offline', (
       tester,

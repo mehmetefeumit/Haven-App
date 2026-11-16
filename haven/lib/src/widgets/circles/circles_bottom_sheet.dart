@@ -288,10 +288,9 @@ class CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet> {
     _collapsedSize = collapsed;
     // A raised snap clamps the sheet up by itself; a lowered one would leave
     // it resting above the new snap, under a dim the user never asked for.
-    // A sheet the user is holding stays where they hold it.
-    if (wasCollapsed && _activePointer == null) {
+    if (wasCollapsed) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted && _controller.isAttached && _activePointer == null) {
+        if (mounted && _controller.isAttached) {
           _controller.jumpTo(_collapsedSize);
         }
       });

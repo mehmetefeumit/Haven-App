@@ -18,11 +18,11 @@ import 'package:haven/src/widgets/identity/npub_qr_code.dart';
 
 import '../../helpers/no_readiness_row.dart';
 
-const _testNpub =
-    'npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqspcd5tr';
+const _testNpub = 'npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqspcd5tr';
 
 final _fakeIdentity = Identity(
-  pubkeyHex: 'abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234',
+  pubkeyHex:
+      'abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234',
   npub: _testNpub,
   createdAt: DateTime(2024),
 );

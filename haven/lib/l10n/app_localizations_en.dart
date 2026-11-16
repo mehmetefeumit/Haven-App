@@ -538,14 +538,6 @@ class AppLocalizationsEn extends AppLocalizations {
   }
 
   @override
-  String get mapStylePreviewUnavailableSemantics =>
-      'Map preview unavailable in this build';
-
-  @override
-  String get mapStylePreviewUnavailableLabel =>
-      'Live preview appears in release builds';
-
-  @override
   String get aboutTitle => 'About';
 
   @override

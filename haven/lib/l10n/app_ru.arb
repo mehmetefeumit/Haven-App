@@ -147,8 +147,6 @@
   "mapStylePreviewCity": "Город",
   "mapStylePreviewNature": "Природа",
   "mapStylePreviewSemantics": "Предпросмотр карты ({scene}): {style}",
-  "mapStylePreviewUnavailableSemantics": "Предпросмотр карты недоступен в этой сборке",
-  "mapStylePreviewUnavailableLabel": "Живой предпросмотр доступен в релизных сборках",
   "aboutTitle": "О приложении",
   "aboutHeroName": "Haven",
   "aboutHeroTagline": "Приватный и устойчивый к цензуре обмен местоположением.",

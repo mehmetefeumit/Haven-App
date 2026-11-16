@@ -229,33 +229,31 @@ void main() {
       expect(find.text(_l10n(tester).memberSearchNoValidId), findsOneWidget);
     });
 
-    testWidgets(
-      'the user entering their own public key is told so, and not staged',
-      (tester) async {
-        // The shipped defect this fixes: create-circle had no identity read at
-        // all, so this npub was staged and validated against the user's own
-        // KeyPackage.
-        final harness = await _pumpField(
-          tester,
-          entryState: (_) => MemberPickState.self,
-        );
+    testWidgets('the user entering their own public key is told so, and not '
+        'staged', (tester) async {
+      // The shipped defect this fixes: create-circle had no identity read at
+      // all, so this npub was staged and validated against the user's own
+      // KeyPackage.
+      final harness = await _pumpField(
+        tester,
+        entryState: (_) => MemberPickState.self,
+      );
 
-        await tester.enterText(find.byKey(WidgetKeys.memberSearchInput), _npub);
-        await tester.testTextInput.receiveAction(TextInputAction.done);
-        await tester.pump();
+      await tester.enterText(find.byKey(WidgetKeys.memberSearchInput), _npub);
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
 
-        expect(harness.staged, isEmpty);
-        expect(find.text(_l10n(tester).memberPickerReasonSelf), findsOneWidget);
-        expect(
-          find.text(_l10n(tester).addMemberAlreadyInCircle),
-          findsNothing,
-          reason:
-              '"Already in this circle" is true of the user themselves and was '
-              'the only thing the shipped code could say — the three reasons '
-              'exist to end exactly that confusion.',
-        );
-      },
-    );
+      expect(harness.staged, isEmpty);
+      expect(find.text(_l10n(tester).memberPickerReasonSelf), findsOneWidget);
+      expect(
+        find.text(_l10n(tester).addMemberAlreadyInCircle),
+        findsNothing,
+        reason:
+            '"Already in this circle" is true of the user themselves and was '
+            'the only thing the shipped code could say — the three reasons '
+            'exist to end exactly that confusion.',
+      );
+    });
 
     testWidgets('an existing circle member is refused, with no relay in the '
         'path', (tester) async {

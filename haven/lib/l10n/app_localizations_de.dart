@@ -549,14 +549,6 @@ class AppLocalizationsDe extends AppLocalizations {
   }
 
   @override
-  String get mapStylePreviewUnavailableSemantics =>
-      'Kartenvorschau in diesem Build nicht verfügbar';
-
-  @override
-  String get mapStylePreviewUnavailableLabel =>
-      'Die Live-Vorschau erscheint in Release-Builds';
-
-  @override
   String get aboutTitle => 'Über';
 
   @override

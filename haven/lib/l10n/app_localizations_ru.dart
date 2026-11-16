@@ -546,14 +546,6 @@ class AppLocalizationsRu extends AppLocalizations {
   }
 
   @override
-  String get mapStylePreviewUnavailableSemantics =>
-      'Предпросмотр карты недоступен в этой сборке';
-
-  @override
-  String get mapStylePreviewUnavailableLabel =>
-      'Живой предпросмотр доступен в релизных сборках';
-
-  @override
   String get aboutTitle => 'О приложении';
 
   @override

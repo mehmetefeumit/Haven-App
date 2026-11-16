@@ -132,8 +132,6 @@
   "mapStylePreviewCity": "Stadt",
   "mapStylePreviewNature": "Natur",
   "mapStylePreviewSemantics": "Kartenvorschau ({scene}): {style}",
-  "mapStylePreviewUnavailableSemantics": "Kartenvorschau in diesem Build nicht verfügbar",
-  "mapStylePreviewUnavailableLabel": "Die Live-Vorschau erscheint in Release-Builds",
   "aboutTitle": "Über",
   "aboutHeroName": "Haven",
   "aboutHeroTagline": "Privates und zensurresistentes Teilen des Standorts.",

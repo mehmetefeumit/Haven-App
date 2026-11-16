@@ -1002,18 +1002,6 @@ abstract class AppLocalizations {
   /// **'Map preview ({scene}): {style}'**
   String mapStylePreviewSemantics(String scene, String style);
 
-  /// Accessibility label for the placeholder shown when no map API key is configured (debug/test builds).
-  ///
-  /// In en, this message translates to:
-  /// **'Map preview unavailable in this build'**
-  String get mapStylePreviewUnavailableSemantics;
-
-  /// Caption inside the placeholder shown when no map API key is configured (debug/test builds).
-  ///
-  /// In en, this message translates to:
-  /// **'Live preview appears in release builds'**
-  String get mapStylePreviewUnavailableLabel;
-
   /// Title of the About page (AppBar).
   ///
   /// In en, this message translates to:

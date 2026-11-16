@@ -132,8 +132,6 @@
   "mapStylePreviewCity": "सहर",
   "mapStylePreviewNature": "प्रकृति",
   "mapStylePreviewSemantics": "नक्सा पूर्वावलोकन ({scene}): {style}",
-  "mapStylePreviewUnavailableSemantics": "यो बिल्डमा नक्सा पूर्वावलोकन उपलब्ध छैन",
-  "mapStylePreviewUnavailableLabel": "लाइभ पूर्वावलोकन रिलिज बिल्डहरूमा देखिन्छ",
   "aboutTitle": "बारेमा",
   "aboutHeroName": "Haven",
   "aboutHeroTagline": "गोप्य र सेन्सरशिप-प्रतिरोधी स्थान साझेदारी।",

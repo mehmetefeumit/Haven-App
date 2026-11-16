@@ -540,14 +540,6 @@ class AppLocalizationsHi extends AppLocalizations {
   }
 
   @override
-  String get mapStylePreviewUnavailableSemantics =>
-      'इस बिल्ड में मानचित्र पूर्वावलोकन उपलब्ध नहीं है';
-
-  @override
-  String get mapStylePreviewUnavailableLabel =>
-      'लाइव पूर्वावलोकन रिलीज़ बिल्ड में दिखता है';
-
-  @override
   String get aboutTitle => 'परिचय';
 
   @override

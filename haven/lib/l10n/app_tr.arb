@@ -132,8 +132,6 @@
   "mapStylePreviewCity": "Şehir",
   "mapStylePreviewNature": "Doğa",
   "mapStylePreviewSemantics": "Harita önizlemesi ({scene}): {style}",
-  "mapStylePreviewUnavailableSemantics": "Harita önizlemesi bu sürümde kullanılamaz",
-  "mapStylePreviewUnavailableLabel": "Anlık önizleme yayın sürümlerinde görünür",
   "aboutTitle": "Hakkında",
   "aboutHeroName": "Haven",
   "aboutHeroTagline": "Gizli ve sansüre dirençli konum paylaşımı.",

@@ -548,14 +548,6 @@ class AppLocalizationsAr extends AppLocalizations {
   }
 
   @override
-  String get mapStylePreviewUnavailableSemantics =>
-      'معاينة الخريطة غير متاحة في هذا الإصدار';
-
-  @override
-  String get mapStylePreviewUnavailableLabel =>
-      'تظهر المعاينة المباشرة في إصدارات النشر';
-
-  @override
   String get aboutTitle => 'حول';
 
   @override

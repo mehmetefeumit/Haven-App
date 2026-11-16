@@ -543,14 +543,6 @@ class AppLocalizationsFa extends AppLocalizations {
   }
 
   @override
-  String get mapStylePreviewUnavailableSemantics =>
-      'پیش‌نمایش نقشه در این نسخه در دسترس نیست';
-
-  @override
-  String get mapStylePreviewUnavailableLabel =>
-      'پیش‌نمایش زنده در نسخه‌های انتشار نمایش داده می‌شود';
-
-  @override
   String get aboutTitle => 'درباره';
 
   @override

@@ -549,14 +549,6 @@ class AppLocalizationsFr extends AppLocalizations {
   }
 
   @override
-  String get mapStylePreviewUnavailableSemantics =>
-      'Aperçu de la carte indisponible dans cette version';
-
-  @override
-  String get mapStylePreviewUnavailableLabel =>
-      'L\'aperçu en direct apparaît dans les versions de production';
-
-  @override
   String get aboutTitle => 'À propos';
 
   @override

@@ -147,8 +147,6 @@
   "mapStylePreviewCity": "مدينة",
   "mapStylePreviewNature": "طبيعة",
   "mapStylePreviewSemantics": "معاينة الخريطة ({scene}): {style}",
-  "mapStylePreviewUnavailableSemantics": "معاينة الخريطة غير متاحة في هذا الإصدار",
-  "mapStylePreviewUnavailableLabel": "تظهر المعاينة المباشرة في إصدارات النشر",
   "aboutTitle": "حول",
   "aboutHeroName": "Haven",
   "aboutHeroTagline": "مشاركة موقع خاصة ومقاوِمة للرقابة.",

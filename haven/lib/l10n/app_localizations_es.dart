@@ -553,14 +553,6 @@ class AppLocalizationsEs extends AppLocalizations {
   }
 
   @override
-  String get mapStylePreviewUnavailableSemantics =>
-      'Vista previa del mapa no disponible en esta versión';
-
-  @override
-  String get mapStylePreviewUnavailableLabel =>
-      'La vista previa en directo aparece en las versiones de lanzamiento';
-
-  @override
   String get aboutTitle => 'Acerca de';
 
   @override
