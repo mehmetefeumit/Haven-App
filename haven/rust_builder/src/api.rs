@@ -2155,6 +2155,69 @@ impl std::fmt::Debug for AcceptInvitationOutcomeFfi {
     }
 }
 
+/// What [`CircleManagerFfi::process_gift_wrapped_invitation`] did with one
+/// gift wrap. At most one of the two is `Some`; neither means the wrap was
+/// already processed.
+#[derive(Clone)]
+pub struct GiftWrapIntakeFfi {
+    /// The new pending invitation.
+    pub invitation: Option<InvitationFfi>,
+    /// Why no invitation came of it, when one should be told apart.
+    pub failure: Option<GiftWrapIntakeFailureFfi>,
+}
+
+impl GiftWrapIntakeFfi {
+    const fn failed(failure: GiftWrapIntakeFailureFfi) -> Self {
+        Self {
+            invitation: None,
+            failure: Some(failure),
+        }
+    }
+
+    /// Classifies the core intake by error variant, never by its text.
+    fn of(intake: Result<CoreInvitation, CoreCircleError>) -> Result<Self, String> {
+        match intake {
+            Ok(invitation) => Ok(Self {
+                invitation: Some(InvitationFfi::from(invitation)),
+                failure: None,
+            }),
+            // Idempotent skip: the poller has already processed this wrapper.
+            Err(CoreCircleError::AlreadyProcessed) => Ok(Self {
+                invitation: None,
+                failure: None,
+            }),
+            Err(CoreCircleError::Mls(_)) => Ok(Self::failed(GiftWrapIntakeFailureFfi::Unusable)),
+            Err(CoreCircleError::Storage(_) | CoreCircleError::Database(_)) => {
+                Ok(Self::failed(GiftWrapIntakeFailureFfi::StoreFailed))
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    }
+}
+
+/// Presence-only: the invitation's own `Debug` already aliases it.
+impl std::fmt::Debug for GiftWrapIntakeFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GiftWrapIntakeFfi")
+            .field("invitation", &self.invitation)
+            .field("failure", &self.failure)
+            .finish()
+    }
+}
+
+/// Why a gift wrap gave no invitation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GiftWrapIntakeFailureFfi {
+    /// It is not an invitation this device can open. Never shown: a shared
+    /// NIP-17 inbox also carries other clients' messages, and anyone who
+    /// knows the npub can send a wrap that names this account's public
+    /// KeyPackage and carries nothing.
+    Unusable,
+    /// It opened, but holding the invitation could not be recorded on this
+    /// device, so it was not held.
+    StoreFailed,
+}
+
 /// A typed reason an invitation cannot be accepted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AcceptFailureFfi {
@@ -3546,24 +3609,30 @@ impl CircleManagerFfi {
     ///
     /// # Returns
     ///
-    /// * `Ok(Some(invitation))` — a new pending invitation the caller must
-    ///   accept or decline.
-    /// * `Ok(None)` — the gift wrap has already been processed on a prior
-    ///   poll cycle and should be silently skipped. This is the expected
-    ///   outcome for the inbox lookback (96 h, wider than NIP-59's 2-day
-    ///   backdating) repeatedly surfacing the same wrapper events.
-    /// * `Err(msg)` — a real failure (malformed event, MDK error, etc.).
-    ///   The message is already sanitized via `redact_hex_sequences`.
+    /// A [`GiftWrapIntakeFfi`]: the new pending invitation the caller must
+    /// accept or decline, or a typed failure, or — both `None` — a wrap
+    /// already processed on a prior poll, to be skipped silently (the inbox
+    /// lookback, wider than NIP-59's 2-day backdating, surfaces the same
+    /// wrappers again and again).
+    ///
+    /// # Errors
+    ///
+    /// Only for bad secret bytes, or a failure no typed outcome names.
     pub async fn process_gift_wrapped_invitation(
         &self,
         identity_secret_bytes: Vec<u8>,
         gift_wrap_event_json: String,
-    ) -> Result<Option<InvitationFfi>, String> {
+    ) -> Result<GiftWrapIntakeFfi, String> {
         let keys = keys_from_secret_bytes(identity_secret_bytes)?;
 
-        // Parse the gift-wrapped event
-        let gift_wrap_event: nostr::Event = serde_json::from_str(&gift_wrap_event_json)
-            .map_err(|e| format!("Invalid gift wrap event JSON: {e}"))?;
+        // serde's message can quote the relay-authored JSON (Rule 15), and a
+        // wrap that does not parse is as unusable as one that does not open.
+        let Ok(gift_wrap_event) = serde_json::from_str::<nostr::Event>(&gift_wrap_event_json)
+        else {
+            return Ok(GiftWrapIntakeFfi::failed(
+                GiftWrapIntakeFailureFfi::Unusable,
+            ));
+        };
 
         // Genuinely async — the Dark Matter peeler previews the welcome (peel
         // WITHOUT ingest, F3 hold-before-ingest) internally. The returned
@@ -3571,18 +3640,11 @@ impl CircleManagerFfi {
         // until Accept ingests and the engine yields the real MLS group id;
         // Dart passes that stand-in id back to `accept_invitation` /
         // `decline_invitation` (they key on the gift-wrap id).
-        match self
-            .inner
-            .process_gift_wrapped_invitation(&keys, &gift_wrap_event)
-            .await
-        {
-            Ok(invitation) => Ok(Some(InvitationFfi::from(invitation))),
-            // Idempotent skip: the poller has already processed this wrapper.
-            // Flatten to `Ok(None)` so the Dart side never surfaces it as
-            // a failure.
-            Err(haven_core::circle::CircleError::AlreadyProcessed) => Ok(None),
-            Err(e) => Err(e.to_string()),
-        }
+        GiftWrapIntakeFfi::of(
+            self.inner
+                .process_gift_wrapped_invitation(&keys, &gift_wrap_event)
+                .await,
+        )
     }
 
     /// Gets all pending invitations from the in-memory held-welcome store.
@@ -6510,6 +6572,16 @@ pub fn fold_for_search(query: String) -> String {
     haven_core::directory::fold_for_search(&query)
 }
 
+/// How far back, in seconds, a read of the user's inbox asks for gift wraps
+/// (`haven_core::relay::cursor::INBOX_GIFTWRAP_LOOKBACK_SECS`): at least
+/// NIP-59's two days of backdating plus the 72-hour hold on an unanswered
+/// invitation, so one held before a restart is read back after it.
+#[frb(sync)]
+#[must_use]
+pub const fn inbox_gift_wrap_lookback_secs() -> i64 {
+    haven_core::relay::cursor::INBOX_GIFTWRAP_LOOKBACK_SECS
+}
+
 /// Returns the canonical default relay list shared by Rust and Dart.
 ///
 /// Single source of truth for [`haven_core::circle::default_relays`].
@@ -6999,6 +7071,9 @@ pub struct OwnRelayPresenceFfi {
     pub relay_list: OwnEventPresenceFfi,
     /// Kind 10050.
     pub inbox_relay_list: OwnEventPresenceFfi,
+    /// How it answered a read of this account's gift wraps; asked of inbox
+    /// relays only, `None` for every other row.
+    pub inbox_read: Option<InboxReadFfi>,
 }
 
 /// Redacting `Debug`: a relay URL is a fingerprint of a customised pool, so
@@ -7016,6 +7091,7 @@ impl std::fmt::Debug for OwnRelayPresenceFfi {
             .field("key_package", &self.key_package)
             .field("relay_list", &self.relay_list)
             .field("inbox_relay_list", &self.inbox_relay_list)
+            .field("inbox_read", &self.inbox_read)
             .finish()
     }
 }
@@ -7030,28 +7106,54 @@ impl From<haven_core::relay::maintenance::OwnRelayPresence> for OwnRelayPresence
             key_package: row.key_package.into(),
             relay_list: row.relay_list.into(),
             inbox_relay_list: row.inbox_relay_list.into(),
+            inbox_read: row.inbox_read.map(InboxReadFfi::from),
+        }
+    }
+}
+
+/// How one relay answered a read of the user's own inbox (kind 1059)
+/// (`haven_core::relay::InboxRead`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InboxReadFfi {
+    /// It ended the read with `EOSE`: what it holds for this account, it sent.
+    Served,
+    /// It refused the read until this device authenticates, which it never
+    /// does: an invitation stored there is never read from it.
+    Refused,
+    /// It was reached but did not finish its answer.
+    Incomplete,
+    /// It could not be reached.
+    Unreached,
+}
+
+impl From<haven_core::relay::InboxRead> for InboxReadFfi {
+    fn from(read: haven_core::relay::InboxRead) -> Self {
+        use haven_core::relay::InboxRead as R;
+        match read {
+            R::Served => Self::Served,
+            R::Refused => Self::Refused,
+            R::Incomplete => Self::Incomplete,
+            R::Unreached => Self::Unreached,
         }
     }
 }
 
 /// Per-relay outcome of a gift-wrap fetch (FFI-friendly).
 ///
-/// `responded` is true when the relay completed the WebSocket handshake (it
-/// answered), even if it returned no events. A relay that answered with zero
-/// events is `responded == true` with an empty `events` list — distinct from
-/// an unreachable relay (`responded == false`). `events` holds the gift-wrap
-/// event JSON strings fetched from this relay.
+/// Only [`InboxReadFfi::Served`] means the relay sent everything it holds for
+/// this account; `events` holds the gift-wrap event JSON strings that arrived,
+/// whatever `read` says.
 #[derive(Clone)]
 pub struct RelayGiftWrapFetchFfi {
     /// The relay URL that was queried.
     pub relay_url: String,
-    /// Whether the relay answered (completed the WebSocket handshake).
-    pub responded: bool,
+    /// How the relay answered the read.
+    pub read: InboxReadFfi,
     /// Gift-wrap event JSON strings fetched from this relay.
     pub events: Vec<String>,
 }
 
-/// Redacting `Debug`: a salted relay handle, whether the relay answered, and
+/// Redacting `Debug`: a salted relay handle, how the relay answered, and
 /// whether it returned anything. The gift-wrap JSONs are whole events and their
 /// COUNT is how many invitations this account is holding (Rule 15).
 impl std::fmt::Debug for RelayGiftWrapFetchFfi {
@@ -7061,7 +7163,7 @@ impl std::fmt::Debug for RelayGiftWrapFetchFfi {
                 "relay",
                 &haven_core::log_alias::relay(RelayUrl(&self.relay_url)),
             )
-            .field("responded", &self.responded)
+            .field("read", &self.read)
             .field("has_events", &!self.events.is_empty())
             .finish()
     }
@@ -9425,16 +9527,15 @@ impl RelayManagerFfi {
             .collect::<Result<Vec<_>, _>>()
     }
 
-    /// Fetches gift-wrapped events (kind 1059) per relay, reporting which
-    /// relays answered.
+    /// Fetches gift-wrapped events (kind 1059) per relay, reporting how each
+    /// relay answered.
     ///
     /// Like [`fetch_gift_wraps`](Self::fetch_gift_wraps), but instead of one
     /// merged list it queries each relay independently and returns a per-relay
-    /// outcome: whether the relay answered (`responded`) and the events it
-    /// returned. This lets the caller show an accurate "N of M inboxes
-    /// answered" tally. A relay that answers with zero events is
-    /// `responded == true` with an empty `events` list — distinct from an
-    /// unreachable relay (`responded == false`).
+    /// outcome: how the relay answered the read ([`InboxReadFfi`]) and the
+    /// events it returned. Only `Served` says the relay sent everything it
+    /// holds; a relay that refuses the read until this device authenticates is
+    /// `Refused`, never mistaken for an empty inbox.
     ///
     /// # Arguments
     ///
@@ -9456,8 +9557,9 @@ impl RelayManagerFfi {
 
         // The per-relay count is shown to the user as exact, so the cap is a
         // generous flood-guard rather than a paging limit: a real inbox holds
-        // far fewer than this many gift wraps in its 96-hour lookback window, so
-        // the headline "N new invitations" is not silently truncated.
+        // far fewer than this many gift wraps in its lookback window
+        // ([`inbox_gift_wrap_lookback_secs`]), so the headline "N new
+        // invitations" is not silently truncated.
         let mut filter = nostr::Filter::new()
             .kind(nostr::Kind::GiftWrap)
             .pubkey(pk)
@@ -9477,6 +9579,7 @@ impl RelayManagerFfi {
         outcomes
             .into_iter()
             .map(|o| {
+                let read = o.inbox_read().into();
                 let events = o
                     .events
                     .into_iter()
@@ -9487,7 +9590,7 @@ impl RelayManagerFfi {
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(RelayGiftWrapFetchFfi {
                     relay_url: o.relay_url,
-                    responded: o.responded,
+                    read,
                     events,
                 })
             })
@@ -13507,10 +13610,12 @@ impl LiveSyncFfi {
     /// Streams decrypted live events to Dart for the lifetime of the session.
     ///
     /// Returns `Err` immediately if no session is active (a cold-start race, not
-    /// a hung stream). The loop ends when the Dart side closes the sink
-    /// (`sink.add` returns `Err`) OR the bus closes on `stop_session` (the last
-    /// `Arc<LiveSyncCore>` drops → `RecvError::Closed`); a lag is skipped, never
-    /// fatal (the cursor + catch-up replay anything dropped).
+    /// a hung stream). The first stream of a session starts at its construction,
+    /// so nothing the session's first REQs replayed before Dart attached is
+    /// lost. The loop ends when the Dart side closes the sink (`sink.add`
+    /// returns `Err`) OR the bus closes on `stop_session` (the last
+    /// `Arc<LiveSyncCore>` drops); a lag is never fatal
+    /// ([`haven_core::relay::live_sync::LiveEvents::recv`]).
     ///
     /// # Errors
     ///
@@ -13525,20 +13630,14 @@ impl LiveSyncFfi {
             .as_ref()
             .map(Arc::clone)
             .ok_or_else(|| "no active live-sync session".to_string())?;
-        let mut rx = core.bus().subscribe();
+        let mut events = core.events();
         // Drop our Arc so the bus closes promptly when stop_session takes the
         // session (otherwise this clone would keep the core — and its bus —
-        // alive, and the Closed branch could never fire).
+        // alive, and the stream could never end).
         drop(core);
-        loop {
-            match rx.recv().await {
-                Ok(event) => {
-                    if sink.add(live_event_to_ffi(event)).is_err() {
-                        break; // Dart closed the stream
-                    }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        while let Some(event) = events.recv().await {
+            if sink.add(live_event_to_ffi(event)).is_err() {
+                break; // Dart closed the stream
             }
         }
         Ok(())
@@ -15300,6 +15399,7 @@ mod maintenance_real_ffi_tests {
                 row.lookup,
                 row.reachable,
                 [row.key_package, row.relay_list, row.inbox_relay_list],
+                row.inbox_read,
             )
         };
 
@@ -15312,28 +15412,32 @@ mod maintenance_real_ffi_tests {
                     true,
                     false,
                     true,
-                    [NotExpected, NotExpected, Missing]
+                    [NotExpected, NotExpected, Missing],
+                    Some(super::InboxReadFfi::Served),
                 ),
                 (
                     dead.clone(),
                     true,
                     false,
                     false,
-                    [NotExpected, NotExpected, NoAnswer]
+                    [NotExpected, NotExpected, NoAnswer],
+                    Some(super::InboxReadFfi::Unreached),
                 ),
                 (
                     key_package.clone(),
                     true,
                     false,
                     true,
-                    [Missing, Missing, NotExpected]
+                    [Missing, Missing, NotExpected],
+                    None,
                 ),
                 (
                     lookup.clone(),
                     false,
                     true,
                     true,
-                    [NotExpected, Missing, Missing]
+                    [NotExpected, Missing, Missing],
+                    None,
                 ),
             ],
             "nothing is published yet, and a lookup relay is never asked for a KeyPackage",
@@ -15354,21 +15458,24 @@ mod maintenance_real_ffi_tests {
                     true,
                     false,
                     true,
-                    [NotExpected, NotExpected, Current]
+                    [NotExpected, NotExpected, Current],
+                    Some(super::InboxReadFfi::Served),
                 ),
                 (
                     dead,
                     true,
                     false,
                     false,
-                    [NotExpected, NotExpected, NoAnswer]
+                    [NotExpected, NotExpected, NoAnswer],
+                    Some(super::InboxReadFfi::Unreached),
                 ),
                 (
                     key_package,
                     true,
                     false,
                     true,
-                    [Current, Current, NotExpected]
+                    [Current, Current, NotExpected],
+                    None,
                 ),
             ],
         );
@@ -16432,6 +16539,7 @@ mod maintenance_real_ffi_tests {
                     )
                     .await
                     .expect("hold the invitation")
+                    .invitation
                     .is_some(),
                 "the invitation is held for the user's answer"
             );
@@ -17006,6 +17114,7 @@ mod maintenance_real_ffi_tests {
                 .process_gift_wrapped_invitation(secret.clone(), invitation.as_json())
                 .await
                 .expect("hold the invitation")
+                .invitation
                 .is_some());
         }
         assert!(accepted(&circle, &invitations[0]).await);
@@ -17043,6 +17152,7 @@ mod maintenance_real_ffi_tests {
             .process_gift_wrapped_invitation(secret.clone(), invitations[1].as_json())
             .await
             .expect("the poll finds it again")
+            .invitation
             .is_some());
         assert!(
             accepted(&circle, &invitations[1]).await,
@@ -18628,6 +18738,39 @@ mod maintenance_real_ffi_tests {
         honest.shutdown();
     }
 
+    /// A relay gating gift-wrap reads behind NIP-42 (strfry's default
+    /// `restrictedReadKinds`) answers the invitation poll `Refused`, never
+    /// `Served`: what it stores is out of this device's reach, and the page
+    /// must not call that inbox up to date.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_invitation_poll_reports_a_relay_gating_gift_wrap_reads_as_refused() {
+        use haven_core::relay::scripted_relay::{Frame, ScriptedRelay};
+
+        install_test_seams();
+        let (gated, open) = (ScriptedRelay::start(), ScriptedRelay::start());
+        gated.answer(
+            |_| true,
+            // relay.damus.io's own words, strfry's `ERROR: ` and all.
+            vec![Frame::Closed(
+                "ERROR: auth-required: requested filter requires authentication".to_owned(),
+            )],
+        );
+        let per_relay = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance")
+            .fetch_gift_wraps_per_relay(
+                Keys::generate().public_key().to_hex(),
+                vec![gated.url().to_owned(), open.url().to_owned()],
+                None,
+            )
+            .await
+            .expect("the poll runs");
+        assert_eq!(
+            per_relay.iter().map(|inbox| inbox.read).collect::<Vec<_>>(),
+            [super::InboxReadFfi::Refused, super::InboxReadFfi::Served],
+        );
+    }
+
     /// The invitation poll keeps the first gift wrap it sees under an id, so a
     /// forged wrap under a genuine id, from the relay that answers first, would
     /// hide the invitation on every poll.
@@ -18679,7 +18822,8 @@ mod maintenance_real_ffi_tests {
         assert_eq!(per_relay.len(), 2);
         for inbox in &per_relay {
             assert!(
-                inbox.responded && is_the_genuine_wrap_alone(&inbox.events),
+                inbox.read == super::InboxReadFfi::Served
+                    && is_the_genuine_wrap_alone(&inbox.events),
                 "an inbox's answer is not exactly the genuine gift wrap"
             );
         }
@@ -22982,6 +23126,86 @@ mod maintenance_real_ffi_tests {
             planted.findings,
         );
     }
+
+    /// The invitation poll's window is the inbox REQ's cold lookback, and it
+    /// covers a wrap backdated NIP-59's two days that was then held the full
+    /// 72 hours before a restart dropped the in-memory copy.
+    #[test]
+    fn the_poll_lookback_reaches_a_held_wrap_backdated_two_days() {
+        const NIP59_BACKDATING_SECS: i64 = 2 * 24 * 60 * 60;
+        let lookback = super::inbox_gift_wrap_lookback_secs();
+        assert_eq!(
+            lookback,
+            haven_core::relay::cursor::INBOX_GIFTWRAP_LOOKBACK_SECS
+        );
+        assert!(
+            lookback
+                >= NIP59_BACKDATING_SECS
+                    + i64::try_from(haven_core::circle::CONSUMED_KEY_PACKAGE_HOLD_SECS)
+                        .expect("the hold fits")
+        );
+    }
+
+    /// A gift wrap is classified by the core error's variant, never by its
+    /// text: an MLS failure is a silent `Unusable`, a store failure the
+    /// `StoreFailed` the user is told about, and a wrap already processed is
+    /// neither.
+    #[test]
+    fn a_gift_wrap_intake_is_classified_by_error_variant() {
+        use super::{GiftWrapIntakeFailureFfi as F, GiftWrapIntakeFfi};
+        use haven_core::circle::CircleError;
+
+        for (case, intake, failure) in [
+            (
+                "mls",
+                CircleError::Mls("canary".to_owned()),
+                Some(F::Unusable),
+            ),
+            (
+                "storage",
+                CircleError::Storage("canary".to_owned()),
+                Some(F::StoreFailed),
+            ),
+            ("already processed", CircleError::AlreadyProcessed, None),
+        ] {
+            let outcome = GiftWrapIntakeFfi::of(Err(intake)).expect(case);
+            assert!(outcome.invitation.is_none(), "{case}");
+            assert_eq!(outcome.failure, failure, "{case}");
+        }
+    }
+
+    /// A wrap that opens no invitation — another client's message, a stranger's
+    /// empty wrap, JSON that does not even parse — is a typed `Unusable`, so no
+    /// relay-authored text reaches an FFI error string (Rule 15).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_gift_wrap_that_opens_no_invitation_is_a_typed_unusable() {
+        use nostr::JsonUtil as _;
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let keys = Keys::generate();
+        let dir = DataDir::new("intake_unusable");
+        let manager = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
+            .expect("CircleManagerFfi::new");
+        let stranger = nostr::EventBuilder::new(Kind::GiftWrap, "bm90IGEgd2VsY29tZQ==")
+            .tag(nostr::Tag::public_key(keys.public_key()))
+            .sign_with_keys(&Keys::generate())
+            .expect("a wrap signs");
+        for json in [
+            stranger.as_json(),
+            r#"{"kind":"canary-7f3a","content":"canary-7f3a"}"#.to_owned(),
+        ] {
+            let intake = manager
+                .process_gift_wrapped_invitation(secret_bytes(&keys), json)
+                .await
+                .expect("a wrap that opens nothing is a typed outcome, not an error string");
+            assert!(intake.invitation.is_none());
+            assert_eq!(
+                intake.failure,
+                Some(super::GiftWrapIntakeFailureFfi::Unusable)
+            );
+        }
+    }
 }
 
 // ============================================================================
@@ -23497,9 +23721,10 @@ mod log_anonymity_tests {
         AcceptFailureFfi, AcceptInvitationOutcomeFfi, BuiltRelayListEventFfi, BuiltUnpublishFfi,
         CircleCreationOutcomeFfi, CircleEngineStateFfi, CircleFfi, CircleMemberFfi,
         CircleWithMembersFfi, ContactFfi, DecryptedLocationFfi, DirectoryEntryFfi,
-        DirectoryTierFfi, FfiRelayEvent, FfiRelayEventKind, FfiSyncStatusReason, HavenTargetFilter,
-        InMemoryStorage, InvitationFfi, LastKnownLocationFfi, LeavePlanFfi, LeavePlanKindFfi,
-        LocationMessage, LocationMessageResultFfi, LocationMessageResultKindFfi, LogAliasClassFfi,
+        DirectoryTierFfi, FfiRelayEvent, FfiRelayEventKind, FfiSyncStatusReason,
+        GiftWrapIntakeFailureFfi, GiftWrapIntakeFfi, HavenTargetFilter, InMemoryStorage,
+        InvitationFfi, LastKnownLocationFfi, LeavePlanFfi, LeavePlanKindFfi, LocationMessage,
+        LocationMessageResultFfi, LocationMessageResultKindFfi, LogAliasClassFfi,
         MemberKeyPackageFfi, MemberLookupFfi, MemberLookupVerdictFfi, NostrIdentityManager,
         OwnProfileRelayAnswerFfi, OwnRelayPresenceFfi, ProfileMetadataFfi, ProfilePictureRefFfi,
         PublicIdentity, RejoinOfferFfi, RejoinOffersOutcomeFfi, RelayConnectionStatusFfi,
@@ -23686,7 +23911,7 @@ mod log_anonymity_tests {
     fn gift_wrap_fetch(events: usize) -> RelayGiftWrapFetchFfi {
         RelayGiftWrapFetchFfi {
             relay_url: RELAY.to_string(),
-            responded: true,
+            read: super::InboxReadFfi::Refused,
             events: vec![TEXT.to_string(); events],
         }
     }
@@ -24215,6 +24440,31 @@ mod log_anonymity_tests {
     }
 
     #[test]
+    fn gift_wrap_intake_ffi_debug_redacts_the_invitation() {
+        let held = GiftWrapIntakeFfi {
+            invitation: Some(InvitationFfi {
+                mls_group_id: vec![7u8; 32],
+                circle_name: NAME.to_string(),
+                inviter_pubkey: HEX_ID.to_string(),
+                inviter_npub: NPUB.to_string(),
+                invited_at: INSTANT,
+            }),
+            failure: None,
+        };
+        assert_debug_redacted!(held, "GiftWrapIntakeFfi", NEEDLES);
+        for (failure, marker) in [
+            (GiftWrapIntakeFailureFfi::Unusable, "Unusable"),
+            (GiftWrapIntakeFailureFfi::StoreFailed, "StoreFailed"),
+        ] {
+            let failed = GiftWrapIntakeFfi {
+                invitation: None,
+                failure: Some(failure),
+            };
+            assert_debug_redacted!(failed, "GiftWrapIntakeFfi", marker = marker, NEEDLES);
+        }
+    }
+
+    #[test]
     fn circle_with_members_ffi_debug_redacts_the_roster() {
         let subject: CircleWithMembersFfi = with_members(4);
         assert_debug_redacted!(subject, "CircleWithMembersFfi", NEEDLES);
@@ -24279,6 +24529,7 @@ mod log_anonymity_tests {
             key_package: super::OwnEventPresenceFfi::Current,
             relay_list: super::OwnEventPresenceFfi::Outdated,
             inbox_relay_list: super::OwnEventPresenceFfi::NoAnswer,
+            inbox_read: Some(super::InboxReadFfi::Refused),
         };
         assert_debug_redacted!(row, "OwnRelayPresenceFfi", NEEDLES);
     }

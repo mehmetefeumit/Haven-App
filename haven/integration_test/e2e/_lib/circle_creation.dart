@@ -165,10 +165,10 @@ Future<CircleWithMembersFfi> joinDeliveredWelcome({
   for (final wrap in wraps) {
     final InvitationFfi? invitation;
     try {
-      invitation = await invitee.processGiftWrappedInvitation(
+      invitation = (await invitee.processGiftWrappedInvitation(
         identitySecretBytes: inviteeSecretBytes,
         giftWrapEventJson: wrap,
-      );
+      )).invitation;
     } on Object catch (_) {
       continue;
     }

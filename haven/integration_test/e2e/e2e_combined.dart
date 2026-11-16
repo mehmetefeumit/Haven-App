@@ -1543,10 +1543,10 @@ void main() {
       final InvitationFfi? pendingInvitation;
       try {
         pendingInvitation =
-            await fe2Dave.user.circleManager.processGiftWrappedInvitation(
+            (await fe2Dave.user.circleManager.processGiftWrappedInvitation(
           identitySecretBytes: daveSecret,
           giftWrapEventJson: giftWrapJson,
-        );
+        )).invitation;
       } finally {
         for (var i = 0; i < daveSecret.length; i++) {
           daveSecret[i] = 0;

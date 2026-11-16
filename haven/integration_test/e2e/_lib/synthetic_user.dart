@@ -414,10 +414,10 @@ class SyntheticUser {
     final secret = await user.getSecretBytes();
     InvitationFfi? invitation;
     try {
-      invitation = await user.circleManager.processGiftWrappedInvitation(
+      invitation = (await user.circleManager.processGiftWrappedInvitation(
         identitySecretBytes: secret,
         giftWrapEventJson: giftWrapJson,
-      );
+      )).invitation;
     } on Object catch (e) {
       debugPrint(
         '[SyntheticUser:$role] gift-wrap ${_eventHandle(giftWrap.id)} '

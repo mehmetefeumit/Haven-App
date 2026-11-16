@@ -647,9 +647,10 @@ class RelayRejection {
 
 /// Per-relay result of a gift-wrap fetch.
 ///
-/// Distinguishes a relay that answered ([responded] is `true`, even with
-/// zero [events]) from one that could not be reached ([responded] is
-/// `false`). The WebSocket handshake is the "answered" signal.
+/// [responded] is `true` only for a relay that served the read in full (it
+/// ended it with `EOSE`), even with zero [events]; a relay that could not be
+/// reached, did not finish, or refused the read until this device
+/// authenticates is `false`.
 @immutable
 class RelayGiftWrapFetch {
   /// Creates a [RelayGiftWrapFetch].
@@ -662,7 +663,7 @@ class RelayGiftWrapFetch {
   /// The relay URL that was queried.
   final String relayUrl;
 
-  /// Whether the relay answered (completed the WebSocket handshake).
+  /// Whether the relay served the read in full (ended it with `EOSE`).
   final bool responded;
 
   /// Gift-wrap event JSON strings fetched from this relay.
@@ -736,14 +737,14 @@ abstract class RelayService {
   });
 
   /// Fetches gift wraps from each relay independently, reporting which
-  /// relays answered.
+  /// relays served the read.
   ///
   /// Unlike [fetchGiftWraps] (one merged list with no per-relay
   /// attribution), this queries each relay on its own and returns a
-  /// per-relay outcome, so callers can show an accurate answered/unanswered
-  /// tally. A relay that answers with zero events is reported with
+  /// per-relay outcome, so callers can show an accurate served/unserved
+  /// tally. A relay that served the read with zero events is reported with
   /// [RelayGiftWrapFetch.responded] `== true` and an empty event list —
-  /// distinct from an unreachable relay (`responded == false`).
+  /// distinct from one that did not serve it (`responded == false`).
   ///
   /// Throws [RelayServiceException] only if the call fails entirely (e.g.
   /// URL validation). Per-relay failures are reported as `responded ==

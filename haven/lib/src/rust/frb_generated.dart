@@ -66,7 +66,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => -549989935;
+  int get rustContentHash => -395515961;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -300,7 +300,8 @@ abstract class RustLibApi extends BaseApi {
     required String selfPubkeyHex,
   });
 
-  Future<InvitationFfi?> crateApiCircleManagerFfiProcessGiftWrappedInvitation({
+  Future<GiftWrapIntakeFfi>
+  crateApiCircleManagerFfiProcessGiftWrappedInvitation({
     required CircleManagerFfi that,
     required List<int> identitySecretBytes,
     required String giftWrapEventJson,
@@ -893,6 +894,8 @@ abstract class RustLibApi extends BaseApi {
   String crateApiFoldForSearch({required String query});
 
   Future<ForceReleaseOutcomeFfi> crateApiForceReleaseLiveSession();
+
+  PlatformInt64 crateApiInboxGiftWrapLookbackSecs();
 
   Future<void> crateApiInitApp();
 
@@ -2718,7 +2721,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<InvitationFfi?> crateApiCircleManagerFfiProcessGiftWrappedInvitation({
+  Future<GiftWrapIntakeFfi>
+  crateApiCircleManagerFfiProcessGiftWrappedInvitation({
     required CircleManagerFfi that,
     required List<int> identitySecretBytes,
     required String giftWrapEventJson,
@@ -2741,7 +2745,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
         },
         codec: SseCodec(
-          decodeSuccessData: sse_decode_opt_box_autoadd_invitation_ffi,
+          decodeSuccessData: sse_decode_gift_wrap_intake_ffi,
           decodeErrorData: sse_decode_String,
         ),
         constMeta:
@@ -7461,6 +7465,35 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  PlatformInt64 crateApiInboxGiftWrapLookbackSecs() {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          return pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 170,
+          )!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_i_64,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiInboxGiftWrapLookbackSecsConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiInboxGiftWrapLookbackSecsConstMeta =>
+      const TaskConstMeta(
+        debugName: "inbox_gift_wrap_lookback_secs",
+        argNames: [],
+      );
+
+  @override
   Future<void> crateApiInitApp() {
     return handler.executeNormal(
       NormalTask(
@@ -7469,7 +7502,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 170,
+            funcId: 171,
             port: port_,
           );
         },
@@ -7496,7 +7529,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 171,
+            funcId: 172,
             port: port_,
           );
         },
@@ -7524,7 +7557,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 172,
+            funcId: 173,
             port: port_,
           );
         },
@@ -7556,7 +7589,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           return pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 173,
+            funcId: 174,
           )!;
         },
         codec: SseCodec(
@@ -7587,7 +7620,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 174,
+            funcId: 175,
             port: port_,
           );
         },
@@ -7622,7 +7655,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 175,
+            funcId: 176,
             port: port_,
           );
         },
@@ -7653,7 +7686,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           return pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 176,
+            funcId: 177,
           )!;
         },
         codec: SseCodec(
@@ -7681,7 +7714,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           return pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 177,
+            funcId: 178,
           )!;
         },
         codec: SseCodec(
@@ -7713,7 +7746,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           return pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 178,
+            funcId: 179,
           )!;
         },
         codec: SseCodec(
@@ -7743,7 +7776,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           return pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 179,
+            funcId: 180,
           )!;
         },
         codec: SseCodec(
@@ -7773,7 +7806,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           return pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 180,
+            funcId: 181,
           )!;
         },
         codec: SseCodec(
@@ -7803,7 +7836,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           return pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 181,
+            funcId: 182,
           )!;
         },
         codec: SseCodec(
@@ -7833,7 +7866,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           return pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 182,
+            funcId: 183,
           )!;
         },
         codec: SseCodec(
@@ -7863,7 +7896,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           return pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 183,
+            funcId: 184,
           )!;
         },
         codec: SseCodec(
@@ -7893,7 +7926,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           return pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 184,
+            funcId: 185,
           )!;
         },
         codec: SseCodec(
@@ -7923,7 +7956,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           return pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 185,
+            funcId: 186,
           )!;
         },
         codec: SseCodec(
@@ -7953,7 +7986,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           return pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 186,
+            funcId: 187,
           )!;
         },
         codec: SseCodec(
@@ -7989,7 +8022,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 187,
+            funcId: 188,
             port: port_,
           );
         },
@@ -8029,7 +8062,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 188,
+            funcId: 189,
             port: port_,
           );
         },
@@ -8059,7 +8092,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 189,
+            funcId: 190,
             port: port_,
           );
         },
@@ -8105,7 +8138,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 190,
+            funcId: 191,
             port: port_,
           );
         },
@@ -8171,7 +8204,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 191,
+            funcId: 192,
             port: port_,
           );
         },
@@ -8210,7 +8243,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 192,
+            funcId: 193,
             port: port_,
           );
         },
@@ -8237,7 +8270,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 193,
+            funcId: 194,
             port: port_,
           );
         },
@@ -8268,7 +8301,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 194,
+            funcId: 195,
             port: port_,
           );
         },
@@ -8781,9 +8814,23 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  GiftWrapIntakeFailureFfi dco_decode_box_autoadd_gift_wrap_intake_failure_ffi(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_gift_wrap_intake_failure_ffi(raw);
+  }
+
+  @protected
   PlatformInt64 dco_decode_box_autoadd_i_64(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_i_64(raw);
+  }
+
+  @protected
+  InboxReadFfi dco_decode_box_autoadd_inbox_read_ffi(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_inbox_read_ffi(raw);
   }
 
   @protected
@@ -9169,6 +9216,26 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  GiftWrapIntakeFailureFfi dco_decode_gift_wrap_intake_failure_ffi(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return GiftWrapIntakeFailureFfi.values[raw as int];
+  }
+
+  @protected
+  GiftWrapIntakeFfi dco_decode_gift_wrap_intake_ffi(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return GiftWrapIntakeFfi(
+      invitation: dco_decode_opt_box_autoadd_invitation_ffi(arr[0]),
+      failure: dco_decode_opt_box_autoadd_gift_wrap_intake_failure_ffi(arr[1]),
+    );
+  }
+
+  @protected
   int dco_decode_i_32(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as int;
@@ -9178,6 +9245,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   PlatformInt64 dco_decode_i_64(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dcoDecodeI64(raw);
+  }
+
+  @protected
+  InboxReadFfi dco_decode_inbox_read_ffi(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return InboxReadFfi.values[raw as int];
   }
 
   @protected
@@ -9635,9 +9708,24 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  GiftWrapIntakeFailureFfi?
+  dco_decode_opt_box_autoadd_gift_wrap_intake_failure_ffi(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null
+        ? null
+        : dco_decode_box_autoadd_gift_wrap_intake_failure_ffi(raw);
+  }
+
+  @protected
   PlatformInt64? dco_decode_opt_box_autoadd_i_64(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_i_64(raw);
+  }
+
+  @protected
+  InboxReadFfi? dco_decode_opt_box_autoadd_inbox_read_ffi(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_inbox_read_ffi(raw);
   }
 
   @protected
@@ -9756,8 +9844,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   OwnRelayPresenceFfi dco_decode_own_relay_presence_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 7)
-      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
+    if (arr.length != 8)
+      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
     return OwnRelayPresenceFfi(
       relayUrl: dco_decode_String(arr[0]),
       own: dco_decode_bool(arr[1]),
@@ -9766,6 +9854,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       keyPackage: dco_decode_own_event_presence_ffi(arr[4]),
       relayList: dco_decode_own_event_presence_ffi(arr[5]),
       inboxRelayList: dco_decode_own_event_presence_ffi(arr[6]),
+      inboxRead: dco_decode_opt_box_autoadd_inbox_read_ffi(arr[7]),
     );
   }
 
@@ -9995,7 +10084,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
     return RelayGiftWrapFetchFfi(
       relayUrl: dco_decode_String(arr[0]),
-      responded: dco_decode_bool(arr[1]),
+      read: dco_decode_inbox_read_ffi(arr[1]),
       events: dco_decode_list_String(arr[2]),
     );
   }
@@ -10782,9 +10871,25 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  GiftWrapIntakeFailureFfi sse_decode_box_autoadd_gift_wrap_intake_failure_ffi(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_gift_wrap_intake_failure_ffi(deserializer));
+  }
+
+  @protected
   PlatformInt64 sse_decode_box_autoadd_i_64(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_i_64(deserializer));
+  }
+
+  @protected
+  InboxReadFfi sse_decode_box_autoadd_inbox_read_ffi(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_inbox_read_ffi(deserializer));
   }
 
   @protected
@@ -11256,6 +11361,29 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  GiftWrapIntakeFailureFfi sse_decode_gift_wrap_intake_failure_ffi(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return GiftWrapIntakeFailureFfi.values[inner];
+  }
+
+  @protected
+  GiftWrapIntakeFfi sse_decode_gift_wrap_intake_ffi(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_invitation = sse_decode_opt_box_autoadd_invitation_ffi(
+      deserializer,
+    );
+    var var_failure = sse_decode_opt_box_autoadd_gift_wrap_intake_failure_ffi(
+      deserializer,
+    );
+    return GiftWrapIntakeFfi(invitation: var_invitation, failure: var_failure);
+  }
+
+  @protected
   int sse_decode_i_32(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return deserializer.buffer.getInt32();
@@ -11265,6 +11393,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   PlatformInt64 sse_decode_i_64(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return deserializer.buffer.getPlatformInt64();
+  }
+
+  @protected
+  InboxReadFfi sse_decode_inbox_read_ffi(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return InboxReadFfi.values[inner];
   }
 
   @protected
@@ -11953,11 +12088,40 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  GiftWrapIntakeFailureFfi?
+  sse_decode_opt_box_autoadd_gift_wrap_intake_failure_ffi(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_gift_wrap_intake_failure_ffi(
+        deserializer,
+      ));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
   PlatformInt64? sse_decode_opt_box_autoadd_i_64(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
 
     if (sse_decode_bool(deserializer)) {
       return (sse_decode_box_autoadd_i_64(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  InboxReadFfi? sse_decode_opt_box_autoadd_inbox_read_ffi(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_inbox_read_ffi(deserializer));
     } else {
       return null;
     }
@@ -12167,6 +12331,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_keyPackage = sse_decode_own_event_presence_ffi(deserializer);
     var var_relayList = sse_decode_own_event_presence_ffi(deserializer);
     var var_inboxRelayList = sse_decode_own_event_presence_ffi(deserializer);
+    var var_inboxRead = sse_decode_opt_box_autoadd_inbox_read_ffi(deserializer);
     return OwnRelayPresenceFfi(
       relayUrl: var_relayUrl,
       own: var_own,
@@ -12175,6 +12340,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       keyPackage: var_keyPackage,
       relayList: var_relayList,
       inboxRelayList: var_inboxRelayList,
+      inboxRead: var_inboxRead,
     );
   }
 
@@ -12434,11 +12600,11 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_relayUrl = sse_decode_String(deserializer);
-    var var_responded = sse_decode_bool(deserializer);
+    var var_read = sse_decode_inbox_read_ffi(deserializer);
     var var_events = sse_decode_list_String(deserializer);
     return RelayGiftWrapFetchFfi(
       relayUrl: var_relayUrl,
-      responded: var_responded,
+      read: var_read,
       events: var_events,
     );
   }
@@ -13326,12 +13492,30 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_box_autoadd_gift_wrap_intake_failure_ffi(
+    GiftWrapIntakeFailureFfi self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_gift_wrap_intake_failure_ffi(self, serializer);
+  }
+
+  @protected
   void sse_encode_box_autoadd_i_64(
     PlatformInt64 self,
     SseSerializer serializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_64(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_inbox_read_ffi(
+    InboxReadFfi self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_inbox_read_ffi(self, serializer);
   }
 
   @protected
@@ -13737,6 +13921,28 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_gift_wrap_intake_failure_ffi(
+    GiftWrapIntakeFailureFfi self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_gift_wrap_intake_ffi(
+    GiftWrapIntakeFfi self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_opt_box_autoadd_invitation_ffi(self.invitation, serializer);
+    sse_encode_opt_box_autoadd_gift_wrap_intake_failure_ffi(
+      self.failure,
+      serializer,
+    );
+  }
+
+  @protected
   void sse_encode_i_32(int self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     serializer.buffer.putInt32(self);
@@ -13746,6 +13952,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   void sse_encode_i_64(PlatformInt64 self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     serializer.buffer.putPlatformInt64(self);
+  }
+
+  @protected
+  void sse_encode_inbox_read_ffi(InboxReadFfi self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
   }
 
   @protected
@@ -14363,6 +14575,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_opt_box_autoadd_gift_wrap_intake_failure_ffi(
+    GiftWrapIntakeFailureFfi? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_gift_wrap_intake_failure_ffi(self, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_opt_box_autoadd_i_64(
     PlatformInt64? self,
     SseSerializer serializer,
@@ -14372,6 +14597,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self != null, serializer);
     if (self != null) {
       sse_encode_box_autoadd_i_64(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_inbox_read_ffi(
+    InboxReadFfi? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_inbox_read_ffi(self, serializer);
     }
   }
 
@@ -14579,6 +14817,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_own_event_presence_ffi(self.keyPackage, serializer);
     sse_encode_own_event_presence_ffi(self.relayList, serializer);
     sse_encode_own_event_presence_ffi(self.inboxRelayList, serializer);
+    sse_encode_opt_box_autoadd_inbox_read_ffi(self.inboxRead, serializer);
   }
 
   @protected
@@ -14796,7 +15035,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.relayUrl, serializer);
-    sse_encode_bool(self.responded, serializer);
+    sse_encode_inbox_read_ffi(self.read, serializer);
     sse_encode_list_String(self.events, serializer);
   }
 
@@ -15777,15 +16016,16 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   ///
   /// # Returns
   ///
-  /// * `Ok(Some(invitation))` — a new pending invitation the caller must
-  ///   accept or decline.
-  /// * `Ok(None)` — the gift wrap has already been processed on a prior
-  ///   poll cycle and should be silently skipped. This is the expected
-  ///   outcome for the inbox lookback (96 h, wider than NIP-59's 2-day
-  ///   backdating) repeatedly surfacing the same wrapper events.
-  /// * `Err(msg)` — a real failure (malformed event, MDK error, etc.).
-  ///   The message is already sanitized via `redact_hex_sequences`.
-  Future<InvitationFfi?> processGiftWrappedInvitation({
+  /// A [`GiftWrapIntakeFfi`]: the new pending invitation the caller must
+  /// accept or decline, or a typed failure, or — both `None` — a wrap
+  /// already processed on a prior poll, to be skipped silently (the inbox
+  /// lookback, wider than NIP-59's 2-day backdating, surfaces the same
+  /// wrappers again and again).
+  ///
+  /// # Errors
+  ///
+  /// Only for bad secret bytes, or a failure no typed outcome names.
+  Future<GiftWrapIntakeFfi> processGiftWrappedInvitation({
     required List<int> identitySecretBytes,
     required String giftWrapEventJson,
   }) =>
@@ -16482,10 +16722,12 @@ class LiveSyncFfiImpl extends RustOpaque implements LiveSyncFfi {
   /// Streams decrypted live events to Dart for the lifetime of the session.
   ///
   /// Returns `Err` immediately if no session is active (a cold-start race, not
-  /// a hung stream). The loop ends when the Dart side closes the sink
-  /// (`sink.add` returns `Err`) OR the bus closes on `stop_session` (the last
-  /// `Arc<LiveSyncCore>` drops → `RecvError::Closed`); a lag is skipped, never
-  /// fatal (the cursor + catch-up replay anything dropped).
+  /// a hung stream). The first stream of a session starts at its construction,
+  /// so nothing the session's first REQs replayed before Dart attached is
+  /// lost. The loop ends when the Dart side closes the sink (`sink.add`
+  /// returns `Err`) OR the bus closes on `stop_session` (the last
+  /// `Arc<LiveSyncCore>` drops); a lag is never fatal
+  /// ([`haven_core::relay::live_sync::LiveEvents::recv`]).
   ///
   /// # Errors
   ///
@@ -17119,16 +17361,15 @@ class RelayManagerFfiImpl extends RustOpaque implements RelayManagerFfi {
     since: since,
   );
 
-  /// Fetches gift-wrapped events (kind 1059) per relay, reporting which
-  /// relays answered.
+  /// Fetches gift-wrapped events (kind 1059) per relay, reporting how each
+  /// relay answered.
   ///
   /// Like [`fetch_gift_wraps`](Self::fetch_gift_wraps), but instead of one
   /// merged list it queries each relay independently and returns a per-relay
-  /// outcome: whether the relay answered (`responded`) and the events it
-  /// returned. This lets the caller show an accurate "N of M inboxes
-  /// answered" tally. A relay that answers with zero events is
-  /// `responded == true` with an empty `events` list — distinct from an
-  /// unreachable relay (`responded == false`).
+  /// outcome: how the relay answered the read ([`InboxReadFfi`]) and the
+  /// events it returned. Only `Served` says the relay sent everything it
+  /// holds; a relay that refuses the read until this device authenticates is
+  /// `Refused`, never mistaken for an empty inbox.
   ///
   /// # Arguments
   ///

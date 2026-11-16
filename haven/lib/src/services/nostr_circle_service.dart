@@ -994,13 +994,20 @@ class NostrCircleService implements CircleService {
     final manager = await _ensureInitialized();
 
     try {
-      final ffiInvitation = await manager.processGiftWrappedInvitation(
+      final intake = await manager.processGiftWrappedInvitation(
         identitySecretBytes: identitySecretBytes,
         giftWrapEventJson: giftWrapEventJson,
       );
-      // `null` signals the Rust side detected a duplicate gift wrap (the
-      // wrapper event ID is already in `processed_gift_wraps`). Propagate
-      // as `null` so the poller can silently skip it.
+      if (intake.failure != null) {
+        throw const CircleServiceException(
+          'Failed to process gift-wrapped invitation',
+        );
+      }
+      // Neither an invitation nor a failure: the Rust side detected a
+      // duplicate gift wrap (the wrapper event ID is already in
+      // `processed_gift_wraps`). Propagate as `null` so the poller can
+      // silently skip it.
+      final ffiInvitation = intake.invitation;
       if (ffiInvitation == null) {
         return null;
       }

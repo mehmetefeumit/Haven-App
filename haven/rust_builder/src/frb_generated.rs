@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -549989935;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -395515961;
 
 // Section: executor
 
@@ -9739,6 +9739,35 @@ fn wire__crate__api__force_release_live_session_impl(
         },
     )
 }
+fn wire__crate__api__inbox_gift_wrap_lookback_secs_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "inbox_gift_wrap_lookback_secs",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let output_ok = Result::<_, ()>::Ok(crate::api::inbox_gift_wrap_lookback_secs())?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
 fn wire__crate__api__init_app_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -11340,6 +11369,31 @@ impl SseDecode for crate::api::ForceReleaseOutcomeFfi {
     }
 }
 
+impl SseDecode for crate::api::GiftWrapIntakeFailureFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::GiftWrapIntakeFailureFfi::Unusable,
+            1 => crate::api::GiftWrapIntakeFailureFfi::StoreFailed,
+            _ => unreachable!("Invalid variant for GiftWrapIntakeFailureFfi: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::GiftWrapIntakeFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_invitation = <Option<crate::api::InvitationFfi>>::sse_decode(deserializer);
+        let mut var_failure =
+            <Option<crate::api::GiftWrapIntakeFailureFfi>>::sse_decode(deserializer);
+        return crate::api::GiftWrapIntakeFfi {
+            invitation: var_invitation,
+            failure: var_failure,
+        };
+    }
+}
+
 impl SseDecode for i32 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -11351,6 +11405,20 @@ impl SseDecode for i64 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         deserializer.cursor.read_i64::<NativeEndian>().unwrap()
+    }
+}
+
+impl SseDecode for crate::api::InboxReadFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::InboxReadFfi::Served,
+            1 => crate::api::InboxReadFfi::Refused,
+            2 => crate::api::InboxReadFfi::Incomplete,
+            3 => crate::api::InboxReadFfi::Unreached,
+            _ => unreachable!("Invalid variant for InboxReadFfi: {}", inner),
+        };
     }
 }
 
@@ -12060,11 +12128,35 @@ impl SseDecode for Option<crate::api::FfiSyncStatusReason> {
     }
 }
 
+impl SseDecode for Option<crate::api::GiftWrapIntakeFailureFfi> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::GiftWrapIntakeFailureFfi>::sse_decode(
+                deserializer,
+            ));
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for Option<i64> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         if (<bool>::sse_decode(deserializer)) {
             return Some(<i64>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::InboxReadFfi> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::InboxReadFfi>::sse_decode(deserializer));
         } else {
             return None;
         }
@@ -12263,6 +12355,7 @@ impl SseDecode for crate::api::OwnRelayPresenceFfi {
         let mut var_keyPackage = <crate::api::OwnEventPresenceFfi>::sse_decode(deserializer);
         let mut var_relayList = <crate::api::OwnEventPresenceFfi>::sse_decode(deserializer);
         let mut var_inboxRelayList = <crate::api::OwnEventPresenceFfi>::sse_decode(deserializer);
+        let mut var_inboxRead = <Option<crate::api::InboxReadFfi>>::sse_decode(deserializer);
         return crate::api::OwnRelayPresenceFfi {
             relay_url: var_relayUrl,
             own: var_own,
@@ -12271,6 +12364,7 @@ impl SseDecode for crate::api::OwnRelayPresenceFfi {
             key_package: var_keyPackage,
             relay_list: var_relayList,
             inbox_relay_list: var_inboxRelayList,
+            inbox_read: var_inboxRead,
         };
     }
 }
@@ -12591,11 +12685,11 @@ impl SseDecode for crate::api::RelayGiftWrapFetchFfi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_relayUrl = <String>::sse_decode(deserializer);
-        let mut var_responded = <bool>::sse_decode(deserializer);
+        let mut var_read = <crate::api::InboxReadFfi>::sse_decode(deserializer);
         let mut var_events = <Vec<String>>::sse_decode(deserializer);
         return crate::api::RelayGiftWrapFetchFfi {
             relay_url: var_relayUrl,
-            responded: var_responded,
+            read: var_read,
             events: var_events,
         };
     }
@@ -13667,23 +13761,23 @@ fn pde_ffi_dispatcher_primary_impl(
             wire__crate__api__convergence_sweep_ffi_default_impl(port, ptr, rust_vec_len, data_len)
         }
         169 => wire__crate__api__force_release_live_session_impl(port, ptr, rust_vec_len, data_len),
-        170 => wire__crate__api__init_app_impl(port, ptr, rust_vec_len, data_len),
-        171 => wire__crate__api__init_keyring_store_impl(port, ptr, rust_vec_len, data_len),
-        172 => wire__crate__api__is_session_live_impl(port, ptr, rust_vec_len, data_len),
-        174 => {
+        171 => wire__crate__api__init_app_impl(port, ptr, rust_vec_len, data_len),
+        172 => wire__crate__api__init_keyring_store_impl(port, ptr, rust_vec_len, data_len),
+        173 => wire__crate__api__is_session_live_impl(port, ptr, rust_vec_len, data_len),
+        175 => {
             wire__crate__api__maintain_subscription_health_impl(port, ptr, rust_vec_len, data_len)
         }
-        175 => wire__crate__api__parse_engine_location_impl(port, ptr, rust_vec_len, data_len),
-        187 => wire__crate__api__tile_cache_evict_impl(port, ptr, rust_vec_len, data_len),
-        188 => wire__crate__api__tile_cache_get_impl(port, ptr, rust_vec_len, data_len),
-        189 => wire__crate__api__tile_cache_init_impl(port, ptr, rust_vec_len, data_len),
-        190 => wire__crate__api__tile_cache_put_impl(port, ptr, rust_vec_len, data_len),
-        191 => wire__crate__api__tile_cache_put_metadata_impl(port, ptr, rust_vec_len, data_len),
-        192 => wire__crate__api__tile_cache_wipe_impl(port, ptr, rust_vec_len, data_len),
-        193 => {
+        176 => wire__crate__api__parse_engine_location_impl(port, ptr, rust_vec_len, data_len),
+        188 => wire__crate__api__tile_cache_evict_impl(port, ptr, rust_vec_len, data_len),
+        189 => wire__crate__api__tile_cache_get_impl(port, ptr, rust_vec_len, data_len),
+        190 => wire__crate__api__tile_cache_init_impl(port, ptr, rust_vec_len, data_len),
+        191 => wire__crate__api__tile_cache_put_impl(port, ptr, rust_vec_len, data_len),
+        192 => wire__crate__api__tile_cache_put_metadata_impl(port, ptr, rust_vec_len, data_len),
+        193 => wire__crate__api__tile_cache_wipe_impl(port, ptr, rust_vec_len, data_len),
+        194 => {
             wire__crate__api__use_in_memory_keyring_for_test_impl(port, ptr, rust_vec_len, data_len)
         }
-        194 => wire__crate__api__wipe_all_mls_state_impl(port, ptr, rust_vec_len, data_len),
+        195 => wire__crate__api__wipe_all_mls_state_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -13756,20 +13850,21 @@ fn pde_ffi_dispatcher_sync_impl(
         166 => wire__crate__api__default_relays_impl(ptr, rust_vec_len, data_len),
         167 => wire__crate__api__discovery_relays_impl(ptr, rust_vec_len, data_len),
         168 => wire__crate__api__fold_for_search_impl(ptr, rust_vec_len, data_len),
-        173 => wire__crate__api__log_alias_impl(ptr, rust_vec_len, data_len),
-        176 => wire__crate__api__reset_pre_v2_storage_impl(ptr, rust_vec_len, data_len),
-        177 => wire__crate__api__rotate_log_alias_salt_impl(ptr, rust_vec_len, data_len),
-        178 => {
+        170 => wire__crate__api__inbox_gift_wrap_lookback_secs_impl(ptr, rust_vec_len, data_len),
+        174 => wire__crate__api__log_alias_impl(ptr, rust_vec_len, data_len),
+        177 => wire__crate__api__reset_pre_v2_storage_impl(ptr, rust_vec_len, data_len),
+        178 => wire__crate__api__rotate_log_alias_salt_impl(ptr, rust_vec_len, data_len),
+        179 => {
             wire__crate__api__sealed_location_event_json_for_test_impl(ptr, rust_vec_len, data_len)
         }
-        179 => wire__crate__api__set_blossom_server_for_test_impl(ptr, rust_vec_len, data_len),
-        180 => wire__crate__api__set_default_relays_for_test_impl(ptr, rust_vec_len, data_len),
-        181 => wire__crate__api__set_discovery_relays_for_test_impl(ptr, rust_vec_len, data_len),
-        182 => wire__crate__api__set_location_relays_for_test_impl(ptr, rust_vec_len, data_len),
-        183 => wire__crate__api__set_profile_relays_for_test_impl(ptr, rust_vec_len, data_len),
-        184 => wire__crate__api__storage_reset_notice_owed_impl(ptr, rust_vec_len, data_len),
-        185 => wire__crate__api__storage_reset_prefs_cleared_impl(ptr, rust_vec_len, data_len),
-        186 => wire__crate__api__storage_reset_prefs_owed_impl(ptr, rust_vec_len, data_len),
+        180 => wire__crate__api__set_blossom_server_for_test_impl(ptr, rust_vec_len, data_len),
+        181 => wire__crate__api__set_default_relays_for_test_impl(ptr, rust_vec_len, data_len),
+        182 => wire__crate__api__set_discovery_relays_for_test_impl(ptr, rust_vec_len, data_len),
+        183 => wire__crate__api__set_location_relays_for_test_impl(ptr, rust_vec_len, data_len),
+        184 => wire__crate__api__set_profile_relays_for_test_impl(ptr, rust_vec_len, data_len),
+        185 => wire__crate__api__storage_reset_notice_owed_impl(ptr, rust_vec_len, data_len),
+        186 => wire__crate__api__storage_reset_prefs_cleared_impl(ptr, rust_vec_len, data_len),
+        187 => wire__crate__api__storage_reset_prefs_owed_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -14502,6 +14597,63 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::ForceReleaseOutcomeFfi>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::GiftWrapIntakeFailureFfi {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Unusable => 0.into_dart(),
+            Self::StoreFailed => 1.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::GiftWrapIntakeFailureFfi
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::GiftWrapIntakeFailureFfi>
+    for crate::api::GiftWrapIntakeFailureFfi
+{
+    fn into_into_dart(self) -> crate::api::GiftWrapIntakeFailureFfi {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::GiftWrapIntakeFfi {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.invitation.into_into_dart().into_dart(),
+            self.failure.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::GiftWrapIntakeFfi {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::GiftWrapIntakeFfi>
+    for crate::api::GiftWrapIntakeFfi
+{
+    fn into_into_dart(self) -> crate::api::GiftWrapIntakeFfi {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::InboxReadFfi {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Served => 0.into_dart(),
+            Self::Refused => 1.into_dart(),
+            Self::Incomplete => 2.into_dart(),
+            Self::Unreached => 3.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::InboxReadFfi {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::InboxReadFfi> for crate::api::InboxReadFfi {
+    fn into_into_dart(self) -> crate::api::InboxReadFfi {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::IngestOutcomeFfi {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -14966,6 +15118,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::OwnRelayPresenceFfi {
             self.key_package.into_into_dart().into_dart(),
             self.relay_list.into_into_dart().into_dart(),
             self.inbox_relay_list.into_into_dart().into_dart(),
+            self.inbox_read.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -15415,7 +15568,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::RelayGiftWrapFetchFfi {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
             self.relay_url.into_into_dart().into_dart(),
-            self.responded.into_into_dart().into_dart(),
+            self.read.into_into_dart().into_dart(),
             self.events.into_into_dart().into_dart(),
         ]
         .into_dart()
@@ -16467,6 +16620,30 @@ impl SseEncode for crate::api::ForceReleaseOutcomeFfi {
     }
 }
 
+impl SseEncode for crate::api::GiftWrapIntakeFailureFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::GiftWrapIntakeFailureFfi::Unusable => 0,
+                crate::api::GiftWrapIntakeFailureFfi::StoreFailed => 1,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::GiftWrapIntakeFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <Option<crate::api::InvitationFfi>>::sse_encode(self.invitation, serializer);
+        <Option<crate::api::GiftWrapIntakeFailureFfi>>::sse_encode(self.failure, serializer);
+    }
+}
+
 impl SseEncode for i32 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -16478,6 +16655,24 @@ impl SseEncode for i64 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         serializer.cursor.write_i64::<NativeEndian>(self).unwrap();
+    }
+}
+
+impl SseEncode for crate::api::InboxReadFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::InboxReadFfi::Served => 0,
+                crate::api::InboxReadFfi::Refused => 1,
+                crate::api::InboxReadFfi::Incomplete => 2,
+                crate::api::InboxReadFfi::Unreached => 3,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
     }
 }
 
@@ -17090,12 +17285,32 @@ impl SseEncode for Option<crate::api::FfiSyncStatusReason> {
     }
 }
 
+impl SseEncode for Option<crate::api::GiftWrapIntakeFailureFfi> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::GiftWrapIntakeFailureFfi>::sse_encode(value, serializer);
+        }
+    }
+}
+
 impl SseEncode for Option<i64> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <i64>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::InboxReadFfi> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::InboxReadFfi>::sse_encode(value, serializer);
         }
     }
 }
@@ -17286,6 +17501,7 @@ impl SseEncode for crate::api::OwnRelayPresenceFfi {
         <crate::api::OwnEventPresenceFfi>::sse_encode(self.key_package, serializer);
         <crate::api::OwnEventPresenceFfi>::sse_encode(self.relay_list, serializer);
         <crate::api::OwnEventPresenceFfi>::sse_encode(self.inbox_relay_list, serializer);
+        <Option<crate::api::InboxReadFfi>>::sse_encode(self.inbox_read, serializer);
     }
 }
 
@@ -17562,7 +17778,7 @@ impl SseEncode for crate::api::RelayGiftWrapFetchFfi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <String>::sse_encode(self.relay_url, serializer);
-        <bool>::sse_encode(self.responded, serializer);
+        <crate::api::InboxReadFfi>::sse_encode(self.read, serializer);
         <Vec<String>>::sse_encode(self.events, serializer);
     }
 }
