@@ -381,7 +381,7 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get relaySettingsInboxInfoTechnical =>
-      'Détail technique, pour les curieux : votre liste de relais de réception est un événement Nostr de kind 10050, et les invitations arrivent sous forme d\'événements emballés (« gift wrap ») de kind 1059.';
+      'Détail technique, pour les esprits curieux : votre liste de relais de réception est un événement Nostr de kind 10050, et les invitations arrivent sous forme d\'événements emballés (« gift wrap ») de kind 1059.';
 
   @override
   String get relaySettingsKeyPackageInfoWhat =>
@@ -401,7 +401,7 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get relaySettingsKeyPackageInfoTechnical =>
-      'Détail technique, pour les curieux : le KeyPackage est un événement Marmot de kind 30443, et la liste de relais est un événement NIP-65 de kind 10002.';
+      'Détail technique, pour les esprits curieux : le KeyPackage est un événement Marmot de kind 30443, et la liste de relais est un événement NIP-65 de kind 10002.';
 
   @override
   String get relaySettingsProfileInfoWhat =>
@@ -421,7 +421,7 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get relaySettingsProfileInfoTechnical =>
-      'Détail technique, pour les curieux : votre profil est un événement Nostr de kind 0, et la photo est stockée sur un serveur Blossom.';
+      'Détail technique, pour les esprits curieux : votre profil est un événement Nostr de kind 0, et la photo est stockée sur un serveur Blossom.';
 
   @override
   String get relaySettingsLookupInfoWhat =>
@@ -441,7 +441,7 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get relaySettingsLookupInfoTechnical =>
-      'Détail technique, pour les curieux : Haven copie vos événements de kind 10050 et de kind 10002 sur ces relais ; le kind 30443 n\'est envoyé qu\'à vos relais KeyPackage.';
+      'Détail technique, pour les esprits curieux : Haven copie vos événements de kind 10050 et de kind 10002 sur ces relais ; le kind 30443 n\'est envoyé qu\'à vos relais KeyPackage.';
 
   @override
   String get relaySettingsLegendTitle => 'Signification des symboles';

@@ -435,7 +435,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get relaySettingsLegendChecking =>
-      '確認中、または未確認: Haven がリレーに何があるかを問い合わせているか、まだ問い合わせていません。';
+      '確認中、または未確認: Haven がリレーに何があるかを問い合わせているところか、まだ問い合わせていないかのどちらかです。';
 
   @override
   String get relaySettingsLegendNotOnRelay =>
@@ -443,7 +443,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get relaySettingsLegendNoAnswer =>
-      '確認できませんでした: リレーが応答しませんでした。オフラインになっているか、リレーが停止しているのかもしれません。Haven は次の確認のときに、もう一度問い合わせます。';
+      '確認できませんでした: リレーが応答しませんでした。あなたの端末がオフラインになっているか、リレーが停止しているのかもしれません。Haven は次の確認のときに、もう一度問い合わせます。';
 
   @override
   String get relaySettingsLegendHeld =>

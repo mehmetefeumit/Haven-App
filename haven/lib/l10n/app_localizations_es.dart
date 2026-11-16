@@ -431,7 +431,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get relaySettingsLookupInfoKeeps =>
-      'Para que alguien que solo conoce tu cuenta pueda invitarte igualmente, Haven copia aquí tu lista de bandeja de entrada y tu lista de relés, sin cambios. Si esas listas nombran un relé privado, ese nombre también es visible aquí. En esta función, Haven solo copia aquí esas dos listas. Algunos relés de búsqueda son también los relés de bandeja de entrada y de KeyPackage predeterminados de Haven; mientras estén en tus listas, también guardan lo que describen esas secciones.';
+      'Para que alguien que solo conoce tu cuenta pueda invitarte igualmente, Haven copia aquí tu lista de bandeja de entrada y tu lista de relés, sin cambios. Si esas listas nombran un relé privado, ese nombre también es visible aquí. En esta función, Haven solo copia aquí esas dos listas. Algunos relés de búsqueda son también relés de bandeja de entrada y de KeyPackage predeterminados de Haven; mientras estén en tus listas, también guardan lo que describen esas secciones.';
 
   @override
   String get relaySettingsLookupInfoMissing =>
