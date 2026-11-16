@@ -1,16 +1,30 @@
 #!/usr/bin/env bash
 #
-# Drives Haven's relay-CUSTOMIZATION Flutter integration tests on the
+# Drives Haven's relay-MANAGEMENT Flutter integration tests on the
 # action-booted emulator-5554, ONE target at a time, against TWO
-# hermetic strfry relays (the relay-customization CI lane).
+# hermetic strfry relays and the fault relays (the relay-management CI lane).
 #
-# This is the two-relay sibling of run-integration-tests.sh. The four
+# This is the two-relay sibling of run-integration-tests.sh. The five
 # targets it drives:
 #
 #   integration_test/relay_customization_publish_test.dart   (service-FFI wire proofs)
 #   integration_test/relay_customization_trigger_test.dart   (provider bug-catcher)
 #   integration_test/relay_resync_convergence_test.dart      (MIP-01 relay-update convergence)
 #   integration_test/relay_two_plane_privacy_test.dart       (two-plane no-leak proof)
+#   integration_test/relay_management_status_test.dart       (every Relays-page state, end to end)
+#
+# # The fault relays
+#
+# The status target needs relays that misbehave: one that refuses (`OK
+# false`), one that never answers `OK`, one that never ends a `REQ`, one that
+# never completes the WebSocket handshake, and a port nothing listens on.
+# strfry can only accept or reject, so these are `haven-fault-relay`
+# processes (tooling/e2e/local-relay/src/fault.rs) on host loopback, beside
+# two storing ones (a green relay that counts what it is offered, and the
+# lookup relay). HAVEN_E2E_FAULT_RELAYS names them, `<role>=<mode>@<port>`,
+# comma-separated; the workflow bakes the SAME value into the status APK, so
+# the app and this runner agree on one list. Every target gets them freshly
+# started (empty stores, zero offers), like the strfry relays.
 #
 # # Why TWO relays
 #
@@ -78,17 +92,17 @@
 # other tooling/e2e/ci scripts.
 #
 # Usage:
-#   bash tooling/e2e/ci/run-relay-customization.sh \
+#   bash tooling/e2e/ci/run-relay-management.sh \
 #     <target.dart>[=<prebuilt.apk>] [<target.dart>[=<prebuilt.apk>] ...]
 #
 # Example (CI, pre-built APKs):
-#   bash tooling/e2e/ci/run-relay-customization.sh \
-#     integration_test/relay_customization_publish_test.dart=/tmp/relay-custom-apks/relay_customization_publish_test.apk \
-#     integration_test/relay_customization_trigger_test.dart=/tmp/relay-custom-apks/relay_customization_trigger_test.apk \
-#     integration_test/relay_resync_convergence_test.dart=/tmp/relay-custom-apks/relay_resync_convergence_test.apk
+#   bash tooling/e2e/ci/run-relay-management.sh \
+#     integration_test/relay_customization_publish_test.dart=/tmp/relay-mgmt-apks/relay_customization_publish_test.apk \
+#     integration_test/relay_customization_trigger_test.dart=/tmp/relay-mgmt-apks/relay_customization_trigger_test.apk \
+#     integration_test/relay_resync_convergence_test.dart=/tmp/relay-mgmt-apks/relay_resync_convergence_test.apk
 #
 # Example (local, build-on-demand):
-#   bash tooling/e2e/ci/run-relay-customization.sh \
+#   bash tooling/e2e/ci/run-relay-management.sh \
 #     integration_test/relay_customization_publish_test.dart \
 #     integration_test/relay_customization_trigger_test.dart \
 #     integration_test/relay_resync_convergence_test.dart
@@ -104,12 +118,20 @@
 #   STRFRY_IMAGE, STRFRY_READY_TIMEOUT  — see start-strfry.sh. R2 always
 #                      uses its own fixed container/port/data-dir below.
 #
+# Optional env:
+#   HAVEN_E2E_FAULT_RELAYS  the fault relays (default: the workflow's value).
+#   HAVEN_FAULT_RELAY_BIN   the built haven-fault-relay (default: the crate's
+#                      release target, which the workflow builds before boot).
+#   HAVEN_RELAY_MGMT_LOG_DIR  where this invocation's evidence lands and what
+#                      its aggregate gate walks (default: /tmp/relay-mgmt-logs).
+#
 # Side effects:
 #   - Per target, overwrites /tmp/adb-logcat.log and
 #     /tmp/flutter-drive.log (run-single-avd-scenario.sh), then copies
-#     them to /tmp/relay-custom-logs/<slug>.{logcat,drive}.log so a
+#     them to /tmp/relay-mgmt-logs/<slug>.{logcat,drive}.log so a
 #     later target can't clobber an earlier failure's evidence.
-#   - Resets BOTH strfry containers + their data dirs between targets.
+#   - Resets BOTH strfry containers + their data dirs between targets,
+#     and restarts every fault relay (logs under /tmp/haven-fault-relay-*.log).
 #   - Stops and restarts R2 mid-drive on the publish target's OD-2 cues
 #     (R2_STOP_CUE / R2_START_CUE below), wiping its data dir on the stop.
 
@@ -133,6 +155,45 @@ set -euo pipefail
 # CI_HARDENING_BACKLOG.md A8.
 export HAVEN_DRIVE_TIMEOUT="${HAVEN_DRIVE_TIMEOUT:-10m}"
 
+# The status target is the one exception, and the workflow gives it its own
+# invocation of this runner with HAVEN_DRIVE_TIMEOUT raised (and its own
+# HAVEN_RELAY_MGMT_LOG_DIR, so each invocation's gate claims exactly the
+# transcripts it drove): it waits out whole maintenance passes against relays
+# that stall, drop and blackhole by design, each wait sized from the production
+# bounds, up to its own test Timeout (`_kTestTimeout` in the Dart target). That
+# bound is the Timeout plus the install and attach a drive also spends, so the
+# test's own named deadline fires first; the self-test holds the workflow's
+# value to the Dart Timeout plus this overhead.
+readonly STATUS_TARGET='integration_test/relay_management_status_test.dart'
+readonly STATUS_DRIVE_OVERHEAD_MINUTES=3
+
+# The fault relays, `<role>=<mode>@<port>` (see the header). The default is the
+# workflow's value, so a local run starts the same set; the self-test holds the
+# workflow, this default and the Dart target's default to one string.
+readonly FAULT_RELAYS="${HAVEN_E2E_FAULT_RELAYS:-green=store@7779,refuse=refuse@7780,drop=drop@7781,stall=stall@7782,hole=blackhole@7783,closed=closed@7784,lookup=store@7785}"
+# How long the fault relays get to print their `listening` line, per restart.
+readonly FAULT_READY_TIMEOUT=30
+
+# fault_relay_specs <list> — one `<role> <mode> <port>` line per entry; rc 2
+# on any entry that is not `<role>=<mode>@<port>` with a known mode, so a typo
+# in the workflow is a red lane before any drive, never a relay quietly absent.
+fault_relay_specs() {
+  local entry
+  local -a entries=()
+  if [[ ! "$1" =~ ^[^,]+(,[^,]+)*$ ]]; then
+    echo "ERROR: HAVEN_E2E_FAULT_RELAYS has an empty entry" >&2
+    return 2
+  fi
+  IFS=',' read -r -a entries <<<"$1"
+  for entry in ${entries[@]+"${entries[@]}"}; do
+    if [[ ! "${entry}" =~ ^([a-z][a-z0-9-]*)=(store|refuse|drop|stall|blackhole|closed)@([0-9]{4,5})$ ]]; then
+      echo "ERROR: HAVEN_E2E_FAULT_RELAYS entry '${entry}' is not <role>=<mode>@<port>" >&2
+      return 2
+    fi
+    echo "${BASH_REMATCH[1]} ${BASH_REMATCH[2]} ${BASH_REMATCH[3]}"
+  done
+}
+
 # The log-privacy gate (logscan_gate_dir): one implementation for every
 # runner, sourced BEFORE the --self-test dispatch so the self-test exercises a
 # runner wired exactly like the real one.
@@ -141,7 +202,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/logscan-gate.sh"
 
 # Where this runner's gate writes its findings report (sink:line, class, rule
 # ids — never a value). Outside LOG_DIR, which the workflow uploads whole.
-readonly LOGSCAN_REPORT="/tmp/logscan-report-relay-customization.ndjson"
+readonly LOGSCAN_REPORT="/tmp/logscan-report-relay-management.ndjson"
 
 # The OD-2 proof's host half (relay_customization_publish_test.dart, FFI-OD2):
 # the HARNESS prints these cues — product code never does — and the watcher
@@ -373,6 +434,62 @@ run_self_test() {
     echo "SELF-TEST FAIL (wiring): both relay logs must be dumped from the live containers exactly once each, after the target's relay reset (line ${reset_line:-none}) and before the aggregate gate (line ${gate_line:-none}), under names logscan_gate_dir types as relay sinks and behind the slug check that refuses a target whose name the walker would match first (first dump line ${dump_line:-none})" >&2
     fail=1
   fi
+  # The fault relays: one list, parsed strictly, shared with the workflow and
+  # the status target; started fresh by every reset and stopped by PID; each
+  # one's log dumped beside the strfry dumps, typed a relay sink.
+  local repo specs fault_line wf_value dart_value want_specs
+  repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+  want_specs=$'green store 7779\nrefuse refuse 7780\ndrop drop 7781\nstall stall 7782\nhole blackhole 7783\nclosed closed 7784\nlookup store 7785'
+  specs="$(fault_relay_specs "${FAULT_RELAYS}" 2>/dev/null || true)"
+  if [[ "${specs}" != "${want_specs}" ]]; then
+    echo "SELF-TEST FAIL (fault relays): the default list parses to '${specs//$'\n'/; }'" >&2
+    fail=1
+  fi
+  for fault_line in 'green=store@7779,refuse=sometimes@7780' 'green=store' 'green=store@7779,' 'Green=store@7779' 'green=store@port'; do
+    if fault_relay_specs "${fault_line}" >/dev/null 2>&1; then
+      echo "SELF-TEST FAIL (fault relays): the malformed list '${fault_line}' parsed" >&2
+      fail=1
+    fi
+  done
+  wf_value="$(sed -n -E 's/^      HAVEN_E2E_FAULT_RELAYS: (.*)$/\1/p' "${repo}/.github/workflows/e2e-relay-management.yml")"
+  dart_value="$(tr '\n' ' ' < "${repo}/haven/${STATUS_TARGET}" | grep -oE "'HAVEN_E2E_FAULT_RELAYS', *defaultValue: *'[^']*'" | sed -E "s/.*defaultValue: *'([^']*)'/\1/" || true)"
+  if [[ -n "${HAVEN_E2E_FAULT_RELAYS:-}" || "${wf_value}" != "${FAULT_RELAYS}" || "${dart_value}" != "${FAULT_RELAYS}" ]]; then
+    echo "SELF-TEST FAIL (fault relays): the workflow's HAVEN_E2E_FAULT_RELAYS ('${wf_value}'), this runner's default and the status target's default ('${dart_value}') must be one string (and the self-test runs with the variable unset)" >&2
+    fail=1
+  fi
+  if ! grep -qxF '  stop_fault_relays' <<<"${real_run}" \
+     || [[ "$(grep -A3 -xF '  stop_fault_relays' <<<"${real_run}" | grep -cxE '  start_(r1|r2|fault_relays)')" != 3 ]] \
+     || ! grep -qF '  stop_fault_relays || true' <<<"${real_run}" \
+     || ! grep -qF 'wait "${FAULT_PIDS[@]}" 2>/dev/null || true' <<<"${real_run}" \
+     || ! grep -qxF '  if ! reset_relays; then' <<<"${real_run}"; then
+    echo "SELF-TEST FAIL (wiring): every reset must stop the fault relays and then start R1, R2 and the fault relays afresh, a target whose relays did not all start must fail, the stop must wait for each by PID, and the EXIT trap must stop them" >&2
+    fail=1
+  fi
+  local fault_dump
+  fault_dump="$(grep -n -m1 -E '^    cp "/tmp/haven-fault-relay-\$\{role\}\.log" "\$\{LOG_DIR\}/haven-fault-relay-\$\{role\}\.\$\{s\}\.log"' "${BASH_SOURCE[0]}" || true)"
+  fault_dump="${fault_dump%%:*}"
+  if [[ -z "${fault_dump}" || -z "${dump_line}" || -z "${gate_line}" ]] \
+     || (( fault_dump < dump_line || fault_dump > gate_line )) \
+     || ! logscan_is_relay_log "haven-fault-relay-refuse.integration_test_relay_management_status_test_dart.log"; then
+    echo "SELF-TEST FAIL (wiring): each fault relay's log must be dumped after the strfry dumps and before the aggregate gate, under a name logscan_gate_dir types as a relay sink (dump line ${fault_dump:-none})" >&2
+    fail=1
+  fi
+  # The workflow drives the status target alone, in a second invocation whose
+  # bound covers the target's own test Timeout plus the install and attach (so
+  # the test's named deadline fires first) and whose evidence lands in a
+  # directory of its own; the first invocation keeps the lane's 10m and never
+  # names the status target.
+  local test_minutes drive_cmd status_minutes first_inv
+  test_minutes="$(tr '\n' ' ' < "${repo}/haven/${STATUS_TARGET}" | grep -oE '_kTestTimeout = Duration\(minutes: *[0-9]+\)' | grep -oE '[0-9]+$' || true)"
+  drive_cmd="$(grep -E '^          script: bash tooling/e2e/ci/run-with-deadline\.sh ' "${repo}/.github/workflows/e2e-relay-management.yml" || true)"
+  status_minutes="$(sed -n -E "s@.* && HAVEN_DRIVE_TIMEOUT=([0-9]+)m HAVEN_RELAY_MGMT_LOG_DIR=[^ ]+ bash tooling/e2e/ci/run-relay-management\.sh ${STATUS_TARGET}=[^ ']+'\$@\1@p" <<<"${drive_cmd}")"
+  first_inv="${drive_cmd%% && *}"
+  if [[ -z "${test_minutes}" || -z "${status_minutes}" ]] \
+     || (( test_minutes + STATUS_DRIVE_OVERHEAD_MINUTES > status_minutes )) \
+     || [[ "${first_inv}" == *"${STATUS_TARGET}"* || "${first_inv}" == *HAVEN_DRIVE_TIMEOUT* ]]; then
+    echo "SELF-TEST FAIL (drive bound): the workflow must drive the status target alone after the others, with HAVEN_DRIVE_TIMEOUT (${status_minutes:-unread} min) covering its _kTestTimeout (${test_minutes:-unread} min) plus ${STATUS_DRIVE_OVERHEAD_MINUTES} min of install and attach and a log directory of its own, and only that invocation may raise the bound" >&2
+    fail=1
+  fi
   if grep -qE '(^|[;&|][[:space:]]*)[[:space:]]*(cat|head|tail|less|more)[[:space:]]+[^|]*\.log' <<<"${real_run}"; then
     echo "SELF-TEST FAIL (wiring): this runner echoes a captured log itself; only the AVD runner may, after its gate" >&2
     fail=1
@@ -442,10 +559,10 @@ run_self_test() {
     fail=1
   fi
   if (( fail )); then
-    echo "run-relay-customization.sh: SELF-TEST FAILED" >&2
+    echo "run-relay-management.sh: SELF-TEST FAILED" >&2
     return 1
   fi
-  echo "run-relay-customization.sh: self-test passed (the OD-2 cue watcher stops R2 on the stop cue only, starts it on the start cue only after a stop and records a failed start; a passing drive of the OD-2 target without a whole cycle, or any drive whose start failed, is red; the Dart target prints the same cues; every drive, the retry included, runs beside the watcher and waits for it by PID; the log-privacy gate removes exactly the *.log files it scanned on a leak and touches nothing on rc 3 or rc 0; the gate library is sourced, the one gate call covers LOG_DIR with its report outside the upload and claims one drive transcript per target spec from a count taken before the loop — a literal in its place is refused, and the one per-target copy keeps a retried target at one file — no soft scanner gate, no captured-log echo of its own, the manifest is sealed once with the lane's drive, logcat and relay floors before the first target; each target's TWO relay logs are dumped from the live containers, typed as relay sinks, before the aggregate gate)."
+  echo "run-relay-management.sh: self-test passed (the OD-2 cue watcher stops R2 on the stop cue only, starts it on the start cue only after a stop and records a failed start; a passing drive of the OD-2 target without a whole cycle, or any drive whose start failed, is red; the Dart target prints the same cues; every drive, the retry included, runs beside the watcher and waits for it by PID; the log-privacy gate removes exactly the *.log files it scanned on a leak and touches nothing on rc 3 or rc 0; the gate library is sourced, the one gate call covers LOG_DIR with its report outside the upload and claims one drive transcript per target spec from a count taken before the loop — a literal in its place is refused, and the one per-target copy keeps a retried target at one file — no soft scanner gate, no captured-log echo of its own, the manifest is sealed once with the lane's drive, logcat and relay floors before the first target; each target's TWO relay logs are dumped from the live containers, typed as relay sinks, before the aggregate gate; the fault-relay list parses strictly and is one string in the workflow, this runner and the status target; every reset restarts the fault relays, a target whose relays did not all start fails, the stop waits by PID and the EXIT trap stops them; each fault relay's log is dumped as a relay sink before the gate; the workflow drives the status target alone, last, with a drive bound covering its own test Timeout and a log directory of its own)."
   return 0
 }
 
@@ -484,6 +601,14 @@ for dep in "${SINGLE_AVD}" "${START_STRFRY}" "${STOP_STRFRY}" "${SECRET_SCAN}"; 
   fi
 done
 
+readonly FAULT_RELAY_BIN="${HAVEN_FAULT_RELAY_BIN:-${script_dir}/../local-relay/target/release/haven-fault-relay}"
+if [[ ! -x "${FAULT_RELAY_BIN}" ]]; then
+  echo "ERROR: ${FAULT_RELAY_BIN} is not built. Build it first:" \
+       "cargo build --release --manifest-path tooling/e2e/local-relay/Cargo.toml --bin haven-fault-relay" >&2
+  exit 1
+fi
+fault_relay_specs "${FAULT_RELAYS}" >/dev/null || exit 2
+
 # R2's distinct identity. start-strfry.sh defaults R1 to
 # strfry/7777/tmp/strfry-data; R2 MUST differ on all three so the R2
 # start can't `docker rm -f` R1's container or `rm -rf` R1's data dir.
@@ -492,7 +617,7 @@ readonly R2_PORT="7778"
 readonly R2_DATA_DIR="/tmp/strfry2-data"
 
 readonly STAGED_APK="/tmp/scenario.apk"
-readonly LOG_DIR="/tmp/relay-custom-logs"
+readonly LOG_DIR="${HAVEN_RELAY_MGMT_LOG_DIR:-/tmp/relay-mgmt-logs}"
 mkdir -p "${LOG_DIR}"
 # The line floors this lane seals with. A floor is what turns "the scan read an
 # empty or truncated file and found nothing" into rc 4 instead of a green, so
@@ -570,28 +695,74 @@ stop_r2() {
     bash "${STOP_STRFRY}"
 }
 
-# Tear down BOTH relays on ANY exit (pass, fail, or signal) so we never
-# leak a container/data dir into a later step or a reused runner. The
-# per-target loop also resets the relays before each target, so this
-# trap is the final backstop. Each teardown is best-effort (`|| true`)
-# so cleanup can't itself flip the script's exit code, and so a failed
-# R1 stop doesn't skip the R2 stop.
+# The fault relays run as this shell's own jobs, so a stop waits for each to
+# exit by PID: the next start binds the same ports, which a process still
+# exiting would hold. The closed port is checked, not started — something
+# listening there would leave the closed-port state unproven.
+declare -a FAULT_PIDS=()
+start_fault_relays() {
+  local role mode port deadline pending
+  local -a roles=()
+  while read -r role mode port; do
+    if [[ "${mode}" == closed ]]; then
+      if (: <"/dev/tcp/127.0.0.1/${port}") 2>/dev/null; then
+        echo "ERROR: something listens on the fault relays' closed port." >&2
+        return 1
+      fi
+      continue
+    fi
+    HAVEN_FAULT_PORT="${port}" HAVEN_FAULT_MODE="${mode}" \
+      "${FAULT_RELAY_BIN}" "--haven-fault-relay-instance=${role}" \
+      > "/tmp/haven-fault-relay-${role}.log" 2>&1 &
+    FAULT_PIDS+=("$!")
+    roles+=("${role}")
+  done < <(fault_relay_specs "${FAULT_RELAYS}")
+  deadline=$(( SECONDS + FAULT_READY_TIMEOUT ))
+  while (( SECONDS < deadline )); do
+    pending=""
+    for role in "${roles[@]}"; do
+      grep -qxF '[haven-fault-relay] listening' "/tmp/haven-fault-relay-${role}.log" 2>/dev/null \
+        || pending="${pending} ${role}"
+    done
+    [[ -n "${pending}" ]] || return 0
+    sleep 1
+  done
+  echo "ERROR: fault relay(s)${pending} did not report listening within ${FAULT_READY_TIMEOUT}s." >&2
+  return 1
+}
+stop_fault_relays() {
+  (( ${#FAULT_PIDS[@]} > 0 )) || return 0
+  kill "${FAULT_PIDS[@]}" 2>/dev/null || true
+  wait "${FAULT_PIDS[@]}" 2>/dev/null || true
+  FAULT_PIDS=()
+}
+
+# Tear down BOTH relays and the fault relays on ANY exit (pass, fail, or
+# signal) so we never leak a container/data dir or a listening port into a
+# later step or a reused runner. The per-target loop also resets the relays
+# before each target, so this trap is the final backstop. Each teardown is
+# best-effort (`|| true`) so cleanup can't itself flip the script's exit code,
+# and so a failed R1 stop doesn't skip the others.
 cleanup() {
   stop_r1 >/dev/null 2>&1 || true
   stop_r2 >/dev/null 2>&1 || true
+  stop_fault_relays || true
 }
 trap cleanup EXIT
 
-# Reset BOTH relays for per-target isolation: stop each (idempotent),
-# then start each fresh. start-strfry.sh wipes the data dir on start,
-# so this guarantees an empty LMDB env on BOTH relays for every target
-# regardless of what the previous target published to either one.
+# Reset BOTH relays and every fault relay for per-target isolation: stop each
+# (idempotent), then start each fresh. start-strfry.sh wipes the data dir on
+# start and a fault relay starts with an empty store and no offers counted, so
+# every target begins with every relay empty regardless of what the previous
+# target published to any of them.
 reset_relays() {
-  echo "[relay] resetting R1 (${STRFRY_CONTAINER:-strfry}) and R2 (${R2_CONTAINER})"
+  echo "[relay] resetting R1 (${STRFRY_CONTAINER:-strfry}), R2 (${R2_CONTAINER}) and the fault relays"
   stop_r1 || true
   stop_r2 || true
+  stop_fault_relays
   start_r1
   start_r2
+  start_fault_relays
 }
 
 # drive_target <target> — one run-single-avd-scenario.sh drive with the cue
@@ -665,15 +836,20 @@ run_one() {
   fi
 
   echo "============================================================"
-  echo "Relay-customization target: ${target}"
+  echo "Relay-management target: ${target}"
   echo "  prebuilt APK: ${apk:-<none — run-single-avd-scenario.sh will build>}"
   echo "============================================================"
 
-  # --- Per-target reset of BOTH relays (isolation) ----------------
-  # Wipe both LMDB envs BEFORE this target so deterministic-seed,
-  # byte-identical events published by a prior target (on EITHER relay)
-  # can't be served back as stale state and poison this one.
-  reset_relays
+  # --- Per-target reset of every relay (isolation) ----------------
+  # Wipe both LMDB envs and every fault relay's store BEFORE this target so
+  # deterministic-seed, byte-identical events published by a prior target (on
+  # ANY relay) can't be served back as stale state and poison this one. The
+  # rc is the fault relays' readiness: a fault relay that never came up would
+  # read as the closed port, a state the status target asserts elsewhere.
+  if ! reset_relays; then
+    FAILED+=("${target}")
+    return 1
+  fi
 
   # --- Stage the APK at the path run-single-avd-scenario.sh expects.
   # If a prebuilt APK was supplied, copy it into place (it would
@@ -761,6 +937,14 @@ run_one() {
   fi
   docker logs "${STRFRY_CONTAINER:-strfry}" > "${LOG_DIR}/strfry.${s}.log" 2>&1 || true
   docker logs "${R2_CONTAINER}" > "${LOG_DIR}/strfry2.${s}.log" 2>&1 || true
+  # Each fault relay's own log, fixed text by construction, under a name the
+  # walker types `relay` (logscan-gate.sh) so it is scanned with the strfry
+  # dumps; the next reset overwrites the /tmp copy.
+  local role mode port
+  while read -r role mode port; do
+    [[ "${mode}" != closed ]] || continue
+    cp "/tmp/haven-fault-relay-${role}.log" "${LOG_DIR}/haven-fault-relay-${role}.${s}.log" 2>/dev/null || true
+  done < <(fault_relay_specs "${FAULT_RELAYS}")
 
   if (( rc == 0 )); then
     echo "PASS: ${target}"
@@ -824,7 +1008,7 @@ logscan_gate_dir host /tmp/haven-soak/needles "${LOG_DIR}" "${LOGSCAN_REPORT}" "
 
 echo
 echo "============================================================"
-echo "Relay-customization test summary"
+echo "Relay-management test summary"
 echo "  passed:  ${#PASSED[@]}"
 echo "  failed:  ${#FAILED[@]}"
 echo "============================================================"
@@ -837,7 +1021,7 @@ fi
 if (( ${#FAILED[@]} > 0 )); then
   printf '  FAIL  %s\n' "${FAILED[@]}"
   echo
-  echo "ERROR: ${#FAILED[@]} relay-customization target(s) failed." >&2
+  echo "ERROR: ${#FAILED[@]} relay-management target(s) failed." >&2
   exit 1
 fi
 
@@ -850,5 +1034,5 @@ if (( scan_rc != 0 )); then
   exit 1
 fi
 
-echo "All relay-customization targets passed (skips, if any, are honest)."
+echo "All relay-management targets passed (skips, if any, are honest)."
 exit 0

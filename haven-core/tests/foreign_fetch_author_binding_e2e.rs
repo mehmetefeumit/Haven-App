@@ -14,8 +14,8 @@ use futures::{SinkExt, StreamExt};
 use haven_core::nostr::mls::types::{KeyPackageAdmission, KeyPackageAdmissionRule};
 use haven_core::nostr::mls::SessionManager;
 use haven_core::relay::maintenance::{
-    build_kp_maintenance_events, build_kp_maintenance_events_reusing, own_presence,
-    OwnEventPresence, OwnRelayLists, TrackedKpLifetime,
+    build_kp_maintenance_events, build_kp_maintenance_events_reusing, names_configured_list,
+    probe_verdict, Probed, TrackedKpLifetime,
 };
 use haven_core::relay::{
     allow_ws_loopback_for_test, set_discovery_relays_for_test, MemberLookup, RelayManager,
@@ -378,8 +378,8 @@ async fn an_invitees_relays_are_dialled_for_the_lookup_and_never_kept_in_the_sha
     );
 }
 
-/// The relay settings check counts only events that match what it asked for:
-/// another author's event of the kind is not ours.
+/// The relay settings board counts only events that match what the
+/// relay-list pass asked for: another author's event of the kind is not ours.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_substituted_event_never_reads_as_published() {
     discovery();
@@ -398,15 +398,21 @@ async fn a_substituted_event_never_reads_as_published() {
 
     let manager = RelayManager::new();
     let own = account.public_key();
-    let lists = OwnRelayLists {
-        inbox: &inbox,
-        key_package: &[],
-        lookup: &[],
+    let check = || async {
+        let answers = manager
+            .fetch_events_per_relay(
+                Filter::new().kind(Kind::InboxRelays).author(own).limit(4),
+                &inbox,
+            )
+            .await
+            .expect("the per-relay read never fails as a whole");
+        probe_verdict(&answers[0], &own, Kind::InboxRelays, &|mine| {
+            names_configured_list(mine, &inbox)
+        })
     };
-    let check = || own_presence(&manager, &own, &lists, None, TrackedKpLifetime::Absent);
     assert_eq!(
-        check().await[0].inbox_relay_list,
-        OwnEventPresence::Missing,
+        check().await,
+        Probed::Missing,
         "another author's event was counted as ours being published"
     );
 
@@ -417,7 +423,7 @@ async fn a_substituted_event_never_reads_as_published() {
             inbox_list(&account, "wss://genuine.example", 1_000),
         ],
     );
-    let drifted = check().await[0].inbox_relay_list;
+    let drifted = check().await;
     answers.lock().unwrap().insert(
         account.public_key(),
         vec![
@@ -425,14 +431,14 @@ async fn a_substituted_event_never_reads_as_published() {
             inbox_list(&account, &url, 1_000),
         ],
     );
-    let current = check().await[0].inbox_relay_list;
+    let current = check().await;
     server.abort();
     assert_eq!(
         drifted,
-        OwnEventPresence::Outdated,
+        Probed::Outdated,
         "the account's own copy is judged, not the newer one another author signed"
     );
-    assert_eq!(current, OwnEventPresence::Current);
+    assert_eq!(current, Probed::Current);
 }
 
 // ── Validation before ranking, and the ranking itself ───────────────────────

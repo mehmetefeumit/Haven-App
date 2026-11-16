@@ -3,6 +3,7 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/src/models/own_relay_board.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/circle_service.dart' show ReinviteDelivery;
 import 'package:haven/src/services/maintenance_service.dart';
@@ -90,6 +91,13 @@ class _FakeCircleManager implements CircleManagerFfi {
   /// How many times the roster was read.
   int visibleReads = 0;
 
+  /// What [ownRelayBoard] answers; `null` makes it throw.
+  OwnRelayBoardFfi? board;
+
+  @override
+  OwnRelayBoardFfi ownRelayBoard() =>
+      board ?? (throw StateError('board unreadable wss://planted.example'));
+
   @override
   Future<List<CircleWithMembersFfi>> getVisibleCircles() async {
     visibleReads++;
@@ -117,6 +125,107 @@ class _FakeCircleManager implements CircleManagerFfi {
 }
 
 void main() {
+  group('MaintenanceService.ownRelayBoard', () {
+    test('never opens a session: with no open handle it answers nothing and '
+        'asks the opener nothing', () {
+      var opens = 0;
+      final service = MaintenanceService(
+        relayService: _RecordingRelay(),
+        circleManagerFactory: () async {
+          opens++;
+          return _FakeCircleManager();
+        },
+        identitySecretBytes: () async => const [],
+        currentCircleManager: () => null,
+      );
+
+      for (var i = 0; i < 5; i++) {
+        expect(service.ownRelayBoard(), isNull);
+      }
+      expect(opens, 0);
+    });
+
+    test('a service built without the accessor reads nothing', () {
+      final service = MaintenanceService(
+        relayService: _RecordingRelay(),
+        circleManagerFactory: () async => _FakeCircleManager(),
+        identitySecretBytes: () async => const [],
+      );
+
+      expect(service.ownRelayBoard(), isNull);
+    });
+
+    test("reads the open handle's board: every state, hold and age", () {
+      OwnKindBoardFfi kind({OwnPublishHoldFfi? hold, int? secs}) =>
+          OwnKindBoardFfi(hold: hold, checkedSecsAgo: secs, cells: const []);
+      final circle = _FakeCircleManager()
+        ..board = OwnRelayBoardFfi(
+          running: true,
+          lookupRelays: const ['wss://look.example'],
+          keyPackage: OwnKindBoardFfi(
+            checkedSecsAgo: 42,
+            cells: [
+              for (final s in OwnRelayStatusFfi.values)
+                OwnRelayCellFfi(relayUrl: 'wss://${s.name}.example', status: s),
+            ],
+          ),
+          relayList: kind(hold: OwnPublishHoldFfi.awaitingResetAcknowledgement),
+          inboxRelayList: kind(hold: OwnPublishHoldFfi.noRelaysConfigured),
+        );
+      final service = MaintenanceService(
+        relayService: _RecordingRelay(),
+        circleManagerFactory: () async => throw StateError('never opened'),
+        identitySecretBytes: () async => const [],
+        currentCircleManager: () => circle,
+      );
+
+      final board = service.ownRelayBoard()!;
+
+      expect(board.running, isTrue);
+      expect(board.lookupRelays, ['wss://look.example']);
+      expect(board.keyPackage.checkedSecsAgo, 42);
+      expect(board.keyPackage.hold, isNull);
+      expect(
+        board.keyPackage.cells.map((c) => (c.relayUrl, c.status.name)),
+        [
+          for (final s in OwnRelayStatusFfi.values)
+            ('wss://${s.name}.example', s.name),
+        ],
+        reason: 'each state keeps its name and its relay',
+      );
+      expect(board.relayList.hold, OwnPublishHold.awaitingResetAcknowledgement);
+      expect(board.inboxRelayList.hold, OwnPublishHold.noRelaysConfigured);
+      expect(board.inboxRelayList.checkedSecsAgo, isNull);
+      expect(
+        ownRelayBoardOf(
+          OwnRelayBoardFfi(
+            running: false,
+            lookupRelays: const [],
+            keyPackage: kind(hold: OwnPublishHoldFfi.publishingSuppressed),
+            relayList: kind(),
+            inboxRelayList: kind(),
+          ),
+        ).keyPackage.hold,
+        OwnPublishHold.publishingSuppressed,
+      );
+    });
+
+    test('a read that throws answers nothing and logs only its type', () {
+      final logs = LogCapture.install();
+      final service = MaintenanceService(
+        relayService: _RecordingRelay(),
+        circleManagerFactory: () async => _FakeCircleManager(),
+        identitySecretBytes: () async => const [],
+        currentCircleManager: _FakeCircleManager.new,
+      );
+
+      expect(service.ownRelayBoard(), isNull);
+      logs
+        ..assertContains('[Maintenance] board read failed')
+        ..assertNoNeedles(['wss://planted.example', 'planted.example']);
+    });
+  });
+
   group('MaintenanceService.maintainKeyPackage', () {
     test('forwards to relay with the resolved handle + secret', () async {
       final relay = _RecordingRelay();

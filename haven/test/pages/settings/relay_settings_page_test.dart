@@ -1,11 +1,10 @@
 /// Widget tests for the editable [`RelaySettingsPage`].
 ///
-/// The page underwent a full rewrite from a read-only status view into
-/// an editable multi-section UI; the prior test suite was dropped because
-/// it asserted layout details that no longer exist. Tests here cover
-/// the surface that matters for v1: section presence, edit affordances,
-/// the privacy callouts, the publish toggles, and (for the local-only
-/// Profile category) the advisory contamination warning.
+/// Cover section presence, edit affordances, the explanation panels, the
+/// per-item status symbols that follow the maintenance passes, the
+/// announcements, the page-open pass, input that lands while something
+/// moves, accessibility, and (for the local-only Profile category) the
+/// advisory contamination warning and underflow banner.
 library;
 
 import 'dart:async';
@@ -16,19 +15,24 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/constants/relays.dart';
+import 'package:haven/src/models/own_relay_board.dart';
+import 'package:haven/src/pages/settings/relay_info_sheet.dart';
 import 'package:haven/src/pages/settings/relay_settings_page.dart';
+import 'package:haven/src/pages/settings/relay_status_cell.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
+import 'package:haven/src/providers/location_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
+import 'package:haven/src/providers/relay_status_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
-import 'package:haven/src/rust/api.dart'
-    show OwnEventPresenceFfi, OwnRelayPresenceFfi;
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/relay_preferences_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 import 'package:haven/src/test_keys.dart';
-import 'package:haven/src/widgets/common/refresh_ring/refresh_ring_button.dart';
+import 'package:haven/src/theme/theme.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import '../../helpers/fake_board_source.dart';
 import '../../mocks/mock_circle_service.dart';
 import '../../mocks/mock_relay_preferences_service.dart';
 import '../../mocks/mock_relay_service.dart';
@@ -39,20 +43,131 @@ Identity _stubIdentity() => Identity(
   createdAt: DateTime.fromMillisecondsSinceEpoch(0),
 );
 
+const _inbox = 'wss://inbox.example.com';
+const _kp = 'wss://kp.example.com';
+
+/// The status cell for [kind] inside [section], optionally for one relay.
+Finder cellIn(String section, RelayKind kind, {String? url}) => find.descendant(
+  of: find.byKey(WidgetKeys.relaySettingsSection(section)),
+  matching: find.byWidgetPredicate(
+    (w) =>
+        w is RelayKindStatusCell &&
+        w.kind == kind &&
+        (url == null || w.relayUrl == url),
+  ),
+);
+
+/// Every status cell inside [section].
+Finder cellsIn(String section) => find.descendant(
+  of: find.byKey(WidgetKeys.relaySettingsSection(section)),
+  matching: find.byType(RelayKindStatusCell),
+);
+
+/// [text] inside [section].
+Finder textIn(String section, String text) => find.descendant(
+  of: find.byKey(WidgetKeys.relaySettingsSection(section)),
+  matching: find.text(text),
+);
+
+OwnRelayStatus _ownStatusOf(KindPresence p) => switch (p) {
+  KindPresence.checking => OwnRelayStatus.checking,
+  KindPresence.publishing => OwnRelayStatus.publishing,
+  KindPresence.current => OwnRelayStatus.current,
+  KindPresence.missing => OwnRelayStatus.missing,
+  KindPresence.outdated => OwnRelayStatus.outdated,
+  KindPresence.refused => OwnRelayStatus.refused,
+  KindPresence.unconfirmed => OwnRelayStatus.unconfirmed,
+  KindPresence.noAnswer => OwnRelayStatus.noAnswer,
+  KindPresence.notChecked ||
+  KindPresence.held => throw ArgumentError('not a cell state: $p'),
+};
+
+/// A board on which every expected item of [_inbox], [_kp] and the lookup
+/// relays reads [p].
+OwnRelayBoard boardAll(KindPresence p) {
+  if (p == KindPresence.notChecked) return const OwnRelayBoard();
+  if (p == KindPresence.held) {
+    const held = OwnKindBoard(
+      hold: OwnPublishHold.awaitingResetAcknowledgement,
+    );
+    return const OwnRelayBoard(
+      keyPackage: held,
+      relayList: held,
+      inboxRelayList: held,
+    );
+  }
+  List<OwnRelayCell> cells(List<String> urls) => [
+    for (final url in urls)
+      OwnRelayCell(relayUrl: url, status: _ownStatusOf(p)),
+  ];
+  return OwnRelayBoard(
+    lookupRelays: fallbackDiscoveryRelays,
+    keyPackage: OwnKindBoard(cells: cells(const [_kp])),
+    relayList: OwnKindBoard(cells: cells([_kp, ...fallbackDiscoveryRelays])),
+    inboxRelayList: OwnKindBoard(
+      cells: cells([_inbox, ...fallbackDiscoveryRelays]),
+    ),
+  );
+}
+
+/// A board with one item of [_kp] in [p] and everything else current.
+OwnRelayBoard boardWithKeyPackage(KindPresence p) {
+  final base = boardAll(KindPresence.current);
+  return OwnRelayBoard(
+    lookupRelays: base.lookupRelays,
+    keyPackage: switch (p) {
+      KindPresence.notChecked => const OwnKindBoard(),
+      KindPresence.held => const OwnKindBoard(
+        hold: OwnPublishHold.awaitingResetAcknowledgement,
+      ),
+      _ => OwnKindBoard(
+        cells: [OwnRelayCell(relayUrl: _kp, status: _ownStatusOf(p))],
+      ),
+    },
+    relayList: base.relayList,
+    inboxRelayList: base.inboxRelayList,
+  );
+}
+
+/// Grows the test surface so every section is laid out at once.
+void tallSurface(WidgetTester tester, {Size size = const Size(800, 3200)}) {
+  tester.view.physicalSize = size;
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.resetPhysicalSize);
+  addTearDown(tester.view.resetDevicePixelRatio);
+}
+
+class _RouteLog extends NavigatorObserver {
+  final List<Route<dynamic>> pushed = [];
+
+  @override
+  void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) =>
+      pushed.add(route);
+}
+
+double _contrast(Color a, Color b) {
+  final la = a.computeLuminance();
+  final lb = b.computeLuminance();
+  final (hi, lo) = la > lb ? (la, lb) : (lb, la);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  final l10n = lookupAppLocalizations(const Locale('en'));
 
   List<Override> appOverrides({
     required MockRelayPreferencesService mock,
     Identity? identity,
     Future<RelayPreferencesService> Function()? openService,
     MockRelayService? relay,
+    FakeBoardSource? board,
     List<Override> extra = const [],
   }) => [
     ...extra,
-    identityProvider.overrideWith(
-      (ref) async => identity ?? _stubIdentity(),
-    ),
+    maintenanceServiceProvider.overrideWithValue(board ?? FakeBoardSource()),
+    appForegroundProvider.overrideWith((_) => true),
+    identityProvider.overrideWith((ref) async => identity ?? _stubIdentity()),
     relayPreferencesServiceProvider.overrideWith(
       (ref) async => openService == null ? mock : await openService(),
     ),
@@ -86,16 +201,36 @@ void main() {
     Identity? identity,
     Future<RelayPreferencesService> Function()? openService,
     MockRelayService? relay,
+    FakeBoardSource? board,
     List<Override> extra = const [],
+    ThemeData? theme,
+    Locale? locale,
+    TextScaler? textScaler,
+    bool reduceMotion = false,
+    List<NavigatorObserver> observers = const [],
   }) => ProviderScope(
     overrides: appOverrides(
       mock: mock,
       identity: identity,
       openService: openService,
       relay: relay,
+      board: board,
       extra: extra,
     ),
-    child: page,
+    child: MaterialApp(
+      theme: theme,
+      locale: locale,
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      navigatorObservers: observers,
+      builder: (context, child) => MediaQuery(
+        data: MediaQuery.of(
+          context,
+        ).copyWith(textScaler: textScaler, disableAnimations: reduceMotion),
+        child: child!,
+      ),
+      home: const RelaySettingsPage(),
+    ),
   );
 
   MockRelayPreferencesService seededMock() => MockRelayPreferencesService(
@@ -108,6 +243,7 @@ void main() {
 
   group('RelaySettingsPage', () {
     testWidgets('renders three relay sections', (tester) async {
+      tallSurface(tester);
       await tester.pumpWidget(buildApp(mock: seededMock()));
       await tester.pumpAndSettle();
 
@@ -117,35 +253,44 @@ void main() {
       expect(find.text('inbox.example.com'), findsOneWidget);
       expect(find.text('kp.example.com'), findsOneWidget);
       expect(find.text('profile.example.com'), findsOneWidget);
+      for (final section in RelaySettingsSection.values) {
+        expect(
+          find.byKey(WidgetKeys.relaySettingsInfoButton(section.name)),
+          findsOneWidget,
+        );
+      }
     });
 
-    testWidgets('checks the relays as it opens', (tester) async {
-      final relayService = MockRelayService();
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: appOverrides(mock: seededMock(), relay: relayService),
-          child: page,
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      expect(relayService.ownPresenceAsks, [_stubIdentity().pubkeyHex]);
-    });
-
-    testWidgets('uses the refresh ring, not a spinner', (tester) async {
+    testWidgets('offers no manual refresh or republish', (tester) async {
+      tallSurface(tester);
       await tester.pumpWidget(buildApp(mock: seededMock()));
       await tester.pumpAndSettle();
 
-      // The segmented ring replaces the former IconButton/CircularProgress
-      // swap; the app bar must never show a spinner while checking.
-      expect(find.byType(RefreshRingButton), findsOneWidget);
+      final appBar = tester.widget<AppBar>(find.byType(AppBar));
+      expect(appBar.actions ?? const <Widget>[], isEmpty);
+      // The only buttons with a label are the lists' own Add and Restore...
       expect(
-        find.descendant(
-          of: find.byType(AppBar),
-          matching: find.byType(CircularProgressIndicator),
+        find.byWidgetPredicate(
+          (w) =>
+              w is OutlinedButton ||
+              w is TextButton ||
+              w is FilledButton ||
+              w is ElevatedButton,
         ),
-        findsNothing,
+        findsNWidgets(6),
+        reason: 'three Add relay and three Restore defaults, nothing else',
       );
+      // ...and every icon button is a section's question mark or a row's
+      // remove button.
+      final allowed = {
+        WidgetKeys.relaySettingsRemoveRelay,
+        for (final s in RelaySettingsSection.values)
+          WidgetKeys.relaySettingsInfoButton(s.name),
+      };
+      for (final e in find.byType(IconButton).evaluate()) {
+        expect(allowed, contains(e.widget.key));
+      }
+      expect(find.byType(CircularProgressIndicator), findsNothing);
     });
 
     testWidgets('shows a short caption, not the long explainer', (
@@ -829,183 +974,6 @@ void main() {
   // the relay providers cache that as an `AsyncError` with no previous value.
   // Reading such a value with `.value` throws, and a release build paints the
   // throwing widget as a grey box filling the page.
-  group('RelaySettingsPage — per relay, per kind', () {
-    OwnRelayPresenceFfi row(
-      String url, {
-      bool own = true,
-      bool lookup = false,
-      OwnEventPresenceFfi keyPackage = OwnEventPresenceFfi.notExpected,
-      OwnEventPresenceFfi relayList = OwnEventPresenceFfi.notExpected,
-      OwnEventPresenceFfi inboxRelayList = OwnEventPresenceFfi.notExpected,
-    }) => OwnRelayPresenceFfi(
-      relayUrl: url,
-      own: own,
-      lookup: lookup,
-      reachable: true,
-      keyPackage: keyPackage,
-      relayList: relayList,
-      inboxRelayList: inboxRelayList,
-    );
-
-    void growSurface(WidgetTester tester) {
-      tester.view.physicalSize = const Size(800, 3200);
-      tester.view.devicePixelRatio = 1;
-      addTearDown(tester.view.resetPhysicalSize);
-      addTearDown(tester.view.resetDevicePixelRatio);
-    }
-
-    testWidgets(
-      'each row says, per expected kind, what the relay serves — Missing and '
-      "Can't reach apart",
-      (tester) async {
-        growSurface(tester);
-        final relay = MockRelayService()
-          ..ownPresence = [
-            row(
-              'wss://inbox.example.com',
-              inboxRelayList: OwnEventPresenceFfi.noAnswer,
-            ),
-            row(
-              'wss://kp.example.com',
-              keyPackage: OwnEventPresenceFfi.outdated,
-              relayList: OwnEventPresenceFfi.missing,
-            ),
-            row(
-              'wss://lookup.example.com',
-              own: false,
-              lookup: true,
-              relayList: OwnEventPresenceFfi.current,
-              inboxRelayList: OwnEventPresenceFfi.current,
-            ),
-          ];
-        await tester.pumpWidget(buildApp(mock: seededMock(), relay: relay));
-        await tester.pumpAndSettle();
-
-        expect(find.text("Inbox list: Can't reach"), findsOneWidget);
-        expect(find.text('KeyPackage: Old version'), findsOneWidget);
-        expect(find.text('Relay list: Missing'), findsOneWidget);
-        expect(find.text('Lookup relays'), findsOneWidget);
-        expect(find.text('lookup.example.com'), findsOneWidget);
-        expect(find.text('Relay list: Published'), findsOneWidget);
-        expect(find.text('Inbox list: Published'), findsOneWidget);
-        expect(
-          find.text('KeyPackage: Published'),
-          findsNothing,
-          reason: 'a lookup relay is never a KeyPackage destination',
-        );
-      },
-    );
-
-    testWidgets('a row is one sentence to a screen reader; the dot is not '
-        'read', (tester) async {
-      growSurface(tester);
-      final semantics = tester.ensureSemantics();
-      final relay = MockRelayService()
-        ..ownPresence = [
-          row(
-            'wss://kp.example.com',
-            keyPackage: OwnEventPresenceFfi.current,
-            relayList: OwnEventPresenceFfi.missing,
-          ),
-        ];
-      await tester.pumpWidget(buildApp(mock: seededMock(), relay: relay));
-      await tester.pumpAndSettle();
-
-      final node = tester.getSemantics(find.text('kp.example.com'));
-      expect(node.label, contains('kp.example.com'));
-      expect(node.label, contains('KeyPackage: Published'));
-      expect(node.label, contains('Relay list: Missing'));
-      expect(
-        find.bySemanticsLabel(RegExp('^Relay status')),
-        findsNothing,
-        reason: 'the dot is decorative: the words already say it',
-      );
-      semantics.dispose();
-    });
-
-    testWidgets('Republish is not offered for a relay that only did not '
-        'answer', (tester) async {
-      growSurface(tester);
-      final relay = MockRelayService()
-        ..ownPresence = [
-          row(
-            'wss://inbox.example.com',
-            inboxRelayList: OwnEventPresenceFfi.noAnswer,
-          ),
-          row(
-            'wss://kp.example.com',
-            keyPackage: OwnEventPresenceFfi.current,
-            relayList: OwnEventPresenceFfi.current,
-          ),
-        ];
-      await tester.pumpWidget(buildApp(mock: seededMock(), relay: relay));
-      await tester.pumpAndSettle();
-
-      expect(find.byKey(WidgetKeys.relaySettingsRepublish), findsNothing);
-    });
-
-    testWidgets('Republish publishes, checks again, is disabled while it '
-        'runs, and reports in fixed copy', (tester) async {
-      growSurface(tester);
-      final published = Completer<void>();
-      var publishes = 0;
-      final relay = MockRelayService()
-        ..ownPresence = [
-          row('wss://kp.example.com', keyPackage: OwnEventPresenceFfi.missing),
-        ];
-      await tester.pumpWidget(
-        buildApp(
-          mock: seededMock(),
-          relay: relay,
-          extra: [
-            keyPackagePublisherProvider.overrideWith((ref) async {
-              publishes++;
-              await published.future;
-              relay.ownPresence = [
-                row(
-                  'wss://kp.example.com',
-                  keyPackage: OwnEventPresenceFfi.current,
-                ),
-              ];
-              return const KeyPackageMaintenancePublished(
-                relaysAcked: 1,
-                isFreshSlotMinted: false,
-              );
-            }),
-          ],
-        ),
-      );
-      await tester.pumpAndSettle();
-      expect(find.text('KeyPackage: Missing'), findsOneWidget);
-
-      await tester.tap(find.byKey(WidgetKeys.relaySettingsRepublish));
-      await tester.pump();
-      expect(publishes, 1);
-      expect(
-        tester
-            .widget<ButtonStyleButton>(
-              find.byKey(WidgetKeys.relaySettingsRepublish),
-            )
-            .onPressed,
-        isNull,
-        reason: 'one Republish at a time',
-      );
-
-      published.complete();
-      await tester.pumpAndSettle();
-
-      expect(relay.ownPresenceAsks, hasLength(2), reason: 'checked again');
-      expect(find.text('KeyPackage: Published'), findsOneWidget);
-      expect(
-        find.text(
-          'Every relay that answered now has what others need to invite you',
-        ),
-        findsOneWidget,
-      );
-      expect(find.byKey(WidgetKeys.relaySettingsRepublish), findsNothing);
-    });
-  });
-
   group('RelaySettingsPage when the relay providers failed to load', () {
     void growSurface(WidgetTester tester) {
       final originalSize = tester.view.physicalSize;
@@ -1039,46 +1007,51 @@ void main() {
       expect(find.text('Add relay'), findsNWidgets(3));
     });
 
-    testWidgets(
-      'lists the relays once they load, though the status is still failed',
-      (tester) async {
-        growSurface(tester);
-        final mock = seededMock();
-        var failing = true;
-        await tester.pumpWidget(
-          buildApp(
-            mock: mock,
-            openService: () async {
-              if (failing) throw StateError('handoff');
-              return mock;
-            },
-          ),
+    testWidgets('lists the relays once they load, each item not checked yet', (
+      tester,
+    ) async {
+      growSurface(tester);
+      final mock = seededMock();
+      var failing = true;
+      await tester.pumpWidget(
+        buildApp(
+          mock: mock,
+          openService: () async {
+            if (failing) throw StateError('handoff');
+            return mock;
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // The handoff ends and the lists are rebuilt (as MapShell's resume
+      // heal does); the relay status follows the lists it watches.
+      failing = false;
+      ProviderScope.containerOf(tester.element(find.byType(RelaySettingsPage)))
+        ..invalidate(relayPreferencesServiceProvider)
+        ..invalidate(inboxRelaysProvider)
+        ..invalidate(keyPackageRelaysProvider)
+        ..invalidate(profileRelaysProvider);
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      expect(find.byType(ErrorWidget), findsNothing);
+      expect(find.text('inbox.example.com'), findsOneWidget);
+      expect(find.text('kp.example.com'), findsOneWidget);
+      expect(find.text('profile.example.com'), findsOneWidget);
+      // One symbol per kind each list publishes there, none checked yet.
+      for (final (section, kind) in [
+        ('inbox', RelayKind.inboxRelayList),
+        ('keyPackage', RelayKind.keyPackage),
+        ('keyPackage', RelayKind.relayList),
+      ]) {
+        expect(
+          tester.widget<RelayKindStatusCell>(cellIn(section, kind)).status,
+          KindPresence.notChecked,
+          reason: '$section $kind',
         );
-        await tester.pumpAndSettle();
-
-        // The handoff ends and the lists are rebuilt (as MapShell's resume
-        // heal does), but the relay status read them once and keeps its error.
-        failing = false;
-        ProviderScope.containerOf(
-            tester.element(find.byType(RelaySettingsPage)),
-          )
-          ..invalidate(relayPreferencesServiceProvider)
-          ..invalidate(inboxRelaysProvider)
-          ..invalidate(keyPackageRelaysProvider)
-          ..invalidate(profileRelaysProvider);
-        await tester.pumpAndSettle();
-
-        expect(tester.takeException(), isNull);
-        expect(find.byType(ErrorWidget), findsNothing);
-        expect(find.text('inbox.example.com'), findsOneWidget);
-        expect(find.text('kp.example.com'), findsOneWidget);
-        expect(find.text('profile.example.com'), findsOneWidget);
-        // One line per kind each list publishes there, none checked yet.
-        expect(find.text('Inbox list: Not checked'), findsOneWidget);
-        expect(find.text('KeyPackage: Not checked'), findsOneWidget);
-        expect(find.text('Relay list: Not checked'), findsOneWidget);
-      },
-    );
+      }
+    });
 
     testWidgets(
       'opening the page loads the KeyPackage and Profile lists that failed '
@@ -1122,6 +1095,11 @@ void main() {
         expect(find.text('inbox.example.com'), findsOneWidget);
         expect(find.text('kp.example.com'), findsOneWidget);
         expect(find.text('profile.example.com'), findsOneWidget);
+
+        // This container outlives the page; its own end stops the board
+        // poll before the test's timer check.
+        await tester.pumpWidget(const SizedBox());
+        container.dispose();
       },
     );
 
@@ -1162,6 +1140,11 @@ void main() {
         expect(find.text('inbox.example.com'), findsOneWidget);
         expect(find.text('kp.example.com'), findsOneWidget);
         expect(find.text('profile.example.com'), findsOneWidget);
+
+        // This container outlives the page; its own end stops the board
+        // poll before the test's timer check.
+        await tester.pumpWidget(const SizedBox());
+        container.dispose();
       },
     );
 
@@ -1182,6 +1165,1266 @@ void main() {
 
       expect(tester.takeException(), isNull);
       expect(find.text('Restore default relays?'), findsOneWidget);
+    });
+  });
+
+  group('RelaySettingsPage — the page-open pass', () {
+    Future<int> runsOnOpen(WidgetTester tester, OwnRelayBoard? board) async {
+      var runs = 0;
+      await tester.pumpWidget(
+        buildApp(
+          mock: seededMock(),
+          board: FakeBoardSource(board: board),
+          extra: [
+            keyPackagePublisherProvider.overrideWith((ref) async {
+              runs++;
+              return const KeyPackageMaintenanceFailed(
+                KeyPackageFailureKind.tickErrored,
+              );
+            }),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      return runs;
+    }
+
+    OwnKindBoard checked(int secs) => OwnKindBoard(checkedSecsAgo: secs);
+
+    testWidgets('runs a pass when no pass has finished in this session', (
+      tester,
+    ) async {
+      expect(await runsOnOpen(tester, const OwnRelayBoard()), 1);
+    });
+
+    testWidgets('runs a pass when nothing can be read', (tester) async {
+      expect(await runsOnOpen(tester, null), 1);
+    });
+
+    testWidgets('runs a pass when a kind was checked over ten minutes ago', (
+      tester,
+    ) async {
+      expect(
+        await runsOnOpen(
+          tester,
+          OwnRelayBoard(
+            keyPackage: checked(30),
+            relayList: checked(601),
+            inboxRelayList: checked(30),
+          ),
+        ),
+        1,
+      );
+    });
+
+    testWidgets('runs no pass when every kind was checked within ten '
+        'minutes', (tester) async {
+      expect(
+        await runsOnOpen(
+          tester,
+          OwnRelayBoard(
+            keyPackage: checked(600),
+            relayList: checked(30),
+            inboxRelayList: checked(30),
+          ),
+        ),
+        0,
+      );
+    });
+
+    testWidgets('runs no pass while one is running or queued', (tester) async {
+      expect(await runsOnOpen(tester, const OwnRelayBoard(running: true)), 0);
+    });
+  });
+
+  group('RelaySettingsPage — status symbols', () {
+    (IconData, Color) glyphOf(WidgetTester tester, Finder cell) {
+      final icon = tester.widget<Icon>(
+        find.descendant(of: cell, matching: find.byType(Icon)),
+      );
+      return (icon.icon!, icon.color!);
+    }
+
+    testWidgets('every state has its shape, colour, exact words and tooltip', (
+      tester,
+    ) async {
+      tallSurface(tester);
+      final semantics = tester.ensureSemantics();
+      final scheme = ThemeData().colorScheme;
+      final expected = <KindPresence, (IconData, Color)>{
+        KindPresence.notChecked: (
+          LucideIcons.circleDashed,
+          scheme.onSurfaceVariant,
+        ),
+        KindPresence.checking: (
+          LucideIcons.circleDashed,
+          scheme.onSurfaceVariant,
+        ),
+        KindPresence.publishing: (
+          LucideIcons.circleArrowUp,
+          scheme.onSurfaceVariant,
+        ),
+        KindPresence.current: (
+          LucideIcons.circleCheck,
+          HavenSecurityColors.encrypted,
+        ),
+        KindPresence.missing: (LucideIcons.circleX, HavenSecurityColors.danger),
+        KindPresence.outdated: (
+          LucideIcons.circleX,
+          HavenSecurityColors.danger,
+        ),
+        KindPresence.refused: (LucideIcons.circleX, HavenSecurityColors.danger),
+        KindPresence.unconfirmed: (
+          LucideIcons.circleX,
+          HavenSecurityColors.danger,
+        ),
+        KindPresence.noAnswer: (
+          Icons.question_mark,
+          HavenSecurityColors.warning,
+        ),
+        KindPresence.held: (LucideIcons.circlePause, scheme.onSurfaceVariant),
+      };
+      final words = {
+        for (final p in KindPresence.values) p: kindPresenceLabel(l10n, p),
+      };
+      expect(
+        words.values.toSet(),
+        hasLength(KindPresence.values.length),
+        reason: 'every state is told apart in words',
+      );
+
+      for (final p in KindPresence.values) {
+        await tester.pumpWidget(
+          buildApp(
+            mock: seededMock(),
+            board: FakeBoardSource(board: boardWithKeyPackage(p)),
+            reduceMotion: true,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final cell = cellIn('keyPackage', RelayKind.keyPackage);
+        expect(tester.widget<RelayKindStatusCell>(cell).status, p);
+        expect(glyphOf(tester, cell), expected[p], reason: '$p');
+        expect(
+          tester
+              .widget<Tooltip>(
+                find.descendant(of: cell, matching: find.byType(Tooltip)),
+              )
+              .message,
+          words[p],
+        );
+        expect(
+          tester.getSemantics(cell).label,
+          contains(
+            l10n.relaySettingsKindLine(
+              l10n.relaySettingsKindKeyPackage,
+              words[p]!,
+            ),
+          ),
+          reason: '$p is said in words, never by colour alone',
+        );
+        await tester.pumpWidget(const SizedBox());
+      }
+      semantics.dispose();
+    });
+
+    testWidgets('one shape per meaning: red for every not-there state, a '
+        'dashed circle for not checked and checking', (tester) async {
+      tallSurface(tester);
+      final shapes = <KindPresence, IconData>{};
+      for (final p in KindPresence.values) {
+        await tester.pumpWidget(
+          buildApp(
+            mock: seededMock(),
+            board: FakeBoardSource(board: boardWithKeyPackage(p)),
+            reduceMotion: true,
+          ),
+        );
+        await tester.pumpAndSettle();
+        shapes[p] = tester
+            .widget<Icon>(
+              find.descendant(
+                of: cellIn('keyPackage', RelayKind.keyPackage),
+                matching: find.byType(Icon),
+              ),
+            )
+            .icon!;
+        await tester.pumpWidget(const SizedBox());
+      }
+      final red = [
+        KindPresence.missing,
+        KindPresence.outdated,
+        KindPresence.refused,
+        KindPresence.unconfirmed,
+      ];
+      expect(red.map((p) => shapes[p]).toSet(), hasLength(1));
+      expect(shapes[KindPresence.notChecked], shapes[KindPresence.checking]);
+      expect(
+        {
+          shapes[KindPresence.checking],
+          shapes[KindPresence.publishing],
+          shapes[KindPresence.current],
+          shapes[KindPresence.missing],
+          shapes[KindPresence.noAnswer],
+          shapes[KindPresence.held],
+        },
+        hasLength(6),
+        reason: 'colour is never the only difference',
+      );
+    });
+
+    testWidgets('the publishing ring turns inside its fixed box, and stands '
+        'still under reduced motion', (tester) async {
+      tallSurface(tester);
+      final board = FakeBoardSource(
+        board: boardWithKeyPackage(KindPresence.publishing),
+      );
+      await tester.pumpWidget(buildApp(mock: seededMock(), board: board));
+      await tester.pump();
+      await tester.pump();
+
+      final cell = cellIn('keyPackage', RelayKind.keyPackage);
+      final ring = find.descendant(
+        of: cell,
+        matching: find.byType(CircularProgressIndicator),
+      );
+      expect(ring, findsOneWidget);
+      expect(
+        tester.getSize(
+          find.descendant(of: cell, matching: find.byType(RelayStatusGlyph)),
+        ),
+        const Size.square(kRelayStatusGlyphBox),
+      );
+      expect(tester.binding.hasScheduledFrame, isTrue, reason: 'it turns');
+
+      // Published: the ring is gone.
+      board.board = boardWithKeyPackage(KindPresence.current);
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(ring, findsNothing);
+
+      await tester.pumpWidget(const SizedBox());
+      await tester.pumpWidget(
+        buildApp(
+          mock: seededMock(),
+          board: FakeBoardSource(
+            board: boardWithKeyPackage(KindPresence.publishing),
+          ),
+          reduceMotion: true,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+      expect(tester.binding.hasScheduledFrame, isFalse);
+    });
+
+    testWidgets('publishing turns into published on its own', (tester) async {
+      tallSurface(tester);
+      final board = FakeBoardSource(
+        board: boardWithKeyPackage(KindPresence.publishing),
+      );
+      await tester.pumpWidget(buildApp(mock: seededMock(), board: board));
+      await tester.pump();
+      await tester.pump();
+      final cell = cellIn('keyPackage', RelayKind.keyPackage);
+      expect(
+        tester.widget<RelayKindStatusCell>(cell).status,
+        KindPresence.publishing,
+      );
+
+      board.board = boardWithKeyPackage(KindPresence.current);
+      await tester.pump(const Duration(milliseconds: 500));
+
+      expect(
+        tester.widget<RelayKindStatusCell>(cell).status,
+        KindPresence.current,
+      );
+    });
+
+    testWidgets('a KeyPackage row stacks KeyPackage above Relay list at the '
+        'end of the row, after the address, in either direction', (
+      tester,
+    ) async {
+      tallSurface(tester);
+      for (final locale in const [Locale('en'), Locale('ar')]) {
+        await tester.pumpWidget(
+          buildApp(
+            mock: seededMock(),
+            board: FakeBoardSource(board: boardAll(KindPresence.current)),
+            locale: locale,
+          ),
+        );
+        await tester.pumpAndSettle();
+        final kp = tester.getRect(cellIn('keyPackage', RelayKind.keyPackage));
+        final list = tester.getRect(cellIn('keyPackage', RelayKind.relayList));
+        final address = tester.getRect(textIn('keyPackage', 'kp.example.com'));
+        expect(kp.top, lessThan(list.top), reason: '$locale');
+        if (locale.languageCode == 'ar') {
+          expect(kp.right, lessThanOrEqualTo(address.left));
+          expect(list.right, lessThanOrEqualTo(address.left));
+        } else {
+          expect(kp.left, greaterThanOrEqualTo(address.right));
+          expect(list.left, greaterThanOrEqualTo(address.right));
+        }
+        await tester.pumpWidget(const SizedBox());
+      }
+    });
+
+    testWidgets('each section shows only what that role needs', (tester) async {
+      tallSurface(tester);
+      await tester.pumpWidget(
+        buildApp(
+          mock: seededMock(),
+          board: FakeBoardSource(board: boardAll(KindPresence.current)),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      Set<RelayKind> kinds(String section) => {
+        for (final e in cellsIn(section).evaluate())
+          (e.widget as RelayKindStatusCell).kind,
+      };
+      expect(kinds('inbox'), {RelayKind.inboxRelayList});
+      expect(kinds('keyPackage'), {RelayKind.keyPackage, RelayKind.relayList});
+      expect(kinds('profile'), isEmpty);
+      expect(
+        kinds('lookup'),
+        {RelayKind.relayList, RelayKind.inboxRelayList},
+        reason: 'a lookup relay is never a KeyPackage destination',
+      );
+      expect(
+        cellsIn('lookup'),
+        findsNWidgets(fallbackDiscoveryRelays.length * 2),
+      );
+    });
+
+    testWidgets('a row reads as one sentence; the remove button is its own '
+        'control, and no symbol is read alone', (tester) async {
+      tallSurface(tester);
+      final semantics = tester.ensureSemantics();
+      await tester.pumpWidget(
+        buildApp(
+          mock: seededMock(),
+          board: FakeBoardSource(
+            board: boardWithKeyPackage(KindPresence.refused),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final label = tester
+          .getSemantics(textIn('keyPackage', 'kp.example.com'))
+          .label;
+      final kpLine = l10n.relaySettingsKindLine(
+        l10n.relaySettingsKindKeyPackage,
+        l10n.relaySettingsPresenceRefused,
+      );
+      final listLine = l10n.relaySettingsKindLine(
+        l10n.relaySettingsKindRelayList,
+        l10n.relaySettingsPresencePublished,
+      );
+      expect(label, contains('kp.example.com'));
+      expect(label.indexOf(kpLine), greaterThan(label.indexOf('kp.example')));
+      expect(label.indexOf(listLine), greaterThan(label.indexOf(kpLine)));
+      expect(
+        tester.getSemantics(find.byTooltip('Remove kp.example.com')).label,
+        isNot(contains(kpLine)),
+      );
+      expect(
+        find.bySemanticsLabel(l10n.relaySettingsPresenceRefused),
+        findsNothing,
+      );
+      semantics.dispose();
+    });
+
+    testWidgets('no symbol leads the row: the address comes first', (
+      tester,
+    ) async {
+      tallSurface(tester);
+      await tester.pumpWidget(
+        buildApp(
+          mock: seededMock(),
+          board: FakeBoardSource(board: boardAll(KindPresence.missing)),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      for (final (section, host) in const [
+        ('inbox', 'inbox.example.com'),
+        ('keyPackage', 'kp.example.com'),
+      ]) {
+        final address = tester.getRect(textIn(section, host));
+        final row = find.ancestor(
+          of: textIn(section, host),
+          matching: find.byType(ConstrainedBox),
+        );
+        final icons = find
+            .descendant(of: row.first, matching: find.byType(Icon))
+            .evaluate();
+        expect(icons, isNotEmpty);
+        for (final icon in icons) {
+          final box = icon.renderObject! as RenderBox;
+          expect(
+            box.localToGlobal(Offset.zero).dx,
+            greaterThanOrEqualTo(address.right),
+          );
+        }
+      }
+    });
+
+    testWidgets('a tap on a symbol shows its exact state', (tester) async {
+      tallSurface(tester);
+      await tester.pumpWidget(
+        buildApp(
+          mock: seededMock(),
+          board: FakeBoardSource(
+            board: boardWithKeyPackage(KindPresence.unconfirmed),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text(l10n.relaySettingsPresenceUnconfirmed), findsNothing);
+
+      await tester.tap(
+        find.descendant(
+          of: cellIn('keyPackage', RelayKind.keyPackage),
+          matching: find.byType(RelayStatusGlyph),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.text(l10n.relaySettingsPresenceUnconfirmed), findsOneWidget);
+      await tester.pumpAndSettle(const Duration(seconds: 2));
+    });
+
+    testWidgets('the page renders whole on its first frame, before the board '
+        'answers anything', (tester) async {
+      tallSurface(tester);
+      await tester.pumpWidget(buildApp(mock: seededMock()));
+      var frames = 0;
+      while (find.text('My Inbox Relays').evaluate().isEmpty && frames < 10) {
+        await tester.pump();
+        frames++;
+      }
+
+      expect(find.text('inbox.example.com'), findsOneWidget);
+      expect(find.text('kp.example.com'), findsOneWidget);
+      expect(
+        cellsIn('lookup'),
+        findsNWidgets(fallbackDiscoveryRelays.length * 2),
+      );
+      for (final e in find.byType(RelayKindStatusCell).evaluate()) {
+        expect(
+          (e.widget as RelayKindStatusCell).status,
+          KindPresence.notChecked,
+          reason: 'nothing read is nothing known: never a fabricated answer',
+        );
+      }
+    });
+
+    testWidgets('a state change never moves the row or its remove button', (
+      tester,
+    ) async {
+      tallSurface(tester);
+      final board = FakeBoardSource(board: boardAll(KindPresence.notChecked));
+      await tester.pumpWidget(
+        buildApp(mock: seededMock(), board: board, reduceMotion: true),
+      );
+      await tester.pumpAndSettle();
+      final remove = find.byTooltip('Remove kp.example.com');
+      final address = textIn('keyPackage', 'kp.example.com');
+      final removeAt = tester.getRect(remove);
+      final addressAt = tester.getRect(address);
+
+      for (final p in KindPresence.values) {
+        board.board = boardAll(p);
+        await tester.pump(const Duration(milliseconds: 500));
+        expect(tester.getRect(remove), removeAt, reason: '$p');
+        expect(tester.getRect(address), addressAt, reason: '$p');
+      }
+    });
+
+    test('coloured symbols keep 3:1 against the card in light and dark', () {
+      for (final theme in [HavenTheme.light(), HavenTheme.dark()]) {
+        for (final colour in const [
+          HavenSecurityColors.encrypted,
+          HavenSecurityColors.danger,
+          HavenSecurityColors.warning,
+        ]) {
+          expect(
+            _contrast(colour, theme.cardTheme.color!),
+            greaterThanOrEqualTo(3),
+            reason: '$colour on ${theme.brightness}',
+          );
+        }
+        expect(
+          _contrast(theme.colorScheme.onSurfaceVariant, theme.cardTheme.color!),
+          greaterThanOrEqualTo(3),
+        );
+      }
+    });
+
+    testWidgets('a long address wraps instead of being cut', (tester) async {
+      tallSurface(tester, size: const Size(360, 3200));
+      const host =
+          'a-very-long-relay-host-name-that-keeps-going.example-relays.org';
+      final mock = MockRelayPreferencesService(
+        initialRelays: const {
+          RelayCategory.inbox: ['wss://$host'],
+          RelayCategory.keyPackage: [_kp],
+        },
+      );
+      await tester.pumpWidget(buildApp(mock: mock));
+      await tester.pumpAndSettle();
+
+      final text = tester.widget<Text>(find.text(host));
+      expect(text.maxLines, isNull);
+      expect(text.overflow, isNull);
+      expect(
+        tester.getSize(find.text(host)).height,
+        greaterThan(tester.getSize(find.text('kp.example.com')).height * 1.5),
+      );
+      expect(tester.takeException(), isNull);
+    });
+  });
+
+  group('RelaySettingsPage — hold notes', () {
+    testWidgets('while the reset notice is unanswered the note says why from '
+        'the first frame, below every list the user edits', (tester) async {
+      tallSurface(tester);
+      await tester.pumpWidget(
+        buildApp(
+          mock: seededMock(),
+          board: FakeBoardSource(board: boardAll(KindPresence.held)),
+        ),
+      );
+      var frames = 0;
+      while (find.text('My Inbox Relays').evaluate().isEmpty && frames < 10) {
+        await tester.pump();
+        frames++;
+      }
+      expect(
+        find.byKey(WidgetKeys.relaySettingsHeldNote),
+        findsOneWidget,
+        reason: 'there in the frame the lists first appear, never later',
+      );
+      expect(find.text(l10n.relaySettingsPublishingHeld), findsOneWidget);
+      await tester.pumpAndSettle();
+      expect(
+        tester.getRect(find.byKey(WidgetKeys.relaySettingsHeldNote)).top,
+        greaterThan(
+          tester
+              .getRect(find.byKey(WidgetKeys.relaySettingsAddRelay('profile')))
+              .bottom,
+        ),
+      );
+      expect(
+        tester
+            .widget<RelayKindStatusCell>(
+              cellIn('keyPackage', RelayKind.keyPackage),
+            )
+            .status,
+        KindPresence.held,
+      );
+    });
+
+    testWidgets('each hold has its own note, and none shows without one', (
+      tester,
+    ) async {
+      tallSurface(tester);
+      for (final (hold, text) in [
+        (OwnPublishHold.noRelaysConfigured, l10n.relaySettingsHeldNoRelays),
+        (
+          OwnPublishHold.publishingSuppressed,
+          l10n.relaySettingsHeldNotYetPublished,
+        ),
+      ]) {
+        await tester.pumpWidget(
+          buildApp(
+            mock: seededMock(),
+            board: FakeBoardSource(
+              board: OwnRelayBoard(keyPackage: OwnKindBoard(hold: hold)),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text(text), findsOneWidget, reason: '$hold');
+        await tester.pumpWidget(const SizedBox());
+      }
+
+      await tester.pumpWidget(
+        buildApp(
+          mock: seededMock(),
+          board: FakeBoardSource(board: boardAll(KindPresence.current)),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byKey(WidgetKeys.relaySettingsHeldNote), findsNothing);
+    });
+  });
+
+  group('RelaySettingsPage — input while something moves', () {
+    testWidgets('a status change landing mid-tap does not cancel the remove', (
+      tester,
+    ) async {
+      tallSurface(tester);
+      final mock = MockRelayPreferencesService(
+        initialRelays: const {
+          RelayCategory.inbox: [
+            'wss://keep.example.com',
+            'wss://drop.example.com',
+          ],
+          RelayCategory.keyPackage: [_kp],
+        },
+      );
+      final board = FakeBoardSource(board: const OwnRelayBoard());
+      await tester.pumpWidget(
+        buildApp(
+          mock: mock,
+          board: board,
+          // A read lands well inside a tap, never as long as a long press.
+          extra: [
+            relayBoardPollIntervalProvider.overrideWithValue(
+              const Duration(milliseconds: 100),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final gesture = await tester.startGesture(
+        tester.getCenter(find.byTooltip('Remove drop.example.com')),
+      );
+      board.board = const OwnRelayBoard(
+        inboxRelayList: OwnKindBoard(
+          cells: [
+            OwnRelayCell(
+              relayUrl: 'wss://drop.example.com',
+              status: OwnRelayStatus.checking,
+            ),
+          ],
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(
+        tester
+            .widget<RelayKindStatusCell>(
+              cellIn(
+                'inbox',
+                RelayKind.inboxRelayList,
+                url: 'wss://drop.example.com',
+              ),
+            )
+            .status,
+        KindPresence.checking,
+        reason: 'premise: the row changed under the finger',
+      );
+      await gesture.up();
+      await tester.pumpAndSettle();
+
+      expect(mock.log, contains('remove:inbox:wss://drop.example.com'));
+      expect(find.text('drop.example.com'), findsNothing);
+    });
+
+    testWidgets('a hold note that appears mid-tap moves no control and does '
+        'not cancel the remove', (tester) async {
+      tallSurface(tester);
+      final mock = seededMock();
+      final board = FakeBoardSource(board: boardAll(KindPresence.current));
+      await tester.pumpWidget(
+        buildApp(
+          mock: mock,
+          board: board,
+          extra: [
+            relayBoardPollIntervalProvider.overrideWithValue(
+              const Duration(milliseconds: 100),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      final remove = find.byTooltip('Remove profile.example.com');
+      final before = tester.getRect(remove);
+
+      final gesture = await tester.startGesture(tester.getCenter(remove));
+      board.board = boardAll(KindPresence.held);
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(
+        find.byKey(WidgetKeys.relaySettingsHeldNote),
+        findsOneWidget,
+        reason: 'premise: the note appeared under the finger',
+      );
+      expect(tester.getRect(remove), before);
+      await gesture.up();
+      await tester.pumpAndSettle();
+
+      expect(mock.log, contains('remove:profile:wss://profile.example.com'));
+    });
+
+    testWidgets('a relay added while a symbol is publishing appears at once, '
+        'not checked yet', (tester) async {
+      tallSurface(tester);
+      final mock = seededMock();
+      await tester.pumpWidget(
+        buildApp(
+          mock: mock,
+          board: FakeBoardSource(
+            board: boardWithKeyPackage(KindPresence.publishing),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async => call.method == 'Clipboard.getData'
+            ? <String, dynamic>{'text': 'wss://added.example.com'}
+            : null,
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+      await tester.tap(find.byKey(WidgetKeys.relaySettingsAddRelay('inbox')));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      await tester.tap(find.byTooltip('Paste from clipboard'));
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.tap(find.text('Add'));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+
+      expect(mock.log, contains('add:inbox:wss://added.example.com'));
+      expect(textIn('inbox', 'added.example.com'), findsOneWidget);
+      expect(
+        tester
+            .widget<RelayKindStatusCell>(
+              cellIn(
+                'inbox',
+                RelayKind.inboxRelayList,
+                url: 'wss://added.example.com',
+              ),
+            )
+            .status,
+        KindPresence.notChecked,
+      );
+    });
+  });
+
+  group('RelaySettingsPage — announcements', () {
+    testWidgets('one announcement when a pass settles, however many symbols '
+        'changed on the way', (tester) async {
+      tallSurface(tester);
+      final board = FakeBoardSource(board: boardAll(KindPresence.checking));
+      await tester.pumpWidget(buildApp(mock: seededMock(), board: board));
+      await tester.pump();
+      await tester.pump();
+      tester.takeAnnouncements();
+
+      board.board = boardAll(KindPresence.publishing);
+      await tester.pump(const Duration(milliseconds: 500));
+      board.board = boardAll(KindPresence.current);
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pump(const Duration(milliseconds: 500));
+
+      expect(tester.takeAnnouncements().map((a) => a.message), [
+        l10n.relaySettingsCheckSettled(0),
+      ]);
+    });
+
+    testWidgets('the settled announcement counts the relays not confirmed up '
+        'to date, and names none', (tester) async {
+      tallSurface(tester);
+      final board = FakeBoardSource(
+        board: boardWithKeyPackage(KindPresence.publishing),
+      );
+      await tester.pumpWidget(buildApp(mock: seededMock(), board: board));
+      await tester.pump();
+      await tester.pump();
+      tester.takeAnnouncements();
+
+      board.board = boardWithKeyPackage(KindPresence.refused);
+      await tester.pump(const Duration(milliseconds: 500));
+
+      final said = tester.takeAnnouncements().map((a) => a.message).toList();
+      expect(said, [l10n.relaySettingsCheckSettled(1)]);
+      expect(said.single, isNot(contains('example')));
+    });
+
+    testWidgets('a relay the user just added is announced once its own '
+        'check settles', (tester) async {
+      tallSurface(tester);
+      final mock = seededMock();
+      final board = FakeBoardSource(board: boardAll(KindPresence.current));
+      await tester.pumpWidget(buildApp(mock: mock, board: board));
+      await tester.pumpAndSettle();
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async => call.method == 'Clipboard.getData'
+            ? <String, dynamic>{'text': 'wss://added.example.com'}
+            : null,
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+      await tester.tap(find.byKey(WidgetKeys.relaySettingsAddRelay('inbox')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Paste from clipboard'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Add'));
+      await tester.pumpAndSettle();
+      tester.takeAnnouncements();
+
+      OwnRelayBoard withAdded(OwnRelayStatus status) {
+        final base = boardAll(KindPresence.current);
+        return OwnRelayBoard(
+          lookupRelays: base.lookupRelays,
+          keyPackage: base.keyPackage,
+          relayList: base.relayList,
+          inboxRelayList: OwnKindBoard(
+            cells: [
+              ...base.inboxRelayList.cells,
+              OwnRelayCell(relayUrl: 'wss://added.example.com', status: status),
+            ],
+          ),
+        );
+      }
+
+      board.board = withAdded(OwnRelayStatus.checking);
+      await tester.pump(const Duration(milliseconds: 500));
+      board.board = withAdded(OwnRelayStatus.current);
+      await tester.pump(const Duration(milliseconds: 500));
+
+      expect(
+        tester.takeAnnouncements().map((a) => a.message),
+        contains(l10n.relaySettingsAddedRelayUpToDate('added.example.com')),
+      );
+    });
+  });
+
+  group('RelaySettingsPage — explanation panels', () {
+    Future<void> openPanel(
+      WidgetTester tester,
+      RelaySettingsSection section,
+    ) async {
+      final button = find.byKey(
+        WidgetKeys.relaySettingsInfoButton(section.name),
+      );
+      await tester.scrollUntilVisible(
+        button,
+        200,
+        scrollable: find.descendant(
+          of: find.byType(ListView),
+          matching: find.byType(Scrollable),
+        ),
+      );
+      await tester.tap(button);
+      await tester.pump();
+      // The legend's publishing ring turns: never settle while it shows.
+      await tester.pump(const Duration(milliseconds: 500));
+    }
+
+    Future<void> closePanel(WidgetTester tester) async {
+      tester.state<NavigatorState>(find.byType(Navigator)).pop();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+    }
+
+    testWidgets("each section's question mark opens its explanation over the "
+        'page, never as a page of its own', (tester) async {
+      tallSurface(tester);
+      final routes = _RouteLog();
+      await tester.pumpWidget(
+        buildApp(mock: seededMock(), observers: [routes]),
+      );
+      await tester.pumpAndSettle();
+      final semantics = tester.ensureSemantics();
+
+      for (final section in RelaySettingsSection.values) {
+        final before = routes.pushed.length;
+        await openPanel(tester, section);
+
+        expect(routes.pushed, hasLength(before + 1));
+        expect(routes.pushed.last, isA<ModalBottomSheetRoute<void>>());
+        expect(find.byType(RelaySettingsPage), findsOneWidget);
+        final heading = find.descendant(
+          of: find.byType(BottomSheet),
+          matching: find.text(relaySectionTitle(l10n, section)),
+        );
+        expect(heading, findsOneWidget);
+        expect(tester.getSemantics(heading), isSemantics(isHeader: true));
+        await closePanel(tester);
+      }
+      semantics.dispose();
+    });
+
+    testWidgets('the panel never reaches past half the screen', (tester) async {
+      for (final size in const [
+        Size(360, 640),
+        Size(412, 915),
+        Size(800, 400),
+      ]) {
+        for (final scale in const [1.0, 2.0]) {
+          tester.view.physicalSize = size;
+          tester.view.devicePixelRatio = 1;
+          await tester.pumpWidget(
+            buildApp(mock: seededMock(), textScaler: TextScaler.linear(scale)),
+          );
+          await tester.pumpAndSettle();
+          for (final section in RelaySettingsSection.values) {
+            await openPanel(tester, section);
+            final sheet = tester.getRect(find.byType(BottomSheet));
+            expect(
+              sheet.height,
+              lessThanOrEqualTo(size.height / 2),
+              reason: '$size × $scale, $section',
+            );
+            expect(sheet.bottom, size.height);
+            await closePanel(tester);
+          }
+          await tester.pumpWidget(const SizedBox());
+        }
+      }
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    testWidgets('the whole explanation is reachable inside the panel at 200% '
+        'text', (tester) async {
+      tallSurface(tester, size: const Size(360, 640));
+      await tester.pumpWidget(
+        buildApp(mock: seededMock(), textScaler: const TextScaler.linear(2)),
+      );
+      await tester.pumpAndSettle();
+
+      for (final section in RelaySettingsSection.values) {
+        await openPanel(tester, section);
+        final scrollable = find.descendant(
+          of: find.byKey(WidgetKeys.relaySettingsInfoSheet),
+          matching: find.byType(Scrollable),
+        );
+        final last = section == RelaySettingsSection.profile
+            ? find.byKey(WidgetKeys.relaySettingsInfoTechnical)
+            : find.text(l10n.relaySettingsLegendHeld);
+        final position = tester.state<ScrollableState>(scrollable).position;
+        expect(
+          position.maxScrollExtent,
+          greaterThan(0),
+          reason: 'premise: at 200% the explanation is taller than the panel',
+        );
+        position.jumpTo(position.maxScrollExtent);
+        await tester.pump();
+        final sheet = tester.getRect(find.byType(BottomSheet));
+        final target = tester.getRect(last);
+        // Its end is in view inside the panel: nothing is out of reach.
+        expect(target.bottom, greaterThan(sheet.top), reason: '$section');
+        expect(target.bottom, lessThanOrEqualTo(sheet.bottom + 0.5));
+        expect(tester.takeException(), isNull);
+        await closePanel(tester);
+      }
+    });
+
+    testWidgets('the question mark is a labelled 48 dp button just after its '
+        'title, in either direction', (tester) async {
+      tallSurface(tester);
+      for (final locale in const [Locale('en'), Locale('ar')]) {
+        final strings = lookupAppLocalizations(locale);
+        await tester.pumpWidget(buildApp(mock: seededMock(), locale: locale));
+        await tester.pumpAndSettle();
+        for (final section in RelaySettingsSection.values) {
+          final button = find.byKey(
+            WidgetKeys.relaySettingsInfoButton(section.name),
+          );
+          final title = relaySectionTitle(strings, section);
+          final size = tester.getSize(button);
+          expect(size.width, greaterThanOrEqualTo(48));
+          expect(size.height, greaterThanOrEqualTo(48));
+          expect(
+            tester.widget<IconButton>(button).tooltip,
+            strings.relaySettingsInfoTooltip(title),
+          );
+          final titleRect = tester.getRect(
+            find.descendant(
+              of: find.byKey(WidgetKeys.relaySettingsSection(section.name)),
+              matching: find.text(title),
+            ),
+          );
+          final buttonRect = tester.getRect(button);
+          if (locale.languageCode == 'ar') {
+            expect(buttonRect.right, lessThanOrEqualTo(titleRect.left + 0.5));
+          } else {
+            expect(
+              buttonRect.left,
+              greaterThanOrEqualTo(titleRect.right - 0.5),
+            );
+          }
+        }
+        await tester.pumpWidget(const SizedBox());
+      }
+    });
+
+    testWidgets('a panel for a section with symbols explains each one with '
+        "the rows' own glyph; the Profile panel has no legend", (tester) async {
+      tallSurface(tester);
+      await tester.pumpWidget(buildApp(mock: seededMock()));
+      await tester.pumpAndSettle();
+
+      for (final section in RelaySettingsSection.values) {
+        await openPanel(tester, section);
+        final legend = find.byKey(WidgetKeys.relaySettingsLegend);
+        if (section == RelaySettingsSection.profile) {
+          expect(legend, findsNothing);
+        } else {
+          final shown = {
+            for (final e
+                in find
+                    .descendant(
+                      of: legend,
+                      matching: find.byType(RelayStatusGlyph),
+                    )
+                    .evaluate())
+              (e.widget as RelayStatusGlyph).status,
+          };
+          expect(shown, {
+            KindPresence.current,
+            KindPresence.publishing,
+            KindPresence.checking,
+            KindPresence.missing,
+            KindPresence.noAnswer,
+            KindPresence.held,
+          }, reason: 'one line per symbol a row can show');
+          for (final text in [
+            l10n.relaySettingsLegendCurrent,
+            l10n.relaySettingsLegendPublishing,
+            l10n.relaySettingsLegendChecking,
+            l10n.relaySettingsLegendNotOnRelay,
+            l10n.relaySettingsLegendNoAnswer,
+            l10n.relaySettingsLegendHeld,
+          ]) {
+            expect(
+              find.descendant(of: legend, matching: find.text(text)),
+              findsOneWidget,
+            );
+          }
+        }
+        await closePanel(tester);
+      }
+    });
+
+    testWidgets('no explanation is shown on the page until it is asked for', (
+      tester,
+    ) async {
+      tallSurface(tester);
+      await tester.pumpWidget(buildApp(mock: seededMock()));
+      await tester.pumpAndSettle();
+
+      for (final paragraph in [
+        l10n.relaySettingsInboxInfoWhat,
+        l10n.relaySettingsKeyPackageInfoWhat,
+        l10n.relaySettingsProfileInfoWhat,
+        l10n.relaySettingsLookupInfoWhat,
+        l10n.relaySettingsLegendTitle,
+      ]) {
+        expect(find.text(paragraph), findsNothing);
+      }
+    });
+
+    testWidgets('a tap on the scrim while the panel is still opening closes '
+        'it', (tester) async {
+      tallSurface(tester);
+      await tester.pumpWidget(buildApp(mock: seededMock()));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(WidgetKeys.relaySettingsInfoButton('inbox')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(find.byType(BottomSheet), findsOneWidget);
+      await tester.tapAt(const Offset(400, 20));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+
+      expect(find.byType(BottomSheet), findsNothing);
+    });
+
+    testWidgets('a tap on another question mark while a panel is closing '
+        'opens that one', (tester) async {
+      tallSurface(tester);
+      await tester.pumpWidget(buildApp(mock: seededMock()));
+      await tester.pumpAndSettle();
+      await openPanel(tester, RelaySettingsSection.inbox);
+
+      await tester.tapAt(const Offset(400, 20));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.tap(
+        find.byKey(WidgetKeys.relaySettingsInfoButton('keyPackage')),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+
+      expect(find.byType(BottomSheet), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byType(BottomSheet),
+          matching: find.text(l10n.relaySettingsKeyPackageTitle),
+        ),
+        findsOneWidget,
+      );
+    });
+  });
+
+  group('RelaySettingsPage — accessibility', () {
+    OwnRelayBoard mixed() => OwnRelayBoard(
+      lookupRelays: fallbackDiscoveryRelays,
+      keyPackage: const OwnKindBoard(
+        cells: [OwnRelayCell(relayUrl: _kp, status: OwnRelayStatus.publishing)],
+      ),
+      relayList: OwnKindBoard(
+        cells: [
+          const OwnRelayCell(relayUrl: _kp, status: OwnRelayStatus.refused),
+          for (final (i, url) in fallbackDiscoveryRelays.indexed)
+            OwnRelayCell(
+              relayUrl: url,
+              status: OwnRelayStatus.values[i % OwnRelayStatus.values.length],
+            ),
+        ],
+      ),
+      inboxRelayList: const OwnKindBoard(
+        hold: OwnPublishHold.awaitingResetAcknowledgement,
+      ),
+    );
+
+    testWidgets('the page meets the tap-target, label and text-contrast '
+        'guidelines in light and dark, with a panel open too', (tester) async {
+      tallSurface(tester);
+      final semantics = tester.ensureSemantics();
+      final mock = MockRelayPreferencesService(
+        initialRelays: const {
+          RelayCategory.inbox: [_inbox],
+          RelayCategory.keyPackage: [_kp],
+          RelayCategory.profile: [_inbox, 'wss://profile.example.com'],
+        },
+      );
+      for (final theme in [HavenTheme.light(), HavenTheme.dark()]) {
+        await tester.pumpWidget(
+          buildApp(
+            mock: mock,
+            board: FakeBoardSource(board: mixed()),
+            theme: theme,
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 500));
+
+        Future<void> meetsAll() async {
+          await expectLater(tester, meetsGuideline(androidTapTargetGuideline));
+          await expectLater(tester, meetsGuideline(iOSTapTargetGuideline));
+          await expectLater(tester, meetsGuideline(labeledTapTargetGuideline));
+          await expectLater(tester, meetsGuideline(textContrastGuideline));
+        }
+
+        await meetsAll();
+        await tester.tap(
+          find.byKey(WidgetKeys.relaySettingsInfoButton('keyPackage')),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 500));
+        await meetsAll();
+        tester.state<NavigatorState>(find.byType(Navigator)).pop();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 500));
+        await tester.pumpWidget(const SizedBox());
+      }
+      semantics.dispose();
+    });
+
+    testWidgets('section titles are headings', (tester) async {
+      tallSurface(tester);
+      final semantics = tester.ensureSemantics();
+      await tester.pumpWidget(buildApp(mock: seededMock()));
+      await tester.pumpAndSettle();
+
+      for (final section in RelaySettingsSection.values) {
+        expect(
+          tester.getSemantics(
+            textIn(section.name, relaySectionTitle(l10n, section)),
+          ),
+          isSemantics(isHeader: true),
+        );
+      }
+      semantics.dispose();
+    });
+
+    testWidgets('the legend title in a panel is a heading', (tester) async {
+      tallSurface(tester);
+      final semantics = tester.ensureSemantics();
+      await tester.pumpWidget(buildApp(mock: seededMock()));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(WidgetKeys.relaySettingsInfoButton('inbox')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+
+      expect(
+        tester.getSemantics(find.text(l10n.relaySettingsLegendTitle)),
+        isSemantics(isHeader: true),
+      );
+      semantics.dispose();
+    });
+
+    testWidgets('200% text on a 320 dp phone: nothing overflows, in any '
+        'state', (tester) async {
+      tallSurface(tester, size: const Size(320, 6000));
+      for (final p in KindPresence.values) {
+        await tester.pumpWidget(
+          buildApp(
+            mock: MockRelayPreferencesService(
+              initialRelays: const {
+                RelayCategory.inbox: [
+                  _inbox,
+                  'wss://a-rather-long-relay-address.example-operator.net/x',
+                ],
+                RelayCategory.keyPackage: [_kp],
+              },
+            ),
+            board: FakeBoardSource(board: boardAll(p)),
+            textScaler: const TextScaler.linear(2),
+            reduceMotion: true,
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull, reason: '$p');
+        await tester.pumpWidget(const SizedBox());
+      }
+    });
+
+    testWidgets('Arabic: addresses keep their spelling, aligned to the start '
+        'of the row', (tester) async {
+      tallSurface(tester);
+      await tester.pumpWidget(
+        buildApp(
+          mock: MockRelayPreferencesService(
+            initialRelays: const {
+              RelayCategory.inbox: ['wss://relay.example.com/x'],
+              RelayCategory.keyPackage: [_kp],
+            },
+          ),
+          locale: const Locale('ar'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final address = textIn('inbox', 'relay.example.com/x');
+      expect(address, findsOneWidget);
+      expect(tester.widget<Text>(address).textDirection, TextDirection.ltr);
+      final cell = tester.getRect(cellIn('inbox', RelayKind.inboxRelayList));
+      expect(cell.right, lessThanOrEqualTo(tester.getRect(address).left));
     });
   });
 }

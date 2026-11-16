@@ -38,11 +38,12 @@ pub enum Frame {
     Hold(tokio::sync::watch::Receiver<bool>),
 }
 
-/// One thing the relay does on its socket: send a frame, or wait for a
-/// [`Frame::Hold`] to open.
+/// One thing the relay does on its socket: send a frame, wait for a
+/// [`Frame::Hold`] or [`Verdict::HoldThen`] to open, or hang up.
 enum Reply {
     Text(String),
     Hold(tokio::sync::watch::Receiver<bool>),
+    HangUp,
 }
 
 /// What the relay does with one published event.
@@ -60,6 +61,11 @@ pub enum Verdict {
     HangUp,
     /// Sends these frames, as wire text, and does not keep it.
     Frames(Vec<String>),
+    /// Does what the inner verdict does to the store at once, and sends what
+    /// it sends — or hangs up — only once the switch reads `true`; the
+    /// socket's next client message waits too. A relay whose `OK` a test
+    /// releases.
+    HoldThen(tokio::sync::watch::Receiver<bool>, Box<Verdict>),
 }
 
 type Asked = Box<dyn Fn(&Filter) -> bool + Send + Sync>;
@@ -72,6 +78,7 @@ struct Script {
     refusals: Mutex<Vec<Refused>>,
     verdict: Mutex<Option<Judged>>,
     published: Mutex<Vec<Event>>,
+    serve_kept: std::sync::atomic::AtomicBool,
     offers: AtomicUsize,
     connections: AtomicUsize,
 }
@@ -165,6 +172,14 @@ impl ScriptedRelay {
             .unwrap_or_else(PoisonError::into_inner) = Some(Box::new(verdict));
     }
 
+    /// Answers every `REQ` no scripted answer matches from what the relay
+    /// kept, as a NIP-01 relay would: each kept event a filter matches, only
+    /// the newest of a replaceable or addressable coordinate, newest first,
+    /// each filter's `limit` honoured, then `EOSE`.
+    pub fn serve_kept(&self) {
+        self.script.serve_kept.store(true, Ordering::SeqCst);
+    }
+
     /// Every event a client has published here and the relay took, in arrival
     /// order. Each was answered `OK true`, or kept in silence
     /// ([`Verdict::KeepSilently`]).
@@ -219,6 +234,7 @@ async fn serve(tcp: TcpStream, script: Arc<Script>) {
                 Reply::Hold(mut open) => {
                     let _ = open.wait_for(|open| *open).await;
                 }
+                Reply::HangUp => return,
             }
         }
     }
@@ -256,34 +272,12 @@ impl Script {
                 let event: Event =
                     serde_json::from_value(event.clone()).expect("a client publishes an event");
                 self.offers.fetch_add(1, Ordering::SeqCst);
-                let keep = |event: Event| {
-                    self.published
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .push(event);
-                };
-                let texts = match self.judge(&event) {
-                    Verdict::Keep => {
-                        let ok = serde_json::json!(["OK", event.id, true, ""]).to_string();
-                        keep(event);
-                        vec![ok]
-                    }
-                    Verdict::KeepSaying(text) => {
-                        let ok = serde_json::json!(["OK", event.id, true, text]).to_string();
-                        keep(event);
-                        vec![ok]
-                    }
-                    Verdict::Frames(frames) => frames,
-                    Verdict::Refuse(text) => {
-                        vec![serde_json::json!(["OK", event.id, false, text]).to_string()]
-                    }
-                    Verdict::KeepSilently => {
-                        keep(event);
-                        Vec::new()
-                    }
-                    Verdict::HangUp => return None,
-                };
-                texts.into_iter().map(Reply::Text).collect()
+                let verdict = self.judge(&event);
+                let replies = self.carry_out(verdict, event);
+                if matches!(replies.first(), Some(Reply::HangUp)) {
+                    return None;
+                }
+                replies
             }
             [verb, sub, filters @ ..] if verb == "REQ" => {
                 let filters: Vec<Filter> = filters
@@ -318,9 +312,98 @@ impl Script {
                             .collect()
                     });
                 drop(answers);
-                scripted.unwrap_or_else(|| vec![Reply::Text(eose())])
+                scripted.unwrap_or_else(|| {
+                    let kept = if self.serve_kept.load(Ordering::SeqCst) {
+                        self.kept_matching(&filters)
+                    } else {
+                        Vec::new()
+                    };
+                    kept.into_iter()
+                        .map(|event| {
+                            Reply::Text(serde_json::json!(["EVENT", sub, event]).to_string())
+                        })
+                        .chain(std::iter::once(Reply::Text(eose())))
+                        .collect()
+                })
             }
             _ => Vec::new(),
         })
+    }
+
+    /// What `verdict` does with `event`: the store now, the frames as replies.
+    fn carry_out(&self, verdict: Verdict, event: Event) -> Vec<Reply> {
+        let keep = |event: Event| {
+            self.published
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(event);
+        };
+        let ok = |accepted: bool, text: &str| {
+            Reply::Text(serde_json::json!(["OK", event.id, accepted, text]).to_string())
+        };
+        match verdict {
+            Verdict::Keep => {
+                let reply = ok(true, "");
+                keep(event);
+                vec![reply]
+            }
+            Verdict::KeepSaying(text) => {
+                let reply = ok(true, &text);
+                keep(event);
+                vec![reply]
+            }
+            Verdict::Frames(frames) => frames.into_iter().map(Reply::Text).collect(),
+            Verdict::Refuse(text) => vec![ok(false, &text)],
+            Verdict::KeepSilently => {
+                keep(event);
+                Vec::new()
+            }
+            Verdict::HangUp => vec![Reply::HangUp],
+            Verdict::HoldThen(open, then) => std::iter::once(Reply::Hold(open))
+                .chain(self.carry_out(*then, event))
+                .collect(),
+        }
+    }
+
+    /// The kept events `filters` match, as a NIP-01 relay serves them.
+    fn kept_matching(&self, filters: &[Filter]) -> Vec<Event> {
+        let mut newest: Vec<Event> = Vec::new();
+        for event in self
+            .published
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+        {
+            let coordinate = |e: &Event| {
+                (e.kind.is_replaceable() || e.kind.is_addressable()).then(|| {
+                    let d = e.tags.identifier().map(str::to_owned);
+                    (e.kind, e.pubkey, d)
+                })
+            };
+            match coordinate(event).and_then(|at| {
+                newest
+                    .iter()
+                    .position(|e| coordinate(e).as_ref() == Some(&at))
+            }) {
+                Some(i) if (newest[i].created_at, event.id) < (event.created_at, newest[i].id) => {
+                    newest[i] = event.clone();
+                }
+                Some(_) => {}
+                None => newest.push(event.clone()),
+            }
+        }
+        newest.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(a.id.cmp(&b.id)));
+        let mut served: Vec<Event> = Vec::new();
+        for filter in filters {
+            let matching = newest.iter().filter(|event| {
+                filter.match_event(event, nostr::filter::MatchEventOptions::default())
+            });
+            for event in matching.take(filter.limit.unwrap_or(usize::MAX)) {
+                if !served.contains(event) {
+                    served.push(event.clone());
+                }
+            }
+        }
+        served
     }
 }

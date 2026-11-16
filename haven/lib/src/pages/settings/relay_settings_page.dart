@@ -1,12 +1,17 @@
 /// Editable relay settings page for Haven.
 ///
-/// Shows three independent relay categories — Inbox (kind 10050), KeyPackage
-/// (kind 10002), and Profile (kind-0, local-only policy — never published)
-/// — with add/remove/restore controls, then the read-only lookup relays
-/// inviters search, plus a short framing caption. Each Inbox, KeyPackage and
-/// lookup row says, per kind expected there, whether the relay serves it
-/// (`relayStatusProvider`); "Republish" appears when one misses a kind or
-/// serves an old one.
+/// Three relay categories the user edits — Inbox (kind 10050), KeyPackage
+/// (kinds 30443 and 10002) and Profile (kind 0, a list kept on the phone and
+/// never published) — then the read-only lookup relays Haven copies the two
+/// relay lists to, and a short framing caption. Each section title carries a
+/// circled question mark that opens an explanation panel over the page.
+///
+/// Every Inbox, KeyPackage and lookup row shows, per item expected on that
+/// relay, a symbol that follows the maintenance passes as they check and
+/// publish (`relayStatusProvider`). The page offers no refresh and no
+/// republish: opening it runs a pass only when the last one is stale
+/// ([ownRelayBoardIsStale]), and one screen-reader announcement follows each
+/// pass when it settles.
 ///
 /// The Profile section's remove control is deliberately absent on the curated
 /// pool entries — `usable_profile_relays()` unions
@@ -27,18 +32,22 @@ library;
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/constants/relays.dart';
-import 'package:haven/src/models/relay_ring_slot.dart';
+import 'package:haven/src/models/own_relay_board.dart';
 import 'package:haven/src/pages/settings/add_relay_sheet.dart';
+import 'package:haven/src/pages/settings/relay_info_sheet.dart';
+import 'package:haven/src/pages/settings/relay_status_cell.dart';
 import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/relay_status_provider.dart';
+import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/relay_preferences_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
-import 'package:haven/src/widgets/common/refresh_ring/refresh_ring_button.dart';
 import 'package:haven/src/widgets/widgets.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -52,6 +61,12 @@ class RelaySettingsPage extends ConsumerStatefulWidget {
 }
 
 class _RelaySettingsPageState extends ConsumerState<RelaySettingsPage> {
+  /// The relay the user just added, normalized, until its check settles.
+  String? _added;
+
+  /// Whether [_added] has been seen checking or publishing.
+  bool _addedSeenBusy = false;
+
   @override
   void initState() {
     super.initState();
@@ -60,7 +75,13 @@ class _RelaySettingsPageState extends ConsumerState<RelaySettingsPage> {
       // Opening the page is the user asking for the lists, so a read that
       // failed earlier is asked again rather than shown as failed.
       retryFailedRelayLoads(ref);
-      ref.read(relayStatusProvider.notifier).checkAllRelays();
+      if (ownRelayBoardIsStale(
+        ref.read(maintenanceServiceProvider).ownRelayBoard(),
+      )) {
+        ref
+          ..invalidate(keyPackagePublisherProvider)
+          ..read(keyPackagePublisherProvider);
+      }
       unawaited(_topUpProfileRelays());
     });
   }
@@ -93,30 +114,55 @@ class _RelaySettingsPageState extends ConsumerState<RelaySettingsPage> {
     }
   }
 
+  void _onRelayAdded(String url) {
+    _added = normalizeRelayUrlForComparison(url);
+    _addedSeenBusy = false;
+  }
+
+  /// One announcement when a pass settles, and one for a relay the user just
+  /// added once its own check settles — never one per symbol.
+  void _announce(RelayStatusState? previous, RelayStatusState next) {
+    if (!mounted) return;
+    final l10n = AppLocalizations.of(context);
+    final messages = <String>[];
+    final added = _added;
+    if (added != null) {
+      final row = _rowFor(next, added);
+      if (row != null) {
+        if (row.expected.any(_unsettled)) {
+          _addedSeenBusy |= row.expected.any(_busy);
+        } else if (_addedSeenBusy) {
+          final host = row.relayUrl.replaceFirst('wss://', '');
+          messages.add(
+            row.expected.every((k) => k == KindPresence.current)
+                ? l10n.relaySettingsAddedRelayUpToDate(host)
+                : l10n.relaySettingsAddedRelayNotUpToDate(host),
+          );
+          _added = null;
+        }
+      }
+    }
+    if ((previous?.busy ?? false) && !next.busy) {
+      final notCurrent = next.relays
+          .where((r) => r.expected.any((k) => k != KindPresence.current))
+          .length;
+      messages.add(l10n.relaySettingsCheckSettled(notCurrent));
+    }
+    final view = View.of(context);
+    final direction = Directionality.of(context);
+    for (final message in messages) {
+      unawaited(SemanticsService.sendAnnouncement(view, message, direction));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
     final identity = ref.watch(identityProvider);
-    final relayStatus = ref.watch(relayStatusProvider);
+    ref.listen(relayStatusProvider, _announce);
 
     return Scaffold(
-      appBar: AppBar(
-        title: Text(l10n.relaySettingsTitle),
-        actions: [
-          // One ring per relay being checked (union of inbox + KeyPackage).
-          // During loading / error the slots are empty, so the ring shows the
-          // plain refresh icon. Replaces the former spinner-swap.
-          RefreshRingButton(
-            slots: relayStatus.valueOrNull?.ringSlots ?? const [],
-            onPressed: () =>
-                ref.read(relayStatusProvider.notifier).checkAllRelays(),
-            tooltip: l10n.relaySettingsCheckRelaysTooltip,
-            // Green/red here mean "holds your data" vs "missing it / unreachable"
-            // — not "answered" — so use the data-centric a11y vocabulary.
-            vocabulary: RefreshRingVocabulary.hasData,
-          ),
-        ],
-      ),
+      appBar: AppBar(title: Text(l10n.relaySettingsTitle)),
       body: identity.when(
         data: (id) => id == null
             ? HavenScrollFill(
@@ -126,7 +172,7 @@ class _RelaySettingsPageState extends ConsumerState<RelaySettingsPage> {
                   message: l10n.relaySettingsNoIdentityMessage,
                 ),
               )
-            : _buildBody(l10n),
+            : _buildBody(),
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (_, _) => HavenScrollFill(
           child: HavenEmptyState(
@@ -138,31 +184,33 @@ class _RelaySettingsPageState extends ConsumerState<RelaySettingsPage> {
     );
   }
 
-  Widget _buildBody(AppLocalizations l10n) {
+  Widget _buildBody() {
     return ListView(
       padding: const EdgeInsets.all(HavenSpacing.base),
       children: [
         _RelaySection(
           category: RelayCategory.inbox,
-          title: l10n.relaySettingsInboxTitle,
-          subtitle: l10n.relaySettingsInboxSubtitle,
+          section: RelaySettingsSection.inbox,
+          onAdded: _onRelayAdded,
         ),
         const SizedBox(height: HavenSpacing.lg),
         _RelaySection(
           category: RelayCategory.keyPackage,
-          title: l10n.relaySettingsKeyPackageTitle,
-          subtitle: l10n.relaySettingsKeyPackageSubtitle,
+          section: RelaySettingsSection.keyPackage,
+          onAdded: _onRelayAdded,
         ),
         const SizedBox(height: HavenSpacing.lg),
         _RelaySection(
           category: RelayCategory.profile,
-          title: l10n.relaySettingsProfileTitle,
-          subtitle: l10n.relaySettingsProfileSubtitle,
+          section: RelaySettingsSection.profile,
+          onAdded: _onRelayAdded,
         ),
+        // Below every control the user taps, so a note appearing or going
+        // never moves a row under a finger.
+        const _HoldNotes(),
         const SizedBox(height: HavenSpacing.lg),
         // After the lists the user edits: Haven's own, read-only.
         const _LookupSection(),
-        const _RepublishAction(),
         const SizedBox(height: HavenSpacing.lg),
         const _BackendCaption(),
         const SizedBox(height: HavenSpacing.base),
@@ -170,6 +218,11 @@ class _RelaySettingsPageState extends ConsumerState<RelaySettingsPage> {
     );
   }
 }
+
+bool _busy(KindPresence k) =>
+    k == KindPresence.checking || k == KindPresence.publishing;
+
+bool _unsettled(KindPresence k) => _busy(k) || k == KindPresence.notChecked;
 
 /// Curated profile-pool URLs (normalized), computed once rather than on
 /// every rebuild of [_RelaySection]. Haven re-admits these regardless of the
@@ -181,25 +234,65 @@ final Set<String> _unremovableProfileRelays = {
     normalizeRelayUrlForComparison(url),
 };
 
+/// A section's title, a heading to screen readers, with the circled question
+/// mark that opens its explanation right after it in reading order.
+class _SectionHeader extends StatelessWidget {
+  const _SectionHeader({required this.section});
+
+  final RelaySettingsSection section;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
+    final theme = Theme.of(context);
+    final title = relaySectionTitle(l10n, section);
+    return Row(
+      children: [
+        Flexible(
+          child: Semantics(
+            header: true,
+            child: Text(
+              title,
+              style: theme.textTheme.titleSmall?.copyWith(
+                color: theme.colorScheme.primary,
+              ),
+            ),
+          ),
+        ),
+        IconButton(
+          key: WidgetKeys.relaySettingsInfoButton(section.name),
+          tooltip: l10n.relaySettingsInfoTooltip(title),
+          icon: Icon(
+            LucideIcons.circleQuestionMark,
+            size: 20,
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+          onPressed: () => showRelayInfoSheet(context, section),
+        ),
+      ],
+    );
+  }
+}
+
 class _RelaySection extends ConsumerWidget {
   const _RelaySection({
     required this.category,
-    required this.title,
-    required this.subtitle,
+    required this.section,
+    required this.onAdded,
   });
 
   final RelayCategory category;
-  final String title;
-  final String subtitle;
+  final RelaySettingsSection section;
+
+  /// Told the canonical URL of a relay the user added to a list whose rows
+  /// carry symbols.
+  final ValueChanged<String> onAdded;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final l10n = AppLocalizations.of(context);
-    final theme = Theme.of(context);
     final relays = ref.watch(_listProviderFor(category));
-    // `.value` rethrows a failed first load, which paints the page as an
-    // error box; rows without a status show "Not checked" instead.
-    final status = ref.watch(relayStatusProvider).valueOrNull;
+    final status = ref.watch(relayStatusProvider);
     // Contamination warning is advisory and Profile-only (task requirement):
     // only watch the set when this section IS the Profile category, so the
     // Inbox/KeyPackage sections neither pay for nor rebuild on it.
@@ -211,26 +304,12 @@ class _RelaySection extends ConsumerWidget {
         : const <String>{};
 
     return Column(
+      key: WidgetKeys.relaySettingsSection(section.name),
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          title,
-          style: theme.textTheme.titleSmall?.copyWith(
-            color: theme.colorScheme.primary,
-          ),
-        ),
-        const SizedBox(height: 2),
-        Text(
-          subtitle,
-          style: theme.textTheme.bodySmall?.copyWith(
-            color: theme.colorScheme.onSurfaceVariant,
-          ),
-        ),
-        if (category == RelayCategory.profile) ...[
-          const SizedBox(height: HavenSpacing.sm),
+        _SectionHeader(section: section),
+        if (category == RelayCategory.profile)
           const _ProfilePoolUnderflowBanner(),
-        ],
-        const SizedBox(height: HavenSpacing.sm),
         relays.when(
           data: (urls) {
             if (urls.isEmpty) {
@@ -239,26 +318,23 @@ class _RelaySection extends ConsumerWidget {
             return Card(
               child: Column(
                 children: [
-                  for (var i = 0; i < urls.length; i++)
-                    Column(
-                      children: [
-                        _EditableRelayRow(
-                          url: urls[i],
-                          kinds: _kindsFor(category, _rowFor(status, urls[i])),
-                          onRemove:
-                              unremovable.contains(
-                                normalizeRelayUrlForComparison(urls[i]),
-                              )
-                              ? null
-                              : () => _removeRelay(context, ref, urls[i]),
-                          isContaminated: contaminated.contains(
+                  for (var i = 0; i < urls.length; i++) ...[
+                    _RelayRow(
+                      url: urls[i],
+                      cells: _cellsFor(category, _rowFor(status, urls[i])),
+                      onRemove:
+                          unremovable.contains(
                             normalizeRelayUrlForComparison(urls[i]),
-                          ),
-                        ),
-                        if (i < urls.length - 1)
-                          const Divider(height: 1, indent: HavenSpacing.base),
-                      ],
+                          )
+                          ? null
+                          : () => _removeRelay(context, ref, urls[i]),
+                      isContaminated: contaminated.contains(
+                        normalizeRelayUrlForComparison(urls[i]),
+                      ),
                     ),
+                    if (i < urls.length - 1)
+                      const Divider(height: 1, indent: HavenSpacing.base),
+                  ],
                 ],
               ),
             );
@@ -274,11 +350,13 @@ class _RelaySection extends ConsumerWidget {
           spacing: HavenSpacing.sm,
           children: [
             OutlinedButton.icon(
+              key: WidgetKeys.relaySettingsAddRelay(section.name),
               icon: const Icon(LucideIcons.plus, size: 16),
               label: Text(l10n.relaySettingsAddRelay),
               onPressed: () => _onAddRelayTapped(context, ref),
             ),
             TextButton.icon(
+              key: WidgetKeys.relaySettingsRestoreDefaults(section.name),
               icon: const Icon(LucideIcons.rotateCcw, size: 16),
               label: Text(l10n.relaySettingsRestoreDefaults),
               onPressed: () => _onRestoreDefaultsTapped(context, ref),
@@ -289,20 +367,17 @@ class _RelaySection extends ConsumerWidget {
     );
   }
 
+  /// The add is a local write; the pass it starts is not waited for, and the
+  /// new row's symbols follow it.
   Future<void> _onAddRelayTapped(BuildContext context, WidgetRef ref) async {
     final messenger = ScaffoldMessenger.of(context);
     final l10n = AppLocalizations.of(context);
     final canonical = await showAddRelaySheet(context, category: category);
     if (canonical == null) return;
     try {
-      final notifier = _notifierFor(ref, category);
-      await notifier.addRelay(canonical);
-      // Kick off a status check so the new relay row's dot updates from
-      // "Not checked" to its real state without requiring the user to
-      // tap the refresh icon. The check is async and bounded by the
-      // relay status notifier's own concurrency model.
-      // ignore: unawaited_futures
-      ref.read(relayStatusProvider.notifier).checkAllRelays();
+      await _notifierFor(ref, category).addRelay(canonical);
+      // A Profile row carries no symbol, so it has no check to announce.
+      if (category != RelayCategory.profile) onAdded(canonical);
     } on RelayValidationError catch (e) {
       messenger.showSnackBar(SnackBar(content: Text(e.message)));
     } on Object {
@@ -386,8 +461,7 @@ ProviderListenable<AsyncValue<List<String>>> _listProviderFor(
   RelayCategory.profile => profileRelaysProvider,
 };
 
-RelayPresence? _rowFor(RelayStatusState? state, String url) {
-  if (state == null) return null;
+RelayPresence? _rowFor(RelayStatusState state, String url) {
   final key = normalizeRelayUrlForComparison(url);
   for (final r in state.relays) {
     if (normalizeRelayUrlForComparison(r.relayUrl) == key) return r;
@@ -395,43 +469,45 @@ RelayPresence? _rowFor(RelayStatusState? state, String url) {
   return null;
 }
 
-/// A kind a relay row reports on.
-enum _Kind { keyPackage, relayList, inboxList }
-
-/// The kinds a section's row reports: what that list is published for. A
-/// relay on two lists shows each list's kinds in that list's section.
-List<(_Kind, KindPresence)> _kindsFor(
+/// The items a section's row reports: what that list is published for. A
+/// relay on two lists shows each list's items in that list's section.
+List<(RelayKind, KindPresence)> _cellsFor(
   RelayCategory category,
   RelayPresence? row,
 ) => switch (category) {
   RelayCategory.inbox => [
-    (_Kind.inboxList, row?.inboxRelayList ?? KindPresence.notChecked),
+    (RelayKind.inboxRelayList, row?.inboxRelayList ?? KindPresence.notChecked),
   ],
   RelayCategory.keyPackage => [
-    (_Kind.keyPackage, row?.keyPackage ?? KindPresence.notChecked),
-    (_Kind.relayList, row?.relayList ?? KindPresence.notChecked),
+    (RelayKind.keyPackage, row?.keyPackage ?? KindPresence.notChecked),
+    (RelayKind.relayList, row?.relayList ?? KindPresence.notChecked),
   ],
-  // Profile relays carry only the public profile, which this check does
-  // not ask about.
+  // Profile relays carry only the public profile, which no screen reports
+  // per relay.
   RelayCategory.profile => const [],
 };
 
-class _EditableRelayRow extends StatelessWidget {
-  const _EditableRelayRow({
+/// A relay's address at the start, its items' symbols stacked at the end.
+///
+/// The address and symbols read as one sentence; the remove button stays its
+/// own control. Symbols sit in fixed boxes, so a change of state never moves
+/// the remove button under a finger.
+class _RelayRow extends StatelessWidget {
+  const _RelayRow({
     required this.url,
-    required this.kinds,
+    required this.cells,
     required this.onRemove,
     this.isContaminated = false,
   });
 
   final String url;
 
-  /// The kinds this row reports, each with what the relay serves of it.
-  final List<(_Kind, KindPresence)> kinds;
+  /// The items this row reports, each with what the relay holds of it.
+  final List<(RelayKind, KindPresence)> cells;
 
   /// Removes this relay, or `null` to suppress the control — the curated
   /// profile-pool rows, which Haven dials regardless of whether a remove
-  /// button exists for them.
+  /// button exists for them, and the lookup rows.
   final VoidCallback? onRemove;
 
   /// Advisory-only: `true` when this relay also carries the account's
@@ -444,24 +520,73 @@ class _EditableRelayRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
+    final theme = Theme.of(context);
     final displayUrl = url.replaceFirst('wss://', '');
     final remove = onRemove;
-    return ListTile(
-      leading: kinds.isEmpty
-          ? null
-          : _PresenceDot(slot: summarizePresence(kinds.map((k) => k.$2))),
-      title: _RelayRowText(url: displayUrl, kinds: kinds),
-      trailing: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (isContaminated) _ContaminationWarningIcon(url: displayUrl),
-          if (remove != null)
-            IconButton(
-              tooltip: l10n.relaySettingsRemoveTooltip(displayUrl),
-              icon: const Icon(LucideIcons.trash2),
-              onPressed: remove,
+    return ConstrainedBox(
+      constraints: const BoxConstraints(minHeight: 56),
+      child: Padding(
+        padding: const EdgeInsetsDirectional.fromSTEB(
+          HavenSpacing.base,
+          HavenSpacing.xs,
+          HavenSpacing.xs,
+          HavenSpacing.xs,
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: MergeSemantics(
+                child: LayoutBuilder(
+                  builder: (context, constraints) => Row(
+                    children: [
+                      // Never cut: the part that tells two relays apart is
+                      // often at the end. Left to right in every locale, so
+                      // its punctuation is not reordered.
+                      Expanded(
+                        child: Align(
+                          alignment: AlignmentDirectional.centerStart,
+                          child: Text(
+                            displayUrl,
+                            textDirection: TextDirection.ltr,
+                            style: theme.textTheme.bodyMedium,
+                          ),
+                        ),
+                      ),
+                      if (cells.isNotEmpty) ...[
+                        const SizedBox(width: HavenSpacing.md),
+                        ConstrainedBox(
+                          constraints: BoxConstraints(
+                            maxWidth: constraints.maxWidth / 2,
+                          ),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: [
+                              for (final (kind, status) in cells)
+                                RelayKindStatusCell(
+                                  relayUrl: url,
+                                  kind: kind,
+                                  status: status,
+                                ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
             ),
-        ],
+            if (isContaminated) _ContaminationWarningIcon(url: displayUrl),
+            if (remove != null)
+              IconButton(
+                key: WidgetKeys.relaySettingsRemoveRelay,
+                tooltip: l10n.relaySettingsRemoveTooltip(displayUrl),
+                icon: const Icon(LucideIcons.trash2),
+                onPressed: remove,
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -569,128 +694,72 @@ class _ProfilePoolUnderflowBanner extends ConsumerWidget {
   }
 }
 
-/// A relay's address and one line per kind it reports ("KeyPackage:
-/// Published"), merged so a screen reader reads the row as one sentence.
-class _RelayRowText extends StatelessWidget {
-  const _RelayRowText({required this.url, required this.kinds});
-
-  final String url;
-  final List<(_Kind, KindPresence)> kinds;
+/// Why Haven publishes nothing of a kind now, from the board's first read, so
+/// the note is there on the page's first frame.
+class _HoldNotes extends ConsumerWidget {
+  const _HoldNotes();
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final l10n = AppLocalizations.of(context);
-    final theme = Theme.of(context);
-    final lineStyle = theme.textTheme.bodySmall?.copyWith(
-      color: theme.colorScheme.onSurfaceVariant,
-    );
-    return MergeSemantics(
+    final holds = ref.watch(relayStatusProvider.select((s) => s.holds)).values;
+    if (holds.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(top: HavenSpacing.lg),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        key: WidgetKeys.relaySettingsHeldNote,
         children: [
-          Text(url, style: theme.textTheme.bodyMedium),
-          for (final (kind, presence) in kinds)
-            Text(
-              l10n.relaySettingsKindLine(
-                _kindLabel(l10n, kind),
-                _presenceLabel(l10n, presence),
+          for (final hold in OwnPublishHold.values)
+            if (holds.contains(hold))
+              Padding(
+                padding: const EdgeInsets.only(bottom: HavenSpacing.sm),
+                child: HavenInfoNote(
+                  icon: LucideIcons.circlePause,
+                  paragraphs: [
+                    switch (hold) {
+                      OwnPublishHold.awaitingResetAcknowledgement =>
+                        l10n.relaySettingsPublishingHeld,
+                      OwnPublishHold.noRelaysConfigured =>
+                        l10n.relaySettingsHeldNoRelays,
+                      OwnPublishHold.publishingSuppressed =>
+                        l10n.relaySettingsHeldNotYetPublished,
+                    },
+                  ],
+                ),
               ),
-              style: lineStyle,
-            ),
         ],
       ),
     );
   }
 }
 
-String _kindLabel(AppLocalizations l10n, _Kind kind) => switch (kind) {
-  _Kind.keyPackage => l10n.relaySettingsKindKeyPackage,
-  _Kind.relayList => l10n.relaySettingsKindRelayList,
-  _Kind.inboxList => l10n.relaySettingsKindInboxList,
-};
-
-String _presenceLabel(AppLocalizations l10n, KindPresence presence) =>
-    switch (presence) {
-      KindPresence.notChecked => l10n.relaySettingsStatusNotChecked,
-      KindPresence.checking => l10n.relaySettingsStatusChecking,
-      KindPresence.current => l10n.relaySettingsPresencePublished,
-      KindPresence.outdated => l10n.relaySettingsPresenceOutdated,
-      KindPresence.missing => l10n.relaySettingsPresenceMissing,
-      KindPresence.noAnswer => l10n.relaySettingsStatusUnreachable,
-    };
-
-/// The row's summary, as colour and shape. Decorative: the row's lines say
-/// the same in words.
-class _PresenceDot extends StatelessWidget {
-  const _PresenceDot({required this.slot});
-
-  final RelayRingSlotState slot;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final (Color color, IconData icon) = switch (slot) {
-      RelayRingSlotState.ok => (
-        HavenSecurityColors.encrypted,
-        LucideIcons.circleCheck,
-      ),
-      RelayRingSlotState.checking => (
-        scheme.onSurfaceVariant,
-        LucideIcons.loaderCircle,
-      ),
-      RelayRingSlotState.error => (
-        HavenSecurityColors.warning,
-        LucideIcons.circleAlert,
-      ),
-      RelayRingSlotState.pending => (scheme.outline, LucideIcons.circle),
-    };
-    return ExcludeSemantics(child: Icon(icon, color: color, size: 20));
-  }
-}
-
-/// The lookup relays inviters search, with what each serves of this
-/// account's relay lists. Read-only: the list is Haven's, not the user's.
+/// The lookup relays Haven copies the relay lists to, with what each holds
+/// of them. Read-only: the list is Haven's, not the user's.
 class _LookupSection extends ConsumerWidget {
   const _LookupSection();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final l10n = AppLocalizations.of(context);
-    final theme = Theme.of(context);
     final rows = [
-      for (final r
-          in ref.watch(relayStatusProvider).valueOrNull?.relays ??
-              const <RelayPresence>[])
+      for (final r in ref.watch(relayStatusProvider).relays)
         if (r.lookup) r,
     ];
-    if (rows.isEmpty) return const SizedBox.shrink();
     return Column(
+      key: WidgetKeys.relaySettingsSection(RelaySettingsSection.lookup.name),
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          l10n.relaySettingsLookupTitle,
-          style: theme.textTheme.titleSmall?.copyWith(
-            color: theme.colorScheme.primary,
-          ),
-        ),
-        const SizedBox(height: 2),
-        Text(
-          l10n.relaySettingsLookupSubtitle,
-          style: theme.textTheme.bodySmall?.copyWith(
-            color: theme.colorScheme.onSurfaceVariant,
-          ),
-        ),
-        const SizedBox(height: HavenSpacing.sm),
+        const _SectionHeader(section: RelaySettingsSection.lookup),
         Card(
           child: Column(
             children: [
               for (var i = 0; i < rows.length; i++) ...[
-                _EditableRelayRow(
+                _RelayRow(
                   url: rows[i].relayUrl,
-                  kinds: [
-                    if (rows[i].relayList case final p?) (_Kind.relayList, p),
+                  cells: [
+                    if (rows[i].relayList case final p?)
+                      (RelayKind.relayList, p),
                     if (rows[i].inboxRelayList case final p?)
-                      (_Kind.inboxList, p),
+                      (RelayKind.inboxRelayList, p),
                   ],
                   onRemove: null,
                 ),
@@ -701,50 +770,6 @@ class _LookupSection extends ConsumerWidget {
           ),
         ),
       ],
-    );
-  }
-}
-
-/// "Republish", offered when a relay that answered misses an expected kind
-/// or serves an old one: the same ordered publish maintenance runs, then a
-/// fresh check, reported in fixed copy.
-class _RepublishAction extends ConsumerWidget {
-  const _RepublishAction();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final l10n = AppLocalizations.of(context);
-    final state = ref.watch(relayStatusProvider).valueOrNull;
-    if (state == null || !(state.needsRepublish || state.isRepublishing)) {
-      return const SizedBox.shrink();
-    }
-    final busy = state.isRepublishing || state.isRefreshing;
-    return Padding(
-      padding: const EdgeInsets.only(top: HavenSpacing.sm),
-      child: Align(
-        alignment: AlignmentDirectional.centerStart,
-        child: FilledButton.tonalIcon(
-          key: WidgetKeys.relaySettingsRepublish,
-          icon: const Icon(LucideIcons.upload, size: 16),
-          label: Text(l10n.relaySettingsRepublish),
-          onPressed: busy ? null : () => _republish(context, ref),
-        ),
-      ),
-    );
-  }
-
-  Future<void> _republish(BuildContext context, WidgetRef ref) async {
-    final messenger = ScaffoldMessenger.of(context);
-    final l10n = AppLocalizations.of(context);
-    final outcome = await ref.read(relayStatusProvider.notifier).republish();
-    messenger.showSnackBar(
-      SnackBar(
-        content: Text(switch (outcome) {
-          RepublishOutcome.allCurrent => l10n.relaySettingsRepublishDone,
-          RepublishOutcome.incomplete => l10n.relaySettingsRepublishIncomplete,
-          RepublishOutcome.heldForReset => l10n.relaySettingsRepublishHeld,
-        }),
-      ),
     );
   }
 }
@@ -782,7 +807,7 @@ class _EmptyCategoryState extends ConsumerWidget {
   }
 }
 
-/// Short caption below the two relay sections.
+/// Short caption at the foot of the page.
 ///
 /// This page is a *control* surface, so it keeps only enough framing to make
 /// the abstract "Inbox" / "KeyPackage" headers meaningful — no long-form

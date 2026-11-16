@@ -10,6 +10,10 @@ IMPLEMENTED or RESOLVED. Each carries evidence so it can be picked up cold.
 > found while they existed — not a surface to check, update or re-verify.
 > `docs/privacy/README.md` describes what the manifest covers now.
 
+> **Historical note (2026-11-16).** The `e2e-relay-customization` lane and its
+> `run-relay-customization.sh` runner were renamed `e2e-relay-management` /
+> `run-relay-management.sh`. Entries below keep the old names as records.
+
 **Context.** The audit asked three questions: is location sharing reliable in
 foreground and background on both platforms; can we prove from the relay's side
 that only the expected data leaves the device; and can CI self-confirm that the

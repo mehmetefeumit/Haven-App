@@ -10,7 +10,7 @@ unhealthy emulator/simulator routinely masquerades as a functional failure.**
 These are the lanes this guide has failure modes for — the core-flow pair, the
 two that share their harness, and the integration lane. They are **not** the
 full E2E fleet: the scenario lanes (`e2e-ios-background-publish`,
-`e2e-fgs-publish`, `e2e-profile`, `e2e-relay-customization`, `e2e-clock-skew`,
+`e2e-fgs-publish`, `e2e-profile`, `e2e-relay-management`, `e2e-clock-skew`,
 `e2e-kp-rotation`, `e2e-network-reconnect`, the real-GPS and auth-tier lanes)
 are inventoried in CLAUDE.md's "CI Pipeline" section and each carries its own
 header. A symptom below is worth reading against any of them; a lane-specific
@@ -343,7 +343,7 @@ cache (`~/.gradle/caches/modules-2` + `~/.gradle/wrapper`) on one canonical key
 before its first build — 13 restore steps today. Exactly ONE job writes that key,
 `build-check.yml`'s `android`, from a successful build only, under the restore
 step's own `cache-primary-key` output; a lane that wipes `~/.gradle` for disk
-headroom (e2e-relay-customization) must never be able to publish the hole. Every
+headroom (e2e-relay-management) must never be able to publish the hole. Every
 restore is `continue-on-error: true` under a `timeout-minutes`, because an
 optimisation must never redden a lane that would have built cold.
 
@@ -716,7 +716,7 @@ status. That last one is what `timeout … adb` returned in eight of run
 so: *"nothing was asked of `<device>` … That is this runner's tooling."*
 
 Where each lane installs: `run-single-avd-scenario.sh` Phase 2 (and through it
-e2e-android, e2e-profile, e2e-integration and e2e-relay-customization);
+e2e-android, e2e-profile, e2e-integration and e2e-relay-management);
 Phase 1 of `run-b1-fgs-publish.sh`,
 `run-b3-real-gps.sh`, `run-b5-permission-revocation.sh`,
 `run-b6-location-provider-toggle.sh`, `run-b8-clock-skew.sh`,
@@ -775,7 +775,7 @@ it — `scan_logs_or_contain` in `run-single-avd-scenario.sh`,
 `scan_log_or_contain` in `run-ios-sim-scenario.sh`, `bgp_scan_or_contain` in
 `run-ios-bg-publish.sh`, `logscan_gate_dir` over the whole log directory in the
 three directory-scanning runners (`run-integration-tests.sh`,
-`run-relay-customization.sh`, `run-m7-background-catchup.sh`) and in the scenario runners' EXIT traps — every
+`run-relay-management.sh`, `run-m7-background-catchup.sh`) and in the scenario runners' EXIT traps — every
 one of them a call into `tooling/e2e/ci/logscan-gate.sh` — and the `Scan
 captured logs for secrets before upload` step in every workflow — **deletes
 every file it scanned before exiting non-zero**. The `if: failure()` upload that
@@ -838,7 +838,7 @@ the iOS lanes, the runner's own choice elsewhere):
   (`rotate-needle-dir.sh`), so a stalled attempt's sidecar never reaches the
   next attempt's seal.
 * **`host`** — every proxy-less device lane (`e2e-profile`, `e2e-integration`,
-  `e2e-relay-customization`, `e2e-background-catchup`,
+  `e2e-relay-management`, `e2e-background-catchup`,
   the seven Android scenario lanes, the three iOS scenario lanes): nothing was
   declared over a channel, so the seal declares what the host knows —
   `tooling/e2e/ci/host-needles.sh`: the four fixed harness seeds derived to
@@ -855,7 +855,8 @@ the iOS lanes, the runner's own choice elsewhere):
   directory gate types each `*.log` by name — `*logcat*`, `*drive*`, the
   exact relay-producer names listed in `logscan-gate.sh`
   (`LOGSCAN_RELAY_LOG_NAMES`: `strfry*.log`, `relay.log`,
-  `relay-profile-*.log`, `haven-local-relay*.log`, B5's `relay-poll.b5.log`
+  `relay-profile-*.log`, `haven-local-relay*.log`, the relay-management
+  lane's `haven-fault-relay-*.log`, B5's `relay-poll.b5.log`
   and promoted relay exports, B9's `relay-backlog-event.b9.log`) as `relay` —
   and then by CONTENT: a file whose own lines are `adb logcat -v threadtime`
   entries is a `logcat` sink whatever it is called
@@ -1039,7 +1040,7 @@ a proxy log, 1 for a relay log (the hermetic host relay prints one listen line
 for a whole run) and 1 for a diag. A lane whose captures are legitimately
 smaller passes its own `--floor <class>=<n>` at its seal rather than lowering a
 default, with its basis and the runs it came from stated beside it: integration
-and relay-customization take `drive=18` (each target is gated as
+and relay-management take `drive=18` (each target is gated as
 `--sink drive=<final>,<full>` and a floor sums its class's files, so it is twice
 the 9 lines the host prints per slice), `logcat=300` (logcat is captured per
 target, not per scenario) and `relay=7`; background-catchup and FGS-publish take
@@ -1246,7 +1247,7 @@ The step's own exit code separates the two ways it can end:
 
 **Why the step exists.** Without it the action installs the packages itself,
 with bare `sdkmanager --install` calls it tries exactly once. In CI run
-35524002720 (`e2e-relay-customization`) the emulator's download failed
+35524002720 (`e2e-relay-customization`, now `e2e-relay-management`) the emulator's download failed
 (`Warning: Failed to download package!`), `sdkmanager` exited non-zero and the
 action stopped at the install — no AVD was created and nothing was booted. The
 LAST thing the job printed, though, was the action's unconditional teardown:
@@ -1302,7 +1303,7 @@ build needs the version Flutter's Gradle plugin asks for (`flutter.ndkVersion`,
 28.2.13676358 on Flutter 3.47.9), so on CI `scripts/ci/build_apk_with_retry.sh`
 installs that version first and grades every attempt on disk. Before it did,
 Flutter's plugin made that install itself with one unretried `sdkmanager` call,
-and in CI run 41546262596 (`e2e-relay-customization`) a truncated download ended
+and in CI run 41546262596 (`e2e-relay-customization`, now `e2e-relay-management`) a truncated download ended
 the build as `Error reading Zip content from a SeekableByteChannel` with nothing
 compiled. A red here is therefore a download that did not land after the
 retries the build budget allowed (they share its 180 s with the Gradle retries).

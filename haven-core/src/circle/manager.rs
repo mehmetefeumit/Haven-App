@@ -225,6 +225,9 @@ pub struct CircleManager {
     /// than a `cfg`-split field, and a field that exists only under test is a
     /// field the shipped code path is not the one being measured.
     convergence_reticks: std::sync::atomic::AtomicUsize,
+    /// What each own relay serves of the user's own events, as the
+    /// maintenance passes last found it — see [`Self::own_relay_board`].
+    own_relay_board: crate::relay::maintenance::OwnRelayBoard,
     pub(crate) storage: Arc<CircleStorage>,
 }
 
@@ -325,6 +328,7 @@ impl CircleManager {
             held_at_open,
             held_polled_back: std::sync::atomic::AtomicBool::new(held_at_open == 0),
             convergence_reticks: std::sync::atomic::AtomicUsize::new(0),
+            own_relay_board: crate::relay::maintenance::OwnRelayBoard::default(),
             storage,
         })
     }
@@ -464,6 +468,7 @@ impl CircleManager {
             held_at_open,
             held_polled_back: std::sync::atomic::AtomicBool::new(held_at_open == 0),
             convergence_reticks: std::sync::atomic::AtomicUsize::new(0),
+            own_relay_board: crate::relay::maintenance::OwnRelayBoard::default(),
             storage,
         })
     }
@@ -5730,7 +5735,9 @@ impl CircleManager {
         url: &str,
         relay_type: super::relay_prefs::RelayType,
     ) -> Result<()> {
-        self.storage.add_user_relay(url, relay_type)
+        self.storage.add_user_relay(url, relay_type)?;
+        self.relay_list_edited(relay_type, Some(url));
+        Ok(())
     }
 
     /// See [`CircleStorage::remove_user_relay`].
@@ -5745,7 +5752,9 @@ impl CircleManager {
         url: &str,
         relay_type: super::relay_prefs::RelayType,
     ) -> Result<bool> {
-        self.storage.remove_user_relay(url, relay_type)
+        let removed = self.storage.remove_user_relay(url, relay_type)?;
+        self.relay_list_edited(relay_type, Some(url));
+        Ok(removed)
     }
 
     /// See [`CircleStorage::restore_defaults_for`] (non-destructive).
@@ -5757,7 +5766,9 @@ impl CircleManager {
         &self,
         relay_type: super::relay_prefs::RelayType,
     ) -> Result<()> {
-        self.storage.restore_defaults_for(relay_type)
+        self.storage.restore_defaults_for(relay_type)?;
+        self.relay_list_edited(relay_type, None);
+        Ok(())
     }
 
     /// See [`CircleStorage::wipe_and_reset_defaults_for`] (destructive).
@@ -5769,7 +5780,38 @@ impl CircleManager {
         &self,
         relay_type: super::relay_prefs::RelayType,
     ) -> Result<()> {
-        self.storage.wipe_and_reset_defaults_for(relay_type)
+        self.storage.wipe_and_reset_defaults_for(relay_type)?;
+        self.relay_list_edited(relay_type, None);
+        Ok(())
+    }
+
+    /// The own-relay board ([`crate::relay::maintenance::OwnRelayBoard`]):
+    /// written by the maintenance passes, read by the relay settings page.
+    #[must_use]
+    pub const fn own_relay_board(&self) -> &crate::relay::maintenance::OwnRelayBoard {
+        &self.own_relay_board
+    }
+
+    /// Forgets what the board says of a list that just changed, in the same
+    /// call as the write: a relay list is current only when it names exactly
+    /// the configured list, so every cell of its kind was judged against the
+    /// old one. A `KeyPackage` stays what it was on every relay but the one
+    /// added or removed (`edited`; every relay for a restore or a wipe).
+    fn relay_list_edited(&self, relay_type: super::relay_prefs::RelayType, edited: Option<&str>) {
+        use super::relay_prefs::RelayType;
+        use crate::relay::maintenance::OwnKind;
+        let board = &self.own_relay_board;
+        match relay_type {
+            RelayType::KeyPackage => {
+                board.clear(OwnKind::RelayList);
+                match edited {
+                    Some(relay) => board.forget(OwnKind::KeyPackage, relay),
+                    None => board.clear(OwnKind::KeyPackage),
+                }
+            }
+            RelayType::Inbox => board.clear(OwnKind::InboxRelayList),
+            RelayType::Profile => {}
+        }
     }
 
     /// See [`CircleStorage::get_publish_kp_relay_list`].
