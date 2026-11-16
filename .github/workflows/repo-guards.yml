@@ -26,6 +26,14 @@
 #     committed; the gitignored dart-define secrets file must stay untracked;
 #     tiles.dart must keep injecting the key at compile time.
 #
+#   Release version follows the tag   scripts/ci/check_release_version_stamp.sh
+#     The version the app shows (About page, licence page, Haven's own
+#     User-Agent) is the release tag's, whole — v1.2.3-beta.1 shows 1.2.3-beta.1
+#     while the native stamp is 1.2.3 — and pubspec.yaml's without a tag; a
+#     value that is not a version never reaches the compiled constant. Every
+#     release showed a hardcoded 0.1.0 until 2026-11. Runs build_release.sh's
+#     `version` target, which builds nothing.
+#
 #   Map tile provider policy          scripts/ci/check_tile_provider.sh
 #     The raw OpenStreetMap endpoint must never become the released default
 #     tile source (OSMF tile usage policy).
@@ -972,6 +980,10 @@ jobs:
       - name: Committed-secrets scan
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_no_committed_secrets.sh
+
+      - name: Release version follows the tag
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_release_version_stamp.sh
 
       - name: Map tile provider policy
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}

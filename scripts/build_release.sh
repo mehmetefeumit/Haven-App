@@ -31,13 +31,17 @@
 #                                        # Match — see haven/DEVELOPMENT.md); export is
 #                                        # driven by ios/ExportOptions.plist.
 #                                        # BUILD_NUMBER is REQUIRED (unique build no.).
+#   scripts/build_release.sh version     # print the version arguments the build would
+#                                        # pass to flutter (one per line) and exit;
+#                                        # builds nothing and needs no key.
 #
 # Version stamping (optional env; the release pipeline sets both from the git tag
 # + CI run number, so the tag is the single source of truth — no pubspec edits):
-#   BUILD_NAME    marketing version e.g. 1.2.3 (-> CFBundleShortVersionString /
-#                 Android versionName). A -prerelease/+build suffix is stripped for
-#                 the stamp (1.2.3-beta.1 -> 1.2.3). Unset -> falls back to
-#                 pubspec.yaml `version:`.
+#   BUILD_NAME    release version e.g. 1.2.3 or 1.2.3-beta.1. Shown in full in the
+#                 app (--dart-define=HAVEN_VERSION, About page). The native stamp
+#                 (CFBundleShortVersionString / Android versionName) drops any
+#                 -prerelease/+build suffix (1.2.3-beta.1 -> 1.2.3). Unset -> both
+#                 fall back to pubspec.yaml `version:` (without its +build part).
 #   BUILD_NUMBER  unique, monotonic build number e.g. the CI run number
 #                 (-> CFBundleVersion / Android versionCode). REQUIRED for ipa.
 #
@@ -96,9 +100,10 @@ case "${target}" in
                 || fail "BUILD_NUMBER must be set for ipa builds (CI passes github.run_number; locally e.g. BUILD_NUMBER=1)" 1
               extra_args=(--export-options-plist ios/ExportOptions.plist)
               ;;
+  version)    ;;
   -h|--help)  usage; exit 0 ;;
-  "")         usage; fail "missing build target (apk|appbundle|ios|ipa)" 1 ;;
-  *)          usage; fail "unknown target '${target}' (expected apk|appbundle|ios|ipa)" 1 ;;
+  "")         usage; fail "missing build target (apk|appbundle|ios|ipa|version)" 1 ;;
+  *)          usage; fail "unknown target '${target}' (expected apk|appbundle|ios|ipa|version)" 1 ;;
 esac
 
 # --- 1b. Version stamping (single source of truth) -------------------------
@@ -109,19 +114,30 @@ esac
 # BUILD_NUMBER is additionally required for ipa (enforced above).
 version_args=()
 if [[ -n "${BUILD_NAME:-}" ]]; then
-  # Accept pre-release / build-metadata tags (e.g. v1.2.3-beta.1 arrives here as
-  # BUILD_NAME=1.2.3-beta.1). The version STAMP (Android versionName /
-  # CFBundleShortVersionString) must be digits-only, so strip any -prerelease or
-  # +build suffix for the stamp. Channel/prerelease ROUTING reads the full git tag
-  # elsewhere (release-build.yml prerelease flag + publish_zapstore.sh beta channel),
-  # NOT this value — so v1.2.3-beta.1 still ships to the beta channel.
-  BUILD_NAME="${BUILD_NAME%%[-+]*}"
-  [[ "${BUILD_NAME}" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] \
-    || fail "BUILD_NAME='${BUILD_NAME}' is not a valid version (expected MAJOR.MINOR[.PATCH], digits only — e.g. tag v1.2.3 or v1.2.3-beta.1)" 1
-  version_args+=(--build-name "${BUILD_NAME}")
+  app_version="${BUILD_NAME}"
+else
+  app_version="$(sed -n 's/^version:[[:space:]]*\([^+[:space:]]*\).*$/\1/p' "${HAVEN_DIR}/pubspec.yaml")"
+fi
+# Accept pre-release / build-metadata tags (e.g. v1.2.3-beta.1 arrives here as
+# BUILD_NAME=1.2.3-beta.1). The value is compiled into the app and sent in a
+# User-Agent header, so nothing but a version's characters may pass.
+[[ "${app_version}" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]] \
+  || fail "version '${app_version}' is not valid (expected MAJOR.MINOR[.PATCH][-prerelease][+build] — e.g. tag v1.2.3 or v1.2.3-beta.1)" 1
+version_args+=(--dart-define="HAVEN_VERSION=${app_version}")
+if [[ -n "${BUILD_NAME:-}" ]]; then
+  # The version STAMP (Android versionName / CFBundleShortVersionString) must be
+  # digits-only, so it drops the -prerelease/+build suffix. Channel/prerelease
+  # ROUTING reads the full git tag elsewhere (release-build.yml prerelease flag +
+  # publish_zapstore.sh beta channel), NOT this value — so v1.2.3-beta.1 still
+  # ships to the beta channel.
+  version_args+=(--build-name "${BUILD_NAME%%[-+]*}")
 fi
 if [[ -n "${BUILD_NUMBER:-}" ]]; then
   version_args+=(--build-number "${BUILD_NUMBER}")
+fi
+if [[ "${target}" == version ]]; then
+  printf '%s\n' "${version_args[@]}"
+  exit 0
 fi
 
 # --- 2. Resolve the key source, refusing empty/placeholder ------------------

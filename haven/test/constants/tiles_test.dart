@@ -8,6 +8,7 @@
 library;
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/src/constants/app_version.dart';
 import 'package:haven/src/constants/tiles.dart';
 
 void main() {
@@ -103,8 +104,11 @@ void main() {
       expect(osmRawDevFallback.userAgentHeader, isNotNull);
     });
 
-    test("userAgentHeader contains 'Haven/'", () {
-      expect(osmRawDevFallback.userAgentHeader, contains('Haven/'));
+    test('userAgentHeader names the build version', () {
+      expect(
+        osmRawDevFallback.userAgentHeader,
+        startsWith('Haven/$havenVersion ('),
+      );
     });
 
     test('requiresApiKey is false', () {

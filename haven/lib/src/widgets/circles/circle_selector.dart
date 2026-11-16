@@ -476,9 +476,15 @@ class _TriggerRow extends StatelessWidget {
                         ),
                       ),
                     ] else ...[
-                      Icon(
-                        LucideIcons.users,
-                        color: colorScheme.onSurfaceVariant,
+                      // Laid out like the selected state (avatar-sized slot,
+                      // one ellipsized line) so the press highlight keeps
+                      // its height when a circle is picked.
+                      SizedBox.square(
+                        dimension: _CircleAvatar.diameter,
+                        child: Icon(
+                          LucideIcons.users,
+                          color: colorScheme.onSurfaceVariant,
+                        ),
                       ),
                       const SizedBox(width: HavenSpacing.md),
                       Expanded(
@@ -487,6 +493,7 @@ class _TriggerRow extends StatelessWidget {
                           style: textTheme.titleSmall?.copyWith(
                             color: colorScheme.onSurfaceVariant,
                           ),
+                          overflow: TextOverflow.ellipsis,
                         ),
                       ),
                     ],
@@ -519,6 +526,8 @@ class _TriggerRow extends StatelessWidget {
 class _CircleAvatar extends StatelessWidget {
   const _CircleAvatar({required this.circle});
 
+  static const double diameter = 32;
+
   final Circle circle;
 
   @override
@@ -530,7 +539,7 @@ class _CircleAvatar extends StatelessWidget {
     final tint = HSLColor.fromAHSL(1, hue, 0.30, 0.55).toColor();
 
     return CircleAvatar(
-      radius: 16,
+      radius: diameter / 2,
       backgroundColor: tint.withValues(alpha: 0.18),
       child: Text(
         circle.displayName.isNotEmpty

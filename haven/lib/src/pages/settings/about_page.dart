@@ -10,6 +10,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:haven/l10n/app_localizations.dart';
+import 'package:haven/src/constants/app_version.dart';
 import 'package:haven/src/constants/tiles.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/external_link.dart';
@@ -91,7 +92,7 @@ class _LegalLinks extends StatelessWidget {
                 onTap: () => showLicensePage(
                   context: context,
                   applicationName: 'Haven',
-                  applicationVersion: '0.1.0',
+                  applicationVersion: havenVersion,
                   applicationLegalese: l10n.aboutLicensesLegalese,
                 ),
               ),
@@ -187,7 +188,7 @@ class _Footer extends StatelessWidget {
         ),
         const SizedBox(height: HavenSpacing.xs),
         Text(
-          l10n.aboutFooterVersion('0.1.0'),
+          l10n.aboutFooterVersion(havenVersion),
           style: mutedStyle,
           textAlign: TextAlign.center,
         ),

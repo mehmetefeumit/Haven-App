@@ -60,6 +60,8 @@ void main() {
 
     testWidgets('shows empty state when no circles exist', (tester) async {
       final mockService = MockCircleService(circles: []);
+      final sheetController = DraggableScrollableController();
+      addTearDown(sheetController.dispose);
 
       await tester.pumpWidget(
         ProviderScope(
@@ -69,12 +71,22 @@ void main() {
             supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: Stack(
-                children: [CirclesBottomSheet(onExpansionChanged: (_) {})],
+                children: [
+                  CirclesBottomSheet(
+                    onExpansionChanged: (_) {},
+                    controller: sheetController,
+                  ),
+                ],
               ),
             ),
           ),
         ),
       );
+      await tester.pumpAndSettle();
+
+      // The collapsed peek holds only the handle and the selector; the
+      // content below needs the sheet open.
+      sheetController.jumpTo(0.5);
       await tester.pumpAndSettle();
 
       expect(find.text('No Circles Yet'), findsOneWidget);
@@ -114,6 +126,8 @@ void main() {
         TestCircleFactory.createCircle(displayName: 'Family'),
       ];
       final mockService = MockCircleService(circles: testCircles);
+      final sheetController = DraggableScrollableController();
+      addTearDown(sheetController.dispose);
 
       await tester.pumpWidget(
         ProviderScope(
@@ -123,12 +137,22 @@ void main() {
             supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: Stack(
-                children: [CirclesBottomSheet(onExpansionChanged: (_) {})],
+                children: [
+                  CirclesBottomSheet(
+                    onExpansionChanged: (_) {},
+                    controller: sheetController,
+                  ),
+                ],
               ),
             ),
           ),
         ),
       );
+      await tester.pumpAndSettle();
+
+      // The collapsed peek holds only the handle and the selector; the
+      // content below needs the sheet open.
+      sheetController.jumpTo(0.5);
       await tester.pumpAndSettle();
 
       expect(find.text('Select a circle to view members'), findsOneWidget);
@@ -296,6 +320,8 @@ void main() {
         shouldThrowOnGetCircles: true,
         errorMessage: 'Storage error',
       );
+      final sheetController = DraggableScrollableController();
+      addTearDown(sheetController.dispose);
 
       await tester.pumpWidget(
         ProviderScope(
@@ -305,12 +331,22 @@ void main() {
             supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: Stack(
-                children: [CirclesBottomSheet(onExpansionChanged: (_) {})],
+                children: [
+                  CirclesBottomSheet(
+                    onExpansionChanged: (_) {},
+                    controller: sheetController,
+                  ),
+                ],
               ),
             ),
           ),
         ),
       );
+      await tester.pumpAndSettle();
+
+      // The collapsed peek holds only the handle and the selector; the
+      // content below needs the sheet open.
+      sheetController.jumpTo(0.5);
       await tester.pumpAndSettle();
 
       // With graceful degradation, should show empty state

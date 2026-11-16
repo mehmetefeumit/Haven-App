@@ -10,6 +10,7 @@
 library;
 
 import 'package:flutter/foundation.dart';
+import 'package:haven/src/constants/app_version.dart';
 
 // ---------------------------------------------------------------------------
 // PLACEHOLDERS — replace before any public release.
@@ -284,7 +285,7 @@ const TileProviderConfig osmRawDevFallback = TileProviderConfig(
   maxNativeZoom: 19,
   userAgentPackageName: 'com.oblivioustech.haven',
   userAgentHeader:
-      'Haven/0.1.0 (+$kHavenWebsiteUrl; contact: $kHavenContactEmail) '
+      'Haven/$havenVersion (+$kHavenWebsiteUrl; contact: $kHavenContactEmail) '
       'flutter_map',
 );
 
