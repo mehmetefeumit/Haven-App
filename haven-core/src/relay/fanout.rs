@@ -5067,7 +5067,11 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
                 found = Some(Own { status, notes });
             }
         }
-        pass.welcomes_sent += self.deliver_welcomes(circle).await.len();
+        let (delivered, due_after_ms) = self.deliver_welcomes(circle).await;
+        pass.welcomes_sent += delivered.len();
+        if let Some(wait) = due_after_ms.map(|wait| wait.max(BUSY_RETRY_MS)) {
+            pass.retry_after_ms = Some(pass.retry_after_ms.map_or(wait, |least| least.min(wait)));
+        }
         if errored {
             pass.errored = true;
             log::warn!(
@@ -5111,28 +5115,36 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
 
     /// Sends every Welcome still owed from its delivery record
     /// (`SessionManager::welcome_records`): the exact stored event, byte for
-    /// byte, to each relay of its invitee's inbox that is due by MDK's own
+    /// byte, to every relay of its invitee's inbox that is due by MDK's own
     /// schedule for such a record — at once, then 30 seconds after an
     /// unanswered attempt, the wait doubling to an hour — until one of those
     /// relays acknowledges that event, which completes the Welcome in the
-    /// engine and ends the record. Returns the circle of each Welcome
-    /// delivered.
+    /// engine and ends the record. Every due relay of every record is sent to
+    /// in one concurrent pass: a relay that never answers delays neither
+    /// another relay of the same inbox, which may be the only one its invitee
+    /// can read, nor another invitee's Welcome. Returns the circle of each
+    /// Welcome delivered, and how long until a record still owed has a relay
+    /// due — the drive's own ask to be resumed.
     ///
-    /// Asked again immediately before each send whether the invite's commit
-    /// is still this device's canonical one and the engine still owes the
-    /// Welcome: a Welcome into an epoch the circle never reached must not go
-    /// out (Security Rule 3). One whose commit lost for good ends as failed;
-    /// one past its bound (a day) is no longer sent, and its circle's note
-    /// that a Welcome is still owed stands. A send that was not begun — the
-    /// mode narrowed, or the wake has no room — is no send, and its relay
-    /// stays due.
-    async fn deliver_welcomes(&self, circle: &CircleManager) -> Vec<GroupId> {
+    /// Asked again immediately before each record's sends whether the
+    /// invite's commit is still this device's canonical one and the engine
+    /// still owes the Welcome: a Welcome into an epoch the circle never
+    /// reached must not go out (Security Rule 3). One whose commit lost for
+    /// good ends as failed; one past its bound (a day) is no longer sent, and
+    /// its circle's note that a Welcome is still owed stands. A send that was
+    /// not begun — the mode narrowed, or the wake has no room — or that the
+    /// wake cut short is no send, and its relay stays due.
+    async fn deliver_welcomes(&self, circle: &CircleManager) -> (Vec<GroupId>, Option<u64>) {
         let mut delivered = Vec::new();
         if self.mode.mode() != DriveMode::Full {
-            return delivered;
+            return (delivered, None);
         }
-        for mut record in circle.session().welcome_records().await {
+        let mut records = Vec::new();
+        let mut sends = Vec::new();
+        let mut cut_short = None;
+        for record in circle.session().welcome_records().await {
             if !self.allows(PUBLISHER_BUDGET_MS) {
+                cut_short = Some(0);
                 break;
             }
             if !still_owed(circle, &record).await {
@@ -5182,39 +5194,79 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
             let Ok(event) = SessionManager::transport_message_to_event(record.welcome()) else {
                 continue;
             };
-            for (index, (relay, url)) in record.due(now_ms).into_iter().enumerate() {
-                // Read again before each send after the first: a relay's
-                // answer takes seconds, and the commit or the engine's
-                // obligation can change under it.
-                if index > 0 && !still_owed(circle, &record).await {
-                    if circle.session().welcome_delivered(&record).await {
-                        delivered.extend(record.group().cloned());
-                    }
-                    break;
-                }
-                let relays = [url];
-                if !circle.record_welcome_relays(&relays) {
-                    continue;
-                }
-                let Some(accepted) = self.send_unrecorded(&event, &relays).await else {
-                    break;
-                };
-                // An answer that is not stored leaves the relay due again:
-                // the same bytes go to it at its next turn, which a relay that
-                // took them answers `duplicate:`.
-                let answered = circle
-                    .session()
-                    .note_welcome_answer(&mut record, relay, accepted, self.clock.now_ms())
-                    .await;
-                if answered.unwrap_or(false) {
-                    if let Some(group_id) = record.group() {
-                        delivered.push(group_id.clone());
-                    }
-                    break;
+            let mut due = record.due(now_ms);
+            let urls: Vec<String> = due.iter().map(|(_, url)| url.clone()).collect();
+            if !urls.is_empty() && !circle.record_welcome_relays(&urls) {
+                due.clear();
+            }
+            records.push(record);
+            sends.push((event, due));
+        }
+        let ended = self.send_welcomes(circle, &mut records, &sends).await;
+        delivered.extend(
+            records
+                .iter()
+                .zip(&ended)
+                .filter(|(_, ended)| **ended)
+                .filter_map(|(record, _)| record.group().cloned()),
+        );
+        let now_ms = self.clock.now_ms();
+        let soonest = records
+            .iter()
+            .zip(&ended)
+            .filter(|(_, ended)| !**ended)
+            .filter_map(|(record, _)| record.due_after_ms(now_ms))
+            .chain(cut_short)
+            .min();
+        (delivered, soonest)
+    }
+
+    /// Sends each record's Welcome (`sends[i]`, the event and its due relays,
+    /// for `records[i]`) in one concurrent pass and stores every answer, and
+    /// returns which records an acknowledgement delivered.
+    async fn send_welcomes(
+        &self,
+        circle: &CircleManager,
+        records: &mut [WelcomeRecord],
+        sends: &[(nostr::Event, Vec<(usize, String)>)],
+    ) -> Vec<bool> {
+        use futures::stream::{FuturesUnordered, StreamExt};
+
+        // Every send of the pass is begun at one instant, so the wake's room
+        // is read once for all of them.
+        let mut answers = FuturesUnordered::new();
+        if self.mode.mode() == DriveMode::Full && self.allows(PUBLISHER_BUDGET_MS) {
+            for (index, (event, due)) in sends.iter().enumerate() {
+                for (relay, url) in due {
+                    answers.push(async move {
+                        let relays = std::slice::from_ref(url);
+                        let publish = self.publisher.publish_unrecorded(event, relays);
+                        (
+                            index,
+                            *relay,
+                            within(self.clock, self.deadline_ms, publish).await,
+                        )
+                    });
                 }
             }
         }
-        delivered
+        let mut ended = vec![false; records.len()];
+        while let Some((index, relay, answer)) = answers.next().await {
+            // Once one relay's acknowledgement ended the record, every later
+            // answer of the pass reads as that same delivery.
+            let (Some(accepted), false) = (answer, ended[index]) else {
+                continue;
+            };
+            // An answer that is not stored leaves the relay due again: the
+            // same bytes go to it at its next turn, which a relay that took
+            // them answers `duplicate:`.
+            ended[index] = circle
+                .session()
+                .note_welcome_answer(&mut records[index], relay, accepted, self.clock.now_ms())
+                .await
+                .unwrap_or(false);
+        }
+        ended
     }
 }
 

@@ -259,9 +259,8 @@ circle's `CLOSE` to every relay of its pool when it dropped that circle's REQ
 that joined their planes; it now goes only to the relays that hold the
 subscription.
 Its last phase pins what the product does today with an invitee's relay
-lists that name other planes (the Welcome goes to the first relay of the
-inbox list that acknowledges it, and the key-package lookup to every relay
-of the NIP-65 write set): the finding set it expects becomes empty when a
+lists that name other planes (the Welcome goes to every relay of the inbox
+list, and the key-package lookup to every relay of the NIP-65 write set): the finding set it expects becomes empty when a
 rule drops such entries. Residuals: L1a and C8 judge with no
 sender, so a request on another identity's own list (an inbox REQ by `#p` of
 an account other than the device's) passes there — the per-identity bindings
@@ -2623,12 +2622,28 @@ Android service's resume claims `false` and only finishes.
   not read for gift wraps, and never the inviter's own inbox. A route the
   store cannot read, or a Welcome the engine cannot answer for now (its group
   not live), is not taken for "none": the Welcomes stay in the commit's row for
-  the next drive. Records are driven by full drives only, from the foreground,
-  and add no wake of their own: due relays are tried one at a time, no sooner
-  than 30 seconds after the last attempt, the wait doubling to an hour (MDK's
-  host's rule), stopping at the first acknowledgement by an inbox relay of
-  that event — at most about thirty sends a relay a day. The engine's state is
-  read again before each relay after the first. An acknowledgement whose
+  the next drive. Records are driven by full drives only, from the
+  foreground. Each pass sends to every due relay of every record at once — a
+  relay is due at once, then no sooner than 30 seconds after its last
+  attempt, the wait doubling to an hour (MDK's host's rule), at most about
+  thirty sends a relay a day — so a relay that never answers holds back
+  neither the inbox's other relays, one of which may be the only one its
+  invitee can read (a relay may take a gift wrap and serve it only to a client
+  that authenticates, which Haven never does), nor another invitee's Welcome
+  (`fanout_change_e2e::{a_welcome_goes_to_every_due_inbox_relay_and_one_acknowledgement_completes_it,
+  a_relay_that_never_answers_holds_back_no_other_welcome_of_the_create}`,
+  `welcome_gated_inbox_e2e`). The price is that a pass, and the create or
+  invite that runs it, can last until its slowest relay's send ends — at most
+  the publisher's longest run, below. The first acknowledgement by an inbox
+  relay of that event completes the Welcome, counted once, and ends its
+  record; every other relay of the pass was sent it at the same instant. The
+  engine's state is read again immediately before each record's sends. A
+  drive that leaves a Welcome owed asks to be resumed when its next relay
+  falls due (`ResumeOutcome::retry_after_ms`, never under five seconds;
+  `a_welcome_still_owed_asks_to_be_resumed_when_its_relays_fall_due`): the
+  live plane arms its drive for then; in poll mode it is only the earliest the
+  next foreground maintenance tick may drive again, so a retry there waits for
+  that tick. An inert record asks for no wake. An acknowledgement whose
   completion the engine's store refused is completed by the next drive without
   a send; an answer that could not be stored leaves the relay due again, which
   a relay that took it answers `duplicate:`; and a record another drive ended

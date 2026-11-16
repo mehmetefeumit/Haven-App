@@ -38,7 +38,8 @@ use haven_core::relay::fanout::scripted::{Answer, ScriptedFanout};
 use haven_core::relay::fanout::UnrecordedPublisher;
 use haven_core::relay::fanout::{
     drive_one, wake_deadline, DriveMode, EvolutionStatus, FanoutClock, FanoutStatus, ModeSource,
-    Publishing, RepairOutcome, WallClock, BUSY_RETRY_MS, RESUME_BUDGET_MS, ROW_BUDGET_MS,
+    Publishing, RepairOutcome, WallClock, BUSY_RETRY_MS, PUBLISHER_BUDGET_MS, RESUME_BUDGET_MS,
+    ROW_BUDGET_MS,
 };
 use haven_core::relay::scripted_relay::ScriptedRelay;
 use haven_core::relay::RelayManager;
@@ -51,6 +52,8 @@ const ONE: &str = "wss://one.change-canary3d8f.example.com";
 const TWO: &str = "wss://two.change-canary3d8f.example.com";
 const THREE: &str = "wss://three.change-canary3d8f.example.com";
 const INBOX: &str = "wss://inbox.change-canary3d8f.example.com";
+const INBOX_TWO: &str = "wss://inbox-two.change-canary3d8f.example.com";
+const SILENT: &str = "wss://silent.change-canary3d8f.example.com";
 const CANARY: &str = "change-canary3d8f";
 
 const SECOND_MS: u64 = 1_000;
@@ -117,6 +120,9 @@ struct Outbox {
     /// Whose drive to run, beside the call, while the first event is handed
     /// over: what the live plane's own drive does when it runs then.
     drives_beside: Mutex<Option<Arc<CircleManager>>>,
+    /// A relay that never answers, and the clock its publisher's whole
+    /// ladder is spent on before the send comes back unacknowledged.
+    stalls: Mutex<Option<(String, Arc<Clock>)>>,
 }
 
 impl Outbox {
@@ -214,6 +220,13 @@ impl UnrecordedPublisher for Outbox {
                     .stage_convergence_input_for_test(&commit, MessageState::ConvergenceDeferred, 0)
                     .await
                     .expect("the commit is restated");
+            }
+            let stalls = self.stalls.lock().expect("outbox").clone();
+            if let Some((_, clock)) = stalls.filter(|(relay, _)| relays == [relay.as_str()]) {
+                clock
+                    .offset
+                    .fetch_add(PUBLISHER_BUDGET_MS, Ordering::SeqCst);
+                return false;
             }
             let withheld = self.unacknowledged.lock().expect("outbox");
             !recipient_of(event).is_some_and(|recipient| withheld.contains(&recipient))
@@ -428,8 +441,12 @@ fn with_closed_store(
 /// Someone to invite: a member of nothing yet, and what an inviter holds of
 /// them.
 async fn an_invitee() -> (CircleMember, MemberKeyPackage) {
+    an_invitee_on(&[INBOX]).await
+}
+
+async fn an_invitee_on(inbox: &[&str]) -> (CircleMember, MemberKeyPackage) {
     let invitee = CircleMember::new();
-    let inbox = vec![INBOX.to_string()];
+    let inbox: Vec<String> = inbox.iter().map(ToString::to_string).collect();
     let key_package_event =
         create_key_package_event(invitee.session(), &invitee.keys, &inbox).await;
     (
@@ -807,7 +824,7 @@ async fn a_relay_update_another_drive_ends(answer: Answer) -> EndedBeside {
 /// commit's own stored row says it was applied.
 #[tokio::test]
 async fn a_change_another_drive_confirms_and_ends_is_answered_applied() {
-    let ended = a_relay_update_another_drive_ends(Answer::Accepted).await;
+    let ended = Box::pin(a_relay_update_another_drive_ends(Answer::Accepted)).await;
 
     assert!(
         ended.beside == FanoutStatus::Confirmed
@@ -827,7 +844,7 @@ async fn a_change_another_drive_confirms_and_ends_is_answered_applied() {
 /// drive it is undone, and the call says so, never "awaiting relays".
 #[tokio::test]
 async fn a_change_another_drive_rolls_back_and_ends_is_answered_undone() {
-    let ended = a_relay_update_another_drive_ends(Answer::Refused).await;
+    let ended = Box::pin(a_relay_update_another_drive_ends(Answer::Refused)).await;
 
     assert!(
         ended.beside == FanoutStatus::RolledBack
@@ -3415,58 +3432,68 @@ async fn a_welcome_waits_while_its_commit_is_set_aside_and_is_never_sent_once_th
     }
 }
 
-/// The commit's state is read once more immediately before each Welcome
-/// leaves. Of two Welcomes one drive handed over, the second is not sent when
-/// a convergence pass has set their commit aside in between — and it is not
-/// let go of either.
+/// The commit's state is read once more immediately before each pass sends a
+/// Welcome. Two Welcomes one pass sends are begun at one instant; once a
+/// convergence pass has set their commit aside under those sends, neither is
+/// sent again — and neither is let go of.
 #[tokio::test]
 async fn a_welcome_handed_over_is_not_sent_once_its_commit_has_been_set_aside() {
     let fx = setup_circle(2, &[ONE]).await;
     let (admin, _others, group) = split(fx);
     let before = owed_welcomes(&admin).await;
-    let (_first, first_package) = an_invitee().await;
-    let (_second, second_package) = an_invitee().await;
+    let (first, first_package) = an_invitee().await;
+    let (second, second_package) = an_invitee().await;
     let transport = answering(&[(ONE, &[Answer::Accepted])]);
     let outbox = Outbox::default();
+    outbox.withhold_welcome_to(&first.pubkey_hex());
+    outbox.withhold_welcome_to(&second.pubkey_hex());
     let source = admin.session().epoch(&group).await.expect("epoch");
     outbox.set_aside_on_first_hand(&admin, &group, source);
     let clock = Clock::at(0);
+    let changes = through(&transport, &outbox, &clock);
 
-    let outcome = through(&transport, &outbox, &clock)
+    let outcome = changes
         .add_members(&admin.circle, &group, &[first_package, second_package])
         .await
         .expect("accepted");
-
     assert_eq!(outcome.status, EvolutionStatus::Confirmed);
-    assert_eq!((outcome.welcomes_sent, outcome.welcomes_total), (1, 2));
+    assert_eq!((outcome.welcomes_sent, outcome.welcomes_total), (0, 2));
     assert_eq!(
         welcomes(&outbox.handed()).len(),
-        1,
+        2,
+        "premise: the pass began both Welcomes at once",
+    );
+
+    outbox.acknowledge_everything();
+    clock.set(HOUR_MS);
+    assert_eq!(changes.resume(&admin.circle).await.welcomes_sent, 0);
+    assert!(
+        welcomes(&outbox.handed()).is_empty(),
         "a Welcome was sent for a commit no longer this device's canonical one",
     );
-    let [kept] = <[Vec<u8>; 1]>::try_from(
-        owed_welcomes(&admin)
-            .await
-            .into_iter()
-            .filter(|id| !before.contains(id))
-            .collect::<Vec<_>>(),
-    )
-    .unwrap_or_else(|_| panic!("one Welcome is still owed"));
-    let (commit, _, _) = admin
-        .session()
-        .welcome_record_for_test(&MessageId::new(kept))
+    let kept: Vec<Vec<u8>> = owed_welcomes(&admin)
         .await
-        .expect("the Welcome not sent keeps its record");
-    assert_eq!(
-        admin
+        .into_iter()
+        .filter(|id| !before.contains(id))
+        .collect();
+    assert_eq!(kept.len(), 2, "a Welcome not sent was let go of");
+    for welcome in kept {
+        let (commit, _, _) = admin
             .session()
-            .stored_message_record_for_test(&commit)
+            .welcome_record_for_test(&MessageId::new(welcome))
             .await
-            .expect("read")
-            .map(|record| record.state),
-        Some(MessageState::ConvergenceDeferred),
-        "premise: the commit was set aside between the two sends",
-    );
+            .expect("the Welcome not sent keeps its record");
+        assert_eq!(
+            admin
+                .session()
+                .stored_message_record_for_test(&commit)
+                .await
+                .expect("read")
+                .map(|record| record.state),
+            Some(MessageState::ConvergenceDeferred),
+            "premise: the commit was set aside under the first pass",
+        );
+    }
 }
 
 /// A frozen Welcome the engine neither holds for delivery nor has seen
@@ -5129,23 +5156,26 @@ async fn a_stored_acknowledgement_is_completed_without_a_send() {
     );
 }
 
-/// The commit is read again before each relay after the first: a Welcome
-/// whose commit is set aside while its first relay answers is not sent to
-/// its second.
+/// The relays each Welcome handed over was sent to, sorted.
+fn relays_sent(handed: &[(nostr::Event, Vec<String>)]) -> Vec<Vec<String>> {
+    let mut sent: Vec<Vec<String>> = welcomes(handed)
+        .into_iter()
+        .map(|(_, relays)| relays.clone())
+        .collect();
+    sent.sort();
+    sent
+}
+
+/// The commit is read again before each pass's sends to a Welcome's relays,
+/// which are begun at one instant: once its commit is set aside under them,
+/// the Welcome is sent to none of its relays again, and its record is kept
+/// as those sends left it.
 #[tokio::test]
 async fn a_welcome_is_not_sent_to_its_next_relay_once_its_commit_is_set_aside() {
-    const INBOX_TWO: &str = "wss://inbox-two.change-canary3d8f.example.com";
-
     let fx = setup_circle(2, &[ONE]).await;
     let (admin, _others, group) = split(fx);
-    let invitee = CircleMember::new();
-    let inbox = vec![INBOX.to_string(), INBOX_TWO.to_string()];
-    let package = MemberKeyPackage {
-        key_package_event: create_key_package_event(invitee.session(), &invitee.keys, &inbox).await,
-        inbox_relays: inbox,
-        nip65_relays: Vec::new(),
-        nip65_write_relays: Vec::new(),
-    };
+    let before = owed_welcomes(&admin).await;
+    let (invitee, package) = an_invitee_on(&[INBOX, INBOX_TWO]).await;
     let epoch = admin
         .session()
         .epoch(&group)
@@ -5156,19 +5186,228 @@ async fn a_welcome_is_not_sent_to_its_next_relay_once_its_commit_is_set_aside() 
     outbox.withhold_welcome_to(&invitee.pubkey_hex());
     outbox.set_aside_on_first_hand(&admin, &group, epoch);
     let clock = Clock::at(0);
-    let _ = through(&transport, &outbox, &clock)
+    let changes = through(&transport, &outbox, &clock);
+    let _ = changes
         .add_members(&admin.circle, &group, &[package])
         .await
         .expect("the invite is accepted");
+    assert_eq!(
+        relays_sent(&outbox.handed()),
+        [vec![INBOX_TWO.to_string()], vec![INBOX.to_string()]],
+        "premise: the pass began the Welcome on both relays at once",
+    );
+
+    outbox.acknowledge_everything();
+    clock.set(HOUR_MS);
+    assert_eq!(changes.resume(&admin.circle).await.welcomes_sent, 0);
+    assert!(
+        welcomes(&outbox.handed()).is_empty(),
+        "a Welcome went to a relay after its commit was set aside",
+    );
+    let welcome = owed_to(&admin, &before).await;
+    assert!(
+        admin
+            .session()
+            .welcome_record_for_test(&welcome)
+            .await
+            .is_some_and(|(_, relays, attempts)| relays == [INBOX, INBOX_TWO]
+                && attempts == [1, 1]),
+        "the record of a Welcome whose commit is set aside was let go of, or changed",
+    );
+}
+
+/// A Welcome goes to every due relay of its invitee's inbox in one pass, the
+/// same bytes to each, whichever answers first: a relay that acknowledges it
+/// may be one its invitee can never read from. One acknowledgement completes
+/// it, counted once, however many relays acknowledged.
+#[tokio::test]
+async fn a_welcome_goes_to_every_due_inbox_relay_and_one_acknowledgement_completes_it() {
+    let fx = setup_circle(2, &[ONE]).await;
+    let (admin, _others, group) = split(fx);
+    let before = owed_welcomes(&admin).await;
+    let (invitee, package) = an_invitee_on(&[INBOX, INBOX_TWO]).await;
+    let transport = answering(&[(ONE, &[Answer::Accepted])]);
+    let outbox = Outbox::default();
+    let clock = Clock::at(0);
+
+    let outcome = through(&transport, &outbox, &clock)
+        .add_members(&admin.circle, &group, &[package])
+        .await
+        .expect("the invite is accepted");
+
+    assert_eq!(outcome.status, EvolutionStatus::Confirmed);
+    assert_eq!(
+        (outcome.welcomes_sent, outcome.welcomes_total),
+        (1, 1),
+        "a Welcome two relays acknowledged was not counted exactly once",
+    );
     let handed = outbox.handed();
     assert_eq!(
-        welcomes(&handed)
-            .iter()
-            .map(|(_, relays)| relays.clone())
-            .collect::<Vec<_>>(),
-        [vec![INBOX.to_string()]],
-        "a Welcome went to its next relay after its commit was set aside",
+        relays_sent(&handed),
+        [vec![INBOX_TWO.to_string()], vec![INBOX.to_string()]],
+        "a Welcome was not sent to every relay of its invitee's inbox",
     );
+    let [first, second] =
+        <[_; 2]>::try_from(welcomes(&handed)).unwrap_or_else(|_| panic!("one Welcome per relay"));
+    assert_eq!(recipient_of(&first.0), Some(invitee.pubkey_hex()));
+    assert_eq!(
+        nostr::JsonUtil::as_json(&first.0),
+        nostr::JsonUtil::as_json(&second.0),
+        "the relays of one inbox were not sent the same bytes",
+    );
+    assert_eq!(owed_welcomes(&admin).await, before);
+    assert!(admin
+        .session()
+        .welcome_record_for_test(&MessageId::new(first.0.id.to_bytes().to_vec()))
+        .await
+        .is_none());
+}
+
+/// Every due relay of an inbox no relay acknowledges is attempted in the one
+/// call, and the drive asks to be resumed when they next fall due — 30
+/// seconds on, the wait doubling — instead of waiting for an unrelated drive.
+#[tokio::test]
+async fn a_welcome_still_owed_asks_to_be_resumed_when_its_relays_fall_due() {
+    let founder = CircleMember::new();
+    let (invitee, package) = an_invitee_on(&[INBOX, INBOX_TWO]).await;
+    let transport = ScriptedFanout::default();
+    let outbox = Outbox::default();
+    outbox.withhold_welcome_to(&invitee.pubkey_hex());
+    let clock = Clock::at(0);
+    let changes = through(&transport, &outbox, &clock);
+    let created = changes
+        .create_circle(
+            &founder.circle,
+            &founder.keys,
+            vec![package],
+            &founding_config(),
+        )
+        .await
+        .expect("the circle is created");
+    assert_eq!(created.welcomes_sent, 0);
+    let group = created.circle.mls_group_id;
+    let (_, record) = the_record(&founder, &group).await;
+    assert_eq!(
+        record.attempts,
+        [1, 1],
+        "a relay of the inbox was not attempted in the call"
+    );
+    assert_eq!(relays_sent(&outbox.handed()).len(), 2);
+
+    let resumed = changes.resume(&founder.circle).await;
+    assert!(
+        welcomes(&outbox.handed()).is_empty(),
+        "sent before it was due"
+    );
+    assert_eq!(
+        resumed.retry_after_ms,
+        Some(30 * SECOND_MS),
+        "a Welcome still owed asked for no wake when its relays fall due",
+    );
+    clock.set(30 * SECOND_MS);
+    let resumed = changes.resume(&founder.circle).await;
+    assert_eq!(relays_sent(&outbox.handed()).len(), 2);
+    assert_eq!(resumed.retry_after_ms, Some(60 * SECOND_MS));
+    let (_, record) = the_record(&founder, &group).await;
+    assert_eq!(record.attempts, [2, 2]);
+}
+
+/// A Welcome past its day, kept inert for its circle's note, asks for no
+/// wake: nothing is due for it ever again.
+#[tokio::test]
+async fn an_inert_welcome_record_asks_for_no_wake() {
+    let founder = CircleMember::new();
+    let (invitee, package) = an_invitee().await;
+    let transport = ScriptedFanout::default();
+    let outbox = Outbox::default();
+    outbox.withhold_welcome_to(&invitee.pubkey_hex());
+    let clock = Clock::at(0);
+    let changes = through(&transport, &outbox, &clock);
+    let created = changes
+        .create_circle(
+            &founder.circle,
+            &founder.keys,
+            vec![package],
+            &founding_config(),
+        )
+        .await
+        .expect("the circle is created");
+    let group = created.circle.mls_group_id;
+    assert!(
+        changes
+            .resume(&founder.circle)
+            .await
+            .retry_after_ms
+            .is_some(),
+        "premise: a Welcome owed asks for a wake",
+    );
+    clock.set(DAY_MS);
+    let _ = changes.resume(&founder.circle).await;
+    let _ = the_record(&founder, &group).await;
+    clock.set(DAY_MS + HOUR_MS);
+    assert_eq!(
+        changes.resume(&founder.circle).await.retry_after_ms,
+        None,
+        "an inert Welcome record asked for a wake",
+    );
+    assert_eq!(
+        founder.session().peek_change_notes(&group),
+        [ChangeNote::WelcomeOwed],
+        "premise: the record is kept for its note",
+    );
+}
+
+/// A relay that never answers holds back neither the Welcome's other relays
+/// nor another invitee's Welcome: in a create whose wake has room for one
+/// publisher's ladder, a relay that spends all of it still leaves both
+/// Welcomes delivered.
+#[tokio::test]
+async fn a_relay_that_never_answers_holds_back_no_other_welcome_of_the_create() {
+    let founder = CircleMember::new();
+    let (stalled, stalled_package) = an_invitee_on(&[SILENT, INBOX]).await;
+    let (other, other_package) = an_invitee().await;
+    let transport = ScriptedFanout::default();
+    let outbox = Outbox::default();
+    let clock = Arc::new(Clock::at(0));
+    *outbox.stalls.lock().expect("outbox") = Some((SILENT.to_string(), Arc::clone(&clock)));
+    let changes = Publishing {
+        fanout: &transport,
+        publisher: &outbox,
+        clock: &*clock,
+        deadline_ms: Some(clock.now_ms() + RESUME_BUDGET_MS),
+        mode: &DriveMode::Full,
+    };
+
+    let created = changes
+        .create_circle(
+            &founder.circle,
+            &founder.keys,
+            vec![stalled_package, other_package],
+            &founding_config(),
+        )
+        .await
+        .expect("the circle is created");
+
+    assert!(
+        created.unsent_recipients.is_empty(),
+        "a Welcome was held back by a relay that never answers",
+    );
+    assert_eq!((created.welcomes_sent, created.welcomes_total), (2, 2));
+    let handed = outbox.handed();
+    let to = |who: &CircleMember| {
+        let mut relays: Vec<Vec<String>> = welcomes(&handed)
+            .into_iter()
+            .filter(|(event, _)| recipient_of(event) == Some(who.pubkey_hex()))
+            .map(|(_, relays)| relays.clone())
+            .collect();
+        relays.sort();
+        relays
+    };
+    assert_eq!(
+        to(&stalled),
+        [vec![INBOX.to_string()], vec![SILENT.to_string()]]
+    );
+    assert_eq!(to(&other), [vec![INBOX.to_string()]]);
 }
 
 /// The engine refusing a Welcome it owes for a reason that can pass — its
@@ -5373,8 +5612,6 @@ async fn a_queued_invite_the_open_retires_takes_its_route_with_it() {
 /// invite kept, instead of taking it away: the earlier Welcome still goes.
 #[tokio::test]
 async fn an_invite_that_stages_nothing_leaves_an_earlier_invites_route_as_it_was() {
-    const INBOX_TWO: &str = "wss://inbox-two.change-canary3d8f.example.com";
-
     let fx = setup_circle(2, &[ONE]).await;
     let (admin, _others, group) = split(fx);
     let (invitee, package) = an_invitee().await;
