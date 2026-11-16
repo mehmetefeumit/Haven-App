@@ -431,14 +431,21 @@ class _ActionableNote extends StatelessWidget {
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Icon(icon, color: HavenSecurityColors.warning, size: 20),
+                Icon(
+                  icon,
+                  color: HavenSecurityColors.warning,
+                  size: 20,
+                ),
                 const SizedBox(width: HavenSpacing.md),
                 Expanded(child: Text(message)),
               ],
             ),
             Align(
               alignment: AlignmentDirectional.centerEnd,
-              child: TextButton(onPressed: onAction, child: Text(actionLabel)),
+              child: TextButton(
+                onPressed: onAction,
+                child: Text(actionLabel),
+              ),
             ),
           ],
         ),
