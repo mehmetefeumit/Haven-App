@@ -1113,6 +1113,13 @@ impl EngineProcessor {
         self.inbox_anchor.suppress_open_generation();
     }
 
+    /// Burns the INBOX generation's pending advance alone: a consumer of the
+    /// bus lost an unknown set of decrypted events, and only a gift wrap
+    /// among them is not already applied.
+    pub fn note_inbox_delivery_gap(&self) {
+        self.inbox_anchor.suppress_open_generation();
+    }
+
     /// Opens a fresh INBOX cursor-anchor generation at `opened_at_secs` — a
     /// LOCAL wall-clock reading taken when the `kind:1059` REQ was (re-)issued.
     ///

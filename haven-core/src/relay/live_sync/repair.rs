@@ -33,7 +33,8 @@
 //! * one pending re-issue per key, never a queue of them;
 //! * an exponential, jittered per-key backoff, so a relay that `CLOSED`s every
 //!   REQ the instant it is issued is met with 1 s, 2 s, 4 s … capped at
-//!   [`BACKOFF_MAX_SECS`], not a hot loop.
+//!   [`BACKOFF_MAX_SECS`] — or, for an inbox REQ refused until this device
+//!   authenticates, a minute doubling to an hour — not a hot loop.
 //!
 //! The table's size is therefore bounded by the session's live `(relay, sub)`
 //! pairs — tens, not an attacker's choice — and that bound holds with no pruning
@@ -61,14 +62,18 @@ use tokio::sync::Notify;
 
 use crate::log_alias::bucket;
 
-use super::config::{BACKOFF_JITTER_FRACTION_BP, BACKOFF_MAX_SECS, BACKOFF_MIN_SECS};
+use super::config::{
+    BACKOFF_JITTER_FRACTION_BP, BACKOFF_MAX_SECS, BACKOFF_MIN_SECS, GATED_BACKOFF_MAX_SECS,
+    GATED_BACKOFF_MIN_SECS,
+};
 
 /// What a relay's `CLOSED` reason means for how soon the REQ may be re-issued.
 ///
-/// The split mirrors nostr-relay-pool's own `HandleClosedMsg` exactly, because
-/// that is what decides whether the pool kept the subscription: re-issuing over
-/// a `MarkAsClosed` would race the pool's own reconnect replay AND ignore a
-/// relay that just asked us, in machine-readable terms, to slow down.
+/// The first two mirror nostr-relay-pool's own `HandleClosedMsg` exactly,
+/// because that is what decides whether the pool kept the subscription:
+/// re-issuing over a `MarkAsClosed` would race the pool's own reconnect replay
+/// AND ignore a relay that just asked us, in machine-readable terms, to slow
+/// down. The third is Haven's, for the inbox alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClosedKind {
     /// The pool DELETED the subscription and will never re-issue it. Haven must.
@@ -77,6 +82,32 @@ pub enum ClosedKind {
     /// `auth-required:`): the relay is throttling us, or wants a NIP-42 AUTH the
     /// engine deliberately never sends. Wait the full backoff.
     Throttled,
+    /// The INBOX REQ, refused until this device authenticates
+    /// ([`refuses_read`]). Haven never sends AUTH (Security Rule 16), so every
+    /// re-issue is refused again until the relay's policy changes: wait the
+    /// gated backoff, [`GATED_BACKOFF_MIN_SECS`] doubling to
+    /// [`GATED_BACKOFF_MAX_SECS`]. Never a group REQ, whose recovery must stay
+    /// within [`BACKOFF_MAX_SECS`].
+    ReadGated,
+}
+
+/// Whether a `CLOSED` refuses the read itself: `auth-required:` or
+/// `restricted:`, the prefixes a relay that gates a filter behind NIP-42 ends
+/// the REQ with.
+///
+/// strfry puts its own `ERROR: ` ahead of the NIP-01 prefix — relay.damus.io
+/// answers `ERROR: auth-required: requested filter requires authentication`
+/// (probed 2026-11-16) — so one leading `error:` is skipped before the parse.
+#[must_use]
+pub fn refuses_read(message: &str) -> bool {
+    let message = message
+        .strip_prefix("ERROR:")
+        .or_else(|| message.strip_prefix("error:"))
+        .map_or(message, str::trim_start);
+    matches!(
+        MachineReadablePrefix::parse(message),
+        Some(MachineReadablePrefix::AuthRequired | MachineReadablePrefix::Restricted)
+    )
 }
 
 impl ClosedKind {
@@ -125,6 +156,9 @@ struct Entry {
     next_allowed_at: Instant,
     /// When the pending re-issue is due, or `None` if none is pending.
     due_at: Option<Instant>,
+    /// A [`ClosedKind::ReadGated`] incident: its windows are the gated
+    /// backoff's until it decays.
+    gated: bool,
 }
 
 /// Per-`(relay, sub)` re-issue schedule.
@@ -142,24 +176,25 @@ impl RepairSchedule {
     /// A first (or fully decayed) `Dropped` incident is due immediately — the
     /// blackout it repairs is permanent, so the first repair must not be
     /// delayed. Everything else waits: a `Throttled` close waits the full
-    /// [`BACKOFF_MAX_SECS`], and a close arriving inside a key's backoff window
-    /// waits for that window to end. A second close while one is already pending
-    /// changes nothing (one pending re-issue per key, never a queue).
+    /// [`BACKOFF_MAX_SECS`], a `ReadGated` one the gated backoff, and a close
+    /// arriving inside a key's backoff window waits for that window to end. A
+    /// second close while one is already pending changes nothing (one pending
+    /// re-issue per key, never a queue).
     fn note_closed(&mut self, key: &RepairKey, kind: ClosedKind, now: Instant) -> Instant {
         let entry = self.entries.entry(key.clone()).or_insert(Entry {
             attempts: 0,
             next_allowed_at: now,
             due_at: None,
+            gated: false,
         });
 
         // A key quiet for a full max-backoff past its window is a fresh
         // incident, not the continuation of an old storm: decay the attempts so
         // an occasional CLOSED does not inherit yesterday's 30 s delay.
-        if entry.due_at.is_none()
-            && now >= entry.next_allowed_at + Duration::from_secs(BACKOFF_MAX_SECS)
-        {
+        if entry.due_at.is_none() && now >= entry.next_allowed_at + entry.decay() {
             entry.attempts = 0;
             entry.next_allowed_at = now;
+            entry.gated = false;
         }
 
         if let Some(due) = entry.due_at {
@@ -174,6 +209,10 @@ impl RepairSchedule {
                 .next_allowed_at
                 .max(now + jittered(Duration::from_secs(BACKOFF_MAX_SECS))),
             ClosedKind::Dropped => entry.next_allowed_at.max(now),
+            ClosedKind::ReadGated => {
+                entry.gated = true;
+                entry.next_allowed_at.max(now + gated_delay(entry.attempts))
+            }
         };
         entry.due_at = Some(due);
         due
@@ -187,14 +226,18 @@ impl RepairSchedule {
             if entry.due_at.is_some_and(|at| at <= now) {
                 entry.due_at = None;
                 entry.attempts = entry.attempts.saturating_add(1);
-                entry.next_allowed_at = now + backoff_delay(entry.attempts);
+                entry.next_allowed_at = now
+                    + if entry.gated {
+                        gated_delay(entry.attempts)
+                    } else {
+                        backoff_delay(entry.attempts)
+                    };
                 due.push(key.clone());
                 return true;
             }
             // Nothing pending and the window has fully decayed: the key carries
             // no state worth remembering, so it must not outlive its incident.
-            entry.due_at.is_some()
-                || now < entry.next_allowed_at + Duration::from_secs(BACKOFF_MAX_SECS)
+            entry.due_at.is_some() || now < entry.next_allowed_at + entry.decay()
         });
         due
     }
@@ -209,6 +252,32 @@ impl RepairSchedule {
     fn pending_len(&self) -> usize {
         self.entries.values().filter(|e| e.due_at.is_some()).count()
     }
+}
+
+impl Entry {
+    /// How long the key must stay quiet past its window to start over. A
+    /// gated key decays only after a full hour: one that decayed sooner would
+    /// let whoever paces its trigger (a flooder lagging the consumer) buy a
+    /// whole inbox-lookback re-download every couple of minutes.
+    const fn decay(&self) -> Duration {
+        Duration::from_secs(if self.gated {
+            GATED_BACKOFF_MAX_SECS
+        } else {
+            BACKOFF_MAX_SECS
+        })
+    }
+}
+
+/// The gated wait after `attempts` re-issues of one key:
+/// [`GATED_BACKOFF_MIN_SECS`] doubling, capped at [`GATED_BACKOFF_MAX_SECS`],
+/// jittered.
+fn gated_delay(attempts: u32) -> Duration {
+    // Saturating, not a shift: `60 << 62` wraps to zero, and a session up
+    // for days reaches its 62nd refusal.
+    let secs = GATED_BACKOFF_MIN_SECS
+        .saturating_mul(2_u64.saturating_pow(attempts))
+        .min(GATED_BACKOFF_MAX_SECS);
+    jittered(Duration::from_secs(secs))
 }
 
 /// Exponential backoff for the `attempts`-th consecutive re-issue of one key,
@@ -559,6 +628,117 @@ mod tests {
         assert!(
             waited >= cap * 3 / 4 && waited <= cap * 5 / 4,
             "a throttled close waits the jittered max backoff, got {waited:?}"
+        );
+    }
+
+    #[test]
+    fn only_auth_required_and_restricted_refuse_the_read() {
+        for m in [
+            "auth-required: requested filter requires authentication",
+            "restricted: not your inbox",
+            // relay.damus.io's own words, strfry's `ERROR: ` and all.
+            "ERROR: auth-required: requested filter requires authentication",
+            "error: restricted: not your inbox",
+        ] {
+            assert!(refuses_read(m), "{m:?}");
+        }
+        for m in [
+            "",
+            "closed",
+            "rate-limited: slow down",
+            "error: shutting down",
+            "ERROR: rate-limited: slow down",
+            "ERROR: ERROR: auth-required: twice",
+            "blocked: you are banned",
+            "invalid: bad filter",
+        ] {
+            assert!(!refuses_read(m), "{m:?}");
+        }
+    }
+
+    /// Haven never authenticates, so a gated relay refuses every re-issue:
+    /// a minute, doubling, capped at an hour — never the 30 s throttle,
+    /// which would ask a relay that has said no a hundred and twenty times an
+    /// hour.
+    #[test]
+    fn a_read_gated_key_backs_off_from_a_minute_to_an_hour() {
+        let mut s = RepairSchedule::default();
+        let k = key("wss://a.example", "s_inbox");
+        let mut now = Instant::now();
+        let (min, max) = (
+            Duration::from_secs(GATED_BACKOFF_MIN_SECS),
+            Duration::from_secs(GATED_BACKOFF_MAX_SECS),
+        );
+        let mut waits = Vec::new();
+        for _ in 0..10 {
+            let due = s.note_closed(&k, ClosedKind::ReadGated, now);
+            assert!(
+                s.take_due(now).is_empty(),
+                "never re-issued before its wait"
+            );
+            waits.push(due.saturating_duration_since(now));
+            now = due;
+            assert_eq!(s.take_due(now).len(), 1);
+        }
+        assert!(
+            waits[0] >= min * 3 / 4 && waits[0] <= min * 5 / 4,
+            "the first refusal waits a jittered minute: {waits:?}"
+        );
+        for pair in waits.windows(2) {
+            assert!(
+                pair[1] >= pair[0] || pair[1] >= max * 3 / 4,
+                "the wait never shrinks before the cap: {waits:?}"
+            );
+        }
+        assert!(
+            waits.iter().all(|w| *w <= max * 5 / 4),
+            "the wait never passes the jittered hour: {waits:?}"
+        );
+        assert!(
+            waits[9] >= max * 3 / 4,
+            "ten refusals in, the wait is the hour: {waits:?}"
+        );
+    }
+
+    /// A relay that keeps refusing for days must never be asked at once
+    /// again: the wait stays the hour however many refusals came before.
+    #[test]
+    fn the_gated_wait_stays_the_hour_however_many_refusals_came_before() {
+        let max = Duration::from_secs(GATED_BACKOFF_MAX_SECS);
+        for attempts in [6, 58, 61, 62, 63, 64, 1_000, u32::MAX] {
+            let wait = gated_delay(attempts);
+            assert!(
+                wait >= max * 3 / 4 && wait <= max * 5 / 4,
+                "{attempts} refusals: {wait:?}"
+            );
+        }
+    }
+
+    /// A trigger paced just past the throttle's 30 s decay must not restart
+    /// the gated wait at a minute: only an hour's quiet does.
+    #[test]
+    fn a_read_gated_key_decays_only_after_an_hours_quiet() {
+        let mut s = RepairSchedule::default();
+        let k = key("wss://a.example", "s_inbox");
+        let t0 = Instant::now();
+        let first = s.note_closed(&k, ClosedKind::ReadGated, t0);
+        assert_eq!(s.take_due(first).len(), 1);
+
+        let paced = first + Duration::from_secs(GATED_BACKOFF_MIN_SECS * 4);
+        let second = s.note_closed(&k, ClosedKind::ReadGated, paced);
+        assert!(
+            second.saturating_duration_since(paced)
+                >= Duration::from_secs(GATED_BACKOFF_MIN_SECS * 2) * 3 / 4,
+            "a gated key re-triggered within the hour keeps doubling"
+        );
+        assert_eq!(s.take_due(second).len(), 1);
+
+        let quiet = second + Duration::from_secs(GATED_BACKOFF_MAX_SECS * 3);
+        let fresh = s.note_closed(&k, ClosedKind::ReadGated, quiet);
+        assert!(
+            fresh.saturating_duration_since(quiet)
+                <= Duration::from_secs(GATED_BACKOFF_MIN_SECS) * 5 / 4,
+            "a gated key quiet for hours starts over at a minute"
         );
     }
 

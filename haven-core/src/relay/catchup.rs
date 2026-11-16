@@ -3292,6 +3292,7 @@ mod tests {
             relay_url: url.to_string(),
             responded: true,
             drained: true,
+            refused: false,
             events,
         }
     }
@@ -3497,6 +3498,7 @@ mod tests {
                 relay_url: "wss://late".to_string(),
                 responded: false,
                 drained: false,
+                refused: false,
                 events: Vec::new(),
             }],
             &state,
@@ -3680,6 +3682,7 @@ mod tests {
             relay_url: "wss://dead".to_string(),
             responded: false,
             drained: false,
+            refused: false,
             events: Vec::new(),
         };
         let fresh = summarize_round(std::slice::from_ref(&dead), &ChaseState::default(), false);

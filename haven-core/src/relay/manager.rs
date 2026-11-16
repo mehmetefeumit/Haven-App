@@ -1903,6 +1903,7 @@ impl RelayManager {
                         relay_url: relay.clone(),
                         responded: false,
                         drained: false,
+                        refused: false,
                         events: Vec::new(),
                     };
                 };
@@ -1926,6 +1927,7 @@ impl RelayManager {
                         relay_url,
                         responded: false,
                         drained: false,
+                        refused: false,
                         events: Vec::new(),
                     };
                 }
@@ -1938,16 +1940,18 @@ impl RelayManager {
                         relay_url,
                         responded: true,
                         drained: false,
+                        refused: false,
                         events: Vec::new(),
                     };
                 };
 
-                let (drained, events) =
+                let (drained, refused, events) =
                     Self::read_one_relays_answer(&handle, filter, req_timeout).await;
                 RelayFetchOutcome {
                     relay_url,
                     responded: true,
                     drained,
+                    refused,
                     events,
                 }
             }
@@ -2055,7 +2059,9 @@ impl RelayManager {
     }
 
     /// Issues ONE REQ to ONE relay and reads that relay's own answer, reporting
-    /// whether the relay finished giving it (`EOSE`) alongside what arrived.
+    /// whether the relay finished giving it (`EOSE`), whether a `CLOSED`
+    /// refused the read itself ([`RelayFetchOutcome::refused`]), and what
+    /// arrived.
     ///
     /// # Why the notification stream and not the subscription's event stream
     ///
@@ -2123,7 +2129,7 @@ impl RelayManager {
         relay: &Relay,
         filter: Filter,
         req_timeout: Duration,
-    ) -> (bool, Vec<Event>) {
+    ) -> (bool, bool, Vec<Event>) {
         let intake_cap = filter.limit.unwrap_or(MAX_EVENTS_PER_UNLIMITED_REQ);
         let id = SubscriptionId::generate();
         let mut notifications = relay.notifications();
@@ -2143,9 +2149,10 @@ impl RelayManager {
             // Presence-only: neither the own-relay URL nor the relay's own
             // words (Security Rule 15), matching the branches above.
             log::debug!("[RelayManager] per-relay REQ failed (one own relay)");
-            return (false, Vec::new());
+            return (false, false, Vec::new());
         }
 
+        let mut refused = false;
         let mut events: Vec<Event> = Vec::new();
         let mut seen: HashSet<EventId> = HashSet::new();
         let mut arrivals: usize = 0;
@@ -2170,8 +2177,12 @@ impl RelayManager {
                         // auth required, refusal). Whatever it had not sent, it
                         // is not going to.
                         RelayMessage::Closed {
-                            subscription_id, ..
-                        } if subscription_id.as_ref() == &id => return false,
+                            subscription_id,
+                            message,
+                        } if subscription_id.as_ref() == &id => {
+                            refused = super::live_sync::repair::refuses_read(&message);
+                            return false;
+                        }
                         _ => {}
                     },
                     // The socket went away mid-delivery, the pool shut down, or a
@@ -2208,7 +2219,7 @@ impl RelayManager {
                 .cmp(&a.created_at)
                 .then_with(|| a.id.cmp(&b.id))
         });
-        (drained, events)
+        (drained, refused, events)
     }
 
     /// Validates relay URLs and ensures they use wss://.
@@ -3957,6 +3968,7 @@ mod tests {
             relay_url: String::new(),
             responded,
             drained,
+            refused: false,
             events: Vec::new(),
         };
         let finished = answer(true, true);
@@ -4012,6 +4024,7 @@ mod tests {
             relay_url: String::new(),
             responded,
             drained,
+            refused: false,
             events: Vec::new(),
         };
         let (finished, cut_short, unreachable) = (
@@ -7650,6 +7663,60 @@ mod tests {
             .expect("a read never fails as a whole");
         assert_eq!(outcomes.len(), urls.len());
         assert!(outcomes.iter().all(|o| o.responded && o.drained));
+    }
+
+    /// A relay that gates gift-wrap reads behind NIP-42 (strfry's default
+    /// `restrictedReadKinds`) ends the REQ refused, never served: the
+    /// Invitations page must not paint it "up to date". Every other `CLOSED`
+    /// is a read that did not finish, and only `EOSE` serves one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_closed_refusing_the_read_ends_a_page_refused_and_never_served() {
+        use crate::relay::scripted_relay::Frame;
+        use crate::relay::InboxRead;
+
+        let wrap = |closed: Option<&str>| {
+            closed.map_or_else(
+                || vec![Frame::Eose],
+                |text| vec![Frame::Closed(text.to_owned())],
+            )
+        };
+        let cases = [
+            (
+                Some("auth-required: requested filter requires authentication"),
+                InboxRead::Refused,
+            ),
+            (Some("restricted: not your inbox"), InboxRead::Refused),
+            // relay.damus.io's own words, strfry's `ERROR: ` and all.
+            (
+                Some("ERROR: auth-required: requested filter requires authentication"),
+                InboxRead::Refused,
+            ),
+            (Some("rate-limited: slow down"), InboxRead::Incomplete),
+            (Some("error: shutting down"), InboxRead::Incomplete),
+            (Some(""), InboxRead::Incomplete),
+            (None, InboxRead::Served),
+        ];
+        let manager = RelayManager::new();
+        for (closed, expected) in cases {
+            let relay = ScriptedRelay::start();
+            relay.answer(|_| true, wrap(closed));
+            let outcomes = manager
+                .fetch_events_per_relay(
+                    Filter::new()
+                        .kind(Kind::GiftWrap)
+                        .pubkey(nostr::Keys::generate().public_key()),
+                    &[relay.url().to_string()],
+                )
+                .await
+                .expect("a read never fails as a whole");
+            let outcome = &outcomes[0];
+            assert_eq!(outcome.inbox_read(), expected, "{closed:?}");
+            assert!(outcome.responded, "{closed:?}");
+            assert!(
+                !(outcome.refused && outcome.drained),
+                "a refused read is never a whole page: {closed:?}"
+            );
+        }
     }
 
     #[test]

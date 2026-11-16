@@ -4,7 +4,7 @@
 //! maintenance sends and judged by maintenance's own rules, so the relay
 //! settings page can never call a relay healthy that the next tick would heal.
 
-use nostr::{Event, Filter, Kind, PublicKey};
+use nostr::{Event, Filter, Kind, PublicKey, Timestamp};
 
 use super::key_package::{
     kp_event_d_tag, kp_event_is_pre_migration, RelayKpEntry, RelayKpPerRelay, RelayKpSnapshot,
@@ -14,8 +14,9 @@ use super::kp_lifetime::TrackedKpLifetime;
 use super::relay_list::list_relay_healthy;
 use crate::log_alias;
 use crate::nostr::mls::TrackedKeyPackage;
+use crate::relay::live_sync::planes::inbox::inbox_filter;
 use crate::relay::publishers::dedup_key;
-use crate::relay::{RelayFetchOutcome, RelayManager};
+use crate::relay::{InboxRead, RelayFetchOutcome, RelayManager};
 
 /// What one relay serves of one of the user's own events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +51,10 @@ pub struct OwnRelayPresence {
     pub relay_list: OwnEventPresence,
     /// Kind 10050, expected on the inbox list and the lookup relays.
     pub inbox_relay_list: OwnEventPresence,
+    /// How it answered a read of this account's gift wraps, asked of inbox
+    /// relays only (`None` for any other row): a relay that refuses it stores
+    /// every invitation sent there out of this device's reach.
+    pub inbox_read: Option<InboxRead>,
 }
 
 /// Redacting `Debug`: the relay is named by a salted handle (Rule 15).
@@ -66,6 +71,7 @@ impl std::fmt::Debug for OwnRelayPresence {
             .field("key_package", &self.key_package)
             .field("relay_list", &self.relay_list)
             .field("inbox_relay_list", &self.inbox_relay_list)
+            .field("inbox_read", &self.inbox_read)
             .finish()
     }
 }
@@ -88,7 +94,8 @@ pub struct OwnRelayLists<'a> {
 /// `KeyPackage` list, then the lookup relays.
 ///
 /// The probes are maintenance's (30443 `limit` 64, 10002 and 10050 `limit` 4),
-/// one kind after another so a relay's handshake is never raced against
+/// then, of inbox relays only, the live plane's gift-wrap read (`limit` 1,
+/// from now), one after another so a relay's handshake is never raced against
 /// itself, and only events `own` signed count. A 30443 is current exactly when
 /// maintenance would count the relay as serving `tracked`
 /// ([`RelayKpSnapshot::serves_current_package`]); a relay list when its newest
@@ -133,6 +140,7 @@ pub async fn own_presence<'a>(
             key_package: expected(key_package),
             relay_list: expected(key_package || lookup),
             inbox_relay_list: expected(inbox || lookup),
+            inbox_read: inbox.then_some(InboxRead::Unreached),
         });
         keys.push(key);
     }
@@ -197,7 +205,33 @@ pub async fn own_presence<'a>(
             *field(&mut rows[i]) = judge(answer, own, kind, current);
         }
     }
+
+    ask_inbox_reads(relay, own, &mut rows).await;
     rows
+}
+
+/// Asks every inbox row the live plane's own inbox REQ, from now so it
+/// normally brings nothing back: a relay gating gift-wrap reads behind NIP-42
+/// refuses it exactly as it refuses the invitee's subscription.
+async fn ask_inbox_reads(relay: &RelayManager, own: &PublicKey, rows: &mut [OwnRelayPresence]) {
+    let asked: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(i, row)| row.inbox_read.is_some().then_some(i))
+        .collect();
+    if asked.is_empty() {
+        return;
+    }
+    let urls: Vec<String> = asked.iter().map(|&i| rows[i].relay_url.clone()).collect();
+    let now = i64::try_from(Timestamp::now().as_secs()).unwrap_or(i64::MAX);
+    let filter = inbox_filter(*own, now).limit(1);
+    let answers = Box::pin(relay.fetch_events_per_relay(filter, &urls))
+        .await
+        .unwrap_or_default();
+    for (&i, answer) in asked.iter().zip(&answers) {
+        rows[i].reachable |= answer.responded;
+        rows[i].inbox_read = Some(answer.inbox_read());
+    }
 }
 
 /// One probe: the kind, its `limit`, the field it is judged into, and what
@@ -409,6 +443,7 @@ mod tests {
                 row.lookup,
                 row.reachable,
                 kinds_of(row),
+                row.inbox_read,
             )
         };
         assert_eq!(
@@ -419,29 +454,32 @@ mod tests {
                     true,
                     false,
                     true,
-                    [NotExpected, NotExpected, Missing]
+                    [NotExpected, NotExpected, Missing],
+                    Some(InboxRead::Served),
                 ),
                 (
                     key_package[0].clone(),
                     true,
                     false,
                     true,
-                    [Missing, Missing, NotExpected]
+                    [Missing, Missing, NotExpected],
+                    None,
                 ),
                 (
                     lookup[0].clone(),
                     false,
                     true,
                     true,
-                    [NotExpected, Missing, Missing]
+                    [NotExpected, Missing, Missing],
+                    None,
                 ),
             ],
         );
         let [inbox_asked, key_package_asked, lookup_asked] = fronts.each_ref().map(asked_kinds);
         assert_eq!(
             inbox_asked,
-            [10050],
-            "an inbox relay holds no 30443 or 10002"
+            [10050, 1059],
+            "an inbox relay holds no 30443 or 10002, and is the one asked for gift wraps"
         );
         assert_eq!(key_package_asked, [10002, 30443]);
         assert_eq!(
@@ -763,7 +801,101 @@ mod tests {
         for row in &rows {
             assert!(!row.reachable, "{row:?}");
             assert_eq!(kinds_of(row), [NoAnswer; 3], "{row:?}");
+            assert_eq!(row.inbox_read, Some(InboxRead::Unreached), "{row:?}");
         }
+    }
+
+    /// The relay settings page warns on exactly the relays that keep an
+    /// invitation out of this device's reach: one refusing the read until the
+    /// device authenticates, which it never does. A throttle or a plain error
+    /// is a read that did not finish, never a refusal.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_inbox_relay_is_judged_by_how_it_answers_a_gift_wrap_read() {
+        let own = Keys::generate();
+        let cases = [
+            (
+                vec![Frame::Closed(
+                    "auth-required: requested filter requires authentication".to_owned(),
+                )],
+                InboxRead::Refused,
+            ),
+            (
+                vec![Frame::Closed("restricted: not your inbox".to_owned())],
+                InboxRead::Refused,
+            ),
+            (
+                vec![Frame::Closed(
+                    "ERROR: auth-required: requested filter requires authentication".to_owned(),
+                )],
+                InboxRead::Refused,
+            ),
+            (
+                vec![Frame::Closed("rate-limited: slow down".to_owned())],
+                InboxRead::Incomplete,
+            ),
+            (
+                vec![Frame::Closed("error: shutting down".to_owned())],
+                InboxRead::Incomplete,
+            ),
+            (served(vec![]), InboxRead::Served),
+        ];
+        for (frames, expected) in cases {
+            let relay = ScriptedRelay::start();
+            answer(&relay, Kind::GiftWrap, frames);
+            let inbox = vec![relay.url().to_owned()];
+            let rows = presence(&own, &inbox, &[], &[], None, VALID).await;
+            assert_eq!(rows[0].inbox_read, Some(expected), "{rows:?}");
+            assert_eq!(
+                rows[0].inbox_relay_list, Missing,
+                "the 10050 probe is judged on its own: {rows:?}"
+            );
+        }
+    }
+
+    /// The probe asks only what the live plane's own inbox REQ asks — this
+    /// account's gift wraps by `#p`, never by author and never a circle's
+    /// `#h` — and only from now, so a relay that serves it hands back nothing
+    /// a later read would not.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_inbox_read_probe_asks_only_for_own_gift_wraps_from_now() {
+        let own = Keys::generate();
+        let relay = ScriptedRelay::start();
+        let front = RecordingFront::start(relay.url());
+        let before = Timestamp::now().as_secs();
+        let _ = presence(&own, &[front.url().to_owned()], &[], &[], None, VALID).await;
+
+        let gift_wrap_reqs: Vec<serde_json::Value> = front
+            .frames()
+            .iter()
+            .filter_map(|frame| serde_json::from_str::<serde_json::Value>(&frame.text).ok())
+            .filter(|message| {
+                message[0] == "REQ" && message[2]["kinds"] == serde_json::json!([1059])
+            })
+            .collect();
+        assert_eq!(
+            gift_wrap_reqs.len(),
+            1,
+            "one gift-wrap read per inbox relay"
+        );
+        let filter = gift_wrap_reqs[0][2]
+            .as_object()
+            .expect("a REQ filter")
+            .clone();
+        let mut keys: Vec<&str> = filter.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["#p", "kinds", "limit", "since"]);
+        let own_hex = own.public_key().to_hex();
+        assert!(
+            filter["#p"]
+                .as_array()
+                .is_some_and(|p| p.len() == 1 && p[0] == own_hex.as_str()),
+            "the read names this account's own key, and only it"
+        );
+        assert_eq!(filter["limit"], 1);
+        assert!(
+            filter["since"].as_u64().expect("a since") >= before,
+            "the read asks from now"
+        );
     }
 
     #[test]
@@ -777,6 +909,7 @@ mod tests {
             key_package: Current,
             relay_list: Outdated,
             inbox_relay_list: NoAnswer,
+            inbox_read: Some(InboxRead::Refused),
         };
         crate::assert_debug_redacted!(
             &row,

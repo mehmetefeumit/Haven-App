@@ -3,12 +3,9 @@
 //! A thin wrapper over a `tokio::sync::broadcast` channel. The producer (the
 //! processor) calls [`EventBus::send`], which intentionally ignores a
 //! "no subscribers" error so a dropped consumer never stalls the receive path.
-//! Each consumer (the FFI `live_events` stream, M3c) gets its own
-//! [`broadcast::Receiver`] via [`EventBus::subscribe`].
-//!
-//! The consumer-loop disposition — *forward on `Ok`, skip on `Lagged`, stop on
-//! `Closed`* — is factored into the pure [`classify_recv`] function so it can be
-//! unit-tested without an async runtime.
+//! Each consumer gets its own [`broadcast::Receiver`] via
+//! [`EventBus::subscribe`]; the FFI `live_events` stream reads through
+//! [`super::LiveEvents`], which owns what a lag means.
 
 use tokio::sync::broadcast;
 
@@ -63,36 +60,11 @@ impl Default for EventBus {
     }
 }
 
-/// What a consumer loop should do with one `recv()` result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RecvDisposition {
-    /// Forward the event downstream.
-    Forward,
-    /// A lag occurred (`n` events were skipped); continue the loop. The cursor
-    /// + catch-up replay any skipped event, so a lag is never fatal.
-    Skip,
-    /// The channel closed (all senders dropped); stop the loop cleanly.
-    Stop,
-}
-
-/// Classifies a `broadcast::Receiver::recv()` result into a [`RecvDisposition`].
-///
-/// Pure, so the loop policy (`Lagged => continue`, `Closed => Ok`) is tested
-/// without a runtime.
-#[must_use]
-pub const fn classify_recv<T>(result: &Result<T, broadcast::error::RecvError>) -> RecvDisposition {
-    match result {
-        Ok(_) => RecvDisposition::Forward,
-        Err(broadcast::error::RecvError::Lagged(_)) => RecvDisposition::Skip,
-        Err(broadcast::error::RecvError::Closed) => RecvDisposition::Stop,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::relay::live_sync::event::SyncStatusReason;
-    use tokio::sync::broadcast::error::{RecvError, TryRecvError};
+    use tokio::sync::broadcast::error::TryRecvError;
 
     fn status(reason: SyncStatusReason) -> LiveSyncEvent {
         LiveSyncEvent::Status { reason }
@@ -166,8 +138,8 @@ mod tests {
 
     #[test]
     fn dropping_all_senders_yields_closed_after_draining() {
-        // The real bus must produce the `Closed` that `classify_recv` maps to
-        // Stop — buffered events drain first, then Closed.
+        // The real bus must produce the `Closed` that ends a consumer —
+        // buffered events drain first, then Closed.
         let bus = EventBus::with_capacity(8);
         let mut rx = bus.subscribe();
         bus.send(status(SyncStatusReason::SessionStarted));
@@ -178,22 +150,7 @@ mod tests {
             rx.try_recv().unwrap(),
             status(SyncStatusReason::SessionStarted)
         );
-        // ...then the channel reports Closed. (The async `recv()` surfaces this
-        // as `RecvError::Closed`, which `classify_recv` maps to Stop — covered
-        // by `classify_recv_maps_each_arm`.)
+        // ...then the channel reports Closed.
         assert!(matches!(rx.try_recv(), Err(TryRecvError::Closed)));
-    }
-
-    #[test]
-    fn classify_recv_maps_each_arm() {
-        assert_eq!(classify_recv::<i32>(&Ok(1)), RecvDisposition::Forward);
-        assert_eq!(
-            classify_recv::<i32>(&Err(RecvError::Lagged(7))),
-            RecvDisposition::Skip
-        );
-        assert_eq!(
-            classify_recv::<i32>(&Err(RecvError::Closed)),
-            RecvDisposition::Stop
-        );
     }
 }

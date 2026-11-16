@@ -170,6 +170,34 @@ fn to_group_subscription(sub: &LiveGroupSub) -> GroupSubscription {
     }
 }
 
+/// One consumer of a session's [`EventBus`] ([`LiveSyncCore::events`]).
+pub struct LiveEvents {
+    rx: broadcast::Receiver<LiveSyncEvent>,
+    core: std::sync::Weak<LiveSyncCore>,
+}
+
+impl LiveEvents {
+    /// The next event, or `None` once the bus has closed.
+    ///
+    /// A lag is never fatal: the inbox is asked again
+    /// ([`LiveSyncCore::note_consumer_lag`]), and the cursors and catch-up
+    /// replay the rest. Holds no `Arc` between calls, so the bus still closes
+    /// when the session's last owner drops it.
+    pub async fn recv(&mut self) -> Option<LiveSyncEvent> {
+        loop {
+            match self.rx.recv().await {
+                Ok(event) => return Some(event),
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    if let Some(core) = self.core.upgrade() {
+                        core.note_consumer_lag().await;
+                    }
+                }
+                Err(broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    }
+}
+
 /// Whether [`LiveSyncCore::stop`] observed every supervisor task exit.
 ///
 /// The distinction matters to exactly one caller: something reclaiming an
@@ -213,6 +241,11 @@ pub struct LiveSyncCore {
     processor: Arc<EngineProcessor>,
     router: Arc<RwLock<Router>>,
     bus: EventBus,
+    /// Subscribed at construction and handed to the first [`Self::events`],
+    /// so an event the session put on the bus before its consumer attached —
+    /// a gift wrap the first inbox REQ replayed, whose `EOSE` then advanced
+    /// the inbox cursor past it — still reaches that consumer.
+    startup_rx: StdMutex<Option<broadcast::Receiver<LiveSyncEvent>>>,
     own_pubkey: PublicKey,
     salt: Zeroizing<[u8; 16]>,
     /// The circle whose next own REQ a test makes fail
@@ -1038,6 +1071,7 @@ impl LiveSyncCore {
             circle,
             processor,
             router: Arc::new(RwLock::new(Router::new())),
+            startup_rx: StdMutex::new(Some(bus.subscribe())),
             bus,
             own_pubkey,
             salt: generate_session_salt(),
@@ -1069,6 +1103,56 @@ impl LiveSyncCore {
     #[must_use]
     pub const fn bus(&self) -> &EventBus {
         &self.bus
+    }
+
+    /// A consumer of [`Self::bus`]: the first one reads from this core's
+    /// construction on, every later one from its own call on.
+    #[must_use]
+    pub fn events(self: &Arc<Self>) -> LiveEvents {
+        let rx = self
+            .startup_rx
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+            .unwrap_or_else(|| self.bus.subscribe());
+        LiveEvents {
+            rx,
+            core: Arc::downgrade(self),
+        }
+    }
+
+    /// A consumer fell behind the bus and lost events it will never see,
+    /// gift wraps among them. Burns the inbox generation's pending advance and
+    /// re-issues the inbox REQ, which asks the lookback again, on the gated
+    /// schedule: anyone who knows the npub can flood wraps past the bus at
+    /// will, and the 30 s cap would buy them a whole lookback re-download
+    /// every half minute.
+    async fn note_consumer_lag(&self) {
+        self.processor.note_inbox_delivery_gap();
+        let inbox: Vec<RepairKey> = self
+            .active
+            .read()
+            .await
+            .as_ref()
+            .map(|active| {
+                active
+                    .inbox_relays
+                    .iter()
+                    .filter_map(|relay| RelayUrl::parse(relay).ok())
+                    .map(|relay_url| RepairKey {
+                        relay_url,
+                        sub_id: active.inbox_sub_id.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for key in &inbox {
+            self.repair.note_closed(key, ClosedKind::ReadGated);
+        }
+        log::warn!(
+            "[live_sync] the event consumer fell behind the bus; the inbox REQ is re-issued \
+             on the gated schedule"
+        );
     }
 
     /// The shared MLS state owner — the SAME `Arc<CircleManager>` (one
@@ -7517,6 +7601,142 @@ mod tests {
              background-sharing right now\" — that an inbox-only relay, which carries \
              none of this device's circles, would otherwise read off the wire"
         );
+
+        let _ = core.stop().await;
+    }
+
+    /// A gift wrap an inbox relay already holds when the session starts is
+    /// replayed by the first inbox REQ — before the app's consumer attaches —
+    /// and that REQ's `EOSE` then moves the inbox cursor past it. The consumer
+    /// attaching after the start must still be handed it, or the invitation
+    /// waits for some later REQ to ask the lookback again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_gift_wrap_replayed_before_the_consumer_attaches_reaches_it() {
+        use nostr::JsonUtil;
+        use nostr_relay_builder::prelude::{MemoryDatabase, MemoryDatabaseOptions, NostrDatabase};
+
+        let _ = crate::relay::allow_ws_loopback_for_test();
+        let db = MemoryDatabase::with_opts(MemoryDatabaseOptions {
+            events: true,
+            max_events: None,
+        });
+        let relay = nostr_relay_builder::LocalRelay::new(
+            nostr_relay_builder::RelayBuilder::default().database(db.clone()),
+        );
+        relay.run().await.expect("local relay runs");
+        let url = relay.url().await.to_string();
+        let (core, _dir) = build_core();
+        let core = Arc::new(core);
+        let wrap = nostr::EventBuilder::new(nostr::Kind::GiftWrap, "sealed")
+            .tags([nostr::Tag::public_key(core.own_pubkey)])
+            .sign_with_keys(&Keys::generate())
+            .expect("a wrap signs");
+        assert!(db.save_event(&wrap).await.expect("save").is_success());
+
+        core.start(&[], std::slice::from_ref(&url))
+            .await
+            .expect("the engine starts against the inbox relay");
+        assert_eq!(core.wait_backlog_settled().await, BacklogOutcome::Settled);
+
+        let mut events = core.events();
+        let delivered = tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(event) = events.recv().await {
+                if let LiveSyncEvent::Welcome { gift_wrap_json } = event {
+                    return gift_wrap_json == wrap.as_json();
+                }
+            }
+            false
+        })
+        .await;
+        assert!(
+            matches!(delivered, Ok(true)),
+            "the wrap the first inbox REQ replayed never reached the consumer"
+        );
+
+        let _ = core.stop().await;
+    }
+
+    /// The consumer holds no `Arc` of the session it reads, so dropping the
+    /// session's last owner closes the bus and ends the stream instead of
+    /// keeping a stopped engine alive behind it.
+    #[tokio::test]
+    async fn a_consumer_ends_when_the_sessions_last_owner_drops_it() {
+        let (core, _dir) = build_core();
+        let core = Arc::new(core);
+        let mut events = core.events();
+        drop(core);
+        let ended = tokio::time::timeout(Duration::from_secs(5), events.recv()).await;
+        assert!(matches!(ended, Ok(None)), "the stream outlived the session");
+    }
+
+    /// A consumer that falls behind the bus loses events it never sees, gift
+    /// wraps among them. The inbox REQ is asked again, on the gated schedule —
+    /// a minute at the least, since anyone who knows the npub can lag the bus
+    /// at will — and the inbox generation's pending advance is burnt, so a
+    /// late `EOSE` cannot move the cursor over what was lost. The log line
+    /// names neither the relay, the subscription nor the account.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_lagged_consumer_reissues_the_inbox_req_on_the_gated_schedule() {
+        let _ = crate::relay::allow_ws_loopback_for_test();
+        let (_relay, url, _recorded) = recording_relay().await;
+        let (core, _dir) = build_core();
+        let core = Arc::new(core);
+        core.start(&[], std::slice::from_ref(&url))
+            .await
+            .expect("the engine starts against the inbox relay");
+        assert_eq!(core.wait_backlog_settled().await, BacklogOutcome::Settled);
+        assert!(
+            core.repair.next_deadline().is_none(),
+            "premise: nothing due"
+        );
+        let inbox_sub = core
+            .active
+            .read()
+            .await
+            .as_ref()
+            .expect("a started session")
+            .inbox_sub_id
+            .to_string();
+        let now = chrono::Utc::now().timestamp();
+        core.processor.note_inbox_subscription_opened(now);
+
+        let mut events = core.events();
+        for _ in 0..=BUS_CAP {
+            core.bus().send(LiveSyncEvent::Status {
+                reason: SyncStatusReason::Connected,
+            });
+        }
+        let before = Instant::now();
+        let lines = crate::test_log::capture_log_lines(async {
+            assert!(events.recv().await.is_some(), "the consumer goes on");
+        })
+        .await;
+
+        let due = core
+            .repair
+            .next_deadline()
+            .expect("the lag scheduled an inbox re-issue");
+        assert!(
+            due >= before
+                + Duration::from_secs(super::super::config::GATED_BACKOFF_MIN_SECS) * 3 / 4,
+            "a lag re-issues on the gated schedule, never at once"
+        );
+        assert!(
+            !core.processor.note_inbox_end_of_stored_events(),
+            "the lag must burn the inbox generation's pending advance"
+        );
+
+        assert!(
+            lines.iter().any(|line| line.contains("fell behind")),
+            "anti-vacuity: the lag was logged"
+        );
+        let host_port = url.trim_start_matches("ws://").trim_end_matches('/');
+        let own = core.own_pubkey.to_hex();
+        for line in &lines {
+            for needle in [host_port, inbox_sub.as_str(), own.as_str()] {
+                assert!(!line.contains(needle), "a lag line names an identifier");
+            }
+        }
 
         let _ = core.stop().await;
     }

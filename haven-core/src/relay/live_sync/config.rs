@@ -239,6 +239,19 @@ pub const BACKOFF_MIN_SECS: u64 = 1;
 /// Maximum supervisor reconnect backoff (seconds).
 pub const BACKOFF_MAX_SECS: u64 = 30;
 
+/// First wait before re-issuing an inbox REQ a relay refused until this device
+/// authenticates (seconds), doubled per refusal up to
+/// [`GATED_BACKOFF_MAX_SECS`].
+///
+/// Haven never authenticates (Security Rule 16), so a re-issue changes nothing
+/// until the relay's policy does: the 30 s throttle would ask a relay that has
+/// said no, again, a hundred and twenty times an hour, each time across the
+/// whole inbox lookback.
+pub const GATED_BACKOFF_MIN_SECS: u64 = 60;
+
+/// Cap on the gated backoff (seconds).
+pub const GATED_BACKOFF_MAX_SECS: u64 = 3_600;
+
 /// Spread (basis points, `10_000` = 100%) applied to every re-subscribe backoff
 /// in [`super::repair`].
 ///

@@ -65,7 +65,7 @@ use super::config::{STORED_REPLAY_BYTE_CAP, WORKER_QUEUE_CAP};
 use super::event::SyncStatusReason;
 use super::planes::{group::GROUP_EVENT_KIND, PlaneKind};
 use super::processor::EngineProcessor;
-use super::repair::{ClosedKind, RepairKey, RepairQueue};
+use super::repair::{refuses_read, ClosedKind, RepairKey, RepairQueue};
 use super::router::{Router, SubCtx};
 
 /// One routed relay event handed from the receiver to the worker.
@@ -140,6 +140,10 @@ pub enum RawSignal {
         subscription_id: SubscriptionId,
         /// Whether the pool deleted the subscription or merely marked it closed.
         kind: ClosedKind,
+        /// Whether it refused the read until this device authenticates
+        /// ([`super::repair::refuses_read`]); the worker, which knows the
+        /// plane, decides what that means.
+        refuses_read: bool,
     },
     /// The session is pausing: drain everything already queued, THEN clear the
     /// router and burn the open generations' advances, and ack.
@@ -492,6 +496,7 @@ pub async fn run_receiver(
                             relay_url,
                             subscription_id: subscription_id.into_owned(),
                             kind: ClosedKind::classify(&message),
+                            refuses_read: refuses_read(&message),
                         }) {
                             Ok(()) => {}
                             Err(mpsc::error::TrySendError::Closed(_)) => {
@@ -556,6 +561,18 @@ pub async fn run_receiver(
             Err(RecvError::Lagged(_)) => processor.note_delivery_gap(),
             Err(RecvError::Closed) => break,
         }
+    }
+}
+
+/// What a `CLOSED` on a REQ of `plane` schedules. Only an inbox REQ is ever
+/// [`ClosedKind::ReadGated`]: a group REQ keeps the pool's disposition, and
+/// with it a re-issue within the 30 s cap, so no circle's receive plane waits
+/// an hour on one relay.
+fn closed_kind(kind: ClosedKind, refuses_read: bool, plane: PlaneKind) -> ClosedKind {
+    if refuses_read && plane == PlaneKind::Inbox {
+        ClosedKind::ReadGated
+    } else {
+        kind
     }
 }
 
@@ -795,12 +812,15 @@ async fn work(
 
         let raw = match signal {
             RawSignal::Event(raw) => *raw,
-            RawSignal::SubscriptionClosed { kind, .. } => {
+            RawSignal::SubscriptionClosed {
+                kind, refuses_read, ..
+            } => {
                 // This endpoint will send nothing more on this REQ, so a burst
                 // waiting on it has its answer — waiting for an `EOSE` that can
                 // no longer come would spend the whole backlog budget.
                 flush_stored(&processor, Some(&key.sub_id)).await;
                 processor.note_endpoint_settled(&key);
+                let kind = closed_kind(kind, refuses_read, ctx.plane);
                 note_subscription_closed(&processor, &repair, &key, kind);
                 continue;
             }
@@ -1711,6 +1731,7 @@ mod supervisor_isolation_tests {
             relay_url: RelayUrl::parse(&relay).unwrap(),
             subscription_id: sub.clone(),
             kind: ClosedKind::Dropped,
+            refuses_read: false,
         };
         tx.send(closed(&SubscriptionId::new("an_id_we_never_issued")))
             .await
@@ -1795,6 +1816,7 @@ mod supervisor_isolation_tests {
             relay_url: key.relay_url.clone(),
             subscription_id: sub,
             kind: ClosedKind::Dropped,
+            refuses_read: false,
         })
         .await
         .unwrap();
@@ -1821,6 +1843,120 @@ mod supervisor_isolation_tests {
              refreshing it would let a relay that ends our REQ on a loop mask \
              its own silence"
         );
+    }
+
+    /// A relay gating gift-wrap reads ends the INBOX REQ refused. Haven sends
+    /// no AUTH, so that key waits the gated backoff (a minute, doubling to an
+    /// hour) instead of re-asking every 30 s; a group REQ refused the same way
+    /// keeps the pool's disposition and its 30 s cap. Neither log line names
+    /// the relay or the subscription (Rule 15).
+    #[tokio::test]
+    async fn a_read_refused_inbox_req_waits_the_gated_backoff_and_a_group_req_does_not() {
+        use super::super::config::{
+            BACKOFF_JITTER_FRACTION_BP, BACKOFF_MAX_SECS, GATED_BACKOFF_MIN_SECS,
+        };
+        use super::super::repair::refuses_read;
+        use std::time::Instant;
+
+        const INBOX_HOST: &str = "gated-inbox.relay.example";
+        const GROUP_HOST: &str = "group.relay.example";
+        // relay.damus.io's own words: strfry's `ERROR: ` ahead of the prefix.
+        const GATED: &str = "ERROR: auth-required: requested filter requires authentication";
+        const REFUSAL: &str = "auth-required: requested filter requires authentication";
+
+        async fn refuse(
+            tx: &mpsc::Sender<RawSignal>,
+            bus: &mut broadcast::Receiver<LiveSyncEvent>,
+            relay: &str,
+            sub: &SubscriptionId,
+            message: &str,
+        ) {
+            tx.send(RawSignal::SubscriptionClosed {
+                relay_url: RelayUrl::parse(relay).unwrap(),
+                subscription_id: sub.clone(),
+                kind: ClosedKind::classify(message),
+                refuses_read: refuses_read(message),
+            })
+            .await
+            .unwrap();
+            while !matches!(
+                bus.recv().await,
+                Ok(LiveSyncEvent::Status {
+                    reason: SyncStatusReason::RelayError
+                })
+            ) {}
+        }
+
+        // `secs` at the low and the high end of its jitter.
+        let spread = u64::from(BACKOFF_JITTER_FRACTION_BP);
+        let low = |secs: u64| Duration::from_millis(secs * (10_000 - spread) / 10);
+        let high = |secs: u64| Duration::from_millis(secs * (10_000 + spread) / 10);
+        let dir = TempDir::new().unwrap();
+        let circle =
+            Arc::new(CircleManager::new_unencrypted(dir.path(), &Keys::generate()).unwrap());
+        let bus = EventBus::new();
+        let mut rx_bus = bus.subscribe();
+        let processor = Arc::new(EngineProcessor::new(circle, bus.clone()));
+        let repair = Arc::new(RepairQueue::default());
+
+        let inbox_relay = format!("wss://{INBOX_HOST}");
+        let group_relay = format!("wss://{GROUP_HOST}");
+        let inbox_sub = SubscriptionId::new("s_inbox_SECRETSUB");
+        let group_sub = SubscriptionId::new("s_group_SECRETSUB");
+        let mut router = Router::new();
+        router.register(
+            &inbox_relay,
+            &inbox_sub,
+            SubCtx {
+                plane: PlaneKind::Inbox,
+                group_ids_hex: HashSet::new(),
+            },
+        );
+        router.register_group(
+            std::slice::from_ref(&group_relay),
+            &group_sub,
+            &HashSet::from([hex::encode([0x66u8; 32])]),
+        );
+        let (tx, worker_rx) = mpsc::channel::<RawSignal>(16);
+        tokio::spawn(run_worker(
+            worker_rx,
+            Arc::new(RwLock::new(router)),
+            processor,
+            Arc::clone(&repair),
+            Keys::generate().public_key(),
+        ));
+
+        let lines = crate::test_log::capture_log_lines(async {
+            let before = Instant::now();
+            refuse(&tx, &mut rx_bus, &inbox_relay, &inbox_sub, GATED).await;
+            let gated = repair
+                .next_deadline()
+                .expect("the inbox re-issue is scheduled");
+            assert!(
+                gated >= before + low(GATED_BACKOFF_MIN_SECS),
+                "a refused inbox read must wait the gated backoff, not the 30 s throttle"
+            );
+
+            let before = Instant::now();
+            refuse(&tx, &mut rx_bus, &group_relay, &group_sub, REFUSAL).await;
+            let throttled = repair.next_deadline().expect("both are scheduled");
+            assert!(
+                throttled >= before + low(BACKOFF_MAX_SECS)
+                    && throttled <= Instant::now() + high(BACKOFF_MAX_SECS),
+                "a group REQ keeps the pool's throttle, never the gated wait"
+            );
+        })
+        .await;
+        assert!(
+            lines.iter().any(|l| l.contains("kind=ReadGated"))
+                && lines.iter().any(|l| l.contains("kind=Throttled")),
+            "anti-vacuity: both closes were logged: {lines:?}"
+        );
+        for line in &lines {
+            for needle in [INBOX_HOST, GROUP_HOST, "SECRETSUB", "wss://"] {
+                assert!(!line.contains(needle), "leaked {needle:?}: {line}");
+            }
+        }
     }
 
     /// A `CLOSED` reaches the worker classified, and the classification is the
@@ -2383,6 +2519,7 @@ mod stored_replay_tests {
                 relay_url: worker.group.relay_url.clone(),
                 subscription_id: worker.group.sub_id.clone(),
                 kind: ClosedKind::classify("error: shutting down"),
+                refuses_read: false,
             })
             .await
             .unwrap();

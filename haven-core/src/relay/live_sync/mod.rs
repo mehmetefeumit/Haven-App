@@ -51,7 +51,7 @@ pub use config::{
 pub use drive::{Claim, Lifecycle, LiveDriver};
 pub use error::{LiveSyncError, LiveSyncResult};
 pub use event::{LiveSyncEvent, SyncStatusReason};
-pub use event_bus::{classify_recv, EventBus, RecvDisposition};
+pub use event_bus::EventBus;
 pub use gate::generate_session_salt;
 pub use health::{
     delivery_is_silent, health_needs_resubscribe, health_needs_targeted_reanchor,
@@ -67,4 +67,4 @@ pub use processor::{
 };
 pub use repair::{ClosedKind, RepairKey};
 pub use router::{Router, SubCtx};
-pub use session::{LiveSyncCore, StopOutcome};
+pub use session::{LiveEvents, LiveSyncCore, StopOutcome};
