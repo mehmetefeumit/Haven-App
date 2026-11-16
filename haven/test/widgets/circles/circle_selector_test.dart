@@ -2,6 +2,7 @@
 ///
 /// Verifies that:
 /// - Collapsed state shows placeholder or selected circle name
+/// - The trigger keeps one height with or without a selection
 /// - Tapping trigger opens/closes the dropdown
 /// - Selecting a circle updates the provider and closes the dropdown
 /// - Tapping a selected circle deselects it

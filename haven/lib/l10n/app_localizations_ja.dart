@@ -159,8 +159,7 @@ class AppLocalizationsJa extends AppLocalizations {
   String get onboardingImportLoading => 'インポートしています…';
 
   @override
-  String get onboardingImportInvalid =>
-      '有効なバックアップ鍵ではないようです。ご確認のうえ、もう一度お試しください。';
+  String get onboardingImportInvalid => '有効な秘密鍵ではないようです。ご確認のうえ、もう一度お試しください。';
 
   @override
   String get onboardingImportError => 'その鍵をインポートできませんでした。ご確認のうえ、もう一度お試しください。';
@@ -639,21 +638,21 @@ class AppLocalizationsJa extends AppLocalizations {
   String get createCircleEmptyTitle => 'サークルのメンバーを追加';
 
   @override
-  String get createCircleEmptyMessage => 'IDで検索するか、QRコードをスキャンしてメンバーを追加します。';
+  String get createCircleEmptyMessage => '公開鍵で検索するか、QRコードをスキャンしてメンバーを追加します。';
 
   @override
   String get createCircleNoValidMembers => '招待できる有効なメンバーがいません';
 
   @override
-  String get createCircleNoIdInQr => 'QRコードに有効なIDが見つかりませんでした';
+  String get createCircleNoIdInQr => 'QRコードに有効な公開鍵が見つかりませんでした';
 
   @override
   String get memberLookupNotFound =>
-      'このIDの Haven アカウントは、まだ見つかりません。相手が Haven を設定したばかりの場合は、少し待ってから、もう一度お試しください。';
+      'この公開鍵の Haven アカウントは、まだ見つかりません。相手が Haven を設定したばかりの場合は、少し待ってから、もう一度お試しください。';
 
   @override
   String get memberLookupIncomplete =>
-      'このIDを最後まで確認できませんでした。接続を確認して、もう一度お試しください。';
+      'この公開鍵を最後まで確認できませんでした。接続を確認して、もう一度お試しください。';
 
   @override
   String get createCircleSomethingWentWrong => '問題が発生しました';
@@ -950,7 +949,7 @@ class AppLocalizationsJa extends AppLocalizations {
       'Haven は現在この人を招待できません。Haven を開いてもらってから、もう一度お試しください。';
 
   @override
-  String get memberSearchHint => 'メンバーIDを入力...';
+  String get memberSearchHint => '公開鍵を入力...';
 
   @override
   String get memberSearchPasteTooltip => 'クリップボードから貼り付け';
@@ -962,10 +961,10 @@ class AppLocalizationsJa extends AppLocalizations {
   String get memberSearchScanTooltip => 'QRコードをスキャン';
 
   @override
-  String get memberSearchHelper => '連絡先に Haven のQRコードまたはIDを聞いてください';
+  String get memberSearchHelper => '連絡先に公開鍵またはQRコードを聞いてください';
 
   @override
-  String get memberSearchNoValidId => '有効な Haven のIDが見つかりませんでした';
+  String get memberSearchNoValidId => '有効な公開鍵が見つかりませんでした';
 
   @override
   String get memberSearchAlreadyAdded => 'このメンバーはすでに追加されています';
@@ -995,7 +994,7 @@ class AppLocalizationsJa extends AppLocalizations {
   }
 
   @override
-  String get memberPickerReasonSelf => 'これはあなた自身のIDです';
+  String get memberPickerReasonSelf => 'これはあなた自身の公開鍵です';
 
   @override
   String get memberPickerReadPublicKey => '公開鍵を読み上げる';
@@ -1013,10 +1012,6 @@ class AppLocalizationsJa extends AppLocalizations {
   String memberPickerCollisionCircleLabel(String circleName) {
     return 'サークル: $circleName';
   }
-
-  @override
-  String get memberPickerStrangerLookupNote =>
-      'Haven は、この人が公開しているプロフィールを、最大2つのリレーに問い合わせました。問い合わせを受けたリレーには、この端末がたった今この鍵について問い合わせたことが分かります。ただし、この問い合わせには電子署名が付いていないため、Haven でのあなたの識別情報とは結びつきません。プロフィールに写真が設定されている場合、Haven はその写真を、この人が選んだサーバーからダウンロードします。そのサーバーには、この端末のネットワークアドレスが分かります。';
 
   @override
   String get memberPickerStrangerLookingUp => '公開プロフィールを調べています…';
@@ -1048,7 +1043,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String invitationCardInvitedBySemantics(String inviter) {
-    return '暗号識別子 $inviter からの招待';
+    return '公開鍵 $inviter からの招待';
   }
 
   @override
@@ -1576,28 +1571,6 @@ class AppLocalizationsJa extends AppLocalizations {
   String get qrCodeYourPublicKeyLabel => 'あなたの公開鍵';
 
   @override
-  String get reachabilityChecking => '招待を受け取る準備をしています…';
-
-  @override
-  String get reachabilityReady => '招待を受け取れる状態です';
-
-  @override
-  String get reachabilityCantCheck => 'ほかの人があなたを招待できるかどうか、今は確認できません';
-
-  @override
-  String get reachabilityNotReady => 'ほかの人はまだあなたを招待できません';
-
-  @override
-  String get reachabilityNoRelays => 'リレーを追加するまで、ほかの人はあなたを招待できません';
-
-  @override
-  String get reachabilityOpenRelaySettings => 'リレー設定';
-
-  @override
-  String get reachabilityAwaitingReset =>
-      'リレー設定に関するお知らせを確認して先に進むと、ほかの人があなたを招待できるようになります';
-
-  @override
   String get qrCodeWhatIsThisTitle => 'これは何ですか？';
 
   @override
@@ -1682,7 +1655,7 @@ class AppLocalizationsJa extends AppLocalizations {
   String get npubQrScanLabel => 'スキャンして追加';
 
   @override
-  String get npubQrSemanticsLabel => 'あなたの公開識別情報のQRコード';
+  String get npubQrSemanticsLabel => 'あなたの公開鍵のQRコード';
 
   @override
   String get photoHeaderRemoveTitle => 'プロフィール写真を削除しますか？';

@@ -372,10 +372,10 @@ abstract class AppLocalizations {
   /// **'Importing…'**
   String get onboardingImportLoading;
 
-  /// Validation error shown when the import input does not look like a valid backup key.
+  /// Validation error shown when the import input does not look like a valid secret key (nsec). Use the same term for 'secret key' as onboardingImportBody.
   ///
   /// In en, this message translates to:
-  /// **'That doesn’t look like a valid backup key. Please check and try again.'**
+  /// **'That doesn’t look like a valid secret key. Please check and try again.'**
   String get onboardingImportInvalid;
 
   /// Generic error shown when importing an existing key fails.
@@ -684,7 +684,7 @@ abstract class AppLocalizations {
   /// **'Lookup relays'**
   String get relaySettingsLookupTitle;
 
-  /// Caption under the Lookup relays section title. States what is sent there and why: only the user's relay lists (not their invitation key), so people who only have their ID can invite them.
+  /// Caption under the Lookup relays section title. States what is sent there and why: only the user's relay lists (not their invitation key), so people who only have their public key can invite them.
   ///
   /// In en, this message translates to:
   /// **'Public relays where others look you up. Haven keeps a copy of your relay lists here so people can invite you.'**
@@ -1188,10 +1188,10 @@ abstract class AppLocalizations {
   /// **'Add circle members'**
   String get createCircleEmptyTitle;
 
-  /// Message of the empty state on the add-members step explaining how to add members.
+  /// Message of the empty state on the add-members step explaining how to add members. 'Public key' is the person's Nostr public key (npub): use this locale's established term for it, the same one as qrCodeYourPublicKeyLabel.
   ///
   /// In en, this message translates to:
-  /// **'Search by ID or scan their QR code to add members.'**
+  /// **'Search by public key or scan their QR code to add members.'**
   String get createCircleEmptyMessage;
 
   /// Error shown when the user tries to continue with no valid members selected.
@@ -1200,22 +1200,22 @@ abstract class AppLocalizations {
   /// **'No valid members to invite'**
   String get createCircleNoValidMembers;
 
-  /// Snackbar shown when a scanned QR code contains no recognizable member ID.
+  /// Snackbar shown when a scanned QR code contains no recognizable public key (npub). Use the same term for 'public key' as qrCodeYourPublicKeyLabel.
   ///
   /// In en, this message translates to:
-  /// **'No valid ID found in QR code'**
+  /// **'No valid public key found in QR code'**
   String get createCircleNoIdInQr;
 
-  /// Member validation message when every relay that was asked answered and none holds an invitation key for the entered ID. Shown next to a Retry button. Deliberately not certain ('yet'): someone who set up Haven moments ago may not be findable for a minute, so the second sentence invites trying again. Must not say the person does not exist or blame anyone. 'Haven' is intentionally English (brand name). 'ID' is the person's public ID the user typed or scanned.
+  /// Member validation message when every relay that was asked answered and none holds an invitation key for the entered public key. Shown next to a Retry button. Deliberately not certain ('yet'): someone who set up Haven moments ago may not be findable for a minute, so the second sentence invites trying again. Must not say the person does not exist or blame anyone. 'Haven' is intentionally English (brand name). 'Public key' is the person's Nostr public key (npub) the user typed or scanned — use the same term as qrCodeYourPublicKeyLabel.
   ///
   /// In en, this message translates to:
-  /// **'No Haven account found for this ID yet. If they just set up Haven, try again in a minute.'**
+  /// **'No Haven account found for this public key yet. If they just set up Haven, try again in a minute.'**
   String get memberLookupNotFound;
 
-  /// Member validation message when the lookup could not finish (a relay did not answer, or the network failed), so it is unknown whether the person has a Haven account. Shown next to a Retry button. Must not suggest the person has no account. 'ID' is the person's public ID the user typed or scanned.
+  /// Member validation message when the lookup could not finish (a relay did not answer, or the network failed), so it is unknown whether the person has a Haven account. Shown next to a Retry button. Must not suggest the person has no account. 'Public key' is the person's Nostr public key (npub) the user typed or scanned — use the same term as qrCodeYourPublicKeyLabel.
   ///
   /// In en, this message translates to:
-  /// **'Couldn\'t finish checking this ID. Check your connection and try again.'**
+  /// **'Couldn\'t finish checking this public key. Check your connection and try again.'**
   String get memberLookupIncomplete;
 
   /// Generic member validation error shown on an unexpected failure.
@@ -1344,7 +1344,7 @@ abstract class AppLocalizations {
   /// **'Once they accept, they will see everyone\'s location from that point on, never anything sent before they joined. They will also see the public keys of everyone already in this circle.'**
   String get addMemberInfo;
 
-  /// Member validation error shown when the entered ID is already a member of this circle.
+  /// Member validation error shown when the entered public key is already a member of this circle.
   ///
   /// In en, this message translates to:
   /// **'Already in this circle'**
@@ -1566,19 +1566,19 @@ abstract class AppLocalizations {
   /// **'Haven can’t invite them right now. Ask them to open Haven, then try again.'**
   String get memberKeyPackageStale;
 
-  /// Hint inside the member-search text field where a member ID is entered.
+  /// Hint inside the member-search text field where a person's public key (npub) is entered. Use the same term for 'public key' as qrCodeYourPublicKeyLabel.
   ///
   /// In en, this message translates to:
-  /// **'Enter member ID...'**
+  /// **'Enter public key...'**
   String get memberSearchHint;
 
-  /// Tooltip on the button that pastes a member ID from the clipboard.
+  /// Tooltip on the button that pastes a public key from the clipboard.
   ///
   /// In en, this message translates to:
   /// **'Paste from clipboard'**
   String get memberSearchPasteTooltip;
 
-  /// Tooltip on the button that adds the entered member ID.
+  /// Tooltip on the button that adds the entered public key.
   ///
   /// In en, this message translates to:
   /// **'Add member'**
@@ -1590,19 +1590,19 @@ abstract class AppLocalizations {
   /// **'Scan QR Code'**
   String get memberSearchScanTooltip;
 
-  /// Helper text under the member-search field. 'Haven' is intentionally English (brand name).
+  /// Helper text under the member-search field: the one place the add-members screen says what to ask a person for. 'Public key' is the person's Nostr public key (npub) — use the same term as qrCodeYourPublicKeyLabel.
   ///
   /// In en, this message translates to:
-  /// **'Ask contacts for their Haven QR code or ID'**
+  /// **'Ask contacts for their public key or QR code'**
   String get memberSearchHelper;
 
-  /// Inline error shown when the entered text is not a recognizable Haven ID. 'Haven' is intentionally English (brand name).
+  /// Inline error shown when the entered text is not a recognizable public key (npub). Use the same term for 'public key' as qrCodeYourPublicKeyLabel.
   ///
   /// In en, this message translates to:
-  /// **'No valid Haven ID found'**
+  /// **'No valid public key found'**
   String get memberSearchNoValidId;
 
-  /// Inline error shown when the entered member ID is already in the selected list.
+  /// Inline error shown when the entered public key is already in the selected list.
   ///
   /// In en, this message translates to:
   /// **'Member already added'**
@@ -1620,7 +1620,7 @@ abstract class AppLocalizations {
   /// **'Member of your circles'**
   String get memberPickerTierRoster;
 
-  /// Shown, and announced once, when what was typed matches nobody in the user's circles. The person can still be invited by pasting their full ID, so this must not read as a dead end.
+  /// Shown, and announced once, when what was typed matches nobody in the user's circles. The person can still be invited by pasting their full public key, so this must not read as a dead end.
   ///
   /// In en, this message translates to:
   /// **'No matches in your circles'**
@@ -1632,7 +1632,7 @@ abstract class AppLocalizations {
   /// **'Loading people from your circles'**
   String get memberPickerLoading;
 
-  /// Shown in place of the picker's list when the on-device directory of co-members could not be read at all (a storage or lookup fault) — distinct from memberPickerNoMatches, which means the read SUCCEEDED and simply matched nobody, and distinct from the silent empty state on a fresh install, which means the read succeeded and truthfully found no co-members yet. This string must never be read as either of those: it says the answer is unknown, not that it is empty or negative. The person can still be invited by pasting or scanning their full ID, so this must not read as a dead end, and must not display any raw error text (Security Rule 8 — never surface exception detail to the UI).
+  /// Shown in place of the picker's list when the on-device directory of co-members could not be read at all (a storage or lookup fault) — distinct from memberPickerNoMatches, which means the read SUCCEEDED and simply matched nobody, and distinct from the silent empty state on a fresh install, which means the read succeeded and truthfully found no co-members yet. This string must never be read as either of those: it says the answer is unknown, not that it is empty or negative. The person can still be invited by pasting or scanning their full public key, so this must not read as a dead end, and must not display any raw error text (Security Rule 8 — never surface exception detail to the UI).
   ///
   /// In en, this message translates to:
   /// **'Couldn\'t load who\'s in your circles right now'**
@@ -1644,10 +1644,10 @@ abstract class AppLocalizations {
   /// **'Matches: {count}'**
   String memberPickerMatchesAnnouncement(int count);
 
-  /// Why someone cannot be added: the entered ID, or the row, is the user's own identity. Shown under the search field when the user enters their own ID, and as the reason on a disabled picker row. Must stay distinct from 'Already in this circle' — being unable to invite yourself is a different fact from already being a member.
+  /// Why someone cannot be added: the entered public key, or the row, is the user's own. Shown under the search field when the user enters their own public key, and as the reason on a disabled picker row. Must stay distinct from 'Already in this circle' — being unable to invite yourself is a different fact from already being a member. Use the same term for 'public key' as qrCodeYourPublicKeyLabel.
   ///
   /// In en, this message translates to:
-  /// **'This is your own ID'**
+  /// **'This is your own public key'**
   String get memberPickerReasonSelf;
 
   /// Screen-reader custom action on a picker row that SPEAKS the person's public key aloud — it does not display or open it. The word 'aloud' is load-bearing: without it, four of the first five translators rendered 'read' in the read-with-your-eyes sense, which many languages distinguish with a different verb entirely (German vorlesen vs lesen). Translate the speaking sense. This label is also a fixed string and must never contain the key itself: Flutter interns custom-action labels in a process-wide map with no prune path, so a per-person label would hold identifier text for the life of the process.
@@ -1680,13 +1680,7 @@ abstract class AppLocalizations {
   /// **'Circle: {circleName}'**
   String memberPickerCollisionCircleLabel(String circleName);
 
-  /// Shown on the ONE row that appears when the user types or pastes a complete, valid npub for someone not already in the local directory (plan §10 D2), and also under a staged row (added by the paste button, Done, a QR scan or a tap on that row) whose person was looked up the same way. Appears whether or not anything resolves. Discloses exactly four things and no more: (1) Haven asked a public relay for the person's published profile — never more than two relays (it never pads with decoys; they are the two relays the existing per-author relay assignment allows, PROFILE_MAX_RELAY_RANK). Do NOT say or imply WHEN the second one is asked, e.g. 'only if the first did not answer': it is also asked when the key is entered again after the first answered without a profile; (2) a relay that was asked can see THIS DEVICE asked about THAT KEY at THAT MOMENT — do not soften this into 'may be able to see' or omit it, it is a real, unavoidable disclosure; (3) the request is NOT tied to the user's Haven identity, because it carries no cryptographic signature and therefore cannot answer a relay's NIP-42 AUTH challenge — translate 'signature' in the cryptographic sense, not a handwritten or email signature; (4) ONLY IF the published profile names a photo, Haven downloads that photo from the server the PERSON chose (not a server Haven or the user chose), and that server can see this device's network address — translate 'network address' as the device's internet (IP) address, not a street or email address. Do NOT use a word meaning 'anonymous' or 'anonymously' anywhere in this string — it overclaims: the network address and timing of the requests are still visible, which is exactly what points (2) and (4) disclose. Do not add or imply a duration, a retry count, or which relay or server was asked. 'This person' is deliberately not a pronoun: do not introduce a gendered pronoun for them.
-  ///
-  /// In en, this message translates to:
-  /// **'Haven asked a relay — two at most — for this person\'s published profile. A relay it asked can see that this device asked about this key just now, but the request carries no signature, so it isn\'t tied to your Haven identity. If the profile has a photo, Haven downloads it from the server this person chose, which can see this device\'s network address.'**
-  String get memberPickerStrangerLookupNote;
-
-  /// Shown, and spoken by a screen reader as part of the row's label, on the typed-npub row of the invite picker while the lookup of that person's published profile is still in flight. Also announced once on its own when the row appears with the lookup still running, so it must read as a complete status. A short status, not a sentence about relays — the disclosure is memberPickerStrangerLookupNote, shown beneath it. Ends with an ellipsis character to mark an activity in progress.
+  /// Shown, and spoken by a screen reader as part of the row's label, on the typed-npub row of the invite picker while the lookup of that person's published profile is still in flight. Also announced once on its own when the row appears with the lookup still running, so it must read as a complete status. A short status, not a sentence about relays. Ends with an ellipsis character to mark an activity in progress.
   ///
   /// In en, this message translates to:
   /// **'Looking up published profile…'**
@@ -1722,10 +1716,10 @@ abstract class AppLocalizations {
   /// **'Invitation to join a circle, sent by {inviter}'**
   String invitationCardSemantics(String inviter);
 
-  /// Accessibility label for the inviter row of an invitation card. {inviter} is the inviter's shortened npub.
+  /// Accessibility label for the inviter row of an invitation card. {inviter} is the inviter's shortened npub; the label says what that string is — their public key — rather than reading it out as a name. Use the same term for 'public key' as qrCodeYourPublicKeyLabel.
   ///
   /// In en, this message translates to:
-  /// **'Invited by cryptographic identifier {inviter}'**
+  /// **'Invited by public key {inviter}'**
   String invitationCardInvitedBySemantics(String inviter);
 
   /// Visible inviter line on an invitation card. {inviter} is the nickname the user saved for the inviter when there is one, else the inviter's resolved public name, else their shortened npub; the npub is then shown on its own line beneath.
@@ -2424,48 +2418,6 @@ abstract class AppLocalizations {
   /// **'Your public key'**
   String get qrCodeYourPublicKeyLabel;
 
-  /// Status line above the user's QR code (and on the Identity page) while Haven has not yet confirmed that others can invite the user, or while a Retry runs. Announced to screen readers when it appears. Plain language: no 'relay' or 'KeyPackage'.
-  ///
-  /// In en, this message translates to:
-  /// **'Getting ready to receive invitations…'**
-  String get reachabilityChecking;
-
-  /// Status line above the user's QR code (and on the Identity page) once Haven has confirmed others can find the user and invite them to a circle. Shown with a check icon. Plain language: no 'relay' or 'KeyPackage'.
-  ///
-  /// In en, this message translates to:
-  /// **'Ready to be invited'**
-  String get reachabilityReady;
-
-  /// Neutral status line above the user's QR code (and on the Identity page) when Haven could not reach the network to check. Shown next to a Retry button. Must NOT say the user cannot be invited — nothing is known, and the phone may simply be offline. Plain language: no 'relay' or 'KeyPackage'.
-  ///
-  /// In en, this message translates to:
-  /// **'Can\'t check right now whether others can invite you'**
-  String get reachabilityCantCheck;
-
-  /// Status line above the user's QR code (and on the Identity page) when Haven reached the network and confirmed that others cannot find the user to invite them yet. Shown with a warning icon and a Retry button. Plain language: no 'relay' or 'KeyPackage'; must not blame the user.
-  ///
-  /// In en, this message translates to:
-  /// **'Others can\'t invite you yet'**
-  String get reachabilityNotReady;
-
-  /// Status line above the user's QR code (and on the Identity page) when the user has removed every relay of a kind Haven needs, so nothing can be published for others to find. Followed by a link to Relay settings (reachabilityOpenRelaySettings). 'relay' is a Nostr term of art — keep this locale's established rendering.
-  ///
-  /// In en, this message translates to:
-  /// **'Others can\'t invite you until you add a relay'**
-  String get reachabilityNoRelays;
-
-  /// Link under the 'add a relay' status line above the user's QR code; opens the Relay settings page. Use the same name as the Relay settings page title in this locale.
-  ///
-  /// In en, this message translates to:
-  /// **'Relay settings'**
-  String get reachabilityOpenRelaySettings;
-
-  /// Status line above the user's QR code (and on the Identity page) while the one-time notice that this update reset the relay settings is still unanswered: Haven publishes nothing others need to invite the user until the user presses Continue on that notice or comes back from Relay settings. No Retry is offered here because it would do nothing.
-  ///
-  /// In en, this message translates to:
-  /// **'Others can invite you once you continue past the relay settings notice'**
-  String get reachabilityAwaitingReset;
-
   /// Heading of the plain-language explainer on the Public Key QR page.
   ///
   /// In en, this message translates to:
@@ -2628,10 +2580,10 @@ abstract class AppLocalizations {
   /// **'Scan to add me'**
   String get npubQrScanLabel;
 
-  /// Accessibility label for the npub QR code group.
+  /// Accessibility label for the npub QR code group. Use the same term for 'public key' as qrCodeYourPublicKeyLabel.
   ///
   /// In en, this message translates to:
-  /// **'QR code for your public identity'**
+  /// **'QR code for your public key'**
   String get npubQrSemanticsLabel;
 
   /// Title of the confirmation dialog before removing the profile photo.

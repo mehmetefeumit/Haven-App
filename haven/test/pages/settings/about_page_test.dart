@@ -33,9 +33,7 @@ void main() {
     expect(havenVersion, 'dev');
   });
 
-  testWidgets('the licenses page shows the same build version', (
-    tester,
-  ) async {
+  testWidgets('the licenses page shows the same build version', (tester) async {
     await pumpLocalized(tester, const AboutPage());
 
     await tester.tap(find.text('Open-source licenses'));

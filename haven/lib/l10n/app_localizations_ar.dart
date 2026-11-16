@@ -167,7 +167,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get onboardingImportInvalid =>
-      'لا يبدو هذا مفتاح نسخ احتياطي صالحًا. يُرجى التحقق وإعادة المحاولة.';
+      'لا يبدو هذا مفتاحًا سريًا صالحًا. يُرجى التحقق وإعادة المحاولة.';
 
   @override
   String get onboardingImportError =>
@@ -679,21 +679,21 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get createCircleEmptyMessage =>
-      'ابحث بالمعرّف أو امسح رمز QR الخاص بهم لإضافة الأعضاء.';
+      'ابحث بالمفتاح العام أو امسح رمز QR الخاص بهم لإضافة الأعضاء.';
 
   @override
   String get createCircleNoValidMembers => 'لا أعضاء صالحون للدعوة';
 
   @override
-  String get createCircleNoIdInQr => 'لم يُعثَر على معرّف صالح في رمز QR';
+  String get createCircleNoIdInQr => 'لم يُعثَر على مفتاح عام صالح في رمز QR';
 
   @override
   String get memberLookupNotFound =>
-      'لم يُعثَر بعدُ على حساب Haven لهذا المعرّف. إن كان الحساب قد أُنشئ للتوّ، فيُرجى إعادة المحاولة بعد دقيقة.';
+      'لم يُعثَر بعدُ على حساب Haven لهذا المفتاح العام. إن كان الحساب قد أُنشئ للتوّ، فيُرجى إعادة المحاولة بعد دقيقة.';
 
   @override
   String get memberLookupIncomplete =>
-      'تعذّر إكمال فحص هذا المعرّف. يُرجى التحقّق من اتصالك وإعادة المحاولة.';
+      'تعذّر إكمال فحص هذا المفتاح العام. يُرجى التحقّق من اتصالك وإعادة المحاولة.';
 
   @override
   String get createCircleSomethingWentWrong => 'حدث خطأ ما';
@@ -1038,7 +1038,7 @@ class AppLocalizationsAr extends AppLocalizations {
       'لا يستطيع Haven دعوة هذا الشخص الآن. اطلب منه فتح Haven، ثم أعد المحاولة.';
 
   @override
-  String get memberSearchHint => 'أدخل معرّف العضو...';
+  String get memberSearchHint => 'أدخل المفتاح العام...';
 
   @override
   String get memberSearchPasteTooltip => 'لصق من الحافظة';
@@ -1051,10 +1051,10 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get memberSearchHelper =>
-      'اطلب من جهات اتصالك رمز Haven QR أو المعرّف الخاص بهم';
+      'اطلب من جهات اتصالك مفتاحهم العام أو رمز QR الخاص بهم';
 
   @override
-  String get memberSearchNoValidId => 'لم يُعثَر على معرّف Haven صالح';
+  String get memberSearchNoValidId => 'لم يُعثَر على مفتاح عام صالح';
 
   @override
   String get memberSearchAlreadyAdded => 'العضو مُضاف بالفعل';
@@ -1085,7 +1085,7 @@ class AppLocalizationsAr extends AppLocalizations {
   }
 
   @override
-  String get memberPickerReasonSelf => 'هذا معرّفك أنت';
+  String get memberPickerReasonSelf => 'هذا مفتاحك العام أنت';
 
   @override
   String get memberPickerReadPublicKey => 'نطق المفتاح العام';
@@ -1104,10 +1104,6 @@ class AppLocalizationsAr extends AppLocalizations {
   String memberPickerCollisionCircleLabel(String circleName) {
     return 'الدائرة: $circleName';
   }
-
-  @override
-  String get memberPickerStrangerLookupNote =>
-      'طلب Haven من أحد المُرحِّلات، أو من اثنين على الأكثر، الملف الشخصي الذي نشره هذا الشخص. ويستطيع كل مُرحِّل سأله Haven أن يرى أن هذا الجهاز سأل للتو عن هذا المفتاح، لكن الطلب لا يحمل أي توقيع تشفيري، فهو غير مرتبط بهويتك في Haven. وإن كان في الملف الشخصي صورة، نزّلها Haven من الخادم الذي اختاره هذا الشخص، ويستطيع ذلك الخادم أن يرى عنوان هذا الجهاز على الشبكة.';
 
   @override
   String get memberPickerStrangerLookingUp =>
@@ -1140,7 +1136,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String invitationCardInvitedBySemantics(String inviter) {
-    return 'بدعوة من المعرّف التشفيري $inviter';
+    return 'بدعوة من المفتاح العام $inviter';
   }
 
   @override
@@ -1717,29 +1713,6 @@ class AppLocalizationsAr extends AppLocalizations {
   String get qrCodeYourPublicKeyLabel => 'مفتاحك العام';
 
   @override
-  String get reachabilityChecking => 'جارٍ الاستعداد لتلقّي الدعوات…';
-
-  @override
-  String get reachabilityReady => 'يمكن للآخرين دعوتك';
-
-  @override
-  String get reachabilityCantCheck =>
-      'يتعذّر الآن التحقّق مما إذا كان بإمكان الآخرين دعوتك';
-
-  @override
-  String get reachabilityNotReady => 'لا يمكن للآخرين دعوتك بعد';
-
-  @override
-  String get reachabilityNoRelays => 'لا يمكن للآخرين دعوتك قبل إضافة مُرحِّل';
-
-  @override
-  String get reachabilityOpenRelaySettings => 'إعدادات المُرحِّلات';
-
-  @override
-  String get reachabilityAwaitingReset =>
-      'سيتمكّن الآخرون من دعوتك بمجرّد تجاوز تنبيه إعدادات المُرحِّلات';
-
-  @override
   String get qrCodeWhatIsThisTitle => 'ما هذا؟';
 
   @override
@@ -1825,7 +1798,7 @@ class AppLocalizationsAr extends AppLocalizations {
   String get npubQrScanLabel => 'امسح لإضافتي';
 
   @override
-  String get npubQrSemanticsLabel => 'رمز QR لهويتك العامة';
+  String get npubQrSemanticsLabel => 'رمز QR لمفتاحك العام';
 
   @override
   String get photoHeaderRemoveTitle => 'إزالة صورة الملف الشخصي؟';

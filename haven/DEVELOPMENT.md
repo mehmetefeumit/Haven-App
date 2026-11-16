@@ -117,7 +117,14 @@ scripts/build_release.sh apk         # -> build/app/outputs/flutter-apk/app-{arm
 scripts/build_release.sh appbundle   # -> build/app/outputs/bundle/release/app-release.aab
 scripts/build_release.sh ios         # iOS release (no codesign)
 scripts/build_release.sh ipa         # iOS signed App Store IPA for TestFlight (see below)
+scripts/build_release.sh version     # print the version arguments a build would use; builds nothing
 ```
+
+The version the app shows (About page, licence page) is compiled in by the
+wrapper as `--dart-define=HAVEN_VERSION`: the release tag's version in full
+(`BUILD_NAME`, see "Cutting a release"), or `pubspec.yaml`'s `version:` without
+its `+build` part when no tag is given. A build that bypasses the wrapper
+(`flutter run`, `flutter test`) shows `dev`.
 
 Why a wrapper and not a plain `flutter build`? `--dart-define`/`--obfuscate` are
 consumed by the `flutter` CLI *before* Gradle/Xcode run, and Flutter exposes no
@@ -163,7 +170,8 @@ never tags or commits. Pushing `vX.Y.Z` (or `vX.Y.Z-beta.N` for a pre-release) t
    release-signed, never debug-signed.
 3. Builds the **per-ABI release APKs** (`app-arm64-v8a-release.apk`,
    `…-armeabi-v7a-…`, `…-x86_64-…`). Marketing version comes from the tag
-   (`vX.Y.Z → X.Y.Z`); the base versionCode is the CI run number.
+   (`vX.Y.Z → X.Y.Z`); the base versionCode is the CI run number. The app's
+   About page shows the tag's version in full (`v1.2.3-beta.1 → 1.2.3-beta.1`).
 4. Creates a **GitHub Release** for the tag and attaches the per-ABI APKs +
    `.sha256` sidecars. Tags containing `-` are flagged pre-release and not marked
    "Latest".
@@ -302,13 +310,16 @@ git tag -a v1.2.3 -m "Haven 1.2.3"   # tag must be vMAJOR.MINOR.PATCH (digits on
 git push origin v1.2.3               # -> Release Build workflow -> Android + iOS/TestFlight
 ```
 
-The tag must be numeric `vX.Y.Z` (the wrapper rejects anything else, since Apple
-requires a numeric short-version string). To re-build the same version (e.g. after
+The tag must be `vX.Y.Z`, optionally with a `-prerelease` / `+build` suffix
+(`v1.2.3-beta.1`); the wrapper refuses anything else. Apple requires a numeric
+short-version string, so the native stamp drops the suffix (`1.2.3`), while the
+app's About page shows it in full (`1.2.3-beta.1`). To re-build the same version (e.g. after
 a fix to the pipeline), push a new build number by deleting and re-pushing the tag,
 or just bump to the next patch — TestFlight accepts repeated versions as long as
 the build number differs, which it always does (it's the run number).
 A manual **Run workflow** (workflow_dispatch) on Release Build has no tag, so it
-falls back to `pubspec.yaml`'s `version:` — handy for a throwaway signed test build.
+falls back to `pubspec.yaml`'s `version:` (the About page too) — handy for a
+throwaway signed test build.
 
 **Export compliance:** the first build lands in App Store Connect as *Missing
 Compliance*. Answer the encryption question there (Haven ships its own

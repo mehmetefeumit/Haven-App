@@ -164,7 +164,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get onboardingImportInvalid =>
-      'That doesn’t look like a valid backup key. Please check and try again.';
+      'That doesn’t look like a valid secret key. Please check and try again.';
 
   @override
   String get onboardingImportError =>
@@ -666,21 +666,21 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get createCircleEmptyMessage =>
-      'Search by ID or scan their QR code to add members.';
+      'Search by public key or scan their QR code to add members.';
 
   @override
   String get createCircleNoValidMembers => 'No valid members to invite';
 
   @override
-  String get createCircleNoIdInQr => 'No valid ID found in QR code';
+  String get createCircleNoIdInQr => 'No valid public key found in QR code';
 
   @override
   String get memberLookupNotFound =>
-      'No Haven account found for this ID yet. If they just set up Haven, try again in a minute.';
+      'No Haven account found for this public key yet. If they just set up Haven, try again in a minute.';
 
   @override
   String get memberLookupIncomplete =>
-      'Couldn\'t finish checking this ID. Check your connection and try again.';
+      'Couldn\'t finish checking this public key. Check your connection and try again.';
 
   @override
   String get createCircleSomethingWentWrong => 'Something went wrong';
@@ -986,7 +986,7 @@ class AppLocalizationsEn extends AppLocalizations {
       'Haven can’t invite them right now. Ask them to open Haven, then try again.';
 
   @override
-  String get memberSearchHint => 'Enter member ID...';
+  String get memberSearchHint => 'Enter public key...';
 
   @override
   String get memberSearchPasteTooltip => 'Paste from clipboard';
@@ -998,10 +998,11 @@ class AppLocalizationsEn extends AppLocalizations {
   String get memberSearchScanTooltip => 'Scan QR Code';
 
   @override
-  String get memberSearchHelper => 'Ask contacts for their Haven QR code or ID';
+  String get memberSearchHelper =>
+      'Ask contacts for their public key or QR code';
 
   @override
-  String get memberSearchNoValidId => 'No valid Haven ID found';
+  String get memberSearchNoValidId => 'No valid public key found';
 
   @override
   String get memberSearchAlreadyAdded => 'Member already added';
@@ -1032,7 +1033,7 @@ class AppLocalizationsEn extends AppLocalizations {
   }
 
   @override
-  String get memberPickerReasonSelf => 'This is your own ID';
+  String get memberPickerReasonSelf => 'This is your own public key';
 
   @override
   String get memberPickerReadPublicKey => 'Read public key aloud';
@@ -1051,10 +1052,6 @@ class AppLocalizationsEn extends AppLocalizations {
   String memberPickerCollisionCircleLabel(String circleName) {
     return 'Circle: $circleName';
   }
-
-  @override
-  String get memberPickerStrangerLookupNote =>
-      'Haven asked a relay — two at most — for this person\'s published profile. A relay it asked can see that this device asked about this key just now, but the request carries no signature, so it isn\'t tied to your Haven identity. If the profile has a photo, Haven downloads it from the server this person chose, which can see this device\'s network address.';
 
   @override
   String get memberPickerStrangerLookingUp => 'Looking up published profile…';
@@ -1086,7 +1083,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String invitationCardInvitedBySemantics(String inviter) {
-    return 'Invited by cryptographic identifier $inviter';
+    return 'Invited by public key $inviter';
   }
 
   @override
@@ -1632,30 +1629,6 @@ class AppLocalizationsEn extends AppLocalizations {
   String get qrCodeYourPublicKeyLabel => 'Your public key';
 
   @override
-  String get reachabilityChecking => 'Getting ready to receive invitations…';
-
-  @override
-  String get reachabilityReady => 'Ready to be invited';
-
-  @override
-  String get reachabilityCantCheck =>
-      'Can\'t check right now whether others can invite you';
-
-  @override
-  String get reachabilityNotReady => 'Others can\'t invite you yet';
-
-  @override
-  String get reachabilityNoRelays =>
-      'Others can\'t invite you until you add a relay';
-
-  @override
-  String get reachabilityOpenRelaySettings => 'Relay settings';
-
-  @override
-  String get reachabilityAwaitingReset =>
-      'Others can invite you once you continue past the relay settings notice';
-
-  @override
   String get qrCodeWhatIsThisTitle => 'What is this?';
 
   @override
@@ -1741,7 +1714,7 @@ class AppLocalizationsEn extends AppLocalizations {
   String get npubQrScanLabel => 'Scan to add me';
 
   @override
-  String get npubQrSemanticsLabel => 'QR code for your public identity';
+  String get npubQrSemanticsLabel => 'QR code for your public key';
 
   @override
   String get photoHeaderRemoveTitle => 'Remove profile photo?';

@@ -168,7 +168,7 @@ class AppLocalizationsNe extends AppLocalizations {
 
   @override
   String get onboardingImportInvalid =>
-      'यो वैध ब्याकअप कुञ्जी जस्तो देखिँदैन। कृपया जाँचेर फेरि प्रयास गर्नुहोस्।';
+      'यो वैध गोप्य कुञ्जी जस्तो देखिँदैन। कृपया जाँचेर फेरि प्रयास गर्नुहोस्।';
 
   @override
   String get onboardingImportError =>
@@ -672,21 +672,22 @@ class AppLocalizationsNe extends AppLocalizations {
 
   @override
   String get createCircleEmptyMessage =>
-      'सदस्य थप्न ID द्वारा खोज्नुहोस् वा तिनको QR कोड स्क्यान गर्नुहोस्।';
+      'सदस्य थप्न सार्वजनिक कुञ्जीद्वारा खोज्नुहोस् वा तिनको QR कोड स्क्यान गर्नुहोस्।';
 
   @override
   String get createCircleNoValidMembers => 'निमन्त्रणा गर्न कुनै वैध सदस्य छैन';
 
   @override
-  String get createCircleNoIdInQr => 'QR कोडमा कुनै वैध ID फेला परेन';
+  String get createCircleNoIdInQr =>
+      'QR कोडमा कुनै वैध सार्वजनिक कुञ्जी फेला परेन';
 
   @override
   String get memberLookupNotFound =>
-      'यो ID को कुनै Haven खाता अहिलेसम्म फेला परेन। तिनले भर्खरै Haven सेटअप गरेका हुन् भने, एक मिनेटपछि फेरि प्रयास गर्नुहोस्।';
+      'यो सार्वजनिक कुञ्जीको कुनै Haven खाता अहिलेसम्म फेला परेन। तिनले भर्खरै Haven सेटअप गरेका हुन् भने, एक मिनेटपछि फेरि प्रयास गर्नुहोस्।';
 
   @override
   String get memberLookupIncomplete =>
-      'यो ID जाँच्ने काम पूरा गर्न सकिएन। आफ्नो जडान जाँचेर फेरि प्रयास गर्नुहोस्।';
+      'यो सार्वजनिक कुञ्जी जाँच्ने काम पूरा गर्न सकिएन। आफ्नो जडान जाँचेर फेरि प्रयास गर्नुहोस्।';
 
   @override
   String get createCircleSomethingWentWrong => 'केही गडबड भयो';
@@ -994,7 +995,7 @@ class AppLocalizationsNe extends AppLocalizations {
       'Haven ले अहिले तिनलाई निमन्त्रणा गर्न सक्दैन। तिनलाई Haven खोल्न भन्नुहोस्, त्यसपछि फेरि प्रयास गर्नुहोस्।';
 
   @override
-  String get memberSearchHint => 'सदस्य ID लेख्नुहोस्...';
+  String get memberSearchHint => 'सार्वजनिक कुञ्जी लेख्नुहोस्...';
 
   @override
   String get memberSearchPasteTooltip => 'क्लिपबोर्डबाट टाँस्नुहोस्';
@@ -1007,10 +1008,10 @@ class AppLocalizationsNe extends AppLocalizations {
 
   @override
   String get memberSearchHelper =>
-      'सम्पर्कहरूसँग तिनको Haven QR कोड वा ID माग्नुहोस्';
+      'सम्पर्कहरूसँग तिनको सार्वजनिक कुञ्जी वा QR कोड माग्नुहोस्';
 
   @override
-  String get memberSearchNoValidId => 'कुनै वैध Haven ID फेला परेन';
+  String get memberSearchNoValidId => 'कुनै वैध सार्वजनिक कुञ्जी फेला परेन';
 
   @override
   String get memberSearchAlreadyAdded => 'सदस्य पहिल्यै थपिएको छ';
@@ -1041,7 +1042,7 @@ class AppLocalizationsNe extends AppLocalizations {
   }
 
   @override
-  String get memberPickerReasonSelf => 'यो तपाईंको आफ्नै ID हो';
+  String get memberPickerReasonSelf => 'यो तपाईंको आफ्नै सार्वजनिक कुञ्जी हो';
 
   @override
   String get memberPickerReadPublicKey => 'सार्वजनिक कुञ्जी पढेर सुनाउनुहोस्';
@@ -1060,10 +1061,6 @@ class AppLocalizationsNe extends AppLocalizations {
   String memberPickerCollisionCircleLabel(String circleName) {
     return 'सर्कल: $circleName';
   }
-
-  @override
-  String get memberPickerStrangerLookupNote =>
-      'Haven ले एउटा रिलेसँग (बढीमा दुईवटासँग) यी व्यक्तिको प्रकाशित प्रोफाइल माग्यो। जुन रिलेसँग सोधियो, त्यसले यो यन्त्रले भर्खरै यही कुञ्जीबारे सोधेको कुरा देख्छ, तर यो अनुरोधले कुनै डिजिटल हस्ताक्षर बोक्दैन, त्यसैले यो तपाईंको Haven परिचयसँग जोडिँदैन। प्रोफाइलमा फोटो छ भने Haven ले त्यो फोटो यी व्यक्तिले छानेको सर्भरबाट डाउनलोड गर्छ, र त्यो सर्भरले यो यन्त्रको नेटवर्क ठेगाना देख्छ।';
 
   @override
   String get memberPickerStrangerLookingUp => 'प्रकाशित प्रोफाइल खोज्दै…';
@@ -1095,7 +1092,7 @@ class AppLocalizationsNe extends AppLocalizations {
 
   @override
   String invitationCardInvitedBySemantics(String inviter) {
-    return 'क्रिप्टोग्राफिक पहिचानकर्ता $inviter बाट आएको निमन्त्रणा';
+    return 'सार्वजनिक कुञ्जी $inviter बाट आएको निमन्त्रणा';
   }
 
   @override
@@ -1647,31 +1644,6 @@ class AppLocalizationsNe extends AppLocalizations {
   String get qrCodeYourPublicKeyLabel => 'तपाईंको सार्वजनिक कुञ्जी';
 
   @override
-  String get reachabilityChecking => 'निमन्त्रणा पाउने तयारी गर्दै…';
-
-  @override
-  String get reachabilityReady => 'निमन्त्रणा पाउन तयार';
-
-  @override
-  String get reachabilityCantCheck =>
-      'अरूले तपाईंलाई निमन्त्रणा गर्न सक्छन् कि सक्दैनन् भनेर अहिले जाँच्न सकिँदैन';
-
-  @override
-  String get reachabilityNotReady =>
-      'अरूले तपाईंलाई अझै निमन्त्रणा गर्न सक्दैनन्';
-
-  @override
-  String get reachabilityNoRelays =>
-      'तपाईंले एउटा रिले नथपेसम्म अरूले तपाईंलाई निमन्त्रणा गर्न सक्दैनन्';
-
-  @override
-  String get reachabilityOpenRelaySettings => 'रिले सेटिङहरू';
-
-  @override
-  String get reachabilityAwaitingReset =>
-      'रिले सेटिङहरूबारेको सूचनाबाट तपाईं अगाडि बढेपछि अरूले तपाईंलाई निमन्त्रणा गर्न सक्नेछन्';
-
-  @override
   String get qrCodeWhatIsThisTitle => 'यो के हो?';
 
   @override
@@ -1763,7 +1735,7 @@ class AppLocalizationsNe extends AppLocalizations {
   String get npubQrScanLabel => 'मलाई थप्न स्क्यान गर्नुहोस्';
 
   @override
-  String get npubQrSemanticsLabel => 'तपाईंको सार्वजनिक परिचयको QR कोड';
+  String get npubQrSemanticsLabel => 'तपाईंको सार्वजनिक कुञ्जीको QR कोड';
 
   @override
   String get photoHeaderRemoveTitle => 'प्रोफाइल फोटो हटाउने?';

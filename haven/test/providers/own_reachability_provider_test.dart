@@ -1,6 +1,6 @@
-// What the readiness row and onboarding say about inviting this account, and
-// what they must never say: an offline phone is not an uninvitable account,
-// and a package this device cannot open is not a ready one.
+// What onboarding is told about inviting this account, and what it must never
+// be told: an offline phone is not an uninvitable account, and a package this
+// device cannot open is not a ready one.
 import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';

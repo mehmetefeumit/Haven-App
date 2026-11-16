@@ -8,9 +8,9 @@
 ///   unsupported and flutter_map fetches all tiles live.
 ///
 /// Both providers are overridden in `main()` before `runApp`. The
-/// [tileCachingProviderProvider] is the single seam that both map call sites
-/// read — neither `map_page.dart` nor `map_style_settings_page.dart` need to
-/// know whether caching is enabled; they just watch this provider.
+/// [tileCachingProviderProvider] is the single seam the map reads —
+/// `map_page.dart` need not know whether caching is enabled; it just watches
+/// this provider.
 library;
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -49,7 +49,7 @@ final tileCacheStoreProvider = Provider<TileCacheStore>((ref) {
 /// tests can exercise the provider with a fake store and a chosen enabled
 /// state without touching Rust or SharedPreferences.
 ///
-/// This is the single seam both map call sites read:
+/// This is the single seam the map's tile layer reads:
 /// ```dart
 /// cachingProvider: ref.watch(tileCachingProviderProvider),
 /// ```

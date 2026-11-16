@@ -165,7 +165,7 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get onboardingImportInvalid =>
-      'یہ کوئی درست بیک اپ کلید معلوم نہیں ہوتی۔ براہِ کرم جانچ کر دوبارہ کوشش کریں۔';
+      'یہ کوئی درست خفیہ کلید معلوم نہیں ہوتی۔ براہِ کرم جانچ کر دوبارہ کوشش کریں۔';
 
   @override
   String get onboardingImportError =>
@@ -666,22 +666,22 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get createCircleEmptyMessage =>
-      'ارکان شامل کرنے کے لیے ID سے تلاش کریں یا ان کا QR کوڈ اسکین کریں۔';
+      'ارکان شامل کرنے کے لیے عوامی کلید سے تلاش کریں یا ان کا QR کوڈ اسکین کریں۔';
 
   @override
   String get createCircleNoValidMembers =>
       'دعوت دینے کے لیے کوئی درست رکن نہیں';
 
   @override
-  String get createCircleNoIdInQr => 'QR کوڈ میں کوئی درست ID نہیں ملی';
+  String get createCircleNoIdInQr => 'QR کوڈ میں کوئی درست عوامی کلید نہیں ملی';
 
   @override
   String get memberLookupNotFound =>
-      'اس ID کا ابھی تک کوئی Haven اکاؤنٹ نہیں ملا۔ اگر انہوں نے ابھی ابھی Haven سیٹ اپ کیا ہے، تو ایک منٹ بعد دوبارہ کوشش کریں۔';
+      'اس عوامی کلید کا ابھی تک کوئی Haven اکاؤنٹ نہیں ملا۔ اگر انہوں نے ابھی ابھی Haven سیٹ اپ کیا ہے، تو ایک منٹ بعد دوبارہ کوشش کریں۔';
 
   @override
   String get memberLookupIncomplete =>
-      'اس ID کی جانچ مکمل نہ ہو سکی۔ اپنا کنکشن جانچیں اور دوبارہ کوشش کریں۔';
+      'اس عوامی کلید کی جانچ مکمل نہ ہو سکی۔ اپنا کنکشن جانچیں اور دوبارہ کوشش کریں۔';
 
   @override
   String get createCircleSomethingWentWrong => 'کچھ غلط ہو گیا';
@@ -989,7 +989,7 @@ class AppLocalizationsUr extends AppLocalizations {
       'Haven ابھی انہیں مدعو نہیں کر سکتا۔ ان سے کہیں کہ Haven کھولیں، پھر دوبارہ کوشش کریں۔';
 
   @override
-  String get memberSearchHint => 'رکن کی ID درج کریں...';
+  String get memberSearchHint => 'عوامی کلید درج کریں...';
 
   @override
   String get memberSearchPasteTooltip => 'کلپ بورڈ سے چسپاں کریں';
@@ -1001,10 +1001,11 @@ class AppLocalizationsUr extends AppLocalizations {
   String get memberSearchScanTooltip => 'QR کوڈ اسکین کریں';
 
   @override
-  String get memberSearchHelper => 'رابطوں سے ان کا Haven QR کوڈ یا ID مانگیں';
+  String get memberSearchHelper =>
+      'رابطوں سے ان کی عوامی کلید یا QR کوڈ مانگیں';
 
   @override
-  String get memberSearchNoValidId => 'کوئی درست Haven ID نہیں ملی';
+  String get memberSearchNoValidId => 'کوئی درست عوامی کلید نہیں ملی';
 
   @override
   String get memberSearchAlreadyAdded => 'رکن پہلے ہی شامل ہے';
@@ -1036,7 +1037,7 @@ class AppLocalizationsUr extends AppLocalizations {
   }
 
   @override
-  String get memberPickerReasonSelf => 'یہ آپ کی اپنی ID ہے';
+  String get memberPickerReasonSelf => 'یہ آپ کی اپنی عوامی کلید ہے';
 
   @override
   String get memberPickerReadPublicKey => 'عوامی کلید پڑھ کر سنائیں';
@@ -1055,10 +1056,6 @@ class AppLocalizationsUr extends AppLocalizations {
   String memberPickerCollisionCircleLabel(String circleName) {
     return 'حلقہ: $circleName';
   }
-
-  @override
-  String get memberPickerStrangerLookupNote =>
-      'Haven نے اس شخص کا شائع شدہ پروفائل ایک ریلے سے مانگا ہے، زیادہ سے زیادہ دو ریلے سے۔ جس ریلے سے بھی پوچھا گیا، وہ دیکھ سکتا ہے کہ اس آلے نے ابھی ابھی اس کلید کے بارے میں پوچھا ہے، مگر اس درخواست پر کوئی ڈیجیٹل دستخط نہیں ہوتے، اس لیے یہ آپ کی Haven شناخت سے نہیں جڑتی۔ اگر پروفائل میں تصویر ہو تو Haven وہ تصویر اُس سرور سے ڈاؤن لوڈ کرتا ہے جسے اس شخص نے چنا ہے، اور وہ سرور اس آلے کا نیٹ ورک پتہ دیکھ سکتا ہے۔';
 
   @override
   String get memberPickerStrangerLookingUp =>
@@ -1091,7 +1088,7 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String invitationCardInvitedBySemantics(String inviter) {
-    return 'رمزی شناخت کنندہ $inviter کی جانب سے دعوت';
+    return 'عوامی کلید $inviter کی جانب سے دعوت';
   }
 
   @override
@@ -1641,30 +1638,6 @@ class AppLocalizationsUr extends AppLocalizations {
   String get qrCodeYourPublicKeyLabel => 'آپ کی عوامی کلید';
 
   @override
-  String get reachabilityChecking => 'دعوت نامے وصول کرنے کی تیاری ہو رہی ہے…';
-
-  @override
-  String get reachabilityReady => 'دعوت نامے وصول کرنے کے لیے تیار';
-
-  @override
-  String get reachabilityCantCheck =>
-      'ابھی یہ جانچ نہیں ہو سکتی کہ دوسرے آپ کو مدعو کر سکتے ہیں یا نہیں';
-
-  @override
-  String get reachabilityNotReady => 'دوسرے ابھی آپ کو مدعو نہیں کر سکتے';
-
-  @override
-  String get reachabilityNoRelays =>
-      'جب تک آپ کوئی ریلے شامل نہ کریں، دوسرے آپ کو مدعو نہیں کر سکتے';
-
-  @override
-  String get reachabilityOpenRelaySettings => 'ریلے کی ترتیبات';
-
-  @override
-  String get reachabilityAwaitingReset =>
-      'ریلے کی ترتیبات والے نوٹس سے آگے بڑھنے پر دوسرے آپ کو مدعو کر سکیں گے';
-
-  @override
   String get qrCodeWhatIsThisTitle => 'یہ کیا ہے؟';
 
   @override
@@ -1752,7 +1725,7 @@ class AppLocalizationsUr extends AppLocalizations {
   String get npubQrScanLabel => 'مجھے شامل کرنے کے لیے اسکین کریں';
 
   @override
-  String get npubQrSemanticsLabel => 'آپ کی عوامی شناخت کا QR کوڈ';
+  String get npubQrSemanticsLabel => 'آپ کی عوامی کلید کا QR کوڈ';
 
   @override
   String get photoHeaderRemoveTitle => 'پروفائل تصویر ہٹائیں؟';

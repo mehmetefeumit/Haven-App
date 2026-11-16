@@ -41,7 +41,8 @@
 #                 app (--dart-define=HAVEN_VERSION, About page). The native stamp
 #                 (CFBundleShortVersionString / Android versionName) drops any
 #                 -prerelease/+build suffix (1.2.3-beta.1 -> 1.2.3). Unset -> both
-#                 fall back to pubspec.yaml `version:` (without its +build part).
+#                 come from pubspec.yaml `version:` (the app shows its name, without
+#                 the +build part).
 #   BUILD_NUMBER  unique, monotonic build number e.g. the CI run number
 #                 (-> CFBundleVersion / Android versionCode). REQUIRED for ipa.
 #
