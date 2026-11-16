@@ -8,7 +8,11 @@
 //! - **WSS only**: Plaintext ws:// connections are rejected
 //! - **Direct connections**: Uses nostr-sdk Client for relay communication
 //! - **Verified events**: every relay event's id and signature are checked
-//!   before anything acts on it (`verified`), on the one client constructor
+//!   before anything acts on it (`verified`), the one file that builds clients
+//! - **Anonymous unless the owner said otherwise**: only `verified`'s
+//!   `identity_client` answers a NIP-42 challenge — for the account's own inbox
+//!   reads and `auth-required:` retries — with a signer that signs that answer
+//!   and nothing else (`nip42`)
 //!
 //! # Architecture
 //!
@@ -33,10 +37,12 @@ pub mod dial_witness;
 pub mod discovery;
 mod error;
 pub mod fanout;
+pub mod identity;
 pub mod live_sync;
 pub mod maintenance;
 mod manager;
 pub mod negentropy;
+pub mod nip42;
 pub mod publishers;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod recording_front;

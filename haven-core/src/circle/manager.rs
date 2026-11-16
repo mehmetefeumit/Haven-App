@@ -225,6 +225,10 @@ pub struct CircleManager {
     /// than a `cfg`-split field, and a field that exists only under test is a
     /// field the shipped code path is not the one being measured.
     convergence_reticks: std::sync::atomic::AtomicUsize,
+    /// The identity key's answer to a relay's NIP-42 challenge, and nothing
+    /// else: built from the same keys as the session, here, so no key is
+    /// handed anywhere new (Security Rules 7 and 9).
+    nip42_signer: Arc<crate::relay::nip42::Nip42Signer>,
     pub(crate) storage: Arc<CircleStorage>,
 }
 
@@ -326,6 +330,7 @@ impl CircleManager {
             held_at_open,
             held_polled_back: std::sync::atomic::AtomicBool::new(held_at_open == 0),
             convergence_reticks: std::sync::atomic::AtomicUsize::new(0),
+            nip42_signer: Arc::new(crate::relay::nip42::Nip42Signer::new(keys)),
             storage,
         })
     }
@@ -483,6 +488,7 @@ impl CircleManager {
             held_at_open,
             held_polled_back: std::sync::atomic::AtomicBool::new(held_at_open == 0),
             convergence_reticks: std::sync::atomic::AtomicUsize::new(0),
+            nip42_signer: Arc::new(crate::relay::nip42::Nip42Signer::new(keys)),
             storage,
         })
     }
@@ -513,6 +519,13 @@ impl CircleManager {
     #[must_use]
     pub const fn session(&self) -> &Arc<SessionManager> {
         &self.session
+    }
+
+    /// The signer that answers a relay's NIP-42 challenge with the identity
+    /// key and signs nothing else, for `relay::identity`'s connections.
+    #[must_use]
+    pub fn nip42_signer(&self) -> Arc<crate::relay::nip42::Nip42Signer> {
+        Arc::clone(&self.nip42_signer)
     }
 
     /// Returns the current MLS epoch for a group.

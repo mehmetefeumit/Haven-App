@@ -454,8 +454,8 @@ which is enough, and both of which can be changed on a client after it is
 built (`Client::set_signer`; `Client::automatic_authentication(&self, enable)`,
 `nostr-sdk-0.44.1/src/client/mod.rs:116`). So check 11 holds both in the three
 source trees: the words `set_signer` / `unset_signer` and a `.signer(` or
-`::signer(` call appear nowhere, and every `automatic_authentication(` is
-`automatic_authentication(false)`. With a signer the pool would answer a
+`::signer(` call appear nowhere outside `identity_client` (below), and every
+other `automatic_authentication(` is `automatic_authentication(false)`. With a signer the pool would answer a
 relay's NIP-42 challenge with the identity key, on a socket that carries a
 circle's routing id, and MDK's relay client would sign an unsigned non-445
 event it was handed (an unsigned 445 it refuses, `sdk_client.rs:660-666`). The
@@ -502,6 +502,53 @@ stored only there is never read by its invitee. Haven does not hide that:
 
 What stays open is tracked as `T-INBOX-READ-GATE` in
 `docs/MDK_UPSTREAM_TRACKER.md`.
+
+### The identity's NIP-42 connections
+
+Owner-directed (2026-11-16, White Noise parity): the identity key answers a
+relay's NIP-42 challenge for the account's own inbox reads, and for a Welcome
+or kind-445 resend only after the relay refused the anonymous send with
+`auth-required:`. Three pieces carry it, and nothing else may sign in.
+
+- **The signer** (`relay/nip42.rs`, `Nip42Signer`) is built once, in
+  `CircleManager::new`, from the keys the session already holds (Rules 7 and
+  9): the public key and the 32 secret bytes in a `Zeroizing` buffer,
+  `ZeroizeOnDrop`, and a `Debug` that renders neither. It signs a kind-22242
+  event with empty content and exactly the `challenge` and `relay` tags
+  `EventBuilder::auth` builds, under the identity key, and refuses every other
+  event — another kind, content, a tag more, fewer or reordered, a relay URL
+  the parser would respell, another author — and every NIP-04/NIP-44 call,
+  with one fixed text that names nothing. It rebuilds the event it signs, so a
+  caller-supplied id is never what is signed. A relay client holding it can be
+  made to sign nothing but that answer, whatever reaches the client.
+- **The constructor** (`relay/verified.rs`, `identity_client`) is the only one
+  that installs a signer and switches authentication on, and it installs the
+  same `VerifiedEvents` policy and no gossip store (check 11).
+- **The per-call connections** (`relay/identity.rs`) hold one relay each,
+  registered with the publish pool's options (no reconnect, no ping) for one
+  direction only: a write connection holds no READ flag and cannot carry a
+  REQ, so no filter rides a retry socket. The call awaits the client's
+  shutdown before it returns; a call dropped mid-await is shut down by the
+  pool's own last-handle destructor (`atomic_destructor`,
+  `nostr-relay-pool-0.44.3 pool/inner.rs:41-46`), pinned by
+  `nip42_identity_e2e::a_send_dropped_mid_wait_still_closes_its_identity_socket`.
+  `send_signed_once_authenticated` sends the already-signed event
+  byte-identical at most twice — once to draw the challenge a relay issues only
+  on a gated write, once after `Authenticated` — through `Relay::send_msg`,
+  never `Relay::send_event`, whose hidden resend would make the frames sent
+  differ from the frames counted, and reads the outcome off that relay's own
+  `OK` frames for the event id by machine-readable prefix, never its prose.
+
+What a relay learns from an answer: the identity key's signature over its
+challenge ties that connection — its address and timing — to the identity.
+Check 12 of `check_engine_client_options.sh` keeps the reach narrow: the
+constructor and the per-call helpers are named only in the files listed for
+them, a kind-22242 event is made only by the signer (and tests), the signer is
+built only in `CircleManager`, the per-call relay keeps its options, and the
+profile module and the discovery plane never touch any of it. Nothing in these
+three logs (Rule 15); `nip42_identity_e2e` captures the logs of an
+authenticated read and asserts the challenge, the relay URL and the identity
+key are absent.
 
 ### What a relay's refusal has to prove before the fanout may act on it
 

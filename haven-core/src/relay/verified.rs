@@ -11,11 +11,15 @@
 //! a check made after the pool's de-duplication could not promise. Tracker
 //! `T-POOL-VERIFY-CACHE`; guarded by `scripts/ci/check_engine_client_options.sh`.
 
+use std::sync::Arc;
+
 use nostr::util::BoxedFuture;
-use nostr::{Event, RelayUrl, SubscriptionId};
+use nostr::{Event, NostrSigner, RelayUrl, SubscriptionId};
 use nostr_sdk::pool::monitor::Monitor;
 use nostr_sdk::pool::policy::{AdmitPolicy, AdmitStatus, PolicyError};
 use nostr_sdk::{Client, ClientOptions};
+
+use super::nip42::Nip42Signer;
 
 /// Admits a relay event only when its id is the hash of its fields and its
 /// signature is its author's over that id.
@@ -57,16 +61,42 @@ impl AdmitPolicy for VerifiedEvents {
 
 /// Builds a relay client that hands on only verified events.
 ///
-/// Every `Client` Haven reads a relay with is built here, so none can be built
-/// without the check. Reachable from `crate::relay` only: the module is private.
+/// Every `Client` Haven reads a relay with is built here or by
+/// [`identity_client`], so none can be built without the check. Reachable from
+/// `crate::relay` only: the module is private.
 ///
-/// And none can be built that answers a relay's NIP-42 challenge: whatever
-/// `opts` says, authentication is switched off here. The SDK's default is ON,
+/// And none built here answers a relay's NIP-42 challenge: whatever `opts`
+/// says, authentication is switched off here. The SDK's default is ON,
 /// and an answer is the identity key's signature over a relay's challenge on a
 /// socket that carries a circle's routing id.
 pub fn verified_client(opts: ClientOptions, monitor: Option<Monitor>) -> Client {
     let builder = Client::builder()
         .opts(opts.automatic_authentication(false))
+        .admit_policy(VerifiedEvents);
+    match monitor {
+        Some(monitor) => builder.monitor(monitor),
+        None => builder,
+    }
+    .build()
+}
+
+/// Builds the one kind of relay client that answers a NIP-42 challenge: under
+/// the identity key, through a signer that signs that answer and nothing else
+/// ([`Nip42Signer`]), with the same admission policy as [`verified_client`].
+///
+/// Owner-directed (2026-11-16, matching White Noise): Haven authenticates for
+/// its own inbox reads and, only after a relay answered `auth-required:`, for a
+/// Welcome or kind-445 resend. Every other client stays anonymous, so a
+/// circle's `#h` REQ never rides an authenticated socket. Its callers are held
+/// to a short list (`check_engine_client_options.sh` check 12).
+pub fn identity_client(
+    signer: Arc<Nip42Signer>,
+    opts: ClientOptions,
+    monitor: Option<Monitor>,
+) -> Client {
+    let builder = Client::builder()
+        .signer(signer as Arc<dyn NostrSigner>)
+        .opts(opts.automatic_authentication(true))
         .admit_policy(VerifiedEvents);
     match monitor {
         Some(monitor) => builder.monitor(monitor),
@@ -102,6 +132,39 @@ mod tests {
             !client.pool().state().is_auto_authentication_enabled(),
             "a relay client built with the SDK's own options would sign a \
              relay's challenge with whatever signer it is ever given",
+        );
+    }
+
+    /// The one client that answers a challenge answers it with the NIP-42
+    /// signer it was handed, whatever `opts` said — and that signer, read back
+    /// off the built client, signs nothing but the answer.
+    #[tokio::test]
+    async fn the_identity_client_answers_with_the_nip42_signer_and_nothing_else() {
+        let keys = Keys::generate();
+        let client = identity_client(
+            Arc::new(Nip42Signer::new(&keys)),
+            ClientOptions::default().automatic_authentication(false),
+            Some(Monitor::new(1)),
+        );
+        let state = client.pool().state();
+        assert!(state.is_auto_authentication_enabled());
+        assert!(client.monitor().is_some(), "the monitor was dropped");
+        let installed = state.signer().await.expect("a signer is installed");
+        assert_eq!(
+            installed.get_public_key().await.expect("its key"),
+            keys.public_key()
+        );
+        let answer = EventBuilder::auth("c", RelayUrl::parse("wss://r.example.com").expect("url"))
+            .sign(&installed)
+            .await
+            .expect("the answer signs");
+        assert_eq!(answer.kind, Kind::Authentication);
+        assert!(
+            EventBuilder::text_note("not an answer")
+                .sign(&installed)
+                .await
+                .is_err(),
+            "the installed signer signs more than the answer to a challenge"
         );
     }
 

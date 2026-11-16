@@ -289,7 +289,7 @@ const PUBLISH_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 /// NOT get these options: it holds standing REQs, so its socket carries no other
 /// traffic and a ping-less NAT drop there would be silent until the 15-minute
 /// health tick.
-fn publish_relay_options() -> RelayOptions {
+pub(super) fn publish_relay_options() -> RelayOptions {
     RelayOptions::default()
         .ping(false)
         .reconnect(false)
@@ -628,7 +628,7 @@ impl RelayManager {
     /// challenge: an answer would be the identity key's signature over a
     /// relay's challenge, on a socket that carries a circle's routing id. The
     /// two facts are pinned apart (`the_publish_client_holds_no_signer_and_never_authenticates`,
-    /// and no source may install a signer:
+    /// and no source but `verified::identity_client` may install a signer:
     /// `scripts/ci/check_engine_client_options.sh` check 11).
     #[must_use]
     pub fn new() -> Self {

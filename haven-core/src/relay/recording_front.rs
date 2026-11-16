@@ -42,6 +42,7 @@ struct Record {
     refused: Mutex<Vec<RecordedFrame>>,
     grew: Notify,
     connections: AtomicUsize,
+    closed: AtomicUsize,
 }
 
 impl Record {
@@ -160,6 +161,27 @@ impl RecordingFront {
         self.record.connections.load(Ordering::SeqCst)
     }
 
+    /// How many of those connections have ended: the client closed its socket,
+    /// or it went.
+    #[must_use]
+    pub fn closed(&self) -> usize {
+        self.record.closed.load(Ordering::SeqCst)
+    }
+
+    /// Resolves once `count` connections have ended, woken by each ending.
+    /// Unbounded: the caller bounds it.
+    pub async fn wait_closed(&self, count: usize) {
+        loop {
+            let grew = self.record.grew.notified();
+            tokio::pin!(grew);
+            grew.as_mut().enable();
+            if self.closed() >= count {
+                return;
+            }
+            grew.await;
+        }
+    }
+
     /// Resolves once `done` holds over the frames recorded so far, woken by
     /// each new frame. Unbounded: the caller bounds it.
     pub async fn wait_for(&self, done: impl Fn(&[RecordedFrame]) -> bool) {
@@ -189,13 +211,13 @@ impl RecordingFront {
 async fn accept(listener: TcpListener, upstream: String, gating: bool, record: Arc<Record>) {
     while let Ok((tcp, _)) = listener.accept().await {
         let conn = record.connections.fetch_add(1, Ordering::SeqCst);
-        tokio::spawn(serve(
-            tcp,
-            upstream.clone(),
-            conn,
-            gating,
-            Arc::clone(&record),
-        ));
+        let serving = Arc::clone(&record);
+        let upstream = upstream.clone();
+        tokio::spawn(async move {
+            serve(tcp, upstream, conn, gating, Arc::clone(&serving)).await;
+            serving.closed.fetch_add(1, Ordering::SeqCst);
+            serving.grew.notify_waiters();
+        });
     }
 }
 
@@ -407,6 +429,9 @@ mod tests {
             .await
             .expect("the close reaches the front");
         client.shutdown().await;
+        tokio::time::timeout(budget(), front.wait_closed(1))
+            .await
+            .expect("the shut-down client's connection ends at the front");
 
         let frames = front.frames();
         assert!(
@@ -464,6 +489,15 @@ mod tests {
             "the second client's frames are on a connection of their own, the binary one flagged",
         );
         assert_eq!(front.connections(), 2);
+        assert_eq!(
+            front.closed(),
+            1,
+            "the raw client's connection is still open"
+        );
+        raw.close(None).await.expect("the raw client closes");
+        tokio::time::timeout(budget(), front.wait_closed(2))
+            .await
+            .expect("the raw client's close reaches the front");
     }
 
     /// Sends `frame` on a connection of its own and reads the answers until

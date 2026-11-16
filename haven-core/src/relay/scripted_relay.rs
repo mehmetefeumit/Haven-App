@@ -8,7 +8,7 @@
 //! transport's tests need what a real relay also will not do on request: keep
 //! an event and withhold its `OK`, or hang up on one. Loopback only.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use futures::{SinkExt, StreamExt};
@@ -74,6 +74,7 @@ struct Script {
     published: Mutex<Vec<Event>>,
     offers: AtomicUsize,
     connections: AtomicUsize,
+    accepts_auth: AtomicBool,
 }
 
 /// The relay. It stops when dropped.
@@ -163,6 +164,13 @@ impl ScriptedRelay {
             .verdict
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(Box::new(verdict));
+    }
+
+    /// Answers every NIP-42 `AUTH` frame `OK true` from here on; until then an
+    /// `AUTH` goes unanswered. The challenge is whatever a test's
+    /// [`Verdict::Frames`] sent: nothing about the answer is checked.
+    pub fn accept_auth(&self) {
+        self.script.accepts_auth.store(true, Ordering::SeqCst);
     }
 
     /// Every event a client has published here and the relay took, in arrival
@@ -284,6 +292,14 @@ impl Script {
                     Verdict::HangUp => return None,
                 };
                 texts.into_iter().map(Reply::Text).collect()
+            }
+            [verb, auth] if verb == "AUTH" => {
+                if !self.accepts_auth.load(Ordering::SeqCst) {
+                    return Some(Vec::new());
+                }
+                vec![Reply::Text(
+                    serde_json::json!(["OK", auth["id"], true, ""]).to_string(),
+                )]
             }
             [verb, sub, filters @ ..] if verb == "REQ" => {
                 let filters: Vec<Filter> = filters
