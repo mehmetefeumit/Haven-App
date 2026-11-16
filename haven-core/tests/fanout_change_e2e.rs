@@ -6412,7 +6412,6 @@ async fn a_live_drain_out_of_deadlines_is_come_back_for_after_the_next_open() {
     };
     let core = haven_core::relay::live_sync::LiveSyncCore::new_local(
         Arc::clone(&admin.circle),
-        admin.keys.public_key(),
         Arc::new(RelayManager::new()),
     );
     core.start(std::slice::from_ref(&spec), &[])

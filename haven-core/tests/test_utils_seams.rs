@@ -685,7 +685,6 @@ async fn the_processor_accessor_reaches_the_cores_own_processor() {
     let stream = group_cursor_stream(&group_hex);
     let core = LiveSyncCore::new_local(
         Arc::clone(&c.alice.manager),
-        c.alice.keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
 

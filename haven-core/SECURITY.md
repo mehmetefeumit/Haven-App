@@ -473,8 +473,10 @@ authenticated reader named in the event (`restrictedReadKinds`,
 `restrictReadToInvolvedPubkey`): such a relay still answers a kind-1059
 publish `OK true`, and answers every unauthenticated REQ for one with `AUTH`
 and `CLOSED`, in strfry's words `ERROR: auth-required: requested filter
-requires authentication`. Since Haven never authenticates, an invitation
-stored only there is never read by its invitee. Haven does not hide that:
+requires authentication`. Haven reads such a relay by answering its
+challenge as the recipient (below, "The identity's NIP-42 connections" and
+"The live plane's inbox socket"); a relay that still refuses is reported,
+never hidden:
 
 - **The invitation poll.** A per-relay read a `CLOSED` ends with an
   `auth-required:` or `restricted:` prefix — read past one leading `error:`,
@@ -488,7 +490,10 @@ stored only there is never read by its invitee. Haven does not hide that:
   from now, `limit` 1 — and reported as `inbox_read`, apart from the kind-10050
   verdict. It discloses nothing the inbox REQ does not already send that
   relay.
-- **The live plane.** An inbox REQ refused that way is re-issued on the gated
+- **The live plane.** The inbox REQ rides its own socket, which answers the
+  challenge (below, "The live plane's inbox socket"), and is asked again the
+  moment that socket authenticates. A relay that refuses it after that — or
+  whose answer to the challenge it refuses — is waited out on the gated
   backoff — a minute, doubling to an hour (`GATED_BACKOFF_MIN_SECS`,
   `GATED_BACKOFF_MAX_SECS`), jittered like every repair, and decaying only
   after an hour's quiet — instead of the 30 s throttle, which would ask a
@@ -549,6 +554,51 @@ profile module and the discovery plane never touch any of it. Nothing in these
 three logs (Rule 15); `nip42_identity_e2e` captures the logs of an
 authenticated read and asserts the challenge, the relay URL and the identity
 key are absent.
+
+### The live plane's inbox socket
+
+The live session holds two pools (`relay/live_sync/session.rs`): the engine
+pool, which carries every circle's `#h` REQ and never authenticates (R9,
+`live_sync_privacy_config_e2e`), and the inbox socket's, built by
+`identity_client`, which holds only the account's inbox relays and carries
+only the kind-1059 `#p` REQ. It answers a relay's challenge as soon as it
+arrives, as White Noise does; no `#h` REQ is ever issued on it, and no `AUTH`
+is ever sent on an engine socket (`live_sync_inbox_socket_e2e`).
+
+- **One re-issue per authentication.** strfry wraps every `CLOSED` reason in
+  `ERROR: `, so the pool deletes a refused REQ and never resends it; an
+  unwrapped `auth-required:` it keeps and resends itself once authenticated.
+  Each inbox relay's own notifications — the only channel a NIP-42 verdict
+  reaches — are watched from before its dial; when the connection
+  authenticates after that relay refused the inbox REQ on it, the REQ is asked
+  again at once if the pool deleted it, and Haven's gated repair is called off
+  if the pool kept it, so exactly one REQ goes out. A failure after
+  `Authenticated` on the same connection (strfry's `already authenticated` to a
+  second challenge's answer) changes nothing.
+- **Inbox floors (Rule 12).** Before each inbox REQ, every relay it goes to is
+  recorded as owing the inbox its history from the `since` it is asked
+  (`relay_floors`, under the key `inbox_1059`), and the record goes only when
+  that relay ends a REQ asked from there or earlier with an `EOSE`. A relay
+  that refuses the REQ until this device authenticates, is not connected, or
+  never answers keeps owing across a restart, and every later inbox REQ to it
+  asks from its floor; the inbox cursor another relay's `EOSE` advances erases
+  no relay's floor. An invitation stored five days ago only on a gating relay
+  is still read after a six-day absence.
+- **The radio.** Every step that closes, counts or watches the engine pool —
+  the pause's disconnect loop, the stop, the radio-off watch, the burst's
+  re-dial, the health probe, the reconnect re-issue — covers the inbox socket's
+  pool too, each pool with its own `Monitor`. Between background bursts
+  neither pool holds a subscription or a connected relay.
+- **What is disclosed.** The inbox relays learn the identity key from the
+  answer to their challenge: that the account is online, for as long as the
+  session holds the socket, and that this connection reads its gift wraps —
+  what the `#p` filter already named. The separation from the circles is
+  cryptographic, not network-level: the authenticated inbox socket and the
+  anonymous `#h` sockets leave from the same device address at the same times,
+  so a relay — or an observer — that sees both can link the identity to the
+  circles that relay carries, as it could link the `#p` REQ before. Haven
+  creates no circle on a relay of the account's own lists; a circle another
+  client created, or a relay list the user chose, can share one.
 
 ### What a relay's refusal has to prove before the fanout may act on it
 

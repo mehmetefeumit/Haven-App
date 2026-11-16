@@ -1330,7 +1330,10 @@ impl CircleStorage {
             -- relay for that id asks from here, and the row goes once the
             -- relay has answered a REQ that reached back this far. A relay
             -- URL at rest, here only; dropped with the circle, and with a
-            -- prior routing id once the window forgets it.
+            -- prior routing id once the window forgets it. The inbox stream's
+            -- floors are kept under the key `inbox_1059`, which no 32-byte
+            -- routing id can be: written for each relay before its inbox REQ,
+            -- gone at that REQ's end of stored events.
             CREATE TABLE IF NOT EXISTS relay_floors (
                 nostr_group_id BLOB NOT NULL,
                 relay TEXT NOT NULL,

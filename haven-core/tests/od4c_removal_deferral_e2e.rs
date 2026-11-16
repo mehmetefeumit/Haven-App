@@ -616,11 +616,7 @@ async fn the_claim_that_puts_a_session_in_the_foreground_sends_what_the_poll_lef
     };
     assert!(unsent().await, "premise: recorded and staged");
 
-    let core = LiveSyncCore::new_local(
-        Arc::clone(&fx.alice),
-        fx.alice_keys.public_key(),
-        Arc::new(RelayManager::new()),
-    );
+    let core = LiveSyncCore::new_local(Arc::clone(&fx.alice), Arc::new(RelayManager::new()));
     core.start(
         &[CircleSpec {
             group_id_hex: hex::encode(fx.nostr_group_id),
@@ -705,11 +701,7 @@ async fn an_unrecoverable_circle_reads_as_such_from_the_open_by_its_pseudonymous
         );
     }
 
-    let core = LiveSyncCore::new_local(
-        Arc::clone(&alice),
-        alice_keys.public_key(),
-        Arc::new(RelayManager::new()),
-    );
+    let core = LiveSyncCore::new_local(Arc::clone(&alice), Arc::new(RelayManager::new()));
     let mut rx = core.bus().subscribe();
     core.claim_foreground(Claim::Foreground).await;
     assert_eq!(alice.unrecoverable_circles().await, vec![nostr_group_id]);

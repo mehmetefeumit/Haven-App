@@ -457,7 +457,6 @@ impl SimDevice {
         // through, which the engine would close at every pause.
         let core = LiveSyncCore::new_local_with_relay_map_for_test(
             manager,
-            self.keys.public_key(),
             Arc::new(RelayManager::new()),
             endpoint_map(self.routes.clone(), Arc::clone(&self.aliases)),
         );

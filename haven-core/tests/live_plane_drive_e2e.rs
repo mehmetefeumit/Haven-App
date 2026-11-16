@@ -3230,7 +3230,6 @@ async fn a_settle_waits_for_the_fold_after_the_last_answer() {
     transport.park();
     let core = LiveSyncCore::new_local_with_driver_for_test(
         Arc::clone(&admin.circle),
-        admin.keys.public_key(),
         LiveDriver {
             fanout: Arc::clone(&transport) as Arc<dyn FanoutSend>,
             publisher: Recording::acking(true) as Arc<dyn UnrecordedPublisher>,
@@ -3909,11 +3908,8 @@ impl Scripted {
         relay: &str,
         claim: Claim,
     ) -> LiveSyncCore {
-        let core = LiveSyncCore::new_local_with_driver_for_test(
-            Arc::clone(&member.circle),
-            member.keys.public_key(),
-            self.driver(),
-        );
+        let core =
+            LiveSyncCore::new_local_with_driver_for_test(Arc::clone(&member.circle), self.driver());
         let spec = CircleSpec {
             group_id_hex: hex::encode(ngid(member, group).await),
             relays: vec![relay.to_owned()],
@@ -4651,7 +4647,6 @@ async fn a_session_started_into_a_burst_within_a_measured_budget_hands_it_to_its
         scripted.transport.answer(&url, [Answer::Accepted]);
         let core = LiveSyncCore::new_local_with_driver_for_test(
             Arc::clone(&admin.circle),
-            admin.keys.public_key(),
             scripted.driver(),
         );
         core.start_into_burst(std::slice::from_ref(&spec), &[], Some(budget_ms))

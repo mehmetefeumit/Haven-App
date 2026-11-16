@@ -456,7 +456,6 @@ async fn the_live_planes_end_of_stored_events_leaves_its_circle_caught_up() {
     };
     let core = haven_core::relay::live_sync::LiveSyncCore::new_local(
         Arc::clone(&fx.alice),
-        fx.alice_keys.public_key(),
         Arc::new(RelayManager::new()),
     );
     assert!(
@@ -512,7 +511,6 @@ async fn a_req_issued_again_forgets_the_mark_until_its_own_end_of_stored_events(
     };
     let core = haven_core::relay::live_sync::LiveSyncCore::new_local(
         Arc::clone(&fx.alice),
-        fx.alice_keys.public_key(),
         Arc::new(RelayManager::new()),
     );
     core.start(std::slice::from_ref(&spec), &[])
@@ -4552,7 +4550,6 @@ async fn a_live_circle_listed_under_a_prior_routing_id_is_caught_up_when_both_re
     );
     let core = haven_core::relay::live_sync::LiveSyncCore::new_local(
         Arc::clone(&fx.bob),
-        fx.bob_keys.public_key(),
         Arc::new(RelayManager::new()),
     );
     let opened_ms = chrono::Utc::now().timestamp() * 1000;
@@ -4688,7 +4685,6 @@ async fn a_circle_waiting_on_a_prior_id_is_caught_up_when_that_id_is_unlisted() 
     );
     let core = haven_core::relay::live_sync::LiveSyncCore::new_local(
         Arc::clone(&fx.bob),
-        fx.bob_keys.public_key(),
         Arc::new(RelayManager::new()),
     );
     let opened_ms = chrono::Utc::now().timestamp() * 1000;

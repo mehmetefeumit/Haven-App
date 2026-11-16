@@ -13096,22 +13096,26 @@ pub struct FfiGroupSpec {
 #[frb(opaque)]
 pub struct LiveSyncFfi {
     circle: Arc<CoreCircleManager>,
-    own_pubkey: nostr::PublicKey,
 }
 
 impl LiveSyncFfi {
-    /// Builds a handle over `circle`'s MLS state for `own_pubkey_hex`.
+    /// Builds a handle over `circle`'s MLS state for `own_pubkey_hex`, which
+    /// must be the identity `circle` was opened with: the session's inbox
+    /// socket reads that key's gift wraps, authenticated as it.
     ///
     /// # Errors
     ///
-    /// Returns an error if `own_pubkey_hex` is not a valid Nostr public key.
+    /// Returns an error if `own_pubkey_hex` is not a valid Nostr public key,
+    /// or not `circle`'s identity.
     pub fn new_instance(circle: &CircleManagerFfi, own_pubkey_hex: String) -> Result<Self, String> {
         validate_pubkey_hex(&own_pubkey_hex, "own_pubkey")?;
         let pk = nostr::PublicKey::from_hex(&normalize_pubkey_hex(&own_pubkey_hex))
             .map_err(|e| e.to_string())?;
+        if pk != circle.inner.nip42_signer().public_key() {
+            return Err("own_pubkey is not this account's identity".to_string());
+        }
         Ok(Self {
             circle: Arc::clone(&circle.inner),
-            own_pubkey: pk,
         })
     }
 
@@ -13184,7 +13188,6 @@ impl LiveSyncFfi {
         // its relay's answer (Security Rule 13).
         let core = Arc::new(LiveSyncCore::new_local(
             Arc::clone(&self.circle),
-            self.own_pubkey,
             Arc::new(CoreRelayManager::new()),
         ));
 
@@ -14781,7 +14784,6 @@ mod maintenance_real_ffi_tests {
         // Install a live core so the reclaim runs its real body.
         let core = std::sync::Arc::new(super::LiveSyncCore::new_local(
             std::sync::Arc::clone(&manager.inner),
-            keys.public_key(),
             std::sync::Arc::new(super::CoreRelayManager::new()),
         ));
         *super::SESSION.write().expect("session lock") = Some(std::sync::Arc::clone(&core));
@@ -14909,7 +14911,6 @@ mod maintenance_real_ffi_tests {
             .expect("CircleManagerFfi::new");
         let core = std::sync::Arc::new(super::LiveSyncCore::new_local(
             std::sync::Arc::clone(&manager.inner),
-            keys.public_key(),
             std::sync::Arc::new(super::CoreRelayManager::new()),
         ));
         *super::SESSION.write().expect("session lock") = Some(std::sync::Arc::clone(&core));
@@ -14951,7 +14952,6 @@ mod maintenance_real_ffi_tests {
 
         let core = std::sync::Arc::new(super::LiveSyncCore::new_local(
             std::sync::Arc::clone(&manager.inner),
-            keys.public_key(),
             std::sync::Arc::new(super::CoreRelayManager::new()),
         ));
         let _ = core.stop().await;

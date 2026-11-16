@@ -33,11 +33,9 @@ use tempfile::TempDir;
 /// PUBLIC circle API, each with their own real MLS store.
 struct ThreeMemberCircle {
     alice: Arc<CircleManager>,
-    alice_keys: Keys,
     bob: Arc<CircleManager>,
     bob_keys: Keys,
     carol: Arc<CircleManager>,
-    carol_keys: Keys,
     mls_group_id: GroupId,
     nostr_group_id: [u8; 32],
     _dirs: Vec<TempDir>,
@@ -106,11 +104,9 @@ async fn build_three_member_circle(group_relays: Vec<String>) -> ThreeMemberCirc
 
     ThreeMemberCircle {
         alice,
-        alice_keys,
         bob,
         bob_keys,
         carol,
-        carol_keys,
         mls_group_id,
         nostr_group_id,
         _dirs: vec![alice_dir, bob_dir, carol_dir],
@@ -213,12 +209,10 @@ async fn two_live_sync_engines_publish_and_converge_on_the_eviction() {
 
     let alice_engine = LiveSyncCore::new_local(
         Arc::clone(&fx.alice),
-        fx.alice_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     let carol_engine = LiveSyncCore::new_local(
         Arc::clone(&fx.carol),
-        fx.carol_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     let spec = CircleSpec {
