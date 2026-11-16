@@ -307,6 +307,7 @@ impl CircleManager {
         session.install_stall_evidence(storage.clone());
         Self::backfill_contamination_ledger(&storage);
         Self::prune_retired_profile_pool(&storage);
+        Self::retire_gated_inbox_seed(&storage);
         Self::sweep_expired_directory_members(&storage);
 
         Ok(Self {
@@ -386,6 +387,23 @@ impl CircleManager {
         }
     }
 
+    /// Runs the one-time retirement of the read-gated relay from an inbox list
+    /// still exactly the old seed, best-effort; see
+    /// [`CircleStorage::retire_gated_inbox_seed`].
+    ///
+    /// Failure is logged rather than propagated, as the profile prune's is: its
+    /// sentinel is written only with its change, so the next launch retries.
+    fn retire_gated_inbox_seed(storage: &CircleStorage) {
+        match storage.retire_gated_inbox_seed() {
+            Ok(0) => {}
+            Ok(_) => log::info!("inbox relays: retired a read-gated seed relay at startup"),
+            Err(e) => log::warn!(
+                "inbox seed retirement failed (retries next launch): {}",
+                e.code()
+            ),
+        }
+    }
+
     /// Enforces the member directory's retention deadline at process start,
     /// best-effort.
     ///
@@ -401,7 +419,7 @@ impl CircleManager {
     /// manager — and because a bare purge is a single indexed DELETE on
     /// `circles.db`: no roster read, no MLS session, nothing that could make it
     /// a new wake or a new battery cost. It rides an open this constructor was
-    /// already performing, beside the two maintenance passes above it.
+    /// already performing, beside the maintenance passes above it.
     ///
     /// Failure is logged rather than propagated, as they are: the next launch
     /// retries, the ranked read sweeps the same rows before it can show one, and
@@ -446,6 +464,7 @@ impl CircleManager {
         session.install_stall_evidence(storage.clone());
         Self::backfill_contamination_ledger(&storage);
         Self::prune_retired_profile_pool(&storage);
+        Self::retire_gated_inbox_seed(&storage);
         Self::sweep_expired_directory_members(&storage);
 
         Ok(Self {

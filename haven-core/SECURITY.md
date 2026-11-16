@@ -147,9 +147,17 @@ save — see *Public Nostr Profiles* below), three additional exposures apply:
   best-effort. The pubkey ↔ name/photo binding survives "delete".
 
 **Relay planes.** Haven keeps four relay lists apart: the account plane (the
-user's Inbox and KeyPackage lists, seeded from `PRODUCTION_DEFAULT_RELAYS`:
-kinds 10050, 10002 and 30443, the inbound kind 1059 and the inbox REQ — the
-user's pubkey is visible there by design), the discovery plane
+user's KeyPackage list, seeded from `PRODUCTION_DEFAULT_RELAYS`, and Inbox
+list, seeded from `PRODUCTION_INBOX_RELAYS` — the same relays less
+`relay.damus.io`, which takes a kind 1059 and then serves it only to a client
+that answers NIP-42 AUTH, which Haven never does (Rule 16; probed 2026-11-16,
+`tests/fixtures/relay_read_gating_2026-11-16.json`, pinned by
+`tests/inbox_seed_read_gating.rs`); an install whose stored inbox list was
+still exactly the old three-relay seed loses that one row once, at the circle
+manager's open (`CircleStorage::retire_gated_inbox_seed`), and a list the user
+changed is left alone: kinds 10050, 10002 and 30443, the inbound kind 1059 and
+the inbox REQ — the user's pubkey is visible there by design), the discovery
+plane
 (`PRODUCTION_DISCOVERY_RELAYS`: other accounts' relay lists and KeyPackages
 are read there, and, owner-directed 2026-11-12, the relay-list heal also
 copies the account's own kinds 10002 and 10050 there — the configured lists,
@@ -1034,9 +1042,13 @@ the circle is followed, received or sent meanwhile. Invitations held before a
 restart are counted durably, and until as many are held again a re-invite not
 yet polled back counts as held
 (`a_reinvite_not_yet_polled_back_after_a_restart_still_keeps_the_left_group`)
-— unless a key package was replaced while none was held: nothing held before
-can open the superseded package, so none of it is waited for any more
+— unless a key package was replaced while none was held: what was held before
+was built on the superseded package, so none of it is waited for any more
 (`a_key_package_replaced_after_a_restart_ends_the_wait_for_what_was_held_before_it`).
+The superseded package itself stays openable for its 24-hour replacement
+grace, but such an invitation re-inviting this device to a circle it left
+meets the forgotten group, which MDK refuses (T-REJOIN-LEAVE): it ends as "ask
+for a new invite", as it did when the package was deleted at the replacement.
 The first receive plane of each session also forgets every
 group the session held at its open that no circle row names and no consented
 join is still owed for — what a create, join or leave that died midway leaves
@@ -4000,12 +4012,33 @@ Security Rule 5 for this material — no init key outlives its use:
   still served it. The tick holds a per-account lock from its sweep to its
   promotion (`SessionManager::key_package_tick`;
   `tc17_overlapping_ticks_publish_one_key_package_into_one_slot_via_real_ffi`).
-- **Superseded ⇒ deleted at the confirmed replacement.** A replacement is
-  staged, signed once, and republished unchanged until a relay acknowledges
-  it; on that acknowledgement the superseded package's private material is
-  deleted — not at its `not_after`, up to 84 days later
-  (`superseded_kp_material_deleted_on_confirmed_replacement_not_at_not_after`).
-  Haven never keeps MDK's `RetainedKeyPackagePrivateMaterial` past that point.
+- **Superseded ⇒ kept for the 24-hour replacement grace, then deleted.**
+  Owner decision D3 (2026-11-16), the spec's replacement grace
+  (`foundation/key-packages.md`; MDK master's
+  `KEY_PACKAGE_REPLACEMENT_GRACE_SECS`). A replacement is staged, signed
+  once, and republished unchanged until a relay acknowledges it; a
+  superseded package no Welcome consumed is then kept, as MDK's
+  `RetainedKeyPackagePrivateMaterial` stamped with that acknowledgement's
+  instant, so a Welcome an inviter built on it just before the replacement
+  landed still opens. It is deleted at the first tick at or after 24 hours
+  from that instant, at its `not_after` if that comes first, or at the first
+  tick whose clock reads earlier than that instant
+  (`superseded_kp_material_is_kept_for_the_grace_after_its_confirmed_replacement_and_no_longer`,
+  `a_superseded_package_goes_at_its_not_after_when_that_ends_the_grace_first`,
+  `a_clock_set_back_below_a_retained_packages_grace_start_ends_it`,
+  `a_welcome_built_on_the_superseded_package_needs_a_new_invite_after_the_grace`).
+  A staged replacement a later stage replaced keeps the grace MDK's stage
+  stamped it with, from that re-staging. No promotion extends a grace already
+  running (`a_second_promotion_never_extends_a_retained_packages_grace`). A
+  superseded package a Welcome consumed has nothing left to wait for: the
+  current one is deleted at the acknowledgement
+  (`a_welcome_that_consumed_our_package_owes_a_replacement`), a retained one
+  at the next sweep or promotion, with the consumption record when it names
+  that package
+  (`a_welcome_built_on_the_superseded_package_joins_within_the_grace_and_the_next_sweep_deletes_it`,
+  `a_grace_sweep_keeps_the_current_packages_consumption_record`). Accepted
+  residual: a second held invitation built on a retained package another
+  Welcome consumed cannot be opened after that sweep (MDK does the same).
 - **Expired ⇒ deleted.** Whatever is still held at `Lifetime.not_after` is
   deleted on the next tick, before anything touches the network
   (`sweep_expired_key_packages`). MDK's own delete and promote validate the

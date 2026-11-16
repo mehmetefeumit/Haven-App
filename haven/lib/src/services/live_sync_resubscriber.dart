@@ -504,8 +504,9 @@ class LiveSyncResubscriber {
   /// pool unremovable, so every inbox row offers removal; and
   /// `seed_defaults_if_unseeded` returns early once its sentinel exists, so it
   /// never re-seeds a list the user has deliberately emptied
-  /// (`InboxRelaysNotifier`'s `fallbackDefaultRelays` only covers a seeding
-  /// THROW). A user who removes every inbox relay really does leave it empty.
+  /// (`InboxRelaysNotifier`'s `fallbackDefaultInboxRelays` only covers a
+  /// seeding THROW). A user who removes every inbox relay really does leave it
+  /// empty.
   ///
   /// What saves it is that the engine refuses rather than pretending: with no
   /// relays at all the bucket subscribe never gets a REQ accepted, so

@@ -34,6 +34,16 @@ void main() {
       expect(discoveryRelays, equals(fallbackDiscoveryRelays));
     });
 
+    test('inbox defaults are the account seed less the read-gated relay', () {
+      expect(
+        fallbackDefaultInboxRelays,
+        fallbackDefaultRelays
+            .where((r) => r != 'wss://relay.damus.io')
+            .toList(),
+      );
+      expect(fallbackDefaultRelays, contains('wss://relay.damus.io'));
+    });
+
     test('discovery set is a superset of the account-seed defaults', () {
       // Discoverability coupling (mirrors the Rust unit test
       // discovery_relays_is_superset_of_account_seed): every seeded public

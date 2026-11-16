@@ -195,7 +195,10 @@ mod tests {
         // Lock the discoverability coupling at the constant level, independent
         // of any process override: every account-seed default MUST be a
         // discovery relay, so a seeded user is always discoverable by pubkey.
-        for seed in crate::circle::PRODUCTION_DEFAULT_RELAYS {
+        for seed in crate::circle::PRODUCTION_DEFAULT_RELAYS
+            .iter()
+            .chain(crate::circle::PRODUCTION_INBOX_RELAYS)
+        {
             assert!(
                 PRODUCTION_DISCOVERY_RELAYS.contains(seed),
                 "production default {seed} must be a production discovery relay"

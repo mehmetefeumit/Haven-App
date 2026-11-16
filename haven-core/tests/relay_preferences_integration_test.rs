@@ -8,11 +8,16 @@
 //! pure-helper suite cannot (schema, encryption interaction, sentinel
 //! persistence across reopen).
 
+mod helpers;
+
 use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use haven_core::circle::{CircleStorage, RelayType, PRODUCTION_DEFAULT_RELAYS};
+use haven_core::circle::{
+    CircleManager, CircleStorage, RelayType, CIRCLES_DB_FILENAME, PRODUCTION_DEFAULT_RELAYS,
+    PRODUCTION_INBOX_RELAYS,
+};
 use haven_core::relay::dedup_relay_targets;
 use nostr::Kind;
 use proptest::prelude::*;
@@ -65,10 +70,13 @@ fn seed_then_reopen_remembers_sentinel() {
         let storage = CircleStorage::new(&path, None).expect("open");
         let did_seed = storage.seed_defaults_if_unseeded().unwrap();
         assert!(did_seed);
-        // User removes a default — leaves two others, allowed.
-        storage
-            .remove_user_relay(PRODUCTION_DEFAULT_RELAYS[0], RelayType::Inbox)
-            .unwrap();
+        // User removes a default — leaves another, allowed.
+        assert!(
+            storage
+                .remove_user_relay(PRODUCTION_INBOX_RELAYS[0], RelayType::Inbox)
+                .unwrap(),
+            "non-vacuity: the removed relay was a seeded inbox row"
+        );
     }
     // Drop and reopen to simulate an app restart.
     {
@@ -80,12 +88,75 @@ fn seed_then_reopen_remembers_sentinel() {
         assert!(!did_seed);
         let inbox = storage.list_user_relays(RelayType::Inbox).unwrap();
         assert_eq!(
-            inbox.len(),
-            PRODUCTION_DEFAULT_RELAYS.len() - 1,
+            inbox,
+            PRODUCTION_INBOX_RELAYS[1..],
             "removed default must NOT be re-added by defensive seed"
         );
     }
     cleanup(&path);
+}
+
+/// The one-time retirement of the read-gated relay runs when the circle
+/// manager opens: an inbox list still exactly the old seed loses it, once, and
+/// a user who adds it back after keeps it across the next open. Its log line
+/// names neither the relay nor the account (Security Rule 15).
+#[tokio::test(flavor = "current_thread")]
+async fn an_old_seed_inbox_list_loses_the_gated_relay_when_the_manager_opens_and_only_once() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let keys = nostr::Keys::generate();
+    let old_seed = PRODUCTION_DEFAULT_RELAYS;
+    let gated = "wss://relay.damus.io";
+    assert!(
+        old_seed.contains(&gated) && !PRODUCTION_INBOX_RELAYS.contains(&gated),
+        "non-vacuity: the old seed held the gated relay and the new one does not"
+    );
+    {
+        let storage = CircleStorage::new(&dir.path().join(CIRCLES_DB_FILENAME), None)
+            .expect("open the circle store");
+        for relay in old_seed {
+            storage.add_user_relay(relay, RelayType::Inbox).unwrap();
+            storage
+                .add_user_relay(relay, RelayType::KeyPackage)
+                .unwrap();
+        }
+    }
+    let mut opened = None;
+    let lines = helpers::capture_haven_log_here(async {
+        opened = Some(CircleManager::new_unencrypted(dir.path(), &keys).expect("open"));
+    })
+    .await;
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.message.contains("retired a read-gated seed relay")),
+        "non-vacuity: the retirement logged"
+    );
+    helpers::assert_no_needles(
+        &lines,
+        &[gated, "relay.damus.io", &keys.public_key().to_hex()],
+    );
+    {
+        let manager = opened.expect("opened");
+        assert_eq!(
+            manager.list_user_relays(RelayType::Inbox).unwrap(),
+            PRODUCTION_INBOX_RELAYS
+        );
+        assert_eq!(
+            manager.list_user_relays(RelayType::KeyPackage).unwrap(),
+            old_seed,
+            "the KeyPackage list keeps the relay, which serves KeyPackages"
+        );
+        manager.add_user_relay(gated, RelayType::Inbox).unwrap();
+    }
+    let reopened = CircleManager::new_unencrypted(dir.path(), &keys).expect("reopen");
+    assert!(
+        reopened
+            .list_user_relays(RelayType::Inbox)
+            .unwrap()
+            .iter()
+            .any(|u| u == gated),
+        "re-added by the user after the retirement, so it stays"
+    );
 }
 
 #[test]
