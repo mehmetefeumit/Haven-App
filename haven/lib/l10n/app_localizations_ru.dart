@@ -394,24 +394,24 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get relaySettingsInboxRefused =>
-      'This relay didn\'t let Haven read your invitations. Remove it, or add another relay.';
+      'Это реле не дало Haven прочитать ваши приглашения. Удалите его или добавьте другое реле.';
 
   @override
   String get relaySettingsInboxRefusedTooltip =>
-      'Didn\'t let Haven read invitations';
+      'Не дало Haven прочитать приглашения';
 
   @override
   String relaySettingsInboxRefusedSemantics(String url) {
-    return 'Warning: $url didn\'t let Haven read your invitations';
+    return 'Предупреждение: реле $url не дало Haven прочитать ваши приглашения';
   }
 
   @override
   String get relaySettingsInboxAllRefusedTitle =>
-      'None of your inbox relays let Haven read your invitations';
+      'Ни одно из ваших входящих реле не дало Haven прочитать приглашения';
 
   @override
   String get relaySettingsInboxAllRefusedMessage =>
-      'Invitations sent to you won\'t reach you until one of your inbox relays lets Haven read them. Restore the defaults, or add another relay.';
+      'Приглашения не будут до вас доходить, пока хотя бы одно из ваших входящих реле не даст Haven их прочитать. Восстановите реле по умолчанию или добавьте другое реле.';
 
   @override
   String get locationSettingsTitle => 'Местоположение';
@@ -1453,9 +1453,13 @@ class AppLocalizationsRu extends AppLocalizations {
       count,
       locale: localeName,
       other:
-          '$countString inbox relays didn\'t let Haven read your invitations, so an invitation sent only there won\'t reach you. In Relay settings, remove them or add another relay.',
+          '$countString входящего реле не дали Haven прочитать ваши приглашения, поэтому приглашение, отправленное только на эти реле, до вас не дойдёт. В настройках реле удалите их или добавьте другое реле.',
+      many:
+          '$countString входящих реле не дали Haven прочитать ваши приглашения, поэтому приглашение, отправленное только на эти реле, до вас не дойдёт. В настройках реле удалите их или добавьте другое реле.',
+      few:
+          '$countString входящих реле не дали Haven прочитать ваши приглашения, поэтому приглашение, отправленное только на эти реле, до вас не дойдёт. В настройках реле удалите их или добавьте другое реле.',
       one:
-          '1 inbox relay didn\'t let Haven read your invitations, so an invitation sent only there won\'t reach you. In Relay settings, remove it or add another relay.',
+          '$countString входящее реле не дало Haven прочитать ваши приглашения, поэтому приглашение, отправленное только туда, до вас не дойдёт. В настройках реле удалите реле со значком предупреждения или добавьте другое.',
     );
     return '$_temp0';
   }
@@ -1470,22 +1474,27 @@ class AppLocalizationsRu extends AppLocalizations {
       count,
       locale: localeName,
       other:
-          '$countString invitations arrived but couldn\'t be saved on this device.',
-      one: 'An invitation arrived but couldn\'t be saved on this device.',
+          'Пришло $countString приглашения, но сохранить их на этом устройстве не удалось.',
+      many:
+          'Пришло $countString приглашений, но сохранить их на этом устройстве не удалось.',
+      few:
+          'Пришло $countString приглашения, но сохранить их на этом устройстве не удалось.',
+      one:
+          'Пришло $countString приглашение, но сохранить на этом устройстве не удалось.',
     );
     return '$_temp0';
   }
 
   @override
   String get invitationsNoticeOffline =>
-      'Haven couldn\'t reach your inbox relays, so new invitations can\'t show up yet.';
+      'Haven не удалось связаться с вашими входящими реле, поэтому новые приглашения пока не появятся.';
 
   @override
   String get invitationsNoticeIncomplete =>
-      'Haven couldn\'t finish checking all your inbox relays, so some invitations may not show up yet.';
+      'Haven не удалось до конца проверить все ваши входящие реле, поэтому некоторые приглашения могут пока не отображаться.';
 
   @override
-  String get invitationsNoticeOpenRelaySettings => 'Relay settings';
+  String get invitationsNoticeOpenRelaySettings => 'Настройки реле';
 
   @override
   String get invitationsEmptyTitle => 'Нет приглашений';
@@ -1519,15 +1528,17 @@ class AppLocalizationsRu extends AppLocalizations {
     String _temp0 = intl.Intl.pluralLogic(
       total,
       locale: localeName,
-      other: 'Invitations checked on all $totalString relays',
-      one: 'Invitations checked on the relay',
+      other: 'Приглашения проверены на всех реле: $totalString',
+      many: 'Приглашения проверены на всех реле: $totalString',
+      few: 'Приглашения проверены на всех реле: $totalString',
+      one: 'Приглашения проверены на $totalString из $totalString реле',
     );
     return '$_temp0';
   }
 
   @override
   String get refreshRingSemanticInboxNone =>
-      'Couldn\'t check invitations on any relay';
+      'Не удалось проверить приглашения ни на одном реле';
 
   @override
   String refreshRingSemanticInboxPartial(int ok, int total) {
@@ -1539,7 +1550,7 @@ class AppLocalizationsRu extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'Invitations checked on $okString of $totalString relays';
+    return 'Приглашения проверены на $okString из $totalString реле';
   }
 
   @override
@@ -1547,7 +1558,7 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get refreshRingAnnouncementInboxAll =>
-      'Invitations checked on every relay';
+      'Приглашения проверены на всех реле';
 
   @override
   String refreshRingAnnouncementInboxPartial(int ok, int total) {
@@ -1559,12 +1570,12 @@ class AppLocalizationsRu extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'Invitations checked on $okString of $totalString relays';
+    return 'Приглашения проверены на $okString из $totalString реле';
   }
 
   @override
   String get refreshRingAnnouncementInboxNone =>
-      'Couldn\'t check invitations on any relay';
+      'Не удалось проверить приглашения ни на одном реле';
 
   @override
   String get refreshRingAnnouncementNoInbox => 'Входящие реле не настроены';

@@ -387,24 +387,24 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get relaySettingsInboxRefused =>
-      'This relay didn\'t let Haven read your invitations. Remove it, or add another relay.';
+      'این رله اجازه نداد Haven دعوت‌هایت را بخواند. آن را حذف کن یا رلهٔ دیگری اضافه کن.';
 
   @override
   String get relaySettingsInboxRefusedTooltip =>
-      'Didn\'t let Haven read invitations';
+      'اجازهٔ خواندن دعوت‌ها را به Haven نداد';
 
   @override
   String relaySettingsInboxRefusedSemantics(String url) {
-    return 'Warning: $url didn\'t let Haven read your invitations';
+    return 'هشدار: $url اجازه نداد Haven دعوت‌هایت را بخواند';
   }
 
   @override
   String get relaySettingsInboxAllRefusedTitle =>
-      'None of your inbox relays let Haven read your invitations';
+      'هیچ‌کدام از رله‌های صندوق ورودی‌ات اجازه نداد Haven دعوت‌هایت را بخواند';
 
   @override
   String get relaySettingsInboxAllRefusedMessage =>
-      'Invitations sent to you won\'t reach you until one of your inbox relays lets Haven read them. Restore the defaults, or add another relay.';
+      'تا وقتی یکی از رله‌های صندوق ورودی‌ات اجازه ندهد Haven دعوت‌هایت را بخواند، دعوت‌هایی که برایت فرستاده می‌شوند به دستت نمی‌رسند. پیش‌فرض‌ها را بازگردان یا رلهٔ دیگری اضافه کن.';
 
   @override
   String get locationSettingsTitle => 'موقعیت مکانی';
@@ -1419,9 +1419,9 @@ class AppLocalizationsFa extends AppLocalizations {
       count,
       locale: localeName,
       other:
-          '$countString inbox relays didn\'t let Haven read your invitations, so an invitation sent only there won\'t reach you. In Relay settings, remove them or add another relay.',
+          '$countString رلهٔ صندوق ورودی اجازه ندادند Haven دعوت‌هایت را بخواند، پس دعوتی که فقط به این رله‌ها فرستاده شود به دستت نمی‌رسد. در تنظیمات رله‌ها، آن‌ها را حذف کن یا رلهٔ دیگری اضافه کن.',
       one:
-          '1 inbox relay didn\'t let Haven read your invitations, so an invitation sent only there won\'t reach you. In Relay settings, remove it or add another relay.',
+          'یک رلهٔ صندوق ورودی اجازه نداد Haven دعوت‌هایت را بخواند، پس دعوتی که فقط به همین رله فرستاده شود به دستت نمی‌رسد. در تنظیمات رله‌ها، آن را حذف کن یا رلهٔ دیگری اضافه کن.',
     );
     return '$_temp0';
   }
@@ -1436,22 +1436,22 @@ class AppLocalizationsFa extends AppLocalizations {
       count,
       locale: localeName,
       other:
-          '$countString invitations arrived but couldn\'t be saved on this device.',
-      one: 'An invitation arrived but couldn\'t be saved on this device.',
+          '$countString دعوت رسید، اما ذخیره کردنشان روی این دستگاه ممکن نشد.',
+      one: 'یک دعوت رسید، اما ذخیره کردنش روی این دستگاه ممکن نشد.',
     );
     return '$_temp0';
   }
 
   @override
   String get invitationsNoticeOffline =>
-      'Haven couldn\'t reach your inbox relays, so new invitations can\'t show up yet.';
+      'Haven نتوانست به رله‌های صندوق ورودی‌ات دسترسی پیدا کند، پس دعوت‌های تازه هنوز نمی‌توانند نمایش داده شوند.';
 
   @override
   String get invitationsNoticeIncomplete =>
-      'Haven couldn\'t finish checking all your inbox relays, so some invitations may not show up yet.';
+      'Haven نتوانست بررسی همهٔ رله‌های صندوق ورودی‌ات را تمام کند، پس ممکن است برخی دعوت‌ها هنوز نمایش داده نشوند.';
 
   @override
-  String get invitationsNoticeOpenRelaySettings => 'Relay settings';
+  String get invitationsNoticeOpenRelaySettings => 'تنظیمات رله‌ها';
 
   @override
   String get invitationsEmptyTitle => 'دعوتی وجود ندارد';
@@ -1485,15 +1485,15 @@ class AppLocalizationsFa extends AppLocalizations {
     String _temp0 = intl.Intl.pluralLogic(
       total,
       locale: localeName,
-      other: 'Invitations checked on all $totalString relays',
-      one: 'Invitations checked on the relay',
+      other: 'دعوت‌ها روی همهٔ $totalString رله بررسی شدند',
+      one: 'دعوت‌ها روی رله بررسی شدند',
     );
     return '$_temp0';
   }
 
   @override
   String get refreshRingSemanticInboxNone =>
-      'Couldn\'t check invitations on any relay';
+      'بررسی دعوت‌ها روی هیچ رله‌ای ممکن نشد';
 
   @override
   String refreshRingSemanticInboxPartial(int ok, int total) {
@@ -1505,7 +1505,7 @@ class AppLocalizationsFa extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'Invitations checked on $okString of $totalString relays';
+    return 'دعوت‌ها روی $okString از $totalString رله بررسی شدند';
   }
 
   @override
@@ -1513,7 +1513,7 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get refreshRingAnnouncementInboxAll =>
-      'Invitations checked on every relay';
+      'دعوت‌ها روی همهٔ رله‌ها بررسی شدند';
 
   @override
   String refreshRingAnnouncementInboxPartial(int ok, int total) {
@@ -1525,12 +1525,12 @@ class AppLocalizationsFa extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'Invitations checked on $okString of $totalString relays';
+    return 'دعوت‌ها روی $okString از $totalString رله بررسی شدند';
   }
 
   @override
   String get refreshRingAnnouncementInboxNone =>
-      'Couldn\'t check invitations on any relay';
+      'بررسی دعوت‌ها روی هیچ رله‌ای ممکن نشد';
 
   @override
   String get refreshRingAnnouncementNoInbox => 'صندوق ورودی پیکربندی نشده است';

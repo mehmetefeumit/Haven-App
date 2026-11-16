@@ -372,24 +372,23 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get relaySettingsInboxRefused =>
-      'This relay didn\'t let Haven read your invitations. Remove it, or add another relay.';
+      'このリレーは、あなた宛ての招待の読み取りを Haven に許可しませんでした。このリレーを削除するか、別のリレーを追加してください。';
 
   @override
-  String get relaySettingsInboxRefusedTooltip =>
-      'Didn\'t let Haven read invitations';
+  String get relaySettingsInboxRefusedTooltip => '招待の読み取りを許可しませんでした';
 
   @override
   String relaySettingsInboxRefusedSemantics(String url) {
-    return 'Warning: $url didn\'t let Haven read your invitations';
+    return '警告: $url は、あなた宛ての招待の読み取りを Haven に許可しませんでした';
   }
 
   @override
   String get relaySettingsInboxAllRefusedTitle =>
-      'None of your inbox relays let Haven read your invitations';
+      '受信トレイのリレーはどれも、あなた宛ての招待の読み取りを Haven に許可しませんでした';
 
   @override
   String get relaySettingsInboxAllRefusedMessage =>
-      'Invitations sent to you won\'t reach you until one of your inbox relays lets Haven read them. Restore the defaults, or add another relay.';
+      '受信トレイのリレーのいずれかが招待の読み取りを Haven に許可するまで、あなた宛ての招待は届きません。デフォルトに戻すか、別のリレーを追加してください。';
 
   @override
   String get locationSettingsTitle => '位置情報';
@@ -1364,9 +1363,9 @@ class AppLocalizationsJa extends AppLocalizations {
       count,
       locale: localeName,
       other:
-          '$countString inbox relays didn\'t let Haven read your invitations, so an invitation sent only there won\'t reach you. In Relay settings, remove them or add another relay.',
+          '受信トレイのリレー$countString件が、あなた宛ての招待の読み取りを Haven に許可しませんでした。それらのリレーにだけ送られた招待は、あなたに届きません。リレー設定で、それらのリレーを削除するか、別のリレーを追加してください。',
       one:
-          '1 inbox relay didn\'t let Haven read your invitations, so an invitation sent only there won\'t reach you. In Relay settings, remove it or add another relay.',
+          '受信トレイのリレー1件が、あなた宛ての招待の読み取りを Haven に許可しませんでした。そのリレーにだけ送られた招待は、あなたに届きません。リレー設定で、そのリレーを削除するか、別のリレーを追加してください。',
     );
     return '$_temp0';
   }
@@ -1380,23 +1379,21 @@ class AppLocalizationsJa extends AppLocalizations {
     String _temp0 = intl.Intl.pluralLogic(
       count,
       locale: localeName,
-      other:
-          '$countString invitations arrived but couldn\'t be saved on this device.',
-      one: 'An invitation arrived but couldn\'t be saved on this device.',
+      other: '招待が$countString件届きましたが、この端末に保存できませんでした。',
     );
     return '$_temp0';
   }
 
   @override
   String get invitationsNoticeOffline =>
-      'Haven couldn\'t reach your inbox relays, so new invitations can\'t show up yet.';
+      'Haven は受信トレイのリレーに接続できなかったため、新しい招待はまだ表示できません。';
 
   @override
   String get invitationsNoticeIncomplete =>
-      'Haven couldn\'t finish checking all your inbox relays, so some invitations may not show up yet.';
+      'Haven は受信トレイのリレーをすべて確認し終えられなかったため、まだ表示されていない招待があるかもしれません。';
 
   @override
-  String get invitationsNoticeOpenRelaySettings => 'Relay settings';
+  String get invitationsNoticeOpenRelaySettings => 'リレー設定';
 
   @override
   String get invitationsEmptyTitle => '招待はありません';
@@ -1433,15 +1430,14 @@ class AppLocalizationsJa extends AppLocalizations {
     String _temp0 = intl.Intl.pluralLogic(
       total,
       locale: localeName,
-      other: 'Invitations checked on all $totalString relays',
-      one: 'Invitations checked on the relay',
+      other: 'すべての $totalString 件のリレーで招待を確認しました',
+      one: 'リレーで招待を確認しました',
     );
     return '$_temp0';
   }
 
   @override
-  String get refreshRingSemanticInboxNone =>
-      'Couldn\'t check invitations on any relay';
+  String get refreshRingSemanticInboxNone => 'どのリレーでも招待を確認できませんでした';
 
   @override
   String refreshRingSemanticInboxPartial(int ok, int total) {
@@ -1453,15 +1449,14 @@ class AppLocalizationsJa extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'Invitations checked on $okString of $totalString relays';
+    return '$totalString 件中 $okString 件のリレーで招待を確認しました';
   }
 
   @override
   String get refreshRingAnnouncementChecking => 'リレーを確認しています';
 
   @override
-  String get refreshRingAnnouncementInboxAll =>
-      'Invitations checked on every relay';
+  String get refreshRingAnnouncementInboxAll => 'すべてのリレーで招待を確認しました';
 
   @override
   String refreshRingAnnouncementInboxPartial(int ok, int total) {
@@ -1473,12 +1468,11 @@ class AppLocalizationsJa extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'Invitations checked on $okString of $totalString relays';
+    return '$totalString 件中 $okString 件のリレーで招待を確認しました';
   }
 
   @override
-  String get refreshRingAnnouncementInboxNone =>
-      'Couldn\'t check invitations on any relay';
+  String get refreshRingAnnouncementInboxNone => 'どのリレーでも招待を確認できませんでした';
 
   @override
   String get refreshRingAnnouncementNoInbox => '受信トレイが未設定です';

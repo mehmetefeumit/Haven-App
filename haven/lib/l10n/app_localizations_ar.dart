@@ -397,24 +397,24 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get relaySettingsInboxRefused =>
-      'This relay didn\'t let Haven read your invitations. Remove it, or add another relay.';
+      'لم يسمح هذا المُرحِّل لتطبيق Haven بقراءة دعواتك. أزِله أو أضف مُرحِّلًا آخر.';
 
   @override
   String get relaySettingsInboxRefusedTooltip =>
-      'Didn\'t let Haven read invitations';
+      'لم يسمح لتطبيق Haven بقراءة الدعوات';
 
   @override
   String relaySettingsInboxRefusedSemantics(String url) {
-    return 'Warning: $url didn\'t let Haven read your invitations';
+    return 'تحذير: $url لم يسمح لتطبيق Haven بقراءة دعواتك';
   }
 
   @override
   String get relaySettingsInboxAllRefusedTitle =>
-      'None of your inbox relays let Haven read your invitations';
+      'لم يسمح أي من مُرحِّلات صندوق الوارد لتطبيق Haven بقراءة دعواتك';
 
   @override
   String get relaySettingsInboxAllRefusedMessage =>
-      'Invitations sent to you won\'t reach you until one of your inbox relays lets Haven read them. Restore the defaults, or add another relay.';
+      'لن تصلك الدعوات المُرسَلة إليك حتى يسمح أحد مُرحِّلات صندوق الوارد لتطبيق Haven بقراءتها. استعِد الإعدادات الافتراضية أو أضف مُرحِّلًا آخر.';
 
   @override
   String get locationSettingsTitle => 'الموقع';
@@ -1481,9 +1481,17 @@ class AppLocalizationsAr extends AppLocalizations {
       count,
       locale: localeName,
       other:
-          '$countString inbox relays didn\'t let Haven read your invitations, so an invitation sent only there won\'t reach you. In Relay settings, remove them or add another relay.',
+          'لم يسمح $countString من مُرحِّلات صندوق الوارد لتطبيق Haven بقراءة دعواتك، لذا لن تصلك أي دعوة أُرسِلت إليها فقط. في إعدادات المُرحِّلات، أزِلها أو أضف مُرحِّلًا آخر.',
+      many:
+          'لم يسمح $countString من مُرحِّلات صندوق الوارد لتطبيق Haven بقراءة دعواتك، لذا لن تصلك أي دعوة أُرسِلت إليها فقط. في إعدادات المُرحِّلات، أزِلها أو أضف مُرحِّلًا آخر.',
+      few:
+          'لم يسمح $countString من مُرحِّلات صندوق الوارد لتطبيق Haven بقراءة دعواتك، لذا لن تصلك أي دعوة أُرسِلت إليها فقط. في إعدادات المُرحِّلات، أزِلها أو أضف مُرحِّلًا آخر.',
+      two:
+          'لم يسمح اثنان من مُرحِّلات صندوق الوارد لتطبيق Haven بقراءة دعواتك، لذا لن تصلك أي دعوة أُرسِلت إليهما فقط. في إعدادات المُرحِّلات، أزِلهما أو أضف مُرحِّلًا آخر.',
       one:
-          '1 inbox relay didn\'t let Haven read your invitations, so an invitation sent only there won\'t reach you. In Relay settings, remove it or add another relay.',
+          'أحد مُرحِّلات صندوق الوارد لم يسمح لتطبيق Haven بقراءة دعواتك، لذا لن تصلك أي دعوة أُرسِلت إليه فقط. في إعدادات المُرحِّلات، أزِله أو أضف مُرحِّلًا آخر.',
+      zero:
+          'لم يسمح $countString من مُرحِّلات صندوق الوارد لتطبيق Haven بقراءة دعواتك، لذا لن تصلك أي دعوة أُرسِلت إليها فقط. في إعدادات المُرحِّلات، أزِلها أو أضف مُرحِّلًا آخر.',
     );
     return '$_temp0';
   }
@@ -1497,23 +1505,26 @@ class AppLocalizationsAr extends AppLocalizations {
     String _temp0 = intl.Intl.pluralLogic(
       count,
       locale: localeName,
-      other:
-          '$countString invitations arrived but couldn\'t be saved on this device.',
-      one: 'An invitation arrived but couldn\'t be saved on this device.',
+      other: 'وصلت $countString دعوة لكن تعذّر حفظها على هذا الجهاز.',
+      many: 'وصلت $countString دعوةً لكن تعذّر حفظها على هذا الجهاز.',
+      few: 'وصلت $countString دعوات لكن تعذّر حفظها على هذا الجهاز.',
+      two: 'وصلت دعوتان لكن تعذّر حفظهما على هذا الجهاز.',
+      one: 'وصلت دعوة لكن تعذّر حفظها على هذا الجهاز.',
+      zero: 'وصلت دعوات لكن تعذّر حفظها على هذا الجهاز.',
     );
     return '$_temp0';
   }
 
   @override
   String get invitationsNoticeOffline =>
-      'Haven couldn\'t reach your inbox relays, so new invitations can\'t show up yet.';
+      'تعذّر على Haven الوصول إلى مُرحِّلات صندوق الوارد الخاصة بك، لذا لا يمكن أن تظهر الدعوات الجديدة حاليًا.';
 
   @override
   String get invitationsNoticeIncomplete =>
-      'Haven couldn\'t finish checking all your inbox relays, so some invitations may not show up yet.';
+      'تعذّر على Haven إكمال فحص جميع مُرحِّلات صندوق الوارد الخاصة بك، لذا قد لا تظهر بعض الدعوات حاليًا.';
 
   @override
-  String get invitationsNoticeOpenRelaySettings => 'Relay settings';
+  String get invitationsNoticeOpenRelaySettings => 'إعدادات المُرحِّلات';
 
   @override
   String get invitationsEmptyTitle => 'لا توجد دعوات';
@@ -1557,15 +1568,18 @@ class AppLocalizationsAr extends AppLocalizations {
     String _temp0 = intl.Intl.pluralLogic(
       total,
       locale: localeName,
-      other: 'Invitations checked on all $totalString relays',
-      one: 'Invitations checked on the relay',
+      other: 'تم فحص الدعوات على جميع المُرحِّلات، وعددها $totalString',
+      many: 'تم فحص الدعوات على جميع المُرحِّلات، وعددها $totalString',
+      few: 'تم فحص الدعوات على جميع المُرحِّلات، وعددها $totalString',
+      two: 'تم فحص الدعوات على المُرحِّلَين كليهما',
+      one: 'تم فحص الدعوات على المُرحِّل',
+      zero: 'تم فحص الدعوات على جميع المُرحِّلات',
     );
     return '$_temp0';
   }
 
   @override
-  String get refreshRingSemanticInboxNone =>
-      'Couldn\'t check invitations on any relay';
+  String get refreshRingSemanticInboxNone => 'تعذّر فحص الدعوات على أي مُرحِّل';
 
   @override
   String refreshRingSemanticInboxPartial(int ok, int total) {
@@ -1577,7 +1591,7 @@ class AppLocalizationsAr extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'Invitations checked on $okString of $totalString relays';
+    return 'تم فحص الدعوات على $okString من المُرحِّلات من أصل $totalString';
   }
 
   @override
@@ -1585,7 +1599,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get refreshRingAnnouncementInboxAll =>
-      'Invitations checked on every relay';
+      'تم فحص الدعوات على كل المُرحِّلات';
 
   @override
   String refreshRingAnnouncementInboxPartial(int ok, int total) {
@@ -1597,12 +1611,12 @@ class AppLocalizationsAr extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'Invitations checked on $okString of $totalString relays';
+    return 'تم فحص الدعوات على $okString من المُرحِّلات من أصل $totalString';
   }
 
   @override
   String get refreshRingAnnouncementInboxNone =>
-      'Couldn\'t check invitations on any relay';
+      'تعذّر فحص الدعوات على أي مُرحِّل';
 
   @override
   String get refreshRingAnnouncementNoInbox => 'لا يوجد صندوق وارد مُهيَّأ';

@@ -393,24 +393,24 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get relaySettingsInboxRefused =>
-      'This relay didn\'t let Haven read your invitations. Remove it, or add another relay.';
+      'Dieses Relay hat Haven deine Einladungen nicht lesen lassen. Entferne es oder füge ein weiteres Relay hinzu.';
 
   @override
   String get relaySettingsInboxRefusedTooltip =>
-      'Didn\'t let Haven read invitations';
+      'Hat Haven die Einladungen nicht lesen lassen';
 
   @override
   String relaySettingsInboxRefusedSemantics(String url) {
-    return 'Warning: $url didn\'t let Haven read your invitations';
+    return 'Warnung: $url hat Haven deine Einladungen nicht lesen lassen';
   }
 
   @override
   String get relaySettingsInboxAllRefusedTitle =>
-      'None of your inbox relays let Haven read your invitations';
+      'Keines deiner Posteingangs-Relays hat Haven deine Einladungen lesen lassen';
 
   @override
   String get relaySettingsInboxAllRefusedMessage =>
-      'Invitations sent to you won\'t reach you until one of your inbox relays lets Haven read them. Restore the defaults, or add another relay.';
+      'An dich gesendete Einladungen erreichen dich erst, wenn eines deiner Posteingangs-Relays Haven sie lesen lässt. Stelle die Standardwerte wieder her oder füge ein weiteres Relay hinzu.';
 
   @override
   String get locationSettingsTitle => 'Standort';
@@ -1432,9 +1432,9 @@ class AppLocalizationsDe extends AppLocalizations {
       count,
       locale: localeName,
       other:
-          '$countString inbox relays didn\'t let Haven read your invitations, so an invitation sent only there won\'t reach you. In Relay settings, remove them or add another relay.',
+          '$countString Posteingangs-Relays haben Haven deine Einladungen nicht lesen lassen, daher erreicht dich eine Einladung, die nur dorthin gesendet wurde, nicht. Entferne sie in den Relay-Einstellungen oder füge ein weiteres Relay hinzu.',
       one:
-          '1 inbox relay didn\'t let Haven read your invitations, so an invitation sent only there won\'t reach you. In Relay settings, remove it or add another relay.',
+          '1 Posteingangs-Relay hat Haven deine Einladungen nicht lesen lassen, daher erreicht dich eine Einladung, die nur dorthin gesendet wurde, nicht. Entferne es in den Relay-Einstellungen oder füge ein weiteres Relay hinzu.',
     );
     return '$_temp0';
   }
@@ -1449,22 +1449,23 @@ class AppLocalizationsDe extends AppLocalizations {
       count,
       locale: localeName,
       other:
-          '$countString invitations arrived but couldn\'t be saved on this device.',
-      one: 'An invitation arrived but couldn\'t be saved on this device.',
+          '$countString Einladungen sind eingegangen, konnten aber nicht auf diesem Gerät gespeichert werden.',
+      one:
+          'Eine Einladung ist eingegangen, konnte aber nicht auf diesem Gerät gespeichert werden.',
     );
     return '$_temp0';
   }
 
   @override
   String get invitationsNoticeOffline =>
-      'Haven couldn\'t reach your inbox relays, so new invitations can\'t show up yet.';
+      'Haven konnte deine Posteingangs-Relays nicht erreichen, daher können neue Einladungen noch nicht angezeigt werden.';
 
   @override
   String get invitationsNoticeIncomplete =>
-      'Haven couldn\'t finish checking all your inbox relays, so some invitations may not show up yet.';
+      'Haven konnte nicht alle deine Posteingangs-Relays vollständig prüfen, daher werden einige Einladungen möglicherweise noch nicht angezeigt.';
 
   @override
-  String get invitationsNoticeOpenRelaySettings => 'Relay settings';
+  String get invitationsNoticeOpenRelaySettings => 'Relay-Einstellungen';
 
   @override
   String get invitationsEmptyTitle => 'Keine Einladungen';
@@ -1504,15 +1505,15 @@ class AppLocalizationsDe extends AppLocalizations {
     String _temp0 = intl.Intl.pluralLogic(
       total,
       locale: localeName,
-      other: 'Invitations checked on all $totalString relays',
-      one: 'Invitations checked on the relay',
+      other: 'Einladungen auf allen $totalString Relays geprüft',
+      one: 'Einladungen auf dem Relay geprüft',
     );
     return '$_temp0';
   }
 
   @override
   String get refreshRingSemanticInboxNone =>
-      'Couldn\'t check invitations on any relay';
+      'Einladungen konnten auf keinem Relay geprüft werden';
 
   @override
   String refreshRingSemanticInboxPartial(int ok, int total) {
@@ -1524,7 +1525,7 @@ class AppLocalizationsDe extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'Invitations checked on $okString of $totalString relays';
+    return 'Einladungen auf $okString von $totalString Relays geprüft';
   }
 
   @override
@@ -1532,7 +1533,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get refreshRingAnnouncementInboxAll =>
-      'Invitations checked on every relay';
+      'Einladungen auf allen Relays geprüft';
 
   @override
   String refreshRingAnnouncementInboxPartial(int ok, int total) {
@@ -1544,12 +1545,12 @@ class AppLocalizationsDe extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'Invitations checked on $okString of $totalString relays';
+    return 'Einladungen auf $okString von $totalString Relays geprüft';
   }
 
   @override
   String get refreshRingAnnouncementInboxNone =>
-      'Couldn\'t check invitations on any relay';
+      'Einladungen konnten auf keinem Relay geprüft werden';
 
   @override
   String get refreshRingAnnouncementNoInbox => 'Kein Posteingang konfiguriert';

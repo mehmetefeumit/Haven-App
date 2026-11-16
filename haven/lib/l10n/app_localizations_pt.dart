@@ -393,24 +393,24 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get relaySettingsInboxRefused =>
-      'This relay didn\'t let Haven read your invitations. Remove it, or add another relay.';
+      'Este relay não permitiu que o Haven lesse seus convites. Remova-o ou adicione outro relay.';
 
   @override
   String get relaySettingsInboxRefusedTooltip =>
-      'Didn\'t let Haven read invitations';
+      'Não permitiu que o Haven lesse os convites';
 
   @override
   String relaySettingsInboxRefusedSemantics(String url) {
-    return 'Warning: $url didn\'t let Haven read your invitations';
+    return 'Aviso: $url não permitiu que o Haven lesse seus convites';
   }
 
   @override
   String get relaySettingsInboxAllRefusedTitle =>
-      'None of your inbox relays let Haven read your invitations';
+      'Nenhum dos seus relays de caixa de entrada permitiu que o Haven lesse seus convites';
 
   @override
   String get relaySettingsInboxAllRefusedMessage =>
-      'Invitations sent to you won\'t reach you until one of your inbox relays lets Haven read them. Restore the defaults, or add another relay.';
+      'Os convites enviados a você não vão chegar até que um dos seus relays de caixa de entrada permita que o Haven os leia. Restaure os padrões ou adicione outro relay.';
 
   @override
   String get locationSettingsTitle => 'Localização';
@@ -1446,9 +1446,11 @@ class AppLocalizationsPt extends AppLocalizations {
       count,
       locale: localeName,
       other:
-          '$countString inbox relays didn\'t let Haven read your invitations, so an invitation sent only there won\'t reach you. In Relay settings, remove them or add another relay.',
+          '$countString relays de caixa de entrada não permitiram que o Haven lesse seus convites, então um convite enviado só para eles não vai chegar até você. Em Configurações de relays, remova-os ou adicione outro relay.',
+      many:
+          '$countString de relays de caixa de entrada não permitiram que o Haven lesse seus convites, então um convite enviado só para eles não vai chegar até você. Em Configurações de relays, remova-os ou adicione outro relay.',
       one:
-          '1 inbox relay didn\'t let Haven read your invitations, so an invitation sent only there won\'t reach you. In Relay settings, remove it or add another relay.',
+          '1 relay de caixa de entrada não permitiu que o Haven lesse seus convites, então um convite enviado só para ele não vai chegar até você. Em Configurações de relays, remova-o ou adicione outro relay.',
     );
     return '$_temp0';
   }
@@ -1463,22 +1465,24 @@ class AppLocalizationsPt extends AppLocalizations {
       count,
       locale: localeName,
       other:
-          '$countString invitations arrived but couldn\'t be saved on this device.',
-      one: 'An invitation arrived but couldn\'t be saved on this device.',
+          '$countString convites chegaram, mas não puderam ser salvos neste dispositivo.',
+      many:
+          '$countString de convites chegaram, mas não puderam ser salvos neste dispositivo.',
+      one: 'Um convite chegou, mas não pôde ser salvo neste dispositivo.',
     );
     return '$_temp0';
   }
 
   @override
   String get invitationsNoticeOffline =>
-      'Haven couldn\'t reach your inbox relays, so new invitations can\'t show up yet.';
+      'O Haven não conseguiu se conectar aos seus relays de caixa de entrada, então os novos convites ainda não podem aparecer.';
 
   @override
   String get invitationsNoticeIncomplete =>
-      'Haven couldn\'t finish checking all your inbox relays, so some invitations may not show up yet.';
+      'O Haven não conseguiu terminar de verificar todos os seus relays de caixa de entrada, então alguns convites talvez ainda não apareçam.';
 
   @override
-  String get invitationsNoticeOpenRelaySettings => 'Relay settings';
+  String get invitationsNoticeOpenRelaySettings => 'Configurações de relays';
 
   @override
   String get invitationsEmptyTitle => 'Nenhum convite';
@@ -1519,15 +1523,16 @@ class AppLocalizationsPt extends AppLocalizations {
     String _temp0 = intl.Intl.pluralLogic(
       total,
       locale: localeName,
-      other: 'Invitations checked on all $totalString relays',
-      one: 'Invitations checked on the relay',
+      other: 'Convites verificados em todos os $totalString relays',
+      many: 'Convites verificados em todos os $totalString de relays',
+      one: 'Convites verificados no relay',
     );
     return '$_temp0';
   }
 
   @override
   String get refreshRingSemanticInboxNone =>
-      'Couldn\'t check invitations on any relay';
+      'Não foi possível verificar os convites em nenhum relay';
 
   @override
   String refreshRingSemanticInboxPartial(int ok, int total) {
@@ -1539,7 +1544,7 @@ class AppLocalizationsPt extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'Invitations checked on $okString of $totalString relays';
+    return 'Convites verificados em $okString de $totalString relays';
   }
 
   @override
@@ -1547,7 +1552,7 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get refreshRingAnnouncementInboxAll =>
-      'Invitations checked on every relay';
+      'Convites verificados em todos os relays';
 
   @override
   String refreshRingAnnouncementInboxPartial(int ok, int total) {
@@ -1559,12 +1564,12 @@ class AppLocalizationsPt extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'Invitations checked on $okString of $totalString relays';
+    return 'Convites verificados em $okString de $totalString relays';
   }
 
   @override
   String get refreshRingAnnouncementInboxNone =>
-      'Couldn\'t check invitations on any relay';
+      'Não foi possível verificar os convites em nenhum relay';
 
   @override
   String get refreshRingAnnouncementNoInbox =>

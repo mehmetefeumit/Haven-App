@@ -387,24 +387,24 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get relaySettingsInboxRefused =>
-      'This relay didn\'t let Haven read your invitations. Remove it, or add another relay.';
+      'اس ریلے نے Haven کو آپ کے دعوت نامے پڑھنے کی اجازت نہیں دی۔ اسے ہٹا دیں، یا کوئی اور ریلے شامل کریں۔';
 
   @override
   String get relaySettingsInboxRefusedTooltip =>
-      'Didn\'t let Haven read invitations';
+      'Haven کو دعوت نامے پڑھنے کی اجازت نہیں دی';
 
   @override
   String relaySettingsInboxRefusedSemantics(String url) {
-    return 'Warning: $url didn\'t let Haven read your invitations';
+    return 'تنبیہ: $url نے Haven کو آپ کے دعوت نامے پڑھنے کی اجازت نہیں دی';
   }
 
   @override
   String get relaySettingsInboxAllRefusedTitle =>
-      'None of your inbox relays let Haven read your invitations';
+      'آپ کے کسی بھی اِن باکس ریلے نے Haven کو دعوت نامے پڑھنے کی اجازت نہیں دی';
 
   @override
   String get relaySettingsInboxAllRefusedMessage =>
-      'Invitations sent to you won\'t reach you until one of your inbox relays lets Haven read them. Restore the defaults, or add another relay.';
+      'آپ کو بھیجے گئے دعوت نامے تب تک آپ تک نہیں پہنچیں گے جب تک آپ کا کوئی اِن باکس ریلے Haven کو انہیں پڑھنے کی اجازت نہ دے۔ طے شدہ ریلے بحال کریں، یا کوئی اور ریلے شامل کریں۔';
 
   @override
   String get locationSettingsTitle => 'مقام';
@@ -1416,9 +1416,9 @@ class AppLocalizationsUr extends AppLocalizations {
       count,
       locale: localeName,
       other:
-          '$countString inbox relays didn\'t let Haven read your invitations, so an invitation sent only there won\'t reach you. In Relay settings, remove them or add another relay.',
+          '$countString اِن باکس ریلے نے Haven کو آپ کے دعوت نامے پڑھنے کی اجازت نہیں دی، اس لیے جو دعوت نامہ صرف وہاں بھیجا گیا ہو وہ آپ تک نہیں پہنچے گا۔ ریلے کی ترتیبات میں جا کر انہیں ہٹا دیں یا کوئی اور ریلے شامل کریں۔',
       one:
-          '1 inbox relay didn\'t let Haven read your invitations, so an invitation sent only there won\'t reach you. In Relay settings, remove it or add another relay.',
+          '1 اِن باکس ریلے نے Haven کو آپ کے دعوت نامے پڑھنے کی اجازت نہیں دی، اس لیے جو دعوت نامہ صرف وہاں بھیجا گیا ہو وہ آپ تک نہیں پہنچے گا۔ ریلے کی ترتیبات میں جا کر اسے ہٹا دیں یا کوئی اور ریلے شامل کریں۔',
     );
     return '$_temp0';
   }
@@ -1432,23 +1432,22 @@ class AppLocalizationsUr extends AppLocalizations {
     String _temp0 = intl.Intl.pluralLogic(
       count,
       locale: localeName,
-      other:
-          '$countString invitations arrived but couldn\'t be saved on this device.',
-      one: 'An invitation arrived but couldn\'t be saved on this device.',
+      other: '$countString دعوت نامے موصول ہوئے مگر اس آلے پر محفوظ نہ ہو سکے۔',
+      one: 'ایک دعوت نامہ موصول ہوا مگر اس آلے پر محفوظ نہ ہو سکا۔',
     );
     return '$_temp0';
   }
 
   @override
   String get invitationsNoticeOffline =>
-      'Haven couldn\'t reach your inbox relays, so new invitations can\'t show up yet.';
+      'Haven آپ کے اِن باکس ریلے تک نہیں پہنچ سکا، اس لیے نئے دعوت نامے ابھی ظاہر نہیں ہو سکتے۔';
 
   @override
   String get invitationsNoticeIncomplete =>
-      'Haven couldn\'t finish checking all your inbox relays, so some invitations may not show up yet.';
+      'Haven آپ کے تمام اِن باکس ریلے کی جانچ مکمل نہیں کر سکا، اس لیے ہو سکتا ہے کچھ دعوت نامے ابھی ظاہر نہ ہوں۔';
 
   @override
-  String get invitationsNoticeOpenRelaySettings => 'Relay settings';
+  String get invitationsNoticeOpenRelaySettings => 'ریلے کی ترتیبات';
 
   @override
   String get invitationsEmptyTitle => 'کوئی دعوت نامہ نہیں';
@@ -1488,15 +1487,15 @@ class AppLocalizationsUr extends AppLocalizations {
     String _temp0 = intl.Intl.pluralLogic(
       total,
       locale: localeName,
-      other: 'Invitations checked on all $totalString relays',
-      one: 'Invitations checked on the relay',
+      other: 'دعوت نامے تمام $totalString ریلے پر جانچ لیے گئے',
+      one: 'دعوت نامے ریلے پر جانچ لیے گئے',
     );
     return '$_temp0';
   }
 
   @override
   String get refreshRingSemanticInboxNone =>
-      'Couldn\'t check invitations on any relay';
+      'کسی بھی ریلے پر دعوت نامے جانچے نہ جا سکے';
 
   @override
   String refreshRingSemanticInboxPartial(int ok, int total) {
@@ -1508,7 +1507,7 @@ class AppLocalizationsUr extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'Invitations checked on $okString of $totalString relays';
+    return 'دعوت نامے $totalString میں سے $okString ریلے پر جانچ لیے گئے';
   }
 
   @override
@@ -1516,7 +1515,7 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get refreshRingAnnouncementInboxAll =>
-      'Invitations checked on every relay';
+      'دعوت نامے ہر ریلے پر جانچ لیے گئے';
 
   @override
   String refreshRingAnnouncementInboxPartial(int ok, int total) {
@@ -1528,12 +1527,12 @@ class AppLocalizationsUr extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'Invitations checked on $okString of $totalString relays';
+    return 'دعوت نامے $totalString میں سے $okString ریلے پر جانچ لیے گئے';
   }
 
   @override
   String get refreshRingAnnouncementInboxNone =>
-      'Couldn\'t check invitations on any relay';
+      'کسی بھی ریلے پر دعوت نامے جانچے نہ جا سکے';
 
   @override
   String get refreshRingAnnouncementNoInbox => 'کوئی اِن باکس کنفیگر نہیں ہے';

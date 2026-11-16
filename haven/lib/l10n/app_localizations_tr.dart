@@ -389,24 +389,24 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get relaySettingsInboxRefused =>
-      'This relay didn\'t let Haven read your invitations. Remove it, or add another relay.';
+      'Bu aktarıcı Haven\'ın davetlerinizi okumasına izin vermedi. Onu kaldırın ya da başka bir aktarıcı ekleyin.';
 
   @override
   String get relaySettingsInboxRefusedTooltip =>
-      'Didn\'t let Haven read invitations';
+      'Haven\'ın davetleri okumasına izin vermedi';
 
   @override
   String relaySettingsInboxRefusedSemantics(String url) {
-    return 'Warning: $url didn\'t let Haven read your invitations';
+    return 'Uyarı: $url Haven\'ın davetlerinizi okumasına izin vermedi';
   }
 
   @override
   String get relaySettingsInboxAllRefusedTitle =>
-      'None of your inbox relays let Haven read your invitations';
+      'Gelen kutusu aktarıcılarınızın hiçbiri Haven\'ın davetlerinizi okumasına izin vermedi';
 
   @override
   String get relaySettingsInboxAllRefusedMessage =>
-      'Invitations sent to you won\'t reach you until one of your inbox relays lets Haven read them. Restore the defaults, or add another relay.';
+      'Size gönderilen davetler, gelen kutusu aktarıcılarınızdan biri Haven\'ın bunları okumasına izin verene kadar size ulaşmayacak. Varsayılanları geri yükleyin ya da başka bir aktarıcı ekleyin.';
 
   @override
   String get locationSettingsTitle => 'Konum';
@@ -1420,9 +1420,9 @@ class AppLocalizationsTr extends AppLocalizations {
       count,
       locale: localeName,
       other:
-          '$countString inbox relays didn\'t let Haven read your invitations, so an invitation sent only there won\'t reach you. In Relay settings, remove them or add another relay.',
+          '$countString gelen kutusu aktarıcısı Haven\'ın davetlerinizi okumasına izin vermedi; bu yüzden yalnızca bu aktarıcılara gönderilen bir davet size ulaşmaz. Aktarıcı ayarları\'ndan onları kaldırın ya da başka bir aktarıcı ekleyin.',
       one:
-          '1 inbox relay didn\'t let Haven read your invitations, so an invitation sent only there won\'t reach you. In Relay settings, remove it or add another relay.',
+          'Gelen kutusu aktarıcılarınızdan biri Haven\'ın davetlerinizi okumasına izin vermedi; bu yüzden yalnızca bu aktarıcıya gönderilen bir davet size ulaşmaz. Aktarıcı ayarları\'ndan onu kaldırın ya da başka bir aktarıcı ekleyin.',
     );
     return '$_temp0';
   }
@@ -1436,23 +1436,22 @@ class AppLocalizationsTr extends AppLocalizations {
     String _temp0 = intl.Intl.pluralLogic(
       count,
       locale: localeName,
-      other:
-          '$countString invitations arrived but couldn\'t be saved on this device.',
-      one: 'An invitation arrived but couldn\'t be saved on this device.',
+      other: '$countString davet geldi ancak bu cihaza kaydedilemedi.',
+      one: 'Bir davet geldi ancak bu cihaza kaydedilemedi.',
     );
     return '$_temp0';
   }
 
   @override
   String get invitationsNoticeOffline =>
-      'Haven couldn\'t reach your inbox relays, so new invitations can\'t show up yet.';
+      'Haven gelen kutusu aktarıcılarınıza ulaşamadı; bu yüzden yeni davetler henüz görünemiyor.';
 
   @override
   String get invitationsNoticeIncomplete =>
-      'Haven couldn\'t finish checking all your inbox relays, so some invitations may not show up yet.';
+      'Haven gelen kutusu aktarıcılarınızın hepsini denetlemeyi bitiremedi; bu yüzden bazı davetler henüz görünmüyor olabilir.';
 
   @override
-  String get invitationsNoticeOpenRelaySettings => 'Relay settings';
+  String get invitationsNoticeOpenRelaySettings => 'Aktarıcı ayarları';
 
   @override
   String get invitationsEmptyTitle => 'Davet Yok';
@@ -1492,15 +1491,15 @@ class AppLocalizationsTr extends AppLocalizations {
     String _temp0 = intl.Intl.pluralLogic(
       total,
       locale: localeName,
-      other: 'Invitations checked on all $totalString relays',
-      one: 'Invitations checked on the relay',
+      other: 'Davetler $totalString aktarıcının tümünde denetlendi',
+      one: 'Davetler aktarıcıda denetlendi',
     );
     return '$_temp0';
   }
 
   @override
   String get refreshRingSemanticInboxNone =>
-      'Couldn\'t check invitations on any relay';
+      'Davetler hiçbir aktarıcıda denetlenemedi';
 
   @override
   String refreshRingSemanticInboxPartial(int ok, int total) {
@@ -1512,7 +1511,7 @@ class AppLocalizationsTr extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'Invitations checked on $okString of $totalString relays';
+    return 'Davetler $totalString aktarıcıdan $okString tanesinde denetlendi';
   }
 
   @override
@@ -1520,7 +1519,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get refreshRingAnnouncementInboxAll =>
-      'Invitations checked on every relay';
+      'Davetler tüm aktarıcılarda denetlendi';
 
   @override
   String refreshRingAnnouncementInboxPartial(int ok, int total) {
@@ -1532,12 +1531,12 @@ class AppLocalizationsTr extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'Invitations checked on $okString of $totalString relays';
+    return 'Davetler $totalString aktarıcıdan $okString tanesinde denetlendi';
   }
 
   @override
   String get refreshRingAnnouncementInboxNone =>
-      'Couldn\'t check invitations on any relay';
+      'Davetler hiçbir aktarıcıda denetlenemedi';
 
   @override
   String get refreshRingAnnouncementNoInbox => 'Gelen kutusu yapılandırılmadı';
