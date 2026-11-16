@@ -456,6 +456,43 @@ holds a signer on purpose.
 relay that demands authentication to write. The fanout transport therefore
 treats `auth-required:` as a refusal that cannot change, not as an outage.
 
+### A relay that gates gift-wrap reads behind NIP-42
+
+strfry's default configuration now restricts reads of kinds 4 and 1059 to an
+authenticated reader named in the event (`restrictedReadKinds`,
+`restrictReadToInvolvedPubkey`): such a relay still answers a kind-1059
+publish `OK true`, and answers every unauthenticated REQ for one with `AUTH`
+and `CLOSED`, in strfry's words `ERROR: auth-required: requested filter
+requires authentication`. Since Haven never authenticates, an invitation
+stored only there is never read by its invitee. Haven does not hide that:
+
+- **The invitation poll.** A per-relay read a `CLOSED` ends with an
+  `auth-required:` or `restricted:` prefix — read past one leading `error:`,
+  the word strfry puts ahead of it — is refused
+  (`RelayFetchOutcome::refused`), and reaches Dart as
+  `InboxReadFfi::Refused`; only an `EOSE` is `Served`, and an unreached or
+  unfinished read is neither. The relay's text is read for its prefix and
+  never kept (Rule 15).
+- **The relay settings check.** Each relay of the inbox list, and no other, is
+  asked the live plane's own inbox read — this account's gift wraps by `#p`,
+  from now, `limit` 1 — and reported as `inbox_read`, apart from the kind-10050
+  verdict. It discloses nothing the inbox REQ does not already send that
+  relay.
+- **The live plane.** An inbox REQ refused that way is re-issued on the gated
+  backoff — a minute, doubling to an hour (`GATED_BACKOFF_MIN_SECS`,
+  `GATED_BACKOFF_MAX_SECS`), jittered like every repair, and decaying only
+  after an hour's quiet — instead of the 30 s throttle, which would ask a
+  relay that has said no, across the whole inbox lookback, 120 times an hour.
+  A group REQ refused the same way keeps the pool's disposition and its 30 s
+  cap. The app's consumer of the event bus falling behind is answered on the
+  same gated schedule: the inbox REQ is re-issued and the inbox generation's
+  pending advance burnt, because anyone who knows the npub can flood wraps
+  past the bus at will, and the 30 s cap would sell them a lookback
+  re-download every half minute.
+
+What stays open is tracked as `T-INBOX-READ-GATE` in
+`docs/MDK_UPSTREAM_TRACKER.md`.
+
 ### What a relay's refusal has to prove before the fanout may act on it
 
 Security Rule 13 lets a commit be rolled back only when every relay proved it
@@ -5263,8 +5300,9 @@ Eleven residuals, none of them optional:
    periodic one is not gone either.** Two cases, both CPU-only and neither
    contacting a relay. (a) A subscription repair armed *before* the pause keeps
    the deadline it already had and fires once, up to `BACKOFF_MAX_SECS` (30 s)
-   into the pause; it finds the engine paused, re-parks, and arms no new
-   deadline while paused — at most once per pause. (b) The public-profile
+   into the pause — up to the jittered `GATED_BACKOFF_MAX_SECS` (an hour) for
+   an inbox REQ on the gated backoff; it finds the engine paused, re-parks,
+   and arms no new deadline while paused — at most once per pause. (b) The public-profile
    anti-entropy sweep is the fourth `MaintenanceSchedulerNotifier` timer and the
    one `suspendForBackground` does **not** cancel: `_armProfileAntiEntropy` has
    no arming gate, the gate is inside `_runProfileAntiEntropyTick`, and the
