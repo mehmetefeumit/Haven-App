@@ -15,7 +15,7 @@ use haven_core::nostr::mls::types::{KeyPackageAdmission, KeyPackageAdmissionRule
 use haven_core::nostr::mls::SessionManager;
 use haven_core::relay::maintenance::{
     build_kp_maintenance_events, build_kp_maintenance_events_reusing, names_configured_list,
-    probe_verdict, Probed, TrackedKpLifetime,
+    probe_verdict, Probed,
 };
 use haven_core::relay::{
     allow_ws_loopback_for_test, set_discovery_relays_for_test, MemberLookup, RelayManager,

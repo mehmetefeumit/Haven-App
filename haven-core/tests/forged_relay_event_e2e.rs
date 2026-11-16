@@ -26,7 +26,7 @@ use haven_core::profile::{
     ProfileRelaySalt, ProfileState,
 };
 use haven_core::relay::maintenance::{
-    build_kp_maintenance_events, names_configured_list, probe_verdict, Probed, TrackedKpLifetime,
+    build_kp_maintenance_events, names_configured_list, probe_verdict, Probed,
 };
 use haven_core::relay::scripted_relay::{Frame, ScriptedRelay};
 use haven_core::relay::{

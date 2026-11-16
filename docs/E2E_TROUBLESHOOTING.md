@@ -13,7 +13,8 @@ full E2E fleet: the scenario lanes (`e2e-ios-background-publish`,
 `e2e-fgs-publish`, `e2e-profile`, `e2e-relay-management`, `e2e-clock-skew`,
 `e2e-kp-rotation`, `e2e-network-reconnect`, the real-GPS and auth-tier lanes)
 are inventoried in CLAUDE.md's "CI Pipeline" section and each carries its own
-header. A symptom below is worth reading against any of them; a lane-specific
+header (failure mode 28 is the relay-management lane's status target). A
+symptom below is worth reading against any of them; a lane-specific
 oracle is not. One thing is uniform across the whole fleet, these lanes and
 the scenario lanes alike: every captured log goes through `scan-logs.sh` — the
 key-material floor plus the `haven-logscan` identifier scanner — before it is
@@ -1819,6 +1820,47 @@ log-privacy gate vouched for and the workflow scanned again — never the
 | infrastructure (3), egress | pf could not be armed (no enable token, the `com.apple/*` anchor is not evaluated) or a probe connected, before the first leg or after the last | re-run; if it repeats, the runner image changed pf — read the summary's egress line |
 | upgrade source unusable (4) | the previous release's simulator asset does not unpack to one simulator `Runner.app`, its ARB lacks a journey label, or it installs but does not onboard offline | yank the tag for `ios` in `scripts/ci/launch_gate_yanked_releases.txt` with a reason |
 | no predecessor (5, job GREEN with a `::notice::`) | no eligible release carries `app-ios-simulator.zip` and its `.sha256` yet | expected until the first release that attaches them; the fresh and relaunch legs still ran |
+
+## Failure mode 28 — `e2e-relay-management`'s status target is red
+
+The last runner invocation of `Run relay-management tests on the emulator`
+drives `integration_test/relay_management_status_test.dart` alone (its own 25m
+drive bound, evidence under `relay-mgmt-logs/status/`). It runs the real app
+against R1, R2 and the `haven-fault-relay` processes
+(`tooling/e2e/local-relay/src/fault.rs`), named by `HAVEN_E2E_FAULT_RELAYS` as
+`<role>=<mode>@<port>` on host loopback, which the emulator dials at
+`10.0.2.2`:
+
+| Role | Mode | What the page must end on |
+|---|---|---|
+| `green`, `lookup` | `store` — keeps and serves what it is sent | current; `lookup` is never offered a kind 30443 |
+| `refuse` | answers every event `OK false "blocked: …"`, keeps none | refused |
+| `drop` | swallows every event (no `OK`), keeps none | unconfirmed, after rendering publishing for the 6 s `OK` wait |
+| `stall` | swallows every frame, so no `REQ` ends | no answer, after rendering checking for the 10 s `REQ` wait; offered nothing |
+| `hole` | accepts TCP, never completes the handshake | no answer |
+| `closed` | nothing listens (the runner checks the port is free) | no answer |
+
+The test reads each fault relay over its own socket with control verbs
+(`HAVEN_FAULT_OFFERS`: events offered per kind, the app's sockets only;
+`HAVEN_FAULT_KEPT`: the store; `HAVEN_FAULT_MODE`, `HAVEN_FAULT_WIPE`), never
+from a log: each fault relay's log (`haven-fault-relay-<role>.<target>.log`) is
+a fixed startup block and nothing else.
+
+Reading a red:
+
+- `[<step>] the board did not settle within 156s (wire evidence seen: …;
+  board: …)` lists every row as `<role> <kind>=<state>`. `wire evidence seen:
+  false` means the step's list never reached the lookup relay (the pass never
+  ran or never offered); a row still `checking`/`publishing` names the relay
+  whose bound was not met; a row `unknown` is a relay the test did not add.
+- `the page never rendered <state>` — the board reached a state the page never
+  drew, or never reached it; the step lines before it say which.
+- `fault relay(s) <roles> did not report listening` in the runner — the
+  binary was not built (`Build the fault relay`) or its port was taken.
+- Steps A–E and C are the launch, the adds (healthy first, the slow relays
+  last), the removal of `green` from the inbox list, the inbox restore, and a
+  relaunch. Each waits at most one settle bound (three maintenance passes of
+  at most 52 s each).
 
 ## What these lanes do NOT cover
 

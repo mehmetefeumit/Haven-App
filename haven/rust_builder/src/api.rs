@@ -15817,7 +15817,6 @@ mod maintenance_real_ffi_tests {
     /// untouched — and runs once that pass is done.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_passes_never_interleave_on_the_board_via_real_ffi() {
-        use futures::FutureExt as _;
         use haven_core::relay::scripted_relay::{ScriptedRelay, Verdict};
 
         let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
@@ -15853,10 +15852,11 @@ mod maintenance_real_ffi_tests {
             })
             .await;
             assert!(circle.inner.session().own_relays_tick_held_for_test());
-            assert!(
-                package.as_mut().now_or_never().is_none(),
-                "the KeyPackage pass waits for the relay-list pass"
-            );
+            tokio::select! {
+                biased;
+                _ = &mut package => panic!("the KeyPackage pass ran inside the relay-list pass"),
+                () = std::future::ready(()) => {}
+            }
             let board = circle.own_relay_board();
             assert!(board.running);
             assert!(
@@ -15881,7 +15881,6 @@ mod maintenance_real_ffi_tests {
     /// three, and all three get its outcome.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn requests_behind_a_running_pass_join_one_pending_pass_via_real_ffi() {
-        use futures::FutureExt as _;
         use haven_core::relay::recording_front::RecordingFront;
         use haven_core::relay::scripted_relay::{ScriptedRelay, Verdict};
 
@@ -15929,19 +15928,19 @@ mod maintenance_real_ffi_tests {
             })
             .await;
             for request in &mut joined {
-                assert!(
-                    request.as_mut().now_or_never().is_none(),
-                    "it waits its turn"
-                );
+                tokio::select! {
+                    biased;
+                    _ = request.as_mut() => panic!("a request ran before its turn"),
+                    () = std::future::ready(()) => {}
+                }
             }
             release.send(true).expect("the relay listens");
         });
         let first = first.expect("maintain_relay_list must not error");
-        let rest: Vec<_> = futures::future::join_all(joined)
-            .await
-            .into_iter()
-            .map(|outcome| outcome.expect("maintain_relay_list must not error"))
-            .collect();
+        let mut rest = Vec::new();
+        for request in joined {
+            rest.push(request.await.expect("maintain_relay_list must not error"));
+        }
         assert_eq!(
             relay_list_reqs(),
             2,

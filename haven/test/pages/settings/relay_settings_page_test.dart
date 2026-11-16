@@ -1197,8 +1197,8 @@ void main() {
       expect(await runsOnOpen(tester, const OwnRelayBoard()), 1);
     });
 
-    testWidgets('runs a pass when nothing can be read', (tester) async {
-      expect(await runsOnOpen(tester, null), 1);
+    testWidgets('runs no pass while no session is open', (tester) async {
+      expect(await runsOnOpen(tester, null), 0);
     });
 
     testWidgets('runs a pass when a kind was checked over ten minutes ago', (

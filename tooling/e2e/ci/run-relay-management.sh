@@ -56,14 +56,15 @@
 #
 #   STRFRY_CONTAINER=strfry2  STRFRY_PORT=7778  STRFRY_DATA_DIR=/tmp/strfry2-data
 #
-# # Per-target reset of BOTH relays (isolation)
+# # Per-target reset of every relay (isolation)
 #
 # The integration targets use deterministic per-actor seeds (Alice
 # [0x01;32], Bob [0x02;32], Carol [0x03;32]); their events are
 # byte-for-byte identical every run. Leftover events from a prior
-# target — on EITHER relay — would be served back as stale state and
+# target — on ANY relay — would be served back as stale state and
 # poison the next target. So before each target we reset BOTH relays
-# (stop + start, which wipes both LMDB envs), guaranteeing
+# (stop + start, which wipes both LMDB envs) and restart every fault
+# relay (empty store, no offers counted), guaranteeing
 # order-independence: the suite passes (or fails) the same way
 # regardless of which target ran first.
 #
@@ -452,7 +453,7 @@ run_self_test() {
     fi
   done
   wf_value="$(sed -n -E 's/^      HAVEN_E2E_FAULT_RELAYS: (.*)$/\1/p' "${repo}/.github/workflows/e2e-relay-management.yml")"
-  dart_value="$(tr '\n' ' ' < "${repo}/haven/${STATUS_TARGET}" | grep -oE "'HAVEN_E2E_FAULT_RELAYS', *defaultValue: *'[^']*'" | sed -E "s/.*defaultValue: *'([^']*)'/\1/" || true)"
+  dart_value="$(tr '\n' ' ' < "${repo}/haven/${STATUS_TARGET}" | sed -e "s/' *'//g" | grep -oE "'HAVEN_E2E_FAULT_RELAYS', *defaultValue: *'[^']*'" | sed -E "s/.*defaultValue: *'([^']*)'/\1/" || true)"
   if [[ -n "${HAVEN_E2E_FAULT_RELAYS:-}" || "${wf_value}" != "${FAULT_RELAYS}" || "${dart_value}" != "${FAULT_RELAYS}" ]]; then
     echo "SELF-TEST FAIL (fault relays): the workflow's HAVEN_E2E_FAULT_RELAYS ('${wf_value}'), this runner's default and the status target's default ('${dart_value}') must be one string (and the self-test runs with the variable unset)" >&2
     fail=1
@@ -480,10 +481,17 @@ run_self_test() {
   # directory of its own; the first invocation keeps the lane's 10m and never
   # names the status target.
   local test_minutes drive_cmd status_minutes first_inv
-  test_minutes="$(tr '\n' ' ' < "${repo}/haven/${STATUS_TARGET}" | grep -oE '_kTestTimeout = Duration\(minutes: *[0-9]+\)' | grep -oE '[0-9]+$' || true)"
+  test_minutes="$(tr '\n' ' ' < "${repo}/haven/${STATUS_TARGET}" | grep -oE '_kTestTimeout = Duration\(minutes: *[0-9]+\)' | grep -oE '[0-9]+' || true)"
   drive_cmd="$(grep -E '^          script: bash tooling/e2e/ci/run-with-deadline\.sh ' "${repo}/.github/workflows/e2e-relay-management.yml" || true)"
   status_minutes="$(sed -n -E "s@.* && HAVEN_DRIVE_TIMEOUT=([0-9]+)m HAVEN_RELAY_MGMT_LOG_DIR=[^ ]+ bash tooling/e2e/ci/run-relay-management\.sh ${STATUS_TARGET}=[^ ']+'\$@\1@p" <<<"${drive_cmd}")"
   first_inv="${drive_cmd%% && *}"
+  local built driven
+  built="$(sed -n -E 's@^            (integration_test/[a-z_]+\.dart)( \\)?$@\1@p' "${repo}/.github/workflows/e2e-relay-management.yml" | LC_ALL=C sort)"
+  driven="$(grep -oE 'integration_test/[a-z_]+\.dart=' <<<"${drive_cmd}" | tr -d '=' | LC_ALL=C sort)"
+  if [[ -z "${built}" || "${built}" != "${driven}" ]]; then
+    echo "SELF-TEST FAIL (wiring): the workflow must build exactly the targets it drives (built: $(paste -sd' ' <<<"${built}"); driven: $(paste -sd' ' <<<"${driven}"))" >&2
+    fail=1
+  fi
   if [[ -z "${test_minutes}" || -z "${status_minutes}" ]] \
      || (( test_minutes + STATUS_DRIVE_OVERHEAD_MINUTES > status_minutes )) \
      || [[ "${first_inv}" == *"${STATUS_TARGET}"* || "${first_inv}" == *HAVEN_DRIVE_TIMEOUT* ]]; then
@@ -562,7 +570,7 @@ run_self_test() {
     echo "run-relay-management.sh: SELF-TEST FAILED" >&2
     return 1
   fi
-  echo "run-relay-management.sh: self-test passed (the OD-2 cue watcher stops R2 on the stop cue only, starts it on the start cue only after a stop and records a failed start; a passing drive of the OD-2 target without a whole cycle, or any drive whose start failed, is red; the Dart target prints the same cues; every drive, the retry included, runs beside the watcher and waits for it by PID; the log-privacy gate removes exactly the *.log files it scanned on a leak and touches nothing on rc 3 or rc 0; the gate library is sourced, the one gate call covers LOG_DIR with its report outside the upload and claims one drive transcript per target spec from a count taken before the loop — a literal in its place is refused, and the one per-target copy keeps a retried target at one file — no soft scanner gate, no captured-log echo of its own, the manifest is sealed once with the lane's drive, logcat and relay floors before the first target; each target's TWO relay logs are dumped from the live containers, typed as relay sinks, before the aggregate gate; the fault-relay list parses strictly and is one string in the workflow, this runner and the status target; every reset restarts the fault relays, a target whose relays did not all start fails, the stop waits by PID and the EXIT trap stops them; each fault relay's log is dumped as a relay sink before the gate; the workflow drives the status target alone, last, with a drive bound covering its own test Timeout and a log directory of its own)."
+  echo "run-relay-management.sh: self-test passed (the OD-2 cue watcher stops R2 on the stop cue only, starts it on the start cue only after a stop and records a failed start; a passing drive of the OD-2 target without a whole cycle, or any drive whose start failed, is red; the Dart target prints the same cues; every drive, the retry included, runs beside the watcher and waits for it by PID; the log-privacy gate removes exactly the *.log files it scanned on a leak and touches nothing on rc 3 or rc 0; the gate library is sourced, the one gate call covers LOG_DIR with its report outside the upload and claims one drive transcript per target spec from a count taken before the loop — a literal in its place is refused, and the one per-target copy keeps a retried target at one file — no soft scanner gate, no captured-log echo of its own, the manifest is sealed once with the lane's drive, logcat and relay floors before the first target; each target's TWO relay logs are dumped from the live containers, typed as relay sinks, before the aggregate gate; the fault-relay list parses strictly and is one string in the workflow, this runner and the status target; every reset restarts the fault relays, a target whose relays did not all start fails, the stop waits by PID and the EXIT trap stops them; each fault relay's log is dumped as a relay sink before the gate; the workflow builds exactly the targets it drives, and drives the status target alone, last, with a drive bound covering its own test Timeout and a log directory of its own)."
   return 0
 }
 

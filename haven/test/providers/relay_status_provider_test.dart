@@ -374,8 +374,8 @@ void main() {
     OwnKindBoard checked(int secs) => OwnKindBoard(checkedSecsAgo: secs);
     const tenMinutes = 600;
 
-    test('asks when nothing is known', () {
-      expect(ownRelayBoardIsStale(null), isTrue);
+    test('does not ask while no session is open', () {
+      expect(ownRelayBoardIsStale(null), isFalse);
     });
 
     test('asks when a kind has no finished pass in this session', () {

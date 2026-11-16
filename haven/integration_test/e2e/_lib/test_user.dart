@@ -112,9 +112,9 @@ class TestUser {
   ///
   /// ## Privacy guard
   ///
-  /// Every URL in [relays], [profileRelays], [discoveryRelays] and [locationRelayUrl] must
-  /// resolve to a loopback / emulator-host address. Public relays are
-  /// rejected to prevent a misconfigured
+  /// Every URL in [relays], [profileRelays], [discoveryRelays] and
+  /// [locationRelayUrl] must resolve to a loopback / emulator-host address.
+  /// Public relays are rejected to prevent a misconfigured
   /// `--dart-define=HAVEN_E2E_RELAY=wss://relay.damus.io` from publishing
   /// test seed pubkeys to a public relay. Override the guard by passing
   /// `allowPublicRelay: true`, only with explicit user authorization and

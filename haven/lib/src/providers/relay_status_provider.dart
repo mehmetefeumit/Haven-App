@@ -289,9 +289,10 @@ KindPresence _presenceOf(OwnRelayStatus status) => switch (status) {
 /// waits before it runs one. A kind held for the reset notice or an empty
 /// list is skipped: a pass would hold it again. One held by a stored publish
 /// setting is not, because opening this page turns that setting on. Without
-/// a board nothing is known, so it asks.
+/// a board no session is open: the page opens none, and the open that comes
+/// runs its own pass.
 bool ownRelayBoardIsStale(OwnRelayBoard? board) {
-  if (board == null) return true;
+  if (board == null) return false;
   if (board.running) return false;
   return [board.keyPackage, board.relayList, board.inboxRelayList].any(
     (kind) => switch (kind.hold) {

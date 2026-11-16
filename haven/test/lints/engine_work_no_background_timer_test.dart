@@ -221,7 +221,7 @@ const _allowedSites = <String, int>{
   // The Relays page's read of the own-relay board: a mutex read of state the
   // maintenance passes write, armed only while the app is in front and the
   // page watches it. It starts no pass, opens no session and reaches no relay.
-  'lib/src/providers/relay_status_provider.dart#RelayStatusNotifier.build': 1,
+  'lib/src/providers/relay_status_provider.dart#RelayStatusNotifier.timer': 1,
   'lib/src/providers/sharing_health_provider.dart#'
           'SharingHealthNotifier._derive':
       1,

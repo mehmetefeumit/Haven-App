@@ -2,6 +2,9 @@
 //! frames on one socket rather than by waiting: the backing relay answers one
 //! connection's frames in the order it receives them, so "no `OK` came before
 //! the `EOSE` of a later `REQ`" proves the event never reached it.
+//!
+//! An assertion over a frame that carries an event id is an `assert!` with a
+//! fixed message, never an `assert_eq!` that would print it (Security Rule 15).
 
 use std::time::Duration;
 
@@ -104,18 +107,21 @@ async fn store_mode_keeps_serves_and_counts_an_offer() {
     send(&mut app, &json!(["EVENT", event])).await;
     let ok = next_frame(&mut app).await;
     assert_eq!(ok[0], "OK");
-    assert_eq!(ok[1], event["id"]);
+    assert!(ok[1] == event["id"], "the OK names the event");
     assert_eq!(ok[2], true, "a storing relay accepts a valid event");
     send(&mut app, &req("s", 10050)).await;
     let frames = until_eose(&mut app, "s").await;
     assert_eq!(frames.len(), 2, "the stored event, then EOSE");
-    assert_eq!(frames[0][2]["id"], event["id"]);
+    assert!(
+        frames[0][2]["id"] == event["id"],
+        "the stored event is served"
+    );
 
     let mut test = connect(&url).await;
     assert_eq!(offers(&mut test).await, json!({"10050": 1}));
     let stored = kept(&mut test).await;
     assert_eq!(stored.len(), 1);
-    assert_eq!(stored[0]["id"], event["id"]);
+    assert!(stored[0]["id"] == event["id"], "the stored event is kept");
 }
 
 #[tokio::test]
@@ -125,11 +131,13 @@ async fn refuse_mode_answers_ok_false_keeps_nothing_and_still_answers_reqs() {
     let mut app = connect(&url).await;
     send(&mut app, &json!(["EVENT", event])).await;
     let ok = next_frame(&mut app).await;
-    assert_eq!(ok, json!(["OK", event["id"], false, REFUSAL]));
+    assert!(
+        ok == json!(["OK", event["id"], false, REFUSAL]),
+        "the event is refused with the fixture's NIP-01 prefix"
+    );
     send(&mut app, &req("s", 10002)).await;
-    assert_eq!(
-        until_eose(&mut app, "s").await,
-        vec![json!(["EOSE", "s"])],
+    assert!(
+        until_eose(&mut app, "s").await == vec![json!(["EOSE", "s"])],
         "the relay answers a REQ, holding nothing"
     );
 
@@ -145,9 +153,8 @@ async fn drop_mode_never_answers_an_event_and_keeps_nothing() {
     let mut app = connect(&url).await;
     send(&mut app, &json!(["EVENT", event])).await;
     send(&mut app, &req("s", 30443)).await;
-    assert_eq!(
-        until_eose(&mut app, "s").await,
-        vec![json!(["EOSE", "s"])],
+    assert!(
+        until_eose(&mut app, "s").await == vec![json!(["EOSE", "s"])],
         "no OK and no stored copy came before the EOSE of a later REQ"
     );
 
@@ -170,9 +177,8 @@ async fn stall_mode_swallows_events_and_reqs() {
         json!(["HAVEN_FAULT_MODE_ACK", "store"])
     );
     send(&mut app, &req("after", 10050)).await;
-    assert_eq!(
-        until_eose(&mut app, "after").await,
-        vec![json!(["EOSE", "after"])],
+    assert!(
+        until_eose(&mut app, "after").await == vec![json!(["EOSE", "after"])],
         "nothing answered the stalled EVENT or REQ"
     );
     let mut test = connect(&url).await;
@@ -259,4 +265,80 @@ async fn the_test_sockets_own_events_are_kept_but_never_counted_as_offers() {
         "the seed is the test's, the 10050 the app's"
     );
     assert_eq!(kept(&mut test).await.len(), 2);
+}
+
+/// The binary's whole log is its fixed startup block: no port, address, frame
+/// or count, however much traffic it carries (Security Rule 15). The runner
+/// waits for the block's last line and the lane's relay floor counts its seven.
+#[tokio::test]
+async fn the_binary_logs_its_fixed_block_and_nothing_a_frame_carries() {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+
+    const BLOCK: [&str; 7] = [
+        "[haven-fault-relay] hermetic fault-injection relay, test harness only",
+        "[haven-fault-relay] bound to loopback",
+        "[haven-fault-relay] mode: store",
+        "[haven-fault-relay] backing store: in memory",
+        "[haven-fault-relay] control verbs: HAVEN_FAULT_MODE HAVEN_FAULT_WIPE HAVEN_FAULT_OFFERS HAVEN_FAULT_KEPT",
+        "[haven-fault-relay] this log carries fixed text only, never a frame",
+        "[haven-fault-relay] listening",
+    ];
+    // A probed port is not held, so a lost race is taken again with another;
+    // nothing has been asserted yet when that happens.
+    for _ in 0..8 {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|probe| probe.local_addr())
+            .expect("probe a loopback port")
+            .port();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_haven-fault-relay"))
+            .env("HAVEN_FAULT_PORT", port.to_string())
+            .env("HAVEN_FAULT_MODE", "store")
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start the fault relay");
+        let (line_tx, mut lines) = tokio::sync::mpsc::unbounded_channel();
+        let stderr = child.stderr.take().expect("stderr");
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                if line_tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut log = Vec::new();
+        while log.last().map(String::as_str) != Some(BLOCK[6]) {
+            match tokio::time::timeout(ANSWER_BOUND, lines.recv())
+                .await
+                .expect("the relay started or failed within the bound")
+            {
+                Some(line) => log.push(line),
+                None => break,
+            }
+        }
+        if log.last().map(String::as_str) != Some(BLOCK[6]) {
+            let _ = child.wait();
+            assert_eq!(
+                log,
+                ["[haven-fault-relay] could not bind its loopback port"],
+                "the only way to fail to start here is a port taken since the probe"
+            );
+            continue;
+        }
+        let url = format!("ws://127.0.0.1:{port}");
+        let mut app = connect(&url).await;
+        let event = list_event(&Keys::generate(), 10050, &url);
+        send(&mut app, &json!(["EVENT", event])).await;
+        assert_eq!(next_frame(&mut app).await[2], true);
+        let mut test = connect(&url).await;
+        assert_eq!(offers(&mut test).await, json!({"10050": 1}));
+        child.kill().expect("stop the relay");
+        let _ = child.wait();
+        while let Some(line) = lines.recv().await {
+            log.push(line);
+        }
+        assert_eq!(log, BLOCK, "the log is the fixed block and nothing else");
+        return;
+    }
+    panic!("eight probed ports were all taken before the relay could bind one");
 }

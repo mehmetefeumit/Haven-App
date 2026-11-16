@@ -6478,6 +6478,7 @@ mod tests {
             "try_publish_once",
             "try_publish_once_harvesting",
             "offer_harvest",
+            "offer_event_to",
             "publish_event_background",
             "send_to_one",
             "publish",
@@ -6513,6 +6514,7 @@ mod tests {
                 "publish_event",
                 "publish_profile_event",
                 "offer_profile_event",
+                "offer_event_to",
                 "publish_location_event",
                 "publish_event_background",
                 "publish_location"
