@@ -21,7 +21,13 @@ use haven_core::relay::scripted_relay::{Frame, ScriptedRelay, Verdict};
 use haven_core::relay::{DeviceClockComplaint, RelayManager, OFFER_ACK_TIMEOUT};
 use helpers::{assert_no_needles, assert_some_line_from, capture_haven_log_here, haven_core_lines};
 use nostr::nips::nip19::ToBech32 as _;
-use nostr::{Event, EventBuilder, Filter, JsonUtil as _, Keys, Kind, Tag, Timestamp};
+use nostr::{
+    event::{Event, EventBuilder, Kind, Tag},
+    filter::Filter,
+    key::Keys,
+    types::Timestamp,
+    JsonUtil as _,
+};
 use OwnCell::{Checking, Current, Missing, NoAnswer, Outdated, Publishing, Refused, Unconfirmed};
 
 /// Bounds the wait for an `OK` only where none can come.

@@ -7891,7 +7891,7 @@ mod tests {
         use nostr::nips::nip19::ToBech32 as _;
         let _ = allow_ws_loopback_for_test();
         let relay = ScriptedRelay::start();
-        let npub = nostr::Keys::generate()
+        let npub = nostr::key::Keys::generate()
             .public_key()
             .to_bech32()
             .expect("an npub");

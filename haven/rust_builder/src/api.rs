@@ -3268,7 +3268,7 @@ fn keys_from_secret_bytes(identity_secret_bytes: Vec<u8>) -> Result<nostr::key::
 fn judge_key_packages(
     pass: &mut haven_core::relay::maintenance::OwnPass<'_>,
     answers: &[haven_core::relay::RelayFetchOutcome],
-    own: &nostr::PublicKey,
+    own: &nostr::key::PublicKey,
     tracked: Option<&haven_core::nostr::mls::TrackedKeyPackage>,
     lifetime: haven_core::relay::maintenance::TrackedKpLifetime,
 ) {
@@ -3279,7 +3279,7 @@ fn judge_key_packages(
         probe_verdict(
             answer,
             own,
-            nostr::Kind::Custom(KIND_MARMOT_KEY_PACKAGE),
+            nostr::event::Kind::Custom(KIND_MARMOT_KEY_PACKAGE),
             &|mine| serves_tracked_package(mine, tracked, lifetime),
         )
     });
@@ -9662,7 +9662,7 @@ impl RelayManagerFfi {
     async fn key_package_pass(
         &self,
         circle: &CircleManagerFfi,
-        keys: &nostr::Keys,
+        keys: &nostr::key::Keys,
     ) -> Result<KpMaintenanceOutcomeFfi, String> {
         use haven_core::relay::maintenance::{
             decide_kp_maintenance, kp_event_d_tag, kp_event_is_pre_migration, read_kp_lifetime,
@@ -15449,7 +15449,7 @@ mod maintenance_real_ffi_tests {
     fn kept(
         relay: &haven_core::relay::scripted_relay::ScriptedRelay,
         kind: Kind,
-    ) -> Vec<nostr::Event> {
+    ) -> Vec<nostr::event::Event> {
         relay
             .published()
             .into_iter()
@@ -15621,7 +15621,7 @@ mod maintenance_real_ffi_tests {
         assert_eq!(
             kept(&relay, Kind::Custom(30443))
                 .last()
-                .map(nostr::Event::as_json),
+                .map(nostr::event::Event::as_json),
             Some(tracked.event.as_json()),
             "a heal sends the tracked event byte for byte"
         );
@@ -15718,7 +15718,7 @@ mod maintenance_real_ffi_tests {
         assert_eq!(
             kept(&added, Kind::Custom(30443))
                 .iter()
-                .map(nostr::Event::as_json)
+                .map(nostr::event::Event::as_json)
                 .collect::<Vec<_>>(),
             [tracked.as_json()],
             "the new relay got the tracked event itself, once: a heal signs nothing"
@@ -15733,7 +15733,7 @@ mod maintenance_real_ffi_tests {
             .list_user_relays(RelayType::KeyPackage)
             .expect("the stored list");
         configured.sort();
-        let names_both = |list: &nostr::Event| {
+        let names_both = |list: &nostr::event::Event| {
             let mut named: Vec<String> = list
                 .tags
                 .iter()
