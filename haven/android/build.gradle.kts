@@ -2,6 +2,8 @@ allprojects {
     repositories {
         google()
         mavenCentral()
+        // Last resort for a 404 from Central; see settings.gradle.kts.
+        maven("https://maven-central.storage-download.googleapis.com/maven2/")
     }
 }
 

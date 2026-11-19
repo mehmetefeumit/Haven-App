@@ -356,6 +356,25 @@ nothing would authenticate the dependencies a restored cache put on disk (no
 `distributionSha256Sum`).
 `scripts/ci/check_gradle_build_hardened.sh` enforces all of this (C1-C6).
 
+**The 404 variant, which the cache does not fix.** `Error resolving plugin
+[id: 'dev.flutter.flutter-plugin-loader' …]` / `Could not find
+org.jetbrains.kotlin:kotlin-stdlib:2.3.20`, with ONLY `https://plugins.gradle.org/m2/…`
+under "Searched in the following locations" (run 44503460373 job 135506633262;
+run 44532048143 jobs 135614752253 and 135614753425). Flutter's own Gradle plugin
+build (`$FLUTTER_ROOT/packages/flutter_tools/gradle`, our `includeBuild`)
+declares no plugin repository and does not inherit ours, so its build classpath
+came from the Plugin Portal alone, which 303s every artifact it does not host to
+`repo.maven.apache.org`; that path answered 404 for files Central holds. Gradle
+caches the miss, so every in-job retry after the first fails in under a second.
+The fix: Haven's own repository lists (`haven/android/settings.gradle.kts`,
+`haven/android/build.gradle.kts`) ask Google's Maven Central mirror right after
+Central, ahead of the Portal, and
+`scripts/ci/maven-central-fallback.init.gradle.kts`, which `build_apk_with_retry.sh`
+and `build_release.sh` install into `$GRADLE_USER_HOME/init.d` on CI, gives
+Flutter's build Central, then the mirror, then the Portal only for the plugins
+it alone hosts. Gradle moves to the next repository only on a 404, so the mirror
+answers exactly this case.
+
 **The retry.** Every Gradle build a workflow invokes DIRECTLY — the E2E lanes'
 and `build-check.yml`'s — goes through `scripts/ci/build_apk_with_retry.sh`; a
 bare `flutter build apk` in a workflow is a C3 violation. (The exception is
@@ -1800,7 +1819,7 @@ a UI dump.
 | harness (2) | `no leg reached MapShell, so the photo save under background sharing … went untested` | no upgrade source onboarded to the map (the baseline leg skipped, or v0.1.13 unusable on this API level) | restore the baseline leg; the release is blocked until it runs |
 | harness (2) | `gallery (API …): the device refused a gallery fixture's push …` / `… the media store refused the gallery query …` / `… the media store answered but never listed both gallery fixtures …` | the device answered, but the seeding method did not work on that system image | fix `pp_seed_gallery` for that image; never re-run to green |
 | infrastructure (3) | `emulator-5554 went offline (…)`, `the device locale is …`, `did not go offline within 30 s`, `gallery (API …): adb gave no answer …` / `… the media store had no shared storage attached within 60 s`, `pm grant … did not read back as granted` | nothing about the app is known | re-run the job |
-| infrastructure (no rc: the `Build release APKs` step is red) | Gradle: `Could not resolve all artifacts for configuration 'classpath'` / `Could not find …` / `Received status code 429` | dependency resolution failed on this runner's egress before anything compiled; seen once on this lane (a plugin-portal `Could not find org.jetbrains.kotlin:kotlin-stdlib:2.3.20` with a cold dependency cache) and gone on the next runner | re-run the job; an in-job retry has never cleared this class (`scripts/ci/build_apk_with_retry.sh` header), a warm Gradle cache removes it |
+| infrastructure (no rc: the `Build release APKs` step is red) | Gradle: `Could not resolve all artifacts for configuration 'classpath'` / `Could not find …` / `Received status code 429` | dependency resolution failed on this runner's egress before anything compiled | a 429/403/5xx: re-run the job; an in-job retry has never cleared this class (`scripts/ci/build_apk_with_retry.sh` header), a warm Gradle cache removes it. A `Could not find` searched only on `plugins.gradle.org` is the 404 variant the Maven Central fallback init script exists for (failure mode 6): check that this step installed it |
 | upgrade source unusable (4) | any failure while the PREVIOUS release was running | the release users would upgrade from is itself broken | add `<tag> android <reason>` to `scripts/ci/launch_gate_yanked_releases.txt` |
 
 `check_apk_loadable.sh` red without a launch red is the ML Kit shape: a
