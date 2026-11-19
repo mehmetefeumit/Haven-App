@@ -107,7 +107,9 @@
 # (mesh_failure_facts): the thrown type, the assertion's file and line, the
 # stack's `package:` frames — read out of the RAW transcript in closed shapes,
 # because the transcript itself is withheld whenever the gate trips on it,
-# which a framework failure report can make it do.
+# which a framework failure report can make it do. A suite that failed is
+# said to be the APP's failure (or the target's): the platform's refusals are
+# the UNUSABLE lines.
 #
 # # Log anonymity (Security Rule 15)
 #
@@ -117,14 +119,42 @@
 # adapter's name and address — read over adb, held in two shell variables,
 # never printed — and, on lines that are not Haven's, every bare run of twelve
 # hex digits replaced by a fixed word (mesh_redact); of the events buffer,
-# only the entries Haven's pid wrote; the drive transcript. A platform dump is
-# kept only as a SKELETON (mesh_skeleton): its lines' shape, every value
+# only the entries Haven's pid wrote; of the drive transcript, the tool's own
+# lines and the lines forwarded under a tag the scanner owns. A platform dump
+# is kept only as a SKELETON (mesh_skeleton): its lines' shape, every value
 # masked, which is what a parser is written against. Everything in LOG_DIR
 # then goes through the gate like any lane's, and a hit there is a leak like
 # any lane's. Whether a line of Haven's carries an address is judged over the
 # RAW captures, by the oracle. What this runner prints — answers and the
 # sentences of a finding alike — is numbers and a closed vocabulary
 # (MESH_WORDS), by construction (mesh_show).
+#
+# The transcript, and whose its lines are. `flutter drive` forwards every
+# device-log line of the app's PID: Haven's, and beside them the plugins' and
+# the runtime's. In the device log the scanner tells the two apart by tag —
+# every needle on every line, its structural rules on the tags its policy
+# calls Haven's own, because "vendor text is not Haven's to answer for"
+# (tooling/logscan/policy.toml). A transcript is a `plain` sink with no tags
+# to apply that by, so there the same platform lines are read as Haven's; on
+# API 34 they happen to trip nothing, and on API 29 — which this lane alone
+# boots — four of them tripped S8 (CI run 44486540042) and withheld a green
+# leg's whole evidence. So the published transcript carries what is Haven's
+# and the tool's, by the scanner's own list of owned tags, read from its
+# policy; the rest are published where every lane publishes them, in the
+# device log, under the scanner's own rule for them. They are NOT left
+# unread: the scanner is handed them once more, as a file of their own that
+# is never uploaded, and what its rules fire on there is said in every leg —
+# `mesh-transcript (<leg>): not-published from=<class> rule=<id> lines=<n>`,
+# and the answer `<leg>.transcript_withheld_rule_hits`. Nothing Haven's own
+# code printed is set aside: a line under an owned tag is kept, and so is any
+# line whose prefix does not parse.
+#
+# One gate a file where one file can cost the rest. A leak deletes what its
+# gate scanned. Each leg's captures have a gate; each dump's skeleton and the
+# verdict file have one each (gate_own_file); the directory scan at exit
+# reads everything again. The verdict file is written after that scan: it
+# holds numbers and fixed words alone, and a red run is the run whose answers
+# are wanted.
 #
 # Usage:
 #   run-mesh-lever.sh <leg>...     # each of s0 | probe | s2, in order
@@ -192,10 +222,26 @@ readonly -a PROBED_BUFFERS=(main system crash radio events stats security kernel
 readonly -a MESH_WORDS=(
   yes no unread present absent foreign ok nolib nosym refused failed on off
   true false none granted denied deniedForGood stopped running paused skipped
-  not_found started error kept other pass red unusable broken
+  not_found started error kept other pass red unusable broken suite tool
+  withheld
   mac unjudged cancelled bluetoothOff noPermission noPermissionForGood
   unsupported ON OFF TURNING_ON TURNING_OFF BLE_TURNING_ON BLE_ON
   BLE_TURNING_OFF missing answered asked unasked empty limited
+)
+
+# Platform and plugin tags a `flutter drive` transcript has carried under
+# Haven's pid (CI run 44486540042, API 34) and a few any Android process
+# writes. Only for NAMING a line that is not Haven's: a tag off this list is
+# `other`, since a tag is whatever its writer chose.
+readonly -a KNOWN_PLATFORM_TAGS=(
+  FlutterSecureStorage FlutterGeolocator FlutterJNI FlutterRenderer
+  FlutterActivity FlutterEngine FlutterLoader FlutterView
+  WindowOnBackDispatcher OpenGLRenderer Choreographer Gralloc4 EGL_emulation
+  ProfileInstaller CompatibilityChangeReporter BluetoothGatt
+  BluetoothGattServer BluetoothAdapter AndroidRuntime ActivityThread
+  ViewRootImpl InputMethodManager StrictMode KeyStore AndroidKeyStore
+  Conscrypt NetworkSecurityConfig HostConnection eglCodecCommon libEGL
+  System.out System.err art zygote libc DEBUG
 )
 
 # The plants beyond P1, P2 and P3, as the target writes them (`_morePlants`):
@@ -517,24 +563,27 @@ mesh_failure_facts() {
   '
 }
 
-# mesh_leak_message <legs whose own gate tripped> <exit-scan rc> — WHICH gate
-# found a leak. Two read this lane's logs: each leg's own, over that leg's
-# device log, events slice and drive transcript the moment its drive ends,
-# and the exit scan over everything left in the directory. A leg's gate
-# deletes what it scanned, so the exit scan after it finds nothing of that
-# leak: "the exit scan was clean" beside a red run is not a contradiction.
+# mesh_leak_message <legs whose own gate tripped> <exit-scan rc> [<files
+# whose own gate tripped>] — WHICH gate found a leak. Three kinds read this
+# lane's logs: each leg's own, over that leg's device log, events slice and
+# drive transcript the moment its drive ends; one a file for each dump's
+# skeleton and for the verdict file; and the exit scan over everything left
+# in the directory. A gate deletes what it scanned, so the exit scan after it
+# finds nothing of that leak: "the exit scan was clean" beside a red run is
+# not a contradiction.
 mesh_leak_message() {
-  local legs="${1:-}" exit_rc="${2:-0}"
+  local legs="${1:-}" exit_rc="${2:-0}" files="${3:-}"
   local text="log-privacy gate tripped (Security Rules 6 and 15):"
   if [[ -n "${legs}" ]]; then
-    text+=" the per-leg gate of ${legs} found the leak, in that leg's device log, events slice or drive transcript. The LEAK line(s) under its 'the leg's own log-privacy gate' heading name the file and line; those captures were deleted there and then"
-    if [[ "${exit_rc}" == 1 ]]; then
-      text+=", and the exit scan over what was left found another (the LEAK line(s) just above)."
-    else
-      text+=", so the exit scan over what was left found nothing more."
-    fi
-  else
-    text+=" the exit scan over the uploaded directory found the leak, in a file no leg's own gate reads (a dump's skeleton, the verdict file, the relay's log). The LEAK line(s) just above name it."
+    text+=" the per-leg gate of ${legs} found a leak, in that leg's device log, events slice or drive transcript. The LEAK line(s) under its 'the leg's own log-privacy gate' heading name the file and line, and the mesh-leak line(s) under them whose text each was; those captures were deleted there and then."
+  fi
+  if [[ -n "${files}" ]]; then
+    text+=" The gate of ${files} alone found a leak in it: that file was deleted and nothing else."
+  fi
+  if [[ "${exit_rc}" == 1 ]]; then
+    text+=" The exit scan over the uploaded directory found a leak in what was left (the LEAK line(s) just above name the file)."
+  elif [[ -n "${legs}${files}" ]]; then
+    text+=" The exit scan over what was left found nothing more."
   fi
   printf '%s\n' "${text}"
 }
@@ -793,10 +842,15 @@ readonly SKELETON_MAX_LINES=3000
 #   * `geo`, `geohash` and `gh` are `<x>`;
 #   * after a key that names something a user or a device chose — a name, an
 #     address, a title, a text, an alias, an account — the rest of the line is
-#     `<redacted>`.
+#     `<redacted>`, the scanner's own placeholder. A key is such a word
+#     followed by `:` or `=`, with or without space before it, or carrying
+#     its value behind a colon inside the word (`name:gatt`): the three
+#     spellings the first form of this rule missed, one of which line 219 of
+#     a real `dumpsys bluetooth_manager` had (CI run 44486540042, `[S10]`).
 #
 # Still scanned as `diag`, every rule and every needle on, so the claim is
-# checked and not merely made.
+# checked and not merely made — each skeleton on its own, so that one the
+# masking failed costs that file and nothing else.
 mesh_skeleton() {
   mesh_redact "${1:-}" "${2:-}" | head -n "${SKELETON_MAX_LINES}" | tr -d '\r' | LC_ALL=C awk '
     function shape(word,    run, rest) {
@@ -820,15 +874,22 @@ mesh_skeleton() {
         if (match(rest, /^[^] \t=(){}[,;"]+/)) {
           word = substr(rest, 1, RLENGTH)
           rest = substr(rest, RLENGTH + 1)
+          at = index(word, ":")
+          key = (at > 1) ? substr(word, 1, at - 1) : word
+          if (tolower(key) ~ /(name|addr|address|alias|title|text|label|ticker|summary|ssid|account|identity)$/) {
+            if (at > 1) {
+              out = out shape(key) ":" (at == length(word) ? " " : "") "<redacted>"
+              break
+            }
+            if (match(rest, /^[ \t]*[:=]/)) {
+              sep = RLENGTH
+              out = out shape(key) substr(rest, 1, sep) (substr(rest, sep + 1, 1) ~ /[ \t]/ ? " " : "") "<redacted>"
+              break
+            }
+          }
           colon = ""
           if (word ~ /:$/ && length(word) > 1) { colon = ":"; word = substr(word, 1, length(word) - 1) }
           out = out shape(word) colon
-          key = tolower(word)
-          if (key ~ /(name|addr|address|alias|title|text|label|ticker|summary|ssid|account|identity)$/ \
-              && (colon == ":" || substr(rest, 1, 1) == "=")) {
-            out = out (colon == ":" ? " " : "=") "<redacted>"
-            break
-          }
         } else {
           out = out substr(rest, 1, 1)
           rest = substr(rest, 2)
@@ -839,8 +900,99 @@ mesh_skeleton() {
   '
 }
 
-# mesh_publish <leg> <raw-dir> <log-dir> <label> <address> <pid> — what of a
-# leg's captures is PUBLISHED, and in what state:
+# mesh_owned_tags <policy.toml> — the logcat tags the scanner calls Haven's
+# own, read out of its policy: the one definition of whose text a line is.
+mesh_owned_tags() {
+  [[ -f "${1:-}" ]] || return 0
+  LC_ALL=C awk '
+    /^logcat = \{/ && match($0, /owned_tags = \[[^]]*\]/) {
+      list = substr($0, RSTART + 14, RLENGTH - 15)
+      gsub(/"/, "", list)
+      n = split(list, tag, /[ \t]*,[ \t]*/)
+      for (i = 1; i <= n; i++) if (tag[i] ~ /^[A-Za-z_][A-Za-z0-9_]*$/) printf "%s%s", (made++ ? " " : ""), tag[i]
+      print ""
+    }
+  ' "$1"
+}
+
+# mesh_transcript_split <owned tags> <kept-index> <withheld> <withheld-index>
+# — stdin a `flutter drive` transcript; stdout the lines of it that are
+# Haven's or the tool's. `flutter drive` forwards every device-log line of
+# the app's PID, whatever wrote it: the plugins' and the runtime's lines come
+# with Haven's own. Each line is one of
+#
+#   host               no forwarded prefix: the tool's own line (kept)
+#   own:<tag>          forwarded under a tag the scanner owns, by the scanner's
+#                      match — the tag itself, or the tag and `::` (kept)
+#   platform:<tag>     forwarded under one of KNOWN_PLATFORM_TAGS
+#   platform:process   …under the process's own name, which is the runtime's
+#                      and SELinux's text about it
+#   platform:other     …under any other tag
+#
+# and the three platform classes go to <withheld>, unpublished. The two index
+# files hold one class a line, for the line of that number in what was kept
+# and in what was withheld: what a hit's line number is read back through.
+# A line whose prefix does not parse is `host`, and so kept and scanned.
+mesh_transcript_split() {
+  LC_ALL=C awk -v owned="${1:-}" -v known="${KNOWN_PLATFORM_TAGS[*]}" -v pkg="${PKG}" \
+      -v kept_index="${2:?}" -v withheld="${3:?}" -v withheld_index="${4:?}" '
+    BEGIN {
+      n = split(owned, word, " "); for (i = 1; i <= n; i++) own[word[i]] = 1
+      n = split(known, word, " "); for (i = 1; i <= n; i++) platform[word[i]] = 1
+      printf "" > kept_index; printf "" > withheld; printf "" > withheld_index
+    }
+    function class_of(line,    tag, at, i) {
+      if (!match(line, /^[VDIWEFA]\/[^(]*\( *[0-9]+\):/)) return "host"
+      tag = substr(line, 3, index(line, "(") - 3)
+      sub(/ +$/, "", tag)
+      if (tag in own) return "own:" tag
+      at = index(tag, "::")
+      if (at > 1 && (substr(tag, 1, at - 1) in own)) return "own:" substr(tag, 1, at - 1)
+      if (tag in platform) return "platform:" tag
+      i = length(pkg) - length(tag) + 1
+      if (length(tag) >= 6 && i >= 1 && substr(pkg, i) == tag) return "platform:process"
+      return "platform:other"
+    }
+    {
+      sub(/\r$/, "")
+      class = class_of($0)
+      if (class ~ /^platform:/) { print > withheld; print class > withheld_index }
+      else { print; print class > kept_index }
+    }
+  '
+}
+
+# mesh_report_hits <report.ndjson> <sink path> — `<line> <rule> <tag>` for
+# each hit the scanner's report holds against that sink: the rule's id, or
+# `needle`; the tag as the scanner read it, or `-`. The report carries no
+# text of a line, by the scanner's design.
+mesh_report_hits() {
+  [[ -f "${1:-}" ]] || return 0
+  LC_ALL=C awk -v sink="\"sink\":\"${2:-}\"" '
+    index($0, sink) == 0 { next }
+    {
+      line = ""; rule = "needle"; tag = "-"
+      if (match($0, /"line":[0-9]+/)) line = substr($0, RSTART + 7, RLENGTH - 7)
+      if (match($0, /"rule":"[A-Za-z0-9-]+"/)) rule = substr($0, RSTART + 8, RLENGTH - 9)
+      if (match($0, /"tag":"[A-Za-z0-9_.:-]+"/)) tag = substr($0, RSTART + 7, RLENGTH - 8)
+      if (line != "") print line, rule, tag
+    }
+  ' "$1"
+}
+
+# mesh_hit_facts <index> — stdin mesh_report_hits' lines; stdout
+# `from=<class> rule=<id> lines=<n>`, one a class and rule, the class read
+# from <index> by line number (`unindexed` for a number it does not have).
+mesh_hit_facts() {
+  LC_ALL=C awk '
+    NR == FNR { class[FNR] = $0; next }
+    { n[(($1 in class) ? class[$1] : "unindexed") " rule=" $2]++ }
+    END { for (key in n) print "from=" key " lines=" n[key] }
+  ' "${1:-/dev/null}" - | sort
+}
+
+# mesh_publish <leg> <raw-dir> <log-dir> <label> <address> <pid> <owned tags>
+# — what of a leg's captures is PUBLISHED, and in what state:
 #
 #   logcat.<leg>.log         the device log whole, as every lane publishes it,
 #                            redacted
@@ -850,13 +1002,22 @@ mesh_skeleton() {
 #                            Haven's process puts there; the system's events —
 #                            every process start, every notification — are
 #                            nobody's evidence here and stay on the runner
-#   flutter-drive.<leg>.log  the drive transcript, redacted; every line of it
-#                            is Haven's or the tool's
+#   flutter-drive.<leg>.log  of the drive transcript, the tool's lines and
+#                            the lines forwarded under a tag the scanner owns,
+#                            redacted. The plugins' and the runtime's lines
+#                            under Haven's pid are not in it: they are in the
+#                            device log above, where the scanner reads them by
+#                            its own rule for text that is not Haven's
+#                            (needles on every line, structural rules on owned
+#                            tags), and a transcript has no tags for it to
+#                            apply that rule by. They stay in <raw-dir> as
+#                            drive.<leg>.withheld.log, read there once more
+#                            (report_leg) and reported, not published
 #
 # An empty capture publishes nothing: the gate reads a missing sink as what
 # it is. With no pid known, no events are published at all.
 mesh_publish() {
-  local leg="$1" raw="$2" out="$3" label="$4" addr="$5" pid="$6"
+  local leg="$1" raw="$2" out="$3" label="$4" addr="$5" pid="$6" owned="${7:-}"
   if [[ -s "${raw}/logcat.${leg}.raw" ]]; then
     mesh_redact "${label}" "${addr}" "${pid}" < "${raw}/logcat.${leg}.raw" > "${out}/logcat.${leg}.log" || true
   fi
@@ -866,7 +1027,9 @@ mesh_publish() {
     [[ -s "${out}/logcat-events.${leg}.log" ]] || rm -f "${out}/logcat-events.${leg}.log"
   fi
   if [[ -s "${raw}/drive.${leg}.raw" ]]; then
-    mesh_redact "${label}" "${addr}" all < "${raw}/drive.${leg}.raw" > "${out}/flutter-drive.${leg}.log" || true
+    mesh_transcript_split "${owned}" "${raw}/drive.${leg}.kept-index" \
+        "${raw}/drive.${leg}.withheld.log" "${raw}/drive.${leg}.withheld-index" < "${raw}/drive.${leg}.raw" \
+      | mesh_redact "${label}" "${addr}" all > "${out}/flutter-drive.${leg}.log" || true
   fi
 }
 
@@ -978,7 +1141,9 @@ mesh_probe_measurements() {
   for key in dump_services dump_notification dump_bluetooth; do
     value="$(mesh_known "${facts}" "${key}")"
     mesh_answer "probe.${key}" "${value}"
-    if [[ "${value}" != kept ]]; then
+    if [[ "${value}" == withheld ]]; then
+      mesh_unusable "the skeleton of a dump tripped its own log-privacy gate and was withheld (${key}): a value survived the masking. The run is red for the leak; add the line's shape to mesh_skeleton with a fixture."
+    elif [[ "${value}" != kept ]]; then
       mesh_unusable "the probe did not keep the skeleton of a dump (${key}=${value:-missing}): the lever's parsers would be written against nothing."
     fi
   done
@@ -1020,9 +1185,15 @@ mesh_run_oracle() {
     mesh_verdict_rc
     return
   fi
-  if [[ "$(mesh_known "${facts}" drive_failed)" != no ]]; then
-    mesh_red "the drive did not complete cleanly (flutter drive failed, or the suite on the device reported a failure) after the target had started."
-  fi
+  # Whose failure a failed drive is. A suite that failed is the APP's, or
+  # this lane's target's: something threw under test. The platform's refusals
+  # are the UNUSABLE lines, and a red here is not one of them.
+  case "$(mesh_known "${facts}" drive_failed)" in
+    no) ;;
+    suite) mesh_red "the suite on the device FAILED after the target had started: a test failed, or one that must run was skipped. That is the app's failure, not the platform's — the app, or this lane's target, under test; a platform that would not answer is an UNUSABLE line. The mesh-failure lines above name the type that was thrown and the frames it came through." ;;
+    tool) mesh_red "flutter drive exited non-zero after the target had started, and the suite on the device reported no failure: the tool, or its connection to the app, ended the drive. The mesh-failure lines above say what its transcript holds." ;;
+    *) mesh_red "whether the drive completed was not recorded after the target had started, so it is not taken to have." ;;
+  esac
   # --- What the image is ---------------------------------------------------
   # Asked in every leg, because what a leg can prove depends on it.
   local le_feature bt_service
@@ -1102,6 +1273,18 @@ mesh_run_oracle() {
   mesh_answer "${leg}.address_lines" "${addressed}" n
   if (( addressed > 0 )); then
     mesh_red "${addressed} line(s) from Haven's process carry a Bluetooth address shape. Nothing of Haven's may write one (Security Rule 15), and no build of push A can so much as read one."
+  fi
+  # What of the drive transcript was not published — the platform's and the
+  # plugins' lines under Haven's pid — and how many of those lines the
+  # scanner's structural rules fire on when it is handed them all the same.
+  # Answers: that text is not Haven's to be red for, and not to go unsaid.
+  mesh_answer "${leg}.transcript_withheld_lines" "$(mesh_known "${facts}" transcript_withheld_lines)" n
+  local withheld_hits
+  withheld_hits="$(mesh_known "${facts}" transcript_withheld_rule_hits)"
+  if [[ "${withheld_hits}" =~ ^[0-9]+$ ]]; then
+    mesh_answer "${leg}.transcript_withheld_rule_hits" "${withheld_hits}" n
+  else
+    mesh_answer "${leg}.transcript_withheld_rule_hits" unread
   fi
 
   # --- The target must have reached its hold --------------------------------
@@ -1411,6 +1594,7 @@ run_self_test() {
       _entry 4021 I '[1296388936]' "${T3}"
     } > "${events}"
     printf '%s\n' ready=yes pid_host=4021 drive_failed=no le_feature=yes bt_service=present \
+      transcript_withheld_lines=37 transcript_withheld_rule_hits=0 \
       package_dump=ok package_mesh_components=0 "package_mesh_permissions=${perms}" \
       am_fgs=not_found am_svc=not_found am_alias=not_found \
       services_dump=ok services_mesh=0 notification_dump=ok notification_mesh=0 \
@@ -1535,10 +1719,10 @@ run_self_test() {
       grep -vE '^(ready|pid_host|drive_failed|package_|am_|services_|notification_|bluetooth_|stored_copy)' \
         "${tmp}/c.facts" > "${tmp}/c.tmp" || true
       mv "${tmp}/c.tmp" "${tmp}/c.facts"
-      printf '%s\n' ready=no drive_failed=yes >> "${tmp}/c.facts"
+      printf '%s\n' ready=no drive_failed=suite >> "${tmp}/c.facts"
     }
     _early probe
-    _oracle "a probe whose target ended before its hold is red: its suite failed" probe 1 'did not complete cleanly'
+    _oracle "a probe whose target ended before its hold is red: its suite failed" probe 1 'the suite on the device FAILED'
     _eq_case "…with ONE sentence for all the host never read, not one a question" 1 "${#MESH_UNUSABLE[@]}"
     _eq_case "…which says the target never reached its hold" 1 \
       "$(grep -cF -- "never reached '${MARK_READY}'" <<<"${MESH_UNUSABLE[*]-}" || true)"
@@ -1548,7 +1732,7 @@ run_self_test() {
       "$(printf '%s\n' "${MESH_ANSWERS[@]}" | grep -cxE 'probe\.(p1=present|le_feature=yes|bt_service=present)' || true)"
     _eq_case "…and nothing is said of a turn-on, a tree or a channel nobody reported" 0 \
       "$(printf '%s\n' "${MESH_ANSWERS[@]}" | grep -cE '^probe\.(turn_on|ui_button|supported|package_)' || true)"
-    _early probe; _edit facts 's/^drive_failed=yes$/drive_failed=no/' 'drive_failed=no'
+    _early probe; _edit facts 's/^drive_failed=suite$/drive_failed=no/' 'drive_failed=no'
     _oracle "…a target that only never reached its hold is unusable, never green" probe 3 "never reached '${MARK_READY}'"
     _early probe; _drop facts 'buffer_'
     _oracle "…and a platform nobody asked is said of a target that ended early too" probe 1 'a shell reads 0 of the five'
@@ -1556,16 +1740,16 @@ run_self_test() {
     _oracle "a run that never recorded whether the cue came is not read as one that got it" probe 1 "never reached '${MARK_READY}'"
     for leg in s0 s2; do
       _early "${leg}"
-      _oracle "${leg}: a target that ended before its hold is red, in one sentence" "${leg}" 1 'did not complete cleanly'
+      _oracle "${leg}: a target that ended before its hold is red, in one sentence" "${leg}" 1 'the suite on the device FAILED'
       _eq_case "…${leg}: one" 1 "${#MESH_UNUSABLE[@]}"
       _eq_case "…${leg}: and no limit is stated of a leg that judged nothing" 0 "${#MESH_LIMITS[@]}"
     done
     # An app that was there at the cue and gone when the host read: a pid nobody
     # could read, no release, a failed drive.
     _fresh probe; _edit facts 's/^pid_host=4021$/pid_host=/' 'pid_host='
-    _edit facts 's/^drive_failed=no$/drive_failed=yes/' 'drive_failed=yes'
+    _edit facts 's/^drive_failed=no$/drive_failed=tool/' 'drive_failed=tool'
     _drop logcat "${MARK_RELEASED}"; _drop logcat "${MARK_DONE}"
-    _oracle "an app gone when the host reads is red, the drive having failed" probe 1 'did not complete cleanly'
+    _oracle "an app gone when the host reads is red, the tool having lost it" probe 1 'flutter drive exited non-zero'
     _eq_case "…and what was read is said to be of no process that reported" 1 \
       "$(grep -cF -- "the host read pid 'nothing'" <<<"${MESH_UNUSABLE[*]-}" || true)"
     _eq_case "…nor of a target that was still holding" 1 \
@@ -1627,11 +1811,28 @@ DRIVE_EOF
 
     # Which gate found a leak: the run's last word used to say only that one had.
     _eq_case "a leak a leg's own gate found is laid at that leg's gate" 1 \
-      "$(mesh_leak_message probe 0 | grep -c 'the per-leg gate of probe found the leak.*the exit scan over what was left found nothing more' || true)"
+      "$(mesh_leak_message probe 0 | grep -c 'the per-leg gate of probe found a leak.*The exit scan over what was left found nothing more' || true)"
     _eq_case "…with the exit scan's own find beside it where it made one" 1 \
-      "$(mesh_leak_message 's0 probe' 1 | grep -c 'the per-leg gate of s0 probe found the leak.*the exit scan over what was left found another' || true)"
+      "$(mesh_leak_message 's0 probe' 1 | grep -c 'the per-leg gate of s0 probe found a leak.*The exit scan over the uploaded directory found a leak in what was left' || true)"
     _eq_case "…and a leak only the exit scan found is laid there" "1 0" \
-      "$(mesh_leak_message '' 1 | grep -c 'the exit scan over the uploaded directory found the leak' || true) $(mesh_leak_message '' 1 | grep -c 'per-leg' || true)"
+      "$(mesh_leak_message '' 1 | grep -c 'The exit scan over the uploaded directory found a leak' || true) $(mesh_leak_message '' 1 | grep -c 'per-leg\|alone' || true)"
+    _eq_case "…a file whose own gate found one is named, and said to be all that was deleted" "1 0" \
+      "$(mesh_leak_message '' 0 'dump-bluetooth-manager.probe.skel.log' | grep -c 'The gate of dump-bluetooth-manager.probe.skel.log alone found a leak in it: that file was deleted and nothing else. The exit scan over what was left found nothing more' || true) $(mesh_leak_message '' 0 'x.log' | grep -c 'per-leg' || true)"
+    _eq_case "…and all three at once are each said" 3 \
+      "$(mesh_leak_message s2 1 'verdict.s2.log' | grep -o 'the per-leg gate of s2\|The gate of verdict.s2.log alone\|The exit scan over the uploaded directory found a leak' | grep -c . || true)"
+
+    # What is not published of the transcript is an answer in every leg, and
+    # so is what the scanner's rules fire on there.
+    _fresh probe; _edit facts 's/^transcript_withheld_rule_hits=0$/transcript_withheld_rule_hits=4/' 'rule_hits=4'
+    _oracle "rule hits on the platform's unpublished lines are an answer, not a verdict" probe 0
+    _eq_case "…written as one, beside how many lines were not published" 2 \
+      "$(printf '%s\n' "${MESH_ANSWERS[@]}" | grep -cxE 'probe\.transcript_withheld_rule_hits=4|probe\.transcript_withheld_lines=37' || true)"
+    _fresh probe; _drop facts 'transcript_withheld_rule_hits='
+    _oracle "…and where the scanner could not read them, that is said" probe 0
+    _eq_case "…as unread, never as none" 1 \
+      "$(printf '%s\n' "${MESH_ANSWERS[@]}" | grep -cx 'probe.transcript_withheld_rule_hits=unread' || true)"
+    _fresh probe; _edit facts 's/^dump_bluetooth=kept$/dump_bluetooth=withheld/' 'dump_bluetooth=withheld'
+    _oracle "a skeleton its own gate withheld is said to have leaked, not to be missing" probe 3 'tripped its own log-privacy gate'
   }
 
   # --- what push A promises, in every leg -----------------------------------
@@ -1667,8 +1868,12 @@ DRIVE_EOF
     _oracle "${leg}: …in the events buffer too" "${leg}" 1 'carry a Bluetooth address shape'
     _fresh "${leg}"; _edit logcat 's/start=unasked/start=asked/' 'start=asked'
     _oracle "${leg}: a turn-on that sent the radio's start is red" "${leg}" 1 "'start' was sent"
-    _fresh "${leg}"; _edit facts 's/^drive_failed=no$/drive_failed=yes/' 'drive_failed=yes'
-    _oracle "${leg}: a drive that failed after the target started is red" "${leg}" 1 'did not complete cleanly'
+    _fresh "${leg}"; _edit facts 's/^drive_failed=no$/drive_failed=suite/' 'drive_failed=suite'
+    _oracle "${leg}: a suite that failed after the target started is red, and is laid at the app" "${leg}" 1 "That is the app's failure, not the platform's"
+    _fresh "${leg}"; _edit facts 's/^drive_failed=no$/drive_failed=tool/' 'drive_failed=tool'
+    _oracle "${leg}: a drive the tool ended, with no suite failure, is red and is laid at the tool" "${leg}" 1 'the suite on the device reported no failure'
+    _fresh "${leg}"; _drop facts 'drive_failed='
+    _oracle "${leg}: a drive nobody recorded the end of is not taken to have completed" "${leg}" 1 'was not recorded'
 
     # …and each of the host's readings must have been read.
     _fresh "${leg}"; _edit facts 's/^package_dump=ok$/package_dump=unread/' 'package_dump=unread'
@@ -1993,6 +2198,57 @@ DRIVE_EOF
     "$(grep -cF '    bonded: <bt-name> (<bt-addr>)' "${tmp}/skeleton.out" || true)"
   _eq_case "…every line is kept" 18 "$(grep -c '' "${tmp}/skeleton.out" || true)"
 
+  # A key and its value, however the dump spells what stands between them:
+  # space before the sign, space on both sides, or no space at all with the
+  # value inside the word. The first form of the rule kept all three, and the
+  # scanner's name rule (S10) fired on a real dump for it (CI run 44486540042).
+  printf '%s\n' \
+    'Bluetooth Status' \
+    '  name: lanephone' \
+    '  Name : lanephone' \
+    '  name = lanephone' \
+    '  name=lanephone' \
+    '  name:lanephone' \
+    '  Device name: lanephone' \
+    '  name = ab12cd' \
+    '  Profile: GattService name:gatt uid/1000' \
+    '  name::lanephone' \
+    '  Alias  =lanephone and more' \
+    '  [name] kept' \
+    '  name(kept)' \
+    '  Bonded devices: name , alias' > "${tmp}/keys.in"
+  mesh_skeleton '' '' < "${tmp}/keys.in" > "${tmp}/keys.out"
+  _eq_case "a key's value is masked whatever stands between the two" \
+    "$(printf '%s\n' \
+      'Bluetooth Status' \
+      '  name: <redacted>' \
+      '  Name : <redacted>' \
+      '  name = <redacted>' \
+      '  name=<redacted>' \
+      '  name:<redacted>' \
+      '  Device name: <redacted>' \
+      '  name = <redacted>' \
+      '  Profile: GattService name:<redacted>' \
+      '  name:<redacted>' \
+      '  Alias  =<redacted>' \
+      '  [name] kept' \
+      '  name(kept)' \
+      '  Bonded devices: name , alias')" \
+    "$(cat "${tmp}/keys.out")"
+  # Held to the scanner's own rule, read out of its source: every name the
+  # two skeletons above still carry is followed by one of ITS placeholders.
+  local rules="${SCRIPT_DIR}/../../logscan/src/rules.rs" s10 placeholders value matched=0 unmasked=0
+  s10="$(awk '/id: "S10",/ { want = 1; next } want && match($0, /r#".*"#/) { print substr($0, RSTART + 3, RLENGTH - 5); exit }' "${rules}" 2>/dev/null || true)"
+  placeholders="$(awk '/^const PLACEHOLDERS: &\[&str\] = &\[/ { on = 1; next } on && /^\];/ { exit } on { gsub(/^[ \t]*"|",[ \t]*$/, ""); print }' "${rules}" 2>/dev/null || true)"
+  _eq_case "the scanner's name rule and its placeholders are read from its source" "1 1" \
+    "$(grep -c 'name' <<<"${s10}" || true) $(grep -cxF '<redacted>' <<<"${placeholders}" || true)"
+  while IFS= read -r value; do
+    matched=$(( matched + 1 ))
+    value="$(sed -E 's/^.*[=:][[:space:]]*"?//' <<<"${value}")"
+    grep -qxF -- "${value}" <<<"${placeholders}" || unmasked=$(( unmasked + 1 ))
+  done < <(cat "${tmp}/keys.out" "${tmp}/skeleton.out" | grep -oP -- "${s10:-^$}" || true)
+  _eq_case "…and by that rule every name a skeleton carries is followed by a placeholder" "10 0" "${matched} ${unmasked}"
+
   # --- the oracle: the three passing legs -----------------------------------
   _fresh s0;    _oracle "S0 passes" s0 0
   _fresh probe; _oracle "the probe passes" probe 0
@@ -2176,8 +2432,23 @@ EOF
     "$(awk -v lit="${gate_lit}" 'index($0, lit) == 3 { n++ } END { print n + 0 }' <<<"${scope}")"
   _eq_case "…the device log always, and the slice of the events buffer where one was published" 2 \
     "$(grep -cE '^  local device_logs="\$\{LOG_DIR\}/logcat\.\$\{leg\}\.log"$|^    device_logs\+=",\$\{LOG_DIR\}/logcat-events\.\$\{leg\}\.log"$' <<<"${scope}" || true)"
-  _eq_case "what the gate is handed is the redacted copy, never the raw capture" 0 \
+  _eq_case "what a gate is handed is the redacted copy, never the raw capture" 0 \
     "$(grep -cE 'logscan_gate(_dir)? .*RAW_DIR' <<<"${joined}" || true)"
+  # The one reading of raw text by the scanner: the transcript lines that are
+  # not published, said in closed shapes and never a gate.
+  local withheld_scope
+  withheld_scope="$(sed -n '/^read_withheld() {/,/^}/p' <<<"${joined}")"
+  local withheld_lit='logscan_gate host /tmp/haven-soak/needles "${SEAL_EXTRA[@]}" --     --sink "diag=${withheld}" --report "${report}" >/dev/null 2>&1 || withheld_rc=$?'
+  _eq_case "the unpublished transcript lines are read by the scanner, its own output discarded" 1 \
+    "$(awk -v lit="${withheld_lit}" 'index($0, lit) == 3 { n++ } END { print n + 0 }' <<<"${withheld_scope}")"
+  _eq_case "…from the runner's own directory, which is never uploaded" 1 \
+    "$(grep -cE '^  local withheld="\$\{RAW_DIR\}/drive\.\$\{leg\}\.withheld\.log" index="\$\{RAW_DIR\}/drive\.\$\{leg\}\.withheld-index"$' <<<"${withheld_scope}" || true)"
+  _eq_case "…and that reading is no gate: it reddens nothing and names no leak" 0 \
+    "$(grep -cE 'note_gate_rc|LOGSCAN_GATE_RC|LEAK_LEGS|LEAK_FILES' <<<"${withheld_scope}" || true)"
+  _eq_case "…while every line under Haven's pid is read, in every leg" 1 \
+    "$(grep -cE '^  read_withheld "\$\{leg\}"$' <<<"${scope}" || true)"
+  _eq_case "whose a transcript line is, is read from the scanner's policy and copied nowhere" 1 \
+    "$(grep -cE '^OWNED_TAGS="\$\(mesh_owned_tags "\$\{REPO_ROOT\}/tooling/logscan/policy\.toml"\)"$' <<<"${joined}" || true)"
   _eq_case "the raw captures are written under RAW_DIR alone" 0 \
     "$(grep -cE 'adb .*(logcat -v|dumpsys) .*> *"\$\{LOG_DIR\}' <<<"${joined}" || true)"
   # What is read of the platform is read whatever became of the target; what
@@ -2199,13 +2470,44 @@ EOF
   _eq_case "a leak is laid at the gate that found it, in the run's last word" 1 \
     "$(grep -cF -- 'mesh_leak_message "${LEAK_LEGS[*]-}" "${scan_rc}"' <<<"$(sed -n '/^cleanup() {/,/^}/p' <<<"${joined}")" || true)"
   _eq_case "…a leg whose own gate found one being remembered" 1 \
-    "$(grep -cE '^  if \(\( gate_rc == 1 \)\); then LEAK_LEGS\+=\("\$\{leg\}"\); fi$' <<<"${scope}" || true)"
+    "$(grep -A1 -E '^  if \(\( gate_rc == 1 \)\); then$' <<<"${scope}" | grep -cE '^    LEAK_LEGS\+=\("\$\{leg\}"\)$' || true)"
+  _eq_case "…and whose text each of its hits was is said, for each file it scanned" 3 \
+    "$(grep -cE '^    report_leaks "\$\{leg\}" "\$\{LOGSCAN_REPORTS\}/gate-\$\{leg\}\.ndjson" ' <<<"${scope}" || true)"
   _eq_case "why a failed drive ended is read from the RAW transcript, which is never withheld" 1 \
     "$(grep -cF -- 'done < <(mesh_failure_facts "${raw_drive}" "${raw_device}"' <<<"${scope}" || true)"
   local exit_scope
   exit_scope="$(sed -n '/^cleanup() {/,/^}/p' <<<"${joined}")"
   _eq_case "the whole evidence directory is gated at exit" 1 \
     "$(grep -cE '^  logscan_gate_dir host /tmp/haven-soak/needles "\$\{LOG_DIR\}"' <<<"${exit_scope}" || true)"
+  # The verdict file is written after that scan and gated by itself, so no
+  # leak in another file takes the answers of a red run with it; and so is
+  # each skeleton, the published file likeliest to trip.
+  local dir_at verdict_at own_lit
+  dir_at="$(grep -nE '^  logscan_gate_dir host ' <<<"${exit_scope}" | cut -d: -f1 | head -n 1 || true)"
+  verdict_at="$(grep -nE '^  write_verdict$' <<<"${exit_scope}" | cut -d: -f1 | head -n 1 || true)"
+  rc=0
+  [[ -n "${dir_at}" && -n "${verdict_at}" ]] && (( dir_at < verdict_at )) || rc=1
+  _case "the verdict file is written only after the directory scan" 0 "${rc}"
+  _eq_case "…in that one place" 1 "$(grep -cE '^[[:space:]]*write_verdict$' <<<"${joined}" || true)"
+  _eq_case "…and gated by itself the moment it is written" 1 \
+    "$(sed -n '/^write_verdict() {/,/^}/p' <<<"${joined}" | grep -cE '^  gate_own_file "\$\{VERDICT_FILE\}" "verdict-\$\{RUN_NAME\}" \|\| true$' || true)"
+  _eq_case "a skeleton passes its own gate, and one that gate found a leak in is said to be withheld" 1 \
+    "$(sed -n '/^keep_skeleton() {/,/^}/p' <<<"${joined}" | grep -A2 -E '^    gate_own_file "\$\{out\}" "skel-\$\{name\}-\$\{leg\}" \|\| own_rc=\$\?$' | grep -A1 -E '^    if \(\( own_rc == 1 \)\); then$' | grep -cE '^      record "\$\{fact\}" withheld$' || true)"
+  own_lit='logscan_gate host /tmp/haven-soak/needles "${SEAL_EXTRA[@]}" --     --sink "diag=${path}" --report "${LOGSCAN_REPORTS}/${2}.ndjson" || own_rc=$?'
+  _eq_case "a file's own gate is the lane's gate over that one file" 1 \
+    "$(sed -n '/^gate_own_file() {/,/^}/p' <<<"${joined}" | awk -v lit="${own_lit}" 'index($0, lit) == 3 { n++ } END { print n + 0 }')"
+  _eq_case "…its verdict folded into the run's, and a leak in it remembered by the file's name" 2 \
+    "$(sed -n '/^gate_own_file() {/,/^}/p' <<<"${joined}" | grep -cE '^  note_gate_rc "\$\{own_rc\}"$|^  if \(\( own_rc == 1 \)\); then LEAK_FILES\+=\("\$\{path##\*/\}"\); fi$' || true)"
+  # The device log is the leg's whole one: its capture starts before the
+  # install, not at the drive.
+  local capture_at install_at
+  capture_at="$(grep -nE '^  adb -s "\$\{DEVICE\}" logcat -v threadtime > ' <<<"${leg_scope}" | cut -d: -f1 | head -n 1 || true)"
+  install_at="$(grep -nE '^  install_fresh "\$\{DEVICE\}" ' <<<"${leg_scope}" | cut -d: -f1 | head -n 1 || true)"
+  rc=0
+  [[ -n "${capture_at}" && -n "${install_at}" ]] && (( capture_at < install_at )) || rc=1
+  _case "a leg's device log is captured from before its install" 0 "${rc}"
+  _eq_case "…the buffers cleared once a leg, ahead of that capture" 1 \
+    "$(grep -cE 'logcat -b all -c' <<<"${leg_scope}" || true)"
   local extra_lit='readonly -a SEAL_EXTRA=(--floor drive=7 --floor relay=7)'
   _eq_case "the seal extras carry the lane's two line floors and nothing else" 1 \
     "$(awk -v lit="${extra_lit}" 'index($0, lit) == 1 { n++ } END { print n + 0 }' "${self}")"
@@ -2227,20 +2529,77 @@ EOF
     _entry 1200 I am_proc_start '[0,5678,10123,com.example.other,activity,{com.example.other/.Main}]'
     _entry 900 I bluetooth_event 'own 2222abcdef01'
   } > "${rawdir}/events.probe.raw"
-  printf '%s\n' '00:03 +1: All tests passed!' 'I/flutter ( 4021): handle 2222abcdef01' > "${rawdir}/drive.probe.raw"
-  mesh_publish probe "${rawdir}" "${dir}" '' 'null' 4021
+  # Whose a transcript line is: the scanner's list, read from its policy.
+  local owned
+  owned="$(mesh_owned_tags "${SCRIPT_DIR}/../../logscan/policy.toml")"
+  _eq_case "the scanner's owned tags are read from its policy" "1 1 0" \
+    "$(grep -cw flutter <<<"${owned}" || true) $(grep -cw haven_core <<<"${owned}" || true) $(grep -c 'haven\.' <<<"${owned}" || true)"
+  printf '%s\n' '[sinks]' 'logcat = { min_lines = 2000, owned_tags = ["flutter", "bad tag", "x-y", "haven_core"] }' \
+    'drive = { owned_tags = ["never"] }' > "${tmp}/policy.toml"
+  _eq_case "…the logcat class's list alone, and no entry that is not a plain tag" "flutter haven_core" \
+    "$(mesh_owned_tags "${tmp}/policy.toml")"
+  _eq_case "…and no policy is no tags, which the runner refuses to start on" "" "$(mesh_owned_tags "${tmp}/nope")"
+  printf '%s\n' \
+    'VMServiceFlutterDriver: Connecting to Flutter application.' \
+    'I/flutter ( 4021): handle 2222abcdef01' \
+    'E/FlutterSecureStorage( 4021): PlatformText one' \
+    'W/oustech.haven( 4021): PlatformText two' \
+    'I/haven_core::circle::storage( 4021): own rust line' \
+    'I/flutterx ( 4021): PlatformText three' \
+    'D/Odd(Tag)( 4021): unparsed prefix' \
+    'I/SomeVendor( 4021): PlatformText four' \
+    'D/rust_lib_haven( 4021): own bridge line' \
+    '00:03 +1: All tests passed!' > "${rawdir}/drive.probe.raw"
+  mesh_transcript_split "${owned}" "${tmp}/kept.index" "${tmp}/withheld.log" "${tmp}/withheld.index" \
+    < "${rawdir}/drive.probe.raw" > "${tmp}/kept.log"
+  _eq_case "of a transcript, the tool's lines and Haven's own are kept, each with its class" \
+    "host own:flutter own:haven_core host own:rust_lib_haven host" "$(tr '\n' ' ' < "${tmp}/kept.index" | sed 's/ $//')"
+  _eq_case "…a line whose prefix does not parse being the tool's, and so kept and scanned" 1 \
+    "$(grep -c 'unparsed prefix' "${tmp}/kept.log" || true)"
+  _eq_case "…and the platform's and the plugins' lines under Haven's pid are set aside, each with its class" \
+    "platform:FlutterSecureStorage platform:process platform:other platform:other" \
+    "$(tr '\n' ' ' < "${tmp}/withheld.index" | sed 's/ $//')"
+  _eq_case "…every line in one or the other, none in both" "6 4 0" \
+    "$(grep -c '' "${tmp}/kept.log" || true) $(grep -c '' "${tmp}/withheld.log" || true) $(grep -c 'PlatformText' "${tmp}/kept.log" || true)"
+  _eq_case "…a tag is owned whole or before '::', never by its opening letters" 1 \
+    "$(grep -c 'I/flutterx' "${tmp}/withheld.log" || true)"
+  # A hit's line number, read back to whose text the line was.
+  printf '%s\n' \
+    '{"class":null,"count":1,"encoding":null,"kind":"rule","line":2,"reassembled":false,"rule":"S8","sink":"/w/withheld.log","tag":null}' \
+    '{"class":null,"count":1,"encoding":null,"kind":"rule","line":1,"reassembled":false,"rule":"S8","sink":"/w/withheld.log","tag":null}' \
+    '{"class":null,"count":1,"encoding":null,"kind":"rule","line":4,"reassembled":false,"rule":"S13","sink":"/w/withheld.log","tag":null}' \
+    '{"class":"pubkey","count":1,"encoding":"hex","kind":"needle","line":19,"reassembled":false,"rule":null,"sink":"/w/withheld.log","tag":null}' \
+    '{"class":null,"count":1,"encoding":null,"kind":"rule","line":3,"reassembled":false,"rule":"S13","sink":"/w/logcat.log","tag":"flutter"}' \
+    > "${tmp}/report.ndjson"
+  _eq_case "a report's hits against one file are its line, its rule and its tag" "2 S8 - 1 S8 - 4 S13 - 19 needle -" \
+    "$(mesh_report_hits "${tmp}/report.ndjson" /w/withheld.log | tr '\n' ' ' | sed 's/ $//')"
+  _eq_case "…another file's are not this one's, and a tag the scanner read is carried" "3 S13 flutter" \
+    "$(mesh_report_hits "${tmp}/report.ndjson" /w/logcat.log)"
+  _eq_case "…and no report is no hits" "" "$(mesh_report_hits "${tmp}/nope" /w/withheld.log)"
+  _eq_case "each hit is said by the class of its line and its rule, counted, with no text" \
+    "from=platform:FlutterSecureStorage rule=S8 lines=1 from=platform:other rule=S13 lines=1 from=platform:process rule=S8 lines=1 from=unindexed rule=needle lines=1" \
+    "$(mesh_report_hits "${tmp}/report.ndjson" /w/withheld.log | mesh_hit_facts "${tmp}/withheld.index" | tr '\n' ' ' | sed 's/ $//')"
+  mesh_publish probe "${rawdir}" "${dir}" '' 'null' 4021 "${owned}"
   _eq_case "of the events buffer, only what Haven's pid wrote is published" "1 0" \
     "$(grep -c '' "${dir}/logcat-events.probe.log" || true) $(grep -cE 'am_proc_start|bluetooth_event|com\.example' "${dir}/logcat-events.probe.log" || true)"
   _eq_case "…which is the planted event" 1 "$(grep -c "${T3}" "${dir}/logcat-events.probe.log" || true)"
   _eq_case "the device log is published whole" "$(grep -c '' "${tmp}/c.logcat")" \
     "$(grep -c '' "${dir}/logcat.probe.log" || true)"
-  _eq_case "the transcript reaches the scanner as Haven wrote it" 1 \
+  _eq_case "Haven's own lines of the transcript reach the scanner as Haven wrote them" 1 \
     "$(grep -c 'handle 2222abcdef01' "${dir}/flutter-drive.probe.log" || true)"
+  _eq_case "…the published transcript being the kept lines and no others" "6 0" \
+    "$(grep -c '' "${dir}/flutter-drive.probe.log" || true) $(grep -c 'PlatformText' "${dir}/flutter-drive.probe.log" || true)"
+  _eq_case "…with its index beside the raw capture, one class a published line" 6 \
+    "$(grep -c '' "${rawdir}/drive.probe.kept-index" || true)"
+  _eq_case "…and what was set aside staying in the raw directory, a class a line" "4 4" \
+    "$(grep -c '' "${rawdir}/drive.probe.withheld.log" || true) $(grep -c '' "${rawdir}/drive.probe.withheld-index" || true)"
   mkdir -p "${tmp}/nopid" "${tmp}/quiet"
-  mesh_publish probe "${rawdir}" "${tmp}/nopid" '' '' ''
+  mesh_publish probe "${rawdir}" "${tmp}/nopid" '' '' '' ''
+  _eq_case "with no owned tag known, only the tool's own lines of a transcript are published" "3 0" \
+    "$(grep -c '' "${tmp}/nopid/flutter-drive.probe.log" || true) $(grep -c 'handle' "${tmp}/nopid/flutter-drive.probe.log" || true)"
   _eq_case "with no pid known, nothing of the events buffer is published" 0 \
     "$(find "${tmp}/nopid" -name 'logcat-events.*' | grep -c . || true)"
-  mesh_publish probe "${rawdir}" "${tmp}/quiet" '' '' 7777
+  mesh_publish probe "${rawdir}" "${tmp}/quiet" '' '' 7777 "${owned}"
   _eq_case "a pid that wrote no event publishes no empty file" 0 \
     "$(find "${tmp}/quiet" -name 'logcat-events.*' | grep -c . || true)"
   printf 'probe.bt_on=yes\n' > "${dir}/verdict.s0-probe.log"
@@ -2353,12 +2712,23 @@ BT_ADDR=""
 BT_LABEL=""
 VERDICT_RC=0
 VERDICT_LINES=()
-# The legs that passed with a limit, and the legs whose own gate found a leak.
+# The legs that passed with a limit, the legs whose own gate found a leak,
+# and the files — a skeleton, the verdict file — whose own gate did.
 LIMITED_LEGS=()
 LEAK_LEGS=()
+LEAK_FILES=()
 readonly VERDICT_FILE="${LOG_DIR}/verdict.${RUN_NAME}.log"
 
 mkdir -p "${LOG_DIR}" "${RAW_DIR}" "${LOGSCAN_REPORTS}"
+
+# Whose text a transcript line is, is the scanner's to say: its policy's own
+# list, read here and never copied.
+OWNED_TAGS="$(mesh_owned_tags "${REPO_ROOT}/tooling/logscan/policy.toml")"
+readonly OWNED_TAGS
+if [[ -z "${OWNED_TAGS}" ]]; then
+  echo "MESH-LANE-FAIL (rc 2): the scanner's owned tags could not be read from tooling/logscan/policy.toml, so nothing says which lines of a drive transcript are Haven's." >&2
+  exit 2
+fi
 
 # stop_captures — ends the two device-log readers.
 stop_captures() {
@@ -2380,22 +2750,48 @@ publish_leg() {
   if [[ ! "${pid}" =~ ^[0-9]+$ ]]; then
     pid="$(mesh_show "$(mesh_field "${RAW_DIR}/logcat.${leg}.raw" "${MARK_PHASE}" pid)")"
   fi
-  mesh_publish "${leg}" "${RAW_DIR}" "${LOG_DIR}" "${BT_LABEL}" "${BT_ADDR}" "${pid}"
+  mesh_publish "${leg}" "${RAW_DIR}" "${LOG_DIR}" "${BT_LABEL}" "${BT_ADDR}" "${pid}" "${OWNED_TAGS}"
   OPEN_LEG=""
 }
 
+# note_gate_rc <rc> — one gate's verdict into the run's: a leak outranks
+# whatever came before it, and otherwise the first that was not clean stands.
+note_gate_rc() {
+  if (( $1 == 1 || LOGSCAN_GATE_RC == 0 )); then
+    LOGSCAN_GATE_RC="$1"
+  fi
+}
+
+# gate_own_file <path> <report-name> — the gate over ONE file, by itself: a
+# leak in it deletes it and nothing else, where the directory scan at exit
+# would take every clean log of the run with it (CI run 44486540042: one line
+# of one skeleton cost S0's logs, the relay's, and the verdict file). 0 when
+# the file may be uploaded.
+gate_own_file() {
+  local path="$1" own_rc=0
+  logscan_gate host /tmp/haven-soak/needles "${SEAL_EXTRA[@]}" -- \
+    --sink "diag=${path}" --report "${LOGSCAN_REPORTS}/${2}.ndjson" || own_rc=$?
+  note_gate_rc "${own_rc}"
+  if (( own_rc == 1 )); then LEAK_FILES+=("${path##*/}"); fi
+  return "${own_rc}"
+}
+
 # write_verdict — the answers of every leg judged, one `<leg>.<key>=<value>`
-# a line.
+# a line, gated by itself. Written AFTER the directory scan: it holds numbers
+# and fixed words alone, and a red run is the run whose answers are wanted,
+# so no leak found in another file may take it down with the rest.
 write_verdict() {
   (( ${#VERDICT_LINES[@]} > 0 )) || return 0
   printf '%s\n' "${VERDICT_LINES[@]}" > "${VERDICT_FILE}"
+  gate_own_file "${VERDICT_FILE}" "verdict-${RUN_NAME}" || true
 }
 
 # ---------------------------------------------------------------------------
 # Cleanup (EXIT trap): stop the helpers, publish what a leg left unpublished,
-# write the verdict file, run the MANDATORY log-privacy gate over everything
-# that will be uploaded, tear the relay down. Escalates on a leak; never masks
-# a verdict. The containment is run-b5-permission-revocation.sh's.
+# run the MANDATORY log-privacy gate over everything that will be uploaded,
+# then write the verdict file behind a gate of its own, tear the relay down.
+# Escalates on a leak; never masks a verdict. The containment is
+# run-b5-permission-revocation.sh's.
 # ---------------------------------------------------------------------------
 cleanup() {
   local rc=$?
@@ -2409,16 +2805,17 @@ cleanup() {
     publish_leg "${OPEN_LEG}"
   fi
   docker logs "${STRFRY_CONTAINER}" > "${LOG_DIR}/strfry.final.log" 2>&1 || true
-  write_verdict
   echo "== Log-privacy scan over ${LOG_DIR} (Security Rules 6 and 15) =="
   logscan_gate_dir host /tmp/haven-soak/needles "${LOG_DIR}" "${LOGSCAN_REPORTS}/exit-${RUN_NAME}.ndjson" "${SEAL_EXTRA[@]}" \
     || scan_rc=$?
+  echo "== The verdict file, behind a gate of its own =="
+  write_verdict
   if (( scan_rc == 1 || LOGSCAN_GATE_RC == 1 )); then
     {
       echo "Logs withheld: the log-privacy gate tripped (Security Rules 6 and 15)."
       echo "See the LEAK line(s) in the step log for file/label/line numbers."
     } > "${LOG_DIR}/LEAK_DETECTED.txt"
-    echo "ERROR: $(mesh_leak_message "${LEAK_LEGS[*]-}" "${scan_rc}") What was scanned is deleted, not uploaded." >&2
+    echo "ERROR: $(mesh_leak_message "${LEAK_LEGS[*]-}" "${scan_rc}" "${LEAK_FILES[*]-}") What a gate found a leak in is deleted, not uploaded." >&2
     rc=1
   elif (( scan_rc != 0 || LOGSCAN_GATE_RC != 0 )); then
     if (( rc == 0 )); then
@@ -2503,9 +2900,10 @@ enable_bluetooth() {
 }
 
 # keep_skeleton <leg> <fact> <name> <raw-dump> — a dump's skeleton into the
-# uploaded directory; `kept` only for one that has lines.
+# uploaded directory, behind a gate of its own: `kept` for one that has
+# lines, `withheld` for one that gate found a leak in.
 keep_skeleton() {
-  local leg="$1" fact="$2" name="$3" raw="$4" out
+  local leg="$1" fact="$2" name="$3" raw="$4" out own_rc=0
   out="${LOG_DIR}/dump-${name}.${leg}.skel.log"
   if [[ -s "${raw}" ]]; then
     {
@@ -2513,7 +2911,14 @@ keep_skeleton() {
       echo "# (run-mesh-lever.sh, mesh_skeleton). The dump itself is not kept."
       mesh_skeleton "${BT_LABEL}" "${BT_ADDR}" < "${raw}"
     } > "${out}" || true
-    record "${fact}" kept
+    gate_own_file "${out}" "skel-${name}-${leg}" || own_rc=$?
+    # Only a leak withholds it. A gate that could not certify (2, 3, 4) leaves
+    # the file, and its code is already in the run's.
+    if (( own_rc == 1 )); then
+      record "${fact}" withheld
+    else
+      record "${fact}" kept
+    fi
   else
     record "${fact}" unread
   fi
@@ -2594,11 +2999,66 @@ inspect_platform() {
   keep_skeleton "${leg}" dump_bluetooth bluetooth-manager "${RAW_DIR}/bluetooth-all.${leg}.dump"
 }
 
+# report_leaks <leg> <report> <sink path> <file word> [<index>] — for each
+# hit the leg's gate recorded against one published file, WHOSE text the line
+# was, in closed shapes: the transcript's lines by their class (the index
+# mesh_publish wrote), the device log's by the tag the scanner read. Never
+# the text: the scanner's report has none, and the published file is gone.
+report_leaks() {
+  local leg="$1" report="$2" sink="$3" word="$4" index="${5:-}" line tag rule
+  if [[ -n "${index}" ]]; then
+    while IFS= read -r line; do
+      [[ -n "${line}" ]] && echo "  mesh-leak (${leg}): file=${word} ${line}" >&2
+    done < <(mesh_report_hits "${report}" "${sink}" | mesh_hit_facts "${index}")
+    return 0
+  fi
+  while read -r line rule tag; do
+    [[ " ${OWNED_TAGS} " == *" ${tag%%::*} "* ]] || tag=other
+    echo "  mesh-leak (${leg}): file=${word} from=own:${tag%%::*} rule=${rule} line=${line}" >&2
+  done < <(mesh_report_hits "${report}" "${sink}")
+}
+
+# read_withheld <leg> — the transcript lines that were not published, handed
+# to the scanner all the same — every rule and every needle, as a `diag` file
+# — and what it found said in closed shapes: which class of line, which rule,
+# how many. Its own output is discarded: it would call a hit a leak and say
+# the file was kept from upload, and this file was never going to be
+# uploaded. Not a gate: the text is the platform's and the plugins', and is
+# not Haven's to be red for. But no line under Haven's pid goes unread, and
+# what the rules fire on there is on the record of every run. (A declared
+# value among them is red all the same: the same line is in the device log,
+# where the leg's own gate searches every line for every needle.)
+read_withheld() {
+  local leg="$1" withheld_rc=0 hits=0 line
+  local withheld="${RAW_DIR}/drive.${leg}.withheld.log" index="${RAW_DIR}/drive.${leg}.withheld-index"
+  local report="${LOGSCAN_REPORTS}/withheld-${leg}.ndjson"
+  if [[ ! -s "${index}" ]]; then
+    record transcript_withheld_lines 0
+    record transcript_withheld_rule_hits 0
+    return 0
+  fi
+  record transcript_withheld_lines "$(grep -c '' "${index}" || true)"
+  rm -f "${report}"
+  logscan_gate host /tmp/haven-soak/needles "${SEAL_EXTRA[@]}" -- \
+    --sink "diag=${withheld}" --report "${report}" >/dev/null 2>&1 || withheld_rc=$?
+  if (( withheld_rc > 1 )) || [[ ! -f "${report}" ]]; then
+    record transcript_withheld_rule_hits unread
+    echo "  mesh-transcript (${leg}): the unpublished lines could not be read by the scanner (rc ${withheld_rc})." >&2
+    return 0
+  fi
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    echo "  mesh-transcript (${leg}): not-published ${line}"
+    hits=$(( hits + ${line##*lines=} ))
+  done < <(mesh_report_hits "${report}" "${withheld}" | mesh_hit_facts "${index}")
+  record transcript_withheld_rule_hits "${hits}"
+}
+
 # report_leg <leg> <drive-rc> — publishes the leg's captures, gates them, and
 # only then echoes the drive log. Records whether the drive failed, and where
 # it did prints why in closed shapes: the transcript may be withheld.
 report_leg() {
-  local leg="$1" drc="$2" gate_rc=0 line said=0
+  local leg="$1" drc="$2" gate_rc=0 line said=0 failed=no
   local drive_log="${LOG_DIR}/flutter-drive.${leg}.log"
   local device_logs="${LOG_DIR}/logcat.${leg}.log"
   local raw_drive="${RAW_DIR}/drive.${leg}.raw" raw_device="${RAW_DIR}/logcat.${leg}.raw"
@@ -2610,26 +3070,33 @@ report_leg() {
   logscan_gate host /tmp/haven-soak/needles "${SEAL_EXTRA[@]}" -- \
     --sink "logcat=${device_logs}" \
     --sink "drive=${drive_log}" --report "${LOGSCAN_REPORTS}/gate-${leg}.ndjson" || gate_rc=$?
-  if (( gate_rc == 1 || LOGSCAN_GATE_RC == 0 )); then
-    LOGSCAN_GATE_RC="${gate_rc}"
+  note_gate_rc "${gate_rc}"
+  if (( gate_rc == 1 )); then
+    LEAK_LEGS+=("${leg}")
+    report_leaks "${leg}" "${LOGSCAN_REPORTS}/gate-${leg}.ndjson" "${drive_log}" drive "${RAW_DIR}/drive.${leg}.kept-index"
+    report_leaks "${leg}" "${LOGSCAN_REPORTS}/gate-${leg}.ndjson" "${LOG_DIR}/logcat.${leg}.log" logcat
+    report_leaks "${leg}" "${LOGSCAN_REPORTS}/gate-${leg}.ndjson" "${LOG_DIR}/logcat-events.${leg}.log" events
   fi
-  if (( gate_rc == 1 )); then LEAK_LEGS+=("${leg}"); fi
+  read_withheld "${leg}"
   if (( gate_rc == 0 )); then
     cat "${drive_log}" || true
   else
     echo "${leg} drive log withheld from the step log — the ${leg} leg's own log-privacy gate ended rc ${gate_rc}." >&2
   fi
-  if (( drc != 0 )) || drive_log_reports_test_failure "${raw_drive}"; then
-    record drive_failed yes
-    echo "  the ${leg} drive did not complete cleanly (flutter drive rc ${drc}). What its transcript and the target's own lines say of it, in closed shapes:" >&2
+  if drive_log_reports_test_failure "${raw_drive}"; then
+    failed=suite
+  elif (( drc != 0 )); then
+    failed=tool
+  fi
+  record drive_failed "${failed}"
+  if [[ "${failed}" != no ]]; then
+    echo "  the ${leg} drive did not complete cleanly (flutter drive rc ${drc}; ${failed}). What its transcript and the target's own lines say of it, in closed shapes:" >&2
     while IFS= read -r line; do
       [[ -n "${line}" ]] || continue
       echo "  mesh-failure (${leg}): ${line}" >&2
       said=1
     done < <(mesh_failure_facts "${raw_drive}" "${raw_device}" "$(mesh_show "$(mesh_field "${raw_device}" "${MARK_PHASE}" pid)")")
     (( said )) || echo "  mesh-failure (${leg}): nothing of a known shape — no thrown type, assertion or stack frame in the transcript or under the target's pid." >&2
-  else
-    record drive_failed no
   fi
 }
 
@@ -2654,6 +3121,17 @@ run_leg() {
   : > "${FACTS}"
   if [[ "${leg}" == s0 ]]; then apk="${APK_OFF}"; fi
 
+  # The leg's WHOLE device log, from before its install: a capture begun at
+  # the drive holds some thirteen seconds of a quiet Android 10 — 1 581
+  # lines in CI run 44486540042, under the 2 000 the scanner asks of a device
+  # log before it calls one proof of anything.
+  OPEN_LEG="${leg}"
+  adb -s "${DEVICE}" logcat -b all -c >/dev/null 2>&1 || true
+  adb -s "${DEVICE}" logcat -v threadtime > "${RAW_DIR}/logcat.${leg}.raw" 2>&1 &
+  LOGCAT_PID=$!
+  adb -s "${DEVICE}" logcat -b events -v threadtime > "${RAW_DIR}/events.${leg}.raw" 2>&1 &
+  EVENTS_PID=$!
+
   # What the image is, asked of the platform before anything is installed:
   # what a leg can show depends on it. An image with no Bluetooth service has
   # no Bluetooth manager to ask anything of.
@@ -2677,13 +3155,6 @@ run_leg() {
     done
   fi
   read_adapter_identity
-
-  OPEN_LEG="${leg}"
-  adb -s "${DEVICE}" logcat -b all -c >/dev/null 2>&1 || true
-  adb -s "${DEVICE}" logcat -v threadtime > "${RAW_DIR}/logcat.${leg}.raw" 2>&1 &
-  LOGCAT_PID=$!
-  adb -s "${DEVICE}" logcat -b events -v threadtime > "${RAW_DIR}/events.${leg}.raw" 2>&1 &
-  EVENTS_PID=$!
 
   echo "== ${leg}: driving =="
   : > "${RAW_DIR}/drive.${leg}.raw"
@@ -2742,15 +3213,15 @@ done
 
 case "${VERDICT_RC}" in
   0)
-    if (( ${#LEAK_LEGS[@]} > 0 )); then
-      echo "MESH LANE RED (${RUN_NAME}) — the oracle found nothing broken, and a leg's own log-privacy gate found a leak (${LEAK_LEGS[*]}): see the ERROR below." >&2
+    if (( ${#LEAK_LEGS[@]} + ${#LEAK_FILES[@]} > 0 )); then
+      echo "MESH LANE RED (${RUN_NAME}) — the oracle found nothing broken, and a log-privacy gate found a leak (${LEAK_LEGS[*]-} ${LEAK_FILES[*]-}): see the ERROR below." >&2
     elif (( ${#LIMITED_LEGS[@]} > 0 )); then
       echo "MESH LANE PASS WITH A STATED LIMIT (${RUN_NAME}; limited: ${LIMITED_LEGS[*]}) — everything that could be judged on this image held, and what could NOT be judged is in the LIMIT line(s) above. That part is not proved by this run."
     else
       echo "MESH LANE PASS (${RUN_NAME}) — every promise of push A held and every measurement was taken."
     fi
     ;;
-  1) echo "MESH LANE RED (${RUN_NAME}) — a promise of push A is broken; see the RED line(s) above." >&2 ;;
+  1) echo "MESH LANE RED (${RUN_NAME}) — a promise of push A is broken, or the app failed under test; the RED line(s) above say which." >&2 ;;
   2) echo "MESH LANE BROKEN (${RUN_NAME}) — the lane drove the wrong thing; see the BROKEN line(s) above." >&2 ;;
   *) echo "MESH LANE UNUSABLE (${RUN_NAME}) — the platform or the capture would not answer; nothing was proved. See the UNUSABLE line(s) above." >&2 ;;
 esac

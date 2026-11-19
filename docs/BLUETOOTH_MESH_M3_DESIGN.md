@@ -6074,11 +6074,15 @@ unchanged and still expects no component.
 O.3's push A, its lane: S0, the probe and S2, the runner and its
 self-test, `HAVEN_MESH` in the build script, and O.2.7's rows; revised
 the same day for an independent review of it and for its first run on
-CI, 43586443164 (the last paragraphs say what each changed). **The lane
-as it stands here has not run**: this machine has no emulator. Of that
-first run, S0 passed, the probe was red and S2 never installed; what it
-settled about the platform is in "What the first run settled", and where
-a fact contradicted this section the fact is what is written. What is
+CI, 43586443164, and on 2026-11-19 for its second, 44486540042 (the last
+paragraphs say what each changed). **The lane as it stands here has not
+run**: this machine has no emulator. Of the first run, S0 passed, the
+probe was red and S2 never installed. Of the second, S0 passed; the
+probe took every measurement and was red for a defect of the app's that
+it found; S2 judged `limited` and was red for four lines of platform
+text in its transcript. What each settled about the platform is in
+"What the first run settled" and "What the second run settled", and
+where a fact contradicted this section the fact is what is written. What is
 proved here is the runner's reading and judging of text, by fixtures;
 what only a run proves is listed last. No product code changed: nothing
 under `haven/lib`, `haven/android/app/src/main`, `haven-core` or
@@ -6119,20 +6123,24 @@ under `haven/lib`, `haven/android/app/src/main`, `haven-core` or
   (`allMessagesHandler`, to `delegate.send`) and two facts are kept —
   what `bluetoothOn` was answered on the radio's channel, and whether
   `start` was ever sent.
-- **`ci/run-mesh-lever.sh <leg>…`** — legs `s0`, `probe`, `s2`. Per
-  leg: what the image is (`pm list features`, `service check`), and in
-  the probe the adapter asked on; a fresh install; the two device logs
-  (`adb logcat -v threadtime`, and `-b events`); the drive in the
-  background; at the target's `READY` the host reads the **app**, then
-  releases the target with `run-as … touch`; after the drive, whatever
-  became of it, the probe reads the **platform** — the buffers, the
-  property, the adapter's settings, the dumps' skeletons, none of which
-  is asked of Haven's app; the oracle over complete captures. A drive
-  that failed prints why as `mesh-failure (<leg>): key=value` lines
-  (below). Exit codes 0 pass, 1 a promise broken or a leak, 2 the lane
-  drove the wrong thing, 3 unusable, 4 the scanner's meta floor, folded
-  1 > 2 > 3 > 4 > 0; and within 0 a leg's verdict word is `pass` or
-  `limited` (below).
+- **`ci/run-mesh-lever.sh <leg>…`** — legs `s0`, `probe`, `s2`. Per leg:
+  the two device logs, begun before anything else so that they hold the
+  leg whole (`adb logcat -v threadtime`, and `-b events`); what the
+  image is (`pm list features`, `service check`), and in the probe the
+  adapter asked on; a fresh install; the drive in the background; at the
+  target's `READY` the host reads the **app**, then releases the target
+  with `run-as … touch`; after the drive, whatever became of it, the
+  probe reads the **platform** — the buffers, the property, the
+  adapter's settings, the dumps' skeletons, none of which is asked of
+  Haven's app; the oracle over complete captures. A drive that failed
+  prints why as `mesh-failure (<leg>): key=value` lines (below), and a
+  suite that failed is said to be the app's failure, not the platform's.
+  One gate a file where one file could cost the rest: each leg's
+  captures, each dump's skeleton, the verdict file — written last — and
+  the directory scan at exit over all of it again. Exit codes 0 pass, 1
+  a promise broken or a leak, 2 the lane drove the wrong thing, 3
+  unusable, 4 the scanner's meta floor, folded 1 > 2 > 3 > 4 > 0; and
+  within 0 a leg's verdict word is `pass` or `limited` (below).
 - **`ci/app-install-lib.sh`** — the barrier a fresh install waits
   behind has a second form, for an API 29 guest (below).
 - **`wf/e2e-mesh.yml`**, called from `ci.yml` stage 4 as `e2e-mesh`,
@@ -6294,8 +6302,9 @@ is a number or one of a fixed list of words; anything else is written
   address replaced; **of the events buffer, only the entries Haven's
   pid wrote** — the lane needs that buffer for its own planted event
   and, in S1, for what Haven's process puts there, and every other
-  process's events are evidence of nothing here; the drive
-  transcript. Where a shell is not given the address (`settings get`
+  process's events are evidence of nothing here; **of the drive
+  transcript, the tool's lines and Haven's own** (below). Where a
+  shell is not given the address (`settings get`
   answers `null`), a bare one cannot be searched for, so every run of
   exactly twelve hex digits is replaced too — on every line **but
   Haven's own**: a truncated id has that shape and must reach the
@@ -6303,6 +6312,35 @@ is a number or one of a fixed list of words; anything else is written
   wrote, on an image that will not say its address; the oracle's
   address-shape count does not see the bare form either, and no build
   of push A can read an address at all. S1 owes it with O.2.6's class.
+- **Of the transcript, the plugins' and the runtime's lines under
+  Haven's pid are not published; they are read, and reported.**
+  `flutter drive` forwards every device-log line of the app's pid,
+  whatever wrote it. In the device log the scanner tells Haven's lines
+  from the rest by tag: every needle on every line, its structural
+  rules on the tags its policy calls Haven's own, because "vendor text
+  is not Haven's to answer for" (`tooling/logscan/policy.toml`). A
+  transcript is a `plain` sink with no tags to apply that by, so there
+  the same platform lines are read as Haven's — in every lane; on API
+  34 they trip nothing, and on API 29, which this lane alone boots,
+  four tripped S8 and withheld a leg's whole evidence. The published
+  transcript therefore carries the tool's own lines and the lines
+  forwarded under a tag on the scanner's list, which the runner reads
+  out of that policy and copies nowhere; a line whose prefix does not
+  parse is kept. The rest are published where every lane publishes
+  them, in the device log, under the scanner's own rule for them.
+  **They are not left unread, and the neighbours' reading is not made
+  weaker by silence**: the scanner is handed them once more — every
+  rule and every needle, as a file that is never uploaded — and each
+  hit is said in the step log by the class of its line and its rule
+  (`mesh-transcript (<leg>): not-published from=platform:<tag|process|
+  other> rule=<id> lines=<n>`) and counted in the answers
+  (`<leg>.transcript_withheld_lines`, `…_rule_hits`). That is an
+  answer and not a verdict: the text is not Haven's. A declared value
+  among those lines is red all the same, since the same line is in the
+  device log, where every needle is searched on every line. *What this
+  leaves, for the owner*: the scanner itself could learn a transcript's
+  forwarded prefix and apply its tag rule there in every lane; that is
+  a change to `tooling/logscan`, not to this lane.
 - **A dump is kept as a skeleton** (O.2.3 has "kept as the runner's
   parser fixtures"). As text, a platform dump fails the scanner on
   platform furniture — a synthetic `dumpsys bluetooth_manager` gave
@@ -6424,7 +6462,7 @@ the guards job's cap, 20 to 30 minutes — it took 17 min 04 s on
 
 *Proved here.*
 
-- The runner's `--self-test`: 530 checks. The three legs' passing
+- The runner's `--self-test`: 583 checks. The three legs' passing
   captures; for each leg, one fixture a clause, each required to fail
   with the finding that names its cause; the probe answering rather than
   judging; S2 on an image with the LE feature, without it and with it
@@ -6435,36 +6473,49 @@ the guards job's cap, 20 to 30 minutes — it took 17 min 04 s on
   hold, in each leg, with the platform read all the same; an app gone
   when the host reads; why a drive ended, out of a transcript with a
   framework failure report in it, in closed shapes and with nothing of
-  an exception's own text; which gate found a leak; a marker another
-  process wrote, which is not read; values that are no word, which are
-  not printed; the redaction, the twelve-digit rule and its exception,
-  the slice of the events buffer, the skeleton; the markers, the plants,
-  the hold and the release file read out of the target's source and held
-  to the runner's; the gate ahead of the one echo of a drive log. Under
-  `gawk` and `mawk`.
+  an exception's own text; which gate found a leak; **the second
+  run's** — a key and its value in each spelling the skeleton's rule
+  missed, held to the scanner's own name rule and placeholders as read
+  out of its source; a transcript split into the tool's lines, Haven's
+  own and the platform's, with the class of each; a hit read back from
+  the scanner's report to the class of its line; a suite that failed
+  told from a drive the tool ended; a skeleton its own gate withheld;
+  a marker another process wrote, which is not read; values that are no
+  word, which are not printed; the redaction, the twelve-digit rule and
+  its exception, the slice of the events buffer, the skeleton; the
+  markers, the plants, the hold and the release file read out of the
+  target's source and held to the runner's; the gate ahead of the one
+  echo of a drive log; the verdict file written after the directory
+  scan and gated by itself; the device log begun before the install.
+  Under `gawk` and `mawk`.
 - **Mutation passes.** Over the readers and the oracle as first built:
   100 changes, 97 failing a fixture, the three that did not — all in the
-  skeleton — each given one. Over them as they now stand: 155 changes,
-  153 failing a fixture; of the two that did not, one — a marker of the
-  target's own under another tag — was given a fixture and fails it now,
-  and the other was a test the slice of the events buffer already makes
-  redundant, which is removed. One change — searching for a name shorter
-  than four characters — is caught by its fixture only after the
-  redactor has looped on an empty name until its memory is taken away;
-  the guard it removes is what ends that loop, and says so now.
+  skeleton — each given one. After the first run: 155 changes, 153
+  failing a fixture, the two that did not closed (a fixture for one, a
+  redundant test removed for the other). As they now stand: 181 changes,
+  180 failing a fixture; the one that did not — a hit's line number read
+  to its first digit — was given a fixture and fails it now.
+- **The device-side helpers under the real scanner**, on this machine:
+  a transcript with platform lines of the shapes S8 and S4 fire on
+  published without them and its leg's gate clean; those lines read
+  and reported by class and rule; a skeleton with a name left in it
+  withheld by its own gate and nothing else deleted; the verdict file
+  written and passed afterwards. And the fixture of key spellings: five
+  `S10` hits as the skeleton stood, none as it stands.
 - `app-install-lib.sh --self-test`, 95 fixtures (80 before), with the
   API 29 pair, its refusals, a guest between the two, and what a
   refusal says of the guest's own words; eleven changes to the new
   branches — four to the choice of pair, seven to what a refusal says
   — each failing a fixture.
 - Every step of the guards job (`repo-guards.yml`, "Static checks"), run
-  here: all 180 `run:` steps pass; the other two, the checkout and the
+  here: all 189 `run:` steps pass; the other two, the checkout and the
   Dart setup, are `uses:` steps.
-- Every lane-policing guard and its self-test, the 67 source guards,
+- Every lane-policing guard and its self-test, the source guards,
   `check_privacy_invariants.sh`, every workflow parsed as YAML, `flutter
-  analyze` with no error and no warning, the whole Dart suite (6201
-  passed, 5 skipped, as before it), and `cli_contract.rs`'s test of the
-  shared fake.
+  analyze` with no error and no warning, the Dart suite (`test/e2e` and
+  `test/lints`, 769 passed; the whole suite, 6201 passed and 5 skipped,
+  before the second run's changes, which touch no Dart), and
+  `cli_contract.rs`'s test of the shared fake.
 - The published shapes under the real scanner and the key-material
   floor: three synthetic skeletons, a verdict file with every key,
   the target's own lines, and an events slice — clean; the raw
@@ -6561,20 +6612,83 @@ API 29 past its boot.
 - **The AVD cache and the "snapshot" step did nothing they were named
   for.** Removed and renamed (above).
 
-*What only a run proves, still* — everything that is Android's and was
-not reached:
+*What the second run settled* (44486540042, of `5fd026e`, the lane
+merged with main; the same images and emulator). Read from the two jobs'
+logs:
+
+| Question | Answer | Where |
+|---|---|---|
+| The Android 10 install barrier (`pm trim-caches 0`, `am wait-for-broadcast-idle`) | 0/0, controls 255/255, inside 24 s | `e2e_mesh_refusal` |
+| A flag-on build installs, loads its library and runs on Android 10 | yes; `READY` 12 s after the drive began | S2 |
+| The API 29 `google_apis` image declares Bluetooth LE; has a Bluetooth service | no; no | `s2.le_feature=no`, `s2.bt_service=absent` |
+| So S2 is | `limited`: `supported=false`, no button, `s2.api_gate_exercised=no` | `s2.verdict=limited` |
+| Android 10 writes a line under a platform Bluetooth tag from an app, at each priority, and a string event | yes, all seven plants | `s2.p1`…`s2.p5`, `s2.p3_call=ok` |
+| The words of `am`, `service check` and the dumps' headings on API 29 | read | S2 judged over them |
+| The turn-on on a device, with the flag | ends `failed` at the unanswered `bluetoothOn`, `start` never sent: 2 417 ms on API 34, 1 670 ms on API 29 | `<leg>.turn_on_bluetooth_on=missing` |
+| The scenario harness mounts the map on both images; the app comes back from the permission question | yes | `READY` in all three legs |
+| Which buffers a shell reads | the five documented, and `kernel`: main, system, radio, events and kernel hand a shell an entry; crash, stats and security are readable and empty | `probe.buffers_readable=5`, `probe.buffer_<name>_read` |
+| A shell can set `log.tag.BluetoothGatt` | yes | `probe.setprop_log_tag=yes` |
+| A shell is told the adapter's address and name | yes, the address a six-pair one | `probe.adapter_address_readable=yes`, `…_shape=mac`, `…_label_readable=yes` |
+| The three dumps' skeletons | kept, one of them failing the scanner (below) | `probe.dump_*=kept` |
+| The adapter | on at once, again | `probe.bt_on=yes`, `probe.bt_on_after_s=0` |
+| A flag-on package's Bluetooth and connected-device permissions | 8 lines of `dumpsys package` | `<leg>.package_mesh_permissions=8` |
+| S0 | `pass` again; `READY` after 18 s; its gate clean over 5 058 lines | `s0.verdict=pass` |
+| A short drive's device log on API 29 | 1 581 lines from a capture begun at the drive: under the scanner's 2 000 | the scanner's own line |
+
+*What the second run found wrong, and what was done.*
+
+- **The app has a defect, and the probe found it.** The suite failed
+  with `thrown=assertion` and frames in Flutter's
+  `draggable_scrollable_sheet.dart`: when mesh availability turns true
+  the map's layer list re-inflates the circles sheet with a controller
+  that is already attached. That is in `haven/lib` and is fixed
+  there, not here; nothing of the oracle changed for it. The failure
+  lines did what they were built for — the transcript was withheld
+  again (the framework's GitHub link, `url_alone_host=github.com`, now
+  seen and not inferred) and the cause was read all the same. What did
+  change: the red sentence now says whose failure a failed suite is —
+  the app's or the target's, never the platform's — and tells it from a
+  drive the tool ended.
+- **A skeleton leaked a shape** (`dump-bluetooth-manager`, line 219,
+  `[S10]`). The key rule masked `name: v` and `name=v` and left `Name
+  : v`, `name = v` and `name:v`; and where it masked a value to `<x>`
+  the scanner, which knows `<redacted>` and not `<x>`, fired anyway.
+  The rule now takes a key followed by `:` or `=` with or without
+  space, and a key with its value behind a colon in the same word, and
+  writes the scanner's own placeholder; the fixture is held to the
+  scanner's rule and placeholder list as read from its source, and was
+  run under the real scanner (five hits before, none after).
+- **One leak cost the whole artifact, the verdict file with it.** The
+  exit scan deletes everything it scanned. Each skeleton and the
+  verdict file now pass a gate of their own, so a leak costs the file
+  it is in; the verdict file is written after the directory scan. A
+  red run still uploads its answers.
+- **S2's transcript tripped the scanner on four lines that are not
+  Haven's** (`[S8]`, none in the device log). Decided as above: of a
+  transcript the lane publishes the tool's lines and Haven's own, and
+  reads and reports the rest. What those four lines were is still not
+  known — the raw capture stays on the runner — and the next run names
+  their class and rule (`mesh-transcript (s2): …`).
+- **S2's device log was under the scanner's floor** (1 581 of 2 000),
+  which would have left the leg rc 4 once the leak was gone. The
+  capture began at the drive; it begins before the install now, and
+  holds the install, the barrier's 24 s and the host's reading as well.
+  Whether that reaches 2 000 on API 29 is the next run's to say; the
+  floor is the scanner's and is neither lowered nor re-declared here.
+  *For the owner, if it does not*: a twelve-second drive of a quiet
+  Android 10 may simply not write 2 000 lines, and the choice is then
+  between a longer hold in the target — lines for their own sake — and
+  a floor for this lane's API 29 device log that says what it measured.
+
+*What only a run proves, still*:
 
 | It rests on | If it is false, the run shows |
 |---|---|
-| On API 29, `pm trim-caches 0` and `am wait-for-broadcast-idle` exist, exit 0 and return inside the bound | `MESH-LANE-FAIL (rc 3)`: "the fresh install … did not complete", with the four codes and the guest's own words |
-| The flag-on build's native library loads on API 29 and a `flutter drive` completes there | `s2` red or unusable, with `mesh-failure` lines |
-| The API 29 image declares Bluetooth LE | `s2.api_gate_exercised=no`, `s2.verdict=limited` — an answer |
-| The scenario harness mounts the map on both images with no location disclosure accepted, and no system dialog stands under the turn-on | `mesh-failure` lines with the target's frame; or `UNUSABLE: the turn-on failed without ever asking 'bluetoothOn'` |
-| The app survives the turn-on's permission question and its return to the foreground | the first run's shape again: no `TURN_ON` line, and now the type and frames of what threw |
-| The test binding's messenger passes a message on to the platform through `delegate.send` and sees its reply | `UNUSABLE: the turn-on failed without ever asking 'bluetoothOn'`, or a drive that failed |
-| The words of `am`, of `service check`, and the dumps' headings on API 29 | `am_…=unread`, `bt_service=unread` or `…_dump=unread`, rc 3 |
-| A shell reads the five documented buffers, and `logcat -d -b <name> -t 1` reports as read here | `probe.buffers_readable` below five, or `buffer_<name>_read=unread`: rc 3 |
-| A real dump's skeleton passes the scanner | rc 1, `LEAK: …skel.log` — a value the masking missed |
+| The probe is green once the app's sheet is fixed | `RED (probe): the suite on the device FAILED`, with `mesh-failure` lines |
+| A leg's whole device log reaches the scanner's 2 000 lines on API 29 | `sink class logcat holds N line(s), below its declared floor`, rc 4 |
+| What the four `S8` lines of S2's transcript were | `mesh-transcript (s2): not-published from=<class> rule=S8 lines=<n>` names them; nothing of that kind, and they were Haven's or the tool's: `mesh-leak (s2): file=drive from=…` and a red |
+| A real `dumpsys bluetooth_manager`'s skeleton passes the scanner with the new key rule; the other two did | `LEAK: …skel.log`, `probe.dump_<name>=withheld`, and only that file gone |
+| The scanner accepts a one-file `diag` gate for the verdict file and for the unpublished lines on a runner | the verdict file missing from a red run's artifact; `<leg>.transcript_withheld_rule_hits=unread` |
 | The first-boot step and the drive step's boot, with no AVD cache, stay inside their caps | a step cap, named by the step |
 
 *What the review changed* (independent, of `1a8e782`; each read again

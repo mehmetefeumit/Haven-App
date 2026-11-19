@@ -3693,8 +3693,8 @@ item 6, that address rotation is the build's; §7.1 carries a note now.
 - **M3h, push A, part 2 — the lane** (`docs/BLUETOOTH_MESH_M3_DESIGN.md`
   §O.2's slices S0, the probe and S2; §O.7 for what was built, each
   difference from §O, the probe's answers and where to read them, what
-  an independent review changed, and what the lane's first run on CI
-  settled and found; `.github/workflows/e2e-mesh.yml`,
+  an independent review changed, and what the lane's first two runs on
+  CI settled and found; `.github/workflows/e2e-mesh.yml`,
   `tooling/e2e/ci/run-mesh-lever.sh`,
   `haven/integration_test/mesh_lever_test.dart`,
   `tooling/e2e/ci/build-integration-apks.sh`,
@@ -3702,22 +3702,25 @@ item 6, that address rotation is the build's; §7.1 carries a note now.
   `haven/lib`, the app's Android sources, `haven-core` or the bridge
   crate. **The lane as it now stands has not run.** Its first run, CI
   43586443164 of `1a8e782`: S0 passed; the probe was red, its target
-  ending inside its turn-on; S2 never installed. **What is built.** One
-  drive target for three legs, on the scenario harness every lane uses,
-  which reports facts as its own `debugPrint`s and holds while the host
-  reads the device: on API 34 a build without the flag (**S0**: every
-  one of the radio's eleven methods has no native end, no mesh button,
-  no component, no permission, nothing for `am` to start) and a build
-  with it (**the probe**: each measurement of §O.2.3 taken and written
-  as a fixed word or a number, and the turn-on a user makes ending
-  `failed` with nothing stored); on API 29 the build with the flag
-  (**S2**: Haven installs and starts on Android 10, `supported` is
-  false, nothing of the mesh is offered). Seven lines are planted from
-  Haven's process through `liblog` — under a platform Bluetooth tag at
-  three priorities and under two more such tags, under `flutter` by the
-  same call, and a string event — and read back by pid and tag. Where a
-  turn-on ended is seen, not inferred: the target watches its own
-  channel traffic, and a turn-on of a flag-on build must have asked
+  ending inside its turn-on; S2 never installed. Its second, 44486540042
+  of `5fd026e`: S0 passed; the probe took every measurement and was red
+  for a defect of the app's that it found; S2 judged `limited` and was
+  red for four lines of platform text in its drive transcript. **What is
+  built.** One drive target for three legs, on the scenario harness
+  every lane uses, which reports facts as its own `debugPrint`s and
+  holds while the host reads the device: on API 34 a build without the
+  flag (**S0**: every one of the radio's eleven methods has no native
+  end, no mesh button, no component, no permission, nothing for `am` to
+  start) and a build with it (**the probe**: each measurement of §O.2.3
+  taken and written as a fixed word or a number, and the turn-on a user
+  makes ending `failed` with nothing stored); on API 29 the build with
+  the flag (**S2**: Haven installs and starts on Android 10, `supported`
+  is false, nothing of the mesh is offered). Seven lines are planted
+  from Haven's process through `liblog` — under a platform Bluetooth tag
+  at three priorities and under two more such tags, under `flutter` by
+  the same call, and a string event — and read back by pid and tag.
+  Where a turn-on ended is seen, not inferred: the target watches its
+  own channel traffic, and a turn-on of a flag-on build must have asked
   `bluetoothOn`, been answered by nobody, and never sent `start`. What
   the host reads of the app it reads at the target's cue; what the probe
   reads of the platform it reads after the drive, whatever became of the
@@ -3798,35 +3801,67 @@ item 6, that address rotation is the build's; §7.1 carries a note now.
   is no snapshot boot, so neither of §O.2.3's fall-backs is built, and
   the lane keeps no AVD cache; S2 leaves Bluetooth as it boots. Q-22 is
   built as (a), and S0 and the probe share a job, so a probe that could
-  not measure reddens it. **Proved here**: the runner's self-test, 530
-  checks under `gawk` and `mawk`, the first run's shapes among them;
-  mutation passes over its readers and oracle — 155 changes, 153 failing
-  a fixture; of the two that did not, one — a marker of the target's own
-  under another tag — was given a fixture and fails it now, and the
-  other was a test the slice of the events buffer already makes
-  redundant, which is removed; the install helper's self-test, 95
-  fixtures, and eleven changes to its new branches each failing one; a
-  synthetic set of everything the lane publishes clean under the real
+  not measure reddens it. **Settled by the second run** (§O.7 has the
+  table): the Android 10 install barrier answers 0/0 inside 24 s; the
+  flag-on build installs, loads and runs on Android 10 and reaches its
+  cue in 12 s; the API 29 image declares no Bluetooth LE and has no
+  Bluetooth service, so S2 is `limited` there and the Android 11 gate
+  rests on its JVM test; Android 10 writes all seven plants; a turn-on
+  on a device ends `failed` at the unanswered `bluetoothOn`, `start`
+  never sent, on both releases; a shell reads the five documented
+  buffers and `kernel`, sets the log property, and is told the adapter's
+  address and name; the adapter is on at once. **Found by the second
+  run, and what was done.** *The probe found a defect of the app's*:
+  when mesh availability turns true the map re-inflates the circles
+  sheet with a controller already attached (`thrown=assertion`,
+  Flutter's `draggable_scrollable_sheet.dart`) — in `haven/lib` and
+  fixed there, not here; the lane's red sentence now says a failed suite
+  is the app's failure and not the platform's. *A dump's skeleton leaked
+  a shape* (`Name : v`, `name = v`, `name:v`; `[S10]`): the key rule
+  takes all three and writes the scanner's own placeholder, held by a
+  fixture to the scanner's rule as read from its source and run under
+  the real scanner. *One leak cost every clean log of the run and the
+  verdict file*: each skeleton and the verdict file have a gate of their
+  own now, and the verdict file is written after the directory scan, so
+  a red run uploads its answers. *S2's transcript tripped the scanner on
+  four lines that are not Haven's* (`[S8]`): `flutter drive` forwards
+  every line of the app's pid, and a transcript has no tags for the
+  scanner to tell the plugins' and the runtime's lines from Haven's by,
+  as it does in the device log; so of a transcript the lane publishes
+  the tool's lines and the lines under a tag the scanner's policy calls
+  Haven's own, and hands the rest to the scanner unpublished, reporting
+  each hit by the class of its line and its rule — an answer, not a
+  verdict; what the four lines were, the next run names. *S2's device
+  log was under the scanner's floor* (1 581 of 2 000 lines): the capture
+  begins before the install now, not at the drive; the floor is not
+  touched, and if the whole leg still falls short §O.7 has the question
+  for the owner. **Proved here**: the runner's self-test, 583 checks
+  under `gawk` and `mawk`, both runs' shapes among them; mutation passes
+  over its readers and oracle — 181 changes, 180 failing a fixture, the
+  one that did not given one; the same helpers run under the real
+  scanner on this machine; the install helper's self-test, 95 fixtures;
+  a synthetic set of everything the lane publishes clean under the real
   scanner, the raw dump its skeletons came from seven structural hits,
   and the framework's closing URL one `S13`; every step of the guards
-  job run here (all 180 `run:` steps pass; the other two, the checkout
+  job run here (all 189 `run:` steps pass; the other two, the checkout
   and the Dart setup, are `uses:` steps); every lane-policing guard and
-  its self-test, the 67 source guards, the privacy invariants, `flutter
-  analyze` and the whole Dart suite (6201 passed, 5 skipped, as before
-  it) — in which `test/e2e/app_lifecycle_test.dart` lists the target
-  among those whose lane compiles the live-sync engine out, and holds
-  each job of a two-job lane to that. **Also found by the first run**:
-  the guards job failed on a UUID written out in the runner's skeleton
-  fixture, which `check_no_committed_secrets.sh` reads as a committed
-  key; it is put together at run time now. That guard is outside the
-  pre-commit set, which is why every step of the guards job is run here
-  now. **Only a run proves, still** (§O.7's table): the Android 10
-  install barrier; that the flag-on library loads and a drive completes
-  on API 29, and whether that image has Bluetooth LE; that the app comes
-  back from the turn-on's permission question; the words of `am` and
-  `service check` and the dumps' headings on API 29; the buffers; that a
-  real dump's skeleton passes the scanner. **Also changed**: the guards
-  job's cap, 20 to 30 minutes (17 min 04 s on `1b5fa0e`);
+  its self-test, the source guards, the privacy invariants, `flutter
+  analyze` and the Dart suite (`test/e2e` and `test/lints`, 769 passed;
+  the whole suite, 6201 passed and 5 skipped, before the second run's
+  changes, which touch no Dart) — in which
+  `test/e2e/app_lifecycle_test.dart` lists the target among those whose
+  lane compiles the live-sync engine out, and holds each job of a
+  two-job lane to that. **Also found by the first run**: the guards job
+  failed on a UUID written out in the runner's skeleton fixture, which
+  `check_no_committed_secrets.sh` reads as a committed key; it is put
+  together at run time now. That guard is outside the pre-commit set,
+  which is why every step of the guards job is run here now. **Only a
+  run proves, still** (§O.7's table): that the probe is green once the
+  app's sheet is fixed; that a leg's whole device log reaches the
+  scanner's floor on API 29; what the four lines of S2's transcript
+  were; that a real `dumpsys bluetooth_manager`'s skeleton passes the
+  scanner with the new rule. **Also changed**: the guards job's cap, 20
+  to 30 minutes (17 min 04 s on `1b5fa0e`);
   `docs/E2E_TROUBLESHOOTING.md` failure mode 28.
 
 ### Proposed CLAUDE.md wording (owner to approve)
