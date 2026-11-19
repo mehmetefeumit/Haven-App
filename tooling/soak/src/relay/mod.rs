@@ -515,7 +515,7 @@ async fn apply_inner(
             Ok(())
         }
         Fault::DropClass(class) => {
-            edit_all(endpoints, |state| state.drop_class = Some(class));
+            edit_all(endpoints, |state| state.drop_classes.add(class));
             Ok(())
         }
         Fault::ClampLimit(n) => {

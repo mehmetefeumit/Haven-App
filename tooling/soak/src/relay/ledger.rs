@@ -40,7 +40,7 @@
 //! silent drop.
 
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -335,6 +335,11 @@ struct Inner {
     /// socket never carried it" is a different fact from "the plane never
     /// wrote it".
     delivered: HashMap<EventId, HashMap<Option<DeviceTag>, usize>>,
+    /// The endpoints that withheld an `EVENT` frame of a dropped class, per
+    /// event: the partition's own evidence, which an absence from
+    /// [`Self::delivered`] is not — that is also what a frame still in flight
+    /// looks like.
+    dropped: HashMap<EventId, HashSet<Option<DeviceTag>>>,
     /// `EVENT` frames the client sent towards the relay, per event.
     published: HashMap<EventId, usize>,
     /// Events this plane forged onto a subscription, in injection order.
@@ -468,6 +473,19 @@ impl Ledger {
                 .delivered
                 .get(event_id)
                 .is_some_and(|endpoints| endpoints.contains_key(&Some(device)))
+        })
+    }
+
+    /// Whether `device`'s OWN endpoint withheld an `EVENT` frame naming
+    /// `event_id` under a dropped class: the relay sent it towards that
+    /// device, and the partition kept it from the socket.
+    #[must_use]
+    pub fn dropped_at(&self, device: DeviceTag, event_id: &EventId) -> bool {
+        self.with(|inner| {
+            inner
+                .dropped
+                .get(event_id)
+                .is_some_and(|endpoints| endpoints.contains(&Some(device)))
         })
     }
 
@@ -655,6 +673,12 @@ impl Ledger {
         });
     }
 
+    pub(crate) fn note_dropped(&self, device: Option<DeviceTag>, event_id: EventId) {
+        self.with(|inner| {
+            inner.dropped.entry(event_id).or_default().insert(device);
+        });
+    }
+
     pub(crate) fn note_injected(&self, event: &Event) {
         self.with(|inner| {
             inner.tag(event.id);
@@ -803,6 +827,7 @@ impl fmt::Debug for Ledger {
                 .field("acked", &sim_magnitude(inner.acked.len()))
                 .field("refused", &sim_magnitude(inner.refusals.len()))
                 .field("delivered", &sim_magnitude(inner.delivered.len()))
+                .field("dropped", &sim_magnitude(inner.dropped.len()))
                 .field("published", &sim_magnitude(inner.published.len()))
                 .field("injected", &sim_magnitude(inner.injected.len()))
                 .field("reqs", &sim_magnitude(inner.reqs.len()))
@@ -944,6 +969,27 @@ mod tests {
             "the plane-wide count is the sum over every endpoint"
         );
         assert_eq!(ledger.delivered(&an_event_id(2)), 1);
+    }
+
+    #[test]
+    fn a_drop_is_answered_per_endpoint_and_is_never_a_delivery() {
+        let ledger = Ledger::new();
+        let (alice, bob) = (DeviceTag::new(0), DeviceTag::new(1));
+        ledger.note_dropped(Some(alice), an_event_id(1));
+        ledger.note_dropped(None, an_event_id(2));
+        assert!(ledger.dropped_at(alice, &an_event_id(1)));
+        assert!(
+            !ledger.dropped_at(bob, &an_event_id(1)),
+            "another endpoint's drop says nothing about this one"
+        );
+        assert!(
+            !ledger.dropped_at(alice, &an_event_id(2)),
+            "a drop at the canonical endpoint is no device's"
+        );
+        assert!(
+            !ledger.delivered_to(alice, &an_event_id(1)) && ledger.delivered(&an_event_id(1)) == 0,
+            "a withheld frame never went out"
+        );
     }
 
     #[test]

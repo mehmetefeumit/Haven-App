@@ -1928,6 +1928,75 @@ async fn a_dropped_class_is_withheld_from_one_devices_endpoint_and_carried_to_th
     );
 }
 
+/// Waits until `device`'s own endpoint has withheld `event_id` under a
+/// dropped class: the drop's own record, which an absence of a delivery is not.
+async fn dropped_reached(plane: &SimRelay, device: DeviceTag, event_id: &EventId) -> bool {
+    let ledger = plane.ledger().clone();
+    let event_id = *event_id;
+    reaching(WIRE_BOUND, 1, move || {
+        usize::from(ledger.dropped_at(device, &event_id))
+    })
+    .await
+        == 1
+}
+
+/// S02's partition arms the application class and then the handshake class on
+/// one endpoint. The second joins the first, and only the heal lifts them: a
+/// replacement would lift the application drop while one of its frames could
+/// still be queued for the socket, and that frame would cross after the
+/// partition was declared (CI run 44516525405).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_second_dropped_class_joins_the_first_until_the_heal() {
+    let (alice, bob) = (DeviceTag::new(0), DeviceTag::new(1));
+    let mut plane = provisioned_plane(&[alice, bob]).await;
+    let _alices = client_on(&plane, alice, 0).await;
+    let bobs = client_on(&plane, bob, 1).await;
+    for class in [DropClass::Application, DropClass::Handshake] {
+        plane
+            .apply_for(alice, Fault::DropClass(class))
+            .await
+            .expect("the fault applies");
+    }
+
+    let location = an_application_445();
+    let commit = a_commit_445();
+    publish_on(&bobs, plane.url_for(bob), &location).await;
+    publish_on(&bobs, plane.url_for(bob), &commit).await;
+    assert!(
+        dropped_reached(&plane, alice, &location.id).await
+            && dropped_reached(&plane, alice, &commit.id).await,
+        "the partitioned endpoint withholds both classes: the second fault lifted the first"
+    );
+    assert!(
+        !plane.ledger().delivered_to(alice, &location.id)
+            && !plane.ledger().delivered_to(alice, &commit.id),
+        "a withheld frame is never also a delivery"
+    );
+    assert!(
+        marker_reached(&plane, bob, &commit.id).await
+            && plane.ledger().delivered_to(bob, &location.id),
+        "the other device's endpoint carries both, untouched"
+    );
+
+    plane
+        .apply_for(alice, Fault::Heal)
+        .await
+        .expect("the heal applies");
+    let healed_location = an_application_445();
+    let healed_commit = a_commit_445();
+    publish_on(&bobs, plane.url_for(bob), &healed_location).await;
+    publish_on(&bobs, plane.url_for(bob), &healed_commit).await;
+    assert!(
+        marker_reached(&plane, alice, &healed_location.id).await
+            && marker_reached(&plane, alice, &healed_commit.id).await,
+        "the heal lifts every class the endpoint was dropping"
+    );
+    assert!(
+        plane.faults_applied() == 2,
+        "two classes are two faults, and the heal is neither"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn healing_one_devices_endpoint_restores_it_and_leaves_the_others_partition_standing() {
     let (alice, bob) = (DeviceTag::new(0), DeviceTag::new(1));
