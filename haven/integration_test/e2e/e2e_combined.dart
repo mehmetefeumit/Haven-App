@@ -1870,19 +1870,27 @@ void main() {
           );
           final read = open.read(invitationPollStatusProvider);
           expect(
-            (read.outcome, read.served, read.refused),
-            (
-              // Flag-on, the engine has already taken the Welcome in, so the
-              // page's read finds nothing new.
-              liveSyncEnabled
-                  ? InvitationPollOutcome.upToDate
-                  : InvitationPollOutcome.newInvites,
-              2,
-              0,
-            ),
+            (read.served, read.refused),
+            (2, 0),
             reason:
                 '[INV] the gated relay heads the inbox list: the page must '
                 'answer its challenge and be served by it and the plain one.',
+          );
+          expect(
+            read.outcome,
+            liveSyncEnabled
+                ? InvitationPollOutcome.upToDate
+                : anyOf(
+                    InvitationPollOutcome.newInvites,
+                    InvitationPollOutcome.upToDate,
+                  ),
+            reason: liveSyncEnabled
+                ? '[INV] the engine took the Welcome in before the page '
+                      'opened, so the page read finds nothing new.'
+                : "[INV] MapShell's background invitation poller, armed at "
+                      'mount, may take the Welcome before the page reads it; '
+                      'either way the card above is the invitation, so the '
+                      'read is new or up to date, never a failure.',
           );
           expect(
             find.byKey(WidgetKeys.invitationsInboxNotice),

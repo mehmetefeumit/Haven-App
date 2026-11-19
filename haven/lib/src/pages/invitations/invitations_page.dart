@@ -7,6 +7,7 @@ library;
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/settings/relay_settings_page.dart';
@@ -62,10 +63,46 @@ class _InvitationsPageState extends ConsumerState<InvitationsPage> {
     _refresh();
   }
 
+  /// Speaks the notice of a refresh that was refused or could not save an
+  /// invitation, once as it settles: the ring announces relay results only,
+  /// which for an invitation not saved reads as success.
+  void _announceLoss(
+    InvitationPollStatus? previous,
+    InvitationPollStatus next,
+  ) {
+    if (previous?.phase == InvitationPollPhase.settled ||
+        next.phase != InvitationPollPhase.settled) {
+      return;
+    }
+    if (next.outcome
+        case InvitationPollOutcome.refused || InvitationPollOutcome.notSaved) {
+      final message = _noticeFor(AppLocalizations.of(context), next)!.message;
+      // Sent after this frame's post-frame callbacks, where the ring sends
+      // its own: queued politely behind it, the notice is heard in full
+      // rather than talked over.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        scheduleMicrotask(() {
+          if (!mounted) return;
+          unawaited(
+            SemanticsService.sendAnnouncement(
+              View.of(context),
+              message,
+              Directionality.of(context),
+            ),
+          );
+        });
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
     final invitationsAsync = ref.watch(pendingInvitationsProvider);
+    ref.listen<InvitationPollStatus>(
+      invitationPollStatusProvider,
+      _announceLoss,
+    );
     // Drives the app-bar refresh ring (per-relay slots plus the no-inbox
     // state) and the notice above the list.
     final pollStatus = ref.watch(invitationPollStatusProvider);
@@ -120,34 +157,36 @@ class _InvitationsPageState extends ConsumerState<InvitationsPage> {
 
   /// The notice a settled refresh calls for, or `null` when it read every
   /// relay and nothing failed.
-  Widget? _noticeFor(AppLocalizations l10n, InvitationPollStatus status) =>
-      switch (status.outcome) {
-        InvitationPollOutcome.refused => _InboxNotice(
-          message: l10n.invitationsNoticeRefused(status.refused),
-          actionLabel: l10n.invitationsNoticeOpenRelaySettings,
-          onAction: _openInboxSettings,
-        ),
-        InvitationPollOutcome.notSaved => _InboxNotice(
-          message: l10n.invitationsNoticeNotSaved(status.notSaved),
-          actionLabel: l10n.commonTryAgain,
-          onAction: _refresh,
-        ),
-        InvitationPollOutcome.offline => _InboxNotice(
-          message: l10n.invitationsNoticeOffline,
-          actionLabel: l10n.commonTryAgain,
-          onAction: _refresh,
-        ),
-        InvitationPollOutcome.incomplete => _InboxNotice(
-          message: l10n.invitationsNoticeIncomplete,
-          actionLabel: l10n.invitationsNoticeOpenRelaySettings,
-          onAction: _openInboxSettings,
-        ),
-        // The ring itself routes a missing inbox to Relay settings.
-        InvitationPollOutcome.noInbox ||
-        InvitationPollOutcome.newInvites ||
-        InvitationPollOutcome.upToDate ||
-        null => null,
-      };
+  _InboxNotice? _noticeFor(
+    AppLocalizations l10n,
+    InvitationPollStatus status,
+  ) => switch (status.outcome) {
+    InvitationPollOutcome.refused => _InboxNotice(
+      message: l10n.invitationsNoticeRefused(status.refused),
+      actionLabel: l10n.invitationsNoticeOpenRelaySettings,
+      onAction: _openInboxSettings,
+    ),
+    InvitationPollOutcome.notSaved => _InboxNotice(
+      message: l10n.invitationsNoticeNotSaved(status.notSaved),
+      actionLabel: l10n.commonTryAgain,
+      onAction: _refresh,
+    ),
+    InvitationPollOutcome.offline => _InboxNotice(
+      message: l10n.invitationsNoticeOffline,
+      actionLabel: l10n.commonTryAgain,
+      onAction: _refresh,
+    ),
+    InvitationPollOutcome.incomplete => _InboxNotice(
+      message: l10n.invitationsNoticeIncomplete,
+      actionLabel: l10n.invitationsNoticeOpenRelaySettings,
+      onAction: _openInboxSettings,
+    ),
+    // The ring itself routes a missing inbox to Relay settings.
+    InvitationPollOutcome.noInbox ||
+    InvitationPollOutcome.newInvites ||
+    InvitationPollOutcome.upToDate ||
+    null => null,
+  };
 
   Widget _scroll(Widget? notice, Widget content) => CustomScrollView(
     slivers: [
@@ -174,8 +213,10 @@ class _InvitationsPageState extends ConsumerState<InvitationsPage> {
 /// one action that helps.
 ///
 /// One container, so a screen reader moves through its sentence and its
-/// button together; not a live region, because the ring already announces
-/// the refresh's result and two announcements would talk over each other.
+/// button together. Not a live region: the ring announces each refresh's
+/// relay result, which already tells an offline or unfinished read, and the
+/// page announces the words of a refused or not-saved one once as it settles
+/// (`_announceLoss`); a live region would speak it again, over the ring.
 /// Names no relay: the page never holds a relay URL.
 class _InboxNotice extends StatelessWidget {
   const _InboxNotice({

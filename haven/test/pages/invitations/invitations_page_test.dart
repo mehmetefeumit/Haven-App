@@ -9,6 +9,8 @@
 /// - A failed list read is an error with Retry, never an empty list
 /// - A refresh that did not read every inbox relay in full shows a notice
 ///   with its one action, and one that did shows none
+/// - A refresh that was refused or could not save an invitation announces
+///   the notice once as it settles, after the ring's own announcement
 /// - A tap on the ring while a refresh runs starts a new one, whose result
 ///   is what settles
 library;
@@ -36,6 +38,7 @@ import 'package:haven/src/widgets/common/empty_state.dart';
 import 'package:haven/src/widgets/common/refresh_ring/refresh_ring_button.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import '../../helpers/accessibility_announcements.dart';
 import '../../helpers/localized_app_harness.dart';
 import '../../mocks/mock_circle_service.dart';
 import '../../mocks/mock_profile_service.dart';
@@ -70,23 +73,57 @@ class _FixedPollStatus extends InvitationPollStatusNotifier {
   Future<void> refresh() async => refreshes++;
 }
 
+/// Plays a refresh per call: every slot in flight, then, once [release]
+/// completes, the relays' answers and [settled] in one synchronous run, so
+/// the ring and the page see the settle in the same frame.
+class _ScriptedPollStatus extends InvitationPollStatusNotifier {
+  _ScriptedPollStatus(this.settled);
+
+  final InvitationPollStatus settled;
+  Completer<void> release = Completer<void>();
+
+  @override
+  InvitationPollStatus build() => InvitationPollStatus.idle;
+
+  @override
+  Future<void> refresh() async {
+    state = InvitationPollStatus(
+      phase: InvitationPollPhase.checking,
+      total: settled.slots.length,
+      slots: [for (final _ in settled.slots) RelayRingSlotState.checking],
+    );
+    await release.future;
+    release = Completer<void>();
+    state = InvitationPollStatus(
+      phase: InvitationPollPhase.checking,
+      total: settled.slots.length,
+      slots: settled.slots,
+    );
+    state = settled;
+  }
+}
+
 InvitationPollStatus _settled(
   InvitationPollOutcome outcome, {
   int refused = 0,
   int notSaved = 0,
+  List<RelayRingSlotState> slots = const [
+    RelayRingSlotState.error,
+    RelayRingSlotState.ok,
+  ],
 }) => InvitationPollStatus(
   phase: InvitationPollPhase.settled,
-  total: 2,
+  total: slots.length,
   refused: refused,
   notSaved: notSaved,
-  slots: const [RelayRingSlotState.error, RelayRingSlotState.ok],
+  slots: slots,
   outcome: outcome,
 );
 
 /// The page with the real list provider over [circle] and a fixed refresh
 /// status, plus what Relay settings needs to open without the FFI.
 Widget _buildNoticeApp({
-  required _FixedPollStatus status,
+  required InvitationPollStatusNotifier status,
   MockCircleService? circle,
 }) => ProviderScope(
   overrides: [
@@ -465,6 +502,144 @@ void main() {
         findsOneWidget,
       );
       semantics.dispose();
+    });
+  });
+
+  group('InvitationsPage inbox notice announcement', () {
+    const ok = RelayRingSlotState.ok;
+    const error = RelayRingSlotState.error;
+    const refusedText =
+        "1 inbox relay didn't let Haven read your invitations, so an "
+        "invitation sent only there won't reach you. In Relay settings, "
+        'remove it or add another relay.';
+    const notSavedText =
+        "2 invitations arrived but couldn't be saved on this device.";
+
+    testWidgets('a refresh that was refused or could not save an invitation '
+        'says so once as it settles, after the ring, and again only at the '
+        'next settle', (tester) async {
+      for (final (settled, ring, notice) in [
+        (
+          _settled(InvitationPollOutcome.refused, refused: 1),
+          'Invitations checked on 1 of 2 relays',
+          refusedText,
+        ),
+        (
+          // Every relay served the read, so the ring speaks of success: the
+          // notice is the only place the lost invitation is told.
+          _settled(
+            InvitationPollOutcome.notSaved,
+            notSaved: 2,
+            slots: const [ok, ok],
+          ),
+          'Invitations checked on every relay',
+          notSavedText,
+        ),
+      ]) {
+        final announced = captureAccessibilityAnnouncements(tester);
+        final status = _ScriptedPollStatus(settled);
+        await tester.pumpWidget(_buildNoticeApp(status: status));
+        await tester.pump();
+        expect(announced, isEmpty, reason: notice);
+
+        status.release.complete();
+        await tester.pump();
+        expect(announced, [ring, notice]);
+
+        // Rebuilds of a settled page say nothing more.
+        tester.element(find.byType(InvitationsPage)).markNeedsBuild();
+        await tester.pumpAndSettle();
+        expect(announced, [ring, notice]);
+
+        await tester.tap(find.byKey(WidgetKeys.invitationsRefresh));
+        await tester.pump();
+        status.release.complete();
+        await tester.pump();
+        expect(announced, [ring, notice, 'Checking relays', ring, notice]);
+        await tester.pumpWidget(const SizedBox());
+      }
+    });
+
+    testWidgets('a refresh that lost no invitation leaves the ring to speak '
+        'alone', (tester) async {
+      for (final (settled, ring) in [
+        (
+          _settled(InvitationPollOutcome.upToDate, slots: const [ok, ok]),
+          ['Invitations checked on every relay'],
+        ),
+        (
+          _settled(InvitationPollOutcome.newInvites, slots: const [ok, ok]),
+          ['Invitations checked on every relay'],
+        ),
+        (
+          _settled(InvitationPollOutcome.offline, slots: const [error, error]),
+          ["Couldn't check invitations on any relay"],
+        ),
+        (
+          _settled(InvitationPollOutcome.incomplete),
+          ['Invitations checked on 1 of 2 relays'],
+        ),
+        (
+          _settled(InvitationPollOutcome.noInbox, slots: const []),
+          <String>[],
+        ),
+      ]) {
+        final announced = captureAccessibilityAnnouncements(tester);
+        final status = _ScriptedPollStatus(settled);
+        await tester.pumpWidget(_buildNoticeApp(status: status));
+        await tester.pump();
+        status.release.complete();
+        await tester.pumpAndSettle();
+        expect(announced, ring, reason: '${settled.outcome}');
+        await tester.pumpWidget(const SizedBox());
+      }
+    });
+
+    testWidgets('a real refresh one relay refused is told after the ring '
+        'counts it', (tester) async {
+      final announced = captureAccessibilityAnnouncements(tester);
+      final relay = MockRelayService()
+        ..fetchGiftWrapsPerRelayHandler = (relays) async => [
+          RelayGiftWrapFetch(
+            relayUrl: relays.single,
+            read: relays.single == 'wss://a.example.com'
+                ? InboxRead.refused
+                : InboxRead.served,
+            events: const [],
+          ),
+        ];
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            pendingInvitationsProvider.overrideWith((ref) async => []),
+            profileServiceProvider.overrideWithValue(MockProfileService()),
+            circleServiceProvider.overrideWithValue(MockCircleService()),
+            identityProvider.overrideWith(
+              (ref) async => Identity(
+                pubkeyHex: 'ab' * 32,
+                npub: 'npub1test',
+                createdAt: DateTime(2024),
+              ),
+            ),
+            relayServiceProvider.overrideWithValue(relay),
+            inboxRelaysProvider.overrideWith(
+              () => _StubInboxRelays(const [
+                'wss://a.example.com',
+                'wss://b.example.com',
+              ]),
+            ),
+          ],
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: InvitationsPage(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text(refusedText), findsOneWidget);
+      expect(announced, ['Invitations checked on 1 of 2 relays', refusedText]);
     });
   });
 
