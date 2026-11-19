@@ -217,7 +217,7 @@ impl DropClass {
     }
 
     /// The digest discriminant.
-    const fn code(self) -> u8 {
+    pub(crate) const fn code(self) -> u8 {
         match self {
             Self::Application => 0,
             Self::Handshake => 1,

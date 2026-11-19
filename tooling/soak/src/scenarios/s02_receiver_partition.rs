@@ -18,14 +18,15 @@
 //! its one advance on its own `EOSE`, and no generation was opened), so the
 //! relay replays everything the device missed.
 //!
-//! An endpoint holds ONE dropped class at a time, so the full partition is two
-//! phases — the application class first, then the handshake class, each armed
-//! ahead of the traffic it withholds. The second phase is also what makes both
-//! absences at the victim's endpoint FINAL facts rather than races: a fix
-//! published after the commit crosses that endpoint (its class is no longer
-//! dropped), and one connection's frames are written in order, so once that fix
-//! is on the ledger neither the first fix nor the commit is merely late. Every
-//! partition canary is read behind that marker.
+//! The full partition is two phases — the application class first, then the
+//! handshake class ADDED to it, each armed ahead of the traffic it withholds —
+//! and nothing is lifted until the heal. That is what makes both absences at
+//! the victim's endpoint FINAL facts rather than races: the endpoint decides a
+//! frame's fate when it writes it, so a class lifted while one of its frames
+//! was still queued behind a slow socket would let that frame cross after the
+//! partition was declared (CI run 44516525405 lost the first canary so). Each
+//! canary reads the endpoint's own record of the drop, so an absence is never
+//! merely "not yet".
 //!
 //! # `commit-class-only` is the discriminator's control
 //!
@@ -278,39 +279,37 @@ async fn partitioned<T: TimelineSink, L: LogDrain>(
     let probe_a = publish_fix(world, publisher, circle_tag, 1).await?;
     let witness_took_a = await_delivery(world, witness, circle_tag, witness_before, bound).await?
         && carried_to(world, witness, &probe_a.id, bound).await?;
+    let dropped_a = dropped_to(world, victim, &probe_a.id, bound).await?;
     cursors.push(cursor_of(world, victim, &stream)?);
 
-    // Phase 2: the handshake class replaces it, ahead of the commit.
+    // Phase 2: the handshake class joins it, ahead of the commit.
     aim(world, victim, Fault::DropClass(DropClass::Handshake)).await?;
     let commit = confirmed_commit(world, publisher, circle_tag, "withheld").await?;
     let ahead = await_condition(bound, || async {
         Ok(epoch_of(world, witness, &group).await? > epoch_of(world, victim, &group).await?)
     })
     .await?;
-    // The fix published AFTER the commit is the witness's "throughout" and the
-    // victim endpoint's marker at once (see the module docs).
+    let dropped_commit = dropped_to(world, victim, &commit.id, bound).await?;
+    // The fix published AFTER the commit is the witness's "throughout".
     let witness_before = deliveries_for(world.device(witness)?, circle_tag);
-    let probe_b = publish_fix(world, publisher, circle_tag, 2).await?;
+    let _probe_b = publish_fix(world, publisher, circle_tag, 2).await?;
     let witness_took_b = await_delivery(world, witness, circle_tag, witness_before, bound).await?;
-    let marker = carried_to(world, victim, &probe_b.id, bound).await?;
     // 1. The ENV-13 control: the witness folded the first fix and its own
-    //    endpoint on every plane carried it, while the victim's endpoint carried
-    //    nothing and its bus folded nothing. Read only now, behind the marker:
-    //    an absence read before a later frame crossed the same connection is
-    //    "not yet", not "withheld". The victim's bus stays at its phase-1 count
-    //    because the one fix that DID cross is sealed above its epoch.
+    //    endpoint on every plane carried it, while the victim's endpoint
+    //    withheld it on every plane, carried nothing, and its bus folded
+    //    nothing.
     canaries.check(
         witness_took_a
-            && marker
+            && dropped_a
             && withheld_from(world, victim, &probe_a.id)
             && deliveries_for(world.device(victim)?, circle_tag) == victim_before,
     );
-    // 2. The victim is strictly behind, the commit never crossed its endpoint
-    //    (final, per the marker), and the witness kept receiving after it.
+    // 2. The victim is strictly behind, its endpoint withheld the commit and
+    //    never carried it, and the witness kept receiving after it.
     canaries.check(
         ahead
             && witness_took_b
-            && marker
+            && dropped_commit
             && withheld_from(world, victim, &commit.id)
             && epoch_of(world, victim, &group).await? < epoch_of(world, witness, &group).await?,
     );
@@ -415,6 +414,23 @@ async fn carried_to<T: TimelineSink, L: LogDrain>(
             .relays()
             .iter()
             .all(|plane| plane.ledger().delivered_to(device, event_id)))
+    })
+    .await
+}
+
+/// Waits, bounded, for `device`'s own endpoint on every plane to have withheld
+/// `event_id` under a dropped class.
+async fn dropped_to<T: TimelineSink, L: LogDrain>(
+    world: &ScenarioWorld<T, L>,
+    device: DeviceTag,
+    event_id: &EventId,
+    bound: Duration,
+) -> Result<bool, RigError> {
+    await_condition(bound, || async {
+        Ok(world
+            .relays()
+            .iter()
+            .all(|plane| plane.ledger().dropped_at(device, event_id)))
     })
     .await
 }

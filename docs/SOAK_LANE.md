@@ -365,12 +365,14 @@ sweep, because an absence window may never be scaled or shortened.
 ### What S02 deliberately does not assert
 
 S02's two arms grade what Tier 1 CAN: a receiver whose ENGINE endpoint drops
-one class of frame at a time keeps the relay's store and acknowledgements
-intact, the unpartitioned witness keeps folding the publisher's fixes
-throughout, the commit never crosses the partitioned endpoint (final, because a
-fix published after it does cross and one connection's frames are written in
-order), and a pause-and-resume recovers the commit from a cursor that never
-went backwards. The catalogue's "the victim recovers no location published
+classes of frame keeps the relay's store and acknowledgements intact, the
+unpartitioned witness keeps folding the publisher's fixes throughout, the
+commit never crosses the partitioned endpoint (final, because the endpoint
+records each frame it withholds and a class it drops is lifted only by the
+heal — a second `DropClass` joins the first rather than replacing it, which
+would let a frame of the first still queued for the socket cross after the
+partition was declared, as CI run 44516525405 did), and a
+pause-and-resume recovers the commit from a cursor that never went backwards. The catalogue's "the victim recovers no location published
 during the partition" is NOT asserted: it needs the TTL horizon, and expiry is
 judged on WALL clocks — the relay double and `nostr-relay-pool` — on the wall
 side of the rig's clock partition, so no

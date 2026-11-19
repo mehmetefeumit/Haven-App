@@ -160,8 +160,11 @@ pub struct FaultState {
     pub closed: Option<ClosedPrefix>,
     /// The largest `EVENT` this plane forwards, when one is capped.
     pub max_event_bytes: Option<usize>,
-    /// The class of `EVENT` frame this endpoint withholds, when one is.
-    pub drop_class: Option<DropClass>,
+    /// The classes of `EVENT` frame this endpoint withholds. Each
+    /// `DropClass` fault adds one and only a heal lifts them: replacing one
+    /// class with another would let a frame of the first, still queued behind
+    /// a slow socket, cross after its partition was declared.
+    pub drop_classes: DropClasses,
     /// The most events a stored-event page carries, when pages are clamped.
     pub clamp_limit: Option<usize>,
     /// The `REQ` each connection has refused, when one is.
@@ -183,8 +186,24 @@ pub struct FaultState {
 impl FaultState {
     /// Whether an `EVENT` frame of `class` is withheld by this state.
     fn drops(self, class: Option<DropClass>) -> bool {
-        (self.drop_class.is_some() && self.drop_class == class)
-            || (self.gate_reads && class == Some(DropClass::GiftWrap))
+        class.is_some_and(|class| {
+            self.drop_classes.contains(class) || (self.gate_reads && class == DropClass::GiftWrap)
+        })
+    }
+}
+
+/// A set of [`DropClass`]es.
+#[derive(Clone, Copy, Default)]
+pub struct DropClasses(u8);
+
+impl DropClasses {
+    /// Adds `class`.
+    pub const fn add(&mut self, class: DropClass) {
+        self.0 |= 1 << class.code();
+    }
+
+    const fn contains(self, class: DropClass) -> bool {
+        self.0 & (1 << class.code()) != 0
     }
 }
 
@@ -1068,7 +1087,11 @@ async fn write_forged(json: &str, to_client: &mut OwnedWriteHalf, endpoint: Endp
         event,
     }) = &message
     {
-        if !endpoint.opened(subscription_id) || endpoint.faults().drops(DropClass::of(event)) {
+        if !endpoint.opened(subscription_id) {
+            return true;
+        }
+        if endpoint.faults().drops(DropClass::of(event)) {
+            ledger.note_dropped(endpoint.device, event.id);
             return true;
         }
     }
@@ -1105,8 +1128,10 @@ async fn write_event(
 ) -> bool {
     let faults = endpoint.faults();
     if faults.drops(class) {
-        // Not recorded: the frame never went out, and a ledger that counted
-        // it would hand the partition arm the delivery it is asserting away.
+        // Recorded as dropped, never as delivered: the frame never went out,
+        // and a ledger that counted it would hand the partition arm the
+        // delivery it is asserting away.
+        endpoint.ledger.note_dropped(endpoint.device, event_id);
         return true;
     }
     let copies = if faults.double_events { 2 } else { 1 };
@@ -1148,10 +1173,8 @@ mod tests {
     fn a_state_drops_exactly_the_class_it_was_armed_with() {
         use crate::nemesis::types::DropClass;
 
-        let state = FaultState {
-            drop_class: Some(DropClass::Application),
-            ..FaultState::default()
-        };
+        let mut state = FaultState::default();
+        state.drop_classes.add(DropClass::Application);
         assert!(state.drops(Some(DropClass::Application)));
         assert!(!state.drops(Some(DropClass::Handshake)));
         assert!(
