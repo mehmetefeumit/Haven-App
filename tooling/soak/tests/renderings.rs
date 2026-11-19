@@ -254,6 +254,7 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
         CapturedLine, CircleTag, DeviceTag, EventTag, KillKind, PublishVerdict, RelayTag,
         ReopenReport, RigError, SessionStoreUse, SimKind, Step, TimelineRecord, Wait, WorldId,
     };
+    use haven_soak::rig::{Keying, StoreDir};
     use haven_soak::scenarios::{Absence, ScenarioReport, WithheldAcks};
     use haven_soak::timeline::{read_lines, Snapshot, Timeline};
     use haven_soak::verdict::{RunVerdict, VerdictError, Violation};
@@ -1155,6 +1156,28 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
                 reopen: Duration::from_millis(90),
                 engine_restarted: true,
             }
+        ),
+    );
+
+    // rig/store.rs — key material and a path, each planted with a needle.
+    add(
+        &mut out,
+        "rig/store.rs::Keying",
+        format!(
+            "{:?} {:?}",
+            Keying::Test,
+            Keying::Production {
+                session_secret: zeroize::Zeroizing::new(needle_bytes().to_vec()),
+                circles_key_hex: zeroize::Zeroizing::new(NEEDLE_HEX.to_owned()),
+            }
+        ),
+    );
+    add(
+        &mut out,
+        "rig/store.rs::StoreDir",
+        format!(
+            "{:?}",
+            StoreDir::Kept(std::path::PathBuf::from(format!("/tmp/{NEEDLE_HEX}")))
         ),
     );
 

@@ -723,6 +723,90 @@ impl CircleStorage {
         Ok(())
     }
 
+    /// Writes a plaintext copy of the circle store at `path` to `out`, as
+    /// `crate::nostr::mls::storage::export_store_plain_for_test` does for the
+    /// MLS store; `encryption_hex_key` is the key [`Self::new`] was given.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be opened, `out` already exists,
+    /// the store holds a `haven_test_%` object, or the export fails.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn export_plain_for_test(
+        path: &Path,
+        encryption_hex_key: Option<&str>,
+        out: &Path,
+    ) -> Result<()> {
+        crate::sqlcipher_init::ensure()?;
+        let conn = Connection::open(path)?;
+        Self::key_for_test(&conn, encryption_hex_key)?;
+        crate::nostr::mls::storage::export_plain_for_test(&conn, out)
+            .map_err(|doing| CircleError::Storage(format!("failed to {doing}")))
+    }
+
+    /// The circle store at `path` as the SQL text a fixture commits, by the
+    /// one recipe `crate::nostr::mls::storage::dump_store_sql_for_test` uses
+    /// for the MLS store; the plain copy goes under `scratch` and is deleted.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::export_plain_for_test`], or if the `sqlite3` shell cannot
+    /// be run or refuses the dump.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn dump_sql_for_test(
+        path: &Path,
+        encryption_hex_key: Option<&str>,
+        scratch: &Path,
+    ) -> Result<String> {
+        use crate::nostr::mls::storage::{dump_plain_for_test, PLAIN_COPY_FOR_TEST};
+        let plain = scratch.join(PLAIN_COPY_FOR_TEST);
+        Self::export_plain_for_test(path, encryption_hex_key, &plain)?;
+        dump_plain_for_test(&plain)
+            .map_err(|doing| CircleError::Storage(format!("failed to {doing}")))
+    }
+
+    /// Creates the circle store at `path` from `sql`, a `sqlite3 .dump` of a
+    /// store [`Self::export_plain_for_test`] wrote, under the key
+    /// [`Self::new`] will be given. The store must not exist yet, so the
+    /// dump's schema, not [`Self::new`]'s, is what the first open finds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `path` exists, or the store cannot be created or
+    /// the dump replayed.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn import_sql_for_test(
+        sql: &str,
+        path: &Path,
+        encryption_hex_key: Option<&str>,
+    ) -> Result<()> {
+        if path.exists() {
+            return Err(CircleError::Storage(
+                "failed to import over an existing store".to_string(),
+            ));
+        }
+        crate::sqlcipher_init::ensure()?;
+        let conn = Connection::open(path)?;
+        Self::key_for_test(&conn, encryption_hex_key)?;
+        conn.execute_batch(sql)?;
+        Ok(())
+    }
+
+    /// Keys `conn` as [`Self::new`] keys its own, or leaves it plain.
+    #[cfg(any(test, feature = "test-utils"))]
+    fn key_for_test(conn: &Connection, encryption_hex_key: Option<&str>) -> Result<()> {
+        let Some(hex_key) = encryption_hex_key else {
+            return Ok(());
+        };
+        if hex_key.len() != 64 || !hex_key.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(CircleError::InvalidData(
+                "Encryption key must be exactly 64 hex characters".to_string(),
+            ));
+        }
+        conn.execute_batch(&format!("PRAGMA key = \"x'{hex_key}'\""))?;
+        Ok(())
+    }
+
     /// Creates an in-memory storage instance for testing.
     ///
     /// # Errors

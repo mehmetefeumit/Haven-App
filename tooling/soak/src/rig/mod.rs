@@ -28,6 +28,7 @@ pub mod device;
 pub mod doubles;
 pub mod plane;
 pub mod restart;
+pub mod store;
 pub mod world;
 
 use std::fmt;
@@ -46,6 +47,7 @@ pub use plane::{
     BUFFER_DID_NOT_GROW, BUFFER_GREW,
 };
 pub use restart::{kill_and_reopen, KillKind, ReopenReport};
+pub use store::{Keying, StoreDir};
 pub use world::{
     install_process_globals, no_pending_fanout, Change, Changed, CircleFingerprint,
     DeviceFingerprint, PendingGuard, Planes, RosterDigest, RoutingSpan, SessionStoreUse, SimWorld,

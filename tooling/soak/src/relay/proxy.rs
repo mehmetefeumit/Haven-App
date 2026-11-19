@@ -238,7 +238,21 @@ impl Proxy {
     /// [`RigError::Core`] with [`Step::ApplyFault`] if the endpoint cannot be
     /// bound — a plane with no address is not a plane.
     pub fn start(relay_url: &str, ledger: Ledger, endpoint: EndpointId) -> Result<Self, RigError> {
-        let listener = reserve((Ipv4Addr::LOCALHOST, 0).into())
+        Self::start_on(relay_url, ledger, endpoint, 0)
+    }
+
+    /// [`Self::start`] on loopback `port`, or a free one for `0`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::start`], which includes a port already bound.
+    pub fn start_on(
+        relay_url: &str,
+        ledger: Ledger,
+        endpoint: EndpointId,
+        port: u16,
+    ) -> Result<Self, RigError> {
+        let listener = reserve((Ipv4Addr::LOCALHOST, port).into())
             .and_then(|socket| socket.listen(BACKLOG))
             .map_err(|_| RigError::Core(Step::ApplyFault))?;
         let addr = listener

@@ -1406,6 +1406,186 @@ pub fn mark_group_removed_for_test(
     .map_err(|_| storage_err("write the group record"))
 }
 
+/// Plants `session_secret` as the MLS store's keyring secret, in a fresh mock
+/// keyring installed as the process's default store.
+///
+/// The production opener (`CircleManager::new`) then reads it in place of the
+/// platform keyring. The store is process-global and the last install wins,
+/// so at most one production-keyed account opens per process; reinstalling
+/// the same secret before a reopen is harmless. It replaces the whole store,
+/// so every entry planted before it is gone, and a later "the key is gone"
+/// assertion would pass without proving anything.
+///
+/// # Errors
+///
+/// Returns [`NostrError::StorageError`] if the mock store cannot be built or
+/// the secret cannot be planted.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn use_mock_keyring_with_session_secret_for_test(session_secret: &[u8]) -> Result<()> {
+    let store =
+        keyring_core::mock::Store::new().map_err(|_| storage_err("build the mock keyring"))?;
+    keyring_core::set_default_store(store);
+    keyring_core::Entry::new(SERVICE_ID, MLS_DB_KEY_ID)
+        .and_then(|entry| entry.set_secret(session_secret))
+        .map_err(|_| storage_err("plant the session secret"))
+}
+
+/// The key the production opener derives from the keyring's `session_secret`.
+///
+/// What [`StorageConfig::sqlcipher_key`] returns — the secret's hex,
+/// stretched by PBKDF2 — for a fixture that must reach a production-keyed
+/// store with no keyring.
+///
+/// # Errors
+///
+/// Returns [`NostrError::StorageError`] if the key cannot be constructed.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn session_sqlcipher_key_for_test(session_secret: &[u8]) -> Result<SqlCipherKey> {
+    cipher_key(Zeroizing::new(hex::encode(session_secret)).as_str())
+}
+
+/// Writes a plaintext copy of the MLS store at `db_path` to `out`.
+///
+/// Through `SQLCipher`'s own `sqlcipher_export`: the first half of MDK's
+/// fixture recipe (`sqlite3 <out> .dump` is the second, and `out` is the
+/// caller's to delete).
+///
+/// # Errors
+///
+/// Returns [`NostrError::StorageError`] if the store cannot be opened, `out`
+/// already exists, the store holds any `haven_test_%` object a fault seam
+/// left behind (a fixture holds only what the product wrote), or the export
+/// fails.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn export_store_plain_for_test(db_path: &Path, key: &SqlCipherKey, out: &Path) -> Result<()> {
+    let conn = open_tamper_connection(db_path, key)?;
+    export_plain_for_test(&conn, out).map_err(storage_err)
+}
+
+/// Creates the MLS store at `db_path` from `sql` — a `sqlite3 .dump` of a
+/// store [`export_store_plain_for_test`] wrote — under `key`, as MDK loads its
+/// own `account-v0.10.4.sql`.
+///
+/// The store must not exist yet: the dump's schema has to be in place before
+/// the engine's first open, which would otherwise create a fresh one. A dump
+/// creates every table and fills it before it creates a trigger, so no
+/// trigger fires on replay, and it ends by restoring `sqlite_sequence`. Of
+/// `options`, only what the file itself keeps is applied: its cipher
+/// compatibility and its journal mode.
+///
+/// # Errors
+///
+/// Returns [`NostrError::StorageError`] if `db_path` exists, or the store
+/// cannot be created or the dump replayed.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn import_store_sql_for_test(
+    sql: &str,
+    db_path: &Path,
+    key: &SqlCipherKey,
+    options: &SqliteStorageOptions,
+) -> Result<()> {
+    if db_path.exists() {
+        return Err(storage_err("import over an existing store"));
+    }
+    crate::sqlcipher_init::ensure().map_err(|_| storage_err("initialise SQLite"))?;
+    let conn =
+        rusqlite::Connection::open(db_path).map_err(|_| storage_err("create the MLS database"))?;
+    conn.pragma_update(
+        None,
+        "cipher_compatibility",
+        i64::from(options.cipher_compatibility),
+    )
+    .map_err(|_| storage_err("set cipher compatibility"))?;
+    conn.pragma_update(None, "key", key.as_secret_str())
+        .map_err(|_| storage_err("apply the SQLCipher key"))?;
+    let journal = match options.journal_mode {
+        storage_sqlite::SqliteJournalMode::Wal => "WAL",
+        storage_sqlite::SqliteJournalMode::Delete => "DELETE",
+    };
+    conn.query_row(&format!("PRAGMA journal_mode = {journal}"), [], |_| Ok(()))
+        .map_err(|_| storage_err("set the journal mode"))?;
+    conn.execute_batch(sql)
+        .map_err(|_| storage_err("replay the dump"))
+}
+
+/// The MLS store at `db_path` as the SQL text a fixture commits.
+///
+/// The whole of MDK's recipe, export and dump, so the round-trip test and the
+/// fixture writer cannot use two. The plain copy is written under `scratch`
+/// and deleted whatever the dump came to.
+///
+/// # Errors
+///
+/// As [`export_store_plain_for_test`], or if the `sqlite3` shell cannot be
+/// run or refuses the dump.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn dump_store_sql_for_test(
+    db_path: &Path,
+    key: &SqlCipherKey,
+    scratch: &Path,
+) -> Result<String> {
+    let plain = scratch.join(PLAIN_COPY_FOR_TEST);
+    export_store_plain_for_test(db_path, key, &plain)?;
+    dump_plain_for_test(&plain).map_err(storage_err)
+}
+
+/// Where [`dump_store_sql_for_test`] puts its plain copy.
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) const PLAIN_COPY_FOR_TEST: &str = "plain-export.sqlite";
+
+/// `sqlite3 <plain> ".dump --preserve-rowids"`, `plain` deleted after.
+///
+/// A stock `.dump` renumbers the implicit rowids of a table whose key is not
+/// an `INTEGER PRIMARY KEY`, closing every gap deletions left, and MDK reads
+/// rows in rowid order (`cgka_welcomes`, `seen_events`): the flag keeps them,
+/// so the fixture is the file the old build wrote. A shell without the flag
+/// refuses the command rather than dumping without it.
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) fn dump_plain_for_test(plain: &Path) -> std::result::Result<String, &'static str> {
+    let output = std::process::Command::new("sqlite3")
+        .arg(plain)
+        .arg(".dump --preserve-rowids")
+        .output();
+    let removed = std::fs::remove_file(plain);
+    let output = output.map_err(|_| "run the sqlite3 shell (apt-get install sqlite3)")?;
+    if !output.status.success() || !output.stderr.is_empty() {
+        return Err("dump with sqlite3 .dump --preserve-rowids");
+    }
+    removed.map_err(|_| "delete the plain copy")?;
+    String::from_utf8(output.stdout).map_err(|_| "read the dump as text")
+}
+
+/// [`export_store_plain_for_test`] on an open connection, shared with the
+/// circle store's. The error names the step that failed.
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) fn export_plain_for_test(
+    conn: &rusqlite::Connection,
+    out: &Path,
+) -> std::result::Result<(), &'static str> {
+    let planted: i64 = conn
+        .query_row(
+            r"SELECT count(*) FROM sqlite_master WHERE name LIKE 'haven\_test\_%' ESCAPE '\'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| "read the schema")?;
+    if planted != 0 {
+        return Err("export a store holding a test object");
+    }
+    if out.exists() {
+        return Err("export over an existing file");
+    }
+    let out = out.to_str().ok_or("name the export file")?;
+    conn.execute("ATTACH DATABASE ?1 AS plain KEY ''", [out])
+        .map_err(|_| "attach the export file")?;
+    let exported = conn
+        .execute_batch("SELECT sqlcipher_export('plain')")
+        .map_err(|_| "export the store");
+    conn.execute_batch("DETACH DATABASE plain")
+        .map_err(|_| "detach the export file")?;
+    exported
+}
+
 /// A storage error naming what failed and nothing else.
 ///
 /// The `rusqlite` cause is dropped deliberately rather than redacted: its

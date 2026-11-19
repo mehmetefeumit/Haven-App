@@ -7,7 +7,7 @@
 # ## What the rig is, and why it needs a boundary
 #
 # `tooling/soak` builds `haven-soak`, which links haven-core with the
-# `test-utils` feature ON. That feature is the door to eleven test-only seams.
+# `test-utils` feature ON. That feature is the door to fifteen test-only seams.
 # Eight only READ state the product deliberately does not expose (a typed ingest
 # that returns the engine's own error, a stored-message probe, the live-sync
 # processor, the circle rotation stamps, direct read/delete of the OpenMLS group
@@ -28,6 +28,19 @@
 # that carried any of this would ship a door into its own MLS store, and with
 # those three a lever on it, a forge inside it and a hand on where its commits
 # go.
+#
+# Four more serve the previous-release fixtures and the mixed-version peers
+# (docs/mdk-v0.16/stage0.md, S0.2a), and three of them are worse than reads too.
+# `use_mock_keyring_with_session_secret_for_test` installs a process-wide mock
+# keyring and plants the MLS store's secret in it, so the app's own opener runs
+# keyed from a secret the harness chose (`session_sqlcipher_key_for_test` is
+# the key the app derives from it). `export_store_plain_for_test` and
+# `CircleStorage::export_plain_for_test` DECRYPT a whole store into a plaintext
+# file. `import_store_sql_for_test` and `CircleStorage::import_sql_for_test`
+# CREATE a keyed store from SQL text. The fourth, `fanout_shapes_for_test` with
+# `store_shape_counts_for_test`, reads value-free shapes and counts only. In a
+# shipped build these would be a way to read every store out in the clear and
+# to plant one.
 #
 # What stops a shipped build from CALLING any of them is the compiler, not this
 # guard: every seam is `#[cfg(any(test, feature = "test-utils"))]`, so the symbol
@@ -68,7 +81,7 @@
 #
 #      A dependency table is not the only door. A `[features]` ALIAS is the
 #      other one, and it is wider: `default = ["test-utils"]` in
-#      haven-core/Cargo.toml turns those eleven test-only seams on for every
+#      haven-core/Cargo.toml turns those fifteen test-only seams on for every
 #      consumer that does not opt out — every DEBUG build of the app included,
 #      since the `compile_error!` fires only with `debug_assertions` off.
 #      Checks 2, 3 and 4 as first written all stay green through that one-word
@@ -115,6 +128,27 @@
 #      The six classes are named in §3.10 of the rig's own design: tag, bucket,
 #      delta, duration, measurement, literal.
 #
+#   7. EVERY SEAM IS COMPILED OUT OF A SHIPPED BUILD. The inventory above is
+#      prose; this is what fails when it stops being true. Every `fn …_for_test`
+#      and every `…ForTest` type, const or static under haven-core/src — the
+#      fifteen seams and every helper beside them — must carry the test-only
+#      cfg (`cfg(test)`, `cfg(feature = "test-utils")`, or `any`/`all` of the
+#      two), or sit inside an item or module that does: a gated `impl` block,
+#      a `#[cfg(test)] mod tests { … }`, a file declared by a gated `mod x;`,
+#      or a file whose first attribute is `#![cfg(test)]`. Lexical, over
+#      literal-free lines (`lib/literal_free.awk`): attributes may span lines,
+#      and braces are counted outside strings and comments. One gap it cannot
+#      see: an item reached through `#[path = …]`, or a gate spelled through a
+#      `cfg_attr` or a macro. Its fixtures pin the shapes it must and must not
+#      pass.
+#
+#      One other shape is not a seam and passes BY NAME: the debug-app e2e
+#      hooks in DEBUG_HOOKS, which the Flutter E2E lanes call through the FFI
+#      on a debug build of the APP (no test-utils there), gated
+#      `cfg(debug_assertions)` with a `cfg(not(debug_assertions))` sibling that
+#      fails closed. A new one is a reviewed addition to that list; an unlisted
+#      item gated that way fails like any other.
+#
 # ## Absent crate
 #
 # Checks 1–4 are about the SHIPPED side and hold whether or not the rig exists;
@@ -152,7 +186,7 @@ readonly SEAM_TEST='haven-core/tests/test_utils_seams.rs'
 readonly SEAM_SOCKET_TEST='haven-core/tests/test_utils_seams_sockets.rs'
 # Equality pin: a fixture added or removed without moving this line is a
 # self-test that no longer says what it runs.
-readonly SELF_TEST_FIXTURES=48
+readonly SELF_TEST_FIXTURES=59
 
 # Trees that ship. `haven/integration_test` and `tooling/` are deliberately
 # absent: that is the harness, and it is where the rig belongs.
@@ -210,6 +244,109 @@ readonly FEATURE_FREE_FILES=(
 readonly FOREIGN_RE='haven_core::|haven-core|cgka_session::|cgka_traits::|cgka_engine::|nostr::|nostr_sdk::|nostr_relay_builder::|nostr_database::|openmls|SessionError|EngineError|IngestOutcome|StaleReason|ScreenedIngest|MessageState|StoredMessageProbe|EpochId|GroupId|CircleRotationState|StopOutcome|LiveSyncEvent|OpenMlsGroupKey|ConvergedRoster|RelayKpSnapshot|RelayKpPerRelay|RelayKpEntry|KpMaintenanceDecision|IngestEffects|KeyPackageMetadata|GroupContextSnapshot|StoredKeyPackageBundle|OutboundFanout|PublishWork'
 readonly DEBUG_FMT_RE='[{][A-Za-z0-9_]*:[#]?x?[?][}]|dbg![(]'
 
+# Debug-app e2e hooks: `cfg(debug_assertions)`, with a fail-closed
+# `cfg(not(debug_assertions))` stub beside each function (check 7).
+readonly DEBUG_HOOKS=(
+  'ALLOW_PRIVATE_BLOSSOM_FOR_TEST' 'allow_private_blossom_for_test'
+  'ALLOW_WS_LOOPBACK_FOR_TEST' 'allow_ws_loopback_for_test' 'ws_loopback_allowed_for_test'
+  'BLOSSOM_SERVER_FOR_TEST' 'set_blossom_server_for_test'
+  'set_default_relays_for_test' 'set_discovery_relays_for_test'
+  'set_location_relays_for_test' 'set_profile_relays_for_test'
+)
+
+LITERAL_FREE="$(cat "$(dirname "${BASH_SOURCE[0]}")/lib/literal_free.awk")"
+readonly LITERAL_FREE
+
+# Check 7's walk over one file. Prints `UNGATED <line> <name>` for a seam-named
+# item no test-only cfg covers (`DEBUGHOOK` instead when its own gate is
+# `debug_assertions` or its negation), and `GATEDMOD <name>` for each `mod name;` a
+# test-only cfg covers, so the caller can treat that file's children as gated.
+# `filegated=1` when the file itself is a gated module.
+# shellcheck disable=SC2016
+readonly GATE_WALK='
+function gating(a,    t) {
+  t = a
+  gsub(/[[:space:]]/, "", t)
+  if (t ~ /not\(/) return 0
+  return t ~ /#!?\[cfg\((test|feature="test-utils"|(any|all)\((test|feature="test-utils")(,(test|feature="test-utils"))*,?\))\)\]/
+}
+function debuggate(a,    t) {
+  t = a
+  gsub(/[[:space:]]/, "", t)
+  return t ~ /#\[cfg\((not\()?debug_assertions\)?\)\]/
+}
+function balance(a,    i, c, d) {
+  d = 0
+  for (i = 1; i <= length(a); i++) {
+    c = substr(a, i, 1)
+    if (c == "[") d++
+    else if (c == "]") d--
+  }
+  return d
+}
+BEGIN { depth = 0; g[0] = filegated + 0; pend = 0; pdbg = 0; attr = ""; open = 0; sq = 0; seen_code = 0 }
+{
+  raw = $0
+  # An attribute is read from the raw line, whose strings hold the feature
+  # name; everything else from the literal-free one.
+  while (1) {
+    if (attr != "") {
+      attr = attr " " raw
+    } else if (raw ~ /^[[:space:]]*#!?\[/) {
+      attr = raw
+    } else break
+    if (balance(attr) > 0) next
+    # The attribute ends on this line: what follows its last `]` is code.
+    rest = attr
+    cut = 0
+    for (i = 1; i <= length(rest); i++) {
+      c = substr(rest, i, 1)
+      if (c == "[") cut++
+      else if (c == "]") { cut--; if (cut == 0) { end = i } }
+    }
+    whole = substr(attr, 1, end)
+    if (whole ~ /^[[:space:]]*#!/) {
+      if (!seen_code && depth == 0 && gating(whole)) g[0] = 1
+    } else if (gating(whole)) pend = 1
+    else if (debuggate(whole)) pdbg = 1
+    raw = substr(attr, end + 1)
+    attr = ""
+    if (raw ~ /^[[:space:]]*$/) next
+  }
+  line = literal_free(raw)
+  if (line ~ /^[[:space:]]*$/) next
+  seen_code = 1
+  if (line ~ /^[[:space:]]*(pub(\([^)]*\))?[[:space:]]+)?((const|async|unsafe|extern|default)[[:space:]]+)*(fn|impl|mod|struct|enum|trait|type|union|static|const)[[:space:]<]/) {
+    gated = pend || g[depth]
+    name = ""
+    if (match(line, /(fn|struct|enum|trait|type|union|static|const|mod)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/)) {
+      name = substr(line, RSTART, RLENGTH)
+      sub(/^[a-z]+[[:space:]]+/, "", name)
+    }
+    if (name ~ /_for_test$|ForTest$|FOR_TEST$/ && !gated) print (pdbg ? "DEBUGHOOK " : "UNGATED ") NR " " name
+    pdbg = 0
+    if (line ~ /^[[:space:]]*(pub(\([^)]*\))?[[:space:]]+)?mod[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*;/ && gated) print "GATEDMOD " name
+    open = 1
+    opened = gated
+  } else if (sq == 0 && !open) {
+    pend = 0; pdbg = 0
+  }
+  for (i = 1; i <= length(line); i++) {
+    c = substr(line, i, 1)
+    if (c == "[") sq++
+    else if (c == "]") { if (sq > 0) sq-- }
+    else if (c == "{") {
+      depth++
+      if (open) { g[depth] = opened; open = 0; pend = 0 } else g[depth] = g[depth - 1]
+    } else if (c == "}") {
+      if (depth > 0) depth--
+    } else if (c == ";" && sq == 0 && open) {
+      open = 0; pend = 0
+    }
+  }
+}
+'
+
 FAILED=0
 fail() { printf 'FAIL: %s\n' "$*" >&2; FAILED=1; }
 log()  { printf '[%s] %s\n' "${SELF_NAME}" "$*"; }
@@ -229,7 +366,7 @@ check_no_production_reach() {
       hits="$(grep -rlF -- "${token}" "${root}/${tree}" 2>/dev/null)"
       if [[ -n "${hits}" ]]; then
         printf '%s\n' "${hits}" >&2
-        fail "'${token}' appears under ${tree}. The soak rig links haven-core with test-utils on — eleven test-only seams (a mutation seam, an outbound sealing seam and an address-map seam among them) and the unencrypted-store constructors — and must be unreachable from the shipped app."
+        fail "'${token}' appears under ${tree}. The soak rig links haven-core with test-utils on — fifteen test-only seams (a mutation seam, an outbound sealing seam, an address-map seam and a plaintext store export among them) and the unencrypted-store constructors — and must be unreachable from the shipped app."
         rc=1
       fi
     done
@@ -360,7 +497,7 @@ check_test_utils_is_dev_only() {
     hits="$(feature_alias_hits "${m}")"
     if [[ -n "${hits}" ]]; then
       printf '%s\n' "${hits}" >&2
-      fail "${m#"${root}/"} pulls haven-core's test-utils into a [features] alias (line:alias above). An alias is not a dev edge: \`default = [\"test-utils\"]\` opens all eleven test-only seams for every consumer that does not opt out, and haven-core's compile_error! only fires with debug_assertions OFF — so every DEBUG build of the app would carry them while checks 2-4 stayed green."
+      fail "${m#"${root}/"} pulls haven-core's test-utils into a [features] alias (line:alias above). An alias is not a dev edge: \`default = [\"test-utils\"]\` opens all fifteen test-only seams for every consumer that does not opt out, and haven-core's compile_error! only fires with debug_assertions OFF — so every DEBUG build of the app would carry them while checks 2-4 stayed green."
       rc=1
     fi
   done < <(other_manifests "${root}")
@@ -513,6 +650,53 @@ check_timeline_field_test_is_pinned() {
   return 0
 }
 
+# ---------------------------------------------------------------------------
+# 7. Every seam carries the test-only cfg, itself or through what encloses it.
+# ---------------------------------------------------------------------------
+check_seams_are_gated() {
+  local root="$1" src="${root}/haven-core/src" f out name before after n=0
+  local -A gated_files=()
+  if [[ ! -d "${src}" ]]; then
+    fail "haven-core/src not found under ${root}: check 7 would read nothing."
+    return 1
+  fi
+  # Gated modules gate their files, and those files' own `mod x;` children:
+  # walked to a fixed point, as deep as the tree goes.
+  while :; do
+    before="${#gated_files[@]}"
+    while IFS= read -r -d '' f; do
+      out="$(awk -v filegated="${gated_files[${f}]:-0}" "${LITERAL_FREE}${GATE_WALK}" "${f}")"
+      while read -r kind name; do
+        [[ "${kind}" == GATEDMOD ]] || continue
+        local dir stem
+        dir="$(dirname "${f}")"; stem="$(basename "${f}" .rs)"
+        [[ "${stem}" == mod || "${stem}" == lib || "${stem}" == main ]] || dir="${dir}/${stem}"
+        for child in "${dir}/${name}.rs" "${dir}/${name}/mod.rs"; do
+          [[ -f "${child}" ]] && gated_files["${child}"]=1
+        done
+      done <<< "${out}"
+    done < <(find "${src}" -name '*.rs' -print0)
+    after="${#gated_files[@]}"
+    [[ "${after}" -eq "${before}" ]] && break
+  done
+  local bad=0
+  while IFS= read -r -d '' f; do
+    n=$(( n + 1 ))
+    out="$(awk -v filegated="${gated_files[${f}]:-0}" "${LITERAL_FREE}${GATE_WALK}" "${f}" | grep -E '^(UNGATED|DEBUGHOOK) ' || true)"
+    while read -r kind line name; do
+      [[ -n "${name:-}" ]] || continue
+      if [[ "${kind}" == DEBUGHOOK ]] && printf '%s\n' "${DEBUG_HOOKS[@]}" | grep -qxF "${name}"; then
+        continue
+      fi
+      fail "${f#"${root}/"}:${line}: \`${name}\` is a test seam with no test-only cfg on it or on anything enclosing it. Gate it \`#[cfg(any(test, feature = \"test-utils\"))]\`: without one it is compiled into the shipped app."
+      bad=1
+    done <<< "${out}"
+  done < <(find "${src}" -name '*.rs' -print0)
+  (( bad )) && return 1
+  log "check 7: ${n} haven-core/src file(s) read; every seam-named item carries the test-only cfg."
+  return 0
+}
+
 run_all() {
   local root="$1"
   check_no_production_reach "${root}"
@@ -521,6 +705,7 @@ run_all() {
   check_profile_trap_is_armed "${root}"
   check_no_foreign_debug_format "${root}"
   check_timeline_field_test_is_pinned "${root}"
+  check_seams_are_gated "${root}"
 }
 
 # ---------------------------------------------------------------------------
@@ -808,6 +993,40 @@ TOML
   rm -f "${landing}/${SOAK_DIR}/src/timeline.rs"
   _case "check 6 is inert while the crate has no timeline yet" 0 check_timeline_field_test_is_pinned "${landing}"
 
+  # --- check 7.
+  local seam="${tmp}/seam"
+  _seam() { # _seam <label> <want-rc> <lib.rs body>
+    rm -rf "${seam}"; _mk "${seam}"
+    printf '%s\n' "$3" > "${seam}/haven-core/src/lib.rs"
+    _case "$1" "$2" check_seams_are_gated "${seam}"
+  }
+  _seam "an un-gated plaintext export seam fails" 1 \
+    'pub fn export_store_plain_for_test(out: &Path) -> Result<()> { Ok(()) }'
+  _seam "a seam gated for test-utils passes" 0 \
+    $'#[cfg(any(test, feature = "test-utils"))]\npub fn export_store_plain_for_test() {}'
+  _seam "a seam gated by cfg(test) alone passes" 0 \
+    $'#[cfg(test)]\nfn helper_for_test() {}'
+  _seam "a gate written over several lines, under a doc comment and another attribute, passes" 0 \
+    $'/// Doc.\n#[cfg(any(\n    test,\n    feature = "test-utils"\n))]\n#[must_use]\npub fn a_for_test() -> [u8; 32] {\n    [0; 32]\n}'
+  _seam "an un-gated method inside a gated impl passes" 0 \
+    $'#[cfg(any(test, feature = "test-utils"))]\nimpl Store {\n    pub fn probe_for_test(&self) -> usize {\n        let s = "}";\n        0\n    }\n}'
+  _seam "an un-gated method of an un-gated impl fails, past a gated sibling" 1 \
+    $'impl Store {\n    #[cfg(test)]\n    pub fn a_for_test(&self) {}\n\n    pub fn b_for_test(&self) {}\n}'
+  _seam "an un-gated type named for tests fails" 1 \
+    $'#[cfg(feature = "other")]\npub struct ProbeForTest;'
+  _seam "a listed debug-app e2e hook with its release stub passes" 0 \
+    $'#[cfg(debug_assertions)]\npub fn set_discovery_relays_for_test() {}\n#[cfg(not(debug_assertions))]\npub fn set_discovery_relays_for_test() {}'
+  _seam "an unlisted seam gated on debug_assertions alone fails" 1 \
+    $'#[cfg(debug_assertions)]\npub fn export_store_plain_for_test() {}'
+  _seam "a negated gate is no gate" 1 \
+    $'#[cfg(not(test))]\npub fn a_for_test() {}'
+  rm -rf "${seam}"; _mk "${seam}"
+  printf '#[cfg(test)]\nmod tests;\n' > "${seam}/haven-core/src/lib.rs"
+  printf 'fn fixture_for_test() {}\nmod deeper;\n' > "${seam}/haven-core/src/tests.rs"
+  mkdir -p "${seam}/haven-core/src/tests"
+  printf 'pub fn deep_for_test() {}\n' > "${seam}/haven-core/src/tests/deeper.rs"
+  _case "a file a gated mod declares is gated, and so are its own children" 0 check_seams_are_gated "${seam}"
+
   if (( fails )); then
     echo "self-test: FAILED" >&2
     return 1
@@ -841,9 +1060,10 @@ main() {
 
   if (( FAILED )); then
     echo >&2
-    echo "The Tier-1 soak rig links haven-core with test-utils on: eleven test-only" >&2
-    echo "seams (a mutation seam, an outbound sealing seam and an address-map" >&2
-    echo "seam among them) and the unencrypted-store constructors. It must stay" >&2
+    echo "The Tier-1 soak rig links haven-core with test-utils on: fifteen test-only" >&2
+    echo "seams (a mutation seam, an outbound sealing seam, an address-map seam" >&2
+    echo "and a plaintext store export among them) and the unencrypted-store" >&2
+    echo "constructors. It must stay" >&2
     echo "out of the" >&2
     echo "shipped app and out of every build path, and the compile-time trap that" >&2
     echo "enforces that must stay armed. See the header of this script and" >&2

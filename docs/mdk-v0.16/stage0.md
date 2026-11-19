@@ -872,11 +872,22 @@ Export:
 - It runs
   `ATTACH DATABASE '<out>' AS plain KEY ''; SELECT sqlcipher_export('plain'); DETACH DATABASE plain;`.
 - `CircleStorage` gets the same.
-- The writer then runs the stock `sqlite3 <plain> .dump`, from the apt package
-  `sqlite3` (not installed on the build machine today; installed by the job and
-  locally). It deletes the plaintext intermediate.
+- `dump_store_sql_for_test(db, key, scratch)` is the one recipe, for the
+  round-trip test and the fixture writer alike (`CircleStorage::dump_sql_for_test`
+  for the circle store): it exports, runs the stock
+  `sqlite3 <plain> ".dump --preserve-rowids"` from the apt package `sqlite3`,
+  and deletes the plaintext intermediate on every path. A shell that rejects
+  the flag is a fixed error, never a fallback.
 
-What `.dump` guarantees:
+What `.dump --preserve-rowids` guarantees:
+- **Implicit rowids are kept.** Without the flag a table with no
+  `INTEGER PRIMARY KEY` is renumbered 1..n on replay. A store the product
+  writes already has gaps (`cgka_member_capabilities`), MDK v0.10.4 reads by
+  rowid (`cgka_welcomes ORDER BY rowid`, the disband candidates,
+  `seen_events … rowid DESC`), and a fixture is never regenerated, so it must be
+  the rows the old build wrote. With the flag such a table is dumped as
+  `INSERT … (rowid, …)`; an `INTEGER PRIMARY KEY` already is the rowid; a
+  `WITHOUT ROWID` table is unchanged.
 - It emits tables and rows, then indexes, triggers and views, so **no trigger
   fires on replay**.
 - It ends with the `PRAGMA writable_schema` / `sqlite_sequence` block, so
@@ -906,12 +917,26 @@ covered by S0.2 run D, which upgrades a live file the old binary wrote.
 **Round-trip test.** `haven-core/tests/fixture_dump_round_trip.rs`:
 1. Write a small store through product calls.
 2. Export it, then `.dump`, then import.
-3. Assert equal: `sqlite_master` rows, every table's rows sorted,
-   `sqlite_sequence`, `auto_vacuum` and `page_size`.
+3. Assert equal: `sqlite_master` rows; every rowid table's rows as `rowid, *`
+   in rowid order, unsorted, so a renumbering or a reorder fails; every
+   `WITHOUT ROWID` table's rows sorted; `sqlite_sequence`; `auto_vacuum`,
+   `page_size`, `journal_mode`, `user_version` and `application_id`.
+4. `a_gap_in_implicit_rowids_comes_back_as_a_gap`: rows deleted from a rowid
+   table before the dump leave the same gap after the import. Dropping
+   `--preserve-rowids` turns it red.
 
 The import must create the schema **before** MDK's first open. Stage 1's MDK
 sets `auto_vacuum = INCREMENTAL` only on a database with no schema, and real
 installs have `NONE`.
+
+**The seams are held test-only by a check, not by a list.** A seam that writes
+a whole store in plaintext must not be able to ship. `check_soak_test_only.sh`
+check 7 reads every `*_for_test` item in `haven-core/src` and fails, naming it,
+unless the item, or something enclosing it, carries
+`#[cfg(any(test, feature = "test-utils"))]` or `#[cfg(test)]`. The eighteen
+debug-app hooks the Flutter E2E lanes call through the FFI are gated on
+`cfg(debug_assertions)` with a fail-closed stub beside each; they are named in
+the guard's `DEBUG_HOOKS`, and an unlisted item gated that way fails.
 
 ### S0.2a.3 Shape probe
 

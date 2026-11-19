@@ -19,7 +19,6 @@
 use std::fmt;
 use std::time::Duration;
 
-use haven_core::circle::CircleManager;
 use haven_core::nostr::mls::storage::is_session_live;
 use haven_core::relay::live_sync::StopOutcome;
 use haven_core::relay::RelayManager;
@@ -143,7 +142,7 @@ pub async fn kill_and_reopen(
     let mut ticker = tokio::time::interval(RESTART_POLL);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let manager = loop {
-        match CircleManager::new_unencrypted(device.dir.path(), &device.keys) {
+        match device.open_stores() {
             Ok(manager) => break manager,
             Err(_) if started.elapsed() < REOPEN_BOUND => {
                 ticker.tick().await;

@@ -9,7 +9,8 @@
 //! # Secret hygiene, and the one residual
 //!
 //! Every raw secret byte this harness materialises is `Zeroizing`
-//! ([`SimDevice::secret_hex_for_declaration`] is the only place it does).
+//! ([`SimDevice::secret_hex_for_declaration`] and [`Keying::Production`]'s
+//! store keys are the only places it does).
 //! `nostr::key::Keys` itself CANNOT be zeroized — the type implements no `Zeroize`
 //! at the pinned version, so neither `Zeroizing<Keys>` nor a `ZeroizeOnDrop`
 //! derive over it compiles — and that residual is recorded rather than papered
@@ -35,6 +36,7 @@ use zeroize::Zeroizing;
 use crate::clock::{PolicyNow, WallNow};
 use crate::nemesis::types::DeviceOp;
 use crate::rig::address_map::{endpoint_map, AliasBook};
+use crate::rig::store::{Keying, StoreDir};
 use crate::rig::{CircleTag, DeviceTag, RigError, SimCircle, Step};
 
 /// How often [`SimDevice::unread_input_taken_in`] reads the hold: the
@@ -136,7 +138,9 @@ pub struct SimDevice {
     pub keys: Keys,
     /// The store's directory, retained so a restart reopens the same `SQLite`
     /// file rather than a fresh one (which would prove nothing).
-    pub dir: tempfile::TempDir,
+    pub dir: StoreDir,
+    /// How its stores are keyed, kept so a restart reopens them the same way.
+    keying: Keying,
     /// The manager. An `Option` because a restart must be able to DROP it: the
     /// Rule-14 guard is released by the last `Arc` going away, and a field that
     /// cannot be emptied makes every restart arm vacuous.
@@ -215,14 +219,38 @@ impl SimDevice {
         inbox_own: Vec<String>,
         (stored_inbox, stored_key_package): (Vec<String>, Vec<String>),
     ) -> Result<Self, RigError> {
-        let dir = tempfile::TempDir::new().map_err(|_| RigError::Core(Step::OpenStore))?;
-        let keys = Keys::generate();
-        let manager = CircleManager::new_unencrypted(dir.path(), &keys)
-            .map_err(|_| RigError::Core(Step::OpenStore))?;
+        Self::open_in(
+            tag,
+            routes,
+            inbox_own,
+            (stored_inbox, stored_key_package),
+            StoreDir::temp()?,
+            Keys::generate(),
+            Keying::Test,
+        )
+    }
+
+    /// Opens a device as [`Self::open_behind`] does, over the stores in `dir`
+    /// — new or already written — as `keys`, keyed by `keying`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::open`].
+    pub fn open_in(
+        tag: DeviceTag,
+        routes: Vec<(String, String)>,
+        inbox_own: Vec<String>,
+        (stored_inbox, stored_key_package): (Vec<String>, Vec<String>),
+        dir: StoreDir,
+        keys: Keys,
+        keying: Keying,
+    ) -> Result<Self, RigError> {
+        let manager = keying.open(dir.path(), &keys)?;
         Ok(Self {
             tag,
             keys,
             dir,
+            keying,
             circle: Some(Arc::new(manager)),
             core: None,
             relays: RelayManager::new(),
@@ -665,6 +693,15 @@ impl SimDevice {
     /// Puts a freshly reopened manager back.
     pub fn restore_manager(&mut self, manager: Arc<CircleManager>) {
         self.circle = Some(manager);
+    }
+
+    /// Opens this device's stores again, keyed as they were first opened.
+    ///
+    /// # Errors
+    ///
+    /// As [`Keying::open`].
+    pub fn open_stores(&self) -> Result<CircleManager, RigError> {
+        self.keying.open(self.dir.path(), &self.keys)
     }
 }
 

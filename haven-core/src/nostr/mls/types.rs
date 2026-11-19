@@ -1403,6 +1403,106 @@ impl FanoutProbe {
     }
 }
 
+/// A stored fanout row reduced to its shape: the discriminants a fixture's
+/// coverage criterion names, and no value — no endpoint, id, payload, attempt
+/// count or instant.
+///
+/// Labels rather than MDK's own types, so a shape cannot carry a value and a
+/// manifest stores it as it is. **No `Debug`**: the length of
+/// [`Self::targets`] is a relay count.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+pub struct FanoutShape {
+    /// `"application"`, `"proposal"` or `"group_evolution"`.
+    pub carries: &'static str,
+    /// The engine's `FanoutPendingKind`, when the row holds pending MLS state.
+    pub pending_kind: Option<&'static str>,
+    /// Where the row's MLS half stands: `"not_applicable"`, `"pending"`,
+    /// `"confirmed"` or `"rolled_back"`.
+    pub mls: &'static str,
+    /// Each frozen target's shape, in the row's order.
+    pub targets: Vec<FanoutTargetShape>,
+    /// Whether the row holds Welcomes to release on its confirm.
+    pub post_confirmation_welcomes: bool,
+}
+
+/// One frozen target of a [`FanoutShape`].
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+pub struct FanoutTargetShape {
+    /// The target's `FanoutTargetStatus`, snake-cased as MDK stores it.
+    pub status: &'static str,
+    /// The failure stored beside it: `"none"`, `"interrupted"` (the fanout
+    /// driver's own marker), `"categorised"` (with a rejection category) or
+    /// `"uncategorised"`.
+    pub failure: &'static str,
+}
+
+/// How many of each value-free state an MLS store holds, beside its
+/// [`FanoutShape`]s: what a fixture's coverage criterion counts.
+///
+/// **No `Debug`**: an exact count of stored rows is a magnitude of the store.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct StoreShapeCounts {
+    /// Stored messages by `MessageState`, snake-cased.
+    pub message_states: std::collections::BTreeMap<&'static str, usize>,
+    /// Groups by `EpochState` variant, snake-cased; `"none"` for a group the
+    /// engine holds no state for.
+    pub epoch_states: std::collections::BTreeMap<&'static str, usize>,
+    /// Durable group evolutions holding a pending ref, by
+    /// `GroupEvolutionPhase`. Two maps rather than one keyed by a pair, so a
+    /// manifest writes them as JSON objects.
+    pub evolutions_holding_ref: std::collections::BTreeMap<&'static str, usize>,
+    /// Durable group evolutions holding none, by `GroupEvolutionPhase`.
+    pub evolutions_without_ref: std::collections::BTreeMap<&'static str, usize>,
+    /// Queued outbound intents by `SendIntent` variant, snake-cased.
+    pub queued_intents: std::collections::BTreeMap<&'static str, usize>,
+    /// Rows of the engine's `pending_application_events` table.
+    pub pending_application_events: usize,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl StoreShapeCounts {
+    pub(crate) const fn message_state(state: MessageState) -> &'static str {
+        match state {
+            MessageState::Sent => "sent",
+            MessageState::Created => "created",
+            MessageState::Processed => "processed",
+            MessageState::Failed => "failed",
+            MessageState::Retryable => "retryable",
+            MessageState::ConvergenceDeferred => "convergence_deferred",
+            MessageState::PeelDeferred => "peel_deferred",
+            MessageState::EpochInvalidated => "epoch_invalidated",
+        }
+    }
+
+    pub(crate) const fn epoch_state(state: Option<&EpochState>) -> &'static str {
+        match state {
+            None => "none",
+            Some(EpochState::Stable { .. }) => "stable",
+            Some(EpochState::PendingPublish(_)) => "pending_publish",
+            Some(EpochState::Merging(_)) => "merging",
+            Some(EpochState::Recovering(_)) => "recovering",
+            Some(EpochState::Unrecoverable(_)) => "unrecoverable",
+            Some(EpochState::Disbanded(_)) => "disbanded",
+        }
+    }
+
+    pub(crate) const fn evolution_phase(
+        phase: cgka_traits::maintenance::GroupEvolutionPhase,
+    ) -> &'static str {
+        use cgka_traits::maintenance::GroupEvolutionPhase as Phase;
+        match phase {
+            Phase::Preparing => "preparing",
+            Phase::Prepared => "prepared",
+            Phase::Attempting => "attempting",
+            Phase::Confirmed => "confirmed",
+            Phase::SupersededByConvergence => "superseded_by_convergence",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

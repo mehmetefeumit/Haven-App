@@ -9723,6 +9723,82 @@ impl SessionManager {
             .and_then(FanoutProbe::of))
     }
 
+    /// The shape of every stored fanout row, sorted: a multiset a fixture
+    /// compares across a write, an export and an open.
+    ///
+    /// # Errors
+    ///
+    /// Returns the engine's storage error, redacted.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn fanout_shapes_for_test(&self) -> Result<Vec<super::types::FanoutShape>> {
+        let mut shapes: Vec<_> = self
+            .reading()
+            .await
+            .outbound_fanouts()
+            .map_err(map_mls_err)?
+            .iter()
+            .map(super::types::FanoutShape::of_row_for_test)
+            .collect();
+        shapes.sort();
+        Ok(shapes)
+    }
+
+    /// How many of each value-free state the store holds beside its fanout
+    /// rows, read in one hold.
+    ///
+    /// # Errors
+    ///
+    /// Returns the engine's storage error, redacted.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn store_shape_counts_for_test(&self) -> Result<super::types::StoreShapeCounts> {
+        use super::types::StoreShapeCounts as Counts;
+        let session = self.reading().await;
+        let mut counts = Counts::default();
+        for group in self.message_store.list_groups().map_err(map_storage_err)? {
+            for record in self
+                .message_store
+                .list_messages(&group, EpochId(0))
+                .map_err(map_storage_err)?
+            {
+                *counts
+                    .message_states
+                    .entry(Counts::message_state(record.state))
+                    .or_default() += 1;
+            }
+            *counts
+                .epoch_states
+                .entry(Counts::epoch_state(session.epoch_state(&group).as_ref()))
+                .or_default() += 1;
+            for queued in self
+                .message_store
+                .list_queued_outbound_intents(&group)
+                .map_err(map_storage_err)?
+            {
+                *counts
+                    .queued_intents
+                    .entry(send_intent_label_for_test(&queued.intent))
+                    .or_default() += 1;
+            }
+        }
+        counts.pending_application_events = self
+            .message_store
+            .list_pending_application_events()
+            .map_err(map_storage_err)?
+            .len();
+        for evolution in session.group_evolutions().map_err(map_mls_err)? {
+            let by_phase = if evolution.pending_ref.is_some() {
+                &mut counts.evolutions_holding_ref
+            } else {
+                &mut counts.evolutions_without_ref
+            };
+            *by_phase
+                .entry(Counts::evolution_phase(evolution.phase))
+                .or_default() += 1;
+        }
+        drop(session);
+        Ok(counts)
+    }
+
     /// The handles of `group_id`'s stored commit and proposal fanouts, in
     /// staging order.
     ///
@@ -15996,6 +16072,82 @@ fn inviter_from_sender(sender: Option<&MemberId>) -> Result<String> {
         .and_then(|m| PublicKey::from_slice(m.as_slice()).ok())
         .map(|pk| pk.to_hex())
         .ok_or_else(|| NostrError::InvalidEvent("welcome has no verifiable sender".to_string()))
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl super::types::FanoutShape {
+    /// The shape of the stored row `fanout`. An interrupted attempt is told by
+    /// the failure the driver records for one
+    /// ([`crate::relay::fanout::interrupted`]), read the way it reads it.
+    pub(crate) fn of_row_for_test(fanout: &OutboundFanout) -> Self {
+        // A row with no MLS half is an application message or a proposal.
+        let (mls, evolves) = match fanout.mls_state() {
+            FanoutMlsState::NotApplicable => ("not_applicable", false),
+            FanoutMlsState::Pending(_) => ("pending", true),
+            FanoutMlsState::Confirmed => ("confirmed", true),
+            FanoutMlsState::RolledBack => ("rolled_back", true),
+        };
+        let carries = if fanout.application_message().is_some() {
+            "application"
+        } else if evolves {
+            "group_evolution"
+        } else {
+            "proposal"
+        };
+        Self {
+            carries,
+            pending_kind: fanout.pending_kind().map(|kind| match kind {
+                FanoutPendingKind::GroupEvolution => "group_evolution",
+                FanoutPendingKind::CreateGroup => "create_group",
+                FanoutPendingKind::Disband => "disband",
+            }),
+            mls,
+            targets: fanout
+                .target_statuses()
+                .iter()
+                .enumerate()
+                .map(|(index, status)| super::types::FanoutTargetShape {
+                    status: match status {
+                        FanoutTargetStatus::NotAttempted => "not_attempted",
+                        FanoutTargetStatus::Attempting => "attempting",
+                        FanoutTargetStatus::Accepted => "accepted",
+                        FanoutTargetStatus::Failed => "failed",
+                        FanoutTargetStatus::PossiblyExposed => "possibly_exposed",
+                        FanoutTargetStatus::RetryableUnavailable => "retryable_unavailable",
+                    },
+                    failure: match fanout.target_failure(index) {
+                        None => "none",
+                        Some(failure)
+                            if failure.reason
+                                == crate::relay::fanout::interrupted(&failure.endpoint).reason =>
+                        {
+                            "interrupted"
+                        }
+                        Some(failure) if failure.rejection_category.is_some() => "categorised",
+                        Some(_) => "uncategorised",
+                    },
+                })
+                .collect(),
+            post_confirmation_welcomes: !fanout.pending_post_confirmation_welcomes().is_empty(),
+        }
+    }
+}
+
+/// A queued intent's variant, as a store-shape label. Here because this is
+/// the one file that names an intent's variants.
+#[cfg(any(test, feature = "test-utils"))]
+const fn send_intent_label_for_test(intent: &SendIntent) -> &'static str {
+    match intent {
+        SendIntent::AppMessage { .. } => "app_message",
+        SendIntent::Invite { .. } => "invite",
+        SendIntent::RemoveMembers { .. } => "remove_members",
+        SendIntent::Leave { .. } => "leave",
+        SendIntent::SelfUpdate { .. } => "self_update",
+        SendIntent::UpdateAppComponents { .. } => "update_app_components",
+        SendIntent::UpdateGroupData { .. } => "update_group_data",
+        SendIntent::EnableDisbanding { .. } => "enable_disbanding",
+        SendIntent::Disband { .. } => "disband",
+    }
 }
 
 #[cfg(test)]

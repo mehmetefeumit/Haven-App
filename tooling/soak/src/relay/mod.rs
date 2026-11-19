@@ -61,6 +61,13 @@ use crate::rig::{sim_magnitude, DeviceTag, RelayTag, RigError, Step};
 /// S08 buries a commit under it; Haven's live group REQ sets no limit.
 pub const RELAY_DEFAULT_REPLAY_CAP: usize = 500;
 
+/// The loopback ports a plane's canonical endpoint may be pinned to
+/// ([`SimRelay::start_on`]).
+///
+/// Below Linux's ephemeral range (32768–60999), so no outgoing connection is
+/// handed one; nothing that binds them runs in parallel with another binder.
+pub const FIXED_PORTS: std::ops::RangeInclusive<u16> = 31201..=31216;
+
 /// One relay the world can break.
 ///
 /// One relay, several endpoints in front of it. The canonical endpoint is what
@@ -118,7 +125,32 @@ impl SimRelay {
     /// classification for a relay plane — if the relay or its endpoint cannot
     /// be bound.
     pub async fn start(tag: RelayTag) -> Result<Self, RigError> {
-        Self::build(tag, |builder| builder).await
+        Self::build(tag, 0, |builder| builder).await
+    }
+
+    /// Starts a healthy plane whose canonical endpoint — the address stores
+    /// keep — is loopback `port`, one of [`FIXED_PORTS`]: how a store written
+    /// in one run finds its relays in the next.
+    ///
+    /// # Errors
+    ///
+    /// [`RigError::ShapeMismatch`] for a port outside [`FIXED_PORTS`]; as
+    /// [`Self::start`] if something already listens there.
+    pub async fn start_on(tag: RelayTag, port: u16) -> Result<Self, RigError> {
+        if !FIXED_PORTS.contains(&port) {
+            return Err(RigError::ShapeMismatch);
+        }
+        // An endpoint binds with `SO_REUSEPORT` (so a downed one can hold its
+        // port), which lets a second listener share a port the kernel then
+        // splits connections across: a plane still up from another run must
+        // fail this one, not quietly take half its traffic.
+        if tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+            .await
+            .is_ok()
+        {
+            return Err(RigError::Core(Step::ApplyFault));
+        }
+        Self::build(tag, port, |builder| builder).await
     }
 
     /// Starts a plane that refuses every subscription from a build-time knob of
@@ -136,7 +168,7 @@ impl SimRelay {
         tag: RelayTag,
         native: NativeClosed,
     ) -> Result<Self, RigError> {
-        Self::build(tag, |builder| native.configure(builder)).await
+        Self::build(tag, 0, |builder| native.configure(builder)).await
     }
 
     /// Starts a plane whose relay clamps every filter's `limit` to `max` itself.
@@ -152,11 +184,12 @@ impl SimRelay {
     ///
     /// As [`Self::start`].
     pub async fn start_clamping_natively(tag: RelayTag, max: RigCount) -> Result<Self, RigError> {
-        Self::build(tag, |builder| builder.max_filter_limit(max.get())).await
+        Self::build(tag, 0, |builder| builder.max_filter_limit(max.get())).await
     }
 
     async fn build(
         tag: RelayTag,
+        port: u16,
         configure: impl FnOnce(RelayBuilder) -> RelayBuilder,
     ) -> Result<Self, RigError> {
         // `events: true` is not the default: a default memory database is an id
@@ -177,7 +210,7 @@ impl SimRelay {
             .map_err(|_| RigError::Core(Step::ApplyFault))?;
         let ledger = Ledger::new();
         let relay_url = relay.url().await.to_string();
-        let canonical = Proxy::start(&relay_url, ledger.clone(), EndpointId::Canonical)?;
+        let canonical = Proxy::start_on(&relay_url, ledger.clone(), EndpointId::Canonical, port)?;
         Ok(Self {
             tag,
             ledger,

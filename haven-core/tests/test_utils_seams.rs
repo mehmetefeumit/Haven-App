@@ -7,16 +7,21 @@
 //! `SQLCipher` database — none of them plants a row to "reach" the state it
 //! asserts.
 //!
-//! Eight are READ seams; three are not. `set_stored_message_write_fault_for_test`
-//! MUTATES a live database so a harness can make a write the engine performs
-//! mid-call fail, `forge_future_header_445_for_test` SEALS a crafted event
+//! Of the first eleven, eight are READ seams; three are not.
+//! `set_stored_message_write_fault_for_test` MUTATES a live database so a
+//! harness can make a write the engine performs mid-call fail,
+//! `forge_future_header_445_for_test` SEALS a crafted event
 //! under the group key (a member's outbound power, not a reader's), and
 //! `LiveSyncCore::new_local_with_relay_map_for_test` lets a harness rewrite the
 //! addresses the engine's auto-commit publish targets. They are listed last and
 //! marked, because "a harness can see state the product does not expose" is not
-//! a true description of any of them.
+//! a true description of any of them. Of the four S0.2a added (12–15), only
+//! the last reads: the others plant a keyring secret, decrypt a whole store
+//! to a plain copy, and create a store.
 //!
-//! The eleven seams and what each is for:
+//! The fifteen seams and what each is for (the four of S0.2a, last, are proved
+//! in `fixture_dump_round_trip.rs` and `tooling/soak/tests/kept_stores.rs`,
+//! not here):
 //!
 //! 1. `SessionManager::process_event_typed_for_test` — one ingest of one event
 //!    that keeps production's pre-authentication screen and hands back the
@@ -71,6 +76,19 @@
 //!     admits it exactly as the trait's default does. It is the one record of a
 //!     dial to a relay outside a test's world. Its socket test lives in
 //!     `test_utils_seams_sockets.rs`; its gate and body tests are below.
+//! 12. `use_mock_keyring_with_session_secret_for_test` (with
+//!     `session_sqlcipher_key_for_test`) — a process-wide mock keyring holding
+//!     a secret the harness chose, so the app's own opener runs over a
+//!     production-keyed store a fixture can name the key of.
+//! 13. `export_store_plain_for_test`, `CircleStorage::export_plain_for_test`
+//!     and `dump_store_sql_for_test` / `CircleStorage::dump_sql_for_test` —
+//!     a store DECRYPTED to a plain copy and dumped as SQL text, the one recipe
+//!     a previous-release fixture is written by.
+//! 14. `import_store_sql_for_test` / `CircleStorage::import_sql_for_test` —
+//!     a keyed store CREATED from that text before anything opens it.
+//! 15. `SessionManager::fanout_shapes_for_test` /
+//!     `store_shape_counts_for_test` — value-free shapes and counts of what a
+//!     store holds, a fixture's coverage criterion.
 //!
 //! # Rule 15 over this file
 //!
