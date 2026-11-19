@@ -27,7 +27,7 @@ use std::time::Duration;
 use haven_core::circle::CircleManager;
 use haven_core::relay::cursor::STREAM_INBOX_1059;
 use haven_core::relay::live_sync::{CircleSpec, LiveSyncCore, LiveSyncEvent, StopOutcome};
-use haven_core::relay::recording_front::{Gate, RecordingFront};
+use haven_core::relay::recording_front::{Gate, RecordedFrame, RecordingFront};
 use haven_core::relay::RelayManager;
 use helpers::{assert_no_needles, assert_some_line_from, capture_haven_log_here, haven_core_lines};
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag, Timestamp};
@@ -80,16 +80,9 @@ async fn store(url: &str, event: &Event) {
     client.shutdown().await;
 }
 
-/// Polls `done` until it holds or the budget runs out.
-async fn until(mut done: impl FnMut() -> bool) -> bool {
-    let deadline = tokio::time::Instant::now() + budget();
-    while tokio::time::Instant::now() < deadline {
-        if done() {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    done()
+/// Whether `wait` finished within the budget.
+async fn within(wait: impl std::future::Future<Output = ()>) -> bool {
+    tokio::time::timeout(budget(), wait).await.is_ok()
 }
 
 /// Waits for the bus to deliver `wrap` as a Welcome.
@@ -110,11 +103,10 @@ async fn delivered(bus: &mut broadcast::Receiver<LiveSyncEvent>, wrap: &Event) -
     .unwrap_or(false)
 }
 
-/// The parsed frames the front recorded.
-fn frames(front: &RecordingFront) -> Vec<(usize, serde_json::Value)> {
-    front
-        .frames()
-        .into_iter()
+/// `recorded`, parsed.
+fn parsed(recorded: &[RecordedFrame]) -> Vec<(usize, serde_json::Value)> {
+    recorded
+        .iter()
         .filter(|frame| !frame.binary)
         .map(|frame| {
             (
@@ -125,9 +117,14 @@ fn frames(front: &RecordingFront) -> Vec<(usize, serde_json::Value)> {
         .collect()
 }
 
-/// How many inbox REQs (`kinds: [1059]`) the front was sent.
-fn inbox_reqs(front: &RecordingFront) -> usize {
-    frames(front)
+/// The parsed frames the front recorded.
+fn frames(front: &RecordingFront) -> Vec<(usize, serde_json::Value)> {
+    parsed(&front.frames())
+}
+
+/// How many inbox REQs (`kinds: [1059]`) are among `recorded`.
+fn inbox_reqs(recorded: &[RecordedFrame]) -> usize {
+    parsed(recorded)
         .iter()
         .filter(|(_, frame)| {
             frame[0] == "REQ"
@@ -201,7 +198,9 @@ async fn a_gated_invitation_older_than_the_advanced_lookback_is_delivered_after_
         // The plain relay's `EOSE` advances the cursor past the invitation's
         // window, while the gating relay has refused and not yet challenged.
         assert!(
-            until(|| cursor_secs(&me.circle) + 60 > now() && !front.refused().is_empty()).await,
+            within(front.wait_for(|_| !front.refused().is_empty())).await
+                && within(core.settles_until_for_test(|| cursor_secs(&me.circle) + 60 > now()))
+                    .await,
             "the plain relay's EOSE must advance the inbox cursor first, and the gating \
              relay must have refused, or this proves nothing about the floor"
         );
@@ -222,10 +221,11 @@ async fn a_gated_invitation_older_than_the_advanced_lookback_is_delivered_after_
         "the invitation was not delivered after the inbox socket authenticated"
     );
     assert!(
-        until(|| me
-            .circle
-            .inbox_floor_for_test(&relay_key(front.url()))
-            .is_none())
+        within(core.settles_until_for_test(|| {
+            me.circle
+                .inbox_floor_for_test(&relay_key(front.url()))
+                .is_none()
+        }))
         .await,
         "the EOSE to the REQ asked from the floor ends the floor"
     );
@@ -276,7 +276,8 @@ async fn a_gated_relays_floor_survives_a_restart() {
     let first = LiveSyncCore::new_local(Arc::clone(&me.circle), Arc::new(RelayManager::new()));
     first.start(&[], &inbox).await.expect("start");
     assert!(
-        until(|| cursor_secs(&me.circle) + 60 > now() && !front.refused().is_empty()).await,
+        within(front.wait_for(|_| !front.refused().is_empty())).await
+            && within(first.settles_until_for_test(|| cursor_secs(&me.circle) + 60 > now())).await,
         "the cursor must advance and the gating relay refuse before the restart"
     );
     assert_eq!(first.stop().await, StopOutcome::Drained);
@@ -298,6 +299,72 @@ async fn a_gated_relays_floor_survives_a_restart() {
         "the restarted session forgot what the gating relay owes the inbox"
     );
     assert_eq!(second.stop().await, StopOutcome::Drained);
+}
+
+/// Has the circle store in `dir` refuse every write of a relay's owed floor.
+fn refuse_floors(dir: &TempDir) {
+    haven_core::sqlcipher_init::ensure().expect("SQLite initialises");
+    rusqlite::Connection::open(dir.path().join(haven_core::circle::CIRCLES_DB_FILENAME))
+        .expect("open the circle store")
+        .execute_batch(
+            "CREATE TRIGGER floors_refused BEFORE INSERT ON relay_floors
+             BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+        )
+        .expect("arm the fault");
+}
+
+/// A floor the store will not take holds the inbox cursor instead (Security
+/// Rule 12): while a relay that was asked owes the inbox what nothing wrote
+/// down, no other relay's `EOSE` advances the cursor — so the gating relay,
+/// once its socket authenticates, is still asked far enough back to deliver
+/// an invitation older than the lookback that advance would have left.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_inbox_floor_the_store_will_not_take_holds_the_cursor() {
+    let _ = haven_core::relay::allow_ws_loopback_for_test();
+    let plain = MockRelay::run().await.expect("plain relay");
+    let plain_url = plain.url().await.to_string();
+    let gated = MockRelay::run().await.expect("gated relay");
+    let front = RecordingFront::start_gating_with(
+        gated.url().await.as_str(),
+        Gate {
+            hold_challenges: true,
+            ..Gate::default()
+        },
+    );
+    let me = six_days_offline();
+    refuse_floors(&me.dir);
+    let offline_since = cursor_secs(&me.circle);
+    let wrap = wrap_to(&me.keys, 5 * DAY);
+    store(gated.url().await.as_str(), &wrap).await;
+
+    let core = LiveSyncCore::new_local(Arc::clone(&me.circle), Arc::new(RelayManager::new()));
+    let mut bus = core.bus().subscribe();
+    core.start(&[], &[plain_url.clone(), front.url().to_owned()])
+        .await
+        .expect("start");
+    let plain_key = RelayUrl::parse(&plain_url).expect("a relay url");
+    assert!(
+        within(front.wait_for(|_| !front.refused().is_empty())).await
+            && within(core.settles_until_for_test(|| core.endpoint_settled_for_test(&plain_key)))
+                .await,
+        "the plain relay must have answered and the gating relay refused, or this proves nothing"
+    );
+    assert_eq!(
+        me.circle.inbox_floor_for_test(&relay_key(front.url())),
+        None,
+        "premise: the gating relay's floor was not recorded"
+    );
+    assert_eq!(
+        cursor_secs(&me.circle),
+        offline_since,
+        "another relay's EOSE moved the cursor past what a relay owes unrecorded"
+    );
+    front.release_challenges();
+    assert!(
+        delivered(&mut bus, &wrap).await,
+        "the invitation the gating relay holds was not delivered after it authenticated"
+    );
+    assert_eq!(core.stop().await, StopOutcome::Drained);
 }
 
 /// Exactly one REQ follows the authentication — Haven's re-issue for a REQ
@@ -324,25 +391,29 @@ async fn exactly_one_more_req(gate: Gate) {
         "the gated invitation was never delivered"
     );
     assert!(
-        until(|| circle
-            .inbox_floor_for_test(&relay_key(front.url()))
-            .is_none())
+        within(core.settles_until_for_test(|| {
+            circle
+                .inbox_floor_for_test(&relay_key(front.url()))
+                .is_none()
+        }))
         .await,
         "the asked-again REQ must end with its EOSE"
     );
     if gate.challenge_again {
         assert!(
-            until(|| frames(&front)
-                .iter()
-                .filter(|(_, f)| f[0] == "AUTH")
-                .count()
-                == 2)
+            within(front.wait_for(|recorded| {
+                parsed(recorded)
+                    .iter()
+                    .filter(|(_, f)| f[0] == "AUTH")
+                    .count()
+                    == 2
+            }))
             .await,
             "the second challenge was answered, and refused as a repeat"
         );
     }
     assert_eq!(
-        inbox_reqs(&front),
+        inbox_reqs(&front.frames()),
         2,
         "the refused REQ and exactly one more: never both the pool's resend and Haven's"
     );
@@ -482,7 +553,7 @@ async fn a_pause_leaves_the_inbox_socket_with_no_req_and_no_connection() {
     .await
     .expect("start");
     assert!(
-        until(|| inbox_reqs(&inbox_front) == 1).await,
+        within(inbox_front.wait_for(|recorded| inbox_reqs(recorded) == 1)).await,
         "the inbox REQ went out on its own socket"
     );
     let live = core.relay_health().await;
@@ -505,7 +576,7 @@ async fn a_pause_leaves_the_inbox_socket_with_no_req_and_no_connection() {
             "burst {burst}: a socket stood"
         );
         assert!(
-            until(|| inbox_front.closed() == inbox_front.connections()).await,
+            within(inbox_front.wait_closed(inbox_front.connections())).await,
             "burst {burst}: the inbox socket was left open at the relay"
         );
         core.open_background_burst().await.expect("burst opens");

@@ -9534,7 +9534,7 @@ impl RelayManagerFfi {
         let outcomes = CoreRelayManager::read_own_inbox_per_relay(
             &circle.inner.nip42_signer(),
             since_timestamp(since)?,
-            100,
+            haven_core::relay::OWN_INBOX_READ_CAP,
             &relays,
         )
         .await;
@@ -9577,15 +9577,14 @@ impl RelayManagerFfi {
         relays: Vec<String>,
         since: Option<i64>,
     ) -> Result<Vec<RelayGiftWrapFetchFfi>, String> {
-        // The per-relay count is shown to the user as exact, so the cap is a
-        // generous flood-guard rather than a paging limit: a real inbox holds
-        // far fewer than this many gift wraps in its lookback window
+        // The per-relay count is shown to the user as exact: a real inbox
+        // holds far fewer than the cap's gift wraps in its lookback window
         // ([`inbox_gift_wrap_lookback_secs`]), so the headline "N new
         // invitations" is not silently truncated.
         let outcomes = CoreRelayManager::read_own_inbox_per_relay(
             &circle.inner.nip42_signer(),
             since_timestamp(since)?,
-            1000,
+            haven_core::relay::OWN_INBOX_READ_CAP,
             &relays,
         )
         .await;
@@ -18987,6 +18986,57 @@ mod maintenance_real_ffi_tests {
                 "the pooled fetch did not return exactly the genuine gift wrap"
             );
         }
+    }
+
+    /// Anyone who knows the npub can store gift wraps addressed to it, dated
+    /// as they like, so a flood past the background poll's old hundred pushed
+    /// a Welcome older than all of it out of every poll. The poll now reads as
+    /// many as the invitations page does.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_flood_of_gift_wraps_does_not_push_a_welcome_out_of_the_poll_via_real_ffi() {
+        use haven_core::relay::scripted_relay::{Frame, ScriptedRelay};
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let inbox = ScriptedRelay::start();
+        let keys = Keys::generate();
+        let (circle, _dir) = circle_of(&keys, "flooded-inbox");
+        let wrap_aged = |age_secs: u64| {
+            nostr::EventBuilder::new(Kind::GiftWrap, "c2VhbGVk")
+                .tag(nostr::Tag::public_key(keys.public_key()))
+                .custom_created_at(nostr::Timestamp::now() - age_secs)
+                .sign_with_keys(&Keys::generate())
+                .expect("sign the wrap")
+        };
+        // Newest first, as a relay serves them: the flood, then the Welcome
+        // NIP-59 backdated two days.
+        let mut frames: Vec<Frame> = (0..150).map(|age| Frame::Event(wrap_aged(age))).collect();
+        let welcome = wrap_aged(2 * 86_400);
+        frames.push(Frame::Event(welcome.clone()));
+        frames.push(Frame::Eose);
+        inbox.answer(
+            |filter| {
+                filter
+                    .kinds
+                    .as_ref()
+                    .is_some_and(|kinds| kinds.contains(&Kind::GiftWrap))
+            },
+            frames,
+        );
+
+        let polled = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance")
+            .fetch_gift_wraps(&circle, vec![inbox.url().to_owned()], None)
+            .await
+            .expect("the poll runs");
+        assert!(
+            polled
+                .iter()
+                .any(|json| serde_json::from_str::<nostr::Event>(json).is_ok_and(|w| w == welcome)),
+            "a flood of gift wraps pushed the Welcome out of the poll"
+        );
+        assert_eq!(polled.len(), 151, "the poll did not read the whole inbox");
     }
 
     // ========================================================================

@@ -38,8 +38,8 @@ use haven_core::relay::fanout::scripted::{Answer, ScriptedFanout};
 use haven_core::relay::fanout::UnrecordedPublisher;
 use haven_core::relay::fanout::{
     drive_one, wake_deadline, DriveMode, EvolutionStatus, FanoutClock, FanoutStatus, ModeSource,
-    Publishing, RepairOutcome, WallClock, BUSY_RETRY_MS, PUBLISHER_BUDGET_MS, RESUME_BUDGET_MS,
-    ROW_BUDGET_MS,
+    Publishing, RepairOutcome, UnrecordedAnswer, WallClock, BUSY_RETRY_MS, PUBLISHER_BUDGET_MS,
+    RESUME_BUDGET_MS, ROW_BUDGET_MS, WELCOME_COPY_WINDOW_MS,
 };
 use haven_core::relay::scripted_relay::ScriptedRelay;
 use haven_core::relay::RelayManager;
@@ -5438,6 +5438,222 @@ async fn a_relay_that_never_answers_holds_back_no_other_welcome_of_the_create() 
         [vec![INBOX.to_string()], vec![SILENT.to_string()]]
     );
     assert_eq!(to(&other), [vec![INBOX.to_string()]]);
+}
+
+/// A clock on tokio's own, which a paused test runtime moves only when every
+/// task waits: a relay's silence costs no real time, and how long a call
+/// waited is read off exactly.
+struct Paused {
+    start: tokio::time::Instant,
+}
+
+impl Paused {
+    fn now() -> Self {
+        Self {
+            start: tokio::time::Instant::now(),
+        }
+    }
+
+    fn elapsed_ms(&self) -> u64 {
+        u64::try_from(self.start.elapsed().as_millis()).expect("a short test")
+    }
+}
+
+impl FanoutClock for Paused {
+    fn now_ms(&self) -> u64 {
+        STAGED_AT + self.elapsed_ms()
+    }
+}
+
+/// A publisher whose relays each answer after their own delay, on tokio's
+/// clock, and which records each answer that came back to the driver.
+struct Timed {
+    relays: Vec<(&'static str, u64, UnrecordedAnswer)>,
+    answered: Mutex<Vec<(String, String)>>,
+}
+
+impl Timed {
+    fn answering(relays: &[(&'static str, u64, UnrecordedAnswer)]) -> Self {
+        Self {
+            relays: relays.to_vec(),
+            answered: Mutex::default(),
+        }
+    }
+
+    /// Each relay that answered, with the bytes it answered for, sorted.
+    fn answered(&self) -> Vec<(String, String)> {
+        let mut answered = self.answered.lock().expect("timed").clone();
+        answered.sort();
+        answered
+    }
+}
+
+impl UnrecordedPublisher for Timed {
+    fn publish_unrecorded<'a>(
+        &'a self,
+        event: &'a nostr::Event,
+        relays: &'a [String],
+    ) -> Pin<Box<dyn Future<Output = Vec<UnrecordedAnswer>> + Send + 'a>> {
+        Box::pin(async move {
+            let [relay] = relays else {
+                panic!("a Welcome is sent one relay per call");
+            };
+            let (_, after_ms, answer) = *self
+                .relays
+                .iter()
+                .find(|(url, _, _)| url == relay)
+                .expect("a scripted relay");
+            tokio::time::sleep(std::time::Duration::from_millis(after_ms)).await;
+            self.answered
+                .lock()
+                .expect("timed")
+                .push((relay.clone(), nostr::JsonUtil::as_json(event)));
+            vec![answer]
+        })
+    }
+
+    fn publish_authenticated<'a>(
+        &'a self,
+        _signer: Arc<haven_core::relay::nip42::Nip42Signer>,
+        _event: &'a nostr::Event,
+        _relay: &'a str,
+    ) -> Pin<Box<dyn Future<Output = haven_core::relay::identity::AuthSendOutcome> + Send + 'a>>
+    {
+        haven_core::relay::fanout::scripted::not_resent()
+    }
+}
+
+const fn timed<'a>(
+    fanout: &'a ScriptedFanout,
+    publisher: &'a Timed,
+    clock: &'a Paused,
+) -> Publishing<'a, ScriptedFanout> {
+    Publishing {
+        fanout,
+        publisher,
+        clock,
+        deadline_ms: None,
+        mode: &DriveMode::Full,
+    }
+}
+
+/// A relay of the invitee's inbox that takes the socket and never answers
+/// does not hold the user's create for its ladder once another relay has
+/// acknowledged the Welcome: the call returns within one send attempt of its
+/// pass, with the Welcome delivered.
+#[tokio::test(start_paused = true)]
+async fn a_relay_that_never_answers_does_not_hold_a_create_another_relay_delivered() {
+    let founder = CircleMember::new();
+    let (_invitee, package) = an_invitee_on(&[SILENT, INBOX]).await;
+    let transport = ScriptedFanout::default();
+    let publisher = Timed::answering(&[
+        (INBOX, 0, UnrecordedAnswer::Accepted),
+        (SILENT, PUBLISHER_BUDGET_MS, UnrecordedAnswer::Unanswered),
+    ]);
+    let clock = Paused::now();
+
+    let created = timed(&transport, &publisher, &clock)
+        .create_circle(
+            &founder.circle,
+            &founder.keys,
+            vec![package],
+            &founding_config(),
+        )
+        .await
+        .expect("the circle is created");
+
+    assert_eq!((created.welcomes_sent, created.welcomes_total), (1, 1));
+    assert!(created.unsent_recipients.is_empty());
+    assert!(
+        clock.elapsed_ms() <= WELCOME_COPY_WINDOW_MS,
+        "a create whose Welcome was delivered waited out a silent relay's ladder",
+    );
+    assert_eq!(
+        publisher
+            .answered()
+            .into_iter()
+            .map(|(relay, _)| relay)
+            .collect::<Vec<_>>(),
+        [INBOX],
+    );
+}
+
+/// The cut costs no responsive relay its copy: a relay that answers within
+/// the pass's attempt, after another relay already delivered the Welcome, is
+/// still sent the same bytes and acknowledges them — and the relay that never
+/// answers still does not hold the invite.
+#[tokio::test(start_paused = true)]
+async fn a_relay_that_answers_within_the_attempt_still_takes_a_delivered_welcome() {
+    let fx = setup_circle(2, &[ONE]).await;
+    let (admin, _others, group) = split(fx);
+    let (_invitee, package) = an_invitee_on(&[INBOX, INBOX_TWO, SILENT]).await;
+    let transport = answering(&[(ONE, &[Answer::Accepted])]);
+    let publisher = Timed::answering(&[
+        (INBOX, 0, UnrecordedAnswer::Accepted),
+        (INBOX_TWO, SECOND_MS, UnrecordedAnswer::Accepted),
+        (SILENT, PUBLISHER_BUDGET_MS, UnrecordedAnswer::Unanswered),
+    ]);
+    let clock = Paused::now();
+
+    let outcome = timed(&transport, &publisher, &clock)
+        .add_members(&admin.circle, &group, &[package])
+        .await
+        .expect("the invite is accepted");
+
+    assert_eq!(outcome.status, EvolutionStatus::Confirmed);
+    assert_eq!((outcome.welcomes_sent, outcome.welcomes_total), (1, 1));
+    assert!(
+        clock.elapsed_ms() <= WELCOME_COPY_WINDOW_MS,
+        "an invite whose Welcome was delivered waited out a silent relay's ladder",
+    );
+    let answered = publisher.answered();
+    let [(first, first_bytes), (second, second_bytes)] =
+        <[_; 2]>::try_from(answered).unwrap_or_else(|_| panic!("two relays answered"));
+    assert_eq!(
+        (first.as_str(), second.as_str()),
+        (INBOX_TWO, INBOX),
+        "a relay that answered within the attempt was cut off",
+    );
+    assert_eq!(first_bytes, second_bytes, "the relays took different bytes");
+}
+
+/// The cut waits on every record of the pass: while one Welcome has no
+/// acknowledgement, its slowest relay is waited for to the end of its ladder,
+/// however soon another invitee's Welcome was delivered — and a relay that
+/// takes it only then delivers it.
+#[tokio::test(start_paused = true)]
+async fn a_welcome_no_relay_has_acknowledged_waits_for_its_slowest_relay() {
+    let founder = CircleMember::new();
+    let (_slow, slow_package) = an_invitee_on(&[SILENT, INBOX_TWO]).await;
+    let (_prompt, prompt_package) = an_invitee_on(&[INBOX]).await;
+    let transport = ScriptedFanout::default();
+    let publisher = Timed::answering(&[
+        (INBOX, 0, UnrecordedAnswer::Accepted),
+        (INBOX_TWO, 0, UnrecordedAnswer::Refused),
+        (SILENT, PUBLISHER_BUDGET_MS, UnrecordedAnswer::Accepted),
+    ]);
+    let clock = Paused::now();
+
+    let created = timed(&transport, &publisher, &clock)
+        .create_circle(
+            &founder.circle,
+            &founder.keys,
+            vec![slow_package, prompt_package],
+            &founding_config(),
+        )
+        .await
+        .expect("the circle is created");
+
+    assert!(
+        clock.elapsed_ms() >= PUBLISHER_BUDGET_MS,
+        "a Welcome no relay had acknowledged was not waited for",
+    );
+    assert_eq!(
+        (created.welcomes_sent, created.welcomes_total),
+        (2, 2),
+        "a Welcome its slowest relay took was not delivered",
+    );
+    assert!(created.unsent_recipients.is_empty());
 }
 
 /// The engine refusing a Welcome it owes for a reason that can pass — its

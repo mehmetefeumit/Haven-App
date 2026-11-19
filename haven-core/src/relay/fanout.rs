@@ -1104,6 +1104,16 @@ pub const FOLD_BUDGET_MS: u64 = crate::relay::retick::MAX_CONVERGENCE_RETICKS as
 pub const PUBLISHER_BUDGET_MS: u64 =
     crate::relay::manager::PUBLISH_LADDER_MS + crate::relay::manager::AUTH_RETRY_MS;
 
+/// How long after a pass of Welcome sends began its other sends are still
+/// waited for once every record of the pass has been acknowledged.
+///
+/// One attempt of the publisher's ladder: the connect and the `OK` window.
+/// What a relay that answers within it acknowledges is still a copy of the
+/// Welcome on that relay; what it cuts off is a copy nothing owes, never a
+/// record's delivery. A relay that would take the Welcome only on a later
+/// attempt of its ladder is not sent it by this pass.
+pub const WELCOME_COPY_WINDOW_MS: u64 = crate::relay::manager::PUBLISH_ATTEMPT_MS;
+
 /// What a drive asks to be woken after when a relay it wants was not free.
 ///
 /// The relay is being called for another record, or was held by another
@@ -5436,7 +5446,9 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
 
     /// Sends each record's Welcome (`sends[i]`, the event and its due relays,
     /// for `records[i]`) in one concurrent pass and stores every answer, and
-    /// returns which records an acknowledgement delivered.
+    /// returns which records an acknowledgement delivered. Once every record
+    /// is delivered, the sends still under way are waited for only until
+    /// [`WELCOME_COPY_WINDOW_MS`] after the pass began, and then dropped.
     ///
     /// Each send is anonymous. A relay that answers it `auth-required:` is
     /// sent the same bytes once more, as the inviter's identity (owner
@@ -5457,6 +5469,7 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
         let taken = taken.as_slice();
         // Every send of the pass is begun at one instant, so the wake's room
         // is read once for all of them.
+        let copies_until_ms = self.clock.now_ms().saturating_add(WELCOME_COPY_WINDOW_MS);
         let mut answers = FuturesUnordered::new();
         if self.may_send_unrecorded() {
             for (index, (event, due)) in sends.iter().enumerate() {
@@ -5473,7 +5486,24 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
         }
 
         let mut ended = vec![false; records.len()];
-        while let Some((index, relay, answer)) = answers.next().await {
+        loop {
+            // A user's create or invite waits on this pass: once every record
+            // is delivered, a relay that takes the socket and never answers
+            // must not hold it for a whole ladder. Polled first, so an answer
+            // already there is never cut.
+            let next = if ended.iter().all(|ended| *ended) {
+                match futures::future::select(answers.next(), self.clock.until(copies_until_ms))
+                    .await
+                {
+                    futures::future::Either::Left((next, _)) => next,
+                    futures::future::Either::Right(((), _)) => None,
+                }
+            } else {
+                answers.next().await
+            };
+            let Some((index, relay, answer)) = next else {
+                break;
+            };
             // Once one relay's acknowledgement ended the record, every later
             // answer of the pass reads as that same delivery.
             let (Some(accepted), false) = (answer, ended[index]) else {

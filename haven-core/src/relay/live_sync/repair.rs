@@ -247,12 +247,16 @@ impl RepairSchedule {
             .entry(key.clone())
             .or_insert_with(|| Entry::fresh(now));
         if std::mem::take(&mut entry.authenticated) {
+            // A re-issue still pending — one a consumer lag scheduled on the
+            // gated backoff — is this one: never a second ask, never a wait.
+            entry.awaits_auth = None;
             if pool_kept {
+                entry.due_at = None;
                 return None;
             }
             entry.gated = true;
-            let due = *entry.due_at.get_or_insert(now);
-            return Some(due);
+            entry.due_at = Some(now);
+            return Some(now);
         }
         let due = self.note_closed(key, ClosedKind::ReadGated, now);
         if let Some(entry) = self.entries.get_mut(key) {
@@ -269,14 +273,15 @@ impl RepairSchedule {
             .entries
             .entry(key.clone())
             .or_insert_with(|| Entry::fresh(now));
-        if entry.due_at.is_none() {
-            entry.authenticated = true;
-            return false;
-        }
         match entry.awaits_auth.take() {
             Some(true) => entry.due_at = None,
             Some(false) => entry.due_at = Some(now),
-            None => return false,
+            // The refusal has not reached this table yet, whatever else is
+            // pending: it decides the one ask when it does.
+            None => {
+                entry.authenticated = true;
+                return false;
+            }
         }
         true
     }
@@ -997,6 +1002,47 @@ mod tests {
             assert!(
                 !s.note_authenticated(&k, t0),
                 "a second authentication brings nothing in"
+            );
+        }
+    }
+
+    /// A gated re-issue a consumer lag left pending holds back no ask an
+    /// authentication owes, and adds none: whichever order the refusal and
+    /// the authentication reach the table in, a REQ the pool deleted is
+    /// re-issued at once, once, and one it kept is left to its own resend.
+    #[test]
+    fn a_lag_scheduled_re_issue_neither_delays_nor_doubles_the_ask_after_authentication() {
+        for (pool_kept, auth_first) in [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let mut s = RepairSchedule::default();
+            let k = key("wss://gate.example", "s_inbox_0");
+            let t0 = Instant::now();
+            let lagged = s.note_closed(&k, ClosedKind::ReadGated, t0);
+            assert!(lagged > t0, "premise: the lag waits the gated backoff");
+            if auth_first {
+                s.note_authenticated(&k, t0);
+                s.note_read_gated(&k, pool_kept, t0);
+            } else {
+                s.note_read_gated(&k, pool_kept, t0);
+                s.note_authenticated(&k, t0);
+            }
+            let due = s.take_due(t0);
+            if pool_kept {
+                assert!(
+                    due.is_empty(),
+                    "Haven asked beside the pool's resend ({auth_first})"
+                );
+            } else {
+                assert_eq!(
+                    due,
+                    vec![k.clone()],
+                    "the re-issue waited out the lag's backoff ({auth_first})"
+                );
+            }
+            assert_eq!(
+                s.pending_len(),
+                0,
+                "a second ask stayed pending ({pool_kept}, {auth_first})"
             );
         }
     }

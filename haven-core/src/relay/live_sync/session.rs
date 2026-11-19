@@ -909,7 +909,8 @@ impl SubscribeCtx<'_> {
         // REQ, so a relay that refuses it until this device authenticates,
         // is not connected, or never answers keeps owing across a restart,
         // and the cursor another relay's `EOSE` advances erases nothing it
-        // owes (Security Rule 12).
+        // owes (Security Rule 12). A floor the store would not take holds
+        // the cursor instead.
         let mut targets: Vec<(RelayUrl, Filter)> = Vec::with_capacity(issued.len());
         for relay_url in issued {
             let asked = self
@@ -921,7 +922,9 @@ impl SubscribeCtx<'_> {
                 sub_id: sub_id.clone(),
             };
             self.processor.note_asked_from(&key, asked);
-            self.circle.owe_inbox_floor(key.relay_url.as_str(), asked);
+            let recorded = self.circle.owe_inbox_floor(key.relay_url.as_str(), asked);
+            self.processor
+                .note_inbox_floor_recorded(&key.relay_url, recorded);
             targets.push((key.relay_url, inbox_filter(self.own_pubkey, asked)));
         }
         let accepted = self.subscribe_targets(self.inbox, sub_id, targets).await?;
@@ -1909,6 +1912,7 @@ impl LiveSyncCore {
         if inbox_sub.relays.is_empty() {
             return Ok(opened);
         }
+        self.processor.forget_unrecorded_inbox_floors();
         opened.extend(
             ctx.issue_inbox(&inbox_sub.relays, &inbox_sub.sub_id, inbox_phase, now)
                 .await?,
@@ -2004,6 +2008,14 @@ impl LiveSyncCore {
     #[must_use]
     pub fn endpoint_settled_for_test(&self, relay: &RelayUrl) -> bool {
         self.processor.endpoint_settled_for_test(relay)
+    }
+
+    /// Resolves once `done` holds, read now and again each time an endpoint
+    /// settles — after its `EOSE` or `CLOSED` was taken in and anchored.
+    /// Unbounded: the caller bounds it.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn settles_until_for_test(&self, done: impl Fn() -> bool) {
+        self.processor.settles_until_for_test(done).await;
     }
 
     /// The relays the engine pool holds now.

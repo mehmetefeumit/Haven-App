@@ -605,7 +605,11 @@ is ever sent on an engine socket (`live_sync_inbox_socket_e2e`).
   never answers keeps owing across a restart, and every later inbox REQ to it
   asks from its floor; the inbox cursor another relay's `EOSE` advances erases
   no relay's floor. An invitation stored five days ago only on a gating relay
-  is still read after a six-day absence.
+  is still read after a six-day absence. A floor the store will not take holds
+  the inbox cursor instead: while a relay asked owes the inbox what nothing
+  recorded, no inbox `EOSE` advances it, until a later write for that relay
+  lands, its own `EOSE` answers, or every inbox REQ is issued anew
+  (`live_sync_inbox_socket_e2e::an_inbox_floor_the_store_will_not_take_holds_the_cursor`).
 - **The radio.** Every step that closes, counts or watches the engine pool —
   the pause's disconnect loop, the stop, the radio-off watch, the burst's
   re-dial, the health probe, the reconnect re-issue — covers the inbox socket's
@@ -2815,11 +2819,21 @@ Android service's resume claims `false` and only finishes.
   another invitee's Welcome
   (`fanout_change_e2e::{a_welcome_goes_to_every_due_inbox_relay_and_one_acknowledgement_completes_it,
   a_relay_that_never_answers_holds_back_no_other_welcome_of_the_create}`,
-  `welcome_gated_inbox_e2e`). The price is that a pass, and the create or
-  invite that runs it, can last until its slowest relay's send ends — at most
-  the publisher's longest run, below. The first acknowledgement by an inbox
-  relay of that event completes the Welcome, counted once, and ends its
-  record; every other relay of the pass was sent it at the same instant. The
+  `welcome_gated_inbox_e2e`). Once every record of the pass is delivered, its
+  other sends are waited for only until one send attempt — the connect and the
+  `OK` window, `WELCOME_COPY_WINDOW_MS` — after the pass began, and then
+  dropped, so a relay that takes the socket and never answers does not hold
+  the create or invite for its whole ladder: a relay that answers within that
+  attempt still holds its copy, and one that would take the Welcome only on a
+  later attempt is not sent it by this pass, whose records owe nothing more
+  (`fanout_change_e2e::{a_relay_that_never_answers_does_not_hold_a_create_another_relay_delivered,
+  a_relay_that_answers_within_the_attempt_still_takes_a_delivered_welcome}`).
+  A pass with a record still undelivered lasts until its slowest relay's send
+  ends — at most the publisher's longest run, below
+  (`a_welcome_no_relay_has_acknowledged_waits_for_its_slowest_relay`). The
+  first acknowledgement by an inbox relay of that event completes the Welcome,
+  counted once, and ends its record; every other relay of the pass was sent it
+  at the same instant. The
   engine's state is read again immediately before each record's sends. A
   drive that leaves a Welcome owed asks to be resumed when its next relay
   falls due (`ResumeOutcome::retry_after_ms`, never under five seconds;

@@ -126,6 +126,18 @@ const MAX_FOREIGN_LIST_RELAYS: usize = 16;
 /// Timeout for waiting for relay WebSocket connections to establish.
 pub const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The `limit` of an invitation read's one REQ to a relay
+/// ([`RelayManager::read_own_inbox_per_relay`]), the background poll's and
+/// the invitations page's alike.
+///
+/// Anyone who knows the npub can store gift
+/// wraps addressed to it at whatever `created_at` they like, and NIP-59
+/// backdates a genuine one at random, so what pushes a Welcome out of the read
+/// is more wraps in the lookback window than one REQ is served: this many, or
+/// fewer where the relay caps a REQ lower. The relay-plane matrix's
+/// `REQ-1059-P` bound.
+pub const OWN_INBOX_READ_CAP: usize = 1_000;
+
 /// Maximum number of attempts (initial try + retries) for [`RelayManager::publish_event`].
 ///
 /// The first publish after a cold start — e.g. the app foregrounds and the
@@ -152,10 +164,13 @@ const MAX_PUBLISH_ATTEMPTS: u32 = 3;
 /// The longest [`RelayManager::publish_event`] takes with relays that never
 /// answer, in milliseconds: every attempt's connect and wait, and the pauses
 /// between them. The wait for a relay another send holds is not in it.
-pub const PUBLISH_LADDER_MS: u64 = (MAX_PUBLISH_ATTEMPTS as u64
-    * (CONNECTION_TIMEOUT.as_secs() + DEFAULT_TIMEOUT.as_secs())
-    + (MAX_PUBLISH_ATTEMPTS as u64 - 1) * PUBLISH_RETRY_BACKOFF.as_secs())
-    * 1_000;
+pub const PUBLISH_LADDER_MS: u64 = MAX_PUBLISH_ATTEMPTS as u64 * PUBLISH_ATTEMPT_MS
+    + (MAX_PUBLISH_ATTEMPTS as u64 - 1) * PUBLISH_RETRY_BACKOFF.as_secs() * 1_000;
+
+/// The longest one attempt of [`RelayManager::publish_event`]'s ladder takes,
+/// in milliseconds: the connect and the wait for the relay's `OK`.
+pub const PUBLISH_ATTEMPT_MS: u64 =
+    (CONNECTION_TIMEOUT.as_secs() + DEFAULT_TIMEOUT.as_secs()) * 1_000;
 
 /// Backoff between [`RelayManager::publish_event`] attempts.
 ///

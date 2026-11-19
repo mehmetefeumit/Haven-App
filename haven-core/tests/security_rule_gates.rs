@@ -3484,6 +3484,8 @@ fn the_drivers_public_surface_is_pinned() {
         "const ROW_BUDGET_MS",
         "const FOLD_BUDGET_MS",
         "const PUBLISHER_BUDGET_MS",
+        // How long a delivered pass still waits for its other Welcome sends.
+        "const WELCOME_COPY_WINDOW_MS",
         "const BUSY_RETRY_MS",
         "enum FanoutStatus",
         "struct DriveOutcome",
