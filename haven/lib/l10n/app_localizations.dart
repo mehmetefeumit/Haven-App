@@ -396,6 +396,12 @@ abstract class AppLocalizations {
   /// **'Couldn’t save that name. Please try again.'**
   String get onboardingDisplayNameError;
 
+  /// Snackbar shown at the end of onboarding when the profile photo the user picked could not be saved on this device. Onboarding still completes without it. Says nothing about publishing or the network: the failure is local. 'Settings' and 'Identity' name the app's own Settings screen and its Identity page; use the same words this locale's Haven UI uses for those two titles.
+  ///
+  /// In en, this message translates to:
+  /// **'Your photo couldn’t be saved. You can add it later in Settings, under Identity.'**
+  String get onboardingPhotoNotSaved;
+
   /// Caption below the avatar circle on the onboarding create-identity screen, inviting the user to optionally add a profile photo. Shown only when no photo has been chosen yet.
   ///
   /// In en, this message translates to:
@@ -1854,10 +1860,10 @@ abstract class AppLocalizations {
   /// **'Circle: {circleName}'**
   String memberPickerCollisionCircleLabel(String circleName);
 
-  /// Shown on the ONE row that appears when the user types or pastes a complete, valid npub for someone not already in the local directory (plan §10 D2), and also under a staged row (added by the paste button, Done, a QR scan or a tap on that row) whose person was looked up the same way. Appears whether or not anything resolves. Discloses exactly four things and no more: (1) Haven asked a public relay for the person's published profile — never more than two relays (it never pads with decoys; they are the two relays the existing per-author relay assignment allows, PROFILE_MAX_RELAY_RANK). Do NOT say or imply WHEN the second one is asked, e.g. 'only if the first did not answer': it is also asked when the key is entered again after the first answered without a profile; (2) a relay that was asked can see THIS DEVICE asked about THAT KEY at THAT MOMENT — do not soften this into 'may be able to see' or omit it, it is a real, unavoidable disclosure; (3) the request is NOT tied to the user's Haven identity, because it carries no cryptographic signature and therefore cannot answer a relay's NIP-42 AUTH challenge — translate 'signature' in the cryptographic sense, not a handwritten or email signature; (4) ONLY IF the published profile names a photo, Haven downloads that photo from the server the PERSON chose (not a server Haven or the user chose), and that server can see this device's network address — translate 'network address' as the device's internet (IP) address, not a street or email address. Do NOT use a word meaning 'anonymous' or 'anonymously' anywhere in this string — it overclaims: the network address and timing of the requests are still visible, which is exactly what points (2) and (4) disclose. Do not add or imply a duration, a retry count, or which relay or server was asked. 'This person' is deliberately not a pronoun: do not introduce a gendered pronoun for them.
+  /// Shown on the ONE row that appears when the user types or pastes a complete, valid npub for someone not already in the local directory (plan §10 D2), and also under a staged row (added by the paste button, Done, a QR scan or a tap on that row) whose person was looked up the same way. Appears whether or not anything resolves. Discloses exactly four things and no more: (1) Haven asked a public relay for the person's published profile — never more than two relays (it never pads with decoys; they are the two relays the existing per-author relay assignment allows, PROFILE_MAX_RELAY_RANK). Do NOT say or imply WHEN the second one is asked, e.g. 'only if the first did not answer': it is also asked when the key is entered again after the first answered without a profile; (2) a relay that was asked can see THIS DEVICE asked about THAT KEY at THAT MOMENT — do not soften this into 'may be able to see' or omit it, it is a real, unavoidable disclosure; (3) the request is NOT tied to the user's Haven identity, because it carries no cryptographic signature and therefore cannot answer a relay's NIP-42 AUTH challenge — translate 'signature' in the cryptographic sense, not a handwritten or email signature; (4) ONLY IF the published profile names a photo, Haven downloads that photo from the server the PERSON chose (not a server Haven or the user chose); that server may redirect the download to another server (Blossom servers such as Primal's hand the file out from a separate media host, and Haven follows up to three such redirects), and each server the download reaches can see this device's network address — translate 'network address' as the device's internet (IP) address, not a street or email address, and keep 'may': not every server redirects. Do NOT use a word meaning 'anonymous' or 'anonymously' anywhere in this string — it overclaims: the network address and timing of the requests are still visible, which is exactly what points (2) and (4) disclose. Do not add or imply a duration, a retry count, or which relay or server was asked. 'This person' is deliberately not a pronoun: do not introduce a gendered pronoun for them.
   ///
   /// In en, this message translates to:
-  /// **'Haven asked a relay — two at most — for this person\'s published profile. A relay it asked can see that this device asked about this key just now, but the request carries no signature, so it isn\'t tied to your Haven identity. If the profile has a photo, Haven downloads it from the server this person chose, which can see this device\'s network address.'**
+  /// **'Haven asked a relay — two at most — for this person\'s published profile. A relay it asked can see that this device asked about this key just now, but the request carries no signature, so it isn\'t tied to your Haven identity. If the profile has a photo, Haven downloads it from the server this person chose, which may send it on to another server. Each of them can see this device\'s network address.'**
   String get memberPickerStrangerLookupNote;
 
   /// Shown, and spoken by a screen reader as part of the row's label, on the typed-npub row of the invite picker while the lookup of that person's published profile is still in flight. Also announced once on its own when the row appears with the lookup still running, so it must read as a complete status. A short status, not a sentence about relays — the disclosure is memberPickerStrangerLookupNote, shown beneath it. Ends with an ellipsis character to mark an activity in progress.
@@ -2436,10 +2442,10 @@ abstract class AppLocalizations {
   /// **'Delete Identity?'**
   String get identityAdvancedDeleteTitle;
 
-  /// Body of the delete-identity confirmation dialog. 'secret key' is the nsec; preserve this exact warning wording. The middle sentence was corrected: the profile photo is not on a relay at all — it is a blob on a Blossom image host (haven-core/src/profile/blossom.rs) for which no delete request exists, so naming relays as the only destination mis-stated where the photo survives. Keep the two destinations distinct in translation.
+  /// Body of the delete-identity confirmation dialog. 'secret key' is the nsec; preserve this exact warning wording. The middle sentence was corrected: the profile photo is not on a relay at all — it is a blob on a Blossom image host (haven-core/src/profile/blossom.rs) for which no delete request exists, so naming relays as the only destination mis-stated where the photo survives. Keep the two destinations distinct in translation. 'any image host it was uploaded to' (corrected 2026-11-16): Haven tries a short ordered list of image hosts and moves to the next one when an upload fails, and an upload that timed out may still have been stored, so a photo can sit on more than one host. Do not name a host, and do not say or imply it is exactly one.
   ///
   /// In en, this message translates to:
-  /// **'This deletes your identity and all circle data from this phone. Anything already published under it stays where it is: your name and keys on the relays that have them, your photo on the image host that stores it. Make sure you have backed up your secret key if you want to recover this identity later.'**
+  /// **'This deletes your identity and all circle data from this phone. Anything already published under it stays where it is: your name and keys on the relays that have them, your photo on any image host it was uploaded to. Make sure you have backed up your secret key if you want to recover this identity later.'**
   String get identityAdvancedDeleteBody;
 
   /// Confirm button in the delete-identity dialog.
@@ -2778,10 +2784,10 @@ abstract class AppLocalizations {
   /// **'Remove profile photo?'**
   String get photoHeaderRemoveTitle;
 
-  /// Body of the remove-profile-photo confirmation dialog. Updated for the public-profile migration: the photo is now a public Nostr/Blossom profile picture, not something shared privately within circles (docs/PUBLIC_PROFILE_MIGRATION_PLAN.md §6.5).
+  /// Body of the remove-profile-photo confirmation dialog. Updated for the public-profile migration: the photo is now a public Nostr/Blossom profile picture, not something shared privately within circles (docs/PUBLIC_PROFILE_MIGRATION_PLAN.md §6.5). 'any server it was uploaded to' (corrected 2026-11-16): Haven tries a short ordered list of image servers and moves to the next one when an upload fails, and an upload that timed out may still have been stored, so the file can sit on more than one server. Haven sends no delete request to any of them. Do not name a server, and do not say or imply it is exactly one.
   ///
   /// In en, this message translates to:
-  /// **'This takes your photo off your public profile. The image file stays on the server that hosts it, and copies others already downloaded stay with them.'**
+  /// **'This takes your photo off your public profile. The image file stays on any server it was uploaded to, and copies others already downloaded stay with them.'**
   String get photoHeaderRemoveBody;
 
   /// Action that opens the photo picker to change the profile photo.

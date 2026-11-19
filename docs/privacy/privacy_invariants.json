@@ -6292,8 +6292,8 @@
     },
     {
       "id": "INV-P-BLOSSOM-HTTPS-ONLY-AND-SSRF-FILTERED",
-      "title": "The Blossom host is HTTPS-only and every download is IP-filtered",
-      "statement": "DEFAULT_BLOSSOM_SERVER is an https:// URL, no plaintext http:// literal exists in the profile module outside the debug loopback exemption, and the download client refuses redirects and rejects loopback, RFC1918, ULA, link-local, CGNAT, multicast, NAT64/IPv4-compatible-embedded and documentation addresses at connect time; this becomes false if the scheme check is relaxed or the resolver filter is bypassed.",
+      "title": "The Blossom hosts are HTTPS-only and every download is IP-filtered",
+      "statement": "Every BLOSSOM_SERVERS base is an https:// literal and no plaintext http:// literal exists in the profile module outside the debug loopback exemption; an upload follows no redirect and takes only a descriptor at an https:// URL on that server's own site that carries the uploaded bytes' hash; the download client rejects loopback, RFC1918, ULA, link-local, CGNAT, multicast, NAT64/IPv4-compatible-embedded and documentation addresses at connect time, and follows a redirect only for a content-addressed picture URL, at most BLOSSOM_MAX_REDIRECTS (3), each target scheme-checked, an IP-literal target vetted against the same filter before it is dialled and a hostname target by the resolver at its connect, with no Referer, the final bytes checked against the REQUESTED URL's address; this becomes false if the scheme check is relaxed, the resolver filter is bypassed, or a redirect target is dialled unvetted.",
       "status": "enforced",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
@@ -6304,13 +6304,17 @@
         {
           "kind": 24242,
           "token": "Kind::Custom(BLOSSOM_AUTH_KIND)",
-          "note": "haven-core/src/profile/blossom.rs:344. Base64'd into an HTTP Authorization header — it LEAVES THE DEVICE but is never a relay event."
+          "note": "haven-core/src/profile/blossom.rs:439. Base64'd into an HTTP Authorization header — it LEAVES THE DEVICE but is never a relay event."
         }
       ],
       "symbols": [
         {
           "file": "haven-core/src/profile/config.rs",
-          "symbol": "DEFAULT_BLOSSOM_SERVER"
+          "symbol": "BLOSSOM_SERVERS"
+        },
+        {
+          "file": "haven-core/src/profile/config.rs",
+          "symbol": "BLOSSOM_MAX_REDIRECTS"
         }
       ],
       "tests": [
@@ -6328,7 +6332,51 @@
         },
         {
           "file": "haven-core/src/profile/blossom.rs",
-          "name": "download_refuses_redirect"
+          "name": "redirect_refusal_table"
+        },
+        {
+          "file": "haven-core/src/profile/blossom.rs",
+          "name": "download_does_not_dial_a_redirect_to_a_private_address_literal"
+        },
+        {
+          "file": "haven-core/src/profile/blossom.rs",
+          "name": "download_of_an_unaddressed_url_follows_no_redirect"
+        },
+        {
+          "file": "haven-core/src/profile/blossom.rs",
+          "name": "upload_does_not_follow_a_redirect"
+        },
+        {
+          "file": "haven-core/src/profile/blossom.rs",
+          "name": "upload_rejects_a_descriptor_on_another_site"
+        },
+        {
+          "file": "haven-core/src/profile/blossom.rs",
+          "name": "upload_rejects_a_descriptor_url_without_our_hash"
+        },
+        {
+          "file": "haven-core/src/profile/config.rs",
+          "name": "every_built_in_blossom_server_is_https_and_names_its_own_site"
+        },
+        {
+          "file": "haven-core/tests/profile_blossom_redirect_e2e.rs",
+          "name": "a_redirect_to_a_non_public_literal_is_refused_even_with_the_test_exemption"
+        },
+        {
+          "file": "haven-core/tests/profile_blossom_redirect_e2e.rs",
+          "name": "a_redirect_down_to_plain_http_is_refused"
+        },
+        {
+          "file": "haven-core/tests/profile_blossom_redirect_e2e.rs",
+          "name": "a_redirect_target_serving_other_bytes_fails_the_requested_address"
+        },
+        {
+          "file": "haven-core/tests/profile_blossom_redirect_e2e.rs",
+          "name": "three_redirects_are_followed_and_a_fourth_is_not"
+        },
+        {
+          "file": "haven-core/tests/profile_blossom_redirect_e2e.rs",
+          "name": "a_blossom_redirect_to_another_host_is_followed_without_a_referer"
         },
         {
           "file": "haven-core/src/profile/blossom.rs",
@@ -6949,7 +6997,7 @@
     {
       "id": "INV-P-PHOTO-REMOVAL-IS-OWED-TO-EVERY-POOL-RELAY",
       "title": "A photo removal or profile deletion stays owed until every usable pool relay serves it; each retry re-sends the same signed event only to the relays that do not.",
-      "statement": "Peers read a profile from the pool relays their own install is assigned, so a relay that did not take the kind-0 without the picture goes on serving the photo to them. (1) remove_my_profile_picture is local: one transaction (stage_own_picture_removal) that drops the staged and the published bytes, clears the row's picture, stages the clear as an outbox edit with the local_version it was staged at, resets the retry ladder and discards any owed event; it signs nothing, takes no secret and no lock, and contacts no relay. (2) sync_own_profile publishes it under the sync lock after reading the retraction gate before any footprint: a pending set with nothing saved in it (the clear alone, or an owed blank) is decided by retraction_gate on what the pass will actually publish — publish when a relay copy was found or this device published and holds a dated row; settle, leveled locally with nothing sent, only when never published here and every relay answered that none holds a profile, and never a version that still carries a staged photo; hold on the ladder otherwise. A new photo staged after the removal does not cancel it (the removal is published first; the uploaded URL wins once it exists), and a commit at least one relay acknowledged clears the removal only when its version is at or past the one it was staged at, inside that commit's transaction. (3) A complete event at least one relay acknowledged is kept with the relays that serve it (profile_publish_debt); the next due sync re-sends that identical event only to the relays not yet covered, ignores their OK for coverage, reads each answering relay back and orders what it serves against the event by (created_at, lowest id): serving the event's own id covers it (commit_profile_coverage, served_against), a newer copy another client wrote redirects the debt onto that copy with one fresh signing for the whole pool, less or an unfinished answer leaves it owed; a timestamp refusal with nothing served earns one fresh signing per edit and then stays owed. The backoff is dated when the pass ends, not when it began; every save, removal, deletion or redirect discards the owed event; the owed set empties with no network when the relay that owed it leaves the usable pool; and no screen reports any of it — the debt is visible only in the outbox and is retried on the ladder and by the foreground timer. (4) delete_my_public_profile leaves the blank it published owed in the same way, by the same statement (write_unqueued_publish_owed) and the same ledger, in the transaction that wipes the cache (wipe_all_profiles); the retry re-sends the identical blank and no field of the deleted profile, even when the relay that refused the blank is the only one to answer. Outside this promise: there is no cap — an owed relay costs one dial, one EVENT and at most one REQ to that relay alone, at most four passes in the first hour and then one per six hours, only while the app is open, until it serves the event or leaves the pool (owner decision 2026-11-10); in the pass that signs the event a relay's acknowledgement counts as covered without a read-back; a pass no relay acknowledged records nothing and signs fresh next time; the kind-5 that accompanies a deletion is sent once; nothing in the app calls the deletion yet; and the hosted image file is not deleted (INV-P-PROFILE-REMOVAL-IS-NOT-DELETION). Letting the removal sign, lock or dial, reading the gate outside the sync lock, recording a partially served removal or blank as synced, counting a re-send's OK as coverage, signing a new event for relays that already serve it, dating the backoff from before the publish, building the retry on an older copy a relay still serves, or re-signing more than once per edit on a timestamp refusal, falsifies this.",
+      "statement": "Peers read a profile from the pool relays their own install is assigned, so a relay that did not take the kind-0 without the picture goes on serving the photo to them. (1) remove_my_profile_picture is local: one transaction (stage_own_picture_removal) that drops the staged and the published bytes, clears the row's picture, stages the clear as an outbox edit with the local_version it was staged at, resets the retry ladder and discards any owed event; it signs nothing, takes no secret and no lock, and contacts no relay. (2) sync_own_profile publishes it under the sync lock after reading the retraction gate before any footprint: a pending set with nothing saved in it (the clear alone, or an owed blank) is decided by retraction_gate on what the pass will actually publish — publish when a relay copy was found or this device published and holds a dated row; settle, leveled locally with nothing sent, only when never published here and every relay answered that none holds a profile, and never a version that still carries a staged photo; hold on the ladder otherwise. A new photo staged after the removal does not cancel it (the removal is published first; the uploaded URL wins once it exists), and a commit at least one relay acknowledged clears the removal only when its version is at or past the one it was staged at, inside that commit's transaction. (3) The newest event of the saved version at least one relay acknowledged — a complete one, or a text-only one while the staged photo has never been uploaded — is kept with the relays that serve it (profile_publish_debt); while that photo is owed, a pass uploads it first and, only if the upload fails again, re-sends the text-only event (so a failing upload signs nothing new, and full coverage of a text-only event never clears the photo from the outbox); the next due sync re-sends that identical event only to the relays not yet covered, ignores their OK for coverage, reads each answering relay back and orders what it serves against the event by (created_at, lowest id): serving the event's own id covers it (commit_profile_coverage, served_against), a newer copy another client wrote redirects the debt onto that copy with one fresh signing for the whole pool, less or an unfinished answer leaves it owed; a timestamp refusal with nothing served earns one fresh signing per edit and then stays owed. The backoff is dated when the pass ends, not when it began; every save, removal, deletion or redirect discards the owed event; the owed set empties with no network when the relay that owed it leaves the usable pool; and no screen reports any of it — the debt is visible only in the outbox and is retried on the ladder and by the foreground timer. (4) delete_my_public_profile leaves the blank it published owed in the same way, by the same statement (write_unqueued_publish_owed) and the same ledger, in the transaction that wipes the cache (wipe_all_profiles); the retry re-sends the identical blank and no field of the deleted profile, even when the relay that refused the blank is the only one to answer. Outside this promise: there is no cap — an owed relay costs one dial, one EVENT and at most one REQ to that relay alone, at most four passes in the first hour and then one per six hours, only while the app is open, until it serves the event or leaves the pool (owner decision 2026-11-10); in the pass that signs the event a relay's acknowledgement counts as covered without a read-back; a pass no relay acknowledged records nothing and signs fresh next time; the kind-5 that accompanies a deletion is sent once; nothing in the app calls the deletion yet; and the hosted image file is not deleted (INV-P-PROFILE-REMOVAL-IS-NOT-DELETION). Letting the removal sign, lock or dial, reading the gate outside the sync lock, recording a partially served removal or blank as synced, counting a re-send's OK as coverage, signing a new event for relays that already serve it, dating the backoff from before the publish, building the retry on an older copy a relay still serves, or re-signing more than once per edit on a timestamp refusal, falsifies this.",
       "status": "enforced",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
@@ -6958,6 +7006,10 @@
         {
           "file": "haven/rust_builder/src/api.rs",
           "symbol": "remove_my_profile_picture"
+        },
+        {
+          "file": "haven-core/src/circle/storage_profile_sync.rs",
+          "symbol": "own_picture_upload_owed"
         },
         {
           "file": "haven-core/src/circle/storage_profile_sync.rs",
@@ -7072,6 +7124,18 @@
         {
           "file": "haven-core/tests/profile_local_first_sync_e2e.rs",
           "name": "a_slow_sync_dates_its_backoff_from_when_it_ends"
+        },
+        {
+          "file": "haven-core/tests/profile_local_first_sync_e2e.rs",
+          "name": "an_upload_that_keeps_failing_signs_one_text_only_kind0_across_rungs"
+        },
+        {
+          "file": "haven-core/tests/profile_local_first_sync_e2e.rs",
+          "name": "an_owed_text_only_kind0_goes_byte_for_byte_only_to_the_relay_that_missed_it"
+        },
+        {
+          "file": "haven-core/src/circle/storage_profile_sync.rs",
+          "name": "a_text_only_commit_owes_its_event_and_full_coverage_keeps_the_photo_pending"
         },
         {
           "file": "haven-core/tests/profile_offline_save_e2e.rs",
@@ -7698,7 +7762,7 @@
     {
       "id": "INV-D-PICKED-PHOTO-IS-PUBLISHED-PUBLICLY",
       "title": "A photo picked from the library becomes a public profile picture",
-      "statement": "The only consumer of a library-picked image is the profile avatar pipeline, which uploads it to the public Blossom host and references it from a public kind-0 — there is no private or circles-only destination, and the iOS permission prompt says so at the moment consent is given.",
+      "statement": "The only consumer of a library-picked image is the profile avatar pipeline, which uploads it to a public Blossom host and references it from a public kind-0 — there is no private or circles-only destination, and the iOS permission prompt says so at the moment consent is given.",
       "status": "enforced",
       "assertion_arb_keys": [
         "relaySettingsProfileInfoTechnical"
@@ -7824,7 +7888,7 @@
       "title": "Haven runs no server of its own for circle traffic",
       "statement": "Identity-plane publishes target the user's own stored relay lists — KeyPackages exactly those, and the kind-10050 and kind-10002 lists those and the curated discovery relays (PRODUCTION_DISCOVERY_RELAYS, owner-directed 2026-11-12); a circle's kind-445 goes to that circle's relays, which for a circle Haven creates without named relays are three third-party relays drawn from the curated location pool (PRODUCTION_LOCATION_RELAYS, INV-R-CIRCLE-RELAYS-FROM-LOCATION-POOL) and for any other circle the relays its creator chose; and the live-sync engine connects only to configured relays — each circle's relays and the inbox list — never a gossip-discovered one. There is no Haven-operated endpoint in the location path. This becomes false if any publisher, engine client or curated relay list acquires a first-party destination.",
       "status": "ratcheted",
-      "residual": "Nothing proves that no curated list holds a Haven-operated relay: the location and profile pools' operators are recorded when the pools are vetted, not tested. And the user chooses none of: the eight profile relays and six discovery relays (contacted unconditionally, not removable, INV-P-P3), the three location-pool relays Haven picks for each circle it creates (no setting edits them), the Blossom host (hardcoded to blossom.primal.net) and the tile provider (hardcoded to Stadia). The copy claims no such choice: onboardingValueProp2Summary was reworded on 2026-10-31 from 'It runs on a relay network you choose.' — false once Haven picks a circle's relays — to 'No central server. It runs on independent relays.' (extended on 2026-11-04 with 'Many people run them, so no single company can switch it off.', which names no choice either), and relaySettingsBackendCaption names no choice either. Nothing fails if a curated list grows.",
+      "residual": "Nothing proves that no curated list holds a Haven-operated relay: the location and profile pools' operators are recorded when the pools are vetted, not tested. And the user chooses none of: the eight profile relays and six discovery relays (contacted unconditionally, not removable, INV-P-P3), the three location-pool relays Haven picks for each circle it creates (no setting edits them), the Blossom upload servers (a built-in list, blossom.primal.net first) and the tile provider (hardcoded to Stadia). The copy claims no such choice: onboardingValueProp2Summary was reworded on 2026-10-31 from 'It runs on a relay network you choose.' — false once Haven picks a circle's relays — to 'No central server. It runs on independent relays.' (extended on 2026-11-04 with 'Many people run them, so no single company can switch it off.', which names no choice either), and relaySettingsBackendCaption names no choice either. Nothing fails if a curated list grows.",
       "assertion_arb_keys": [
         "onboardingValueProp2Title",
         "onboardingValueProp2Summary",

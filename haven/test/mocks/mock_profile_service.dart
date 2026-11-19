@@ -71,8 +71,16 @@ class MockProfileService implements ProfileService {
   /// Set to make [updateOwnProfile] throw.
   bool shouldThrowOnUpdateOwnProfile = false;
 
+  /// When set, [updateOwnProfile] throws this instead of the generic error —
+  /// for a log test that plants an identifier in what the caller catches.
+  Error? updateOwnProfileError;
+
   /// Set to make [setOwnAvatar] throw.
   bool shouldThrowOnSetOwnAvatar = false;
+
+  /// When set, [setOwnAvatar] throws this instead of the generic error — for a
+  /// log test that plants an identifier in what the caller catches.
+  Error? setOwnAvatarError;
 
   /// Set to make [removeOwnAvatar] throw.
   bool shouldThrowOnRemoveOwnAvatar = false;
@@ -209,6 +217,8 @@ class MockProfileService implements ProfileService {
     ));
     final gate = updateOwnProfileGate;
     if (gate != null && !gate.isCompleted) await gate.future;
+    final error = updateOwnProfileError;
+    if (error != null) throw error;
     if (shouldThrowOnUpdateOwnProfile) throw _genericError;
     final updated = (ownProfile ?? Profile(pubkeyHex: ownPubkeyHex)).copyWith(
       displayName: displayName,
@@ -223,6 +233,8 @@ class MockProfileService implements ProfileService {
     methodCalls.add((method: 'setOwnAvatar', args: {'raw': raw}));
     final gate = setOwnAvatarGate;
     if (gate != null && !gate.isCompleted) await gate.future;
+    final error = setOwnAvatarError;
+    if (error != null) throw error;
     if (shouldThrowOnSetOwnAvatar) throw _genericError;
     final updated = (ownProfile ?? Profile(pubkeyHex: ownPubkeyHex)).copyWith(
       pictureBytes: raw,

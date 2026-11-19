@@ -215,7 +215,7 @@ log_privacy_gate() {
             --expect petname=1 --expect nostr_group_id=1 --expect mls_group_id=1
             --expect event_id=3)
   fi
-  IFS=',' read -r -a endpoints <<<"${HAVEN_E2E_RELAY_2:-},${HAVEN_E2E_BLOSSOM_URL:-},${HAVEN_E2E_PROFILE_RELAYS:-},${HAVEN_E2E_LOCATION_RELAY:-}"
+  IFS=',' read -r -a endpoints <<<"${HAVEN_E2E_RELAY_2:-},${HAVEN_E2E_BLOSSOM_URLS:-},${HAVEN_E2E_PROFILE_RELAYS:-},${HAVEN_E2E_LOCATION_RELAY:-}"
   for endpoint in "${endpoints[@]}"; do
     [[ -z "${endpoint}" ]] || extra+=(--exempt-endpoint "${endpoint}")
   done
@@ -737,7 +737,7 @@ eth0	0000000A	00000000	0001	0	0	0	000000FF	0	0	0" 10.0.2.2 'wlan*'; then
     rc=0
     (
       export GITHUB_RUN_ID= GITHUB_RUN_ATTEMPT= \
-        HAVEN_E2E_RELAY_2= HAVEN_E2E_BLOSSOM_URL= HAVEN_E2E_PROFILE_RELAYS= \
+        HAVEN_E2E_RELAY_2= HAVEN_E2E_BLOSSOM_URLS= HAVEN_E2E_PROFILE_RELAYS= \
         HAVEN_E2E_LOCATION_RELAY= \
         WIRE_UPSTREAM="${upstream}" HAVEN_LOGSCAN_PROFILE="${profile_env}" \
         HAVEN_LOGSCAN=true HAVEN_LOGSCAN_BIN="${fake_bin}" RELAY_URL=ws://10.0.2.2:7788
@@ -806,10 +806,10 @@ eth0	0000000A	00000000	0001	0	0	0	000000FF	0	0	0" 10.0.2.2 'wlan*'; then
   fi
   # A caller's infrastructure endpoints are exempted, never declared.
   reset_gate_logs
-  gate_run "" "" HAVEN_E2E_RELAY_2=ws://10.0.2.2:7778 HAVEN_E2E_BLOSSOM_URL=http://10.0.2.2:3000 \
+  gate_run "" "" HAVEN_E2E_RELAY_2=ws://10.0.2.2:7778 HAVEN_E2E_BLOSSOM_URLS=http://10.0.2.2:3000,http://10.0.2.2:3002 \
     HAVEN_E2E_PROFILE_RELAYS=ws://10.0.2.2:7778,ws://10.0.2.2:7779
   mapfile -t got < "${seal_argv}"
-  if (( rc != 0 )) || [[ "${got[*]}" != *" --exempt-endpoint ws://10.0.2.2:7778 --exempt-endpoint http://10.0.2.2:3000 --exempt-endpoint ws://10.0.2.2:7778 --exempt-endpoint ws://10.0.2.2:7779 --out "* ]] \
+  if (( rc != 0 )) || [[ "${got[*]}" != *" --exempt-endpoint ws://10.0.2.2:7778 --exempt-endpoint http://10.0.2.2:3000 --exempt-endpoint http://10.0.2.2:3002 --exempt-endpoint ws://10.0.2.2:7778 --exempt-endpoint ws://10.0.2.2:7779 --out "* ]] \
      || [[ "${got[*]}" == *"--host-decl relay_url"* || "${got[*]}" == *"--host-decl blossom_url"* ]]; then
     echo "SELF-TEST FAIL (9c caller endpoints): every configured endpoint must be an exempt endpoint and none a needle; got '${got[*]}'" >&2
     fail=1

@@ -38,9 +38,8 @@ import 'package:haven/src/services/nostr_circle_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/services/pending_mls_wipe_service.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/utils/image_picker_config.dart';
 import 'package:haven/src/widgets/app_router.dart';
-import 'package:image_picker_android/image_picker_android.dart';
-import 'package:image_picker_platform_interface/image_picker_platform_interface.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -88,16 +87,7 @@ Future<void> main() async {
     return true;
   };
 
-  // Force the Android system Photo Picker (scoped, permission-free, per-item
-  // access) instead of image_picker's default ACTION_GET_CONTENT document
-  // browser. The user picks one photo and the app receives only that image —
-  // no whole-library permission is ever requested or held. The `is` guard
-  // makes this a no-op on iOS/web/desktop, where the gallery picker
-  // (PHPickerViewController on iOS) is already scoped and permission-free.
-  final imagePickerPlatform = ImagePickerPlatform.instance;
-  if (imagePickerPlatform is ImagePickerAndroid) {
-    imagePickerPlatform.useAndroidPhotoPicker = true;
-  }
+  configureImagePicker();
 
   // Privacy: bound the decoded-image cache and evict it when backgrounded so
   // avatar pixels do not linger in memory while Haven is not in the

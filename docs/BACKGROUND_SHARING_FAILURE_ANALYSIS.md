@@ -92,9 +92,12 @@ external crates are the pinned versions in `haven-core/Cargo.toml` / `haven/pubs
   (`background_location_task.dart`): `onRepeatEvent` every 72 s → `_publishCycle` (foreground-
   active gate → Rule-14 session open/reclaim → encrypt+publish per due circle → poll-receive
   every ~120 s). MapShell hands the MLS session to the FGS on pause
-  (`_handOffMlsSession` → `NostrCircleService.releaseForHandoff`) and takes it back on resume
+  (`_handOffMlsSession` → `NostrCircleService.releaseForHandoff`) — after up to 20 s when the
+  pause came from Haven's own photo picker or crop editor (`kSystemActivityHandoffGrace`, from
+  the trip's first pause; a resume inside it hands nothing over) — and takes it back on resume
   (`_endMlsSessionHandoff` → lazy reopen → `mls_session_handover.dart::requestSessionHandover`
-  stops the FGS, waits ≤12 s, restarts it). WorkManager 15-min receive-only floor.
+  stops the FGS, waits ≤ `handoverTimeout` (20 s), restarts it). WorkManager 15-min
+  receive-only floor.
 - **iOS background** = the main isolate kept alive by ONE Haven-owned CoreLocation session.
   Since power-plan phase P3 (2026-09-04) its owner is native — `HavenLocationStreamHandler.swift`,
   not geolocator — and the shape is set once in `init` for BOTH accuracy profiles and BOTH toggle

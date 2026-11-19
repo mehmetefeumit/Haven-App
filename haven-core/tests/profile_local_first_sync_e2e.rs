@@ -19,11 +19,14 @@
 //! relay it can script (refuse, lie, serve a newer copy) adds a
 //! [`ScriptedRelay`] to ITS OWN account's Profile relays, beside the three.
 //!
-//! # One Blossom server per binary
+//! # One Blossom override per binary
 //!
-//! `set_blossom_server_for_test` is install-once, so one mock server serves the
-//! whole binary and each test's mock is constrained to the bytes of its own
-//! distinct JPEG: concurrent tests cannot answer each other.
+//! `set_blossom_server_for_test` is install-once, so one ordered pair of mock
+//! servers serves the whole binary — the first, and the fallback an upload
+//! tries after it fails — and each test's mock is constrained to the bytes of
+//! its own distinct JPEG: concurrent tests cannot answer each other. A request
+//! no mock matches gets mockito's `501`, so a test that mocks only the first
+//! server sees its failures fail on the second too.
 //!
 //! # No sleeps, no timing races
 //!
@@ -388,22 +391,42 @@ fn asks_own_profile(own: PublicKey) -> impl Fn(&Filter) -> bool + Send + Sync + 
     }
 }
 
-// ---- the one Blossom server of this binary ----------------------------------
+// ---- the one Blossom override of this binary --------------------------------
 
-static BLOSSOM: tokio::sync::OnceCell<tokio::sync::Mutex<mockito::ServerGuard>> =
-    tokio::sync::OnceCell::const_new();
+/// The first upload server, and the one tried after it.
+type Blossoms = (
+    tokio::sync::Mutex<mockito::ServerGuard>,
+    tokio::sync::Mutex<mockito::ServerGuard>,
+);
 
-async fn blossom() -> &'static tokio::sync::Mutex<mockito::ServerGuard> {
+static BLOSSOM: tokio::sync::OnceCell<Blossoms> = tokio::sync::OnceCell::const_new();
+
+// The servers live for the whole binary by design.
+#[allow(clippy::significant_drop_tightening)]
+async fn blossoms() -> &'static Blossoms {
     BLOSSOM
         .get_or_init(|| async {
             // The upload path is SSRF-guarded, so the debug-only loopback
             // exemption has to be armed for it to be reachable at all.
             let _ = allow_private_blossom_for_test();
-            let server = mockito::Server::new_async().await;
-            set_blossom_server_for_test(server.url()).expect("install the Blossom override once");
-            tokio::sync::Mutex::new(server)
+            let first = mockito::Server::new_async().await;
+            let next = mockito::Server::new_async().await;
+            set_blossom_server_for_test(&format!("{},{}", first.url(), next.url()))
+                .expect("install the Blossom override once");
+            (
+                tokio::sync::Mutex::new(first),
+                tokio::sync::Mutex::new(next),
+            )
         })
         .await
+}
+
+async fn blossom() -> &'static tokio::sync::Mutex<mockito::ServerGuard> {
+    &blossoms().await.0
+}
+
+async fn next_blossom() -> &'static tokio::sync::Mutex<mockito::ServerGuard> {
+    &blossoms().await.1
 }
 
 /// A sanitized photo and the content address Blossom will hand back for it.
@@ -425,16 +448,36 @@ async fn photo(seed: u8) -> Photo {
 }
 
 /// Answers an upload of exactly this photo's bytes with `status`, `hits` times.
+async fn upload_mock(photo: &Photo, status: usize, hits: usize) -> mockito::Mock {
+    upload_mock_on(blossom().await, &photo.url, photo, status, hits).await
+}
+
+/// [`upload_mock`], on the server an upload falls back to; a descriptor it
+/// hands back names that server.
+async fn next_upload_mock(photo: &Photo, status: usize, hits: usize) -> mockito::Mock {
+    let url = format!(
+        "{}/{}",
+        next_blossom().await.lock().await.url(),
+        photo.sha_hex
+    );
+    upload_mock_on(next_blossom().await, &url, photo, status, hits).await
+}
+
 // The guard is held across the mock's creation by design.
 #[allow(clippy::significant_drop_tightening)]
-async fn upload_mock(photo: &Photo, status: usize, hits: usize) -> mockito::Mock {
+async fn upload_mock_on(
+    server: &tokio::sync::Mutex<mockito::ServerGuard>,
+    url: &str,
+    photo: &Photo,
+    status: usize,
+    hits: usize,
+) -> mockito::Mock {
     let descriptor = format!(
-        r#"{{"url":"{}","sha256":"{}","size":{},"type":"image/jpeg","uploaded":1700000000}}"#,
-        photo.url,
+        r#"{{"url":"{url}","sha256":"{}","size":{},"type":"image/jpeg","uploaded":1700000000}}"#,
         photo.sha_hex,
         photo.staged.canonical().len(),
     );
-    let mut server = blossom().await.lock().await;
+    let mut server = server.lock().await;
     server
         .mock("PUT", "/upload")
         .match_body(photo.staged.canonical().to_vec())
@@ -1475,6 +1518,9 @@ async fn a_partial_row_from_before_the_ledger_is_published_by_a_full_pass() {
             now: NOW,
         })
         .expect("the legacy partial commit");
+    manager
+        .discard_profile_publish_debt(&own_hex, version)
+        .expect("that build kept no owed event");
     assert!(
         manager
             .profile_pending_state(&own_hex, NOW)
@@ -1587,6 +1633,274 @@ async fn an_upload_failure_after_a_removal_publishes_the_removal_not_the_old_pic
     let published = plane.ledger.published(&own_hex);
     assert_eq!(published.len(), 3);
     assert!(published[2].contains(&new.sha_hex) && !published[2].contains(&old.sha_hex));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_photo_the_first_server_refuses_is_published_from_the_next_one() {
+    let plane = plane();
+    let (_dir, manager, keys, own_hex) = account();
+    let photo = photo(31).await;
+    let refused = upload_mock(&photo, 401, 1).await;
+    let took = next_upload_mock(&photo, 201, 1).await;
+
+    manager
+        .stage_own_profile_picture(&own_hex, &photo.staged, NOW)
+        .expect("stage the picture");
+    let report = sync(&manager, &keys, NOW).await;
+
+    assert_eq!(report.outcome, ProfileSyncOutcome::Published);
+    assert!(!report.still_pending);
+    refused.assert_async().await;
+    took.assert_async().await;
+    let next_url = format!(
+        "{}/{}",
+        next_blossom().await.lock().await.url(),
+        photo.sha_hex
+    );
+    let published = plane.ledger.published(&own_hex);
+    assert_eq!(
+        published.len(),
+        1,
+        "one kind-0, signed once the upload landed"
+    );
+    assert!(
+        published[0].contains(&next_url),
+        "the picture is the URL the server that took it handed back: {}",
+        published[0],
+    );
+    assert!(!manager.profile_picture_is_staged(&own_hex).unwrap());
+}
+
+/// An account whose name and photo are saved while Blossom refuses the photo
+/// `hits` times in all.
+async fn photo_owed(
+    seed: u8,
+    hits: usize,
+) -> (TempDir, CircleManager, Keys, String, Photo, mockito::Mock) {
+    let (dir, manager, keys, own_hex) = account();
+    let photo = photo(seed).await;
+    let down = upload_mock(&photo, 500, hits).await;
+    manager
+        .stage_own_profile_edits(&own_hex, &name_edit("Name Owed A Photo"), NOW)
+        .expect("stage the name");
+    manager
+        .stage_own_profile_picture(&own_hex, &photo.staged, NOW + 1)
+        .expect("stage the picture");
+    (dir, manager, keys, own_hex, photo, down)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_upload_that_keeps_failing_signs_one_text_only_kind0_across_rungs() {
+    // Each rung used to sign a new text-only kind-0 to the whole pool while
+    // Blossom refused the photo: a public mark of every retry.
+    let plane = plane();
+    let (_dir, manager, keys, own_hex, photo, down) = photo_owed(32, 3).await;
+
+    let first = sync(&manager, &keys, NOW + 2).await;
+    assert_eq!(first.outcome, ProfileSyncOutcome::Published);
+    assert!(first.still_pending, "the photo is still owed");
+    let after_first = plane.ledger.wire(&own_hex);
+    assert_eq!(after_first.0, POOL_SIZE);
+
+    for at in [NOW + 40, NOW + 200] {
+        let retry = sync(&manager, &keys, at).await;
+        assert_eq!(retry.outcome, ProfileSyncOutcome::UploadFailed);
+        assert!(retry.still_pending);
+    }
+    down.assert_async().await;
+    assert_eq!(
+        plane.ledger.ids(&own_hex).len(),
+        1,
+        "the retries signed nothing"
+    );
+    assert_eq!(
+        plane.ledger.wire(&own_hex),
+        after_first,
+        "and every relay that serves the name saw no admission and no REQ",
+    );
+    assert!(plane.ledger.published(&own_hex)[0].contains("Name Owed A Photo"));
+    assert!(manager.profile_picture_is_staged(&own_hex).unwrap());
+
+    down.remove_async().await;
+    let up = upload_mock(&photo, 201, 1).await;
+    let landed = sync(&manager, &keys, NOW + 600).await;
+    assert_eq!(landed.outcome, ProfileSyncOutcome::Published);
+    assert!(!landed.still_pending);
+    up.assert_async().await;
+    let published = plane.ledger.published(&own_hex);
+    assert_eq!(published.len(), 2, "one new kind-0, once the photo was up");
+    assert!(published[1].contains(&photo.sha_hex));
+    assert!(published[1].contains("Name Owed A Photo"));
+    assert!(!manager.profile_picture_is_staged(&own_hex).unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failing_upload_pass_advances_the_ladder_one_rung() {
+    let _plane = plane();
+    let (_dir, manager, keys, own_hex, _photo, down) = photo_owed(33, 2).await;
+    let rung = |now: i64| {
+        manager
+            .profile_pending_state(&own_hex, now)
+            .expect("pending state")
+            .next_retry_in_secs
+    };
+
+    sync(&manager, &keys, NOW + 2).await;
+    assert_eq!(rung(NOW + 2), Some(30), "the text-only publish took rung 1");
+    sync(&manager, &keys, NOW + 40).await;
+    assert_eq!(
+        rung(NOW + 40),
+        u32::try_from(PROFILE_SYNC_BACKOFF_SECS[1]).ok(),
+        "a failing upload and its re-send are one attempt, not two",
+    );
+    down.assert_async().await;
+}
+
+/// [`photo_owed`], with one relay of the account's own that refuses the
+/// first, text-only publish.
+async fn photo_owed_and_a_relay_missed_it(
+    seed: u8,
+    hits: usize,
+) -> (
+    TempDir,
+    CircleManager,
+    Keys,
+    String,
+    Photo,
+    mockito::Mock,
+    ScriptedRelay,
+    Event,
+) {
+    let plane = plane();
+    let (dir, manager, keys, own_hex, photo, down) = photo_owed(seed, hits).await;
+    let relay = ScriptedRelay::start();
+    manager
+        .add_user_relay(relay.url(), RelayType::Profile)
+        .expect("add the scripted relay");
+    relay.on_publish(|_| Verdict::Refuse("blocked: not today".to_owned()));
+    let version = manager
+        .pending_profile_sync(&own_hex)
+        .unwrap()
+        .expect("pending")
+        .local_version;
+
+    let first = sync(&manager, &keys, NOW + 2).await;
+    assert_eq!(first.outcome, ProfileSyncOutcome::Published);
+    assert_eq!(relay.offers(), 1);
+    let owed = manager
+        .profile_publish_debt(&keys.public_key(), version)
+        .expect("debt read")
+        .expect("the text-only event is owed to the relay that refused it")
+        .event;
+    assert_eq!(plane.ledger.ids(&own_hex), [owed.id.to_hex()]);
+    (dir, manager, keys, own_hex, photo, down, relay, owed)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_owed_text_only_kind0_goes_byte_for_byte_only_to_the_relay_that_missed_it() {
+    let plane = plane();
+    let (_dir, manager, keys, own_hex, _photo, down, relay, owed) =
+        photo_owed_and_a_relay_missed_it(34, 2).await;
+    let before = plane.ledger.wire(&own_hex);
+
+    relay.on_publish(|_| Verdict::Keep);
+    relay.answer(
+        asks_own_profile(keys.public_key()),
+        vec![Frame::Event(owed.clone()), Frame::Eose],
+    );
+    let retry = sync(&manager, &keys, NOW + 40).await;
+
+    assert_eq!(
+        retry.outcome,
+        ProfileSyncOutcome::Published,
+        "the re-send landed"
+    );
+    assert!(retry.still_pending, "the photo is still owed");
+    down.assert_async().await;
+    let kept: Vec<_> = relay.published().iter().map(|e| e.id).collect();
+    assert_eq!(
+        kept,
+        [owed.id],
+        "the very event pass 1 signed, byte for byte"
+    );
+    assert_eq!(
+        plane.ledger.wire(&own_hex),
+        before,
+        "the relays that already serve it saw no admission and no REQ",
+    );
+    assert_eq!(plane.ledger.ids(&own_hex), [owed.id.to_hex()]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_newer_copy_while_the_photo_is_owed_costs_one_upload_and_one_fresh_text_only_kind0() {
+    let plane = plane();
+    let (_dir, manager, keys, own_hex, photo, down, relay, owed) =
+        photo_owed_and_a_relay_missed_it(35, 2).await;
+
+    // Another client wrote a newer profile that this relay serves.
+    let foreign = signed(
+        &keys,
+        r#"{"display_name":"Other Client","website":"https://other.example.com"}"#,
+        owed.created_at.as_secs() + 100,
+    );
+    relay.on_publish(|_| Verdict::KeepSaying(String::new()));
+    relay.answer(
+        asks_own_profile(keys.public_key()),
+        vec![Frame::Event(foreign.clone()), Frame::Eose],
+    );
+    let retry = sync(&manager, &keys, NOW + 40).await;
+
+    assert_eq!(retry.outcome, ProfileSyncOutcome::Published);
+    assert!(retry.still_pending, "the photo is still owed");
+    down.assert_async().await; // two PUTs in all: the redirect did not upload again
+    let ids = plane.ledger.ids(&own_hex);
+    assert_eq!(ids.len(), 2, "exactly one fresh text-only kind-0");
+    let rebuilt = plane.ledger.published(&own_hex)[1].clone();
+    assert!(rebuilt.contains("Name Owed A Photo"), "our pending name");
+    assert!(rebuilt.contains("other.example.com"), "their field");
+    assert!(!rebuilt.contains(&photo.sha_hex), "no photo yet");
+    assert!(manager.profile_picture_is_staged(&own_hex).unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rename_republishes_the_name_haven_mirrored_and_keeps_a_handle_set_elsewhere() {
+    let plane = plane();
+    let name_of = |content: &str| {
+        let metadata = Metadata::from_json(content).expect("a kind-0 content is metadata");
+        (metadata.name, metadata.display_name)
+    };
+
+    // The onboarding pseudonym, mirrored into `name`, then a rename.
+    let (_dir, manager, keys, own_hex) = account();
+    for (at, name) in [(NOW, "Quiet Wanderer"), (NOW + 1, "Alice")] {
+        manager
+            .stage_own_profile_edits(&own_hex, &name_edit(name), at)
+            .expect("stage");
+        assert!(!sync(&manager, &keys, at).await.still_pending);
+    }
+    let published = plane.ledger.published(&own_hex);
+    assert_eq!(
+        name_of(&published[1]),
+        (Some("Alice".to_owned()), Some("Alice".to_owned())),
+        "the pseudonym must not stay public as `name`",
+    );
+
+    // A handle another client set beside its own display name.
+    let (_dir, manager, keys, own_hex) = account();
+    let foreign = signed(&keys, r#"{"name":"alice_h","display_name":"Alice"}"#, 1_000);
+    RelayManager::new()
+        .publish_event(&foreign, &manager.usable_profile_relays().expect("pool"))
+        .await
+        .expect("seed the other client's profile");
+    manager
+        .stage_own_profile_edits(&own_hex, &name_edit("Bob"), NOW)
+        .expect("stage");
+    assert!(!sync(&manager, &keys, NOW).await.still_pending);
+    let published = plane.ledger.published(&own_hex);
+    assert_eq!(
+        name_of(published.last().expect("our publish")),
+        (Some("alice_h".to_owned()), Some("Bob".to_owned())),
+    );
 }
 
 // ===========================================================================

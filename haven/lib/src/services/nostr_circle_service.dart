@@ -256,11 +256,15 @@ class NostrCircleService implements CircleService {
   /// back from the service.
   bool get _handoffHolds => _handedOff && !_isForegrounded();
 
-  /// Message for the refusal above. Deliberately says nothing about the
-  /// database, the path, or any group (Rule 8) — a caller only needs to know
-  /// this isolate is not the session's owner right now.
-  static const String _handoffRefusalMessage =
-      'MLS session handed off to the background service';
+  /// Completed, and cleared, whenever [_handedOff] is — see
+  /// [untilHandoffEnded].
+  Completer<void>? _handoffEnded;
+
+  void _endHandoff() {
+    _handedOff = false;
+    _handoffEnded?.complete();
+    _handoffEnded = null;
+  }
 
   /// Ends the pause-time handoff so the next [initialize] may re-open.
   ///
@@ -270,8 +274,26 @@ class NostrCircleService implements CircleService {
   /// is what [_sessionHandover] is for.
   bool endSessionHandoff() {
     if (!_handedOff) return false;
-    _handedOff = false;
+    _endHandoff();
     return true;
+  }
+
+  /// Waits up to [timeout] for this isolate to own the session again after a
+  /// pause-time handoff — at once when none is in effect — and answers
+  /// whether it did.
+  ///
+  /// Keyed on the latch, not on the lifecycle: on Android a picker or crop
+  /// result arrives before the window has focus, and an open made then is
+  /// refused; one made behind the resume's stand-down of the service
+  /// (`MapShell._onResumed`) is not.
+  Future<bool> untilHandoffEnded({required Duration timeout}) async {
+    if (!_handedOff) return true;
+    try {
+      await (_handoffEnded ??= Completer<void>()).future.timeout(timeout);
+      return true;
+    } on TimeoutException {
+      return false;
+    }
   }
 
   /// Releases the MLS session so another isolate can take it, WITHOUT the
@@ -358,14 +380,11 @@ class NostrCircleService implements CircleService {
     // the whole backgrounded session.
     if (_handedOff) {
       if (_handoffHolds) {
-        return Future.error(
-          // log-scan-ok: _handoffRefusalMessage is the fixed literal above.
-          const CircleServiceException(_handoffRefusalMessage),
-        );
+        return Future.error(const SessionHandedOffException());
       }
       // Foregrounded again — the handoff is over even if no resume path got
       // around to saying so.
-      _handedOff = false;
+      _endHandoff();
     }
     if (_initialized) return Future.value();
 
@@ -453,17 +472,16 @@ class NostrCircleService implements CircleService {
         _initialized = false;
         _initCompleter = null;
         completer.completeError(
-          // log-scan-ok: both branches are fixed literals, never live data.
-          CircleServiceException(
-            _wiped ? 'circle service was wiped' : _handoffRefusalMessage,
-          ),
+          _wiped
+              ? const CircleServiceException('circle service was wiped')
+              : const SessionHandedOffException(),
         );
         return;
       }
       // Adopting IS taking ownership back, so the handoff is over — clear it
       // rather than leaving a stale flag that a later pause would revive
       // against a manager this instance is already holding.
-      _handedOff = false;
+      _endHandoff();
       _manager = manager;
       _initialized = true;
       _initCompleter = null;

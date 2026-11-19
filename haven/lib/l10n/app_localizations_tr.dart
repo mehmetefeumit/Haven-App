@@ -180,6 +180,10 @@ class AppLocalizationsTr extends AppLocalizations {
       'Bu ad kaydedilemedi. Lütfen tekrar deneyin.';
 
   @override
+  String get onboardingPhotoNotSaved =>
+      'Fotoğrafınız kaydedilemedi. Daha sonra Ayarlar\'da, Kimlik bölümünden ekleyebilirsiniz.';
+
+  @override
   String get onboardingAddPhotoOptional => 'Fotoğraf ekle (isteğe bağlı)';
 
   @override
@@ -1188,7 +1192,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get memberPickerStrangerLookupNote =>
-      'Haven, bu kişinin yayımlanmış profilini bir aktarıcıya — en fazla ikisine — sordu. Sorulan her aktarıcı, bu cihazın az önce bu anahtarı sorduğunu görür; ama istek imza taşımadığı için Haven kimliğinize bağlı değildir. Profilde fotoğraf varsa Haven fotoğrafı bu kişinin seçtiği sunucudan indirir; o sunucu bu cihazın ağ adresini görür.';
+      'Haven, bu kişinin yayımlanmış profilini bir aktarıcıya — en fazla ikisine — sordu. Sorulan her aktarıcı, bu cihazın az önce bu anahtarı sorduğunu görür; ama istek imza taşımadığı için Haven kimliğinize bağlı değildir. Profilde fotoğraf varsa Haven fotoğrafı bu kişinin seçtiği sunucudan indirir; o sunucu da indirmeyi başka bir sunucuya yönlendirebilir. Bu sunucuların her biri, bu cihazın ağ adresini (IP adresini) görür.';
 
   @override
   String get memberPickerStrangerLookingUp => 'Yayımlanmış profil aranıyor…';
@@ -1649,7 +1653,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get identityAdvancedDeleteBody =>
-      'Bu işlem, kimliğinizi ve tüm çevre verilerinizi bu telefondan siler. Bu kimlikle daha önce yayımlanmış her şey olduğu yerde kalır: adınız ve anahtarlarınız onlara sahip aktarıcılarda, fotoğrafınız da onu saklayan görsel barındırma hizmetinde. Kimliğinizi geri getirmek istiyorsanız gizli anahtarınızı yedeklediğinizden emin olun.';
+      'Bu işlem, kimliğinizi ve tüm çevre verilerinizi bu telefondan siler. Bu kimlikle daha önce yayımlanmış her şey olduğu yerde kalır: adınız ve anahtarlarınız onlara sahip aktarıcılarda, fotoğrafınız da yüklendiği her görsel barındırma hizmetinde. Kimliğinizi geri getirmek istiyorsanız gizli anahtarınızı yedeklediğinizden emin olun.';
 
   @override
   String get identityAdvancedDeleteConfirm => 'Sil';
@@ -1837,7 +1841,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get photoHeaderRemoveBody =>
-      'Bu işlem, fotoğrafınızı herkese açık profilinizden kaldırır. Görsel dosyası onu barındıran sunucuda kalır ve başkalarının daha önce indirdiği kopyalar onlarda kalmaya devam eder.';
+      'Bu işlem, fotoğrafınızı herkese açık profilinizden kaldırır. Görsel dosyası yüklendiği her sunucuda kalır ve başkalarının daha önce indirdiği kopyalar onlarda kalmaya devam eder.';
 
   @override
   String get photoHeaderEditPhoto => 'Fotoğrafı Düzenle';

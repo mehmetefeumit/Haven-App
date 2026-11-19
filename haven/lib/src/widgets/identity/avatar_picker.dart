@@ -20,6 +20,11 @@
 /// granted (none is declared) nor toggled in system settings. The crop editor
 /// (uCrop / TOCropViewController) likewise operates only on the picked file and
 /// needs no permission.
+///
+/// On Android both are activities of their own, so the trip through them
+/// pauses Haven; [pickAndSetOwnAvatar] runs it as one
+/// `SystemActivityExcursions` trip so that pause does not hand the MLS session
+/// away from the save waiting on the result.
 library;
 
 import 'dart:async';
@@ -49,10 +54,13 @@ import 'package:image_picker/image_picker.dart';
 /// editor → read the cropped bytes. Returns the bytes, or `null` if the user
 /// cancelled the picker or the crop editor, or if an error occurred. Cancelling
 /// is a silent no-op; an error shows the single generic-failure SnackBar (never
-/// a raw error). `requestFullMetadata: false` keeps EXIF/location metadata out
-/// of the picked bytes (the Rust upload pipeline strips it again and bakes
-/// orientation, defence in depth). Both temp files are best-effort deleted once
-/// their bytes are read so avatar pixels do not linger on disk.
+/// a raw error). `requestFullMetadata: false` spares iOS a photo-library
+/// permission; it keeps nothing out of the bytes on Android, whose plugin
+/// ignores it, and uCrop copies the source's EXIF — GPS included — into its
+/// output. Nothing leaves the device with it: the Rust pipeline re-encodes the
+/// pixels, every metadata block dropped, before anything is stored or uploaded.
+/// Both temp files are best-effort deleted once their bytes are read so avatar
+/// pixels do not linger on disk.
 Future<Uint8List?> pickAndCropAvatar(BuildContext context) async {
   // ── Stage 1: scoped, permission-free system picker ──────────────────────
   final picker = ImagePicker();
@@ -60,9 +68,10 @@ Future<Uint8List?> pickAndCropAvatar(BuildContext context) async {
   try {
     picked = await picker.pickImage(
       source: ImageSource.gallery,
-      requestFullMetadata: false, // do not ask for full EXIF/location metadata
+      requestFullMetadata: false, // no iOS photo-library permission
     );
-  } on Object {
+  } on Object catch (e) {
+    debugPrint('[Avatar] pick failed: ${e.runtimeType}');
     if (context.mounted) _showGenericFailure(context);
     return null;
   }
@@ -82,7 +91,8 @@ Future<Uint8List?> pickAndCropAvatar(BuildContext context) async {
   final CroppedFile? cropped;
   try {
     cropped = await _cropToSquare(context, picked.path);
-  } on Object {
+  } on Object catch (e) {
+    debugPrint('[Avatar] crop failed: ${e.runtimeType}');
     await _deleteQuietly(picked.path);
     if (context.mounted) _showGenericFailure(context);
     return null;
@@ -96,7 +106,8 @@ Future<Uint8List?> pickAndCropAvatar(BuildContext context) async {
   // ── Read the cropped bytes, then delete BOTH temp files (privacy) ───────
   try {
     return await cropped.readAsBytes();
-  } on Object {
+  } on Object catch (e) {
+    debugPrint('[Avatar] read failed: ${e.runtimeType}');
     if (context.mounted) _showGenericFailure(context);
     return null;
   } finally {
@@ -125,27 +136,33 @@ Future<void> pickAndSetOwnAvatar(BuildContext context, WidgetRef ref) async {
   final view = View.of(context);
   final textDirection = Directionality.of(context);
   final syncController = ref.read(ownProfileSyncProvider.notifier);
+  final profileService = ref.read(profileServiceProvider);
+  final excursions = ref.read(systemActivityExcursionsProvider);
 
-  final raw = await pickAndCropAvatar(context);
-  if (raw == null || !context.mounted) return;
+  await excursions.run(() async {
+    final raw = await pickAndCropAvatar(context);
+    if (raw == null || !context.mounted) return;
 
-  try {
-    await ref.read(profileServiceProvider).setOwnAvatar(raw);
-    // The local write is done: publish even if the page is gone, since `ref`
-    // is unusable then and the next resume would otherwise be the first try.
-    unawaited(syncController.sync());
-    if (!context.mounted) return;
-    ref.invalidate(ownProfileProvider);
-    unawaited(
-      SemanticsService.sendAnnouncement(
-        view,
-        l10n.avatarPickerPhotoUpdatedAnnouncement,
-        textDirection,
-      ),
-    );
-  } on Object {
-    if (context.mounted) _showGenericFailure(context);
-  }
+    try {
+      await excursions.save(() => profileService.setOwnAvatar(raw));
+      // The local write is done: publish even if the page is gone, since
+      // `ref` is unusable then and the next resume would otherwise be the
+      // first try.
+      unawaited(syncController.sync());
+      if (!context.mounted) return;
+      ref.invalidate(ownProfileProvider);
+      unawaited(
+        SemanticsService.sendAnnouncement(
+          view,
+          l10n.avatarPickerPhotoUpdatedAnnouncement,
+          textDirection,
+        ),
+      );
+    } on Object catch (e) {
+      debugPrint('[Avatar] save failed: ${e.runtimeType}');
+      if (context.mounted) _showGenericFailure(context);
+    }
+  });
 }
 
 /// Opens the native square-locked crop/rotate editor on [sourcePath], themed to

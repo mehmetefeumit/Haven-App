@@ -1,24 +1,33 @@
-# Hermetic in-memory Blossom (BUD-02) media server for Haven's iOS E2E lane.
+# Hermetic in-memory Blossom media server for Haven's public-profile E2E lane,
+# on both platforms.
 #
-# macOS GitHub runners have no Linux Docker daemon, so the Android lane's
-# `ghcr.io/hzrd149/blossom-server` container cannot run there. This tiny
-# standalone binary implements just enough of BUD-02 (PUT /upload, GET
-# /<sha256>, HEAD /upload, DELETE /<sha256>) to drive the public-profile
-# picture-sharing scenario, reachable at `http://127.0.0.1:<port>` (default
-# `3000`). It is a separate Cargo project (NOT a member of haven-core) so it
-# never enters the app build or the release binary.
+# Its `primal` profile mimics blossom.primal.net — the first production upload
+# server — as Primal's published source behaves (PrimalHQ/primal-blossom-server
+# rev 7e595c9): the Authorization token decoded as padded standard base64 only,
+# the kind-24242 event's id and signature verified, an expired token refused,
+# and `GET /<sha256>` answered with a 302 to a separate media host (here a
+# second port, the "CDN"). Its `reference` profile is the plain shape: a direct
+# 200 and every base64 spelling accepted. A device lane that downloads through
+# the primal profile is the proof that Haven follows a redirect; one that
+# uploads to it is the proof that Haven's auth interoperates with Primal.
+#
+# `--control` adds a test-only surface under /__haven-e2e/ (fault injection,
+# a server-clock skew, counts-only stats). It is a separate Cargo project (NOT
+# a member of haven-core) so none of it can enter the app build or a release
+# binary.
 #
 # Stack rationale: `tiny_http` is a single synchronous HTTP crate with a tiny
-# transitive tree (no async runtime) — exactly right for a test stub that
-# serves a handful of blobs during one CI run. `sha2`/`hex` compute the
-# content-addressed blob hash. No serde: the BUD-02 blob descriptor is a flat
-# JSON object hand-formatted through a small escaper (unit-tested).
+# transitive tree (no async runtime). `k256` verifies the BIP-340 signature,
+# `sha2`/`hex` compute the NIP-01 event id and the blob hash, `serde_json`
+# parses the auth event and re-serializes it in NIP-01 form, `base64` decodes
+# the token in the encodings each profile accepts. All pure Rust, so the one
+# binary builds on the Linux and macOS runners alike.
 [package]
 name = "haven-local-blossom"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 publish = false
-description = "Hermetic in-memory Blossom (BUD-02) media server for Haven's iOS E2E lane (no Docker)."
+description = "Hermetic in-memory Blossom server for Haven's profile E2E lane: a Primal mimic and a reference shape."
 license = "MIT"
 
 [[bin]]
@@ -28,7 +37,13 @@ path = "src/main.rs"
 [dependencies]
 # Minimal synchronous HTTP server — no async runtime pulled in.
 tiny_http = "0.12"
-# Content-addressed blob hashing (Blossom's sha256 commitment).
+# Content-addressed blob hashing and the NIP-01 event id.
 sha2 = "0.10"
-# Lower-hex encoding of the digest.
+# Lower-hex encoding of digests, keys and signatures.
 hex = "0.4"
+# The auth event: parsed, then re-serialized as NIP-01's id preimage.
+serde_json = "1"
+# The Authorization token, in the base64 spellings each profile accepts.
+base64 = "0.22"
+# BIP-340 verification of the auth event's signature.
+k256 = { version = "0.13", default-features = false, features = ["schnorr", "std"] }

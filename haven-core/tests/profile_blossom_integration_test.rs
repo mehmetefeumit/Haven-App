@@ -15,7 +15,10 @@
 use std::io::Cursor;
 
 use haven_core::avatar::{process_own_avatar, StagedPicture};
-use haven_core::profile::{download_profile_picture, upload_profile_picture};
+use haven_core::profile::{
+    blossom_servers, download_profile_picture, upload_profile_picture, BlossomAuthEncoding,
+    UploadServer,
+};
 use image::{codecs::jpeg::JpegEncoder, RgbImage};
 use nostr::Keys;
 
@@ -26,6 +29,16 @@ fn blossom_url() -> Option<url::Url> {
     }
     let raw = std::env::var("HAVEN_E2E_BLOSSOM_URL").ok()?;
     url::Url::parse(&raw).ok()
+}
+
+/// The live server as the one upload server, sent the token as Primal
+/// decodes it.
+fn only(server: &url::Url) -> [UploadServer; 1] {
+    [UploadServer {
+        base: server.clone(),
+        site: server.host_str().expect("a host").to_string(),
+        auth: BlossomAuthEncoding::PaddedStandard,
+    }]
 }
 
 fn sample_jpeg(seed: u8) -> Vec<u8> {
@@ -61,7 +74,7 @@ async fn upload_then_download_byte_identical_after_revalidation() {
     let keys = Keys::generate();
     let raw = sample_jpeg(11);
 
-    let uploaded = upload_profile_picture(&keys, &server, staged(&raw))
+    let uploaded = upload_profile_picture(&keys, &only(&server), staged(&raw))
         .await
         .expect("upload to live Blossom");
     let downloaded = download_profile_picture(&uploaded.url)
@@ -92,12 +105,12 @@ async fn duplicate_upload_succeeds() {
     let keys = Keys::generate();
     let raw = sample_jpeg(22);
 
-    let first = upload_profile_picture(&keys, &server, staged(&raw))
+    let first = upload_profile_picture(&keys, &only(&server), staged(&raw))
         .await
         .expect("first upload");
     // A second upload of the same bytes (server returns the existing blob) must
     // also succeed and resolve to the same content address.
-    let second = upload_profile_picture(&keys, &server, staged(&raw))
+    let second = upload_profile_picture(&keys, &only(&server), staged(&raw))
         .await
         .expect("duplicate upload");
     assert_eq!(first.sha256_hex, second.sha256_hex);
@@ -118,4 +131,55 @@ async fn download_of_absent_hash_errors_not_panics() {
     let url = server.join(&absent).expect("join absent hash").to_string();
     let result = download_profile_picture(&url).await;
     assert!(result.is_err(), "absent blob must error");
+}
+
+/// The live probe of the built-in upload servers that
+/// `docs/BLOSSOM_SERVER_VETTING.md` records: per server, a throwaway key
+/// uploads a fresh JPEG through the production checks and downloads it back
+/// through the production redirect path. It writes that JPEG to each
+/// third-party server for good and shows them the caller's IP, so it runs only
+/// when a maintainer asks:
+///
+/// ```bash
+/// HAVEN_PROBE_BLOSSOM_SERVERS=1 \
+///   cargo test --test profile_blossom_integration_test \
+///   blossom_servers_accept_an_anonymous_avatar_and_serve_it_back -- --ignored --nocapture
+/// ```
+#[tokio::test]
+#[ignore = "uploads to the production Blossom servers (HAVEN_PROBE_BLOSSOM_SERVERS=1)"]
+async fn blossom_servers_accept_an_anonymous_avatar_and_serve_it_back() {
+    if std::env::var("HAVEN_PROBE_BLOSSOM_SERVERS").as_deref() != Ok("1") {
+        eprintln!("skipping: HAVEN_PROBE_BLOSSOM_SERVERS=1 not set");
+        return;
+    }
+    let mut failed = Vec::new();
+    println!("| server | upload (B1-B3) | download (B4) |");
+    println!("|---|---|---|");
+    for server in blossom_servers() {
+        let keys = Keys::generate();
+        // A picture no server has seen: its colour comes from the throwaway key.
+        let raw = sample_jpeg(keys.public_key().to_bytes()[0]);
+        let base = server.base.to_string();
+        let (upload, download) = match upload_profile_picture(
+            &keys,
+            std::slice::from_ref(&server),
+            staged(&raw),
+        )
+        .await
+        {
+            Ok(picture) => match download_profile_picture(&picture.url).await {
+                Ok(round) if round.sha256_hex == picture.sha256_hex => {
+                    ("pass".to_string(), "pass".to_string())
+                }
+                Ok(_) => ("pass".to_string(), "fail (hash-mismatch)".to_string()),
+                Err(e) => ("pass".to_string(), format!("fail ({})", e.code())),
+            },
+            Err(e) => (format!("fail ({})", e.code()), "not run".to_string()),
+        };
+        println!("| `{base}` | {upload} | {download} |");
+        if upload != "pass" || download != "pass" {
+            failed.push(base);
+        }
+    }
+    assert!(failed.is_empty(), "servers that did not pass: {failed:?}");
 }

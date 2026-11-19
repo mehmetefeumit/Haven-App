@@ -42,6 +42,8 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
+import 'package:haven/src/services/background_idle_waiter.dart'
+    show kBackgroundIdleMaxWait;
 
 
 /// Ceiling on how long the foreground service's `onDestroy` WAITS for the
@@ -111,6 +113,12 @@ const Duration handoverTimeout = Duration(
 
 /// Gap between guard re-checks while waiting for the service to let go.
 const Duration handoverPollInterval = Duration(milliseconds: 250);
+
+/// How long a save the user just made waits for the resume to end the
+/// pause-time handoff: twice the resume's idle wait for the service
+/// ([kBackgroundIdleMaxWait]), the one long step the resume takes before it
+/// ends the handoff.
+const Duration kHandoffEndWait = Duration(seconds: 10);
 
 /// Whether the app is currently foregrounded.
 ///

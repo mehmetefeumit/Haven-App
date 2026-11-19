@@ -60,8 +60,8 @@ on:
         description: >-
           `sha256sum app-*-release.apk` run inside the candidate directory —
           one `<sha256>  <basename>` line per APK, sorted, joined with `;` —
-          set only when every step of the job passed.
-        value: ${{ jobs.android-launch.outputs.tested_sha256 }}
+          set only when both launch jobs passed.
+        value: ${{ jobs.tested.outputs.tested_sha256 }}
   # By hand, to prove the gate: v0.1.14 must be red; empty builds the
   # checked-out tree, as a pull request does, and a fixed tree must be green.
   workflow_dispatch:
@@ -76,35 +76,21 @@ permissions:
   contents: read
 
 jobs:
-  android-launch:
-    name: 'Release APK: launch, relaunch and upgrade'
+  candidate:
+    name: 'Release APK: build or fetch the candidate'
     runs-on: ubuntu-latest
     # HAVEN_LIVE_SYNC-INTENT: production-default — see the header. The build
     # step below passes no HAVEN_LIVE_SYNC define on purpose.
     #
-    # The job cap is the sum of every step cap this job can run, plus its
-    # uncapped work (check_e2e_step_timeout_ordering.sh C6):
-    #   scanner 10 + upgrade sources 5 + Setup Flutter 15 + Gradle cache 2 +
-    #   build 40 + verify 5 + prepare 5 + SDK 11 + AVD cache 10 +
-    #   snapshot 15 + emulator 76 + egress report 5 + guard teardown 5 +
-    #   dex check 5 + scan 5 + upload 5                               = 224
-    #   + uncapped 2.5                                                = 226.5 -> 227
-    # The uncapped figure is NOT yet measured on this job. Until it is, it is
-    # the measured uncapped time of the two jobs whose steps this one joins:
-    # release-build's Android job, 2.3 min outside its capped build step (run
-    # 43585389047: free disk, toolchain and Flutter setup, pub get, uploads,
-    # post steps), and the incident repro's emulator job, 0.2 min outside its
-    # emulator step (run 43589953220, job fixed-launch). Re-measure from this
-    # job's own runs and replace it.
-    # job-uncapped-minutes: 2.5 (2 runs of the jobs this one joins, worst 43585389047)
-    timeout-minutes: 227
+    # No emulator here. The cap clears the sum of the step caps: upgrade
+    # sources 5 + Setup Flutter 15 + Gradle cache 2 + build 40 + verify 5 +
+    # prepare 5 + upload 5 = 77, plus the uncapped setup (free disk, Java,
+    # Rust, cargo cache, pub get, the artifact download), rounded to 90.
+    timeout-minutes: 90
     outputs:
-      tested_sha256: ${{ steps.tested.outputs.tested_sha256 }}
+      has_baseline: ${{ steps.sources.outputs.has_baseline }}
     env:
       FLUTTER_SUPPRESS_ANALYTICS: "true"
-      # The runner gates its summaries through the identifier scanner, sealing
-      # the display name the app generated (logscan-gate.sh, host profile).
-      HAVEN_LOGSCAN: "true"
       CANDIDATE_APKS: /tmp/launch-gate/candidate-apks
       # Which candidate this run tests, decided once.
       MODE: ${{ inputs.candidate_release_tag != '' && 'release-tag' || inputs.candidate_artifact != '' && 'artifact' || 'build' }}
@@ -117,7 +103,6 @@ jobs:
 
     steps:
       - name: Checkout
-        id: checkout
         uses: actions/checkout@v6
 
       - name: Free disk space
@@ -139,23 +124,14 @@ jobs:
         with:
           workspaces: |
             haven-core
-            tooling/logscan
           key: launch-gate-android
           save-if: ${{ github.ref_type != 'tag' }}
-
-      # Release-built before Flutter and the emulator are resident; the runner
-      # seals and scans with it, and so does the pre-upload scan below.
-      - name: Build the runtime log scanner
-        timeout-minutes: 10
-        run: cargo build --release --manifest-path tooling/logscan/Cargo.toml
-
-      - name: Rotate the needle directory
-        run: bash tooling/e2e/ci/rotate-needle-dir.sh
 
       # The release to upgrade from, and the v0.1.13 baseline unless it IS that
       # release (true until a fixed release ships, v0.1.14 being yanked) or is
       # not older than the candidate (a candidate tag at or before it).
       - name: Fetch the releases to upgrade from
+        id: sources
         timeout-minutes: 5
         env:
           GH_TOKEN: ${{ github.token }}
@@ -163,6 +139,7 @@ jobs:
           set -euo pipefail
           bash tooling/e2e/ci/launch-gate-previous-apk.sh fetch --out /tmp/launch-gate/previous --previous-of "${CANDIDATE_TAG}"
           newest="$(printf '%s\n' "${BASELINE_TAG#v}" "${CANDIDATE_TAG#v}" | sort -V | tail -n 1)"
+          has_baseline=false
           if [[ "$(cat /tmp/launch-gate/previous/tag)" == "${BASELINE_TAG}" ]]; then
             echo "baseline ${BASELINE_TAG} is the previous release: the upgrade leg covers it."
           elif [[ -n "${CANDIDATE_TAG}" && ( "${CANDIDATE_TAG}" == "${BASELINE_TAG}" || "${newest}" != "${CANDIDATE_TAG#v}" ) ]]; then
@@ -170,7 +147,9 @@ jobs:
           else
             bash tooling/e2e/ci/launch-gate-previous-apk.sh fetch --out /tmp/launch-gate/baseline --tag "${BASELINE_TAG}"
             echo "LAUNCH_GATE_BASELINE_DIR=/tmp/launch-gate/baseline" >> "${GITHUB_ENV}"
+            has_baseline=true
           fi
+          echo "has_baseline=${has_baseline}" >> "${GITHUB_OUTPUT}"
 
       - name: Setup Flutter
         if: env.MODE == 'build'
@@ -228,7 +207,6 @@ jobs:
 
       # Exactly the three ABIs, each matching the sidecar it came with.
       - name: Verify the candidate APKs
-        id: verify
         timeout-minutes: 5
         env:
           GH_TOKEN: ${{ github.token }}
@@ -257,7 +235,7 @@ jobs:
           context=release
           [[ "${MODE}" != build ]] || context=pr
           cand=/tmp/launch-gate/candidate
-          mkdir -p "${cand}"
+          mkdir -p "${cand}" /tmp/launch-gate/baseline
           for src in /tmp/launch-gate/previous ${LAUNCH_GATE_BASELINE_DIR:-}; do
             bash tooling/e2e/ci/launch-gate-previous-apk.sh prepare --candidate "${CANDIDATE_APKS}/app-x86_64-release.apk" --source "${src}" --context "${context}"
           done
@@ -272,6 +250,89 @@ jobs:
             echo "candidate" > "${cand}/tag"
           fi
 
+      # The hand-off to the two launch jobs: the candidate APKs with their
+      # sidecars, the prepared candidate and upgrade-source directories. No log
+      # is in it. One day is enough: only this run reads it. Named by the run
+      # alone, never its attempt: "Re-run failed jobs" re-runs a launch job
+      # without this one, so the re-run must find the first attempt's hand-off,
+      # and a full re-run overwrites it.
+      - name: Hand the candidate to the launch jobs
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v6
+        with:
+          name: launch-gate-candidate-${{ github.run_id }}
+          path: |
+            /tmp/launch-gate/candidate-apks
+            /tmp/launch-gate/candidate
+            /tmp/launch-gate/previous
+            /tmp/launch-gate/baseline
+          retention-days: 1
+          overwrite: true
+          if-no-files-found: error
+
+  launch-api34:
+    name: 'Release APK: launch, relaunch and upgrade (API 34)'
+    needs: [candidate]
+    runs-on: ubuntu-latest
+    # The job cap is the sum of every step cap this job can run, plus its
+    # uncapped work (check_e2e_step_timeout_ordering.sh C6):
+    #   scanner 10 + candidate download 5 + SDK 11 + AVD cache 10 +
+    #   snapshot 15 + emulator 114 + egress report 5 + guard teardown 5 +
+    #   dex check 5 + manifest initializers 5 + scan 5 + upload 5          = 195
+    #   + uncapped 2.5                                                = 197.5 -> 198
+    # The uncapped figure is the one measured on the single job this one was
+    # split from (its build half is the candidate job now, so it overstates):
+    # release-build's Android job, 2.3 min outside its capped build step (run
+    # 43585389047), and the incident repro's emulator job, 0.2 min outside its
+    # emulator step (run 43589953220). Re-measure from this job's runs.
+    # job-uncapped-minutes: 2.5 (2 runs of the jobs this one joins, worst 43585389047)
+    timeout-minutes: 198
+    env:
+      # The runner gates its summaries through the identifier scanner, sealing
+      # the display name the app generated (logscan-gate.sh, host profile).
+      HAVEN_LOGSCAN: "true"
+      CANDIDATE_APKS: /tmp/launch-gate/candidate-apks
+
+    steps:
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@v6
+
+      - name: Free disk space
+        run: bash tooling/e2e/ci/free-disk-space.sh
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            tooling/logscan
+          key: launch-gate-android-scanner
+          save-if: ${{ github.ref_type != 'tag' }}
+
+      # Release-built before the emulator is resident; the runner seals and
+      # scans with it, and so does the pre-upload scan below.
+      - name: Build the runtime log scanner
+        timeout-minutes: 10
+        run: cargo build --release --manifest-path tooling/logscan/Cargo.toml
+
+      - name: Rotate the needle directory
+        run: bash tooling/e2e/ci/rotate-needle-dir.sh
+
+      - name: Receive the candidate
+        id: verify
+        timeout-minutes: 5
+        uses: actions/download-artifact@v6
+        with:
+          name: launch-gate-candidate-${{ github.run_id }}
+          path: /tmp/launch-gate
+
+      - name: Point the runner at the baseline
+        if: needs.candidate.outputs.has_baseline == 'true'
+        run: echo "LAUNCH_GATE_BASELINE_DIR=/tmp/launch-gate/baseline" >> "${GITHUB_ENV}"
+
       - name: Enable KVM group perms
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
@@ -285,7 +346,7 @@ jobs:
         timeout-minutes: 11
         run: bash tooling/e2e/ci/provision-android-sdk.sh 34 google_apis x86_64
 
-      # Restore-only: twelve other lanes share this key, and the AVD this job
+      # Restore-only: other lanes share the api-34 key, and the AVD this job
       # leaves behind is in airplane mode with error dialogs hidden — saved, it
       # would be every other lane's emulator. A miss is created locally below.
       - name: AVD cache
@@ -317,13 +378,16 @@ jobs:
 
       # The legs, under the egress guard (installed inside the script, after the
       # action's own SDK work and boot) and an attributable inner deadline:
-      # 66m is scripts/ci/check_e2e_lane_budget.sh's sum over the runner's own
-      # constants (`--explain` prints it). The step cap is that deadline + 1
-      # (run-with-deadline's kill grace) + 7 (emulator-boot-timeout) + 2 (the
-      # action's own setup and teardown), as e2e-android.yml derives its own.
+      # 104m is scripts/ci/check_e2e_lane_budget.sh's sum over the runner's own
+      # constants and photo-picker-lib.sh's (`--explain` prints it: 6209 s with
+      # the 180 s allowance; the two photo trips at their bounds are 870 s of
+      # it, background sharing and the Identity page 470 s, the second cold
+      # reopen 385 s). The step cap is that deadline + 1 (run-with-deadline's
+      # kill grace) + 7 (emulator-boot-timeout) + 2 (the action's own setup and
+      # teardown), as e2e-android.yml derives its own.
       - name: Run the launch gate on the emulator
         id: gate
-        timeout-minutes: 76
+        timeout-minutes: 114
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
@@ -336,7 +400,7 @@ jobs:
             -noaudio -no-boot-anim -camera-back none
           disable-animations: true
           emulator-boot-timeout: 420
-          script: bash tooling/e2e/ci/run-with-deadline.sh 66m "launch-gate-android" -- bash -c 'bash tooling/e2e/ci/setup-network-guard.sh install && bash tooling/e2e/ci/run-launch-gate-android.sh /tmp/launch-gate/candidate /tmp/launch-gate/previous'
+          script: bash tooling/e2e/ci/run-with-deadline.sh 104m "launch-gate-android api-34" -- bash -c 'bash tooling/e2e/ci/setup-network-guard.sh install && bash tooling/e2e/ci/run-launch-gate-android.sh /tmp/launch-gate/candidate /tmp/launch-gate/previous'
 
       - name: Report egress observations
         if: always()
@@ -351,21 +415,27 @@ jobs:
       # After the launch, and whatever it found, so a red candidate is named by
       # both halves: a stripped constructor the launch could not reach (ML Kit's
       # registrars only fail when a QR scan starts) and a crash the dex cannot
-      # show.
+      # show. Static, so once, here.
       - name: Check every APK keeps its name-instantiated constructors
         if: ${{ !cancelled() && steps.verify.outcome == 'success' }}
         timeout-minutes: 5
         run: bash scripts/ci/check_apk_loadable.sh "${CANDIDATE_APKS}"/app-*-release.apk
 
-      # The digests the publish job compares its own download against: every
-      # APK this job verified, read inside their directory as sha256sum prints
-      # them, sorted, one line. Reached only when every step above passed.
-      - name: Record the tested APK digests
-        id: tested
+      # The startup initializers that ship are a property of the merged
+      # manifest, which only the built APK holds.
+      - name: Check the release manifest's startup initializers
+        if: ${{ !cancelled() && steps.verify.outcome == 'success' }}
+        timeout-minutes: 5
         run: |
           set -euo pipefail
-          cd "${CANDIDATE_APKS}"
-          echo "tested_sha256=$(sha256sum app-*-release.apk | sort | paste -sd ';' -)" >> "${GITHUB_OUTPUT}"
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:?no Android SDK}}"
+          newest="$(for d in "${sdk}"/build-tools/*/; do [[ -d "${d}" ]] && basename "${d}"; done | sort -V | tail -n 1)"
+          aapt2="${sdk}/build-tools/${newest}/aapt2"
+          [[ -x "${aapt2}" ]] || { echo "no executable aapt2 in build-tools '${newest}'" >&2; exit 2; }
+          for apk in "${CANDIDATE_APKS}"/app-*-release.apk; do
+            "${aapt2}" dump xmltree --file AndroidManifest.xml "${apk}" > "${RUNNER_TEMP}/merged-manifest.txt"
+            bash scripts/ci/check_ucrop_runtime_deps.sh --merged-manifest "${RUNNER_TEMP}/merged-manifest.txt"
+          done
 
       - name: Scan the launch-gate summaries before upload
         id: scan
@@ -378,13 +448,13 @@ jobs:
           bash tooling/e2e/ci/scan-logs.sh --manifest-dir /tmp/haven-soak/needles "${sinks[@]}" --report /tmp/launch-gate/logscan-upload.ndjson
 
       # The summaries only: never logcat, never a UI dump (the runner keeps
-      # neither), never the APKs.
+      # neither); the APKs leave the run only through the candidate hand-off.
       - name: Upload the launch-gate summaries
         if: ${{ !cancelled() && steps.scan.outcome == 'success' }}
         timeout-minutes: 5
         uses: actions/upload-artifact@v6
         with:
-          name: launch-gate-android-${{ github.run_id }}-${{ github.run_attempt }}
+          name: launch-gate-android-api34-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             /tmp/launch-gate/out/launch-gate-summary.log
             /tmp/launch-gate/out/crash-summary.log
@@ -394,3 +464,200 @@ jobs:
       - name: Discard needle manifests
         if: always()
         run: rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
+
+  launch-api35:
+    name: 'Release APK: launch, relaunch and upgrade (API 35)'
+    needs: [candidate]
+    runs-on: ubuntu-latest
+    # The job cap is the sum of every step cap this job can run, plus its
+    # uncapped work (check_e2e_step_timeout_ordering.sh C6):
+    #   scanner 10 + candidate download 5 + SDK 11 + AVD cache 10 +
+    #   snapshot 15 + emulator 114 + egress report 5 + guard teardown 5 +
+    #   scan 5 + upload 5                                    = 185
+    #   + uncapped 2.5                                                = 187.5 -> 188
+    # The uncapped figure is the one measured on the single job this one was
+    # split from (its build half is the candidate job now, so it overstates):
+    # release-build's Android job, 2.3 min outside its capped build step (run
+    # 43585389047), and the incident repro's emulator job, 0.2 min outside its
+    # emulator step (run 43589953220). Re-measure from this job's runs.
+    # job-uncapped-minutes: 2.5 (2 runs of the jobs this one joins, worst 43585389047)
+    timeout-minutes: 188
+    env:
+      # The runner gates its summaries through the identifier scanner, sealing
+      # the display name the app generated (logscan-gate.sh, host profile).
+      HAVEN_LOGSCAN: "true"
+      CANDIDATE_APKS: /tmp/launch-gate/candidate-apks
+
+    steps:
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@v6
+
+      - name: Free disk space
+        run: bash tooling/e2e/ci/free-disk-space.sh
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            tooling/logscan
+          key: launch-gate-android-scanner
+          save-if: ${{ github.ref_type != 'tag' }}
+
+      # Release-built before the emulator is resident; the runner seals and
+      # scans with it, and so does the pre-upload scan below.
+      - name: Build the runtime log scanner
+        timeout-minutes: 10
+        run: cargo build --release --manifest-path tooling/logscan/Cargo.toml
+
+      - name: Rotate the needle directory
+        run: bash tooling/e2e/ci/rotate-needle-dir.sh
+
+      - name: Receive the candidate
+        id: verify
+        timeout-minutes: 5
+        uses: actions/download-artifact@v6
+        with:
+          name: launch-gate-candidate-${{ github.run_id }}
+          path: /tmp/launch-gate
+
+      - name: Point the runner at the baseline
+        if: needs.candidate.outputs.has_baseline == 'true'
+        run: echo "LAUNCH_GATE_BASELINE_DIR=/tmp/launch-gate/baseline" >> "${GITHUB_ENV}"
+
+      - name: Enable KVM group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      # Unconditional, with the emulator steps' own api/target/arch
+      # (check_android_sdk_provisioned.sh); its cap is the script's worst case.
+      - name: Provision the Android SDK
+        timeout-minutes: 11
+        run: bash tooling/e2e/ci/provision-android-sdk.sh 35 google_apis x86_64
+
+      # Restore-only: no lane writes the api-35 key yet, so this is a miss
+      # created locally below; and an AVD this job leaves behind is in airplane
+      # mode with error dialogs hidden — saved, it would be the next lane's
+      # emulator.
+      - name: AVD cache
+        uses: actions/cache/restore@v4
+        id: avd-cache
+        timeout-minutes: 10
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          key: avd-api35-x86_64-google_apis-single-v1
+
+      - name: Create AVD snapshot
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 15
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none
+          disable-animations: false
+          emulator-boot-timeout: 420
+          script: echo "Generated AVD snapshot for caching."
+
+      # The legs, under the egress guard (installed inside the script, after the
+      # action's own SDK work and boot) and an attributable inner deadline:
+      # 104m is scripts/ci/check_e2e_lane_budget.sh's sum over the runner's own
+      # constants and photo-picker-lib.sh's (`--explain` prints it: 6209 s with
+      # the 180 s allowance; the two photo trips at their bounds are 870 s of
+      # it, background sharing and the Identity page 470 s, the second cold
+      # reopen 385 s). The step cap is that deadline + 1 (run-with-deadline's
+      # kill grace) + 7 (emulator-boot-timeout) + 2 (the action's own setup and
+      # teardown), as e2e-android.yml derives its own.
+      - name: Run the launch gate on the emulator
+        id: gate
+        timeout-minutes: 114
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          emulator-boot-timeout: 420
+          script: bash tooling/e2e/ci/run-with-deadline.sh 104m "launch-gate-android api-35" -- bash -c 'bash tooling/e2e/ci/setup-network-guard.sh install && bash tooling/e2e/ci/run-launch-gate-android.sh /tmp/launch-gate/candidate /tmp/launch-gate/previous'
+
+      - name: Report egress observations
+        if: always()
+        timeout-minutes: 5
+        run: bash tooling/e2e/ci/setup-network-guard.sh report
+
+      - name: Remove network egress guard
+        if: always()
+        timeout-minutes: 5
+        run: bash tooling/e2e/ci/setup-network-guard.sh teardown || true
+
+      - name: Scan the launch-gate summaries before upload
+        id: scan
+        if: ${{ !cancelled() && steps.gate.outcome != 'skipped' }}
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          sinks=(--sink diag=/tmp/launch-gate/out/launch-gate-summary.log)
+          if [[ -f /tmp/launch-gate/out/crash-summary.log ]]; then sinks+=(--sink diag=/tmp/launch-gate/out/crash-summary.log); fi
+          bash tooling/e2e/ci/scan-logs.sh --manifest-dir /tmp/haven-soak/needles "${sinks[@]}" --report /tmp/launch-gate/logscan-upload.ndjson
+
+      # The summaries only: never logcat, never a UI dump (the runner keeps
+      # neither); the APKs leave the run only through the candidate hand-off.
+      - name: Upload the launch-gate summaries
+        if: ${{ !cancelled() && steps.scan.outcome == 'success' }}
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v6
+        with:
+          name: launch-gate-android-api35-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            /tmp/launch-gate/out/launch-gate-summary.log
+            /tmp/launch-gate/out/crash-summary.log
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Discard needle manifests
+        if: always()
+        run: rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
+
+  # The digests the publish job compares its own download against: every APK
+  # the candidate job verified, read inside their directory as sha256sum
+  # prints them, sorted, one line — reached only when both launches passed.
+  tested:
+    name: 'Release APK: tested digests'
+    needs: [candidate, launch-api34, launch-api35]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      tested_sha256: ${{ steps.tested.outputs.tested_sha256 }}
+    steps:
+      - name: Receive the candidate
+        timeout-minutes: 5
+        uses: actions/download-artifact@v6
+        with:
+          name: launch-gate-candidate-${{ github.run_id }}
+          path: /tmp/launch-gate
+
+      - name: Record the tested APK digests
+        id: tested
+        run: |
+          set -euo pipefail
+          cd /tmp/launch-gate/candidate-apks
+          sha256sum -c app-*-release.apk.sha256
+          echo "tested_sha256=$(sha256sum app-*-release.apk | sort | paste -sd ';' -)" >> "${GITHUB_OUTPUT}"

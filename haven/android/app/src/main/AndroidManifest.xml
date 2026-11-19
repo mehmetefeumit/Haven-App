@@ -93,6 +93,23 @@
             android:name="com.yalantis.ucrop.UCropActivity"
             android:screenOrientation="portrait"
             android:theme="@style/Theme.AppCompat.DayNight.NoActionBar" />
+        <!-- AppCompat's emoji2 registers EmojiCompatInitializer with
+             androidx.startup, which at every cold start asks the system font
+             provider (Google Play services, where present) for the emoji
+             font: a cross-app request naming Haven, and start-up work, for
+             emoji Flutter draws itself. Removed by the documented opt-out;
+             AppCompat widgets (uCrop's among them) then skip EmojiCompat.
+             Excluding the emoji2 module instead would crash
+             AppCompatTextView. -->
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            android:exported="false"
+            tools:node="merge">
+            <meta-data
+                android:name="androidx.emoji2.text.EmojiCompatInitializer"
+                tools:node="remove" />
+        </provider>
         <!-- RebootReceiver: ENABLED at M7-E (backgroundCatchupEnabled == true,
              paired with autoRunOnBoot:true in ForegroundTaskOptions.init())
              so the FGS restarts after a device reboot when background sharing

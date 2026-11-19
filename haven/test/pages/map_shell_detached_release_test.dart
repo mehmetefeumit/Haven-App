@@ -21,9 +21,15 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:fake_async/fake_async.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/pages/map_shell.dart';
+import 'package:haven/src/services/mls_session_handover.dart';
 import 'package:haven/src/services/subscription_service.dart';
+import 'package:haven/src/services/system_activity_excursions.dart';
+
+import '../helpers/log_capture.dart';
 
 void main() {
   late String source;
@@ -418,6 +424,278 @@ void main() {
         isFalse,
         reason: 'Security Rule 8: log the type, never the message',
       );
+    });
+  });
+
+  group("a pause during Haven's own photo picker or crop editor", () {
+    // Android stops Haven's activity for the picker and the editor exactly as
+    // for the user leaving, and the result is saved while Dart still reads
+    // `inactive`: a session handed over by then refuses that save, and the
+    // user sees "Could not update your photo" for a photo they just chose.
+
+    /// Runs the static as `_onPaused` wires it, recording what it does.
+    ({List<String> order, Future<void> done}) handOff({
+      required Future<void>? grace,
+      Future<void> Function()? untilSaved,
+      bool Function()? superseded,
+    }) {
+      final order = <String>[];
+      final done = MapShell.handOffMlsSession(
+        engineStop: Future.value(LiveSyncStopOutcome.stopped),
+        ownershipWrites: [
+          () async => order.add('write:lastPublish'),
+          () async => order.add('write:foregroundInactive'),
+        ],
+        releaseSession: () {
+          order.add('release');
+          return true;
+        },
+        announce: ({required handedOff}) => order.add('announce:$handedOff'),
+        superseded: superseded ?? () => false,
+        grace: grace,
+        untilSaved: untilSaved,
+      );
+      return (order: order, done: done);
+    }
+
+    test('hands nothing over, and tells the service nothing, until its grace '
+        'ends', () async {
+      final grace = Completer<void>();
+      final run = handOff(grace: grace.future);
+      await pumpEventQueue();
+      expect(
+        run.order,
+        isEmpty,
+        reason:
+            'the stamp write is what tells the service to take over; '
+            'written before the grace, the service probes a live owner',
+      );
+
+      grace.complete();
+      await run.done;
+      expect(run.order, [
+        'write:lastPublish',
+        'write:foregroundInactive',
+        'release',
+        'announce:true',
+      ]);
+    });
+
+    test('a resume inside the grace hands nothing over at all', () async {
+      final grace = Completer<void>();
+      var resumed = false;
+      final run = handOff(grace: grace.future, superseded: () => resumed);
+      await pumpEventQueue();
+      resumed = true;
+      grace.complete();
+      await run.done;
+      expect(run.order, isEmpty);
+    });
+
+    test('a save in progress when the grace ends is waited for, then the '
+        'session is released', () async {
+      // Releasing under it disposes the manager the save still reads through:
+      // a saved photo reported as a failure, and the service signalled while
+      // the save's own call still holds the Rule-14 guard.
+      final grace = Completer<void>();
+      final save = Completer<void>();
+      late List<String> order;
+      final run = handOff(
+        grace: grace.future,
+        untilSaved: () => save.future.then((_) => order.add('save-done')),
+      );
+      order = run.order;
+      grace.complete();
+      await pumpEventQueue();
+      expect(order, ['write:lastPublish', 'write:foregroundInactive']);
+
+      save.complete();
+      await run.done;
+      expect(order, [
+        'write:lastPublish',
+        'write:foregroundInactive',
+        'save-done',
+        'release',
+        'announce:true',
+      ]);
+    });
+
+    test('a resume during that save hands nothing over', () async {
+      final save = Completer<void>();
+      var resumed = false;
+      final run = handOff(
+        grace: null,
+        untilSaved: () => save.future,
+        superseded: () => resumed,
+      );
+      await pumpEventQueue();
+      resumed = true;
+      save.complete();
+      await run.done;
+      expect(run.order, ['write:lastPublish', 'write:foregroundInactive']);
+    });
+
+    test('a save that never settles holds the release for kHandoffEndWait and '
+        'no longer', () {
+      fakeAsync((async) {
+        final never = Completer<void>();
+        final run = handOff(grace: null, untilSaved: () => never.future);
+        async.flushMicrotasks();
+        expect(run.order, ['write:lastPublish', 'write:foregroundInactive']);
+        async.elapse(kHandoffEndWait - const Duration(microseconds: 1));
+        expect(run.order, hasLength(2));
+        async.elapse(const Duration(microseconds: 1));
+        expect(run.order, [
+          'write:lastPublish',
+          'write:foregroundInactive',
+          'release',
+          'announce:true',
+        ]);
+      });
+    });
+
+    test('the shell wires the grace into the Android hand-off and nowhere '
+        'else', () {
+      final call = source.indexOf('await _handOffMlsSession(');
+      final branch = source.lastIndexOf(
+        'if (bgEnabled && Platform.isAndroid) {',
+        call,
+      );
+      expect(branch, isNonNegative);
+      expect(
+        RegExp(r'graceForPause\(\)').allMatches(source).length,
+        1,
+        reason: 'a second grace site is one no resume or detach ends',
+      );
+      final at = source.indexOf('grace: _excursions.graceForPause(),');
+      expect(
+        at,
+        allOf(greaterThan(call), lessThan(source.indexOf(');', call))),
+        reason:
+            "the grace is an argument of the Android branch's hand-off, "
+            "evaluated in the pause's first synchronous run",
+      );
+      final wiring = source.substring(
+        source.indexOf('Future<void> _handOffMlsSession({'),
+        source.indexOf("/// Gives this isolate's MLS session away"),
+      );
+      expect(wiring, contains('grace: grace,'));
+      expect(wiring, contains('untilSaved: () => _excursions.saved,'));
+    });
+
+    test('a resume, a detach and a dispose each end the grace', () {
+      final dispatch = source.substring(
+        source.indexOf('void didChangeAppLifecycleState('),
+        source.indexOf('/// Releases the live-sync engine when the Flutter'),
+      );
+      final resumed = dispatch.indexOf('state == AppLifecycleState.resumed');
+      final turn = dispatch.indexOf('_lifecycleTurn++;', resumed);
+      final endResumed = dispatch.indexOf(
+        '_excursions.endGrace(HandoffGraceEnd.resumed);',
+      );
+      expect(
+        endResumed,
+        allOf(greaterThan(turn), lessThan(dispatch.indexOf('_onResumed()'))),
+        reason:
+            'after the turn moves, so the pause the grace releases reads '
+            'superseded and hands nothing over',
+      );
+      final detached = dispatch.indexOf('state == AppLifecycleState.detached');
+      expect(
+        dispatch.indexOf('_excursions.endGrace(HandoffGraceEnd.detached);'),
+        allOf(
+          greaterThan(detached),
+          lessThan(dispatch.indexOf('_onDetached()')),
+        ),
+      );
+      final dispose = source.indexOf('void dispose() {');
+      expect(
+        source.indexOf('_excursions.endGrace(HandoffGraceEnd.disposed);'),
+        allOf(
+          greaterThan(dispose),
+          lessThan(source.indexOf('super.dispose();', dispose)),
+        ),
+        reason:
+            'the hand-off can outlive the State; nothing else would end '
+            'its grace',
+      );
+    });
+
+    test('the save is the last thing waited for before the release', () {
+      // Check and release in one synchronous step: a save that starts after
+      // the check finds the session handed off and waits for the resume.
+      final at = source.indexOf('static Future<void> handOffMlsSession({');
+      final body = source.substring(
+        at,
+        source.indexOf('static Future<void> _handoffWrite(', at),
+      );
+      final wait = body.indexOf(
+        'await untilSaved().timeout(kHandoffEndWait, onTimeout: () {});',
+      );
+      expect(wait, isNonNegative);
+      expect(body.lastIndexOf('await '), wait, reason: 'no await after it');
+      expect(body.indexOf('handedOff = releaseSession();'), greaterThan(wait));
+      expect(
+        body.indexOf('await grace;'),
+        allOf(isNonNegative, lessThan(body.indexOf('_handoffWrite(write)'))),
+        reason: 'the grace comes before the writes that tell the service',
+      );
+    });
+  });
+
+  group('the pause-branch debug line', () {
+    // The e2e lanes read it to know the Android background hand-off branch
+    // ran (background sharing on). `_onPaused` cannot run here (CLAUDE.md),
+    // so its text is read from the source and every line that branch's
+    // hand-off can log is captured with identifiers planted in each input.
+    const marker = '[MapShell] pause: background handoff branch';
+
+    test('is the first statement of the branch, a fixed literal', () {
+      final branch = source.indexOf('if (bgEnabled && Platform.isAndroid) {');
+      expect(branch, isNonNegative);
+      final first = source.substring(branch).split('\n')[1].trim();
+      expect(first, "debugPrint('$marker');");
+      expect(
+        "debugPrint('$marker');".allMatches(source).length,
+        1,
+        reason: 'one site, so the line proves that branch and no other ran',
+      );
+    });
+
+    test('and nothing that branch logs carries an identifier', () async {
+      const npub =
+          'npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqp9k8z0';
+      const groupId =
+          '6e7d3f0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1';
+      const relay = 'wss://relay.planted-host.example';
+      final log = LogCapture.install();
+      debugPrint(marker);
+      final excursions = SystemActivityExcursions();
+      final hold = Completer<String>();
+      unawaited(excursions.run(() => hold.future));
+      final grace = excursions.graceForPause();
+      final done = MapShell.handOffMlsSession(
+        engineStop: Future.value(LiveSyncStopOutcome.stopped),
+        ownershipWrites: [
+          () async => throw StateError('$npub $relay'),
+          () async => throw ArgumentError(groupId),
+        ],
+        releaseSession: () => throw StateError('$groupId $npub'),
+        announce: ({required handedOff}) => throw StateError(relay),
+        superseded: () => false,
+        grace: grace,
+        untilSaved: () => excursions.saved,
+      );
+      excursions.endGrace(HandoffGraceEnd.detached);
+      await done;
+      hold.complete('$npub $groupId');
+
+      log
+        ..assertContains(marker)
+        ..assertContains('[MapShell] handoff grace: ended by detached')
+        ..assertContains('[MapShell] handoff write failed: StateError')
+        ..assertContains('[MapShell] handoff failed: StateError')
+        ..assertNoNeedles([npub, groupId, relay]);
     });
   });
 }

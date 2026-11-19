@@ -13,6 +13,13 @@ pluginManagement {
     repositories {
         google()
         mavenCentral()
+        // Google's Maven Central mirror, asked only after Central answered
+        // 404, and ahead of the Plugin Portal, whose redirect to Central has
+        // answered 404 for files Central holds and killed this settings phase
+        // on CI. This list also resolves the Flutter plugin's runtime
+        // classpath; Flutter's included build gets the same order from
+        // scripts/ci/maven-central-fallback.init.gradle.kts.
+        maven("https://maven-central.storage-download.googleapis.com/maven2/")
         gradlePluginPortal()
     }
 }

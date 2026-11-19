@@ -21,8 +21,10 @@
 #     server (see PUBLIC_PROFILE_MIGRATION_PLAN.md §2, §7.3).
 
 # Leave blank so the blob "url" field is derived from the incoming request's
-# Host header — the emulator sees 10.0.2.2:3000, so the returned URL is
-# reachable from inside the emulator without any hard-coded host.
+# Host header — the emulator sees 10.0.2.2:<published port> (3002, as the
+# lane's fallback server), so the returned URL is reachable from inside the
+# emulator without any hard-coded host, and is on the host Haven's upload
+# check requires (the server's own).
 publicDomain: ""
 
 # Relative to the container workdir (/app); the host data dir is bind-mounted

@@ -254,7 +254,7 @@ async fn a_picture_whose_publish_no_relay_took_is_uploaded_once_per_pass_and_sta
         .expect(2)
         .create_async()
         .await;
-    set_blossom_server_for_test(blossom.url()).expect("install the Blossom override once");
+    set_blossom_server_for_test(&blossom.url()).expect("install the Blossom override once");
 
     manager
         .stage_own_profile_picture(&own_hex, &staged, NOW)

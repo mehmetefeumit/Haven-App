@@ -17,14 +17,24 @@ use super::types::{ProfileEdits, ProfileMetadata};
 /// * `Some(value)` — set it to `value.trim()`, or **clear** it (set `None`) if
 ///   the trimmed value is empty.
 ///
-/// All other fields (`name`, `website`, `banner`, `nip05`, `lud06`, `lud16`)
-/// and the entire `custom` map are carried over unchanged.
+/// `name` follows a `display_name` edit only when, in `base`, it is present
+/// and equal to `display_name` after the publish sanitizer: Haven writes
+/// `name` only as that mirror ([`enforce_name_rule`]), so a `name` that
+/// differs is a handle someone set deliberately and is kept.
+///
+/// All other fields (`website`, `banner`, `nip05`, `lud06`, `lud16`) and the
+/// entire `custom` map are carried over unchanged.
 #[must_use]
 pub fn merge_edits(base: &ProfileMetadata, edits: &ProfileEdits) -> ProfileMetadata {
     let mut metadata = base.as_metadata().clone();
 
     if let Some(display_name) = &edits.display_name {
+        let published = base.sanitized();
+        let mirrored = published.name().is_some() && published.name() == published.display_name();
         metadata.display_name = normalize_edit(display_name);
+        if mirrored {
+            metadata.name.clone_from(&metadata.display_name);
+        }
     }
     if let Some(about) = &edits.about {
         metadata.about = normalize_edit(about);
@@ -132,6 +142,70 @@ mod tests {
         // All-None edits are a no-op.
         let merged = merge_edits(&base, &ProfileEdits::default());
         assert_eq!(merged, base);
+    }
+
+    fn renamed(base: &str, display_name: &str) -> ProfileMetadata {
+        merge_edits(
+            &md_from(base),
+            &ProfileEdits {
+                display_name: Some(display_name.to_string()),
+                ..ProfileEdits::default()
+            },
+        )
+    }
+
+    #[test]
+    fn a_rename_carries_a_name_that_mirrored_the_display_name() {
+        let merged = renamed(
+            r#"{"name":"Quiet Wanderer","display_name":"Quiet Wanderer"}"#,
+            "Alice",
+        );
+        assert_eq!(merged.name(), Some("Alice"));
+        assert_eq!(merged.display_name(), Some("Alice"));
+        let wire = crate::profile::build_metadata_event(&nostr::Keys::generate(), &merged, None)
+            .expect("sign");
+        let published = Metadata::from_json(&wire.content).expect("metadata");
+        assert_eq!(
+            published.name.as_deref(),
+            Some("Alice"),
+            "and so does the wire"
+        );
+    }
+
+    #[test]
+    fn a_rename_keeps_a_handle_set_in_another_client() {
+        let merged = renamed(r#"{"name":"alice_h","display_name":"Alice"}"#, "Bob");
+        assert_eq!(merged.name(), Some("alice_h"));
+        assert_eq!(merged.display_name(), Some("Bob"));
+    }
+
+    #[test]
+    fn a_mirror_is_recognised_through_the_publish_sanitizer() {
+        // The published form of this display name is "Ada Lovelace".
+        let merged = renamed(
+            "{\"name\":\"Ada Lovelace\",\"display_name\":\"  Ada\\u202e\\n\\n Lovelace \"}",
+            "Ada King",
+        );
+        assert_eq!(merged.name(), Some("Ada King"));
+    }
+
+    #[test]
+    fn clearing_a_mirrored_display_name_clears_its_name() {
+        let merged = renamed(r#"{"name":"Alice","display_name":"Alice"}"#, "  ");
+        assert_eq!(merged.display_name(), None);
+        assert_eq!(merged.name(), None, "no stale mirror stays public");
+    }
+
+    #[test]
+    fn an_edit_that_leaves_the_display_name_alone_never_touches_name() {
+        let merged = merge_edits(
+            &md_from(r#"{"name":"Alice","display_name":"Alice"}"#),
+            &ProfileEdits {
+                about: Some("bio".to_string()),
+                ..ProfileEdits::default()
+            },
+        );
+        assert_eq!(merged.name(), Some("Alice"));
     }
 
     #[test]

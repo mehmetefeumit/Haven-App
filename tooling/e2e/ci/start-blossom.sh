@@ -4,9 +4,11 @@
 # lane (Android job), then verifies it actually accepts HTTP before
 # declaring success — not just that its TCP port briefly opens.
 #
-# The Android emulator reaches this server at `http://10.0.2.2:3000`
-# (host-loopback alias); the profile-picture upload/download path targets it
-# via the `HAVEN_E2E_BLOSSOM_URL` dart-define.
+# The public-profile lane runs it as the FALLBACK upload server on the host's
+# :3002 (BLOSSOM_PORT), behind the Primal-mimicking primary on :3000
+# (start-local-blossom.sh); the Android emulator reaches it at
+# `http://10.0.2.2:3002` (host-loopback alias), the second entry of the
+# `HAVEN_E2E_BLOSSOM_URLS` dart-define.
 #
 # It runs the same pinned `ghcr.io/hzrd149/blossom-server` image White Noise
 # uses (whitenoise-rs/docker-compose.yml), bind-mounting the checked-in

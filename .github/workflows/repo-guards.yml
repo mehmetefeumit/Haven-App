@@ -921,6 +921,16 @@
 #     created_at, read once, never `/attempts/<n>`, never the local clock), so
 #     the fixtures are the whole proof.
 #
+#   Repo-guards step conditions       scripts/ci/check_repo_guards_step_conditions.sh
+#     Every step of this job after its checkout carries the standard `if:`,
+#     so no earlier red — a guard's, or a tool install's on a mirror outage —
+#     can skip a later setup step or hide a later guard's verdict.
+#
+#   CI tool installer                 scripts/ci/ensure_ci_tools.sh
+#     Installs xmllint and jq here, and lcov in coverage.yml, only when
+#     missing, retrying the archive within a bounded budget and failing by
+#     name. Its subject is the Ubuntu archive, so the fixtures are the proof.
+#
 #   Soak issue filing                 scripts/ci/file_soak_issue.sh
 #     Composes soak-nightly.yml's one issue per red key from an ALLOWLIST of
 #     verdict.log fields and nothing else, and files it only on a scheduled
@@ -939,26 +949,29 @@ jobs:
   guards:
     name: Static checks
     runs-on: ubuntu-latest
-    # Generous against the measured few minutes, but far below GitHub's 6-hour
-    # default: a hung guard (or a baseline fetch that never returns) should
-    # surface as a bounded red, not burn a runner for the afternoon.
-    timeout-minutes: 20
+    # A hang guard, sized from measurement, far below GitHub's 6-hour default:
+    # a hung guard (or a baseline fetch that never returns) should surface as a
+    # bounded red, not burn a runner for the afternoon. Measured: 12.7 min on
+    # main (run 43868543765) before the photo harness self-tests, which add
+    # ~7 min (launch gate 218 s, photo UI 185 s, run 44481804001) — ~20 min of
+    # work; the two slow steps carry their own caps below.
+    timeout-minutes: 30
     steps:
       - name: Checkout
         id: checkout
         uses: actions/checkout@v6
 
-      # xmllint (libxml2-utils) is pre-installed on ubuntu-latest, but ensure it
-      # so the XML-comment-safe manifest/plist checks never depend on the image.
-      # Braced group so the install only runs when xmllint is actually missing.
-      - name: Ensure xmllint
-        run: xmllint --version >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y libxml2-utils; }
-
-      # Same doctrine as xmllint above: jq ships on ubuntu-latest, but the ARB
-      # and privacy-manifest checks parse JSON rather than grep it, so ensure it
-      # instead of depending on the image.
-      - name: Ensure jq
-        run: jq --version >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y jq; }
+      # The XML-comment-safe manifest/plist checks need xmllint, which the
+      # Ubuntu 26.04 image no longer ships, and the ARB and privacy-manifest
+      # checks parse JSON with jq. Installed only when missing, through an
+      # archive outage (run 44523702729), or failing here by name; the guards
+      # that need either tool then say it is missing, never a violation. The
+      # cap is the script's 300 s archive budget plus the untimed local install,
+      # and it keeps the job inside its 30: ~20 min of work + 7 = 27.
+      - name: Ensure xmllint and jq
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        timeout-minutes: 7
+        run: bash scripts/ci/ensure_ci_tools.sh xmllint=libxml2-utils jq=jq
 
       # The one non-bash guard in this job. `check-wire-canaries.dart` is a
       # plain Dart program with no package dependencies — it imports
@@ -967,13 +980,15 @@ jobs:
       # which is why the canary self-test can live here with the other
       # invariants instead of behind the coverage job's toolchain.
       - name: Set up Dart
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         uses: dart-lang/setup-dart@v1
         with:
           sdk: stable
 
-      # Every guard below carries the same `if:` — run whenever checkout
-      # succeeded, even if an earlier guard failed — so one red run reports the
-      # full set of violations instead of stopping at the first.
+      # Every step after the checkout, the setup above included, carries the
+      # same `if:` — run whenever checkout succeeded, even if an earlier step
+      # failed — so one red run reports the full set of violations instead of
+      # stopping at the first (check_repo_guards_step_conditions.sh).
 
       - name: Committed-secrets scan
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
@@ -1020,6 +1035,15 @@ jobs:
       - name: FLAG_SECURE covers every Activity
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_flag_secure_app_wide.sh
+
+      # uCrop's JitPack POM declares no dependencies, so the crop editor runs on
+      # whatever AndroidX the app pins; the release manifest half runs in the
+      # Android launch gate, on the APK it launched.
+      - name: uCrop runtime dependencies (static + self-test)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: |
+          bash scripts/ci/check_ucrop_runtime_deps.sh --self-test
+          bash scripts/ci/check_ucrop_runtime_deps.sh
 
       # The guard above is four greps and a brace-slicer over Kotlin, so its
       # fixtures pin one mutation per link — a registration moved out of
@@ -2240,17 +2264,46 @@ jobs:
       # launch, a restart or ANR mid-journey, Intro after a relaunch, a name
       # that did not survive, an unusable upgrade source and an offline device
       # each get their own verdict, crash evidence is read before anything else
-      # is blamed, and the pseudonym never reaches a transcript.
+      # is blamed, and the pseudonym never reaches a transcript. Its photo
+      # rounds too: a save refused after the crop, a uCrop crash, a picker the
+      # selectors do not know (rc 2) or that is not the Photo Picker (rc 1), a
+      # photo that is late or lost after a restart, background sharing that
+      # will not turn on, no leg reaching MapShell (rc 2), a gallery the device
+      # would not seed (rc 2) or never answered for (rc 3) — and no picker
+      # description ever reaches a transcript.
       - name: E2E harness self-test (Android launch gate)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        timeout-minutes: 8
         run: bash tooling/e2e/ci/run-launch-gate-android.sh --self-test
 
       # The screen reader the Android gate decides on: exact-line matching,
       # entity and apostrophe folding, and an empty or label-less dump read as
-      # no observation rather than a verdict.
+      # no observation rather than a verdict; the system-screen finder (anchored
+      # ids, sorted matches, nothing a node says printed) and the resumed
+      # activity read from dumpsys.
       - name: E2E harness self-test (launch-gate screen reader)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: python3 -I tooling/e2e/ci/ui-dump.py --self-test
+
+      # The gallery fixtures the photo rounds pick: the same bytes every run,
+      # two different pictures, valid PNGs with no metadata chunk.
+      - name: E2E harness self-test (photo fixtures)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: python3 -I tooling/e2e/ci/make-avatar-fixture.py --self-test
+
+      # The debug photo UI lane's runner and its host sidecar against a stubbed
+      # adb and a stubbed drive: rounds played in marker order, the pause
+      # branch required on a pick, an early-expired grace a product failure, a
+      # broken marker sequence or an unknown picker a harness failure, the
+      # drive held until the sidecar has recorded each round (a record run-as
+      # refuses a harness failure), a sidecar failure red even under a passing
+      # drive, the sidecar log gated before it is echoed, and the bounds,
+      # markers and record file it shares with the Dart target and
+      # system_activity_excursions.dart pinned.
+      - name: E2E harness self-test (photo UI lane)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        timeout-minutes: 8
+        run: bash tooling/e2e/ci/run-photo-ui-scenario.sh --self-test
 
       # Which release the upgrade leg starts from and whether it can replace it:
       # drafts, pre-releases, yanked and later tags excluded; a bad checksum,
@@ -2718,3 +2771,20 @@ jobs:
       - name: Runner-loss re-run gate self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/rerun_runner_losses.sh --self-test
+
+      # A step without the standard `if:` is skipped after any earlier red:
+      # run 44523702729 lost its Dart setup that way, behind a failed xmllint
+      # install, and two Dart guards then failed for want of `dart`.
+      - name: Repo-guards step conditions
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_repo_guards_step_conditions.sh
+
+      - name: Repo-guards step conditions (self-test)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_repo_guards_step_conditions.sh --self-test
+
+      # The installer's subject is the archive, so its fixtures are the proof:
+      # a stubbed apt-get that is healthy, stale, down or hung.
+      - name: CI tool installer self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/ensure_ci_tools.sh --self-test
