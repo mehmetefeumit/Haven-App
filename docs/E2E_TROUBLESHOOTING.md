@@ -1900,8 +1900,8 @@ optional to turn it green: each UNUSABLE line names the one reading that failed,
 and the raw capture it was made over is deliberately not in the artifact (it
 holds the emulator's Bluetooth address). What the artifact has: the device log
 with every address replaced, of the events buffer only the entries Haven's own
-process wrote, of the drive transcript the tool's lines and Haven's own, the
-dumps' skeletons and the verdict file — which is written last and gated by
+process wrote, the drive transcript whole, the dumps' skeletons and the
+verdict file — which is written last and gated by
 itself, so a red run still has it. Reproduce on an emulator instead:
 `bash tooling/e2e/ci/run-mesh-lever.sh s0` with both APKs staged under
 `/tmp/integration-apks`, and read `/tmp/mesh-raw/`.
@@ -1926,7 +1926,6 @@ lever reachable (`docs/BLUETOOTH_MESH_M3_DESIGN.md` §O.2.3, §O.7):
 | `probe.setprop_log_tag` | `yes` `no` | `no`: the lever's slice drops its `log.tag` clause and says so |
 | `probe.dump_services`, `probe.dump_notification`, `probe.dump_bluetooth` | `kept` | the skeletons `dump-*.probe.skel.log`: what the lever's parsers are written against |
 | `probe.supported`, `probe.ui_button`, `probe.turn_on`, `probe.turn_on_bluetooth_on`, `probe.turn_on_ms`, `probe.bt_tag_lines`, `probe.address_lines` | `true`; 1; `failed`; `missing`; ms; 0; 0 | what Haven promises of push A on this image; a different value is rc 1 or rc 3, named in the log. `turn_on_bluetooth_on` is what the turn-on's own `bluetoothOn` was answered: `missing` is the unanswered method |
-| `<leg>.transcript_withheld_lines`, `<leg>.transcript_withheld_rule_hits` (every leg) | counts; the second may be `unread` | how many lines of the drive transcript were not published — the plugins' and the runtime's, under Haven's pid — and on how many of them a rule of the scanner fires. Not a verdict; the `mesh-transcript` lines say which class of line and which rule. See "The transcript" below |
 | `<leg>.wall_s` | seconds | the lane's deadlines (`e2e-mesh.yml`), which are worst cases until this has history |
 
 **A drive that failed: the `mesh-failure` lines.** A leg whose `flutter drive`
@@ -1972,9 +1971,12 @@ nothing else:
 The run's last `ERROR:` says which found a leak. For a leg's gate,
 `mesh-leak (<leg>): file=<drive|logcat|events> from=<class> rule=<id> …` lines
 under the scanner's own `LEAK:` lines say WHOSE text each hit was: `own:<tag>`
-a line Haven's code wrote under that tag, `host` a line of the tool's
-(`flutter drive`'s own, or the test reporter's closing report). Never the
-text. One known cause that is not an identifier: Flutter's failure report
+a line Haven's code wrote under that tag; `host` a line of the tool's
+(`flutter drive`'s own, or the test reporter's closing report); and, in the
+transcript, `platform:<tag>` a line a plugin or the platform wrote under
+Haven's pid (`FlutterSecureStorage`, `AndroidRuntime`, `DEBUG`, `System.err`
+and the like), `platform:process` the runtime's lines under the process's own
+name, `platform:other` any other tag. Never the text. One known cause that is not an identifier: Flutter's failure report
 for a FRAMEWORK assertion ends "please report this assertion by filing a bug
 on GitHub:" and then the URL alone on its own line, which the scanner's S13
 reads as a relay host a line wrap left alone (`[S13] tag=flutter`; seen in
@@ -1982,21 +1984,25 @@ both runs, reproduced on the real scanner). `url_alone_host=github.com`
 among the `mesh-failure` lines is that case: fix the failure, and the leak
 line goes with it.
 
-**The transcript: `mesh-transcript (<leg>): not-published from=<class>
-rule=<id> lines=<n>`.** `flutter drive` forwards every device-log line of the
-app's pid, the plugins' and the runtime's with Haven's own. The lane
-publishes of it the tool's lines and the lines under a tag the scanner's
-policy calls Haven's own; the others are in `logcat.<leg>.log`, where the
-scanner reads them by its rule for text that is not Haven's. They are still
-handed to the scanner once, unpublished, and each line it would have called
-a hit is reported by class — `platform:<tag>` for a tag on the runner's list
-of known ones, `platform:process` for the runtime's lines about the process,
-`platform:other` — and rule. That is an answer, not a red: on Android 10
-four such lines tripped `S8` in the lane's second run, when the transcript
-was still published whole, and withheld a leg that had judged `limited`. If
-a class and rule here look like a real secret in a plugin's line, that is a
-finding about the plugin on that Android release: take it to the owner; do
-not allowlist it.
+**`mesh-leak (<leg>): file=drive from=platform:…` — a line that is not under
+one of Haven's tags.** `flutter drive` forwards every device-log line of the
+app's pid, the plugins' and the runtime's with Haven's own, and the lane
+gates the whole transcript, every rule on every line, as every lane does. So
+a hit there is a red, and the leg's device log and events slice go with the
+transcript: they hold the same lines. It is NOT thereby known to be harmless
+platform text. A crash's message (`AndroidRuntime`), a native abort's
+(`DEBUG`, `libc` — a Rust panic's own words), a `System.err` print and a
+plugin's line about Haven's data are all under tags the scanner's policy
+does not call Haven's own, and can carry what Haven wrote. The class says
+where to look, not what was said: reproduce on an emulator and read the raw
+transcript (`/tmp/mesh-raw/drive.<leg>.raw`, never uploaded). Then either
+the cause is removed at its source, or — if the line is the platform's own
+furniture and the owner agrees — it is the scanner's to learn, not this
+lane's to set aside. On Android 10 four lines tripped `S8` in the lane's
+second run; what they said is not known, and the third run's `mesh-leak`
+lines are what will name their class. Whether platform text under Haven's
+pid should be rule-scanned in a transcript at all is an open question for
+the owner (`docs/BLUETOOTH_MESH_M3_DESIGN.md` §O.7).
 
 **`sink class logcat holds N line(s), below its declared floor of 2000`
 (rc 4).** A leg's device log is captured from before its install to the end

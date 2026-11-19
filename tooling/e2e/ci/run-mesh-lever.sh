@@ -119,35 +119,29 @@
 # adapter's name and address — read over adb, held in two shell variables,
 # never printed — and, on lines that are not Haven's, every bare run of twelve
 # hex digits replaced by a fixed word (mesh_redact); of the events buffer,
-# only the entries Haven's pid wrote; of the drive transcript, the tool's own
-# lines and the lines forwarded under a tag the scanner owns. A platform dump
-# is kept only as a SKELETON (mesh_skeleton): its lines' shape, every value
-# masked, which is what a parser is written against. Everything in LOG_DIR
-# then goes through the gate like any lane's, and a hit there is a leak like
-# any lane's. Whether a line of Haven's carries an address is judged over the
-# RAW captures, by the oracle. What this runner prints — answers and the
-# sentences of a finding alike — is numbers and a closed vocabulary
+# only the entries Haven's pid wrote; the drive transcript whole. A platform
+# dump is kept only as a SKELETON (mesh_skeleton): its lines' shape, every
+# value masked, which is what a parser is written against. Everything in
+# LOG_DIR then goes through the gate like any lane's, and a hit there is a
+# leak like any lane's. Whether a line of Haven's carries an address is judged
+# over the RAW captures, by the oracle. What this runner prints — answers and
+# the sentences of a finding alike — is numbers and a closed vocabulary
 # (MESH_WORDS), by construction (mesh_show).
 #
 # The transcript, and whose its lines are. `flutter drive` forwards every
 # device-log line of the app's PID: Haven's, and beside them the plugins' and
-# the runtime's. In the device log the scanner tells the two apart by tag —
-# every needle on every line, its structural rules on the tags its policy
-# calls Haven's own, because "vendor text is not Haven's to answer for"
-# (tooling/logscan/policy.toml). A transcript is a `plain` sink with no tags
-# to apply that by, so there the same platform lines are read as Haven's; on
-# API 34 they happen to trip nothing, and on API 29 — which this lane alone
-# boots — four of them tripped S8 (CI run 44486540042) and withheld a green
-# leg's whole evidence. So the published transcript carries what is Haven's
-# and the tool's, by the scanner's own list of owned tags, read from its
-# policy; the rest are published where every lane publishes them, in the
-# device log, under the scanner's own rule for them. They are NOT left
-# unread: the scanner is handed them once more, as a file of their own that
-# is never uploaded, and what its rules fire on there is said in every leg —
-# `mesh-transcript (<leg>): not-published from=<class> rule=<id> lines=<n>`,
-# and the answer `<leg>.transcript_withheld_rule_hits`. Nothing Haven's own
-# code printed is set aside: a line under an owned tag is kept, and so is any
-# line whose prefix does not parse.
+# the runtime's. It is published and gated WHOLE, every line under every
+# rule, exactly as every other lane hands its own to the `drive` sink — on
+# API 29, which this lane alone boots, four such lines tripped S8 (CI run
+# 44486540042) and what they said is not known. A crash's message under
+# `AndroidRuntime` or `DEBUG`, a `System.err` print, a plugin's line about
+# Haven's data: text Haven wrote, or text about Haven's data, reaches the log
+# under tags the scanner's policy does not call Haven's own, so setting such
+# lines aside would be this lane deciding a log-anonymity question that is
+# the owner's (§O.7 has it, open). What the lane adds is a NAME for each hit:
+# the class of the line it was on, read back through an index of the raw
+# transcript (mesh_transcript_classes) — `own:<tag>`, `platform:<tag>`,
+# `platform:process`, `platform:other`, `host` — and never its text.
 #
 # One gate a file where one file can cost the rest. A leak deletes what its
 # gate scanned. Each leg's captures have a gate; each dump's skeleton and the
@@ -241,7 +235,7 @@ readonly -a KNOWN_PLATFORM_TAGS=(
   BluetoothGattServer BluetoothAdapter AndroidRuntime ActivityThread
   ViewRootImpl InputMethodManager StrictMode KeyStore AndroidKeyStore
   Conscrypt NetworkSecurityConfig HostConnection eglCodecCommon libEGL
-  System.out System.err art zygote libc DEBUG
+  System.out System.err art zygote libc DEBUG GeneratedPluginRegistrant
 )
 
 # The plants beyond P1, P2 and P3, as the target writes them (`_morePlants`):
@@ -915,31 +909,29 @@ mesh_owned_tags() {
   ' "$1"
 }
 
-# mesh_transcript_split <owned tags> <kept-index> <withheld> <withheld-index>
-# — stdin a `flutter drive` transcript; stdout the lines of it that are
-# Haven's or the tool's. `flutter drive` forwards every device-log line of
-# the app's PID, whatever wrote it: the plugins' and the runtime's lines come
-# with Haven's own. Each line is one of
+# mesh_transcript_classes <owned tags> — stdin a `flutter drive` transcript;
+# stdout one class a line, for the line of that number. `flutter drive`
+# forwards every device-log line of the app's PID, whatever wrote it, so a
+# line is one of
 #
-#   host               no forwarded prefix: the tool's own line (kept)
+#   host               no forwarded prefix: the tool's own line
 #   own:<tag>          forwarded under a tag the scanner owns, by the scanner's
-#                      match — the tag itself, or the tag and `::` (kept)
+#                      match — the tag itself, or the tag and `::`
 #   platform:<tag>     forwarded under one of KNOWN_PLATFORM_TAGS
 #   platform:process   …under the process's own name, which is the runtime's
 #                      and SELinux's text about it
 #   platform:other     …under any other tag
 #
-# and the three platform classes go to <withheld>, unpublished. The two index
-# files hold one class a line, for the line of that number in what was kept
-# and in what was withheld: what a hit's line number is read back through.
-# A line whose prefix does not parse is `host`, and so kept and scanned.
-mesh_transcript_split() {
-  LC_ALL=C awk -v owned="${1:-}" -v known="${KNOWN_PLATFORM_TAGS[*]}" -v pkg="${PKG}" \
-      -v kept_index="${2:?}" -v withheld="${3:?}" -v withheld_index="${4:?}" '
+# The class is of the line's OWN prefix, at its start: a tag-like word inside
+# a `flutter` line's message is that message's text. Nothing is decided by
+# it: every line is published and gated alike, and the class is only what a
+# hit's line number is read back through, so that a leak can be laid at
+# Haven's code, a plugin, the runtime or the tool without its text.
+mesh_transcript_classes() {
+  LC_ALL=C awk -v owned="${1:-}" -v known="${KNOWN_PLATFORM_TAGS[*]}" -v pkg="${PKG}" '
     BEGIN {
       n = split(owned, word, " "); for (i = 1; i <= n; i++) own[word[i]] = 1
       n = split(known, word, " "); for (i = 1; i <= n; i++) platform[word[i]] = 1
-      printf "" > kept_index; printf "" > withheld; printf "" > withheld_index
     }
     function class_of(line,    tag, at, i) {
       if (!match(line, /^[VDIWEFA]\/[^(]*\( *[0-9]+\):/)) return "host"
@@ -953,12 +945,7 @@ mesh_transcript_split() {
       if (length(tag) >= 6 && i >= 1 && substr(pkg, i) == tag) return "platform:process"
       return "platform:other"
     }
-    {
-      sub(/\r$/, "")
-      class = class_of($0)
-      if (class ~ /^platform:/) { print > withheld; print class > withheld_index }
-      else { print; print class > kept_index }
-    }
+    { sub(/\r$/, ""); print class_of($0) }
   '
 }
 
@@ -988,7 +975,7 @@ mesh_hit_facts() {
     NR == FNR { class[FNR] = $0; next }
     { n[(($1 in class) ? class[$1] : "unindexed") " rule=" $2]++ }
     END { for (key in n) print "from=" key " lines=" n[key] }
-  ' "${1:-/dev/null}" - | sort
+  ' "${1:-/dev/null}" - | LC_ALL=C sort
 }
 
 # mesh_publish <leg> <raw-dir> <log-dir> <label> <address> <pid> <owned tags>
@@ -1002,17 +989,13 @@ mesh_hit_facts() {
 #                            Haven's process puts there; the system's events —
 #                            every process start, every notification — are
 #                            nobody's evidence here and stay on the runner
-#   flutter-drive.<leg>.log  of the drive transcript, the tool's lines and
-#                            the lines forwarded under a tag the scanner owns,
-#                            redacted. The plugins' and the runtime's lines
-#                            under Haven's pid are not in it: they are in the
-#                            device log above, where the scanner reads them by
-#                            its own rule for text that is not Haven's
-#                            (needles on every line, structural rules on owned
-#                            tags), and a transcript has no tags for it to
-#                            apply that rule by. They stay in <raw-dir> as
-#                            drive.<leg>.withheld.log, read there once more
-#                            (report_leg) and reported, not published
+#   flutter-drive.<leg>.log  the drive transcript whole, redacted: every line
+#                            `flutter drive` printed, the plugins' and the
+#                            runtime's under Haven's pid with Haven's own, as
+#                            every lane publishes its transcript. Beside the
+#                            raw capture, drive.<leg>.classes holds the class
+#                            of each line (mesh_transcript_classes), for
+#                            naming a hit
 #
 # An empty capture publishes nothing: the gate reads a missing sink as what
 # it is. With no pid known, no events are published at all.
@@ -1027,9 +1010,8 @@ mesh_publish() {
     [[ -s "${out}/logcat-events.${leg}.log" ]] || rm -f "${out}/logcat-events.${leg}.log"
   fi
   if [[ -s "${raw}/drive.${leg}.raw" ]]; then
-    mesh_transcript_split "${owned}" "${raw}/drive.${leg}.kept-index" \
-        "${raw}/drive.${leg}.withheld.log" "${raw}/drive.${leg}.withheld-index" < "${raw}/drive.${leg}.raw" \
-      | mesh_redact "${label}" "${addr}" all > "${out}/flutter-drive.${leg}.log" || true
+    mesh_redact "${label}" "${addr}" all < "${raw}/drive.${leg}.raw" > "${out}/flutter-drive.${leg}.log" || true
+    mesh_transcript_classes "${owned}" < "${raw}/drive.${leg}.raw" > "${raw}/drive.${leg}.classes" || true
   fi
 }
 
@@ -1273,18 +1255,6 @@ mesh_run_oracle() {
   mesh_answer "${leg}.address_lines" "${addressed}" n
   if (( addressed > 0 )); then
     mesh_red "${addressed} line(s) from Haven's process carry a Bluetooth address shape. Nothing of Haven's may write one (Security Rule 15), and no build of push A can so much as read one."
-  fi
-  # What of the drive transcript was not published — the platform's and the
-  # plugins' lines under Haven's pid — and how many of those lines the
-  # scanner's structural rules fire on when it is handed them all the same.
-  # Answers: that text is not Haven's to be red for, and not to go unsaid.
-  mesh_answer "${leg}.transcript_withheld_lines" "$(mesh_known "${facts}" transcript_withheld_lines)" n
-  local withheld_hits
-  withheld_hits="$(mesh_known "${facts}" transcript_withheld_rule_hits)"
-  if [[ "${withheld_hits}" =~ ^[0-9]+$ ]]; then
-    mesh_answer "${leg}.transcript_withheld_rule_hits" "${withheld_hits}" n
-  else
-    mesh_answer "${leg}.transcript_withheld_rule_hits" unread
   fi
 
   # --- The target must have reached its hold --------------------------------
@@ -1594,7 +1564,6 @@ run_self_test() {
       _entry 4021 I '[1296388936]' "${T3}"
     } > "${events}"
     printf '%s\n' ready=yes pid_host=4021 drive_failed=no le_feature=yes bt_service=present \
-      transcript_withheld_lines=37 transcript_withheld_rule_hits=0 \
       package_dump=ok package_mesh_components=0 "package_mesh_permissions=${perms}" \
       am_fgs=not_found am_svc=not_found am_alias=not_found \
       services_dump=ok services_mesh=0 notification_dump=ok notification_mesh=0 \
@@ -1821,16 +1790,6 @@ DRIVE_EOF
     _eq_case "…and all three at once are each said" 3 \
       "$(mesh_leak_message s2 1 'verdict.s2.log' | grep -o 'the per-leg gate of s2\|The gate of verdict.s2.log alone\|The exit scan over the uploaded directory found a leak' | grep -c . || true)"
 
-    # What is not published of the transcript is an answer in every leg, and
-    # so is what the scanner's rules fire on there.
-    _fresh probe; _edit facts 's/^transcript_withheld_rule_hits=0$/transcript_withheld_rule_hits=4/' 'rule_hits=4'
-    _oracle "rule hits on the platform's unpublished lines are an answer, not a verdict" probe 0
-    _eq_case "…written as one, beside how many lines were not published" 2 \
-      "$(printf '%s\n' "${MESH_ANSWERS[@]}" | grep -cxE 'probe\.transcript_withheld_rule_hits=4|probe\.transcript_withheld_lines=37' || true)"
-    _fresh probe; _drop facts 'transcript_withheld_rule_hits='
-    _oracle "…and where the scanner could not read them, that is said" probe 0
-    _eq_case "…as unread, never as none" 1 \
-      "$(printf '%s\n' "${MESH_ANSWERS[@]}" | grep -cx 'probe.transcript_withheld_rule_hits=unread' || true)"
     _fresh probe; _edit facts 's/^dump_bluetooth=kept$/dump_bluetooth=withheld/' 'dump_bluetooth=withheld'
     _oracle "a skeleton its own gate withheld is said to have leaked, not to be missing" probe 3 'tripped its own log-privacy gate'
   }
@@ -2434,19 +2393,17 @@ EOF
     "$(grep -cE '^  local device_logs="\$\{LOG_DIR\}/logcat\.\$\{leg\}\.log"$|^    device_logs\+=",\$\{LOG_DIR\}/logcat-events\.\$\{leg\}\.log"$' <<<"${scope}" || true)"
   _eq_case "what a gate is handed is the redacted copy, never the raw capture" 0 \
     "$(grep -cE 'logscan_gate(_dir)? .*RAW_DIR' <<<"${joined}" || true)"
-  # The one reading of raw text by the scanner: the transcript lines that are
-  # not published, said in closed shapes and never a gate.
-  local withheld_scope
-  withheld_scope="$(sed -n '/^read_withheld() {/,/^}/p' <<<"${joined}")"
-  local withheld_lit='logscan_gate host /tmp/haven-soak/needles "${SEAL_EXTRA[@]}" --     --sink "diag=${withheld}" --report "${report}" >/dev/null 2>&1 || withheld_rc=$?'
-  _eq_case "the unpublished transcript lines are read by the scanner, its own output discarded" 1 \
-    "$(awk -v lit="${withheld_lit}" 'index($0, lit) == 3 { n++ } END { print n + 0 }' <<<"${withheld_scope}")"
-  _eq_case "…from the runner's own directory, which is never uploaded" 1 \
-    "$(grep -cE '^  local withheld="\$\{RAW_DIR\}/drive\.\$\{leg\}\.withheld\.log" index="\$\{RAW_DIR\}/drive\.\$\{leg\}\.withheld-index"$' <<<"${withheld_scope}" || true)"
-  _eq_case "…and that reading is no gate: it reddens nothing and names no leak" 0 \
-    "$(grep -cE 'note_gate_rc|LOGSCAN_GATE_RC|LEAK_LEGS|LEAK_FILES' <<<"${withheld_scope}" || true)"
-  _eq_case "…while every line under Haven's pid is read, in every leg" 1 \
-    "$(grep -cE '^  read_withheld "\$\{leg\}"$' <<<"${scope}" || true)"
+  # The transcript goes to the gate WHOLE, as every lane's does: the raw one,
+  # redacted line for line, with nothing set aside. A hit on any line of it —
+  # Haven's, a plugin's, the runtime's — is the leg's leak.
+  _eq_case "the published transcript is the raw one redacted, line for line" 1 \
+    "$(sed -n '/^mesh_publish() {/,/^}/p' <<<"${joined}" | grep -cF -- 'mesh_redact "${label}" "${addr}" all < "${raw}/drive.${leg}.raw" > "${out}/flutter-drive.${leg}.log" || true' || true)"
+  _eq_case "…and the class of each of its lines is kept beside the raw capture, for naming a hit" 1 \
+    "$(sed -n '/^mesh_publish() {/,/^}/p' <<<"${joined}" | grep -cF -- 'mesh_transcript_classes "${owned}" < "${raw}/drive.${leg}.raw" > "${raw}/drive.${leg}.classes" || true' || true)"
+  _eq_case "the leg gate's verdict is the run's: folded in, whatever line it was for" 1 \
+    "$(grep -cE '^  note_gate_rc "\$\{gate_rc\}"$' <<<"${scope}" || true)"
+  _eq_case "…and nothing in the leg's report reads the scanner without gating on it" 1 \
+    "$(grep -cE 'logscan_gate' <<<"${scope}" || true)"
   _eq_case "whose a transcript line is, is read from the scanner's policy and copied nowhere" 1 \
     "$(grep -cE '^OWNED_TAGS="\$\(mesh_owned_tags "\$\{REPO_ROOT\}/tooling/logscan/policy\.toml"\)"$' <<<"${joined}" || true)"
   _eq_case "the raw captures are written under RAW_DIR alone" 0 \
@@ -2539,46 +2496,57 @@ EOF
   _eq_case "…the logcat class's list alone, and no entry that is not a plain tag" "flutter haven_core" \
     "$(mesh_owned_tags "${tmp}/policy.toml")"
   _eq_case "…and no policy is no tags, which the runner refuses to start on" "" "$(mesh_owned_tags "${tmp}/nope")"
+  # A transcript as `flutter drive` forwards one: the tool's lines, Haven's
+  # own, and under Haven's pid a plugin's line about its data, the runtime's
+  # warnings, a crash's message, a native abort's, a stderr print.
   printf '%s\n' \
     'VMServiceFlutterDriver: Connecting to Flutter application.' \
     'I/flutter ( 4021): handle 2222abcdef01' \
-    'E/FlutterSecureStorage( 4021): PlatformText one' \
-    'W/oustech.haven( 4021): PlatformText two' \
+    'E/FlutterSecureStorage( 4021): PlatformText read name=lane-wanderer' \
+    'W/oustech.haven( 4021): PlatformText hidden method' \
     'I/haven_core::circle::storage( 4021): own rust line' \
-    'I/flutterx ( 4021): PlatformText three' \
+    'I/flutterx ( 4021): PlatformText not flutter' \
     'D/Odd(Tag)( 4021): unparsed prefix' \
-    'I/SomeVendor( 4021): PlatformText four' \
+    'E/AndroidRuntime( 4021): java.lang.IllegalStateException: PlatformText circle Wanderers gone' \
+    "F/DEBUG   ( 4021): Abort message: 'PlatformText panicked at src/relay.rs'" \
+    'I/flutter ( 4021): W/oustech.haven( 4021): PlatformText quoted inside a line of Haven'"'"'s' \
     'D/rust_lib_haven( 4021): own bridge line' \
+    'W/System.err( 4021): PlatformText printed' \
     '00:03 +1: All tests passed!' > "${rawdir}/drive.probe.raw"
-  mesh_transcript_split "${owned}" "${tmp}/kept.index" "${tmp}/withheld.log" "${tmp}/withheld.index" \
-    < "${rawdir}/drive.probe.raw" > "${tmp}/kept.log"
-  _eq_case "of a transcript, the tool's lines and Haven's own are kept, each with its class" \
-    "host own:flutter own:haven_core host own:rust_lib_haven host" "$(tr '\n' ' ' < "${tmp}/kept.index" | sed 's/ $//')"
-  _eq_case "…a line whose prefix does not parse being the tool's, and so kept and scanned" 1 \
-    "$(grep -c 'unparsed prefix' "${tmp}/kept.log" || true)"
-  _eq_case "…and the platform's and the plugins' lines under Haven's pid are set aside, each with its class" \
-    "platform:FlutterSecureStorage platform:process platform:other platform:other" \
-    "$(tr '\n' ' ' < "${tmp}/withheld.index" | sed 's/ $//')"
-  _eq_case "…every line in one or the other, none in both" "6 4 0" \
-    "$(grep -c '' "${tmp}/kept.log" || true) $(grep -c '' "${tmp}/withheld.log" || true) $(grep -c 'PlatformText' "${tmp}/kept.log" || true)"
-  _eq_case "…a tag is owned whole or before '::', never by its opening letters" 1 \
-    "$(grep -c 'I/flutterx' "${tmp}/withheld.log" || true)"
+  _eq_case "each line of a transcript has a class: the tool's, Haven's own by the scanner's tags, or the platform's by name" \
+    "host own:flutter platform:FlutterSecureStorage platform:process own:haven_core platform:other host platform:AndroidRuntime platform:DEBUG own:flutter own:rust_lib_haven platform:System.err host" \
+    "$(mesh_transcript_classes "${owned}" < "${rawdir}/drive.probe.raw" | tr '\n' ' ' | sed 's/ $//')"
+  _eq_case "…a tag being owned whole or before '::', never by its opening letters" platform:other \
+    "$(printf 'I/flutterx ( 1): x\n' | mesh_transcript_classes "${owned}")"
+  _eq_case "…a line being classed by its own prefix, not by one quoted in its message" own:flutter \
+    "$(printf 'I/flutter ( 1): E/AndroidRuntime( 1): quoted\n' | mesh_transcript_classes "${owned}")"
+  _eq_case "…and the tool's line that quotes one stays the tool's" host \
+    "$(printf 'the driver said: I/flutter ( 1): quoted\n' | mesh_transcript_classes "${owned}")"
+  _eq_case "…and with no owned tag known, nothing forwarded is called Haven's" 0 \
+    "$(mesh_transcript_classes '' < "${rawdir}/drive.probe.raw" | grep -c '^own:' || true)"
   # A hit's line number, read back to whose text the line was.
   printf '%s\n' \
-    '{"class":null,"count":1,"encoding":null,"kind":"rule","line":2,"reassembled":false,"rule":"S8","sink":"/w/withheld.log","tag":null}' \
-    '{"class":null,"count":1,"encoding":null,"kind":"rule","line":1,"reassembled":false,"rule":"S8","sink":"/w/withheld.log","tag":null}' \
-    '{"class":null,"count":1,"encoding":null,"kind":"rule","line":4,"reassembled":false,"rule":"S13","sink":"/w/withheld.log","tag":null}' \
-    '{"class":"pubkey","count":1,"encoding":"hex","kind":"needle","line":19,"reassembled":false,"rule":null,"sink":"/w/withheld.log","tag":null}' \
+    '{"class":null,"count":1,"encoding":null,"kind":"rule","line":3,"reassembled":false,"rule":"S10","sink":"/w/drive.log","tag":null}' \
+    '{"class":null,"count":1,"encoding":null,"kind":"rule","line":8,"reassembled":false,"rule":"S10","sink":"/w/drive.log","tag":null}' \
+    '{"class":null,"count":1,"encoding":null,"kind":"rule","line":9,"reassembled":false,"rule":"S8","sink":"/w/drive.log","tag":null}' \
+    '{"class":null,"count":1,"encoding":null,"kind":"rule","line":2,"reassembled":false,"rule":"S2","sink":"/w/drive.log","tag":null}' \
+    '{"class":null,"count":1,"encoding":null,"kind":"rule","line":10,"reassembled":false,"rule":"S8","sink":"/w/drive.log","tag":null}' \
+    '{"class":null,"count":1,"encoding":null,"kind":"rule","line":7,"reassembled":false,"rule":"S13","sink":"/w/drive.log","tag":null}' \
+    '{"class":null,"count":1,"encoding":null,"kind":"rule","line":4,"reassembled":false,"rule":"S8","sink":"/w/drive.log","tag":null}' \
+    '{"class":null,"count":1,"encoding":null,"kind":"rule","line":12,"reassembled":false,"rule":"S8","sink":"/w/drive.log","tag":null}' \
+    '{"class":"pubkey","count":1,"encoding":"hex","kind":"needle","line":19,"reassembled":false,"rule":null,"sink":"/w/drive.log","tag":null}' \
     '{"class":null,"count":1,"encoding":null,"kind":"rule","line":3,"reassembled":false,"rule":"S13","sink":"/w/logcat.log","tag":"flutter"}' \
     > "${tmp}/report.ndjson"
-  _eq_case "a report's hits against one file are its line, its rule and its tag" "2 S8 - 1 S8 - 4 S13 - 19 needle -" \
-    "$(mesh_report_hits "${tmp}/report.ndjson" /w/withheld.log | tr '\n' ' ' | sed 's/ $//')"
+  _eq_case "a report's hits against one file are its line, its rule and its tag" \
+    "3 S10 - 8 S10 - 9 S8 - 2 S2 - 10 S8 - 7 S13 - 4 S8 - 12 S8 - 19 needle -" \
+    "$(mesh_report_hits "${tmp}/report.ndjson" /w/drive.log | tr '\n' ' ' | sed 's/ $//')"
   _eq_case "…another file's are not this one's, and a tag the scanner read is carried" "3 S13 flutter" \
     "$(mesh_report_hits "${tmp}/report.ndjson" /w/logcat.log)"
-  _eq_case "…and no report is no hits" "" "$(mesh_report_hits "${tmp}/nope" /w/withheld.log)"
-  _eq_case "each hit is said by the class of its line and its rule, counted, with no text" \
-    "from=platform:FlutterSecureStorage rule=S8 lines=1 from=platform:other rule=S13 lines=1 from=platform:process rule=S8 lines=1 from=unindexed rule=needle lines=1" \
-    "$(mesh_report_hits "${tmp}/report.ndjson" /w/withheld.log | mesh_hit_facts "${tmp}/withheld.index" | tr '\n' ' ' | sed 's/ $//')"
+  _eq_case "…and no report is no hits" "" "$(mesh_report_hits "${tmp}/nope" /w/drive.log)"
+  mesh_transcript_classes "${owned}" < "${rawdir}/drive.probe.raw" > "${tmp}/drive.classes"
+  _eq_case "each hit is said by the class of its line and its rule, counted, with no text: a plugin's, a crash's, an abort's, Haven's own, the tool's" \
+    "from=host rule=S13 lines=1 from=own:flutter rule=S2 lines=1 from=own:flutter rule=S8 lines=1 from=platform:AndroidRuntime rule=S10 lines=1 from=platform:DEBUG rule=S8 lines=1 from=platform:FlutterSecureStorage rule=S10 lines=1 from=platform:System.err rule=S8 lines=1 from=platform:process rule=S8 lines=1 from=unindexed rule=needle lines=1" \
+    "$(mesh_report_hits "${tmp}/report.ndjson" /w/drive.log | mesh_hit_facts "${tmp}/drive.classes" | tr '\n' ' ' | sed 's/ $//')"
   mesh_publish probe "${rawdir}" "${dir}" '' 'null' 4021 "${owned}"
   _eq_case "of the events buffer, only what Haven's pid wrote is published" "1 0" \
     "$(grep -c '' "${dir}/logcat-events.probe.log" || true) $(grep -cE 'am_proc_start|bluetooth_event|com\.example' "${dir}/logcat-events.probe.log" || true)"
@@ -2587,16 +2555,30 @@ EOF
     "$(grep -c '' "${dir}/logcat.probe.log" || true)"
   _eq_case "Haven's own lines of the transcript reach the scanner as Haven wrote them" 1 \
     "$(grep -c 'handle 2222abcdef01' "${dir}/flutter-drive.probe.log" || true)"
-  _eq_case "…the published transcript being the kept lines and no others" "6 0" \
+  _eq_case "…and so does every other: the published transcript is the whole of it, a plugin's line, the runtime's, a crash's and a stderr print with Haven's own" "13 7" \
     "$(grep -c '' "${dir}/flutter-drive.probe.log" || true) $(grep -c 'PlatformText' "${dir}/flutter-drive.probe.log" || true)"
-  _eq_case "…with its index beside the raw capture, one class a published line" 6 \
-    "$(grep -c '' "${rawdir}/drive.probe.kept-index" || true)"
-  _eq_case "…and what was set aside staying in the raw directory, a class a line" "4 4" \
-    "$(grep -c '' "${rawdir}/drive.probe.withheld.log" || true) $(grep -c '' "${rawdir}/drive.probe.withheld-index" || true)"
+  _eq_case "…with the class of each line beside the raw capture, a line for a line" 13 \
+    "$(grep -c '' "${rawdir}/drive.probe.classes" || true)"
+  # What a hit on any of those lines costs: the scanner's rc 1 over the leg's
+  # three files deletes all three. The device log holds the same lines, so a
+  # leak in the transcript must never leave it behind for upload.
+  mkdir -p "${tmp}/leak"
+  mesh_publish probe "${rawdir}" "${tmp}/leak" '' 'null' 4021 "${owned}"
+  rc=0
+  FAKE_SCAN_RC=1 FAKE_SCAN_ARGV="${fake_dir}/leg-argv" GITHUB_RUN_ID= GITHUB_RUN_ATTEMPT= WIRE_UPSTREAM= RELAY_URL= \
+    HAVEN_LOGSCAN=true HAVEN_LOGSCAN_BIN="${fake_bin}" \
+    logscan_gate host "${fake_dir}/needles" -- \
+      --sink "logcat=${tmp}/leak/logcat.probe.log,${tmp}/leak/logcat-events.probe.log" \
+      --sink "drive=${tmp}/leak/flutter-drive.probe.log" --report "${fake_dir}/leg.ndjson" >/dev/null 2>&1 || rc=$?
+  _case "a hit the scanner reports in a leg's captures is the leg's leak" 1 "${rc}"
+  _eq_case "…the scanner having been handed the whole transcript as a drive sink" 1 \
+    "$(grep -cxF -- "drive=${tmp}/leak/flutter-drive.probe.log" "${fake_dir}/leg-argv" 2>/dev/null || true)"
+  _eq_case "…and it leaves nothing of the leg for upload: not the transcript, the device log or the events slice" 0 \
+    "$(find "${tmp}/leak" -name '*.log' | grep -c . || true)"
   mkdir -p "${tmp}/nopid" "${tmp}/quiet"
   mesh_publish probe "${rawdir}" "${tmp}/nopid" '' '' '' ''
-  _eq_case "with no owned tag known, only the tool's own lines of a transcript are published" "3 0" \
-    "$(grep -c '' "${tmp}/nopid/flutter-drive.probe.log" || true) $(grep -c 'handle' "${tmp}/nopid/flutter-drive.probe.log" || true)"
+  _eq_case "with no owned tag known the transcript is published whole all the same" 13 \
+    "$(grep -c '' "${tmp}/nopid/flutter-drive.probe.log" || true)"
   _eq_case "with no pid known, nothing of the events buffer is published" 0 \
     "$(find "${tmp}/nopid" -name 'logcat-events.*' | grep -c . || true)"
   mesh_publish probe "${rawdir}" "${tmp}/quiet" '' '' 7777 "${owned}"
@@ -3018,42 +3000,6 @@ report_leaks() {
   done < <(mesh_report_hits "${report}" "${sink}")
 }
 
-# read_withheld <leg> — the transcript lines that were not published, handed
-# to the scanner all the same — every rule and every needle, as a `diag` file
-# — and what it found said in closed shapes: which class of line, which rule,
-# how many. Its own output is discarded: it would call a hit a leak and say
-# the file was kept from upload, and this file was never going to be
-# uploaded. Not a gate: the text is the platform's and the plugins', and is
-# not Haven's to be red for. But no line under Haven's pid goes unread, and
-# what the rules fire on there is on the record of every run. (A declared
-# value among them is red all the same: the same line is in the device log,
-# where the leg's own gate searches every line for every needle.)
-read_withheld() {
-  local leg="$1" withheld_rc=0 hits=0 line
-  local withheld="${RAW_DIR}/drive.${leg}.withheld.log" index="${RAW_DIR}/drive.${leg}.withheld-index"
-  local report="${LOGSCAN_REPORTS}/withheld-${leg}.ndjson"
-  if [[ ! -s "${index}" ]]; then
-    record transcript_withheld_lines 0
-    record transcript_withheld_rule_hits 0
-    return 0
-  fi
-  record transcript_withheld_lines "$(grep -c '' "${index}" || true)"
-  rm -f "${report}"
-  logscan_gate host /tmp/haven-soak/needles "${SEAL_EXTRA[@]}" -- \
-    --sink "diag=${withheld}" --report "${report}" >/dev/null 2>&1 || withheld_rc=$?
-  if (( withheld_rc > 1 )) || [[ ! -f "${report}" ]]; then
-    record transcript_withheld_rule_hits unread
-    echo "  mesh-transcript (${leg}): the unpublished lines could not be read by the scanner (rc ${withheld_rc})." >&2
-    return 0
-  fi
-  while IFS= read -r line; do
-    [[ -n "${line}" ]] || continue
-    echo "  mesh-transcript (${leg}): not-published ${line}"
-    hits=$(( hits + ${line##*lines=} ))
-  done < <(mesh_report_hits "${report}" "${withheld}" | mesh_hit_facts "${index}")
-  record transcript_withheld_rule_hits "${hits}"
-}
-
 # report_leg <leg> <drive-rc> — publishes the leg's captures, gates them, and
 # only then echoes the drive log. Records whether the drive failed, and where
 # it did prints why in closed shapes: the transcript may be withheld.
@@ -3073,11 +3019,10 @@ report_leg() {
   note_gate_rc "${gate_rc}"
   if (( gate_rc == 1 )); then
     LEAK_LEGS+=("${leg}")
-    report_leaks "${leg}" "${LOGSCAN_REPORTS}/gate-${leg}.ndjson" "${drive_log}" drive "${RAW_DIR}/drive.${leg}.kept-index"
+    report_leaks "${leg}" "${LOGSCAN_REPORTS}/gate-${leg}.ndjson" "${drive_log}" drive "${RAW_DIR}/drive.${leg}.classes"
     report_leaks "${leg}" "${LOGSCAN_REPORTS}/gate-${leg}.ndjson" "${LOG_DIR}/logcat.${leg}.log" logcat
     report_leaks "${leg}" "${LOGSCAN_REPORTS}/gate-${leg}.ndjson" "${LOG_DIR}/logcat-events.${leg}.log" events
   fi
-  read_withheld "${leg}"
   if (( gate_rc == 0 )); then
     cat "${drive_log}" || true
   else

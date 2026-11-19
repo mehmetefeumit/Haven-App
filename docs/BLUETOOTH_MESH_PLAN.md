@@ -3705,65 +3705,66 @@ item 6, that address rotation is the build's; §7.1 carries a note now.
   ending inside its turn-on; S2 never installed. Its second, 44486540042
   of `5fd026e`: S0 passed; the probe took every measurement and was red
   for a defect of the app's that it found; S2 judged `limited` and was
-  red for four lines of platform text in its drive transcript. **What is
-  built.** One drive target for three legs, on the scenario harness
-  every lane uses, which reports facts as its own `debugPrint`s and
-  holds while the host reads the device: on API 34 a build without the
-  flag (**S0**: every one of the radio's eleven methods has no native
-  end, no mesh button, no component, no permission, nothing for `am` to
-  start) and a build with it (**the probe**: each measurement of §O.2.3
-  taken and written as a fixed word or a number, and the turn-on a user
-  makes ending `failed` with nothing stored); on API 29 the build with
-  the flag (**S2**: Haven installs and starts on Android 10, `supported`
-  is false, nothing of the mesh is offered). Seven lines are planted
-  from Haven's process through `liblog` — under a platform Bluetooth tag
-  at three priorities and under two more such tags, under `flutter` by
-  the same call, and a string event — and read back by pid and tag.
-  Where a turn-on ended is seen, not inferred: the target watches its
-  own channel traffic, and a turn-on of a flag-on build must have asked
-  `bluetoothOn`, been answered by nobody, and never sent `start`. What
-  the host reads of the app it reads at the target's cue; what the probe
-  reads of the platform it reads after the drive, whatever became of the
-  target. The build script takes an optional `HAVEN_MESH`. Verdicts: 0,
-  1 a promise broken, 2 the wrong build driven, 3 unusable — the
-  platform would not answer, never green — 4 the scanner's floor. **The
-  probe answers; it does not judge**: Bluetooth that does not come on is
-  `probe.bt_on=no`, rc 0. **Settled by the first run, for API 34
-  `google_apis` under emulator 37.2.13.0** (§O.7 has the table): every
-  boot is a cold boot — no snapshot exists to load, in this lane or the
-  ones it was copied from; the image declares Bluetooth LE and the
-  adapter is on at once; a DEBUG line under `BluetoothGatt` written with
-  no property is in the log (O-11), and a string event written by an app
-  is read back (O-12); `pm grant` of the Bluetooth permissions takes; a
-  short drive clears the scanner's floors; an API 29 image boots under
-  the action and has neither of API 34's install-barrier commands. **Not
-  settled**, the probe having ended first: the buffers a shell reads,
-  the property, the adapter's settings, the dumps' skeletons, where a
-  turn-on ends on a device — and everything of API 29 past its boot.
-  **Found by the first run, and what was done.** *Why the probe's target
-  ended is not established*: the gate withheld the transcript that says.
-  On the evidence — the product's turn-on ends `failed` without a print
-  or a throw on the host; the turn-on is the one step that takes the
-  activity out of the foreground and back; S0 has no such step and
-  passed; the target mounted the map over a stand-in identity — the
-  target now runs on the scenario harness with a real one; that is not a
-  proven fix. A failed drive now says why, as `mesh-failure` lines of
-  closed shapes read out of the raw transcript (a thrown type, an
-  assertion's file and line, stack frames; never a message), so the next
-  run names it either way. The two leak lines (`[S13] tag=flutter`) are
-  consistent with — and reproduced on the real scanner by — the URL that
-  closes Flutter's report of a framework assertion, alone on its line;
-  nothing in `haven/lib` was found to print a URL there, and no
-  allowlist entry was added. A target that dies is one finding now, not
-  twenty; the run's last word says which gate found a leak;
-  `probe.boot`, which was written and not measured, is gone; so are the
-  AVD cache, the second boot and the leg `adapter`, which did nothing
-  they were named for. **S2 says what it showed on the image it had.**
-  `supported` is false below Android 11 and on a phone with no Bluetooth
-  LE: only on an image that has the feature does S2 show the Android 11
-  gate. On one without it, S2 is rc 0 with the verdict word
-  **`limited`**, the answer `s2.api_gate_exercised=no` and a notice on
-  the run — the gate then rests on the JVM test
+  red for four lines of its drive transcript, whose text is not known.
+  **What is built.** One drive target for three legs, on the scenario
+  harness every lane uses, which reports facts as its own `debugPrint`s
+  and holds while the host reads the device: on API 34 a build without
+  the flag (**S0**: every one of the radio's eleven methods has no
+  native end, no mesh button, no component, no permission, nothing for
+  `am` to start) and a build with it (**the probe**: each measurement of
+  §O.2.3 taken and written as a fixed word or a number, and the turn-on
+  a user makes ending `failed` with nothing stored); on API 29 the build
+  with the flag (**S2**: Haven installs and starts on Android 10,
+  `supported` is false, nothing of the mesh is offered). Seven lines are
+  planted from Haven's process through `liblog` — under a platform
+  Bluetooth tag at three priorities and under two more such tags, under
+  `flutter` by the same call, and a string event — and read back by pid
+  and tag. Where a turn-on ended is seen, not inferred: the target
+  watches its own channel traffic, and a turn-on of a flag-on build must
+  have asked `bluetoothOn`, been answered by nobody, and never sent
+  `start`. What the host reads of the app it reads at the target's cue;
+  what the probe reads of the platform it reads after the drive,
+  whatever became of the target. The build script takes an optional
+  `HAVEN_MESH`. Verdicts: 0, 1 a promise broken, 2 the wrong build
+  driven, 3 unusable — the platform would not answer, never green — 4
+  the scanner's floor. **The probe answers; it does not judge**:
+  Bluetooth that does not come on is `probe.bt_on=no`, rc 0. **Settled
+  by the first run, for API 34 `google_apis` under emulator 37.2.13.0**
+  (§O.7 has the table): every boot is a cold boot — no snapshot exists
+  to load, in this lane or the ones it was copied from; the image
+  declares Bluetooth LE and the adapter is on at once; a DEBUG line
+  under `BluetoothGatt` written with no property is in the log (O-11),
+  and a string event written by an app is read back (O-12); `pm grant`
+  of the Bluetooth permissions takes; a short drive clears the scanner's
+  floors; an API 29 image boots under the action and has neither of API
+  34's install-barrier commands. **Not settled**, the probe having ended
+  first: the buffers a shell reads, the property, the adapter's
+  settings, the dumps' skeletons, where a turn-on ends on a device — and
+  everything of API 29 past its boot. **Found by the first run, and what
+  was done.** *Why the probe's target ended is not established*: the
+  gate withheld the transcript that says. On the evidence — the
+  product's turn-on ends `failed` without a print or a throw on the
+  host; the turn-on is the one step that takes the activity out of the
+  foreground and back; S0 has no such step and passed; the target
+  mounted the map over a stand-in identity — the target now runs on the
+  scenario harness with a real one; that is not a proven fix. A failed
+  drive now says why, as `mesh-failure` lines of closed shapes read out
+  of the raw transcript (a thrown type, an assertion's file and line,
+  stack frames; never a message), so the next run names it either way.
+  The two leak lines (`[S13] tag=flutter`) are consistent with — and
+  reproduced on the real scanner by — the URL that closes Flutter's
+  report of a framework assertion, alone on its line; nothing in
+  `haven/lib` was found to print a URL there, and no allowlist entry was
+  added. A target that dies is one finding now, not twenty; the run's
+  last word says which gate found a leak; `probe.boot`, which was
+  written and not measured, is gone; so are the AVD cache, the second
+  boot and the leg `adapter`, which did nothing they were named for.
+  **S2 says what it showed on the image it had.** `supported` is false
+  below Android 11 and on a phone with no Bluetooth LE: only on an image
+  that has the feature does S2 show the Android 11 gate. On one without
+  it, S2 is rc 0 with the verdict word **`limited`**, the answer
+  `s2.api_gate_exercised=no` and a notice on the run — the gate then
+  rests on the JVM test
   `PoliciesTest.belowApiThirtyAStartIsUnsupportedAndTouchesNothing`
   alone — and what it still shows is that the flag-on build installs and
   runs on Android 10 and offers nothing of the mesh. Which the hosted
@@ -3824,31 +3825,51 @@ item 6, that address rotation is the build's; §7.1 carries a note now.
   verdict file*: each skeleton and the verdict file have a gate of their
   own now, and the verdict file is written after the directory scan, so
   a red run uploads its answers. *S2's transcript tripped the scanner on
-  four lines that are not Haven's* (`[S8]`): `flutter drive` forwards
-  every line of the app's pid, and a transcript has no tags for the
-  scanner to tell the plugins' and the runtime's lines from Haven's by,
-  as it does in the device log; so of a transcript the lane publishes
-  the tool's lines and the lines under a tag the scanner's policy calls
-  Haven's own, and hands the rest to the scanner unpublished, reporting
-  each hit by the class of its line and its rule — an answer, not a
-  verdict; what the four lines were, the next run names. *S2's device
-  log was under the scanner's floor* (1 581 of 2 000 lines): the capture
-  begins before the install now, not at the drive; the floor is not
-  touched, and if the whole leg still falls short §O.7 has the question
-  for the owner. **Proved here**: the runner's self-test, 583 checks
-  under `gawk` and `mawk`, both runs' shapes among them; mutation passes
-  over its readers and oracle — 181 changes, 180 failing a fixture, the
-  one that did not given one; the same helpers run under the real
-  scanner on this machine; the install helper's self-test, 95 fixtures;
-  a synthetic set of everything the lane publishes clean under the real
+  four lines* (`[S8]`): what they said is not known. `flutter drive`
+  forwards every line of the app's pid, the plugins' and the runtime's
+  with Haven's own, and the lane gates the whole transcript, every rule
+  on every line, exactly as its neighbours do; a hit on any line is the
+  leg's leak and takes the leg's device log with it. What is new is a
+  name: each hit is read back to the class of its line — the tool's, a
+  tag of Haven's own, a known platform or plugin tag, the process's, or
+  another — and said in the step log without its text, so the third run
+  says whose those four lines were. (A first form of this, which
+  published only the tool's and Haven's own lines and merely reported
+  hits on the rest, was found by review to be weaker than the neighbours
+  — the same line was uploaded in the device log — and is removed.)
+  **For the owner, undecided**: whether a line under Haven's pid but not
+  under one of Haven's tags is Haven's to answer for in a transcript.
+  (i) Leave every lane's transcript fully rule-scanned, as now: it goes
+  on catching a crash's message under `AndroidRuntime`, a `System.err`
+  or `System.out` print, a native abort's under `DEBUG` or `libc`,
+  `GeneratedPluginRegistrant`, and the plugins that handle Haven's data
+  (`FlutterSecureStorage`, `FlutterGeolocator`), and it reddens a lane
+  for any platform line that merely has a rule's shape — possibly S2 on
+  Android 10 today; its four lines are not yet known. (ii) Teach the scanner a transcript's forwarded prefix and
+  apply its owned-tag rule there in every lane, as in device logs: no
+  more reds for platform furniture, and an identifier that is neither a
+  declared needle nor key material in exactly those lines would pass, in
+  every lane, and be uploaded. §O.7 has both with their consequences.
+  Until it is decided the lane does (i). *S2's device log was under the
+  scanner's floor* (1 581 of 2 000 lines): the capture begins before the
+  install now, not at the drive; the floor is not touched, and if the
+  whole leg still falls short §O.7 has the question for the owner.
+  **Proved here**: the runner's self-test, 581 checks under `gawk` and
+  `mawk`, both runs' shapes among them; mutation passes over its readers
+  and oracle — 182 changes, each failing a fixture; the leg's gate run
+  under the real scanner on this machine, a platform line, a plugin's, a
+  crash's and one of Haven's own each red and named, nothing of the leg
+  left for upload; the install helper's self-test, 95 fixtures; a
+  synthetic set of everything the lane publishes clean under the real
   scanner, the raw dump its skeletons came from seven structural hits,
   and the framework's closing URL one `S13`; every step of the guards
-  job run here (all 189 `run:` steps pass; the other two, the checkout
-  and the Dart setup, are `uses:` steps); every lane-policing guard and
-  its self-test, the source guards, the privacy invariants, `flutter
-  analyze` and the Dart suite (`test/e2e` and `test/lints`, 769 passed;
-  the whole suite, 6201 passed and 5 skipped, before the second run's
-  changes, which touch no Dart) — in which
+  job run here (all 189 `run:` steps pass on the tree after the second
+  run's changes; since the review's change, the lane guards, the 69
+  source guards and the privacy invariants again); every lane-policing
+  guard and its self-test, the source guards, the privacy invariants,
+  `flutter analyze` and the Dart suite (`test/e2e` and `test/lints`, 769
+  passed; the whole suite, 6201 passed and 5 skipped, before the second
+  run's changes, which touch no Dart) — in which
   `test/e2e/app_lifecycle_test.dart` lists the target among those whose
   lane compiles the live-sync engine out, and holds each job of a
   two-job lane to that. **Also found by the first run**: the guards job
@@ -3858,11 +3879,11 @@ item 6, that address rotation is the build's; §7.1 carries a note now.
   which is why every step of the guards job is run here now. **Only a
   run proves, still** (§O.7's table): that the probe is green once the
   app's sheet is fixed; that a leg's whole device log reaches the
-  scanner's floor on API 29; what the four lines of S2's transcript
-  were; that a real `dumpsys bluetooth_manager`'s skeleton passes the
-  scanner with the new rule. **Also changed**: the guards job's cap, 20
-  to 30 minutes (17 min 04 s on `1b5fa0e`);
-  `docs/E2E_TROUBLESHOOTING.md` failure mode 29.
+  scanner's floor on API 29; whose the four lines of S2's transcript
+  were, which will be a red that names them; that a real `dumpsys
+  bluetooth_manager`'s skeleton passes the scanner with the new rule.
+  **Also changed**: the guards job's cap, 20 to 30 minutes (17 min 04 s
+  on `1b5fa0e`); `docs/E2E_TROUBLESHOOTING.md` failure mode 29.
 
 ### Proposed CLAUDE.md wording (owner to approve)
 

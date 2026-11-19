@@ -224,12 +224,10 @@ settle run_leg#1/sleep:SETTLE_POLL_SECS#1 charge SETTLE_TIMEOUT_SECS times ARGC
 logscan run_leg#1/report_leg#1/lib:logscan_gate#1 charge @ times ARGC
 logscan-exit cleanup#1/lib:logscan_gate_dir#1 charge @
 # The same gate over one file by itself — each of the probe's three skeletons,
-# the verdict file — and the scanner's reading of the transcript lines that
-# are not published: files already on disk, as above.
+# the verdict file: files already on disk, as above.
 logscan-skeleton-services run_leg#1/inspect_platform#1/keep_skeleton#1/gate_own_file#1/lib:logscan_gate#1 charge @ times ARGC
 logscan-skeleton-notification run_leg#1/inspect_platform#1/keep_skeleton#2/gate_own_file#1/lib:logscan_gate#1 charge @ times ARGC
 logscan-skeleton-bluetooth run_leg#1/inspect_platform#1/keep_skeleton#3/gate_own_file#1/lib:logscan_gate#1 charge @ times ARGC
-logscan-withheld run_leg#1/report_leg#1/read_withheld#1/lib:logscan_gate#1 charge @ times ARGC
 logscan-verdict cleanup#1/write_verdict#1/gate_own_file#1/lib:logscan_gate#1 charge @
 
 # ---------------------------------------------------------------------------

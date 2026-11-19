@@ -81,14 +81,12 @@
 # same. The runner keeps its raw captures in a directory that is never
 # uploaded; publishes the device log with every address shape and the
 # adapter's own name and address replaced by a fixed word, of the events
-# buffer only the entries Haven's own process wrote, and of the drive
-# transcript the tool's lines and the lines under a tag the scanner calls
-# Haven's own — the plugins' and the runtime's lines under Haven's pid are
-# published in the device log, under the scanner's rule for them, and what
-# its rules fire on among them is said in the step log as
-# `mesh-transcript (<leg>): not-published from=<class> rule=<id> lines=<n>`;
-# keeps a platform dump only as a skeleton of its lines; and runs everything
-# it publishes through the gate. Each skeleton and the verdict file have a
+# buffer only the entries Haven's own process wrote, and the drive
+# transcript whole, as every lane does — a hit on any line of it is the
+# leg's leak, and the step log says whose line it was
+# (`mesh-leak (<leg>): file=drive from=<class> rule=<id> lines=<n>`), never
+# its text; keeps a platform dump only as a skeleton of its lines; and runs
+# everything it publishes through the gate. Each skeleton and the verdict file have a
 # gate of their own, so a leak in one file costs that file: a red run still
 # uploads `verdict.<legs>.log` (run-mesh-lever.sh header).
 #

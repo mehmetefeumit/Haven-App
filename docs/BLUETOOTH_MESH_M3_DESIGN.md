@@ -6079,8 +6079,8 @@ paragraphs say what each changed). **The lane as it stands here has not
 run**: this machine has no emulator. Of the first run, S0 passed, the
 probe was red and S2 never installed. Of the second, S0 passed; the
 probe took every measurement and was red for a defect of the app's that
-it found; S2 judged `limited` and was red for four lines of platform
-text in its transcript. What each settled about the platform is in
+it found; S2 judged `limited` and was red for four lines of its transcript,
+whose text is not known. What each settled about the platform is in
 "What the first run settled" and "What the second run settled", and
 where a fact contradicted this section the fact is what is written. What is
 proved here is the runner's reading and judging of text, by fixtures;
@@ -6295,52 +6295,84 @@ is a number or one of a fixed list of words; anything else is written
   still the two-emulator slice's to add (O.2.6).
 - **What is published is not what is captured.** An emulator's address
   and adapter name are identifiers all the same (Rule 15). The raw
-  captures and dumps stay in a directory the workflow never uploads
-  and the gate is never handed. Published: the device log whole, as
-  every lane publishes it, with every address shape — six pairs, the
-  platform's own `XX:XX:XX:XX:…` — and this adapter's name and
-  address replaced; **of the events buffer, only the entries Haven's
-  pid wrote** — the lane needs that buffer for its own planted event
-  and, in S1, for what Haven's process puts there, and every other
-  process's events are evidence of nothing here; **of the drive
-  transcript, the tool's lines and Haven's own** (below). Where a
-  shell is not given the address (`settings get`
-  answers `null`), a bare one cannot be searched for, so every run of
-  exactly twelve hex digits is replaced too — on every line **but
-  Haven's own**: a truncated id has that shape and must reach the
-  scanner. Left by that: a bare address in a line Haven's own process
-  wrote, on an image that will not say its address; the oracle's
-  address-shape count does not see the bare form either, and no build
-  of push A can read an address at all. S1 owes it with O.2.6's class.
-- **Of the transcript, the plugins' and the runtime's lines under
-  Haven's pid are not published; they are read, and reported.**
-  `flutter drive` forwards every device-log line of the app's pid,
-  whatever wrote it. In the device log the scanner tells Haven's lines
-  from the rest by tag: every needle on every line, its structural
-  rules on the tags its policy calls Haven's own, because "vendor text
-  is not Haven's to answer for" (`tooling/logscan/policy.toml`). A
-  transcript is a `plain` sink with no tags to apply that by, so there
-  the same platform lines are read as Haven's — in every lane; on API
-  34 they trip nothing, and on API 29, which this lane alone boots,
-  four tripped S8 and withheld a leg's whole evidence. The published
-  transcript therefore carries the tool's own lines and the lines
-  forwarded under a tag on the scanner's list, which the runner reads
-  out of that policy and copies nowhere; a line whose prefix does not
-  parse is kept. The rest are published where every lane publishes
-  them, in the device log, under the scanner's own rule for them.
-  **They are not left unread, and the neighbours' reading is not made
-  weaker by silence**: the scanner is handed them once more — every
-  rule and every needle, as a file that is never uploaded — and each
-  hit is said in the step log by the class of its line and its rule
-  (`mesh-transcript (<leg>): not-published from=platform:<tag|process|
-  other> rule=<id> lines=<n>`) and counted in the answers
-  (`<leg>.transcript_withheld_lines`, `…_rule_hits`). That is an
-  answer and not a verdict: the text is not Haven's. A declared value
-  among those lines is red all the same, since the same line is in the
-  device log, where every needle is searched on every line. *What this
-  leaves, for the owner*: the scanner itself could learn a transcript's
-  forwarded prefix and apply its tag rule there in every lane; that is
-  a change to `tooling/logscan`, not to this lane.
+  captures and dumps stay in a directory the workflow never uploads and
+  the gate is never handed. Published: the device log whole, as every
+  lane publishes it, with every address shape — six pairs, the
+  platform's own `XX:XX:XX:XX:…` — and this adapter's name and address
+  replaced; **of the events buffer, only the entries Haven's pid wrote**
+  — the lane needs that buffer for its own planted event and, in S1, for
+  what Haven's process puts there, and every other process's events are
+  evidence of nothing here; the drive transcript whole (below). Where a
+  shell is not given the address (`settings get` answers `null`), a bare
+  one cannot be searched for, so every run of exactly twelve hex digits
+  is replaced too — on every line **but Haven's own**: a truncated id
+  has that shape and must reach the scanner. Left by that: a bare
+  address in a line Haven's own process wrote, on an image that will not
+  say its address; the oracle's address-shape count does not see the
+  bare form either, and no build of push A can read an address at all.
+  S1 owes it with O.2.6's class.
+- **The transcript is published and gated whole, as every lane's is;
+  what the lane adds is a name for each hit.** `flutter drive` forwards
+  every device-log line of the app's pid, whatever wrote it: Haven's
+  lines, and with them the plugins' and the runtime's. Every lane
+  hands that transcript to the scanner's `drive` sink, which is
+  `plain`: every rule on every line. On API 34 those lines trip
+  nothing; on API 29, which this lane alone boots, four tripped S8
+  (below). The lane keeps its neighbours' rule exactly — a hit on any
+  line is the leg's leak, and the leg's device log, events slice and
+  transcript are deleted together, since the device log holds the same
+  lines. What it adds: beside the raw capture it keeps the class of
+  every transcript line — `host` (the tool's own), `own:<tag>` (a tag
+  on the scanner's `owned_tags`, read out of
+  `tooling/logscan/policy.toml` and copied nowhere), `platform:<tag>`
+  for a known platform or plugin tag, `platform:process` for the
+  runtime's lines under the process's own name, `platform:other` — and
+  on a leak reads each hit's line number in the scanner's report back
+  to it: `mesh-leak (<leg>): file=drive from=<class> rule=<id>
+  lines=<n>`. Never the text. A line is classed by its own prefix; one
+  quoted inside a `flutter` line's message stays Haven's.
+  *What was built first, and why it went.* After the second run the
+  lane published of a transcript only the tool's lines and the lines
+  under an owned tag, handed the rest to the scanner unpublished, and
+  reported what its rules fired on there as an answer. An independent
+  review found that strictly weaker than the neighbours, and it was:
+  such a hit left the lane green, and the same line was then uploaded
+  in the device log, where the scanner's structural rules read owned
+  tags only. And text Haven writes, or text about Haven's data, does
+  reach the log under tags the policy does not own (the list is in
+  the question below). Whether such lines may be exempt is a
+  log-anonymity trade, which is the owner's and not a runner's; the
+  split and its second reading are removed.
+  *For the owner — whose text is a line under Haven's pid?* **Open;
+  nothing here decides it.** In a device log the scanner searches
+  every needle on every line and applies its structural rules only to
+  `owned_tags`, because "vendor text is not Haven's to answer for"; in
+  a transcript, having no tags to go by, it applies them to every
+  line. The two choices:
+  (i) **Leave every lane's transcript fully rule-scanned**, as now.
+  It keeps catching, in the transcript, what the device log's rule
+  lets through: an uncaught Kotlin or Java exception's message under
+  `AndroidRuntime`; a print under `System.err` or `System.out`; a
+  native abort under `DEBUG` or `libc`, whose abort message is a Rust
+  panic's own text; `GeneratedPluginRegistrant`; and the plugins that
+  handle Haven's data, `FlutterSecureStorage` and `FlutterGeolocator`.
+  Its cost: any line of the platform's or a plugin's that merely has a
+  rule's shape reddens the lane and deletes that leg's evidence —
+  possibly S2 on Android 10 today, whose four lines are not yet known
+  — and each must then be dealt with at its source, or by a reviewed allowlist entry, one line at a time, for
+  each Android release and plugin version a lane boots.
+  (ii) **Teach the scanner** (`tooling/logscan`) to parse a
+  transcript's forwarded prefix and apply its owned-tag rule to the
+  `drive` sink in every lane, as it does to device logs. It would stop
+  tripping on platform furniture. It would also stop catching, in
+  every lane, an identifier that is neither a declared needle nor key
+  material in exactly the lines named under (i): those would then pass
+  in the transcript as they already pass in the device log, and be
+  uploaded in both. Needles and the key-material floor would still
+  read every line. A narrower form — adding the crash and
+  standard-error tags to `owned_tags` in both sinks — is the same
+  decision, made tag by tag.
+  Until it is decided this lane does (i), as its neighbours do.
 - **A dump is kept as a skeleton** (O.2.3 has "kept as the runner's
   parser fixtures"). As text, a platform dump fails the scanner on
   platform furniture — a synthetic `dumpsys bluetooth_manager` gave
@@ -6462,7 +6494,7 @@ the guards job's cap, 20 to 30 minutes — it took 17 min 04 s on
 
 *Proved here.*
 
-- The runner's `--self-test`: 583 checks. The three legs' passing
+- The runner's `--self-test`: 581 checks. The three legs' passing
   captures; for each leg, one fixture a clause, each required to fail
   with the finding that names its cause; the probe answering rather than
   judging; S2 on an image with the LE feature, without it and with it
@@ -6476,9 +6508,13 @@ the guards job's cap, 20 to 30 minutes — it took 17 min 04 s on
   an exception's own text; which gate found a leak; **the second
   run's** — a key and its value in each spelling the skeleton's rule
   missed, held to the scanner's own name rule and placeholders as read
-  out of its source; a transcript split into the tool's lines, Haven's
-  own and the platform's, with the class of each; a hit read back from
-  the scanner's report to the class of its line; a suite that failed
+  out of its source; each line of a transcript classed — the tool's,
+  Haven's own, a plugin's, a crash's under `AndroidRuntime`, an abort's
+  under `DEBUG`, a `System.err` print, a prefix quoted inside a line of
+  Haven's — and every one of them in the published transcript; a hit
+  read back from the scanner's report to the class of its line; the
+  scanner's verdict of a leak over a leg's three files leaving none of
+  them for upload; a suite that failed
   told from a drive the tool ended; a skeleton its own gate withheld;
   a marker another process wrote, which is not read; values that are no
   word, which are not printed; the redaction, the twelve-digit rule and
@@ -6492,24 +6528,36 @@ the guards job's cap, 20 to 30 minutes — it took 17 min 04 s on
   100 changes, 97 failing a fixture, the three that did not — all in the
   skeleton — each given one. After the first run: 155 changes, 153
   failing a fixture, the two that did not closed (a fixture for one, a
-  redundant test removed for the other). As they now stand: 181 changes,
-  180 failing a fixture; the one that did not — a hit's line number read
-  to its first digit — was given a fixture and fails it now.
-- **The device-side helpers under the real scanner**, on this machine:
-  a transcript with platform lines of the shapes S8 and S4 fire on
-  published without them and its leg's gate clean; those lines read
-  and reported by class and rule; a skeleton with a name left in it
-  withheld by its own gate and nothing else deleted; the verdict file
-  written and passed afterwards. And the fixture of key spellings: five
-  `S10` hits as the skeleton stood, none as it stands.
+  redundant test removed for the other). As they now stand: 182 changes,
+  each failing a fixture.
+- **The leg's gate under the real scanner**, on this machine, by the
+  runner's own publish, gate and naming over synthetic captures: a
+  clean transcript with plugin lines in it — green, its three files
+  kept; an Android 10 hidden-method warning under the process's tag —
+  red, `from=platform:process rule=S8`; a plugin's line with a circle's
+  name — red, `platform:FlutterSecureStorage rule=S10`; an uncaught
+  exception's message under `AndroidRuntime` — red; a native abort's
+  under `DEBUG` naming a relay — red, `rule=S7`; a line of Haven's own
+  under `flutter`, and one that quotes a platform prefix — red,
+  `own:flutter`, in the transcript and in the device log both. In
+  every red one nothing of the leg was left for upload; in the four
+  under tags that are not Haven's, the scanner had no hit in the
+  device log, which is what the review said. And the helpers of the
+  round before: a skeleton with a name left in it withheld by its own
+  gate and nothing else deleted, the verdict file written and passed
+  afterwards; the fixture of key spellings, five `S10` hits as the
+  skeleton stood and none as it stands.
 - `app-install-lib.sh --self-test`, 95 fixtures (80 before), with the
   API 29 pair, its refusals, a guest between the two, and what a
   refusal says of the guest's own words; eleven changes to the new
   branches — four to the choice of pair, seven to what a refusal says
   — each failing a fixture.
 - Every step of the guards job (`repo-guards.yml`, "Static checks"), run
-  here: all 189 `run:` steps pass; the other two, the checkout and the
-  Dart setup, are `uses:` steps.
+  here on the tree as it stood after the second run's changes: all 189
+  `run:` steps pass; the other two, the checkout and the Dart setup, are
+  `uses:` steps. Since the review's change to the transcript: the
+  runner's self-test, the lane guards, the 69 source guards and the
+  privacy invariants, again.
 - Every lane-policing guard and its self-test, the source guards,
   `check_privacy_invariants.sh`, every workflow parsed as YAML, `flutter
   analyze` with no error and no warning, the Dart suite (`test/e2e` and
@@ -6663,12 +6711,24 @@ logs:
   verdict file now pass a gate of their own, so a leak costs the file
   it is in; the verdict file is written after the directory scan. A
   red run still uploads its answers.
-- **S2's transcript tripped the scanner on four lines that are not
-  Haven's** (`[S8]`, none in the device log). Decided as above: of a
-  transcript the lane publishes the tool's lines and Haven's own, and
-  reads and reports the rest. What those four lines were is still not
-  known — the raw capture stays on the runner — and the next run names
-  their class and rule (`mesh-transcript (s2): …`).
+- **S2's transcript tripped the scanner on four lines** (`[S8]`, none
+  in the device log). **What they said is not known**: the transcript
+  was withheld and the raw capture stays on the runner. That they are
+  the platform's or a plugin's is an inference — S0's transcript, on
+  the same harness, passes on API 34, and the device log's rules read
+  owned tags only — and not a reading. The lane's rule is unchanged,
+  and its neighbours' (above); what is new is that the next run names
+  the class of each such line and its rule (`mesh-leak (s2):
+  file=drive from=<class> rule=S8 lines=<n>`), so that the cause can
+  be dealt with at its source, or the owner's question answered with
+  the text's origin known.
+- **Left as it is, and noted**: after a name-like key the skeleton
+  masks the whole rest of the line, so a second key on that line is
+  not kept. Keeping it would need telling a key from a word of the
+  value, and a name a user chose can hold `word: word`; the mask is
+  what makes "no value survives" true by construction. If push B's
+  parsers need a key that sits behind a name on one line, that line's
+  shape is added by name, with a fixture.
 - **S2's device log was under the scanner's floor** (1 581 of 2 000),
   which would have left the leg rc 4 once the leak was gone. The
   capture began at the drive; it begins before the install now, and
@@ -6686,9 +6746,9 @@ logs:
 |---|---|
 | The probe is green once the app's sheet is fixed | `RED (probe): the suite on the device FAILED`, with `mesh-failure` lines |
 | A leg's whole device log reaches the scanner's 2 000 lines on API 29 | `sink class logcat holds N line(s), below its declared floor`, rc 4 |
-| What the four `S8` lines of S2's transcript were | `mesh-transcript (s2): not-published from=<class> rule=S8 lines=<n>` names them; nothing of that kind, and they were Haven's or the tool's: `mesh-leak (s2): file=drive from=…` and a red |
+| What the four `S8` lines of S2's transcript were | if they recur, S2 is red and `mesh-leak (s2): file=drive from=<class> rule=S8 lines=<n>` names whose they were: the intended outcome |
 | A real `dumpsys bluetooth_manager`'s skeleton passes the scanner with the new key rule; the other two did | `LEAK: …skel.log`, `probe.dump_<name>=withheld`, and only that file gone |
-| The scanner accepts a one-file `diag` gate for the verdict file and for the unpublished lines on a runner | the verdict file missing from a red run's artifact; `<leg>.transcript_withheld_rule_hits=unread` |
+| The scanner accepts a one-file `diag` gate for the verdict file and for a skeleton on a runner | the verdict file missing from a red run's artifact |
 | The first-boot step and the drive step's boot, with no AVD cache, stay inside their caps | a step cap, named by the step |
 
 *What the review changed* (independent, of `1a8e782`; each read again
