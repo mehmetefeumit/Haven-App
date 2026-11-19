@@ -739,8 +739,14 @@ void main() {
       required MockProfileService svc,
     }) async {
       await _pumpHeader(tester, svc);
-      final log = LogCapture.install();
-      await _tapEditPhoto(tester);
+      // Restored inside the body: testWidgets checks that debugPrint is back
+      // before addTearDown callbacks run.
+      final log = LogCapture();
+      try {
+        await _tapEditPhoto(tester);
+      } finally {
+        log.restore();
+      }
       return log;
     }
 

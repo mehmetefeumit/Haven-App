@@ -899,15 +899,20 @@ void main() {
       final name = prefilledName(tester);
       // Rule 15: the user's own name, planted in the error the save throws.
       profile.setOwnAvatarError = StateError('no space for $name');
-      final log = LogCapture.install();
-
-      await tester.tap(find.byType(HavenAvatar));
-      await tester.pump();
-      await tester.pump();
-      await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
-      await pumpFrames(tester);
-      await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
-      await pumpFrames(tester);
+      // Restored inside the body: testWidgets checks that debugPrint is back
+      // before addTearDown callbacks run.
+      final log = LogCapture();
+      try {
+        await tester.tap(find.byType(HavenAvatar));
+        await tester.pump();
+        await tester.pump();
+        await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+        await pumpFrames(tester);
+        await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+        await pumpFrames(tester);
+      } finally {
+        log.restore();
+      }
 
       expect(
         find.text(_photoNotSaved),
@@ -1027,16 +1032,19 @@ void main() {
       final name = prefilledName(tester);
       // Rule 15: the user's own name, planted in the error the save throws.
       profile.updateOwnProfileError = StateError('cannot store $name');
-      final log = LogCapture.install();
+      final log = LogCapture();
+      try {
+        await tester.tap(find.byType(HavenAvatar));
+        await tester.pump();
+        await tester.pump();
 
-      await tester.tap(find.byType(HavenAvatar));
-      await tester.pump();
-      await tester.pump();
-
-      await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
-      await pumpFrames(tester);
-      await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
-      await pumpFrames(tester);
+        await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+        await pumpFrames(tester);
+        await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+        await pumpFrames(tester);
+      } finally {
+        log.restore();
+      }
 
       // The name local save threw, so the avatar's local save is gated off
       // — no picture-only local edit is queued without the intended name.
