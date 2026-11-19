@@ -293,6 +293,50 @@ void main() {
       expect(find.byType(CircularProgressIndicator), findsNothing);
     });
 
+    testWidgets("the lookup list is Haven's: nothing in its section edits it", (
+      tester,
+    ) async {
+      tallSurface(tester);
+      await tester.pumpWidget(buildApp(mock: seededMock()));
+      await tester.pumpAndSettle();
+
+      Finder inSection(String section, Finder matching) => find.descendant(
+        of: find.byKey(WidgetKeys.relaySettingsSection(section)),
+        matching: matching,
+      );
+      final lookup = RelaySettingsSection.lookup.name;
+      expect(
+        cellsIn(lookup),
+        findsNWidgets(fallbackDiscoveryRelays.length * 2),
+        reason: 'non-vacuity: every built-in lookup relay has its row',
+      );
+      final iconButtons = inSection(lookup, find.byType(IconButton));
+      expect(iconButtons, findsOneWidget, reason: 'its question mark alone');
+      expect(
+        tester.widget<IconButton>(iconButtons).key,
+        WidgetKeys.relaySettingsInfoButton(lookup),
+      );
+      expect(
+        inSection(
+          lookup,
+          find.byWidgetPredicate(
+            (w) =>
+                w is OutlinedButton ||
+                w is TextButton ||
+                w is FilledButton ||
+                w is ElevatedButton,
+          ),
+        ),
+        findsNothing,
+        reason: 'no Add relay or Restore defaults',
+      );
+      expect(
+        inSection('inbox', find.byKey(WidgetKeys.relaySettingsRemoveRelay)),
+        findsOneWidget,
+        reason: "the user's own list keeps its remove control",
+      );
+    });
+
     testWidgets('shows a short caption, not the long explainer', (
       tester,
     ) async {
@@ -1282,14 +1326,29 @@ void main() {
         ),
         KindPresence.held: (LucideIcons.circlePause, scheme.onSurfaceVariant),
       };
-      final words = {
-        for (final p in KindPresence.values) p: kindPresenceLabel(l10n, p),
+      // Spelled out, not read back from the page's own mapping: each word is
+      // the state the legend and the board give it.
+      final words = <KindPresence, String>{
+        KindPresence.notChecked: l10n.relaySettingsStatusNotChecked,
+        KindPresence.checking: l10n.relaySettingsStatusChecking,
+        KindPresence.publishing: l10n.relaySettingsPresencePublishing,
+        KindPresence.current: l10n.relaySettingsPresencePublished,
+        KindPresence.missing: l10n.relaySettingsPresenceMissing,
+        KindPresence.outdated: l10n.relaySettingsPresenceOutdated,
+        KindPresence.refused: l10n.relaySettingsPresenceRefused,
+        KindPresence.unconfirmed: l10n.relaySettingsPresenceUnconfirmed,
+        KindPresence.noAnswer: l10n.relaySettingsPresenceNoAnswer,
+        KindPresence.held: l10n.relaySettingsPresenceHeld,
       };
+      expect(words.keys, unorderedEquals(KindPresence.values));
       expect(
         words.values.toSet(),
         hasLength(KindPresence.values.length),
         reason: 'every state is told apart in words',
       );
+      for (final p in KindPresence.values) {
+        expect(kindPresenceLabel(l10n, p), words[p], reason: '$p');
+      }
 
       for (final p in KindPresence.values) {
         await tester.pumpWidget(
@@ -2332,17 +2391,28 @@ void main() {
             KindPresence.noAnswer,
             KindPresence.held,
           }, reason: 'one line per symbol a row can show');
-          for (final text in [
-            l10n.relaySettingsLegendCurrent,
-            l10n.relaySettingsLegendPublishing,
-            l10n.relaySettingsLegendChecking,
-            l10n.relaySettingsLegendNotOnRelay,
-            l10n.relaySettingsLegendNoAnswer,
-            l10n.relaySettingsLegendHeld,
+          for (final (status, text) in [
+            (KindPresence.current, l10n.relaySettingsLegendCurrent),
+            (KindPresence.publishing, l10n.relaySettingsLegendPublishing),
+            (KindPresence.checking, l10n.relaySettingsLegendChecking),
+            (KindPresence.missing, l10n.relaySettingsLegendNotOnRelay),
+            (KindPresence.noAnswer, l10n.relaySettingsLegendNoAnswer),
+            (KindPresence.held, l10n.relaySettingsLegendHeld),
           ]) {
+            final line = find.descendant(of: legend, matching: find.text(text));
+            expect(line, findsOneWidget);
+            final row = find.ancestor(of: line, matching: find.byType(Row));
             expect(
-              find.descendant(of: legend, matching: find.text(text)),
-              findsOneWidget,
+              tester
+                  .widget<RelayStatusGlyph>(
+                    find.descendant(
+                      of: row.first,
+                      matching: find.byType(RelayStatusGlyph),
+                    ),
+                  )
+                  .status,
+              status,
+              reason: 'each line sits beside the symbol it explains: $text',
             );
           }
         }

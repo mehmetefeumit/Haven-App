@@ -149,6 +149,9 @@
         "even when closed"
       ]
     },
+    "relaySettingsInfoTooltip": {
+      "reason": "Tooltip and screen-reader name of each section's question-mark button ('About {section}'). Names the panel it opens; every checkable claim lives in that panel's paragraphs."
+    },
     "relaySettingsKeyPackageInfoWhat": {
       "reason": "First paragraph of the KeyPackage relays panel: what the invitation key is for and why it is kept on these relays. Correct only by omission: the profile plane is the separate Profile list, so this paragraph must stay silent about the public profile.",
       "forbidden_additions": [
@@ -156,6 +159,9 @@
         "your profile is published",
         "name and photo"
       ]
+    },
+    "relaySettingsLegendTitle": {
+      "reason": "Heading of the symbol legend ('What the symbols mean'). Names the list below it; each legend line is itself an assertion under INV-R-RELAYS-PAGE-REPORTS-WHAT-MAINTENANCE-FOUND."
     },
     "sharingHealthBodyStalled": {
       "reason": "Says this phone cannot read its circle's updates and how a re-add fixes it. The sweep matches 'no one' in the sole-admin fallback ('If no one can, make a new circle'), which is about who can re-add the user, not about who sees anything.",
@@ -3080,11 +3086,19 @@
     {
       "id": "INV-W-RELAY-LISTS-PUBLISHED-KINDS",
       "title": "The inbox and KeyPackage relay lists are published under the identity key",
-      "statement": "Haven publishes a kind-10050 inbox relay list and a kind-10002 NIP-65 list, both signed by the identity key and both fanned out to the relays already on them and, unchanged, to the discovery relays (owner-directed 2026-11-12; an opt-out retracts them there too), and it publishes kind-30443 KeyPackages to those relays; consequently every URL a user adds to those lists becomes public and permanently linked to their pubkey, and the retired kind-10051 is not emitted at all. Gift wraps (kind 1059) are read only from the inbox list `inboxRelaysProvider` gives — the stored list kind 10050 is built from, or the compile-time seed while seeding has failed — by the invitation poller, the manual inbox refresh and the live-sync engine's inbox REQ, whose start is handed that list, over 96 h (the poller and the refresh from the wall clock; the engine from its inbox cursor, and 7 days on the one REQ made before any cursor exists); an empty list polls nothing rather than ask other relays for this pubkey's gift wraps. An inviter's lookup (RelayManager::lookup_member_for_invite) reads the invitee's kind 10050 from the discovery relays, which is why the list is kept there as well as on the user's own relays; and each inbox row on the Relays page carries that list's presence on that relay.",
+      "statement": "Haven publishes a kind-10050 inbox relay list and a kind-10002 NIP-65 list, both signed by the identity key and both fanned out to the relays already on them and, unchanged, to the discovery relays (owner-directed 2026-11-12; an opt-out retracts them there too), and it publishes kind-30443 KeyPackages to those relays; consequently every URL a user adds to those lists becomes public and permanently linked to their pubkey, and the retired kind-10051 is not emitted at all. Gift wraps (kind 1059) are read only from the inbox list `inboxRelaysProvider` gives — the stored list kind 10050 is built from, or the compile-time seed while seeding has failed — by the invitation poller, the manual inbox refresh and the live-sync engine's inbox REQ, whose start is handed that list, over 96 h (the poller and the refresh from the wall clock; the engine from its inbox cursor, and 7 days on the one REQ made before any cursor exists); an empty list polls nothing rather than ask other relays for this pubkey's gift wraps. An inviter's lookup (RelayManager::lookup_member_for_invite) reads the invitee's kind 10050 from the discovery relays, which is why the list is kept there as well as on the user's own relays; and each inbox row on the Relays page carries that list's presence on that relay. An inviter routes the Welcome's gift wrap to the invitee's kind-10050 inbox relays and never to its NIP-65 relays; a kind-30443 KeyPackage goes only to the relays on the KeyPackage list, never to a lookup relay that is not on it; an invite lookup that finds no package where the invitee's lists say it should be reports the person not found, so a relay missing the user's KeyPackage or lists can cost them an invitation; and a list with no relays is published nowhere, the lookup relays included.",
       "status": "enforced",
       "assertion_arb_keys": [
         "relaySettingsKeyPackageInfoKeeps",
-        "relaySettingsInboxInfoMissing"
+        "relaySettingsInboxInfoMissing",
+        "relaySettingsInboxInfoWhat",
+        "relaySettingsInboxInfoTechnical",
+        "relaySettingsKeyPackageInfoMissing",
+        "relaySettingsKeyPackageInfoTechnical",
+        "relaySettingsLookupInfoWhat",
+        "relaySettingsLookupInfoMissing",
+        "relaySettingsLookupInfoTechnical",
+        "relaySettingsHeldNoRelays"
       ],
       "disclosure_arb_keys": [
         "relaySettingsInboxInfoActions",
@@ -3191,6 +3205,30 @@
         {
           "file": "haven/test/pages/settings/relay_settings_page_test.dart",
           "name": "each section shows only what that role needs"
+        },
+        {
+          "file": "haven-core/tests/circle_integration_test.rs",
+          "name": "cascade_uses_inbox_relays_when_present"
+        },
+        {
+          "file": "haven-core/tests/circle_integration_test.rs",
+          "name": "cascade_never_routes_a_welcome_to_nip65_relays"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "adding_a_kp_relay_republishes_the_list_everywhere_and_the_package_only_to_it_via_real_ffi"
+        },
+        {
+          "file": "haven-core/tests/invite_lookup_verdict_e2e.rs",
+          "name": "a_live_empty_write_relay_is_not_found_whatever_discovery_says"
+        },
+        {
+          "file": "haven-core/tests/invite_lookup_verdict_e2e.rs",
+          "name": "every_relay_finishing_empty_is_not_found"
+        },
+        {
+          "file": "haven-core/src/relay/maintenance/relay_list.rs",
+          "name": "no_configured_relays_is_nothing_configured_not_suppressed"
         }
       ],
       "guards": []
@@ -3263,6 +3301,178 @@
         {
           "file": "haven/test/providers/key_package_provider_test.dart",
           "name": "calls maintainKeyPackage and maintainRelayList when identity exists"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-R-RELAYS-PAGE-REPORTS-WHAT-MAINTENANCE-FOUND",
+      "title": "Every symbol, word and announcement on the Relays page is what the maintenance passes found and did",
+      "statement": "The symbol on each Inbox, KeyPackage and lookup row, its exact words (tooltip, tap and screen-reader line), the legend line beside each symbol and the page's announcements are all read from the own-relay board (OwnRelayBoard), which only the maintenance passes that probe and publish write. A cell reads checking while a pass has asked the relay and not judged its answer; current only when the relay serves what maintenance would leave in place, or returned OK true for what the pass sent it; publishing while it was sent and no OK has come; missing when the relay answered in full and holds nothing of the account's; outdated when it serves an event of the account that maintenance would replace (an old KeyPackage, or a relay list that does not name the configured list); refused on OK false; unconfirmed when it was proven not to serve the item, was sent it, and no OK came; no answer when the relay could not be reached or did not finish answering and nothing it said proves what it holds; and not checked while no pass has judged it in this session — the page never shows an answer nobody gave. A kind is held, with no cell and nothing probed or sent, while the storage-reset notice is unanswered (AwaitingResetAcknowledgement), while its list has no relays (NoRelaysConfigured: published nowhere, the lookup relays included), or while the stored publish setting for its list is off (PublishingSuppressed) — which forceEnablePublishToggles turns back on whenever the relay-preferences service opens, and for which opening the page runs a pass, so the next check publishes the list; each hold has its own note. Each section's rows carry only the items that role holds: Inbox the kind 10050, KeyPackage the kinds 30443 and 10002, lookup the kinds 10002 and 10050, and Profile none. The settled announcement counts the relays with any item not current and names none; a relay the user just added is announced up to date only when every item it should hold reads current. A state shown that the board does not hold, a word or legend line attached to another state, a Profile row with a symbol, or a held kind that is still published falsifies this.",
+      "status": "enforced",
+      "assertion_arb_keys": [
+        "relaySettingsLegendCurrent",
+        "relaySettingsLegendPublishing",
+        "relaySettingsLegendChecking",
+        "relaySettingsLegendNotOnRelay",
+        "relaySettingsLegendNoAnswer",
+        "relaySettingsLegendHeld",
+        "relaySettingsStatusNotChecked",
+        "relaySettingsPresencePublishing",
+        "relaySettingsPresenceRefused",
+        "relaySettingsPresenceUnconfirmed",
+        "relaySettingsPresenceNoAnswer",
+        "relaySettingsPresenceHeld",
+        "relaySettingsHeldNoRelays",
+        "relaySettingsHeldNotYetPublished",
+        "relaySettingsCheckSettled",
+        "relaySettingsAddedRelayUpToDate",
+        "relaySettingsAddedRelayNotUpToDate",
+        "relaySettingsInboxInfoMissing",
+        "relaySettingsKeyPackageInfoMissing",
+        "relaySettingsLookupInfoMissing",
+        "relaySettingsProfileInfoActions"
+      ],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "symbols": [
+        {
+          "file": "haven-core/src/relay/maintenance/own_board.rs",
+          "symbol": "OwnRelayBoard"
+        },
+        {
+          "file": "haven-core/src/relay/maintenance/own_board.rs",
+          "symbol": "OwnCell"
+        },
+        {
+          "file": "haven-core/src/relay/maintenance/own_board.rs",
+          "symbol": "OwnHold"
+        },
+        {
+          "file": "haven/lib/src/providers/relay_status_provider.dart",
+          "symbol": "relayStatusOf"
+        },
+        {
+          "file": "haven/lib/src/pages/settings/relay_status_cell.dart",
+          "symbol": "kindPresenceLabel"
+        },
+        {
+          "file": "haven/lib/src/providers/relay_preferences_provider.dart",
+          "symbol": "forceEnablePublishToggles"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/src/relay/maintenance/own_board.rs",
+          "name": "a_sent_cell_settles_by_what_the_probe_proved_and_what_the_relay_said"
+        },
+        {
+          "file": "haven-core/src/relay/maintenance/own_board.rs",
+          "name": "a_pass_judges_cells_keyed_by_relay_and_leaves_no_checking_cell_behind"
+        },
+        {
+          "file": "haven-core/src/relay/maintenance/own_board.rs",
+          "name": "a_hold_empties_its_kind_and_the_next_pass_lifts_it"
+        },
+        {
+          "file": "haven-core/src/relay/maintenance/own_board.rs",
+          "name": "a_relay_list_is_current_only_when_its_newest_copy_names_the_configured_list"
+        },
+        {
+          "file": "haven-core/src/relay/maintenance/own_board.rs",
+          "name": "a_package_maintenance_would_replace_reads_outdated"
+        },
+        {
+          "file": "haven-core/src/relay/maintenance/own_board.rs",
+          "name": "a_req_the_relay_closed_is_no_answer_unless_what_came_first_is_current"
+        },
+        {
+          "file": "haven-core/src/relay/maintenance/own_board.rs",
+          "name": "a_relay_that_cannot_be_reached_is_no_answer"
+        },
+        {
+          "file": "haven-core/src/relay/maintenance/relay_list.rs",
+          "name": "no_configured_relays_is_nothing_configured_not_suppressed"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "the_board_reads_what_the_maintenance_passes_found_and_did_via_real_ffi"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "an_older_package_in_the_slot_is_healed_and_current_only_on_the_relays_ok_via_real_ffi"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "a_refusing_relay_reads_refused_and_only_acks_count_as_healed_via_real_ffi"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "awaiting_the_reset_notice_holds_every_kind_and_probes_nothing_via_real_ffi"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "a_list_stored_as_unpublished_is_held_and_the_other_checked_via_real_ffi"
+        },
+        {
+          "file": "haven/test/services/maintenance_service_test.dart",
+          "name": "reads the open handle's board: every state, hold and age"
+        },
+        {
+          "file": "haven/test/providers/relay_status_provider_test.dart",
+          "name": "every board state reaches its row, whatever spelling the pass used for the relay"
+        },
+        {
+          "file": "haven/test/providers/relay_status_provider_test.dart",
+          "name": "a held kind reads held on every row that expects it, with its reason; the other kinds keep their cells"
+        },
+        {
+          "file": "haven/test/providers/relay_status_provider_test.dart",
+          "name": "skips a kind held for the reset notice or an empty list, but asks for one held by a stored publish setting"
+        },
+        {
+          "file": "haven/test/providers/relay_preferences_provider_test.dart",
+          "name": "force-enables publish only for Inbox/KeyPackage — regression: the service-provider init loop must never call setPublishRelayList for profile"
+        },
+        {
+          "file": "haven/test/pages/settings/relay_settings_page_test.dart",
+          "name": "every state has its shape, colour, exact words and tooltip"
+        },
+        {
+          "file": "haven/test/pages/settings/relay_settings_page_test.dart",
+          "name": "a tap on a symbol shows its exact state"
+        },
+        {
+          "file": "haven/test/pages/settings/relay_settings_page_test.dart",
+          "name": "the page renders whole on its first frame, before the board answers anything"
+        },
+        {
+          "file": "haven/test/pages/settings/relay_settings_page_test.dart",
+          "name": "each section shows only what that role needs"
+        },
+        {
+          "file": "haven/test/pages/settings/relay_settings_page_test.dart",
+          "name": "a panel for a section with symbols explains each one with the rows' own glyph; the Profile panel has no legend"
+        },
+        {
+          "file": "haven/test/pages/settings/relay_settings_page_test.dart",
+          "name": "each hold has its own note, and none shows without one"
+        },
+        {
+          "file": "haven/test/pages/settings/relay_settings_page_test.dart",
+          "name": "both lists empty show the no-relays note once"
+        },
+        {
+          "file": "haven/test/pages/settings/relay_settings_page_test.dart",
+          "name": "the settled announcement counts the relays not confirmed up to date, and names none"
+        },
+        {
+          "file": "haven/test/pages/settings/relay_settings_page_test.dart",
+          "name": "a relay the user just added is announced once its own check settles"
+        },
+        {
+          "file": "haven/test/pages/settings/relay_settings_page_test.dart",
+          "name": "an added relay whose check ends between two reads is still announced, once, when the pass ends"
         }
       ],
       "guards": []
@@ -5035,9 +5245,13 @@
     {
       "id": "INV-R-DISCOVERY-POOL-DISJOINT-AND-NOT-USER-CHOSEN",
       "title": "The eight profile relays never overlap the six discovery relays, the eight location relays overlap neither, and the user cannot remove them",
-      "statement": "PRODUCTION_PROFILE_RELAYS (8) and PRODUCTION_DISCOVERY_RELAYS (6) are disjoint by construction and disjoint from the account seed defaults, and both are contacted unconditionally even when every relay the user chose is private; the curated eight cannot be taken out of the profile group at EITHER layer — Settings offers no remove control on a curated Profile row (matched across URL spelling variants, so a case or trailing-slash difference cannot bring the control back), and usable_profile_relays() unions the defaults back in on every resolution, so a row deleted by any other route still leaves the relay dialled. PRODUCTION_LOCATION_RELAYS (8) is host-disjoint from the account seed, the discovery plane and the profile pool, each of its entries is on its own registrable domain, and it is not user-chosen either: no Settings category lists it and nothing in the app edits it, and Haven itself dials a pool entry only as a relay of a circle it was picked for. The profile pool also shares no operator with the account seed any more: wss://nostr.mom, run by nos.lol's operator, was retired on 2026-10-31 (RETIRED_PROFILE_RELAYS) — an operator overlap is recorded at vetting, which no test can check. The copy must therefore keep saying \"that you do not choose\". Resizing either pool without updating the paragraph that spells both counts fails the copy tie.",
+      "statement": "PRODUCTION_PROFILE_RELAYS (8) and PRODUCTION_DISCOVERY_RELAYS (6) are disjoint by construction and disjoint from the account seed defaults, and both are contacted unconditionally even when every relay the user chose is private; the curated eight cannot be taken out of the profile group at EITHER layer — Settings offers no remove control on a curated Profile row (matched across URL spelling variants, so a case or trailing-slash difference cannot bring the control back), and usable_profile_relays() unions the defaults back in on every resolution, so a row deleted by any other route still leaves the relay dialled. PRODUCTION_LOCATION_RELAYS (8) is host-disjoint from the account seed, the discovery plane and the profile pool, each of its entries is on its own registrable domain, and it is not user-chosen either: no Settings category lists it and nothing in the app edits it, and Haven itself dials a pool entry only as a relay of a circle it was picked for. The profile pool also shares no operator with the account seed any more: wss://nostr.mom, run by nos.lol's operator, was retired on 2026-10-31 (RETIRED_PROFILE_RELAYS) — an operator overlap is recorded at vetting, which no test can check. The copy must therefore keep saying \"that you do not choose\". Resizing either pool without updating the paragraph that spells both counts fails the copy tie. PRODUCTION_DISCOVERY_RELAYS is compiled in, so the lookup relays are the same on every install, and the Relays page shows them read-only: its lookup rows are exactly the relays the maintenance passes ask, and nothing in the lookup section adds, restores or removes one. Opening the page also writes any curated Profile relay missing from the stored list back into it, so the list on screen is the one Haven dials.",
       "status": "enforced",
-      "assertion_arb_keys": [],
+      "assertion_arb_keys": [
+        "relaySettingsProfileInfoActions",
+        "relaySettingsLookupInfoWhat",
+        "relaySettingsLookupInfoActions"
+      ],
       "disclosure_arb_keys": [],
       "non_arb_claims": [],
       "doc_anchors": [
@@ -5104,6 +5318,22 @@
         {
           "file": "haven-core/tests/profile_plane_separation.rs",
           "name": "location_pool_entries_have_distinct_registrable_domains"
+        },
+        {
+          "file": "haven/test/pages/settings/relay_settings_page_test.dart",
+          "name": "the lookup list is Haven's: nothing in its section edits it"
+        },
+        {
+          "file": "haven/test/pages/settings/relay_settings_page_test.dart",
+          "name": "tops the Profile list back up on open, and only that category"
+        },
+        {
+          "file": "haven-core/src/relay/discovery.rs",
+          "name": "discovery_plane_size_is_exactly_six"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "the_board_reads_what_the_maintenance_passes_found_and_did_via_real_ffi"
         }
       ],
       "guards": [
@@ -5913,7 +6143,8 @@
       "disclosure_arb_keys": [
         "profileIsPublicNoticeTitle",
         "profileIsPublicNoticeBody",
-        "qrCodeExplainerUsername"
+        "qrCodeExplainerUsername",
+        "relaySettingsProfileInfoWhat"
       ],
       "doc_anchors": [
         "haven-core/SECURITY.md#public-nostr-profiles-kind-0--blossom",
@@ -6322,7 +6553,9 @@
       "title": "Profile lookups ask one relay about one person, bounded at two relays",
       "statement": "Every kind-0 filter carries exactly one author, no p tag and kind 0 only; each author resolves to its own assigned relay by salted rendezvous hash, and PROFILE_MAX_RELAY_RANK = 2 bounds the relays it may ever be asked of — its second-ranked relay is asked only after the first answered without a profile (the retry ladder, which alternates between the two), or in the same cycle when the first did not answer at all. So a lookup discloses an author to at most two of the eight. Only a relay's own EOSE says it holds nothing. A relay that did not answer is not asked for the rest of its slice and is not sent another author's second request in that cycle; an author no relay could be reached for is stamped nothing, and an author a relay was reached for, and no relay answered, backs off as a miss — unstamped it would be asked again on every trigger, handing a relay that declines to answer a count of them. This becomes false if authors are batched into one filter, if the rank cap is raised, or if a fetch fans out beyond the assignment.",
       "status": "enforced",
-      "assertion_arb_keys": [],
+      "assertion_arb_keys": [
+        "relaySettingsProfileInfoWhat"
+      ],
       "disclosure_arb_keys": [],
       "doc_anchors": [
         "haven-core/SECURITY.md#profile-plane-relay-separation--accepted-deviations"
@@ -6466,7 +6699,8 @@
       "accepted_deviation_id": "P2",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [
-        "relaySettingsProfileInfoKeeps"
+        "relaySettingsProfileInfoKeeps",
+        "relaySettingsProfileInfoWhat"
       ],
       "doc_anchors": [
         "haven-core/SECURITY.md#publish-fans-out-to-the-whole-pool-p2"
@@ -7146,7 +7380,9 @@
       "title": "The Identity page and the two photo flows render and announce the same in every publish state",
       "statement": "No screen reports a relay outcome as a state of the user's profile. The Identity page renders the local profile row and nothing else: no publish status, no progress copy, no Retry, and the same widget tree whether the outbox is clean, pending and due, pending and backing off, left over from a failed pass, or being synced right now; a sync in flight disables nothing on it. The copy a save, a photo set or a photo removal shows or announces describes the device only — the edit is held locally and will be published — and never says synced, published, syncing or up to date; the name card announces the saved outcome and an assertive local failure, never a progress message, and the two photo flows announce their local outcome politely with no SnackBar on success. What a relay has or has not taken is visible only in the outbox and retried by the controller (INV-P-PHOTO-REMOVAL-IS-OWED-TO-EVERY-POOL-RELAY). The claim is bounded to the Identity page, the display-name card and the two photo flows, not to every future surface; a widget that renders ProfilePendingState or ProfileSyncResult on that page, or copy that names the network, falsifies it.",
       "status": "enforced",
-      "assertion_arb_keys": [],
+      "assertion_arb_keys": [
+        "relaySettingsProfileInfoActions"
+      ],
       "disclosure_arb_keys": [],
       "doc_anchors": [
         "docs/PROFILE_LOCAL_FIRST_SYNC.md#what-it-is-now",
@@ -7464,7 +7700,9 @@
       "title": "A photo picked from the library becomes a public profile picture",
       "statement": "The only consumer of a library-picked image is the profile avatar pipeline, which uploads it to the public Blossom host and references it from a public kind-0 — there is no private or circles-only destination, and the iOS permission prompt says so at the moment consent is given.",
       "status": "enforced",
-      "assertion_arb_keys": [],
+      "assertion_arb_keys": [
+        "relaySettingsProfileInfoTechnical"
+      ],
       "disclosure_arb_keys": [
         "relaySettingsProfileInfoKeeps"
       ],
