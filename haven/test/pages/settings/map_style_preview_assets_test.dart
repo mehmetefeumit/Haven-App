@@ -3,9 +3,7 @@
 ///
 /// The bundled-asset test reads the test build's asset manifest, which lists
 /// exactly the files pubspec.yaml declares that exist on disk, so it fails
-/// both for an image missing from disk and for one the app would not ship. It
-/// stays red until `scripts/generate_map_style_previews.sh` has been run and
-/// its output committed.
+/// both for an image missing from disk and for one the app would not ship.
 library;
 
 import 'dart:io';

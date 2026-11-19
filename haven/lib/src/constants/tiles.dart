@@ -259,6 +259,8 @@ const TileProviderConfig stadiaOutdoors = TileProviderConfig(
 /// Nostr/relay correlation and the choice is stored only on-device, so the
 /// exposure is negligible — but keep new styles on the same host so this stays
 /// the only added signal.
+///
+/// Adding a style? See haven/DEVELOPMENT.md → Map-style previews.
 const List<TileProviderConfig> kTileStyleCatalog = [
   stadiaAlidadeSmooth,
   stadiaAlidadeSmoothDark,

@@ -97,6 +97,13 @@ from `pubspec.yaml`'s `version:`. Anything that is not a version is refused;
 Refuses to build if the key is missing/empty/placeholder. Emits debug symbols to
 `haven/build/symbols/` (gitignored) — keep them to de-obfuscate crash reports.
 
+### `generate_map_style_previews.sh`
+
+Renders the Map style page's bundled preview images from Stadia's cacheable
+Static Maps endpoint with the same key. Billed per request, and storing the
+images depends on a paid Stadia plan: see `haven/DEVELOPMENT.md` → "Map-style
+previews" for the licensing, the exact command and the add-a-style checklist.
+
 ### `ci/check_no_committed_secrets.sh`
 
 Fails if the Stadia key (or any UUID-shaped secret) is committed, if the

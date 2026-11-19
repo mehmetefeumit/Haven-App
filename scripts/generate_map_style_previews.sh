@@ -8,32 +8,28 @@
 # per style in kTileStyleCatalog (haven/lib/src/constants/tiles.dart) per scene,
 # written to haven/assets/map_style_previews/<config id>_<scene>.webp — the name
 # the page derives from TileProviderConfig.id and MapStylePreviewScene.name.
-# Commit the eight files it writes. Re-run it only to change a scene or a style.
+# Commit the files it writes. Adding, removing or renaming a style, and
+# regenerating: see haven/DEVELOPMENT.md → Map-style previews.
 #
 # ---------------------------------------------------------------------------
-# UNVERIFIED — CONFIRM BEFORE RUNNING
+# ENDPOINT AND LICENSING — RE-CHECK STADIA'S TERMS BEFORE EVERY RUN
 #
-# This script was written without network access to Stadia, so neither the
-# endpoint below nor its terms were checked:
-#   * STATIC_MAPS_ENDPOINT and the query shape built in render_one() are the
-#     Stadia Static Maps API as remembered (center=<lat>,<lon>, zoom=<z>,
-#     size=<w>x<h>@2x, api_key=<key>). Check them on docs.stadiamaps.com.
-#   * LICENSING: Stadia's standard static maps may not be stored. Stadia offers
-#     a separate cacheable static-maps product whose images may be kept while
-#     a paid plan is held. Confirm on docs.stadiamaps.com (and the terms of
-#     service) WHICH endpoint permits storing the images inside a distributed
-#     app and that the account's plan covers it, then pass that endpoint as
-#     STATIC_MAPS_ENDPOINT. There is deliberately no default: the script refuses
-#     to run until the endpoint has been chosen.
-#   * ZOOM: the scenes' zooms are the ones the page's old live FlutterMap used
-#     (256 px raster-tile convention). If the static renderer counts zoom the
-#     vector way (512 px tiles), its images come out one level wider; compare
-#     them with the map at the same place and adjust.
+# The committed set was rendered on 2026-11-19 from
+# https://tiles.stadiamaps.com/static_cacheable with this script's query shape
+# (center=<lat>,<lon>, zoom=<z>, size=<w>x<h>@2x, api_key=<key>), and the
+# scenes' zooms, taken from the page's earlier live map, gave the intended
+# detail.
+#   * LICENSING: only the CACHEABLE static maps endpoint's images may be stored
+#     and shipped in the app, and only while Haven holds an active paid Stadia
+#     subscription; raw tiles and standard static maps may not. Every request
+#     is billed. Re-read the terms before each run (DEVELOPMENT.md records the
+#     last review). There is deliberately no default endpoint: the script
+#     refuses to run until one is passed.
 #
 # ATTRIBUTION: the images are a Produced Work of OpenStreetMap data (ODbL) in
-# Stadia/OpenMapTiles styles. The page shows the real map's credits and the
-# ODbL link under them (StaticMapAttribution); if the endpoint also burns an
-# attribution into the image, that does not replace the page's links.
+# Stadia/OpenMapTiles styles. The endpoint burns a short attribution line into
+# each image's bottom-right corner; the page's own credits and ODbL link
+# (StaticMapAttribution) are still required and must stay.
 # ---------------------------------------------------------------------------
 #
 # Format and size: each image is <LOGICAL_WIDTH>x<LOGICAL_HEIGHT> map pixels
@@ -46,8 +42,8 @@
 # fraction of a PNG's size (Flutter decodes WebP natively on every platform);
 # an image above BUDGET_KB is reported, not refused.
 #
-# Usage (from anywhere), with the endpoint confirmed as above:
-#   STATIC_MAPS_ENDPOINT=https://tiles.stadiamaps.com/<path> \
+# Usage (from anywhere), after re-checking the terms as above:
+#   STATIC_MAPS_ENDPOINT=https://tiles.stadiamaps.com/static_cacheable \
 #     scripts/generate_map_style_previews.sh
 #
 # Key source (first match wins, the same order as scripts/build_release.sh):
@@ -77,7 +73,8 @@ PLACEHOLDER='STADIA_API_KEY_PLACEHOLDER'
 UUID_RE='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 
 # No default (see the header): whether an endpoint's images may be stored in
-# the app is a licensing decision the owner makes, not one this script assumes.
+# the app is a licensing decision the owner re-makes at each run, not one this
+# script assumes.
 STATIC_MAPS_ENDPOINT="${STATIC_MAPS_ENDPOINT:-}"
 
 LOGICAL_WIDTH=480
@@ -89,6 +86,7 @@ BUDGET_KB=150
 # Every TileProviderConfig.id in kTileStyleCatalog. The Stadia style slug is the
 # id without its `stadia_` prefix. Pinned to the catalog by
 # haven/test/pages/settings/map_style_preview_assets_test.dart.
+# Adding a style? See haven/DEVELOPMENT.md → Map-style previews.
 STYLES=(
   stadia_alidade_smooth
   stadia_alidade_smooth_dark
@@ -120,7 +118,7 @@ fail() { printf '\033[1;31m[map_previews] FAIL:\033[0m %s\n' "$1" >&2; exit "${2
 # --- 0. Endpoint, chosen by the owner --------------------------------------
 # Held to Stadia's tile host so the key is never sent anywhere else.
 [[ -n "${STATIC_MAPS_ENDPOINT}" ]] \
-  || fail "STATIC_MAPS_ENDPOINT is not set: confirm which Stadia endpoint permits storing the images in the app (see this script's header and haven/DEVELOPMENT.md), then pass it" 5
+  || fail "STATIC_MAPS_ENDPOINT is not set: re-check Stadia's terms (haven/DEVELOPMENT.md → Map-style previews), then pass https://tiles.stadiamaps.com/static_cacheable" 5
 [[ "${STATIC_MAPS_ENDPOINT}" =~ ^https://tiles\.stadiamaps\.com/[A-Za-z0-9_/-]*[A-Za-z0-9_-]$ ]] \
   || fail "STATIC_MAPS_ENDPOINT must be an https://tiles.stadiamaps.com/<path> URL with no query string or trailing slash" 5
 

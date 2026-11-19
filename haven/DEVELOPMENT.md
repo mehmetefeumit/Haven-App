@@ -141,51 +141,138 @@ run: `flutter run --dart-define-from-file=dart_defines/secrets.json` (from `have
 > account, not in this repository. (This note used to cite
 > `docs/MAP_AND_PRIVACY_BACKLOG.md`, which does not exist in this tree.)
 
-### Map-style previews
-
-Settings → Map style previews each style over a city and a nature scene from
-WebP images bundled in `haven/assets/map_style_previews/`
-(`<TileProviderConfig.id>_<city|nature>.webp`, one per style in
-`kTileStyleCatalog`), so the page makes no network request and costs no tile
-credits. They are rendered once, with your Stadia key, and committed:
-
-```bash
-# Needs curl + libwebp's tools (cwebp, webpinfo):
-#   Fedora: sudo dnf install libwebp-tools | Debian/Ubuntu: sudo apt install webp | macOS: brew install webp
-# Key: haven/dart_defines/secrets.json, else $STADIA_API_KEY.
-# Endpoint: required, no default — confirm it first (see below).
-STATIC_MAPS_ENDPOINT=https://tiles.stadiamaps.com/<path> scripts/generate_map_style_previews.sh
-```
-
-The script renders each scene (its centre, zoom and rationale are defined at
-the top of the script) at the preview box's 180 dp height, @2x (960×360 px),
-converts to lossy WebP, verifies each image's size, and replaces the committed
-set only when all of them succeed. Re-run it only to change a scene or a style;
-`test/pages/settings/map_style_preview_assets_test.dart` fails while any
-preview the page can show is missing or mis-sized, and when the script's
-styles or scenes drift from the app's.
-
-**Before committing images, confirm on docs.stadiamaps.com** (the script was
-written without access to Stadia, so its endpoint is unverified):
-
-- which Static Maps endpoint permits *storing* the images inside a distributed
-  app — Stadia's standard static maps may not be stored; its cacheable static
-  maps may be kept while a paid plan is held — and that your plan covers it.
-  Pass that endpoint as `STATIC_MAPS_ENDPOINT` (the script has no default and
-  refuses to run without it, e.g.
-  `STATIC_MAPS_ENDPOINT=https://tiles.stadiamaps.com/<path> scripts/generate_map_style_previews.sh`);
-- that the request shape (`center`, `zoom`, `size=WxH@2x`, `api_key`) and the
-  zoom convention match, by comparing each image with the map at the same
-  place.
-
-The images are a Produced Work of OpenStreetMap data (ODbL) in Stadia /
-OpenMapTiles styles, so the page shows the same credits and Open Database
-License link as the map (`StaticMapAttribution`). Keep them whenever the
-previews are shown.
-
 Output: `build/app/outputs/flutter-apk/app-debug.apk` (debug) /
 `app-{arm64-v8a,armeabi-v7a,x86_64}-release.apk` (release, per-ABI splits — see
 "Cutting a release" below).
+
+### Map-style previews
+
+Settings → Map style shows each style over two fixed scenes, City (Amsterdam's
+canal ring, zoom 17) and Nature (Lake Louise, zoom 16), from WebP images
+bundled in `haven/assets/map_style_previews/`, so opening the page makes no
+network request and costs no tile credits. `scripts/generate_map_style_previews.sh`
+renders them from Stadia's cacheable Static Maps endpoint; the committed set was
+generated on 2026-11-19.
+
+- **One image per catalog config per scene**, named
+  `<TileProviderConfig.id>_<scene>.webp` (`<scene>` is a `MapStylePreviewScene`
+  value). The page derives the name from the config, so there is no mapping to
+  maintain. A config the page offers no row for still needs its pair: Minimal
+  shows `stadia_alidade_smooth_dark` in a dark theme, and a persisted selection
+  may pin any catalog config.
+- **960×360 px** (480×180 map pixels @2x; 180 dp is the preview box height, so
+  labels appear at their native size), lossy WebP. The script checks the size.
+
+#### Licensing — re-check before every run
+
+Last reviewed 2026-11-19, against Stadia's Terms of Service effective
+2026-11-09:
+
+- **Raw map tiles may never be bundled or bulk-downloaded.** The terms allow
+  only device-local caching within the HTTP cache headers (at most 7 days) and
+  a per-device offline cache of at most 100 MB. Never build previews from tile
+  URLs.
+- **Images from the cacheable static maps endpoint may be stored and
+  redistributed while Haven holds an active paid Stadia subscription** (ToS
+  addendum; Stadia's FAQ words it as a paid plan at generation time — the ToS
+  governs). Images from the standard static maps endpoint may not be stored.
+- So: regenerate only with `https://tiles.stadiamaps.com/static_cacheable`, on a
+  paid plan. If the paid subscription ends, the next release must ship without
+  the bundled images — and so without these previews, which the page and
+  `map_style_preview_assets_test.dart` require.
+- Every request is billed. The script always renders the whole set: one request
+  per style per scene (8 today).
+
+Before each run, re-read the [terms](https://stadiamaps.com/terms-of-service/)
+and update the review date above.
+
+#### Tools and key
+
+`curl` plus libwebp's `cwebp` and `webpinfo`:
+
+- Fedora: `sudo dnf install libwebp-tools`
+- Debian/Ubuntu: `sudo apt install webp`
+- macOS: `brew install webp`
+
+Key: `haven/dart_defines/secrets.json` (see "Build APK"), else
+`$STADIA_API_KEY`. The script never prints the key or a URL that carries it.
+
+#### Checklist: regenerate the previews
+
+1. Re-check the licensing above.
+2. From the repo root:
+
+   ```bash
+   STATIC_MAPS_ENDPOINT=https://tiles.stadiamaps.com/static_cacheable scripts/generate_map_style_previews.sh
+   ```
+
+   The endpoint has no default and must be a `https://tiles.stadiamaps.com/`
+   URL. The committed set is replaced only once every image has rendered at the
+   expected size; an image over 150 KB is reported, not refused.
+3. Compare one image per scene with the live map at the same centre and zoom
+   (`SCENES` in the script): City should show legible street names and POIs,
+   Nature the trails. Stadia burns a short attribution line into each image's
+   bottom-right corner; it does not replace the page's `StaticMapAttribution`
+   (full credits and the ODbL link), which must stay.
+4. `cd haven && flutter test test/pages/settings/`.
+   `map_style_preview_assets_test.dart` fails if a preview the page can show is
+   missing or mis-sized, if the directory holds a file the page cannot show, or
+   if the script's `STYLES`, `SCENES` or height drift from the app.
+5. Commit the changed `.webp` files.
+
+To move a scene, edit its line in `SCENES` (keep its rationale comment true) and
+regenerate. A new scene also needs a `MapStylePreviewScene` value, its
+`_sceneLabel` arm and a translated label (step 5 below).
+
+#### Checklist: add, remove or rename a map style
+
+1. **Check the style fits.** It must be a Stadia raster style on
+   `tiles.stadiamaps.com` that the plan covers and the cacheable endpoint
+   renders under the same slug (the script requests `<endpoint>/<id without
+   stadia_>`). TLS pinning (`lib/src/network/pinned_tile_client.dart`), the tile
+   cache and the catalog's privacy note all assume that host. A style that is
+   not OpenMapTiles-based (Stamen, satellite) needs its own credit list, never
+   `_stadiaBaseAttribution`.
+2. **`lib/src/constants/tiles.dart`**: add a `kStyleId…` constant
+   (`stadia_<slug>`), its `TileProviderConfig` (URL template with `{r}` and
+   `?api_key={api_key}`, `attribution`, `maxNativeZoom`, `requiresApiKey: true`)
+   and append it to `kTileStyleCatalog` (`stadiaAlidadeSmooth` stays first: it
+   is the default). Add the slug to the catalog's privacy note. Ids are
+   persisted: an id that leaves the catalog resets everyone who chose it to
+   Minimal (`_decode` in `lib/src/providers/map_style_provider.dart`), so a
+   rename is a removal plus an addition.
+3. **`lib/src/services/tile_key.dart`**: add the slug to `_kKnownStyles`. A
+   style missing there is never stored in the encrypted tile cache, and no test
+   catches it.
+4. **`lib/src/pages/settings/map_style_settings_page.dart`**: add an `_options`
+   entry (`MapStyleSelection.style(kStyleId…)`, a Lucide icon) and its
+   title/subtitle resolvers. Copy and icons stay cartographic, never privacy
+   vocabulary (the page header says why). `MapStyleSelection.resolve` needs no
+   change for a fixed style; it knows only Minimal's light/dark pair
+   (`stadiaAlidadeSmooth` / `stadiaAlidadeSmoothDark`), so a style with its own
+   dark twin needs a new selection kind there, two configs and four images.
+5. **l10n**: add `mapStyle<Name>Title` and `mapStyle<Name>Subtitle`, each with
+   an `@` description, to `lib/l10n/app_en.arb`; translate them into all 12
+   other ARB files, one AI agent per language, each checked by a separate
+   reviewer agent (CLAUDE.md, "Localization"); then run `flutter gen-l10n`
+   (warning-free) and `bash scripts/ci/check_l10n_parity.sh`, and commit the
+   regenerated `app_localizations*.dart`.
+6. **`scripts/generate_map_style_previews.sh`**: add the id to `STYLES`, in
+   catalog order.
+7. **Regenerate** (checklist above) and commit the new pair.
+8. **Tests**: update `test/constants/tiles_test.dart` (the catalog's ordered id
+   list; the shared-invariants list), `test/pages/settings/map_style_settings_page_test.dart`
+   (row count, titles and subtitles, `mapStyleLabel`, tap-to-preview) and
+   `test/services/tile_key_test.dart` (the slug parses).
+   `map_style_preview_assets_test.dart` and `test/providers/map_style_provider_test.dart`
+   follow the catalog on their own.
+9. Run `flutter analyze`, `flutter test test/constants/ test/pages/settings/
+   test/providers/ test/services/tile_key_test.dart` and
+   `bash scripts/ci/check_tile_provider.sh`.
+
+To remove a style, undo steps 2–6 and 8: delete its two images (the assets test
+fails on a stray file), its `STYLES` entry, its slug in `_kKnownStyles` and its
+keys in all 13 ARB files. Removing one makes no Stadia request.
 
 ### Install APK Manually
 
