@@ -865,9 +865,10 @@ void main() {
     _timedTest(
         'nothing is re-subscribed while suspended, nor by the resume probe',
         (async) {
-      // The invalidate cancels the subscription at once and rebuilds it at a
-      // frame, and a paused app renders none: on iOS that withdraws the
-      // session keeping the process alive until the next resume.
+      // A re-subscribe cancels the running subscription, and the stream that
+      // replaces it starts no platform session while the app is not
+      // foregrounded: on iOS that withdraws the session keeping the process
+      // alive until the next resume.
       //
       // `suspend()` cancels the timers, so the only verdict that can land
       // while suspended is one already in flight. Hold it there.
@@ -1378,9 +1379,9 @@ void main() {
 
     _timedTest('suspend() stops probing until resume() lets it back', (async) {
       // The app is paused: nobody can see the banner, and a recovery edge
-      // fired while backgrounded would invalidate `locationStreamProvider` —
-      // which cancels the running platform subscription NOW and can only
-      // rebuild it at the next frame, i.e. at resume.
+      // fired while backgrounded would re-subscribe `locationStreamProvider` —
+      // which cancels the running platform subscription NOW, and the stream
+      // that replaces it starts no platform session until resume.
       final container = harness();
       service.serviceEnabled = false;
       _settle(async);
@@ -1490,9 +1491,10 @@ void main() {
 
     _timedTest('a recovery edge while suspended does not touch the stream',
         (async) {
-      // `_apply`'s recovery edge invalidates `locationStreamProvider`. While
-      // the app is paused that cancels the running subscription synchronously
-      // and defers the rebuild to a frame — so on iOS it would withdraw the
+      // `_apply`'s recovery edge re-subscribes `locationStreamProvider`. While
+      // the app is paused that cancels the running subscription, and the
+      // stream that replaces it starts no platform session — so on iOS it
+      // would withdraw the
       // background session keeping the process executable and restore it only
       // at the next resume, and with sharing off it would also throw away the
       // cached fix the publish path serves from.
