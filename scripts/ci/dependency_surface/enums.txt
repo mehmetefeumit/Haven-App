@@ -652,6 +652,45 @@ nostr_relay_pool::relay::RelayNotification
     Authenticated
     AuthenticationFailed
     Shutdown
+nostr_relay_pool::relay::error::Error
+    Transport
+    SharedState
+    Policy
+    MessageHandle
+    Event
+    EventBuilder
+    Hex
+    Negentropy
+    Database
+    Timeout
+    NotRepliedToPing
+    CantParsePong
+    PongNotMatch
+    CantSendChannelMessage
+    NotReady
+    NotConnected
+    Sleeping
+    SubscriptionNotFound
+    EventNotMatchFilter
+    TooManyEvents
+    Banned
+    ConnectionRejected
+    TerminationRequest
+    ReceivedShutdown
+    RelayMessage
+    BatchMessagesEmpty
+    ReadDisabled
+    WriteDisabled
+    NegentropyNotSupported
+    UnknownNegentropyError
+    RelayMessageTooLarge
+    EventTooLarge
+    TooManyTags
+    EventExpired
+    Handler
+    MaximumLatencyExceeded
+    AuthenticationFailed
+    PrematureExit
 nostr_relay_pool::relay::options::ReqExitPolicy
     ExitOnEOSE
     WaitForEvents
