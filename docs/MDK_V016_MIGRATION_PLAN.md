@@ -17,7 +17,7 @@ shipped behaviour until the stage that delivers it is marked done below.
 
 | Stage | State |
 |---|---|
-| 0 — safety net | in progress: steps 2 (timing-dependent tests) and 3 (exhaustive decisions over MDK enums) done; steps 4–10 not started |
+| 0 — safety net | in progress: steps 2 (timing-dependent tests) and 3 (exhaustive decisions over MDK enums) done; step 4's import convention done, its remaining items and step 7 (soak-rig seams) in review; steps 5, 6, 8, 9 and 10 not started |
 | 1 — dependency move | not started |
 | 2 — onto the runtime | not started; needs owner rulings R0, C1, C2 first |
 
