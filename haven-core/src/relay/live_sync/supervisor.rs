@@ -71,7 +71,10 @@ use super::repair::{refuses_read, ClosedKind, RepairKey, RepairQueue};
 use super::router::{Router, SubCtx};
 
 /// One routed relay event handed from the receiver to the worker.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is hand-written: the relay, the subscription id and the event are
+/// identifiers (Security Rule 15).
+#[derive(Clone)]
 pub struct RawEvent {
     /// Relay the event arrived on.
     pub relay_url: RelayUrl,
@@ -81,6 +84,17 @@ pub struct RawEvent {
     pub event: Event,
     /// The pool whose socket carried it, named by the plane that pool serves.
     pub pool: PlaneKind,
+}
+
+impl std::fmt::Debug for RawEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RawEvent")
+            .field("relay_url", &"<redacted>")
+            .field("subscription_id", &"<redacted>")
+            .field("event", &"<redacted>")
+            .field("pool", &self.pool)
+            .finish()
+    }
 }
 
 /// What the receiver hands the worker: a delivered event, a relay's
@@ -119,7 +133,8 @@ pub struct RawEvent {
 /// require an ack that can be dropped silently — and a pause whose ack is lost
 /// blocks the lifecycle lock until its bound elapses. Nothing in the receive
 /// path clones a signal, so the capability is simply not offered.
-#[derive(Debug)]
+///
+/// `Debug` is hand-written, as [`RawEvent`]'s is.
 pub enum RawSignal {
     /// A first-seen event on a live subscription.
     Event(Box<RawEvent>),
@@ -192,6 +207,39 @@ pub enum RawSignal {
         /// stale) and any suppression applied.
         ack: oneshot::Sender<()>,
     },
+}
+
+impl std::fmt::Debug for RawSignal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Event(event) => f.debug_tuple("Event").field(event).finish(),
+            Self::EndOfStoredEvents { pool, .. } => f
+                .debug_struct("EndOfStoredEvents")
+                .field("relay_url", &"<redacted>")
+                .field("subscription_id", &"<redacted>")
+                .field("pool", pool)
+                .finish(),
+            Self::SubscriptionClosed {
+                kind,
+                refuses_read,
+                pool,
+                ..
+            } => f
+                .debug_struct("SubscriptionClosed")
+                .field("relay_url", &"<redacted>")
+                .field("subscription_id", &"<redacted>")
+                .field("kind", kind)
+                .field("refuses_read", refuses_read)
+                .field("pool", pool)
+                .finish(),
+            Self::Authenticated { .. } => f
+                .debug_struct("Authenticated")
+                .field("relay_url", &"<redacted>")
+                .field("subscription_id", &"<redacted>")
+                .finish(),
+            Self::Pause { .. } => f.debug_struct("Pause").finish_non_exhaustive(),
+        }
+    }
 }
 
 /// What the receiver loop should do with one pool notification.
@@ -590,7 +638,7 @@ pub async fn run_receiver(
 /// Pure over the relay's own notifications, which carry its messages and its
 /// NIP-42 verdicts in the one order the pool saw them; the pool's notification
 /// stream carries no verdict at all.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(crate) struct InboxAuthWatch {
     auth: AuthTracker,
     /// The REQ the relay refused, on this connection, before it authenticated.
@@ -1221,6 +1269,68 @@ mod tests {
     }
 
     const WRAPPED: &str = "ERROR: auth-required: requested filter requires authentication";
+
+    /// Security Rule 15: no signal names its relay, its subscription or its
+    /// event.
+    #[test]
+    fn raw_event_and_raw_signal_debug_redacts_relay_sub_id_and_event() {
+        let relay = "wss://planted-relay-host.example.com";
+        let sub = "planted_subscription_9f3a";
+        let h = "ab".repeat(32);
+        let event = commit_event_with_h(&h);
+        let (id, author) = (event.id.to_hex(), event.pubkey.to_hex());
+        let raw = || RawEvent {
+            relay_url: RelayUrl::parse(relay).unwrap(),
+            subscription_id: SubscriptionId::new(sub),
+            event: event.clone(),
+            pool: PlaneKind::Group,
+        };
+        let needles = &[relay, sub, &id, &author, &h, "planted-relay-host"];
+        crate::assert_debug_redacted!(raw(), "RawEvent", needles);
+        let (ack, _) = oneshot::channel();
+        for (signal, marker) in [
+            (RawSignal::Event(Box::new(raw())), "RawEvent"),
+            (
+                RawSignal::EndOfStoredEvents {
+                    relay_url: RelayUrl::parse(relay).unwrap(),
+                    subscription_id: SubscriptionId::new(sub),
+                    pool: PlaneKind::Inbox,
+                },
+                "EndOfStoredEvents",
+            ),
+            (
+                RawSignal::SubscriptionClosed {
+                    relay_url: RelayUrl::parse(relay).unwrap(),
+                    subscription_id: SubscriptionId::new(sub),
+                    kind: ClosedKind::ReadGated,
+                    refuses_read: true,
+                    pool: PlaneKind::Inbox,
+                },
+                "SubscriptionClosed",
+            ),
+            (
+                RawSignal::Authenticated {
+                    relay_url: RelayUrl::parse(relay).unwrap(),
+                    subscription_id: SubscriptionId::new(sub),
+                },
+                "Authenticated",
+            ),
+            (
+                RawSignal::Pause {
+                    registrations: 7_654_321,
+                    ack,
+                },
+                "Pause",
+            ),
+        ] {
+            crate::assert_debug_redacted!(
+                signal,
+                "RawSignal",
+                marker = marker,
+                &[needles.as_slice(), &["7654321"]].concat()
+            );
+        }
+    }
 
     /// A REQ the relay refused before the connection authenticated is asked
     /// again once, at the authentication — and a refusal after it is the

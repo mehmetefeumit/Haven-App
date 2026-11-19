@@ -222,6 +222,15 @@ const KEY_PACKAGE_REFRESH_LEAD_SECS: u64 = 7_261_200 / 4;
 /// ends it sooner.
 pub const KEY_PACKAGE_REPLACEMENT_GRACE_SECS: u64 = 86_400;
 
+/// The `replaced_at` of a retained `KeyPackage` a Welcome consumed: a grace
+/// that ended a day after 1970 is over at every clock reading, so the next
+/// sweep deletes it.
+const CONSUMED_RETAINED_AT: cgka_traits::transport::Timestamp =
+    cgka_traits::transport::Timestamp(0);
+
+/// MDK's consumption record: the ref a Welcome consumed, and when.
+type Consumption = (Option<Vec<u8>>, Option<cgka_traits::transport::Timestamp>);
+
 /// The `KeyPackage` this device tracks: Haven's view of MDK's durable
 /// lifecycle record (`KeyPackageLifecycleState`, v0.10.4
 /// `traits/src/maintenance.rs:267-302`).
@@ -11933,11 +11942,13 @@ impl SessionManager {
     pub async fn accept_welcome(&self, gift_wrap: &Event) -> Result<WelcomeAcceptance> {
         let msg = Self::event_to_transport_message(gift_wrap)?;
         let mut session = self.engine().await?;
+        let consumption = Self::mark_consumed_retained(&session, (None, None))?;
         let before = (
             session.outbound_fanouts().unwrap_or_default(),
             session.transport_fanouts().unwrap_or_default(),
         );
         let accepted = Box::pin(session.ingest(msg)).await;
+        Self::mark_consumed_retained_after_join(&session, consumption);
         if let Ok(ingest) = &accepted {
             self.note_effects(&session, ingest);
             for event in &ingest.effects.events {
@@ -12060,11 +12071,13 @@ impl SessionManager {
         token: &[u8],
     ) -> Result<RejoinConfirmation> {
         let mut session = self.engine().await?;
+        let consumption = Self::mark_consumed_retained(&session, (None, None))?;
         let before = (
             session.outbound_fanouts().unwrap_or_default(),
             session.transport_fanouts().unwrap_or_default(),
         );
         let confirmed = Box::pin(session.confirm_group_rejoin(&offer.welcome_id, token)).await;
+        Self::mark_consumed_retained_after_join(&session, consumption);
         let answer = match confirmed {
             Ok(group_id) => {
                 self.drop_rows_of_replaced_copy(&session, &group_id, &before.0, &before.1);
@@ -12389,7 +12402,10 @@ impl SessionManager {
         }
         let (spent, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut state.retained_private_material)
             .into_iter()
-            .partition(|kept| consumed.as_ref() == Some(&kept.key_package_ref));
+            .partition(|kept| {
+                kept.replaced_at == CONSUMED_RETAINED_AT
+                    || consumed.as_ref() == Some(&kept.key_package_ref)
+            });
         state.retained_private_material = kept;
         superseded.extend(
             spent
@@ -12429,6 +12445,48 @@ impl SessionManager {
             .map_err(map_mls_err)?;
         drop(session);
         Ok(true)
+    }
+
+    /// Moves the consumption MDK's record names onto the retained package it
+    /// names, and writes `prior` back as the record; returns the record as
+    /// it then stands.
+    ///
+    /// MDK keeps one consumption record and every Welcome join overwrites it
+    /// (`cgka-engine/src/group_lifecycle.rs:1463-1470`), so a retained
+    /// package's consumption would be lost to the next join and its init key
+    /// kept for the rest of its grace (`docs/MDK_UPSTREAM_TRACKER.md`
+    /// T-KP-CONSUMED-SLOT). Called in the join's hold, before it and after
+    /// it with what was read before, so a join that consumed a retained
+    /// package does not erase the record of the current one. Marked
+    /// [`CONSUMED_RETAINED_AT`], the package stays until the next sweep: a
+    /// second held invitation built on it still opens until then.
+    fn mark_consumed_retained(
+        session: &AccountDeviceSession,
+        prior: Consumption,
+    ) -> Result<Consumption> {
+        let Some(mut state) = session.key_package_lifecycle().map_err(map_mls_err)? else {
+            return Ok((None, None));
+        };
+        let Some(kept) = state.retained_private_material.iter_mut().find(|kept| {
+            state.last_consumed_key_package_ref.as_ref() == Some(&kept.key_package_ref)
+        }) else {
+            return Ok((state.last_consumed_key_package_ref, state.last_consumed_at));
+        };
+        kept.replaced_at = CONSUMED_RETAINED_AT;
+        (state.last_consumed_key_package_ref, state.last_consumed_at) = prior.clone();
+        session
+            .put_key_package_lifecycle(&state)
+            .map_err(map_mls_err)?;
+        Ok(prior)
+    }
+
+    /// [`Self::mark_consumed_retained`] after a join. The join stands either
+    /// way: a write that fails leaves MDK's record naming the package, which
+    /// the next sweep or join acts on.
+    fn mark_consumed_retained_after_join(session: &AccountDeviceSession, before: Consumption) {
+        if Self::mark_consumed_retained(session, before).is_err() {
+            log::warn!("[KeyPackage] a consumed retained package is left to the next sweep");
+        }
     }
 
     /// Records `event` — already acknowledged by a relay — as the current

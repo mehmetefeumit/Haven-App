@@ -4277,7 +4277,11 @@ Security Rule 5 for this material — no init key outlives its use:
   at the next sweep or promotion, with the consumption record when it names
   that package
   (`a_welcome_built_on_the_superseded_package_joins_within_the_grace_and_the_next_sweep_deletes_it`,
-  `a_grace_sweep_keeps_the_current_packages_consumption_record`). Accepted
+  `a_grace_sweep_keeps_the_current_packages_consumption_record`), whatever
+  joins come between: MDK records only the last Welcome's consumption, so
+  every join moves a retained package's onto that package, before the join
+  and after it, and leaves the record of the current one standing
+  (`docs/MDK_UPSTREAM_TRACKER.md` `T-KP-CONSUMED-SLOT`). Accepted
   residual: a second held invitation built on a retained package another
   Welcome consumed cannot be opened after that sweep (MDK does the same).
 - **Expired ⇒ deleted.** Whatever is still held at `Lifetime.not_after` is
