@@ -176,16 +176,15 @@
 /// the background pass awaits the gap AFTER the previous publish returns, so
 /// its span is `Σ (dur_i + gap_i+1)` — strictly additive. One publish is priced
 /// at its anonymous send's 10 s (`kBurstPublishBudget` adds the 22 s
-/// authenticated resend only a relay that answers `auth-required:` draws,
-/// which no vetted location relay does). At `kMaxCirclesPerAccount` — the largest
-
+/// authenticated resend only a relay that answers `auth-required:` draws, which
+/// no vetted location relay does). At `kMaxCirclesPerAccount` — the largest
 /// burst a bounded roster can produce — the realized span therefore reaches
 /// ≈90 s (foreground shape) or ≈120 s (background), and ≈100 s / ≈130 s at the
 /// burst cap one circle further, against the 30 s `kPublishStaggerMaxSpread`
 /// the SCHEDULE promises. Unlike the two head terms above it lands TWICE: once
-/// in a deferred circle's realized gap,
-/// and once in the duration-shaped circle-count estimator a relay reads off the
-/// burst's connect-to-disconnect span (`PUB-COALESCE`).
+/// in a deferred circle's realized gap, and once in the duration-shaped
+/// circle-count estimator a relay reads off the burst's connect-to-disconnect
+/// span (`PUB-COALESCE`).
 ///
 /// The pre-Dark-Matter per-send TTL jitter is gone: the engine derives
 /// the expiration deterministically, and the wrapped event is signed by

@@ -172,7 +172,6 @@ const int kBurstPublishSecs = 32;
 /// two `LOCATION_ACK_WINDOW`s and `AUTH_WAIT`) — Rust's `LOCATION_SEND_MS`.
 ///
 /// The WHOLE ladder, not one attempt of it — `LOCATION_PUBLISH_ATTEMPTS` is
-
 /// exactly 1 (`haven-core/src/relay/manager.rs`), because the next tick
 /// supersedes a location that missed. The 3-attempt ≈49 s ladder
 /// ([kCommitLadderSecs]) belongs to the COMMIT path, and nothing on the

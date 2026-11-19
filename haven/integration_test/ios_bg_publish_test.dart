@@ -562,7 +562,6 @@ const Duration _streamFreshnessWindow = Duration(seconds: 60);
 /// The coordinator's budgets already price the publish itself
 /// (`kBurstPublishBudget` is `CONNECTION_TIMEOUT` + `LOCATION_ACK_WINDOW`, and
 /// the one authenticated resend a relay that asked for it is given);
-
 /// what they do not price is strfry storing the event and fanning it out to a
 /// second subscriber, plus the event-loop hops on this side. Both are
 /// sub-second against a localhost relay. It is deliberately NOT sized from CI
