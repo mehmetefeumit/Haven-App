@@ -55,6 +55,7 @@ pub mod s23_chained_backlog;
 pub mod s24_routing_collision;
 pub mod s25_silent_relays;
 pub mod s26_identity_planes;
+pub mod s27_gated_inbox_welcome;
 
 use std::fmt;
 use std::time::Duration;
@@ -391,11 +392,15 @@ pub enum Scenario {
     /// and read back by every peer, every key package looked up where it was
     /// published: the identity planes, graded by O7.
     IdentityPlanes,
+    /// **S27** — a Welcome to an invitee whose first inbox relay serves gift
+    /// wraps only to an authenticated reader: read from the second, joined
+    /// live; and with every inbox relay gated, refused and never joined.
+    GatedInboxWelcome,
 }
 
 impl Scenario {
     /// Every scenario this crate runs.
-    pub const REGISTRY: [Self; 24] = [
+    pub const REGISTRY: [Self; 25] = [
         Self::RelayOutage,
         Self::ReceiverPartition,
         Self::LostCommit,
@@ -420,6 +425,7 @@ impl Scenario {
         Self::RoutingCollision,
         Self::SilentRelays,
         Self::IdentityPlanes,
+        Self::GatedInboxWelcome,
     ];
 
     /// The id the profiles, the timeline and `--list-scenarios` spell.
@@ -450,6 +456,7 @@ impl Scenario {
             Self::RoutingCollision => "S24",
             Self::SilentRelays => "S25",
             Self::IdentityPlanes => "S26",
+            Self::GatedInboxWelcome => "S27",
         }
     }
 
@@ -481,6 +488,7 @@ impl Scenario {
             Self::RoutingCollision => "ROUTING COLLISION ON DISTINCT RELAYS",
             Self::SilentRelays => "DEAD AND EOSE-SILENT RELAYS",
             Self::IdentityPlanes => "IDENTITY PLANES UNDER FAULTS",
+            Self::GatedInboxWelcome => "WELCOME PAST A GATED INBOX RELAY",
         }
     }
 
@@ -512,6 +520,7 @@ impl Scenario {
             Self::RoutingCollision => &s24_routing_collision::ARMS,
             Self::SilentRelays => &s25_silent_relays::ARMS,
             Self::IdentityPlanes => &s26_identity_planes::ARMS,
+            Self::GatedInboxWelcome => &s27_gated_inbox_welcome::ARMS,
         }
     }
 
@@ -596,6 +605,9 @@ impl Scenario {
             }
             Self::SilentRelays => Box::pin(s25_silent_relays::run(world, arm, tick)).await?,
             Self::IdentityPlanes => Box::pin(s26_identity_planes::run(world, arm, tick)).await?,
+            Self::GatedInboxWelcome => {
+                Box::pin(s27_gated_inbox_welcome::run(world, arm, tick)).await?
+            }
         };
         // Every arm, once, over everything its world sent: O7's subject is
         // the whole wire, so no arm grades it and none is exempt from it.

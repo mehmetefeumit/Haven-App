@@ -254,10 +254,23 @@ fn lists<R: RelayPlane, T: TimelineSink, L: LogDrain>(
         .get(1)
         .or_else(|| account.first())
         .and_then(|plane| table.resolve(plane.url()));
-    for (_, pubkey) in senders {
+    for (tag, pubkey) in senders {
         table.add_account(pubkey);
-        if let Some(inbox) = inbox {
-            table.add(List::OwnInbox(pubkey), inbox, 0);
+        // The device's inbox list as it stands: the first account plane, or
+        // the list an arm gave it (S27), held from the start — a device opens
+        // no inbox read on a plane before it lists it.
+        let own_inbox: Vec<RelayIx> = world.device(*tag).map_or_else(
+            |_| inbox.into_iter().collect(),
+            |device| {
+                device
+                    .stored_inbox()
+                    .iter()
+                    .filter_map(|url| table.resolve(url))
+                    .collect()
+            },
+        );
+        for ix in own_inbox {
+            table.add(List::OwnInbox(pubkey), ix, 0);
         }
         if let Some(key_package) = key_package {
             table.add(List::OwnKeyPackage(pubkey), key_package, 0);

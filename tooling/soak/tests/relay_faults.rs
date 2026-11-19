@@ -3654,3 +3654,72 @@ async fn a_relay_refusing_negentropy_forwards_nothing_and_answers_unknown_cmd() 
         "the healed opening is counted"
     );
 }
+
+/// `AuthGatedReads` answers as strfry's default `restrictedReadKinds` answers a
+/// reader that has not authenticated, which Haven never is: a gift wrap is
+/// taken, a read of gift wraps alone is refused with strfry's own words and
+/// typed `refused` by the product's read, and a read that also names another
+/// kind is served with the gift wrap withheld.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_gated_plane_takes_a_gift_wrap_and_serves_it_to_no_unauthenticated_reader() {
+    install_process_globals().expect("the ws:// loopback opt-in");
+    let mut plane = plane().await;
+    plane
+        .apply(Fault::AuthGatedReads)
+        .await
+        .expect("the fault applies");
+    let client = connected_client(&plane).await;
+    let wrap = EventBuilder::new(Kind::GiftWrap, "c2VhbGVk")
+        .tag(Tag::public_key(Keys::generate().public_key()))
+        .sign_with_keys(&Keys::generate())
+        .expect("a gift wrap signs");
+    let note = an_event("beside the gift wrap");
+    for event in [&wrap, &note] {
+        publish(&client, &plane, event).await;
+        assert!(
+            acked_within(&plane, &event.id, WIRE_BOUND).await,
+            "a gated plane takes every write"
+        );
+    }
+
+    let reader = haven_core::relay::RelayManager::new();
+    let url = vec![plane.url().to_owned()];
+    let gated = reader
+        .fetch_events_per_relay(Filter::new().kind(Kind::GiftWrap), &url)
+        .await
+        .expect("the read runs");
+    let ledger = plane.ledger().clone();
+    assert!(
+        gated.len() == 1 && gated[0].refused && !gated[0].drained && gated[0].events.is_empty(),
+        "a read of gift wraps alone is typed refused, and serves nothing"
+    );
+    assert!(
+        ledger.gated_refusals(None) == 1,
+        "the gate's firing is ledgered against the endpoint it answered on"
+    );
+    assert!(
+        ledger.closed_messages().contains(
+            &"ERROR: auth-required: requested filter requires authentication".to_string()
+        ),
+        "the refusal is strfry's text"
+    );
+
+    let mixed = reader
+        .fetch_events_per_relay(Filter::new().kinds([Kind::GiftWrap, Kind::TextNote]), &url)
+        .await
+        .expect("the read runs");
+    reader.shutdown().await;
+    assert!(
+        mixed.len() == 1 && !mixed[0].refused && mixed[0].drained,
+        "a read naming another kind is served to its end"
+    );
+    let served: Vec<EventId> = mixed[0].events.iter().map(|event| event.id).collect();
+    assert!(
+        served == vec![note.id],
+        "the note is served and the gift wrap withheld"
+    );
+    assert!(
+        ledger.gated_refusals(None) == 1,
+        "only the read of gift wraps alone was refused"
+    );
+}

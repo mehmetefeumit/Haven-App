@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Instant;
 
-use nostr::{ClientMessage, Event, EventId, JsonUtil, RelayMessage, SubscriptionId};
+use nostr::{ClientMessage, Event, EventId, Filter, JsonUtil, Kind, RelayMessage, SubscriptionId};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
@@ -175,13 +175,104 @@ pub struct FaultState {
     /// Whether every `NEG-OPEN` is answered as a relay without NIP-77 answers
     /// it, and never passed on.
     pub refuse_negentropy: bool,
+    /// Whether kind-1059 reads are refused to a client that has not
+    /// authenticated, and gift wraps withheld from every other answer.
+    pub gate_reads: bool,
 }
 
 impl FaultState {
     /// Whether an `EVENT` frame of `class` is withheld by this state.
     fn drops(self, class: Option<DropClass>) -> bool {
-        self.drop_class.is_some() && self.drop_class == class
+        (self.drop_class.is_some() && self.drop_class == class)
+            || (self.gate_reads && class == Some(DropClass::GiftWrap))
     }
+}
+
+/// strfry's refusal of a read only an authenticated client may make, with the
+/// `ERROR: ` its `sendClosedError` puts before every `CLOSED` reason.
+pub const GATED_READ: &str = "auth-required: requested filter requires authentication";
+
+/// strfry's `isFilterFullyRestricted` for a gate on kind 1059: the filter
+/// names kinds, every one of them 1059.
+fn gift_wraps_only(filter: &Filter) -> bool {
+    filter
+        .kinds
+        .as_ref()
+        .is_some_and(|kinds| kinds.iter().all(|kind| *kind == Kind::GiftWrap))
+}
+
+/// What a gate on kind 1059 answers in place of the relay, after its `AUTH`
+/// challenge: strfry refuses a `REQ` whose every filter names only gift
+/// wraps, a `COUNT` naming them and a `NEG-OPEN` naming only them. `None` for
+/// a frame it hands on.
+fn gated_refusal(message: &ClientMessage<'_>) -> Option<RelayMessage<'static>> {
+    // strfry's `sendClosedError` puts `ERROR: ` before every `CLOSED` reason.
+    let closed = |id: &SubscriptionId| RelayMessage::Closed {
+        subscription_id: Cow::Owned(id.clone()),
+        message: Cow::Owned(format!("ERROR: {GATED_READ}")),
+    };
+    match message {
+        ClientMessage::Req {
+            subscription_id,
+            filters,
+        } if !filters.is_empty() && filters.iter().all(|filter| gift_wraps_only(filter)) => {
+            Some(closed(subscription_id))
+        }
+        ClientMessage::Count {
+            subscription_id,
+            filter,
+        } if filter
+            .kinds
+            .as_ref()
+            .is_some_and(|kinds| kinds.contains(&Kind::GiftWrap)) =>
+        {
+            Some(closed(subscription_id))
+        }
+        ClientMessage::NegOpen {
+            subscription_id,
+            filter,
+            ..
+        } if gift_wraps_only(filter) => Some(RelayMessage::NegErr {
+            subscription_id: Cow::Owned(subscription_id.clone().into_owned()),
+            message: Cow::Borrowed(GATED_READ),
+        }),
+        _ => None,
+    }
+}
+
+/// The gate's answer to a read it refuses, in place of the relay, which never
+/// sees it: an `AUTH` challenge, then the refusal, counted as the gate firing.
+/// `None` for a frame the gate hands on, and under no gate.
+async fn refuse_gated(
+    message: &ClientMessage<'_>,
+    faults: FaultState,
+    device: Option<DeviceTag>,
+    ledger: &Ledger,
+    forged: &mpsc::Sender<String>,
+) -> Option<bool> {
+    let refusal = faults
+        .gate_reads
+        .then(|| gated_refusal(message))
+        .flatten()?;
+    if let ClientMessage::Req {
+        subscription_id,
+        filters,
+    } = message
+    {
+        let filters = filters
+            .iter()
+            .map(|filter| filter.as_ref().clone())
+            .collect();
+        ledger.note_req(subscription_id.as_ref().clone(), filters);
+    }
+    ledger.note_gated_refusal(device);
+    let challenge = RelayMessage::Auth {
+        challenge: Cow::Borrowed("challenge-soak"),
+    };
+    Some(
+        forged.send(challenge.as_json()).await.is_ok()
+            && forged.send(refusal.as_json()).await.is_ok(),
+    )
 }
 
 /// What a plane under [`crate::nemesis::Fault::RefusesNegentropy`] answers a
@@ -657,6 +748,7 @@ async fn refuse_negentropy(
         .is_ok()
 }
 
+#[allow(clippy::too_many_lines)]
 async fn forward_from_client(
     frame: &Frame,
     to_relay: &mut OwnedWriteHalf,
@@ -676,6 +768,9 @@ async fn forward_from_client(
     if frame.is_text() {
         if let Ok(message) = ClientMessage::from_json(frame.payload().as_ref()) {
             let faults = *state.read().unwrap_or_else(PoisonError::into_inner);
+            if let Some(sent) = refuse_gated(&message, faults, device, ledger, forged).await {
+                return sent;
+            }
             match message {
                 ClientMessage::Event(event) => {
                     ledger.note_published(event.id);

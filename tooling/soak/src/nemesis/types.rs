@@ -299,6 +299,16 @@ pub enum Fault {
     /// and never reaches the relay: a relay that does not speak NIP-77, as
     /// strfry with negentropy off. The in-process relay has no switch for it.
     RefusesNegentropy,
+    /// Kind-1059 reads are served only to a client that has authenticated
+    /// (NIP-42), as strfry's default `restrictedReadKinds` does and
+    /// `relay.damus.io` runs it — to a client that never authenticates, as
+    /// Haven never does. A `REQ` whose every filter names only kind 1059 and a
+    /// `NEG-OPEN` whose filter does are answered `AUTH` then `CLOSED`
+    /// (`NEG-ERR`) and never reach the relay, a `COUNT` naming the kind too,
+    /// and a gift wrap the relay sends for any other subscription is withheld.
+    /// Writes go through: the relay takes the Welcome and never serves it.
+    /// Arm-applied only.
+    AuthGatedReads,
     /// Everything above is undone.
     Heal,
 }
@@ -327,6 +337,7 @@ impl Fault {
             Self::Unanswering => "unanswering",
             Self::WithholdEose => "withhold-eose",
             Self::RefusesNegentropy => "refuses-negentropy",
+            Self::AuthGatedReads => "auth-gated-reads",
             Self::Heal => "heal",
         }
     }
@@ -352,6 +363,7 @@ impl Fault {
             Self::Unanswering => 16,
             Self::WithholdEose => 17,
             Self::RefusesNegentropy => 18,
+            Self::AuthGatedReads => 19,
         };
         buf.push(code);
         match self {

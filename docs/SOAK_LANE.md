@@ -47,9 +47,11 @@ Five more, specific to this tier and listed here so nobody has to infer them:
 
 * **The KeyPackage plane is DISCOVERY-free.** A world's members are still
   invited from key packages minted in process and handed to `create_circle` as
-  values, and no NIP-65 (kind 10002) list is read. One lookup exists: S26's
+  values, and no NIP-65 (kind 10002) list is read. Two lookups exist: S26's
   invite lookup of each member's own key package on the member's own
-  key-package relay, which is what that relay holds — the discovery plane a
+  key-package relay, and S27's, the same lookup followed by a read of the
+  inbox list (kind 10050) the invitee published on its own account relay —
+  what those relays hold. The discovery plane a
   lookup falls back to is a loopback port that refuses every dial, held for
   the process's life (`rig/world.rs` `install_process_globals`), so no soak
   world can reach a public indexer.
@@ -186,8 +188,8 @@ the next foreground sweep makes.
 
 ## Which scenarios have lane execution, and where
 
-Twenty-four scenarios exist: **S01, S02, S03, S04, S05, S06, S08, S09, S10, S11,
-S12, S13, S14, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26**.
+Twenty-five scenarios exist: **S01, S02, S03, S04, S05, S06, S08, S09, S10, S11,
+S12, S13, S14, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27**.
 
 * `pr` (the profile `ci.yml` calls on every push) runs **S01's single-relay
   outage arm, S06, S11 and S13**.
@@ -205,8 +207,8 @@ S12, S13, S14, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26**.
   run under `scripts/run_soak_local.sh core --profile weekly` alone — and S05
   `kill-receive-auto-commit`, swept since MDK v0.10.4 and held out of the
   nightly until the owner returns it, and S25's `dead-and-silent-relays`,
-  swept by the crate's own tests and out of the nightly by price. None has
-  scheduled execution until then.
+  swept by the crate's own tests and out of the nightly by price, and S27's
+  `gated-inbox-welcome`, the same. None has scheduled execution until then.
 
 A green `soak-core-pr` therefore says nothing about a receiver partitioned
 behind a second publisher (S02), a commit a relay forgot before a paused member
@@ -558,6 +560,46 @@ relays (three to include an answering one, which the crate's own sweep and
 `weekly` give it), and it is `weekly`-only: its derived deadline pays the
 pool's reconnect ladder and the lookback, which the nightly's slack does not
 hold.
+
+### S27: a Welcome to an inbox whose first relay will not serve it
+
+`relay.damus.io` takes a gift wrap from anybody and serves kind 1059 only to a
+reader that has authenticated (NIP-42) — strfry's default
+`restrictedReadKinds` — and Haven never authenticates (Security Rule 16). A
+Welcome sent to the first inbox relay alone, when that relay is the gated one,
+is stored and never read. S27's `gated-inbox-welcome` plays it with an
+arm-applied proxy fault, `AuthGatedReads` (never in the random generator): a
+`REQ` whose every filter names only kind 1059 and such a `NEG-OPEN` are answered
+`AUTH` then strfry's `CLOSED "ERROR: auth-required: …"` (`NEG-ERR`) and never
+reach the relay, a `COUNT` naming the kind too, a gift wrap is withheld from
+every other answer, and writes go through. The rule matches haven-core's
+`RecordingFront::start_gating` and the E2E proxy's `gate-read=1059` route.
+
+The nightly world's two account relays become the invitee's inbox list, the
+first gated; the invitee publishes the list and reopens its engine's inbox
+REQs on it. The admin asks the product for the invitee's key package on its
+key-package relay (`lookup_key_package_on`), reads the kind-10050 the invitee
+published, and founds a circle through its driver with THAT list — never
+`stored_inbox()`. The invitee takes the Welcome the app's way: its live inbox
+plane reads it from the second relay, the bus hands up the gift wrap, and the
+invitee processes and accepts it — never through `driver.unrecorded()`. Then
+both relays are gated and the admin invites again: the product's per-relay read
+is typed `refused` on both with nothing served, both relays acknowledged the
+Welcome, neither delivered it, and the bus never handed it up — anchored on
+what the planes recorded, never on elapsed time.
+
+The floor: two gates, a delivery, and five canaries (the gate fired on the
+invitee's own inbox REQ; the gated relay acknowledged the first Welcome; the
+invitee joined live; both reads refused; the second Welcome held and never
+delivered). `ungated_control` runs the arm with no gate: the gate never fires
+and the second Welcome is delivered, so the arm is rc 3. Both run on every
+push as `tests/oracles.rs` (`s27_gated_inbox_welcome_holds`,
+`s27_an_inbox_nothing_gates_proves_nothing`, the `soak-tooling` job). The arm
+is `weekly`-only, by price: priced in the nightly it is 6 246.75 s of 6 240,
+and the next whole minute would move the nightly job cap to 157 minutes, onto
+`e2e-nightly.yml`'s 03:00 start (`soak-nightly.yml`). Returning it to the
+nightly is the owner's call. O7 judges an invitee's inbox by the list the
+device holds, which an arm may widen (`oracle/planes.rs`).
 
 ### S05's receive-plane kill: swept since MDK v0.10.4 (C9)
 

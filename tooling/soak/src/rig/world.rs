@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
-use haven_core::circle::MemberKeyPackage;
+use haven_core::circle::{CircleConfig, MemberKeyPackage};
 use haven_core::location::LocationMessage;
 use haven_core::nostr::mls::storage::is_session_live;
 use haven_core::nostr::mls::types::{ConvergedRoster, FanoutMls, GroupId};
@@ -28,7 +28,9 @@ use crate::nemesis::types::{DeviceOp, Fault, Op, Schedule, ScheduledOp};
 use crate::profiles::WorldShape;
 use crate::rc::Rc;
 use crate::relay::plane_instant;
-use crate::rig::circle::{build_circle, publish_witnessed, DeviceDriver, PublishVerdict};
+use crate::rig::circle::{
+    build_circle, publish_witnessed, DeviceDriver, PacingClock, PublishVerdict,
+};
 use crate::rig::declare::DeclareSink;
 use crate::rig::plane::{CapturedLine, LogDrain, RelayPlane, TimelineRecord, TimelineSink};
 use crate::rig::{
@@ -815,6 +817,54 @@ impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
             declare_one(sink.as_ref(), &circle)?;
         }
         Ok(circle)
+    }
+
+    /// An arm's own invitation: `admin` founds a circle on this world's relays
+    /// inviting `members`, each as the admin's lookup found it — inbox list
+    /// included — through the admin's driver, and the circle is declared and
+    /// its routing recorded as [`Self::build_extra_circle`]'s is. Nobody joins
+    /// it here: an invitee takes its Welcome the way the app does, or does not.
+    ///
+    /// Returns the circle's MLS group and how many Welcomes a relay
+    /// acknowledged.
+    ///
+    /// # Errors
+    ///
+    /// [`RigError::Core`] with [`Step::CreateCircle`] if the create fails, or
+    /// [`RigError::DeclarationRefused`] if the circle cannot be declared.
+    pub async fn invite_to_new_circle(
+        &self,
+        admin: DeviceTag,
+        members: Vec<MemberKeyPackage>,
+    ) -> Result<(GroupId, usize), RigError> {
+        let ordinal = self.next_extra_circle.fetch_add(1, Ordering::AcqRel);
+        let urls = self.relay_urls();
+        let at = plane_instant();
+        let admin = self.device(admin)?;
+        // Not a rig handle, for `build_circle`'s reason.
+        let name = format!("soak-circle-{ordinal}");
+        let config = CircleConfig::new(&name).with_relays(urls.clone());
+        let clock = PacingClock::default();
+        let driver = DeviceDriver::new(admin, &clock)?;
+        let created = driver
+            .publishing()
+            .create_circle(admin.manager()?, &admin.keys, members, &config)
+            .await
+            .map_err(|_| RigError::Core(Step::CreateCircle))?;
+        let h = hex::encode(created.circle.nostr_group_id);
+        self.routing_log().extend(spans(&h, &urls, at));
+        self.routing_ids
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((created.circle.mls_group_id.clone(), h.clone()));
+        if let Some(sink) = &self.declarations {
+            sink.declare_circle(
+                &hex::encode(created.circle.mls_group_id.as_slice()),
+                &h,
+                &name,
+            )?;
+        }
+        Ok((created.circle.mls_group_id, created.welcomes_sent))
     }
 
     /// Pushes `circle` into the world's own table so every world-wide oracle

@@ -366,6 +366,9 @@ struct Inner {
     withheld_eose: usize,
     /// NIP-77 frames, per endpoint and kind.
     neg: HashMap<(Option<DeviceTag>, NegFrame), usize>,
+    /// Reads a plane under `AuthGatedReads` refused, per endpoint: the gate's
+    /// firing, which arming it is not.
+    gated_refusals: HashMap<Option<DeviceTag>, usize>,
     /// Every client→relay data frame, for O7.
     planes: PlaneLog,
 }
@@ -592,6 +595,17 @@ impl Ledger {
                 .map(|(_, count)| count)
                 .sum()
         })
+    }
+
+    /// How many reads `device`'s endpoint (`None`: the canonical one) refused
+    /// under `AuthGatedReads`.
+    #[must_use]
+    pub fn gated_refusals(&self, device: Option<DeviceTag>) -> usize {
+        self.with(|inner| inner.gated_refusals.get(&device).copied().unwrap_or(0))
+    }
+
+    pub(crate) fn note_gated_refusal(&self, device: Option<DeviceTag>) {
+        self.with(|inner| *inner.gated_refusals.entry(device).or_default() += 1);
     }
 
     pub(crate) fn note_neg(&self, device: Option<DeviceTag>, frame: NegFrame) {
