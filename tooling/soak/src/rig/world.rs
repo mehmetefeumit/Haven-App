@@ -21,7 +21,7 @@ use haven_core::relay::fanout::{
 };
 use haven_core::relay::live_sync::processor::group_cursor_stream;
 use haven_core::relay::live_sync::StopOutcome;
-use nostr::{Alphabet, Event, Filter, JsonUtil as _, SingleLetterTag};
+use nostr::{Alphabet, Event, Filter, JsonUtil as _, Kind, SingleLetterTag};
 use sha2::{Digest, Sha256};
 
 use crate::clock::WallNow;
@@ -228,16 +228,30 @@ pub struct Changed {
     pub verdict: PublishVerdict,
     /// The commit the change staged, whichever of the device's drives sent
     /// it: read off this call's transport, or — when the device's engine took
-    /// the record first — off the record while one is stored, and off the
-    /// plane that acknowledged it once it is applied and its record ended.
-    /// `None` when nothing was staged (queued, already so, unrecorded), and
-    /// when the engine's drive ended the record and no plane names the one
-    /// commit: it was rolled back or set aside, the plane keeps no ledger (a
-    /// test double), or the device handed over more than one handshake of the
-    /// circle meanwhile.
+    /// the record first — off the record while one is stored and off the
+    /// plane the device's own endpoints handed it to. `None` when nothing was
+    /// staged (queued, already so, unrecorded), and when the engine's drive
+    /// took the record and those two do not name one commit: it was rolled
+    /// back or set aside, no record and no plane's store holds it, the plane
+    /// keeps no ledger (a test double), or the device recorded or handed over
+    /// more than one handshake of the circle meanwhile.
     pub commit: Option<Event>,
-    /// The Welcomes it published, read off its publisher.
+    /// The Welcomes the change's invitees were sent, whichever of the
+    /// device's drives sent them: read off this call's publisher, and for an
+    /// invitee it sent none — the engine delivered the Welcome from its
+    /// record first — the one gift wrap addressed to them that the device's
+    /// own endpoints handed an account plane during the call and its store
+    /// kept. More than one names none, and so does a plane with no ledger.
     pub welcomes: Vec<Event>,
+}
+
+/// Appends each of `more` that `events` does not hold yet.
+fn extend_distinct(events: &mut Vec<Event>, more: Vec<Event>) {
+    for event in more {
+        if !events.iter().any(|held| held.id == event.id) {
+            events.push(event);
+        }
+    }
 }
 
 /// The event ids of `device`'s commit records for `group` still pending: what
@@ -1139,7 +1153,7 @@ impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
                 DropClass::of(event) == Some(DropClass::Handshake) && !before.contains(&event.id)
             })
             .cloned();
-        let welcomes: Vec<Event> = driver
+        let mut welcomes: Vec<Event> = driver
             .unrecorded()
             .into_iter()
             .filter(|event| DropClass::of(event) == Some(DropClass::GiftWrap))
@@ -1153,11 +1167,28 @@ impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
         });
         let commit = match sent {
             None => {
-                self.commit_sent_beside(sender, change.group(), verdict, &before, &sent_before)
+                self.commit_carried_beside(sender, change.group(), verdict, &before, &sent_before)
                     .await?
             }
             sent => sent,
         };
+        if let (Change::Add { members, .. }, PublishVerdict::Confirmed) = (change, verdict) {
+            for member in members {
+                let invitee = member.key_package_event.pubkey;
+                if !welcomes
+                    .iter()
+                    .any(|welcome| welcome.tags.public_keys().any(|key| *key == invitee))
+                {
+                    // Acknowledged before its record ended, so on the inbox
+                    // plane (Rule 13): named only when it is the one wrap.
+                    let filter = Filter::new().kind(Kind::GiftWrap).pubkey(invitee);
+                    let sent = self
+                        .handed_over(&self.account, device, &sent_before, filter)
+                        .await?;
+                    welcomes.extend(<[Event; 1]>::try_from(sent).ok().map(|[welcome]| welcome));
+                }
+            }
+        }
         Ok(Changed {
             verdict,
             commit,
@@ -1165,11 +1196,12 @@ impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
         })
     }
 
-    /// The id of every event `device`'s own endpoints handed a location
-    /// plane that keeps a ledger.
+    /// The id of every event `device`'s own endpoints handed a location or
+    /// account plane that keeps a ledger.
     fn sent_from(&self, device: DeviceTag) -> HashSet<nostr::EventId> {
         self.relays
             .iter()
+            .chain(&self.account)
             .filter_map(RelayPlane::plane_ledger)
             .flat_map(|ledger| {
                 let mut ids = ledger.published_ids();
@@ -1179,18 +1211,110 @@ impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
             .collect()
     }
 
-    /// The commit a change of `group` staged and its own call did not send:
-    /// the device's engine drives every stored record too, and took this one
-    /// first (the product answers such a change by its record:
-    /// `haven-core/tests/fanout_change_e2e.rs`).
+    /// The distinct events `filter` selects among those `device`'s own
+    /// endpoints handed `planes` since `sent_before` was read and their
+    /// stores kept. A plane with no ledger names none.
+    async fn handed_over(
+        &self,
+        planes: &[R],
+        device: DeviceTag,
+        sent_before: &HashSet<nostr::EventId>,
+        filter: Filter,
+    ) -> Result<Vec<Event>, RigError> {
+        let mut kept = Vec::new();
+        for plane in planes {
+            let Some(ledger) = plane.plane_ledger() else {
+                continue;
+            };
+            let mut ids = ledger.published_ids();
+            ids.retain(|id| ledger.published_by(Some(device), id) > 0 && !sent_before.contains(id));
+            if !ids.is_empty() {
+                extend_distinct(
+                    &mut kept,
+                    plane.stored_events(filter.clone().ids(ids)).await?,
+                );
+            }
+        }
+        Ok(kept)
+    }
+
+    /// The frozen event of each record `device` stored for `group` since
+    /// `before` was read — a commit's alone when `commits_only`.
     ///
-    /// Off the record while one is stored — pending, or applied and still
-    /// owed to a relay. An applied commit whose record has ended is on the
-    /// plane that acknowledged it (Rule 13): the one handshake of the circle
-    /// the device's own endpoints handed over during the call and a plane's
-    /// store kept; more than one names none. `before` and `sent_before` are
-    /// what was recorded and handed over when the call began.
-    async fn commit_sent_beside(
+    /// The device's engine drives every stored record too, and can take one
+    /// a call staged before the call's own drive does (the product answers
+    /// such a change by its record: `haven-core/tests/fanout_change_e2e.rs`);
+    /// what that drive carried is read where it left it.
+    async fn recorded_beside(
+        device: &SimDevice,
+        group: &GroupId,
+        before: &[nostr::EventId],
+        commits_only: bool,
+    ) -> Result<Vec<Event>, RigError> {
+        let session = device.session()?;
+        let mut recorded = Vec::new();
+        for id in session
+            .fanout_ids_for_test(group)
+            .await
+            .map_err(|_| RigError::Core(Step::ReadConvergenceState))?
+        {
+            let Ok(Some(probe)) = session.fanout_probe_for_test(&id).await else {
+                continue;
+            };
+            let proposal = probe.mls == FanoutMls::NotApplicable;
+            if (proposal && commits_only) || before.contains(&probe.event_id) {
+                continue;
+            }
+            recorded.push(
+                Event::from_json(&probe.payload).map_err(|_| RigError::Core(Step::StageCommit))?,
+            );
+        }
+        Ok(recorded)
+    }
+
+    /// The handshakes of `group` that `device`'s own endpoints handed a
+    /// location plane since the call began and its store kept: where an
+    /// acknowledged commit or proposal is once its record has ended (Rule
+    /// 13). The routing id is the device's own row's.
+    async fn handshakes_handed_over(
+        &self,
+        device: &SimDevice,
+        group: &GroupId,
+        before: &[nostr::EventId],
+        sent_before: &HashSet<nostr::EventId>,
+    ) -> Result<Vec<Event>, RigError> {
+        let held = device
+            .manager()?
+            .get_circles()
+            .await
+            .map_err(|_| RigError::Core(Step::ReadConvergenceState))?;
+        let Some(h) = held
+            .iter()
+            .find(|held| &held.circle.mls_group_id == group)
+            .map(|held| hex::encode(held.circle.nostr_group_id))
+        else {
+            return Ok(Vec::new());
+        };
+        let filter = Filter::new().custom_tag(SingleLetterTag::lowercase(Alphabet::H), h);
+        let mut handshakes = self
+            .handed_over(&self.relays, device.tag, sent_before, filter)
+            .await?;
+        handshakes.retain(|event| {
+            DropClass::of(event) == Some(DropClass::Handshake) && !before.contains(&event.id)
+        });
+        Ok(handshakes)
+    }
+
+    /// The commit a change of `group` staged and its own call did not send,
+    /// because the device's engine took its record first.
+    ///
+    /// A pending commit is on its record, and so is an applied one a relay
+    /// is still owed; an applied one whose record has ended is on the plane.
+    /// A plane cannot tell a commit from a proposal, and the engine can
+    /// stage a commit of its own for the circle meanwhile, so a commit is
+    /// named only when the record and the plane together hold one event. One
+    /// that drive rolled back or set aside names none.
+    async fn commit_carried_beside(
         &self,
         device: &SimDevice,
         group: &GroupId,
@@ -1198,58 +1322,21 @@ impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
         before: &[nostr::EventId],
         sent_before: &HashSet<nostr::EventId>,
     ) -> Result<Option<Event>, RigError> {
-        if matches!(
+        if !matches!(
             verdict,
-            PublishVerdict::AlreadySo | PublishVerdict::Queued | PublishVerdict::Unrecorded
+            PublishVerdict::Confirmed | PublishVerdict::Unresolved
         ) {
-            // Nothing was staged under a record.
             return Ok(None);
         }
-        let session = device.session()?;
-        for id in session
-            .fanout_ids_for_test(group)
-            .await
-            .map_err(|_| RigError::Core(Step::ReadConvergenceState))?
-        {
-            if let Ok(Some(probe)) = session.fanout_probe_for_test(&id).await {
-                if probe.mls != FanoutMls::NotApplicable && !before.contains(&probe.event_id) {
-                    return Event::from_json(&probe.payload)
-                        .map(Some)
-                        .map_err(|_| RigError::Core(Step::StageCommit));
-                }
-            }
+        let mut carried = Self::recorded_beside(device, group, before, true).await?;
+        if verdict == PublishVerdict::Confirmed {
+            extend_distinct(
+                &mut carried,
+                self.handshakes_handed_over(device, group, before, sent_before)
+                    .await?,
+            );
         }
-        let (PublishVerdict::Confirmed, Some(h)) = (verdict, self.routing_id_of(group)) else {
-            return Ok(None);
-        };
-        let mut handed_over: Vec<Event> = Vec::new();
-        for plane in &self.relays {
-            let Some(ledger) = plane.plane_ledger() else {
-                continue;
-            };
-            let mut ids = ledger.published_ids();
-            ids.retain(|id| {
-                ledger.published_by(Some(device.tag), id) > 0
-                    && !sent_before.contains(id)
-                    && !before.contains(id)
-            });
-            if ids.is_empty() {
-                continue;
-            }
-            let filter = Filter::new()
-                .ids(ids)
-                .custom_tag(SingleLetterTag::lowercase(Alphabet::H), h.as_str());
-            for event in plane.stored_events(filter).await? {
-                if DropClass::of(&event) == Some(DropClass::Handshake)
-                    && !handed_over.iter().any(|held| held.id == event.id)
-                {
-                    handed_over.push(event);
-                }
-            }
-        }
-        Ok(<[Event; 1]>::try_from(handed_over)
-            .ok()
-            .map(|[commit]| commit))
+        Ok(<[Event; 1]>::try_from(carried).ok().map(|[commit]| commit))
     }
 
     /// Drives every stored record of `device` that has something due, as a
@@ -1282,8 +1369,11 @@ impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
 
     /// `device` leaves `group` through the product driver (`Publishing::leave`):
     /// the intent written, the proposal recorded and sent. Returns where the
-    /// leave stands, every event the driver sent under a record, and every
-    /// one it published without.
+    /// leave stands, every event sent under a record — the driver's, and
+    /// each one another drive of the device carried for the circle during
+    /// the call (its engine's: read off the record while one is stored, and
+    /// off the plane it was handed to) — and every one the driver published
+    /// without.
     ///
     /// # Errors
     ///
@@ -1295,6 +1385,8 @@ impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
         group: &GroupId,
     ) -> Result<(LeaveStatus, Vec<Event>, Vec<Event>), RigError> {
         let leaver = self.device(device)?;
+        let before = pending_commit_ids(leaver, group).await?;
+        let sent_before = self.sent_from(device);
         let driver = DeviceDriver::new(leaver, &WallClock)?;
         let guard = self.note_pending_staged();
         let outcome = driver
@@ -1303,13 +1395,15 @@ impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
             .await
             .map_err(|_| RigError::Core(Step::StageCommit))?;
         drop(guard);
-        Ok((outcome.status, driver.recorded(), driver.unrecorded()))
+        let sent = self
+            .sent_under_a_record(leaver, group, &driver, &before, &sent_before)
+            .await?;
+        Ok((outcome.status, sent, driver.unrecorded()))
     }
 
     /// Carries `device`'s leave of `group` on through the product driver
     /// (`Publishing::resume_leave`): the admin step a leave takes first, then
-    /// its proposal. Returns where the leave stands, every event the driver
-    /// sent under a record, and every one it published without.
+    /// its proposal. Returns what [`Self::leave`] does.
     ///
     /// # Errors
     ///
@@ -1321,6 +1415,8 @@ impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
         group: &GroupId,
     ) -> Result<(LeaveStatus, Vec<Event>, Vec<Event>), RigError> {
         let leaver = self.device(device)?;
+        let before = pending_commit_ids(leaver, group).await?;
+        let sent_before = self.sent_from(device);
         let driver = DeviceDriver::new(leaver, &WallClock)?;
         let guard = self.note_pending_staged();
         let outcome = driver
@@ -1329,7 +1425,34 @@ impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
             .await
             .map_err(|_| RigError::Core(Step::StageCommit))?;
         drop(guard);
-        Ok((outcome.status, driver.recorded(), driver.unrecorded()))
+        let sent = self
+            .sent_under_a_record(leaver, group, &driver, &before, &sent_before)
+            .await?;
+        Ok((outcome.status, sent, driver.unrecorded()))
+    }
+
+    /// What `driver` sent under a record, then what another drive of `device`
+    /// carried for `group` during the call: each record stored since, and
+    /// each handshake its endpoints handed a plane since.
+    async fn sent_under_a_record(
+        &self,
+        device: &SimDevice,
+        group: &GroupId,
+        driver: &DeviceDriver<'_>,
+        before: &[nostr::EventId],
+        sent_before: &HashSet<nostr::EventId>,
+    ) -> Result<Vec<Event>, RigError> {
+        let mut sent = driver.recorded();
+        extend_distinct(
+            &mut sent,
+            Self::recorded_beside(device, group, before, false).await?,
+        );
+        extend_distinct(
+            &mut sent,
+            self.handshakes_handed_over(device, group, before, sent_before)
+                .await?,
+        );
+        Ok(sent)
     }
 
     /// Seals `location` for `group` on `device` through the product driver
@@ -1897,11 +2020,12 @@ mod tests {
     use haven_core::nostr::mls::types::FanoutId;
     use haven_core::relay::fanout::{
         before_next_change_drive_for_test, drive_one, hold_fanout_row_for_test, DriveMode,
-        FanoutStatus,
+        FanoutStatus, RowHoldForTest,
     };
     use tokio::time::{Instant, MissedTickBehavior};
 
     type TestWorld = SimWorld<TestRelay, RecordingTimeline, StubDrain>;
+    type LedgeredWorld = SimWorld<crate::relay::SimRelay, RecordingTimeline, StubDrain>;
 
     /// Stops `device`'s engine, leaving the rig's driver the only drive of
     /// its records.
@@ -2331,6 +2455,99 @@ mod tests {
         world.teardown().await.expect("teardown");
     }
 
+    /// A world over real relay planes, which keep a ledger and a store.
+    async fn ledgered_world(shape: &WorldShape) -> LedgeredWorld {
+        SimWorld::build(
+            shape,
+            Schedule::new(Vec::new()),
+            crate::relay::planes_for(shape)
+                .await
+                .expect("the relay planes start"),
+            RecordingTimeline::default(),
+            StubDrain::default(),
+        )
+        .await
+        .unwrap_or_else(|failure| panic!("world builds: {failure}"))
+    }
+
+    /// The current relays and one more address, which no plane serves.
+    fn widened(world: &LedgeredWorld, host: &str) -> Vec<String> {
+        let mut relays = world.relay_urls();
+        relays.push(format!("wss://{host}.example.com"));
+        relays
+    }
+
+    /// Hands the record of `group`'s next change, held, to whoever plays the
+    /// device's other drive.
+    fn hold_next_change(
+        group: &GroupId,
+    ) -> tokio::sync::oneshot::Receiver<(FanoutId, RowHoldForTest)> {
+        let (hand_over, handed) = tokio::sync::oneshot::channel();
+        before_next_change_drive_for_test(group, move |id| {
+            let hold = hold_fanout_row_for_test(id).expect("premise: no drive has the record yet");
+            let _ = hand_over.send((id.clone(), hold));
+        });
+        handed
+    }
+
+    /// What `device`'s other drive did with a change's record.
+    struct Beside<T> {
+        /// The commit the record froze, by id.
+        staged: Option<nostr::EventId>,
+        /// Where that drive left the commit.
+        status: FanoutStatus,
+        /// Whether the record had ended when that drive returned.
+        ended: bool,
+        /// What ran before the call was let back in.
+        then: T,
+    }
+
+    /// Plays `device`'s other drive — its engine's — on the record `handed`
+    /// carries: takes it, sends its commit and resolves it, then runs `then`,
+    /// and only then lets the change's own call back in.
+    ///
+    /// Joined with the call in one task: no step of the call falls between a
+    /// hold and the claim that follows it.
+    async fn drive_beside<T>(
+        device: &SimDevice,
+        handed: tokio::sync::oneshot::Receiver<(FanoutId, RowHoldForTest)>,
+        then: impl std::future::Future<Output = T>,
+    ) -> Beside<T> {
+        let (id, hold) = handed.await.expect("the change reaches its drive");
+        let staged = frozen(device, &id).await;
+        drop(hold);
+        let driven = drive_one(
+            device.manager().expect("a manager"),
+            &device.fanout_transport(),
+            &WallClock,
+            &id,
+            &DriveMode::Full,
+        )
+        .await
+        .unwrap_or_else(|_| panic!("the other drive runs"));
+        let hold = hold_fanout_row_for_test(&id).expect("the other drive has let the row go");
+        let ended = frozen(device, &id).await.is_none();
+        let then = then.await;
+        drop(hold);
+        Beside {
+            staged,
+            status: driven.status,
+            ended,
+            then,
+        }
+    }
+
+    /// Stages a further relay change of `group` on `device`, as its engine
+    /// stages a commit of its own, and answers whether one was staged.
+    async fn stage_further(device: &SimDevice, group: &GroupId, relays: &[String]) -> bool {
+        device
+            .manager()
+            .expect("a manager")
+            .update_circle_relays_staging(group, relays, WallClock.now_ms())
+            .await
+            .is_ok_and(|staged| staged.commit.is_some())
+    }
+
     /// Another drive of the device takes the change's record, sends its
     /// commit, applies it on the relay's acknowledgement and ends the record
     /// before the call's own drive is let back in — the engine's, beside the
@@ -2338,31 +2555,18 @@ mod tests {
     /// the one the plane took from the device's endpoint.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_change_another_drive_confirms_and_ends_still_names_its_commit() {
-        let shape = smallest_shape();
-        let mut world = SimWorld::build(
-            &shape,
-            Schedule::new(Vec::new()),
-            crate::relay::planes_for(&shape)
-                .await
-                .expect("the relay planes start"),
-            RecordingTimeline::default(),
-            StubDrain::default(),
-        )
-        .await
-        .unwrap_or_else(|failure| panic!("world builds: {failure}"));
+        let mut world = ledgered_world(&smallest_shape()).await;
         let alice = DeviceTag::new(0);
         let group = world.circles()[0].mls_group_id().clone();
         stop_engine(&mut world, alice).await;
         // An earlier commit of the circle, which the plane already holds from
         // the device when the change under test begins.
-        let mut widened = world.relay_urls();
-        widened.push("wss://earlier.example.com".to_owned());
         let earlier = world
             .change(
                 alice,
                 Change::Relays {
                     group: &group,
-                    relays: &widened,
+                    relays: &widened(&world, "earlier"),
                 },
             )
             .await
@@ -2373,56 +2577,528 @@ mod tests {
             "premise: the call's own driver sent the earlier commit ({})",
             earlier.verdict.label()
         );
-        let (hand_over, handed) = tokio::sync::oneshot::channel();
-        before_next_change_drive_for_test(&group, move |id| {
-            let hold = hold_fanout_row_for_test(id).expect("premise: no drive has the record yet");
-            let _ = hand_over.send((id.clone(), hold));
-        });
 
-        widened.push("wss://beside.example.com".to_owned());
-        let device = world.device(alice).expect("alice");
-        // In one task with the call, so the row passes from the hold to the
-        // other drive with no step of the call between the two.
-        let beside = async {
-            let (id, hold) = handed.await.expect("the change reaches its drive");
-            let staged = frozen(device, &id).await;
-            drop(hold);
-            let driven = drive_one(
-                device.manager().expect("a manager"),
-                &device.fanout_transport(),
-                &WallClock,
-                &id,
-                &DriveMode::Full,
-            )
-            .await
-            .unwrap_or_else(|_| panic!("the other drive runs"));
-            (staged, driven.status, frozen(device, &id).await.is_none())
-        };
-        let (changed, (staged, beside, ended)) = tokio::join!(
+        // A location of the circle, which the device's endpoint hands the
+        // plane while the change is made: no handshake.
+        let location = stray_event(
+            Kind::Custom(445),
+            [
+                nostr::Tag::custom(
+                    nostr::TagKind::h(),
+                    [world.circles()[0].group_id_hex().to_owned()],
+                ),
+                nostr::Tag::expiration(nostr::Timestamp::now() + Duration::from_secs(228)),
+            ],
+        );
+        let handed = hold_next_change(&group);
+        let relays = widened(&world, "beside");
+        let (changed, beside) = tokio::join!(
             world.change(
                 alice,
                 Change::Relays {
                     group: &group,
-                    relays: &widened,
+                    relays: &relays,
                 },
             ),
-            beside,
+            drive_beside(
+                world.device(alice).expect("alice"),
+                handed,
+                plant(&world.relays()[0], alice, &location),
+            ),
         );
         let changed = changed.expect("the driver makes the change");
 
         assert!(
-            beside == FanoutStatus::Confirmed
-                && ended
+            beside.status == FanoutStatus::Confirmed
+                && beside.ended
+                && beside.then
                 && published_by_the_call(world.timeline()) == sim_magnitude(0),
-            "premise: the other drive applied the change and ended its record, and the call \
-             sent nothing"
+            "premise: the other drive applied the change and ended its record beside a \
+             location, and the call sent nothing ({:?}, ended {}, location {}, the call \
+             published {})",
+            beside.status,
+            beside.ended,
+            beside.then,
+            published_by_the_call(world.timeline())
         );
         assert!(
             changed.verdict == PublishVerdict::Confirmed
-                && staged.is_some()
-                && changed.commit.map(|commit| commit.id) == staged,
+                && beside.staged.is_some()
+                && changed.commit.map(|commit| commit.id) == beside.staged,
             "a commit another drive confirmed is the one the plane took from the device ({})",
             changed.verdict.label()
+        );
+
+        world.teardown().await.expect("teardown");
+    }
+
+    /// The device's engine stages a commit of its own for the circle while
+    /// the change's commit, applied, is still recorded — a relay is owed it:
+    /// two commits are recorded since the call began, nothing tells them
+    /// apart, and none is named.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_commits_recorded_during_a_change_name_none() {
+        let shape = WorldShape {
+            relays: 2,
+            ..smallest_shape()
+        };
+        let mut world = ledgered_world(&shape).await;
+        let alice = DeviceTag::new(0);
+        let group = world.circles()[0].mls_group_id().clone();
+        stop_engine(&mut world, alice).await;
+        // The second relay never takes the commit from the device, so its
+        // record outlives the first relay's acknowledgement.
+        world.relays_mut()[1]
+            .apply_for(alice, Fault::Down)
+            .await
+            .expect("the device's endpoint goes down");
+
+        let handed = hold_next_change(&group);
+        let (relays, further) = (widened(&world, "owed"), widened(&world, "further"));
+        let device = world.device(alice).expect("alice");
+        let (changed, beside) = tokio::join!(
+            world.change(
+                alice,
+                Change::Relays {
+                    group: &group,
+                    relays: &relays,
+                },
+            ),
+            drive_beside(device, handed, stage_further(device, &group, &further)),
+        );
+        let changed = changed.expect("the driver makes the change");
+
+        assert!(
+            beside.status == FanoutStatus::Confirmed
+                && !beside.ended
+                && beside.then
+                && published_by_the_call(world.timeline()) == sim_magnitude(0),
+            "premise: the change's commit is applied and still recorded beside a further \
+             commit, and the call sent nothing ({:?}, ended {}, further {}, the call \
+             published {})",
+            beside.status,
+            beside.ended,
+            beside.then,
+            published_by_the_call(world.timeline())
+        );
+        assert!(
+            changed.verdict == PublishVerdict::Confirmed && changed.commit.is_none(),
+            "two commits recorded during the call were told apart ({})",
+            changed.verdict.label()
+        );
+
+        world.teardown().await.expect("teardown");
+    }
+
+    /// The change's commit is applied and its record ended — it is on the
+    /// plane — when the device's engine stages a commit of its own: one
+    /// commit on the plane and another on record name none, whichever is
+    /// read first.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_commit_recorded_beside_an_ended_one_names_none() {
+        let mut world = ledgered_world(&smallest_shape()).await;
+        let alice = DeviceTag::new(0);
+        let group = world.circles()[0].mls_group_id().clone();
+        stop_engine(&mut world, alice).await;
+
+        let handed = hold_next_change(&group);
+        let (relays, further) = (widened(&world, "ended"), widened(&world, "further"));
+        let device = world.device(alice).expect("alice");
+        let (changed, beside) = tokio::join!(
+            world.change(
+                alice,
+                Change::Relays {
+                    group: &group,
+                    relays: &relays,
+                },
+            ),
+            drive_beside(device, handed, stage_further(device, &group, &further)),
+        );
+        let changed = changed.expect("the driver makes the change");
+
+        assert!(
+            beside.status == FanoutStatus::Confirmed
+                && beside.ended
+                && beside.then
+                && published_by_the_call(world.timeline()) == sim_magnitude(0),
+            "premise: the change's commit is applied and its record ended beside a further \
+             commit, and the call sent nothing ({:?}, ended {}, further {}, the call \
+             published {})",
+            beside.status,
+            beside.ended,
+            beside.then,
+            published_by_the_call(world.timeline())
+        );
+        assert!(
+            changed.verdict == PublishVerdict::Confirmed && changed.commit.is_none(),
+            "a commit on record was taken for the one the plane holds ({})",
+            changed.verdict.label()
+        );
+
+        world.teardown().await.expect("teardown");
+    }
+
+    /// Another drive of the device takes the change's record and every
+    /// relay refuses its commit: that drive rolls it back, and the engine
+    /// then stages a commit of its own. The change's commit is on no record
+    /// and no plane, and the engine's is not taken for it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_change_another_drive_rolls_back_names_none() {
+        let mut world = ledgered_world(&smallest_shape()).await;
+        let alice = DeviceTag::new(0);
+        let group = world.circles()[0].mls_group_id().clone();
+        stop_engine(&mut world, alice).await;
+        world.relays_mut()[0]
+            .apply_for(
+                alice,
+                Fault::RefuseOversize {
+                    max_bytes: crate::nemesis::types::ByteCap::new(1),
+                },
+            )
+            .await
+            .expect("the device's endpoint refuses every event");
+
+        let handed = hold_next_change(&group);
+        let (relays, further) = (widened(&world, "refused"), widened(&world, "further"));
+        let device = world.device(alice).expect("alice");
+        let (changed, beside) = tokio::join!(
+            world.change(
+                alice,
+                Change::Relays {
+                    group: &group,
+                    relays: &relays,
+                },
+            ),
+            drive_beside(device, handed, stage_further(device, &group, &further)),
+        );
+        let changed = changed.expect("the driver makes the change");
+
+        assert!(
+            beside.status == FanoutStatus::RolledBack
+                && beside.then
+                && published_by_the_call(world.timeline()) == sim_magnitude(0),
+            "premise: the other drive rolled the change back beside a further commit, and \
+             the call sent nothing ({:?}, further {}, the call published {})",
+            beside.status,
+            beside.then,
+            published_by_the_call(world.timeline())
+        );
+        assert!(
+            changed.verdict == PublishVerdict::RolledBack && changed.commit.is_none(),
+            "a commit staged after a rollback was taken for the one rolled back ({})",
+            changed.verdict.label()
+        );
+
+        world.teardown().await.expect("teardown");
+    }
+
+    /// Plants `event` on `plane` as one `device`'s own endpoint handed over
+    /// and the plane's store kept, and answers whether the store took it.
+    async fn plant(plane: &crate::relay::SimRelay, device: DeviceTag, event: &Event) -> bool {
+        plane.ledger().note_published(Some(device), event.id);
+        plane.store(std::slice::from_ref(event)).await == Ok(1)
+    }
+
+    /// An event of `kind`, by nobody, carrying `tags`.
+    fn stray_event(kind: Kind, tags: impl IntoIterator<Item = nostr::Tag>) -> Event {
+        nostr::EventBuilder::new(kind, "stray")
+            .tags(tags)
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("a signed event")
+    }
+
+    /// Plants an event of `kind` that names `to` on the inbox plane, from
+    /// `device`.
+    async fn stray(
+        world: &LedgeredWorld,
+        device: DeviceTag,
+        kind: Kind,
+        to: nostr::PublicKey,
+    ) -> bool {
+        let event = stray_event(kind, [nostr::Tag::public_key(to)]);
+        plant(&world.account_relays()[0], device, &event).await
+    }
+
+    /// Three devices, the circle the test builds over the first two — which
+    /// no world table names — and the third's key package: an invite.
+    async fn invite_world() -> (LedgeredWorld, GroupId, [MemberKeyPackage; 1]) {
+        let shape = WorldShape {
+            members: 3,
+            ..smallest_shape()
+        };
+        let mut world = ledgered_world(&shape).await;
+        let circle = build_circle(
+            CircleTag::new(9),
+            &world.devices()[..2],
+            &world.relay_urls(),
+        )
+        .await
+        .expect("the circle builds");
+        stop_engine(&mut world, DeviceTag::new(0)).await;
+        let joiner = world.device(DeviceTag::new(2)).expect("the joiner");
+        let invite = [MemberKeyPackage {
+            key_package_event: joiner.mint_key_package().await.expect("a key package"),
+            inbox_relays: joiner.stored_inbox().to_vec(),
+            nip65_relays: Vec::new(),
+            nip65_write_relays: Vec::new(),
+        }];
+        (world, circle.mls_group_id().clone(), invite)
+    }
+
+    /// The device's engine takes an add's record, applies its commit and
+    /// delivers its Welcome, ending both records, before the call's own
+    /// drive is let back in: the call sends neither, and both are named —
+    /// the commit off the circle's plane, the Welcome off the invitee's
+    /// inbox plane — and the invitee joins from that Welcome.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_add_another_drive_confirms_and_welcomes_still_names_both() {
+        let (world, group, invite) = invite_world().await;
+        let (alice, carol) = (DeviceTag::new(0), DeviceTag::new(2));
+        let invitee = invite[0].key_package_event.pubkey;
+        let bystander = world
+            .device(DeviceTag::new(1))
+            .expect("bob")
+            .keys
+            .public_key();
+        // What is not the Welcome: a wrap the plane held for the invitee
+        // before the add, and — during it — a wrap for somebody else and a
+        // note that only names the invitee.
+        let earlier = stray(&world, alice, Kind::GiftWrap, invitee).await;
+
+        let handed = hold_next_change(&group);
+        let (changed, beside) = tokio::join!(
+            world.change(
+                alice,
+                Change::Add {
+                    group: &group,
+                    members: &invite,
+                },
+            ),
+            drive_beside(world.device(alice).expect("alice"), handed, async {
+                let delivered = world.resume(alice).await.expect("the other drive resumes");
+                let strays = stray(&world, alice, Kind::GiftWrap, bystander).await
+                    && stray(&world, alice, Kind::TextNote, invitee).await;
+                (delivered.welcomes_sent, strays)
+            }),
+        );
+        let changed = changed.expect("the driver makes the change");
+
+        assert!(
+            earlier
+                && beside.status == FanoutStatus::Confirmed
+                && beside.ended
+                && beside.then == (1, true)
+                && published_by_the_call(world.timeline()) == sim_magnitude(0),
+            "premise: the other drive applied the add and delivered its Welcome among the \
+             strays, and the call sent nothing (earlier stray {earlier}, {:?}, ended {}, \
+             delivered {}, strays {}, the call published {})",
+            beside.status,
+            beside.ended,
+            beside.then.0 == 1,
+            beside.then.1,
+            published_by_the_call(world.timeline())
+        );
+        assert!(
+            changed.verdict == PublishVerdict::Confirmed
+                && beside.staged.is_some()
+                && changed.commit.as_ref().map(|commit| commit.id) == beside.staged,
+            "an add another drive confirmed names the commit the plane took ({})",
+            changed.verdict.label()
+        );
+        let [welcome] = <[Event; 1]>::try_from(changed.welcomes)
+            .unwrap_or_else(|_| panic!("a Welcome another drive delivered is named, once"));
+        assert!(
+            world.account_relays()[0].witnessed_ok(&welcome.id),
+            "the Welcome named is the one the inbox plane acknowledged"
+        );
+        let joiner = world.device(carol).expect("the joiner");
+        let manager = joiner.manager().expect("a manager");
+        manager
+            .process_gift_wrapped_invitation(&joiner.keys, &welcome)
+            .await
+            .unwrap_or_else(|_| panic!("the invitee opens the Welcome"));
+        manager
+            .accept_invitation(&welcome.id)
+            .await
+            .unwrap_or_else(|_| panic!("the invitee joins from the Welcome"));
+
+        world.teardown().await.expect("teardown");
+    }
+
+    /// A second gift wrap addressed to the invitee crosses the device's
+    /// endpoint while its engine delivers an add's Welcome: two wraps were
+    /// handed over since the call began, nothing tells them apart, and none
+    /// is named.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_wraps_handed_over_during_an_add_name_no_welcome() {
+        let (world, group, invite) = invite_world().await;
+        let alice = DeviceTag::new(0);
+        let invitee = invite[0].key_package_event.pubkey;
+
+        let handed = hold_next_change(&group);
+        let (changed, beside) = tokio::join!(
+            world.change(
+                alice,
+                Change::Add {
+                    group: &group,
+                    members: &invite,
+                },
+            ),
+            drive_beside(world.device(alice).expect("alice"), handed, async {
+                let delivered = world.resume(alice).await.expect("the other drive resumes");
+                let second = stray(&world, alice, Kind::GiftWrap, invitee).await;
+                (delivered.welcomes_sent, second)
+            }),
+        );
+        let changed = changed.expect("the driver makes the change");
+
+        assert!(
+            beside.status == FanoutStatus::Confirmed
+                && beside.then == (1, true)
+                && published_by_the_call(world.timeline()) == sim_magnitude(0),
+            "premise: the other drive delivered the Welcome, a second wrap reached the inbox \
+             plane, and the call sent nothing ({:?}, delivered {}, second wrap {}, the call \
+             published {})",
+            beside.status,
+            beside.then.0 == 1,
+            beside.then.1,
+            published_by_the_call(world.timeline())
+        );
+        assert!(
+            changed.verdict == PublishVerdict::Confirmed && changed.welcomes.is_empty(),
+            "two wraps handed over during the call were told apart ({})",
+            changed.verdict.label()
+        );
+
+        world.teardown().await.expect("teardown");
+    }
+
+    /// The device's engine takes the hand-over an admin's leave begins with
+    /// and applies it before the call's own drive is let back in: the leave
+    /// goes on, and what it sent under a record still holds the hand-over.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_leave_whose_hand_over_another_drive_confirms_still_names_it() {
+        let mut world = ledgered_world(&smallest_shape()).await;
+        let alice = DeviceTag::new(0);
+        let group = world.circles()[0].mls_group_id().clone();
+        stop_engine(&mut world, alice).await;
+
+        let handed = hold_next_change(&group);
+        let (left, beside) = tokio::join!(
+            world.leave(alice, &group),
+            drive_beside(world.device(alice).expect("alice"), handed, async {}),
+        );
+        let (_, sent, _) = left.expect("the driver makes the leave");
+
+        assert!(
+            beside.status == FanoutStatus::Confirmed && beside.ended && beside.staged.is_some(),
+            "premise: the other drive applied the hand-over and ended its record ({:?}, ended \
+             {})",
+            beside.status,
+            beside.ended
+        );
+        assert!(
+            sent.iter().any(|event| Some(event.id) == beside.staged),
+            "a hand-over another drive confirmed is among what the leave sent"
+        );
+
+        world.teardown().await.expect("teardown");
+    }
+
+    /// The device's engine takes the hand-over an admin's leave begins with
+    /// and no relay takes it from the device: the hand-over stays pending on
+    /// its record, on no plane, and is still among what the leave sent.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_leave_whose_hand_over_another_drive_left_pending_still_names_it() {
+        let mut world = ledgered_world(&smallest_shape()).await;
+        let alice = DeviceTag::new(0);
+        let group = world.circles()[0].mls_group_id().clone();
+        stop_engine(&mut world, alice).await;
+        world.relays_mut()[0]
+            .apply_for(alice, Fault::Down)
+            .await
+            .expect("the device's endpoint goes down");
+
+        let handed = hold_next_change(&group);
+        let (left, beside) = tokio::join!(
+            world.leave(alice, &group),
+            drive_beside(world.device(alice).expect("alice"), handed, async {}),
+        );
+        let (_, sent, _) = left.expect("the driver makes the leave");
+
+        assert!(
+            beside.status == FanoutStatus::Unresolved
+                && !beside.ended
+                && beside
+                    .staged
+                    .is_some_and(|staged| !world.relays()[0].witnessed_ok(&staged)),
+            "premise: the other drive left the hand-over pending, and no relay took it \
+             ({:?}, ended {})",
+            beside.status,
+            beside.ended
+        );
+        assert!(
+            sent.iter().any(|event| Some(event.id) == beside.staged),
+            "a hand-over another drive left pending is among what the leave sent"
+        );
+
+        world.teardown().await.expect("teardown");
+    }
+
+    /// A leave's proposal that no relay took is on its record alone: it is
+    /// among what was recorded for the circle since, and is no commit.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_proposal_another_drive_recorded_is_read_and_is_no_commit() {
+        let mut world = ledgered_world(&smallest_shape()).await;
+        let bob = DeviceTag::new(1);
+        let group = world.circles()[0].mls_group_id().clone();
+        stop_engine(&mut world, bob).await;
+        world.relays_mut()[0]
+            .apply_for(bob, Fault::Down)
+            .await
+            .expect("the device's endpoint goes down");
+        let device = world.device(bob).expect("bob");
+        let before = pending_commit_ids(device, &group)
+            .await
+            .expect("the records read");
+
+        let driver = DeviceDriver::new(device, &WallClock).expect("a driver");
+        let left = driver
+            .publishing()
+            .leave(
+                device.manager().expect("a manager"),
+                &group,
+                &device.keys.public_key(),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("the other drive makes the leave"));
+        let proposal: Vec<nostr::EventId> = driver
+            .recorded()
+            .iter()
+            .filter(|event| DropClass::of(event) == Some(DropClass::Handshake))
+            .map(|event| event.id)
+            .collect();
+        drop(driver);
+        assert!(
+            left.status == LeaveStatus::Proposed
+                && proposal.len() == 1
+                && !world.relays()[0].witnessed_ok(&proposal[0]),
+            "premise: the leave is proposed, under one record, and no relay took it \
+             ({:?}, one record {})",
+            left.status,
+            proposal.len() == 1
+        );
+
+        let mut carried = Vec::new();
+        for commits_only in [false, true] {
+            let events = LedgeredWorld::recorded_beside(device, &group, &before, commits_only)
+                .await
+                .expect("the records read");
+            carried.push(events.iter().map(|event| event.id).collect::<Vec<_>>());
+        }
+        assert!(
+            carried[0] == proposal && carried[1].is_empty(),
+            "a recorded proposal is read for the circle, and never as a commit"
         );
 
         world.teardown().await.expect("teardown");
