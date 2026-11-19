@@ -434,8 +434,7 @@ jobs:
       - name: Generate HTML report
         if: ${{ !cancelled() }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y lcov
+          bash ../scripts/ci/ensure_ci_tools.sh genhtml=lcov
           genhtml coverage/lcov_filtered.info -o coverage/html
 
       - name: Upload coverage reports

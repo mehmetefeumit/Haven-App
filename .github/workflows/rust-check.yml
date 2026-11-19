@@ -338,6 +338,7 @@ jobs:
         with:
           workspaces: |
             tooling/e2e/local-relay
+            tooling/e2e/local-blossom
             tooling/logscan
           key: e2e-tooling
 
@@ -381,6 +382,39 @@ jobs:
       # debug twin of it.
       - name: Wire-proxy self-test (release binary)
         run: cargo run --release --bin haven-wire-proxy -- --self-test
+
+      # tooling/e2e/local-blossom: the Blossom server the public-profile lane
+      # trusts as its PRIMARY, a mimic of blossom.primal.net (padded standard
+      # base64 auth only, a verified kind-24242 event, GET answered with a 302
+      # to a media host). A lane that downloads through it proves Haven
+      # follows the redirect only while the mimic really redirects and really
+      # refuses what Primal refuses, so its unit tests run here, on every
+      # push, rather than first on a device an hour into a lane.
+      - name: local-blossom — resolve from the committed lockfile
+        working-directory: tooling/e2e/local-blossom
+        run: cargo metadata --locked --format-version 1 >/dev/null
+
+      - name: local-blossom — check formatting
+        working-directory: tooling/e2e/local-blossom
+        run: cargo fmt --check
+
+      - name: local-blossom — clippy
+        working-directory: tooling/e2e/local-blossom
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: local-blossom — run tests
+        working-directory: tooling/e2e/local-blossom
+        run: |
+          set -o pipefail
+          cargo test --locked 2>&1 | tee "${RUNNER_TEMP}/local-blossom-cargo-test.log"
+
+      - name: Scan the local-blossom test transcript for identifiers
+        if: ${{ !cancelled() && steps.build-scanner.outcome == 'success' }}
+        working-directory: ${{ github.workspace }}
+        run: bash tooling/e2e/ci/scan-logs.sh --rules-only --sink rust-test="${RUNNER_TEMP}/local-blossom-cargo-test.log"
+
+      - name: No undeclared test skips (local-blossom)
+        run: bash ../../../scripts/ci/check_no_undeclared_skips.sh cargo e2e_tooling_blossom "${RUNNER_TEMP}/local-blossom-cargo-test.log"
 
   # ============================================================================
   # logscan-tooling — tooling/logscan: the runtime log-privacy scanner.

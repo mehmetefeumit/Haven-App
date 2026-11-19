@@ -693,8 +693,9 @@ void main() {
         () {
       expect(
         _suspensionsIn(source, 'handOffMlsSession').awaits,
-        hasLength(2),
-        reason: 'anti-vacuity: each ownership write, and the engine stop',
+        hasLength(4),
+        reason: "anti-vacuity: the picker's grace, each ownership write, the "
+            'engine stop, and the save the release waits for',
       );
       expect(
         _unguardedAwaits(

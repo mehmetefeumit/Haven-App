@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 #
-# Guard: each Dart-side relay-pool override has exactly ONE install site.
+# Guard: each Dart-side relay-pool and Blossom override has exactly ONE
+# install site.
 #
-# `set_profile_relays_for_test` retargets the kind-0 (profile) plane and
+# `set_profile_relays_for_test` retargets the kind-0 (profile) plane,
 # `set_location_relays_for_test` the pool a new circle's relays are picked
-# from. Each Rust side is an install-once `OnceLock`
-# (haven-core/src/profile/relay_pool.rs, haven-core/src/circle/location_pool.rs),
+# from, `set_blossom_server_for_test` the ordered list of picture upload
+# servers (it REPLACES the production list) and
+# `allow_private_blossom_for_test` the download path's private-address filter.
+# Each Rust side is an install-once `OnceLock`
+# (haven-core/src/profile/relay_pool.rs, haven-core/src/circle/location_pool.rs,
+# haven-core/src/profile/config.rs, haven-core/src/profile/blossom.rs),
 # so a SECOND install site does not override — it throws "already installed",
 # and which of the two racing sites wins depends on call order.
 #
@@ -33,7 +38,7 @@
 #
 set -euo pipefail
 
-readonly SYMBOLS=(setProfileRelaysForTest setLocationRelaysForTest)
+readonly SYMBOLS=(setProfileRelaysForTest setLocationRelaysForTest setBlossomServerForTest allowPrivateBlossomForTest)
 readonly ALLOWED_CALL_SITE='haven/integration_test/e2e/_lib/test_user.dart'
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

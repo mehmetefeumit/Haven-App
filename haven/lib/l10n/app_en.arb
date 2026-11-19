@@ -206,6 +206,10 @@
   "@onboardingDisplayNameError": {
     "description": "Snackbar message shown when saving the display name fails."
   },
+  "onboardingPhotoNotSaved": "Your photo couldn’t be saved. You can add it later in Settings, under Identity.",
+  "@onboardingPhotoNotSaved": {
+    "description": "Snackbar shown at the end of onboarding when the profile photo the user picked could not be saved on this device. Onboarding still completes without it. Says nothing about publishing or the network: the failure is local. 'Settings' and 'Identity' name the app's own Settings screen and its Identity page; use the same words this locale's Haven UI uses for those two titles."
+  },
   "onboardingAddPhotoOptional": "Add a photo (optional)",
   "@onboardingAddPhotoOptional": {
     "description": "Caption below the avatar circle on the onboarding create-identity screen, inviting the user to optionally add a profile photo. Shown only when no photo has been chosen yet."
@@ -1844,9 +1848,9 @@
   "@identityAdvancedDeleteTitle": {
     "description": "Title of the confirmation dialog before permanently deleting the identity."
   },
-  "identityAdvancedDeleteBody": "This deletes your identity and all circle data from this phone. Anything already published under it stays where it is: your name and keys on the relays that have them, your photo on the image host that stores it. Make sure you have backed up your secret key if you want to recover this identity later.",
+  "identityAdvancedDeleteBody": "This deletes your identity and all circle data from this phone. Anything already published under it stays where it is: your name and keys on the relays that have them, your photo on any image host it was uploaded to. Make sure you have backed up your secret key if you want to recover this identity later.",
   "@identityAdvancedDeleteBody": {
-    "description": "Body of the delete-identity confirmation dialog. 'secret key' is the nsec; preserve this exact warning wording. The middle sentence was corrected: the profile photo is not on a relay at all — it is a blob on a Blossom image host (haven-core/src/profile/blossom.rs) for which no delete request exists, so naming relays as the only destination mis-stated where the photo survives. Keep the two destinations distinct in translation."
+    "description": "Body of the delete-identity confirmation dialog. 'secret key' is the nsec; preserve this exact warning wording. The middle sentence was corrected: the profile photo is not on a relay at all — it is a blob on a Blossom image host (haven-core/src/profile/blossom.rs) for which no delete request exists, so naming relays as the only destination mis-stated where the photo survives. Keep the two destinations distinct in translation. 'any image host it was uploaded to' (corrected 2026-11-16): Haven tries a short ordered list of image hosts and moves to the next one when an upload fails, and an upload that timed out may still have been stored, so a photo can sit on more than one host. Do not name a host, and do not say or imply it is exactly one."
   },
   "identityAdvancedDeleteConfirm": "Delete",
   "@identityAdvancedDeleteConfirm": {
@@ -2051,9 +2055,9 @@
   "@photoHeaderRemoveTitle": {
     "description": "Title of the confirmation dialog before removing the profile photo."
   },
-  "photoHeaderRemoveBody": "This takes your photo off your public profile. The image file stays on the server that hosts it, and copies others already downloaded stay with them.",
+  "photoHeaderRemoveBody": "This takes your photo off your public profile. The image file stays on any server it was uploaded to, and copies others already downloaded stay with them.",
   "@photoHeaderRemoveBody": {
-    "description": "Body of the remove-profile-photo confirmation dialog. Updated for the public-profile migration: the photo is now a public Nostr/Blossom profile picture, not something shared privately within circles (docs/PUBLIC_PROFILE_MIGRATION_PLAN.md §6.5)."
+    "description": "Body of the remove-profile-photo confirmation dialog. Updated for the public-profile migration: the photo is now a public Nostr/Blossom profile picture, not something shared privately within circles (docs/PUBLIC_PROFILE_MIGRATION_PLAN.md §6.5). 'any server it was uploaded to' (corrected 2026-11-16): Haven tries a short ordered list of image servers and moves to the next one when an upload fails, and an upload that timed out may still have been stored, so the file can sit on more than one server. Haven sends no delete request to any of them. Do not name a server, and do not say or imply it is exactly one."
   },
   "photoHeaderEditPhoto": "Edit Photo",
   "@photoHeaderEditPhoto": {

@@ -171,6 +171,9 @@ class AppLocalizationsJa extends AppLocalizations {
   String get onboardingDisplayNameError => 'その名前を保存できませんでした。もう一度お試しください。';
 
   @override
+  String get onboardingPhotoNotSaved => '写真を保存できませんでした。あとで「設定」の「識別情報」から追加できます。';
+
+  @override
   String get onboardingAddPhotoOptional => '写真を追加（任意）';
 
   @override
@@ -1573,7 +1576,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get identityAdvancedDeleteBody =>
-      'これにより、この端末から識別情報とすべてのサークルのデータが削除されます。その識別情報ですでに公開したものは、そのまま残ります: 名前と鍵はそれらを保持しているリレーに、写真はそれを預かっている画像サーバーに残り続けます。あとでこの識別情報を復元したい場合は、秘密鍵をバックアップ済みであることを必ず確認してください。';
+      'これにより、この端末から識別情報とすべてのサークルのデータが削除されます。その識別情報ですでに公開したものは、そのまま残ります: 名前と鍵はそれらを保持しているリレーに、写真はアップロードされたどの画像サーバーにも残り続けます。あとでこの識別情報を復元したい場合は、秘密鍵をバックアップ済みであることを必ず確認してください。';
 
   @override
   String get identityAdvancedDeleteConfirm => '削除';
@@ -1731,7 +1734,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get photoHeaderRemoveBody =>
-      'これにより、あなたの公開プロフィールから写真が外されます。画像ファイルはそれを預かっているサーバーに残り、ほかの人がすでにダウンロードしたコピーも、その人たちの手元に残ります。';
+      'これにより、あなたの公開プロフィールから写真が外されます。画像ファイルはアップロードされたどのサーバーにもそのまま残り、ほかの人がすでにダウンロードしたコピーも、その人たちの手元に残ります。';
 
   @override
   String get photoHeaderEditPhoto => '写真を編集';

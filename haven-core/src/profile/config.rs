@@ -132,70 +132,176 @@ pub const PROFILE_INTER_REQ_JITTER_MS: RangeInclusive<u64> = 120..=480;
 pub const BLOSSOM_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Lifetime, in seconds, of a Blossom kind-24242 authorization event's
-/// `expiration` tag (stamped `now + this`). Short-lived by design.
-pub const BLOSSOM_AUTH_EXPIRY_SECS: u64 = 60;
-
-/// Default Blossom server for profile-picture hosting (White Noise parity).
-/// MUST be `https://` — enforced by the CI privacy guard.
-pub const DEFAULT_BLOSSOM_SERVER: &str = "https://blossom.primal.net";
-
-/// Process-static install-once override for the Blossom upload server, **debug
-/// builds only**. Lets the hermetic e2e harness point profile-picture UPLOADS
-/// at a local Blossom (`http://10.0.2.2:3000` on the Android emulator,
-/// `http://localhost:3000` on the iOS simulator/host) instead of the production
-/// default, without ever affecting a release binary. Mirrors the install-once
-/// `relay::set_default_relays_for_test` override discipline.
-#[cfg(debug_assertions)]
-static BLOSSOM_SERVER_FOR_TEST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-
-/// The Blossom server URL profile-picture uploads target.
+/// `expiration` tag (stamped `now + this`).
 ///
-/// Returns [`DEFAULT_BLOSSOM_SERVER`] in production. In debug builds an e2e
-/// override installed via [`set_blossom_server_for_test`] wins; release builds
-/// can never install one (the setter is a fail-closed stub), so this always
-/// returns the hard-coded HTTPS default there. The returned URL is still passed
-/// through `blossom::require_https`, which permits plaintext `http://` only for
-/// the loopback/emulator allowlist in debug builds.
-#[must_use]
-pub fn blossom_server() -> String {
-    #[cfg(debug_assertions)]
-    if let Some(url) = BLOSSOM_SERVER_FOR_TEST.get() {
-        return url.clone();
-    }
-    DEFAULT_BLOSSOM_SERVER.to_string()
+/// Ten minutes: a server refuses a token whose expiration it has passed
+/// (Primal: `exp <= now`), so this is the clock skew an upload tolerates; the
+/// `x` tag confines a replay to re-uploading this one public blob.
+pub const BLOSSOM_AUTH_EXPIRY_SECS: u64 = 600;
+
+/// The most redirects a content-addressed picture download follows.
+///
+/// Primal answers `GET /<sha256>` with one `302` to its media host; three
+/// leave room for a CDN chain. Every hop is one more host an attacker-chosen
+/// `picture` URL makes a viewer's device contact, so the cap stays low.
+pub const BLOSSOM_MAX_REDIRECTS: usize = 3;
+
+/// How a Blossom server decodes the kind-24242 `Authorization` token.
+///
+/// BUD-11 specifies base64url, but Primal's server decodes padded standard
+/// base64 only; each built-in server is listed with the encoding its evidence
+/// shows it accepts, and a refusal is never retried in the other encoding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlossomAuthEncoding {
+    /// Standard alphabet, `=`-padded.
+    PaddedStandard,
+    /// URL-safe alphabet, unpadded.
+    UrlSafeUnpadded,
 }
 
-/// Overrides the Blossom upload server for hermetic e2e tests (**debug only**).
+/// One built-in Blossom upload server.
+pub struct BlossomServer {
+    /// The server's base URL. MUST be `https://` — enforced by the CI privacy
+    /// guard.
+    pub base: &'static str,
+    /// The registrable domain the server's descriptor URLs must be on (the
+    /// host itself or a subdomain of it).
+    pub site: &'static str,
+    /// The encoding the server's `Authorization` token is sent in.
+    pub auth: BlossomAuthEncoding,
+}
+
+/// The profile-picture upload servers, in the order they are tried: the next
+/// one only after the previous one failed to hand back a verified descriptor.
 ///
-/// Intended to be called once from a scenario's `setUpAll` (alongside
-/// `set_discovery_relays_for_test` and `allow_private_blossom_for_test`) so the
-/// own-profile sync's picture upload targets the local Blossom
-/// container/binary.
+/// Primal first (White Noise parity); then the two media servers White Noise
+/// uploads to in production. Source evidence per server, and what is not
+/// verified live, is in `docs/BLOSSOM_SERVER_VETTING.md`.
+pub const BLOSSOM_SERVERS: &[BlossomServer] = &[
+    BlossomServer {
+        base: "https://blossom.primal.net",
+        site: "primal.net",
+        auth: BlossomAuthEncoding::PaddedStandard,
+    },
+    BlossomServer {
+        base: "https://blossom.divine.video",
+        site: "divine.video",
+        auth: BlossomAuthEncoding::UrlSafeUnpadded,
+    },
+    BlossomServer {
+        base: "https://blossom.ditto.pub",
+        site: "ditto.pub",
+        auth: BlossomAuthEncoding::UrlSafeUnpadded,
+    },
+];
+
+/// An upload server as a pass uses it: a built-in one, or a debug override.
+///
+/// No `Debug`: it carries a host (Security Rule 15).
+#[derive(Clone)]
+pub struct UploadServer {
+    /// The server's base URL.
+    pub base: url::Url,
+    /// The host or registrable domain its descriptor URLs must be on.
+    pub site: String,
+    /// The encoding of its `Authorization` token.
+    pub auth: BlossomAuthEncoding,
+}
+
+/// Process-static install-once override for the Blossom upload servers,
+/// **debug builds only**. Lets the hermetic e2e harness point profile-picture
+/// UPLOADS at local Blossom servers (`http://10.0.2.2:3000` on the Android
+/// emulator, `http://localhost:3000` on the iOS simulator/host) instead of the
+/// production list, without ever affecting a release binary. Mirrors the
+/// install-once `relay::set_default_relays_for_test` override discipline.
+#[cfg(debug_assertions)]
+static BLOSSOM_SERVERS_FOR_TEST: std::sync::OnceLock<Vec<UploadServer>> =
+    std::sync::OnceLock::new();
+
+/// The servers profile-picture uploads try, in order.
+///
+/// [`BLOSSOM_SERVERS`] in production. In debug builds an e2e override
+/// installed via [`set_blossom_server_for_test`] REPLACES the whole list, so a
+/// hermetic run never dials a production server; release builds can never
+/// install one (the setter is a fail-closed stub). Every base is still passed
+/// through `blossom::require_https`, which permits plaintext `http://` only
+/// for the loopback/emulator allowlist in debug builds.
+#[must_use]
+pub fn blossom_servers() -> Vec<UploadServer> {
+    #[cfg(debug_assertions)]
+    if let Some(servers) = BLOSSOM_SERVERS_FOR_TEST.get() {
+        return servers.clone();
+    }
+    BLOSSOM_SERVERS
+        .iter()
+        .filter_map(|s| {
+            Some(UploadServer {
+                base: url::Url::parse(s.base).ok()?,
+                site: s.site.to_string(),
+                auth: s.auth,
+            })
+        })
+        .collect()
+}
+
+/// Parses an override list: comma-separated base URLs, tried in order. Each
+/// entry is trimmed, must be non-empty and must parse as a URL with a host,
+/// which is the site its descriptors must be on. Override servers are sent the
+/// token in [`BlossomAuthEncoding::PaddedStandard`], as Primal decodes it.
+#[cfg(debug_assertions)]
+fn parse_server_list(list: &str) -> std::result::Result<Vec<UploadServer>, String> {
+    list.split(',')
+        .map(|entry| {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                return Err("blossom server override must not be empty".to_string());
+            }
+            let base = url::Url::parse(entry)
+                .map_err(|_| "blossom server override is not a URL".to_string())?;
+            let site = base
+                .host_str()
+                .ok_or_else(|| "blossom server override has no host".to_string())?
+                .to_string();
+            Ok(UploadServer {
+                base,
+                site,
+                auth: BlossomAuthEncoding::PaddedStandard,
+            })
+        })
+        .collect()
+}
+
+/// Overrides the Blossom upload servers for hermetic e2e tests (**debug
+/// only**).
+///
+/// `servers` is a comma-separated, ordered list of base URLs
+/// (`"http://10.0.2.2:3000,http://10.0.2.2:3002"`); it replaces the whole
+/// production list. Intended to be called once from a scenario's `setUpAll`
+/// (alongside `set_discovery_relays_for_test` and
+/// `allow_private_blossom_for_test`) so the own-profile sync's picture upload
+/// targets the local Blossom container/binary.
 ///
 /// # Errors
 ///
-/// * Returns an error if `url` is empty.
+/// * Returns an error if an entry is empty or is not a URL with a host.
 /// * Returns an error if the override has already been installed in this
 ///   process (`OnceLock` install-once semantics).
 /// * In release builds this is unreachable; the sibling stub always errors.
 #[cfg(debug_assertions)]
-pub fn set_blossom_server_for_test(url: String) -> std::result::Result<(), String> {
-    if url.is_empty() {
-        return Err("blossom server override must not be empty".to_string());
-    }
-    BLOSSOM_SERVER_FOR_TEST
-        .set(url)
+pub fn set_blossom_server_for_test(servers: &str) -> std::result::Result<(), String> {
+    BLOSSOM_SERVERS_FOR_TEST
+        .set(parse_server_list(servers)?)
         .map_err(|_existing| "set_blossom_server_for_test already installed".to_string())
 }
 
 /// Release stub for [`set_blossom_server_for_test`] — always errors so release
-/// callers fail closed and the production default is never overridable.
+/// callers fail closed and the production list is never overridable.
 ///
 /// # Errors
 ///
 /// Always returns an error.
 #[cfg(not(debug_assertions))]
-pub fn set_blossom_server_for_test(_url: String) -> std::result::Result<(), String> {
+pub fn set_blossom_server_for_test(_servers: &str) -> std::result::Result<(), String> {
     Err("set_blossom_server_for_test is disabled in release builds".to_string())
 }
 
@@ -221,8 +327,56 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_blossom_server_is_https() {
-        assert!(DEFAULT_BLOSSOM_SERVER.starts_with("https://"));
+    fn every_built_in_blossom_server_is_https_and_names_its_own_site() {
+        let servers = blossom_servers();
+        assert_eq!(
+            servers.len(),
+            BLOSSOM_SERVERS.len(),
+            "a built-in base that does not parse would silently drop out of the list",
+        );
+        assert_eq!(
+            servers[0].base.host_str(),
+            Some("blossom.primal.net"),
+            "Primal is tried first (White Noise parity)",
+        );
+        for (i, server) in servers.iter().enumerate() {
+            assert_eq!(server.base.scheme(), "https", "server {i}");
+            let host = server.base.host_str().expect("a built-in base has a host");
+            assert!(
+                host == server.site || host.ends_with(&format!(".{}", server.site)),
+                "server {i}: its own descriptors would be refused as off-site",
+            );
+            assert!(
+                servers[..i].iter().all(|other| other.base != server.base),
+                "server {i} is listed twice",
+            );
+        }
+        assert_eq!(servers[0].auth, BlossomAuthEncoding::PaddedStandard);
+    }
+
+    #[test]
+    fn an_override_list_replaces_every_built_in_server_in_its_own_order() {
+        let servers = parse_server_list(" http://10.0.2.2:3000 ,http://localhost:3002")
+            .expect("two valid entries");
+        let bases: Vec<&str> = servers.iter().map(|s| s.base.as_str()).collect();
+        assert_eq!(bases, ["http://10.0.2.2:3000/", "http://localhost:3002/"]);
+        let sites: Vec<&str> = servers.iter().map(|s| s.site.as_str()).collect();
+        assert_eq!(sites, ["10.0.2.2", "localhost"]);
+        assert!(
+            servers
+                .iter()
+                .all(|s| s.auth == BlossomAuthEncoding::PaddedStandard),
+            "an override mimics Primal's decoder",
+        );
+        for bad in [
+            "",
+            "http://a.example,",
+            " , http://a.example",
+            "not a url",
+            "data:x",
+        ] {
+            assert!(parse_server_list(bad).is_err(), "{bad:?} must be refused");
+        }
     }
 
     #[test]

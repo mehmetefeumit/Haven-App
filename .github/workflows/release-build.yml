@@ -80,14 +80,15 @@ jobs:
   # start because nothing ever launched a release build, so this workflow
   # launches the exact APKs before anything is published, and launches a
   # simulator build of the tag's tree before TestFlight (a signed device IPA
-  # cannot run on a simulator); ci.yml's iOS launch gate is also one of the
-  # gate jobs check_ci_verdict.sh requires.
+  # cannot run on a simulator); ci.yml's iOS launch gate and its public-profile
+  # E2E jobs are also among the gate jobs check_ci_verdict.sh requires.
   # ---------------------------------------------------------------------------
   gate:
     name: CI passed on this commit
     runs-on: ubuntu-latest
-    # The script's own deadline is 120 minutes.
-    timeout-minutes: 130
+    # The script's own deadline is 180 minutes (e2e-profile.yml's iOS job,
+    # capped at 135, is the slowest gate job behind the rust stage).
+    timeout-minutes: 190
     permissions:
       actions: read
       contents: read

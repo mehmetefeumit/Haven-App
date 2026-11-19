@@ -180,6 +180,10 @@ class AppLocalizationsEs extends AppLocalizations {
       'No se pudo guardar ese nombre. Inténtalo de nuevo.';
 
   @override
+  String get onboardingPhotoNotSaved =>
+      'No se ha podido guardar tu foto. Puedes añadirla más tarde en Ajustes, dentro de Identidad.';
+
+  @override
   String get onboardingAddPhotoOptional => 'Añadir una foto (opcional)';
 
   @override
@@ -1679,7 +1683,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get identityAdvancedDeleteBody =>
-      'Esto elimina tu identidad y todos los datos de tus círculos de este teléfono. Todo lo que ya se haya publicado con ella se queda donde está: tu nombre y tus claves en los relés que los tengan, y tu foto en el alojamiento de imágenes que la guarda. Asegúrate de haber respaldado tu clave secreta si quieres poder recuperar esa identidad.';
+      'Esto elimina tu identidad y todos los datos de tus círculos de este teléfono. Todo lo que ya se haya publicado con ella se queda donde está: tu nombre y tus claves en los relés que los tengan, y tu foto en los servicios de alojamiento de imágenes a los que se haya subido. Asegúrate de haber respaldado tu clave secreta si quieres poder recuperar esa identidad.';
 
   @override
   String get identityAdvancedDeleteConfirm => 'Eliminar';
@@ -1843,7 +1847,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get photoHeaderRemoveBody =>
-      'Esto quita tu foto de tu perfil público. El archivo de imagen sigue en el servidor que lo aloja, y las copias que otras personas ya hayan descargado se quedan con ellas.';
+      'Esto quita tu foto de tu perfil público. El archivo de imagen sigue en los servidores a los que se haya subido, y las copias que otras personas ya hayan descargado se quedan con ellas.';
 
   @override
   String get photoHeaderEditPhoto => 'Editar foto';

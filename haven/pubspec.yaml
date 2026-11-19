@@ -73,9 +73,10 @@ dependencies:
   # Picker / iOS PHPicker) are permission-free and scoped to the chosen
   # image, so permission_handler is intentionally NOT a dependency.
   image_picker: ^1.1.2
-  # Direct deps (also pulled transitively by image_picker) so main.dart can
-  # opt into the scoped Android Photo Picker via
-  # ImagePickerAndroid.useAndroidPhotoPicker. Pinned to the resolved versions.
+  # Direct deps (also pulled transitively by image_picker) so
+  # lib/src/utils/image_picker_config.dart can opt into the scoped Android
+  # Photo Picker via ImagePickerAndroid.useAndroidPhotoPicker. Pinned to the
+  # resolved versions.
   image_picker_android: ^0.8.13+17
   image_picker_platform_interface: ^2.11.1
   # Android WorkManager periodic background-wake floor (M7-C).

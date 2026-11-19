@@ -24,11 +24,13 @@
 //!
 //! # The owed event
 //!
-//! A complete event (it carries every pending item at `local_version`) that
-//! some relays acknowledged is kept in `profile_publish_debt` with the relays
-//! that serve it, so a retry re-sends those exact bytes to the rest instead of
-//! signing a new kind-0 for the whole pool. Every write that bumps
-//! `local_version` deletes it.
+//! The newest event of `local_version` that some relays acknowledged is kept
+//! in `profile_publish_debt` with the relays that serve it, so a retry
+//! re-sends those exact bytes to the rest instead of signing a new kind-0 for
+//! the whole pool. That is a complete event (it carries every pending item),
+//! or a text-only one while the staged photo has never been uploaded — whose
+//! full coverage therefore never cleans the outbox: the photo is still owed.
+//! Every write that bumps `local_version` deletes it.
 //!
 //! [`Self::commit_profile_sync`] is a compare-and-set on that counter: it may
 //! only clear the pending set for the exact version it published. An edit saved
@@ -125,7 +127,8 @@ pub struct ProfileSyncCommit<'a> {
     /// The usable pool this publish was for.
     pub pool: &'a [String],
     /// Whether the event carries every pending item at `version` (no upload
-    /// failed).
+    /// failed). Only a complete event every pool relay serves cleans the
+    /// outbox.
     pub complete: bool,
     /// Injected clock, in Unix seconds.
     pub now: i64,
@@ -541,6 +544,20 @@ impl CircleStorage {
         Ok(staged.is_some_and(|flag| flag != 0))
     }
 
+    /// Whether the staged photo has never been uploaded: it is staged and its
+    /// row still has no URL, which only a successful upload's commit stamps.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::stage_own_profile_edits`].
+    pub fn own_picture_upload_owed(&self, pubkey_hex: &str) -> Result<bool> {
+        let conn = self
+            .conn()
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        Ok(Self::picture_upload_owed_on(&conn, pubkey_hex)?)
+    }
+
     /// Records a sync attempt that did not fully land, advancing the persisted
     /// retry ladder.
     ///
@@ -575,9 +592,11 @@ impl CircleStorage {
     /// The compare-and-set: `published_version` and (once every pool relay
     /// serves the event) `synced_version` only ever move FORWARD, and the
     /// pending set is cleared only when the version that was published is
-    /// still the newest one saved. Short of full coverage the ladder advances,
-    /// and a complete event for the newest version is kept as the owed event
-    /// with the relays that took it.
+    /// still the newest one saved. Short of a complete event every pool relay
+    /// serves, the ladder advances and the event, for the newest version, is
+    /// kept as the owed event with the relays that took it — a text-only one
+    /// too, so a retry while the upload keeps failing re-sends it rather than
+    /// signing another.
     ///
     /// # The row keeps what is still pending
     ///
@@ -652,9 +671,7 @@ impl CircleStorage {
                 params![pubkey_hex, c.version],
             )?;
             Self::write_sync_attempt_row(&tx, &pubkey_hex, c.now)?;
-            if c.complete {
-                Self::write_publish_debt(&tx, &pubkey_hex, c.version, c.event, c.covered)?;
-            }
+            Self::write_publish_debt(&tx, &pubkey_hex, c.version, c.event, c.covered)?;
         }
 
         // Before the row is rewritten from what is still pending. A version at
@@ -761,8 +778,10 @@ impl CircleStorage {
     /// Records that `newly_covered` relays now serve the owed event of
     /// `version`.
     ///
-    /// Once every relay of `pool` does, the outbox is clean; otherwise the
-    /// ladder advances. A compare-and-set on both the owed event's version and
+    /// Once every relay of `pool` does, the outbox is clean — unless the
+    /// staged photo's upload is still owed ([`Self::own_picture_upload_owed`]),
+    /// which a text-only event does not carry; otherwise the ladder advances.
+    /// A compare-and-set on both the owed event's version and
     /// `local_version`, so a pass that a save, a removal, a deletion or a
     /// redirect overtook changes nothing.
     ///
@@ -796,7 +815,7 @@ impl CircleStorage {
         };
         let mut covered: Vec<String> = serde_json::from_str(&covered_json).unwrap_or_default();
         covered.extend(uncovered(newly_covered, &covered));
-        if uncovered(pool, &covered).is_empty() {
+        if uncovered(pool, &covered).is_empty() && !Self::picture_upload_owed_on(&tx, pubkey_hex)? {
             tx.execute(
                 "UPDATE profile_sync_state SET
                     published_version = MAX(published_version, ?2),
@@ -1156,6 +1175,17 @@ impl CircleStorage {
             ],
         )?;
         Ok(())
+    }
+
+    /// [`Self::own_picture_upload_owed`], on an ALREADY-LOCKED connection.
+    fn picture_upload_owed_on(conn: &Connection, pubkey_hex: &str) -> rusqlite::Result<bool> {
+        conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM profile_sync_state s
+                 JOIN profile_pictures p ON p.pubkey = s.pubkey
+                 WHERE s.pubkey = ?1 AND s.picture_staged = 1 AND p.url = '')",
+            params![pubkey_hex],
+            |r| r.get(0),
+        )
     }
 
     fn delete_publish_debt(conn: &Connection, pubkey_hex: &str) -> rusqlite::Result<()> {
@@ -2646,8 +2676,10 @@ mod tests {
             Some(""),
             "'untouched' would leave A on every relay the pass reaches"
         );
+        // The removal merges as an absent picture (`merge_edits`).
         let event = kind0_at(&keys, &meta("Me"), 1);
-        commit_new(&storage, &keys, 2, &event, &pool[..1], &pool, false).unwrap();
+        let version = version_of(&storage, &hex);
+        commit_new(&storage, &keys, version, &event, &pool[..1], &pool, false).unwrap();
 
         let snapshot = storage
             .pending_profile_sync(&hex)
@@ -2658,13 +2690,14 @@ mod tests {
         assert_eq!(
             snapshot.edits.to_edits(None).picture,
             None,
-            "and a second failure must not publish it again as an empty picture"
+            "and a second failure must not sign it again as an empty picture"
         );
-        assert_eq!(
-            debt_rows(&storage),
-            0,
-            "a text-only publish is no complete event"
-        );
+        let debt = storage
+            .profile_publish_debt(&keys.public_key(), version)
+            .unwrap()
+            .expect("the text-only removal is what a failing retry re-sends");
+        assert_eq!(debt.event, event, "byte for byte, never signed afresh");
+        assert!(storage.own_picture_upload_owed(&hex).unwrap(), "B is owed");
         assert_eq!(
             storage
                 .get_profile(&hex)
@@ -2794,14 +2827,37 @@ mod tests {
             .unwrap()
             .is_none());
 
-        // A text-only publish (the upload failed) is not a complete event.
+        // A text-only publish (the photo's upload failed) is owed like a
+        // complete one, so a retry re-sends it rather than signing another.
+        storage1
+            .stage_own_profile_picture(&hex, &staged(b"photo", b"thumb"), 1_000)
+            .unwrap();
+        let text_only = version_of(&storage1, &hex);
         let event = kind0_at(&keys, &meta("Owed"), 1);
-        commit_new(&storage1, &keys, 1, &event, &pool[..1], &pool, false).unwrap();
-        assert_eq!(debt_rows(&storage1), 0);
+        commit_new(
+            &storage1,
+            &keys,
+            text_only,
+            &event,
+            &pool[..1],
+            &pool,
+            false,
+        )
+        .unwrap();
+        let debt = storage1
+            .profile_publish_debt(&keys.public_key(), text_only)
+            .unwrap()
+            .expect("the text-only event one relay took is owed");
+        assert_eq!(debt.event, event);
+        assert_eq!(debt.covered, pool[..1].to_vec());
+        assert!(
+            storage1.own_picture_upload_owed(&hex).unwrap(),
+            "the photo is still owed"
+        );
         assert_eq!(
             raw(&storage1, &hex).unwrap().2,
-            1,
-            "but a relay did take it"
+            text_only,
+            "and a relay did take it"
         );
 
         // A complete event for a version a later save has passed.
@@ -2935,6 +2991,93 @@ mod tests {
             (stored.event_created_at, stored.fetched_at),
             (row.event_created_at, row.fetched_at)
         );
+    }
+
+    #[test]
+    fn a_text_only_commit_owes_its_event_and_full_coverage_keeps_the_photo_pending() {
+        let storage = storage();
+        let keys = Keys::generate();
+        let hex = keys.public_key().to_hex();
+        let pool = relays(&["a", "b"]);
+        storage
+            .stage_own_profile_edits(&hex, &name_edit("Text First"), 1_000)
+            .unwrap();
+        storage
+            .stage_own_profile_picture(&hex, &staged(b"photo", b"thumb"), 1_000)
+            .unwrap();
+        let version = version_of(&storage, &hex);
+        let event = kind0_at(&keys, &meta("Text First"), 1);
+        commit_new(&storage, &keys, version, &event, &pool[..1], &pool, false).unwrap();
+        assert_eq!(debt_rows(&storage), 1);
+        assert_eq!(
+            raw(&storage, &hex).unwrap().3,
+            1,
+            "the ladder advanced once"
+        );
+
+        // Every relay now serves the text: the name is out, the photo is not.
+        storage
+            .commit_profile_coverage(&hex, version, &pool[1..], &pool, 2_000)
+            .unwrap();
+        let snapshot = storage
+            .pending_profile_sync(&hex)
+            .unwrap()
+            .expect("the photo keeps the outbox pending");
+        assert!(snapshot.picture_staged);
+        assert_eq!(snapshot.edits.display_name.as_deref(), Some("Text First"));
+        let debt = storage
+            .profile_publish_debt(&keys.public_key(), version)
+            .unwrap()
+            .expect("still owed, now to nobody");
+        assert_eq!(debt.event, event);
+        assert!(uncovered(&pool, &debt.covered).is_empty());
+        let (_, synced, _, attempts, next_retry_at) = raw(&storage, &hex).unwrap();
+        assert_eq!(synced, 0);
+        assert_eq!(attempts, 2, "the pass advanced the ladder instead");
+        assert_eq!(next_retry_at, 2_000 + PROFILE_SYNC_BACKOFF_SECS[1]);
+        assert_eq!(
+            &*storage.get_profile_picture(&hex).unwrap().unwrap(),
+            b"photo"
+        );
+    }
+
+    #[test]
+    fn once_the_photo_is_uploaded_full_coverage_of_its_event_cleans_the_outbox() {
+        let storage = storage();
+        let keys = Keys::generate();
+        let hex = keys.public_key().to_hex();
+        let pool = relays(&["a", "b"]);
+        let picture = staged(b"photo", b"thumb");
+        storage
+            .stage_own_profile_picture(&hex, &picture, 1_000)
+            .unwrap();
+        assert!(storage.own_picture_upload_owed(&hex).unwrap());
+        let version = version_of(&storage, &hex);
+        let url = "https://blossom.example/photo";
+        let merged = meta_with_picture("Me", url);
+        let event = kind0_at(&keys, &merged, 1);
+        storage
+            .commit_profile_sync(&ProfileSyncCommit {
+                pubkey: &keys.public_key(),
+                version,
+                merged: &merged,
+                event: &event,
+                uploaded_picture: Some((url, picture.sha256())),
+                covered: &pool[..1],
+                pool: &pool,
+                complete: true,
+                now: NOW,
+            })
+            .unwrap();
+        assert!(
+            !storage.own_picture_upload_owed(&hex).unwrap(),
+            "the upload's commit stamped the URL"
+        );
+        storage
+            .commit_profile_coverage(&hex, version, &pool[1..], &pool, 2_000)
+            .unwrap();
+        assert!(storage.pending_profile_sync(&hex).unwrap().is_none());
+        assert_eq!(debt_rows(&storage), 0);
     }
 
     #[test]

@@ -20,6 +20,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/circle_service.dart';
@@ -2347,6 +2348,82 @@ void _handoffTests() {
           ),
         ),
       );
+    });
+
+    test('the handoff refusal is typed', () async {
+      // A log line, or a caller, tells it from a keyring failure or a wipe by
+      // type alone (Rule 8: never by reading the message).
+      final h = build(isForegrounded: () => false);
+      h.service.releaseForHandoff();
+      await expectLater(
+        h.service.initialize(),
+        throwsA(isA<SessionHandedOffException>()),
+      );
+    });
+
+    group('untilHandoffEnded', () {
+      // A photo picked on Android comes back before the window has focus, so
+      // the save waits for the resume to end the handoff instead of opening
+      // into the refusal above.
+
+      test('answers at once when no handoff holds', () async {
+        final h = build(isForegrounded: () => false);
+        expect(
+          await h.service.untilHandoffEnded(timeout: Duration.zero),
+          isTrue,
+        );
+      });
+
+      test('waits for the resume to end the handoff', () async {
+        final h = build(isForegrounded: () => false);
+        h.service.releaseForHandoff();
+        bool? answer;
+        unawaited(
+          h.service
+              .untilHandoffEnded(timeout: kHandoffEndWait)
+              .then((ended) => answer = ended),
+        );
+        await pumpEventQueue();
+        expect(answer, isNull, reason: 'the handoff still holds');
+
+        h.service.endSessionHandoff();
+        await pumpEventQueue();
+        expect(answer, isTrue);
+      });
+
+      test('gives up at its bound', () {
+        fakeAsync((async) {
+          final h = build(isForegrounded: () => false);
+          h.service.releaseForHandoff();
+          bool? answer;
+          unawaited(
+            h.service
+                .untilHandoffEnded(timeout: kHandoffEndWait)
+                .then((ended) => answer = ended),
+          );
+          async.elapse(kHandoffEndWait - const Duration(microseconds: 1));
+          expect(answer, isNull);
+          async.elapse(const Duration(microseconds: 1));
+          expect(answer, isFalse);
+        });
+      });
+
+      test('an open that lapses the handoff ends the wait too', () async {
+        var foregrounded = false;
+        final h = build(isForegrounded: () => foregrounded);
+        h.service.releaseForHandoff();
+        bool? answer;
+        unawaited(
+          h.service
+              .untilHandoffEnded(timeout: kHandoffEndWait)
+              .then((ended) => answer = ended),
+        );
+        foregrounded = true;
+        // The open itself fails on this harness's missing identity.
+        await expectLater(h.service.initialize(), throwsA(anything));
+        await pumpEventQueue();
+        expect(answer, isTrue);
+      });
     });
 
     test('an in-flight open is not adopted once a handoff latched', () {

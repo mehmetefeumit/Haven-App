@@ -23,8 +23,8 @@
 //! would keep the profile off every relay that joined. An install with no
 //! such record — a storage reset — waits for the whole read.
 //!
-//! A **re-send** runs when a complete signed kind-0 is owed to part of the
-//! pool: the identical event goes only to the relays not known to serve it,
+//! A **re-send** runs when a signed kind-0 is owed to part of the pool: the
+//! identical event goes only to the relays not known to serve it,
 //! and each relay that answered is read back. An OK is no evidence (relays
 //! answer OK true to an older replaceable they will not store), so a relay
 //! counts as covered only when it serves our id. A relay serving a newer own
@@ -35,7 +35,11 @@
 //! freshest kind-0 back from the whole pool, caches that copy when it is newer
 //! than the row, merges the pending edits onto it, signs one kind-0 and offers
 //! it to every pool relay. A failed upload does not hold back a pending name or
-//! removal: they publish without the photo, which stays staged. A pass whose
+//! removal: they publish without the photo, which stays staged, and that
+//! text-only event is the owed one. A later pass uploads the photo first and,
+//! while the upload keeps failing, only re-sends that event; a new kind-0 is
+//! signed once the photo is up, so a Blossom outage puts no new event on the
+//! relays per retry. A pass whose
 //! event would carry no saved content (a photo removal alone, or an owed
 //! deletion blank) first passes the retraction gate, so it never mints a first
 //! public event and never overwrites a profile this device cannot see.
@@ -64,7 +68,7 @@ use crate::avatar::StagedPicture;
 use crate::log_alias::bucket;
 use crate::profile::fetch::newest_own_copy;
 use crate::profile::{
-    blossom_server, build_metadata_event, merge_base, merge_edits, newest_own_event,
+    blossom_servers, build_metadata_event, merge_base, merge_edits, newest_own_event,
     offer_metadata, read_own_per_relay, read_own_profile_on_relays, retraction_gate,
     served_against, uncovered, upload_profile_picture, OwnProfileOnRelays, OwnReadVerdict,
     OwnRelayRead, PendingSnapshot, ProfileError, ProfileMetadata, ProfilePicture, RetractionGate,
@@ -179,6 +183,10 @@ impl CircleManager {
     /// Returns a [`CircleError`](super::error::CircleError) only for LOCAL
     /// faults: a database failure, or a kind-0 that could not be built/signed.
     /// Every network failure is an outcome instead — see the module docs.
+    // Long because every footprint of the pass — each offer and each upload —
+    // must sit in this one body, after the gate read
+    // (`check_profile_privacy_boundaries.sh` check 6).
+    #[allow(clippy::too_many_lines)]
     pub async fn sync_own_profile(
         &self,
         own_pk: &PublicKey,
@@ -194,7 +202,7 @@ impl CircleManager {
         // below can leave the device.
         let published_here = self.storage.has_published_profile(own_pk)?;
         let snapshot = self.storage.pending_profile_sync(&own_hex)?;
-        let (pool, version, debt) = match self.scope(own_pk, snapshot.as_ref(), &clock)? {
+        let (pool, version, mut debt) = match self.scope(own_pk, snapshot.as_ref(), &clock)? {
             Ok(scope) => scope,
             Err(report) => return Ok(report),
         };
@@ -202,6 +210,25 @@ impl CircleManager {
         // A signer-less client (`RelayManager::new`), so a relay's NIP-42 AUTH
         // challenge structurally cannot be answered.
         let relay = RelayManager::new();
+        let servers = blossom_servers();
+
+        // The owed event is text-only while the staged photo was never
+        // uploaded: the photo goes first, and only a failed upload leaves the
+        // pass to re-send that event, so retries sign nothing.
+        let mut early: Option<([u8; 32], crate::profile::Result<ProfilePicture>)> = None;
+        if let (Some(snapshot), Some(keys), Some(_)) = (&snapshot, keys, &debt) {
+            if self.storage.own_picture_upload_owed(&own_hex)? {
+                let Some(staged) = self.staged_now(&own_hex, snapshot)? else {
+                    return self.reported(&own_hex, ProfileSyncOutcome::PublishFailed);
+                };
+                let sha256 = *staged.sha256();
+                let uploaded = upload_profile_picture(keys, &servers, staged).await;
+                if uploaded.is_ok() {
+                    debt = None;
+                }
+                early = Some((sha256, uploaded));
+            }
+        }
 
         if let Some(debt) = debt {
             let owed = uncovered(&pool, &debt.covered);
@@ -221,7 +248,17 @@ impl CircleManager {
             if let Some(report) =
                 self.close_resend(own_pk, resigned, &debt, &found, &pool, clock())?
             {
-                return Ok(report);
+                // The photo is still owed, so this pass is its failed upload
+                // unless the re-send reached a relay.
+                return Ok(match early {
+                    Some(_) if report.outcome != ProfileSyncOutcome::Published => {
+                        ProfileSyncReport {
+                            outcome: ProfileSyncOutcome::UploadFailed,
+                            ..report
+                        }
+                    }
+                    _ => report,
+                });
             }
         }
 
@@ -247,25 +284,32 @@ impl CircleManager {
             return self.reported(&own_hex, ProfileSyncOutcome::PublishFailed);
         };
 
-        let staged = self.staged_now(&own_hex, &snapshot)?;
-        // A removal landed after the snapshot: what it describes is gone, and
-        // building on it would re-sign the removed photo. Nothing was tried,
-        // so the ladder stays where the removal reset it.
-        if snapshot.picture_staged && staged.is_none() {
-            return self.reported(&own_hex, ProfileSyncOutcome::PublishFailed);
-        }
-        let staged_sha256 = staged.as_ref().map(|picture| *picture.sha256());
+        // One upload per pass: one made above for the owed event is the
+        // upload this pass publishes from.
+        let (staged_sha256, uploaded, staged) = if let Some((sha256, uploaded)) = early {
+            (Some(sha256), Some(uploaded), None)
+        } else {
+            let staged = self.staged_now(&own_hex, &snapshot)?;
+            // A removal landed after the snapshot: what it describes is gone,
+            // and building on it would re-sign the removed photo. Nothing was
+            // tried, so the ladder stays where the removal reset it.
+            if snapshot.picture_staged && staged.is_none() {
+                return self.reported(&own_hex, ProfileSyncOutcome::PublishFailed);
+            }
+            (
+                staged.as_ref().map(|picture| *picture.sha256()),
+                None,
+                staged,
+            )
+        };
         // The upload and the merge-base read are independent: one talks to a
         // Blossom host, the other to the relay pool. Running them concurrently
         // is what keeps a photo save from costing the sum of both round trips.
-        // The server URL is parsed inside the future so a malformed override
-        // folds into the same failure path as an unreachable host.
         let upload = async {
-            let staged = staged?;
-            let Ok(server) = blossom_server().parse::<url::Url>() else {
-                return Some(Err(ProfileError::BadUrl));
-            };
-            Some(upload_profile_picture(keys, &server, staged).await)
+            match uploaded {
+                Some(uploaded) => Some(uploaded),
+                None => Some(upload_profile_picture(keys, &servers, staged?).await),
+            }
         };
         let (uploaded, read) = tokio::join!(
             upload,

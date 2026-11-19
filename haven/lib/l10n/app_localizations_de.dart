@@ -180,6 +180,10 @@ class AppLocalizationsDe extends AppLocalizations {
       'Dieser Name konnte nicht gespeichert werden. Bitte versuche es erneut.';
 
   @override
+  String get onboardingPhotoNotSaved =>
+      'Dein Foto konnte nicht gespeichert werden. Du kannst es später unter Einstellungen → Identität hinzufügen.';
+
+  @override
   String get onboardingAddPhotoOptional => 'Foto hinzufügen (optional)';
 
   @override
@@ -1654,7 +1658,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get identityAdvancedDeleteBody =>
-      'Dadurch werden deine Identität und alle Kreisdaten von diesem Handy gelöscht. Alles, was bereits unter dieser Identität veröffentlicht wurde, bleibt dort, wo es ist: dein Name und deine Schlüssel auf den Relays, die sie haben, dein Foto auf dem Bild-Host, der es speichert. Stelle sicher, dass du deinen geheimen Schlüssel gesichert hast, falls du die Identität später wiederherstellen möchtest.';
+      'Dadurch werden deine Identität und alle Kreisdaten von diesem Handy gelöscht. Alles, was bereits unter dieser Identität veröffentlicht wurde, bleibt dort, wo es ist: dein Name und deine Schlüssel auf den Relays, die sie haben, dein Foto auf jedem Bild-Host, auf den es hochgeladen wurde. Stelle sicher, dass du deinen geheimen Schlüssel gesichert hast, falls du die Identität später wiederherstellen möchtest.';
 
   @override
   String get identityAdvancedDeleteConfirm => 'Löschen';
@@ -1826,7 +1830,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get photoHeaderRemoveBody =>
-      'Dadurch wird dein Foto aus deinem öffentlichen Profil entfernt. Die Bilddatei bleibt auf dem Server, der sie hostet, und bereits heruntergeladene Kopien bleiben bei denen, die sie haben.';
+      'Dadurch wird dein Foto aus deinem öffentlichen Profil entfernt. Die Bilddatei bleibt auf jedem Server, auf den sie hochgeladen wurde, und bereits heruntergeladene Kopien bleiben bei denen, die sie haben.';
 
   @override
   String get photoHeaderEditPhoto => 'Foto bearbeiten';

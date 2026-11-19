@@ -248,6 +248,12 @@ const _allowedSites = <String, int>{
           'LiveSyncResubscriber.onCirclesChanged':
       1,
   'lib/src/services/mls_session_handover.dart#_defaultDelay': 1,
+  // A photo-picker pause's handoff grace: armed only while paused inside
+  // Haven's own picker or crop editor, once per stretch away, and it ends a
+  // hold rather than starting engine work.
+  'lib/src/services/system_activity_excursions.dart#'
+          'SystemActivityExcursions.graceForPause':
+      1,
   'lib/src/services/tile_prefetch_service.dart#'
           'TilePrefetchServiceImpl._fetchOne':
       2,
@@ -270,7 +276,7 @@ const _allowedSites = <String, int>{
 
 /// The sum of [_allowedSites]: a second pin, so an edit that moves a count
 /// from one site to another is still a visible change of this number.
-const _allowedTotal = 46;
+const _allowedTotal = 47;
 
 /// The sites of [_allowedSites] that reach the MLS or the live-sync engine,
 /// reviewed by hand: the existing wakes. A timer's callback reaches through

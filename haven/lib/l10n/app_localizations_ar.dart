@@ -181,6 +181,10 @@ class AppLocalizationsAr extends AppLocalizations {
       'تعذّر حفظ هذا الاسم. يُرجى إعادة المحاولة.';
 
   @override
+  String get onboardingPhotoNotSaved =>
+      'تعذّر حفظ صورتك. يمكنك إضافتها لاحقًا من صفحة الهوية في الإعدادات.';
+
+  @override
   String get onboardingAddPhotoOptional => 'إضافة صورة (اختياري)';
 
   @override
@@ -1710,7 +1714,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get identityAdvancedDeleteBody =>
-      'يحذف هذا هويتك وكل بيانات دوائرك من هذا الهاتف. أما ما نُشِر تحتها بالفعل فيبقى مكانه: اسمك ومفاتيحك على المُرحِّلات التي لديها نسخة منها، وصورتك على مستضيف الصور الذي يخزّنها. وتأكّد من أنك نسخت مفتاحك السري احتياطيًا إن أردت استعادة هويتك.';
+      'يحذف هذا هويتك وكل بيانات دوائرك من هذا الهاتف. أما ما نُشِر تحتها بالفعل فيبقى مكانه: اسمك ومفاتيحك على المُرحِّلات التي لديها نسخة منها، وصورتك على أي مستضيف صور رُفِعت إليه. وتأكّد من أنك نسخت مفتاحك السري احتياطيًا إن أردت استعادة هويتك.';
 
   @override
   String get identityAdvancedDeleteConfirm => 'حذف';
@@ -1871,7 +1875,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get photoHeaderRemoveBody =>
-      'يؤدي هذا إلى إزالة صورتك من ملفك الشخصي العام. ويبقى ملف الصورة على الخادم الذي يستضيفه، وتبقى النسخ التي نزّلها آخرون بالفعل عندهم.';
+      'يؤدي هذا إلى إزالة صورتك من ملفك الشخصي العام. ويبقى ملف الصورة على أي خادم رُفِع إليه، وتبقى النسخ التي نزّلها آخرون بالفعل عندهم.';
 
   @override
   String get photoHeaderEditPhoto => 'تعديل الصورة';

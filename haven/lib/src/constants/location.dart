@@ -184,6 +184,24 @@
 /// and once in the duration-shaped circle-count estimator a relay reads off the
 /// burst's connect-to-disconnect span (`PUB-COALESCE`).
 ///
+/// **A fourth realized-gap term: Haven's own photo picker and crop editor.**
+/// Android pauses Haven for them as it does when the user leaves, and that
+/// pause holds the MLS session for up to `kSystemActivityHandoffGrace` (20 s,
+/// owner-chosen 2026-11-16), counted from the trip's FIRST pause, before the
+/// foreground service is told to take over (`system_activity_excursions.dart`).
+/// Nothing publishes meanwhile, so the gap that spans such a pause grows by up
+/// to 20 s — until the resume publishes, or, for a user who leaves Haven from
+/// inside the picker or editor, until the service takes over: on the
+/// scheduled worst case `198 + 20 = 218 s` before the service's own fix head,
+/// leaving 10 s of the 30 s margin for that head, propagation and clock skew,
+/// so any head over 10 s crosses the retention. A head term like the first
+/// two. A task removal (a Recents swipe) inside the grace costs more: Haven's
+/// engine is destroyed right after `detached`, so the hand-off never reaches
+/// the write that tells the service to take over, and the service does so
+/// only once the foreground stamp goes stale and its watchdog next looks — 72
+/// to about 216 s after the pause. No test pins the gap; the grace's bound and
+/// its anchoring are pinned in `system_activity_excursions_test.dart`.
+///
 /// The pre-Dark-Matter per-send TTL jitter is gone: the engine derives
 /// the expiration deterministically, and the wrapped event is signed by
 /// an ephemeral key inside the engine's peeler, so no Haven-side

@@ -29,8 +29,9 @@ what keeps that true).
 | `e2e-live-sync.yml` | The SAME two lanes, flag-ON (`HAVEN_LIVE_SYNC=true`) — a manual re-run of what `ci.yml` already gates on | `workflow_dispatch` only | — |
 | `soak-core.yml` | the Tier-1 soak rig (`tooling/soak`): several whole Haven devices in one process against hermetic relays broken on a seeded schedule, grading haven-core's invariants; no app, no emulator. Every capture is scanned twice before the upload — against the manifest the rig sealed from its own declarations and against the host needles (failure mode 14) | `run-soak-core.sh` under `run-with-deadline.sh`, on a plain ubuntu runner | in-process `nostr-relay-builder` relays, ws:// loopback |
 | `soak-nightly.yml` | the same rig at the `nightly` profile on four matrix slots (`Soak Core (nightly, s1)` … `s4`), each with its own seed from `scripts/ci/soak_seed.sh` (the run's `created_at`, never the local clock); the three expected-red arms (C7/C8/C9) are deliberately NOT in the nightly — `verdict.log` keeps a run's first violation only, so they would mask every later defect — and are asserted red by `cargo test` instead, so a red night is a finding. A red night files one issue per key (`docs/SOAK_LANE.md`, "When a night goes red") | cron `23 0 * * 1-6`, or `workflow_dispatch` with a pinned `seed` and 1–4 `slots`; each slot calls `soak-core.yml` | as `soak-core.yml` |
-| `launch-gate-android.yml` | the RELEASE APKs built by `scripts/build_release.sh apk` (R8, AOT, obfuscated) — or, in `release-build.yml`, the tag's exact signed artifacts — cold-launched from the launcher: fresh, after a cold relaunch, and installed over the previous non-yanked release and v0.1.13 with their data kept; `check_apk_loadable.sh` on all three APKs. Only the log-privacy-gated summaries are uploaded, never logcat or a UI dump (failure mode 26) | `run-launch-gate-android.sh` under `run-with-deadline.sh` on an api-34 x86_64 AVD in airplane mode, behind the host egress guard | none — offline by design: a release build knows only production relays |
+| `launch-gate-android.yml` | the RELEASE APKs built by `scripts/build_release.sh apk` (R8, AOT, obfuscated) — or, in `release-build.yml`, the tag's exact signed artifacts — cold-launched from the launcher: fresh (with a photo picked through the real Photo Picker and uCrop on the create screen), after a cold relaunch, and installed over the previous non-yanked release and v0.1.13 with their data kept, the first MapShell turning background sharing on and saving a photo through Settings › Identity; `check_apk_loadable.sh` on all three APKs. Only the log-privacy-gated summaries are uploaded, never logcat or a UI dump (failure mode 26) | `run-launch-gate-android.sh` (+ `photo-picker-lib.sh`) under `run-with-deadline.sh` on an api-34 AND an api-35 x86_64 AVD (one job each) in airplane mode, behind the host egress guard | none — offline by design: a release build knows only production relays |
 | `launch-gate-ios.yml` | the production `main()` in the Release native configuration (debug Dart: the simulator runs nothing else) on a simulator: fresh, cold relaunch, and installed over the previous release's simulator build; `check_ios_app_loadable.sh` on the app (failure mode 27) | `run-launch-gate-ios.sh` driving a standalone XCUITest bundle (`tooling/e2e/ios-launch-gate`) | none — egress blocked by pf (or a hosts sinkhole) |
+| `e2e-profile.yml` `e2e_profile_android_ui` | `e2e_profile_ui_photo.dart`: the Identity-page photo trip through the REAL Photo Picker and uCrop with background sharing on (cancel, pick, rename, replace, remove, re-add), each edit asserted as one kind-0 on every profile relay, Bob downloading through the Primal mimic's 302; a release gate job (failure mode 28) | `run-photo-ui-scenario.sh`: seeds the gallery, runs the host sidecar beside `run-single-avd-scenario.sh` | strfry containers (circle + three profile relays), the Primal-mimicking `local-blossom` (primary, `:3000` + CDN `:3001`) and the hzrd149 container (fallback, `:3002`) |
 | `e2e-integration.yml` | seven component targets (`smoke_test`, `app_test`, `keyring_test`, …), one after another; the lane's one manifest is sealed from the host needles before the first target, and every target's captures and the aggregate go through `scan-logs.sh` (failure mode 13) | `run-integration-tests.sh` → `run-single-avd-scenario.sh` per target, on one AVD | strfry container reset per target, `ws://10.0.2.2:7777` |
 
 `e2e-android.yml` / `e2e-ios.yml` take a `live_sync` boolean input (default
@@ -354,6 +355,25 @@ nothing would authenticate the dependencies a restored cache put on disk (no
 `verification-metadata.xml`; the Gradle distribution itself is pinned by
 `distributionSha256Sum`).
 `scripts/ci/check_gradle_build_hardened.sh` enforces all of this (C1-C6).
+
+**The 404 variant, which the cache does not fix.** `Error resolving plugin
+[id: 'dev.flutter.flutter-plugin-loader' …]` / `Could not find
+org.jetbrains.kotlin:kotlin-stdlib:2.3.20`, with ONLY `https://plugins.gradle.org/m2/…`
+under "Searched in the following locations" (run 44503460373 job 135506633262;
+run 44532048143 jobs 135614752253 and 135614753425). Flutter's own Gradle plugin
+build (`$FLUTTER_ROOT/packages/flutter_tools/gradle`, our `includeBuild`)
+declares no plugin repository and does not inherit ours, so its build classpath
+came from the Plugin Portal alone, which 303s every artifact it does not host to
+`repo.maven.apache.org`; that path answered 404 for files Central holds. Gradle
+caches the miss, so every in-job retry after the first fails in under a second.
+The fix: Haven's own repository lists (`haven/android/settings.gradle.kts`,
+`haven/android/build.gradle.kts`) ask Google's Maven Central mirror right after
+Central, ahead of the Portal, and
+`scripts/ci/maven-central-fallback.init.gradle.kts`, which `build_apk_with_retry.sh`
+and `build_release.sh` install into `$GRADLE_USER_HOME/init.d` on CI, gives
+Flutter's build Central, then the mirror, then the Portal only for the plugins
+it alone hosts. Gradle moves to the next repository only on a 404, so the mirror
+answers exactly this case.
 
 **The retry.** Every Gradle build a workflow invokes DIRECTLY — the E2E lanes'
 and `build-check.yml`'s — goes through `scripts/ci/build_apk_with_retry.sh`; a
@@ -1768,8 +1788,10 @@ compile error is this class; re-running cannot help.
 
 ## Failure mode 26 — `launch-gate-android` is red
 
-`Release APK: launch, relaunch and upgrade` (`.github/workflows/launch-gate-android.yml`,
-docs/LAUNCH_GATE.md) runs the RELEASE APK the way a user does. Read the one
+`Release APK: launch, relaunch and upgrade (API 34)` and `(API 35)`
+(`.github/workflows/launch-gate-android.yml`, docs/LAUNCH_GATE.md) run the
+RELEASE APK the way a user does; `Release APK: build or fetch the candidate`
+before them builds it, and a red there is a build red, not a launch one. Read the one
 `::error::launch-gate-android <class>: …` line first: it names the leg
 (`fresh`, `upgrade (from vX)`, `baseline (from v0.1.13)`), the state reached,
 the last observation (visible label keys, foreground package, EditText count)
@@ -1787,8 +1809,17 @@ a UI dump.
 | product (1) | `a debug-only log plant (logscan-plant-*) reached logcat` | the APK logs like a debug build | product |
 | product (1) | `the create screen never showed exactly one non-empty name field` | the gate cannot read the name it must later compare | check Flutter's EditText semantics in release; product until shown otherwise |
 | usage (2) | `'<dir>' has no app_en.arb` / `… has no usable commonSettings` | a launch-gate input is missing, or a required ARB key was renamed | fix the workflow, or the key list in run-launch-gate-android.sh |
-| infrastructure (3) | `emulator-5554 went offline (…)`, `the device locale is …`, `did not go offline within 30 s` | nothing about the app is known | re-run the job |
-| infrastructure (no rc: the `Build release APKs` step is red) | Gradle: `Could not resolve all artifacts for configuration 'classpath'` / `Could not find …` / `Received status code 429` | dependency resolution failed on this runner's egress before anything compiled; seen once on this lane (a plugin-portal `Could not find org.jetbrains.kotlin:kotlin-stdlib:2.3.20` with a cold dependency cache) and gone on the next runner | re-run the job; an in-job retry has never cleared this class (`scripts/ci/build_apk_with_retry.sh` header), a warm Gradle cache removes it |
+| product (1) | `photo round (identity): the photo save was refused after the crop (avatarPickerUpdateError): root cause A's class …` | with background sharing on, uCrop stopped MainActivity, MapShell handed the MLS session off, and the crop result (delivered before the app is resumed) could not be saved | product: the 2026-11-16 photo bug; never re-run |
+| product (1) | `photo round (…): did not progress: the photo tap opened no picker …` / `… a picker other than the system Photo Picker opened (<component>) …` (DocumentsUI, the GET_CONTENT alias or the Play services picker on API 33+) / `uCrop did not return a result …` / `the photo did not show within 40 s …` / `the photo saved at MapShell was gone after a cold restart` / `uCrop, Haven's own activity, was resumed but its window never took input focus …` | the photo trip broke on the shipped build — the picker not opening, the scoped Photo Picker promise broken on API 33+, uCrop stuck, a save slower than the product's worst case, or the photo not persisted | product |
+| product (1) | `the app crashed (photo round …); NoClassDefFoundError: … AppCompatActivity` | uCrop could not load an androidx class the release build lacks (hnvn/flutter_image_cropper#573's shape) | fix the androidx dependencies in `haven/android/app/build.gradle.kts` |
+| product (1) | `background sharing did not turn on through Settings > Location with notifications granted and the battery exemption read back` | the enable path failed with nothing to excuse it | product |
+| harness (2) | `photo round (…): harness: the system picker was resumed but its window never took input focus …` | the system picker never became ready for input (`dumpsys input` named no picker window as focused); no input was sent to it | fix the harness for that system image; never re-run to green |
+| harness (2) | `photo round (…): harness: no thumbnail selector matched the picker … (rids: …)` / `… uCrop's crop action was not found … (rids: …)` / `… an activity the picker rules do not know took the front … (<component>)` | a system image whose picker or uCrop the selectors do not know; the resource ids or the component it DOES have are listed | update the selectors in `photo-picker-lib.sh` (and the `ui-dump.py` self-test) for that image; never re-run to green |
+| harness (2) | `harness precondition: background sharing did not turn on, and Android showed the battery or notification snack …` | the grants or the battery exemption did not take on this image | fix `photo_at_map`'s preconditions |
+| harness (2) | `no leg reached MapShell, so the photo save under background sharing … went untested` | no upgrade source onboarded to the map (the baseline leg skipped, or v0.1.13 unusable on this API level) | restore the baseline leg; the release is blocked until it runs |
+| harness (2) | `gallery (API …): the device refused a gallery fixture's push …` / `… the media store refused the gallery query …` / `… the media store answered but never listed both gallery fixtures …` | the device answered, but the seeding method did not work on that system image | fix `pp_seed_gallery` for that image; never re-run to green |
+| infrastructure (3) | `emulator-5554 went offline (…)`, `the device locale is …`, `did not go offline within 30 s`, `gallery (API …): adb gave no answer …` / `… the media store had no shared storage attached within 60 s`, `pm grant … did not read back as granted` | nothing about the app is known | re-run the job |
+| infrastructure (no rc: the `Build release APKs` step is red) | Gradle: `Could not resolve all artifacts for configuration 'classpath'` / `Could not find …` / `Received status code 429` | dependency resolution failed on this runner's egress before anything compiled | a 429/403/5xx: re-run the job; an in-job retry has never cleared this class (`scripts/ci/build_apk_with_retry.sh` header), a warm Gradle cache removes it. A `Could not find` searched only on `plugins.gradle.org` is the 404 variant the Maven Central fallback init script exists for (failure mode 6): check that this step installed it |
 | upgrade source unusable (4) | any failure while the PREVIOUS release was running | the release users would upgrade from is itself broken | add `<tag> android <reason>` to `scripts/ci/launch_gate_yanked_releases.txt` |
 
 `check_apk_loadable.sh` red without a launch red is the ML Kit shape: a
@@ -1800,6 +1831,76 @@ reds before the emulator starts: rc 1 is a real upgrade break (certificates
 differ, versionCode not above the previous release's); rc 2 is an input it
 cannot vouch for (no eligible release, a sidecar mismatch, a yanked-list line
 that is not `<vMAJOR.MINOR.PATCH> <android|ios|all> <reason>`).
+
+## Failure mode 28 — a public-profile photo job is red
+
+The three jobs of `e2e-profile.yml` — the API-level scenario on Android and
+iOS, and the Android photo UI trip — are release gate jobs
+(`scripts/ci/check_ci_verdict.sh`), with one re-run policy: re-run a job only
+when its logs attribute the failure to infrastructure — the photo UI job's verdict rc 3;
+for the two API-level jobs, which print no verdict class, a red step outside
+the drive (an image pull, a host server that never started, Gradle
+resolution, the emulator or simulator boot) or a device lost mid-drive
+(`emulator-5554 went offline`, the iOS runner's infrastructure verdict). A
+harness red (rc 2) is fixed in the harness, never re-run to green. Any other
+red is product and blocks the tag.
+
+**`e2e_profile_android` / `e2e_profile_ios`** (the API-level scenario). The
+primary is the Primal mimic (`tooling/e2e/local-blossom --profile primal`):
+its log (`blossom-primary.log`) holds fixed phrases only — `upload: ok` and
+`refused: <reason>` (`bad_b64` = a token not in padded standard base64,
+`bad_id`/`bad_sig`, `expired`, `x_missing`/`x_mismatch`, `fault` = the
+scenario's own injected 503). A step names what broke:
+
+| Step | Red means |
+|---|---|
+| 3b `Bob's download must have FOLLOWED the 302 …` | the download refused or did not follow the redirect blossom.primal.net answers with: root cause B, a Primal-hosted photo never loading on another device |
+| 6 fallback | a primary answering 503 kept the photo from publishing, or the next server was not tried, or the primary was asked more than once |
+| 7 clock skew | an upload token whose expiration does not outlive a 90 s skew (the 60 s token of before) |
+| 8 / 5 `one distinct kind-0 per edit` | a pass signed a new kind-0 for an edit already published |
+
+A pass whose upload FAILS on every server is the Rust sync tests' to prove; no
+device step provokes one.
+
+**`e2e_profile_android_ui`** (`run-photo-ui-scenario.sh`). Read the
+`::error::photo-ui rc <n>: …` line, then the echoed `--- photo sidecar ---`
+block (`photo-sidecar.log`, uploaded on failure): one line per round,
+`round=<n> act=<pick|cancel> picker=<selector> ucrop=<selector>
+pause=<yes|no> grace=<cause> dwell=<s> focus=<s>` (a failed round:
+`… failed class=<product|harness|infrastructure> focus=<s>`), then
+`drive rc=… sidecar rc=…`. `focus` is how long the system picker took from
+resumed to holding input focus: no input is sent to the picker or uCrop
+before its window holds it (`dumpsys input`), because a key sent earlier is
+dropped by the input dispatcher — the lane's first device run lost its cancel
+BACK that way. System error dialogs are hidden before the first round, as in
+the launch gate, so another process's "isn't responding" dialog cannot take
+that focus; with none to show, Android kills a foreground app that stops
+responding, so Haven's own ANR still fails the drive (product).
+
+| rc | Line | Meaning | Action |
+|---|---|---|---|
+| 1 | `round <n> (pick): … a picker other than the system Photo Picker … (<component>)` / `uCrop did not return a result` | the system trip broke: a KNOWN wrong picker (DocumentsUI, the GET_CONTENT alias, the Play services picker) on API 33+, or uCrop stuck | product |
+| 1 | `the cancelled picker left the front but Haven did not resume …` / `uCrop, Haven's own activity, was resumed but its window never took input focus …` | the picker DID go after its BACK and Haven did not come back, or Haven's own crop screen never became ready | product |
+| 1 | `the excursion grace expired though Haven was away for at most <s> s` | the grace that keeps the session through Haven's own photo trip ran out inside its own window. `<s>` runs from just before the thumbnail tap to MainActivity seen resumed, an upper bound on the excursion, so a slow runner cannot fake this | product (Area A's grace anchoring) |
+| 1 | `the drive failed (rc 1), with the sidecar's <n> round(s) all played` | the Dart side failed after the sidecar did its part: read the drive log — `the photo save was refused after the crop` is root cause A, a lifecycle timeout names the sequence it saw | product |
+| 1 | `the drive hung past HAVEN_DRIVE_TIMEOUT and was killed (rc 124\|137)` | the drive did not finish inside its bound | product unless the drive log shows the runner or the device stalled; then infrastructure |
+| 2 | `harness: the system picker ignored the BACK sent while its window held input focus …` / `harness: the system picker was resumed but its window never took input focus …` | the system picker (MediaProvider's, not Haven's) never became ready for input, or ignored a BACK it was given while focused — AOSP's PhotoPickerActivity finishes on one BACK at its root, so this is a picker build behaving otherwise | fix the harness for that system image; never re-run to green |
+| 2 | `MapShell never took its Android pause branch …` | background sharing was not on at the pause (or the C6 marker moved): root cause A's precondition was not exercised | fix the scenario or the marker; never re-run to green |
+| 2 | `harness: no thumbnail selector matched …(rids: …)` / `harness: an activity the picker rules do not know took the front … (<component>)` / `the marker sequence broke …` / `round <n>: run-as could not record the round on the device …` / `the drive passed but reported … round count` / `run-single-avd-scenario.sh refused its configuration (rc 2)` | the selectors or picker rules (a newer Photopicker module, say), the Dart↔sidecar protocol (the drive arms nothing, and prints no END, before the sidecar's `files/pp_recorded_<n>` exists, so a refused `run-as` holds it until its own bound), or the lane's configuration | fix the harness; never re-run to green |
+| 2 | `gallery (API …): the device refused a gallery fixture's push …` / `… the media store refused the gallery query …` / `… the media store answered but never listed both gallery fixtures …` | the device answered, but the seeding method did not work on that system image | fix `pp_seed_gallery`; never re-run to green |
+| 3 | `gallery (API …): adb gave no answer …` / `… the media store had no shared storage attached …` / `emulator-5554 did not come online …` / `hide_error_dialogs did not read back 1` / `emulator-5554 was gone when the drive ended …` | infrastructure | re-run |
+
+A sidecar failure reds the job even when the drive passed. When the sidecar's
+verdict is harness and the drive failed too, the line ends `; the drive also
+failed — …`: read the drive log, because a failure the harness did not cause
+(root cause A under a moved marker, say) is the product's. One residual: on the
+device the 302 to the media host is an `http` hop the debug loopback exemption
+admits; the release build's `https`-only hop is proven in-process
+(`haven-core` redirect tests) and on no device. `HAVEN_E2E_NO_BACKGROUND`
+is read only by `lib/main.dart`, which no integration target runs, so it is
+inert on every Android integration lane; this job leaves it out for clarity,
+and sets `kBackgroundSharingKey` itself so MapShell starts the foreground
+service.
 
 ## Failure mode 27 — `launch-gate-ios` is red (or green with a notice)
 
@@ -1894,7 +1995,7 @@ that background execution survives.
 | Flag | Meaning | Default |
 |---|---|---|
 | `HAVEN_LIVE_SYNC` | M11 persistent live-sync engine (vs the retained poller) | `true` (LIVE since M11 Phase B); every e2e lane forces it explicitly |
-| `HAVEN_E2E_NO_BACKGROUND` | skip M7 FGS/background init (single-engine for `flutter drive`) | `false` (prod), `true` on e2e_combined only |
+| `HAVEN_E2E_NO_BACKGROUND` | skip M7 FGS/background init (single-engine for `flutter drive`); read only by `lib/main.dart`, so inert for integration targets, which pump `HavenApp` directly | `false` (prod), `true` on e2e_combined only |
 | `backgroundCatchupEnabled` | M7-E background catch-up (Dart const) | `true` (LIVE) |
 | ~~`enablePeriodicSelfUpdate`~~ | M5 hourly self-update | **REMOVED (Unit E)** — the flag and `self_update_provider.dart` are deleted; nothing re-keys on a timer |
 

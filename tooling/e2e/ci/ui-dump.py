@@ -37,6 +37,66 @@ reaches the screen per string. Element-tree parsing decodes `&apos;` and every
 other entity. A node is on screen when its bounds have area and lie at least
 partly inside the root's.
 
+  ui-dump.py find --dump <file> --package-regex <regex> --select <spec>
+                  [--select <spec> ...] [--list-rids] [--digest-out <file>]
+      Finds a system UI's nodes — the Photo Picker's thumbnails, uCrop's crop
+      action — that no ARB labels, among the on-screen nodes whose package
+      fully matches --package-regex:
+          observation ok
+          foreground <package of the first root node>
+          selector <n>|none     the first spec (1-based) with a match
+          match <x> <y>         that spec's matches, at their centres, sorted
+                                by top then left
+          rids <id,...>         with --list-rids: the resource-id entry names
+                                (after `:id/`) in the foreground window
+      A spec is `rid:<regex>` (the whole resource-id), `desc-prefix:<text>` or
+      `text:<line>` (one whole line of the text). Nothing a node says is ever
+      printed: a picker thumbnail's description can carry a date, and resource
+      ids are developer names. --digest-out (0600) receives the foreground
+      window's digest — its nodes' ids, classes, bounds and text, hashed —
+      so the runner can tell a settled foreign screen from one still moving.
+      `observation none <reason>` and rc 3 as for observe.
+
+  ui-dump.py resumed --dumpsys <file>
+      The resumed activity from `dumpsys activity activities`:
+      `resumed <package>/<class>` (a `.Short` class expanded), read from
+      `topResumedActivity=` (API 29+) or `mResumedActivity:` /
+      `ResumedActivity:`; `resumed none` and rc 3 when no line names one.
+
+  ui-dump.py focused --dumpsys <file> [--package <ours>]
+      The window holding INPUT focus on the default display, from `dumpsys
+      input` — where the next key goes and, since the dispatcher focuses only
+      a visible window, proof the window is on screen: `focused
+      <package>/<class>` for an activity's window, `focused none` while no
+      window has focus, and for a window that is no activity's `focused
+      window:<kind>` in fixed words, its title never printed (an app may
+      title a window with anything):
+          not-responding-<whose>  the system's "isn't responding" dialog
+          app-error-<whose>       the system's "keeps stopping" dialog
+          dialog-<whose>          a window titled only by its package (an
+                                  untitled Dialog or popup of that app)
+          notification-shade | status-bar | input-method | other
+      <whose> is ours (--package, or a process of it), systemui, system or
+      app. A window's title is the component for an activity (Window.
+      setWindowManager's appName) and the package when untitled
+      (WindowState.getWindowTag); the error dialogs title themselves
+      "Application Not Responding: <process>" and "Application Error:
+      <process>" (AOSP android14-release AppNotRespondingDialog,
+      AppErrorDialog). rc 3 when no dispatcher state is in the text. Read
+      from the current state only, never from the copy the dispatcher keeps
+      of its state at the last ANR.
+
+  ui-dump.py trace --events <file> --since <epoch> --package <ours>
+      What the activity manager recorded from <epoch> on, from `logcat -d -b
+      events -v epoch`, as one line of fixed words: `trace <token>...` or
+      `trace none`. +<Name> an activity created, -<Name>(<reason>) one
+      finished, crash(<whose>:<exception class>), anr(<whose>). <Name> is the
+      class's simple name for our package and the system picker packages,
+      `other` for any other; a reason that is not a short lower-case phrase
+      reads `other`. No URI, message, pid, token or process name is printed:
+      wm_create_activity carries the intent's URI and am_crash the
+      exception's message.
+
   ui-dump.py --self-test
 
 Exit: 0 ok, 2 usage, 3 no observation.
@@ -153,6 +213,10 @@ def write_private(path, value):
         handle.write(value)
 
 
+REPEATABLE = {"select"}
+FLAGS = {"list-rids"}
+
+
 def parse_args(argv):
     if not argv:
         raise Usage("no command")
@@ -160,10 +224,223 @@ def parse_args(argv):
     opts = {}
     while rest:
         flag = rest.pop(0)
+        if flag.startswith("--") and flag[2:] in FLAGS:
+            opts[flag[2:]] = True
+            continue
         if not flag.startswith("--") or not rest:
             raise Usage(f"bad argument {flag!r}")
-        opts[flag[2:]] = rest.pop(0)
+        name = flag[2:]
+        if name in REPEATABLE:
+            opts.setdefault(name, []).append(rest.pop(0))
+        elif name in opts:
+            raise Usage(f"{flag} given twice")
+        else:
+            opts[name] = rest.pop(0)
     return command, opts
+
+
+def parse_dump(dump_text):
+    """(root, None) or (None, reason) for a uiautomator dump."""
+    if not dump_text.strip():
+        return None, "the dump is empty"
+    try:
+        root = ET.fromstring(dump_text)
+    except ET.ParseError:
+        return None, "the dump is not a complete XML document"
+    if root.tag != "hierarchy":
+        return None, "the dump has no hierarchy root"
+    if not [child for child in root if child.tag == "node"]:
+        return None, "the dump holds no node"
+    return root, None
+
+
+def parse_spec(spec):
+    kind, sep, arg = spec.partition(":")
+    if not sep or not arg or kind not in ("rid", "desc-prefix", "text"):
+        raise Usage("a --select spec is rid:<regex>, desc-prefix:<text> or text:<line>")
+    if kind == "rid":
+        try:
+            return kind, re.compile(arg)
+        except re.error:
+            raise Usage("a rid: spec is not a valid regex") from None
+    return kind, arg
+
+
+def spec_matches(spec, node):
+    kind, arg = spec
+    if kind == "rid":
+        return arg.fullmatch(node.get("resource-id", "")) is not None
+    if kind == "desc-prefix":
+        return node.get("content-desc", "").startswith(arg)
+    return arg in node.get("text", "").split("\n")
+
+
+def find(dump_text, package_regex, specs, list_rids):
+    """(stdout lines, None, foreground digest) or (None, reason, None)."""
+    root, reason = parse_dump(dump_text)
+    if root is None:
+        return None, reason, None
+    roots = [child for child in root if child.tag == "node"]
+    foreground = roots[0].get("package", "")
+    screen = bounds(roots[0])
+    candidates = []
+    rids = set()
+    window = []
+    for node in root.iter("node"):
+        if node.get("package") == foreground:
+            rid = node.get("resource-id", "")
+            if ":id/" in rid:
+                rids.add(rid.split(":id/", 1)[1])
+            window.append("\x1f".join(node.get(attr, "") for attr in
+                                      ("class", "resource-id", "bounds", "text", "content-desc")))
+        box = bounds(node)
+        if package_regex.fullmatch(node.get("package", "")) and on_screen(box, screen):
+            candidates.append((box, node))
+    out = ["observation ok", f"foreground {foreground or '<none>'}"]
+    chosen = None
+    for index, spec in enumerate(specs, start=1):
+        hits = sorted((box[1], box[0], box) for box, node in candidates if spec_matches(spec, node))
+        if hits:
+            chosen = index
+            out.append(f"selector {index}")
+            out += [f"match {(b[0] + b[2]) // 2} {(b[1] + b[3]) // 2}" for _, _, b in hits]
+            break
+    if chosen is None:
+        out.append("selector none")
+    if list_rids:
+        out.append("rids " + ",".join(sorted(rids)))
+    digest = hashlib.sha256("\n".join(sorted(window)).encode("utf-8")).hexdigest()
+    return out, None, digest
+
+
+RESUMED_RES = (
+    re.compile(r"topResumedActivity=ActivityRecord\{\S+ u\d+ ([\w.]+)/([\w.$]+)"),
+    re.compile(r"\bm?ResumedActivity: ?ActivityRecord\{\S+ u\d+ ([\w.]+)/([\w.$]+)"),
+)
+
+
+def resumed(dumpsys_text):
+    for pattern in RESUMED_RES:
+        match = pattern.search(dumpsys_text)
+        if match:
+            package, cls = match.groups()
+            if cls.startswith("."):
+                cls = package + cls
+            return f"{package}/{cls}"
+    return None
+
+
+FOCUSED_ENTRY_RE = re.compile(r"^\s*displayId=(\d+), name='([^']*)'")
+# An activity window's name: "<hash> <package>/<class>" (API 31+), or
+# "Window{<hash> u<user> <package>/<class>}" before.
+WINDOW_COMPONENT_RES = (
+    re.compile(r"^[0-9a-f]+ ([\w.]+/[\w.$]+)$"),
+    re.compile(r"^Window\{[0-9a-f]+ u\d+ ([\w.]+/[\w.$]+)\}$"),
+)
+
+
+SYSTEMUI = "com.android.systemui"
+PACKAGE_NAME_RE = re.compile(r"^[A-Za-z][\w]*(\.[A-Za-z][\w]*)+$")
+FIXED_WINDOWS = {"NotificationShade": "notification-shade", "StatusBar": "status-bar",
+                 "InputMethod": "input-method"}
+
+
+def whose(process, ours):
+    """A process or package name in fixed words; the name itself is never printed."""
+    base = process.split(":", 1)[0]
+    if ours and base == ours:
+        return "ours"
+    if base == SYSTEMUI:
+        return "systemui"
+    if base in ("system", "android", "system_server"):
+        return "system"
+    return "app"
+
+
+def window_kind(title, ours):
+    for prefix, kind in (("Application Not Responding: ", "not-responding"), ("Application Error: ", "app-error")):
+        if title.startswith(prefix):
+            return f"window:{kind}-{whose(title[len(prefix):], ours)}"
+    if title in FIXED_WINDOWS:
+        return f"window:{FIXED_WINDOWS[title]}"
+    if PACKAGE_NAME_RE.match(title):
+        return f"window:dialog-{whose(title, ours)}"
+    return "window:other"
+
+
+def focused(dumpsys_text, ours=None):
+    """'<package>/<class>', 'window:<kind>' or 'none'; None without dispatcher state."""
+    lines = dumpsys_text.splitlines()
+    try:
+        start = [line.strip() for line in lines].index("Input Dispatcher State:")
+    except ValueError:
+        return None
+    for index in range(start + 1, len(lines)):
+        line = lines[index].strip()
+        if line == "Input Dispatcher State at time of last ANR:":
+            break
+        if line == "FocusedWindows: <none>":
+            return "none"
+        if line != "FocusedWindows:":
+            continue
+        for entry in lines[index + 1:]:
+            match = FOCUSED_ENTRY_RE.match(entry)
+            if not match:
+                break
+            if match.group(1) != "0":
+                continue
+            for pattern in WINDOW_COMPONENT_RES:
+                component = pattern.match(match.group(2))
+                if component:
+                    return component.group(1)
+            title = match.group(2)
+            pre_s = re.match(r"^Window\{[0-9a-f]+ u\d+ (.*)\}$", title)
+            title = pre_s.group(1) if pre_s else re.sub(r"^[0-9a-f]+ ", "", title, count=1)
+            return window_kind(title, ours)
+        return "none"
+    return None
+
+
+# `<epoch>.<ms>  <pid>  <tid> I <tag>: [<fields>]`, the fields comma-separated;
+# every field before the one each reader stops at is a number or a name, so
+# none of them can hold a comma.
+EVENT_RE = re.compile(r"^\s*(\d+)\.\d+\s+\d+\s+\d+\s+\w\s+(wm|am)_(create_activity|finish_activity|crash|anr)\s*: \[(.*)\]\s*$")
+PICKER_PACKAGE_RE = re.compile(r"^com(\.google)?\.android\.(providers\.media(\.module)?|documentsui|gms)$")
+CLASS_NAME_RE = re.compile(r"^[A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*)*$")
+REASON_RE = re.compile(r"^[a-z][a-z -]{0,39}$")
+TRACE_MAX_TOKENS = 24
+
+
+def activity_name(component, ours):
+    package, _, cls = component.partition("/")
+    if not cls or not CLASS_NAME_RE.match(cls.lstrip(".")):
+        return "other"
+    if package == ours or PICKER_PACKAGE_RE.match(package):
+        return cls.rsplit(".", 1)[-1]
+    return "other"
+
+
+def trace(events_text, since, ours):
+    tokens = []
+    for line in events_text.splitlines():
+        match = EVENT_RE.match(line)
+        if not match or int(match.group(1)) < since:
+            continue
+        what, fields = match.group(3), match.group(4).split(",")
+        if what == "create_activity" and len(fields) >= 4:
+            tokens.append(f"+{activity_name(fields[3], ours)}")
+        elif what == "finish_activity" and len(fields) >= 5:
+            reason = ",".join(fields[4:])
+            reason = reason.replace(" ", "-") if REASON_RE.match(reason) else "other"
+            tokens.append(f"-{activity_name(fields[3], ours)}({reason})")
+        elif what == "crash" and len(fields) >= 5:
+            exception = fields[4] if CLASS_NAME_RE.match(fields[4]) else "other"
+            tokens.append(f"crash({whose(fields[2], ours)}:{exception})")
+        elif what == "anr" and len(fields) >= 3:
+            tokens.append(f"anr({whose(fields[2], ours)})")
+    if len(tokens) > TRACE_MAX_TOKENS:
+        tokens = tokens[:TRACE_MAX_TOKENS] + [f"+{len(tokens) - TRACE_MAX_TOKENS}-more"]
+    return " ".join(tokens) or "none"
 
 
 def main(argv, stdout=sys.stdout):
@@ -198,6 +475,63 @@ def main(argv, stdout=sys.stdout):
             write_private(opts["digest-out"], digest)
         print("\n".join(out), file=stdout)
         return 0
+    if command == "find":
+        required = {"dump", "package-regex", "select"}
+        if not required <= set(opts) or not set(opts) <= required | {"list-rids", "digest-out"}:
+            raise Usage("find needs --dump, --package-regex and --select")
+        try:
+            package_regex = re.compile(opts["package-regex"])
+        except re.error:
+            raise Usage("--package-regex is not a valid regex") from None
+        specs = [parse_spec(spec) for spec in opts["select"]]
+        try:
+            with open(opts["dump"], encoding="utf-8", errors="replace") as handle:
+                dump_text = handle.read()
+        except OSError:
+            dump_text = ""
+        out, reason, digest = find(dump_text, package_regex, specs, opts.get("list-rids", False))
+        if out is None:
+            print(f"observation none {reason}", file=stdout)
+            return 3
+        if "digest-out" in opts:
+            write_private(opts["digest-out"], digest)
+        print("\n".join(out), file=stdout)
+        return 0
+    if command == "resumed":
+        if set(opts) != {"dumpsys"}:
+            raise Usage("resumed needs --dumpsys")
+        try:
+            with open(opts["dumpsys"], encoding="utf-8", errors="replace") as handle:
+                text = handle.read()
+        except OSError:
+            text = ""
+        component = resumed(text)
+        print(f"resumed {component or 'none'}", file=stdout)
+        return 0 if component else 3
+    if command == "focused":
+        if "dumpsys" not in opts or not set(opts) <= {"dumpsys", "package"}:
+            raise Usage("focused needs --dumpsys")
+        try:
+            with open(opts["dumpsys"], encoding="utf-8", errors="replace") as handle:
+                text = handle.read()
+        except OSError:
+            text = ""
+        window = focused(text, opts.get("package"))
+        if window is None:
+            print("focused unknown", file=stdout)
+            return 3
+        print(f"focused {window}", file=stdout)
+        return 0
+    if command == "trace":
+        if set(opts) != {"events", "since", "package"} or not opts["since"].isdigit():
+            raise Usage("trace needs --events, --since <epoch seconds> and --package")
+        try:
+            with open(opts["events"], encoding="utf-8", errors="replace") as handle:
+                text = handle.read()
+        except OSError:
+            text = ""
+        print(f"trace {trace(text, int(opts['since']), opts['package'])}", file=stdout)
+        return 0
     raise Usage(f"unknown command {command!r}")
 
 
@@ -205,14 +539,14 @@ def main(argv, stdout=sys.stdout):
 # Self-test: hermetic dumps in the shape uiautomator writes, run through main()
 # exactly as the runner calls it.
 # ---------------------------------------------------------------------------
-SELF_TEST_CASES = 22
+SELF_TEST_CASES = 54
 PKG = "com.oblivioustech.haven"
 SECRET_NAME = "Quiet Wanderer"
 
 
-def node(cls="android.view.View", text="", desc="", pkg=PKG, box="[0,0][100,100]", children=""):
+def node(cls="android.view.View", text="", desc="", pkg=PKG, box="[0,0][100,100]", children="", rid=""):
     return (
-        f'<node index="0" text="{text}" resource-id="" class="{cls}" package="{pkg}" '
+        f'<node index="0" text="{text}" resource-id="{rid}" class="{cls}" package="{pkg}" '
         f'content-desc="{desc}" checkable="false" checked="false" clickable="true" '
         f'enabled="true" focusable="true" focused="false" scrollable="false" '
         f'long-clickable="false" password="false" selected="false" bounds="{box}">{children}</node>'
@@ -336,6 +670,198 @@ def self_test():
         case("(21) a second dialog with the same button and other text has another digest", other != first)
         _, _, foreign = digest_of(dump(node(box=screen, children=dialog_a), node(pkg="com.android.systemui", desc="12:01", box=screen)))
         case("(22) another package's nodes do not move the digest", foreign == first)
+
+        # find: the system picker and uCrop, read by resource id or prefix.
+        picker_pkg = "com.google.android.providers.media.module"
+        picker_regex = r"^com(\.google)?\.android\.providers\.media(\.module)?$"
+        thumb_rid = r"rid:^com(\.google)?\.android\.providers\.media(\.module)?:id/icon_thumbnail$"
+        planted_desc = "Photo taken on Nov 16, 2026 12:01"
+
+        def thumb(box, pkg=picker_pkg, rid_pkg=picker_pkg, desc=planted_desc):
+            return node(pkg=pkg, rid=f"{rid_pkg}:id/icon_thumbnail", desc=desc, box=box)
+
+        grid = dump(node(pkg=picker_pkg, box=screen, rid=f"{picker_pkg}:id/picker_tab_layout", children=(
+            thumb("[400,600][700,900]") + thumb("[40,600][340,900]") + thumb("[40,950][340,1250]")
+            + node(pkg=picker_pkg, rid=f"{picker_pkg}:id/icon_thumbnail_long", box="[40,1300][340,1600]")
+            + thumb("[40,2500][340,2800]"))))
+
+        def find_run(dump_text, specs, regex=picker_regex, extra=()):
+            path = os.path.join(tmp, "find.xml")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(dump_text)
+            captured = io.StringIO()
+            argv = ["find", "--dump", path, "--package-regex", regex]
+            for spec in specs:
+                argv += ["--select", spec]
+            try:
+                rc = main([*argv, *extra], captured)
+            except Usage:
+                rc = 2
+            return rc, captured.getvalue().rstrip("\n").split("\n")
+
+        rc, lines = find_run(grid, [thumb_rid])
+        case("(23) thumbnails match by anchored id, sorted by top then left, off-screen excluded",
+             rc == 0 and lines[2:] == ["selector 1", "match 190 750", "match 550 750", "match 190 1100"])
+        aosp = dump(node(pkg="com.android.providers.media", box=screen,
+                         children=thumb("[0,0][10,10]", pkg="com.android.providers.media", rid_pkg="com.android.providers.media")))
+        rc, lines = find_run(aosp, [thumb_rid], regex=picker_regex)
+        case("(24) the AOSP picker package matches the same selector", rc == 0 and "selector 1" in lines)
+        rc, lines = find_run(grid, ["rid:^com\\.example:id/none$", "desc-prefix:Photo taken"])
+        case("(25) a later spec answers when an earlier one has no match", rc == 0 and lines[2] == "selector 2")
+        rc, lines = find_run(grid, ["rid:^com\\.example:id/none$", "text:Add"])
+        case("(26) no spec matching is `selector none`, rc 0", rc == 0 and lines[2:] == ["selector none"])
+        rc, lines = find_run(grid, ["text:Add"], extra=("--list-rids",))
+        out_text = "\n".join(lines)
+        case("(27) --list-rids prints entry names and never a description or text",
+             rc == 0 and "rids icon_thumbnail,icon_thumbnail_long,picker_tab_layout" in lines
+             and "Photo taken" not in out_text and "Nov 16" not in out_text)
+        rc, lines = find_run(grid, [thumb_rid], regex=r"^com\.oblivioustech\.haven$")
+        case("(28) nodes of a package the regex does not name never match", rc == 0 and "selector none" in lines)
+        ucrop = dump(node(box=screen, children=node(rid=f"{PKG}:id/menu_crop", desc="Crop", box="[900,100][1040,240]")))
+        rc, lines = find_run(ucrop, [f"rid:^com\\.oblivioustech\\.haven:id/menu_crop$", "desc-prefix:Crop"],
+                             regex=r"^com\.oblivioustech\.haven$")
+        case("(29) uCrop's crop action is found by its id first", rc == 0 and lines[2:] == ["selector 1", "match 970 170"])
+        fg_digest = os.path.join(tmp, "fg-digest")
+
+        def fg_digest_of(dump_text):
+            find_run(dump_text, ["text:Add"], extra=("--digest-out", fg_digest))
+            with open(fg_digest, encoding="utf-8") as handle:
+                return handle.read()
+
+        moved = grid.replace("[400,600][700,900]", "[400,620][700,920]")
+        case("(30) the foreground digest moves with a foreign node's bounds and is stable otherwise",
+             fg_digest_of(grid) == fg_digest_of(grid) != fg_digest_of(moved)
+             and (os.stat(fg_digest).st_mode & 0o777) == 0o600)
+        rc, lines = find_run("", [thumb_rid])
+        case("(31) find over an empty dump is no observation, rc 3", rc == 3 and lines[0].startswith("observation none"))
+        rc, _ = find_run(grid, ["bogus:x"])
+        case("(32) an unknown spec kind is a usage error", rc == 2)
+
+        def resumed_run(text):
+            path = os.path.join(tmp, "dumpsys.txt")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(text)
+            captured = io.StringIO()
+            rc = main(["resumed", "--dumpsys", path], captured)
+            return rc, captured.getvalue().strip()
+
+        api34 = ("  Display #0 (activities from top to bottom):\n"
+                 "  topResumedActivity=ActivityRecord{2b2a1e5 u0 com.oblivioustech.haven/com.yalantis.ucrop.UCropActivity t42}\n"
+                 "  ResumedActivity:ActivityRecord{9f1 u0 com.oblivioustech.haven/.MainActivity t42}\n")
+        case("(33) resumed reads API 34's topResumedActivity line",
+             resumed_run(api34) == (0, "resumed com.oblivioustech.haven/com.yalantis.ucrop.UCropActivity"))
+        api29 = "    mResumedActivity: ActivityRecord{7c0d u0 com.google.android.providers.media.module/com.android.providers.media.photopicker.PhotoPickerActivity t9}\n"
+        case("(34) resumed reads the older mResumedActivity line",
+             resumed_run(api29) == (0, "resumed com.google.android.providers.media.module/com.android.providers.media.photopicker.PhotoPickerActivity"))
+        case("(35) a .Short class is expanded with its package",
+             resumed_run("topResumedActivity=ActivityRecord{1 u0 com.oblivioustech.haven/.MainActivity t1}") ==
+             (0, "resumed com.oblivioustech.haven/com.oblivioustech.haven.MainActivity"))
+        case("(36) dumpsys output naming no resumed activity is rc 3",
+             resumed_run("ACTIVITY MANAGER ACTIVITIES (dumpsys activity activities)\nnothing here") == (3, "resumed none"))
+
+        def focused_run(text):
+            path = os.path.join(tmp, "input.txt")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(text)
+            captured = io.StringIO()
+            rc = main(["focused", "--dumpsys", path], captured)
+            return rc, captured.getvalue().strip()
+
+        picker_window = "com.google.android.providers.media.module/com.android.providers.media.photopicker.PhotoPickerActivity"
+
+        def dispatcher(focus, anr=""):
+            return ("INPUT MANAGER (dumpsys input)\n\nInput Reader State (Nums of device: 3):\n  Device 1: virtio_input_multi_touch_7\n"
+                    "Input Dispatcher State:\n  DispatchEnabled: true\n  FocusedDisplayId: 0\n  FocusedApplications:\n"
+                    f"    displayId=0, name='ActivityRecord{{7c0d u0 {picker_window} t9}}', dispatchingTimeout=5000ms\n"
+                    f"{focus}  FocusRequests:\n    displayId=0, name='9a1 {picker_window}' result='NOT_VISIBLE'\n{anr}")
+
+        case("(37) the focused activity window is read from the dispatcher's FocusedWindows",
+             focused_run(dispatcher(f"  FocusedWindows:\n    displayId=0, name='4f2e1c0 {picker_window}'\n"))
+             == (0, f"focused {picker_window}"))
+        case("(38) the picker resumed and focused nowhere yet is `focused none` (its focus request still NOT_VISIBLE)",
+             focused_run(dispatcher("  FocusedWindows: <none>\n")) == (0, "focused none"))
+        case("(39) another display's focus is not the default display's",
+             focused_run(dispatcher(f"  FocusedWindows:\n    displayId=2, name='4f2e1c0 {picker_window}'\n")) == (0, "focused none"))
+        case("(40) a focused system window that is no activity's is named in fixed words",
+             focused_run(dispatcher("  FocusedWindows:\n    displayId=0, name='77e1 NotificationShade'\n"))
+             == (0, "focused window:notification-shade"))
+        case("(41) the state kept from the last ANR never stands in for the current one",
+             focused_run(dispatcher("  FocusedWindows: <none>\n",
+                                    "\nInput Dispatcher State at time of last ANR:\n  FocusedWindows:\n"
+                                    "    displayId=0, name='11 com.oblivioustech.haven/com.oblivioustech.haven.MainActivity'\n"))
+             == (0, "focused none"))
+        case("(42) the pre-S window name shape is read too",
+             focused_run("Input Dispatcher State:\n  FocusedWindows:\n"
+                         "    displayId=0, name='Window{2d3b u0 com.oblivioustech.haven/com.yalantis.ucrop.UCropActivity}'\n")
+             == (0, "focused com.oblivioustech.haven/com.yalantis.ucrop.UCropActivity"))
+        case("(43) text without dispatcher state (adb gave nothing) is rc 3",
+             focused_run("") == (3, "focused unknown"))
+
+        def focused_ours(title):
+            path = os.path.join(tmp, "input.txt")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(dispatcher(f"  FocusedWindows:\n    displayId=0, name='{title}'\n"))
+            captured = io.StringIO()
+            rc = main(["focused", "--dumpsys", path, "--package", PKG], captured)
+            return rc, captured.getvalue().strip()
+
+        case("(44) our \"isn't responding\" dialog over the picker is not-responding-ours, no name printed",
+             focused_ours(f"5a1 Application Not Responding: {PKG}") == (0, "focused window:not-responding-ours"))
+        case("(45) System UI's \"isn't responding\" dialog is not-responding-systemui",
+             focused_ours("5a1 Application Not Responding: com.android.systemui") == (0, "focused window:not-responding-systemui"))
+        case("(46) a crash dialog for a process of ours is app-error-ours; another app's is app-error-app",
+             focused_ours(f"5a1 Application Error: {PKG}:remote") == (0, "focused window:app-error-ours")
+             and focused_ours("5a1 Application Error: com.example.other") == (0, "focused window:app-error-app"))
+        case("(47) a window titled only by its package is that app's dialog; without --package ours is not claimed",
+             focused_ours(f"5a1 {PKG}") == (0, "focused window:dialog-ours")
+             and focused_ours("5a1 com.google.android.providers.media.module") == (0, "focused window:dialog-app")
+             and focused_run(dispatcher(f"  FocusedWindows:\n    displayId=0, name='5a1 {PKG}'\n")) == (0, "focused window:dialog-app"))
+        rc, out = focused_ours(f"5a1 {SECRET_NAME} wrote this")
+        case("(48) a window titled with free text is window:other, and nothing of the title is printed",
+             (rc, out) == (0, "focused window:other") and SECRET_NAME not in out)
+        case("(49) the pre-S shape of an error dialog's name is classified too",
+             focused_ours(f"Window{{2d3b u0 Application Not Responding: {PKG}}}") == (0, "focused window:not-responding-ours"))
+
+        def trace_run(text, since="1000", ours=PKG):
+            path = os.path.join(tmp, "events.txt")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(text)
+            captured = io.StringIO()
+            try:
+                rc = main(["trace", "--events", path, "--since", since, "--package", ours], captured)
+            except Usage:
+                return 2, ""
+            return rc, captured.getvalue().strip()
+
+        def ev(at, tag, fields):
+            return f"{at}.123   500   600 I {tag}: [{fields}]\n"
+
+        picker_component = "com.google.android.providers.media.module/com.android.providers.media.photopicker.PhotoPickerActivity"
+        ucrop_component = f"{PKG}/com.yalantis.ucrop.UCropActivity"
+        secret_uri = "content://media/picker/0/com.android.providers.media.photopicker/media/1000000018"
+        round_events = (ev(999, "wm_create_activity", f"0,1,42,{PKG}/.MainActivity,android.intent.action.MAIN,NULL,NULL,270532608")
+                        + "11-19 11:20:22.000   500   600 I wm_create_activity: [0,9,42,com.example.x/.Y,NULL,NULL,NULL,0]\n"
+                        + ev(1001, "wm_create_activity", f"0,77,42,{picker_component},android.provider.action.PICK_IMAGES,image/*,NULL,0")
+                        + ev(1002, "wm_finish_activity", f"0,77,42,{picker_component},app-request")
+                        + ev(1003, "wm_create_activity", f"0,78,42,{ucrop_component},NULL,NULL,{secret_uri},0")
+                        + ev(1003, "wm_finish_activity", f"0,78,42,{ucrop_component},app-request"))
+        rc, out = trace_run(round_events)
+        case("(50) a round's activities, from --since on, in fixed words; no URI, token or older line",
+             (rc, out) == (0, "trace +PhotoPickerActivity -PhotoPickerActivity(app-request) +UCropActivity -UCropActivity(app-request)")
+             and "content:" not in out and "MainActivity" not in out)
+        rc, out = trace_run(ev(1004, "am_crash", f"0,4242,{PKG},952745540,java.lang.NoClassDefFoundError,Failed resolution of: Landroidx/a, named {SECRET_NAME},UCropActivity.java,120,0")
+                            + ev(1005, "am_anr", "0,812,com.android.systemui,551144,Input dispatching timed out (5001ms, waited for a window)"))
+        case("(51) a crash is its exception class only and an ANR whose only; no message, pid or process name",
+             (rc, out) == (0, "trace crash(ours:java.lang.NoClassDefFoundError) anr(systemui)") and SECRET_NAME not in out)
+        rc, out = trace_run(ev(1001, "wm_create_activity", "0,5,9,com.example.other/.Secret,NULL,NULL,NULL,0")
+                            + ev(1001, "wm_finish_activity", f"0,5,9,{ucrop_component},Reason {SECRET_NAME}!"))
+        case("(52) another app's component and a reason that is not a short lower-case phrase read `other`",
+             (rc, out) == (0, "trace +other -UCropActivity(other)") and SECRET_NAME not in out)
+        case("(53) no event since --since is `trace none`; a since that is no number is a usage error",
+             trace_run(round_events, since="2000") == (0, "trace none") and trace_run("", since="soon")[0] == 2)
+        rc, out = trace_run("".join(ev(1001, "wm_create_activity", f"0,{n},9,{ucrop_component},NULL,NULL,NULL,0") for n in range(30)))
+        case("(54) a trace is bounded: past the cap it says how many more",
+             rc == 0 and out.split()[-1] == "+6-more" and len(out.split()) == 1 + 24 + 1)
     if ran != SELF_TEST_CASES:
         print(f"SELF-TEST FAIL: ran {ran} cases, expected {SELF_TEST_CASES}", file=sys.stderr)
         failed += 1

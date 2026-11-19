@@ -47,12 +47,16 @@ sync_own_profile(own_pk, keys?, clock)
         ├─ nothing saved, no owed event, pool coverage settled ──► NothingPending,
         │      no relay client built
         ├─ owed event for local_version?  ── yes ──► RE-SEND PASS
+        │      (text-only while the staged photo was never uploaded: upload it
+        │       first; on success skip the re-send and run the FULL PASS on
+        │       that upload; on failure re-send, never re-sign)
         │      offer the IDENTICAL signed kind-0 only to uncovered(pool, covered)
         │      read back each relay that answered: Holds ⇒ covered,
         │      Newer ⇒ cache it, drop the debt, fall through to ONE full pass,
         │      Lacks / not drained ⇒ still owed (timestamp refusal + Lacks ⇒
         │      one fresh signing per edit, then owed)
-        │      commit_profile_coverage: covered ⊇ pool ⇒ clean; else ladder
+        │      commit_profile_coverage: covered ⊇ pool ⇒ clean (unless the
+        │      photo's upload is still owed); else ladder
         │      (with nothing saved a refused copy is never signed afresh)
         ├─ nothing saved, pool coverage owed ──► COVERAGE PASS (no key, no signing)
         │      read_own_per_relay over the WHOLE pool; act on a whole read
@@ -67,13 +71,15 @@ sync_own_profile(own_pk, keys?, clock)
         │      all covered ⇒ covered_pool = pool; else the copy is the owed
         │      event at the unchanged version, ladder advanced
         └─ a save is pending ──► FULL PASS
-               Blossom upload of staged picture  ∥  read_own_profile_on_relays
+               Blossom upload of staged picture (BLOSSOM_SERVERS in order, the
+               next only after a failure)  ∥  read_own_profile_on_relays
                (every pool relay at once, ≤ 5 s connect + 4 s REQ each)
                cache the newest copy if newer than the row
                nothing saved to publish (a clear alone / an owed blank)?
                  retraction_gate ⇒ Publish | Settle (level locally, send nothing)
                                            | Hold (stay on the ladder)
-               upload failed with text or a clear pending ⇒ publish text-only
+               upload failed with text or a clear pending ⇒ publish text-only,
+                 which becomes the owed event like a complete one
                merge_base → merge_edits → sign ONE kind-0 → offer_metadata to
                EVERY pool relay, each sent as soon as its own connect succeeds
                commit_profile_sync: every relay ⇒ clean; ≥1 ack ⇒ pending with
@@ -118,9 +124,16 @@ neither starts nor queues one. Never from the background isolates.
 - The outbox marker clears only for the version actually published, and fully
   only when every usable pool relay serves it (`stage v1, stage v2, commit v1
   ⇒ still pending`).
-- **The owed event.** `profile_publish_debt` holds a row only for a COMPLETE
-  signed event (every pending item at `version == local_version`) that at
-  least one relay acknowledged, with the relays known to serve it. Every
+- **The owed event.** `profile_publish_debt` holds a row only for the newest
+  signed event at `version == local_version` that at least one relay
+  acknowledged, with the relays known to serve it: a COMPLETE event (every
+  pending item), or a text-only one while the staged photo has never been
+  uploaded (`own_picture_upload_owed`: `picture_staged` and the own picture row
+  still without a URL). Only a complete event's full coverage clears the
+  outbox; a text-only one's leaves the photo pending, and the next pass
+  uploads first — a new kind-0 is signed only once the upload succeeds, so a
+  Blossom outage costs PUTs, never a new public event per rung
+  (`an_upload_that_keeps_failing_signs_one_text_only_kind0_across_rungs`). Every
   staging call (text, picture, removal), the reset and a redirect delete it in
   the same transaction, so a stale re-send can never put a superseded or
   deleted profile back on a relay that missed the later event. It is
@@ -200,10 +213,21 @@ neither starts nor queues one. Never from the background isolates.
   floor includes it even if that relay does not answer the second read.
 - An upload failure no longer aborts the pass: a pending text edit or clear
   publishes with the picture untouched (`to_edits(None)`), commits as
-  not-complete (no debt row; `picture_staged` and the edits kept; ladder
-  advanced). A successful commit re-stamps the staged picture row only
+  not-complete (the event is the owed one; `picture_staged` and the edits
+  kept; ladder advanced once per pass, a failed upload and its re-send
+  included). The upload tries `BLOSSOM_SERVERS` in order and moves on after
+  ANY failure to obtain a verified descriptor — a timeout included, so a slow
+  server may hold the bytes too; one pass makes one upload, even when a
+  re-send's read-back sends it on to a full pass. A successful commit re-stamps the staged picture row only
   `WHERE sha256 = ?` of the uploaded bytes, so a photo picked mid-upload never
   receives the previous photo's URL.
+- `name` follows a display-name edit only when, in the base it merges onto,
+  it is present and equal to `display_name` after the publish sanitizer
+  (`merge_edits`, owner decision 2026-11-16): Haven writes `name` only as that
+  mirror, so a different handle set in another client is kept, and clearing a
+  mirrored display name clears its mirror. A profile renamed under the earlier
+  rule — `name` left at the onboarding pseudonym — reads as a deliberate handle
+  and is not healed.
 - Staging never arms the retraction gate (picture rows with an empty URL do not
   count) and never disarms it (a seen kind-0 with `event_created_at > 0` counts).
 - Everything uploaded went through `process_own_avatar` (private fields on
@@ -257,7 +281,8 @@ neither starts nor queues one. Never from the background isolates.
   lock, on what the pass will actually publish.
 - **A new event per retry pass** — a new `created_at` and id on every relay
   that takes a pass is a public mark of when the app was opened; the one
-  signed event is re-sent instead.
+  signed event is re-sent instead. This holds while the photo upload fails
+  too (2026-11-16): the text-only event is re-sent, never re-signed.
 - **Reading the OK string as coverage** — nostr-rs-relay and khatru answer OK
   true to an OLDER replaceable, strfry answers OK false with a non-standard
   prefix; an ack after a re-send proves only that the relay judged it.
@@ -336,9 +361,12 @@ neither starts nor queues one. Never from the background isolates.
   believed covered until the next edit (needs both on one relay).
 - A pass no relay acknowledged records nothing and signs fresh next time (no
   metadata cost: no relay saw the earlier event).
-- During a Blossom outage each rung signs a text-only event while the picture
-  stays staged: peers see the new name (and a pending removal) with the old
-  photo until Blossom recovers.
+- While every Blossom server refuses the photo, peers see the new name (and a
+  pending removal) with the old photo; each rung costs one PUT per server
+  tried and, to a relay that lacks the text-only event, a re-send of it — no
+  new signature.
+- A server that timed out may have stored the photo before the next one took
+  it, so it can sit on more than one server.
 - One timestamp re-sign per edit; a relay that refuses that one too stays
   owed, with no further re-sign.
 - Each re-send pass costs one own-profile REQ per owed relay that answered the

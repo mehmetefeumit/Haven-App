@@ -266,15 +266,23 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
         // merge and (b) the photo is gated on the name save SUCCEEDING — a
         // picture-only kind-0 must never publish without the intended name.
         // Both are fast, local-only SQLCipher writes (no relay/Blossom I/O),
-        // so they are awaited directly; a genuine local failure is logged and
-        // swallowed so it can never block onboarding completion.
+        // so they are awaited directly; a genuine local failure never blocks
+        // onboarding completion, but a picked photo it lost is reported.
         final photo = _pickedPhoto;
-        await _saveOnboardingProfileLocally(
+        final photoSaved = await _saveOnboardingProfileLocally(
           ref.read(profileServiceProvider),
           name,
           photo,
         );
         if (!mounted) return;
+        if (!photoSaved) {
+          messenger.showSnackBar(
+            SnackBar(
+              content: Text(l10n.onboardingPhotoNotSaved),
+              backgroundColor: HavenSecurityColors.danger,
+            ),
+          );
+        }
         triggerProfileSync(ref);
       } on IdentityServiceException {
         if (!mounted) return;
@@ -565,18 +573,27 @@ class _BusyLabel extends StatelessWidget {
 /// ([IdentityService.setDisplayName]) and republishes on the next profile
 /// edit. Errors are logged by runtime type only, never surfaced raw
 /// (Security Rule 8).
-Future<void> _saveOnboardingProfileLocally(
+///
+/// Answers whether the picked photo was saved: `true` when none was picked,
+/// `false` when one was and either save failed — the name's gates it.
+Future<bool> _saveOnboardingProfileLocally(
   ProfileService service,
   String name,
   Uint8List? photo,
 ) async {
   try {
     await service.updateOwnProfile(displayName: name);
-    if (photo != null) {
-      await service.setOwnAvatar(photo);
-    }
   } on Object catch (e) {
-    debugPrint('Onboarding profile local save failed: ${e.runtimeType}');
+    debugPrint('[Onboarding] profile name save failed: ${e.runtimeType}');
+    return photo == null;
+  }
+  if (photo == null) return true;
+  try {
+    await service.setOwnAvatar(photo);
+    return true;
+  } on Object catch (e) {
+    debugPrint('[Onboarding] profile photo save failed: ${e.runtimeType}');
+    return false;
   }
 }
 

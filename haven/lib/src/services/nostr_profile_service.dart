@@ -109,14 +109,21 @@ class NostrProfileService implements ProfileService {
   /// `getCircleManagerFfi`) — holding a second manager over the same
   /// SQLCipher database would split state across two in-memory MDK/cache
   /// instances.
+  ///
+  /// [untilSessionOwned] is awaited before a photo save opens the session: on
+  /// Android the picker or crop result can arrive while the session is still
+  /// handed to the foreground service.
   NostrProfileService({
     required IdentityService identityService,
     required Future<CircleManagerFfi> Function() circleManagerFactory,
+    Future<void> Function()? untilSessionOwned,
   }) : _identityService = identityService,
-       _circleManagerFactory = circleManagerFactory;
+       _circleManagerFactory = circleManagerFactory,
+       _untilSessionOwned = untilSessionOwned;
 
   final IdentityService _identityService;
   final Future<CircleManagerFfi> Function() _circleManagerFactory;
+  final Future<void> Function()? _untilSessionOwned;
 
   @override
   Future<Profile?> getOwnProfile({bool forceRefresh = false}) async {
@@ -224,6 +231,7 @@ class NostrProfileService implements ProfileService {
   @override
   Future<Profile> setOwnAvatar(Uint8List raw) async {
     try {
+      await _untilSessionOwned?.call();
       final manager = await _circleManagerFactory();
       final ref = await manager.saveMyProfilePictureLocal(raw: raw);
       // `saveMyProfilePictureLocal` upserts both the picture bytes and the

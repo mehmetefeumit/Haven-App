@@ -299,13 +299,17 @@ jobs:
       #     (Phase 4's own broadcast barrier, BARRIER_TIMEOUT_SECS, runs
       #     inside the drive, so the drive's bound already covers it)
       #   the sampler's stop, 3 x SAMPLE_PERIOD_SECS                  3 x 5 =  15
-      #                                                      = 1428 s = 23m48s
+      #   the system_server reads around the drive, 2 x
+      #     SYSTEM_SERVER_READ_SECS, and the settle after it,
+      #     SYSTEM_SERVER_SETTLE_SECS + 1 + SYSTEM_SERVER_READ_SECS
+      #                                                 10 + 20 + 1 + 5 =   36
+      #                                                      = 1464 s = 24m24s
       #   + the unbounded relay, adb, install, grant, scan and oracle work,
       #     ~3 min: e2e-android.yml's allowance, kept because the sick device
       #     that pushes the waits above to their bounds is the one that slows
       #     adb (the own-installer lanes spent under 40 s on it in run
       #     34511084722)
-      #                                                      = 26m48s, in 28m.
+      #                                                      = 27m24s, in 28m.
       # Sizing evidence: this lane is new (2026-08-02) and has no green run
       # yet, so the base number came from the FAILED runs, where the step ran
       # 5.2-12.1 min (14 runs) — none of which reached the forced-idle phase.
