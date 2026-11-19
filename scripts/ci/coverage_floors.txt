@@ -309,10 +309,10 @@ flutter|lib/src/services/background_catchup_worker.dart|30  # measured 32.94% (2
 # nostr_relay_preferences_service.dart sat at literal 0.00% when first pinned
 # — 88 instrumented lines, none executed by any test, invisible to the 50%
 # gate — and has since been fully covered, so it is pinned exactly at 100.
-flutter|lib/src/services/nostr_circle_service.dart|69       # measured 71.94% (382/531)
+flutter|lib/src/services/nostr_circle_service.dart|70       # measured 72.10% (385/534)
 flutter|lib/src/services/nostr_identity_service.dart|61     # measured 63.56% (75/118)
 flutter|lib/src/services/nostr_profile_service.dart|63      # measured 65.54% (97/148)
-flutter|lib/src/services/nostr_relay_service.dart|71        # measured 73.72% (230/312); was 0 (0.63%, 1/158)
+flutter|lib/src/services/nostr_relay_service.dart|74        # measured 76.19% (240/315); was 0 (0.63%, 1/158)
                                                             # before classifyKeyPackageMaintenance was lifted
                                                             # out of the class. It decides whether a KeyPackage
                                                             # tick counts as reachable, and every branch of it is
@@ -325,7 +325,7 @@ flutter|lib/src/services/nostr_relay_preferences_service.dart|100 # measured 100
 # --- Leave / wipe paths -----------------------------------------------------
 # The proofs that leaving a circle and logging out actually destroy state.
 flutter|lib/src/services/pending_leave_service.dart|100     # measured 100.00% (20/20)
-flutter|lib/src/services/pending_mls_wipe_service.dart|76   # measured 78.95% (15/19)
+flutter|lib/src/services/pending_mls_wipe_service.dart|78   # measured 80.95% (17/21)
 
 # --- Tile privacy -----------------------------------------------------------
 # tile_key.dart strips the Stadia API key before a URL is ever used as a cache
@@ -337,7 +337,7 @@ flutter|lib/src/network/pinned_tile_client.dart|59|10       # measured 61.54% (8
 # --- Riverpod state and validators ------------------------------------------
 # The providers layer is where service results become UI state; the validators
 # are the input filters on relay URLs and npubs.
-flutter|lib/src/providers/|88                # measured 90.31% (2294/2540)
+flutter|lib/src/providers/|89                # measured 91.58% (2654/2898)
 flutter|lib/src/utils/|92                    # measured 94.04% (268/285)
 flutter|lib/src/utils/relay_url_validator.dart|93           # measured 95.83% (23/24)
 flutter|lib/src/utils/npub_validator.dart|82                # measured 84.38% (27/32)
