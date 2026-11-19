@@ -644,6 +644,12 @@ readonly DRIVE_LOG_WIRING_EXEMPT=(
   # there is no drive log for the failure predicate to read; its verdict is the
   # binary's own rc and the markers it writes (docs/SOAK_LANE.md).
   run-soak-core.sh
+  # The launch gates start the PRODUCTION app from the OS and read its screen
+  # through UiAutomator (Android) or an XCUITest bundle (iOS); no `flutter
+  # drive`, no integration test, so no drive log for the predicate to read.
+  # Their verdict is their own rc.
+  run-launch-gate-android.sh
+  run-launch-gate-ios.sh
 )
 
 # Everything a runner SAYS rather than does: full-line `#` comments, a ` # `
@@ -1480,8 +1486,8 @@ DART
 # Suite 4: the runners against the predicate.
 #
 # Two fixture trees, because the two ways to reach it fail differently. `_mk`
-# writes one runner; every tree carries BOTH exempt runners (the deadline wrapper
-# and the soak driver), whose presence is what the stale-exemption rule reads, so
+# writes one runner; every tree carries every exempt runner (the deadline wrapper,
+# the soak driver and the two launch gates), whose presence is what the stale-exemption rule reads, so
 # a tree that omits one is fixture 36's
 # own case rather than an accident.
 # ---------------------------------------------------------------------------
@@ -1494,6 +1500,8 @@ _dl_mk_runner() { # <tree> <name> <body>
 _dl_mk_exempt() { # <tree>
   _dl_mk_runner "$1" run-with-deadline.sh 'exec "$@"'
   _dl_mk_runner "$1" run-soak-core.sh 'cargo run --profile soak -- "$@"'
+  _dl_mk_runner "$1" run-launch-gate-android.sh 'adb -s "${DEVICE}" shell am start -W -n "${ACTIVITY}"'
+  _dl_mk_runner "$1" run-launch-gate-ios.sh 'xcodebuild test-without-building -xctestrun "${XCTESTRUN}"'
 }
 _dl_mk_tree_a() { # <tree> — one direct caller, one delegating runner
   _dl_mk_exempt "$1"

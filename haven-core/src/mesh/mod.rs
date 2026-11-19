@@ -13,6 +13,11 @@ pub mod noise;
 pub mod packet;
 pub mod store;
 
+/// The generator a shipped engine is handed, under the `rand` this crate is
+/// built against: a caller on another `rand` major has no generator of its own
+/// that meets the bounds here.
+pub use rand::rngs::OsRng;
+
 #[cfg(test)]
 pub(crate) mod test_rng {
     use std::collections::VecDeque;

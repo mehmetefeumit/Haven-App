@@ -1,0 +1,466 @@
+# Fixture for scripts/ci/check_apk_loadable.sh --self-test. Lines starting with
+# '#' are this header; the self-test strips them, nothing else is changed.
+#
+# REAL dexdump output, not an emulation: `dexdump classes.dex` (build-tools
+# 36.1.0 for Linux, build-tools_r36.1_linux.zip, sha1 936a0d6bd5ae3e2118a7567dddbc95ff67ed46e9
+# as dl.google.com/android/repository/repository2-3.xml lists it) run on the
+# only dex of the published v0.1.14 app-arm64-v8a-release.apk (APK sha256
+# 512514140be2d54da4e7c88fe019a0d8fdae8c252d5f0080ebe01fd6abfff486,
+# classes.dex sha256 988a90e451df189a91e7a6953e11d3a3982a60b319708b454663dedad82d7f5c; the x86_64 split carries the same dex).
+#
+# Excerpted, never edited: the two header lines, then the WHOLE "Class #" block
+# of each class the checks read — every manifest component and initializer and
+# registrar named in the paired .manifest.txt, Room's WorkDatabase and
+# WorkDatabase_Impl, androidx.work.Worker, Worker's (R8-renamed) superclass,
+# and every class below it in this dex — in dexdump's own order.
+# Inside every method except MainActivity's, the `code -` sub-block
+# (registers, ins, outs, insns size, catches, positions, locals) is cut;
+# MainActivity's is kept whole so the parser is proven against it.
+Processing 'classes.dex'...
+Opened 'classes.dex', DEX version '037'
+Class #307            -
+  Class descriptor  : 'Landroidx/core/app/CoreComponentFactory;'
+  Access flags      : 0x0001 (PUBLIC)
+  Superclass        : 'Landroid/app/AppComponentFactory;'
+  Interfaces        -
+  Static fields     -
+  Instance fields   -
+  Direct methods    -
+    #0              : (in Landroidx/core/app/CoreComponentFactory;)
+      name          : '<init>'
+      type          : '()V'
+      access        : 0x10001 (PUBLIC CONSTRUCTOR)
+  Virtual methods   -
+  source_file_idx   : 19077 (r8-map-id-2099c023936165f24eab8f9d1afe36d6a843f01ea518aee8eebb951f2f5a7790)
+
+Class #314            -
+  Class descriptor  : 'Landroidx/emoji2/text/EmojiCompatInitializer;'
+  Access flags      : 0x0001 (PUBLIC)
+  Superclass        : 'Ljava/lang/Object;'
+  Interfaces        -
+    #0              : 'Ldl0;'
+  Static fields     -
+  Instance fields   -
+  Direct methods    -
+    #0              : (in Landroidx/emoji2/text/EmojiCompatInitializer;)
+      name          : '<init>'
+      type          : '()V'
+      access        : 0x10001 (PUBLIC CONSTRUCTOR)
+  Virtual methods   -
+    #0              : (in Landroidx/emoji2/text/EmojiCompatInitializer;)
+      name          : 'a'
+      type          : '()Ljava/util/List;'
+      access        : 0x0011 (PUBLIC FINAL)
+    #1              : (in Landroidx/emoji2/text/EmojiCompatInitializer;)
+      name          : 'b'
+      type          : '(Landroid/content/Context;)Ljava/lang/Object;'
+      access        : 0x0011 (PUBLIC FINAL)
+  source_file_idx   : 19077 (r8-map-id-2099c023936165f24eab8f9d1afe36d6a843f01ea518aee8eebb951f2f5a7790)
+
+Class #317            -
+  Class descriptor  : 'Landroidx/lifecycle/ProcessLifecycleInitializer;'
+  Access flags      : 0x0011 (PUBLIC FINAL)
+  Superclass        : 'Ljava/lang/Object;'
+  Interfaces        -
+    #0              : 'Ldl0;'
+  Static fields     -
+  Instance fields   -
+  Direct methods    -
+    #0              : (in Landroidx/lifecycle/ProcessLifecycleInitializer;)
+      name          : '<init>'
+      type          : '()V'
+      access        : 0x10001 (PUBLIC CONSTRUCTOR)
+  Virtual methods   -
+    #0              : (in Landroidx/lifecycle/ProcessLifecycleInitializer;)
+      name          : 'a'
+      type          : '()Ljava/util/List;'
+      access        : 0x0011 (PUBLIC FINAL)
+    #1              : (in Landroidx/lifecycle/ProcessLifecycleInitializer;)
+      name          : 'b'
+      type          : '(Landroid/content/Context;)Ljava/lang/Object;'
+      access        : 0x0011 (PUBLIC FINAL)
+  source_file_idx   : 19077 (r8-map-id-2099c023936165f24eab8f9d1afe36d6a843f01ea518aee8eebb951f2f5a7790)
+
+Class #334            -
+  Class descriptor  : 'Landroidx/profileinstaller/ProfileInstallerInitializer;'
+  Access flags      : 0x0001 (PUBLIC)
+  Superclass        : 'Ljava/lang/Object;'
+  Interfaces        -
+    #0              : 'Ldl0;'
+  Static fields     -
+  Instance fields   -
+  Direct methods    -
+    #0              : (in Landroidx/profileinstaller/ProfileInstallerInitializer;)
+      name          : '<init>'
+      type          : '()V'
+      access        : 0x10001 (PUBLIC CONSTRUCTOR)
+  Virtual methods   -
+    #0              : (in Landroidx/profileinstaller/ProfileInstallerInitializer;)
+      name          : 'a'
+      type          : '()Ljava/util/List;'
+      access        : 0x0011 (PUBLIC FINAL)
+    #1              : (in Landroidx/profileinstaller/ProfileInstallerInitializer;)
+      name          : 'b'
+      type          : '(Landroid/content/Context;)Ljava/lang/Object;'
+      access        : 0x0011 (PUBLIC FINAL)
+  source_file_idx   : 19077 (r8-map-id-2099c023936165f24eab8f9d1afe36d6a843f01ea518aee8eebb951f2f5a7790)
+
+Class #340            -
+  Class descriptor  : 'Landroidx/startup/InitializationProvider;'
+  Access flags      : 0x0001 (PUBLIC)
+  Superclass        : 'Landroid/content/ContentProvider;'
+  Interfaces        -
+  Static fields     -
+  Instance fields   -
+  Direct methods    -
+    #0              : (in Landroidx/startup/InitializationProvider;)
+      name          : '<init>'
+      type          : '()V'
+      access        : 0x10001 (PUBLIC CONSTRUCTOR)
+  Virtual methods   -
+    #0              : (in Landroidx/startup/InitializationProvider;)
+      name          : 'delete'
+      type          : '(Landroid/net/Uri;Ljava/lang/String;[Ljava/lang/String;)I'
+      access        : 0x0011 (PUBLIC FINAL)
+    #1              : (in Landroidx/startup/InitializationProvider;)
+      name          : 'getType'
+      type          : '(Landroid/net/Uri;)Ljava/lang/String;'
+      access        : 0x0011 (PUBLIC FINAL)
+    #2              : (in Landroidx/startup/InitializationProvider;)
+      name          : 'insert'
+      type          : '(Landroid/net/Uri;Landroid/content/ContentValues;)Landroid/net/Uri;'
+      access        : 0x0011 (PUBLIC FINAL)
+    #3              : (in Landroidx/startup/InitializationProvider;)
+      name          : 'onCreate'
+      type          : '()Z'
+      access        : 0x0011 (PUBLIC FINAL)
+    #4              : (in Landroidx/startup/InitializationProvider;)
+      name          : 'query'
+      type          : '(Landroid/net/Uri;[Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;Ljava/lang/String;)Landroid/database/Cursor;'
+      access        : 0x0011 (PUBLIC FINAL)
+    #5              : (in Landroidx/startup/InitializationProvider;)
+      name          : 'update'
+      type          : '(Landroid/net/Uri;Landroid/content/ContentValues;Ljava/lang/String;[Ljava/lang/String;)I'
+      access        : 0x0011 (PUBLIC FINAL)
+  source_file_idx   : 19077 (r8-map-id-2099c023936165f24eab8f9d1afe36d6a843f01ea518aee8eebb951f2f5a7790)
+
+Class #352            -
+  Class descriptor  : 'Landroidx/work/WorkManagerInitializer;'
+  Access flags      : 0x0011 (PUBLIC FINAL)
+  Superclass        : 'Ljava/lang/Object;'
+  Interfaces        -
+    #0              : 'Ldl0;'
+  Static fields     -
+    #0              : (in Landroidx/work/WorkManagerInitializer;)
+      name          : 'a'
+      type          : 'Ljava/lang/String;'
+      access        : 0x0019 (PUBLIC STATIC FINAL)
+  Instance fields   -
+  Direct methods    -
+    #0              : (in Landroidx/work/WorkManagerInitializer;)
+      name          : '<clinit>'
+      type          : '()V'
+      access        : 0x10008 (STATIC CONSTRUCTOR)
+    #1              : (in Landroidx/work/WorkManagerInitializer;)
+      name          : '<init>'
+      type          : '()V'
+      access        : 0x10001 (PUBLIC CONSTRUCTOR)
+  Virtual methods   -
+    #0              : (in Landroidx/work/WorkManagerInitializer;)
+      name          : 'a'
+      type          : '()Ljava/util/List;'
+      access        : 0x0011 (PUBLIC FINAL)
+    #1              : (in Landroidx/work/WorkManagerInitializer;)
+      name          : 'b'
+      type          : '(Landroid/content/Context;)Ljava/lang/Object;'
+      access        : 0x0011 (PUBLIC FINAL)
+  source_file_idx   : 19077 (r8-map-id-2099c023936165f24eab8f9d1afe36d6a843f01ea518aee8eebb951f2f5a7790)
+
+Class #353            -
+  Class descriptor  : 'Lmo2;'
+  Access flags      : 0x0401 (PUBLIC ABSTRACT)
+  Superclass        : 'Ljava/lang/Object;'
+  Interfaces        -
+  Static fields     -
+  Instance fields   -
+  Direct methods    -
+    #0              : (in Lmo2;)
+      name          : '<init>'
+      type          : '(Landroid/content/Context;Landroidx/work/WorkerParameters;)V'
+      access        : 0x10001 (PUBLIC CONSTRUCTOR)
+  Virtual methods   -
+  source_file_idx   : 19077 (r8-map-id-2099c023936165f24eab8f9d1afe36d6a843f01ea518aee8eebb951f2f5a7790)
+
+Class #354            -
+  Class descriptor  : 'Landroidx/work/Worker;'
+  Access flags      : 0x0401 (PUBLIC ABSTRACT)
+  Superclass        : 'Lmo2;'
+  Interfaces        -
+  Static fields     -
+  Instance fields   -
+  Direct methods    -
+    #0              : (in Landroidx/work/Worker;)
+      name          : '<init>'
+      type          : '(Landroid/content/Context;Landroidx/work/WorkerParameters;)V'
+      access        : 0x10001 (PUBLIC CONSTRUCTOR)
+  Virtual methods   -
+  source_file_idx   : 19077 (r8-map-id-2099c023936165f24eab8f9d1afe36d6a843f01ea518aee8eebb951f2f5a7790)
+
+Class #356            -
+  Class descriptor  : 'Landroidx/work/impl/WorkDatabase;'
+  Access flags      : 0x0401 (PUBLIC ABSTRACT)
+  Superclass        : 'Ljava/lang/Object;'
+  Interfaces        -
+  Static fields     -
+  Instance fields   -
+    #0              : (in Landroidx/work/impl/WorkDatabase;)
+      name          : 'a'
+      type          : 'Lnl1;'
+      access        : 0x0001 (PUBLIC)
+    #1              : (in Landroidx/work/impl/WorkDatabase;)
+      name          : 'b'
+      type          : 'Z'
+      access        : 0x0001 (PUBLIC)
+    #2              : (in Landroidx/work/impl/WorkDatabase;)
+      name          : 'c'
+      type          : 'Ljava/util/ArrayList;'
+      access        : 0x0001 (PUBLIC)
+  Direct methods    -
+    #0              : (in Landroidx/work/impl/WorkDatabase;)
+      name          : 'i'
+      type          : '(Ljava/lang/Class;Lnl1;)Ljava/lang/Object;'
+      access        : 0x0009 (PUBLIC STATIC)
+  Virtual methods   -
+    #0              : (in Landroidx/work/impl/WorkDatabase;)
+      name          : 'a'
+      type          : '()V'
+      access        : 0x0011 (PUBLIC FINAL)
+    #1              : (in Landroidx/work/impl/WorkDatabase;)
+      name          : 'b'
+      type          : '()V'
+      access        : 0x0011 (PUBLIC FINAL)
+    #2              : (in Landroidx/work/impl/WorkDatabase;)
+      name          : 'c'
+      type          : '(Lvw;)Lnl1;'
+      access        : 0x0401 (PUBLIC ABSTRACT)
+      code          : (none)
+    #3              : (in Landroidx/work/impl/WorkDatabase;)
+      name          : 'd'
+      type          : '()Ljava/util/List;'
+      access        : 0x0001 (PUBLIC)
+    #4              : (in Landroidx/work/impl/WorkDatabase;)
+      name          : 'e'
+      type          : '()Lnl1;'
+      access        : 0x0011 (PUBLIC FINAL)
+    #5              : (in Landroidx/work/impl/WorkDatabase;)
+      name          : 'f'
+      type          : '()Ljava/util/Set;'
+      access        : 0x0001 (PUBLIC)
+    #6              : (in Landroidx/work/impl/WorkDatabase;)
+      name          : 'g'
+      type          : '()Ljava/util/Map;'
+      access        : 0x0001 (PUBLIC)
+    #7              : (in Landroidx/work/impl/WorkDatabase;)
+      name          : 'h'
+      type          : '()Lhn1;'
+      access        : 0x0401 (PUBLIC ABSTRACT)
+      code          : (none)
+    #8              : (in Landroidx/work/impl/WorkDatabase;)
+      name          : 'j'
+      type          : '()Ljy1;'
+      access        : 0x0401 (PUBLIC ABSTRACT)
+      code          : (none)
+    #9              : (in Landroidx/work/impl/WorkDatabase;)
+      name          : 'k'
+      type          : '()Lqy1;'
+      access        : 0x0401 (PUBLIC ABSTRACT)
+      code          : (none)
+  source_file_idx   : 19077 (r8-map-id-2099c023936165f24eab8f9d1afe36d6a843f01ea518aee8eebb951f2f5a7790)
+
+Class #357            -
+  Class descriptor  : 'Landroidx/work/impl/WorkDatabase_Impl;'
+  Access flags      : 0x0011 (PUBLIC FINAL)
+  Superclass        : 'Landroidx/work/impl/WorkDatabase;'
+  Interfaces        -
+  Static fields     -
+  Instance fields   -
+  Direct methods    -
+  Virtual methods   -
+    #0              : (in Landroidx/work/impl/WorkDatabase_Impl;)
+      name          : 'c'
+      type          : '(Lvw;)Lnl1;'
+      access        : 0x0011 (PUBLIC FINAL)
+    #1              : (in Landroidx/work/impl/WorkDatabase_Impl;)
+      name          : 'd'
+      type          : '()Ljava/util/List;'
+      access        : 0x0011 (PUBLIC FINAL)
+    #2              : (in Landroidx/work/impl/WorkDatabase_Impl;)
+      name          : 'f'
+      type          : '()Ljava/util/Set;'
+      access        : 0x0011 (PUBLIC FINAL)
+    #3              : (in Landroidx/work/impl/WorkDatabase_Impl;)
+      name          : 'g'
+      type          : '()Ljava/util/Map;'
+      access        : 0x0011 (PUBLIC FINAL)
+    #4              : (in Landroidx/work/impl/WorkDatabase_Impl;)
+      name          : 'h'
+      type          : '()Lhn1;'
+      access        : 0x0011 (PUBLIC FINAL)
+    #5              : (in Landroidx/work/impl/WorkDatabase_Impl;)
+      name          : 'j'
+      type          : '()Ljy1;'
+      access        : 0x0011 (PUBLIC FINAL)
+    #6              : (in Landroidx/work/impl/WorkDatabase_Impl;)
+      name          : 'k'
+      type          : '()Lqy1;'
+      access        : 0x0011 (PUBLIC FINAL)
+  source_file_idx   : 19077 (r8-map-id-2099c023936165f24eab8f9d1afe36d6a843f01ea518aee8eebb951f2f5a7790)
+
+Class #371            -
+  Class descriptor  : 'Landroidx/work/impl/workers/DiagnosticsWorker;'
+  Access flags      : 0x0011 (PUBLIC FINAL)
+  Superclass        : 'Landroidx/work/Worker;'
+  Interfaces        -
+  Static fields     -
+  Instance fields   -
+  Direct methods    -
+    #0              : (in Landroidx/work/impl/workers/DiagnosticsWorker;)
+      name          : '<init>'
+      type          : '(Landroid/content/Context;Landroidx/work/WorkerParameters;)V'
+      access        : 0x10001 (PUBLIC CONSTRUCTOR)
+  Virtual methods   -
+  source_file_idx   : 19077 (r8-map-id-2099c023936165f24eab8f9d1afe36d6a843f01ea518aee8eebb951f2f5a7790)
+
+Class #792            -
+  Class descriptor  : 'Lcom/google/mlkit/common/internal/CommonComponentRegistrar;'
+  Access flags      : 0x0001 (PUBLIC)
+  Superclass        : 'Ljava/lang/Object;'
+  Interfaces        -
+    #0              : 'Lcom/google/firebase/components/ComponentRegistrar;'
+  Static fields     -
+  Instance fields   -
+  Direct methods    -
+  Virtual methods   -
+    #0              : (in Lcom/google/mlkit/common/internal/CommonComponentRegistrar;)
+      name          : 'a'
+      type          : '()Ljava/util/List;'
+      access        : 0x0011 (PUBLIC FINAL)
+  source_file_idx   : 19077 (r8-map-id-2099c023936165f24eab8f9d1afe36d6a843f01ea518aee8eebb951f2f5a7790)
+
+Class #793            -
+  Class descriptor  : 'Lcom/google/mlkit/common/internal/MlKitComponentDiscoveryService;'
+  Access flags      : 0x0001 (PUBLIC)
+  Superclass        : 'Landroid/app/Service;'
+  Interfaces        -
+  Static fields     -
+  Instance fields   -
+  Direct methods    -
+    #0              : (in Lcom/google/mlkit/common/internal/MlKitComponentDiscoveryService;)
+      name          : '<init>'
+      type          : '()V'
+      access        : 0x10001 (PUBLIC CONSTRUCTOR)
+  Virtual methods   -
+    #0              : (in Lcom/google/mlkit/common/internal/MlKitComponentDiscoveryService;)
+      name          : 'onBind'
+      type          : '(Landroid/content/Intent;)Landroid/os/IBinder;'
+      access        : 0x0011 (PUBLIC FINAL)
+  source_file_idx   : 19077 (r8-map-id-2099c023936165f24eab8f9d1afe36d6a843f01ea518aee8eebb951f2f5a7790)
+
+Class #799            -
+  Class descriptor  : 'Lcom/google/mlkit/vision/barcode/internal/BarcodeRegistrar;'
+  Access flags      : 0x0001 (PUBLIC)
+  Superclass        : 'Ljava/lang/Object;'
+  Interfaces        -
+    #0              : 'Lcom/google/firebase/components/ComponentRegistrar;'
+  Static fields     -
+  Instance fields   -
+  Direct methods    -
+  Virtual methods   -
+    #0              : (in Lcom/google/mlkit/vision/barcode/internal/BarcodeRegistrar;)
+      name          : 'a'
+      type          : '()Ljava/util/List;'
+      access        : 0x0011 (PUBLIC FINAL)
+  source_file_idx   : 19077 (r8-map-id-2099c023936165f24eab8f9d1afe36d6a843f01ea518aee8eebb951f2f5a7790)
+
+Class #800            -
+  Class descriptor  : 'Lcom/google/mlkit/vision/common/internal/VisionCommonRegistrar;'
+  Access flags      : 0x0001 (PUBLIC)
+  Superclass        : 'Ljava/lang/Object;'
+  Interfaces        -
+    #0              : 'Lcom/google/firebase/components/ComponentRegistrar;'
+  Static fields     -
+  Instance fields   -
+  Direct methods    -
+  Virtual methods   -
+    #0              : (in Lcom/google/mlkit/vision/common/internal/VisionCommonRegistrar;)
+      name          : 'a'
+      type          : '()Ljava/util/List;'
+      access        : 0x0011 (PUBLIC FINAL)
+  source_file_idx   : 19077 (r8-map-id-2099c023936165f24eab8f9d1afe36d6a843f01ea518aee8eebb951f2f5a7790)
+
+Class #801            -
+  Class descriptor  : 'Lcom/oblivioustech/haven/HavenApplication;'
+  Access flags      : 0x0011 (PUBLIC FINAL)
+  Superclass        : 'Landroid/app/Application;'
+  Interfaces        -
+  Static fields     -
+  Instance fields   -
+  Direct methods    -
+    #0              : (in Lcom/oblivioustech/haven/HavenApplication;)
+      name          : '<init>'
+      type          : '()V'
+      access        : 0x10001 (PUBLIC CONSTRUCTOR)
+  Virtual methods   -
+    #0              : (in Lcom/oblivioustech/haven/HavenApplication;)
+      name          : 'onCreate'
+      type          : '()V'
+      access        : 0x0011 (PUBLIC FINAL)
+  source_file_idx   : 19077 (r8-map-id-2099c023936165f24eab8f9d1afe36d6a843f01ea518aee8eebb951f2f5a7790)
+
+Class #803            -
+  Class descriptor  : 'Lcom/oblivioustech/haven/MainActivity;'
+  Access flags      : 0x0011 (PUBLIC FINAL)
+  Superclass        : 'Ln70;'
+  Interfaces        -
+  Static fields     -
+  Instance fields   -
+  Direct methods    -
+    #0              : (in Lcom/oblivioustech/haven/MainActivity;)
+      name          : '<init>'
+      type          : '()V'
+      access        : 0x10001 (PUBLIC CONSTRUCTOR)
+      code          -
+      registers     : 1
+      ins           : 1
+      outs          : 1
+      insns size    : 4 16-bit code units
+      catches       : (none)
+      positions     :
+        0x0000 line=1
+        0x0001 line=2
+        0x0002 line=3
+        0x0003 line=4
+      locals        :
+        0x0000 - 0x0004 reg=0 this Lcom/oblivioustech/haven/MainActivity;
+  Virtual methods   -
+  source_file_idx   : 19077 (r8-map-id-2099c023936165f24eab8f9d1afe36d6a843f01ea518aee8eebb951f2f5a7790)
+
+Class #1023            -
+  Class descriptor  : 'Ldev/fluttercommunity/workmanager/BackgroundWorker;'
+  Access flags      : 0x0011 (PUBLIC FINAL)
+  Superclass        : 'Lmo2;'
+  Interfaces        -
+  Static fields     -
+  Instance fields   -
+  Direct methods    -
+    #0              : (in Ldev/fluttercommunity/workmanager/BackgroundWorker;)
+      name          : '<clinit>'
+      type          : '()V'
+      access        : 0x10008 (STATIC CONSTRUCTOR)
+    #1              : (in Ldev/fluttercommunity/workmanager/BackgroundWorker;)
+      name          : '<init>'
+      type          : '(Landroid/content/Context;Landroidx/work/WorkerParameters;)V'
+      access        : 0x10001 (PUBLIC CONSTRUCTOR)
+  Virtual methods   -
+  source_file_idx   : 19077 (r8-map-id-2099c023936165f24eab8f9d1afe36d6a843f01ea518aee8eebb951f2f5a7790)
+

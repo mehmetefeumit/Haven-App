@@ -772,7 +772,7 @@ error string.
 ```rust
 // api.rs, beside SESSION (api:12645-12660), same shape and rules.
 struct MeshSlot {
-    engine: MeshEngine<rand::rngs::OsRng>,
+    engine: MeshEngine<haven_core::mesh::OsRng>,
     handoff: Arc<haven_core::mesh::handoff::Handoff>,
     folded_passed_on: u64,
 }

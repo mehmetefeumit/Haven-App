@@ -1,8 +1,8 @@
 # Release build: produces key-injected, obfuscated release artifacts.
 #
 # Triggered ONLY by version tags (v*) and manual dispatch — NEVER on PRs, so the
-# Stadia key and signing secrets never touch PR/debug builds. Both jobs go
-# through scripts/build_release.sh, which injects STADIA_API_KEY (from the repo
+# Stadia key and signing secrets never touch PR/debug builds. The android and
+# ios jobs build through scripts/build_release.sh, which injects STADIA_API_KEY (from the repo
 # secret, via the env path so the key never appears in argv/logs), forces
 # --obfuscate --split-debug-info, runs the no-committed-secrets guard, and sets
 # HAVEN_RELEASE_WRAPPER=1 so the Gradle release gate passes.
@@ -51,9 +51,10 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
-# Least-privilege default: every job gets a read-only GITHUB_TOKEN; the android
-# job overrides to `contents: write` for the GitHub Release. This pins downstream
-# token scope (notably the zapstore job, which holds the Nostr publisher key)
+# Least-privilege default: every job gets a read-only GITHUB_TOKEN; only the
+# job that writes the GitHub Release (publish) overrides to `contents: write`.
+# This pins downstream token scope (notably the zapstore job, which holds the
+# Nostr publisher key, and the emulator job, which runs third-party actions)
 # independent of the repo's default-permissions setting.
 permissions:
   contents: read
@@ -72,16 +73,21 @@ jobs:
   # manifest against the previous tip, which a tag run cannot. A tag must
   # therefore point at the tip of a push to main. If that commit's gate jobs
   # are still running this job waits for them; a later push to main cancels
-  # them, and the gate then fails until they are re-run. The emulator E2E lanes are
-  # deliberately NOT part of this gate: their AVD nondeterminism must never
-  # block a release of an already-green commit, so they stay the PR/nightly
-  # functional signal.
+  # them, and the gate then fails until they are re-run. The functional E2E
+  # lanes are not part of this gate: they drive debug builds with peers and
+  # relays, so they stay the PR/nightly functional signal. The launch gates are
+  # (docs/LAUNCH_GATE.md): v0.1.14 shipped an APK that died at every process
+  # start because nothing ever launched a release build, so this workflow
+  # launches the exact APKs before anything is published, and launches a
+  # simulator build of the tag's tree before TestFlight (a signed device IPA
+  # cannot run on a simulator); ci.yml's iOS launch gate is also one of the
+  # gate jobs check_ci_verdict.sh requires.
   # ---------------------------------------------------------------------------
   gate:
     name: CI passed on this commit
     runs-on: ubuntu-latest
-    # The script's own deadline is 90 minutes.
-    timeout-minutes: 100
+    # The script's own deadline is 120 minutes.
+    timeout-minutes: 130
     permissions:
       actions: read
       contents: read
@@ -118,13 +124,10 @@ jobs:
     # checksums are pinned and verified.
     needs: [gate]
     runs-on: ubuntu-latest
-    # contents: write lets the built-in GITHUB_TOKEN create the GitHub Release and
-    # attach the signed APKs. The GitHub Release is the canonical Android channel:
-    # Obtainium and Zapstore both PULL from it (not from Actions artifacts, which
-    # are auth-gated and expire). Least-privilege: only this job gets write;
-    # everything else stays read-only.
+    # Builds and uploads only; publish releases the bytes once
+    # android-launch-gate has launched them.
     permissions:
-      contents: write
+      contents: read
     defaults:
       run:
         working-directory: haven
@@ -246,30 +249,6 @@ jobs:
             haven/build/app/outputs/flutter-apk/app-*-release.apk.sha256
           retention-days: 14
 
-      # The linchpin: attach the signed per-ABI APKs (+ checksums) to a real GitHub
-      # Release so Obtainium and Zapstore can pull them. The de-obfuscation symbols
-      # are NOT attached publicly (separate private artifact below) so the
-      # obfuscation map is never handed to attackers. Tag pushes only — a manual
-      # workflow_dispatch has no tag and must not publish a Release.
-      #
-      # NOTE: the app-*-release.apk glob is contractually tied to
-      # scripts/build_release.sh apk producing --split-per-abi outputs; changing the
-      # ABI-split scheme means updating this glob AND zapstore.yaml's `match` together.
-      - name: Publish GitHub Release
-        if: github.ref_type == 'tag'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          name: Haven ${{ github.ref_name }}
-          generate_release_notes: true
-          # v*-beta.N / v*-rc.N (any tag containing '-') -> pre-release, never "Latest".
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          make_latest: ${{ !contains(github.ref_name, '-') }}
-          fail_on_unmatched_files: true
-          files: |
-            haven/build/app/outputs/flutter-apk/app-*-release.apk
-            haven/build/app/outputs/flutter-apk/app-*-release.apk.sha256
-
       - name: Upload debug symbols (de-obfuscation)
         uses: actions/upload-artifact@v6
         with:
@@ -277,12 +256,120 @@ jobs:
           path: haven/build/symbols
           retention-days: 90
 
+  # The exact APKs `android` uploaded are installed and launched on an emulator:
+  # fresh, cold relaunch, and in place over the previous release (and the
+  # baseline) with its data kept. Nothing below publishes unless this passes.
+  android-launch-gate:
+    name: Android launch gate
+    needs: [android]
+    uses: ./.github/workflows/launch-gate-android.yml
+    with:
+      candidate_artifact: haven-release-android
+
+  # The linchpin: the one job that writes the GitHub Release. It carries the
+  # signed per-ABI APKs (+ checksums), which Obtainium and Zapstore pull, and
+  # the simulator app the iOS launch gate tested, which the NEXT release's iOS
+  # gate upgrades from (simulator-only: it cannot run on a device). The
+  # de-obfuscation symbols are NOT attached publicly (a separate private
+  # artifact) so the obfuscation map is never handed to attackers. Tag pushes
+  # only — a manual workflow_dispatch has no tag and must not publish a Release.
+  #
+  # Releases are immutable in this repository: once published, no asset can be
+  # added, replaced or removed. v0.1.16 published the APKs, and the later
+  # attach of the simulator app was refused. So every asset goes onto a draft,
+  # and the draft is published last, in this job. The APKs therefore wait for
+  # the iOS launch gate too; a red iOS gate holds the whole Release until it
+  # is re-run.
+  #
+  # NOTE: the app-*-release.apk glob is contractually tied to
+  # scripts/build_release.sh apk producing --split-per-abi outputs; changing the
+  # ABI-split scheme means updating this glob AND zapstore.yaml's `match` together.
+  publish:
+    name: Publish GitHub Release
+    needs: [android, android-launch-gate, ios-launch-gate]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    # contents: write lets the built-in GITHUB_TOKEN create the GitHub Release.
+    # The GitHub Release is the canonical Android channel: Obtainium and Zapstore
+    # both PULL from it (not from Actions artifacts, which are auth-gated and
+    # expire). This job runs no third-party code but the release action.
+    permissions:
+      contents: write
+    steps:
+      - name: Download the launched APKs
+        uses: actions/download-artifact@v6
+        with:
+          name: haven-release-android
+          path: apks
+
+      # The sidecars prove the download is intact; the gate's own digests prove
+      # these are the bytes it installed and launched.
+      - name: Require the bytes the launch gate tested
+        working-directory: apks
+        env:
+          TESTED_SHA256: ${{ needs.android-launch-gate.outputs.tested_sha256 }}
+        run: |
+          for sidecar in app-*-release.apk.sha256; do sha256sum -c "${sidecar}"; done
+          diff <(sha256sum app-*-release.apk | sort) <(printf '%s\n' "${TESTED_SHA256}" | tr ';' '\n' | sed '/^$/d' | sort) \
+            || { echo "::error::The APKs to publish are not the ones the launch gate tested."; exit 1; }
+
+      - name: Download the launched simulator app
+        uses: actions/download-artifact@v6
+        with:
+          name: haven-ios-simulator-app
+          path: sim
+
+      - name: Verify it
+        working-directory: sim
+        run: sha256sum -c app-ios-simulator.zip.sha256
+
+      # draft: true for every tag: the action creates a non-prerelease as a
+      # draft by itself, but a prerelease as already published, which an
+      # immutable release then refuses every asset for. A draft left by a
+      # failed attempt is reused (same-name assets replaced).
+      - name: Upload every asset to a draft release
+        id: draft
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Haven ${{ github.ref_name }}
+          generate_release_notes: true
+          # v*-beta.N / v*-rc.N (any tag containing '-') -> pre-release, never "Latest".
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          draft: true
+          fail_on_unmatched_files: true
+          files: |
+            apks/app-*-release.apk
+            apks/app-*-release.apk.sha256
+            sim/app-ios-simulator.zip
+            sim/app-ios-simulator.zip.sha256
+
+      # The only step that publishes; nothing can be attached after it.
+      # "Latest" is set here because a draft cannot be latest.
+      - name: Publish the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.draft.outputs.id }}
+          MAKE_LATEST: ${{ !contains(github.ref_name, '-') }}
+        run: |
+          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            -F draft=false -f make_latest="${MAKE_LATEST}" --jq '.html_url'
+
+  # The simulator app built from this tag is launched fresh, relaunched, and
+  # installed over the previous release's simulator app with its data kept.
+  # TestFlight waits for it; publish attaches the app it launched, which
+  # becomes the next release's upgrade source.
+  ios-launch-gate:
+    name: iOS launch gate
+    needs: [gate]
+    uses: ./.github/workflows/launch-gate-ios.yml
+
   ios:
     name: iOS release (TestFlight)
     # HAVEN_LIVE_SYNC-INTENT: production-default — see the header. The shipped
     # IPA's receive path is live_sync_provider.dart's defaultValue, not a
     # value this workflow chooses.
-    needs: [gate]
+    needs: [gate, ios-launch-gate]
     # Pin macos-15 (GA) rather than macos-latest: macos-latest is mid-migration
     # to macos-26 (started 2026-06-15), so the SDK it provides is ambiguous.
     # macos-15 ships Xcode 26.x (up to 26.3, the newest that runs on macOS 15).
@@ -363,18 +450,26 @@ jobs:
       # forces --obfuscate/--split-debug-info, runs the secret guard, compiles the
       # haven-core Rust pod for aarch64-apple-ios, and exports a SIGNED .ipa via
       # ios/ExportOptions.plist. BUILD_NUMBER = the run number -> unique & monotonic.
+      # Its `pod install` does not retry adding CocoaPods' trunk source on a
+      # fresh runner, so a network-level failure, and only that, runs it again.
       - name: Build signed IPA (release wrapper)
         env:
           STADIA_API_KEY: ${{ secrets.STADIA_API_KEY }}
           BUILD_NUMBER: ${{ github.run_number }}
         run: |
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then export BUILD_NAME="${GITHUB_REF_NAME#v}"; fi
-          bash ../scripts/build_release.sh ipa
+          bash ../scripts/ci/retry_on_network_failure.sh -- bash ../scripts/build_release.sh ipa
 
       # Security Rule 15: nothing reaches TestFlight with SQLCipher's native
       # logger compiled in.
       - name: Probe the archive for SQLCipher's logger
         run: bash ../scripts/ci/check_sqlcipher_logger_omitted.sh build/ios/archive/Runner.xcarchive/Products/Applications/Runner.app
+
+      # The release-only load failures a simulator cannot show: every dylib the
+      # app links resolves, and the framework Dart opens exports every symbol
+      # the bridge looks up.
+      - name: Check the archive can load
+        run: bash ../scripts/ci/check_ios_app_loadable.sh build/ios/archive/Runner.xcarchive/Products/Applications/Runner.app
 
       - name: Upload to TestFlight
         working-directory: haven/ios
@@ -399,16 +494,16 @@ jobs:
           retention-days: 90
 
   # ===========================================================================
-  # PUSH fan-out. The Zapstore job depends ONLY on `android`, so a Zapstore
-  # failure never blocks the iOS/TestFlight job, and the GitHub Release created in
-  # the android job is already published regardless. It skips cleanly when its
+  # PUSH fan-out. The Zapstore job depends ONLY on `publish`, so a
+  # Zapstore failure never blocks the iOS/TestFlight job, and the GitHub Release
+  # is already published regardless. It skips cleanly when its
   # secret is absent (forks / before the publisher key exists) by gating every
   # step on a job-level env var (secrets cannot be referenced in a job-level `if:`).
   # The pull-based channels — direct GitHub Release download and Obtainium — need
   # NO job here; they read the GitHub Release on their own cadence.
   # ===========================================================================
 
-  # Zapstore (Nostr app store) — runs after the android job so the GitHub Release
+  # Zapstore (Nostr app store) — runs after publish so the GitHub Release
   # exists; `zsp` pulls the arm64-v8a APK straight from the Release (zapstore.yaml
   # metadata_sources: github + match) and signs the Nostr events with SIGN_WITH.
   # It does NOT re-sign the APK, so Zapstore stays in Haven's single signing
@@ -416,7 +511,7 @@ jobs:
   # in scripts/ci/publish_zapstore.sh).
   zapstore:
     name: Publish to Zapstore
-    needs: [android]
+    needs: [publish]
     if: ${{ github.ref_type == 'tag' }}
     runs-on: ubuntu-latest
     env:

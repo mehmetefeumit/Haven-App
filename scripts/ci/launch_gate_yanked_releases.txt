@@ -1,0 +1,12 @@
+# Published releases a launch gate never upgrades from.
+#
+# One per line: `<tag> <platform> <reason>`, platform one of `android`, `ios`
+# or `all`. A release listed here stays a normal GitHub release (owner decision
+# OD1, 2026-11-14) but is skipped when a gate picks the release a candidate
+# must upgrade cleanly from: a build that cannot start cannot hold the data an
+# upgrade has to keep. The Android gate
+# (tooling/e2e/ci/launch-gate-previous-apk.sh) honours `android` and `all`,
+# the iOS gate `ios` and `all`, so a release broken on one platform stays the
+# other's upgrade source. Both gates refuse the whole list when any line is
+# not in this shape.
+v0.1.14 android crashes at every process start: R8 under AGP 9 stripped WorkDatabase_Impl.<init>() (CI run 43588108447)

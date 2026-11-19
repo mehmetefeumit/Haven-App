@@ -3825,7 +3825,7 @@ item 6, that address rotation is the build's; §7.1 carries a note now.
   `service check` and the dumps' headings on API 29; the buffers; that a
   real dump's skeleton passes the scanner. **Also changed**: the guards
   job's cap, 20 to 30 minutes (17 min 04 s on `1b5fa0e`);
-  `docs/E2E_TROUBLESHOOTING.md` failure mode 26.
+  `docs/E2E_TROUBLESHOOTING.md` failure mode 28.
 
 ### Proposed CLAUDE.md wording (owner to approve)
 
@@ -3993,7 +3993,7 @@ New, added:
 > answer — never green and not a finding about Haven; a failed drive
 > says why in `mesh-failure` lines of closed shapes; its raw captures
 > hold the emulator's Bluetooth address and are never uploaded:
-> `docs/E2E_TROUBLESHOOTING.md` failure mode 26),
+> `docs/E2E_TROUBLESHOOTING.md` failure mode 28),
 
 Next: M3, the radio, and with it everything on screen, as
 `docs/BLUETOOTH_MESH_M3_DESIGN.md` has it; and, if Android is to pass
