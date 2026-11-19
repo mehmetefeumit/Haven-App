@@ -138,6 +138,13 @@ Future<void> _sidecarRecorded(Directory files, int round) => waitUntilAsync(
   pollInterval: const Duration(seconds: 1),
 );
 
+/// The photo header's avatar button by its spoken name. Flutter merges the
+/// avatar's own label into the button's node (`name\navatar label`), so
+/// the name is matched as a whole line of it, as the launch gate's
+/// `ui-dump.py` matches content-desc lines.
+Finder _avatarButton(String name) =>
+    find.bySemanticsLabel(RegExp('(^|\n)${RegExp.escape(name)}(\n|\$)'));
+
 /// From the resume to the photo on screen: the product's worst case, not its
 /// usual one. A crop that outlasts the excursion grace hands the session
 /// over; the save then waits up to [kHandoffEndWait] for the resume to end the
@@ -436,7 +443,7 @@ void main() {
         await _cancelRound(tester, life, files, round++, editPhoto);
         await tester.pump();
         expect(
-          find.bySemanticsLabel(l10n.photoHeaderAddPhotoSemantics),
+          _avatarButton(l10n.photoHeaderAddPhotoSemantics),
           findsOneWidget,
           reason: 'a cancelled pick must leave the photo header as it was',
         );
@@ -553,7 +560,7 @@ void main() {
         );
         await pumpUntilFound(
           tester,
-          find.bySemanticsLabel(l10n.photoHeaderAddPhotoSemantics),
+          _avatarButton(l10n.photoHeaderAddPhotoSemantics),
           timeout: _applyBound,
           description: 'the photo header without a photo',
         );
@@ -707,10 +714,9 @@ Future<void> _pickRound(
             'before the app was resumed while the MLS session was handed off.',
           );
         }
-        return find
-                .bySemanticsLabel(l10n.photoHeaderViewPhotoSemantics)
-                .evaluate()
-                .isNotEmpty &&
+        return _avatarButton(
+              l10n.photoHeaderViewPhotoSemantics,
+            ).evaluate().isNotEmpty &&
             find.text(l10n.photoHeaderRemove).evaluate().isNotEmpty;
       },
       timeout: _applyBound,
