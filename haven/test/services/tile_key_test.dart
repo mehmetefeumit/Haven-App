@@ -2,6 +2,8 @@
 ///
 /// Verifies that the cache-key parser:
 /// - Correctly parses all four Stadia styles, retina and non-retina.
+/// - Accepts every style in `kTileStyleCatalog`, so a new style cannot
+///   silently bypass the encrypted tile cache.
 /// - Strips the api_key so it never appears in the parsed result.
 /// - Returns `null` for the dev OSM fallback and other unrecognised shapes.
 ///
@@ -9,6 +11,7 @@
 library;
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/src/constants/tiles.dart';
 import 'package:haven/src/services/tile_key.dart';
 
 void main() {
@@ -305,5 +308,32 @@ void main() {
       );
       expect(a, isNot(equals(b)));
     });
+  });
+
+  // A catalog style the parser rejects is fetched on every view and never
+  // cached, with nothing else to notice it.
+  group('TileKey.tryParse — every catalog style', () {
+    for (final config in kTileStyleCatalog) {
+      for (final retina in const [false, true]) {
+        test('${config.id} (retina: $retina) parses to its slug', () {
+          final url = config.urlTemplate
+              .replaceAll('{r}', retina ? '@2x' : '')
+              .replaceAll('{z}/{x}/{y}', '14/8187/5451')
+              .replaceAll('{api_key}', 'SECRETKEY');
+
+          expect(
+            TileKey.tryParse(url),
+            TileKey(
+              style: config.id.replaceFirst('stadia_', ''),
+              z: 14,
+              x: 8187,
+              y: 5451,
+              retina: retina,
+            ),
+            reason: 'add its slug to _kKnownStyles',
+          );
+        });
+      }
+    }
   });
 }

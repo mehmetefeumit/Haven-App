@@ -18,7 +18,8 @@
 # https://tiles.stadiamaps.com/static_cacheable with this script's query shape
 # (center=<lat>,<lon>, zoom=<z>, size=<w>x<h>@2x, api_key=<key>), and the
 # scenes' zooms, taken from the page's earlier live map, gave the intended
-# detail.
+# detail. That set predates manual_attribution=true (below) and still carries
+# Stadia's burned-in credit; the next run drops it.
 #   * LICENSING: only the CACHEABLE static maps endpoint's images may be stored
 #     and shipped in the app, and only while Haven holds an active paid Stadia
 #     subscription; raw tiles and standard static maps may not. Every request
@@ -27,9 +28,10 @@
 #     refuses to run until one is passed.
 #
 # ATTRIBUTION: the images are a Produced Work of OpenStreetMap data (ODbL) in
-# Stadia/OpenMapTiles styles. The endpoint burns a short attribution line into
-# each image's bottom-right corner; the page's own credits and ODbL link
-# (StaticMapAttribution) are still required and must stay.
+# Stadia/OpenMapTiles styles. The request sets manual_attribution=true, so the
+# images carry no credit: the page's StaticMapAttribution (the config's credits
+# and the ODbL link) is the ONLY attribution and must never be removed or
+# hidden while previews are shown. Check the output has no watermark.
 # ---------------------------------------------------------------------------
 #
 # Format and size: each image is <LOGICAL_WIDTH>x<LOGICAL_HEIGHT> map pixels
@@ -162,7 +164,10 @@ render_one() {
   local id="$1" scene="$2" lat="$3" lon="$4" zoom="$5"
   local name="${id}_${scene}"
   local raw="${WORK_DIR}/${name}.raw" webp="${WORK_DIR}/${name}.webp"
-  local url="${STATIC_MAPS_ENDPOINT}/${id#stadia_}?center=${lat},${lon}&zoom=${zoom}&size=${size_param}&api_key=${api_key}"
+  # manual_attribution=true drops Stadia's burned-in credit, which the page's
+  # BoxFit.cover crop cuts mid-word on phones; the page's StaticMapAttribution
+  # is then the only attribution, and Stadia's terms make it mandatory.
+  local url="${STATIC_MAPS_ENDPOINT}/${id#stadia_}?center=${lat},${lon}&zoom=${zoom}&size=${size_param}&manual_attribution=true&api_key=${api_key}"
   local out rc=0
 
   # The URL reaches curl as a config line on stdin, keeping the key out of the

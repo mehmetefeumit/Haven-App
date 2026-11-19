@@ -162,6 +162,13 @@ generated on 2026-11-19.
   may pin any catalog config.
 - **960×360 px** (480×180 map pixels @2x; 180 dp is the preview box height, so
   labels appear at their native size), lossy WebP. The script checks the size.
+- **No credit in the image.** The script requests `manual_attribution=true`,
+  which drops Stadia's burned-in credit (the page's `BoxFit.cover` crop cut it
+  mid-word on phones). Stadia's terms still require the credit, so the page's
+  `StaticMapAttribution` (the config's `attribution` list and the ODbL link) is
+  the **only** attribution: never remove or hide it while previews are shown.
+  The set committed on 2026-11-19 predates the parameter and still carries the
+  burned-in line; the next regeneration drops it.
 
 #### Licensing — re-check before every run
 
@@ -211,9 +218,9 @@ Key: `haven/dart_defines/secrets.json` (see "Build APK"), else
    expected size; an image over 150 KB is reported, not refused.
 3. Compare one image per scene with the live map at the same centre and zoom
    (`SCENES` in the script): City should show legible street names and POIs,
-   Nature the trails. Stadia burns a short attribution line into each image's
-   bottom-right corner; it does not replace the page's `StaticMapAttribution`
-   (full credits and the ODbL link), which must stay.
+   Nature the trails. Check that no image carries Stadia's credit line in its
+   bottom-right corner. If one does, `manual_attribution=true` was ignored:
+   find out why in Stadia's static maps docs before committing.
 4. `cd haven && flutter test test/pages/settings/`.
    `map_style_preview_assets_test.dart` fails if a preview the page can show is
    missing or mis-sized, if the directory holds a file the page cannot show, or
@@ -230,9 +237,11 @@ regenerate. A new scene also needs a `MapStylePreviewScene` value, its
    `tiles.stadiamaps.com` that the plan covers and the cacheable endpoint
    renders under the same slug (the script requests `<endpoint>/<id without
    stadia_>`). TLS pinning (`lib/src/network/pinned_tile_client.dart`), the tile
-   cache and the catalog's privacy note all assume that host. A style that is
-   not OpenMapTiles-based (Stamen, satellite) needs its own credit list, never
-   `_stadiaBaseAttribution`.
+   cache and the catalog's privacy note all assume that host. Its config's
+   `attribution` must name every credit the style requires, because it is the
+   only attribution the map and the previews show: a style that is not
+   OpenMapTiles-based needs its own list, never `_stadiaBaseAttribution` (a
+   Stamen style also needs © Stamen Design; satellite imagery its own credit).
 2. **`lib/src/constants/tiles.dart`**: add a `kStyleId…` constant
    (`stadia_<slug>`), its `TileProviderConfig` (URL template with `{r}` and
    `?api_key={api_key}`, `attribution`, `maxNativeZoom`, `requiresApiKey: true`)
@@ -242,8 +251,8 @@ regenerate. A new scene also needs a `MapStylePreviewScene` value, its
    Minimal (`_decode` in `lib/src/providers/map_style_provider.dart`), so a
    rename is a removal plus an addition.
 3. **`lib/src/services/tile_key.dart`**: add the slug to `_kKnownStyles`. A
-   style missing there is never stored in the encrypted tile cache, and no test
-   catches it.
+   style missing there is never stored in the encrypted tile cache;
+   `test/services/tile_key_test.dart` fails until it is added.
 4. **`lib/src/pages/settings/map_style_settings_page.dart`**: add an `_options`
    entry (`MapStyleSelection.style(kStyleId…)`, a Lucide icon) and its
    title/subtitle resolvers. Copy and icons stay cartographic, never privacy
@@ -261,11 +270,11 @@ regenerate. A new scene also needs a `MapStylePreviewScene` value, its
    catalog order.
 7. **Regenerate** (checklist above) and commit the new pair.
 8. **Tests**: update `test/constants/tiles_test.dart` (the catalog's ordered id
-   list; the shared-invariants list), `test/pages/settings/map_style_settings_page_test.dart`
-   (row count, titles and subtitles, `mapStyleLabel`, tap-to-preview) and
-   `test/services/tile_key_test.dart` (the slug parses).
-   `map_style_preview_assets_test.dart` and `test/providers/map_style_provider_test.dart`
-   follow the catalog on their own.
+   list; the shared-invariants list) and `test/pages/settings/map_style_settings_page_test.dart`
+   (row count, titles and subtitles, `mapStyleLabel`, tap-to-preview).
+   `map_style_preview_assets_test.dart`, `test/providers/map_style_provider_test.dart`
+   and the catalog test in `test/services/tile_key_test.dart` follow the catalog
+   on their own.
 9. Run `flutter analyze`, `flutter test test/constants/ test/pages/settings/
    test/providers/ test/services/tile_key_test.dart` and
    `bash scripts/ci/check_tile_provider.sh`.
