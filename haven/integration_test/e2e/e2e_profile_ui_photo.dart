@@ -10,10 +10,11 @@
 /// marker (`[pp] ARM round=<n> act=<pick:i|cancel>`) before each tap that
 /// opens the picker, and the sidecar answers the marker, never the reverse.
 /// Each side waits only on the other's EFFECT: the sidecar on the picker and
-/// uCrop being resumed, this side on its own lifecycle. While the activity is
-/// away this side never pumps (frames stop when it is paused); it waits on a
-/// recorded lifecycle history, so a transition that lands before the wait
-/// starts is not lost.
+/// uCrop being resumed, this side on its own lifecycle and then, before it
+/// goes on from a round, on the file the sidecar creates once it has recorded
+/// the round ([_kRecordedFile]). While the activity is away this side never
+/// pumps (frames stop when it is paused); it waits on a recorded lifecycle
+/// history, so a transition that lands before the wait starts is not lost.
 ///
 /// The lifecycle a round must show (AOSP MediaProvider android14-release):
 /// the Photo Picker is TRANSLUCENT, so it only pauses Haven (`inactive`);
@@ -42,7 +43,7 @@ library;
 
 import 'dart:async' show StreamController, StreamSubscription;
 import 'dart:convert' show jsonDecode;
-import 'dart:io' show HttpClient;
+import 'dart:io' show Directory, File, HttpClient;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -71,6 +72,8 @@ import 'package:haven/src/utils/log_alias.dart'
 import 'package:haven/src/widgets/identity/display_name_card.dart'
     show DisplayNameCard;
 import 'package:integration_test/integration_test.dart';
+import 'package:path_provider/path_provider.dart'
+    show getApplicationSupportDirectory;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '_lib/app_lifecycle.dart';
@@ -92,6 +95,12 @@ import '_lib/throw_time_error_capture.dart';
 const String _kArmMarker = '[pp] ARM round=';
 const String _kEndMarker = '[pp] END rounds=';
 
+/// The file the sidecar creates through `run-as`, as `files/<this><n>`, once
+/// it has recorded round n: `getApplicationSupportDirectory()` is
+/// `Context.getFilesDir()`, the `files/` under the directory `run-as` starts
+/// in (the runner's RECORDED_NAME; its self-test pins the two).
+const String _kRecordedFile = 'pp_recorded_';
+
 // photo-picker-lib.sh's bounds, mirrored (run-photo-ui-scenario.sh's
 // self-test pins each to the library's default).
 const int _sidecarPickerSecs = 60;
@@ -112,6 +121,19 @@ const Duration _tripBound = Duration(
       3 * _sidecarDumpSecs +
       8 * _sidecarAdbSecs +
       30,
+);
+
+/// Until the sidecar has recorded [round]. Nothing after the round — the next
+/// ARM, the END, the drive's own end — may come before it: an ARM would put
+/// the picker in front before the sidecar saw Haven back, and an end would
+/// take the app, and the file's directory, from under its record. From Haven's
+/// return the sidecar has the tail of its return window, the grace marker and
+/// one adb write left, well inside [_tripBound].
+Future<void> _sidecarRecorded(Directory files, int round) => waitUntilAsync(
+  File('${files.path}/$_kRecordedFile$round').exists,
+  description: 'round $round: the sidecar recorded it ($_kRecordedFile$round)',
+  timeout: _tripBound,
+  pollInterval: const Duration(seconds: 1),
 );
 
 /// From the resume to the photo on screen: the product's worst case, not its
@@ -413,11 +435,14 @@ void main() {
           description: 'the photo header',
         );
         final editPhoto = find.text(l10n.photoHeaderEditPhoto);
+        // Created by this call if absent, so it is there for the sidecar's
+        // first record.
+        final files = await getApplicationSupportDirectory();
         var edits = 0;
         var round = 0;
 
         // ---- Round 0: cancel at the picker. -------------------------------
-        await _cancelRound(tester, life, round++, editPhoto);
+        await _cancelRound(tester, life, files, round++, editPhoto);
         await tester.pump();
         expect(
           find.bySemanticsLabel(l10n.photoHeaderAddPhotoSemantics),
@@ -436,7 +461,15 @@ void main() {
 
         // ---- Round 1: the first photo. ------------------------------------
         await _expectBackgroundSharing(tester, container);
-        await _pickRound(tester, life, l10n, round++, editPhoto, cell: 0);
+        await _pickRound(
+          tester,
+          life,
+          l10n,
+          files,
+          round++,
+          editPhoto,
+          cell: 0,
+        );
         edits++;
         final first = await _kind0OnEveryRelay(
           profilePool,
@@ -473,7 +506,15 @@ void main() {
 
         // ---- Round 2: replace the photo. ----------------------------------
         await _expectBackgroundSharing(tester, container);
-        await _pickRound(tester, life, l10n, round++, editPhoto, cell: 1);
+        await _pickRound(
+          tester,
+          life,
+          l10n,
+          files,
+          round++,
+          editPhoto,
+          cell: 1,
+        );
         edits++;
         await _kind0OnEveryRelay(
           profilePool,
@@ -521,7 +562,15 @@ void main() {
 
         // ---- Round 3: a photo again after the removal. --------------------
         await _expectBackgroundSharing(tester, container);
-        await _pickRound(tester, life, l10n, round++, editPhoto, cell: 0);
+        await _pickRound(
+          tester,
+          life,
+          l10n,
+          files,
+          round++,
+          editPhoto,
+          cell: 0,
+        );
         edits++;
         await _kind0OnEveryRelay(
           profilePool,
@@ -597,6 +646,7 @@ Future<void> _expectBackgroundSharing(
 Future<void> _cancelRound(
   WidgetTester tester,
   _Lifecycle life,
+  Directory files,
   int round,
   Finder tap,
 ) async {
@@ -611,8 +661,10 @@ Future<void> _cancelRound(
     from: from,
     what: 'round $round (cancel): inactive, then resumed',
   );
+  final seen = life.history.sublist(from);
+  await _sidecarRecorded(files, round);
   expect(
-    life.history.sublist(from),
+    seen,
     isNot(contains(AppLifecycleState.paused)),
     reason:
         'the Photo Picker is translucent: opening and cancelling it '
@@ -621,11 +673,13 @@ Future<void> _cancelRound(
 }
 
 /// A pick: `paused` (uCrop) then a later `resumed`; then the photo shows
-/// within [_applyBound], and the error SnackBar never, checked on every pump.
+/// within [_applyBound], and the error SnackBar never, checked on every pump
+/// while the sidecar records the round.
 Future<void> _pickRound(
   WidgetTester tester,
   _Lifecycle life,
   AppLocalizations l10n,
+  Directory files,
   int round,
   Finder tap, {
   required int cell,
@@ -642,25 +696,29 @@ Future<void> _pickRound(
     from: from,
     what: 'round $round (pick): paused by uCrop, then resumed',
   );
-  await pumpUntilCondition(
-    tester,
-    () {
-      if (find.text(l10n.avatarPickerUpdateError).evaluate().isNotEmpty) {
-        throw TestFailure(
-          '[e2e_photo_ui] round $round: the photo save was refused after the '
-          'crop (avatarPickerUpdateError) — root cause A: the result arrived '
-          'before the app was resumed while the MLS session was handed off.',
-        );
-      }
-      return find
-              .bySemanticsLabel(l10n.photoHeaderViewPhotoSemantics)
-              .evaluate()
-              .isNotEmpty &&
-          find.text(l10n.photoHeaderRemove).evaluate().isNotEmpty;
-    },
-    timeout: _applyBound,
-    description: 'round $round: the photo shown after the crop',
-  );
+  // Not eagerError: a failed photo check still waits for the record.
+  await Future.wait<void>([
+    _sidecarRecorded(files, round),
+    pumpUntilCondition(
+      tester,
+      () {
+        if (find.text(l10n.avatarPickerUpdateError).evaluate().isNotEmpty) {
+          throw TestFailure(
+            '[e2e_photo_ui] round $round: the photo save was refused after the '
+            'crop (avatarPickerUpdateError) — root cause A: the result arrived '
+            'before the app was resumed while the MLS session was handed off.',
+          );
+        }
+        return find
+                .bySemanticsLabel(l10n.photoHeaderViewPhotoSemantics)
+                .evaluate()
+                .isNotEmpty &&
+            find.text(l10n.photoHeaderRemove).evaluate().isNotEmpty;
+      },
+      timeout: _applyBound,
+      description: 'round $round: the photo shown after the crop',
+    ),
+  ]);
 }
 
 /// Types [name] into the Identity page's field and saves it with the button.

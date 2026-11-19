@@ -112,6 +112,7 @@ seed main#1/lib:pp_seed_gallery#1 charge @
 sidecar-poll main#1/watch#1/sleep:MARKER_POLL_SECS#1 concurrent
 sidecar-round main#1/watch#1/play_round#1/lib:pp_round#1 concurrent
 sidecar-grace main#1/watch#1/play_round#1/grace_cause#1/sleep:1#1 concurrent
+sidecar-record main#1/watch#1/play_round#1/timeout:PP_ADB_SECS#1 concurrent
 drive main#1/bash:run-single-avd-scenario.sh#1 charge @
 # After a failed drive: is the device still there (infrastructure if not)?
 device-state main#1/timeout:ADB_STATE_SECS#1 charge ADB_STATE_SECS

@@ -2263,10 +2263,12 @@ jobs:
       # The debug photo UI lane's runner and its host sidecar against a stubbed
       # adb and a stubbed drive: rounds played in marker order, the pause
       # branch required on a pick, an early-expired grace a product failure, a
-      # broken marker sequence or an unknown picker a harness failure, a
-      # sidecar failure red even under a passing drive, the sidecar log gated
-      # before it is echoed, and the bounds and markers it shares with the Dart
-      # target and system_activity_excursions.dart pinned.
+      # broken marker sequence or an unknown picker a harness failure, the
+      # drive held until the sidecar has recorded each round (a record run-as
+      # refuses a harness failure), a sidecar failure red even under a passing
+      # drive, the sidecar log gated before it is echoed, and the bounds,
+      # markers and record file it shares with the Dart target and
+      # system_activity_excursions.dart pinned.
       - name: E2E harness self-test (photo UI lane)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/run-photo-ui-scenario.sh --self-test

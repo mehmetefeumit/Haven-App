@@ -17,8 +17,16 @@
 #     (pick: paused, then resumed;          waits for uCrop, taps its crop,
 #      cancel: inactive, then resumed,      waits for MainActivity
 #      no paused)                     <-    (the app's own resume hands back)
-#   asserts the photo, the relays, Bob      records the round, waits for n+1
+#   asserts the photo, and waits for  <-    records the round, then creates
+#     files/pp_recorded_<n>                 files/pp_recorded_<n> (run-as)
+#   the relays, Bob; then the next ARM      waits for n+1
 #   print "[pp] END rounds=<n>"             checks the count
+#
+# The record file is the one effect the Dart side waits for from here: an ARM
+# that came before the sidecar saw Haven back would put the picker in front
+# again, and the sidecar would wait out its return window on a screen it was
+# never asked about. The drive also cannot end under a round this has not
+# recorded, so a refused run-as is the harness's, never a dying drive's.
 #
 # Per pick round the sidecar also requires MapShell's Android pause branch
 # marker between the ARM and the return (C6: `[MapShell] pause: background
@@ -38,7 +46,8 @@
 #      the sidecar was fine and the device was still there
 #   2  harness: a screen or an activity the selectors do not know, the marker
 #      sequence broken, the pause branch never taken (the precondition unmet),
-#      a passing drive that never reported its rounds, or
+#      a round run-as could not record on the device, a passing drive that
+#      never reported its rounds, or
 #      run-single-avd-scenario.sh refusing its configuration (its rc 2)
 #   3  infrastructure: no device, the device gone when the drive ended, or the
 #      gallery never indexed — re-run
@@ -88,6 +97,10 @@ readonly GRACE_MARGIN_SECS="${PHOTO_UI_GRACE_MARGIN_SECS:-5}"
 readonly ARM_RE='\[pp\] ARM round=[0-9]+ act=(pick:[0-9]+|cancel)'
 readonly END_RE='\[pp\] END rounds=[0-9]+'
 readonly PAUSE_MARKER='[MapShell] pause: background handoff branch'
+# Under files/, the directory run-as starts in plus the one the target's
+# getApplicationSupportDirectory() (Context.getFilesDir) names; the self-test
+# pins it to the target's _kRecordedFile.
+readonly RECORDED_NAME='pp_recorded_'
 readonly GRACE_RE='\[MapShell\] handoff grace: ended by (resumed|expired|superseded|detached|disposed)'
 
 say() { echo "[photo-ui] $*"; }
@@ -146,29 +159,39 @@ play_round() {
     record "round=${round} act=pick picker=${PP_PICKER} ucrop=${PP_UCROP} pause=${pause} grace=${cause} dwell=${PP_DWELL}s"
     if [[ "${pause}" == no ]]; then
       watch_verdict 2 "round ${round} (pick): MapShell never took its Android pause branch between the ARM and the return, so root cause A's precondition (background sharing on at the pause) was not exercised"
-      return 2
-    fi
-    if [[ "${cause}" == expired ]] && (( PP_DWELL < GRACE_SECS - GRACE_MARGIN_SECS )); then
+      rc=2
+    elif [[ "${cause}" == expired ]] && (( PP_DWELL < GRACE_SECS - GRACE_MARGIN_SECS )); then
       watch_verdict 1 "round ${round} (pick): the excursion grace expired though Haven was away for at most ${PP_DWELL} s of its ${GRACE_SECS} s"
-      return 1
+      rc=1
     fi
   else
     record "round=${round} act=cancel picker=${PP_PICKER} pause=${pause}"
   fi
-  return 0
+  # Haven is back and the round is recorded: only now may the drive go on.
+  # It is let go whatever the verdict, so its own checks of the round run.
+  if ! timeout "${PP_ADB_SECS}" adb -s "${DEVICE}" shell run-as "${PP_PKG}" touch "files/${RECORDED_NAME}${round}" >/dev/null 2>&1 \
+     && (( rc == 0 )); then
+    watch_verdict 2 "round ${round}: run-as could not record the round on the device, so the drive cannot go on (the lane needs a debug build)"
+    rc=2
+  fi
+  return "${rc}"
 }
 
 # watch — the sidecar, in the background: the rounds in marker order until the
 # main shell touches STOP. Its verdict is the file it writes.
 watch() {
-  local offset=0 expect=0 played=0 hit at marker round act rc reported=-1
+  local offset=0 expect=0 played=0 hit at marker round act rc reported=-1 stopped
   watch_verdict 0 ''
   # After STOP it still reads what the drive wrote before it ended (its END
-  # marker above all); a round armed then is abandoned by pp_hook_alive.
+  # marker above all); a round armed then is abandoned by pp_hook_alive. STOP
+  # is seen before the read, since the drive's last line can land between an
+  # empty read and STOP.
   while :; do
+    stopped=0
+    [[ ! -e "${STOP}" ]] || stopped=1
     hit="$(next_marker "${offset}")"
     if [[ -z "${hit}" ]]; then
-      [[ ! -e "${STOP}" ]] || break
+      (( ! stopped )) || break
       sleep "${MARKER_POLL_SECS}"
       continue
     fi
@@ -306,10 +329,11 @@ main() {
 # ---------------------------------------------------------------------------
 # Self-test: a copy of this directory in a sandbox, a stub adb that plays the
 # picker and uCrop, and a stub run-single-avd-scenario.sh that plays the Dart
-# side — markers in a logcat file, the tap that opens the picker, and the wait
-# for Haven to be back. Bounds are shrunk through the PHOTO_* overrides only.
+# side — markers in a logcat file, the tap that opens the picker, and the waits
+# for Haven to be back and for the sidecar's record of the round. Bounds are
+# shrunk through the PHOTO_* overrides only.
 # ---------------------------------------------------------------------------
-readonly SELF_TEST_FIXTURES=36
+readonly SELF_TEST_FIXTURES=39
 
 _st_stub_adb() { # <bin dir>
   cat > "$1/adb" <<'STUB'
@@ -370,6 +394,9 @@ if [[ "${cmd}" == "content delete "* ]]; then
 fi
 case "${cmd}" in
   "getprop ro.build.version.sdk") echo 34 ;;
+  "run-as ${PKG} touch files/pp_recorded_"*) [[ -z "${STUB_RUNAS_REFUSED:-}" ]] || exit 1
+    [[ "$4" =~ ^files/pp_recorded_[0-9]+$ ]] || exit 9
+    mkdir -p "${S}/files"; : > "${S}/$4" ;;
   "touch -t "*|"content call "*|"rm -f "*) : ;;
   "dumpsys activity activities") resumed ;;
   "input keyevent 4") [[ "$(get screen)" == picker ]] && put screen main ;;
@@ -392,16 +419,26 @@ STUB
 }
 
 # The Dart side: arms each round in turn, opens the picker as the app's tap
-# would, and waits for Haven to be back before arming the next.
+# would, waits for Haven to be back and then for the sidecar's record of the
+# round before arming the next or printing its END. STUB/files is the app's
+# files directory, which a restarted drive's fresh install empties.
 _st_stub_drive() { # <ci dir>
   cat > "$1/run-single-avd-scenario.sh" <<'DRIVE'
 #!/usr/bin/env bash
 S="${STUB}"
 log() { printf '11-16 12:00:00.000  4242  4242 I flutter : %s\n' "$1" >> "${PHOTO_UI_LOGCAT}"; }
 back() { # Haven resumed again, within a bound
-  local deadline=$(( SECONDS + 40 ))
+  local deadline=$(( SECONDS + 20 ))
   while (( SECONDS < deadline )); do
     [[ "$(cat "${S}/screen" 2>/dev/null)" == main ]] && return 0
+    sleep 0.1
+  done
+  return 1
+}
+recorded() { # the sidecar's record of round $1, within a bound
+  local deadline=$(( SECONDS + 20 ))
+  while (( SECONDS < deadline )); do
+    [[ -e "${S}/files/pp_recorded_$1" ]] && return 0
     sleep 0.1
   done
   return 1
@@ -411,12 +448,13 @@ log 'unrelated app line naming no marker'
 n=0
 for act in ${STUB_ROUNDS:-cancel pick:0 pick:1}; do
   if [[ -n "${STUB_RESTART:-}" && "${n}" == 1 && ! -f "${S}/restarted" ]]; then
-    touch "${S}/restarted"; n=0
-    log '[pp] ARM round=0 act=cancel'; echo picker > "${S}/screen"; back || exit 1; n=1
+    touch "${S}/restarted"; rm -rf "${S}/files"; n=0
+    log '[pp] ARM round=0 act=cancel'; echo picker > "${S}/screen"; back || exit 1; recorded 0 || exit 1; n=1
   fi
   log "[pp] ARM round=$(( n + ${STUB_ROUND_SKEW:-0} )) act=${act}"
   echo picker > "${S}/screen"
   back || exit 1
+  recorded "${n}" || exit 1
   n=$(( n + 1 ))
 done
 [[ -n "${STUB_NO_END:-}" ]] || log "[pp] END rounds=${n}"
@@ -445,7 +483,7 @@ self_test() {
     out="$(env PATH="${tmp}/bin:${PATH}" STUB="${tmp}/stub" \
       PHOTO_UI_LOGCAT="${tmp}/stub/logcat.log" PHOTO_UI_SIDECAR_LOG="${tmp}/stub/sidecar.log" PHOTO_UI_WORK="${tmp}/work" \
       PHOTO_UI_NEEDLE_DIR="${tmp}/needles" \
-      PHOTO_MEDIA_SECS=10 PHOTO_PICKER_SECS=10 PHOTO_UCROP_SECS=10 PHOTO_RETURN_SECS=10 PHOTO_UI_GRACE_MARKER_SECS=5 PHOTO_UI_JOIN_SECS=30 \
+      PHOTO_MEDIA_SECS=2 PHOTO_PICKER_SECS=3 PHOTO_UCROP_SECS=3 PHOTO_RETURN_SECS=3 PHOTO_UI_GRACE_MARKER_SECS=2 PHOTO_UI_JOIN_SECS=10 \
       HAVEN_LOGSCAN=true HAVEN_LOGSCAN_BIN="${LOGSCAN_FAKE_BIN}" FAKE_SEAL_ARGV="${tmp}/seal.argv" \
       GITHUB_RUN_ID="photo-ui-self-test-$$-${ran}" GITHUB_RUN_ATTEMPT=1 "$@" \
       bash "${tmp}/ci/run-photo-ui-scenario.sh" integration_test/e2e/e2e_profile_ui_photo.dart 2>&1)" || rc=$?
@@ -510,6 +548,12 @@ self_test() {
   _scenario "a passing drive whose sidecar failed is red" 1 STUB_GRACE=expired STUB_ROUNDS="cancel pick:0"
   _has "…saying the drive itself passed" "a sidecar failure is red"
   _scenario "a passing drive that never reports its rounds is a harness failure" 2 STUB_NO_END=1
+  _scenario "a round run-as cannot record on the device is a harness failure" 2 STUB_RUNAS_REFUSED=1
+  _has "…named as such" "run-as could not record the round on the device"
+  ran=$(( ran + 1 ))
+  if grep -qF 'ARM round=1' "${tmp}/stub/logcat.log"; then
+    echo "  FAIL the drive armed round 1 though the sidecar never recorded round 0" >&2; fails=1
+  else echo "  PASS …and the drive arms nothing past a round the sidecar has not recorded"; fi
   _scenario "a drive restarted after a connect flake counts its rounds again from 0" 0 STUB_RESTART=1
   _has "…and says so" "drive restarted: rounds counted again from 0"
   # The constants the Dart target and this runner share, pinned both ways.
@@ -530,11 +574,12 @@ self_test() {
   if [[ -z "${drift}" ]]; then echo "  PASS the Dart target's trip bound is built from this lane's photo-picker-lib.sh bounds"; else
     echo "  FAIL the Dart target's mirrored bounds drifted:${drift}" >&2; fails=1; fi
   ran=$(( ran + 1 ))
-  got="$(grep -cE "^const String _k(Arm|End)Marker" "${target}" 2>/dev/null || true)"
-  if [[ "${got}" == 2 ]] && grep -qF "const String _kArmMarker = '[pp] ARM round=';" "${target}" \
-     && grep -qF "const String _kEndMarker = '[pp] END rounds=';" "${target}"; then
-    echo "  PASS the Dart target prints the markers this sidecar reads"
-  else echo "  FAIL the Dart target's marker constants are not the ones ARM_RE/END_RE read" >&2; fails=1; fi
+  got="$(grep -cE "^const String _k(ArmMarker|EndMarker|RecordedFile) " "${target}" 2>/dev/null || true)"
+  if [[ "${got}" == 3 ]] && grep -qF "const String _kArmMarker = '[pp] ARM round=';" "${target}" \
+     && grep -qF "const String _kEndMarker = '[pp] END rounds=';" "${target}" \
+     && grep -qF "const String _kRecordedFile = '${RECORDED_NAME}';" "${target}"; then
+    echo "  PASS the Dart target prints the markers this sidecar reads and waits for the file it creates"
+  else echo "  FAIL the Dart target's marker or record-file constants are not the ones ARM_RE/END_RE/RECORDED_NAME use" >&2; fails=1; fi
 
   if (( ran != SELF_TEST_FIXTURES )); then
     echo "SELF-TEST FAIL: ran ${ran} fixture(s), expected ${SELF_TEST_FIXTURES}" >&2
