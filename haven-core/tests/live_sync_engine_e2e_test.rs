@@ -291,7 +291,6 @@ async fn engine_receives_routes_and_processes_a_kind445_over_a_real_relay() {
 
     let engine = LiveSyncCore::new_local(
         Arc::clone(&circle),
-        admin_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     let mut bus = engine.bus().subscribe();
@@ -366,7 +365,6 @@ async fn the_committer_of_a_relay_change_listens_where_the_circle_now_lives() {
     let fx = real_circle(&circle, &admin_keys, std::slice::from_ref(&old_url)).await;
     let engine = LiveSyncCore::new_local(
         Arc::clone(&circle),
-        admin_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     let mut bus = engine.bus().subscribe();
@@ -422,7 +420,6 @@ async fn the_receiver_of_a_peers_relay_change_listens_where_the_circle_now_lives
     let fx = real_circle(&admin, &admin_keys, std::slice::from_ref(&old_url)).await;
     let engine = LiveSyncCore::new_local(
         Arc::clone(&fx.peer),
-        fx.peer_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     let mut bus = engine.bus().subscribe();
@@ -529,7 +526,6 @@ async fn the_receiver_of_a_routing_rotation_listens_under_the_new_id_and_the_pri
 
     let engine = LiveSyncCore::new_local(
         Arc::clone(&fx.peer),
-        fx.peer_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     let mut bus = engine.bus().subscribe();
@@ -668,7 +664,6 @@ async fn a_held_circle_the_app_listed_under_a_stale_id_is_listened_for_under_its
         .0;
     let engine = LiveSyncCore::new_local(
         Arc::clone(&fx.peer),
-        fx.peer_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     let mut bus = engine.bus().subscribe();
@@ -741,7 +736,6 @@ async fn a_start_lists_a_rotated_circles_prior_id_and_a_leave_lists_none_of_its_
 
     let engine = LiveSyncCore::new_local(
         Arc::clone(&fx.peer),
-        fx.peer_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     let mut bus = engine.bus().subscribe();
@@ -827,7 +821,6 @@ async fn a_move_fails_on_one_of_two_circles(fault_on_first: bool) -> bool {
     let second = real_circle(&circle, &admin_keys, std::slice::from_ref(&old_url)).await;
     let engine = LiveSyncCore::new_local(
         Arc::clone(&circle),
-        admin_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     let mut bus = engine.bus().subscribe();
@@ -924,7 +917,6 @@ async fn a_relay_a_circle_left_keeps_its_standing_req_for_a_day_and_no_longer() 
     let fx = real_circle(&circle, &admin_keys, std::slice::from_ref(&old_url)).await;
     let engine = LiveSyncCore::new_local(
         Arc::clone(&circle),
-        admin_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     engine
@@ -1027,7 +1019,6 @@ async fn a_relay_a_circle_left_is_let_go_when_its_day_ends_with_nothing_asking()
     let fx = real_circle(&circle, &admin_keys, std::slice::from_ref(&old_url)).await;
     let engine = LiveSyncCore::new_local(
         Arc::clone(&circle),
-        admin_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     engine
@@ -1092,7 +1083,6 @@ async fn a_bursts_measured_budget_survives_a_pause_that_had_the_lock_first() {
     let fx = real_circle(&circle, &admin_keys, std::slice::from_ref(&url)).await;
     let engine = LiveSyncCore::new_local(
         Arc::clone(&circle),
-        admin_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     engine
@@ -1136,7 +1126,6 @@ async fn a_burst_open_moves_a_circle_whose_routing_changed_while_paused() {
     let fx = real_circle(&circle, &admin_keys, std::slice::from_ref(&old_url)).await;
     let engine = LiveSyncCore::new_local(
         Arc::clone(&circle),
-        admin_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     engine
@@ -1190,7 +1179,6 @@ async fn a_stop_whose_lock_is_held_tears_down_within_its_bound() {
     let fx = real_circle(&circle, &admin_keys, std::slice::from_ref(&url)).await;
     let engine = LiveSyncCore::new_local(
         Arc::clone(&circle),
-        admin_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     engine
@@ -1256,7 +1244,6 @@ async fn a_stop_beside_a_wedged_holder_leaves_no_foreground_standing() {
     let fx = real_circle(&circle, &admin_keys, std::slice::from_ref(&url)).await;
     let engine = LiveSyncCore::new_local(
         Arc::clone(&circle),
-        admin_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     engine
@@ -1306,7 +1293,6 @@ async fn engine_multiplexes_two_circles_and_drops_unsubscribed_h() {
 
     let engine = LiveSyncCore::new_local(
         Arc::clone(&circle),
-        admin_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     let mut bus = engine.bus().subscribe();
@@ -1406,7 +1392,6 @@ async fn engine_resume_after_background_re_anchors_and_still_delivers() {
 
     let engine = LiveSyncCore::new_local(
         Arc::clone(&circle),
-        admin_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     let opened = nostr::Timestamp::now().as_secs();
@@ -1485,7 +1470,6 @@ async fn a_start_no_relay_has_answered_is_not_an_established_subscription() {
     let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &Keys::generate()).unwrap());
     let engine = LiveSyncCore::new_local(
         Arc::clone(&circle),
-        Keys::generate().public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     let opened = nostr::Timestamp::now().as_secs();
@@ -1526,11 +1510,7 @@ async fn subscription_health_reports_healthy_over_a_connected_relay() {
         Arc::new(CircleManager::new_unencrypted(dir.path(), &nostr::Keys::generate()).unwrap());
     // A session lists the ids of circles its manager holds.
     circle.keep_circle_row_for_test([0x11; 32]);
-    let engine = LiveSyncCore::new_local(
-        circle,
-        Keys::generate().public_key(),
-        Arc::new(haven_core::relay::RelayManager::new()),
-    );
+    let engine = LiveSyncCore::new_local(circle, Arc::new(haven_core::relay::RelayManager::new()));
     engine
         .start(
             &[CircleSpec {
@@ -1592,7 +1572,6 @@ async fn a_relay_that_is_down_does_not_reanchor_the_session_and_owes_its_floor()
     circle.keep_circle_row_for_test([0x22; 32]);
     let engine = LiveSyncCore::new_local(
         Arc::clone(&circle),
-        Keys::generate().public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     engine
@@ -1701,7 +1680,6 @@ async fn a_session_started_into_a_burst_reads_as_one_and_keeps_the_starts_inbox_
         }
         let engine = LiveSyncCore::new_local(
             Arc::clone(&circle),
-            admin_keys.public_key(),
             Arc::new(haven_core::relay::RelayManager::new()),
         );
         engine
@@ -1771,7 +1749,6 @@ async fn a_claimed_session_on(
     let fx = real_circle(circle, admin_keys, &[old_url.to_owned()]).await;
     let engine = LiveSyncCore::new_local(
         Arc::clone(circle),
-        admin_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     let bus = engine.bus().subscribe();
@@ -1918,7 +1895,6 @@ async fn a_burst_open_on_a_stopped_session_answers_no_session() {
     let fx = real_circle(&circle, &admin_keys, std::slice::from_ref(&url)).await;
     let engine = LiveSyncCore::new_local(
         Arc::clone(&circle),
-        admin_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     engine

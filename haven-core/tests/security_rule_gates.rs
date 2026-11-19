@@ -67,7 +67,7 @@ use haven_core::nostr::mls::{
 };
 use haven_core::relay::live_sync::config::WORKER_QUEUE_CAP;
 use haven_core::relay::live_sync::supervisor::{intake_queue, run_receiver, RawSignal};
-use haven_core::relay::live_sync::{group_cursor_stream, EngineProcessor, EventBus};
+use haven_core::relay::live_sync::{group_cursor_stream, EngineProcessor, EventBus, PlaneKind};
 use nostr::nips::nip44;
 use nostr::{
     Alphabet, Event, EventBuilder, JsonUtil as _, Keys, Kind, PublicKey, RelayUrl, SingleLetterTag,
@@ -504,6 +504,7 @@ async fn deliver_through_receiver(
     }
     let handle = tokio::spawn(run_receiver(
         brx,
+        PlaneKind::Group,
         tx,
         processor,
         Arc::new(AtomicBool::new(false)),
@@ -547,6 +548,7 @@ fn rule12_live_intake_cap_is_pinned_and_really_bounds_the_queue() {
     let eose = || RawSignal::EndOfStoredEvents {
         relay_url: RelayUrl::parse("wss://relay.example").expect("relay url"),
         subscription_id: SubscriptionId::new("s_group_0"),
+        pool: PlaneKind::Group,
     };
     let (tx, _rx) = intake_queue();
     for slot in 0..WORKER_QUEUE_CAP {
@@ -2868,7 +2870,7 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
             // A start into a burst is in the burst from before its first socket.
             && start
                 .find("ifburst{self.enter_burst(BurstKind::Background,ends)?;}")
-                .zip(start.find("self.client.connect().await;"))
+                .zip(start.find("self.connect_both().await;"))
                 .is_some_and(|(burst, connect)| burst < connect)
             && squash(fn_body(&core, "pub async fn start(").expect("start"))
                 == "{self.start_in(circles,inbox_relays,false,None).await}"
@@ -4315,7 +4317,7 @@ fn the_live_plane_sends_what_it_records_from_its_drive_alone() {
     assert!(
         core.contains(
             "letdriver=LiveDriver::over(&drive_pool);\
-             Self::assemble(circle,own_pubkey,driver,Some(drive_pool))"
+             Self::assemble(circle,driver,Some(drive_pool))"
         ),
         "the session's driver must be built over the drive pool it was handed",
     );

@@ -429,7 +429,6 @@ async fn haven_dedup_never_suppresses_refused_redelivery() {
 
     let engine = LiveSyncCore::new_local(
         Arc::clone(&fx.alice),
-        fx.alice_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     let mut bus = engine.bus().subscribe();

@@ -37,6 +37,7 @@ use super::rotation::{rotation_decision, RotationDecision, RotationInputs, SkipR
 use super::storage::{CircleStorage, PriorRouting};
 use super::storage_key_packages::CONSUMED_HOLD_OVER;
 use super::storage_member_directory::DirectoryTier;
+use super::storage_relay_floor::INBOX_FLOOR_KEY;
 use super::types::{
     Circle, CircleConfig, CircleEngineState, CircleMember, CircleMembership, CircleType,
     CircleWithMembers, Contact, GiftWrappedWelcome, Invitation, MemberKeyPackage, MembershipStatus,
@@ -5112,6 +5113,45 @@ impl CircleManager {
             {
                 log::warn!("a relay's owed floor was not cleared");
             }
+        }
+    }
+
+    /// Records that `relay` owes the inbox stream its history from
+    /// `since_secs` (Security Rule 12), keeping an earlier floor. Whether it
+    /// was recorded.
+    pub(crate) fn owe_inbox_floor(&self, relay: &str, since_secs: i64) -> bool {
+        self.storage
+            .owe_relay_floor(INBOX_FLOOR_KEY, relay, since_secs)
+            .inspect_err(|_| log::warn!("a relay's owed inbox floor was not recorded"))
+            .is_ok()
+    }
+
+    /// The floor `relay` owes the inbox stream, if any. A store that cannot
+    /// say answers none, said in the log.
+    pub(crate) fn inbox_floor(&self, relay: &str) -> Option<i64> {
+        self.storage
+            .relay_floor(INBOX_FLOOR_KEY, relay)
+            .inspect_err(|_| log::warn!("a relay's owed inbox floor was not read"))
+            .ok()
+            .flatten()
+    }
+
+    /// [`Self::inbox_floor`], for a test.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[must_use]
+    pub fn inbox_floor_for_test(&self, relay: &str) -> Option<i64> {
+        self.inbox_floor(relay)
+    }
+
+    /// Ends the floor `relay` owes the inbox stream once a REQ it answered to
+    /// its end asked from `covered_since` or earlier.
+    pub(crate) fn clear_inbox_floor(&self, relay: &str, covered_since: i64) {
+        if self
+            .storage
+            .clear_relay_floor(INBOX_FLOOR_KEY, relay, covered_since)
+            .is_err()
+        {
+            log::warn!("a relay's owed inbox floor was not cleared");
         }
     }
 

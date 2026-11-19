@@ -275,12 +275,10 @@ async fn a_two_engine_receive_path_logs_no_identifier() {
     };
     let alice_engine = LiveSyncCore::new_local(
         Arc::clone(&fx.alice),
-        fx.alice_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     let bob_engine = LiveSyncCore::new_local(
         Arc::clone(&fx.bob),
-        fx.bob_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     let mut bob_bus = bob_engine.bus().subscribe();

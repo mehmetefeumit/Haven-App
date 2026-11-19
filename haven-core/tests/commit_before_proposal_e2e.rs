@@ -287,11 +287,7 @@ fn group_req(filter: &Filter) -> bool {
 /// next open is a background burst.
 async fn paused_engine(fx: &CircleFixture, relays: &[&str]) -> LiveSyncCore {
     let carol = &fx.members[CAROL];
-    let core = LiveSyncCore::new_local(
-        Arc::clone(&carol.circle),
-        carol.keys.public_key(),
-        Arc::new(RelayManager::new()),
-    );
+    let core = LiveSyncCore::new_local(Arc::clone(&carol.circle), Arc::new(RelayManager::new()));
     core.start(
         &[CircleSpec {
             group_id_hex: hex::encode(ngid(carol, &fx.group).await),

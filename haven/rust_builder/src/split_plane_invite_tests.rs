@@ -673,8 +673,26 @@ async fn first_inbox_relay_gates_reads(world: &World, alice: &Account) -> Vec<u8
     );
     let invitation = take_in(alice, &bob, &wrap).await;
 
+    let answered_before_live = answers_from(&world.gated.front, &bob.hex());
     let (live, mut events) = start_live(&bob).await;
     let heard = next_welcome(&mut events).await;
+    // The live session's inbox socket answers the gated relay's challenge
+    // too, on a connection of its own (D1a, D1d).
+    within(
+        "the live inbox socket's answer",
+        // Counted off the frames handed in: the front holds its record's
+        // lock while it asks.
+        world.gated.front.wait_for(|frames| {
+            let bob = bob.hex();
+            frames
+                .iter()
+                .filter_map(json)
+                .filter(|frame| frame[0] == "AUTH" && frame[1]["pubkey"].as_str() == Some(&bob))
+                .count()
+                > answered_before_live
+        }),
+    )
+    .await;
     stop_live(&live).await;
     assert!(
         wrap_id(&heard) == wrap_id(&wrap),

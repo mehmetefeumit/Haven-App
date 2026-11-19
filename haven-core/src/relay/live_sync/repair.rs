@@ -83,11 +83,13 @@ pub enum ClosedKind {
     /// engine deliberately never sends. Wait the full backoff.
     Throttled,
     /// The INBOX REQ, refused until this device authenticates
-    /// ([`refuses_read`]). Haven never sends AUTH (Security Rule 16), so every
-    /// re-issue is refused again until the relay's policy changes: wait the
-    /// gated backoff, [`GATED_BACKOFF_MIN_SECS`] doubling to
-    /// [`GATED_BACKOFF_MAX_SECS`]. Never a group REQ, whose recovery must stay
-    /// within [`BACKOFF_MAX_SECS`].
+    /// ([`refuses_read`]). The inbox socket answers the challenge that came
+    /// with the refusal, and the REQ is asked again the moment it has
+    /// authenticated ([`RepairQueue::note_authenticated`]); a relay that
+    /// refuses it after that is waited out on the gated backoff,
+    /// [`GATED_BACKOFF_MIN_SECS`] doubling to [`GATED_BACKOFF_MAX_SECS`].
+    /// Never a group REQ, whose recovery must stay within
+    /// [`BACKOFF_MAX_SECS`].
     ReadGated,
 }
 
@@ -159,6 +161,15 @@ struct Entry {
     /// A [`ClosedKind::ReadGated`] incident: its windows are the gated
     /// backoff's until it decays.
     gated: bool,
+    /// The pending re-issue answers a refusal made before the inbox socket
+    /// authenticated: whether the pool KEPT that REQ (an unwrapped
+    /// `auth-required:`), which it resends itself once authenticated. `None`
+    /// for every other pending re-issue.
+    awaits_auth: Option<bool>,
+    /// The inbox socket authenticated after this REQ's refusal, and the
+    /// refusal has not reached this table yet: the two travel on different
+    /// channels.
+    authenticated: bool,
 }
 
 /// Per-`(relay, sub)` re-issue schedule.
@@ -181,12 +192,10 @@ impl RepairSchedule {
     /// second close while one is already pending changes nothing (one pending
     /// re-issue per key, never a queue).
     fn note_closed(&mut self, key: &RepairKey, kind: ClosedKind, now: Instant) -> Instant {
-        let entry = self.entries.entry(key.clone()).or_insert(Entry {
-            attempts: 0,
-            next_allowed_at: now,
-            due_at: None,
-            gated: false,
-        });
+        let entry = self
+            .entries
+            .entry(key.clone())
+            .or_insert_with(|| Entry::fresh(now));
 
         // A key quiet for a full max-backoff past its window is a fresh
         // incident, not the continuation of an old storm: decay the attempts so
@@ -218,6 +227,60 @@ impl RepairSchedule {
         due
     }
 
+    /// Records a [`ClosedKind::ReadGated`] close for `key`; `pool_kept` is
+    /// whether the pool kept the REQ. Answers when its re-issue is due, or
+    /// `None` when Haven makes none.
+    ///
+    /// Once the inbox socket has authenticated after this refusal, exactly
+    /// one path asks again: the pool's own resend of a REQ it kept, or else
+    /// Haven's re-issue, due at once. Until then it waits the gated backoff
+    /// like any refusal, to be brought in or called off when the socket
+    /// authenticates ([`Self::note_authenticated`]).
+    fn note_read_gated(
+        &mut self,
+        key: &RepairKey,
+        pool_kept: bool,
+        now: Instant,
+    ) -> Option<Instant> {
+        let entry = self
+            .entries
+            .entry(key.clone())
+            .or_insert_with(|| Entry::fresh(now));
+        if std::mem::take(&mut entry.authenticated) {
+            if pool_kept {
+                return None;
+            }
+            entry.gated = true;
+            let due = *entry.due_at.get_or_insert(now);
+            return Some(due);
+        }
+        let due = self.note_closed(key, ClosedKind::ReadGated, now);
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.awaits_auth = Some(pool_kept);
+        }
+        Some(due)
+    }
+
+    /// Records that the inbox socket to `key`'s relay authenticated after
+    /// that relay refused `key`'s REQ until it did. Whether a pending
+    /// re-issue was brought in to `now` or called off.
+    fn note_authenticated(&mut self, key: &RepairKey, now: Instant) -> bool {
+        let entry = self
+            .entries
+            .entry(key.clone())
+            .or_insert_with(|| Entry::fresh(now));
+        if entry.due_at.is_none() {
+            entry.authenticated = true;
+            return false;
+        }
+        match entry.awaits_auth.take() {
+            Some(true) => entry.due_at = None,
+            Some(false) => entry.due_at = Some(now),
+            None => return false,
+        }
+        true
+    }
+
     /// Takes every key whose re-issue is due at `now`, arming each one's next
     /// backoff window, and prunes fully decayed entries.
     fn take_due(&mut self, now: Instant) -> Vec<RepairKey> {
@@ -225,6 +288,7 @@ impl RepairSchedule {
         self.entries.retain(|key, entry| {
             if entry.due_at.is_some_and(|at| at <= now) {
                 entry.due_at = None;
+                entry.awaits_auth = None;
                 entry.attempts = entry.attempts.saturating_add(1);
                 entry.next_allowed_at = now
                     + if entry.gated {
@@ -248,13 +312,24 @@ impl RepairSchedule {
     }
 
     /// Keys with a re-issue still pending (diagnostics + tests).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     fn pending_len(&self) -> usize {
         self.entries.values().filter(|e| e.due_at.is_some()).count()
     }
 }
 
 impl Entry {
+    const fn fresh(now: Instant) -> Self {
+        Self {
+            attempts: 0,
+            next_allowed_at: now,
+            due_at: None,
+            gated: false,
+            awaits_auth: None,
+            authenticated: false,
+        }
+    }
+
     /// How long the key must stay quiet past its window to start over. A
     /// gated key decays only after a full hour: one that decayed sooner would
     /// let whoever paces its trigger (a flooder lagging the consumer) buy a
@@ -370,6 +445,31 @@ impl RepairQueue {
         self.wake.notify_one();
     }
 
+    /// Records a `CLOSED` that refused the inbox REQ until this device
+    /// authenticates, for a subscription this session owns (screened as
+    /// [`Self::note_closed`]); `pool_kept` is whether the pool kept the REQ.
+    pub(crate) fn note_read_gated(&self, key: &RepairKey, pool_kept: bool) {
+        self.schedule
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .note_read_gated(key, pool_kept, Instant::now());
+        self.wake.notify_one();
+    }
+
+    /// Records that the inbox socket authenticated after `key`'s relay
+    /// refused its REQ until it did (screened as [`Self::note_closed`]), and
+    /// wakes the repair task for a re-issue that is now due.
+    pub(crate) fn note_authenticated(&self, key: &RepairKey) {
+        if self
+            .schedule
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .note_authenticated(key, Instant::now())
+        {
+            self.wake.notify_one();
+        }
+    }
+
     /// Records a relay that came up connected and wakes the repair task, which
     /// re-issues alone each REQ of it the pool does not hold.
     pub(crate) fn note_reconnected(&self, relay_url: RelayUrl) {
@@ -475,7 +575,7 @@ impl RepairQueue {
     }
 
     /// Re-issues still pending (tests only).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn pending_len(&self) -> usize {
         self.schedule
             .lock()
@@ -857,5 +957,64 @@ mod tests {
             .await
             .expect("a close recorded before the park must still wake the task");
         assert_eq!(q.take_due(), vec![k]);
+    }
+
+    /// Once the inbox socket authenticates after a relay refused the inbox
+    /// REQ, exactly one path asks again — whichever order the refusal and the
+    /// authentication reach the table in: Haven's re-issue, at once, for a REQ
+    /// the pool deleted (strfry's wrapped `ERROR: auth-required:`), and none
+    /// for one the pool kept, which it resends itself.
+    #[test]
+    fn an_authentication_after_a_refusal_leaves_exactly_one_path_either_order() {
+        for (pool_kept, auth_first) in [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let mut s = RepairSchedule::default();
+            let k = key("wss://gate.example", "s_inbox_0");
+            let t0 = Instant::now();
+            if auth_first {
+                assert!(!s.note_authenticated(&k, t0), "nothing pending yet");
+                s.note_read_gated(&k, pool_kept, t0);
+            } else {
+                let gated = s
+                    .note_read_gated(&k, pool_kept, t0)
+                    .expect("a refusal waits");
+                assert!(gated > t0, "a refusal alone waits the gated backoff");
+                assert!(
+                    s.note_authenticated(&k, t0),
+                    "the pending re-issue is resolved"
+                );
+            }
+            let due = s.take_due(t0);
+            if pool_kept {
+                assert!(
+                    due.is_empty(),
+                    "the pool's own resend is the re-issue ({auth_first})"
+                );
+                assert_eq!(s.pending_len(), 0, "and Haven keeps none pending");
+            } else {
+                assert_eq!(due, vec![k.clone()], "re-issued at once ({auth_first})");
+            }
+            assert!(
+                !s.note_authenticated(&k, t0),
+                "a second authentication brings nothing in"
+            );
+        }
+    }
+
+    /// A refusal on a connection that has already authenticated is the
+    /// relay's answer: it waits the gated backoff, never a hot loop.
+    #[test]
+    fn a_refusal_after_the_resolved_re_issue_waits_the_gated_backoff() {
+        let mut s = RepairSchedule::default();
+        let k = key("wss://gate.example", "s_inbox_0");
+        let t0 = Instant::now();
+        s.note_read_gated(&k, false, t0);
+        s.note_authenticated(&k, t0);
+        assert_eq!(s.take_due(t0), vec![k.clone()]);
+        let again = s.note_read_gated(&k, false, t0).expect("a refusal waits");
+        assert!(
+            again >= t0 + Duration::from_secs(GATED_BACKOFF_MIN_SECS) / 2,
+            "a refusal after authentication was asked again at once"
+        );
     }
 }

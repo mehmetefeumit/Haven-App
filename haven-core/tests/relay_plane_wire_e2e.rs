@@ -503,11 +503,7 @@ impl Device {
     }
 
     fn engine(&self) -> LiveSyncCore {
-        LiveSyncCore::new_local(
-            Arc::clone(&self.circle),
-            self.keys.public_key(),
-            Arc::new(RelayManager::new()),
-        )
+        LiveSyncCore::new_local(Arc::clone(&self.circle), Arc::new(RelayManager::new()))
     }
 }
 

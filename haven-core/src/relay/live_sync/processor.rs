@@ -1001,6 +1001,14 @@ impl EngineProcessor {
         }
     }
 
+    /// Ends what `key`'s relay owed the inbox back to the `since` it was
+    /// asked: its `EOSE` vouches for the inbox's history from there.
+    pub fn settle_inbox_floor(&self, key: &RepairKey) {
+        if let Some(since) = self.asked_from(key) {
+            self.circle.clear_inbox_floor(key.relay_url.as_str(), since);
+        }
+    }
+
     /// The `since` `key`'s relay was last asked from, if this REQ recorded one.
     #[must_use]
     pub fn asked_from(&self, key: &RepairKey) -> Option<i64> {

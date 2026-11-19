@@ -12,7 +12,7 @@
 //! nothing; the
 //! frames hold identifiers, so no type here has `Debug` (Security Rule 15).
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use futures::{SinkExt, StreamExt};
@@ -49,6 +49,33 @@ struct Record {
     grew: Notify,
     connections: AtomicUsize,
     closed: AtomicUsize,
+    /// Whether a held challenge may be sent ([`Gate::hold_challenges`]).
+    released: AtomicBool,
+    release: Notify,
+}
+
+/// How a gating front plays the relay beyond strfry's defaults
+/// ([`RecordingFront::start_gating_with`]).
+///
+/// The default is [`RecordingFront::start_gating`]'s: a challenge with each
+/// refusal, the refusal in strfry's wrapped words.
+// Independent switches a test sets one at a time; no two are states of one
+// thing.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Copy, Default)]
+pub struct Gate {
+    /// Refuse in the unwrapped NIP-01 form (`auth-required: …`), which
+    /// `nostr-relay-pool` keeps the REQ for and resends once authenticated,
+    /// instead of strfry's `ERROR: auth-required: …`, which it deletes.
+    pub unwrapped: bool,
+    /// Challenge each connection the moment it opens, as well.
+    pub challenge_on_connect: bool,
+    /// Hold every challenge until [`RecordingFront::release_challenges`]; the
+    /// refusal itself goes at once.
+    pub hold_challenges: bool,
+    /// Challenge once more right after a connection authenticates; the second
+    /// answer is refused as strfry's "already authenticated".
+    pub challenge_again: bool,
 }
 
 impl Record {
@@ -80,7 +107,7 @@ impl RecordingFront {
     /// nothing to assert.
     #[must_use]
     pub fn start(upstream: &str) -> Self {
-        Self::start_with(upstream, Gate::Open)
+        Self::start_with(upstream, Gating::Open, Gate::default())
     }
 
     /// [`Self::start`] for a front that answers as a relay restricting the
@@ -109,7 +136,24 @@ impl RecordingFront {
     /// As [`Self::start`].
     #[must_use]
     pub fn start_gating(upstream: &str) -> Self {
-        Self::start_with(upstream, Gate::UntilAuthenticated)
+        Self::start_with(upstream, Gating::UntilAuthenticated, Gate::default())
+    }
+
+    /// [`Self::start_gating`], playing the relay as `play` says.
+    ///
+    /// # Panics
+    ///
+    /// As [`Self::start`].
+    #[must_use]
+    pub fn start_gating_with(upstream: &str, play: Gate) -> Self {
+        Self::start_with(upstream, Gating::UntilAuthenticated, play)
+    }
+
+    /// Sends every challenge held so far ([`Gate::hold_challenges`]), and
+    /// every later one at once.
+    pub fn release_challenges(&self) {
+        self.record.released.store(true, Ordering::SeqCst);
+        self.record.release.notify_waiters();
     }
 
     /// [`Self::start_gating`] for a relay whose policy does not serve the
@@ -122,10 +166,10 @@ impl RecordingFront {
     /// As [`Self::start`].
     #[must_use]
     pub fn start_refusing(upstream: &str) -> Self {
-        Self::start_with(upstream, Gate::Always)
+        Self::start_with(upstream, Gating::Always, Gate::default())
     }
 
-    fn start_with(upstream: &str, gate: Gate) -> Self {
+    fn start_with(upstream: &str, gate: Gating, play: Gate) -> Self {
         let _ = super::allow_ws_loopback_for_test();
         let record = Arc::new(Record::default());
         let serving = Arc::clone(&record);
@@ -146,7 +190,7 @@ impl RecordingFront {
                         .send(format!("ws://127.0.0.1:{port}"))
                         .expect("hand the url over");
                     let front = format!("ws://127.0.0.1:{port}");
-                    tokio::spawn(accept(listener, upstream, front, gate, serving));
+                    tokio::spawn(accept(listener, upstream, front, (gate, play), serving));
                     // Resolves when the handle is stopped or dropped; the
                     // runtime and every connection task go with it.
                     let _ = stopped.await;
@@ -243,7 +287,7 @@ async fn accept(
     listener: TcpListener,
     upstream: String,
     front: String,
-    gate: Gate,
+    (gate, play): (Gating, Gate),
     record: Arc<Record>,
 ) {
     while let Ok((tcp, _)) = listener.accept().await {
@@ -256,6 +300,7 @@ async fn accept(
                 front,
                 conn,
                 gate,
+                play,
             };
             serve(tcp, at, Arc::clone(&serving)).await;
             serving.closed.fetch_add(1, Ordering::SeqCst);
@@ -266,7 +311,7 @@ async fn accept(
 
 /// Which reads of the restricted kinds a front refuses.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Gate {
+enum Gating {
     /// None.
     Open,
     /// Those of a connection that has not authenticated.
@@ -280,7 +325,8 @@ struct Connection {
     upstream: String,
     front: String,
     conn: usize,
-    gate: Gate,
+    gate: Gating,
+    play: Gate,
 }
 
 async fn serve(tcp: TcpStream, at: Connection, record: Arc<Record>) {
@@ -289,8 +335,9 @@ async fn serve(tcp: TcpStream, at: Connection, record: Arc<Record>) {
         front,
         conn,
         gate,
+        play,
     } = at;
-    let gating = gate != Gate::Open;
+    let gating = gate != Gating::Open;
     // The key this connection authenticated as, once a gating front accepted
     // its answer.
     let authed: Arc<Mutex<Option<PublicKey>>> = Arc::default();
@@ -308,6 +355,9 @@ async fn serve(tcp: TcpStream, at: Connection, record: Arc<Record>) {
     let (mut to_client, mut from_client) = client.split();
     let (mut to_relay, from_relay) = relay.split();
     let (answers, answered) = futures::channel::mpsc::unbounded::<Message>();
+    if gating && play.challenge_on_connect {
+        let _ = answers.unbounded_send(challenge_to(conn));
+    }
     let relay_to_client = tokio::spawn(async move {
         // The relay's end ends the client's connection, as it did before the
         // front's own answers joined the stream.
@@ -336,22 +386,23 @@ async fn serve(tcp: TcpStream, at: Connection, record: Arc<Record>) {
                 };
                 if gating && verb(text.as_str()).as_deref() == Some("AUTH") {
                     record.push(frame);
+                    let before = is_authed(&authed);
                     let answer = answer_auth(text.as_str(), conn, &front, &authed);
-                    if answers.unbounded_send(answer).is_err() {
+                    let again = play.challenge_again && !before && is_authed(&authed);
+                    if answers.unbounded_send(answer).is_err()
+                        || (again && answers.unbounded_send(challenge_to(conn)).is_err())
+                    {
                         break;
                     }
                     continue;
                 }
-                let authenticated = authed
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .is_some();
+                let authenticated = is_authed(&authed);
                 let refusal = match gate {
-                    Gate::UntilAuthenticated | Gate::Always if !authenticated => {
-                        refusal(text.as_str(), Some(conn))
+                    Gating::UntilAuthenticated | Gating::Always if !authenticated => {
+                        refusal(text.as_str(), Some(conn), play.unwrapped)
                     }
-                    Gate::Always => refusal(text.as_str(), None),
-                    Gate::Open | Gate::UntilAuthenticated => None,
+                    Gating::Always => refusal(text.as_str(), None, play.unwrapped),
+                    Gating::Open | Gating::UntilAuthenticated => None,
                 };
                 if let Some(refusal) = refusal {
                     record
@@ -360,10 +411,7 @@ async fn serve(tcp: TcpStream, at: Connection, record: Arc<Record>) {
                         .unwrap_or_else(PoisonError::into_inner)
                         .push(frame.clone());
                     record.push(frame);
-                    if refusal
-                        .into_iter()
-                        .any(|answer| answers.unbounded_send(answer).is_err())
-                    {
+                    if !send_refusal(refusal, play, &answers, &record) {
                         break;
                     }
                     continue;
@@ -390,7 +438,7 @@ async fn serve(tcp: TcpStream, at: Connection, record: Arc<Record>) {
 /// has not authenticated — on connection `challenge` an `AUTH` challenge, then
 /// the refusal — or, with no challenge to send, an authenticated client it
 /// still refuses. `None` for every frame it hands on.
-fn refusal(text: &str, challenge: Option<usize>) -> Option<Vec<Message>> {
+fn refusal(text: &str, challenge: Option<usize>, unwrapped: bool) -> Option<Vec<Message>> {
     let frame: serde_json::Value = serde_json::from_str(text).ok()?;
     let frame = frame.as_array()?;
     let verb = frame.first()?.as_str()?;
@@ -412,20 +460,72 @@ fn refusal(text: &str, challenge: Option<usize>) -> Option<Vec<Message>> {
     };
     let refusal = if verb == "NEG-OPEN" {
         serde_json::json!(["NEG-ERR", id, reason])
+    } else if unwrapped {
+        serde_json::json!(["CLOSED", id, reason])
     } else {
         // strfry's `sendClosedError` puts `ERROR: ` before every `CLOSED`
         // reason it sends.
         serde_json::json!(["CLOSED", id, format!("ERROR: {reason}")])
     };
-    let challenge = challenge.map(|conn| {
-        Message::text(serde_json::json!(["AUTH", format!("challenge-{conn}")]).to_string())
-    });
+    let challenge = challenge.map(challenge_to);
     Some(
         challenge
             .into_iter()
             .chain([Message::text(refusal.to_string())])
             .collect(),
     )
+}
+
+/// Whether the connection has authenticated.
+fn is_authed(authed: &Mutex<Option<PublicKey>>) -> bool {
+    authed
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .is_some()
+}
+
+/// Sends a refusal's frames, holding its challenge while `play` says to;
+/// `false` once the client is gone.
+fn send_refusal(
+    refusal: Vec<Message>,
+    play: Gate,
+    answers: &futures::channel::mpsc::UnboundedSender<Message>,
+    record: &Arc<Record>,
+) -> bool {
+    let mut refusal = refusal.into_iter().peekable();
+    if play.hold_challenges && !record.released.load(Ordering::SeqCst) {
+        if let Some(challenge) =
+            refusal.next_if(|message| message.to_text().is_ok_and(|t| t.starts_with(r#"["AUTH""#)))
+        {
+            hold(challenge, answers.clone(), Arc::clone(record));
+        }
+    }
+    refusal.all(|answer| answers.unbounded_send(answer).is_ok())
+}
+
+/// Connection `conn`'s challenge.
+fn challenge_to(conn: usize) -> Message {
+    Message::text(serde_json::json!(["AUTH", format!("challenge-{conn}")]).to_string())
+}
+
+/// Sends `challenge` once the front's challenges are released.
+fn hold(
+    challenge: Message,
+    answers: futures::channel::mpsc::UnboundedSender<Message>,
+    record: Arc<Record>,
+) {
+    tokio::spawn(async move {
+        loop {
+            let release = record.release.notified();
+            tokio::pin!(release);
+            release.as_mut().enable();
+            if record.released.load(Ordering::SeqCst) {
+                break;
+            }
+            release.await;
+        }
+        let _ = answers.unbounded_send(challenge);
+    });
 }
 
 fn kinds(filter: &serde_json::Value) -> Option<impl Iterator<Item = Option<u64>> + '_> {

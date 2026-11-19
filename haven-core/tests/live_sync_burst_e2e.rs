@@ -275,7 +275,6 @@ async fn publish_to(url: &str, event: &Event) {
 /// A genuine multi-member circle, each member with their own real MLS store.
 struct Circle {
     alice: Arc<CircleManager>,
-    alice_keys: Keys,
     bob: Arc<CircleManager>,
     bob_keys: Keys,
     carol: Option<Arc<CircleManager>>,
@@ -365,7 +364,6 @@ async fn build_circle(group_relays: Vec<String>, with_carol: bool) -> Circle {
     dirs.push(alice_dir);
     Circle {
         alice,
-        alice_keys,
         bob,
         bob_keys,
         carol: carol_pair.map(|(c, _)| c),
@@ -380,7 +378,6 @@ async fn build_circle(group_relays: Vec<String>, with_carol: bool) -> Circle {
 async fn start_engine(fx: &Circle, relays: &[String]) -> LiveSyncCore {
     let core = LiveSyncCore::new_local(
         Arc::clone(&fx.alice),
-        fx.alice_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     core.start(
@@ -722,7 +719,6 @@ async fn a_closed_queued_before_pause_does_not_reopen_a_req_while_paused() {
 
     let core = LiveSyncCore::new_local(
         Arc::clone(&fx.alice),
-        fx.alice_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     core.start(
@@ -1077,7 +1073,6 @@ async fn burst_ingests_a_peer_commit_before_the_location_is_encrypted() {
     // who can stage a routing commit.
     let core = LiveSyncCore::new_local(
         Arc::clone(&fx.bob),
-        fx.bob_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     core.start(
@@ -1143,7 +1138,6 @@ async fn a_deferred_peel_drains_on_its_cutoff_inside_one_burst() {
     let fx = build_circle(vec![url.clone()], false).await;
     let core = LiveSyncCore::new_local(
         Arc::clone(&fx.bob),
-        fx.bob_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     core.start(
@@ -1502,7 +1496,6 @@ async fn pause_never_disconnects_while_an_auto_commit_awaits_its_ok() {
     let fx = build_circle(vec![url.clone()], true).await;
     let core = Arc::new(LiveSyncCore::new_local(
         Arc::clone(&fx.alice),
-        fx.alice_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     ));
     core.start(
@@ -1598,7 +1591,6 @@ async fn a_commit_arriving_between_settle_and_pause_is_still_confirmed() {
     let fx = build_circle(vec![url.clone()], true).await;
     let core = Arc::new(LiveSyncCore::new_local(
         Arc::clone(&fx.alice),
-        fx.alice_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     ));
     core.start(
@@ -1690,7 +1682,6 @@ async fn a_burst_that_did_not_settle_every_endpoint_advances_only_with_the_silen
     // stage a routing commit.
     let core = LiveSyncCore::new_local(
         Arc::clone(&fx.bob),
-        fx.bob_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     core.start(
@@ -1806,7 +1797,6 @@ async fn a_relay_left_out_of_coverage_is_asked_from_its_floor_by_the_next_sessio
 
     let first = LiveSyncCore::new_local(
         Arc::clone(&fx.bob),
-        fx.bob_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     first
@@ -1841,7 +1831,6 @@ async fn a_relay_left_out_of_coverage_is_asked_from_its_floor_by_the_next_sessio
     gate.send_replace(true);
     let second = LiveSyncCore::new_local(
         Arc::clone(&fx.bob),
-        fx.bob_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     second
@@ -1959,7 +1948,6 @@ async fn a_single_relays_reissue_keeps_the_buckets_other_relays_in_coverage() {
 
     let first = LiveSyncCore::new_local(
         Arc::clone(&fx.bob),
-        fx.bob_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     let mut bus = first.bus().subscribe();
@@ -1994,7 +1982,6 @@ async fn a_single_relays_reissue_keeps_the_buckets_other_relays_in_coverage() {
     gate.send_replace(true);
     let second = LiveSyncCore::new_local(
         Arc::clone(&fx.bob),
-        fx.bob_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     let mut bus = second.bus().subscribe();
@@ -2041,7 +2028,6 @@ async fn the_foreground_releases_a_silent_relay_after_the_eose_wait_without_a_ti
     let fx = build_circle(vec![fast_url.clone(), slow_url.clone()], false).await;
     let core = LiveSyncCore::new_local(
         Arc::clone(&fx.bob),
-        fx.bob_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     core.start(
@@ -2091,7 +2077,6 @@ async fn a_burst_waits_on_no_relay_that_is_not_connected() {
     let fx = build_circle(vec![live_url.clone(), dead_url.clone()], false).await;
     let core = LiveSyncCore::new_local(
         Arc::clone(&fx.bob),
-        fx.bob_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     core.start(
@@ -2125,7 +2110,6 @@ async fn a_resume_waits_on_no_inbox_relay_that_is_not_connected() {
     let fx = build_circle(vec![live_url.clone()], false).await;
     let core = LiveSyncCore::new_local(
         Arc::clone(&fx.bob),
-        fx.bob_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     core.start(
