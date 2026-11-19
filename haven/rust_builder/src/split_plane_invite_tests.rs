@@ -234,14 +234,14 @@ async fn invitee(world: &World, tag: &str, inbox: &[&str], key_packages: &[&str]
         "every KeyPackage relay acknowledged the invitee's package",
     );
 
-    for (kind, category, stored) in [
-        (Kind::InboxRelays, RelayTypeFfi::Inbox, &stored_inbox),
-        (Kind::RelayList, RelayTypeFfi::Nip65, &stored_kp),
+    for (kind, stored) in [
+        (Kind::InboxRelays, &stored_inbox),
+        (Kind::RelayList, &stored_kp),
     ] {
         let held = fetch_by_kind(bob.keys.public_key(), kind, &world.discovery).await;
         let [list] = <[_; 1]>::try_from(held)
             .unwrap_or_else(|_| panic!("the discovery relay holds one list of each kind"));
-        let urls = super::relay_list_urls_for(category, &list).expect("the list's relays");
+        let urls = listed_relays(&list);
         assert!(
             urls.len() == stored.len() && urls.iter().zip(stored).all(|(a, b)| same_relay(a, b)),
             "the discovery relay holds the stored list, in order",
@@ -252,6 +252,23 @@ async fn invitee(world: &World, tag: &str, inbox: &[&str], key_packages: &[&str]
         );
     }
     bob
+}
+
+/// The relays a published list names, in order: its `relay` tags for a 10050,
+/// its `r` tags for a 10002.
+fn listed_relays(list: &nostr::Event) -> Vec<String> {
+    let name = if list.kind == Kind::RelayList {
+        "r"
+    } else {
+        "relay"
+    };
+    list.tags
+        .iter()
+        .filter_map(|tag| {
+            let values = tag.as_slice();
+            (values.len() >= 2 && values[0] == name).then(|| values[1].clone())
+        })
+        .collect()
 }
 
 /// The inviter's product lookup of `bob`, for `group` or a new circle.
@@ -825,6 +842,19 @@ async fn an_inbox_relay_refusing_after_authentication_serves_nothing(
         published_wraps(&world.refusing.front, &bob.hex()).len() == 1,
         "premise: the refusing inbox relay took the Welcome",
     );
+    // The invitee's own relay-list pass asked first, and the relay settings
+    // board says the relay refused it.
+    let board = bob.circle.own_relay_board();
+    assert!(
+        board.inbox_reads.len() == 1
+            && same_relay(&board.inbox_reads[0].relay_url, refusing)
+            && board.inbox_reads[0].read == InboxReadFfi::Refused,
+        "the board names the relay that refused the pass's read",
+    );
+    let (refused_before, answers_before) = (
+        refused_reads(&world.refusing.front, &bob.hex()),
+        answers_from(&world.refusing.front, &bob.hex()),
+    );
 
     let [read] = <[_; 1]>::try_from(read_inbox(world, &bob).await)
         .unwrap_or_else(|_| panic!("one answer per inbox relay"));
@@ -841,9 +871,9 @@ async fn an_inbox_relay_refusing_after_authentication_serves_nothing(
         "no invitation came of an inbox nothing can be read from",
     );
     // The read before the answer, and the one after it.
-    await_refused_reads(&world.refusing.front, &bob.hex(), 2).await;
+    await_refused_reads(&world.refusing.front, &bob.hex(), refused_before + 2).await;
     assert!(
-        answers_from(&world.refusing.front, &bob.hex()) == 1,
+        answers_from(&world.refusing.front, &bob.hex()) == answers_before + 1,
         "the refusal came after the invitee answered the relay's challenge",
     );
     assert_only_identity_connections_authenticated(world);

@@ -1,6 +1,7 @@
 //! The user's own inbox reads (`RelayManager::read_own_inbox_per_relay`, and
-//! the relay settings check's inbox probe), against relays that serve gift
-//! wraps only to their authenticated recipient.
+//! the relay-list pass's inbox probe the relay settings board shows,
+//! `OwnRelayBoard::ask_inbox_reads`), against relays that serve gift wraps
+//! only to their authenticated recipient.
 //!
 //! What is promised (owner-directed 2026-11-16, White Noise parity): an own
 //! inbox read answers the relay's NIP-42 challenge with the identity key and
@@ -15,7 +16,7 @@ mod helpers;
 
 use std::sync::Arc;
 
-use haven_core::relay::maintenance::{own_presence, OwnRelayLists, TrackedKpLifetime};
+use haven_core::relay::maintenance::OwnRelayBoard;
 use haven_core::relay::nip42::Nip42Signer;
 use haven_core::relay::recording_front::RecordingFront;
 use haven_core::relay::scripted_relay::{Frame, ScriptedRelay};
@@ -158,19 +159,13 @@ async fn a_relay_serving_an_inbox_only_to_its_owner_serves_the_own_read() {
         .expect("the identity connection is closed when its read returns");
 
     let manager = RelayManager::new();
-    let rows = own_presence(
-        &manager,
-        &me.signer,
-        &OwnRelayLists {
-            inbox: &inbox,
-            key_package: &[],
-            lookup: &[],
-        },
-        None,
-        TrackedKpLifetime::Absent,
-    )
-    .await;
-    assert_eq!(rows[0].inbox_read, Some(InboxRead::Served));
+    let board = OwnRelayBoard::default();
+    board
+        .ask_inbox_reads(&me.signer, board.inbox_reads_generation(), &inbox)
+        .await;
+    let reads = board.snapshot().inbox_reads;
+    assert_eq!(reads.len(), 1);
+    assert_eq!(reads[0].read, InboxRead::Served);
     let anonymous = manager
         .fetch_events_per_relay(
             Filter::new()
@@ -189,8 +184,8 @@ async fn a_relay_serving_an_inbox_only_to_its_owner_serves_the_own_read() {
     let anonymous_conn = front
         .frames()
         .iter()
-        .find(|frame| frame.text.contains(r#""kinds":[10050]"#))
-        .expect("the anonymous 10050 probe reached the front")
+        .rfind(|frame| frame.text.starts_with(r#"["REQ""#))
+        .expect("the anonymous read reached the front")
         .conn;
     assert!(
         answered.len() == 2 && answered[0] == 0 && !answered.contains(&anonymous_conn),

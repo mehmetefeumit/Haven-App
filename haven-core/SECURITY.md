@@ -507,11 +507,14 @@ never hidden:
   `InboxReadFfi::Refused`; only an `EOSE` is `Served`, and an unreached or
   unfinished read is neither. The relay's text is read for its prefix and
   never kept (Rule 15).
-- **The relay settings check.** Each relay of the inbox list, and no other, is
-  asked the live plane's own inbox read — this account's gift wraps by `#p`,
-  from now, `limit` 1 — and reported as `inbox_read`, apart from the kind-10050
-  verdict. It discloses nothing the inbox REQ does not already send that
-  relay.
+- **The relay settings board.** Each relay-list maintenance pass, beside its
+  inbox-list probe, asks each relay of the inbox list, and no other, the live plane's own inbox read
+  — this account's gift wraps by `#p`, from now, `limit` 1 — and writes how
+  each answered onto the own-relay board's `inbox_reads`, apart from the
+  kind-10050 cells (`OwnRelayBoard::ask_inbox_reads`); like the rest of the
+  pass it asks nothing while the storage-reset notice is unanswered, and an
+  inbox list edit forgets every answer. It discloses nothing the inbox REQ does not already
+  send that relay.
 - **The live plane.** The inbox REQ rides its own socket, which answers the
   challenge (below, "The live plane's inbox socket"), and is asked again the
   moment that socket authenticates. A relay that refuses it after that — or
@@ -4265,8 +4268,10 @@ Security Rule 5 for this material — no init key outlives its use:
 - **One maintenance tick at a time.** Two overlapping ticks would each mint,
   and the second promotion would delete the first package's key while a relay
   still served it. The tick holds a per-account lock from its sweep to its
-  promotion (`SessionManager::key_package_tick`;
-  `tc17_overlapping_ticks_publish_one_key_package_into_one_slot_via_real_ffi`).
+  promotion (`SessionManager::own_relays_tick`;
+  `tc17_overlapping_ticks_publish_one_key_package_into_one_slot_via_real_ffi`),
+  which the relay-list pass takes too
+  (`concurrent_passes_never_interleave_on_the_board_via_real_ffi`).
 - **Superseded ⇒ kept for the 24-hour replacement grace, then deleted.**
   Owner decision D3 (2026-11-16), the spec's replacement grace
   (`foundation/key-packages.md`; MDK master's

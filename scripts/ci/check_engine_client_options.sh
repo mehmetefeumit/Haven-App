@@ -1214,7 +1214,7 @@ check_relay_events_verified() { # <core-src-dir> <ffi-src-dir> <soak-src-dir>
 #     read: `tests/`, and a re-export under another name.
 # ---------------------------------------------------------------------------
 readonly -a IDENTITY_CLIENT_FILES=('relay/identity.rs' 'relay/live_sync/session.rs')
-readonly -a IDENTITY_CALL_FILES=('relay/identity.rs' 'relay/manager.rs' 'relay/fanout.rs' 'relay/maintenance/own_presence.rs')
+readonly -a IDENTITY_CALL_FILES=('relay/identity.rs' 'relay/manager.rs' 'relay/fanout.rs')
 # recording_front.rs is compiled only with `test-utils`: the gating front that
 # checks the AUTH frames it is sent.
 readonly -a AUTH_EVENT_FILES=('relay/nip42.rs' 'relay/recording_front.rs')

@@ -26,7 +26,7 @@ use haven_core::profile::{
     ProfileRelaySalt, ProfileState,
 };
 use haven_core::relay::maintenance::{
-    build_kp_maintenance_events, own_presence, OwnEventPresence, OwnRelayLists, TrackedKpLifetime,
+    build_kp_maintenance_events, names_configured_list, probe_verdict, Probed,
 };
 use haven_core::relay::scripted_relay::{Frame, ScriptedRelay};
 use haven_core::relay::{
@@ -853,7 +853,6 @@ async fn a_forged_event_never_reads_as_published_on_a_relay() {
     let relay = ScriptedRelay::start();
     let keys = Keys::generate();
     let own = keys.public_key();
-    let (signer, _store) = helpers::nip42_signer_of(&keys);
     let inbox = urls(&[&relay]);
     // The very list configured: it would read current were it believed.
     let (prime, forged) = forged_as(
@@ -865,17 +864,17 @@ async fn a_forged_event_never_reads_as_published_on_a_relay() {
     );
     relay.answer(asks(own, Kind::InboxRelays), primed(&prime, vec![forged]));
 
-    let rows = own_presence(
-        &RelayManager::new(),
-        &signer,
-        &OwnRelayLists {
-            inbox: &inbox,
-            key_package: &[],
-            lookup: &[],
-        },
-        None,
-        TrackedKpLifetime::Absent,
-    )
-    .await;
-    assert_eq!(rows[0].inbox_relay_list, OwnEventPresence::Missing);
+    // The probe and judge the relay-list maintenance pass writes the board
+    // with.
+    let answers = RelayManager::new()
+        .fetch_events_per_relay(
+            Filter::new().kind(Kind::InboxRelays).author(own).limit(4),
+            &inbox,
+        )
+        .await
+        .expect("the read never fails as a whole");
+    let verdict = probe_verdict(&answers[0], &own, Kind::InboxRelays, &|mine| {
+        names_configured_list(mine, &inbox)
+    });
+    assert_eq!(verdict, Probed::Missing);
 }

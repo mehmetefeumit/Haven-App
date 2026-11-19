@@ -619,7 +619,7 @@ fn only_a_declaring_lane_mints_an_offset_identity() {
             // Proxy profile (e2e-android.yml, e2e-ios.yml): every identity this
             // drive mints is declared over the channel, offset included.
             "e2e/e2e_combined.dart",
-            // HOST profile (e2e-relay-customization.yml). Its three offset
+            // HOST profile (e2e-relay-management.yml). Its three offset
             // Bobs (`seedOffset: 1`, `2`, `3`) are derived from the canonical
             // Bob seed by a rule the host knows, so host-needles.sh declares
             // them and that lane's logs ARE searched for each pubkey.

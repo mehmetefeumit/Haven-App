@@ -908,7 +908,7 @@ eth0	0000000A	00000000	0001	0	0	0	000000FF	0	0	0" 10.0.2.2 'wlan*'; then
   #      cleared before the earliest thing in this script that can exit, so a
   #      target that dies at an argument guard, in Phase 1's build or in Phase
   #      2's install leaves NOTHING for its caller's `cp` to file under its own
-  #      name — run-integration-tests.sh and run-relay-customization.sh both
+  #      name — run-integration-tests.sh and run-relay-management.sh both
   #      copy these paths per target, and
   #      until this landed the copy carried the PREVIOUS target's complete
   #      transcript, reporter progress line included.
@@ -982,7 +982,7 @@ fi
 # redirects sits behind a guard that can exit first: the usage check below, the
 # four helper/project checks, `adb logcat -c`, Phase 1's build, Phase 2's
 # install. A caller that drives SEVERAL targets through this script
-# (run-integration-tests.sh, run-relay-customization.sh)
+# (run-integration-tests.sh, run-relay-management.sh)
 # copies these paths under each target's own name afterwards, so a target that
 # died before its own capture began was handed the PREVIOUS target's
 # transcript: a complete file, carrying that other target's reporter progress
@@ -1444,7 +1444,7 @@ fi
 # e2e-profile substitute their values into it at their drive steps. A
 # multi-target lane runs it once per target and cannot cover N of them, so its
 # aggregate deadline is the reaper by design (e2e-integration and
-# e2e-relay-customization say so at theirs).
+# e2e-relay-management say so at theirs).
 readonly CONNECT_WATCHDOG_SECS="${HAVEN_DRIVE_CONNECT_WATCHDOG_SECS:-300}"
 readonly WATCHDOG_POLL_SECS="${HAVEN_DRIVE_WATCHDOG_POLL_SECS:-5}"
 # How long the watchdog's SIGTERM gets before its SIGKILL.

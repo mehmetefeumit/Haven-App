@@ -96,7 +96,10 @@ void main() {
     });
 
     test('addRelay rebuilds what is built from the inbox list', () async {
-      final statusBefore = await container.read(relayStatusProvider.future);
+      container.listen(relayStatusProvider, (_, _) {});
+      await container.read(inboxRelaysProvider.future);
+      await container.read(keyPackageRelaysProvider.future);
+      final statusBefore = container.read(relayStatusProvider);
       final pollerMarker = container.read(invitationInvalidatorProvider);
       final publisherMarker = container.read(
         keyPackagePublisherInvalidatorProvider,
@@ -107,7 +110,7 @@ void main() {
       expect(after, contains('wss://added.example.com'));
       // A marker that is invalidated rather than advanced rebuilds to the same
       // 0, and nothing watching it rebuilds.
-      final statusAfter = await container.read(relayStatusProvider.future);
+      final statusAfter = container.read(relayStatusProvider);
       expect(
         statusBefore.relays.map((r) => r.relayUrl),
         isNot(contains('wss://added.example.com')),
@@ -269,14 +272,17 @@ void main() {
 
   group('KeyPackageRelaysNotifier', () {
     test('addRelay rebuilds what is built from the KeyPackage list', () async {
-      final statusBefore = await container.read(relayStatusProvider.future);
+      container.listen(relayStatusProvider, (_, _) {});
+      await container.read(inboxRelaysProvider.future);
+      await container.read(keyPackageRelaysProvider.future);
+      final statusBefore = container.read(relayStatusProvider);
       final publisherMarker = container.read(
         keyPackagePublisherInvalidatorProvider,
       );
       await container
           .read(keyPackageRelaysProvider.notifier)
           .addRelay('wss://kp-added.example.com');
-      final statusAfter = await container.read(relayStatusProvider.future);
+      final statusAfter = container.read(relayStatusProvider);
       expect(
         statusBefore.relays.map((r) => r.relayUrl),
         isNot(contains('wss://kp-added.example.com')),
@@ -662,20 +668,29 @@ void main() {
       tester,
     ) async {
       final ref = await widgetRef(tester);
+      final watching = c.listen(relayStatusProvider, (_, _) {});
       prefs.listThrowsFor.add(RelayCategory.keyPackage);
+      await c.read(inboxRelaysProvider.future);
       await expectLater(
-        c.read(relayStatusProvider.future),
+        c.read(keyPackageRelaysProvider.future),
         throwsA(isA<RelayPreferencesException>()),
       );
+      Iterable<String> own() => c
+          .read(relayStatusProvider)
+          .relays
+          .where((r) => r.own)
+          .map((r) => r.relayUrl);
+      expect(own(), ['wss://inbox.example.com']);
       prefs.listThrowsFor.clear();
 
       retryFailedRelayLoads(ref);
 
-      final status = await c.read(relayStatusProvider.future);
-      expect(status.relays.where((r) => r.own).map((r) => r.relayUrl), [
-        'wss://inbox.example.com',
-        'wss://kp.example.com',
-      ]);
+      await c.read(keyPackageRelaysProvider.future);
+      expect(own(), ['wss://inbox.example.com', 'wss://kp.example.com']);
+
+      // Nothing watches any more: the board poll stops with it.
+      watching.close();
+      await tester.pump();
     });
 
     testWidgets('loads the profile-pool status whose read failed', (

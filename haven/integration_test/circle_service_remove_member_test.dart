@@ -173,9 +173,6 @@ class _RecordingRelayService implements RelayService {
   }) => throw UnimplementedError();
 
   @override
-  Future<List<OwnRelayPresenceFfi>> checkOwnReachability() => throw UnimplementedError();
-
-  @override
   Future<void> disconnectRelay(String url) => throw UnimplementedError();
 }
 

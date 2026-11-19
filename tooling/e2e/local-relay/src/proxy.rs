@@ -5,7 +5,7 @@
 //! The proxy binds one listener per ROUTE (`listen port -> upstream relay`),
 //! and every route shares one journal and one `wire_seq` space. That is what
 //! makes an endpoint-level assertion possible in a lane with more than one
-//! relay (the relay-customization lane runs two): the alternative — one proxy
+//! relay (the relay-management lane runs two): the alternative — one proxy
 //! process per relay, each with its own journal — would give each file its own
 //! sequence space, and no consumer could establish a total order across them.
 //!

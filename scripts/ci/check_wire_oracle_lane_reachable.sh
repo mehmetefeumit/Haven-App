@@ -217,7 +217,7 @@ readonly KNOWN_UNWIRED_LANES=(
   # test's roles and R1 for no kind 0, key-package rotation's R2 for the
   # key-package plane only.
   'e2e-kp-rotation.yml:e2e_kp_rotation'
-  'e2e-relay-customization.yml:e2e_relay_customization'
+  'e2e-relay-management.yml:e2e_relay_management'
 
   # The kind-0 + Blossom plane. C7's egress guard already runs here; the wire
   # oracles have never been wired to this lane. The allow-list question that
@@ -437,7 +437,7 @@ proxy_listen_ports() { # proxy_listen_ports <job-records>
 # Every literal `ws://host:PORT` a proxy-starting job declares must name a port
 # the proxy LISTENS on. Checking every literal URL rather than only
 # `HAVEN_E2E_RELAY` is deliberate: multi-relay lanes (e2e-profile, kp-rotation,
-# relay-customization) carry several, and a lane that re-points one and forgets
+# relay-management) carry several, and a lane that re-points one and forgets
 # the rest records a partial transcript, which is worse than none — it looks
 # complete.
 # ---------------------------------------------------------------------------
@@ -584,7 +584,7 @@ check_oracle_runs() { # <records> <file> <job>
 # one list — the day a soak job does bring up a relay, the flag is demanded
 # without anybody having to remember why.
 # ---------------------------------------------------------------------------
-readonly LOGSCAN_RUNNER_RE='run-(single-avd-scenario|ios-sim-scenario|ios-bg-publish|b4-ios-real-gps|b7-ios-auth-tier|integration-tests|relay-customization|m7-background-catchup|b1-fgs-publish|b3-real-gps|b5-permission-revocation|b6-location-provider-toggle|b8-clock-skew|b9-network-reconnect|kp-rotation|soak-core)[.]sh'
+readonly LOGSCAN_RUNNER_RE='run-(single-avd-scenario|ios-sim-scenario|ios-bg-publish|b4-ios-real-gps|b7-ios-auth-tier|integration-tests|relay-management|m7-background-catchup|b1-fgs-publish|b3-real-gps|b5-permission-revocation|b6-location-provider-toggle|b8-clock-skew|b9-network-reconnect|kp-rotation|soak-core)[.]sh'
 
 check_logscan_is_on() { # <records> <file> <job>
   local records="$1" file="$2" job="$3"

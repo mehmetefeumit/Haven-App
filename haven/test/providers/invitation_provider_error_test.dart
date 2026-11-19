@@ -284,9 +284,6 @@ class _MockRelayService implements RelayService {
   }) async => [];
 
   @override
-  Future<List<OwnRelayPresenceFfi>> checkOwnReachability() async => const [];
-
-  @override
   Future<void> disconnectRelay(String url) async {}
 }
 

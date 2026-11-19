@@ -94,7 +94,6 @@ Widget _host({
   VoidCallback? onNoInbox,
   bool reduceMotion = true,
   String tooltip = 'Refresh',
-  RefreshRingVocabulary vocabulary = RefreshRingVocabulary.inbox,
 }) => MaterialApp(
   localizationsDelegates: AppLocalizations.localizationsDelegates,
   supportedLocales: AppLocalizations.supportedLocales,
@@ -109,7 +108,6 @@ Widget _host({
             tooltip: tooltip,
             noInbox: noInbox,
             onNoInbox: onNoInbox,
-            vocabulary: vocabulary,
           ),
         ],
       ),
@@ -541,29 +539,6 @@ void main() {
       expect(
         find.bySemanticsLabel(l10n.refreshRingSemanticNoInbox),
         findsOneWidget,
-      );
-    });
-
-    testWidgets('hasData vocabulary uses the data-centric labels', (
-      tester,
-    ) async {
-      await tester.pumpWidget(
-        _host(
-          slots: const [RelayRingSlotState.ok, RelayRingSlotState.error],
-          vocabulary: RefreshRingVocabulary.hasData,
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      final l10n = l10nOf(tester, RefreshRingButton);
-      // The relay-settings flow must say "have your data", never "checked".
-      expect(
-        find.bySemanticsLabel(l10n.refreshRingSemanticPartialFound(1, 2)),
-        findsOneWidget,
-      );
-      expect(
-        find.bySemanticsLabel(l10n.refreshRingSemanticInboxPartial(1, 2)),
-        findsNothing,
       );
     });
   });

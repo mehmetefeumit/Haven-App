@@ -214,9 +214,6 @@ class AppLocalizationsJa extends AppLocalizations {
   String get relaySettingsTitle => 'リレー';
 
   @override
-  String get relaySettingsCheckRelaysTooltip => 'リレーを確認';
-
-  @override
   String get relaySettingsNoIdentityTitle => '識別情報がありません';
 
   @override
@@ -229,21 +226,10 @@ class AppLocalizationsJa extends AppLocalizations {
   String get relaySettingsInboxTitle => '受信トレイのリレー';
 
   @override
-  String get relaySettingsInboxSubtitle => '招待があなたに届く場所（kind 10050）';
-
-  @override
   String get relaySettingsKeyPackageTitle => 'KeyPackage リレー';
 
   @override
-  String get relaySettingsKeyPackageSubtitle =>
-      'あなたを招待するために必要な鍵を、ほかの人が見つける場所（kind 10002）';
-
-  @override
   String get relaySettingsProfileTitle => 'プロフィールリレー';
-
-  @override
-  String get relaySettingsProfileSubtitle =>
-      'あなたの公開プロフィールを取得・公開する場所。これらのリレーはあなたのほかのリレーとは分けられており、プロフィールリレーのリスト自体が公開されることはありません（kind 0）';
 
   @override
   String get relaySettingsProfileUnderflowTitle => 'プロフィールの取得を一時停止中';
@@ -305,9 +291,6 @@ class AppLocalizationsJa extends AppLocalizations {
   String get relaySettingsStatusChecking => '確認中';
 
   @override
-  String get relaySettingsStatusUnreachable => '接続できません';
-
-  @override
   String relaySettingsKindLine(String kind, String status) {
     return '$kind: $status';
   }
@@ -334,26 +317,167 @@ class AppLocalizationsJa extends AppLocalizations {
   String get relaySettingsLookupTitle => '検索用リレー';
 
   @override
-  String get relaySettingsLookupSubtitle =>
-      'ほかの人があなたを探すときに使う公開リレーです。人々があなたを招待できるよう、Haven はあなたのリレーのリストのコピーをここに置いています。';
-
-  @override
-  String get relaySettingsRepublish => '再公開';
-
-  @override
-  String get relaySettingsRepublishDone =>
-      '応答したすべてのリレーに、ほかの人があなたを招待するために必要なものがそろいました';
-
-  @override
-  String get relaySettingsRepublishIncomplete =>
-      'ほかの人があなたを招待するために必要なものが、まだそろっていないリレーがあります';
-
-  @override
-  String get relaySettingsRepublishHeld =>
+  String get relaySettingsPublishingHeld =>
       'リレー設定に関するお知らせを確認して先に進むまで、Haven はリレーの設定も招待用の鍵も公開しません';
 
   @override
   String get relaySettingsStatusNotChecked => '未確認';
+
+  @override
+  String get relaySettingsPresencePublishing => '公開中…';
+
+  @override
+  String get relaySettingsPresenceRefused => 'リレーが保存を拒否しました';
+
+  @override
+  String get relaySettingsPresenceUnconfirmed => 'リレーが保存を確認しませんでした';
+
+  @override
+  String get relaySettingsPresenceNoAnswer => '確認できませんでした';
+
+  @override
+  String get relaySettingsPresenceHeld => '保留中';
+
+  @override
+  String relaySettingsInfoTooltip(String section) {
+    return '$sectionについて';
+  }
+
+  @override
+  String get relaySettingsInboxInfoWhat =>
+      '誰かがあなたをサークルに招待すると、その招待はこれらのリレーに届けられます。リレーとは、メッセージを中継する独立したサーバーです。Haven は、新しい招待が届いていないか、これらのリレーを確認します。';
+
+  @override
+  String get relaySettingsInboxInfoKeeps =>
+      'Haven は、ここにあなたの受信トレイのリストを保管します。これは、どのリレーがあなたの受信トレイなのかを示す短い公開メモで、ほかの人が招待の送り先を知るためのものです。そのコピーは、このページの下にある検索用リレーにも送られます。招待は、あなただけが開けられるように封がされています。';
+
+  @override
+  String get relaySettingsInboxInfoMissing =>
+      'Haven を使う人は検索用リレーであなたの受信トレイのリストを探し、ほかのアプリはあなた自身のリレーで探すことがあるため、Haven は両方にコピーを置いています。各行には、そのリレーに最新のバージョンがあるかどうかが表示されます。';
+
+  @override
+  String get relaySettingsInboxInfoActions =>
+      '信頼できるリレーを追加したり、不要になったリレーを削除したりできます。Haven では、このリストの最後のリレーは削除できません。このリストのリレーはすべて公開されており、あなたの受信トレイのリストで誰でも見ることができます。リレーを削除すると、Haven はそのリレーに、あなたの古いリストを削除するよう依頼します。';
+
+  @override
+  String get relaySettingsInboxInfoTechnical =>
+      '技術に興味のある方へ: あなたの受信トレイのリストは kind 10050 の Nostr イベントで、招待は kind 1059 のギフトラップされたイベントとして届きます。';
+
+  @override
+  String get relaySettingsKeyPackageInfoWhat =>
+      'あなたをサークルに追加するには、招待する人があなたの招待用の鍵を必要とします。この鍵は KeyPackage と呼ばれます。Haven はこれをこれらのリレーに置いておくので、あなたの端末の電源が切れているときでも、ほかの人はあなたを招待できます。';
+
+  @override
+  String get relaySettingsKeyPackageInfoKeeps =>
+      'Haven は、ここに二つのものを保管します。あなたの KeyPackage と、あなたのリレーのリストです。リレーのリストは、どのリレーがあなたの KeyPackage を保管しているかを示す短い公開メモです。リレーのリストのコピーは、検索用リレーにも送られます。あなたの KeyPackage は、このリストのリレーにだけ送られます。KeyPackage が使われると、Haven は新しいものに置き換えます。また、ときどき更新もします。';
+
+  @override
+  String get relaySettingsKeyPackageInfoMissing =>
+      '各行には、そのリレーに最新の KeyPackage とリレーのリストがあるかどうかが表示されます。リレーにあなたの KeyPackage がない場合や、Haven がすでに置き換えた古いものしかない場合、そこで KeyPackage を探す人は、あなたを招待できないことがあります。';
+
+  @override
+  String get relaySettingsKeyPackageInfoActions =>
+      'リレーを追加したり削除したりできます。Haven では、このリストの最後のリレーは削除できません。このリストのリレーはすべて公開されており、あなたのリレーのリストで誰でも見ることができます。リレーを削除すると、Haven はそのリレーに、あなたの古いリレーのリストを削除するよう依頼します。';
+
+  @override
+  String get relaySettingsKeyPackageInfoTechnical =>
+      '技術に興味のある方へ: KeyPackage は kind 30443 の Marmot イベントで、リレーのリストは kind 10002 の NIP-65 イベントです。';
+
+  @override
+  String get relaySettingsProfileInfoWhat =>
+      '名前や写真を保存すると、Haven はあなたの公開プロフィールをこれらのリレーに送信します。Haven は、ほかのメンバーの名前と写真もここで調べます。';
+
+  @override
+  String get relaySettingsProfileInfoKeeps =>
+      'これらのリレーでは、誰でもあなたのプロフィールを調べることができます。写真そのものは別の写真用サーバーに保存されていて、プロフィールにはその写真のウェブアドレスが含まれています。';
+
+  @override
+  String get relaySettingsProfileInfoPrivacy =>
+      'Haven は、あなたのプロフィールをこれらのリレーにだけ送信し、これらのリレーを、あなたの招待を中継するリレーとは分けています。プロフィールは公開されているため、ほかのアプリがそれを別の場所にコピーすることがあります。Haven はこのリストをあなたの端末に保存し、決して公開しません。ここにあるリレーのうち、Haven でのあなたのほかの通信も中継するものには、警告が表示されます。';
+
+  @override
+  String get relaySettingsProfileInfoActions =>
+      'リレーを追加できます。Haven に組み込まれたプロフィールリレーは、Haven が必ず追加し直すため、削除できません。このセクションでは、リレーごとの記号は表示されません。保存したプロフィールは「識別情報」ページに表示されます。';
+
+  @override
+  String get relaySettingsProfileInfoTechnical =>
+      '技術に興味のある方へ: あなたのプロフィールは kind 0 の Nostr イベントで、写真は Blossom サーバーに保存されています。';
+
+  @override
+  String get relaySettingsLookupInfoWhat =>
+      '検索用リレーは、よく知られた公開リレーです。ある人の識別情報しかわからないとき、アプリはここでその人のリレーを探します。これらのリレーは Haven が選んだもので、Haven を使うすべての人に共通です。Haven は、あなたが招待する人を見つけるためにも、これらのリレーを使います。';
+
+  @override
+  String get relaySettingsLookupInfoKeeps =>
+      'あなたの識別情報しか知らない人でもあなたを招待できるよう、Haven はあなたの受信トレイのリストとリレーのリストを、手を加えずにそのままここにコピーします。それらのリストに非公開のリレーが含まれている場合、その名前もここで見える状態になります。検索用リレーとしての役割で Haven がここにコピーするのは、この二つのリストだけです。一部の検索用リレーは、Haven のデフォルトの受信トレイのリレーや KeyPackage リレーでもあります。それらがあなたのリストに含まれている間は、それぞれのセクションで説明しているものも保管します。';
+
+  @override
+  String get relaySettingsLookupInfoMissing =>
+      '各行には、そのリレーに両方のリストの最新バージョンがあるかどうかが表示されます。検索用リレーにそれらのリストがない場合や、古いバージョンしかない場合、そこで探す人はあなたを見つけられないことがあります。同じリレーが複数のセクションに表示されることがありますが、各セクションには、その役割に必要なものだけが表示されます。';
+
+  @override
+  String get relaySettingsLookupInfoActions =>
+      'このリストは Haven に組み込まれているため、ここで変更することはできません。あなたが管理できるのは、上にある「受信トレイのリレー」と「KeyPackage リレー」のリストです。';
+
+  @override
+  String get relaySettingsLookupInfoTechnical =>
+      '技術に興味のある方へ: Haven は、あなたの kind 10050 と kind 10002 のイベントをこれらのリレーにコピーします。kind 30443 は、あなたの KeyPackage リレーにだけ送られます。';
+
+  @override
+  String get relaySettingsLegendTitle => '記号の意味';
+
+  @override
+  String get relaySettingsLegendCurrent => '公開済み: このリレーには最新のバージョンがあります。';
+
+  @override
+  String get relaySettingsLegendPublishing =>
+      '公開中: Haven は送信済みで、リレーが保存を確認するのを待っています。';
+
+  @override
+  String get relaySettingsLegendChecking =>
+      '確認中、または未確認: Haven がリレーに何があるかを問い合わせているところか、まだ問い合わせていないかのどちらかです。';
+
+  @override
+  String get relaySettingsLegendNotOnRelay =>
+      'このリレーにはまだありません: リレーにない、古いバージョンしかない、リレーが保存を拒否した、リレーが保存を確認しなかった、のいずれかです。どれに当たるかは、記号をタップすると表示されます。Haven は次の確認のときに再試行します。Haven を開いている間は、KeyPackage は約10分ごと、リストは約30分ごとに確認し、Haven を起動するたびにも確認します。あなたのリレーのどれかにこの表示が続く場合は、そのリレーを置き換えることができます。';
+
+  @override
+  String get relaySettingsLegendNoAnswer =>
+      '確認できませんでした: リレーが応答しませんでした。あなたの端末がオフラインになっているか、リレーが停止しているのかもしれません。Haven は次の確認のときに、もう一度問い合わせます。';
+
+  @override
+  String get relaySettingsLegendHeld =>
+      '保留中: Haven はいま、これを公開していません。理由は、このページにあるお知らせで説明しています。';
+
+  @override
+  String get relaySettingsHeldNoRelays =>
+      '上のリストのうち、リレーが一つもないものは、Haven には公開先がありません。もう一度公開するには、空のリストごとに「デフォルトに戻す」を使ってください。';
+
+  @override
+  String get relaySettingsHeldNotYetPublished =>
+      'Haven は、あなたのリレーに関するリストの一つを、まだ公開していません。次の確認のときに公開します。';
+
+  @override
+  String relaySettingsCheckSettled(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'リレーの確認が完了しました。$count件のリレーは、最新の状態であることを確認できていません。',
+      one: 'リレーの確認が完了しました。$count件のリレーは、最新の状態であることを確認できていません。',
+      zero: 'リレーの確認が完了しました。すべて最新の状態です。',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String relaySettingsAddedRelayUpToDate(String relay) {
+    return '$relay は最新の状態です。';
+  }
+
+  @override
+  String relaySettingsAddedRelayNotUpToDate(String relay) {
+    return '$relay は、最新の状態であることを確認できていません。理由は、そのリレーの行に表示されています。';
+  }
 
   @override
   String get relaySettingsEmptyTitle => 'リレーが設定されていません';
@@ -1476,55 +1600,6 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get refreshRingAnnouncementNoInbox => '受信トレイが未設定です';
-
-  @override
-  String refreshRingSemanticAllFound(int total) {
-    final intl.NumberFormat totalNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String totalString = totalNumberFormat.format(total);
-
-    String _temp0 = intl.Intl.pluralLogic(
-      total,
-      locale: localeName,
-      other: 'すべての $totalString 件のリレーにあなたのデータがあります',
-    );
-    return '$_temp0';
-  }
-
-  @override
-  String get refreshRingSemanticNoneFound => 'あなたのデータを持つリレーはありません';
-
-  @override
-  String refreshRingSemanticPartialFound(int ok, int total) {
-    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
-      localeName,
-    );
-    final String okString = okNumberFormat.format(ok);
-    final intl.NumberFormat totalNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String totalString = totalNumberFormat.format(total);
-
-    return '$totalString 件中 $okString 件のリレーにあなたのデータがあります';
-  }
-
-  @override
-  String get refreshRingAnnouncementAllFound => 'すべてのリレーにあなたのデータがあります';
-
-  @override
-  String refreshRingAnnouncementPartialFound(int ok, int total) {
-    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
-      localeName,
-    );
-    final String okString = okNumberFormat.format(ok);
-    final intl.NumberFormat totalNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String totalString = totalNumberFormat.format(total);
-
-    return '$totalString 件中 $okString 件のリレーにあなたのデータがあります';
-  }
-
-  @override
-  String get refreshRingAnnouncementNoneFound => 'あなたのデータを持つリレーはありません';
 
   @override
   String get identityTitle => '識別情報';

@@ -902,19 +902,6 @@ abstract class RelayService {
     int? limit,
   });
 
-  /// The relay settings check: what each relay of the user's own inbox and
-  /// `KeyPackage` lists, and each lookup relay, serves of the account's kind
-  /// 30443, 10002 and 10050, judged as maintenance judges them. One row per
-  /// relay: the inbox list first, then the `KeyPackage` list, then the lookup
-  /// relays. A kind not expected on a relay is
-  /// [OwnEventPresenceFfi.notExpected] and was never asked for.
-  ///
-  /// Probes run one after another, so this can take tens of seconds when a
-  /// relay never answers; a caller shows that as checking, never as a block.
-  ///
-  /// Throws [RelayServiceException] if the check cannot run.
-  Future<List<OwnRelayPresenceFfi>> checkOwnReachability();
-
   /// Removes a single relay from the persistent connection pool by URL.
   ///
   /// Used by the relay-preferences UI when the user explicitly removes

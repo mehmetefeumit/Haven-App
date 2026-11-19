@@ -23,13 +23,16 @@
 //!   -drifted for the user's kind 10050 (inbox) + 10002 (`KeyPackage`-discovery)
 //!   relay lists, on the user's own relays and the lookup relays. Pure decision
 //!   only; the network probe + signed publish are composed at the FFI boundary.
-//! * [`own_presence`] — what each own relay and each lookup relay serves of
-//!   the user's own `KeyPackage` and relay lists, asked with the probes above
-//!   and judged by their rules (the relay settings check).
+//! * [`own_board`] — the own-relay board: per relay and per kind, what each
+//!   own relay and lookup relay serves of the user's `KeyPackage` and relay
+//!   lists as the two maintenance passes judged it, and what became of what
+//!   they sent it, and how each own inbox relay answered a read of the
+//!   account's gift wraps, read by the relay settings page as a
+//!   network-free snapshot.
 
 pub mod key_package;
 pub mod kp_lifetime;
-pub mod own_presence;
+pub mod own_board;
 pub mod relay_list;
 
 pub use kp_lifetime::{
@@ -45,7 +48,11 @@ pub use key_package::{
     KpMaintenanceOutcome, KpSlotRetirement, RelayKpEntry, RelayKpPerRelay, RelayKpSnapshot,
     TrackedKpSlot, KIND_MARMOT_KEY_PACKAGE,
 };
-pub use own_presence::{own_presence, OwnEventPresence, OwnRelayLists, OwnRelayPresence};
+pub use own_board::{
+    names_configured_list, probe_verdict, serves_tracked_package, Coalesced, OfferMode, Offered,
+    OwnBoardSnapshot, OwnCell, OwnHold, OwnInboxReadCell, OwnKind, OwnKindSnapshot, OwnPass,
+    OwnRelayBoard, OwnRelayCell, Probed,
+};
 pub use relay_list::{
     decide_relay_list, list_relay_healthy, own_list_confirmed, RelayListAction,
     RelayListCategoryOutcome, RelayListDecision, RelayListMaintenanceOutcome, RelayListPerRelay,

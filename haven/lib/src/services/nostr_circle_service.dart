@@ -582,6 +582,14 @@ class NostrCircleService implements CircleService {
   /// getter, at each use: [releaseForHandoff] disposes the handle it returned.
   Future<CircleManagerFfi> getCircleManagerFfi() => _ensureInitialized();
 
+  /// The open [CircleManagerFfi] handle, or `null` while none is open.
+  ///
+  /// Never opens one, for a read so frequent that every failed open would be
+  /// re-run (an open that fails latches nothing). Fetch it at each use, as
+  /// [getCircleManagerFfi]'s handle.
+  CircleManagerFfi? get currentCircleManagerFfi =>
+      _initialized ? _manager : null;
+
   /// Converts a Rust timestamp to DateTime.
   DateTime _timestampToDateTime(num timestamp) {
     return DateTime.fromMillisecondsSinceEpoch(timestamp.toInt() * 1000);

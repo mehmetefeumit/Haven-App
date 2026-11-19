@@ -772,24 +772,6 @@ class NostrRelayService implements RelayService, CircleChangeDriver {
     }
   }
 
-  @override
-  Future<List<OwnRelayPresenceFfi>> checkOwnReachability() async {
-    final manager = await _ensureInitialized();
-
-    try {
-      final circleManagerFactory = _circleManagerFactory;
-      if (circleManagerFactory == null) {
-        throw StateError('no circle manager to read the relay lists from');
-      }
-      return await manager.checkOwnReachability(
-        circle: await circleManagerFactory(),
-      );
-    } on Object catch (e) {
-      debugPrint('Failed to check own reachability: ${e.runtimeType}');
-      throw const RelayServiceException('Failed to check own reachability');
-    }
-  }
-
   /// Shuts down the relay manager.
   ///
   /// Call this when the app is being closed or going to background. The next

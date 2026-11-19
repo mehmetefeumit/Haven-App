@@ -90,18 +90,6 @@ class MockRelayService implements RelayService {
   /// [RelayServiceException]).
   final Exception? fetchKeyPackageException;
 
-  /// What [checkOwnReachability] answers.
-  List<OwnRelayPresenceFfi> ownPresence = const [];
-
-  /// When set, [checkOwnReachability] throws.
-  bool shouldThrowOnOwnPresence = false;
-
-  /// When set, [checkOwnReachability] parks on it before answering.
-  Completer<void>? ownPresenceGate;
-
-  /// How many times [checkOwnReachability] was called.
-  int ownPresenceChecks = 0;
-
   /// Optional completer to control when fetchKeyPackage resolves.
   ///
   /// When set, fetchKeyPackage waits for this completer before returning.
@@ -263,17 +251,6 @@ class MockRelayService implements RelayService {
           events: const [],
         ),
     ];
-  }
-
-  @override
-  Future<List<OwnRelayPresenceFfi>> checkOwnReachability() async {
-    methodCalls.add('checkOwnReachability');
-    ownPresenceChecks++;
-    await ownPresenceGate?.future;
-    if (shouldThrowOnOwnPresence) {
-      throw const RelayServiceException('Check failed');
-    }
-    return ownPresence;
   }
 
   @override

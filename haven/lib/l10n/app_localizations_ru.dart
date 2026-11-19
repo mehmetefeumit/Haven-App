@@ -222,9 +222,6 @@ class AppLocalizationsRu extends AppLocalizations {
   String get relaySettingsTitle => 'Реле';
 
   @override
-  String get relaySettingsCheckRelaysTooltip => 'Проверить реле';
-
-  @override
   String get relaySettingsNoIdentityTitle => 'Нет личности';
 
   @override
@@ -238,22 +235,10 @@ class AppLocalizationsRu extends AppLocalizations {
   String get relaySettingsInboxTitle => 'Мои входящие реле';
 
   @override
-  String get relaySettingsInboxSubtitle =>
-      'kind 10050: сюда приходят приглашения для вас';
-
-  @override
   String get relaySettingsKeyPackageTitle => 'Мои реле KeyPackage';
 
   @override
-  String get relaySettingsKeyPackageSubtitle =>
-      'kind 10002: здесь другие находят ключи, которые нужны, чтобы вас пригласить';
-
-  @override
   String get relaySettingsProfileTitle => 'Мои реле профиля';
-
-  @override
-  String get relaySettingsProfileSubtitle =>
-      'kind 0: здесь ищут и публикуют ваш публичный профиль. Эти реле отделены от остальных ваших реле, а сам список реле профиля никогда не публикуется';
 
   @override
   String get relaySettingsProfileUnderflowTitle =>
@@ -326,9 +311,6 @@ class AppLocalizationsRu extends AppLocalizations {
   String get relaySettingsStatusChecking => 'Проверка';
 
   @override
-  String get relaySettingsStatusUnreachable => 'Недоступно';
-
-  @override
   String relaySettingsKindLine(String kind, String status) {
     return '$kind: $status';
   }
@@ -355,26 +337,174 @@ class AppLocalizationsRu extends AppLocalizations {
   String get relaySettingsLookupTitle => 'Реле для поиска';
 
   @override
-  String get relaySettingsLookupSubtitle =>
-      'Публичные реле, на которых вас ищут другие. Haven хранит на них копию ваших списков реле, чтобы люди могли вас пригласить.';
-
-  @override
-  String get relaySettingsRepublish => 'Опубликовать снова';
-
-  @override
-  String get relaySettingsRepublishDone =>
-      'У всех ответивших реле теперь есть всё, что нужно другим, чтобы вас пригласить';
-
-  @override
-  String get relaySettingsRepublishIncomplete =>
-      'У некоторых реле всё ещё нет того, что нужно другим, чтобы вас пригласить';
-
-  @override
-  String get relaySettingsRepublishHeld =>
+  String get relaySettingsPublishingHeld =>
       'Haven не будет публиковать ваши настройки реле и ключ приглашения, пока вы не ответите на уведомление о сбросе настроек реле';
 
   @override
   String get relaySettingsStatusNotChecked => 'Не проверено';
+
+  @override
+  String get relaySettingsPresencePublishing => 'Публикация…';
+
+  @override
+  String get relaySettingsPresenceRefused => 'Реле отклонило';
+
+  @override
+  String get relaySettingsPresenceUnconfirmed => 'Реле не подтвердило';
+
+  @override
+  String get relaySettingsPresenceNoAnswer => 'Не удалось проверить';
+
+  @override
+  String get relaySettingsPresenceHeld => 'Приостановлено';
+
+  @override
+  String relaySettingsInfoTooltip(String section) {
+    return 'О разделе «$section»';
+  }
+
+  @override
+  String get relaySettingsInboxInfoWhat =>
+      'Когда вас приглашают в круг, приглашение доставляется на эти реле. Реле — это независимые серверы, которые передают сообщения дальше. Haven проверяет их на наличие новых приглашений.';
+
+  @override
+  String get relaySettingsInboxInfoKeeps =>
+      'Здесь Haven хранит ваш список входящих реле. Это короткая публичная запись о том, какие реле служат вам входящими, чтобы люди знали, куда отправлять приглашения. Копия также попадает на реле для поиска — они ниже на этой странице. Приглашения запечатаны так, что открыть их можете только вы.';
+
+  @override
+  String get relaySettingsInboxInfoMissing =>
+      'Пользователи Haven ищут ваш список входящих реле на реле для поиска, а другие приложения могут искать его на ваших собственных реле, поэтому Haven хранит копию и там, и там. В каждой строке видно, есть ли на этом реле текущая версия.';
+
+  @override
+  String get relaySettingsInboxInfoActions =>
+      'Вы можете добавлять реле, которым доверяете, и удалять те, что вам больше не нужны. Haven не даст удалить последнее реле из этого списка. Все реле в этом списке публичны: любой может увидеть их в вашем списке входящих реле. Когда вы удаляете реле, Haven просит его удалить ваш старый список.';
+
+  @override
+  String get relaySettingsInboxInfoTechnical =>
+      'Для тех, кому интересны технические детали: ваш список входящих реле — это событие Nostr kind 10050, а приглашения приходят в виде событий kind 1059, упакованных в gift wrap.';
+
+  @override
+  String get relaySettingsKeyPackageInfoWhat =>
+      'Чтобы добавить вас в круг, приглашающему нужен ваш ключ приглашения — он называется KeyPackage. Haven хранит его на этих реле, чтобы вас могли пригласить, даже когда ваш телефон выключен.';
+
+  @override
+  String get relaySettingsKeyPackageInfoKeeps =>
+      'Здесь Haven хранит две вещи: ваш KeyPackage и ваш список реле — короткую публичную запись о том, на каких реле хранится ваш KeyPackage. Копия списка реле также попадает на реле для поиска. Сам KeyPackage отправляется только на реле из этого списка. После того как его используют, Haven заменяет его новым, а также время от времени обновляет его.';
+
+  @override
+  String get relaySettingsKeyPackageInfoMissing =>
+      'В каждой строке видно, есть ли на этом реле ваш текущий KeyPackage и список реле. Если на реле нет вашего KeyPackage или там хранится старый, который Haven уже заменил, люди, которые ищут его там, возможно, не смогут вас пригласить.';
+
+  @override
+  String get relaySettingsKeyPackageInfoActions =>
+      'Вы можете добавлять и удалять реле. Haven не даст удалить последнее реле из этого списка. Все реле в этом списке публичны: любой может увидеть их в вашем списке реле. Когда вы удаляете реле, Haven просит его удалить ваш старый список реле.';
+
+  @override
+  String get relaySettingsKeyPackageInfoTechnical =>
+      'Для тех, кому интересны технические детали: KeyPackage — это событие Marmot kind 30443, а список реле — событие NIP-65 kind 10002.';
+
+  @override
+  String get relaySettingsProfileInfoWhat =>
+      'Когда вы сохраняете имя или фото, Haven отправляет ваш публичный профиль на эти реле. Здесь же Haven ищет имена и фото других участников.';
+
+  @override
+  String get relaySettingsProfileInfoKeeps =>
+      'Ваш профиль на этих реле может найти любой. Само фото хранится на отдельном сервере для фотографий, а в профиле указан его веб-адрес.';
+
+  @override
+  String get relaySettingsProfileInfoPrivacy =>
+      'Haven отправляет ваш профиль только на эти реле и держит их отдельно от реле, через которые идут ваши приглашения. Поскольку профиль публичный, другие приложения могут скопировать его в другие места. Haven хранит этот список на вашем телефоне и никогда его не публикует. Реле в этом списке, через которое идёт и другой ваш трафик Haven, отмечено предупреждением.';
+
+  @override
+  String get relaySettingsProfileInfoActions =>
+      'Вы можете добавлять реле. Встроенные реле профиля Haven удалить нельзя: Haven всегда добавляет их обратно. В этом разделе у реле нет значков; сохранённый вами профиль показан на странице «Личность».';
+
+  @override
+  String get relaySettingsProfileInfoTechnical =>
+      'Для тех, кому интересны технические детали: ваш профиль — это событие Nostr kind 0, а фото хранится на сервере Blossom.';
+
+  @override
+  String get relaySettingsLookupInfoWhat =>
+      'Реле для поиска — это известные публичные реле, на которых приложения ищут реле человека, когда знают только его аккаунт. Их выбрал Haven, и они одинаковы для всех, кто пользуется Haven. Haven также использует их, чтобы находить людей, которых вы приглашаете.';
+
+  @override
+  String get relaySettingsLookupInfoKeeps =>
+      'Чтобы вас мог пригласить даже тот, кто знает только ваш аккаунт, Haven копирует сюда без изменений ваш список входящих реле и ваш список реле. Если в этих списках указано частное реле, его адрес здесь тоже виден. В этой роли Haven копирует сюда только эти два списка. Некоторые реле для поиска одновременно служат входящими реле и реле KeyPackage Haven по умолчанию; пока они есть в ваших списках, на них хранится и то, что описано в тех разделах.';
+
+  @override
+  String get relaySettingsLookupInfoMissing =>
+      'В каждой строке видно, есть ли на этом реле текущие версии обоих списков. Если на реле для поиска их нет или там старые версии, люди, которые ищут вас там, могут вас не найти. Одно и то же реле может быть в нескольких разделах; каждый раздел показывает только то, что нужно для его роли.';
+
+  @override
+  String get relaySettingsLookupInfoActions =>
+      'Этот список встроен в Haven, поэтому изменить его здесь нельзя. Списками входящих реле и реле KeyPackage выше управляете вы.';
+
+  @override
+  String get relaySettingsLookupInfoTechnical =>
+      'Для тех, кому интересны технические детали: Haven копирует на эти реле ваши события kind 10050 и kind 10002; kind 30443 отправляется только на ваши реле KeyPackage.';
+
+  @override
+  String get relaySettingsLegendTitle => 'Что означают значки';
+
+  @override
+  String get relaySettingsLegendCurrent =>
+      'Опубликовано: на этом реле есть текущая версия.';
+
+  @override
+  String get relaySettingsLegendPublishing =>
+      'Публикация: Haven отправил данные и ждёт подтверждения от реле.';
+
+  @override
+  String get relaySettingsLegendChecking =>
+      'Проверка или ещё не проверено: Haven выясняет у реле, что на нём есть, или ещё не обращался к нему.';
+
+  @override
+  String get relaySettingsLegendNotOnRelay =>
+      'Пока нет на этом реле: данные отсутствуют, это старая версия, реле их отклонило или не подтвердило. Нажмите на значок, чтобы узнать, что именно. Haven попробует снова при следующей проверке: примерно каждые 10 минут для вашего KeyPackage и каждые 30 минут для ваших списков, пока Haven открыт, а также при каждом запуске Haven. Если одно из ваших реле постоянно показывает этот значок, его можно заменить.';
+
+  @override
+  String get relaySettingsLegendNoAnswer =>
+      'Не удалось проверить: реле не ответило — возможно, вы не в сети или оно не работает. Haven спросит снова при следующей проверке.';
+
+  @override
+  String get relaySettingsLegendHeld =>
+      'Приостановлено: Haven пока не публикует эти данные. Причина указана в примечании на этой странице.';
+
+  @override
+  String get relaySettingsHeldNoRelays =>
+      'Если в списке выше нет ни одного реле, Haven некуда его публиковать. Нажмите «Восстановить по умолчанию» в каждом пустом списке, чтобы снова его опубликовать.';
+
+  @override
+  String get relaySettingsHeldNotYetPublished =>
+      'Haven ещё не опубликовал один из ваших списков реле. Он сделает это при следующей проверке.';
+
+  @override
+  String relaySettingsCheckSettled(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other:
+          'Проверка реле завершена. Актуальность не подтверждена для $count реле.',
+      many:
+          'Проверка реле завершена. Актуальность не подтверждена для $count реле.',
+      few:
+          'Проверка реле завершена. Актуальность не подтверждена для $count реле.',
+      one:
+          'Проверка реле завершена. Актуальность не подтверждена для $count реле.',
+      zero: 'Проверка реле завершена. Всё актуально.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String relaySettingsAddedRelayUpToDate(String relay) {
+    return 'На $relay всё актуально.';
+  }
+
+  @override
+  String relaySettingsAddedRelayNotUpToDate(String relay) {
+    return 'Актуальность данных на $relay не подтверждена. Причина указана в строке этого реле.';
+  }
 
   @override
   String get relaySettingsEmptyTitle => 'Реле не настроены';
@@ -1579,60 +1709,6 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get refreshRingAnnouncementNoInbox => 'Входящие реле не настроены';
-
-  @override
-  String refreshRingSemanticAllFound(int total) {
-    final intl.NumberFormat totalNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String totalString = totalNumberFormat.format(total);
-
-    String _temp0 = intl.Intl.pluralLogic(
-      total,
-      locale: localeName,
-      other: 'Ваши данные есть на всех реле: $totalString',
-      many: 'Ваши данные есть на всех реле: $totalString',
-      few: 'Ваши данные есть на всех реле: $totalString',
-      one: 'Ваши данные есть на всех реле: $totalString',
-    );
-    return '$_temp0';
-  }
-
-  @override
-  String get refreshRingSemanticNoneFound =>
-      'Ваших данных нет ни на одном реле';
-
-  @override
-  String refreshRingSemanticPartialFound(int ok, int total) {
-    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
-      localeName,
-    );
-    final String okString = okNumberFormat.format(ok);
-    final intl.NumberFormat totalNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String totalString = totalNumberFormat.format(total);
-
-    return 'Ваши данные есть на $okString из $totalString реле';
-  }
-
-  @override
-  String get refreshRingAnnouncementAllFound => 'Ваши данные есть на всех реле';
-
-  @override
-  String refreshRingAnnouncementPartialFound(int ok, int total) {
-    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
-      localeName,
-    );
-    final String okString = okNumberFormat.format(ok);
-    final intl.NumberFormat totalNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String totalString = totalNumberFormat.format(total);
-
-    return 'Ваши данные есть на $okString из $totalString реле';
-  }
-
-  @override
-  String get refreshRingAnnouncementNoneFound =>
-      'Ваших данных нет ни на одном реле';
 
   @override
   String get identityTitle => 'Личность';
