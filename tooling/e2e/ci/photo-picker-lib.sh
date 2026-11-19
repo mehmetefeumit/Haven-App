@@ -20,8 +20,20 @@
 #   return     image_cropper answers from onActivityResult, before onResume.
 #
 # A resumed activity is read from `dumpsys activity activities` (ui-dump.py
-# resumed), a screen from `uiautomator dump` (ui-dump.py find), and every step
-# waits for the next activity rather than for time. On API 33+ a picker KNOWN
+# resumed), the window holding input focus from `dumpsys input` (ui-dump.py
+# focused), a screen from `uiautomator dump` (ui-dump.py find), and every step
+# waits for the next activity rather than for time.
+#
+# No input reaches a system screen before its window holds input focus.
+# "Resumed" is the activity manager's word, said before the window exists:
+# the Photo Picker runs in a process of its own (android:process=":PhotoPicker")
+# and is translucent, so no starting window stands in, and until its first
+# frame no window has focus at all. A key injected then waits in the input
+# dispatcher and is dropped once no window has taken focus within its
+# dispatching timeout; a tap lands on whatever is visible under it. The
+# dispatcher focuses only a visible window, so focus is also proof the
+# window is on screen. The first device run sent its BACK in that gap and the
+# picker never saw it. On API 33+ a picker KNOWN
 # to be the wrong one — DocumentsUI, the Photo Picker's GET_CONTENT alias, the
 # Play services picker — is a product failure: main() promises the scoped,
 # permission-free picker (C5), and those would mean that promise broke. An
@@ -37,14 +49,18 @@
 #                                      both photos (infrastructure)
 #   pp_clear_gallery <device>          best effort, always 0
 #   pp_round <device> <dir> <pick|cancel> <index> <api>
-#       0 done; 1 product; 2 harness (a screen the selectors do not know);
-#       3 infrastructure (adb gave no answer); 4 aborted by the hook.
+#       0 done; 1 product; 2 harness (a screen the selectors do not know, or
+#       a system screen that never took focus or ignored the input it was
+#       given while focused: nothing Haven decides); 3 infrastructure (adb
+#       gave no answer); 4 aborted by the hook.
 #       PP_MSG says why in fixed words; PP_PICKER and PP_UCROP name the
 #       selector that matched (photopicker-rid | photopicker-desc |
 #       documentsui-rid | -, and rid | desc | -); PP_DWELL is the seconds from
 #       just before the thumbnail tap to MainActivity seen resumed (-1 when not
 #       measured): it starts before uCrop can resume and ends after Haven
 #       did, so it is an UPPER bound on the time Haven was away.
+#       PP_FOCUS_WAIT is the seconds from the picker seen resumed to its
+#       window seen focused (-1 when not reached).
 #
 # Nothing this prints or returns carries what a node says: a thumbnail's
 # description can hold a date. Component names and resource ids are developer
@@ -69,8 +85,8 @@ readonly PP_MEDIA_DIR='/sdcard/Pictures'
 # The bounds. PHOTO_* overrides exist for the self-tests, whose stub device
 # answers at once; no workflow sets them.
 readonly PP_MEDIA_SECS="${PHOTO_MEDIA_SECS:-60}"    # both photos listed by the media store
-readonly PP_PICKER_SECS="${PHOTO_PICKER_SECS:-60}"  # tap -> picker resumed; picker -> thumbnail tapped
-readonly PP_UCROP_SECS="${PHOTO_UCROP_SECS:-60}"    # thumbnail -> uCrop resumed; uCrop -> crop tapped
+readonly PP_PICKER_SECS="${PHOTO_PICKER_SECS:-60}"  # tap -> picker resumed; picker -> focused, thumbnail tapped (or BACK sent)
+readonly PP_UCROP_SECS="${PHOTO_UCROP_SECS:-60}"    # thumbnail -> uCrop resumed; uCrop -> focused, crop tapped
 readonly PP_RETURN_SECS="${PHOTO_RETURN_SECS:-60}"  # crop (or cancel) -> MainActivity resumed
 readonly PP_ADB_SECS="${PHOTO_ADB_SECS:-10}"        # one adb read
 readonly PP_DUMP_SECS="${PHOTO_DUMP_SECS:-15}"      # one uiautomator dump
@@ -82,8 +98,10 @@ PP_MSG=''
 PP_PICKER='-'
 PP_UCROP='-'
 PP_DWELL=-1
+PP_FOCUS_WAIT=-1
 PP_TAP_AT=''
 PP_RESUMED=''
+PP_FOCUSED=''
 PP_FIND_SEL=''
 PP_FIND_DIGEST=''
 PP_FIND_RIDS=''
@@ -139,6 +157,30 @@ pp_resumed() {
   rm -f "${dir}/pp-activities.txt"
   [[ "${out}" == 'resumed '* && "${out}" != 'resumed none' ]] || return 0
   PP_RESUMED="${out#resumed }"
+}
+
+# pp_focused <device> <dir> — PP_FOCUSED: the component whose window holds
+# input focus on the default display, `other` (a window that is no
+# activity's), `none`, or '' when adb gave no answer.
+pp_focused() {
+  local device="$1" dir="$2" out
+  PP_FOCUSED=''
+  timeout "${PP_ADB_SECS}" adb -s "${device}" shell dumpsys input \
+    > "${dir}/pp-input.txt" 2>/dev/null || true
+  out="$(python3 -I "${_PP_LIB_DIR}/ui-dump.py" focused --dumpsys "${dir}/pp-input.txt" 2>/dev/null || true)"
+  rm -f "${dir}/pp-input.txt"
+  [[ "${out}" == 'focused '* && "${out}" != 'focused unknown' ]] || return 0
+  PP_FOCUSED="${out#focused }"
+}
+
+# _pp_focus_words <focus> — a PP_FOCUSED value in fixed words, for a message.
+_pp_focus_words() {
+  case "$1" in
+    '') echo 'unread (adb gave no answer)' ;;
+    none) echo 'on no window' ;;
+    other) echo 'on a window that is no activity'"'"'s' ;;
+    *) echo "on $1" ;;
+  esac
 }
 
 # pp_find <device> <dir> <package-regex> <spec>... — one dump read for system
@@ -213,9 +255,13 @@ _pp_await_picker() { # <device> <dir> <api>
   return 1
 }
 
-# Phase 2: one thumbnail tapped, once the picker's window holds still.
+# Phase 2: one thumbnail tapped, once the picker's window holds input focus
+# and then holds still (the sheet slides up after its first frame). One
+# bounded read per pass: the focus until it is the picker's, then the dump.
+# Focus does not leave a resumed picker unless another window takes it, and
+# the tap is judged by its effect (phase 3), so it is not read again.
 _pp_pick_thumbnail() { # <device> <dir> <index> <api>
-  local device="$1" dir="$2" index="$3" api="$4" deadline prev='' n regex="${PP_PICKER_PKG_RE}"
+  local device="$1" dir="$2" index="$3" api="$4" deadline prev='' n regex="${PP_PICKER_PKG_RE}" focused=0 last='' start="${SECONDS}"
   local -a specs=("${PP_THUMB_RID}") names=(photopicker-rid)
   if (( api < 33 )); then
     specs+=("${PP_DOCUMENTSUI_THUMB_RID}"); names+=(documentsui-rid)
@@ -226,6 +272,13 @@ _pp_pick_thumbnail() { # <device> <dir> <index> <api>
   deadline=$(( SECONDS + PP_PICKER_SECS ))
   while (( SECONDS < deadline )); do
     pp_hook_alive || return 4
+    if (( ! focused )); then
+      pp_focused "${device}" "${dir}"
+      last="${PP_FOCUSED:-${last}}"
+      _pp_is_picker "${PP_FOCUSED}" "${api}" || continue
+      focused=1; PP_FOCUS_WAIT=$(( SECONDS - start ))
+      continue
+    fi
     pp_find "${device}" "${dir}" "${regex}" "${specs[@]}" || continue
     if [[ "${PP_FIND_DIGEST}" != "${prev}" ]]; then prev="${PP_FIND_DIGEST}"; continue; fi
     [[ "${PP_FIND_SEL}" != none ]] || continue
@@ -239,26 +292,73 @@ _pp_pick_thumbnail() { # <device> <dir> <index> <api>
     _pp_tap "${device}" "${PP_FIND_XY[${index}]}"
     return 0
   done
+  (( focused )) || { _pp_unfocused_picker "${last}"; return; }
   PP_MSG="harness: no thumbnail selector matched the picker within ${PP_PICKER_SECS} s (rids: ${PP_FIND_RIDS:-none})"
   return 2
 }
 
-# The cancel round: BACK once the picker holds still; Haven must come back
-# with nothing changed.
-_pp_cancel() { # <device> <dir>
-  local device="$1" dir="$2" deadline prev=''
+# _pp_unfocused_picker <last focus read> — a resumed picker whose window
+# never took input focus: the system's own window never became ready, which
+# nothing in Haven decides.
+_pp_unfocused_picker() {
+  if [[ -z "$1" ]]; then
+    PP_MSG="adb never named the focused window within ${PP_PICKER_SECS} s of the picker resuming"
+    return 3
+  fi
+  PP_MSG="harness: the system picker was resumed but its window never took input focus within ${PP_PICKER_SECS} s (focus $(_pp_focus_words "$1")), so no input was sent to it"
+  return 2
+}
+
+# The cancel round: ONE BACK, sent once the picker's window holds input
+# focus; Haven must come back with nothing changed. One BACK is the whole
+# gesture: PhotoPickerActivity registers no back callback of its own, and at
+# its root (the Photos tab, nothing on the fragment back stack) the default
+# handling finishes it (AOSP MediaProvider, PhotoPickerActivity.onBackPressed
+# and TabContainerFragment.show). Where the sheet is in its slide does not
+# matter to a key, so no dump is read.
+_pp_cancel() { # <device> <dir> <api>
+  local device="$1" dir="$2" api="$3" deadline last='' start="${SECONDS}"
   deadline=$(( SECONDS + PP_PICKER_SECS ))
   while (( SECONDS < deadline )); do
     pp_hook_alive || return 4
-    pp_find "${device}" "${dir}" "${PP_PICKER_PKG_RE}" 'text:-' || continue
-    if [[ "${PP_FIND_DIGEST}" == "${prev}" ]]; then
-      adb -s "${device}" shell input keyevent 4 >/dev/null 2>&1
-      return 0
-    fi
-    prev="${PP_FIND_DIGEST}"
+    pp_focused "${device}" "${dir}"
+    last="${PP_FOCUSED:-${last}}"
+    _pp_is_picker "${PP_FOCUSED}" "${api}" || continue
+    PP_FOCUS_WAIT=$(( SECONDS - start ))
+    adb -s "${device}" shell input keyevent 4 >/dev/null 2>&1
+    return 0
   done
-  PP_MSG="harness: the picker never held still for a cancel within ${PP_PICKER_SECS} s"
-  return 2
+  _pp_unfocused_picker "${last}"
+}
+
+# Phase 5 of a cancel: MainActivity resumed again. A picker that left the
+# front without Haven coming back is Haven's failure. One still in front,
+# still holding the focus it held when the BACK was sent, ignored that BACK:
+# the system's, which nothing in Haven decides.
+_pp_await_cancelled() { # <device> <dir> <api>
+  local device="$1" dir="$2" api="$3" deadline front=''
+  deadline=$(( SECONDS + PP_RETURN_SECS ))
+  while (( SECONDS < deadline )); do
+    pp_hook_alive || return 4
+    pp_resumed "${device}" "${dir}"
+    [[ "${PP_RESUMED}" != "${PP_MAIN}" ]] || return 0
+    [[ -z "${PP_RESUMED}" ]] || front="${PP_RESUMED}"
+  done
+  if [[ -z "${front}" ]]; then
+    PP_MSG="adb never named a resumed activity within ${PP_RETURN_SECS} s of the BACK"
+    return 3
+  fi
+  if _pp_is_picker "${front}" "${api}"; then
+    pp_focused "${device}" "${dir}"
+    if _pp_is_picker "${PP_FOCUSED}" "${api}"; then
+      PP_MSG="harness: the system picker ignored the BACK sent while its window held input focus: still in front and focused ${PP_RETURN_SECS} s later; nothing in Haven decides that"
+    else
+      PP_MSG="harness: the system picker was still in front ${PP_RETURN_SECS} s after the BACK sent while it held input focus, with focus $(_pp_focus_words "${PP_FOCUSED}") since"
+    fi
+    return 2
+  fi
+  PP_MSG="the cancelled picker left the front but Haven did not resume within ${PP_RETURN_SECS} s (front: ${front})"
+  return 1
 }
 
 # Phase 3: the thumbnail opened uCrop. A picker that asks to confirm a single
@@ -289,13 +389,22 @@ _pp_await_ucrop() { # <device> <dir> <api>
   return 1
 }
 
-# Phase 4: uCrop's crop action, polled — the menu swaps it for a loader
-# while the image decodes.
+# Phase 4: uCrop's crop action, once uCrop's window holds input focus, polled
+# — the menu swaps it for a loader while the image decodes. As in phase 2,
+# one bounded read per pass. (A picker's confirm tap in phase 3 needs no
+# read of its own: it goes to the picker window phase 2 saw focused.)
 _pp_crop() { # <device> <dir>
-  local device="$1" dir="$2" deadline prev=''
+  local device="$1" dir="$2" deadline prev='' focused=0 last=''
   deadline=$(( SECONDS + PP_UCROP_SECS ))
   while (( SECONDS < deadline )); do
     pp_hook_alive || return 4
+    if (( ! focused )); then
+      pp_focused "${device}" "${dir}"
+      last="${PP_FOCUSED:-${last}}"
+      [[ "${PP_FOCUSED}" == "${PP_UCROP_ACTIVITY}" ]] || continue
+      focused=1
+      continue
+    fi
     pp_find "${device}" "${dir}" "${PP_OURS_RE}" "${PP_CROP_RID}" 'desc-prefix:Crop' || continue
     if [[ "${PP_FIND_DIGEST}" != "${prev}" ]]; then prev="${PP_FIND_DIGEST}"; continue; fi
     [[ "${PP_FIND_SEL}" != none ]] || continue
@@ -303,11 +412,18 @@ _pp_crop() { # <device> <dir>
     _pp_tap "${device}" "${PP_FIND_XY[0]}"
     return 0
   done
+  if (( ! focused )); then
+    case "${last}" in
+      '') PP_MSG="adb never named the focused window within ${PP_UCROP_SECS} s of uCrop resuming"; return 3 ;;
+      other|none|"${PP_PKG}/"*) PP_MSG="uCrop, Haven's own activity, was resumed but its window never took input focus within ${PP_UCROP_SECS} s (focus $(_pp_focus_words "${last}"))"; return 1 ;;
+      *) PP_MSG="harness: another app's window held input focus over uCrop for ${PP_UCROP_SECS} s (focus $(_pp_focus_words "${last}"))"; return 2 ;;
+    esac
+  fi
   PP_MSG="harness: uCrop's crop action was not found within ${PP_UCROP_SECS} s (rids: ${PP_FIND_RIDS:-none})"
   return 2
 }
 
-# Phase 5: MainActivity resumed again.
+# Phase 5 of a pick: MainActivity resumed again after uCrop, Haven's own.
 _pp_await_main() { # <device> <dir> <what>
   local device="$1" dir="$2" what="$3" deadline
   deadline=$(( SECONDS + PP_RETURN_SECS ))
@@ -323,11 +439,11 @@ _pp_await_main() { # <device> <dir> <what>
 # pp_round <device> <dir> <pick|cancel> <index> <api> — after the caller's tap.
 pp_round() {
   local device="$1" dir="$2" act="$3" index="$4" api="$5" rc=0
-  PP_MSG=''; PP_PICKER='-'; PP_UCROP='-'; PP_DWELL=-1
+  PP_MSG=''; PP_PICKER='-'; PP_UCROP='-'; PP_DWELL=-1; PP_FOCUS_WAIT=-1
   _pp_await_picker "${device}" "${dir}" "${api}" || return
   if [[ "${act}" == cancel ]]; then
-    _pp_cancel "${device}" "${dir}" || return
-    _pp_await_main "${device}" "${dir}" "the cancelled picker" || return
+    _pp_cancel "${device}" "${dir}" "${api}" || return
+    _pp_await_cancelled "${device}" "${dir}" "${api}" || return
     return 0
   fi
   _pp_pick_thumbnail "${device}" "${dir}" "${index}" "${api}" || return

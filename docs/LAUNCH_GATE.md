@@ -119,7 +119,10 @@ decides).
 debug photo UI lane). Each round taps Haven's own control, then plays the user
 in the system screens, judging every step by the RESUMED activity
 (`dumpsys activity activities`, read by `ui-dump.py resumed`) and the screen
-(`ui-dump.py find`, by anchored resource id, never by anything a node says):
+(`ui-dump.py find`, by anchored resource id, never by anything a node says),
+and sending no tap to the picker or uCrop before its window holds input focus
+(`dumpsys input`, read by `ui-dump.py focused`: an activity is resumed before
+its window can take input, and a key sent in that gap is dropped):
 the Photo Picker (`.photopicker.PhotoPickerActivity`; on API 33+ any other
 picker — DocumentsUI, the GET_CONTENT alias — is a product failure, because
 `main()` promises the scoped Photo Picker through `configureImagePicker()`),
@@ -205,8 +208,8 @@ running). That is why a v0.1.14-shaped candidate's red names
 | rc | Class | Meaning | What to do |
 |---|---|---|---|
 | 0 | pass | every leg passed | — |
-| 1 | product | the candidate crashed, stalled, lost data, showed the intro after onboarding, kept a debug log plant, or did not replace the previous release; a photo tap opened no picker, or (API 33+) a known wrong picker — DocumentsUI, the GET_CONTENT alias, the Play services picker; uCrop did not return; the photo save was refused after the crop (`avatarPickerUpdateError`: root cause A's class), did not show within `APPLY_SECS`, or was gone after a cold restart; background sharing did not turn on with everything granted | fix the app; never re-run to green |
-| 2 | usage or harness | a missing input (directory, ARB key); a picker or uCrop screen no selector knows (the summary lists the resource ids it does have: update the selectors for that system image), or an activity the picker rules do not know (its component is listed: a newer Photopicker module, say); background sharing held off while Android showed the battery or notification snack the grants were meant to prevent; no leg reached MapShell | fix the workflow or the selectors; never re-run to green |
+| 1 | product | the candidate crashed, stalled, lost data, showed the intro after onboarding, kept a debug log plant, or did not replace the previous release; a photo tap opened no picker, or (API 33+) a known wrong picker — DocumentsUI, the GET_CONTENT alias, the Play services picker; uCrop did not return or its window never took input focus; the photo save was refused after the crop (`avatarPickerUpdateError`: root cause A's class), did not show within `APPLY_SECS`, or was gone after a cold restart; background sharing did not turn on with everything granted | fix the app; never re-run to green |
+| 2 | usage or harness | a missing input (directory, ARB key); a picker or uCrop screen no selector knows (the summary lists the resource ids it does have: update the selectors for that system image), a system picker whose window never took input focus, or an activity the picker rules do not know (its component is listed: a newer Photopicker module, say); background sharing held off while Android showed the battery or notification snack the grants were meant to prevent; no leg reached MapShell | fix the workflow or the selectors; never re-run to green |
 | 3 | infrastructure | the device went away, never booted, is not en-US, would not go offline, never indexed the gallery fixtures, or would not take a permission grant or the battery exemption | re-run the job ("Re-run failed jobs" works: the launch jobs read the candidate hand-off, which is named by the run, not the attempt) |
 | 4 | upgrade source unusable | the previous release itself failed before the candidate was installed | add it to `scripts/ci/launch_gate_yanked_releases.txt` with the reason |
 

@@ -44,7 +44,10 @@
 #      Play services picker), uCrop never returned, the grace expired early,
 #      or the drive failed or hung past HAVEN_DRIVE_TIMEOUT (124/137) while
 #      the sidecar was fine and the device was still there
-#   2  harness: a screen or an activity the selectors do not know, the marker
+#   2  harness: a screen or an activity the selectors do not know, a system
+#      picker whose window never took input focus or that ignored the BACK
+#      it was sent while it held focus (nothing Haven decides; Haven not
+#      resuming after the picker DID leave the front is product, 1), the marker
 #      sequence broken, the pause branch never taken (the precondition unmet),
 #      a round run-as could not record on the device, a passing drive that
 #      never reported its rounds, or
@@ -55,7 +58,8 @@
 # failed too, the verdict line says so, since that failure may be the product's.
 #
 # The sidecar log (/tmp/photo-sidecar.log) is fixed vocabulary: round
-# numbers, selector names, cause words, seconds. It passes the log-privacy
+# numbers, selector names, cause and class words, seconds (`focus=<s>s` is
+# how long the picker took from resumed to holding input focus). It passes the log-privacy
 # gate before it is echoed, and the workflow scans it again before upload.
 #
 # Usage:
@@ -110,6 +114,11 @@ pp_hook_alive() { [[ ! -e "${STOP}" ]]; }
 
 record() { printf '%s\n' "$*" >> "${SIDECAR_LOG}"; }
 
+# class_word <rc> — a verdict class in the sidecar log's words.
+class_word() {
+  case "$1" in 1) echo product ;; 2) echo harness ;; 3) echo infrastructure ;; *) echo "rc$1" ;; esac
+}
+
 # watch_verdict <rc> <message> — the sidecar's verdict, for the main shell.
 watch_verdict() { printf '%s\t%s\n' "$1" "$2" > "${WATCH_VERDICT}"; }
 
@@ -149,14 +158,14 @@ play_round() {
     return 4
   fi
   if (( rc != 0 )); then
-    record "round=${round} act=${kind} picker=${PP_PICKER} ucrop=${PP_UCROP} failed"
+    record "round=${round} act=${kind} picker=${PP_PICKER} ucrop=${PP_UCROP} failed class=$(class_word "${rc}") focus=${PP_FOCUS_WAIT}s"
     watch_verdict "${rc}" "round ${round} (${kind}): ${PP_MSG}"
     return "${rc}"
   fi
   if since_has "${offset}" "${PAUSE_MARKER}"; then pause=yes; fi
   if [[ "${kind}" == pick ]]; then
     cause="$(grace_cause "${offset}")"
-    record "round=${round} act=pick picker=${PP_PICKER} ucrop=${PP_UCROP} pause=${pause} grace=${cause} dwell=${PP_DWELL}s"
+    record "round=${round} act=pick picker=${PP_PICKER} ucrop=${PP_UCROP} pause=${pause} grace=${cause} dwell=${PP_DWELL}s focus=${PP_FOCUS_WAIT}s"
     if [[ "${pause}" == no ]]; then
       watch_verdict 2 "round ${round} (pick): MapShell never took its Android pause branch between the ARM and the return, so root cause A's precondition (background sharing on at the pause) was not exercised"
       rc=2
@@ -165,7 +174,7 @@ play_round() {
       rc=1
     fi
   else
-    record "round=${round} act=cancel picker=${PP_PICKER} pause=${pause}"
+    record "round=${round} act=cancel picker=${PP_PICKER} pause=${pause} focus=${PP_FOCUS_WAIT}s"
   fi
   # Haven is back and the round is recorded: only now may the drive go on.
   # It is let go whatever the verdict, so its own checks of the round run.
@@ -333,7 +342,7 @@ main() {
 # for Haven to be back and for the sidecar's record of the round. Bounds are
 # shrunk through the PHOTO_* overrides only.
 # ---------------------------------------------------------------------------
-readonly SELF_TEST_FIXTURES=39
+readonly SELF_TEST_FIXTURES=50
 
 _st_stub_adb() { # <bin dir>
   cat > "$1/adb" <<'STUB'
@@ -343,7 +352,8 @@ printf '%s\n' "$*" >> "${S}/calls"
 [[ "${1:-}" == -s ]] && shift 2
 PKG=com.oblivioustech.haven
 get() { cat "${S}/$1" 2>/dev/null || true; }
-put() { printf '%s\n' "$2" > "${S}/$1"; }
+# Every change of screen is a new window: its focus starts over (focus_of).
+put() { printf '%s\n' "$2" > "${S}/$1"; [[ "$1" != screen ]] || printf '%s\n' "$(( $(get gen) + 1 ))" > "${S}/gen"; }
 log() { printf '11-16 12:00:00.000  4242  4242 I flutter : %s\n' "$1" >> "${PHOTO_UI_LOGCAT}"; }
 pnode() { printf '<node index="0" text="" resource-id="%s" class="android.widget.ImageView" package="%s" content-desc="%s" clickable="true" enabled="true" bounds="%s"/>' "$2" "$1" "$3" "$4"; }
 # The screen as the host sees it. STUB_UCROP_LATE_SECS keeps the picker in
@@ -365,13 +375,42 @@ screen_xml() {
   esac
   printf "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><hierarchy rotation=\"0\"><node index=\"0\" text=\"\" resource-id=\"\" class=\"android.widget.FrameLayout\" package=\"%s\" content-desc=\"\" bounds=\"[0,0][1080,2400]\">%s</node></hierarchy>" "${root}" "${body}"
 }
-resumed() {
-  local c="${PKG}/.MainActivity"
-  case "$(seen)" in
-    picker) c='com.google.android.providers.media.module/com.android.providers.media.photopicker.PhotoPickerActivity' ;;
-    ucrop) c="${PKG}/com.yalantis.ucrop.UCropActivity" ;;
+component_of() {
+  case "$1" in
+    picker) echo 'com.google.android.providers.media.module/com.android.providers.media.photopicker.PhotoPickerActivity' ;;
+    ucrop) echo "${PKG}/com.yalantis.ucrop.UCropActivity" ;;
+    home) echo 'com.android.launcher3/com.android.launcher3.uioverrides.QuickstepLauncher' ;;
+    *) echo "${PKG}/${PKG}.MainActivity" ;;
   esac
-  printf '  topResumedActivity=ActivityRecord{1 u0 %s t1}\n' "${c}"
+}
+resumed() { printf '  topResumedActivity=ActivityRecord{1 u0 %s t1}\n' "$(component_of "$(seen)")"; }
+# Input focus as the device has it: the picker and uCrop are resumed before
+# their windows can hold focus, so the first STUB_FOCUS_LAG `dumpsys input`
+# reads of each new one see no focused window (STUB_NEVER_FOCUSED=<screen>:
+# none ever does). uCrop seen late is a new window when it is seen.
+focus_of() { # <advance: 1 on a dumpsys read>
+  local scr key reads; scr="$(seen)"
+  case "${scr}" in picker|ucrop) ;; *) component_of "${scr}"; return ;; esac
+  key="$(get gen):${scr}"
+  [[ "$(get fkey)" == "${key}" ]] || { put fkey "${key}"; put freads 0; }
+  reads="$(get freads)"
+  if (( $1 )); then reads=$(( reads + 1 )); put freads "${reads}"; fi
+  if [[ "${STUB_NEVER_FOCUSED:-}" == "${scr}" ]] || (( reads <= ${STUB_FOCUS_LAG:-1} )); then echo none; return; fi
+  component_of "${scr}"
+}
+focus_dump() {
+  local f; f="$(focus_of 1)"
+  echo 'Input Dispatcher State:'
+  if [[ "${f}" == none ]]; then echo '  FocusedWindows: <none>'
+  else printf "  FocusedWindows:\n    displayId=0, name='4f2e1c0 %s'\n" "${f}"; fi
+}
+# An input to the picker or uCrop while its window does not hold focus:
+# dropped, as the dispatcher drops a key no window took in time, and
+# recorded so the self-test fails on it.
+unfocused() {
+  case "$(seen)" in picker|ucrop) ;; *) return 1 ;; esac
+  [[ "$(focus_of 0)" == none ]] || return 1
+  printf '%s\n' "$1" >> "${S}/unfocused"
 }
 case "${1:-}" in
   wait-for-device) exit 0 ;;
@@ -399,8 +438,12 @@ case "${cmd}" in
     mkdir -p "${S}/files"; : > "${S}/$4" ;;
   "touch -t "*|"content call "*|"rm -f "*) : ;;
   "dumpsys activity activities") resumed ;;
-  "input keyevent 4") [[ "$(get screen)" == picker ]] && put screen main ;;
+  "dumpsys input") focus_dump ;;
+  "input keyevent 4") ! unfocused BACK || exit 0
+    [[ "$(get screen)" == picker && -z "${STUB_BACK_IGNORED:-}" ]] || exit 0
+    if [[ -n "${STUB_CANCEL_STRANDED:-}" ]]; then put screen home; else put screen main; fi ;;
   "input tap "*) read -r _ _ x y <<<"${cmd}"
+    ! unfocused "tap ${x} ${y}" || exit 0
     case "$(seen)" in
       picker) (( y >= 600 && y <= 900 )) || exit 0
         [[ -n "${STUB_NO_PAUSE:-}" ]] || log '[MapShell] pause: background handoff branch'
@@ -427,10 +470,15 @@ _st_stub_drive() { # <ci dir>
 #!/usr/bin/env bash
 S="${STUB}"
 log() { printf '11-16 12:00:00.000  4242  4242 I flutter : %s\n' "$1" >> "${PHOTO_UI_LOGCAT}"; }
-back() { # Haven resumed again, within a bound
-  local deadline=$(( SECONDS + 20 ))
+show_picker() { # the tap on Edit Photo: a new picker window
+  echo picker > "${S}/screen"; echo $(( $(cat "${S}/gen" 2>/dev/null || echo 0) + 1 )) > "${S}/gen"
+}
+back() { # Haven resumed again, within a bound; failed at once once the sidecar has, as the app would stay away
+  local deadline=$(( SECONDS + 20 )) vrc
   while (( SECONDS < deadline )); do
     [[ "$(cat "${S}/screen" 2>/dev/null)" == main ]] && return 0
+    vrc="$(cut -f1 "${PHOTO_UI_WORK}/verdict" 2>/dev/null || true)"
+    [[ -z "${vrc}" || "${vrc}" == 0 ]] || return 1
     sleep 0.1
   done
   return 1
@@ -449,10 +497,10 @@ n=0
 for act in ${STUB_ROUNDS:-cancel pick:0 pick:1}; do
   if [[ -n "${STUB_RESTART:-}" && "${n}" == 1 && ! -f "${S}/restarted" ]]; then
     touch "${S}/restarted"; rm -rf "${S}/files"; n=0
-    log '[pp] ARM round=0 act=cancel'; echo picker > "${S}/screen"; back || exit 1; recorded 0 || exit 1; n=1
+    log '[pp] ARM round=0 act=cancel'; show_picker; back || exit 1; recorded 0 || exit 1; n=1
   fi
   log "[pp] ARM round=$(( n + ${STUB_ROUND_SKEW:-0} )) act=${act}"
-  echo picker > "${S}/screen"
+  show_picker
   back || exit 1
   recorded "${n}" || exit 1
   n=$(( n + 1 ))
@@ -495,6 +543,9 @@ self_test() {
     if compgen -G "${tmp}/stub/media.haven-gate-*" >/dev/null; then
       printf '  FAIL %s: the gallery fixtures were left on the device\n' "${label}" >&2; fails=1
     fi
+    if [[ -s "${tmp}/stub/unfocused" ]]; then
+      printf '  FAIL %s: an input was sent to the picker or uCrop before its window held focus: %s\n' "${label}" "$(tr '\n' ' ' < "${tmp}/stub/unfocused")" >&2; fails=1
+    fi
   }
   _has() { # <label> <fixed string>
     ran=$(( ran + 1 ))
@@ -505,7 +556,7 @@ self_test() {
   echo "run-photo-ui-scenario.sh --self-test"
   _scenario "a cancel and two picks, each played, recorded and counted, pass" 0
   _has "…each pick recorded with its selectors, the pause branch and the grace cause" "round=1 act=pick picker=photopicker-rid ucrop=rid pause=yes grace=resumed"
-  _has "…the cancel round recorded without a pick" "round=0 act=cancel picker=- pause=no"
+  _has "…the cancel round recorded without a pick" "round=0 act=cancel picker=- pause=no focus="
   _has "…and the count the target reported matches" "end rounds=3 played=3"
   # The sidecar log is echoed only after the gate, and the gate is told nothing
   # the log does not carry.
@@ -556,6 +607,20 @@ self_test() {
   else echo "  PASS …and the drive arms nothing past a round the sidecar has not recorded"; fi
   _scenario "a drive restarted after a connect flake counts its rounds again from 0" 0 STUB_RESTART=1
   _has "…and says so" "drive restarted: rounds counted again from 0"
+  # The first device run: the picker was resumed long before its window held
+  # input focus, and the BACK sent in that gap was dropped. Every input now
+  # waits for the focus (no scenario may send one before it, see _scenario).
+  _scenario "a picker and uCrop that take focus late get the BACK and the taps only once they hold it" 0 STUB_FOCUS_LAG=4
+  _scenario "a system picker that ignores the BACK it got while focused is a harness verdict, not Haven's" 2 STUB_BACK_IGNORED=1 STUB_ROUNDS=cancel
+  _has "…named as such" "the system picker ignored the BACK sent while its window held input focus"
+  _has "…and the sidecar log says which class" "round=0 act=cancel picker=- ucrop=- failed class=harness focus="
+  _scenario "a picker that left after the BACK without Haven resuming is a product failure" 1 STUB_CANCEL_STRANDED=1 STUB_ROUNDS=cancel
+  _has "…named as such" "the cancelled picker left the front but Haven did not resume"
+  _has "…and the sidecar log says which class" "failed class=product"
+  _scenario "a picker whose window never takes focus gets no input and is a harness verdict" 2 STUB_NEVER_FOCUSED=picker STUB_ROUNDS=cancel
+  _has "…named as such" "the system picker was resumed but its window never took input focus within 3 s (focus on no window), so no input was sent to it"
+  _scenario "uCrop, Haven's own, never taking focus is a product failure" 1 STUB_NEVER_FOCUSED=ucrop STUB_ROUNDS=pick:0
+  _has "…named as such" "uCrop, Haven's own activity, was resumed but its window never took input focus"
   # The constants the Dart target and this runner share, pinned both ways.
   ran=$(( ran + 1 ))
   local repo dart_grace target

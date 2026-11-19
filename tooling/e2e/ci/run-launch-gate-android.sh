@@ -1014,7 +1014,7 @@ finish() {
 # overrides only for scenarios that must run one out; every other verdict
 # comes from what the stub shows, not from time.
 # ---------------------------------------------------------------------------
-readonly SELF_TEST_FIXTURES=84
+readonly SELF_TEST_FIXTURES=90
 readonly ST_NAME='Quiet Wanderer Fixture'
 # What a picker thumbnail's description says in the stub: a date, which no
 # transcript or summary may carry.
@@ -1030,7 +1030,8 @@ printf '%s\n' "$*" >> "${S}/calls"
 if [[ -f "${S}/offline" ]]; then echo "error: device offline" >&2; exit 1; fi
 PKG=com.oblivioustech.haven
 get() { cat "${S}/$1" 2>/dev/null || true; }
-put() { printf '%s\n' "$2" > "${S}/$1"; }
+# Every change of screen is a new window: its focus starts over (focus_of).
+put() { printf '%s\n' "$2" > "${S}/$1"; [[ "$1" != screen ]] || printf '%s\n' "$(( $(get gen) + 1 ))" > "${S}/gen"; }
 flow() { sed -n 's/^flow //p' "$(get installed)"; }
 tt() { echo "11-14 12:00:00.000  4242  4242 E AndroidRuntime: $*"; }
 node() { # <class> <text> <desc> <bounds> [pkg]
@@ -1053,10 +1054,10 @@ picker_rid() {
     *) echo com.google.android.providers.media.module:id/icon_thumbnail ;;
   esac
 }
-# The resumed component `dumpsys activity activities` names for a screen.
-resumed_line() {
-  local c="${PKG}/.MainActivity"
-  case "$(get screen)" in
+# The activity a screen is.
+component_of() {
+  local c="${PKG}/${PKG}.MainActivity"
+  case "$1" in
     picker) case "${STUB_PICKER_COMPONENT:-photopicker}" in
         documentsui) c='com.google.android.documentsui/com.android.documentsui.picker.PickActivity' ;;
         getcontent) c='com.google.android.providers.media.module/com.android.providers.media.photopicker.PhotoPickerGetContentActivity' ;;
@@ -1065,7 +1066,35 @@ resumed_line() {
       esac ;;
     ucrop) c="${PKG}/com.yalantis.ucrop.UCropActivity" ;;
   esac
-  printf '  topResumedActivity=ActivityRecord{2b2a1e5 u0 %s t42}\n' "${c}"
+  printf '%s' "${c}"
+}
+resumed_line() { printf '  topResumedActivity=ActivityRecord{2b2a1e5 u0 %s t42}\n' "$(component_of "$(get screen)")"; }
+# Input focus as the device has it: a system picker or uCrop is resumed before
+# its window can hold focus, so the first STUB_FOCUS_LAG `dumpsys input` reads
+# of each new one see no focused window (STUB_NEVER_FOCUSED=<screen>: none
+# ever does). Haven's own screens are focused at once.
+focus_of() { # <advance: 1 on a dumpsys read>
+  local scr reads; scr="$(get screen)"
+  case "${scr}" in picker|ucrop) ;; *) component_of "${scr}"; return ;; esac
+  [[ "$(get fgen)" == "$(get gen)" ]] || { put fgen "$(get gen)"; put freads 0; }
+  reads="$(get freads)"
+  if (( $1 )); then reads=$(( reads + 1 )); put freads "${reads}"; fi
+  if [[ "${STUB_NEVER_FOCUSED:-}" == "${scr}" ]] || (( reads <= ${STUB_FOCUS_LAG:-1} )); then echo none; return; fi
+  component_of "${scr}"
+}
+focus_dump() {
+  local f; f="$(focus_of 1)"
+  echo 'Input Dispatcher State:'
+  if [[ "${f}" == none ]]; then echo '  FocusedWindows: <none>'
+  else printf "  FocusedWindows:\n    displayId=0, name='4f2e1c0 %s'\n" "${f}"; fi
+}
+# An input to a system screen whose window does not hold focus: dropped, as
+# the dispatcher drops a key no window took in time, and recorded so the
+# self-test fails on it.
+unfocused() {
+  case "$(get screen)" in picker|ucrop) ;; *) return 1 ;; esac
+  [[ "$(focus_of 0)" == none ]] || return 1
+  printf '%s\n' "$1" >> "${S}/unfocused"
 }
 body_of() {
   local scr="$1" body=''
@@ -1210,6 +1239,7 @@ crop_done() {
 }
 tap() {
   local x="$1" y="$2" scr; scr="$(get screen)"
+  ! unfocused "tap ${x} ${y}" || return 0
   case "${scr}" in picker|ucrop|location|disclosure) ;; *)
     [[ -z "${STUB_TRANSITION:-}" ]] || { put leaving "${scr}"; put leaving_dumps 0; } ;;
   esac
@@ -1263,6 +1293,7 @@ tap() {
   esac
 }
 keyevent() {
+  ! unfocused BACK || return 0
   case "$(get screen)" in
     picker) put screen "$(get trip_from)" ;;
     identity|location) put screen settings ;;
@@ -1334,6 +1365,7 @@ case "${cmd}" in
   "getprop ro.build.version.sdk") echo "${STUB_API:-34}" ;;
   "touch -t "*|"content call "*) : ;;
   "dumpsys activity activities") resumed_line ;;
+  "dumpsys input") focus_dump ;;
   "input keyevent 4") keyevent ;;
   "dumpsys package ${PKG} | grep -c 'android.permission."*": granted=true'") echo "${STUB_GRANTED:-1}" ;;
   "dumpsys deviceidle whitelist +${PKG}") echo "Added: ${PKG}" ;;
@@ -1422,6 +1454,11 @@ print(json.dumps({k[0]: "Get Started", k[1]: "Create My Identity", k[2]: "Not no
     fi
     if [[ -n "$(ls -A "${tmp}/priv")" ]]; then
       printf '  FAIL %s: the private directory was left behind\n' "${label}" >&2
+      fails=1
+    fi
+    # …and no input ever reached a system screen whose window did not hold focus.
+    if [[ -s "${tmp}/stub/unfocused" ]]; then
+      printf '  FAIL %s: an input was sent to the picker or uCrop before its window held focus: %s\n' "${label}" "$(tr '\n' ' ' < "${tmp}/stub/unfocused")" >&2
       fails=1
     fi
   }
@@ -1575,6 +1612,15 @@ print(json.dumps({k[0]: "Get Started", k[1]: "Create My Identity", k[2]: "Not no
   _has "…named as such" "uCrop did not return a result"
   _scenario "uCrop's crop action without its id is found by its description" 0 setup-held map STUB_UCROP_NO_RID=1
   _has "…and the summary says which" "ucrop=desc"
+  # The first device run: the picker resumed long before its window held
+  # focus. Every input waits for the focus, so none is dropped (the check
+  # every scenario makes), and the trip still completes.
+  _scenario "a picker and uCrop that take focus late get no input before they hold it" 0 setup-held map STUB_FOCUS_LAG=4
+  _taps "…and the trip still makes its 21 taps"
+  _scenario "a picker whose window never takes focus gets no input and is a harness failure" 2 setup-held map STUB_NEVER_FOCUSED=picker
+  _has "…named as such" "the system picker was resumed but its window never took input focus within 3 s (focus on no window), so no input was sent to it"
+  _scenario "uCrop, Haven's own, never taking focus is a product failure" 1 setup-held map STUB_NEVER_FOCUSED=ucrop
+  _has "…named as such" "uCrop, Haven's own activity, was resumed but its window never took input focus"
   ARB_PREV="${arb_now}" _scenario "a run in which no leg reached MapShell is rc 2" 2 setup-held setup-held
   _has "…naming the untested hand-off path" "no leg reached MapShell"
   _scenario "a gallery the media store never indexes is infrastructure" 3 setup-held map STUB_MEDIA_NEVER=1

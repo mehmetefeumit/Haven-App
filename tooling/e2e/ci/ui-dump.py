@@ -63,6 +63,16 @@ partly inside the root's.
       `topResumedActivity=` (API 29+) or `mResumedActivity:` /
       `ResumedActivity:`; `resumed none` and rc 3 when no line names one.
 
+  ui-dump.py focused --dumpsys <file>
+      The window holding INPUT focus on the default display, from `dumpsys
+      input` — where the next key goes and, since the dispatcher focuses only
+      a visible window, proof the window is on screen: `focused
+      <package>/<class>` for an activity's window, `focused other` for a
+      window that is no activity's (its name is not printed), `focused none`
+      while no window has focus; rc 3 when no dispatcher state is in the
+      text. Read from the current state only, never from the copy the
+      dispatcher keeps of its state at the last ANR.
+
   ui-dump.py --self-test
 
 Exit: 0 ok, 2 usage, 3 no observation.
@@ -296,6 +306,45 @@ def resumed(dumpsys_text):
     return None
 
 
+FOCUSED_ENTRY_RE = re.compile(r"^\s*displayId=(\d+), name='([^']*)'")
+# An activity window's name: "<hash> <package>/<class>" (API 31+), or
+# "Window{<hash> u<user> <package>/<class>}" before.
+WINDOW_COMPONENT_RES = (
+    re.compile(r"^[0-9a-f]+ ([\w.]+/[\w.$]+)$"),
+    re.compile(r"^Window\{[0-9a-f]+ u\d+ ([\w.]+/[\w.$]+)\}$"),
+)
+
+
+def focused(dumpsys_text):
+    """'<package>/<class>', 'other' or 'none'; None without dispatcher state."""
+    lines = dumpsys_text.splitlines()
+    try:
+        start = [line.strip() for line in lines].index("Input Dispatcher State:")
+    except ValueError:
+        return None
+    for index in range(start + 1, len(lines)):
+        line = lines[index].strip()
+        if line == "Input Dispatcher State at time of last ANR:":
+            break
+        if line == "FocusedWindows: <none>":
+            return "none"
+        if line != "FocusedWindows:":
+            continue
+        for entry in lines[index + 1:]:
+            match = FOCUSED_ENTRY_RE.match(entry)
+            if not match:
+                break
+            if match.group(1) != "0":
+                continue
+            for pattern in WINDOW_COMPONENT_RES:
+                component = pattern.match(match.group(2))
+                if component:
+                    return component.group(1)
+            return "other"
+        return "none"
+    return None
+
+
 def main(argv, stdout=sys.stdout):
     command, opts = parse_args(argv)
     keys = [key for key in opts.get("keys", "").split(",") if key]
@@ -361,6 +410,20 @@ def main(argv, stdout=sys.stdout):
         component = resumed(text)
         print(f"resumed {component or 'none'}", file=stdout)
         return 0 if component else 3
+    if command == "focused":
+        if set(opts) != {"dumpsys"}:
+            raise Usage("focused needs --dumpsys")
+        try:
+            with open(opts["dumpsys"], encoding="utf-8", errors="replace") as handle:
+                text = handle.read()
+        except OSError:
+            text = ""
+        window = focused(text)
+        if window is None:
+            print("focused unknown", file=stdout)
+            return 3
+        print(f"focused {window}", file=stdout)
+        return 0
     raise Usage(f"unknown command {command!r}")
 
 
@@ -368,7 +431,7 @@ def main(argv, stdout=sys.stdout):
 # Self-test: hermetic dumps in the shape uiautomator writes, run through main()
 # exactly as the runner calls it.
 # ---------------------------------------------------------------------------
-SELF_TEST_CASES = 36
+SELF_TEST_CASES = 43
 PKG = "com.oblivioustech.haven"
 SECRET_NAME = "Quiet Wanderer"
 
@@ -587,6 +650,44 @@ def self_test():
              (0, "resumed com.oblivioustech.haven/com.oblivioustech.haven.MainActivity"))
         case("(36) dumpsys output naming no resumed activity is rc 3",
              resumed_run("ACTIVITY MANAGER ACTIVITIES (dumpsys activity activities)\nnothing here") == (3, "resumed none"))
+
+        def focused_run(text):
+            path = os.path.join(tmp, "input.txt")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(text)
+            captured = io.StringIO()
+            rc = main(["focused", "--dumpsys", path], captured)
+            return rc, captured.getvalue().strip()
+
+        picker_window = "com.google.android.providers.media.module/com.android.providers.media.photopicker.PhotoPickerActivity"
+
+        def dispatcher(focus, anr=""):
+            return ("INPUT MANAGER (dumpsys input)\n\nInput Reader State (Nums of device: 3):\n  Device 1: virtio_input_multi_touch_7\n"
+                    "Input Dispatcher State:\n  DispatchEnabled: true\n  FocusedDisplayId: 0\n  FocusedApplications:\n"
+                    f"    displayId=0, name='ActivityRecord{{7c0d u0 {picker_window} t9}}', dispatchingTimeout=5000ms\n"
+                    f"{focus}  FocusRequests:\n    displayId=0, name='9a1 {picker_window}' result='NOT_VISIBLE'\n{anr}")
+
+        case("(37) the focused activity window is read from the dispatcher's FocusedWindows",
+             focused_run(dispatcher(f"  FocusedWindows:\n    displayId=0, name='4f2e1c0 {picker_window}'\n"))
+             == (0, f"focused {picker_window}"))
+        case("(38) the picker resumed and focused nowhere yet is `focused none` (its focus request still NOT_VISIBLE)",
+             focused_run(dispatcher("  FocusedWindows: <none>\n")) == (0, "focused none"))
+        case("(39) another display's focus is not the default display's",
+             focused_run(dispatcher(f"  FocusedWindows:\n    displayId=2, name='4f2e1c0 {picker_window}'\n")) == (0, "focused none"))
+        case("(40) a focused window that is no activity's is `other`, its name withheld",
+             focused_run(dispatcher("  FocusedWindows:\n    displayId=0, name='77e1 NotificationShade'\n"))
+             == (0, "focused other"))
+        case("(41) the state kept from the last ANR never stands in for the current one",
+             focused_run(dispatcher("  FocusedWindows: <none>\n",
+                                    "\nInput Dispatcher State at time of last ANR:\n  FocusedWindows:\n"
+                                    "    displayId=0, name='11 com.oblivioustech.haven/com.oblivioustech.haven.MainActivity'\n"))
+             == (0, "focused none"))
+        case("(42) the pre-S window name shape is read too",
+             focused_run("Input Dispatcher State:\n  FocusedWindows:\n"
+                         "    displayId=0, name='Window{2d3b u0 com.oblivioustech.haven/com.yalantis.ucrop.UCropActivity}'\n")
+             == (0, "focused com.oblivioustech.haven/com.yalantis.ucrop.UCropActivity"))
+        case("(43) text without dispatcher state (adb gave nothing) is rc 3",
+             focused_run("") == (3, "focused unknown"))
     if ran != SELF_TEST_CASES:
         print(f"SELF-TEST FAIL: ran {ran} cases, expected {SELF_TEST_CASES}", file=sys.stderr)
         failed += 1
