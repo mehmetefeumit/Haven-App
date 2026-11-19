@@ -1555,34 +1555,42 @@ async fn a_stop_during_a_foreground_pass_drains_and_dials_nothing() {
     assert!(wire.frames_of(Dir::ToRelay, "NEG-OPEN").is_empty());
 }
 
-/// A stop that lands while the foreground pass is still dialling — the one
-/// stretch between the pass's dial and its fetch where it reads no fence —
-/// ends the pass there: the stop drains every task, and no session is opened
-/// after it, even once the slow relay answers the dial.
+/// A stop that lands in the one stretch of a foreground pass that reads no
+/// fence — dialled, its sessions not yet open — ends the pass there: the
+/// stop drains every task, and no session is opened after it, not even once
+/// the pass is let go.
+///
+/// The pass is held there by the test, its bound not running, and the wall
+/// clock is let cross that bound before the stop: a pass whose own bound
+/// ended it before the stop landed (a starved test thread, once) would prove
+/// nothing about the stop.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stop_while_a_foreground_pass_dials_opens_no_session_after_it() {
-    let (open, held) = tokio::sync::watch::channel(true);
-    let relay = SeededRelay::held(held).await;
+    let relay = SeededRelay::run().await;
     let wire = NegWire::in_front_of(&relay.url, NegPolicy::Forward).await;
     let urls = vec![wire.url.clone()];
     let pair = pair().await;
     let circle = pair.circle(&urls).await;
     let _ = start_clock(&pair.bob);
-    let core = entry_waiting_for_its_replay(&pair, &circle, &urls, &open).await;
-    wire.hold_new_connections();
-    open.send(true).expect("the entry's replay comes in");
+    let core = paused_engine(&pair, &circle, &urls).await;
+    let processor = core.processor();
+    processor.for_test().hold_passes_after_their_dial();
+    core.resume_after_background(Claim::Foreground)
+        .await
+        .expect("foreground entry");
     assert!(
-        poll_until(|| wire.held() == 1).await,
-        "premise: the pass is dialling the relay"
+        processor
+            .for_test()
+            .a_pass_is_held(Duration::from_secs(20))
+            .await,
+        "premise: the entry's pass dialled and is held before its sessions"
     );
+    let held_from = tokio::time::Instant::now();
+    tokio::time::sleep_until(held_from + processor.for_test().live_pass_bound()).await;
 
     let stopped = core.stop().await;
-    wire.release_connections();
-    let processor = core.processor();
-    assert!(
-        poll_until(|| wire.held() == 0).await,
-        "premise: the slow relay answered the dial"
-    );
+    let (connections, frames) = (wire.connections(), wire.frames().len());
+    processor.for_test().release_held_passes();
 
     assert_eq!(
         stopped,
@@ -1590,12 +1598,24 @@ async fn a_stop_while_a_foreground_pass_dials_opens_no_session_after_it() {
         "a foreground pass kept the session's tasks past its stop"
     );
     assert_eq!(
-        processor.for_test().negentropy_steps().1,
-        0,
+        processor.for_test().negentropy_steps(),
+        (1, 0),
         "the pass ran on past the stop instead of ending where it stood"
     );
     assert!(
         wire.frames_of(Dir::ToRelay, "NEG-OPEN").is_empty(),
         "a session was opened after the stop"
+    );
+    assert_eq!(
+        wire.connections(),
+        connections,
+        "a socket was opened after the stop"
+    );
+    assert!(
+        wire.frames()[frames..]
+            .iter()
+            .filter(|frame| frame.dir == Dir::ToRelay)
+            .all(|frame| frame.verb().as_deref() == Some("CLOSE")),
+        "the device asked a relay for something after the stop returned"
     );
 }
