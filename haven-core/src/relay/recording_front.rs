@@ -642,7 +642,7 @@ fn answer_auth(text: &str, conn: usize, front: &str, authed: &Mutex<Option<Publi
 mod tests {
     use std::time::Duration;
 
-    use nostr::{EventBuilder, Filter, JsonUtil as _, Keys, Kind};
+    use nostr::{EventBuilder, Filter, Keys, Kind};
     use nostr_sdk::ClientOptions;
 
     use super::*;

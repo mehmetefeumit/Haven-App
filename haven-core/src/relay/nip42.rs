@@ -95,7 +95,7 @@ impl Nip42Signer {
 }
 
 /// A tag's elements as `&str`s, for matching by shape.
-fn tag_parts(tag: &[String]) -> [&str; 2] {
+const fn tag_parts(tag: &[String]) -> [&str; 2] {
     match tag {
         [name, value] => [name.as_str(), value.as_str()],
         _ => ["", ""],
