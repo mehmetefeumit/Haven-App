@@ -33,6 +33,7 @@ import com.oblivioustech.haven.mesh.core.PermissionMatrix
 import com.oblivioustech.haven.mesh.core.RadioEnd
 import com.oblivioustech.haven.mesh.core.RadioMove
 import com.oblivioustech.haven.mesh.core.RadioPort
+import com.oblivioustech.haven.mesh.core.ReceiverPolicy
 import com.oblivioustech.haven.mesh.core.ServiceStarts
 import com.oblivioustech.haven.mesh.core.Start
 import com.oblivioustech.haven.mesh.core.StartPolicy
@@ -453,6 +454,20 @@ class MeshService : Service() {
             live?.stop()
             MeshPrefs(context).forget()
             live?.whenOver(done) ?: done()
+        }
+
+        /**
+         * The receiver found a mesh whose time ran out with no service to
+         * stop it. Decided again here, where no start is live and none can
+         * be made meanwhile, on what is stored now: a start made since the
+         * receiver read is live, or has come and gone and left its own flag.
+         */
+        fun end(context: Context) = starts.idle {
+            val prefs = MeshPrefs(context)
+            if (ReceiverPolicy.ended(prefs.wanted, prefs.deadlineMs, System.currentTimeMillis())) {
+                prefs.forget()
+                MeshNotices(context, prefs).post(Notice.STOPPED)
+            }
         }
 
         /** The alarm: whether a live start took it. */

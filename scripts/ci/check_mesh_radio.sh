@@ -260,7 +260,9 @@
 #      (`starts.detach(prefs::forget)`), cancels the alarm and leaves the
 #      foreground only where no start was made since (`starts.idle`), and
 #      ends the service by `stopSelfResult(joined)`: `stopSelf` is written
-#      nowhere else. One
+#      nowhere else. The receiver's end of a mesh whose time is up is the
+#      service's `end`, under `starts.idle` too, on the flag and the copy
+#      read again there. One
 #      `MeshThread` and one `MeshLoop` are made, `loop.start` has one caller,
 #      and `startForeground(` is written once. The receivers are registered
 #      in one function — `RECEIVER_EXPORTED` from Android 13, the
@@ -416,7 +418,7 @@ readonly -a LEVER_STRINGS=(
 
 # How many fixtures the self-test runs. Pinned, because a fixture that stops
 # running is the one way a deleted check reports success.
-readonly SELF_TEST_FIXTURES=445
+readonly SELF_TEST_FIXTURES=448
 
 # The Kotlin of the radio (design §B): the app's mesh packages, whatever the
 # source set, and the JVM build of the pure one with its tests.
@@ -500,7 +502,7 @@ readonly -a WHOLE_TEXT=(
   'overridefunonBind(intent:Intent?):IBinder?=null'
   'overridefunonStartCommand(intent:Intent?,flags:Int,startId:Int):Int{starts.command(startId){Live()}returnSTART_STICKY}'
   'overridefunonDestroy(){starts.live()?.stop()}'
-  'overridefunonReceive(context:Context,intent:Intent)=RadioEnd.each({valprefs=MeshPrefs(context)valstep=ReceiverPolicy.step(intent.action!=null,MeshService::alarm,prefs.wanted,prefs.deadlineMs,System.currentTimeMillis()){StartPolicy.refusal(Build.VERSION.SDK_INT,MeshService.bluetoothLe(context),MeshNative,MeshService.permitted(context))}when(step){ReceiverStep.START->context.startForegroundService(Intent(context,MeshService::class.java))ReceiverStep.END->{prefs.forget()MeshNotices(context,prefs).post(Notice.STOPPED)}ReceiverStep.NONE->{}}})'
+  'overridefunonReceive(context:Context,intent:Intent)=RadioEnd.each({valprefs=MeshPrefs(context)valstep=ReceiverPolicy.step(intent.action!=null,MeshService::alarm,prefs.wanted,prefs.deadlineMs,System.currentTimeMillis()){StartPolicy.refusal(Build.VERSION.SDK_INT,MeshService.bluetoothLe(context),MeshNative,MeshService.permitted(context))}when(step){ReceiverStep.START->context.startForegroundService(Intent(context,MeshService::class.java))ReceiverStep.END->MeshService.end(context)ReceiverStep.NONE->{}}})'
   'overridefunonMethodCall(call:MethodCall,result:MethodChannel.Result){try{answer(call,result)}catch(_:Throwable){result.error(ChannelWords.ERROR,null,null)}}'
 )
 # What none of unit 5's four files writes: a `try` of its own — what is thrown
@@ -523,6 +525,7 @@ readonly -a SERVICE_PINS=(
   'funstop()=loop.post{mesh.stop(notice=false)}'
   'detach={joined=starts.detach(prefs::forget)}'
   'cancelAlarm={starts.idle{alarms.cancel(alarm)}}'
+  'funend(context:Context)=starts.idle{valprefs=MeshPrefs(context)if(ReceiverPolicy.ended(prefs.wanted,prefs.deadlineMs,System.currentTimeMillis())){prefs.forget()MeshNotices(context,prefs).post(Notice.STOPPED)}}'
   'unpost={starts.idle{stopForeground(STOP_FOREGROUND_REMOVE)notices.cancel(NoticePlan.ONGOING)notices.cancel(NoticePlan.ALERT)}}'
   'end={stopSelfResult(joined)loop.quit()}'
   'if(Build.VERSION.SDK_INT>=Build.VERSION_CODES.TIRAMISU){registerReceiver(receiver,IntentFilter(action),Context.RECEIVER_EXPORTED)}else{registerReceiver(receiver,IntentFilter(action))}'
@@ -660,6 +663,8 @@ readonly -a JVM_TEST_NAMES=(
   aStartMadeBehindAStopKeepsItsFlagItsAlarmAndTheForeground
   onlyWhatMustComeWhileThePhoneSleepsIsATermOfTheAlarm
   anAlarmHoldsThePhoneOnlyUntilItsBodiesHaveRun
+  whatIsOverdueIsTakenDownBeforeANewcomerIsJudged
+  aLinksOwnInputIsReadBeforeItsTimeIsHeldAgainstIt
 )
 
 readonly B='(^|[^A-Za-z0-9_])'
@@ -1417,7 +1422,7 @@ run_check() {
     (( COUNT == ${want##*:} )) || hits+="'${want%:*}' written ${COUNT} time(s), not ${want##*:}; "
   done
   if [[ -n "${hits}" ]]; then
-    fail "the service is not started, stopped, woken and tapped as pinned (${hits}). Its start hands StartPolicy.start the level and then every input unread — the foreground's three calls first, the class that loads the native library named once, inside a lambda — because a service ended while it still owes its foreground start takes down the process that also publishes to relays; for the same reason a stop lets go of the service first — clearing its flag in that step, so that nothing asks for the radio back — and ends it by stopSelfResult with the last start command that joined, never by a plain stopSelf; and it cancels the alarm and leaves the foreground only where no start was made since, which would lose its alarm and its notice. Its three receivers are registered in one function, exported from Android 13: not exported, the bond watch hears nothing. Its lock is one, timed and not counted, taken and released through WakePlan alone; its alarm is setAndAllowWhileIdle to the receiver by an immutable intent, armed by a live start alone and held only until its two bodies have run; a broadcast's device is read by the typed call from Android 14 only, the platform's form being faulty on 13; a notice's tap is an immutable activity intent on the alias no other app can start; a radio's closes each run whatever the one before threw. And a foreground service is started at one site, the receiver's at boot: the channel starts none until the lever's lane exists."
+    fail "the service is not started, stopped, woken and tapped as pinned (${hits}). Its start hands StartPolicy.start the level and then every input unread — the foreground's three calls first, the class that loads the native library named once, inside a lambda — because a service ended while it still owes its foreground start takes down the process that also publishes to relays; for the same reason a stop lets go of the service first — clearing its flag in that step, so that nothing asks for the radio back — and ends it by stopSelfResult with the last start command that joined, never by a plain stopSelf; and it cancels the alarm and leaves the foreground only where no start was made since, which would lose its alarm and its notice — as the receiver's end of a mesh whose time is up is made only there, decided again on what is stored then. Its three receivers are registered in one function, exported from Android 13: not exported, the bond watch hears nothing. Its lock is one, timed and not counted, taken and released through WakePlan alone; its alarm is setAndAllowWhileIdle to the receiver by an immutable intent, armed by a live start alone and held only until its two bodies have run; a broadcast's device is read by the typed call from Android 14 only, the platform's form being faulty on 13; a notice's tap is an immutable activity intent on the alias no other app can start; a radio's closes each run whatever the one before threw. And a foreground service is started at one site, the receiver's at boot: the channel starts none until the lever's lane exists."
   fi
   hits="$(while IFS= read -r file; do
     grep -lE "${EXACT_ALARMS}" "${file}" || true
@@ -2263,6 +2268,15 @@ class MeshService : Service() {
 
         // Named here alone, unevaluated: never MeshRadioCore(MeshNative, …).
         private val native = { MeshNative }
+
+        // Never prefs.forget() on what the receiver read: read again, where no start is live.
+        fun end(context: Context) = starts.idle {
+            val prefs = MeshPrefs(context)
+            if (ReceiverPolicy.ended(prefs.wanted, prefs.deadlineMs, System.currentTimeMillis())) {
+                prefs.forget()
+                MeshNotices(context, prefs).post(Notice.STOPPED)
+            }
+        }
     }
 }
 KT
@@ -2280,10 +2294,7 @@ class MeshReceiver : BroadcastReceiver() {
         }
         when (step) {
             ReceiverStep.START -> context.startForegroundService(Intent(context, MeshService::class.java))
-            ReceiverStep.END -> {
-                prefs.forget()
-                MeshNotices(context, prefs).post(Notice.STOPPED)
-            }
+            ReceiverStep.END -> MeshService.end(context)
             ReceiverStep.NONE -> {}
         }
     })
@@ -3536,9 +3547,21 @@ RS
   sed -i 's/override fun onReceive(context: Context, intent: Intent) = RadioEnd.each({/override fun onReceive(context: Context, intent: Intent) {/; s/ReceiverStep.START -> context.startForegroundService(Intent(context, MeshService::class.java))/ReceiverStep.START -> RadioEnd.each({ context.startForegroundService(Intent(context, MeshService::class.java)) })/; s/^    })$/    }/' "${t}/${RECEIVER}"
   _case "a receiver with only its start inside RadioEnd.each fails: the refusal names the native class ahead of it" 1 "${RECEIVER} does not hold onReceive as pinned" "${t}"
 
-  t="${tmp}/receiver-ends-without-clearing"; _tree "${t}"
-  sed -i '/^                prefs.forget()$/d' "${t}/${RECEIVER}"
-  _case "a mesh ended with its flag left set fails: a clock set back would bring it back without the user" 1 "${RECEIVER} does not hold onReceive as pinned" "${t}"
+  t="${tmp}/receiver-ends-by-itself"; _tree "${t}"
+  sed -i 's/ReceiverStep.END -> MeshService.end(context)/ReceiverStep.END -> prefs.forget()/' "${t}/${RECEIVER}"
+  _case "a receiver that clears the flag itself fails: on what it read, outside the lock, where a start made since has stored its own" 1 "${RECEIVER} does not hold onReceive as pinned" "${t}"
+
+  t="${tmp}/end-outside-the-lock"; _tree "${t}"
+  sed -i 's/fun end(context: Context) = starts.idle {/fun end(context: Context) = run {/' "${t}/${SERVICE}"
+  _case "an end made whatever start is live fails: its flag cleared, and the stopped notice beside a running mesh" 1 "'funend(context:Context)=starts.idle{valprefs=MeshPrefs(context)if(ReceiverPolicy.ended(" "${t}"
+
+  t="${tmp}/end-without-clearing"; _tree "${t}"
+  sed -i -z 's/                prefs.forget()\n                MeshNotices(context, prefs).post(Notice.STOPPED)/                MeshNotices(context, prefs).post(Notice.STOPPED)/' "${t}/${SERVICE}"
+  _case "a mesh ended with its flag left set fails: a clock set back would bring it back without the user" 1 "'funend(context:Context)=starts.idle{valprefs=MeshPrefs(context)if(ReceiverPolicy.ended(" "${t}"
+
+  t="${tmp}/end-undecided"; _tree "${t}"
+  sed -i 's/            if (ReceiverPolicy.ended(prefs.wanted, prefs.deadlineMs, System.currentTimeMillis())) {/            run {/' "${t}/${SERVICE}"
+  _case "an end not decided again under the lock fails: the receiver's reading is from before it" 1 "'funend(context:Context)=starts.idle{valprefs=MeshPrefs(context)if(ReceiverPolicy.ended(" "${t}"
 
   t="${tmp}/receiver-starts-at-alarm"; _tree "${t}"
   sed -i 's/ReceiverPolicy.step(intent.action != null, MeshService::alarm,/ReceiverPolicy.step(true, MeshService::alarm,/' "${t}/${RECEIVER}"

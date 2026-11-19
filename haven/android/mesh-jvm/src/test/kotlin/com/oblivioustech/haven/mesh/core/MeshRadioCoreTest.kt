@@ -318,7 +318,9 @@ class MeshRadioCoreTest {
         assertEquals(64, rig.port.called("close").size)
         assertEquals(64, rig.engine.called("poll").size, "the pump polled past its budget")
         assertEquals(listOf(0L), rig.port.wakes, "a pump that stopped at its budget does not come back at once")
-        assertTrue(rig.engine.called("wakeInMs").isEmpty())
+        // It comes back by the timer, which a phone that sleeps in between does not run: the alarm is asked for
+        // the engine's wake all the same — not for the deadline, hours on, in the slot's place.
+        assertEquals(listOf(rig.engine.wake), rig.port.alarms)
         rig.core.onWake()
         assertEquals(100, rig.port.called("close").size)
         assertEquals(listOf(0L, rig.engine.wake), rig.port.wakes)
@@ -403,14 +405,101 @@ class MeshRadioCoreTest {
         rig.core.stopRadio()
         assertEquals(rig.port.wakes.last(), rig.port.alarms.last())
 
-        // A pump that gave the thread back comes again at once, by the timer; the alarm then is the deadline's.
+        // A pump that gave the thread back comes again at once, by the timer; the alarm is still the engine's
+        // wake, so that a phone that sleeps before the timer runs is woken for the slot.
         val busy = Rig().started()
         busy.core.onLinkUp(1, central = false, attMtu = 517, address = null)
         busy.engine.left = 3 * HOUR
+        busy.engine.wake = 70_000
         repeat(PUMP_BUDGET) { busy.engine.outputs += closeOf(99) }
         busy.core.onWake()
-        assertEquals(0L, busy.port.wakes.last())
-        assertTrue(busy.port.alarms.last() in MINUTE..3 * HOUR, "the alarm was asked for ${busy.port.alarms.last()} ms ahead")
+        assertEquals(0L to 70_000L, busy.port.wakes.last() to busy.port.alarms.last())
+        // An engine that went in the middle of such a pump is gone there too.
+        busy.engine.wake = -1
+        repeat(PUMP_BUDGET) { busy.engine.outputs += closeOf(99) }
+        busy.core.onWake()
+        assertFalse(busy.core.running)
+    }
+
+    /**
+     * §B.4: four connections may wait to become links, ten seconds each; a frame may wait ten for its completion.
+     * Those times are the thread's timer's, which does not count while the phone sleeps. So whatever wakes the
+     * phone takes down what is overdue before it is judged itself: a stranger who filled the four places and went
+     * silent a minute ago must not have a newcomer turned away, nor a link with a dead frame keep the table full.
+     */
+    @Test
+    fun whatIsOverdueIsTakenDownBeforeANewcomerIsJudged() {
+        val rig = Rig().started()
+        rig.engine.wake = 90_000
+        for (link in 1..4L) rig.core.onConnected(link)
+        // The phone sleeps: no timer, and the alarm is the slot's, a minute and a half on.
+        assertEquals(90_000L, rig.port.alarms.last())
+        rig.now += 60_000
+        // A real peer connects, and that is what wakes the phone.
+        rig.core.onConnected(5)
+        assertEquals(listOf("close(1)", "close(2)", "close(3)", "close(4)"), rig.port.called("close"), "the newcomer was turned away for places that were overdue")
+        // It has its own ten seconds from now, and becomes a link.
+        assertEquals(UNLINKED_TIMEOUT_MS, rig.port.wakes.last())
+        rig.core.onLinkUp(5, central = false, attMtu = 517, address = null)
+        assertEquals(listOf("linkUp(5,false,517,-1)"), rig.engine.called("linkUp"))
+
+        // The same for the table of links: one whose frame never completed is dropped before a ninth is refused.
+        val full = linked(links = 8)
+        full.engine.outputs += sendOf(3, frame)
+        full.core.onWake()
+        full.now += 60_000
+        full.fresh()
+        full.core.onLinkUp(20, central = false, attMtu = 517, address = null)
+        assertEquals(listOf("linkDown(3)", "linkUp(20,false,517,-1)"), full.engine.calls.filter { "ink" in it })
+        assertEquals(listOf("close(3)"), full.port.called("close"))
+        // Not yet overdue, nothing is taken down for a newcomer: the cap holds.
+        full.core.onLinkUp(21, central = false, attMtu = 517, address = null)
+        assertEquals(listOf("close(3)", "close(21)"), full.port.called("close"))
+    }
+
+    /**
+     * The exception to the test above: what an input says of its own link is read before that link's time is held
+     * against it. The time ran while the phone slept, and the input is what woke it.
+     */
+    @Test
+    fun aLinksOwnInputIsReadBeforeItsTimeIsHeldAgainstIt() {
+        // A connection whose ten seconds are gone, and whose MTU is what woke the phone, is a link — not cancelled
+        // and then told to the engine, which would hold a link no connection stands behind.
+        val late = Rig().started()
+        late.engine.wake = 90_000
+        late.core.onConnected(1)
+        late.now += 60_000
+        late.fresh()
+        late.core.onLinkUp(1, central = false, attMtu = 517, address = null)
+        assertEquals(listOf("linkUp(1,false,517,-1)"), late.engine.called("linkUp"))
+        assertTrue(late.port.called("close").isEmpty(), "a connection that became a link was cancelled: ${late.port.calls}")
+
+        /** A link whose frame has been in flight for a minute of sleep. */
+        fun inFlight(): Rig = linked().apply {
+            engine.wake = 90_000
+            engine.outputs += sendOf(1, frame)
+            core.onWake()
+            now += 60_000
+            fresh()
+        }
+
+        // The completion that was owed arrives: the link stands, and takes a frame again.
+        val done = inFlight()
+        done.core.onSendDone(1, ok = true)
+        assertTrue(done.engine.called("linkDown").isEmpty() && done.port.called("close").isEmpty(), "a link was dropped at its frame's completion")
+        assertEquals(listOf(1L), done.engine.readies.last())
+
+        // A frame of the link's reaches the engine; its own frame still never completed, and the link goes behind it.
+        val heard = inFlight()
+        heard.core.onFrame(1, frame)
+        assertEquals(listOf("receive(1,3)", "linkDown(1)"), heard.engine.calls.filter { "poll" !in it && "Ms" !in it })
+        assertEquals(listOf("close(1)"), heard.port.called("close"))
+
+        // A link that went down is told to the engine once, and nothing is closed that is already gone.
+        val gone = inFlight()
+        gone.core.onLinkDown(1)
+        assertEquals(listOf("linkDown(1)"), gone.engine.called("linkDown"))
+        assertTrue(gone.port.called("close").isEmpty(), "a link that was down was closed: ${gone.port.calls}")
     }
 
     @Test

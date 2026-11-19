@@ -5,7 +5,6 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.os.Build
-import com.oblivioustech.haven.mesh.core.Notice
 import com.oblivioustech.haven.mesh.core.RadioEnd
 import com.oblivioustech.haven.mesh.core.ReceiverPolicy
 import com.oblivioustech.haven.mesh.core.ReceiverStep
@@ -37,10 +36,7 @@ class MeshReceiver : BroadcastReceiver() {
         }
         when (step) {
             ReceiverStep.START -> context.startForegroundService(Intent(context, MeshService::class.java))
-            ReceiverStep.END -> {
-                prefs.forget()
-                MeshNotices(context, prefs).post(Notice.STOPPED)
-            }
+            ReceiverStep.END -> MeshService.end(context)
             ReceiverStep.NONE -> {}
         }
     })

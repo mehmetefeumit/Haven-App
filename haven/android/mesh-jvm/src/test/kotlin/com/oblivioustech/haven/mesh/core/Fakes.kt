@@ -199,6 +199,7 @@ class Rig {
         engine.readies.clear()
         lever.calls.clear()
         port.calls.clear()
+        port.alarms.clear()
         port.frames.clear()
     }
 }

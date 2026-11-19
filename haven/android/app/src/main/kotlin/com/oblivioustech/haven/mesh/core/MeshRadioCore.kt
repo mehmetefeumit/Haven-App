@@ -87,7 +87,7 @@ class MeshRadioCore(
      * [address] is the one dialled, for a link this phone made. A link taken
      * has no peer: a central's address is not the one it advertises under.
      */
-    override fun onLinkUp(link: Long, central: Boolean, attMtu: Int, address: String?) = input {
+    override fun onLinkUp(link: Long, central: Boolean, attMtu: Int, address: String?) = input(link) {
         if (!up) return@input null
         unlinked.remove(link)
         val peer = (if (central) address?.let(dialing::remove) else null) ?: NO_PEER
@@ -101,7 +101,7 @@ class MeshRadioCore(
         link
     }
 
-    override fun onLinkDown(link: Long) = input {
+    override fun onLinkDown(link: Long) = input(link) {
         unlinked.remove(link)
         if (links.remove(link) != null) engine.linkDown(link)
         null
@@ -112,14 +112,14 @@ class MeshRadioCore(
         null
     }
 
-    override fun onFrame(link: Long, frame: ByteArray) = input {
+    override fun onFrame(link: Long, frame: ByteArray) = input(link) {
         if (link !in links) return@input null
         engine.receive(link, frame)
         link
     }
 
     /** The platform's completion of the frame it took for [link]. */
-    override fun onSendDone(link: Long, ok: Boolean) = input {
+    override fun onSendDone(link: Long, ok: Boolean) = input(link) {
         val state = links[link] ?: return@input null
         if (ok && state.refused == null) state.due = null else drop(link)
         null
@@ -137,9 +137,17 @@ class MeshRadioCore(
         onWake()
     }
 
-    /** [act] answers the link the phone is held awake for: one that came up, or brought a frame. */
-    private fun input(act: () -> Long?) {
+    /**
+     * [act] answers the link the phone is held awake for: one that came up,
+     * or brought a frame. What is overdue is taken down before the input is
+     * judged: a frame's and a connection's times are the timer's, which does
+     * not count while the phone sleeps, and a newcomer must not be turned
+     * away for a place that has been free since. All but [own], the link the
+     * input is of: what it says of that link is read first, its time after.
+     */
+    private fun input(own: Long? = null, act: () -> Long?) {
         val left = left() ?: return
+        expire(clock(), own)
         pump(left, holdFor = act())
     }
 
@@ -194,8 +202,7 @@ class MeshRadioCore(
             }
             budget--
         }
-        // A spent budget gives the thread back and comes again at once.
-        val wake = if (budget == 0) 0 else engine.wakeInMs()
+        val wake = engine.wakeInMs()
         if (wake < 0) {
             running = false
             return
@@ -203,11 +210,14 @@ class MeshRadioCore(
         // What must come though the phone sleeps: the scan's restart, the
         // reminder, and the engine's wake, which is never later than its
         // deadline. A frame's and a connection's own times are not among
-        // them: each follows something that woke the phone, and late, they
-        // cost a link its place a little longer.
-        val asleep = listOfNotNull(scan.dueIn(now), deadline.reminderIn(left), if (budget == 0) left else wake).min()
+        // them: each follows something that woke the phone, and whatever
+        // wakes it next takes down what is overdue before it is judged.
+        val asleep = listOfNotNull(scan.dueIn(now), deadline.reminderIn(left), wake).min()
         val awake = links.values.mapNotNull { it.due } + unlinked.values
-        port.wakeAt((awake.map { it - now } + asleep + wake).min(), asleep)
+        // A spent budget gives the thread back and comes again at once, by
+        // the timer. The alarm is asked for all the same: the phone may
+        // sleep before the timer runs.
+        port.wakeAt(if (budget == 0) 0 else (awake.map { it - now } + asleep).min(), asleep)
         if (hold) port.holdAwake(minOf(wake + HOLD_MARGIN_MS, HOLD_CAP_MS))
     }
 
@@ -217,15 +227,15 @@ class MeshRadioCore(
     /** The links that can take a frame now: only for these does the engine hand one over. */
     private fun ready(): LongArray = links.filterValues { it.due == null }.keys.toLongArray()
 
-    private fun expire(now: Long) {
+    private fun expire(now: Long, own: Long? = null) {
         for ((link, at) in unlinked.entries.toList()) {
-            if (at > now) continue
+            if (at > now || link == own) continue
             unlinked.remove(link)
             port.close(link)
         }
         for ((link, state) in links.entries.toList()) {
             val due = state.due
-            if (due == null || due > now) continue
+            if (due == null || due > now || link == own) continue
             // No frame held: the one in flight never completed, and nothing else would free the link.
             val refused = state.refused
             if (refused == null) drop(link) else offer(link, state, refused, now)

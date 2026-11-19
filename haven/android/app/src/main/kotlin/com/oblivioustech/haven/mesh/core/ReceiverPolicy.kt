@@ -31,9 +31,16 @@ object ReceiverPolicy {
         refusal: () -> MeshStart?,
     ): ReceiverStep = when {
         !boot && taken() -> ReceiverStep.NONE
-        !wanted -> ReceiverStep.NONE
-        deadlineMs <= wallClockMs -> ReceiverStep.END
-        boot && refusal() == null -> ReceiverStep.START
+        ended(wanted, deadlineMs, wallClockMs) -> ReceiverStep.END
+        wanted && boot && refusal() == null -> ReceiverStep.START
         else -> ReceiverStep.NONE
     }
+
+    /**
+     * Whether what is stored is a mesh whose time is up. Asked again by
+     * whoever acts on [ReceiverStep.END], under the lock a start command
+     * takes and with the flag and the copy read afresh there: a start made
+     * since the broadcast was read has stored its own.
+     */
+    fun ended(wanted: Boolean, deadlineMs: Long, wallClockMs: Long): Boolean = wanted && deadlineMs <= wallClockMs
 }

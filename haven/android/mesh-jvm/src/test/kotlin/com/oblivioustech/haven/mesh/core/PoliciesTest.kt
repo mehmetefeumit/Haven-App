@@ -248,6 +248,45 @@ class PoliciesTest {
                 for (live in listOf(true, false)) assertNotEquals(ReceiverStep.START, alarm(wanted, deadline, live).first)
             }
         }
+
+        // The end is decided twice: by the broadcast, and again under the lock a start command takes, on what is
+        // stored then. The second asking is the first's own: a flag set and a time up, and nothing else.
+        for (wanted in listOf(true, false)) {
+            for (deadline in listOf(0, wallClock - 1, wallClock, wallClock + 1, wallClock + HOUR)) {
+                val ended = ReceiverPolicy.ended(wanted, deadline, wallClock)
+                assertEquals(wanted && deadline <= wallClock, ended, "wanted $wanted, deadline $deadline")
+                for (boot in listOf(true, false)) {
+                    assertEquals(ended, received(boot, wanted, deadline).first == ReceiverStep.END, "boot $boot, wanted $wanted, deadline $deadline")
+                }
+            }
+        }
+        // A start made between the two — the user turned the mesh on as a late boot broadcast came — is live by
+        // then, with a flag of its own: the end is not made at all, nor its notice posted beside a running mesh.
+        val starts = ServiceStarts<String>()
+        var wanted = true
+        var deadline = wallClock - HOUR
+        var ends = 0
+        fun end() = starts.idle {
+            if (ReceiverPolicy.ended(wanted, deadline, wallClock)) {
+                wanted = false
+                ends++
+            }
+        }
+        assertEquals(ReceiverStep.END, received(boot = true, wanted, deadline).first)
+        starts.command(1) { "the user's" }
+        end()
+        assertTrue(wanted && ends == 0, "a mesh that had just been started was ended for the one before it")
+        // That start stores its own deadline; once it has stopped, the same broadcast finds nothing to end …
+        deadline = wallClock + 12 * HOUR
+        starts.detach { wanted = false }
+        end()
+        assertEquals(0, ends)
+        // … and with no start made, a mesh whose time is up is ended, once.
+        wanted = true
+        deadline = wallClock
+        end()
+        end()
+        assertEquals(1, ends)
     }
 
     /**
