@@ -1653,8 +1653,14 @@ A job in `build-check.yml`:
 ### Lane pass-rate baseline (P0)
 
 - Read the last 20 `main` push runs of each newly gated E2E lane and of
-  `soak-nightly` through `gh api`, and record the pass/fail counts with their
-  run ids in the Stage 0 exit pull request.
+  `soak-nightly`, and record the pass/fail counts with their run ids.
+- **Recorded 2026-11-19** in `docs/mdk-v0.16/lane_baseline.md`, for every
+  `ci.yml` job, over the last 20 runs a newer push did not cancel (27 runs
+  back): 8 runs green, 12 red. The newly gated lanes failed in 2 of the 20
+  (`E2E Core Flow (iOS)` once, `Dependency Audit` once) beyond the 3 runs
+  today's gate already refuses, plus one `E2E Core Flow (Android, live-sync)`
+  failure inside one of those 3. No failing commit was re-run, so none is
+  shown to be flaky or real.
 - Stage 1's exit (`docs/mdk-v0.16/stage1a_nostr.md` §F.3) compares each lane's
   two Stage 1 runs against these counts. Cost: a few `gh api` calls; no build.
 
