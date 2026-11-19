@@ -2,8 +2,9 @@
 //!
 //! The invitee lists two inbox relays, the first of them gated as
 //! `relay.damus.io` gates gift wraps (`Fault::AuthGatedReads`: kind-1059
-//! reads refused to a client that has not authenticated, as the live plane
-//! never does (Security Rule 16); writes taken). The admin finds the invitee
+//! reads refused to a client that has not authenticated — and to the live
+//! inbox socket, which answers the challenge (Security Rule 16), since the
+//! gate accepts no answer; writes taken). The admin finds the invitee
 //! with the product's lookup on its key-package relay, takes the inbox list
 //! the invitee published, and invites it through its driver. The promise: the Welcome reaches every
 //! inbox relay, so the invitee's own live inbox plane reads it from the
@@ -11,14 +12,14 @@
 //! would sit there unread for good.
 //!
 //! Then both relays are gated and the admin invites again: the product's
-//! anonymous per-relay read of the inbox — the live plane's way, answering
-//! no challenge — is typed `refused` on both, both relays hold the Welcome,
-//! neither ever hands it to the invitee, and the invitee does not join. The
-//! Invitations page's own read answers the challenge (A5) and is not what
-//! this rig makes; haven-core's `own_inbox_read_e2e` proves it. Anchored
-//! on what the planes recorded — the gate's refusals, the relays' own
-//! acknowledgements of the Welcome, the deliveries they never
-//! made — and never on elapsed time.
+//! anonymous per-relay read of the inbox
+//! (`RelayManager::fetch_events_per_relay`, answering no challenge) is typed
+//! `refused` on both, both relays hold the Welcome, neither ever hands it to
+//! the invitee, and the invitee does not join. The Invitations page's own read
+//! answers the challenge (A5) and is not what this rig makes; haven-core's
+//! `own_inbox_read_e2e` proves it. Anchored on what the planes recorded — the
+//! gate's refusals, the relays' own acknowledgements of the Welcome, the
+//! deliveries they never made — and never on elapsed time.
 //!
 //! # The floor
 //!

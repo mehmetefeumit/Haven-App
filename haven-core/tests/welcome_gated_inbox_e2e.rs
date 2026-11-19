@@ -1,14 +1,15 @@
 //! A Welcome reaches an invitee whose first inbox relay takes gift wraps and
 //! never serves them to a client that has not authenticated — as
-//! `relay.damus.io` does under strfry's default `restrictedReadKinds` — and
-//! Haven never authenticates (Security Rule 16).
+//! `relay.damus.io` does under strfry's default `restrictedReadKinds` — even
+//! when the invitee's read answers no challenge.
 //!
 //! The founder's product driver sends the founding Welcome through its own
 //! publish pool to in-process relays; the gated one sits behind a gating
 //! recording front (`relay::recording_front`), which answers a gift-wrap read
 //! as strfry does and hands every write on. The invitee reads its inbox per
-//! relay through its own pool, as the Invitations page does, and joins from
-//! what it read.
+//! relay through an anonymous pool (`RelayManager::fetch_events_per_relay`;
+//! the Invitations page's own read answers the challenge,
+//! `own_inbox_read_e2e`), and joins from what it read.
 //!
 //! One test, one world: the loopback opt-in it installs is install-once. No
 //! wait here is a sleep: each awaits a product outcome, bounded by a budget

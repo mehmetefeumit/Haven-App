@@ -46,13 +46,16 @@ pub const PRODUCTION_DEFAULT_RELAYS: &[&str] = &[
 
 /// Production **inbox-seed** relay URLs: the account seed less every relay
 /// that withholds kind-1059 reads from a client that does not authenticate
-/// (NIP-42), as Haven never does (Security Rule 16).
+/// (NIP-42).
 ///
 /// A new account's kind-10050 list is seeded from this set, never from
 /// [`PRODUCTION_DEFAULT_RELAYS`]: an inviter delivers a Welcome to the
-/// invitee's inbox relays, and one on a relay that takes the gift wrap but
-/// will not serve it back is never read. `relay.damus.io` gates kinds 4 and
-/// 1059 that way (probed 2026-11-16,
+/// invitee's inbox relays, and the seed prefers relays that serve it back with
+/// no proof of identity: Haven's own inbox reads answer the challenge
+/// (Security Rule 16), but an inbox that needs it depends on authentication
+/// succeeding, and a client that does not answer — another app, an older
+/// Haven build — reads nothing there. `relay.damus.io` gates kinds 4 and 1059
+/// that way (probed 2026-11-16,
 /// `tests/fixtures/relay_read_gating_2026-11-16.json`) and serves every other
 /// kind, so it stays in the account seed and on the discovery plane.
 /// `relay.ditto.pub` runs other software than the strfry relays beside it

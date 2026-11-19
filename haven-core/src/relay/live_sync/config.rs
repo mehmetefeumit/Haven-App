@@ -243,10 +243,13 @@ pub const BACKOFF_MAX_SECS: u64 = 30;
 /// authenticates (seconds), doubled per refusal up to
 /// [`GATED_BACKOFF_MAX_SECS`].
 ///
-/// Haven never authenticates (Security Rule 16), so a re-issue changes nothing
-/// until the relay's policy does: the 30 s throttle would ask a relay that has
-/// said no, again, a hundred and twenty times an hour, each time across the
-/// whole inbox lookback.
+/// The inbox socket answers the challenge that came with the refusal and asks
+/// again the moment it has authenticated (`RepairQueue::note_authenticated`);
+/// what waits this backoff is a relay that sent no challenge, refused the
+/// answer or refuses the REQ after it, where a re-issue changes nothing until
+/// the relay's policy does: the 30 s throttle would ask a relay that has said
+/// no, again, a hundred and twenty times an hour, each time across the whole
+/// inbox lookback.
 pub const GATED_BACKOFF_MIN_SECS: u64 = 60;
 
 /// Cap on the gated backoff (seconds).

@@ -943,16 +943,18 @@ pub trait FanoutSend: Send + Sync {
     ) -> FanoutTargetOutcome;
 
     /// Offers a location's `event` to every one of `targets` — relay URLs
-    /// exactly as its record froze them — once, inside the location window,
-    /// and answers what the transport did, unchanged: one relay's `OK` is a
+    /// exactly as its record froze them — once (an authenticating transport
+    /// once more, as the identity, to a relay that answered `auth-required:`
+    /// when no relay took it), inside the location window, and answers what
+    /// the transport did, unchanged: one relay's `OK` is a
     /// success, and when no relay took it and a relay's `invalid:`,
     /// `blocked:` or unprefixed refusal blamed the timestamp it is
     /// [`RelayError::DeviceClockRejected`](crate::relay::RelayError::DeviceClockRejected)
     /// (`clock_skew::classify_publish_outcome`).
     ///
-    /// Haven's own transport, not MDK's relay client: one attempt a relay
-    /// where that client makes up to three, and the relay's words kept for
-    /// the clock verdict where it discards them
+    /// Haven's own transport, not MDK's relay client: one anonymous attempt
+    /// a relay where that client makes up to three, and the relay's words kept
+    /// for the clock verdict where it discards them
     /// (`docs/MDK_UPSTREAM_TRACKER.md` T-APP-TRANSPORT). No relay is taken
     /// for it ([`Self::take`]): a location never waits behind a commit's
     /// call, and never makes one wait.
