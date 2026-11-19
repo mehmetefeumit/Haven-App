@@ -229,8 +229,10 @@ mod tests {
     async fn it_refuses_every_other_kind() {
         let keys = Keys::generate();
         let signer = Nip42Signer::new(&keys);
+        // Kind 0 is refused too: `tests/nip42_identity_e2e.rs`, since
+        // `check_profile_privacy_boundaries.sh` holds kind-0 construction to
+        // the profile module everywhere under `src/`.
         for kind in [
-            Kind::Metadata,
             Kind::TextNote,
             Kind::Custom(444),
             Kind::Custom(445),

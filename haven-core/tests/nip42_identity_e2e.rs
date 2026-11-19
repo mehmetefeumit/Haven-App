@@ -526,3 +526,18 @@ async fn a_relay_haven_does_not_dial_is_sent_nothing() {
         AuthSendOutcome::NotSent
     );
 }
+
+#[tokio::test]
+async fn the_signer_refuses_a_profile_event() {
+    use nostr::signer::NostrSigner as _;
+
+    let me = identity();
+    let mut unsigned =
+        EventBuilder::auth("challenge", url("wss://relay.example.com")).build(me.keys.public_key());
+    unsigned.kind = Kind::Metadata;
+    unsigned.id = None;
+    assert!(
+        me.signer.sign_event(unsigned).await.is_err(),
+        "a kind-0 event was signed under the identity key"
+    );
+}
