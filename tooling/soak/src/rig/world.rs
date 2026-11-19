@@ -233,9 +233,13 @@ pub struct Changed {
     /// `None` when nothing was
     /// staged (queued, already so, unrecorded), and when the engine's drive
     /// took the record and those two do not name one commit: it was rolled
-    /// back or set aside, no record and no plane's store holds it, the plane
-    /// keeps no ledger (a test double), or the device recorded or handed over
-    /// more than one handshake of the circle meanwhile.
+    /// back or set aside, the plane keeps no ledger (a test double), or the
+    /// device recorded or handed over more than one handshake of the circle
+    /// meanwhile. A commit that no record and no plane's store holds is named
+    /// by nothing — unless exactly one other handshake of the circle was
+    /// handed over meanwhile, which is then named in its place: a scenario
+    /// that wipes a store or withholds an ack must not grade by this field
+    /// alone (`docs/SOAK_LANE.md`).
     pub commit: Option<Event>,
     /// The Welcomes the change's invitees were sent, whichever of the
     /// device's drives sent them: read off this call's publisher, and for an
