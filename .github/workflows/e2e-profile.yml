@@ -40,9 +40,13 @@
 # production server: the debug-only list override REPLACES the production
 # list (C1), and the egress guard refuses :443.
 #
-# This lane is a release gate (scripts/check_ci_verdict.sh): it is hermetic and
-# peer-free on the device, and it is the only lane that sees the download path
-# a redirecting server takes.
+# This lane is a release gate (scripts/ci/check_ci_verdict.sh): it is hermetic
+# and peer-free on the device, and it is the only lane that sees the download
+# path a redirecting server takes. Re-run a job only when its logs attribute
+# the failure to infrastructure: the photo UI job's verdict rc 3, or, for the
+# two API-level jobs, which print no verdict class, a red step outside the
+# drive or a device lost mid-drive. A harness red is fixed, never re-run to
+# green; any other red blocks the tag (docs/E2E_TROUBLESHOOTING.md mode 28).
 #
 # # Why the profile plane needs its OWN relays
 #
@@ -673,13 +677,13 @@ jobs:
     # rule): Build the runtime log scanner 10 + Build E2E test APK 25 +
     # Restore Gradle dependency cache 2 + Provision the Android SDK 11 + AVD
     # cache 10 + Create AVD snapshot 15 +
-    # the drive step 56 (derived there) + the uncapped work, taken
+    # the drive step 57 (derived there) + the uncapped work, taken
     # from e2e_profile_android until this job has runs of its own: 12.9 min
     # over 201 runs of that job and e2e-android.yml's (worst 30792258968), plus
     # this job's two blossom starts, under a minute measured locally -> 14
-    # = 143.
+    # = 144.
     # job-uncapped-minutes: 14 (201 runs of e2e_profile_android's family, worst 30792258968)
-    timeout-minutes: 143
+    timeout-minutes: 144
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
       # Profile plane. DISJOINT from HAVEN_E2E_RELAY above by construction —
@@ -805,10 +809,12 @@ jobs:
           restore-keys: |
             gradle-deps-${{ runner.os }}-
 
-      # No HAVEN_E2E_NO_BACKGROUND: the foreground service must exist, or the
-      # pause a pick causes would not take MapShell's Android hand-off branch
-      # (B1 builds the same way and runs a real foreground service under
-      # `flutter drive`). Build the test APK BEFORE the emulator boots (the OOM rule — the
+      # No HAVEN_E2E_NO_BACKGROUND, which is inert here anyway (only
+      # lib/main.dart reads it, and no integration target runs main()): the
+      # target sets kBackgroundSharingKey before it pumps the app, so MapShell
+      # starts the foreground service and a pick's pause takes the Android
+      # hand-off branch (B1 runs a real foreground service under `flutter
+      # drive` the same way). Build the test APK BEFORE the emulator boots (the OOM rule — the
       # Rust-NDK + Gradle peak must not coincide with a resident emulator +
       # containers; see docs/E2E_TROUBLESHOOTING.md). Staged at /tmp/scenario.apk;
       # run-single-avd-scenario.sh detects it and skips its own build.
@@ -959,14 +965,14 @@ jobs:
       #        downloads. Not measured yet: the API-level drive's p95 is
       #        2.7 min, and each trip a few seconds healthy; re-derive by the
       #        lane's 4.4x rule once runs exist.
-      #   46m  this step's inner deadline: scripts/ci/check_e2e_lane_budget.sh's
+      #   47m  this step's inner deadline: scripts/ci/check_e2e_lane_budget.sh's
       #        sum over run-photo-ui-scenario.sh, photo-picker-lib.sh and
       #        run-single-avd-scenario.sh with the drive timeout above
-      #        (`--explain` prints it: 2756 s, the 180 s allowance included).
-      #   56m  this step's timeout-minutes = deadline + 1 (kill grace) + 7
+      #        (`--explain` prints it: 2786 s, the 180 s allowance included).
+      #   57m  this step's timeout-minutes = deadline + 1 (kill grace) + 7
       #        (emulator-boot-timeout) + 2 (the action's own setup/teardown).
       - name: Run e2e_profile_ui_photo on the emulator
-        timeout-minutes: 56
+        timeout-minutes: 57
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
@@ -979,7 +985,7 @@ jobs:
             -noaudio -no-boot-anim -camera-back none
           disable-animations: true
           emulator-boot-timeout: 420
-          script: bash tooling/e2e/ci/run-with-deadline.sh 46m "e2e-profile android photo UI" -- bash -c 'bash tooling/e2e/ci/setup-network-guard.sh install && HAVEN_DRIVE_TIMEOUT=20m bash tooling/e2e/ci/run-photo-ui-scenario.sh integration_test/e2e/e2e_profile_ui_photo.dart'
+          script: bash tooling/e2e/ci/run-with-deadline.sh 47m "e2e-profile android photo UI" -- bash -c 'bash tooling/e2e/ci/setup-network-guard.sh install && HAVEN_DRIVE_TIMEOUT=20m bash tooling/e2e/ci/run-photo-ui-scenario.sh integration_test/e2e/e2e_profile_ui_photo.dart'
 
       # Publish what the guard OBSERVED (CI_HARDENING_BACKLOG C7). Runs BEFORE
       # the teardown: the report cross-checks its parse against the chain's own

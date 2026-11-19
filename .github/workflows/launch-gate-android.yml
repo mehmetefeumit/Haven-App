@@ -252,18 +252,22 @@ jobs:
 
       # The hand-off to the two launch jobs: the candidate APKs with their
       # sidecars, the prepared candidate and upgrade-source directories. No log
-      # is in it. One day is enough: only this run reads it.
+      # is in it. One day is enough: only this run reads it. Named by the run
+      # alone, never its attempt: "Re-run failed jobs" re-runs a launch job
+      # without this one, so the re-run must find the first attempt's hand-off,
+      # and a full re-run overwrites it.
       - name: Hand the candidate to the launch jobs
         timeout-minutes: 5
         uses: actions/upload-artifact@v6
         with:
-          name: launch-gate-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          name: launch-gate-candidate-${{ github.run_id }}
           path: |
             /tmp/launch-gate/candidate-apks
             /tmp/launch-gate/candidate
             /tmp/launch-gate/previous
             /tmp/launch-gate/baseline
           retention-days: 1
+          overwrite: true
           if-no-files-found: error
 
   launch-api34:
@@ -322,7 +326,7 @@ jobs:
         timeout-minutes: 5
         uses: actions/download-artifact@v6
         with:
-          name: launch-gate-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          name: launch-gate-candidate-${{ github.run_id }}
           path: /tmp/launch-gate
 
       - name: Point the runner at the baseline
@@ -517,7 +521,7 @@ jobs:
         timeout-minutes: 5
         uses: actions/download-artifact@v6
         with:
-          name: launch-gate-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          name: launch-gate-candidate-${{ github.run_id }}
           path: /tmp/launch-gate
 
       - name: Point the runner at the baseline
@@ -537,9 +541,10 @@ jobs:
         timeout-minutes: 11
         run: bash tooling/e2e/ci/provision-android-sdk.sh 35 google_apis x86_64
 
-      # Restore-only: other lanes share the api-34 key, and the AVD this job
-      # leaves behind is in airplane mode with error dialogs hidden — saved, it
-      # would be every other lane's emulator. A miss is created locally below.
+      # Restore-only: no lane writes the api-35 key yet, so this is a miss
+      # created locally below; and an AVD this job leaves behind is in airplane
+      # mode with error dialogs hidden — saved, it would be the next lane's
+      # emulator.
       - name: AVD cache
         uses: actions/cache/restore@v4
         id: avd-cache
@@ -646,7 +651,7 @@ jobs:
         timeout-minutes: 5
         uses: actions/download-artifact@v6
         with:
-          name: launch-gate-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          name: launch-gate-candidate-${{ github.run_id }}
           path: /tmp/launch-gate
 
       - name: Record the tested APK digests

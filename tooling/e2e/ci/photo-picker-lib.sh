@@ -21,10 +21,12 @@
 #
 # A resumed activity is read from `dumpsys activity activities` (ui-dump.py
 # resumed), a screen from `uiautomator dump` (ui-dump.py find), and every step
-# waits for the next activity rather than for time. On API 33+ any picker but
-# the Photo Picker is refused as a product failure: main() promises the scoped,
-# permission-free picker (C5), and a DocumentsUI or GET_CONTENT browser would
-# mean that promise broke.
+# waits for the next activity rather than for time. On API 33+ a picker KNOWN
+# to be the wrong one — DocumentsUI, the Photo Picker's GET_CONTENT alias, the
+# Play services picker — is a product failure: main() promises the scoped,
+# permission-free picker (C5), and those would mean that promise broke. An
+# activity this file does not know (a newer Photopicker module, say) is a
+# harness failure naming its component, never a product one.
 #
 # # Contract
 #
@@ -40,7 +42,9 @@
 #       PP_MSG says why in fixed words; PP_PICKER and PP_UCROP name the
 #       selector that matched (photopicker-rid | photopicker-desc |
 #       documentsui-rid | -, and rid | desc | -); PP_DWELL is the seconds from
-#       uCrop resumed to MainActivity resumed (-1 when not measured).
+#       just before the thumbnail tap to MainActivity seen resumed (-1 when not
+#       measured): it starts before uCrop can resume and ends after Haven
+#       did, so it is an UPPER bound on the time Haven was away.
 #
 # Nothing this prints or returns carries what a node says: a thumbnail's
 # description can hold a date. Component names and resource ids are developer
@@ -53,6 +57,8 @@ readonly PP_UCROP_ACTIVITY="${PP_PKG}/com.yalantis.ucrop.UCropActivity"
 readonly PP_PICKER_PKG_RE='^com(\.google)?\.android\.providers\.media(\.module)?$'
 readonly PP_PHOTO_PICKER_RE='^com(\.google)?\.android\.providers\.media(\.module)?/.*\.photopicker\.PhotoPickerActivity$'
 readonly PP_DOCUMENTSUI_PKG_RE='^com(\.google)?\.android\.documentsui$'
+readonly PP_GETCONTENT_RE='\.photopicker\.PhotoPickerGetContentActivity$'
+readonly PP_GMS_PKG='com.google.android.gms'
 readonly PP_OURS_RE='^com\.oblivioustech\.haven$'
 readonly PP_THUMB_RID='rid:^com(\.google)?\.android\.providers\.media(\.module)?:id/icon_thumbnail$'
 readonly PP_DOCUMENTSUI_THUMB_RID='rid:^com(\.google)?\.android\.documentsui:id/icon_thumb$'
@@ -76,6 +82,7 @@ PP_MSG=''
 PP_PICKER='-'
 PP_UCROP='-'
 PP_DWELL=-1
+PP_TAP_AT=''
 PP_RESUMED=''
 PP_FIND_SEL=''
 PP_FIND_DIGEST=''
@@ -115,9 +122,9 @@ pp_seed_gallery() {
 # disk, so a saved AVD snapshot never carries them into another lane.
 pp_clear_gallery() {
   local device="$1"
-  adb -s "${device}" shell \
+  timeout "${PP_ADB_SECS}" adb -s "${device}" shell \
     "content delete --uri content://media/external/images/media --where \"_display_name LIKE 'haven-gate-%'\"" >/dev/null 2>&1 || true
-  adb -s "${device}" shell rm -f "${PP_MEDIA_DIR}/${PP_FIXTURE_A}" "${PP_MEDIA_DIR}/${PP_FIXTURE_B}" >/dev/null 2>&1 || true
+  timeout "${PP_ADB_SECS}" adb -s "${device}" shell rm -f "${PP_MEDIA_DIR}/${PP_FIXTURE_A}" "${PP_MEDIA_DIR}/${PP_FIXTURE_B}" >/dev/null 2>&1 || true
   return 0
 }
 
@@ -170,16 +177,20 @@ _pp_tap() { # <device> <"x y">
   adb -s "$1" shell input tap "${x}" "${y}" >/dev/null 2>&1
 }
 
-_pp_is_picker() { # <component> <api>
-  if (( $2 >= 33 )); then
-    [[ "$1" =~ ${PP_PHOTO_PICKER_RE} ]]
-  else
-    [[ "$1" =~ ${PP_PHOTO_PICKER_RE} || "${1%%/*}" =~ ${PP_DOCUMENTSUI_PKG_RE} || "${1%%/*}" == com.google.android.gms ]]
-  fi
+# A picker other than the Photo Picker that a device can resolve Haven's
+# request to: DocumentsUI, the GET_CONTENT alias, the Play services picker.
+_pp_is_other_picker() { # <component>
+  [[ "${1%%/*}" =~ ${PP_DOCUMENTSUI_PKG_RE} || "$1" =~ ${PP_GETCONTENT_RE} || "${1%%/*}" == "${PP_GMS_PKG}" ]]
 }
 
-# Phase 1: the tap opened the picker. Anything else that took the front is
-# named; on API 33+ it is the broken Photo Picker promise.
+_pp_is_picker() { # <component> <api>
+  if [[ "$1" =~ ${PP_PHOTO_PICKER_RE} ]]; then return 0; fi
+  (( $2 < 33 )) && _pp_is_other_picker "$1"
+}
+
+# Phase 1: the tap opened the picker. A known wrong picker on API 33+ is the
+# broken Photo Picker promise; an activity nobody here knows is named for the
+# harness to learn.
 _pp_await_picker() { # <device> <dir> <api>
   local device="$1" dir="$2" api="$3" deadline answered=0
   deadline=$(( SECONDS + PP_PICKER_SECS ))
@@ -190,8 +201,12 @@ _pp_await_picker() { # <device> <dir> <api>
     answered=1
     [[ "${PP_RESUMED}" != "${PP_MAIN}" ]] || continue
     if _pp_is_picker "${PP_RESUMED}" "${api}"; then return 0; fi
-    PP_MSG="a picker other than the system Photo Picker opened (${PP_RESUMED}); main() promises the scoped Photo Picker on API ${api}"
-    return 1
+    if _pp_is_other_picker "${PP_RESUMED}"; then
+      PP_MSG="a picker other than the system Photo Picker opened (${PP_RESUMED}); main() promises the scoped Photo Picker on API ${api}"
+      return 1
+    fi
+    PP_MSG="harness: an activity the picker rules do not know took the front after the photo tap (${PP_RESUMED}); teach photo-picker-lib.sh what it is"
+    return 2
   done
   if (( ! answered )); then PP_MSG="adb never named a resumed activity within ${PP_PICKER_SECS} s of the tap"; return 3; fi
   PP_MSG="did not progress: the photo tap opened no picker within ${PP_PICKER_SECS} s"
@@ -220,6 +235,7 @@ _pp_pick_thumbnail() { # <device> <dir> <index> <api>
       return 2
     fi
     PP_PICKER="${names[$(( PP_FIND_SEL - 1 ))]}"
+    PP_TAP_AT="${SECONDS}"
     _pp_tap "${device}" "${PP_FIND_XY[${index}]}"
     return 0
   done
@@ -306,7 +322,7 @@ _pp_await_main() { # <device> <dir> <what>
 
 # pp_round <device> <dir> <pick|cancel> <index> <api> — after the caller's tap.
 pp_round() {
-  local device="$1" dir="$2" act="$3" index="$4" api="$5" rc=0 ucrop_at
+  local device="$1" dir="$2" act="$3" index="$4" api="$5" rc=0
   PP_MSG=''; PP_PICKER='-'; PP_UCROP='-'; PP_DWELL=-1
   _pp_await_picker "${device}" "${dir}" "${api}" || return
   if [[ "${act}" == cancel ]]; then
@@ -316,11 +332,10 @@ pp_round() {
   fi
   _pp_pick_thumbnail "${device}" "${dir}" "${index}" "${api}" || return
   _pp_await_ucrop "${device}" "${dir}" "${api}" || return
-  ucrop_at="${SECONDS}"
   _pp_crop "${device}" "${dir}" || return
   _pp_await_main "${device}" "${dir}" "uCrop" || rc=$?
   if (( rc == 1 )); then PP_MSG="uCrop did not return a result: ${PP_MSG}"; fi
   (( rc == 0 )) || return "${rc}"
-  PP_DWELL=$(( SECONDS - ucrop_at ))
+  PP_DWELL=$(( SECONDS - PP_TAP_AT ))
   return 0
 }

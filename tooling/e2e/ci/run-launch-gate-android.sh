@@ -87,12 +87,14 @@
 #   0  every leg passed
 #   1  product: the candidate crashed, stalled, lost data, showed the intro
 #      after onboarding, kept a debug log plant, or did not replace the
-#      previous release; a photo tap opened no picker or a picker other than
-#      the Photo Picker (API 33+), uCrop never returned, the photo save was
+#      previous release; a photo tap opened no picker or a known wrong one
+#      (DocumentsUI, the GET_CONTENT alias, the Play services picker; API
+#      33+), uCrop never returned, the photo save was
 #      refused or did not show within APPLY_SECS, or was gone after a cold
 #      restart
 #   2  usage or harness: a missing input; a picker screen the selectors do
-#      not know (its resource ids are printed); background sharing would not
+#      not know (its resource ids are printed) or an activity the picker
+#      rules do not know (its component is printed); background sharing would not
 #      turn on while Android showed the battery/notification snack the
 #      grants were meant to prevent; no leg reached MapShell
 #   3  infrastructure: the device went away, never booted, is not en-US,
@@ -1012,7 +1014,7 @@ finish() {
 # overrides only for scenarios that must run one out; every other verdict
 # comes from what the stub shows, not from time.
 # ---------------------------------------------------------------------------
-readonly SELF_TEST_FIXTURES=82
+readonly SELF_TEST_FIXTURES=84
 readonly ST_NAME='Quiet Wanderer Fixture'
 # What a picker thumbnail's description says in the stub: a date, which no
 # transcript or summary may carry.
@@ -1058,6 +1060,7 @@ resumed_line() {
     picker) case "${STUB_PICKER_COMPONENT:-photopicker}" in
         documentsui) c='com.google.android.documentsui/com.android.documentsui.picker.PickActivity' ;;
         getcontent) c='com.google.android.providers.media.module/com.android.providers.media.photopicker.PhotoPickerGetContentActivity' ;;
+        unknown) c='com.android.photopicker/com.android.photopicker.MainActivity' ;;
         *) c='com.google.android.providers.media.module/com.android.providers.media.photopicker.PhotoPickerActivity' ;;
       esac ;;
     ucrop) c="${PKG}/com.yalantis.ucrop.UCropActivity" ;;
@@ -1560,6 +1563,8 @@ print(json.dumps({k[0]: "Get Started", k[1]: "Create My Identity", k[2]: "Not no
   _scenario "DocumentsUI in place of the Photo Picker on API 34 is a product failure" 1 setup-held map STUB_PICKER_COMPONENT=documentsui
   _has "…naming the broken promise" "a picker other than the system Photo Picker opened (com.google.android.documentsui/com.android.documentsui.picker.PickActivity)"
   _scenario "the GET_CONTENT picker alias on API 34 is a product failure" 1 setup-held map STUB_PICKER_COMPONENT=getcontent
+  _scenario "an activity the picker rules do not know is a harness failure, not a product one" 2 setup-held map STUB_PICKER_COMPONENT=unknown
+  _has "…naming its component" "took the front after the photo tap (com.android.photopicker/com.android.photopicker.MainActivity)"
   _scenario "DocumentsUI below API 33 is the picker that API has, and passes" 0 setup-held map STUB_PICKER_COMPONENT=documentsui STUB_API=32
   _has "…by its own selector" "picker=documentsui-rid"
   _scenario "a photo that does not show within APPLY_SECS is a product failure" 1 setup-held map STUB_APPLY_DUMPS=999

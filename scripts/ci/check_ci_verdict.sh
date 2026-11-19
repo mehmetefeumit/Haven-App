@@ -21,11 +21,16 @@
 # (e2e-profile.yml), since 2026-11-16: hermetic (local relays, local Blossom
 # servers, no production host), peer-free on the device (Bob is in-process),
 # and the only lane that sees the picture DOWNLOAD path a redirecting server
-# takes and the photo trip through the real picker and uCrop with background
-# sharing on — the two halves of the photo bug no offline gate can see. Re-run
-# one of its jobs only when its verdict line says infrastructure or harness; a
-# product red blocks the tag. Android's launch gate is not in the list:
-# release-build.yml launches the tag's exact APKs itself.
+# takes — the half of the photo bug no offline gate can see — and that runs
+# the photo trip through the real picker and uCrop with background sharing on
+# against real servers (the Android launch gate runs that trip offline). Re-run
+# one of its jobs only when its logs attribute the failure to infrastructure:
+# the photo UI job's verdict rc 3, or, for the two API-level jobs, which print
+# no verdict class, a red step outside the drive or a device lost mid-drive. A
+# harness red is fixed in the harness, never re-run to green; any other red is
+# product and blocks the tag (docs/E2E_TROUBLESHOOTING.md failure mode 28).
+# Android's launch gate is not in the list: release-build.yml launches the
+# tag's exact APKs itself.
 # While a gate job is still running the gate waits, so a tag may be pushed
 # right after main.
 #

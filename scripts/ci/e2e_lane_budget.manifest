@@ -69,6 +69,9 @@ round-confirm pp_round/_pp_await_ucrop#1/pp_find#1/timeout:PP_DUMP_SECS#1 within
 round-crop pp_round/_pp_crop#1/pp_find#1/timeout:PP_DUMP_SECS#1 charge PP_UCROP_SECS + PP_DUMP_SECS + PP_ADB_SECS
 round-return pp_round/_pp_await_main#2/pp_resumed#1/timeout:PP_ADB_SECS#1 charge PP_RETURN_SECS + PP_ADB_SECS + PP_ADB_SECS
 round-return-cancel pp_round/_pp_await_main#1/pp_resumed#1/timeout:PP_ADB_SECS#1 within round-return a round either cancels or picks, and both wait for MainActivity in the same window
+# The fixtures out of the media store and off the disk: two bounded adb calls.
+clear-query pp_clear_gallery/timeout:PP_ADB_SECS#1 charge PP_ADB_SECS
+clear-files pp_clear_gallery/timeout:PP_ADB_SECS#2 charge PP_ADB_SECS
 
 lib tooling/e2e/ci/logscan-gate.sh
 # The log-privacy gate: the key-material floor and the identifier scanner over
@@ -110,6 +113,8 @@ sidecar-poll main#1/watch#1/sleep:MARKER_POLL_SECS#1 concurrent
 sidecar-round main#1/watch#1/play_round#1/lib:pp_round#1 concurrent
 sidecar-grace main#1/watch#1/play_round#1/grace_cause#1/sleep:1#1 concurrent
 drive main#1/bash:run-single-avd-scenario.sh#1 charge @
+# After a failed drive: is the device still there (infrastructure if not)?
+device-state main#1/timeout:ADB_STATE_SECS#1 charge ADB_STATE_SECS
 # The join after the drive, and the EXIT trap's (which spends its bound only
 # when the main shell never reached its own): one tick past each bound.
 join main#1/sleep:1#1 charge JOIN_SECS + 1
@@ -117,6 +122,7 @@ join-exit main#1/finish#1/sleep:1#1 charge JOIN_SECS + 1
 # The log-privacy gate over the sidecar log in the EXIT trap: a file already on
 # disk, no wait of its own (logscan-gate.sh).
 logscan main#1/finish#1/lib:logscan_gate#1 charge @
+clear-gallery main#1/finish#1/lib:pp_clear_gallery#1 charge @
 
 unit tooling/e2e/ci/run-b3-real-gps.sh
 strfry bash:start-strfry.sh#1 charge @

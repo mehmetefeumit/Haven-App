@@ -1789,10 +1789,10 @@ a UI dump.
 | product (1) | `the create screen never showed exactly one non-empty name field` | the gate cannot read the name it must later compare | check Flutter's EditText semantics in release; product until shown otherwise |
 | usage (2) | `'<dir>' has no app_en.arb` / `… has no usable commonSettings` | a launch-gate input is missing, or a required ARB key was renamed | fix the workflow, or the key list in run-launch-gate-android.sh |
 | product (1) | `photo round (identity): the photo save was refused after the crop (avatarPickerUpdateError): root cause A's class …` | with background sharing on, uCrop stopped MainActivity, MapShell handed the MLS session off, and the crop result (delivered before the app is resumed) could not be saved | product: the 2026-11-16 photo bug; never re-run |
-| product (1) | `photo round (…): did not progress: the photo tap opened no picker …` / `… a picker other than the system Photo Picker opened (<component>) …` / `uCrop did not return a result …` / `the photo did not show within 40 s …` / `the photo saved at MapShell was gone after a cold restart` | the photo trip broke on the shipped build — the picker not opening, the scoped Photo Picker promise broken on API 33+, uCrop stuck, a save slower than the product's worst case, or the photo not persisted | product |
+| product (1) | `photo round (…): did not progress: the photo tap opened no picker …` / `… a picker other than the system Photo Picker opened (<component>) …` (DocumentsUI, the GET_CONTENT alias or the Play services picker on API 33+) / `uCrop did not return a result …` / `the photo did not show within 40 s …` / `the photo saved at MapShell was gone after a cold restart` | the photo trip broke on the shipped build — the picker not opening, the scoped Photo Picker promise broken on API 33+, uCrop stuck, a save slower than the product's worst case, or the photo not persisted | product |
 | product (1) | `the app crashed (photo round …); NoClassDefFoundError: … AppCompatActivity` | uCrop could not load an androidx class the release build lacks (hnvn/flutter_image_cropper#573's shape) | fix the androidx dependencies in `haven/android/app/build.gradle.kts` |
 | product (1) | `background sharing did not turn on through Settings > Location with notifications granted and the battery exemption read back` | the enable path failed with nothing to excuse it | product |
-| harness (2) | `photo round (…): harness: no thumbnail selector matched the picker … (rids: …)` / `… uCrop's crop action was not found … (rids: …)` | a system image whose picker or uCrop the selectors do not know; the resource ids it DOES have are listed | update the selectors in `photo-picker-lib.sh` (and the `ui-dump.py` self-test) for that image; never re-run to green |
+| harness (2) | `photo round (…): harness: no thumbnail selector matched the picker … (rids: …)` / `… uCrop's crop action was not found … (rids: …)` / `… an activity the picker rules do not know took the front … (<component>)` | a system image whose picker or uCrop the selectors do not know; the resource ids or the component it DOES have are listed | update the selectors in `photo-picker-lib.sh` (and the `ui-dump.py` self-test) for that image; never re-run to green |
 | harness (2) | `harness precondition: background sharing did not turn on, and Android showed the battery or notification snack …` | the grants or the battery exemption did not take on this image | fix `photo_at_map`'s preconditions |
 | harness (2) | `no leg reached MapShell, so the photo save under background sharing … went untested` | no upgrade source onboarded to the map (the baseline leg skipped, or v0.1.13 unusable on this API level) | restore the baseline leg; the release is blocked until it runs |
 | infrastructure (3) | `emulator-5554 went offline (…)`, `the device locale is …`, `did not go offline within 30 s`, `the media store did not list both gallery fixtures within 60 s`, `pm grant … did not read back as granted` | nothing about the app is known | re-run the job |
@@ -1811,9 +1811,16 @@ that is not `<vMAJOR.MINOR.PATCH> <android|ios|all> <reason>`).
 
 ## Failure mode 28 — a public-profile photo job is red
 
-Two jobs of `e2e-profile.yml` touch the photo path, and both are release gate
-jobs (`scripts/ci/check_ci_verdict.sh`): re-run one only when its verdict says
-infrastructure or harness.
+The three jobs of `e2e-profile.yml` — the API-level scenario on Android and
+iOS, and the Android photo UI trip — are release gate jobs
+(`scripts/ci/check_ci_verdict.sh`), with one re-run policy: re-run a job only
+when its logs attribute the failure to infrastructure — the photo UI job's verdict rc 3;
+for the two API-level jobs, which print no verdict class, a red step outside
+the drive (an image pull, a host server that never started, Gradle
+resolution, the emulator or simulator boot) or a device lost mid-drive
+(`emulator-5554 went offline`, the iOS runner's infrastructure verdict). A
+harness red (rc 2) is fixed in the harness, never re-run to green. Any other
+red is product and blocks the tag.
 
 **`e2e_profile_android` / `e2e_profile_ios`** (the API-level scenario). The
 primary is the Primal mimic (`tooling/e2e/local-blossom --profile primal`):
@@ -1840,14 +1847,21 @@ pause=<yes|no> grace=<cause> dwell=<s>`, then `drive rc=… sidecar rc=…`.
 
 | rc | Line | Meaning | Action |
 |---|---|---|---|
-| 1 | `round <n> (pick): … a picker other than the system Photo Picker …` / `uCrop did not return a result` | the system trip broke | product |
-| 1 | `the excursion grace expired though uCrop was in front for only <s> s` | the grace that keeps the session through Haven's own photo trip ran out inside its own window | product (Area A's grace anchoring) |
-| 1 | `the drive failed (rc 1) with the sidecar's <n> round(s) all played` | the Dart side failed after the sidecar did its part: read the drive log — `the photo save was refused after the crop` is root cause A, a lifecycle timeout names the sequence it saw | product |
+| 1 | `round <n> (pick): … a picker other than the system Photo Picker … (<component>)` / `uCrop did not return a result` | the system trip broke: a KNOWN wrong picker (DocumentsUI, the GET_CONTENT alias, the Play services picker) on API 33+, or uCrop stuck | product |
+| 1 | `the excursion grace expired though Haven was away for at most <s> s` | the grace that keeps the session through Haven's own photo trip ran out inside its own window. `<s>` runs from just before the thumbnail tap to MainActivity seen resumed, an upper bound on the excursion, so a slow runner cannot fake this | product (Area A's grace anchoring) |
+| 1 | `the drive failed (rc 1), with the sidecar's <n> round(s) all played` | the Dart side failed after the sidecar did its part: read the drive log — `the photo save was refused after the crop` is root cause A, a lifecycle timeout names the sequence it saw | product |
+| 1 | `the drive hung past HAVEN_DRIVE_TIMEOUT and was killed (rc 124\|137)` | the drive did not finish inside its bound | product unless the drive log shows the runner or the device stalled; then infrastructure |
 | 2 | `MapShell never took its Android pause branch …` | background sharing was not on at the pause (or the C6 marker moved): root cause A's precondition was not exercised | fix the scenario or the marker; never re-run to green |
-| 2 | `harness: no thumbnail selector matched …(rids: …)` / `the marker sequence broke …` / `the drive passed but reported … round count` | the selectors, or the Dart↔sidecar protocol | fix the harness |
-| 3 | `the media store did not list both gallery fixtures …` / `emulator-5554 did not come online …` | infrastructure | re-run |
+| 2 | `harness: no thumbnail selector matched …(rids: …)` / `harness: an activity the picker rules do not know took the front … (<component>)` / `the marker sequence broke …` / `the drive passed but reported … round count` / `run-single-avd-scenario.sh refused its configuration (rc 2)` | the selectors or picker rules (a newer Photopicker module, say), the Dart↔sidecar protocol, or the lane's configuration | fix the harness; never re-run to green |
+| 3 | `the media store did not list both gallery fixtures …` / `emulator-5554 did not come online …` / `emulator-5554 was gone when the drive ended …` | infrastructure | re-run |
 
-A sidecar failure reds the job even when the drive passed. `HAVEN_E2E_NO_BACKGROUND`
+A sidecar failure reds the job even when the drive passed. When the sidecar's
+verdict is harness and the drive failed too, the line ends `; the drive also
+failed — …`: read the drive log, because a failure the harness did not cause
+(root cause A under a moved marker, say) is the product's. One residual: on the
+device the 302 to the media host is an `http` hop the debug loopback exemption
+admits; the release build's `https`-only hop is proven in-process
+(`haven-core` redirect tests) and on no device. `HAVEN_E2E_NO_BACKGROUND`
 is read only by `lib/main.dart`, which no integration target runs, so it is
 inert on every Android integration lane; this job leaves it out for clarity,
 and sets `kBackgroundSharingKey` itself so MapShell starts the foreground

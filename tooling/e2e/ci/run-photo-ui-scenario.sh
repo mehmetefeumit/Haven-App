@@ -24,18 +24,26 @@
 # marker between the ARM and the return (C6: `[MapShell] pause: background
 # handoff branch`) — the precondition of root cause A, true before and after
 # the fix — and reads the grace marker (`[MapShell] handoff grace: ended by
-# <cause>`): a grace that EXPIRED while uCrop was in front for less than the
-# grace minus a margin is a product failure.
+# <cause>`): a grace that EXPIRED although Haven was away for less than the
+# grace minus a margin is a product failure. "Away" is measured from just
+# before the thumbnail tap to MainActivity seen resumed — an upper bound, since
+# the grace starts at the pause uCrop causes after that tap — so a slow runner
+# that sees uCrop late can only lengthen it, never fake an early expiry.
 #
 # Verdicts (one `::error::` line names the round and the selector):
 #   0  the drive passed and every round it armed was played and recorded
-#   1  product: a picker other than the Photo Picker, uCrop never returned,
-#      the grace expired early, or the drive failed while the sidecar was fine
-#   2  harness: a screen the selectors do not know, the marker sequence
-#      broken, the pause branch never taken (the precondition unmet), or a
-#      passing drive that never reported its rounds
-#   3  infrastructure: no device, or the gallery never indexed
-# A sidecar failure reds the lane even when the drive passed.
+#   1  product: a known wrong picker (DocumentsUI, the GET_CONTENT alias, the
+#      Play services picker), uCrop never returned, the grace expired early,
+#      or the drive failed or hung past HAVEN_DRIVE_TIMEOUT (124/137) while
+#      the sidecar was fine and the device was still there
+#   2  harness: a screen or an activity the selectors do not know, the marker
+#      sequence broken, the pause branch never taken (the precondition unmet),
+#      a passing drive that never reported its rounds, or
+#      run-single-avd-scenario.sh refusing its configuration (its rc 2)
+#   3  infrastructure: no device, the device gone when the drive ended, or the
+#      gallery never indexed — re-run
+# A sidecar failure reds the lane even when the drive passed; when the drive
+# failed too, the verdict line says so, since that failure may be the product's.
 #
 # The sidecar log (/tmp/photo-sidecar.log) is fixed vocabulary: round
 # numbers, selector names, cause words, seconds. It passes the log-privacy
@@ -57,8 +65,9 @@ source "${SCRIPT_DIR}/photo-picker-lib.sh"
 
 readonly DEVICE='emulator-5554'
 readonly SINGLE_AVD="${SCRIPT_DIR}/run-single-avd-scenario.sh"
-readonly NEEDLE_DIR=/tmp/haven-soak/needles
-# The paths are fixed in a lane; the self-test moves them into its sandbox.
+# The paths are fixed in a lane; the self-test moves them into its sandbox, so
+# it shares no file with another runner's self-test run beside it.
+readonly NEEDLE_DIR="${PHOTO_UI_NEEDLE_DIR:-/tmp/haven-soak/needles}"
 readonly LOGCAT="${PHOTO_UI_LOGCAT:-/tmp/adb-logcat.log}"
 readonly SIDECAR_LOG="${PHOTO_UI_SIDECAR_LOG:-/tmp/photo-sidecar.log}"
 readonly WORK="${PHOTO_UI_WORK:-/tmp/photo-ui}"
@@ -66,13 +75,16 @@ readonly STOP="${WORK}/stop"
 readonly WATCH_VERDICT="${WORK}/verdict"
 readonly LOGSCAN_REPORT="${WORK}-logscan.ndjson"
 readonly DEVICE_SECS=60
+readonly ADB_STATE_SECS=10
 readonly MARKER_POLL_SECS=1
 readonly GRACE_MARKER_SECS="${PHOTO_UI_GRACE_MARKER_SECS:-10}"
 readonly JOIN_SECS="${PHOTO_UI_JOIN_SECS:-30}"
 # Mirrors haven/lib/src/services/system_activity_excursions.dart's
 # kSystemActivityHandoffGrace; the self-test pins the two together.
 readonly GRACE_SECS=20
-readonly GRACE_MARGIN_SECS=5
+# The self-test shrinks the margin so a few seconds of "uCrop seen late" can
+# stand for the real thing; no lane sets it.
+readonly GRACE_MARGIN_SECS="${PHOTO_UI_GRACE_MARGIN_SECS:-5}"
 readonly ARM_RE='\[pp\] ARM round=[0-9]+ act=(pick:[0-9]+|cancel)'
 readonly END_RE='\[pp\] END rounds=[0-9]+'
 readonly PAUSE_MARKER='[MapShell] pause: background handoff branch'
@@ -137,7 +149,7 @@ play_round() {
       return 2
     fi
     if [[ "${cause}" == expired ]] && (( PP_DWELL < GRACE_SECS - GRACE_MARGIN_SECS )); then
-      watch_verdict 1 "round ${round} (pick): the excursion grace expired though uCrop was in front for only ${PP_DWELL} s of its ${GRACE_SECS} s"
+      watch_verdict 1 "round ${round} (pick): the excursion grace expired though Haven was away for at most ${PP_DWELL} s of its ${GRACE_SECS} s"
       return 1
     fi
   else
@@ -191,6 +203,17 @@ watch() {
 RC=''
 MSG=''
 WATCH_PID=''
+
+# drive_verdict <rc> — DRIVE_CLASS and DRIVE_WHY for run-single-avd-scenario.sh's
+# exit: 2 is its own refusal of the configuration, 124/137 the drive killed at
+# HAVEN_DRIVE_TIMEOUT, anything else a failed drive.
+drive_verdict() {
+  case "$1" in
+    2) DRIVE_CLASS=2; DRIVE_WHY="run-single-avd-scenario.sh refused its configuration (rc 2)" ;;
+    124|137) DRIVE_CLASS=1; DRIVE_WHY="the drive hung past HAVEN_DRIVE_TIMEOUT and was killed (rc $1): product unless its log shows the runner or the device stalled" ;;
+    *) DRIVE_CLASS=1; DRIVE_WHY="the drive failed (rc $1)" ;;
+  esac
+}
 
 finish() {
   local gate_rc=0 deadline
@@ -256,10 +279,22 @@ main() {
   IFS=$'\t' read -r wrc wmsg < "${WATCH_VERDICT}" || { wrc=2; wmsg="the sidecar left no verdict"; }
   [[ ! -f "${WORK}/played" ]] || read -r played reported < "${WORK}/played"
   record "drive rc=${drive_rc} sidecar rc=${wrc} rounds played=${played}"
-  if (( wrc != 0 )); then
-    RC="${wrc}"; MSG="${wmsg}$( (( drive_rc == 0 )) && printf ' (the drive itself passed: a sidecar failure is red)')"
+  local state=''
+  if (( drive_rc != 0 )); then
+    drive_verdict "${drive_rc}"
+    state="$(timeout "${ADB_STATE_SECS}" adb -s "${DEVICE}" get-state 2>/dev/null | tr -d '\r' || true)"
+  fi
+  if (( drive_rc != 0 )) && [[ "${state}" != device ]]; then
+    RC=3; MSG="${DEVICE} was gone when the drive ended (rc ${drive_rc}): infrastructure, re-run the job"
+  elif (( wrc != 0 )); then
+    RC="${wrc}"
+    if (( drive_rc == 0 )); then
+      MSG="${wmsg} (the drive itself passed: a sidecar failure is red)"
+    else
+      MSG="${wmsg}; the drive also failed — ${DRIVE_WHY}: read its log, a failure the sidecar's did not cause is product"
+    fi
   elif (( drive_rc != 0 )); then
-    RC="${drive_rc}"; MSG="the drive failed (rc ${drive_rc}) with the sidecar's ${played} round(s) all played"
+    RC="${DRIVE_CLASS}"; MSG="${DRIVE_WHY}, with the sidecar's ${played} round(s) all played"
   elif [[ "${reported}" != "${played}" ]]; then
     RC=2; MSG="the drive passed but reported ${reported/#-1/no} round count where the sidecar played ${played}"
   else
@@ -274,7 +309,7 @@ main() {
 # side — markers in a logcat file, the tap that opens the picker, and the wait
 # for Haven to be back. Bounds are shrunk through the PHOTO_* overrides only.
 # ---------------------------------------------------------------------------
-readonly SELF_TEST_FIXTURES=26
+readonly SELF_TEST_FIXTURES=36
 
 _st_stub_adb() { # <bin dir>
   cat > "$1/adb" <<'STUB'
@@ -287,9 +322,16 @@ get() { cat "${S}/$1" 2>/dev/null || true; }
 put() { printf '%s\n' "$2" > "${S}/$1"; }
 log() { printf '11-16 12:00:00.000  4242  4242 I flutter : %s\n' "$1" >> "${PHOTO_UI_LOGCAT}"; }
 pnode() { printf '<node index="0" text="" resource-id="%s" class="android.widget.ImageView" package="%s" content-desc="%s" clickable="true" enabled="true" bounds="%s"/>' "$2" "$1" "$3" "$4"; }
+# The screen as the host sees it. STUB_UCROP_LATE_SECS keeps the picker in
+# front that long after the thumbnail tap, as a slow device would.
+seen() {
+  local scr; scr="$(get screen)"
+  if [[ "${scr}" == ucrop && -n "$(get ucrop_at)" ]] && (( $(date +%s) < $(get ucrop_at) )); then scr=picker; fi
+  printf '%s' "${scr}"
+}
 screen_xml() {
   local root="${PKG}" body=''
-  case "$(get screen)" in
+  case "$(seen)" in
     picker) root=com.google.android.providers.media.module
       local rid="${root}:id/icon_thumbnail"
       [[ -z "${STUB_PICKER_UNKNOWN:-}" ]] || rid="${root}:id/unknown_grid_item"
@@ -301,7 +343,7 @@ screen_xml() {
 }
 resumed() {
   local c="${PKG}/.MainActivity"
-  case "$(get screen)" in
+  case "$(seen)" in
     picker) c='com.google.android.providers.media.module/com.android.providers.media.photopicker.PhotoPickerActivity' ;;
     ucrop) c="${PKG}/com.yalantis.ucrop.UCropActivity" ;;
   esac
@@ -309,6 +351,7 @@ resumed() {
 }
 case "${1:-}" in
   wait-for-device) exit 0 ;;
+  get-state) [[ -z "${STUB_DEVICE_LOST:-}" ]] || exit 1; echo device; exit 0 ;;
   push) cp "$2" "${S}/media.$(basename "$3")"; exit 0 ;;
   exec-out) screen_xml; exit 0 ;;
   shell) shift ;;
@@ -331,9 +374,10 @@ case "${cmd}" in
   "dumpsys activity activities") resumed ;;
   "input keyevent 4") [[ "$(get screen)" == picker ]] && put screen main ;;
   "input tap "*) read -r _ _ x y <<<"${cmd}"
-    case "$(get screen)" in
+    case "$(seen)" in
       picker) (( y >= 600 && y <= 900 )) || exit 0
         [[ -n "${STUB_NO_PAUSE:-}" ]] || log '[MapShell] pause: background handoff branch'
+        put ucrop_at $(( $(date +%s) + ${STUB_UCROP_LATE_SECS:-0} ))
         put screen ucrop ;;
       ucrop) (( x >= 900 )) || exit 0
         [[ -n "${STUB_UCROP_NEVER:-}" ]] && exit 0
@@ -355,7 +399,7 @@ _st_stub_drive() { # <ci dir>
 S="${STUB}"
 log() { printf '11-16 12:00:00.000  4242  4242 I flutter : %s\n' "$1" >> "${PHOTO_UI_LOGCAT}"; }
 back() { # Haven resumed again, within a bound
-  local deadline=$(( SECONDS + 20 ))
+  local deadline=$(( SECONDS + 40 ))
   while (( SECONDS < deadline )); do
     [[ "$(cat "${S}/screen" 2>/dev/null)" == main ]] && return 0
     sleep 0.1
@@ -400,7 +444,8 @@ self_test() {
     rc=0
     out="$(env PATH="${tmp}/bin:${PATH}" STUB="${tmp}/stub" \
       PHOTO_UI_LOGCAT="${tmp}/stub/logcat.log" PHOTO_UI_SIDECAR_LOG="${tmp}/stub/sidecar.log" PHOTO_UI_WORK="${tmp}/work" \
-      PHOTO_MEDIA_SECS=2 PHOTO_PICKER_SECS=3 PHOTO_UCROP_SECS=3 PHOTO_RETURN_SECS=3 PHOTO_UI_GRACE_MARKER_SECS=2 PHOTO_UI_JOIN_SECS=10 \
+      PHOTO_UI_NEEDLE_DIR="${tmp}/needles" \
+      PHOTO_MEDIA_SECS=10 PHOTO_PICKER_SECS=10 PHOTO_UCROP_SECS=10 PHOTO_RETURN_SECS=10 PHOTO_UI_GRACE_MARKER_SECS=5 PHOTO_UI_JOIN_SECS=30 \
       HAVEN_LOGSCAN=true HAVEN_LOGSCAN_BIN="${LOGSCAN_FAKE_BIN}" FAKE_SEAL_ARGV="${tmp}/seal.argv" \
       GITHUB_RUN_ID="photo-ui-self-test-$$-${ran}" GITHUB_RUN_ATTEMPT=1 "$@" \
       bash "${tmp}/ci/run-photo-ui-scenario.sh" integration_test/e2e/e2e_profile_ui_photo.dart 2>&1)" || rc=$?
@@ -438,7 +483,13 @@ self_test() {
   _scenario "a pick round without MapShell's pause branch is a harness failure (precondition unmet)" 2 STUB_NO_PAUSE=1
   _has "…naming the precondition" "MapShell never took its Android pause branch"
   _scenario "a grace that expired while uCrop was in front briefly is a product failure" 1 STUB_GRACE=expired
-  _has "…naming the dwell" "the excursion grace expired though uCrop was in front for only"
+  _has "…naming the dwell" "the excursion grace expired though Haven was away for at most"
+  # A slow device: uCrop seen 6 s after the thumbnail tap. The dwell runs from
+  # the tap, so it covers that wait and an expired grace is not called early
+  # (the margin is shrunk to a 3 s threshold to stand for the real 15 s).
+  _scenario "uCrop seen late after the tap: an expired grace is not an early expiry" 0 STUB_GRACE=expired \
+    STUB_UCROP_LATE_SECS=6 PHOTO_UCROP_SECS=20 PHOTO_UI_GRACE_MARGIN_SECS=17
+  _has "…and the round records the expired grace with the dwell from the tap" "grace=expired dwell="
   _scenario "a grace ended by the resume or any other cause passes" 0 STUB_GRACE=superseded
   _scenario "a skipped round number breaks the marker sequence, rc 2" 2 STUB_ROUND_SKEW=1
   _has "…named as such" "the marker sequence broke: round 1 was armed where round 0 was due"
@@ -448,6 +499,14 @@ self_test() {
   _has "…named as such" "uCrop did not return a result"
   _scenario "a drive that fails with every round played keeps the drive's verdict" 1 STUB_DRIVE_RC=1
   _has "…named as the drive's" "the drive failed (rc 1)"
+  _scenario "a drive killed at its timeout is a product failure named as a hang" 1 STUB_DRIVE_RC=124
+  _has "…named as such" "the drive hung past HAVEN_DRIVE_TIMEOUT and was killed (rc 124)"
+  _scenario "the AVD runner refusing its configuration is a harness failure" 2 STUB_DRIVE_RC=2
+  _has "…named as such" "run-single-avd-scenario.sh refused its configuration"
+  _scenario "a device gone when the drive failed is infrastructure" 3 STUB_DRIVE_RC=1 STUB_DEVICE_LOST=1
+  _has "…named as such" "was gone when the drive ended (rc 1)"
+  _scenario "a harness verdict beside a failed drive names the drive's failure too" 2 STUB_NO_PAUSE=1 STUB_ROUNDS="cancel pick:0" STUB_DRIVE_RC=1
+  _has "…so a product failure under it is not lost" "the drive also failed — the drive failed (rc 1)"
   _scenario "a passing drive whose sidecar failed is red" 1 STUB_GRACE=expired STUB_ROUNDS="cancel pick:0"
   _has "…saying the drive itself passed" "a sidecar failure is red"
   _scenario "a passing drive that never reports its rounds is a harness failure" 2 STUB_NO_END=1
