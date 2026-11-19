@@ -291,6 +291,14 @@ readonly MARK_ACT2_DONE='[b5] ACT2_DONE'
 # ACT2_CYCLE: see the gate on `wedged=` in b5_assert_act2.
 readonly MARK_ACT2_WEDGED='[b5] ACT2_WEDGED'
 readonly MARK_COMPLETE='[b5] SEQUENCE_COMPLETE'
+# CONTEXT for an app-op phase that never armed (`b5_arming_context`), never a
+# verdict. Play services reaping the process the platform's location provider
+# lives in (the B1 lane reads the same line), and Haven's own record of a
+# faulted position stream — the exception TYPE, never its message. The second
+# MUST match `location_access_provider.dart` VERBATIM; the self-test reads it
+# there.
+readonly MARK_GMS_PROCESS_DEATH='ActivityManager: Process com.google.android.gms'
+readonly MARK_STREAM_ERROR='[LocationAccess] position stream error: '
 
 # The app-ops this lane denies and restores. `android:fine_location` is the
 # one AOSP notes for an app holding ACCESS_FINE_LOCATION
@@ -449,6 +457,52 @@ b5_marker_number() {
   { grep -aF -- "${marker}" "${logfile}" 2>/dev/null \
       | grep -aoE "${key}=[0-9]+" \
       | grep -aoE '[0-9]+' | LC_ALL=C sort -n | tail -1; } || true
+}
+
+# b5_arming_context <logfile> — what disturbed the position stream before the
+# app-op phase's arming attempt ended, as two fixed-word lines.
+#
+# Two different failures leave the same `streamAgeMs=-1`: a stream that
+# ERRORED (the provider's process died under it, or the platform reported
+# location off for an instant) and one that was registered and stayed SILENT.
+# CI jobs 132302215968 and 135443107159 were one of each, and telling them
+# apart took the whole capture.
+#
+# COUNTS and exception class names only, never a captured line (Security
+# Rule 15): the class is cut at the first character a Dart identifier cannot
+# hold, so nothing a line carries after it can ride out.
+#
+# The window is the capture up to the arming line — or, where that was never
+# printed, up to the end of ACT 1. It opens at the capture's first line, not at
+# ACT 1's PHASE line: the stream is subscribed before the drive target reports
+# anything, and in job 132302215968 the fault came first.
+b5_arming_context() {
+  local logfile="${1:-}"
+  [[ -f "${logfile}" ]] || return 0
+  awk -v armed="${MARK_APPOPS_ARMED}" -v revoke="${MARK_AWAIT_REVOKE}" \
+      -v act2="${MARK_PHASE} act=2 " -v gms="${MARK_GMS_PROCESS_DEATH}" \
+      -v err="${MARK_STREAM_ERROR}" '
+    index($0, armed) || index($0, revoke) || index($0, act2) { exit }
+    index($0, gms) && index($0, "has died") { deaths++ }
+    (at = index($0, err)) {
+      cls = substr($0, at + length(err))
+      sub(/[^A-Za-z0-9_].*$/, "", cls)
+      if (cls == "") cls = "unnamed"
+      errors[cls]++
+    }
+    # A leading sort key, cut off below: `for (… in …)` has no order of its
+    # own, and the answer must read the same on every run.
+    END {
+      printf "0\t  Play-services process deaths before arming: %s (%d)\n",
+        (deaths ? "yes" : "no"), deaths
+      for (cls in errors) {
+        printf "1\t  position stream errors before arming: %s x%d\n",
+          cls, errors[cls]
+        named = 1
+      }
+      if (!named) print "1\t  position stream errors before arming: none"
+    }
+  ' "${logfile}" 2>/dev/null | LC_ALL=C sort | cut -f2- || true
 }
 
 # b5_phase_pid <logfile> <act> — echoes the pid recorded by the `[b5] PHASE
@@ -792,10 +846,21 @@ was EMPTY. Arming then proved a door the app-op cannot move, so it is not the \
   #      emulator: a fresh one-shot read refuses with the permission granted
   #      too (CI run 32661622879), so counting its refusals proved nothing.
   if b5_has_marker "${log}" "${MARK_APPOPS_NOT_OBSERVED}"; then
-    b5_finding "the app's position stream went on delivering fixes for the \
-whole app-op observation window ('${MARK_APPOPS_NOT_OBSERVED}'), having been \
-delivering at arming. The app-op read back as denied but had no effect on \
-this app."
+    # Worded off the PARSED arming age. "Went on delivering" is a claim about
+    # a stream that was delivering, and one that never held a fix prints this
+    # marker too — it has no fix whose age could reach the silence threshold.
+    if [[ -n "${appops_stream_age}" ]]; then
+      b5_finding "the app's position stream went on delivering fixes for the \
+whole app-op observation window ('${MARK_APPOPS_NOT_OBSERVED}'), having held \
+one ${appops_stream_age}ms old at arming. The app-op read back as denied but \
+had no effect on this app."
+    else
+      b5_finding "the app's position stream never showed the silence the \
+app-op observation waits for ('${MARK_APPOPS_NOT_OBSERVED}'), but no arming \
+age was recorded for it, so it was never established to be delivering: a \
+stream that holds no fix at all cannot go silent. This is NOT evidence that \
+the app-op had no effect."
+    fi
   elif ! b5_has_marker "${log}" "${MARK_APPOPS_OBSERVED}"; then
     b5_finding "neither '${MARK_APPOPS_OBSERVED}' nor \
 '${MARK_APPOPS_NOT_OBSERVED}' was recorded — the app-op phase never reached \
@@ -1590,6 +1655,63 @@ type=LocationServiceException streamAgeMs=52000" \
     fails=1
   fi
 
+  # (36b) …and a stream that held NO fix at arming is not called one that
+  #       went on delivering. CI job 135443107159: `streamAgeMs=-1`, not one
+  #       fix in the whole phase, and the finding said the denial had no
+  #       effect on a stream "delivering at arming".
+  sed "s/streamAgeMs=4200 /streamAgeMs=-1 /" "${tmp}/notobserved.log" \
+    > "${tmp}/notobserved-cold.log"
+  _assert_mutated 36b "${tmp}/notobserved-cold.log" \
+    "${MARK_APPOPS_ARMED} streamAgeMs=-1 "
+  rc=0
+  b5_run_oracle "${tmp}/notobserved-cold.log" "${tmp}/oracle-baseline.ids" \
+    "${tmp}/oracle-new.ids" 1 "${tmp}/oracle-appops.ids" deny allow \
+    >/dev/null || rc=$?
+  _case "a stream that never held a fix still fails the oracle" 1 "${rc}"
+  rc=0
+  [[ "${B5_FINDINGS[*]}" == *"NOT evidence that the app-op had no effect"* \
+     && "${B5_FINDINGS[*]}" != *"went on delivering fixes"* ]] || rc=1
+  _case "…and is not reported as a denial that had no effect" 0 "${rc}"
+
+  # --- b5_arming_context --------------------------------------------------
+  # Job 132302215968's shape, in logcat's own `threadtime` format: the fault
+  # lands BEFORE ACT 1's PHASE line, the provider's process dies beside it,
+  # and ACT 2's process faults on the revoked permission afterwards. Only the
+  # first two belong to the arming attempt. The second line shares the death's
+  # prefix and is not one; the second error line carries text after the class,
+  # which must not survive.
+  printf '%s\n' \
+    "11-14 03:00:02.100   612   640 I ActivityManager: Process com.google.android.gms.persistent (pid 2301) has died: fg  SVC" \
+    "11-14 03:00:02.180   612   640 W ActivityManager: Process com.google.android.gms.unstable has crashed too many times, killing!" \
+    "11-14 03:00:03.300  5098  5098 I flutter : ${MARK_STREAM_ERROR}LocationServiceDisabledException" \
+    "11-14 03:00:03.900  5098  5098 I flutter : ${MARK_STREAM_ERROR}LocationServiceDisabledException: text a message would carry" \
+    "11-14 03:00:04.842  5098  5098 I flutter : ${MARK_PHASE} act=1 perm=whileInUse pid=5098" \
+    "11-14 03:01:27.500  5098  5098 I flutter : ${MARK_APPOPS_ARMED} streamAgeMs=-1 eligible=1 readMs=-1" \
+    "11-14 03:02:10.000   612   640 I ActivityManager: Process com.google.android.gms.persistent (pid 2399) has died: fg  SVC" \
+    "11-14 03:06:00.000  6681  6681 I flutter : ${MARK_STREAM_ERROR}PermissionDeniedException" \
+    "11-14 03:06:01.000  6681  6681 I flutter : ${MARK_PHASE} act=2 perm=denied pid=6681" \
+    > "${tmp}/arming-errored.log"
+  _eq_case "an errored stream is attributed by count and class, nothing else" \
+    "  Play-services process deaths before arming: yes (1)
+  position stream errors before arming: LocationServiceDisabledException x2" \
+    "$(b5_arming_context "${tmp}/arming-errored.log")"
+
+  # Job 135443107159's shape: nothing at all before arming. The SILENT entry,
+  # and the answer has to say so rather than print nothing.
+  grep -avF -e 'has died' -e 'LocationServiceDisabledException' \
+    "${tmp}/arming-errored.log" > "${tmp}/arming-silent.log"
+  _eq_case "a silent stream reads as no death and no error" \
+    "  Play-services process deaths before arming: no (0)
+  position stream errors before arming: none" \
+    "$(b5_arming_context "${tmp}/arming-silent.log")"
+
+  # The marker is only worth counting while it is the line the app prints.
+  rc=0
+  grep -qF -- "'${MARK_STREAM_ERROR}\${next.error.runtimeType}'" \
+    "${SCRIPT_DIR}/../../../haven/lib/src/providers/location_access_provider.dart" \
+    || rc=1
+  _case "the stream-error marker is the one the app prints" 0 "${rc}"
+
   # (37) THE HEADLINE — a coordinate produced after access was withdrawn from
   #      the live process. The defect `pm revoke` structurally cannot reach,
   #      and therefore the one finding in this phase that must be named rather
@@ -2336,6 +2458,11 @@ fail() {
   echo "---- app-op read-backs ----" >&2
   cat "${APPOPS_DENIED_DUMP}" "${APPOPS_RESTORED_DUMP}" 2>/dev/null \
     | sed 's/^/    /' >&2 || echo "(no appops dumps captured)" >&2
+  if [[ -f "${LOGCAT_FILE}" && -z "$(b5_marker_number "${LOGCAT_FILE}" \
+          "${MARK_APPOPS_ARMED}" 'streamAgeMs')" ]]; then
+    echo "---- the app-op phase did not arm: what reached the stream ----" >&2
+    b5_arming_context "${LOGCAT_FILE}" >&2
+  fi
   # Which providers the platform has and which are mocked; never the position
   # (Security Rule 15 — the point is synthetic, and still a needle).
   echo "---- emulator location providers ----" >&2

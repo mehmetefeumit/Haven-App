@@ -240,8 +240,9 @@ const String kAppOpsArmedMarker = '[b5] APPOPS_ARMED';
 const String kAppOpsObservedMarker = '[b5] APPOPS_OBSERVED';
 
 /// ACT 1: the position stream never went [_appOpsStreamSilence] without a
-/// fix for the whole observation window, having been delivering at arming.
-/// The app-op `set` did not take, or took and Android ignored it.
+/// fix for the whole observation window. Where it was delivering at arming,
+/// the app-op `set` did not take, or took and Android ignored it; where it
+/// held no fix at arming, there was no silence to observe.
 const String kAppOpsNotObservedMarker = '[b5] APPOPS_NOT_OBSERVED';
 
 /// ACT 1, with `type=<runtimeType> streamAgeMs=<ms>`: the production
@@ -929,12 +930,21 @@ void main() {
           );
         } else {
           debugPrint(kAppOpsNotObservedMarker);
+          // Worded off the arming age: a stream that holds no fix at all
+          // lands here too, having no fix whose age could reach the
+          // threshold, and "was delivering" is false of it.
+          final atArming = armingStreamAgeMs < 0
+              ? 'but arming found no stream fix newer than '
+                    '${_maxArmingStreamAge.inSeconds}s, so it was never '
+                    'established to be delivering and this is not evidence '
+                    'that the app-op had no effect'
+              : 'and it was delivering at arming, so the signal exists and '
+                    'was simply never withdrawn';
           failures.add(
             'the position stream never went '
             '${_appOpsStreamSilence.inSeconds}s without a fix in the '
             '${_appOpsObservationTimeout.inSeconds}s after the shell denied '
-            'the location app-op — and it was delivering at arming, so the '
-            'signal exists and was simply never withdrawn. Nothing below is '
+            'the location app-op — $atArming. Nothing below is '
             'an observation of an app that lost access. The shell read-back '
             'separates the two causes: an app-op that did not change at all, '
             'or one that changed and had no effect',
