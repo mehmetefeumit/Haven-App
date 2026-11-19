@@ -157,14 +157,22 @@ self_test() {
   echo "uCrop runtime-deps guard: self-test OK (11 fixtures)."
 }
 
+# The static check reads a manifest it could not parse as malformed, so a
+# missing xmllint must say so instead of reading as a violation.
+need_xmllint() {
+  command -v xmllint >/dev/null 2>&1 \
+    || { echo "ERROR: xmllint (libxml2-utils) is required by this guard" >&2; exit 2; }
+}
+
 case "${1:-}" in
-  --self-test) self_test ;;
+  --self-test) need_xmllint; self_test ;;
   --merged-manifest)
     [[ -f "${2:-}" ]] || { echo "usage: $0 --merged-manifest <aapt2 xmltree output>" >&2; exit 2; }
     check_merged_manifest "$2"
     echo "OK: the release APK carries exactly the listed androidx.startup initializers."
     ;;
   "")
+    need_xmllint
     check_static "${GRADLE_FILE}" "${MANIFEST}"
     echo "OK: uCrop's AndroidX dependencies are declared and emoji2's initializer is removed."
     ;;
