@@ -1853,7 +1853,10 @@ pause=<yes|no> grace=<cause> dwell=<s> focus=<s>` (a failed round:
 resumed to holding input focus: no input is sent to the picker or uCrop
 before its window holds it (`dumpsys input`), because a key sent earlier is
 dropped by the input dispatcher — the lane's first device run lost its cancel
-BACK that way.
+BACK that way. System error dialogs are hidden before the first round, as in
+the launch gate, so another process's "isn't responding" dialog cannot take
+that focus; with none to show, Android kills a foreground app that stops
+responding, so Haven's own ANR still fails the drive (product).
 
 | rc | Line | Meaning | Action |
 |---|---|---|---|
@@ -1866,7 +1869,7 @@ BACK that way.
 | 2 | `MapShell never took its Android pause branch …` | background sharing was not on at the pause (or the C6 marker moved): root cause A's precondition was not exercised | fix the scenario or the marker; never re-run to green |
 | 2 | `harness: no thumbnail selector matched …(rids: …)` / `harness: an activity the picker rules do not know took the front … (<component>)` / `the marker sequence broke …` / `round <n>: run-as could not record the round on the device …` / `the drive passed but reported … round count` / `run-single-avd-scenario.sh refused its configuration (rc 2)` | the selectors or picker rules (a newer Photopicker module, say), the Dart↔sidecar protocol (the drive arms nothing, and prints no END, before the sidecar's `files/pp_recorded_<n>` exists, so a refused `run-as` holds it until its own bound), or the lane's configuration | fix the harness; never re-run to green |
 | 2 | `gallery (API …): the device refused a gallery fixture's push …` / `… the media store refused the gallery query …` / `… the media store answered but never listed both gallery fixtures …` | the device answered, but the seeding method did not work on that system image | fix `pp_seed_gallery`; never re-run to green |
-| 3 | `gallery (API …): adb gave no answer …` / `… the media store had no shared storage attached …` / `emulator-5554 did not come online …` / `emulator-5554 was gone when the drive ended …` | infrastructure | re-run |
+| 3 | `gallery (API …): adb gave no answer …` / `… the media store had no shared storage attached …` / `emulator-5554 did not come online …` / `hide_error_dialogs did not read back 1` / `emulator-5554 was gone when the drive ended …` | infrastructure | re-run |
 
 A sidecar failure reds the job even when the drive passed. When the sidecar's
 verdict is harness and the drive failed too, the line ends `; the drive also

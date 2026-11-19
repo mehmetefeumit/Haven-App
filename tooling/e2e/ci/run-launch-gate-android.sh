@@ -1257,16 +1257,15 @@ dump() {
     put fin $(( $(get fin) + 1 )); (( $(get fin) < 3 )) || put screen held
   fi
   [[ "${scr}" != identity ]] || put identity_dumps $(( $(get identity_dumps) + 1 ))
-  # A crash moments after a terminal screen's first frames.
-  if [[ -n "${STUB_LATE_CRASH:-}" && ( "${scr}" == held || "${scr}" == identity ) ]]; then
-    put late $(( $(get late) + 1 ))
-    if (( $(get late) == 3 )); then
-      tt "FATAL EXCEPTION: main" >> "${S}/crash.log"; tt "Process: ${PKG}, PID: 4242" >> "${S}/crash.log"
-      tt "java.lang.IllegalStateException: late" >> "${S}/crash.log"
-      rm -f "${S}/pid"; return 0
-    fi
-  fi
   screen_xml "${scr}"
+  # A crash moments after the setup screen's first frame: the dump that shows
+  # it is the process's last. Keyed to that dump, never to the reads after it,
+  # because how many reads a 1 s settle window holds is the host's speed.
+  if [[ -n "${STUB_LATE_CRASH:-}" && "${scr}" == held ]]; then
+    tt "FATAL EXCEPTION: main" >> "${S}/crash.log"; tt "Process: ${PKG}, PID: 4242" >> "${S}/crash.log"
+    tt "java.lang.IllegalStateException: late" >> "${S}/crash.log"
+    rm -f "${S}/pid"
+  fi
 }
 # A crop's result: saved (after STUB_APPLY_DUMPS dumps on the Identity page)
 # or refused; back on the screen the trip started from.
@@ -1639,7 +1638,7 @@ print(json.dumps({k[0]: "Get Started", k[1]: "Create My Identity", k[2]: "Not no
   _scenario "an upgraded map whose Identity page lost the name is a product failure" 1 setup-held map STUB_IDENTITY_LOST=1
   _has "…named at the upgrade leg's Identity page" "leg upgrade (from v0.1.13), state after settingsIdentityTitle; a cold launch did not show the display name the first launch saved"
   # A crash moments after a terminal screen is drawn.
-  _scenario "a crash just after the setup screen or the Identity page is a product failure" 1 setup-held map STUB_LATE_CRASH=1
+  _scenario "a crash just after the setup screen is a product failure" 1 setup-held map STUB_LATE_CRASH=1
   _has "…caught by the settle watch" "state: SETUP_HELD, settling"
   # A crash the upgrade's own install provokes is not cleared away.
   _scenario "a crash during the in-place install is a product failure" 1 setup-held map STUB_CRASH_ON_REPLACE=1

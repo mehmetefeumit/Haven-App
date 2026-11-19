@@ -56,12 +56,20 @@
 #      the device answered (a push or query it refused, or a media store that
 #      never listed them), or
 #      run-single-avd-scenario.sh refusing its configuration (its rc 2)
-#   3  infrastructure: no device, the device gone when the drive ended, no
+#   3  infrastructure: no device, error dialogs that could not be hidden, the
+#      device gone when the drive ended, no
 #      answer while the gallery was seeded, shared storage that never
 #      attached, or another process's "isn't responding" or "keeps stopping"
 #      dialog holding the picker's or uCrop's focus — re-run
 # A sidecar failure reds the lane even when the drive passed; when the drive
 # failed too, the verdict line says so, since that failure may be the product's.
+#
+# System error dialogs are hidden first (rc 3 unless the setting reads back),
+# as the release launch gate hides them: another process's "isn't responding"
+# dialog on a slow emulator would take the input focus the picker and uCrop
+# need. With no dialog to show, the system kills a foreground app that stops
+# responding (AOSP AppErrors.handleShowAnrUi), so Haven's own ANR still ends
+# the drive, red; the dialog verdicts above remain for a dialog shown anyway.
 #
 # The sidecar log (/tmp/photo-sidecar.log) is fixed vocabulary: round
 # numbers, selector names, cause and class words, seconds (`focus=<s>s` is
@@ -297,6 +305,10 @@ main() {
   if [[ ! "${API_LEVEL}" =~ ^[0-9]+$ ]]; then
     RC=3; MSG="ro.build.version.sdk did not read as a number"; exit 0
   fi
+  adb -s "${DEVICE}" shell settings put global hide_error_dialogs 1 >/dev/null 2>&1 || true
+  if [[ "$(adb -s "${DEVICE}" shell settings get global hide_error_dialogs 2>/dev/null | tr -d '\r' || true)" != 1 ]]; then
+    RC=3; MSG="hide_error_dialogs did not read back 1"; exit 0
+  fi
   pp_seed_gallery "${DEVICE}" "${WORK}/priv" || { RC=$?; MSG="gallery (API ${API_LEVEL}): ${PP_MSG}"; exit 0; }
   record "api=${API_LEVEL} gallery=seeded"
   watch &
@@ -347,7 +359,7 @@ main() {
 # for Haven to be back and for the sidecar's record of the round. Bounds are
 # shrunk through the PHOTO_* overrides only.
 # ---------------------------------------------------------------------------
-readonly SELF_TEST_FIXTURES=63
+readonly SELF_TEST_FIXTURES=68
 
 _st_stub_adb() { # <bin dir>
   cat > "$1/adb" <<'STUB'
@@ -411,12 +423,26 @@ focus_of() { # <advance: 1 on a dumpsys read>
   if [[ "${STUB_NEVER_FOCUSED:-}" == "${scr}" ]] || (( reads <= ${STUB_FOCUS_LAG:-1} )); then echo none; return; fi
   component_of "${scr}"
 }
+# STUB_ANR=systemui: System UI stops responding as the picker opens;
+# STUB_ANR=ours: Haven stops responding to uCrop's crop tap. The system shows
+# the process's "isn't responding" dialog, which takes the focus from every
+# window, or, with error dialogs hidden, kills the process (returns 1).
+anr() { # <process>
+  printf '1000.750   500   600 I am_anr  : [0,812,%s,551144,Input dispatching timed out]\n' "$1" >> "${S}/events.log"
+  [[ ! -e "${S}/hide" ]] || return 1
+  printf 'Application Not Responding: %s\n' "$1" > "${S}/dialog"
+}
 # STUB_FOCUS_WINDOW=<title>: a window that is no activity's (an error dialog)
 # holds the focus the picker or uCrop does not.
 focus_dump() {
-  local f; f="$(focus_of 1)"
+  local f
+  if [[ "${STUB_ANR:-}" == systemui && "$(seen)" == picker && ! -e "${S}/anr" ]]; then
+    : > "${S}/anr"; anr com.android.systemui || true
+  fi
+  f="$(focus_of 1)"
   echo 'Input Dispatcher State:'
-  if [[ "${f}" == none && -n "${STUB_FOCUS_WINDOW:-}" ]]; then printf "  FocusedWindows:\n    displayId=0, name='5a1 %s'\n" "${STUB_FOCUS_WINDOW}"
+  if [[ -s "${S}/dialog" ]]; then printf "  FocusedWindows:\n    displayId=0, name='5a1 %s'\n" "$(cat "${S}/dialog")"
+  elif [[ "${f}" == none && -n "${STUB_FOCUS_WINDOW:-}" ]]; then printf "  FocusedWindows:\n    displayId=0, name='5a1 %s'\n" "${STUB_FOCUS_WINDOW}"
   elif [[ "${f}" == none ]]; then echo '  FocusedWindows: <none>'
   else printf "  FocusedWindows:\n    displayId=0, name='4f2e1c0 %s'\n" "${f}"; fi
 }
@@ -425,7 +451,7 @@ focus_dump() {
 # recorded so the self-test fails on it.
 unfocused() {
   case "$(seen)" in picker|ucrop) ;; *) return 1 ;; esac
-  [[ "$(focus_of 0)" == none ]] || return 1
+  [[ "$(focus_of 0)" == none || -s "${S}/dialog" ]] || return 1
   printf '%s\n' "$1" >> "${S}/unfocused"
 }
 # The shared storage and its media store, in AOSP's order: sys.boot_completed
@@ -486,6 +512,8 @@ if [[ "${cmd}" == "content delete "* ]]; then
 fi
 case "${cmd}" in
   "getprop ro.build.version.sdk") echo "${STUB_API:-34}" ;;
+  "settings put global hide_error_dialogs 1") [[ -n "${STUB_HIDE_REFUSED:-}" ]] || : > "${S}/hide" ;;
+  "settings get global hide_error_dialogs") [[ -e "${S}/hide" ]] && echo 1 || echo 0 ;;
   "run-as ${PKG} touch files/pp_recorded_"*) [[ -z "${STUB_RUNAS_REFUSED:-}" ]] || exit 1
     [[ "$4" =~ ^files/pp_recorded_[0-9]+$ ]] || exit 9
     mkdir -p "${S}/files"; : > "${S}/$4" ;;
@@ -510,6 +538,7 @@ case "${cmd}" in
         put screen ucrop ;;
       ucrop) (( x >= 900 )) || exit 0
         [[ -n "${STUB_UCROP_NEVER:-}" ]] && exit 0
+        if [[ "${STUB_ANR:-}" == ours ]]; then anr "${PKG}" || { : > "${S}/dead"; put screen home; }; exit 0; fi
         ev finish ucrop
         put screen main
         log "[MapShell] handoff grace: ended by ${STUB_GRACE:-resumed}" ;;
@@ -536,6 +565,7 @@ show_picker() { # the tap on Edit Photo: a new picker window
 back() { # Haven resumed again, within a bound; failed at once once the sidecar has, as the app would stay away
   local deadline=$(( SECONDS + 20 )) vrc
   while (( SECONDS < deadline )); do
+    [[ ! -e "${S}/dead" ]] || return 1  # the app process killed: the drive loses it at once
     [[ "$(cat "${S}/screen" 2>/dev/null)" == main ]] && return 0
     vrc="$(cut -f1 "${PHOTO_UI_WORK}/verdict" 2>/dev/null || true)"
     [[ -z "${vrc}" || "${vrc}" == 0 ]] || return 1
@@ -688,6 +718,14 @@ self_test() {
   _has "…named as such" "input focus was on Haven's \"isn't responding\" dialog over the picker for 3 s: Haven failed while the picker was open"
   _scenario "System UI's \"isn't responding\" dialog over the picker is infrastructure" 3 STUB_NEVER_FOCUSED=picker STUB_ROUNDS=cancel "STUB_FOCUS_WINDOW=Application Not Responding: com.android.systemui"
   _has "…named as such, the sidecar log classing it" "failed class=infrastructure"
+  # Error dialogs are hidden before any round, so another process stopping
+  # responding no longer holds the picker's focus; Haven stopping responding
+  # is killed instead of covered, and the lane is still red.
+  _scenario "error dialogs that cannot be hidden are infrastructure" 3 STUB_HIDE_REFUSED=1
+  _has "…named as such" "hide_error_dialogs did not read back 1"
+  _scenario "System UI stopping responding as the picker opens takes no focus from it" 0 STUB_ANR=systemui STUB_ROUNDS=cancel
+  _scenario "Haven stopping responding to the crop tap is still a product failure" 1 STUB_ANR=ours STUB_ROUNDS=pick:0
+  _has "…the drive losing the app" "the drive failed (rc 1)"
   _scenario "a picker whose window never takes focus gets no input and is a harness verdict" 2 STUB_NEVER_FOCUSED=picker STUB_ROUNDS=cancel
   _has "…named as such" "the system picker was resumed but its window never took input focus within 3 s (focus on no window), so no input was sent to it"
   _scenario "uCrop, Haven's own, never taking focus is a product failure" 1 STUB_NEVER_FOCUSED=ucrop STUB_ROUNDS=pick:0
