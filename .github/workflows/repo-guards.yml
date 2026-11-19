@@ -933,10 +933,13 @@ jobs:
   guards:
     name: Static checks
     runs-on: ubuntu-latest
-    # Generous against the measured few minutes, but far below GitHub's 6-hour
-    # default: a hung guard (or a baseline fetch that never returns) should
-    # surface as a bounded red, not burn a runner for the afternoon.
-    timeout-minutes: 20
+    # A hang guard, sized from measurement, far below GitHub's 6-hour default:
+    # a hung guard (or a baseline fetch that never returns) should surface as a
+    # bounded red, not burn a runner for the afternoon. Measured: 12.7 min on
+    # main (run 43868543765) before the photo harness self-tests, which add
+    # ~7 min (launch gate 218 s, photo UI 185 s, run 44481804001) — ~20 min of
+    # work; the two slow steps carry their own caps below.
+    timeout-minutes: 30
     steps:
       - name: Checkout
         id: checkout
@@ -2243,6 +2246,7 @@ jobs:
       # (rc 3) — and no picker description ever reaches a transcript.
       - name: E2E harness self-test (Android launch gate)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        timeout-minutes: 8
         run: bash tooling/e2e/ci/run-launch-gate-android.sh --self-test
 
       # The screen reader the Android gate decides on: exact-line matching,
@@ -2271,6 +2275,7 @@ jobs:
       # system_activity_excursions.dart pinned.
       - name: E2E harness self-test (photo UI lane)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        timeout-minutes: 8
         run: bash tooling/e2e/ci/run-photo-ui-scenario.sh --self-test
 
       # Which release the upgrade leg starts from and whether it can replace it:
