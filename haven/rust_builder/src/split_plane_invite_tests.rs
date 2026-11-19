@@ -1040,14 +1040,16 @@ async fn a_welcome_stored_before_the_session_reaches_it(world: &World, alice: &A
     );
     let stored = published_wraps(&world.plain.front, &pubkey);
     assert!(stored.len() == 1, "premise: the Welcome was stored first");
-    let inbox_cursor = || {
+    // Read through the bridge's own cursor read, as Dart does: the FFI crate
+    // never names a stream key (`check_no_event_timestamp_cursor_advance.sh`).
+    let inbox_cursor = || async {
         bob.circle
-            .inner
-            .read_sync_cursor(haven_core::relay::cursor::STREAM_INBOX_1059)
+            .cursor_get("inbox_1059".to_owned())
+            .await
             .expect("the inbox cursor")
     };
     assert!(
-        inbox_cursor().is_none(),
+        inbox_cursor().await.is_none(),
         "premise: a fresh inbox has no cursor",
     );
 
@@ -1060,7 +1062,7 @@ async fn a_welcome_stored_before_the_session_reaches_it(world: &World, alice: &A
     stop_live(&live).await;
     drop(events);
     assert!(
-        inbox_cursor().is_some(),
+        inbox_cursor().await.is_some(),
         "premise: the served inbox relay's EOSE moved the inbox cursor",
     );
 
