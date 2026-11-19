@@ -709,7 +709,7 @@ finish() {
 # deadline is a count of device calls and every verdict comes from what the
 # stub shows, never from how fast this machine runs it.
 # ---------------------------------------------------------------------------
-readonly SELF_TEST_FIXTURES=46
+readonly SELF_TEST_FIXTURES=47
 readonly ST_NAME='Quiet Wanderer Fixture'
 
 _st_write_stub() { # <dir>
@@ -1094,6 +1094,14 @@ print(json.dumps({k[0]: "Get Started", k[1]: "Create My Identity", k[2]: "Not no
   _scenario "a display-name error on screen is a product failure naming it" 1 name-error map
   ARB_CAND="$(python3 -I -c 'import json,sys; d=json.loads(sys.argv[1]); d.pop("commonSettings"); print(json.dumps(d))' "${arb_now}")" \
     _scenario "an ARB without a required key is a usage error" 2 setup-held map
+
+  # Every window must read the clock the stub `date` counts; a single loop put
+  # back on bash's SECONDS races the wall clock again, and the slow-device
+  # fixture above only covers the first screen's window.
+  ran=$(( ran + 1 ))
+  if grep -nE '^[^#]*(\$\{?SECONDS|\(\(\s*SECONDS|SECONDS\s*[-+*/<>=])' "${BASH_SOURCE[0]}" >&2; then
+    echo "  FAIL a window reads bash's SECONDS instead of date +%s" >&2; fails=1
+  else echo "  PASS every window reads date +%s, never SECONDS"; fi
 
   if (( ran != SELF_TEST_FIXTURES )); then
     echo "SELF-TEST FAIL: ran ${ran} fixture(s), expected ${SELF_TEST_FIXTURES}" >&2
