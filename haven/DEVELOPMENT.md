@@ -167,8 +167,6 @@ generated on 2026-11-19.
   mid-word on phones). Stadia's terms still require the credit, so the page's
   `StaticMapAttribution` (the config's `attribution` list and the ODbL link) is
   the **only** attribution: never remove or hide it while previews are shown.
-  The set committed on 2026-11-19 predates the parameter and still carries the
-  burned-in line; the next regeneration drops it.
 
 #### Licensing — re-check before every run
 

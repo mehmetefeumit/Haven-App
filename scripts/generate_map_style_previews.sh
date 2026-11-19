@@ -16,10 +16,9 @@
 #
 # The committed set was rendered on 2026-11-19 from
 # https://tiles.stadiamaps.com/static_cacheable with this script's query shape
-# (center=<lat>,<lon>, zoom=<z>, size=<w>x<h>@2x, api_key=<key>), and the
-# scenes' zooms, taken from the page's earlier live map, gave the intended
-# detail. That set predates manual_attribution=true (below) and still carries
-# Stadia's burned-in credit; the next run drops it.
+# (center=<lat>,<lon>, zoom=<z>, size=<w>x<h>@2x, manual_attribution=true,
+# api_key=<key>); the scenes' zooms, taken from the page's earlier live map,
+# gave the intended detail, and the images carry no burned-in credit.
 #   * LICENSING: only the CACHEABLE static maps endpoint's images may be stored
 #     and shipped in the app, and only while Haven holds an active paid Stadia
 #     subscription; raw tiles and standard static maps may not. Every request
