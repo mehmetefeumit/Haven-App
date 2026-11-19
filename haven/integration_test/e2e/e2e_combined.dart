@@ -151,9 +151,11 @@ import 'dart:typed_data' show Uint8List;
 
 import 'package:flutter/foundation.dart'
     show debugPrint, listEquals, setEquals;
-import 'package:flutter/material.dart' show FilledButton, SizedBox, ValueKey;
+import 'package:flutter/material.dart'
+    show FilledButton, SizedBox, Text, ValueKey;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/main.dart';
 import 'package:haven/src/pages/circles/add_member_page.dart';
 import 'package:haven/src/pages/circles/create_circle_page.dart';
@@ -1898,7 +1900,28 @@ void main() {
             reason: '[INV] an inbox read every relay served needs no notice.',
           );
 
+          final l10n = AppLocalizations.of(tester.element(accept));
           await tester.tap(accept);
+          // The card's snack is the handler's last act. The roster below can
+          // read the joined group while the handler is still in flight, and a
+          // teardown under it disposes the container it still writes to.
+          final outcome = find.byWidgetPredicate(
+            (w) =>
+                w is Text &&
+                (w.data == l10n.invitationAcceptedSnack ||
+                    w.data == l10n.invitationAcceptError),
+          );
+          await pumpUntilFound(
+            tester,
+            outcome,
+            description: 'the accept to end in its snack',
+            shouldAbort: () => _m11Superseded(generation),
+          );
+          expect(
+            find.text(l10n.invitationAcceptedSnack),
+            findsOneWidget,
+            reason: '[INV] the user must be told the invitation was accepted.',
+          );
           final members = <String>{
             _alicePubkeyHex().toLowerCase(),
             bob.pubkeyHex.toLowerCase(),
