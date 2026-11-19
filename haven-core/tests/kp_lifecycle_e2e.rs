@@ -81,6 +81,40 @@ impl Device {
             .len()
     }
 
+    /// The same device after a kill: its session dropped and reopened.
+    fn reopen(self) -> Self {
+        let Self { session, keys, dir } = self;
+        drop(session);
+        Self {
+            session: SessionManager::new_unencrypted(dir.path(), &keys).expect("reopen"),
+            keys,
+            dir,
+        }
+    }
+
+    /// Accepts the Welcome `inviter` builds on `package` for a circle of its
+    /// own.
+    async fn join_on(&self, inviter: &Self, package: &KpMaintenanceEvents) {
+        let config = LocationGroupConfig::new("Joined")
+            .with_relay(RELAY)
+            .with_admin(inviter.keys.public_key().to_hex());
+        let created = inviter
+            .session
+            .create_group(
+                vec![SessionManager::key_package_from_event(&package.event).expect("parse")],
+                config,
+            )
+            .await
+            .expect("create");
+        assert!(matches!(
+            self.session
+                .accept_welcome(&helpers::first_welcome_event(&created.effects))
+                .await
+                .expect("accept"),
+            WelcomeAcceptance::Ingested(_)
+        ));
+    }
+
     /// The device's consumption record, read off the store.
     fn last_consumed(&self) -> Option<Vec<u8>> {
         self.store()
@@ -629,6 +663,130 @@ async fn a_grace_sweep_keeps_the_current_packages_consumption_record() {
         bob.tracked().await.replacement_owed,
         "the consumed current package still owes its replacement"
     );
+}
+
+/// A retained package and the current one, both acknowledged, the second at
+/// the returned instant.
+async fn retained_and_current(device: &Device) -> (KpMaintenanceEvents, KpMaintenanceEvents, u64) {
+    let retained = device.publish(None).await;
+    let acked_at = now_secs();
+    let current = device
+        .publish_acked_at(Some(&retained.d_tag), acked_at)
+        .await;
+    (retained, current, acked_at)
+}
+
+/// MDK keeps one consumption record, which every join overwrites
+/// (T-KP-CONSUMED-SLOT): a retained package consumed before a join on the
+/// current package still goes at the next sweep, and the current package
+/// still owes its replacement.
+#[tokio::test]
+async fn a_retained_packages_consumption_survives_a_later_join_on_the_current_package() {
+    let alice = Device::new();
+    let bob = Device::new();
+    let (retained, current, acked_at) = retained_and_current(&bob).await;
+    bob.join_on(&alice, &retained).await;
+    bob.join_on(&alice, &current).await;
+    assert!(bob.tracked().await.replacement_owed);
+
+    assert!(!bob.sweep(acked_at).await);
+    assert_eq!(
+        bob.bundles().await,
+        1,
+        "the consumed retained package went at the next sweep, in its grace"
+    );
+    assert_eq!(bob.tracked().await.package, current.key_package.bytes());
+    assert!(
+        bob.tracked().await.replacement_owed,
+        "and the current package still owes its replacement"
+    );
+}
+
+/// The same two joins, then a kill before the next sweep: nothing is lost.
+#[tokio::test]
+async fn a_retained_packages_consumption_survives_a_later_join_and_a_restart() {
+    let alice = Device::new();
+    let bob = Device::new();
+    let (retained, current, acked_at) = retained_and_current(&bob).await;
+    bob.join_on(&alice, &retained).await;
+    bob.join_on(&alice, &current).await;
+
+    let bob = bob.reopen();
+    bob.sweep(acked_at).await;
+    assert_eq!(bob.bundles().await, 1, "the consumed retained package went");
+    assert!(bob.tracked().await.replacement_owed);
+}
+
+/// The other order: a join on a retained package leaves the record of the
+/// current package's consumption standing, across a restart.
+#[tokio::test]
+async fn a_join_on_a_retained_package_keeps_the_current_packages_consumption() {
+    let alice = Device::new();
+    let bob = Device::new();
+    let (retained, current, acked_at) = retained_and_current(&bob).await;
+    bob.join_on(&alice, &current).await;
+    bob.join_on(&alice, &retained).await;
+    assert!(
+        bob.tracked().await.replacement_owed,
+        "the consumed current package still owes its replacement"
+    );
+
+    let bob = bob.reopen();
+    assert!(bob.tracked().await.replacement_owed);
+    bob.sweep(acked_at).await;
+    assert_eq!(bob.bundles().await, 1, "the consumed retained package went");
+    assert!(bob.tracked().await.replacement_owed);
+}
+
+/// A consumed retained package stays until the next sweep, so a second
+/// invitation built on it still opens until then.
+#[tokio::test]
+async fn a_second_invitation_on_a_consumed_retained_package_opens_until_the_next_sweep() {
+    let alice = Device::new();
+    let carol = Device::new();
+    let bob = Device::new();
+    let (retained, _, acked_at) = retained_and_current(&bob).await;
+    bob.join_on(&alice, &retained).await;
+    bob.join_on(&carol, &retained).await;
+    assert_eq!(bob.groups().await, 2);
+
+    bob.sweep(acked_at).await;
+    assert_eq!(bob.bundles().await, 1, "and goes at the sweep");
+    assert!(bob.last_consumed().is_none());
+}
+
+/// A kill between MDK's join and Haven's move of its record leaves the record
+/// naming the retained package; the next join moves it onto the package
+/// before overwriting it.
+#[tokio::test]
+async fn a_consumption_a_kill_left_in_the_record_is_kept_through_the_next_join() {
+    let alice = Device::new();
+    let bob = Device::new();
+    let (retained, current, acked_at) = retained_and_current(&bob).await;
+    bob.join_on(&alice, &retained).await;
+    let store = bob.store();
+    let records = store
+        .maintenance_storage()
+        .expect("the store keeps maintenance records");
+    let mut state = records
+        .key_package_lifecycle()
+        .expect("read the record")
+        .expect("a slot is tracked");
+    let [kept] = state.retained_private_material.as_mut_slice() else {
+        panic!("one package is retained");
+    };
+    kept.replaced_at = MdkTimestamp(acked_at);
+    state.last_consumed_key_package_ref = Some(kept.key_package_ref.clone());
+    records
+        .put_key_package_lifecycle(&state)
+        .expect("plant the record as MDK's join left it");
+    drop(store);
+
+    let bob = bob.reopen();
+    bob.join_on(&alice, &current).await;
+    bob.sweep(acked_at).await;
+    assert_eq!(bob.bundles().await, 1, "the consumed retained package went");
+    assert!(bob.tracked().await.replacement_owed);
 }
 
 /// V16, as predicted from source: MDK's own delete validates the lifetime
