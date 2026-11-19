@@ -14,6 +14,8 @@
 
 mod cargo_graph;
 mod helpers;
+#[path = "helpers/sources.rs"]
+mod sources;
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -373,19 +375,6 @@ async fn bury(pair: &Pair, circle: &Joined, relays: &[&SeededRelay], urls: &[Str
     commit
 }
 
-fn crate_source(package: &str, file: &str) -> String {
-    let metadata = cargo_graph::host_metadata();
-    let manifest = metadata["packages"]
-        .as_array()
-        .expect("packages")
-        .iter()
-        .find(|candidate| candidate["name"] == package)
-        .and_then(|candidate| candidate["manifest_path"].as_str())
-        .expect("the crate is in the graph");
-    std::fs::read_to_string(std::path::Path::new(manifest).with_file_name(file))
-        .expect("read the crate's source")
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
 // The pins
 // ═══════════════════════════════════════════════════════════════════════════
@@ -395,7 +384,7 @@ fn crate_source(package: &str, file: &str) -> String {
 /// pool's and negentropy's own, as compared.
 #[test]
 fn neg_constants_match_mdk() {
-    let adapter = crate_source("transport-nostr-adapter", "src/sdk_client.rs");
+    let adapter = sources::mdk_source("transport-nostr-adapter", "src/sdk_client.rs");
     for (literal, ours) in [
         (
             format!(
@@ -431,9 +420,9 @@ fn neg_constants_match_mdk() {
         storage_sqlite::TRANSPORT_RECONCILIATION_RETENTION_SECS
     );
     assert_eq!(NEG_ROUTES_PER_PASS, 4);
-    assert!(crate_source("nostr-relay-pool", "src/relay/error.rs")
+    assert!(sources::sdk_source("src/relay/error.rs")
         .contains(r#"Self::NegentropyNotSupported => f.write_str("negentropy not supported"),"#));
-    assert!(crate_source("negentropy", "src/error.rs")
+    assert!(sources::registry_source("negentropy", "src/error.rs")
         .contains(r#"write!(f, "server does not support our negentropy protocol version")"#));
 }
 

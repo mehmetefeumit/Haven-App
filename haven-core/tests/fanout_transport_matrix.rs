@@ -19,6 +19,8 @@
 //! pays at most two 600 ms adapter backoffs.
 
 mod cargo_graph;
+#[path = "helpers/sources.rs"]
+mod sources;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -547,24 +549,34 @@ async fn held_copies(client: &Client, url: &str, id: nostr::event::EventId) -> u
         .len()
 }
 
-/// `file` of the MDK crate `package`, from the checkout cargo resolved for
-/// this crate.
-fn mdk_source(package: &str, file: &str) -> String {
-    let metadata = cargo_graph::host_metadata();
-    let manifest = metadata["packages"]
-        .as_array()
-        .expect("packages")
-        .iter()
-        .find(|candidate| candidate["name"] == package)
-        .and_then(|candidate| candidate["manifest_path"].as_str())
-        .expect("the crate is in the graph");
-    std::fs::read_to_string(std::path::Path::new(manifest).with_file_name(file))
-        .expect("read MDK's source")
-}
-
 /// The cargo checkout of MDK's Nostr adapter this crate links.
 fn mdk_relay_client_source() -> String {
-    mdk_source("transport-nostr-adapter", "src/sdk_client.rs")
+    sources::mdk_source("transport-nostr-adapter", "src/sdk_client.rs")
+}
+
+/// The reads these pins rest on fail closed: a crate resolved from another
+/// source than its pin, and an anchor found nowhere or twice, are failures,
+/// never a read of some other copy or place.
+#[test]
+fn a_source_read_fails_off_its_pin_and_on_an_anchor_not_found_exactly_once() {
+    let fails = |read: fn()| std::panic::catch_unwind(read).is_err();
+    sources::package_dir("transport-nostr-adapter", &sources::pin("HAVEN_MDK_SOURCE"));
+    assert!(fails(|| {
+        sources::package_dir(
+            "transport-nostr-adapter",
+            &sources::pin("HAVEN_NOSTR_SOURCE"),
+        );
+    }));
+    assert!(fails(|| {
+        sources::pin("HAVEN_NO_SUCH_PIN");
+    }));
+    assert_eq!(sources::the_one("fn a fn b", "fn b"), 5);
+    assert!(fails(|| {
+        sources::the_one("fn a fn b", "fn c");
+    }));
+    assert!(fails(|| {
+        sources::the_one("fn a fn b", "fn ");
+    }));
 }
 
 /// The driver tells an attempt that never ran to an answer from one a relay
@@ -577,14 +589,7 @@ fn mdk_relay_client_source() -> String {
 #[test]
 fn every_failure_reason_mdks_relay_client_writes_is_fixed_and_none_is_the_drivers_marker() {
     let source = mdk_relay_client_source();
-    let product = source
-        .split("#[cfg(test)]\nmod tests {")
-        .next()
-        .expect("the file has a product half");
-    assert!(
-        product.len() < source.len(),
-        "the test half was not cut off"
-    );
+    let product = sources::product_half(&source);
     let written: Vec<&str> = product
         .lines()
         .map(str::trim)
@@ -623,7 +628,7 @@ fn every_failure_reason_mdks_relay_client_writes_is_fixed_and_none_is_the_driver
         "the reason of a relay's rejection is no longer built from a category name alone",
     );
     assert!(
-        mdk_source("cgka-traits", "src/transport_adapter.rs").contains(
+        sources::mdk_source("cgka-traits", "src/transport_adapter.rs").contains(
             "impl TransportEndpointRejectionCategory {\n    pub fn as_str(self) -> &'static str {"
         ),
         "a rejection category's name is no longer a fixed string",
@@ -652,7 +657,7 @@ fn every_failure_reason_mdks_relay_client_writes_is_fixed_and_none_is_the_driver
 /// never promoted: the invitee on the roster with no way in.
 #[test]
 fn an_invites_commit_is_applied_only_through_a_confirm_at_this_pin() {
-    let send = mdk_source("cgka-engine", "src/message_processor/send.rs");
+    let send = sources::mdk_source("cgka-engine", "src/message_processor/send.rs");
     assert!(
         send.contains(
             "let (commit_out, welcome_out) = if granted_admin_ids.is_empty() {
@@ -661,7 +666,7 @@ fn an_invites_commit_is_applied_only_through_a_confirm_at_this_pin() {
         ),
         "MDK no longer stages an invite that grants no admin with `add_members`",
     );
-    let fork = mdk_source("openmls", "src/group/mls_group/processing.rs");
+    let fork = sources::openmls_source("src/group/mls_group/processing.rs");
     assert!(
         fork.contains(
             "if is_own_commit && commit.path.is_some() {
@@ -670,7 +675,7 @@ fn an_invites_commit_is_applied_only_through_a_confirm_at_this_pin() {
         ),
         "the fork no longer refuses an own commit that carries a path",
     );
-    let membership = mdk_source("openmls", "src/group/mls_group/membership.rs");
+    let membership = sources::openmls_source("src/group/mls_group/membership.rs");
     assert!(
         membership.contains("self.add_members_internal(provider, signer, key_packages, true)"),
         "`add_members` no longer forces the path its commit is refused by",
@@ -762,12 +767,9 @@ fn mdks_call_ceiling_is_the_one_a_drive_is_said_to_wait() {
 #[test]
 fn mdks_relay_client_builds_no_client_and_installs_nothing_on_the_one_it_is_handed() {
     let source = mdk_relay_client_source();
-    let product = source
-        .split("#[cfg(test)]\nmod tests {")
-        .next()
-        .expect("the file has a product half");
+    let product = sources::product_half(&source);
     assert!(
-        product.len() < source.len() && product.contains("pub fn new(client: Client) -> Self"),
+        product.contains("pub fn new(client: Client) -> Self"),
         "the scan is not reading the product half of MDK's relay client",
     );
     // The control: MDK's own tests, in the other half of this file, do build

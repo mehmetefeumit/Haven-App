@@ -52,6 +52,8 @@
 
 mod cargo_graph;
 mod helpers;
+#[path = "helpers/sources.rs"]
+mod sources;
 
 use std::collections::HashSet;
 use std::sync::atomic::AtomicBool;
@@ -86,6 +88,7 @@ use helpers::{
     cleanup_dir, setup_two_party_group, setup_two_party_group_capturing_welcome, unique_temp_dir,
     TwoPartyGroup,
 };
+use sources::mdk_source;
 
 /// A kind-445 `content` is `base64(nonce || ciphertext)` with a 12-byte
 /// ChaCha20-Poly1305 nonce (MIP-04 / `transport-nostr-peeler`); the 16-byte AEAD
@@ -5194,25 +5197,7 @@ fn assert_a_completed_location_send_is_never_made_again(root: &std::path::Path) 
 /// that crate; its source ships in the same repository, at the pinned
 /// revision.
 fn mdk_host_source() -> String {
-    mdk_source("marmot-account/src/runtime.rs")
-}
-
-/// A file of MDK's, by its path under the crates directory of the checkout
-/// cargo resolved the MDK crates this one links from.
-fn mdk_source(file: &str) -> String {
-    let metadata = cargo_graph::host_metadata();
-    let manifest = metadata["packages"]
-        .as_array()
-        .expect("packages")
-        .iter()
-        .find(|package| package["name"] == "transport-nostr-adapter")
-        .and_then(|package| package["manifest_path"].as_str())
-        .expect("the adapter is in the graph");
-    let crates = std::path::Path::new(manifest)
-        .parent()
-        .and_then(std::path::Path::parent)
-        .expect("the MDK crates directory");
-    std::fs::read_to_string(crates.join(file)).expect("read MDK's source")
+    sources::mdk_checkout_source("marmot-account/src/runtime.rs")
 }
 
 /// Three things of MDK's that Haven's handling of what the engine parks,
@@ -5241,10 +5226,8 @@ fn mdk_source(file: &str) -> String {
 #[test]
 fn mdks_visitor_admission_rule_and_record_before_processing_are_what_haven_counts_on() {
     let squash = |text: &str| text.split_whitespace().collect::<String>();
-    let store = squash(&mdk_source("storage-sqlite/src/storage/messages.rs"));
-    let visit = &store[store
-        .find("fnvisit_messages_in_states(")
-        .expect("MDK's SQLite store no longer has its own streaming read")..];
+    let store = squash(&mdk_source("storage-sqlite", "src/storage/messages.rs"));
+    let visit = &store[sources::the_one(&store, "fnvisit_messages_in_states(")..];
     let visit = &visit[..visit[1..].find("fn").map_or(visit.len(), |next| next + 1)];
     assert!(
         visit.contains("WHEREgroup_id=?1ANDepoch>=?2ANDstateIN({})ORDERBYinsert_order")
@@ -5254,7 +5237,7 @@ fn mdks_visitor_admission_rule_and_record_before_processing_are_what_haven_count
          stops when its visitor says so: re-read `stranded_rows` and `proposal_stands`",
     );
     assert!(
-        squash(&mdk_source("traits/src/storage.rs")).contains(
+        squash(&mdk_source("cgka-traits", "src/storage.rs")).contains(
             "fnvisit_messages_in_states(&self,group_id:&GroupId,states:&[MessageState],\
              at_or_after_epoch:EpochId,visitor:&mutdynFnMut(MessageRecord)->bool,)\
              ->StorageResult<()>"
@@ -5262,7 +5245,10 @@ fn mdks_visitor_admission_rule_and_record_before_processing_are_what_haven_count
         "the streaming read's signature changed",
     );
 
-    let ingest = squash(&mdk_source("cgka-engine/src/message_processor/ingest.rs"));
+    let ingest = squash(&mdk_source(
+        "cgka-engine",
+        "src/message_processor/ingest.rs",
+    ));
     assert!(
         ingest.contains(
             "letcommit_should_enter_convergence=ifmsg_content_type==ContentType::Commit{\
@@ -5274,12 +5260,11 @@ fn mdks_visitor_admission_rule_and_record_before_processing_are_what_haven_count
         "MDK no longer sends every commit at or above the circle's epoch into convergence \
          first: re-read whether an ingest can now mint a leave for a relay's delivery",
     );
-    let recorded = ingest
-        .find(
-            "matchself.storage.with_transaction(|_storage|{\
-             self.persist_openmls_wire_message_with_processed_transport_id(",
-        )
-        .expect("the row and its processed id are no longer written in one transaction");
+    let recorded = sources::the_one(
+        &ingest,
+        "matchself.storage.with_transaction(|_storage|{\
+         self.persist_openmls_wire_message_with_processed_transport_id(",
+    );
     let processed = ingest[recorded..]
         .find("mls_group.process_message(&provider,proto)")
         .expect("the message is no longer processed after its record is written");
@@ -5292,7 +5277,7 @@ fn mdks_visitor_admission_rule_and_record_before_processing_are_what_haven_count
          answers an unclassified processing failure with an error: re-read `hand_back`",
     );
     assert!(
-        squash(&mdk_source("cgka-engine/src/wire_format.rs"))
+        squash(&mdk_source("cgka-engine", "src/wire_format.rs"))
             .contains("pubconstDEFAULT_MAXIMUM_FORWARD_DISTANCE:u32=1_000;"),
         "MDK's forward distance changed: the recipe a test errs the engine with changes too",
     );
@@ -5311,7 +5296,7 @@ fn mdks_visitor_admission_rule_and_record_before_processing_are_what_haven_count
 #[test]
 fn mdk_marks_a_proposal_processed_only_where_a_commit_consumes_it() {
     let squash = |text: &str| text.split_whitespace().collect::<String>();
-    let canonical = squash(&mdk_source("cgka-engine/src/canonicalization.rs"));
+    let canonical = squash(&mdk_source("cgka-engine", "src/canonicalization.rs"));
     assert!(
         canonical.matches("result.accepted_proposals.push(").count() == 1
             && canonical.contains(
@@ -5321,7 +5306,7 @@ fn mdk_marks_a_proposal_processed_only_where_a_commit_consumes_it() {
         "MDK's convergence now accepts a proposal its selected branch did not consume: \
          re-read `UNRESOLVED` in `proposal_stands`",
     );
-    let projection = squash(&mdk_source("cgka-engine/src/openmls_projection.rs"));
+    let projection = squash(&mdk_source("cgka-engine", "src/openmls_projection.rs"));
     assert!(
         projection
             .matches("persist_openmls_canonicalization_dispositions(")
@@ -5333,7 +5318,7 @@ fn mdk_marks_a_proposal_processed_only_where_a_commit_consumes_it() {
             ),
         "MDK no longer writes a pass's dispositions with the group record they move",
     );
-    let publish = squash(&mdk_source("cgka-engine/src/publish.rs"));
+    let publish = squash(&mdk_source("cgka-engine", "src/publish.rs"));
     let confirm = publish
         .find("self.storage.with_transaction(|storage|->Result<(),EngineError>{")
         .expect("the confirm no longer runs in one transaction");
@@ -5348,10 +5333,8 @@ fn mdk_marks_a_proposal_processed_only_where_a_commit_consumes_it() {
         "MDK no longer marks what its own commit consumed in the transaction that merges it \
          and writes the new epoch",
     );
-    let store = squash(&mdk_source("storage-sqlite/src/storage/messages.rs"));
-    let probe = &store[store
-        .find("fnhas_messages_in_states(")
-        .expect("MDK's SQLite store no longer has its existence probe")..];
+    let store = squash(&mdk_source("storage-sqlite", "src/storage/messages.rs"));
+    let probe = &store[sources::the_one(&store, "fnhas_messages_in_states(")..];
     let probe = &probe[..probe[1..].find("fn").map_or(probe.len(), |next| next + 1)];
     assert!(
         probe.contains(
@@ -5378,7 +5361,7 @@ fn mdks_reservation_is_still_the_two_conditions_haven_reads() {
             .map(|rest| rest.split('{').next().unwrap_or_default().to_owned())
             .collect()
     };
-    let mdk = mdk_source("cgka-engine/src/message_processor/mod.rs");
+    let mdk = mdk_source("cgka-engine", "src/message_processor/mod.rs");
     let haven = production_source(&repo_root().join("haven-core/src/nostr/mls/manager.rs"));
     let reserved = kinds(&mdk, "fn is_admin_group_state_intent(");
     assert_eq!(
@@ -5421,7 +5404,7 @@ fn mdks_reservation_is_still_the_two_conditions_haven_reads() {
     // condition.
     let pass = squash(
         fn_body(
-            &mdk_source("cgka-engine/src/distributed_convergence.rs"),
+            &mdk_source("cgka-engine", "src/distributed_convergence.rs"),
             "fn load_or_open_convergence_pass(",
         )
         .expect("MDK opens a convergence pass in `load_or_open_convergence_pass`"),
