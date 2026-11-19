@@ -137,7 +137,6 @@ rust|src/nostr/mls/welcome.rs|100            # measured 100.00% (124/124)
 # kind-445 tag allowlist — `h` only for commits, `h` + NIP-40 expiration for
 # application messages, nothing else — and a tag leaking past it is a metadata
 # disclosure no aggregate would flinch at.
-rust|src/nostr/encryption/|97                # measured 99.20% (124/125)
 rust|src/nostr/identity/|93                  # measured 95.51% (659/690)
 rust|src/nostr/keys.rs|97                    # measured 99.27% (136/137)
 rust|src/nostr/giftwrap.rs|96                # measured 98.41% (124/126)

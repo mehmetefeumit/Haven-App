@@ -12,9 +12,9 @@
 #     haven        64.82%  ( 6944/10712)  ->  ~1588 lines of slack
 #
 # 2290 lines is larger than any single file in haven-core. src/nostr/mls/
-# manager.rs (755 instrumented lines), src/nostr/giftwrap.rs (208), all of
-# src/nostr/encryption/ (126) — every one of those could drop to ZERO coverage,
-# simultaneously, and the 80% gate would still print a green check.
+# manager.rs (755 instrumented lines) and src/nostr/giftwrap.rs (208) could
+# both drop to ZERO coverage, simultaneously, and the 80% gate would still
+# print a green check.
 #
 # On the Flutter side it is not hypothetical. The same reports showed:
 #

@@ -870,7 +870,7 @@ accepts up to the 5 MiB frame limit, a few MiB of transient allocation per hosti
 - Stage 0's `an_invite_whose_welcome_exceeds_the_nip44_ceiling_sends_nothing` (S0.10) stays green
   unchanged, and 16.4 adds two assertions that v0.16.0's wrap-before-record order makes true (§C.8.2): afterwards no
   fanout row (`fanout_shapes_for_test`), and the circle's sends are not held. Its premise is unchanged: enough
-  synthetic invitees that the inner peeler alone would emit an extended outer layer (MDK's test: ≈150 members).
+  synthetic invitees that the inner peeler alone would emit an extended outer layer (80; on MDK v0.10.4 the wrap is refused from 60).
 - Stage 0's compat oversized-Welcome case (run B, R3.f) records today's outcome against a v0.10.4 peer and must
   give the same outcome on the new build.
 

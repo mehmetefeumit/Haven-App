@@ -40,7 +40,6 @@ mod event;
 mod keys;
 mod tags;
 
-pub mod encryption;
 pub mod giftwrap;
 pub mod identity;
 pub mod mls;

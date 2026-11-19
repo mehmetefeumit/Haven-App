@@ -435,9 +435,15 @@ product edge tests are green.
 
 **Cost.** 3 C + 2 t + 1 T.
 
-**Risk.** The product edge test needs an invite large enough to cross the
-ceiling: a rumor of more than 40,960 bytes, about 150 members (ESTIMATED). The test mints synthetic member
-KeyPackages in-process; it publishes none of them as devices.
+**The edge, measured on MDK v0.10.4.** One invite is refused from 60 invitees
+(59 still wraps); the product edge test invites 80. Because a Welcome carries
+the circle's whole ratchet tree, the same ceiling caps the size of a circle: a
+circle grown in confirmed batches of ten refuses an invite of one more member
+at 86 members with one relay and at 85 with five, the routing in the Welcome
+moving the edge slightly. Those two circle-size figures come from a one-off
+run and no test pins them. Every refusal reaches the user as the generic
+circle-change failure. The test mints synthetic member KeyPackages in-process
+and publishes none of them as devices.
 
 ---
 
@@ -1390,7 +1396,7 @@ exactly one `p`.
 | Run | Peers | Steps | P0 / P1 |
 |---|---|---|---|
 | **A** | old admin O1, new N1, N2 | N1/N2 publish KeyPackages → O1 creates and invites N1 → N1 accepts (self-update) → locations both ways → O1 changes relays (REQs follow, O7) → O1 invites N2 → O1 removes N2 (asserted through O5 and the epoch, not an undecryptable count, because a removed member may stop asking) → N1 makes the epoch-rotation repair | P0 up to the repair; then P1 tail: hand-over O1→N1, N1 removes, O1 leaves and forgets |
-| **B** | new admin N1, old O1, O2 | A with roles swapped, then the **oversized Welcome**: N1 `invite_many` with n chosen by a size probe so the Welcome's NIP-44 plaintext exceeds 65,408 bytes (about 150 members, ESTIMATED) → refused through today's generic error path; no kind-1059 for it on any plane; the old peers' state is unchanged | P0, with the same P1 tail |
+| **B** | new admin N1, old O1, O2 | A with roles swapped, then the **oversized Welcome**: N1 `invite_many` with n chosen by a size probe so the Welcome's NIP-44 plaintext exceeds 65,408 bytes (60 invitees and more, measured in S0.10) → refused through today's generic error path; no kind-1059 for it on any plane; the old peers' state is unchanged | P0, with the same P1 tail |
 | **C** | O1, N1, then O2 upgraded in place | N1 rotates its KeyPackage twice → O1 invites with the rotated package → joins. O1's package → N1 invites → joins. **A package published before an upgrade:** O2 publishes, `exit`s; a new peer opens O2's store in place; O1 invites using that pre-upgrade 30443 event from the relay → the upgraded peer joins, never `NeedsNewInvite` | P0 |
 | **D** | O1 (**production key form**), N1, N2 | O1 stages a relay change under `swallow_ok` and reports pending → `abort` (an un-checkpointed WAL) → a **new** peer opens the same store and identity → `resume` resends the byte-identical event (compared with the proxy ledger) → `duplicate:` → confirmed → locations flow. Then a soft `exit` (TRUNCATE checkpoint); the orchestrator records a **logical-dump hash** (sorted dump through the export seam; never raw file hashes, which `-wal`/`-shm` sidecars break) → the **old** peer `open`s. If `store_schema(new) > store_schema(old)`: `refused` and the dump hash unchanged. If equal (Stage 0): it opens, and `report` shows the circle at its epoch. This proves `v0.1.13` reads a `circles-v2.db` HEAD wrote, extra column included | P0 |
 

@@ -17,7 +17,7 @@ shipped behaviour until the stage that delivers it is marked done below.
 
 | Stage | State |
 |---|---|
-| 0 — safety net | in progress: steps 2 (timing-dependent tests) and 3 (exhaustive decisions over MDK enums) done; step 4's import convention done, its remaining items and step 7 (soak-rig seams) in review; steps 5, 6, 8, 9 and 10 not started |
+| 0 — safety net | in progress: steps 2 (timing-dependent tests), 3 (exhaustive decisions over MDK enums) and 4 (refactors that already work on 0.44) done; step 7 (soak-rig seams) in review; steps 5, 6, 8, 9 and 10 not started |
 | 1 — dependency move | not started |
 | 2 — onto the runtime | not started; needs owner rulings R0, C1, C2 first |
 
@@ -110,7 +110,7 @@ choice.
 | O10 | Required status checks on the `main` ruleset (there are none today) | Owner action; the in-repo release gate is extended regardless |
 | O11 | Upstream asks | Drafted in the tracker for the owner to file |
 | O12 | Suppress the fork's new `user-agent` header with Haven's own header-less WebSocket transport | Yes; keeps today's wire |
-| O13 | Refuse a Welcome above today's NIP-44 edge, 65,408 plaintext bytes on each NIP-59 layer, while v0.1.13 may be in the field (the fork removed the ceiling, and a v0.1.13 device cannot open the larger payload). Enforced by Haven's own Welcome signer, so the edge is identical to today's. The refusal reaches the user as a generic error today and that is unchanged; typed copy for it is an optional follow-up | Yes |
+| O13 | Refuse a Welcome above today's NIP-44 edge, 65,408 plaintext bytes on each NIP-59 layer, while v0.1.13 may be in the field (the fork removed the ceiling, and a v0.1.13 device cannot open the larger payload). Enforced by Haven's own Welcome signer, so the edge is identical to today's. Measured on today's build: one invite is refused from 60 invitees, and a circle stops taking invites at about 85 members. The refusal reaches the user as a generic error today and that is unchanged; typed copy for it is an optional follow-up | Yes |
 | O14 | The release gate also reads the soak, build-check, core E2E and audit jobs, so a release tag waits for them (the iOS lanes are the slowest) | Yes |
 
 Three rulings are needed before Stage 2 starts, and not before

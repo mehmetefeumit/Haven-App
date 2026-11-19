@@ -118,7 +118,7 @@ haven/                → Flutter app (UI, state management, platform bindings)
 haven-core/           → Rust library (MLS operations, crypto, Nostr integration)
   src/circle/         → Circle management (groups, contacts, invitations)
   src/location/       → Location types, privacy, Nostr event encoding
-  src/nostr/          → MLS manager, encryption, keys, event handling
+  src/nostr/          → MLS manager, gift wrap, keys, event handling
 scripts/              → Build and utility scripts
 tooling/soak/         → `haven-soak`: hermetic core soak rig (N real engines + in-process relays behind a fault layer; test-utils only, never shipped)
 tooling/logscan/      → `haven-logscan`: the runtime log-privacy scanner every CI log sink passes through before upload

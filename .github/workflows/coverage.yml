@@ -215,9 +215,9 @@ jobs:
       # The gate above is a single AGGREGATE, and an aggregate is a budget the
       # whole crate shares: haven-core sits ~10 points over its 80% threshold,
       # which is ~2290 lines of slack — more than any one file in the crate.
-      # src/nostr/mls/manager.rs, src/nostr/giftwrap.rs and all of
-      # src/nostr/encryption/ could go to zero coverage together and the step
-      # above would still print a green check. The floors below are the
+      # src/nostr/mls/manager.rs and src/nostr/giftwrap.rs could go to zero
+      # coverage together and the step above would still print a green
+      # check. The floors below are the
       # per-path minimum that cannot express, enforced against the SAME lcov.
       # Keyed on the tests, so a failing aggregate, scan or skip gate still
       # reports the floors too.

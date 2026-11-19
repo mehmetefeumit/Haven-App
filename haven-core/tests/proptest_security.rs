@@ -9,44 +9,34 @@
 //! Note: MLS group context tests require MDK infrastructure and are covered
 //! in the integration tests. This file focuses on cryptographic primitives.
 
-use haven_core::nostr::encryption::{decrypt_nip44, encrypt_nip44};
 use haven_core::nostr::EphemeralKeypair;
+use nostr::key::{Keys, SecretKey};
+use nostr::nips::nip44::{self, Version};
 use proptest::prelude::*;
-use zeroize::Zeroizing;
 
-/// Strategy for generating 32-byte keys with various characteristics, wrapped in `Zeroizing`
-fn diverse_key_strategy() -> impl Strategy<Value = Zeroizing<[u8; 32]>> {
-    prop_oneof![
-        // Normal random keys
-        prop::array::uniform32(1u8..=255u8),
-        // Keys with leading zeros
-        (
-            prop::array::uniform16(0u8..=10u8),
-            prop::array::uniform16(1u8..=255u8)
-        )
-            .prop_map(|(a, b)| {
-                let mut key = [0u8; 32];
-                key[..16].copy_from_slice(&a);
-                key[16..].copy_from_slice(&b);
-                key
-            }),
-        // Keys with trailing zeros
-        (
-            prop::array::uniform16(1u8..=255u8),
-            prop::array::uniform16(0u8..=10u8)
-        )
-            .prop_map(|(a, b)| {
-                let mut key = [0u8; 32];
-                key[..16].copy_from_slice(&a);
-                key[16..].copy_from_slice(&b);
-                key
-            }),
-        // High-entropy keys
-        prop::array::uniform32(200u8..=255u8),
-        // Low-entropy keys (but not all zeros)
-        (1u8..=10u8).prop_map(|v| [v; 32]),
-    ]
-    .prop_map(Zeroizing::new)
+/// `plaintext` encrypted from `sender` to `receiver` on the path the NIP-59
+/// layers call, or `None` where it refuses. (No error type is named: it is
+/// `nip44::Error` at nostr 0.44 and the crate-wide error at the fork.)
+fn encrypt(plaintext: &str, sender: &Keys, receiver: &Keys) -> Option<String> {
+    nip44::encrypt(
+        sender.secret_key(),
+        &receiver.public_key(),
+        plaintext,
+        Version::V2,
+    )
+    .ok()
+}
+
+/// `payload` decrypted by `receiver`, from `sender`, or `None` where it is
+/// refused.
+fn decrypt(payload: &str, receiver: &Keys, sender: &Keys) -> Option<String> {
+    nip44::decrypt(receiver.secret_key(), &sender.public_key(), payload).ok()
+}
+
+/// Strategy for a conversation party's keys.
+fn keys_strategy() -> impl Strategy<Value = Keys> {
+    valid_secret_key_strategy()
+        .prop_map(|secret| Keys::new(SecretKey::from_slice(&secret).expect("in range")))
 }
 
 /// Strategy for generating plaintext of various lengths
@@ -90,39 +80,43 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(100))]
 
     // ========================================================================
-    // Encryption Security Properties
+    // Encryption Security Properties — NIP-44 v2 between two parties' keys,
+    // the API the NIP-59 layers of every Welcome use
     // ========================================================================
 
-    /// Property: Different keys always produce different ciphertexts for same plaintext
+    /// Property: Different senders always produce different ciphertexts for
+    /// the same plaintext to the same receiver
     #[test]
     fn different_keys_produce_different_ciphertexts(
         plaintext in "[a-zA-Z]{20,50}",
-        key1 in diverse_key_strategy(),
-        key2 in diverse_key_strategy(),
+        sender1 in keys_strategy(),
+        sender2 in keys_strategy(),
+        receiver in keys_strategy(),
     ) {
-        prop_assume!(key1 != key2);
+        prop_assume!(sender1 != sender2);
 
-        let ct1 = encrypt_nip44(&plaintext, &key1);
-        let ct2 = encrypt_nip44(&plaintext, &key2);
+        let ct1 = encrypt(&plaintext, &sender1, &receiver);
+        let ct2 = encrypt(&plaintext, &sender2, &receiver);
 
         // Both should succeed
-        prop_assert!(ct1.is_ok());
-        prop_assert!(ct2.is_ok());
+        prop_assert!(ct1.is_some());
+        prop_assert!(ct2.is_some());
 
         // Ciphertexts should differ
-        prop_assert_ne!(ct1.unwrap(), ct2.unwrap());
+        prop_assert_ne!(ct1, ct2);
     }
 
     /// Property: Ciphertext length is always larger than plaintext
     #[test]
     fn ciphertext_larger_than_plaintext(
         plaintext in diverse_plaintext_strategy(),
-        key in diverse_key_strategy(),
+        sender in keys_strategy(),
+        receiver in keys_strategy(),
     ) {
         prop_assume!(!plaintext.is_empty());
 
-        let ciphertext = encrypt_nip44(&plaintext, &key);
-        prop_assert!(ciphertext.is_ok());
+        let ciphertext = encrypt(&plaintext, &sender, &receiver);
+        prop_assert!(ciphertext.is_some());
 
         let ct = ciphertext.unwrap();
         // Ciphertext includes nonce, padding, and MAC
@@ -130,32 +124,32 @@ proptest! {
     }
 
     /// Property: the ciphertext never contains the plaintext as a substring.
-    /// (Consolidated from the former `proptest_encryption.rs`, now exercised
-    /// with the richer `diverse_key_strategy`. Plaintext is >=10 alpha chars so
-    /// it cannot coincidentally appear within the base64 ciphertext.)
+    /// (Plaintext is >=10 alpha chars so it cannot coincidentally appear
+    /// within the base64 ciphertext.)
     #[test]
     fn ciphertext_never_contains_plaintext(
         plaintext in "[a-zA-Z]{10,100}",
-        key in diverse_key_strategy(),
+        sender in keys_strategy(),
+        receiver in keys_strategy(),
     ) {
-        let ciphertext = encrypt_nip44(&plaintext, &key).expect("encryption should succeed");
+        let ciphertext = encrypt(&plaintext, &sender, &receiver).expect("encryption should succeed");
         prop_assert!(
             !ciphertext.contains(&plaintext),
             "ciphertext must not contain the plaintext"
         );
     }
 
-    /// Property: encrypting the same plaintext+key twice yields different
-    /// ciphertexts (NIP-44 random nonce). (Consolidated from the former
-    /// `proptest_encryption.rs`.)
+    /// Property: encrypting the same plaintext between the same parties twice
+    /// yields different ciphertexts (NIP-44 random nonce).
     #[test]
     fn encryption_is_randomized(
         plaintext in diverse_plaintext_strategy(),
-        key in diverse_key_strategy(),
+        sender in keys_strategy(),
+        receiver in keys_strategy(),
     ) {
         prop_assume!(!plaintext.is_empty());
-        let ct1 = encrypt_nip44(&plaintext, &key).expect("encryption should succeed");
-        let ct2 = encrypt_nip44(&plaintext, &key).expect("encryption should succeed");
+        let ct1 = encrypt(&plaintext, &sender, &receiver).expect("encryption should succeed");
+        let ct2 = encrypt(&plaintext, &sender, &receiver).expect("encryption should succeed");
         prop_assert_ne!(ct1, ct2, "random nonce must make repeated ciphertexts differ");
     }
 
@@ -163,36 +157,34 @@ proptest! {
     #[test]
     fn decryption_is_deterministic(
         plaintext in diverse_plaintext_strategy(),
-        key in diverse_key_strategy(),
+        sender in keys_strategy(),
+        receiver in keys_strategy(),
     ) {
         prop_assume!(!plaintext.is_empty());
 
-        let ciphertext = encrypt_nip44(&plaintext, &key).expect("encryption succeeds");
+        let ciphertext = encrypt(&plaintext, &sender, &receiver).expect("encryption succeeds");
 
         // Decrypt multiple times
-        let d1 = decrypt_nip44(&ciphertext, &key);
-        let d2 = decrypt_nip44(&ciphertext, &key);
-        let d3 = decrypt_nip44(&ciphertext, &key);
+        let d1 = decrypt(&ciphertext, &receiver, &sender);
+        let d2 = decrypt(&ciphertext, &receiver, &sender);
+        let d3 = decrypt(&ciphertext, &receiver, &sender);
 
-        prop_assert!(d1.is_ok());
-        prop_assert!(d2.is_ok());
-        prop_assert!(d3.is_ok());
-
-        prop_assert_eq!(&d1.unwrap(), &plaintext);
-        prop_assert_eq!(&d2.unwrap(), &plaintext);
-        prop_assert_eq!(&d3.unwrap(), &plaintext);
+        prop_assert_eq!(d1.as_deref(), Some(plaintext.as_str()));
+        prop_assert_eq!(d2.as_deref(), Some(plaintext.as_str()));
+        prop_assert_eq!(d3.as_deref(), Some(plaintext.as_str()));
     }
 
     /// Property: Tampering with the MAC portion of ciphertext causes decryption failure
     #[test]
     fn mac_tampering_causes_decryption_failure(
         plaintext in "[a-zA-Z]{20,50}",
-        key in diverse_key_strategy(),
+        sender in keys_strategy(),
+        receiver in keys_strategy(),
         mac_offset in 0usize..32,
     ) {
         use base64::Engine;
 
-        let ciphertext = encrypt_nip44(&plaintext, &key).expect("encryption succeeds");
+        let ciphertext = encrypt(&plaintext, &sender, &receiver).expect("encryption succeeds");
         let mut ct_bytes = base64::engine::general_purpose::STANDARD
             .decode(&ciphertext)
             .expect("valid base64");
@@ -206,48 +198,51 @@ proptest! {
         }
 
         let tampered_ct = base64::engine::general_purpose::STANDARD.encode(&ct_bytes);
-        let result = decrypt_nip44(&tampered_ct, &key);
+        let result = decrypt(&tampered_ct, &receiver, &sender);
 
         // Decryption should fail due to MAC verification
-        prop_assert!(result.is_err(), "MAC-tampered ciphertext should not decrypt");
+        prop_assert!(result.is_none(), "MAC-tampered ciphertext should not decrypt");
     }
 
-    /// Property (RP-2): Decrypting with a key different from the one used to
-    /// encrypt must fail. NIP-44's AEAD MAC is keyed by the conversation key,
-    /// so a wrong key cannot verify the tag. The security-named file
-    /// previously lacked this core confidentiality check.
+    /// Property (RP-2): Decrypting with keys other than the conversation's
+    /// must fail — by a third party holding the sender's public key, and by
+    /// the receiver taking it to come from someone else. NIP-44's AEAD MAC is
+    /// keyed by the conversation key, so a wrong key cannot verify the tag.
     #[test]
     fn wrong_key_fails_decryption(
         plaintext in diverse_plaintext_strategy(),
-        key1 in diverse_key_strategy(),
-        key2 in diverse_key_strategy(),
+        sender in keys_strategy(),
+        receiver in keys_strategy(),
+        other in keys_strategy(),
     ) {
         prop_assume!(!plaintext.is_empty());
-        prop_assume!(key1 != key2);
+        prop_assume!(other != sender && other != receiver);
 
-        let ciphertext = encrypt_nip44(&plaintext, &key1).expect("encryption should succeed");
-        let result = decrypt_nip44(&ciphertext, &key2);
+        let ciphertext = encrypt(&plaintext, &sender, &receiver).expect("encryption should succeed");
 
         prop_assert!(
-            result.is_err(),
-            "ciphertext encrypted under key1 must not decrypt under a different key2"
+            decrypt(&ciphertext, &other, &sender).is_none(),
+            "a third party must not decrypt a ciphertext between two others"
+        );
+        prop_assert!(
+            decrypt(&ciphertext, &receiver, &other).is_none(),
+            "the receiver must not decrypt a ciphertext as from another sender"
         );
     }
 
     /// Property (RP-3): Flipping any single byte of the 32-byte NIP-44 v2
     /// nonce (payload bytes `1..33`) causes decryption to fail. The nonce is
-    /// authenticated by the MAC, so any alteration must be detected. Mirrors
-    /// `d4_nonce_tampering_detected` in `proptest_encryption.rs` but over the
-    /// diverse key strategy used here.
+    /// authenticated by the MAC, so any alteration must be detected.
     #[test]
     fn nonce_tampering_causes_decryption_failure(
         plaintext in "[a-zA-Z]{20,50}",
-        key in diverse_key_strategy(),
+        sender in keys_strategy(),
+        receiver in keys_strategy(),
         nonce_offset in 0usize..32,
     ) {
         use base64::Engine;
 
-        let ciphertext = encrypt_nip44(&plaintext, &key).expect("encryption succeeds");
+        let ciphertext = encrypt(&plaintext, &sender, &receiver).expect("encryption succeeds");
         let mut ct_bytes = base64::engine::general_purpose::STANDARD
             .decode(&ciphertext)
             .expect("valid base64");
@@ -259,10 +254,10 @@ proptest! {
         ct_bytes[tamper_pos] ^= 0xFF;
 
         let tampered_ct = base64::engine::general_purpose::STANDARD.encode(&ct_bytes);
-        let result = decrypt_nip44(&tampered_ct, &key);
+        let result = decrypt(&tampered_ct, &receiver, &sender);
 
         prop_assert!(
-            result.is_err(),
+            result.is_none(),
             "nonce-tampered ciphertext at offset {nonce_offset} must not decrypt"
         );
     }
@@ -276,44 +271,42 @@ proptest! {
     #[test]
     fn encrypt_decrypt_identity_over_diverse_plaintext(
         plaintext in diverse_plaintext_strategy(),
-        key in diverse_key_strategy(),
+        sender in keys_strategy(),
+        receiver in keys_strategy(),
     ) {
         if plaintext.is_empty() {
             // Source contract: NIP-44 v2 rejects empty plaintext.
             prop_assert!(
-                encrypt_nip44(&plaintext, &key).is_err(),
+                encrypt(&plaintext, &sender, &receiver).is_none(),
                 "empty plaintext must be rejected by NIP-44"
             );
         } else {
-            let ciphertext = encrypt_nip44(&plaintext, &key).expect("encryption should succeed");
-            let decrypted = decrypt_nip44(&ciphertext, &key).expect("decryption should succeed");
+            let ciphertext = encrypt(&plaintext, &sender, &receiver).expect("encryption should succeed");
+            let decrypted = decrypt(&ciphertext, &receiver, &sender).expect("decryption should succeed");
             prop_assert_eq!(decrypted, plaintext);
         }
     }
 
-    /// Property (RP-5): Flipping ANY single byte in the authenticated region
-    /// of the NIP-44 v2 payload — the nonce, the padded ciphertext, OR the
-    /// MAC (payload bytes `1..len`) — causes decryption to fail. This is the
-    /// whole-AEAD integrity guarantee and a strict superset of the MAC-only
+    /// Property (RP-5): Flipping ANY single byte of the NIP-44 v2 payload —
+    /// the version, the nonce, the padded ciphertext, OR the MAC (payload
+    /// bytes `0..len`) — causes decryption to fail. This is the whole-payload
+    /// integrity guarantee and a strict superset of the MAC-only
     /// (`len-32..len`) and nonce-only (`1..33`) tamper properties.
     ///
-    /// Byte 0 (the version tag) is deliberately excluded: Haven calls
-    /// `nip44::v2::decrypt_to_bytes`, whose HMAC authenticates only
-    /// `nonce || ciphertext` (verified against the source — it slices
-    /// `payload[1..33]`, `payload[33..len-32]`, `payload[len-32..]` and never
-    /// reads byte 0). Asserting a byte-0 flip must fail would be a *false*
-    /// assertion, not a stronger one; the offset therefore ranges over
-    /// `1..len`, covering every authenticated byte.
+    /// The HMAC authenticates only `nonce || ciphertext`; byte 0 is covered
+    /// because `nip44::decrypt` reads it as the version and refuses any but
+    /// v2's.
     #[test]
     fn any_authenticated_byte_tamper_causes_decryption_failure(
         plaintext in "[a-zA-Z]{20,80}",
-        key in diverse_key_strategy(),
+        sender in keys_strategy(),
+        receiver in keys_strategy(),
         offset_seed in any::<prop::sample::Index>(),
         flip_mask in 1u8..=255u8,
     ) {
         use base64::Engine;
 
-        let ciphertext = encrypt_nip44(&plaintext, &key).expect("encryption succeeds");
+        let ciphertext = encrypt(&plaintext, &sender, &receiver).expect("encryption succeeds");
         let mut ct_bytes = base64::engine::general_purpose::STANDARD
             .decode(&ciphertext)
             .expect("valid base64");
@@ -321,18 +314,17 @@ proptest! {
         // Need at least version(1) + nonce(32) + len-prefix-ish + MAC(32).
         prop_assume!(ct_bytes.len() > 33);
 
-        // Pick an arbitrary byte in the authenticated region [1, len) and
-        // flip >= 1 bit (flip_mask is never 0).
-        let span = ct_bytes.len() - 1;
-        let pos = 1 + offset_seed.index(span);
+        // Pick an arbitrary byte in [0, len) and flip >= 1 bit (flip_mask is
+        // never 0).
+        let pos = offset_seed.index(ct_bytes.len());
         ct_bytes[pos] ^= flip_mask;
 
         let tampered_ct = base64::engine::general_purpose::STANDARD.encode(&ct_bytes);
-        let result = decrypt_nip44(&tampered_ct, &key);
+        let result = decrypt(&tampered_ct, &receiver, &sender);
 
         prop_assert!(
-            result.is_err(),
-            "tampering authenticated byte {pos}/{} must not decrypt successfully",
+            result.is_none(),
+            "tampering payload byte {pos}/{} must not decrypt successfully",
             ct_bytes.len()
         );
     }
@@ -537,42 +529,17 @@ mod special_cases {
 
     #[test]
     fn empty_string_encryption_fails() {
-        let key = Zeroizing::new([0x42u8; 32]);
-        let result = encrypt_nip44("", &key);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn all_zero_key_encryption_roundtrips() {
-        // NIP-44 v2 treats the 32-byte conversation key as a *symmetric* key
-        // fed directly into HKDF/ChaCha20 (see `encrypt_nip44` in
-        // `src/nostr/encryption/mod.rs`, which calls `ConversationKey::new`
-        // with the raw bytes). Unlike an secp256k1 *secret* scalar, there is no
-        // curve-order range check, so an all-zero key is accepted. Assert the
-        // exact behavior: encryption succeeds AND an encrypt -> decrypt cycle
-        // recovers the plaintext under the same all-zero key.
-        let key = Zeroizing::new([0u8; 32]);
-        let plaintext = "test";
-
-        let ciphertext = encrypt_nip44(plaintext, &key)
-            .expect("NIP-44 v2 accepts an all-zero 32-byte symmetric key");
-        let decrypted = decrypt_nip44(&ciphertext, &key)
-            .expect("round-trip under the all-zero key must decrypt");
-
-        assert_eq!(
-            decrypted, plaintext,
-            "encrypt -> decrypt under an all-zero key must recover the plaintext"
-        );
+        assert!(encrypt("", &Keys::generate(), &Keys::generate()).is_none());
     }
 
     #[test]
     fn invalid_base64_decryption_fails() {
-        let key = Zeroizing::new([0x42u8; 32]);
+        let (sender, receiver) = (Keys::generate(), Keys::generate());
         let invalid_inputs = ["not base64!!!", "====", "a", "", " ", "\n\t"];
 
         for input in invalid_inputs {
-            let result = decrypt_nip44(input, &key);
-            assert!(result.is_err(), "Should fail for input: {input:?}");
+            let result = decrypt(input, &receiver, &sender);
+            assert!(result.is_none(), "Should fail for input: {input:?}");
         }
     }
 
