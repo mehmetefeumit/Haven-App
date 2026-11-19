@@ -1014,7 +1014,9 @@ declared in `e2e_lane_budget.manifest`.
 - **T-PRIV-2** with a seeded generator, `packet == nonce ‖
   ChaCha20-Poly1305(K, nonce, AAD, plaintext)` against an independent vector,
   the nonce equals the generator's output, the length is exactly 12+996+16
-  and the AAD is the constant; a guard pins `OsRng` in production.
+  and the AAD is the constant. In production the generator is pinned by
+  the engine's type at the bridge (`MeshEngine<haven_core::mesh::OsRng>`),
+  which no other generator satisfies; no script checks it.
 - **T-PRIV-3** forwarding traces are identical for a member and a non-member,
   and for own and carried packets, including eviction. Under store pressure
   own packets are one class among the links', evicted by the same rule.
@@ -3994,6 +3996,22 @@ New, added:
 > says why in `mesh-failure` lines of closed shapes; its raw captures
 > hold the emulator's Bluetooth address and are never uploaded:
 > `docs/E2E_TROUBLESHOOTING.md` failure mode 28),
+
+**9. "CI Pipeline", Stage 1.** `cross-check.yml`'s Android step has been
+clippy with warnings denied since the radio's JNI shim landed (the one
+target that compiles it); the line still says `cargo check` for all
+four.
+
+Old:
+
+> `cross-check.yml` (`cargo check --target` for macOS/iOS/Windows/Android; validates platform-gated `#[cfg]` code)
+
+New:
+
+> `cross-check.yml` (`cargo check --target` for macOS/iOS/Windows, and
+> `cargo clippy --target aarch64-linux-android -- -D warnings` for
+> Android, the one build of the radio's JNI shim; validates
+> platform-gated `#[cfg]` code)
 
 Next: M3, the radio, and with it everything on screen, as
 `docs/BLUETOOTH_MESH_M3_DESIGN.md` has it; and, if Android is to pass
