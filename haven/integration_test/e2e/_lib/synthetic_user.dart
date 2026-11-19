@@ -151,8 +151,9 @@ class SyntheticUser {
       //
       // On a gated lane the gated relay heads both lists first, as the
       // default-relay override puts it at the head of the app's: inviters
-      // then deliver to it, and only a Welcome that also reached the next
-      // relay is ever read (see [acceptInvitationViaRelay]).
+      // then deliver to it, and only a read that answers its challenge, or a
+      // Welcome that also reached the next relay, is served (see
+      // [acceptInvitationViaRelay]).
       if (gatedInboxConfigured) {
         for (final type in <RelayTypeFfi>[
           RelayTypeFfi.nip65,
@@ -363,12 +364,14 @@ class SyntheticUser {
   /// exists to catch.
   ///
   /// On a gated lane ([gatedInboxConfigured]) it also proves the gate was
-  /// exercised: the gated relay heads this peer's inbox list, the product
-  /// read of it is [InboxReadFfi.refused] with nothing served, and the
-  /// gated store holds the very Welcome this peer joined through.
+  /// exercised and passed (A5, owner-directed 2026-11-16): the gated relay
+  /// heads this peer's inbox list, every relay of that list served the read —
+  /// the gated one only after this peer's read answered its NIP-42 challenge
+  /// — each served the very Welcome this peer joined through, and the gated
+  /// relay's own store holds it.
   ///
-  /// Throws on timeout, on a gated read that was not refused, on no fetched
-  /// gift wrap yielding an applicable Welcome, or on a gated store missing it.
+  /// Throws on timeout, on no fetched gift wrap yielding an applicable
+  /// Welcome, or on a gated lane where any of that does not hold.
   Future<CircleWithMembersFfi> acceptInvitationViaRelay({
     required TestRelay relay,
     Duration timeout = const Duration(seconds: 90),
@@ -390,7 +393,6 @@ class SyntheticUser {
       relayType: RelayTypeFfi.inbox,
     );
     final fetched = await _readInbox(inbox);
-    if (gatedInboxConfigured) _assertGatedReadRefused(inbox, fetched);
 
     // Every wrap any relay sent, de-duplicated by id, tried until one applies:
     // with a pubkey reused on a store that is not wiped between tests, a STALE
@@ -406,7 +408,10 @@ class SyntheticUser {
     for (final MapEntry(key: id, value: eventJson) in wraps.entries) {
       final joined = await _tryApplyGiftWrap(id, eventJson);
       if (joined == null) continue;
-      if (gatedInboxConfigured) await _assertGatedStoreHolds(id);
+      if (gatedInboxConfigured) {
+        _assertEveryInboxRelayServed(inbox, fetched, id);
+        await _assertGatedStoreHolds(id);
+      }
       return joined;
     }
     throw StateError(
@@ -423,7 +428,7 @@ class SyntheticUser {
     final relayManager = await RelayManagerFfi.newInstance();
     try {
       return await relayManager.fetchGiftWrapsPerRelay(
-        recipientPubkey: pubkeyHex,
+        circle: user.circleManager,
         relays: inbox,
         since: now - lookback,
       );
@@ -432,35 +437,47 @@ class SyntheticUser {
     }
   }
 
-  /// The gate's half of the vacuity guard: the gated relay heads [inbox] and
-  /// the product read of it was refused, serving nothing.
-  void _assertGatedReadRefused(
+  /// The read's half of the vacuity guard: the gated relay heads [inbox],
+  /// and each relay of [inbox] was read once, [InboxReadFfi.served], with the
+  /// Welcome [id] among what it served. The gated relay serves a gift wrap
+  /// only to a read that answered its challenge, so its copy proves the
+  /// product's inbox read authenticated; the plain relay's proves the Welcome
+  /// reached every inbox relay, not only the first.
+  void _assertEveryInboxRelayServed(
     List<String> inbox,
     List<RelayGiftWrapFetchFfi> fetched,
+    String id,
   ) {
-    String canon(String url) => url.toLowerCase().replaceAll(RegExp(r'/+$'), '');
-    final gated = canon(gatedInboxRelayUrl);
-    if (inbox.isEmpty || canon(inbox.first) != gated) {
+    String canon(String url) =>
+        url.toLowerCase().replaceAll(RegExp(r'/+$'), '');
+    if (inbox.isEmpty || canon(inbox.first) != canon(gatedInboxRelayUrl)) {
       throw StateError(
         '[SyntheticUser:$role] the gated relay does not head the stored inbox '
-        'list, so this read cannot prove a Welcome reached a readable relay.',
+        'list, so this read cannot prove the gate was passed.',
       );
     }
-    final reads = fetched.where((f) => canon(f.relayUrl) == gated).toList();
-    if (reads.length != 1 ||
-        reads.single.read != InboxReadFfi.refused ||
-        reads.single.events.isNotEmpty) {
-      throw StateError(
-        '[SyntheticUser:$role] the gated inbox relay was not read once, as '
-        'refused, with nothing served: the gate did not stand between this '
-        'peer and its Welcome.',
-      );
+    for (final url in inbox) {
+      final reads = fetched.where((f) => canon(f.relayUrl) == canon(url));
+      final servedIt = reads.length == 1 &&
+          reads.single.read == InboxReadFfi.served &&
+          reads.single.events.any(
+            (json) => (jsonDecode(json) as Map<String, dynamic>)['id'] == id,
+          );
+      if (!servedIt) {
+        final which = canon(url) == canon(gatedInboxRelayUrl)
+            ? 'the gated inbox relay'
+            : 'an ungated inbox relay';
+        throw StateError(
+          '[SyntheticUser:$role] $which was not read once, served, with '
+          'Welcome ${_eventHandle(id)} among what it sent.',
+        );
+      }
     }
   }
 
-  /// The store's half: the gated relay holds the Welcome [id] this peer
-  /// joined through, so the gate held a copy the product read could not
-  /// reach and the join came through another relay.
+  /// The store's half: the gated route's own store holds the Welcome [id],
+  /// read past the gate, so what the gated relay served came from the store
+  /// it fronts and no other.
   Future<void> _assertGatedStoreHolds(String id) async {
     final store = await connectProbeRelay(gatedStoreProbeUrl);
     try {

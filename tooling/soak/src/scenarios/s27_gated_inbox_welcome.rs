@@ -2,19 +2,22 @@
 //!
 //! The invitee lists two inbox relays, the first of them gated as
 //! `relay.damus.io` gates gift wraps (`Fault::AuthGatedReads`: kind-1059
-//! reads refused to a client that has not authenticated, which Haven never
-//! is; writes taken). The admin finds the invitee with the product's lookup
-//! on its key-package relay, takes the inbox list the invitee published, and
-//! invites it through its driver. The promise: the Welcome reaches every
+//! reads refused to a client that has not authenticated, as the live plane
+//! never does (Security Rule 16); writes taken). The admin finds the invitee
+//! with the product's lookup on its key-package relay, takes the inbox list
+//! the invitee published, and invites it through its driver. The promise: the Welcome reaches every
 //! inbox relay, so the invitee's own live inbox plane reads it from the
 //! second and the invitee joins — a Welcome sent to the first relay alone
 //! would sit there unread for good.
 //!
 //! Then both relays are gated and the admin invites again: the product's
-//! per-relay read of the inbox is typed `refused` on both, both relays hold
-//! the Welcome, neither ever hands it to the invitee, and the invitee does
-//! not join. Anchored on what the planes recorded — the gate's refusals, the
-//! relays' own acknowledgements of the Welcome, the deliveries they never
+//! anonymous per-relay read of the inbox — the live plane's way, answering
+//! no challenge — is typed `refused` on both, both relays hold the Welcome,
+//! neither ever hands it to the invitee, and the invitee does not join. The
+//! Invitations page's own read answers the challenge (A5) and is not what
+//! this rig makes; haven-core's `own_inbox_read_e2e` proves it. Anchored
+//! on what the planes recorded — the gate's refusals, the relays' own
+//! acknowledgements of the Welcome, the deliveries they never
 //! made — and never on elapsed time.
 //!
 //! # The floor
@@ -372,7 +375,7 @@ async fn joined_live<T: TimelineSink, L: LogDrain>(
         wraps.extend(world.device_mut(invitee)?.take_welcome_wraps());
         let device = world.device(invitee)?;
         let manager = device.manager()?;
-        for json in wraps.drain(..) {
+        for json in std::mem::take(&mut wraps) {
             let Ok(wrap) = Event::from_json(&json) else {
                 continue;
             };
@@ -397,8 +400,8 @@ async fn joined_live<T: TimelineSink, L: LogDrain>(
     }
 }
 
-/// Whether the product's per-relay read of the invitee's inbox came back
-/// typed `refused`, with nothing served, from every relay it lists.
+/// Whether the product's anonymous per-relay read of the invitee's inbox
+/// came back typed `refused`, with nothing served, from every relay it lists.
 async fn refused_everywhere<T: TimelineSink, L: LogDrain>(
     world: &ScenarioWorld<T, L>,
     invitee: DeviceTag,

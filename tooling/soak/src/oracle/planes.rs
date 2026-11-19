@@ -185,14 +185,15 @@ fn crossing(relay: RelayTag, device: Option<DeviceTag>, row: Option<Row>, class:
     let rule = class.name();
     match class {
         Class::CrossedRequest => Finding::PlaneCrossedRequest { relay, device, row },
-        Class::CrossedEvent | Class::WrongAuthor | Class::ListNamesForeignPlane => {
-            Finding::PlaneCrossedEvent {
-                relay,
-                device,
-                row,
-                rule,
-            }
-        }
+        Class::CrossedEvent
+        | Class::WrongAuthor
+        | Class::ListNamesForeignPlane
+        | Class::AuthOnSharedConnection => Finding::PlaneCrossedEvent {
+            relay,
+            device,
+            row,
+            rule,
+        },
         Class::UnknownFrame
         | Class::UnresolvedId
         | Class::NoGroundTruth
@@ -387,6 +388,7 @@ mod tests {
             (Class::UnresolvedId, "plane-unknown-frame"),
             (Class::NoGroundTruth, "plane-unknown-frame"),
             (Class::UndeclaredCircle, "plane-unknown-frame"),
+            (Class::AuthOnSharedConnection, "plane-crossed-event"),
         ];
         for (class, o7) in expected {
             let finding = crossing(relay, device, Some(Row::Ev0), class);

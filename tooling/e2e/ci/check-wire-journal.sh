@@ -1656,27 +1656,29 @@ self_test() {
   write_healthy "${healthy}"
   expect_rc 0 "healthy journal passes" --journal "${healthy}" "${base[@]}" || fail=1
 
-  # A GATED ROUTE's journal. The gate's own AUTH challenge is outside the closed
-  # verb set and the gift wrap it withheld is not something Haven received, so
-  # this stays clean only while `p2c`/`r2p` are read as the proxy's, not the
-  # relay's; the refused REQ (`c2p`) is still Haven's, so a filter key nobody
-  # reasoned about on it is still a finding.
+  # A GATED ROUTE's journal. The gift wrap the gate withheld is not something
+  # Haven received, so this stays clean only while `p2c`/`r2p` are read as the
+  # proxy's, not the relay's; the refused REQ (`c2p`) and the client's answer to
+  # the challenge are still Haven's, so a filter key nobody reasoned about on
+  # the REQ is still a finding.
   local gated="${tmp}/gated.ndjson"
   fx_begin "${tmp}/gated.raw"
   jline c2p c1 "[\"REQ\",\"sub-in\",{\"kinds\":[1059],\"#p\":[\"${PK_A}\"]}]"
   jline p2c c1 '["AUTH","challenge-c1"]'
   jline p2c c1 '["CLOSED","sub-in","ERROR: auth-required: requested filter requires authentication"]'
   jline r2p c1 "[\"EVENT\",\"sub-mix\",$(ev 1059 "eW" "${PK_EPH1}" "[[\"p\",\"${PK_A}\"]]")]"
+  jline c2p c1 "[\"AUTH\",$(ev 22242 "eAUTH" "${PK_A}" '[["challenge","challenge-c1"],["relay","ws://10.0.2.2:7790"]]')]"
+  jline p2c c1 '["OK","eAUTH",true,""]'
   cat "${healthy}" >> "${tmp}/gated.raw"
   renumber "${tmp}/gated.raw" "${gated}"
   expect_rc 0 "a gated route's refusal and withheld event leave a clean journal clean" \
     --journal "${gated}" "${base[@]}" || fail=1
-  local relayed_auth="${tmp}/relayed-auth.ndjson"
-  sed 's/"dir":"p2c"\(.*"frame":\["AUTH"\)/"dir":"r2c"\1/' \
-    "${gated}" > "${relayed_auth}"
-  expect_msg 'frame verb "AUTH" is not in the allow-list' \
-    "an AUTH a RELAY sent is still outside the closed verb set" \
-    --journal "${relayed_auth}" "${base[@]}" || fail=1
+  local counted="${tmp}/counted.ndjson"
+  sed 's/"dir":"c2p"\(.*"frame":\["\)AUTH"/"dir":"c2p"\1COUNT"/' \
+    "${gated}" > "${counted}"
+  expect_msg 'frame verb "COUNT" is not in the allow-list' \
+    "a frame Haven sent a gated route is still held to the closed verb set" \
+    --journal "${counted}" "${base[@]}" || fail=1
   local gated_search="${tmp}/gated-search.ndjson"
   sed 's/{"kinds":\[1059\],"#p"/{"kinds":[1059],"search":"x","#p"/' "${gated}" > "${gated_search}"
   expect_msg 'carried the filter key "search"' \

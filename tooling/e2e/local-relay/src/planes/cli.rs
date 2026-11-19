@@ -47,8 +47,8 @@ const USAGE: &str = "usage: haven-wire-planes --journal <path> --sentinel <token
 [--declare-overlap <role>:<role>]...\n       haven-wire-planes --export <path>\n\
 roles: inbox, keypackage, discovery, profile, location";
 
-const BANNER: &str = "wire-planes: CLEAN - C8.1-C8.8 hold: every EVENT (C8.1), REQ (C8.2) and \
-NEG-OPEN (C8.3) on a listen whose roles admit it, every routing on the location plane (C8.4), \
+const BANNER: &str = "wire-planes: CLEAN - C8.1-C8.8 hold: every EVENT (C8.1), REQ and AUTH \
+(C8.2) and NEG-OPEN (C8.3) on a listen whose roles admit it, every routing on the location plane (C8.4), \
 every circle declared (C8.5), every binding grounded (C8.6), every declared role witnessed \
 (C8.7), every listen declared (C8.8)";
 

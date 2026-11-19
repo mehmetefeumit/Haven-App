@@ -50,6 +50,8 @@ pub enum Row {
     Req0A,
     /// A NIP-77 NEG-OPEN over one circle's kind 445.
     Neg445H,
+    /// A NIP-42 answer to a relay's challenge.
+    Auth22242,
 }
 
 impl Row {
@@ -73,6 +75,7 @@ impl Row {
             Self::Req10050A => "REQ-10050-A",
             Self::Req0A => "REQ-0-A",
             Self::Neg445H => "NEG-445-H",
+            Self::Auth22242 => "AUTH-22242",
         }
     }
 
@@ -99,7 +102,9 @@ pub enum Verb {
     NegMsg,
     /// `NEG-CLOSE`.
     NegClose,
-    /// Anything else: `COUNT`, `AUTH`, an unknown verb, not a frame at all.
+    /// `AUTH` (NIP-42).
+    Auth,
+    /// Anything else: `COUNT`, an unknown verb, not a frame at all.
     Other,
 }
 
@@ -114,6 +119,7 @@ impl Verb {
             Self::Close => "CLOSE",
             Self::NegMsg => "NEG-MSG",
             Self::NegClose => "NEG-CLOSE",
+            Self::Auth => "AUTH",
             Self::Other => "other",
         }
     }
@@ -262,15 +268,15 @@ pub enum Limit {
 pub struct RowSpec {
     /// The row.
     pub row: Row,
-    /// `EVENT`, `REQ` or `NEG-OPEN`.
+    /// `EVENT`, `REQ`, `NEG-OPEN` or `AUTH`.
     pub verb: Verb,
     /// The kinds: an event's kind, or a filter's `kinds` set exactly.
     pub kinds: &'static [u16],
-    /// EVENT: tag names present exactly once each. REQ / NEG-OPEN: filter keys
-    /// that must be present.
+    /// EVENT / AUTH: tag names present exactly once each. REQ / NEG-OPEN:
+    /// filter keys that must be present.
     pub required: &'static [&'static str],
-    /// EVENT: tag names that may repeat. REQ / NEG-OPEN: filter keys that may
-    /// be present. Nothing outside `required` and `optional` is admitted.
+    /// EVENT / AUTH: tag names that may repeat. REQ / NEG-OPEN: filter keys
+    /// that may be present. Nothing outside `required` and `optional` is admitted.
     pub optional: &'static [&'static str],
     /// The `limit` the filter may carry.
     pub limit: Limit,
@@ -303,7 +309,7 @@ const KEY_PACKAGE_TAGS: &[&str] = &[
 ];
 
 /// The matrix.
-pub static ROWS: [RowSpec; 16] = [
+pub static ROWS: [RowSpec; 17] = [
     RowSpec {
         row: Row::Ev445Commit,
         verb: Verb::Event,
@@ -480,6 +486,17 @@ pub static ROWS: [RowSpec; 16] = [
         roles: &[Role::Location],
         admitted_on: "one `#h` circle whose routing stands; opening message `6100000200`",
     },
+    RowSpec {
+        row: Row::Auth22242,
+        verb: Verb::Auth,
+        kinds: &[22242],
+        required: &["challenge", "relay"],
+        optional: &[],
+        limit: Limit::Any,
+        author: Author::Account,
+        roles: &[Role::Inbox],
+        admitted_on: "the author's own inbox list current at the instant, on a connection that carries nothing else but `REQ-1059-P` reads of the author's own gift wraps and their `CLOSE`s",
+    },
 ];
 
 fn code_list(items: &[&str]) -> String {
@@ -526,7 +543,7 @@ pub fn render_markdown() -> String {
          |---|---|---|---|---|---|---|---|\n",
     );
     for spec in &ROWS {
-        let limit = if spec.verb == Verb::Event {
+        let limit = if matches!(spec.verb, Verb::Event | Verb::Auth) {
             "-".to_owned()
         } else {
             limit_text(spec.limit)

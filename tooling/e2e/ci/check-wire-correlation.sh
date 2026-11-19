@@ -1967,15 +1967,18 @@ self_test() {
   write_healthy "${healthy}"
   expect_rc 0 "healthy two-circle journal passes" --journal "${healthy}" "${base[@]}" || fail=1
 
-  # A GATED ROUTE. The gate's AUTH and refusal and the gift wrap it withheld
-  # are not traffic of Haven's, so they leave a clean journal clean; the REQ it
-  # refused is still a filter Haven asked for, so C5.2 judges that one.
+  # A GATED ROUTE. The gate's challenge, refusal and OK and the gift wrap it
+  # withheld are not traffic of Haven's, and Haven's answer to the challenge is
+  # no group traffic, so they leave a clean journal clean; the REQ it refused
+  # is still a filter Haven asked for, so C5.2 judges that one.
   local gated="${tmp}/gated.ndjson"
   write_healthy "${gated}"
   jline c2p c1 "[\"REQ\",\"sub-in\",{\"kinds\":[1059],\"#p\":[\"${PK_A}\"]}]"
   jline p2c c1 '["AUTH","challenge-c1"]'
   jline p2c c1 '["CLOSED","sub-in","ERROR: auth-required: requested filter requires authentication"]'
   jline r2p c1 "[\"EVENT\",\"sub-mix\",$(ev 1059 "eW" "${PK_EPH1}" "[[\"p\",\"${PK_A}\"],[\"p\",\"${PK_B}\"]]")]"
+  jline c2p c1 "[\"AUTH\",$(ev 22242 "eAUTH" "${PK_A}" '[["challenge","challenge-c1"],["relay","ws://10.0.2.2:7790"]]')]"
+  jline p2c c1 '["OK","eAUTH",true,""]'
   emit_sentinel c0
   expect_rc 0 "a gated route's refusal and withheld event leave a clean journal clean" \
     --journal "${gated}" "${base[@]}" || fail=1

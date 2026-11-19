@@ -105,11 +105,13 @@ jobs:
       # The GATED inbox relay: the proxy's `gate-read=1059` route (7790), in
       # front of a strfry store of its own (7778). It answers as relay.damus.io
       # does — takes a gift wrap, refuses every unauthenticated read of kind
-      # 1059 with `auth-required:` — and the harness puts it FIRST in every
-      # account's inbox list, so a Welcome delivered to the first inbox relay
-      # alone is never read and every invite in the scenario turns red. Its
-      # own store, never 7777's: a gate in front of the store the plain route
-      # reads would let the plain route serve a Welcome only the gate took.
+      # 1059 with `auth-required:`, and serves an inbox read that answers its
+      # NIP-42 challenge (A5) the gift wraps naming it — and the harness puts
+      # it FIRST in every account's inbox list, so an invite proves both that
+      # the Welcome reached every inbox relay and that the app's own inbox read
+      # authenticates there. Its own store, never 7777's: a gate in front of
+      # the store the plain route reads would let the plain route serve a
+      # Welcome only the gate took.
       # C8 judges it as an inbox, key-package and discovery listen like 7788.
       HAVEN_E2E_GATED_INBOX_RELAY: ws://10.0.2.2:7790
       # The same store through an ungated route (7791), for the harness's own

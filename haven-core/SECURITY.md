@@ -183,10 +183,16 @@ proof below judges with (`planes::judge::judge`); the crate test
 and `the_exported_matrix_is_current` pins the export
 (`tooling/e2e/relay_planes.json`, read by the Dart mirror test only). A frame
 no row's shape admits — a stray tag or filter key, a filter spanning two rows,
-a REQ whose filters land on two planes, `COUNT`, `AUTH`, a `CLOSE` naming a
+a REQ whose filters land on two planes, `COUNT`, a `CLOSE` naming a
 subscription its relay was never sent, a `NEG-*` naming a session its
 connection never opened — is unknown; one a row
-admits on a relay its binding does not is a crossing. A relay holding several
+admits on a relay its binding does not is a crossing. An answer to a relay's
+NIP-42 challenge (`AUTH-22242`, "The identity's NIP-42 connections" below) is
+judged with everything its connection carried, before and after it: any frame
+there but a `CLOSE` or a `REQ-1059-P` read of the answering key's own gift
+wraps, or an answer under a second key, is a crossing
+(`plane-auth-shared-connection`), since the answer ties that key to the whole
+connection. A relay holding several
 roles admits their union: an account's inbox and key-package lists may share a
 relay; an own list with a location or discovery relay, and an invitee's list
 with any relay, only when the world or lane being judged declares the pair;
@@ -213,6 +219,7 @@ when it was sent; a circle's routing counts from the commit's staging.
 | `REQ-10050-A` | REQ | 10050 | `kinds`, `authors` | `limit` | at most 64 | - | one author: the sender's own inbox list or a discovery relay when it is the sender; otherwise a discovery relay or the author's inbox list |
 | `REQ-0-A` | REQ | 0 | `kinds`, `authors` | `limit` | at most 4 | - | one author, a profile relay |
 | `NEG-445-H` | NEG-OPEN | 445 | `kinds`, `#h`, `since`, `until`, `limit` | none | at most 16384 | - | one `#h` circle whose routing stands; opening message `6100000200` |
+| `AUTH-22242` | AUTH | 22242 | `challenge`, `relay` | none | - | an account | the author's own inbox list current at the instant, on a connection that carries nothing else but `REQ-1059-P` reads of the author's own gift wraps and their `CLOSE`s |
 
 Three proofs judge with it: **L1a / L1b** on every pull request — L1a,
 `every_relay_plane_receives_only_its_own_traffic_across_a_circle_lifecycle`

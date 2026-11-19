@@ -43,10 +43,11 @@
 //!
 //! A route with a [`ReadGate`] (`;gate-read=<kinds>` in the routing table)
 //! answers as a relay that will not serve those kinds' reads to a client that
-//! has not authenticated — see [`crate::gate`]. The frames it refuses, the
-//! answers it writes and the relay events it withholds are journalled under
-//! their own directions (`c2p`, `p2c`, `r2p`), never as `c2r`/`r2c`: those
-//! claim a hop to or from `relay_url` that these frames never made.
+//! has not authenticated — see [`crate::gate`]. The frames it refuses or
+//! answers itself (a client's `AUTH` among them), the answers it writes and
+//! the relay events it withholds are journalled under their own directions
+//! (`c2p`, `p2c`, `r2p`), never as `c2r`/`r2c`: those claim a hop to or from
+//! `relay_url` that these frames never made.
 //!
 //! # Errors are logged by KIND, never interpolated
 //!
@@ -93,7 +94,7 @@ use crate::frame::{
     sentinel_ack, validate_mls_group_id, ControlFrame, ControlVerb, MlsGroupIdRejection,
     Observation, CONTROL_VERB_NAMESPACE,
 };
-use crate::gate::ReadGate;
+use crate::gate::{answer_auth, ReadGate};
 use crate::journal::{now_ms, Dir, Endpoint, WireJournal};
 use crate::needles::{CanarySink, NeedleSink};
 
@@ -837,6 +838,18 @@ async fn handle_connection(
     // relay's, journalled `p2c`, so their shortfall is counted apart: a
     // retraction names the direction whose last lines it retracts.
     let p2c_ledger = Ledger::default();
+    // The key this connection answered the gate's challenge under: read by
+    // both pumps, which run in this one task.
+    let reader = std::sync::Mutex::new(None::<String>);
+    let gate = gate.map(|gate| Gated {
+        gate,
+        reader: &reader,
+        listen_port: endpoint
+            .listen
+            .rsplit_once(':')
+            .and_then(|(_, port)| port.parse().ok())
+            .unwrap_or_default(),
+    });
 
     // `mut` because the teardown below awaits each handle THROUGH a borrow, so
     // a writer that finished within the bound is never polled again.
@@ -1192,32 +1205,82 @@ fn reply(control: &Control<'_>, ack: String) {
     });
 }
 
-/// Answers a frame the route's read gate refuses, in place of the relay:
-/// `true` when `message` was such a frame and must not be forwarded.
-///
-/// The refused frame is journalled `c2p` — the client sent it, no relay got
-/// it — and each answer `p2c` before it is queued, so the journal holds what
-/// the client saw without ever claiming the relay sent or received it.
-fn gate_refused(
-    gate: &ReadGate,
+/// One connection's view of its route's read gate.
+#[derive(Clone, Copy)]
+struct Gated<'a> {
+    gate: &'a ReadGate,
+    /// The key the connection authenticated as, hex.
+    reader: &'a std::sync::Mutex<Option<String>>,
+    listen_port: u16,
+}
+
+impl Gated<'_> {
+    fn reader(&self) -> Option<String> {
+        self.reader
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Answers, in place of the relay, a client's `AUTH` or a read the gate
+    /// refuses a connection that has not authenticated: `true` when `message`
+    /// was such a frame and must not be forwarded.
+    fn answered(
+        &self,
+        control: &Control<'_>,
+        message: &Message,
+        conn_id: &str,
+        endpoint: &Endpoint,
+        journal: &WireJournal,
+    ) -> bool {
+        let Message::Text(text) = message else {
+            return false;
+        };
+        let challenge = format!("challenge-{conn_id}");
+        let reader = self.reader();
+        let answers: Vec<String> = if let Some((ok, now)) = answer_auth(
+            text.as_str(),
+            &challenge,
+            self.listen_port,
+            reader.as_deref(),
+        ) {
+            if now.is_some() {
+                *self
+                    .reader
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = now;
+            }
+            vec![ok]
+        } else if reader.is_none() {
+            match self.gate.refusal(text.as_str(), &challenge) {
+                Some(answers) => answers.into(),
+                None => return false,
+            }
+        } else {
+            return false;
+        };
+        answer_in_place(control, text.as_str(), answers, conn_id, endpoint, journal);
+        true
+    }
+}
+
+/// Journals `text` as `c2p` — the client sent it, no relay got it — and each
+/// of `answers` as `p2c` before it is queued, so the journal holds what the
+/// client saw without ever claiming the relay sent or received it.
+fn answer_in_place(
     control: &Control<'_>,
-    message: &Message,
+    text: &str,
+    answers: Vec<String>,
     conn_id: &str,
     endpoint: &Endpoint,
     journal: &WireJournal,
-) -> bool {
-    let Message::Text(text) = message else {
-        return false;
-    };
-    let Some(answers) = gate.refusal(text.as_str(), &format!("challenge-{conn_id}")) else {
-        return false;
-    };
+) {
     journal.record(
         conn_id,
         endpoint,
         Dir::ClientToProxy,
         now_ms(),
-        &classify_text(text.as_str()),
+        &classify_text(text),
     );
     for answer in answers {
         journal.record(
@@ -1233,7 +1296,6 @@ fn gate_refused(
             claim: Claim::Synthesized,
         });
     }
-    true
 }
 
 /// One direction of one connection.
@@ -1249,7 +1311,7 @@ async fn pump<S>(
     forward: mpsc::UnboundedSender<Outbound>,
     control: Option<Control<'_>>,
     dir: Dir,
-    gate: Option<&ReadGate>,
+    gate: Option<Gated<'_>>,
     conn_id: &str,
     endpoint: &Endpoint,
     journal: &WireJournal,
@@ -1377,12 +1439,14 @@ async fn pump<S>(
             // A GATED ROUTE plays the relay's read gate (`crate::gate`). Like a
             // control frame, what the gate answers is decided before the
             // recorder, so no line ever claims a hop the frame did not make.
-            if let Some(gate) = gate {
+            if let Some(gated) = gate {
                 if let Some(control) = control.as_ref() {
-                    if gate_refused(gate, control, &message, conn_id, endpoint, journal) {
+                    if gated.answered(control, &message, conn_id, endpoint, journal) {
                         continue;
                     }
-                } else if matches!(&message, Message::Text(text) if gate.withholds(text.as_str())) {
+                } else if matches!(&message, Message::Text(text)
+                    if gated.gate.withholds(text.as_str(), gated.reader().as_deref()))
+                {
                     journal.record(conn_id, endpoint, Dir::RelayToProxy, now_ms(), &observation);
                     continue;
                 }

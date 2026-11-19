@@ -177,6 +177,8 @@ pub enum Frame {
     NegMsg(String),
     /// `["NEG-CLOSE", <sub>]`.
     NegClose(String),
+    /// `["AUTH", <event>]`: an answer to a relay's NIP-42 challenge.
+    Auth(Event),
     /// Anything else, with the verb it claimed (`Verb::Other` when none).
     Other(Verb),
 }
@@ -195,6 +197,7 @@ impl Frame {
             Some("CLOSE") => Verb::Close,
             Some("NEG-MSG") => Verb::NegMsg,
             Some("NEG-CLOSE") => Verb::NegClose,
+            Some("AUTH") => Verb::Auth,
             _ => return Self::Other(Verb::Other),
         };
         Self::parse_as(verb, array).unwrap_or(Self::Other(verb))
@@ -211,6 +214,7 @@ impl Frame {
         let sub = || array.get(1)?.as_str().map(str::to_owned);
         match (verb, array.len()) {
             (Verb::Event, 2) => Event::from_value(&array[1]).map(Self::Event),
+            (Verb::Auth, 2) => Event::from_value(&array[1]).map(Self::Auth),
             (Verb::Req, n) if n >= 3 => Some(Self::Req {
                 sub: sub()?,
                 filters: array[2..]
@@ -240,6 +244,7 @@ impl Frame {
             Self::Close(_) => Verb::Close,
             Self::NegMsg(_) => Verb::NegMsg,
             Self::NegClose(_) => Verb::NegClose,
+            Self::Auth(_) => Verb::Auth,
             Self::Other(verb) => *verb,
         }
     }

@@ -3656,10 +3656,10 @@ async fn a_relay_refusing_negentropy_forwards_nothing_and_answers_unknown_cmd() 
 }
 
 /// `AuthGatedReads` answers as strfry's default `restrictedReadKinds` answers a
-/// reader that has not authenticated, which Haven never is: a gift wrap is
-/// taken, a read of gift wraps alone is refused with strfry's own words and
-/// typed `refused` by the product's read, and a read that also names another
-/// kind is served with the gift wrap withheld.
+/// reader that has not authenticated, as Haven's live plane never is: a gift
+/// wrap is taken, a read of gift wraps alone is refused with strfry's own words
+/// and typed `refused` by the product's anonymous read, and a read that also
+/// names another kind is served with the gift wrap withheld.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_gated_plane_takes_a_gift_wrap_and_serves_it_to_no_unauthenticated_reader() {
     install_process_globals().expect("the ws:// loopback opt-in");

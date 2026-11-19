@@ -61,12 +61,14 @@ const String locationRelayUrl = String.fromEnvironment(
 /// URL of the GATED inbox relay: a recording-proxy route (`gate-read=1059`)
 /// that answers as `relay.damus.io` does — it takes a gift wrap and refuses
 /// every read of kind 1059 from a client that has not authenticated (NIP-42),
-/// which Haven never does — in front of a relay store of its own.
+/// as the live plane never does, and serves an inbox read that answered its
+/// challenge (A5) the gift wraps naming it — in front of a relay store of its
+/// own.
 ///
 /// When set, it is the FIRST entry of the default-relay override, so it heads
 /// every account's inbox list (and its key-package list, whose reads it
-/// serves), and a Welcome delivered to it alone is never read. Empty means the
-/// lane has no gated relay.
+/// serves), and a Welcome delivered to it alone is never read live. Empty
+/// means the lane has no gated relay.
 const String gatedInboxRelayUrl = String.fromEnvironment(
   'HAVEN_E2E_GATED_INBOX_RELAY',
 );

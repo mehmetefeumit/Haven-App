@@ -565,9 +565,9 @@ hold.
 
 `relay.damus.io` takes a gift wrap from anybody and serves kind 1059 only to a
 reader that has authenticated (NIP-42) — strfry's default
-`restrictedReadKinds` — and Haven never authenticates (Security Rule 16). A
-Welcome sent to the first inbox relay alone, when that relay is the gated one,
-is stored and never read. S27's `gated-inbox-welcome` plays it with an
+`restrictedReadKinds` — and Haven's live plane never authenticates (Security
+Rule 16). A Welcome sent to the first inbox relay alone, when that relay is the
+gated one, is stored and never read live. S27's `gated-inbox-welcome` plays it with an
 arm-applied proxy fault, `AuthGatedReads` (never in the random generator): a
 `REQ` whose every filter names only kind 1059 and such a `NEG-OPEN` are answered
 `AUTH` then strfry's `CLOSED "ERROR: auth-required: …"` (`NEG-ERR`) and never
@@ -583,10 +583,14 @@ published, and founds a circle through its driver with THAT list — never
 `stored_inbox()`. The invitee takes the Welcome the app's way: its live inbox
 plane reads it from the second relay, the bus hands up the gift wrap, and the
 invitee processes and accepts it — never through `driver.unrecorded()`. Then
-both relays are gated and the admin invites again: the product's per-relay read
-is typed `refused` on both with nothing served, both relays acknowledged the
+both relays are gated and the admin invites again: the product's anonymous
+per-relay read — answering no challenge, as the live plane does — is typed
+`refused` on both with nothing served, both relays acknowledged the
 Welcome, neither delivered it, and the bus never handed it up — anchored on
-what the planes recorded, never on elapsed time.
+what the planes recorded, never on elapsed time. The Invitations page's own
+read answers the challenge (A5, owner-directed 2026-11-16); the rig does not
+make it, and haven-core's `own_inbox_read_e2e` and the E2E lanes' gated route
+prove it.
 
 The floor: two gates, a delivery, and five canaries (the gate fired on the
 invitee's own inbox REQ; the gated relay acknowledged the first Welcome; the

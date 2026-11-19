@@ -1723,9 +1723,10 @@ void main() {
   // Welcome the engine finds at its start reaches the app); flag-off the
   // Invitations page's own read on open. The inviter finds the app with the
   // product lookup and invites it over the driven create. The lane heads
-  // every inbox list with the gated relay (`gatedInboxRelayUrl`), so the page
-  // reads one relay as refused and shows the invitation from the one that
-  // served it.
+  // every inbox list with the gated relay (`gatedInboxRelayUrl`), which serves
+  // a gift wrap only to a read that answered its NIP-42 challenge, so the
+  // page's read is served by every relay only because it authenticated (A5,
+  // owner-directed 2026-11-16).
   // ===========================================================================
   group('INV: the app as invitee', () {
     late TestRelay invRelay;
@@ -1785,10 +1786,9 @@ void main() {
                 '[INV] the product lookup found no KeyPackage for the app.',
               );
             }
-            final held = await giftWrapIdsFor(
-              relayManager: relayManager,
-              recipientPubkeyHex: _alicePubkeyHex(),
-              relays: <String>[invRelay.url],
+            final held = await _giftWrapIdSnapshot(
+              invRelay,
+              _alicePubkeyHex(),
             );
             final bobSecret = await bob.user.getSecretBytes();
             try {
@@ -1805,10 +1805,9 @@ void main() {
             } finally {
               bobSecret.fillRange(0, bobSecret.length, 0);
             }
-            sent = (await giftWrapIdsFor(
-              relayManager: relayManager,
-              recipientPubkeyHex: _alicePubkeyHex(),
-              relays: <String>[invRelay.url],
+            sent = (await _giftWrapIdSnapshot(
+              invRelay,
+              _alicePubkeyHex(),
             )).difference(held);
           } finally {
             await relayManager.shutdown();
@@ -1871,16 +1870,24 @@ void main() {
           );
           final read = open.read(invitationPollStatusProvider);
           expect(
-            (read.outcome, read.refused),
-            (InvitationPollOutcome.refused, 1),
+            (read.outcome, read.served, read.refused),
+            (
+              // Flag-on, the engine has already taken the Welcome in, so the
+              // page's read finds nothing new.
+              liveSyncEnabled
+                  ? InvitationPollOutcome.upToDate
+                  : InvitationPollOutcome.newInvites,
+              2,
+              0,
+            ),
             reason:
                 '[INV] the gated relay heads the inbox list: the page must '
-                'read it as refused, and only it.',
+                'answer its challenge and be served by it and the plain one.',
           );
           expect(
             find.byKey(WidgetKeys.invitationsInboxNotice),
-            findsOneWidget,
-            reason: '[INV] a refused inbox relay must be told to the user.',
+            findsNothing,
+            reason: '[INV] an inbox read every relay served needs no notice.',
           );
 
           await tester.tap(accept);

@@ -387,7 +387,170 @@ fn fixture(w: &World, row: Row) -> (Value, Option<String>, Vec<RelayIx>, Plane) 
             vec![w.loc_x],
             Plane::Location,
         ),
+        Row::Auth22242 => (
+            json!(["AUTH", auth_event(18, &a)]),
+            a_str,
+            vec![w.a_inbox],
+            Plane::OwnInbox,
+        ),
     }
+}
+
+/// `pubkey`'s answer to a NIP-42 challenge from alice's inbox relay.
+fn auth_event(n: u32, pubkey: &str) -> Value {
+    event(
+        &id(n),
+        pubkey,
+        22242,
+        1_000,
+        &[&["challenge", "challenge-c0"], &["relay", A_INBOX]],
+    )
+}
+
+/// Judges `frames`, each `(connection, relay, frame)`, sent at 10 with the
+/// sender unknown, as the E2E journal is.
+fn judge_conns(table: &PlaneTable, frames: &[(u64, RelayIx, Value)]) -> Judgement {
+    let parsed: Vec<(u64, RelayIx, Frame)> = frames
+        .iter()
+        .map(|(conn, relay, value)| (*conn, *relay, frame(value)))
+        .collect();
+    judge(
+        table,
+        parsed.iter().map(|(conn, relay, frame)| Observed {
+            relay: *relay,
+            conn: *conn,
+            sender: None,
+            at: 10,
+            frame,
+        }),
+    )
+    .expect("the world is usable")
+}
+
+fn shared_at(judgement: &Judgement) -> Vec<usize> {
+    assert_holds_no_value(&format!("{:?}", judgement.findings), "a judgement's Debug");
+    judgement
+        .findings
+        .iter()
+        .filter(|f| f.class == Class::AuthOnSharedConnection)
+        .map(|f| {
+            assert_eq!(f.row, Some(Row::Auth22242));
+            f.index
+        })
+        .collect()
+}
+
+/// A5 (owner-directed 2026-11-16): the identity key answers a challenge only
+/// on a connection of its own that reads its own gift wraps, so the answer
+/// ties the key to nothing else.
+#[test]
+fn an_answer_on_a_connection_carrying_only_its_own_gift_wrap_reads_is_admitted() {
+    let w = world();
+    let a = alice();
+    let own_read = json!(["REQ", "r1", {"kinds": [1059], "#p": [a], "since": 1, "limit": 1000}]);
+    let judgement = judge_conns(
+        &w.table,
+        &[
+            (0, w.a_inbox, own_read),
+            (0, w.a_inbox, json!(["AUTH", auth_event(30, &a)])),
+            (
+                0,
+                w.a_inbox,
+                json!(["REQ", "r2", {"kinds": [1059], "#p": [a], "limit": 1000}]),
+            ),
+            (0, w.a_inbox, json!(["CLOSE", "r2"])),
+            // Another connection's reads are its own business.
+            (
+                1,
+                w.disc,
+                json!(["REQ", "l", {"kinds": [10050], "authors": [bob()], "limit": 1}]),
+            ),
+        ],
+    );
+    assert!(judgement.findings.is_empty(), "{:?}", judgement.findings);
+    assert!(judgement
+        .hits
+        .contains_key(&(w.a_inbox, Row::Auth22242, Plane::OwnInbox)));
+}
+
+#[test]
+fn an_answer_ties_its_key_to_everything_else_its_connection_carried_before_or_after_it() {
+    let w = world();
+    let a = alice();
+    let answer = json!(["AUTH", auth_event(31, &a)]);
+    for (why, other) in [
+        (
+            "a lookup the relay would admit on its own",
+            json!(["REQ", "l", {"kinds": [10050], "authors": [a], "limit": 1}]),
+        ),
+        (
+            "a read of another key's gift wraps",
+            json!(["REQ", "p", {"kinds": [1059], "#p": [bob()], "limit": 1000}]),
+        ),
+        (
+            "an own read beside another filter",
+            json!(["REQ", "m", {"kinds": [1059], "#p": [a]}, {"kinds": [1059], "#p": [bob()]}]),
+        ),
+        (
+            "a publish",
+            json!([
+                "EVENT",
+                event(&id(32), &a, 10050, 1_000, &[&["relay", A_INBOX]])
+            ]),
+        ),
+    ] {
+        for before in [true, false] {
+            let frames = if before {
+                vec![
+                    (0, w.a_inbox, other.clone()),
+                    (0, w.a_inbox, answer.clone()),
+                ]
+            } else {
+                vec![
+                    (0, w.a_inbox, answer.clone()),
+                    (0, w.a_inbox, other.clone()),
+                ]
+            };
+            let at = usize::from(!before);
+            assert_eq!(shared_at(&judge_conns(&w.table, &frames)), [at], "{why}");
+        }
+    }
+}
+
+#[test]
+fn answers_under_two_keys_on_one_connection_are_each_a_crossing() {
+    let mut w = world();
+    let b = bob();
+    w.table.add(List::OwnInbox(&b), w.a_inbox, 0);
+    let judgement = judge_conns(
+        &w.table,
+        &[
+            (0, w.a_inbox, json!(["AUTH", auth_event(33, &alice())])),
+            (0, w.a_inbox, json!(["AUTH", auth_event(34, &b)])),
+        ],
+    );
+    assert_eq!(shared_at(&judgement), [0, 1]);
+}
+
+#[test]
+fn an_answer_off_its_authors_own_inbox_list_is_a_crossing() {
+    let w = world();
+    let answer = json!(["AUTH", auth_event(35, &alice())]);
+    assert!(admitted(&w.table, w.a_inbox, None, &answer));
+    for relay in [w.b_inbox, w.disc, w.a_kp] {
+        assert_eq!(
+            class_of(&w.table, relay, None, &answer),
+            Some(Class::CrossedEvent)
+        );
+    }
+    let no_relay = json!([
+        "AUTH",
+        event(&id(36), &alice(), 22242, 1_000, &[&["challenge", "c"]])
+    ]);
+    assert_eq!(
+        class_of(&w.table, w.a_inbox, None, &no_relay),
+        Some(Class::UnknownFrame)
+    );
 }
 
 #[test]
@@ -417,7 +580,7 @@ fn every_row_admits_its_own_shape_on_its_own_list_and_nothing_else() {
     let w = world();
     for spec in &ROWS {
         let (value, sender, homes, plane) = fixture(&w, spec.row);
-        let crossed = if spec.verb == Verb::Event {
+        let crossed = if matches!(spec.verb, Verb::Event | Verb::Auth) {
             Class::CrossedEvent
         } else {
             Class::CrossedRequest
@@ -919,7 +1082,7 @@ fn after_removal_a_former_list_admits_only_the_kind_5_scrub_and_close() {
 }
 
 #[test]
-fn auth_count_and_unparsable_frames_are_unknown() {
+fn a_malformed_answer_count_and_unparsable_frames_are_unknown() {
     let w = world();
     for value in [
         json!(["AUTH", {"kind": 22242}]),
@@ -1968,6 +2131,48 @@ fn cases() -> Vec<Case> {
         RC_VIOLATION,
         C82,
     ));
+    // A5 (owner-directed 2026-11-16): an own inbox read answers the gate's
+    // challenge on a connection of its own, and is then served.
+    let answered = |j: &mut J, conn: &str, before: Option<Value>| {
+        let gated = "127.0.0.1:7788";
+        j.open(conn, 7788);
+        if let Some(before) = before {
+            j.c2r(conn, 7788, before);
+        }
+        j.frame(conn, "p2c", gated, json!(["AUTH", "challenge-c9"]));
+        j.frame(
+            conn,
+            "c2p",
+            gated,
+            json!(["AUTH", auth_event(25, &alice())]),
+        );
+        j.frame(conn, "p2c", gated, json!(["OK", id(25), true, ""]));
+        j.c2r(
+            conn,
+            7788,
+            json!(["REQ", "sub-authed", {"kinds": [1059], "#p": [alice()], "since": 1}]),
+        );
+    };
+    cases.push(case(
+        "P7 an own inbox read that answered a gated route's challenge",
+        &healthy(|j| answered(j, "app-inbox-authed", None)),
+        &[],
+        RC_CLEAN,
+        &["C8.1-C8.8 hold"],
+    ));
+    cases.push(case(
+        "C8.2 an answer to a challenge on a connection that also looked an account up",
+        &healthy(|j| {
+            answered(
+                j,
+                "app-inbox-shared",
+                Some(json!(["REQ", "sub-l", {"kinds": [10050], "authors": [alice()], "limit": 1}])),
+            );
+        }),
+        &[],
+        RC_VIOLATION,
+        &["C8.2 VIOLATION: plane-auth-shared-connection"],
+    ));
     // C8.1 — EVENT placement.
     let c81: [Plant; 15] = [
         (
@@ -2643,7 +2848,7 @@ fn lane_args(journal: &Path, extra: &[String]) -> Vec<String> {
 }
 
 /// The number of C8 fixtures. Moving it is the only way to add or remove one.
-const CLI_CASES: usize = 82;
+const CLI_CASES: usize = 84;
 
 #[test]
 fn the_c8_fixture_suite() {

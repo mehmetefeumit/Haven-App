@@ -42,7 +42,7 @@ pub enum Class {
     CrossedEvent,
     /// A REQ or NEG-OPEN filter on a relay its row does not admit.
     CrossedRequest,
-    /// A frame no row admits: unknown verb, `COUNT`, `AUTH`, an unparsable
+    /// A frame no row admits: unknown verb, `COUNT`, an unparsable
     /// frame, a stray tag or key, a filter spanning two rows, a REQ whose
     /// filters land on different planes, a `CLOSE` naming a subscription its
     /// relay was never sent, a `NEG-*` naming a session its connection never
@@ -60,6 +60,11 @@ pub enum Class {
     NoGroundTruth,
     /// An `h` no routing of the table names.
     UndeclaredCircle,
+    /// A frame on a connection that answered a NIP-42 challenge which is not
+    /// a gift-wrap read of the answering key's own or its `CLOSE`, or an
+    /// answer under a second key: the answer ties the identity to whatever
+    /// that connection carries.
+    AuthOnSharedConnection,
 }
 
 impl Class {
@@ -75,6 +80,7 @@ impl Class {
             Self::UnresolvedId => "plane-unresolved-id",
             Self::NoGroundTruth => "plane-no-ground-truth",
             Self::UndeclaredCircle => "plane-undeclared-circle",
+            Self::AuthOnSharedConnection => "plane-auth-shared-connection",
         }
     }
 }
@@ -117,6 +123,16 @@ struct Judge<'t> {
     reqs: HashMap<RelayIx, HashSet<String>>,
     negs: HashMap<u64, HashSet<String>>,
     ephemeral: HashMap<String, String>,
+    conns: BTreeMap<u64, Carried>,
+}
+
+/// What one connection carried, for [`Row::Auth22242`]'s binding: its
+/// answers, and every frame other than an answer or a `CLOSE` with the key
+/// whose own gift wraps it reads, if it is such a read.
+#[derive(Default)]
+struct Carried {
+    answers: Vec<(usize, RelayIx, String)>,
+    others: Vec<(usize, RelayIx, Verb, Option<String>)>,
 }
 
 /// Judges `frames` against `table`.
@@ -135,9 +151,11 @@ pub fn judge<'a>(
         reqs: HashMap::new(),
         negs: HashMap::new(),
         ephemeral: HashMap::new(),
+        conns: BTreeMap::new(),
     };
     let mut out = Judgement::default();
     for (index, obs) in frames.into_iter().enumerate() {
+        judge.carry(index, &obs);
         match judge.frame(&obs) {
             Ok(admitted) => {
                 for (row, plane) in admitted {
@@ -153,6 +171,7 @@ pub fn judge<'a>(
             }),
         }
     }
+    out.findings.extend(judge.shared_answers());
     out.findings.sort_by_key(|f| (f.relay, f.index));
     Ok(out)
 }
@@ -167,11 +186,11 @@ const fn require(ok: bool, row: Row, class: Class) -> Result<(), Reject> {
     }
 }
 
-/// The row whose tag shape an event has, if any: each required tag exactly
-/// once, optional tags any number of times, nothing else.
-fn event_row(event: &Event) -> Option<Row> {
+/// The row whose tag shape an event `verb` carries has, if any: each required
+/// tag exactly once, optional tags any number of times, nothing else.
+fn event_row(event: &Event, verb: Verb) -> Option<Row> {
     ROWS.iter()
-        .filter(|spec| spec.verb == Verb::Event && spec.kinds.contains(&event.kind))
+        .filter(|spec| spec.verb == verb && spec.kinds.contains(&event.kind))
         .find(|spec| {
             let names = || {
                 event
@@ -230,7 +249,7 @@ impl Judge<'_> {
     fn frame(&mut self, obs: &Observed<'_>) -> Result<Vec<(Row, Plane)>, Reject> {
         match obs.frame {
             Frame::Event(event) => {
-                let row = event_row(event).ok_or(UNKNOWN)?;
+                let row = event_row(event, Verb::Event).ok_or(UNKNOWN)?;
                 let plane = self.event(row, event, obs)?;
                 Ok(vec![(row, plane)])
             }
@@ -259,8 +278,89 @@ impl Judge<'_> {
             }
             Frame::Close(sub) => opened(self.reqs.get(&obs.relay), sub),
             Frame::NegMsg(sub) | Frame::NegClose(sub) => opened(self.negs.get(&obs.conn), sub),
+            Frame::Auth(event) => {
+                let row = event_row(event, Verb::Auth).ok_or(UNKNOWN)?;
+                self.account_author(row, event, obs)?;
+                require(
+                    self.table.has_list(Plane::OwnInbox, &event.pubkey),
+                    row,
+                    Class::NoGroundTruth,
+                )?;
+                require(
+                    self.own(Plane::OwnInbox, &event.pubkey, obs),
+                    row,
+                    Class::CrossedEvent,
+                )?;
+                Ok(vec![(row, Plane::OwnInbox)])
+            }
             Frame::Other(_) => Err(UNKNOWN),
         }
+    }
+
+    /// Notes what `obs` adds to its connection's [`Carried`].
+    fn carry(&mut self, index: usize, obs: &Observed<'_>) {
+        let carried = self.conns.entry(obs.conn).or_default();
+        match obs.frame {
+            Frame::Auth(event) => carried
+                .answers
+                .push((index, obs.relay, event.pubkey.clone())),
+            Frame::Close(_) => {}
+            frame => {
+                let own_read = match frame {
+                    Frame::Req { filters, .. } => {
+                        let mut keys = filters.iter().map(|filter| {
+                            (filter_row(filter, Verb::Req) == Some(Row::Req1059P))
+                                .then(|| one(filter.p.as_ref()))
+                                .flatten()
+                        });
+                        let first = keys.next().flatten();
+                        first
+                            .filter(|first| keys.all(|key| key == Some(*first)))
+                            .map(str::to_owned)
+                    }
+                    _ => None,
+                };
+                carried
+                    .others
+                    .push((index, obs.relay, frame.verb(), own_read));
+            }
+        }
+    }
+
+    /// [`Row::Auth22242`]'s connection binding, over every connection once
+    /// all of it is seen: a frame a connection carried before its answer
+    /// counts as much as one after it.
+    fn shared_answers(&self) -> Vec<Finding> {
+        let finding = |(index, relay, verb): (usize, RelayIx, Verb)| Finding {
+            index,
+            relay,
+            verb,
+            row: Some(Row::Auth22242),
+            class: Class::AuthOnSharedConnection,
+        };
+        let mut out = Vec::new();
+        for carried in self.conns.values() {
+            let Some((_, _, key)) = carried.answers.first() else {
+                continue;
+            };
+            if carried.answers.iter().any(|(_, _, other)| other != key) {
+                out.extend(
+                    carried
+                        .answers
+                        .iter()
+                        .map(|(index, relay, _)| finding((*index, *relay, Verb::Auth))),
+                );
+                continue;
+            }
+            out.extend(
+                carried
+                    .others
+                    .iter()
+                    .filter(|(_, _, _, read)| read.as_ref() != Some(key))
+                    .map(|(index, relay, verb, _)| finding((*index, *relay, *verb))),
+            );
+        }
+        out
     }
 
     /// The circle checks every `h`-bound row shares: a routing exists, and a

@@ -1326,27 +1326,58 @@ async fn case_unknown_control_verb() -> Case {
     Ok(())
 }
 
-/// A signed event of `kind` with no tags: what the gated-read case publishes.
-fn signed_kind_json(kind: u16) -> Result<String, String> {
+/// A signed event of `kind`, tagged `p` to `to` when given: what the
+/// gated-read case publishes.
+fn signed_kind_json(kind: u16, to: Option<&str>) -> Result<String, String> {
     use nostr_relay_builder::prelude::*;
 
+    let tags = to
+        .map(|to| Tag::parse(["p", to]).map_err(|_| "p tag".to_owned()))
+        .transpose()?;
     EventBuilder::new(Kind::Custom(kind), "Y2lwaGVydGV4dA==")
+        .tags(tags)
         .sign_with_keys(&Keys::generate())
         .map_err(|_| "event signing failed".to_owned())?
         .try_as_json()
         .map_err(|_| "event encoding failed".to_owned())
 }
 
-/// K: a `gate-read=1059` route answers as a relay that will not serve gift
-/// wraps to a client that has not authenticated, and its journal never claims
-/// a hop a frame did not make.
+/// `keys`' answer to `challenge` from the relay at `relay`, as a client frame.
+fn auth_answer(
+    keys: &nostr_relay_builder::prelude::Keys,
+    challenge: &str,
+    relay: &str,
+) -> Result<String, String> {
+    use nostr_relay_builder::prelude::*;
+
+    let tags = [
+        Tag::parse(["challenge", challenge]).map_err(|_| "challenge tag".to_owned())?,
+        Tag::parse(["relay", relay]).map_err(|_| "relay tag".to_owned())?,
+    ];
+    let event = EventBuilder::new(Kind::Authentication, "")
+        .tags(tags)
+        .sign_with_keys(keys)
+        .map_err(|_| "answer signing failed".to_owned())?
+        .try_as_json()
+        .map_err(|_| "answer encoding failed".to_owned())?;
+    Ok(format!(r#"["AUTH",{event}]"#))
+}
+
+/// K: a `gate-read=1059` route answers as a relay that serves gift wraps only
+/// to a client that has authenticated, and only those naming it, and its
+/// journal never claims a hop a frame did not make.
 ///
-/// The publish goes through (`OK true`), a REQ for kind 1059 alone is answered
-/// AUTH then strfry's `CLOSED` and never reaches the relay, a NEG-OPEN for it
-/// gets `NEG-ERR`, and a REQ that also names an open kind is served with the
-/// gift wrap withheld. The refused frames are journalled `c2p`, the gate's
-/// answers `p2c` and the withheld event `r2p` — none as `c2r`/`r2c`.
+/// Publishes go through (`OK true`). Before the client authenticates, a REQ
+/// for kind 1059 alone is answered AUTH then strfry's `CLOSED` and never
+/// reaches the relay, a NEG-OPEN for it gets `NEG-ERR`, and a REQ that also
+/// names an open kind is served with every gift wrap withheld. Once it answers
+/// the challenge (`OK true`), the same read reaches the relay and is served
+/// the wrap naming the client, not the other. The refused frames and the
+/// answer are journalled `c2p`, the gate's frames `p2c` and each withheld
+/// event `r2p` — none as `c2r`/`r2c`.
 async fn case_gated_read() -> Case {
+    use nostr_relay_builder::prelude::Keys;
+
     let dir = TempDir::new("gated")?;
     let journal_path = dir.0.join("journal.ndjson");
     let (_relay, relay_url) = start_relay().await?;
@@ -1359,11 +1390,17 @@ async fn case_gated_read() -> Case {
     .await
     .map_err(|e| format!("proxy start: {:?}", e.kind()))?;
     let mut client = connect(proxy.local_addr()).await?;
+    let reader = Keys::generate();
+    let me = reader.public_key().to_hex();
+    let other = Keys::generate().public_key().to_hex();
 
-    for kind in [1059, 445] {
+    for (kind, to) in [(1059, Some(&me)), (1059, Some(&other)), (445, None)] {
         send(
             &mut client,
-            &format!(r#"["EVENT",{}]"#, signed_kind_json(kind)?),
+            &format!(
+                r#"["EVENT",{}]"#,
+                signed_kind_json(kind, to.map(String::as_str))?
+            ),
         )
         .await?;
         let ok = recv_until(&mut client, "OK", |v| verb_is(v, "OK")).await?;
@@ -1413,9 +1450,34 @@ async fn case_gated_read() -> Case {
         ));
     }
 
-    // conn_open, 2 EVENT + 2 OK, the gated REQ + AUTH + CLOSED, the NEG-OPEN +
-    // AUTH + NEG-ERR, the mixed REQ, the withheld 1059, the served 445, EOSE.
-    check_gated_journal(&read_journal(&journal_path, 15).await?)?;
+    let route = format!("ws://{}", proxy.local_addr());
+    send(&mut client, &auth_answer(&reader, "challenge-c0", &route)?).await?;
+    let ok = recv_until(&mut client, "the answer's OK", |v| verb_is(v, "OK")).await?;
+    if ok[2] != Value::Bool(true) {
+        return Err("the gate refused a valid answer to its challenge".to_owned());
+    }
+    send(&mut client, r#"["REQ","authed",{"kinds":[1059]}]"#).await?;
+    let served = recv_collecting(&mut client, "the authenticated REQ's EOSE", |v| {
+        verb_is(v, "EOSE") && v[1] == "authed"
+    })
+    .await?;
+    let served: Vec<Value> = served
+        .iter()
+        .filter_map(|m| serde_json::from_str::<Value>(m).ok())
+        .filter(|v| verb_is(v, "EVENT"))
+        .collect();
+    if served.len() != 1 || served[0][2]["tags"][0][1] != me.as_str() {
+        return Err(format!(
+            "an authenticated reader must be served its own gift wrap alone, got {}",
+            served.len()
+        ));
+    }
+
+    // conn_open; 3 EVENT + 3 OK; the gated REQ + AUTH + CLOSED; the NEG-OPEN +
+    // AUTH + NEG-ERR; the mixed REQ, 2 withheld 1059s, the served 445, EOSE;
+    // the answer + OK; the authenticated REQ, the served and the withheld
+    // 1059, EOSE.
+    check_gated_journal(&read_journal(&journal_path, 24).await?)?;
     close(client).await;
     Ok(())
 }
@@ -1432,6 +1494,9 @@ fn check_gated_journal(lines: &[Value]) -> Case {
         ("c2r", "REQ", "mixed"),
         ("r2p", "EVENT", "mixed"),
         ("r2c", "EVENT", "mixed"),
+        ("c2r", "REQ", "authed"),
+        ("r2p", "EVENT", "authed"),
+        ("r2c", "EVENT", "authed"),
     ] {
         if !journalled
             .iter()
@@ -1447,17 +1512,28 @@ fn check_gated_journal(lines: &[Value]) -> Case {
     if auth_lines != 2 {
         return Err("each refusal's AUTH challenge must be journalled p2c".to_owned());
     }
+    for (dir, verb) in [("c2p", "AUTH"), ("p2c", "OK")] {
+        let answered = journalled
+            .iter()
+            .filter(|l| l["dir"] == dir && l["frame"][0] == verb)
+            .count();
+        // The OK lines of the publishes are the relay's, journalled r2c.
+        if answered != 1 {
+            return Err(format!("the answer's {verb} must be journalled {dir} once"));
+        }
+    }
     for line in &journalled {
         let verb = line["frame"][0].as_str().unwrap_or_default();
         let sub = line["frame"][1].as_str().unwrap_or_default();
-        let gated = matches!(sub, "gated" | "neg") || verb == "AUTH";
+        let gated = matches!(sub, "gated" | "neg") || verb == "AUTH" || line["dir"] == "p2c";
         if gated && (line["dir"] == "c2r" || line["dir"] == "r2c") {
             return Err(format!(
                 "a frame the gate handled was journalled {}, a relay hop it never made",
                 line["dir"]
             ));
         }
-        if line["dir"] == "r2c" && line["frame"][2]["kind"] == 1059 {
+        if line["dir"] == "r2c" && line["frame"][2]["kind"] == 1059 && line["frame"][1] != "authed"
+        {
             return Err("a withheld gift wrap was journalled as delivered".to_owned());
         }
     }
