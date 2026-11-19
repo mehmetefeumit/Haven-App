@@ -1969,14 +1969,25 @@ nothing else:
 - the exit scan, over what is left.
 
 The run's last `ERROR:` says which found a leak. For a leg's gate,
-`mesh-leak (<leg>): file=<drive|logcat|events> from=<class> rule=<id> …` lines
+`mesh-leak (<leg>): file=<drive|logcat|events> from=<class> shape=<word>
+rule=<id> …` lines
 under the scanner's own `LEAK:` lines say WHOSE text each hit was: `own:<tag>`
 a line Haven's code wrote under that tag; `host` a line of the tool's
 (`flutter drive`'s own, or the test reporter's closing report); and, in the
 transcript, `platform:<tag>` a line a plugin or the platform wrote under
 Haven's pid (`FlutterSecureStorage`, `AndroidRuntime`, `DEBUG`, `System.err`
 and the like), `platform:process` the runtime's lines under the process's own
-name, `platform:other` any other tag. Never the text. One known cause that is not an identifier: Flutter's failure report
+name, `platform:other` any other tag. `shape=` is the KIND of line, one of
+five words decided on the whole message: `java-frame` (a Java stack frame —
+`at <path>(<File>.java:<n>)`, `(Native Method)`, `(Unknown Source)`),
+`java-exception-head` (a dotted class name ending `Exception` or `Error`,
+alone or before its message; the message is not read), `avc-audit` (the
+kernel's SELinux `avc: denied|granted { … } for …` record), `dart-frame`,
+and `other` for anything else, a sentence that merely holds ` at ` included.
+Read the two together: `from=platform:KeyStore shape=java-frame rule=S8` is
+a stack frame the platform logged under `KeyStore`, on which the key-blob
+rule fired; `from=own:flutter shape=java-frame` is a line Haven's Dart wrote
+that looks like one. Neither word changes the verdict. Never the text. One known cause that is not an identifier: Flutter's failure report
 for a FRAMEWORK assertion ends "please report this assertion by filing a bug
 on GitHub:" and then the URL alone on its own line, which the scanner's S13
 reads as a relay host a line wrap left alone (`[S13] tag=flutter`; seen in
@@ -1998,9 +2009,12 @@ where to look, not what was said: reproduce on an emulator and read the raw
 transcript (`/tmp/mesh-raw/drive.<leg>.raw`, never uploaded). Then either
 the cause is removed at its source, or — if the line is the platform's own
 furniture and the owner agrees — it is the scanner's to learn, not this
-lane's to set aside. On Android 10 four lines tripped `S8` in the lane's
-second run; what they said is not known, and the third run's `mesh-leak`
-lines are what will name their class. Whether platform text under Haven's
+lane's to set aside. On Android 10 four lines tripped `S8` in the lane's second and third runs, and
+a fifth `S10` in the third; the third named their tags (`platform:KeyStore`
+for the four, `platform:other` for the fifth). **What they say is still not
+known**: that they are Java stack frames of a `KeyStore exception` trace and
+a kernel `avc` record is an inference, and the next run's `shape=` word is
+what confirms or refutes it. Until the owner decides, S2 is expected red. Whether platform text under Haven's
 pid should be rule-scanned in a transcript at all is an open question for
 the owner (`docs/BLUETOOTH_MESH_M3_DESIGN.md` §O.7).
 

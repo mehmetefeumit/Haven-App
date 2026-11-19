@@ -6074,19 +6074,23 @@ unchanged and still expects no component.
 O.3's push A, its lane: S0, the probe and S2, the runner and its
 self-test, `HAVEN_MESH` in the build script, and O.2.7's rows; revised
 the same day for an independent review of it and for its first run on
-CI, 43586443164, and on 2026-11-19 for its second, 44486540042 (the last
-paragraphs say what each changed). **The lane as it stands here has not
-run**: this machine has no emulator. Of the first run, S0 passed, the
-probe was red and S2 never installed. Of the second, S0 passed; the
-probe took every measurement and was red for a defect of the app's that
-it found; S2 judged `limited` and was red for four lines of its transcript,
-whose text is not known. What each settled about the platform is in
-"What the first run settled" and "What the second run settled", and
-where a fact contradicted this section the fact is what is written. What is
-proved here is the runner's reading and judging of text, by fixtures;
-what only a run proves is listed last. No product code changed: nothing
-under `haven/lib`, `haven/android/app/src/main`, `haven-core` or
-`haven/rust_builder`. Plan §16 has the same in short.
+CI, 43586443164, and on 2026-11-19 for its second, 44486540042, and its
+third, 44541718555 (the last paragraphs say what each changed). **The
+lane as it stands here has not run**: this machine has no emulator. Of
+the first run, S0 passed, the probe was red and S2 never installed. Of
+the second, S0 passed; the probe took every measurement and was red for
+a defect of the app's that it found; S2 judged `limited` and was red for
+four lines of its transcript, whose text is not known. Of the third, S0
+and the probe passed — the job `e2e_mesh_lever` is green — and S2 judged
+`limited` and was red for the same four lines and one more, now named by
+tag and still unread. What each settled about the platform is in "What
+the first run settled", "What the second run settled" and "What the
+third run settled", and where a fact contradicted this section the fact
+is what is written. What is proved here is the runner's reading and
+judging of text, by fixtures; what only a run proves is listed last. No
+product code changed: nothing under `haven/lib`,
+`haven/android/app/src/main`, `haven-core` or `haven/rust_builder`. Plan
+§16 has the same in short.
 
 *What is built.*
 
@@ -6314,65 +6318,93 @@ is a number or one of a fixed list of words; anything else is written
 - **The transcript is published and gated whole, as every lane's is;
   what the lane adds is a name for each hit.** `flutter drive` forwards
   every device-log line of the app's pid, whatever wrote it: Haven's
-  lines, and with them the plugins' and the runtime's. Every lane
-  hands that transcript to the scanner's `drive` sink, which is
-  `plain`: every rule on every line. On API 34 those lines trip
-  nothing; on API 29, which this lane alone boots, four tripped S8
-  (below). The lane keeps its neighbours' rule exactly — a hit on any
-  line is the leg's leak, and the leg's device log, events slice and
-  transcript are deleted together, since the device log holds the same
-  lines. What it adds: beside the raw capture it keeps the class of
-  every transcript line — `host` (the tool's own), `own:<tag>` (a tag
-  on the scanner's `owned_tags`, read out of
-  `tooling/logscan/policy.toml` and copied nowhere), `platform:<tag>`
-  for a known platform or plugin tag, `platform:process` for the
-  runtime's lines under the process's own name, `platform:other` — and
-  on a leak reads each hit's line number in the scanner's report back
-  to it: `mesh-leak (<leg>): file=drive from=<class> rule=<id>
-  lines=<n>`. Never the text. A line is classed by its own prefix; one
-  quoted inside a `flutter` line's message stays Haven's.
-  *What was built first, and why it went.* After the second run the
-  lane published of a transcript only the tool's lines and the lines
-  under an owned tag, handed the rest to the scanner unpublished, and
-  reported what its rules fired on there as an answer. An independent
-  review found that strictly weaker than the neighbours, and it was:
-  such a hit left the lane green, and the same line was then uploaded
-  in the device log, where the scanner's structural rules read owned
-  tags only. And text Haven writes, or text about Haven's data, does
-  reach the log under tags the policy does not own (the list is in
-  the question below). Whether such lines may be exempt is a
-  log-anonymity trade, which is the owner's and not a runner's; the
-  split and its second reading are removed.
-  *For the owner — whose text is a line under Haven's pid?* **Open;
-  nothing here decides it.** In a device log the scanner searches
-  every needle on every line and applies its structural rules only to
-  `owned_tags`, because "vendor text is not Haven's to answer for"; in
-  a transcript, having no tags to go by, it applies them to every
-  line. The two choices:
-  (i) **Leave every lane's transcript fully rule-scanned**, as now.
-  It keeps catching, in the transcript, what the device log's rule
+  lines, and with them the plugins' and the runtime's. Every lane hands
+  that transcript to the scanner's `drive` sink, which is `plain`: every
+  rule on every line. On API 34 those lines trip nothing; on API 29,
+  which this lane alone boots, four tripped S8 (below). The lane keeps
+  its neighbours' rule exactly — a hit on any line is the leg's leak,
+  and the leg's device log, events slice and transcript are deleted
+  together, since the device log holds the same lines. What it adds:
+  beside the raw capture it keeps the class of every transcript line —
+  `host` (the tool's own), `own:<tag>` (a tag on the scanner's
+  `owned_tags`, read out of `tooling/logscan/policy.toml` and copied
+  nowhere), `platform:<tag>` for a known platform or plugin tag,
+  `platform:process` for the runtime's lines under the process's own
+  name, `platform:other` — and on a leak reads each hit's line number in
+  the scanner's report back to it, and to a second word, the KIND of
+  line it was: `mesh-leak (<leg>): file=drive from=<class> shape=<word>
+  rule=<id> lines=<n>`. The shape is one of five — `java-frame` (a Java
+  stack frame, whole), `java-exception-head` (a dotted class name ending
+  `Exception` or `Error`, alone or before a message; the class of line,
+  the message is not read), `avc-audit` (the kernel's SELinux record),
+  `dart-frame`, `other` — decided by patterns anchored on the whole
+  message, so a sentence that merely holds ` at ` is `other`. It decides
+  nothing: no gate reads it, and a line of Haven's own that looks like a
+  frame is `own:<tag>` and is said to look like one. Never the text. A
+  line is classed by its own prefix; one quoted inside a `flutter`
+  line's message stays Haven's. *What was built first, and why it went.*
+  After the second run the lane published of a transcript only the
+  tool's lines and the lines under an owned tag, handed the rest to the
+  scanner unpublished, and reported what its rules fired on there as an
+  answer. An independent review found that strictly weaker than the
+  neighbours, and it was: such a hit left the lane green, and the same
+  line was then uploaded in the device log, where the scanner's
+  structural rules read owned tags only. And text Haven writes, or text
+  about Haven's data, does reach the log under tags the policy does not
+  own (the list is in the question below). Whether such lines may be
+  exempt is a log-anonymity trade, which is the owner's and not a
+  runner's; the split and its second reading are removed. *For the owner
+  — whose text is a line under Haven's pid?* **Open; nothing here
+  decides it.** In a device log the scanner searches every needle on
+  every line and applies its structural rules only to `owned_tags`,
+  because "vendor text is not Haven's to answer for"; in a transcript,
+  having no tags to go by, it applies them to every line. The two
+  choices: (i) **Leave every lane's transcript fully rule-scanned**, as
+  now. It keeps catching, in the transcript, what the device log's rule
   lets through: an uncaught Kotlin or Java exception's message under
-  `AndroidRuntime`; a print under `System.err` or `System.out`; a
-  native abort under `DEBUG` or `libc`, whose abort message is a Rust
-  panic's own text; `GeneratedPluginRegistrant`; and the plugins that
-  handle Haven's data, `FlutterSecureStorage` and `FlutterGeolocator`.
-  Its cost: any line of the platform's or a plugin's that merely has a
+  `AndroidRuntime`; a print under `System.err` or `System.out`; a native
+  abort under `DEBUG` or `libc`, whose abort message is a Rust panic's
+  own text; `GeneratedPluginRegistrant`; and the plugins that handle
+  Haven's data, `FlutterSecureStorage` and `FlutterGeolocator`. Its
+  cost: any line of the platform's or a plugin's that merely has a
   rule's shape reddens the lane and deletes that leg's evidence —
-  possibly S2 on Android 10 today, whose four lines are not yet known
-  — and each must then be dealt with at its source, or by a reviewed allowlist entry, one line at a time, for
-  each Android release and plugin version a lane boots.
-  (ii) **Teach the scanner** (`tooling/logscan`) to parse a
-  transcript's forwarded prefix and apply its owned-tag rule to the
-  `drive` sink in every lane, as it does to device logs. It would stop
-  tripping on platform furniture. It would also stop catching, in
-  every lane, an identifier that is neither a declared needle nor key
-  material in exactly the lines named under (i): those would then pass
-  in the transcript as they already pass in the device log, and be
-  uploaded in both. Needles and the key-material floor would still
-  read every line. A narrower form — adding the crash and
-  standard-error tags to `owned_tags` in both sinks — is the same
-  decision, made tag by tag.
-  Until it is decided this lane does (i), as its neighbours do.
+  possibly S2 on Android 10 today, whose four lines are not yet known —
+  and each must then be dealt with at its source, or by a reviewed
+  allowlist entry, one line at a time, for each Android release and
+  plugin version a lane boots. (ii) **Teach the scanner**
+  (`tooling/logscan`) to parse a transcript's forwarded prefix and apply
+  its owned-tag rule to the `drive` sink in every lane, as it does to
+  device logs. It would stop tripping on platform furniture. It would
+  also stop catching, in every lane, an identifier that is neither a
+  declared needle nor key material in exactly the lines named under (i):
+  those would then pass in the transcript as they already pass in the
+  device log, and be uploaded in both. Needles and the key-material
+  floor would still read every line. A narrower form — adding the crash
+  and standard-error tags to `owned_tags` in both sinks — is the same
+  decision, made tag by tag. (iii) **Narrower still, and only if the
+  next run shows the four lines to be Java stack frames**: teach the
+  scanner to read past a blob that sits wholly inside a Java frame's
+  `(File.java:N)` location, on the precedent it already has for Dart —
+  `DART_FRAME` (`tooling/logscan/src/rules.rs:170-182`), which S8
+  consults through `is_dart_frame_location` (`:569-573`, `:610-617`)
+  since a frame through `withFreshSecret` made three lanes delete the
+  transcript that said why they failed. The Java form would need the
+  same discipline: the line is a frame and nothing else, the location is
+  its last token, and only a blob inside the location is passed; with
+  clean fixtures (a frame whose method is named for a key and whose file
+  name runs past 24 characters with digits in it — the shape inferred
+  for Android 10's `KeyStore` traces) and dirty ones (the same blob
+  after `key=` on a line that is no frame; a frame with a value outside
+  its location; a frame-like sentence). It would stop S8 firing on a
+  class or file name in a crash's stack, in every lane and for Haven's
+  own Kotlin frames too. It would NOT touch a blob anywhere else on any
+  line, any other rule on a frame line, the needles, the exception's
+  head line and its message, or the `S10` hit — an `avc` record's
+  `name="…"` is a different shape and would still be red, needing its
+  own answer. What a file name inside a frame can carry is what a
+  developer named a source file, not what a user did; that is the
+  judgement being asked for. Until it is decided this lane does (i), as
+  its neighbours do: S2 is expected to be red.
 - **A dump is kept as a skeleton** (O.2.3 has "kept as the runner's
   parser fixtures"). As text, a platform dump fails the scanner on
   platform furniture — a synthetic `dumpsys bluetooth_manager` gave
@@ -6494,7 +6526,7 @@ the guards job's cap, 20 to 30 minutes — it took 17 min 04 s on
 
 *Proved here.*
 
-- The runner's `--self-test`: 581 checks. The three legs' passing
+- The runner's `--self-test`: 590 checks. The three legs' passing
   captures; for each leg, one fixture a clause, each required to fail
   with the finding that names its cause; the probe answering rather than
   judging; S2 on an image with the LE feature, without it and with it
@@ -6505,31 +6537,37 @@ the guards job's cap, 20 to 30 minutes — it took 17 min 04 s on
   hold, in each leg, with the platform read all the same; an app gone
   when the host reads; why a drive ended, out of a transcript with a
   framework failure report in it, in closed shapes and with nothing of
-  an exception's own text; which gate found a leak; **the second
-  run's** — a key and its value in each spelling the skeleton's rule
-  missed, held to the scanner's own name rule and placeholders as read
-  out of its source; each line of a transcript classed — the tool's,
-  Haven's own, a plugin's, a crash's under `AndroidRuntime`, an abort's
-  under `DEBUG`, a `System.err` print, a prefix quoted inside a line of
+  an exception's own text; which gate found a leak; **the second run's**
+  — a key and its value in each spelling the skeleton's rule missed,
+  held to the scanner's own name rule and placeholders as read out of
+  its source; each line of a transcript classed — the tool's, Haven's
+  own, a plugin's, a crash's under `AndroidRuntime`, an abort's under
+  `DEBUG`, a `System.err` print, a prefix quoted inside a line of
   Haven's — and every one of them in the published transcript; a hit
   read back from the scanner's report to the class of its line; the
   scanner's verdict of a leak over a leg's three files leaving none of
-  them for upload; a suite that failed
-  told from a drive the tool ended; a skeleton its own gate withheld;
-  a marker another process wrote, which is not read; values that are no
-  word, which are not printed; the redaction, the twelve-digit rule and
-  its exception, the slice of the events buffer, the skeleton; the
-  markers, the plants, the hold and the release file read out of the
-  target's source and held to the runner's; the gate ahead of the one
-  echo of a drive log; the verdict file written after the directory
-  scan and gated by itself; the device log begun before the install.
-  Under `gawk` and `mawk`.
+  them for upload; **the third run's** — the kind of line a hit was on:
+  the reader's example of an Android 10 `KeyStore` frame, frames ending
+  `(Native Method)` and `(Unknown Source)`, an exception's head with and
+  without `Caused by:`, an `avc` record with a `name="…"` field, a Dart
+  frame, sentences that only hold those words, a line of Haven's own
+  imitating a frame, and a word off the list read as `other`; a suite
+  that failed told from a drive the tool ended; a skeleton its own gate
+  withheld; a marker another process wrote, which is not read; values
+  that are no word, which are not printed; the redaction, the
+  twelve-digit rule and its exception, the slice of the events buffer,
+  the skeleton; the markers, the plants, the hold and the release file
+  read out of the target's source and held to the runner's; the gate
+  ahead of the one echo of a drive log; the verdict file written after
+  the directory scan and gated by itself; the device log begun before
+  the install. Under `gawk` and `mawk`.
 - **Mutation passes.** Over the readers and the oracle as first built:
   100 changes, 97 failing a fixture, the three that did not — all in the
   skeleton — each given one. After the first run: 155 changes, 153
   failing a fixture, the two that did not closed (a fixture for one, a
-  redundant test removed for the other). As they now stand: 182 changes,
-  each failing a fixture.
+  redundant test removed for the other). As they now stand: 203 changes,
+  202 failing a fixture; the one that did not — a Java frame found after
+  other words on its line — was given a fixture and fails it now.
 - **The leg's gate under the real scanner**, on this machine, by the
   runner's own publish, gate and naming over synthetic captures: a
   clean transcript with plugin lines in it — green, its three files
@@ -6740,15 +6778,46 @@ logs:
   between a longer hold in the target — lines for their own sake — and
   a floor for this lane's API 29 device log that says what it measured.
 
+*What the third run settled* (44541718555, of `d6bd602` under a
+coverage re-pin; the same images and emulator).
+
+| Question | Answer | Where |
+|---|---|---|
+| The lever job | green: `MESH LANE PASS (s0-probe)` | `e2e_mesh_lever` |
+| S0 | `pass`, 45 s | `s0.verdict=pass`, `s0.wall_s=45` |
+| The probe, with the app's sheet fixed | `pass`, 53 s; every measurement taken again and the same: all seven plants present; main, system, kernel, radio and events hand a shell an entry, crash, stats and security are empty; the property can be set; the adapter's address (a six-pair one) and name are readable | `probe.verdict=pass` |
+| The turn-on on a device | `failed` at the unanswered `bluetoothOn`: 2 799 ms on API 34, 1 715 ms on API 29 | `<leg>.turn_on_bluetooth_on=missing` |
+| A real dump's skeleton under the scanner | all three `kept`, each clean behind its own gate (3 002, 915 and 1 022 lines) | the three one-file gates |
+| The exit scan | clean over ten files | `e2e_mesh_lever` |
+| A whole leg's device log on API 29 | over the floor: 9 653 lines across the leg's three sinks, no floor line printed | S2's gate |
+| S2's oracle | `limited` again: `le_feature=no`, `bt_service=absent`, `supported=false`, `api_gate_exercised=no`, its cue after 16 s | `s2.verdict=limited` |
+| A red run's verdict file | uploaded | `e2e_mesh_refusal`'s artifact |
+| Whose S2's hits are | four `S8` under the tag `KeyStore`, one `S10` under a tag off the runner's list — none under a tag of Haven's, none in the device log | `mesh-leak (s2): file=drive from=platform:KeyStore rule=S8 lines=4`, `… from=platform:other rule=S10 lines=1` |
+
+*What the third run left open, and what was added.* S2 is red by its
+own gate alone, on five lines of its transcript (38, `S10`; 95, 118,
+151 and 176, `S8` — the second run's four, the same distances apart,
+28 lines further down now that the transcript is whole). **Their text
+is still unknown.** What is inferred, from the tags and the rules and
+from what the built scanner fires on, and not read: that the four are
+Java stack frames of `KeyStore exception` traces Android 10 logs under
+Haven's pid when the secure-storage plugin probes the AndroidKeyStore
+— a frame whose method is named for a key and whose file name is 28
+characters with digits in it gives exactly `S8` — and that the fifth
+is a kernel `avc: denied { … } for name="…"` record under a
+thread-name tag. So each `mesh-leak` line now carries the kind of line
+as well (`shape=`, above): if the inference is right the next run
+prints `from=platform:KeyStore shape=java-frame rule=S8 lines=4` and
+`from=platform:other shape=avc-audit rule=S10 lines=1`, and if it
+prints `other` it was wrong. Nothing is filtered or exempted for it:
+S2 stays red until the owner's question above is answered, and the
+shapes are what it will be answered on.
+
 *What only a run proves, still*:
 
 | It rests on | If it is false, the run shows |
 |---|---|
-| The probe is green once the app's sheet is fixed | `RED (probe): the suite on the device FAILED`, with `mesh-failure` lines |
-| A leg's whole device log reaches the scanner's 2 000 lines on API 29 | `sink class logcat holds N line(s), below its declared floor`, rc 4 |
-| What the four `S8` lines of S2's transcript were | if they recur, S2 is red and `mesh-leak (s2): file=drive from=<class> rule=S8 lines=<n>` names whose they were: the intended outcome |
-| A real `dumpsys bluetooth_manager`'s skeleton passes the scanner with the new key rule; the other two did | `LEAK: …skel.log`, `probe.dump_<name>=withheld`, and only that file gone |
-| The scanner accepts a one-file `diag` gate for the verdict file and for a skeleton on a runner | the verdict file missing from a red run's artifact |
+| What kind of line each of S2's five hits is on | `shape=other` where a frame or an audit record was inferred; `java-frame` and `avc-audit` where the inference holds. S2 is red either way |
 | The first-boot step and the drive step's boot, with no AVD cache, stay inside their caps | a step cap, named by the step |
 
 *What the review changed* (independent, of `1a8e782`; each read again

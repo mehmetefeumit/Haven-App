@@ -238,6 +238,10 @@ readonly -a KNOWN_PLATFORM_TAGS=(
   System.out System.err art zygote libc DEBUG GeneratedPluginRegistrant
 )
 
+# What KIND of line a hit was on, for a `mesh-leak` line: one of these and
+# nothing else (mesh_line_shapes).
+readonly -a MESH_SHAPES=(java-frame java-exception-head avc-audit dart-frame other)
+
 # The plants beyond P1, P2 and P3, as the target writes them (`_morePlants`):
 # the priorities and tags the lever's own lane will plant at. Each is an
 # answer in every leg, never a verdict.
@@ -949,6 +953,66 @@ mesh_transcript_classes() {
   '
 }
 
+# mesh_line_shapes <transcript|threadtime> — stdin a drive transcript or a
+# device log; stdout one word of MESH_SHAPES a line: the KIND of line its
+# message is, the forwarded prefix or the entry's header taken off first.
+#
+#   java-frame           a Java stack frame, whole: `at <dotted path>(<File>
+#                        .java:<n>)`, or `(Native Method)`, `(Unknown Source)`
+#   java-exception-head  a dotted class name ending `Exception` or `Error`,
+#                        alone or before `: <message>`, with or without
+#                        `Caused by: `. The CLASS of line: its message is not
+#                        read
+#   avc-audit            the kernel's SELinux record, `avc: denied|granted
+#                        { … } for …`
+#   dart-frame           a Dart stack frame, `#<n> <member> (<location>)`
+#   other                anything else — a sentence that merely holds ` at `
+#                        among it
+#
+# Each is anchored at both ends of the message, so the word says what the
+# whole line IS. It names a hit for a reader (CI run 44541718555: five hits
+# on Android 10 under `KeyStore` and an unlisted tag, their text unseen); no
+# gate reads it, and a line of Haven's own that looks like a frame is said
+# to look like one.
+mesh_line_shapes() {
+  LC_ALL=C awk -v format="${1:-transcript}" -v head="${THREADTIME_HEAD_RE}" '
+    function shape_of(text) {
+      if (text ~ /^[ \t]*at [A-Za-z_$][A-Za-z0-9_$]*([.][A-Za-z_$<][A-Za-z0-9_$<>]*)+[(]([A-Za-z0-9_$]+[.](java|kt):[0-9]+|Native Method|Unknown Source)[)][ \t]*$/) return "java-frame"
+      if (text ~ /^[ \t]*(Caused by: )?[A-Za-z_][A-Za-z0-9_$]*([.][A-Za-z_][A-Za-z0-9_$]*)+(Exception|Error)(: .*)?$/) return "java-exception-head"
+      if (text ~ /^(type=[0-9]+ audit[(][0-9.:]+[)]: )?avc: +(denied|granted) +[{] [a-z_ ]+ [}] for /) return "avc-audit"
+      if (text ~ /^#[0-9]+ +[^ ].* [(](package:|file:\/\/|dart:)[^ ()]+[)]$/) return "dart-frame"
+      return "other"
+    }
+    {
+      sub(/\r$/, "")
+      text = $0
+      if (format == "threadtime") {
+        if (match(text, head)) {
+          text = substr(text, RLENGTH + 1)
+          at = index(text, ": ")
+          if (at) text = substr(text, at + 2)
+        }
+      } else if (match(text, /^[VDIWEFA]\/[^(]*\( *[0-9]+\): ?/)) {
+        text = substr(text, RLENGTH + 1)
+      }
+      print shape_of(text)
+    }
+  '
+}
+
+# mesh_shape_word <word> — <word> where it is one of MESH_SHAPES, and
+# `other` where it is anything else or nothing.
+mesh_shape_word() {
+  local word
+  for word in "${MESH_SHAPES[@]}"; do
+    if [[ "${1:-}" == "${word}" ]]; then
+      printf '%s\n' "${word}"
+      return 0
+    fi
+  done
+  echo other
+}
+
 # mesh_report_hits <report.ndjson> <sink path> — `<line> <rule> <tag>` for
 # each hit the scanner's report holds against that sink: the rule's id, or
 # `needle`; the tag as the scanner read it, or `-`. The report carries no
@@ -967,15 +1031,25 @@ mesh_report_hits() {
   ' "$1"
 }
 
-# mesh_hit_facts <index> — stdin mesh_report_hits' lines; stdout
-# `from=<class> rule=<id> lines=<n>`, one a class and rule, the class read
-# from <index> by line number (`unindexed` for a number it does not have).
+# mesh_hit_facts <classes> [<shapes>] — stdin mesh_report_hits' lines; stdout
+# `from=<class> shape=<word> rule=<id> lines=<n>`, one a class, shape and
+# rule: the class and the shape read by line number from the two indexes
+# (`unindexed` for a line <classes> does not have; `other` for a shape that
+# is not there or is no word of MESH_SHAPES).
 mesh_hit_facts() {
-  LC_ALL=C awk '
-    NR == FNR { class[FNR] = $0; next }
-    { n[(($1 in class) ? class[$1] : "unindexed") " rule=" $2]++ }
-    END { for (key in n) print "from=" key " lines=" n[key] }
-  ' "${1:-/dev/null}" - | LC_ALL=C sort
+  LC_ALL=C awk -v classes="${1:-}" -v shapes="${2:-}" -v words="${MESH_SHAPES[*]}" '
+    BEGIN {
+      n = split(words, word, " "); for (i = 1; i <= n; i++) ok[word[i]] = 1
+      i = 0; if (classes != "") while ((getline line < classes) > 0) class[++i] = line
+      i = 0; if (shapes != "") while ((getline line < shapes) > 0) shape[++i] = line
+    }
+    {
+      key = (($1 in class) ? class[$1] : "unindexed")
+      key = key " shape=" ((($1 in shape) && (shape[$1] in ok)) ? shape[$1] : "other")
+      hits[key " rule=" $2]++
+    }
+    END { for (key in hits) print "from=" key " lines=" hits[key] }
+  ' | LC_ALL=C sort
 }
 
 # mesh_publish <leg> <raw-dir> <log-dir> <label> <address> <pid> <owned tags>
@@ -997,21 +1071,27 @@ mesh_hit_facts() {
 #                            of each line (mesh_transcript_classes), for
 #                            naming a hit
 #
+# and, beside each raw capture, <name>.<leg>.shapes: the kind of line each
+# published line is (mesh_line_shapes), a line for a line.
+#
 # An empty capture publishes nothing: the gate reads a missing sink as what
 # it is. With no pid known, no events are published at all.
 mesh_publish() {
   local leg="$1" raw="$2" out="$3" label="$4" addr="$5" pid="$6" owned="${7:-}"
   if [[ -s "${raw}/logcat.${leg}.raw" ]]; then
     mesh_redact "${label}" "${addr}" "${pid}" < "${raw}/logcat.${leg}.raw" > "${out}/logcat.${leg}.log" || true
+    mesh_line_shapes threadtime < "${raw}/logcat.${leg}.raw" > "${raw}/logcat.${leg}.shapes" || true
   fi
   if [[ -s "${raw}/events.${leg}.raw" ]]; then
     mesh_pid_slice "${pid}" < "${raw}/events.${leg}.raw" \
       | mesh_redact "${label}" "${addr}" "${pid}" > "${out}/logcat-events.${leg}.log" || true
     [[ -s "${out}/logcat-events.${leg}.log" ]] || rm -f "${out}/logcat-events.${leg}.log"
+    mesh_pid_slice "${pid}" < "${raw}/events.${leg}.raw" | mesh_line_shapes threadtime > "${raw}/events.${leg}.shapes" || true
   fi
   if [[ -s "${raw}/drive.${leg}.raw" ]]; then
     mesh_redact "${label}" "${addr}" all < "${raw}/drive.${leg}.raw" > "${out}/flutter-drive.${leg}.log" || true
     mesh_transcript_classes "${owned}" < "${raw}/drive.${leg}.raw" > "${raw}/drive.${leg}.classes" || true
+    mesh_line_shapes transcript < "${raw}/drive.${leg}.raw" > "${raw}/drive.${leg}.shapes" || true
   fi
 }
 
@@ -2404,6 +2484,10 @@ EOF
     "$(grep -cE '^  note_gate_rc "\$\{gate_rc\}"$' <<<"${scope}" || true)"
   _eq_case "…and nothing in the leg's report reads the scanner without gating on it" 1 \
     "$(grep -cE 'logscan_gate' <<<"${scope}" || true)"
+  _eq_case "what names a hit decides nothing: no gate is handed a class or a shape" 0 \
+    "$(grep -cE '^[[:space:]]*(logscan_gate|--sink|note_gate_rc).*(classes|shapes)' <<<"${joined}" || true)"
+  _eq_case "…each file's hits being named with the kind of line from that file's own index" 3 \
+    "$(grep -cE '^    report_leaks .* (drive "\$\{RAW_DIR\}/drive|logcat "\$\{RAW_DIR\}/logcat|events "\$\{RAW_DIR\}/events)\.\$\{leg\}\.shapes"' <<<"${scope}" || true)"
   _eq_case "whose a transcript line is, is read from the scanner's policy and copied nowhere" 1 \
     "$(grep -cE '^OWNED_TAGS="\$\(mesh_owned_tags "\$\{REPO_ROOT\}/tooling/logscan/policy\.toml"\)"$' <<<"${joined}" || true)"
   _eq_case "the raw captures are written under RAW_DIR alone" 0 \
@@ -2544,9 +2628,56 @@ EOF
     "$(mesh_report_hits "${tmp}/report.ndjson" /w/logcat.log)"
   _eq_case "…and no report is no hits" "" "$(mesh_report_hits "${tmp}/nope" /w/drive.log)"
   mesh_transcript_classes "${owned}" < "${rawdir}/drive.probe.raw" > "${tmp}/drive.classes"
-  _eq_case "each hit is said by the class of its line and its rule, counted, with no text: a plugin's, a crash's, an abort's, Haven's own, the tool's" \
-    "from=host rule=S13 lines=1 from=own:flutter rule=S2 lines=1 from=own:flutter rule=S8 lines=1 from=platform:AndroidRuntime rule=S10 lines=1 from=platform:DEBUG rule=S8 lines=1 from=platform:FlutterSecureStorage rule=S10 lines=1 from=platform:System.err rule=S8 lines=1 from=platform:process rule=S8 lines=1 from=unindexed rule=needle lines=1" \
-    "$(mesh_report_hits "${tmp}/report.ndjson" /w/drive.log | mesh_hit_facts "${tmp}/drive.classes" | tr '\n' ' ' | sed 's/ $//')"
+  mesh_line_shapes transcript < "${rawdir}/drive.probe.raw" > "${tmp}/drive.shapes"
+  _eq_case "each hit is said by the class of its line, the kind of line and its rule, counted, with no text: a plugin's, a crash's, an abort's, Haven's own, the tool's" \
+    "from=host shape=other rule=S13 lines=1 from=own:flutter shape=other rule=S2 lines=1 from=own:flutter shape=other rule=S8 lines=1 from=platform:AndroidRuntime shape=java-exception-head rule=S10 lines=1 from=platform:DEBUG shape=other rule=S8 lines=1 from=platform:FlutterSecureStorage shape=other rule=S10 lines=1 from=platform:System.err shape=other rule=S8 lines=1 from=platform:process shape=other rule=S8 lines=1 from=unindexed shape=other rule=needle lines=1" \
+    "$(mesh_report_hits "${tmp}/report.ndjson" /w/drive.log | mesh_hit_facts "${tmp}/drive.classes" "${tmp}/drive.shapes" | tr '\n' ' ' | sed 's/ $//')"
+  printf '%s\n' x x x x x x x 'PlantedText' > "${tmp}/bad.shapes"
+  _eq_case "…a shape that is no word of the list is other, whatever the index holds; and none is other too" "other other" \
+    "$(mesh_report_hits "${tmp}/report.ndjson" /w/drive.log | mesh_hit_facts "${tmp}/drive.classes" "${tmp}/bad.shapes" | grep -o 'AndroidRuntime shape=[^ ]*' | cut -d= -f2) $(mesh_report_hits "${tmp}/report.ndjson" /w/drive.log | mesh_hit_facts "${tmp}/drive.classes" | grep -o 'AndroidRuntime shape=[^ ]*' | cut -d= -f2)"
+  # What KIND of line a hit was on: one of five words, decided on the whole
+  # message, the forwarded prefix off. The first is the reader's example of
+  # what Android 10 printed (CI run 44541718555): a `Key…` method, and a
+  # class name with digits inside the frame's location.
+  local tab=$'\t'
+  printf '%s\n' \
+    "E/KeyStore( 4021): ${tab}at com.it_nomads.fluttersecurestorage.ciphers.KeyCipherImplementationRSA18.getPrivateKey(KeyCipherImplementationRSA18.java:74)" \
+    "E/KeyStore( 4021): ${tab}at java.lang.reflect.Method.invoke(Native Method)" \
+    'W/System.err( 4021): at a.B.<init>(Unknown Source)' \
+    'E/AndroidRuntime( 4021): at com.oblivioustech.haven.MainActivity.onCreate(MainActivity.kt:21)' \
+    'W/KeyStore( 4021): android.security.KeyStoreException: PlantedText invalid key blob' \
+    'E/AndroidRuntime( 4021): Caused by: java.lang.IllegalStateException' \
+    'W/DefaultDispatch( 4021): type=1400 audit(0.0:123): avc: denied { read } for name="PlantedText" dev="dm-2" ino=1 scontext=u:r:untrusted_app:s0 tclass=file permissive=0' \
+    'W/Thread-2( 4021): avc: granted { search } for name="PlantedText"' \
+    'I/flutter ( 4021): #3      _MapShellState._onResumed (package:haven/src/pages/map_shell.dart:2870:9)' \
+    '#0      main (file:///x/integration_test/mesh_lever_test.dart:1:1)' \
+    'W/Foo( 4021): PlantedText failed at com.x.Y.z(Y.java:1) while reading' \
+    'I/flutter ( 4021): look at this' \
+    "I/flutter ( 4021): ${tab}at com.fake.KeyThing.get(KeyThing9.java:7)" \
+    'E/KeyStore( 4021): KeyStore exception' \
+    'W/Foo( 4021): at com.x.Y.z(Y.java:1) and more' \
+    'W/Foo( 4021): java.lang.IllegalStateException in a sentence PlantedText' \
+    'W/Foo( 4021): avc: denied by a sentence' \
+    'W/Foo( 4021): #3 a sentence with (package: in it)' \
+    'W/Foo( 4021): PlantedText failed at com.x.Y.z(Y.java:1)' > "${tmp}/shapes.raw"
+  mesh_line_shapes transcript < "${tmp}/shapes.raw" > "${tmp}/shapes.out"
+  _eq_case "a Java frame, an exception's head, the kernel's audit record and a Dart frame are each named; a sentence that only holds their words is other" \
+    "java-frame java-frame java-frame java-frame java-exception-head java-exception-head avc-audit avc-audit dart-frame dart-frame other other java-frame other other other other other other" \
+    "$(tr '\n' ' ' < "${tmp}/shapes.out" | sed 's/ $//')"
+  _eq_case "…every word of it one of the five, and nothing of a line's text" "0 0" \
+    "$(grep -cvxE "$(IFS='|'; echo "${MESH_SHAPES[*]}")" "${tmp}/shapes.out" || true) $(grep -c 'Planted' "${tmp}/shapes.out" || true)"
+  _eq_case "…a line of Haven's own that imitates a Java frame stays Haven's, and is said to look like one" "own:flutter java-frame" \
+    "$(sed -n 13p "${tmp}/shapes.raw" | mesh_transcript_classes "${owned}") $(sed -n 13p "${tmp}/shapes.out")"
+  {
+    echo '--------- beginning of main'
+    _entry 4021 E KeyStore "${tab}at a.b.C.d(C.java:1)"
+    _entry 4021 W oustech.haven 'type=1400 audit(0.0:9): avc: denied { read } for name="PlantedText"'
+    _entry 4021 I flutter 'at a.b.C.d(C.java:1) is quoted, PlantedText'
+  } > "${tmp}/shapes.logcat"
+  _eq_case "a device log's entries are named the same way, their header off" "other java-frame avc-audit other" \
+    "$(mesh_line_shapes threadtime < "${tmp}/shapes.logcat" | tr '\n' ' ' | sed 's/ $//')"
+  _eq_case "a word is a shape only if it is on the list" "java-frame other other" \
+    "$(mesh_shape_word java-frame) $(mesh_shape_word PlantedText) $(mesh_shape_word '')"
   mesh_publish probe "${rawdir}" "${dir}" '' 'null' 4021 "${owned}"
   _eq_case "of the events buffer, only what Haven's pid wrote is published" "1 0" \
     "$(grep -c '' "${dir}/logcat-events.probe.log" || true) $(grep -cE 'am_proc_start|bluetooth_event|com\.example' "${dir}/logcat-events.probe.log" || true)"
@@ -2559,6 +2690,9 @@ EOF
     "$(grep -c '' "${dir}/flutter-drive.probe.log" || true) $(grep -c 'PlatformText' "${dir}/flutter-drive.probe.log" || true)"
   _eq_case "…with the class of each line beside the raw capture, a line for a line" 13 \
     "$(grep -c '' "${rawdir}/drive.probe.classes" || true)"
+  _eq_case "…and the kind of each published line, of all three files, a line for a line" \
+    "13 $(grep -c '' "${dir}/logcat.probe.log" || true) $(grep -c '' "${dir}/logcat-events.probe.log" || true)" \
+    "$(grep -c '' "${rawdir}/drive.probe.shapes" || true) $(grep -c '' "${rawdir}/logcat.probe.shapes" || true) $(grep -c '' "${rawdir}/events.probe.shapes" || true)"
   # What a hit on any of those lines costs: the scanner's rc 1 over the leg's
   # three files deletes all three. The device log holds the same lines, so a
   # leak in the transcript must never leave it behind for upload.
@@ -2981,22 +3115,24 @@ inspect_platform() {
   keep_skeleton "${leg}" dump_bluetooth bluetooth-manager "${RAW_DIR}/bluetooth-all.${leg}.dump"
 }
 
-# report_leaks <leg> <report> <sink path> <file word> [<index>] — for each
-# hit the leg's gate recorded against one published file, WHOSE text the line
-# was, in closed shapes: the transcript's lines by their class (the index
-# mesh_publish wrote), the device log's by the tag the scanner read. Never
-# the text: the scanner's report has none, and the published file is gone.
+# report_leaks <leg> <report> <sink path> <file word> <shapes> [<classes>] —
+# for each hit the leg's gate recorded against one published file, WHOSE text
+# the line was and what KIND of line, in closed shapes: the transcript's
+# lines by their class (the index mesh_publish wrote), the device log's by
+# the tag the scanner read; either's by its shape. Never the text: the
+# scanner's report has none, and the published file is gone.
 report_leaks() {
-  local leg="$1" report="$2" sink="$3" word="$4" index="${5:-}" line tag rule
-  if [[ -n "${index}" ]]; then
+  local leg="$1" report="$2" sink="$3" word="$4" shapes="$5" classes="${6:-}" line tag rule shape
+  if [[ -n "${classes}" ]]; then
     while IFS= read -r line; do
       [[ -n "${line}" ]] && echo "  mesh-leak (${leg}): file=${word} ${line}" >&2
-    done < <(mesh_report_hits "${report}" "${sink}" | mesh_hit_facts "${index}")
+    done < <(mesh_report_hits "${report}" "${sink}" | mesh_hit_facts "${classes}" "${shapes}")
     return 0
   fi
   while read -r line rule tag; do
     [[ " ${OWNED_TAGS} " == *" ${tag%%::*} "* ]] || tag=other
-    echo "  mesh-leak (${leg}): file=${word} from=own:${tag%%::*} rule=${rule} line=${line}" >&2
+    shape="$(mesh_shape_word "$(sed -n "${line}p" "${shapes}" 2>/dev/null || true)")"
+    echo "  mesh-leak (${leg}): file=${word} from=own:${tag%%::*} shape=${shape} rule=${rule} line=${line}" >&2
   done < <(mesh_report_hits "${report}" "${sink}")
 }
 
@@ -3019,9 +3155,9 @@ report_leg() {
   note_gate_rc "${gate_rc}"
   if (( gate_rc == 1 )); then
     LEAK_LEGS+=("${leg}")
-    report_leaks "${leg}" "${LOGSCAN_REPORTS}/gate-${leg}.ndjson" "${drive_log}" drive "${RAW_DIR}/drive.${leg}.classes"
-    report_leaks "${leg}" "${LOGSCAN_REPORTS}/gate-${leg}.ndjson" "${LOG_DIR}/logcat.${leg}.log" logcat
-    report_leaks "${leg}" "${LOGSCAN_REPORTS}/gate-${leg}.ndjson" "${LOG_DIR}/logcat-events.${leg}.log" events
+    report_leaks "${leg}" "${LOGSCAN_REPORTS}/gate-${leg}.ndjson" "${drive_log}" drive "${RAW_DIR}/drive.${leg}.shapes" "${RAW_DIR}/drive.${leg}.classes"
+    report_leaks "${leg}" "${LOGSCAN_REPORTS}/gate-${leg}.ndjson" "${LOG_DIR}/logcat.${leg}.log" logcat "${RAW_DIR}/logcat.${leg}.shapes"
+    report_leaks "${leg}" "${LOGSCAN_REPORTS}/gate-${leg}.ndjson" "${LOG_DIR}/logcat-events.${leg}.log" events "${RAW_DIR}/events.${leg}.shapes"
   fi
   if (( gate_rc == 0 )); then
     cat "${drive_log}" || true
