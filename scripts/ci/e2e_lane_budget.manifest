@@ -170,6 +170,13 @@ drive timeout:DRIVE_TIMEOUT#1 charge DRIVE_TIMEOUT + DRIVE_KILL_AFTER_SECS
 # kills it if it is still running at the end.
 sampler-stop sleep:1#2 charge 3 * SAMPLE_PERIOD_SECS
 sampler sleep:SAMPLE_PERIOD_SECS#1 within sampler-stop the sampler is joined only after sampler-stop, which kills it if still running
+# The system_server identity read before the drive and the first one after it.
+system-server-before read_system_server_identity#1/timeout:SYSTEM_SERVER_READ_SECS#1 charge SYSTEM_SERVER_READ_SECS
+system-server-after read_system_server_identity#2/timeout:SYSTEM_SERVER_READ_SECS#1 charge SYSTEM_SERVER_READ_SECS
+# A wall-clock loop (SECONDS < deadline) can start one more tick, a 1 s sleep
+# and a bounded read, just before its bound.
+system-server-settle sleep:1#3 charge SYSTEM_SERVER_SETTLE_SECS + 1 + SYSTEM_SERVER_READ_SECS
+system-server-settle-read read_system_server_identity#3/timeout:SYSTEM_SERVER_READ_SECS#1 within system-server-settle each tick's read is in system-server-settle's charge
 # The log-privacy gate after the drive and over the whole evidence directory
 # at exit: files already on disk, no wait of its own (logscan-gate.sh).
 logscan lib:logscan_gate#1 charge @
