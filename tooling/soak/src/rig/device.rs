@@ -10,7 +10,7 @@
 //!
 //! Every raw secret byte this harness materialises is `Zeroizing`
 //! ([`SimDevice::secret_hex_for_declaration`] is the only place it does).
-//! `nostr::Keys` itself CANNOT be zeroized — the type implements no `Zeroize`
+//! `nostr::key::Keys` itself CANNOT be zeroized — the type implements no `Zeroize`
 //! at the pinned version, so neither `Zeroizing<Keys>` nor a `ZeroizeOnDrop`
 //! derive over it compiles — and that residual is recorded rather than papered
 //! over with a wrapper that would zero a copy while the original stays.
@@ -27,7 +27,7 @@ use haven_core::relay::fanout::RelayMappedFanout;
 use haven_core::relay::live_sync::{CircleSpec, Claim, LiveSyncCore, LiveSyncEvent};
 use haven_core::relay::maintenance::build_kp_maintenance_events;
 use haven_core::relay::{FanoutTransport, RelayManager};
-use nostr::Keys;
+use nostr::key::Keys;
 use tokio::sync::broadcast::error::TryRecvError;
 use tokio::sync::broadcast::Receiver;
 use zeroize::Zeroizing;
@@ -362,7 +362,7 @@ impl SimDevice {
     ///
     /// [`RigError::Core`] with [`Step::MintKeyPackage`] if the session cannot
     /// mint one.
-    pub async fn mint_key_package(&self) -> Result<nostr::Event, RigError> {
+    pub async fn mint_key_package(&self) -> Result<nostr::event::Event, RigError> {
         build_kp_maintenance_events(
             self.session()?,
             &self.keys,

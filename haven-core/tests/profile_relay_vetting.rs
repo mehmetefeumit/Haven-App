@@ -41,7 +41,7 @@ use std::fmt::Write as _;
 use haven_core::profile::{
     build_blank_metadata_event, build_metadata_event, production_profile_relays, ProfileMetadata,
 };
-use nostr::{Filter, Keys, Kind, Metadata};
+use nostr::{event::Kind, filter::Filter, key::Keys, nips::nip01::Metadata};
 use nostr_relay_builder::builder::{RelayBuilder, RelayBuilderNip42, RelayBuilderNip42Mode};
 use nostr_sdk::Client;
 use vetting::{

@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use nostr::{Filter, PublicKey, RelayUrl, SubscriptionId};
+use nostr::{filter::Filter, key::PublicKey, message::SubscriptionId, types::RelayUrl};
 use nostr_sdk::pool::monitor::{Monitor, MonitorNotification};
 use nostr_sdk::{Client, ClientOptions, RelayPoolNotification, RelayPoolOptions, RelayStatus};
 use tokio::sync::{broadcast, watch, Mutex as TokioMutex, MutexGuard as TokioMutexGuard, RwLock};
@@ -99,7 +99,7 @@ const fn seed_ms(now: i64) -> i64 {
 /// plaintext too. A string that is no relay URL at all is not refused here;
 /// the pool refuses it at `add_relay`, as before.
 pub(crate) fn engine_relay_allowed(relay: &str) -> bool {
-    nostr::RelayUrl::parse(relay).map_or(true, |url| crate::relay::url_norm::may_dial(&url))
+    nostr::types::RelayUrl::parse(relay).map_or(true, |url| crate::relay::url_norm::may_dial(&url))
 }
 
 /// Builds the engine `Client` with the verified privacy-minimizing options.
@@ -961,7 +961,7 @@ impl<M: Fn(&str) -> String + Send + Sync> crate::relay::fanout::UnrecordedPublis
 {
     fn publish_unrecorded<'a>(
         &'a self,
-        event: &'a nostr::Event,
+        event: &'a nostr::event::Event,
         relays: &'a [String],
     ) -> std::pin::Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         Box::pin(async move {
@@ -1284,7 +1284,7 @@ impl LiveSyncCore {
         // issued; the follow at the end of the start lists where it led.
         self.circle.reconcile_routing().await;
         let circles = &followed(&self.circle, circles).await;
-        let now = i64::try_from(nostr::Timestamp::now().as_secs()).unwrap_or(i64::MAX);
+        let now = i64::try_from(nostr::types::Timestamp::now().as_secs()).unwrap_or(i64::MAX);
         let inbox_phase = self.seed_cursors(circles, inbox_relays, now);
 
         let own_pk_bytes = self.own_pubkey.to_bytes();
@@ -1742,7 +1742,7 @@ impl LiveSyncCore {
     /// in the order they arrived — before any ordering of a held batch.
     #[cfg(any(test, feature = "test-utils"))]
     #[must_use]
-    pub fn group_events_taken_in_for_test(&self) -> Vec<nostr::EventId> {
+    pub fn group_events_taken_in_for_test(&self) -> Vec<nostr::event::EventId> {
         self.processor.group_events_taken_in_for_test()
     }
 
@@ -2254,7 +2254,7 @@ impl LiveSyncCore {
         // returns.
         self.processor.owe_come_back();
         if let Some(active) = active {
-            let now = i64::try_from(nostr::Timestamp::now().as_secs()).unwrap_or(i64::MAX);
+            let now = i64::try_from(nostr::types::Timestamp::now().as_secs()).unwrap_or(i64::MAX);
             // Re-anchor the STORED live set (base buckets + any dynamic singletons)
             // under their frozen sub-ids — NO re-bucketing, so nothing is orphaned
             // and a dynamically-added circle is re-anchored too. `Resubscribe`
@@ -3992,7 +3992,7 @@ impl RepairPlane {
         // seeded cursor the next burst's `bucket_since` reads `unwrap_or(0)` and
         // issues the forbidden `since = 0` REQ — this circle's entire history,
         // on a background wake.
-        let now = i64::try_from(nostr::Timestamp::now().as_secs()).unwrap_or(i64::MAX);
+        let now = i64::try_from(nostr::types::Timestamp::now().as_secs()).unwrap_or(i64::MAX);
         let _ = self
             .circle
             .seed_sync_cursor_if_unset(&group_cursor_stream(&hex), seed_ms(now));
@@ -4177,7 +4177,7 @@ impl RepairPlane {
 
             let mut remaining_vec: Vec<String> = remaining.iter().cloned().collect();
             remaining_vec.sort();
-            let now = i64::try_from(nostr::Timestamp::now().as_secs()).unwrap_or(i64::MAX);
+            let now = i64::try_from(nostr::types::Timestamp::now().as_secs()).unwrap_or(i64::MAX);
             // The bucket's REQ is being replaced, so every remaining circle
             // starts a fresh anchor generation at this local `now`; the leaving
             // circle's anchor is dropped outright.
@@ -4279,7 +4279,7 @@ impl RepairPlane {
         {
             return;
         }
-        let now = i64::try_from(nostr::Timestamp::now().as_secs()).unwrap_or(i64::MAX);
+        let now = i64::try_from(nostr::types::Timestamp::now().as_secs()).unwrap_or(i64::MAX);
         let ctx = self.ctx();
 
         if key.sub_id == active.inbox_sub_id {
@@ -5021,7 +5021,7 @@ impl LiveSyncCore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::{Alphabet, Keys, SingleLetterTag};
+    use nostr::{filter::SingleLetterTag, key::Keys, Alphabet};
     use std::sync::atomic::AtomicUsize;
     use tempfile::TempDir;
 
@@ -5353,7 +5353,7 @@ mod tests {
             .await;
 
         let sub_id = SubscriptionId::new("test_group_0");
-        let filter = Filter::new().kind(nostr::Kind::Custom(445));
+        let filter = Filter::new().kind(nostr::event::Kind::Custom(445));
         let r = tokio::time::timeout(
             Duration::from_secs(10),
             core.subscribe_bucket(vec![url], sub_id, filter),
@@ -5384,7 +5384,7 @@ mod tests {
             .await;
         let sub_id = SubscriptionId::new("test_group_0");
         let inbox_sub_id = SubscriptionId::new("test_inbox_0");
-        let now = i64::try_from(nostr::Timestamp::now().as_secs()).unwrap();
+        let now = i64::try_from(nostr::types::Timestamp::now().as_secs()).unwrap();
         let relays = vec![url.to_string()];
         core.ctx()
             .issue_group(
@@ -5607,7 +5607,7 @@ mod tests {
 
         // Age the INBOX endpoint far past the window. It must STILL not count:
         // a quiet inbox is the normal state, not a fault.
-        let now = i64::try_from(nostr::Timestamp::now().as_secs()).unwrap();
+        let now = i64::try_from(nostr::types::Timestamp::now().as_secs()).unwrap();
         let window = delivery_silence_window_secs();
         core.processor
             .open_delivery_window(&endpoint(&url, &inbox_sub), now - window * 10);
@@ -5767,7 +5767,7 @@ mod tests {
         core.client
             .wait_for_connection(Duration::from_secs(5))
             .await;
-        let now = i64::try_from(nostr::Timestamp::now().as_secs()).unwrap();
+        let now = i64::try_from(nostr::types::Timestamp::now().as_secs()).unwrap();
         let relays = vec![url_a.clone(), url_b.clone()];
         core.ctx()
             .issue_group(
@@ -5976,7 +5976,7 @@ mod tests {
             .subscribe_bucket(
                 vec!["wss://relay.example".to_string()],
                 SubscriptionId::new("interrupted"),
-                Filter::new().kind(nostr::Kind::Custom(445)),
+                Filter::new().kind(nostr::event::Kind::Custom(445)),
             )
             .await;
         assert!(
@@ -6275,7 +6275,7 @@ mod tests {
             .subscribe_with_id_to(
                 vec!["ws://localhost:7777".to_string()],
                 SubscriptionId::new("regress"),
-                Filter::new().kind(nostr::Kind::Custom(445)),
+                Filter::new().kind(nostr::event::Kind::Custom(445)),
                 None,
             )
             .await;
@@ -6575,7 +6575,7 @@ mod tests {
         let read = || core.circle.read_sync_cursor(&key).ok().flatten();
         // The cold seed is `now − 24h`; the EOSE anchor is `now`, so "moved off
         // the seed" is an unambiguous, engine-independent signal.
-        let floor = i64::try_from(nostr::Timestamp::now().as_secs())
+        let floor = i64::try_from(nostr::types::Timestamp::now().as_secs())
             .unwrap_or(i64::MAX)
             .saturating_sub(SEED_LOOKBACK_SECS / 2)
             .saturating_mul(1000);
@@ -6951,7 +6951,11 @@ mod tests {
         // SEQUENTIALLY, each awaited, so a missing delivery for A times out on
         // its own await instead of being masked by B's.
         // (Scary panic messages on stderr are expected.)
-        use nostr::{Alphabet, EventBuilder, Kind, SingleLetterTag, Tag, TagKind};
+        use nostr::{
+            event::{EventBuilder, Kind, Tag},
+            filter::SingleLetterTag,
+            Alphabet, TagKind,
+        };
 
         let a = "aa".repeat(32);
         let b = "bb".repeat(32);
@@ -9185,7 +9189,7 @@ mod tests {
         // Plant the stale registration while the socket is still LIVE, so it is
         // REGISTERED in the pool (the state `resubscribe()` replays from) rather
         // than merely queued on a dead relay's outbound channel.
-        let stale_since = nostr::Timestamp::from(1_000_u64);
+        let stale_since = nostr::types::Timestamp::from(1_000_u64);
         let planted = group_filter(std::slice::from_ref(&hex), 1_000);
         core.client
             .subscribe_with_id_to(vec![url.clone()], sub_id.clone(), planted, None)
@@ -9697,13 +9701,16 @@ mod tests {
                 Box::new(crate::relay::live_sync::supervisor::RawEvent {
                     relay_url: RelayUrl::parse(&url).expect("relay url"),
                     subscription_id: sub_id.clone(),
-                    event: nostr::EventBuilder::new(nostr::Kind::Custom(445), "__panic_for_test__")
-                        .tags([nostr::Tag::custom(
-                            nostr::TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H)),
-                            [hex.clone()],
-                        )])
-                        .sign_with_keys(&Keys::generate())
-                        .expect("sign"),
+                    event: nostr::event::EventBuilder::new(
+                        nostr::event::Kind::Custom(445),
+                        "__panic_for_test__",
+                    )
+                    .tags([nostr::event::Tag::custom(
+                        nostr::TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H)),
+                        [hex.clone()],
+                    )])
+                    .sign_with_keys(&Keys::generate())
+                    .expect("sign"),
                 }),
             ))
             .await
@@ -10200,7 +10207,10 @@ mod tests {
     /// than a race.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_marker_from_an_abandoned_pause_never_wipes_the_next_bursts_router() {
-        use nostr::{EventBuilder, Kind, Tag, TagKind};
+        use nostr::{
+            event::{EventBuilder, Kind, Tag},
+            TagKind,
+        };
 
         let hex = "a7".repeat(32);
         let (core, _relay, _dir, url) = started_core_with(&[&hex]).await;
@@ -10299,12 +10309,12 @@ mod tests {
         // the instant `start` returns makes this precondition a race.
         let mut before = object_id().await;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        while before == nostr::Timestamp::from(0) && tokio::time::Instant::now() < deadline {
+        while before == nostr::types::Timestamp::from(0) && tokio::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(10)).await;
             before = object_id().await;
         }
         assert!(
-            before > nostr::Timestamp::from(0),
+            before > nostr::types::Timestamp::from(0),
             "precondition: the relay connected, so the fingerprint is written"
         );
 
@@ -10312,8 +10322,8 @@ mod tests {
         // — and a second crossed, so a rebuilt object's own first connection
         // could not be mistaken for this one.
         core.client.disconnect().await;
-        let start = nostr::Timestamp::now().as_secs();
-        assert!(poll_until(|| nostr::Timestamp::now().as_secs() > start).await);
+        let start = nostr::types::Timestamp::now().as_secs();
+        assert!(poll_until(|| nostr::types::Timestamp::now().as_secs() > start).await);
 
         // The foreground re-anchor. Its OUTCOME is not the subject: with a
         // Terminated relay the REQ may or may not be accepted inside the connect
@@ -10540,7 +10550,14 @@ mod tests {
         let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &keys).unwrap());
         let pool = Arc::new(RelayManager::new());
         let core = LiveSyncCore::new_local(circle, keys.public_key(), Arc::clone(&pool));
-        let probe = || pool.neg_probe_ids(&url, &[0xab; 32], 0, nostr::Timestamp::now().as_secs());
+        let probe = || {
+            pool.neg_probe_ids(
+                &url,
+                &[0xab; 32],
+                0,
+                nostr::types::Timestamp::now().as_secs(),
+            )
+        };
 
         assert!(
             pool.neg_prepare(std::slice::from_ref(&url))
@@ -10558,11 +10575,11 @@ mod tests {
             matches!(probe().await, crate::relay::NegProbe::Ids(_)),
             "after the close a NIP-77 pass must reach the relay a cut dial stranded",
         );
-        let event = nostr::EventBuilder::new(
-            nostr::Kind::Custom(crate::nostr::KIND_GROUP_MESSAGE),
+        let event = nostr::event::EventBuilder::new(
+            nostr::event::Kind::Custom(crate::nostr::KIND_GROUP_MESSAGE),
             "ciphertext",
         )
-        .tag(nostr::Tag::parse(["h", &"ab".repeat(32)]).expect("an h tag"))
+        .tag(nostr::event::Tag::parse(["h", &"ab".repeat(32)]).expect("an h tag"))
         .sign_with_keys(&Keys::generate())
         .expect("sign");
         let message = crate::nostr::mls::SessionManager::event_to_transport_message(&event)

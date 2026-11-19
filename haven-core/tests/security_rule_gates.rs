@@ -9,7 +9,7 @@
 //!   process and identical across launches. The same sample carries Rule 2 (a
 //!   fresh ephemeral author key per message).
 //! * **Rule 3 — kind-444 welcome stays UNSIGNED.** Asserted on the RAW decrypted
-//!   rumor JSON: `nostr::UnsignedEvent` has no `sig` field at all, so peeling
+//!   rumor JSON: `nostr::event::UnsignedEvent` has no `sig` field at all, so peeling
 //!   into one silently drops a stray signature and says nothing about the bytes
 //!   that were wrapped.
 //! * **Rule 5 — exporter retention.** The negative edge (an epoch-N ciphertext
@@ -70,8 +70,12 @@ use haven_core::relay::live_sync::supervisor::{intake_queue, run_receiver, RawSi
 use haven_core::relay::live_sync::{group_cursor_stream, EngineProcessor, EventBus};
 use nostr::nips::nip44;
 use nostr::{
-    Alphabet, Event, EventBuilder, JsonUtil as _, Keys, Kind, PublicKey, RelayUrl, SingleLetterTag,
-    SubscriptionId, Tag, TagKind, Timestamp,
+    event::{Event, EventBuilder, Kind, Tag},
+    filter::SingleLetterTag,
+    key::{Keys, PublicKey},
+    message::SubscriptionId,
+    types::{RelayUrl, Timestamp},
+    Alphabet, JsonUtil as _, TagKind,
 };
 use nostr_sdk::RelayPoolNotification;
 use serde_json::Value;
@@ -495,7 +499,7 @@ async fn deliver_through_receiver(
     for event in events {
         btx.send(RelayPoolNotification::Message {
             relay_url: RelayUrl::parse("wss://relay.example").expect("relay url"),
-            message: nostr::RelayMessage::Event {
+            message: nostr::message::RelayMessage::Event {
                 subscription_id: std::borrow::Cow::Owned(SubscriptionId::new("s_group_0")),
                 event: std::borrow::Cow::Owned(event.clone()),
             },

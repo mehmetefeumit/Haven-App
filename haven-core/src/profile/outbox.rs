@@ -13,7 +13,13 @@
 
 use std::cmp::Reverse;
 
-use nostr::{Event, JsonUtil, Kind, Metadata, PublicKey, RelayUrl};
+use nostr::{
+    event::{Event, Kind},
+    key::PublicKey,
+    nips::nip01::Metadata,
+    types::RelayUrl,
+    JsonUtil,
+};
 use serde::{Deserialize, Serialize};
 
 use super::types::{CachedProfile, ProfileEdits, ProfileMetadata};
@@ -255,7 +261,7 @@ mod tests {
     use crate::profile::merge::merge_edits;
     use crate::profile::publish::build_metadata_event;
     use crate::profile::types::ProfileState;
-    use nostr::{JsonUtil, Keys, Metadata};
+    use nostr::{key::Keys, nips::nip01::Metadata, JsonUtil};
 
     fn edits(display_name: Option<&str>, about: Option<&str>) -> PendingEdits {
         PendingEdits {
@@ -530,7 +536,11 @@ mod tests {
 
     // ---- the pending photo removal -----------------------------------------
 
-    use nostr::{Event, EventBuilder, Kind, PublicKey, Timestamp};
+    use nostr::{
+        event::{Event, EventBuilder, Kind},
+        key::PublicKey,
+        types::Timestamp,
+    };
 
     fn removal(clear_version: i64) -> PendingEdits {
         PendingEdits {

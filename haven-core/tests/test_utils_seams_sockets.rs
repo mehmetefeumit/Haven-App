@@ -22,7 +22,11 @@ use haven_core::relay::dial_witness::{AlreadyArmed, DialWatch};
 use haven_core::relay::live_sync::{CircleSpec, Claim, LiveSyncCore};
 use haven_core::relay::maintenance::build_kp_maintenance_events;
 use haven_core::relay::{normalize_relay_url, RelayManager};
-use nostr::{EventBuilder, Filter, Keys, Kind};
+use nostr::{
+    event::{EventBuilder, Kind},
+    filter::Filter,
+    key::Keys,
+};
 use tempfile::TempDir;
 
 /// The one address the circle stores; the engine's pool never holds it.
@@ -118,7 +122,7 @@ async fn a_leave_on_an_unstored_address(
     nostr_relay_builder::MockRelay,
     String,
     nostr_sdk::Client,
-    nostr::Event,
+    nostr::event::Event,
 ) {
     let _ = haven_core::relay::allow_ws_loopback_for_test();
     let relay = nostr_relay_builder::MockRelay::run()
@@ -156,7 +160,7 @@ async fn within(bound: Duration, mut done: impl FnMut() -> bool) -> bool {
     done()
 }
 
-async fn stored_445s(observer: &nostr_sdk::Client) -> Vec<nostr::EventId> {
+async fn stored_445s(observer: &nostr_sdk::Client) -> Vec<nostr::event::EventId> {
     observer
         .fetch_events(
             Filter::new().kind(Kind::Custom(445)),

@@ -28,7 +28,7 @@ use haven_core::relay::fanout::{
 };
 use haven_core::relay::live_sync::CircleSpec;
 use haven_core::relay::{FanoutTransport, PublishResult, RelayManager, RelayResult};
-use nostr::Event;
+use nostr::event::Event;
 
 use crate::nemesis::types::DropClass;
 use crate::rig::plane::RelayPlane;
@@ -549,7 +549,7 @@ pub async fn build_circle(
             .tags
             .public_keys()
             .next()
-            .map(nostr::PublicKey::to_hex)
+            .map(nostr::key::PublicKey::to_hex)
         else {
             return Err(RigError::UnknownTarget);
         };
@@ -596,9 +596,9 @@ pub async fn build_circle(
 }
 
 /// The gift wraps `device`'s inbox holds for it, by id.
-async fn inbox_wraps(device: &SimDevice) -> Vec<nostr::EventId> {
-    let filter = nostr::Filter::new()
-        .kind(nostr::Kind::GiftWrap)
+async fn inbox_wraps(device: &SimDevice) -> Vec<nostr::event::EventId> {
+    let filter = nostr::filter::Filter::new()
+        .kind(nostr::event::Kind::GiftWrap)
         .pubkey(device.keys.public_key());
     device
         .relays
@@ -615,10 +615,10 @@ async fn inbox_wraps(device: &SimDevice) -> Vec<nostr::EventId> {
 async fn take_welcome_from_inbox(
     device: &SimDevice,
     group: &GroupId,
-    before: &[nostr::EventId],
+    before: &[nostr::event::EventId],
 ) -> Result<bool, RigError> {
-    let filter = nostr::Filter::new()
-        .kind(nostr::Kind::GiftWrap)
+    let filter = nostr::filter::Filter::new()
+        .kind(nostr::event::Kind::GiftWrap)
         .pubkey(device.keys.public_key());
     let manager = device.manager()?;
     let found = poll_until(WITNESS_BOUND, INBOX_POLL, || async {

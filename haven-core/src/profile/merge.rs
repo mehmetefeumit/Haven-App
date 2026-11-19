@@ -6,7 +6,7 @@
 //! field and — crucially — the `custom` map (fields written by other clients),
 //! so an edit never silently drops metadata Haven does not model.
 
-use nostr::Metadata;
+use nostr::nips::nip01::Metadata;
 
 use super::types::{ProfileEdits, ProfileMetadata};
 
@@ -67,7 +67,7 @@ pub fn enforce_name_rule(metadata: &mut Metadata) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::{JsonUtil, Metadata};
+    use nostr::{nips::nip01::Metadata, JsonUtil};
     use proptest::prelude::*;
 
     fn md_from(json: &str) -> ProfileMetadata {

@@ -61,7 +61,7 @@ use haven_core::location::LocationMessage;
 use haven_core::nostr::mls::types::{GroupId as HavenGroupId, LocationMessageResult};
 use haven_core::relay::fanout::{EvolutionStatus, RepairOutcome};
 use haven_core::relay::maintenance::build_kp_maintenance_events;
-use nostr::Keys;
+use nostr::key::Keys;
 use openmls::framing::errors::{MessageDecryptionError, SecretTreeError};
 use openmls::prelude::*;
 use openmls_basic_credential::SignatureKeyPair;

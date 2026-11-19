@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use haven_core::circle::{Circle, CircleStorage, CircleType, LastKnownLocation};
 use haven_core::nostr::mls::types::GroupId;
 use haven_core::nostr::mls::{ChangeNote, CommitNotes as _, GroupIdExt as _, RestageWait};
-use nostr::{EventId, Keys};
+use nostr::{event::EventId, key::Keys};
 
 /// Long, high-entropy ASCII sentinel written into a TEXT column. Unlikely to
 /// appear verbatim in an encrypted (high-entropy) page by chance.

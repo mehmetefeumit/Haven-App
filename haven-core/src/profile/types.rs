@@ -7,7 +7,7 @@
 
 use std::fmt;
 
-use nostr::Metadata;
+use nostr::nips::nip01::Metadata;
 use serde_json::Value;
 use zeroize::Zeroizing;
 

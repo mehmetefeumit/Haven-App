@@ -31,7 +31,11 @@ use haven_core::relay::live_sync::{
     BacklogOutcome, CircleSpec, Claim, LiveSyncCore, LiveSyncEvent, SyncStatusReason,
 };
 use nostr::{
-    Alphabet, EventBuilder, Filter, Keys, Kind, RelayUrl, SingleLetterTag, Tag, TagKind, Timestamp,
+    event::{EventBuilder, Kind, Tag},
+    filter::{Filter, SingleLetterTag},
+    key::Keys,
+    types::{RelayUrl, Timestamp},
+    Alphabet, TagKind,
 };
 use nostr_relay_builder::builder::{RelayBuilder, RelayBuilderNip42, RelayBuilderNip42Mode};
 use nostr_relay_builder::{LocalRelay, MockRelay};
@@ -85,7 +89,7 @@ fn wait_budget(base: Duration) -> Duration {
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Builds a `kind:445` carrying `#h = group_hex` (opaque ciphertext, random key).
-fn kind445_with_h(group_hex: &str) -> nostr::Event {
+fn kind445_with_h(group_hex: &str) -> nostr::event::Event {
     EventBuilder::new(Kind::Custom(445), "opaque-ciphertext")
         .tags([Tag::custom(
             TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H)),
@@ -217,8 +221,9 @@ async fn engine_never_authenticates_to_an_auth_required_relay() {
     // the relay's AUTH challenge it sends NO client AUTH and its REQ is CLOSED
     // (auth-required) — it can never read the stored event.
     let dir = TempDir::new().unwrap();
-    let circle =
-        Arc::new(CircleManager::new_unencrypted(dir.path(), &nostr::Keys::generate()).unwrap());
+    let circle = Arc::new(
+        CircleManager::new_unencrypted(dir.path(), &nostr::key::Keys::generate()).unwrap(),
+    );
     let engine = LiveSyncCore::new_local(
         circle,
         Keys::generate().public_key(),
@@ -325,8 +330,9 @@ async fn engine_connects_only_to_configured_relays_never_gossip_discovered() {
 
     let identity = Keys::generate();
     let dir = TempDir::new().unwrap();
-    let circle =
-        Arc::new(CircleManager::new_unencrypted(dir.path(), &nostr::Keys::generate()).unwrap());
+    let circle = Arc::new(
+        CircleManager::new_unencrypted(dir.path(), &nostr::key::Keys::generate()).unwrap(),
+    );
     // A session lists the ids of circles its manager holds.
     circle.keep_circle_row_for_test([0x33; 32]);
     let engine = LiveSyncCore::new_local(

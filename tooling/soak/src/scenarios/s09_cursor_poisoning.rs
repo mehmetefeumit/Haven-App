@@ -57,7 +57,10 @@ use haven_core::nostr::mls::types::GroupId;
 use haven_core::relay::catchup::run_catchup_all_circles;
 use haven_core::relay::live_sync::planes::group::group_filter;
 use haven_core::relay::live_sync::{group_cursor_stream, GroupProcessOutcome};
-use nostr::{Event, EventId, RelayMessage};
+use nostr::{
+    event::{Event, EventId},
+    message::RelayMessage,
+};
 use nostr_sdk::{Client, RelayPoolNotification};
 
 use crate::clock::WallNow;

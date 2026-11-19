@@ -27,7 +27,7 @@ pub enum RelayInputRejection {
     #[error("Relay URL must not contain credentials")]
     Credentials,
 
-    /// `nostr::RelayUrl::parse` refused the URL.
+    /// `nostr::types::RelayUrl::parse` refused the URL.
     #[error("Invalid relay URL")]
     Unparseable,
 

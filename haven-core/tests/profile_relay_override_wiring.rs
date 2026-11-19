@@ -42,7 +42,7 @@ use haven_core::profile::{
     production_profile_relays, profile_relay_pool_default, set_profile_relays_for_test,
     PROFILE_POOL_MIN,
 };
-use nostr::Keys;
+use nostr::key::Keys;
 use tempfile::TempDir;
 
 /// Three distinct hosts: `resolve_profile_pool` dedupes after normalization and

@@ -31,7 +31,7 @@ use haven_core::location::LocationMessage;
 use haven_core::relay::live_sync::{CircleSpec, LiveSyncCore, LiveSyncEvent};
 use haven_core::relay::maintenance::build_kp_maintenance_events;
 use haven_core::relay::RelayManager;
-use nostr::{Event, Keys};
+use nostr::{event::Event, key::Keys};
 use nostr_relay_builder::MockRelay;
 use tempfile::TempDir;
 

@@ -81,7 +81,11 @@ use std::time::Duration;
 
 use haven_core::nostr::mls::types::{ConvergedRoster, EpochState, FanoutMls, GroupId};
 use haven_core::relay::fanout::{FanoutClock as _, LocationSeal, SendHeld, WallClock};
-use nostr::{Event, EventId, Filter, JsonUtil, Kind};
+use nostr::{
+    event::{Event, EventId, Kind},
+    filter::Filter,
+    JsonUtil,
+};
 
 use crate::nemesis::types::{ByteCap, Fault};
 use crate::oracle::vacuity::{ExpectationFloor, Observed};

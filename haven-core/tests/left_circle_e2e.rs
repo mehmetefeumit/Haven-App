@@ -76,8 +76,8 @@ async fn package_of(member: &CircleMember) -> MemberKeyPackage {
 }
 
 /// The last event `transport` was handed.
-fn last_sent(transport: &ScriptedFanout) -> nostr::Event {
-    nostr::Event::from_json(
+fn last_sent(transport: &ScriptedFanout) -> nostr::event::Event {
+    nostr::event::Event::from_json(
         transport
             .calls()
             .pop()
@@ -89,7 +89,11 @@ fn last_sent(transport: &ScriptedFanout) -> nostr::Event {
 
 /// `admin` removes `member` from `group`, a relay acknowledging it; the
 /// removal commit is handed back.
-async fn removal_of(admin: &CircleMember, group: &GroupId, member: &CircleMember) -> nostr::Event {
+async fn removal_of(
+    admin: &CircleMember,
+    group: &GroupId,
+    member: &CircleMember,
+) -> nostr::event::Event {
     let transport = ScriptedFanout::default();
     transport.answer(ONE, [Answer::Accepted]);
     let outbox = Recorder::acking(true);
@@ -108,7 +112,11 @@ async fn removal_of(admin: &CircleMember, group: &GroupId, member: &CircleMember
 
 /// `admin` invites `member` to `group`, a relay acknowledging the invite;
 /// its Welcome's gift wrap is handed back.
-async fn invite_of(admin: &CircleMember, group: &GroupId, member: &CircleMember) -> nostr::Event {
+async fn invite_of(
+    admin: &CircleMember,
+    group: &GroupId,
+    member: &CircleMember,
+) -> nostr::event::Event {
     let package = package_of(member).await;
     let transport = ScriptedFanout::default();
     transport.answer(ONE, [Answer::Accepted]);
@@ -133,7 +141,7 @@ async fn leave_pressed(
     transport: &ScriptedFanout,
     member: &CircleMember,
     group: &GroupId,
-) -> nostr::Event {
+) -> nostr::event::Event {
     let pressed = driver
         .leave(&member.circle, group, &member.keys.public_key())
         .await
@@ -396,8 +404,8 @@ async fn a_rejoin_after_a_completed_leave_carries_no_stale_leave_request() {
     // the forget: the invite is made once the wall clock has passed the
     // second the forget was made in. At most one second, and no race — the
     // outcome is fixed once that second has passed.
-    let forgotten_by = nostr::Timestamp::now().as_secs();
-    while nostr::Timestamp::now().as_secs() <= forgotten_by {
+    let forgotten_by = nostr::types::Timestamp::now().as_secs();
+    while nostr::types::Timestamp::now().as_secs() <= forgotten_by {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     let _ = removal_of(&admin, &group, &member).await;
@@ -620,7 +628,7 @@ async fn a_removal_owing_a_relay(
     admin: &CircleMember,
     group: &GroupId,
     target: &CircleMember,
-) -> nostr::Event {
+) -> nostr::event::Event {
     let transport = ScriptedFanout::default();
     transport.answer(ONE, [Answer::Accepted]);
     transport.answer(TWO, [Answer::Silent]);
@@ -635,7 +643,7 @@ async fn a_removal_owing_a_relay(
         haven_core::relay::fanout::EvolutionStatus::Confirmed,
         "premise: applied on ONE's acknowledgement",
     );
-    nostr::Event::from_json(
+    nostr::event::Event::from_json(
         transport
             .calls()
             .into_iter()
@@ -877,7 +885,11 @@ async fn a_rejoin_deletes_the_groups_fanout_rows() {
 /// `admin` removes `member`, who never sees it, and invites them back:
 /// accepted, the Welcome would replace `member`'s still-active copy, which
 /// MDK does only on consent. The gift wrap is handed back, held.
-async fn an_offer(admin: &CircleMember, group: &GroupId, member: &CircleMember) -> nostr::Event {
+async fn an_offer(
+    admin: &CircleMember,
+    group: &GroupId,
+    member: &CircleMember,
+) -> nostr::event::Event {
     let _ = removal_of(admin, group, member).await;
     let welcome = invite_of(admin, group, member).await;
     member
@@ -1076,7 +1088,7 @@ async fn a_plain_decline_after_a_cancelled_rejoin_leaves_no_offer_and_spares_a_s
 /// restart.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_pager_hold_from_before_a_rejoin_does_not_hold_the_rejoined_circle() {
-    let stale = [nostr::EventId::all_zeros()];
+    let stale = [nostr::event::EventId::all_zeros()];
     // A Welcome accepted over the removed copy.
     let fx = setup_circle(2, &[ONE]).await;
     let (admin, mut others, group) = split(fx);
@@ -1164,7 +1176,7 @@ async fn a_hold_the_rejoined_copy_takes_survives_the_late_join_announcement() {
         .confirm_group_rejoin(&welcome.id, &offers[0].local_state_token)
         .await
         .expect("the consent joins");
-    let fresh = [nostr::EventId::all_zeros()];
+    let fresh = [nostr::event::EventId::all_zeros()];
     member.session().hold_pager_commits_for_test(&group, &fresh);
     // The next engine batch, which carries the deferred announcement.
     let _ = member.session().settle_receive_for_test(&group).await;
@@ -1300,22 +1312,23 @@ async fn a_rejoin_offer_for_a_circle_being_left_is_declined() {
 /// `welcome`, opened with `invitee`'s keys and wrapped again by `sealer`:
 /// the same MLS Welcome, from a seal author who did not write it.
 async fn rewrapped(
-    welcome: &nostr::Event,
-    invitee: &nostr::Keys,
-    sealer: &nostr::Keys,
-) -> nostr::Event {
+    welcome: &nostr::event::Event,
+    invitee: &nostr::key::Keys,
+    sealer: &nostr::key::Keys,
+) -> nostr::event::Event {
     use nostr::nips::nip44;
     let seal = nip44::decrypt(invitee.secret_key(), &welcome.pubkey, &welcome.content)
         .expect("the wrap opens");
-    let seal = nostr::Event::from_json(seal).expect("a seal");
+    let seal = nostr::event::Event::from_json(seal).expect("a seal");
     let rumor =
         nip44::decrypt(invitee.secret_key(), &seal.pubkey, &seal.content).expect("the seal opens");
-    let rumor: nostr::UnsignedEvent = nostr::UnsignedEvent::from_json(rumor).expect("a rumor");
-    let forged = nostr::EventBuilder::new(rumor.kind, rumor.content.clone())
+    let rumor: nostr::event::UnsignedEvent =
+        nostr::event::UnsignedEvent::from_json(rumor).expect("a rumor");
+    let forged = nostr::event::EventBuilder::new(rumor.kind, rumor.content.clone())
         .tags(rumor.tags.clone())
         .custom_created_at(rumor.created_at)
         .build(sealer.public_key());
-    nostr::EventBuilder::gift_wrap(sealer, &invitee.public_key(), forged, [])
+    nostr::event::EventBuilder::gift_wrap(sealer, &invitee.public_key(), forged, [])
         .await
         .expect("wrapped again")
 }
@@ -1334,7 +1347,7 @@ async fn welcomer_mismatch_forgets_group() {
             let (admin, _, group) = split(fx);
             let member = CircleMember::new();
             let welcome = invite_of(&admin, &group, &member).await;
-            let stranger = nostr::Keys::generate();
+            let stranger = nostr::key::Keys::generate();
             let welcome = if honest {
                 welcome
             } else {
@@ -1570,7 +1583,7 @@ async fn a_welcomer_mismatch_over_a_removed_copy_ends_its_circle() {
             let welcome = if honest {
                 welcome
             } else {
-                rewrapped(&welcome, &member.keys, &nostr::Keys::generate()).await
+                rewrapped(&welcome, &member.keys, &nostr::key::Keys::generate()).await
             };
             let _ = member
                 .session()
@@ -1829,7 +1842,7 @@ async fn a_rejoin_offer_whose_author_is_not_the_inviter_is_declined() {
     let member = others.remove(0);
     let _ = removal_of(&admin, &group, &member).await;
     let welcome = invite_of(&admin, &group, &member).await;
-    let welcome = rewrapped(&welcome, &member.keys, &nostr::Keys::generate()).await;
+    let welcome = rewrapped(&welcome, &member.keys, &nostr::key::Keys::generate()).await;
     member
         .circle
         .process_gift_wrapped_invitation(&member.keys, &welcome)

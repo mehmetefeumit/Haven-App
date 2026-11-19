@@ -71,7 +71,11 @@ use haven_core::relay::cursor::{
 use haven_core::relay::live_sync::{Claim, LiveSyncCore, LiveSyncEvent, StopOutcome};
 use nostr::nips::nip59::RANGE_RANDOM_TIMESTAMP_TWEAK;
 use nostr::{
-    Event, EventBuilder, EventId, Filter, JsonUtil, Keys, Kind, PublicKey, RelayUrl, Tag, Timestamp,
+    event::{Event, EventBuilder, EventId, Kind, Tag},
+    filter::Filter,
+    key::{Keys, PublicKey},
+    types::{RelayUrl, Timestamp},
+    JsonUtil,
 };
 use nostr_relay_builder::prelude::{
     BoxedFuture, MemoryDatabase, MemoryDatabaseOptions, NostrDatabase, PolicyResult, QueryPolicy,
@@ -1020,7 +1024,7 @@ async fn a_start_cut_before_its_inbox_end_leaves_the_next_start_seven_days() {
             let inbox = filter
                 .kinds
                 .as_ref()
-                .is_some_and(|kinds| kinds.contains(&nostr::Kind::GiftWrap));
+                .is_some_and(|kinds| kinds.contains(&nostr::event::Kind::GiftWrap));
             if inbox {
                 recorded
                     .lock()

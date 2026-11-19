@@ -34,7 +34,7 @@ use helpers::stranded::{
     try_staged, unopened_retryable, Bare, ONE, THREE, TWO,
 };
 use helpers::{create_key_package_event, setup_circle};
-use nostr::Event;
+use nostr::event::Event;
 
 async fn stable(session: &SessionManager, group: &GroupId) -> bool {
     matches!(

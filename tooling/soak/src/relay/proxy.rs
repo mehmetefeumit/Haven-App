@@ -24,7 +24,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Instant;
 
-use nostr::{ClientMessage, Event, EventId, JsonUtil, RelayMessage, SubscriptionId};
+use nostr::{
+    event::{Event, EventId},
+    message::{ClientMessage, RelayMessage, SubscriptionId},
+    JsonUtil,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
@@ -1024,7 +1028,7 @@ async fn write(to_client: &mut OwnedWriteHalf, bytes: &[u8]) -> bool {
 mod tests {
     use super::{arm_refuse_page, hold, release, FaultState, HeldEvent, HeldPages, ReqCount};
     use crate::nemesis::types::RigCount;
-    use nostr::{EventId, SubscriptionId};
+    use nostr::{event::EventId, message::SubscriptionId};
 
     fn reversing() -> FaultState {
         FaultState {

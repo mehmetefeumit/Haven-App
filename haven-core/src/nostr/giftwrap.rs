@@ -29,7 +29,10 @@
 //! gift wrap from the recipient's side.
 
 use nostr::nips::nip59::UnwrappedGift as NostrUnwrappedGift;
-use nostr::{Event, EventId, Keys, Kind, PublicKey, UnsignedEvent};
+use nostr::{
+    event::{Event, EventId, Kind, UnsignedEvent},
+    key::{Keys, PublicKey},
+};
 
 use super::error::{NostrError, Result};
 use crate::log_alias::{self, EventIdHex};
@@ -130,7 +133,7 @@ pub async fn unwrap_welcome(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::{EventBuilder, Timestamp};
+    use nostr::{event::EventBuilder, types::Timestamp};
 
     /// Wraps `rumor` exactly the way production does — `EventBuilder::gift_wrap`
     /// with an EMPTY extra-tag set, mirroring the MDK peeler

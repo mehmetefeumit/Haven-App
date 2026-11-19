@@ -40,8 +40,12 @@ use haven_core::nostr::mls::types::{
 use haven_core::nostr::mls::SessionManager;
 use haven_core::nostr::NostrError;
 use haven_core::relay::maintenance::build_kp_maintenance_events;
-use nostr::prelude::ToBech32 as _;
-use nostr::{Event, JsonUtil as _, Keys, PublicKey};
+use nostr::nips::nip19::ToBech32 as _;
+use nostr::{
+    event::Event,
+    key::{Keys, PublicKey},
+    JsonUtil as _,
+};
 
 /// Atomic counter for unique test directory names.
 static HELPER_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1013,7 +1017,7 @@ impl haven_core::nostr::mls::CommitNotes for BalkyNotes {
 #[cfg(test)]
 mod log_capture_self_tests {
     use base64::Engine as _;
-    use nostr::prelude::ToBech32 as _;
+    use nostr::nips::nip19::ToBech32 as _;
 
     use super::{assert_no_needles, assert_some_line_from, LogLine};
 

@@ -131,7 +131,7 @@ async fn a_withdrawn_relay_change_and_its_commit() -> (
     CircleMember,
     GroupId,
     Vec<String>,
-    nostr::EventId,
+    nostr::event::EventId,
 ) {
     let fx = setup_circle(3, &[ONE]).await;
     co_admin(&fx).await;
@@ -205,7 +205,7 @@ async fn invite_spending(
     by: &CircleMember,
     group: &GroupId,
     newcomer: &CircleMember,
-) -> (SessionEffects, nostr::Event) {
+) -> (SessionEffects, nostr::event::Event) {
     let event =
         helpers::create_key_package_event(newcomer.session(), &newcomer.keys, &[ONE.to_string()])
             .await;
@@ -241,7 +241,7 @@ async fn two_invites_race_spending() -> (
     CircleMember,
     GroupId,
     CircleMember,
-    nostr::Event,
+    nostr::event::Event,
 ) {
     let fx = setup_circle(2, &[ONE]).await;
     co_admin(&fx).await;
@@ -1529,7 +1529,7 @@ async fn an_owed_reinvite() -> (
     CircleMember,
     GroupId,
     CircleMember,
-    nostr::Event,
+    nostr::event::Event,
 ) {
     let (loser, winner, group, newcomer, spent) = two_invites_race_spending().await;
     loser.session().mark_caught_up_for_test(&group);
@@ -1551,7 +1551,7 @@ async fn an_owed_reinvite() -> (
 }
 
 /// What a lookup finds of `newcomer`: the `KeyPackage` event `package`.
-fn finding(package: nostr::Event) -> Lookup {
+fn finding(package: nostr::event::Event) -> Lookup {
     Lookup {
         found: Some(haven_core::circle::MemberKeyPackage {
             key_package_event: package,

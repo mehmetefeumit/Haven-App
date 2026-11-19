@@ -44,7 +44,7 @@ use haven_core::profile::{
     PROFILE_MAX_RELAY_RANK, PROFILE_POOL_MIN,
 };
 use haven_core::relay::{canonicalize, MemberLookup, RelayManager};
-use nostr::{PublicKey, Timestamp};
+use nostr::{key::PublicKey, types::Timestamp};
 
 use crate::nemesis::types::Fault;
 use crate::oracle::vacuity::{ExpectationFloor, Observed};

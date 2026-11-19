@@ -61,7 +61,7 @@ use std::time::Duration;
 
 use haven_core::circle::MemberKeyPackage;
 
-use nostr::Event;
+use nostr::event::Event;
 
 use crate::oracle::bounds;
 use crate::oracle::undecryptable;

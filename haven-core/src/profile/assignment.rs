@@ -54,7 +54,7 @@
 //! "fix" it by adding rotation.
 
 use hmac::{Hmac, Mac};
-use nostr::PublicKey;
+use nostr::key::PublicKey;
 use rand::RngCore;
 use sha2::Sha256;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};

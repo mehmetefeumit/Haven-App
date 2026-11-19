@@ -35,7 +35,7 @@ pub use cgka_traits::types::{EpochId, GroupId, MemberId, MessageId};
 pub use cgka_traits::{
     FanoutTargetStatus, TransportEndpointFailureKind, TransportEndpointRejectionCategory,
 };
-pub use nostr::Event;
+pub use nostr::event::Event;
 
 // ── Typed engine errors — MATCHED, NEVER FORMATTED ───────────────────────────
 //
@@ -1338,7 +1338,7 @@ pub struct FanoutProbe {
     /// The acknowledgement count frozen at staging.
     pub required_acks: usize,
     /// The frozen event's id.
-    pub event_id: nostr::EventId,
+    pub event_id: nostr::event::EventId,
     /// The frozen signed event's exact transport bytes.
     pub payload: Vec<u8>,
     /// How many Welcomes the row holds for release on its confirm.
@@ -1381,7 +1381,7 @@ impl FanoutProbe {
                 .collect(),
             statuses: fanout.target_statuses().to_vec(),
             required_acks: fanout.request().required_acks,
-            event_id: nostr::EventId::from_slice(fanout.message_id().as_slice()).ok()?,
+            event_id: nostr::event::EventId::from_slice(fanout.message_id().as_slice()).ok()?,
             payload: fanout.request().message.payload.clone(),
             held_welcomes: fanout.pending_post_confirmation_welcomes().len(),
             welcome_ids: fanout
@@ -1414,7 +1414,7 @@ mod tests {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let session = crate::nostr::mls::SessionManager::new_unencrypted(
             dir.path(),
-            &nostr::Keys::generate(),
+            &nostr::key::Keys::generate(),
         )
         .expect("session");
         let rule = session

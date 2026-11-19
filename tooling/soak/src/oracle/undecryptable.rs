@@ -47,7 +47,7 @@ use haven_core::nostr::mls::types::{
     ScreenedIngest, SessionError, StaleReason, StoredMessageProbe,
 };
 use haven_core::nostr::NostrError;
-use nostr::Event;
+use nostr::event::Event;
 
 use crate::rig::{RigError, SimDevice};
 

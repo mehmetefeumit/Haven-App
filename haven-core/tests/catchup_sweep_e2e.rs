@@ -65,7 +65,12 @@ use haven_core::relay::fanout::{
 use haven_core::relay::live_sync::group_cursor_stream;
 use haven_core::relay::maintenance::build_kp_maintenance_events;
 use haven_core::relay::{allow_ws_loopback_for_test, RelayError, RelayManager};
-use nostr::{Event, EventBuilder, JsonUtil as _, Keys, Kind, Tag, Timestamp};
+use nostr::{
+    event::{Event, EventBuilder, Kind, Tag},
+    key::Keys,
+    types::Timestamp,
+    JsonUtil as _,
+};
 use nostr_relay_builder::prelude::{
     BoxedFuture, MemoryDatabase, MemoryDatabaseOptions, NostrDatabase, PolicyResult, QueryPolicy,
 };
@@ -718,14 +723,17 @@ async fn one_undecryptable_envelope_cannot_pin_the_cursor() {
     // A well-formed, correctly-addressed `kind:445` that no group key can open:
     // exactly what a hostile or confused relay can inject into the window.
     let junk_secs = chrono::Utc::now().timestamp() - 3600;
-    let junk = nostr::EventBuilder::new(nostr::Kind::Custom(445), "opaque-ciphertext")
-        .tags([nostr::Tag::custom(
-            nostr::TagKind::SingleLetter(nostr::SingleLetterTag::lowercase(nostr::Alphabet::H)),
-            [hex_gid],
-        )])
-        .custom_created_at(Timestamp::from(u64::try_from(junk_secs).unwrap()))
-        .sign_with_keys(&Keys::generate())
-        .expect("sign junk 445");
+    let junk =
+        nostr::event::EventBuilder::new(nostr::event::Kind::Custom(445), "opaque-ciphertext")
+            .tags([nostr::event::Tag::custom(
+                nostr::TagKind::SingleLetter(nostr::filter::SingleLetterTag::lowercase(
+                    nostr::Alphabet::H,
+                )),
+                [hex_gid],
+            )])
+            .custom_created_at(Timestamp::from(u64::try_from(junk_secs).unwrap()))
+            .sign_with_keys(&Keys::generate())
+            .expect("sign junk 445");
     relay_mgr
         .publish_event(&junk, std::slice::from_ref(&url))
         .await
@@ -1521,7 +1529,7 @@ async fn a_chase_page_that_is_never_served_holds_the_cursor() {
     impl QueryPolicy for RefuseChasePages {
         fn admit_query<'a>(
             &'a self,
-            query: &'a nostr::Filter,
+            query: &'a nostr::filter::Filter,
             _addr: &'a std::net::SocketAddr,
         ) -> BoxedFuture<'a, PolicyResult> {
             Box::pin(async move {
@@ -1817,9 +1825,12 @@ async fn a_short_page_is_only_drained_when_the_relay_said_so() {
     let window = unparseable_window(&h, 4, chrono::Utc::now().timestamp() - 60);
     relay.seed(&window).await;
 
-    let filter = nostr::Filter::new()
+    let filter = nostr::filter::Filter::new()
         .kind(Kind::Custom(445))
-        .custom_tag(nostr::SingleLetterTag::lowercase(nostr::Alphabet::H), h)
+        .custom_tag(
+            nostr::filter::SingleLetterTag::lowercase(nostr::Alphabet::H),
+            h,
+        )
         .limit(500);
     let relay_mgr = RelayManager::new();
 
@@ -1900,9 +1911,12 @@ async fn a_relay_that_overruns_the_req_limit_is_capped_and_not_called_finished()
         .await;
 
     let asked_for = 4;
-    let filter = nostr::Filter::new()
+    let filter = nostr::filter::Filter::new()
         .kind(Kind::Custom(445))
-        .custom_tag(nostr::SingleLetterTag::lowercase(nostr::Alphabet::H), h)
+        .custom_tag(
+            nostr::filter::SingleLetterTag::lowercase(nostr::Alphabet::H),
+            h,
+        )
         .limit(asked_for);
     let relay_mgr = RelayManager::new();
     let overrun = relay_mgr
@@ -1957,9 +1971,12 @@ async fn an_eose_for_another_subscription_does_not_finish_this_read() {
     let window = unparseable_window(&h, 4, chrono::Utc::now().timestamp() - 60);
     relay.seed(&window).await;
 
-    let filter = nostr::Filter::new()
+    let filter = nostr::filter::Filter::new()
         .kind(Kind::Custom(445))
-        .custom_tag(nostr::SingleLetterTag::lowercase(nostr::Alphabet::H), h)
+        .custom_tag(
+            nostr::filter::SingleLetterTag::lowercase(nostr::Alphabet::H),
+            h,
+        )
         .limit(500);
     let outcome = RelayManager::new()
         .fetch_events_per_relay(filter, std::slice::from_ref(&confusing.url))
@@ -2003,9 +2020,12 @@ async fn a_page_is_ordered_by_this_device_and_not_by_the_relay() {
         ))
         .await;
 
-    let filter = nostr::Filter::new()
+    let filter = nostr::filter::Filter::new()
         .kind(Kind::Custom(445))
-        .custom_tag(nostr::SingleLetterTag::lowercase(nostr::Alphabet::H), h)
+        .custom_tag(
+            nostr::filter::SingleLetterTag::lowercase(nostr::Alphabet::H),
+            h,
+        )
         .limit(500);
     let relay_mgr = RelayManager::new();
     let straight = relay_mgr
@@ -2066,9 +2086,12 @@ async fn a_read_that_gives_up_early_closes_its_own_req() {
         ))
         .await;
 
-    let filter = nostr::Filter::new()
+    let filter = nostr::filter::Filter::new()
         .kind(Kind::Custom(445))
-        .custom_tag(nostr::SingleLetterTag::lowercase(nostr::Alphabet::H), h)
+        .custom_tag(
+            nostr::filter::SingleLetterTag::lowercase(nostr::Alphabet::H),
+            h,
+        )
         .limit(4);
     // Bound to a variable on purpose: dropping the manager tears the pool down,
     // and a `CLOSE` still queued on the writer would go with it.
@@ -2307,7 +2330,7 @@ async fn a_relay_that_answers_only_a_later_page_cannot_complete_the_window() {
     impl QueryPolicy for RefuseTheFirstPage {
         fn admit_query<'a>(
             &'a self,
-            query: &'a nostr::Filter,
+            query: &'a nostr::filter::Filter,
             _addr: &'a std::net::SocketAddr,
         ) -> BoxedFuture<'a, PolicyResult> {
             Box::pin(async move {
@@ -2594,7 +2617,7 @@ struct DelayEveryQuery {
 impl QueryPolicy for DelayEveryQuery {
     fn admit_query<'a>(
         &'a self,
-        _query: &'a nostr::Filter,
+        _query: &'a nostr::filter::Filter,
         _addr: &'a std::net::SocketAddr,
     ) -> BoxedFuture<'a, PolicyResult> {
         Box::pin(async move {
@@ -3478,7 +3501,7 @@ async fn the_wake_sweep_leaves_the_leave_for_the_first_full_advance() {
 
     let stored = relay_mgr
         .fetch_events(
-            nostr::Filter::new().kind(Kind::Custom(445)),
+            nostr::filter::Filter::new().kind(Kind::Custom(445)),
             std::slice::from_ref(&relay.url),
             None,
         )
@@ -3829,7 +3852,7 @@ async fn the_foreground_sweep_sends_an_owed_removal_through_the_apps_own_transpo
     );
     let held = relay_mgr
         .fetch_events(
-            nostr::Filter::new().kind(Kind::Custom(445)),
+            nostr::filter::Filter::new().kind(Kind::Custom(445)),
             std::slice::from_ref(&url),
             None,
         )
@@ -4348,7 +4371,7 @@ impl AskedFilters {
 impl QueryPolicy for AskedFilters {
     fn admit_query<'a>(
         &'a self,
-        query: &'a nostr::Filter,
+        query: &'a nostr::filter::Filter,
         _addr: &'a std::net::SocketAddr,
     ) -> BoxedFuture<'a, PolicyResult> {
         self.0
@@ -4643,8 +4666,8 @@ async fn a_history_range_never_tells_a_relay_the_circle_left_its_new_id() {
         .expect("bob applies the rotation");
     left_asked.forget();
     new_asked.forget();
-    let refused: Vec<nostr::EventId> = (0..=MAX_REFUSED_IDS_PER_GROUP)
-        .map(|_| nostr::EventId::from_byte_array(rand::random()))
+    let refused: Vec<nostr::event::EventId> = (0..=MAX_REFUSED_IDS_PER_GROUP)
+        .map(|_| nostr::event::EventId::from_byte_array(rand::random()))
         .collect();
     fx.bob
         .session()
@@ -4874,7 +4897,7 @@ async fn a_capped_answer_never_completes_the_window() {
             fx.nostr_group_id,
             &capped
                 .iter()
-                .map(|id| (nostr::EventId::from_byte_array(*id), now))
+                .map(|id| (nostr::event::EventId::from_byte_array(*id), now))
                 .collect::<Vec<_>>(),
         )
         .await;

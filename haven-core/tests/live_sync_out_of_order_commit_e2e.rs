@@ -32,7 +32,7 @@ use haven_core::circle::{CircleConfig, CircleManager, MemberKeyPackage};
 use haven_core::location::LocationMessage;
 use haven_core::nostr::mls::types::{GroupId, LocationMessageResult};
 use haven_core::relay::maintenance::build_kp_maintenance_events;
-use nostr::Keys;
+use nostr::key::Keys;
 use tempfile::TempDir;
 
 /// A genuine MLS circle: `admin` (creator) + `members`, each with its own on-disk
@@ -134,7 +134,7 @@ async fn cross_decrypts(
 
 /// An admin routing commit that advances the epoch by one; returns the publishable
 /// commit event.
-async fn admin_commit(admin: &CircleManager, gid: &GroupId, relay: &str) -> nostr::Event {
+async fn admin_commit(admin: &CircleManager, gid: &GroupId, relay: &str) -> nostr::event::Event {
     let commit = admin
         .update_relays_for_test(gid, &[relay.to_string()])
         .await

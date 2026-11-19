@@ -48,7 +48,10 @@ use helpers::{
     assert_no_needles, capture_haven_log, capture_haven_log_here, setup_circle, CircleFixture,
     CircleMember,
 };
-use nostr::{Event, JsonUtil as _, Kind};
+use nostr::{
+    event::{Event, Kind},
+    JsonUtil as _,
+};
 use nostr_relay_builder::MockRelay;
 
 const RELAY: &str = "wss://one.live-canary7d2f.example.com";
@@ -211,7 +214,7 @@ async fn records_of(member: &CircleMember, group: &GroupId) -> Vec<FanoutProbe> 
 /// What a record is, for "nothing touched it": its event's id and bytes,
 /// where its commit stands, and each relay's status and attempt count.
 type Standing = (
-    nostr::EventId,
+    nostr::event::EventId,
     Vec<u8>,
     FanoutMls,
     Vec<FanoutTargetStatus>,
@@ -1791,7 +1794,7 @@ async fn an_event_arriving_while_the_engine_is_held_is_held_and_applied_once_it_
         .iter()
         .find_map(|work| match work {
             haven_core::nostr::mls::types::PublishWork::GroupEvolution { msg, .. } => {
-                nostr::EventId::from_slice(msg.id.as_slice()).ok()
+                nostr::event::EventId::from_slice(msg.id.as_slice()).ok()
             }
             _ => None,
         })
@@ -1938,7 +1941,7 @@ async fn the_legacy_sweep_leaves_a_recorded_commit_as_it_found_it() {
     fx.assert_untouched_by("the legacy sweep").await;
     let on_relay = relay_mgr
         .fetch_events(
-            nostr::Filter::new().kind(Kind::Custom(445)),
+            nostr::filter::Filter::new().kind(Kind::Custom(445)),
             std::slice::from_ref(&fx.url),
             None,
         )
@@ -2461,7 +2464,7 @@ impl FanoutSend for Counting {
 
     async fn publish_location(
         &self,
-        event: &nostr::Event,
+        event: &nostr::event::Event,
         targets: &[String],
     ) -> haven_core::relay::RelayResult<haven_core::relay::PublishResult> {
         self.inner.publish_location(event, targets).await
@@ -3147,7 +3150,7 @@ impl FanoutSend for HeldAtTake {
 
     async fn publish_location(
         &self,
-        event: &nostr::Event,
+        event: &nostr::event::Event,
         targets: &[String],
     ) -> haven_core::relay::RelayResult<haven_core::relay::PublishResult> {
         self.inner.publish_location(event, targets).await

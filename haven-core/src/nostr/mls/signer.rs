@@ -32,7 +32,7 @@
 
 use std::sync::Arc;
 
-use nostr::{Keys, SecretKey};
+use nostr::key::{Keys, SecretKey};
 use zeroize::Zeroizing;
 
 use cgka_engine::account_identity_proof::{
@@ -135,8 +135,8 @@ impl AccountIdentityProofSigner for HavenIdentityProofSigner {
 mod tests {
     use super::*;
     use cgka_traits::group::ProtocolProfile;
+    use nostr::key::PublicKey;
     use nostr::secp256k1::schnorr::Signature;
-    use nostr::PublicKey;
 
     /// The Marmot mandatory ciphersuite id (`0x0001`) and its Ed25519 signature
     /// scheme (`0x0807`). Named as raw `u16`s here so the test does not need a

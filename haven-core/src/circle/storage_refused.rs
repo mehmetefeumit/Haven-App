@@ -42,7 +42,12 @@ fn fresh_generation() -> i64 {
 }
 
 impl CircleStorage {
-    fn record_refused(&self, group_id: &GroupId, ids: &[nostr::EventId], now: i64) -> Result<()> {
+    fn record_refused(
+        &self,
+        group_id: &GroupId,
+        ids: &[nostr::event::EventId],
+        now: i64,
+    ) -> Result<()> {
         let mut conn = self.conn().lock().map_err(|_| {
             super::error::CircleError::Storage("Failed to acquire database lock".into())
         })?;
@@ -93,7 +98,7 @@ impl CircleStorage {
         owe_refused_range(&conn, group_id, now)
     }
 
-    fn all_owed_refused(&self, group_id: &GroupId) -> Result<HashSet<nostr::EventId>> {
+    fn all_owed_refused(&self, group_id: &GroupId) -> Result<HashSet<nostr::event::EventId>> {
         let conn = self.conn().lock().map_err(|_| {
             super::error::CircleError::Storage("Failed to acquire database lock".into())
         })?;
@@ -102,7 +107,7 @@ impl CircleStorage {
         let rows = stmt.query_map(params![group_id.as_slice()], |row| row.get::<_, Vec<u8>>(0))?;
         let mut ids = HashSet::new();
         for row in rows {
-            if let Ok(id) = nostr::EventId::from_slice(&row?) {
+            if let Ok(id) = nostr::event::EventId::from_slice(&row?) {
                 ids.insert(id);
             }
         }
@@ -114,7 +119,7 @@ impl CircleStorage {
         group_id: &GroupId,
         limit: usize,
         now: i64,
-    ) -> Result<Vec<nostr::EventId>> {
+    ) -> Result<Vec<nostr::event::EventId>> {
         let conn = self.conn().lock().map_err(|_| {
             super::error::CircleError::Storage("Failed to acquire database lock".into())
         })?;
@@ -133,7 +138,7 @@ impl CircleStorage {
         )?;
         let mut ids = Vec::new();
         for row in rows {
-            if let Ok(id) = nostr::EventId::from_slice(&row?) {
+            if let Ok(id) = nostr::event::EventId::from_slice(&row?) {
                 ids.push(id);
             }
         }
@@ -143,7 +148,7 @@ impl CircleStorage {
     fn mark_refused_tried(
         &self,
         group_id: &GroupId,
-        ids: &[nostr::EventId],
+        ids: &[nostr::event::EventId],
         now: i64,
         wholesale: bool,
     ) -> Result<()> {
@@ -242,7 +247,7 @@ impl CircleStorage {
         Ok(())
     }
 
-    fn resolve_refused(&self, group_id: &GroupId, ids: &[nostr::EventId]) -> Result<()> {
+    fn resolve_refused(&self, group_id: &GroupId, ids: &[nostr::event::EventId]) -> Result<()> {
         let mut conn = self.conn().lock().map_err(|_| {
             super::error::CircleError::Storage("Failed to acquire database lock".into())
         })?;
@@ -344,7 +349,7 @@ fn owe_refused_range(conn: &rusqlite::Connection, group_id: &GroupId, now: i64) 
 }
 
 impl RefusedRedeliveryLedger for CircleStorage {
-    fn record(&self, group_id: &GroupId, ids: &[nostr::EventId], now_secs: i64) -> bool {
+    fn record(&self, group_id: &GroupId, ids: &[nostr::event::EventId], now_secs: i64) -> bool {
         self.record_refused(group_id, ids, now_secs)
             .inspect_err(|e| log::warn!("refused object not recorded for refetch: {}", e.code()))
             .is_ok()
@@ -356,7 +361,7 @@ impl RefusedRedeliveryLedger for CircleStorage {
             .is_ok()
     }
 
-    fn owed(&self, group_id: &GroupId, limit: usize, now_secs: i64) -> Vec<nostr::EventId> {
+    fn owed(&self, group_id: &GroupId, limit: usize, now_secs: i64) -> Vec<nostr::event::EventId> {
         self.owed_refused(group_id, limit, now_secs)
             .unwrap_or_else(|e| {
                 log::warn!("refused objects not read for refetch: {}", e.code());
@@ -364,7 +369,13 @@ impl RefusedRedeliveryLedger for CircleStorage {
             })
     }
 
-    fn tried(&self, group_id: &GroupId, ids: &[nostr::EventId], now_secs: i64, wholesale: bool) {
+    fn tried(
+        &self,
+        group_id: &GroupId,
+        ids: &[nostr::event::EventId],
+        now_secs: i64,
+        wholesale: bool,
+    ) {
         if let Err(e) = self.mark_refused_tried(group_id, ids, now_secs, wholesale) {
             log::warn!("refetch attempt not recorded: {}", e.code());
         }
@@ -382,13 +393,13 @@ impl RefusedRedeliveryLedger for CircleStorage {
         }
     }
 
-    fn resolve(&self, group_id: &GroupId, ids: &[nostr::EventId]) {
+    fn resolve(&self, group_id: &GroupId, ids: &[nostr::event::EventId]) {
         if let Err(e) = self.resolve_refused(group_id, ids) {
             log::warn!("refetched objects not discharged: {}", e.code());
         }
     }
 
-    fn owed_ids(&self, group_id: &GroupId) -> HashSet<nostr::EventId> {
+    fn owed_ids(&self, group_id: &GroupId) -> HashSet<nostr::event::EventId> {
         self.all_owed_refused(group_id).unwrap_or_else(|e| {
             log::warn!("refused objects not read for refetch: {}", e.code());
             HashSet::new()
@@ -417,13 +428,13 @@ mod tests {
 
     const NOW: i64 = 1_759_300_000;
 
-    fn ids(seeds: &[u16]) -> Vec<nostr::EventId> {
+    fn ids(seeds: &[u16]) -> Vec<nostr::event::EventId> {
         seeds
             .iter()
             .map(|seed| {
                 let mut bytes = [0u8; 32];
                 bytes[..2].copy_from_slice(&seed.to_be_bytes());
-                nostr::EventId::from_byte_array(bytes)
+                nostr::event::EventId::from_byte_array(bytes)
             })
             .collect()
     }

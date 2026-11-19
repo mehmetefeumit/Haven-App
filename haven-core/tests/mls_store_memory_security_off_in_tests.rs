@@ -12,7 +12,7 @@ mod helpers;
 
 use haven_core::circle::CircleManager;
 use haven_core::nostr::mls::{SessionManager, StorageConfig};
-use nostr::Keys;
+use nostr::key::Keys;
 
 #[tokio::test]
 async fn no_test_fixture_turns_cipher_memory_security_on() {

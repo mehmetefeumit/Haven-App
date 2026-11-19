@@ -26,7 +26,7 @@ use haven_core::circle::{CircleConfig, CircleManager, MemberKeyPackage};
 use haven_core::nostr::mls::types::GroupId;
 use haven_core::relay::fanout::UnrecordedPublisher;
 use haven_core::relay::maintenance::build_kp_maintenance_events;
-use nostr::Keys;
+use nostr::key::Keys;
 use tempfile::TempDir;
 
 /// A genuine three-member circle (Alice admin + Bob + Carol) built through the

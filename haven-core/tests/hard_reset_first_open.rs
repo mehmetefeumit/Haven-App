@@ -25,7 +25,7 @@ use haven_core::storage_reset::{
     storage_reset_acknowledged, storage_reset_prefs_cleared, storage_reset_prefs_owed,
     STORAGE_RESET_NOTICE_MARKER, STORAGE_RESET_PREFS_MARKER,
 };
-use nostr::{Keys, Metadata};
+use nostr::{key::Keys, nips::nip01::Metadata};
 use tempfile::TempDir;
 
 use helpers::{assert_no_needles, capture_haven_log, haven_core_lines};

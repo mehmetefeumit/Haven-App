@@ -30,7 +30,12 @@ use haven_core::relay::scripted_relay::{Frame, ScriptedRelay};
 use haven_core::relay::{
     discovery_relays, normalize_relay_url, set_discovery_relays_for_test, RelayManager,
 };
-use nostr::{Event, EventBuilder, Filter, JsonUtil as _, Keys, Kind, Tag};
+use nostr::{
+    event::{Event, EventBuilder, Kind, Tag},
+    filter::Filter,
+    key::Keys,
+    JsonUtil as _,
+};
 use tempfile::TempDir;
 use tokio::sync::broadcast::error::TryRecvError;
 
@@ -656,7 +661,7 @@ async fn a_forged_copy_served_to_a_reconciliation_fetch_never_reaches_the_engine
                     Tag::parse(["h", &routing]).unwrap(),
                     Tag::parse(["h", &hex::encode([0x11u8; 32])]).unwrap(),
                 ])
-                .custom_created_at(nostr::Timestamp::from(above))
+                .custom_created_at(nostr::types::Timestamp::from(above))
                 .sign_with_keys(&Keys::generate())
                 .unwrap()
         })
@@ -666,7 +671,7 @@ async fn a_forged_copy_served_to_a_reconciliation_fetch_never_reaches_the_engine
             assert!(db.save_event(event).await.expect("seed").is_success());
         }
     }
-    while nostr::Timestamp::now().as_secs() <= above {
+    while nostr::types::Timestamp::now().as_secs() <= above {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     // The pool has verified the genuine copy once: it checks no later copy

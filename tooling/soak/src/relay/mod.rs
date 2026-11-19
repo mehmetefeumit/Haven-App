@@ -35,7 +35,10 @@ use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
-use nostr::{Event, EventId, Filter};
+use nostr::{
+    event::{Event, EventId},
+    filter::Filter,
+};
 use nostr_database::{DatabaseEventStatus, MemoryDatabase, MemoryDatabaseOptions, NostrDatabase};
 use nostr_relay_builder::{LocalRelay, RelayBuilder};
 

@@ -64,8 +64,14 @@ use haven_local_relay::planes::judge::{judge, Class, Finding, Judgement, Observe
 use haven_local_relay::planes::policy::{Plane, Row, Verb};
 use haven_local_relay::planes::table::{List, PlaneTable, RelayIx, RelayMatch, RoutingEnd};
 use helpers::{assert_no_needles, assert_some_line_from, capture_haven_log, haven_core_lines};
-use nostr::prelude::ToBech32 as _;
-use nostr::{Alphabet, Event, EventBuilder, Filter, Keys, Kind, SingleLetterTag, Tag, Timestamp};
+use nostr::nips::nip19::ToBech32 as _;
+use nostr::{
+    event::{Event, EventBuilder, Kind, Tag},
+    filter::{Filter, SingleLetterTag},
+    key::Keys,
+    types::Timestamp,
+    Alphabet,
+};
 use nostr_relay_builder::prelude::{MemoryDatabase, MemoryDatabaseOptions, NostrDatabase};
 use nostr_relay_builder::{LocalRelay, RelayBuilder};
 use tempfile::TempDir;
@@ -1044,7 +1050,9 @@ async fn lifecycle_then_plants(watch: &DialWatch, needles: &mut Vec<String>) {
     w.next();
     let kind0 = build_metadata_event(
         &alice.keys,
-        &ProfileMetadata::from_metadata(nostr::Metadata::new().display_name("Quiet Wanderer")),
+        &ProfileMetadata::from_metadata(
+            nostr::nips::nip01::Metadata::new().display_name("Quiet Wanderer"),
+        ),
         None,
     )
     .expect("a kind 0");

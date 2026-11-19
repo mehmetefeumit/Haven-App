@@ -59,7 +59,11 @@ use std::sync::{Arc, OnceLock};
 use base64::Engine as _;
 use futures::StreamExt;
 use nostr::{
-    Alphabet, EventBuilder, JsonUtil, Keys, Kind, SingleLetterTag, Tag, TagKind, Timestamp,
+    event::{EventBuilder, Kind, Tag},
+    filter::SingleLetterTag,
+    key::Keys,
+    types::Timestamp,
+    Alphabet, JsonUtil, TagKind,
 };
 use sha2::{Digest, Sha256};
 
@@ -1208,7 +1212,7 @@ mod tests {
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(b64)
             .expect("auth header is standard padded base64");
-        let event: nostr::Event =
+        let event: nostr::event::Event =
             serde_json::from_slice(&decoded).expect("auth payload is a nostr event");
 
         assert_eq!(event.kind.as_u16(), 24242, "auth event kind is 24242");
@@ -1219,7 +1223,7 @@ mod tests {
         );
         assert!(event.verify().is_ok(), "auth event signature verifies");
 
-        let now = nostr::Timestamp::now().as_secs();
+        let now = nostr::types::Timestamp::now().as_secs();
         assert!(
             event.created_at.as_secs() <= now + 1,
             "created_at is in the past"

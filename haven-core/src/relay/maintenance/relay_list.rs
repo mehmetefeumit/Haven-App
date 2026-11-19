@@ -217,7 +217,7 @@ pub fn own_list_confirmed(snapshot: &RelayListSnapshot, acknowledged_by: &[Strin
 /// The one spelling two URLs for the same relay share: the pool names an
 /// acknowledging relay by its parsed URL, not as the list spelled it.
 fn relay_key(url: &str) -> Option<String> {
-    nostr::RelayUrl::parse(url)
+    nostr::types::RelayUrl::parse(url)
         .ok()
         .map(|parsed| crate::relay::url_norm::canonicalize(parsed.as_str()))
 }

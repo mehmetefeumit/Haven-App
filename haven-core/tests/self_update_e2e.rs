@@ -24,7 +24,7 @@ use haven_core::relay::fanout::{
 use haven_core::relay::live_sync::{EngineProcessor, EventBus, LiveDriver};
 use helpers::drive::{through, ManualClock, Recorder, HOUR_MS, MINUTE_MS, SECOND_MS};
 use helpers::{setup_circle, CircleFixture, CircleMember};
-use nostr::{Event, JsonUtil as _};
+use nostr::{event::Event, JsonUtil as _};
 
 const RELAY: &str = "wss://one.self-update-canary4b1e.example.com";
 
@@ -970,15 +970,15 @@ fn undecryptable(routing: &[u8; 32]) -> Event {
     use rand::RngCore as _;
     let mut bytes = [0u8; 96];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
-    nostr::EventBuilder::new(
-        nostr::Kind::Custom(445),
+    nostr::event::EventBuilder::new(
+        nostr::event::Kind::Custom(445),
         base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes),
     )
-    .tag(nostr::Tag::custom(
+    .tag(nostr::event::Tag::custom(
         nostr::TagKind::custom("h"),
         [hex::encode(routing)],
     ))
-    .sign_with_keys(&nostr::Keys::generate())
+    .sign_with_keys(&nostr::key::Keys::generate())
     .expect("a forged envelope")
 }
 

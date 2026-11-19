@@ -22,7 +22,12 @@ use haven_core::relay::{allow_ws_loopback_for_test, RelayManager};
 use helpers::drive::{through, ManualClock, Recorder};
 use helpers::stranded::split;
 use helpers::{setup_circle, CircleMember};
-use nostr::{Event, EventBuilder, JsonUtil as _, Keys, Kind, Tag, TagKind, Timestamp};
+use nostr::{
+    event::{Event, EventBuilder, Kind, Tag},
+    key::Keys,
+    types::Timestamp,
+    JsonUtil as _, TagKind,
+};
 use nostr_relay_builder::MockRelay;
 
 const RELAY: &str = "wss://one.recovery-canary8c3d.example.com";

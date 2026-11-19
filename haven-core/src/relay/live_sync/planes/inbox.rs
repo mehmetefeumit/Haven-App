@@ -1,7 +1,7 @@
 //! The inbox plane: `kind:1059` gift-wrapped invitations addressed to us by
 //! the `#p` tag.
 
-use nostr::{Filter, Kind, PublicKey, Timestamp};
+use nostr::{event::Kind, filter::Filter, key::PublicKey, types::Timestamp};
 
 /// Builds the `kind:1059` inbox filter for our own public key.
 ///
@@ -15,11 +15,11 @@ use nostr::{Filter, Kind, PublicKey, Timestamp};
 ///
 /// ```
 /// use haven_core::relay::live_sync::planes::inbox::inbox_filter;
-/// use nostr::Keys;
+/// use nostr::key::Keys;
 ///
 /// let pk = Keys::generate().public_key();
 /// let f = inbox_filter(pk, 1_000);
-/// assert!(f.kinds.as_ref().unwrap().contains(&nostr::Kind::GiftWrap));
+/// assert!(f.kinds.as_ref().unwrap().contains(&nostr::event::Kind::GiftWrap));
 /// ```
 #[must_use]
 pub fn inbox_filter(own_pubkey: PublicKey, since_secs: i64) -> Filter {
@@ -33,7 +33,7 @@ pub fn inbox_filter(own_pubkey: PublicKey, since_secs: i64) -> Filter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::{Alphabet, Keys, SingleLetterTag};
+    use nostr::{filter::SingleLetterTag, key::Keys, Alphabet};
 
     #[test]
     fn filter_targets_giftwrap_and_p_tag_is_recipient_not_author() {

@@ -20,9 +20,12 @@
 //! MLS signing keys are generated and managed internally by MDK.
 //! Compromise of this Nostr identity key does NOT compromise MLS group messages.
 
-use nostr::prelude::{Keys, PublicKey, ToBech32};
+use nostr::key::SecretKey as NostrSecretKey;
 use nostr::secp256k1::{Keypair, Message, SecretKey as Secp256k1SecretKey};
-use nostr::SecretKey as NostrSecretKey;
+use nostr::{
+    key::{Keys, PublicKey},
+    nips::nip19::ToBech32,
+};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use super::IdentityError;

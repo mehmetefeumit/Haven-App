@@ -20,7 +20,12 @@ use haven_core::nostr::mls::types::{
     WelcomeAcceptance,
 };
 use haven_core::nostr::mls::{redact_hex_sequences, SessionManager};
-use nostr::{Event, EventBuilder, JsonUtil, Keys, Kind, Timestamp};
+use nostr::{
+    event::{Event, EventBuilder, Kind},
+    key::Keys,
+    types::Timestamp,
+    JsonUtil,
+};
 
 use helpers::{
     assert_no_raw_mls_group_id_leak, setup_two_party_group,
@@ -697,7 +702,7 @@ async fn rm6_malformed_events_fail_gracefully() {
 
     for content in ["", "!!!not-base64!!!", big.as_str()] {
         let ev = EventBuilder::new(Kind::Custom(445), content)
-            .tags([nostr::Tag::parse(["h", &h]).unwrap()])
+            .tags([nostr::event::Tag::parse(["h", &h]).unwrap()])
             .sign_with_keys(&Keys::generate())
             .unwrap();
         // Either a hard error or a non-Location outcome — never plaintext, never panic.

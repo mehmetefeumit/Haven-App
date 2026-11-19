@@ -15,7 +15,10 @@ use std::collections::BTreeSet;
 
 use haven_core::nostr::mls::types::{KeyPackageAdmission, LocationGroupConfig, ProtocolProfile};
 use haven_core::nostr::mls::SessionManager;
-use nostr::{EventBuilder, Keys, Kind};
+use nostr::{
+    event::{EventBuilder, Kind},
+    key::Keys,
+};
 
 use helpers::{cleanup_dir, create_key_package_event, unique_temp_dir};
 

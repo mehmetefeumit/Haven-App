@@ -19,7 +19,7 @@ use haven_core::relay::fanout::{
 };
 use haven_core::relay::live_sync::processor::group_cursor_stream;
 use haven_core::relay::live_sync::StopOutcome;
-use nostr::Event;
+use nostr::event::Event;
 use sha2::{Digest, Sha256};
 
 use crate::clock::WallNow;
@@ -197,7 +197,7 @@ pub enum Change<'a> {
         /// The circle.
         group: &'a GroupId,
         /// The new admin.
-        successor: &'a nostr::PublicKey,
+        successor: &'a nostr::key::PublicKey,
     },
     /// The caller stops being an admin.
     SelfDemote {
@@ -236,7 +236,7 @@ pub struct Changed {
 async fn pending_commit_ids(
     device: &SimDevice,
     group: &GroupId,
-) -> Result<Vec<nostr::EventId>, RigError> {
+) -> Result<Vec<nostr::event::EventId>, RigError> {
     let session = device.session()?;
     let mut ids = Vec::new();
     for id in session

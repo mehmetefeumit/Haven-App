@@ -7,7 +7,7 @@
 //!
 //! # Privacy and security notes
 //!
-//! * URLs are normalized through [`nostr::RelayUrl::parse`] before insertion,
+//! * URLs are normalized through [`nostr::types::RelayUrl::parse`] before insertion,
 //!   so duplicate-with-trailing-slash inserts collide on the `UNIQUE
 //!   (url, relay_type)` constraint instead of producing two rows.
 //! * `ws://` is rejected at the storage boundary as defense-in-depth — the
@@ -36,7 +36,7 @@
 use std::collections::BTreeSet;
 
 use chrono::Utc;
-use nostr::{EventId, PublicKey, RelayUrl};
+use nostr::{event::EventId, key::PublicKey, types::RelayUrl};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::contamination::ContaminationSource;
@@ -123,7 +123,7 @@ pub struct PublishedEventRecord {
 /// 1. Trims surrounding whitespace.
 /// 2. Rejects empty input with [`CircleError::InvalidRelayInput`].
 /// 3. Rejects URLs containing `user:pass@` to avoid credential leakage.
-/// 4. Delegates to [`nostr::RelayUrl::parse`] for canonical handling of IDN,
+/// 4. Delegates to [`nostr::types::RelayUrl::parse`] for canonical handling of IDN,
 ///    case, ports, and trailing slashes on the root.
 /// 5. Rejects a URL whose PARSED scheme is plaintext `ws`, however the input
 ///    spelled it ([`crate::relay::url_norm::may_dial`], the policy every
@@ -161,7 +161,7 @@ pub fn normalize_url(input: &str) -> Result<String> {
     }
     // Defense in depth — lowercase the scheme + authority ourselves so
     // case-only differing URLs deduplicate on the UNIQUE (url, relay_type)
-    // index. `nostr::RelayUrl::parse` does some canonicalization but does
+    // index. `nostr::types::RelayUrl::parse` does some canonicalization but does
     // not always lowercase the host on every nostr-sdk version, and may
     // preserve a trailing slash on the root path which would also defeat
     // the UNIQUE constraint.
@@ -1587,10 +1587,10 @@ mod tests {
 
     #[test]
     fn published_event_round_trip() {
-        use nostr::Keys;
+        use nostr::key::Keys;
         let storage = make_storage();
         let keys = Keys::generate();
-        let event = nostr::EventBuilder::new(nostr::Kind::InboxRelays, "")
+        let event = nostr::event::EventBuilder::new(nostr::event::Kind::InboxRelays, "")
             .sign_with_keys(&keys)
             .unwrap();
         storage
@@ -1604,7 +1604,7 @@ mod tests {
         assert_eq!(got.published_at, 1_000);
 
         // Re-record with newer timestamp must overwrite, not duplicate.
-        let event2 = nostr::EventBuilder::new(nostr::Kind::InboxRelays, "")
+        let event2 = nostr::event::EventBuilder::new(nostr::event::Kind::InboxRelays, "")
             .sign_with_keys(&keys)
             .unwrap();
         storage
@@ -1620,7 +1620,7 @@ mod tests {
 
     #[test]
     fn last_published_event_returns_none_when_missing() {
-        use nostr::Keys;
+        use nostr::key::Keys;
         let storage = make_storage();
         let keys = Keys::generate();
         let res = storage
@@ -1636,12 +1636,12 @@ mod tests {
         // recorded) must not regress the stored event_id. Otherwise a
         // future NIP-09 deletion would reference the older event_id and
         // fail to retract the newer one from cooperative relays.
-        use nostr::Keys;
+        use nostr::key::Keys;
         let storage = make_storage();
         let keys = Keys::generate();
 
         // First record: newer publication.
-        let newer = nostr::EventBuilder::new(nostr::Kind::InboxRelays, "")
+        let newer = nostr::event::EventBuilder::new(nostr::event::Kind::InboxRelays, "")
             .sign_with_keys(&keys)
             .unwrap();
         storage
@@ -1649,7 +1649,7 @@ mod tests {
             .unwrap();
 
         // Late callback for an older publication tries to overwrite.
-        let older = nostr::EventBuilder::new(nostr::Kind::InboxRelays, "")
+        let older = nostr::event::EventBuilder::new(nostr::event::Kind::InboxRelays, "")
             .sign_with_keys(&keys)
             .unwrap();
         storage

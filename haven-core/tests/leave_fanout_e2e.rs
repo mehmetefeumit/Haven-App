@@ -42,7 +42,7 @@ async fn seal(
     driver: &Publishing<'_, ScriptedFanout>,
     member: &CircleMember,
     group: &GroupId,
-) -> Result<nostr::Event, SendHeld> {
+) -> Result<nostr::event::Event, SendHeld> {
     match driver
         .seal_location(&member.circle, group, &fix())
         .await
@@ -989,7 +989,7 @@ async fn a_leave_a_peer_has_committed_ends_on_this_device() {
         .leave(&member.circle, &group, &pubkey)
         .await
         .expect("the leave is proposed");
-    let proposal = nostr::Event::from_json(
+    let proposal = nostr::event::Event::from_json(
         transport
             .calls()
             .pop()
@@ -1006,7 +1006,7 @@ async fn a_leave_a_peer_has_committed_ends_on_this_device() {
     let _ = through(&commit_transport, &outbox, &clock, &FULL)
         .resume(&admin.circle)
         .await;
-    let eviction = nostr::Event::from_json(
+    let eviction = nostr::event::Event::from_json(
         commit_transport
             .calls()
             .pop()
@@ -1442,7 +1442,7 @@ fn addressed(calls: Vec<haven_core::relay::fanout::scripted::Call>) -> Vec<(Stri
     calls
         .into_iter()
         .map(|call| {
-            let event = nostr::Event::from_json(&call.payload).expect("a sent event");
+            let event = nostr::event::Event::from_json(&call.payload).expect("a sent event");
             let h = event
                 .tags
                 .iter()

@@ -198,7 +198,12 @@ async fn serve(tcp: TcpStream, upstream: String, conn: usize, record: Arc<Record
 mod tests {
     use std::time::Duration;
 
-    use nostr::{EventBuilder, Filter, JsonUtil as _, Keys, Kind};
+    use nostr::{
+        event::{EventBuilder, Kind},
+        filter::Filter,
+        key::Keys,
+        JsonUtil as _,
+    };
     use nostr_sdk::ClientOptions;
 
     use super::*;

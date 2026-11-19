@@ -11,12 +11,12 @@ use super::{
 const WHOLE: RangePass = RangePass::Whole { owing: false };
 
 /// `count` distinct ids, from `from`.
-fn seeded(from: u32, count: u32) -> Vec<nostr::EventId> {
+fn seeded(from: u32, count: u32) -> Vec<nostr::event::EventId> {
     (from..from + count)
         .map(|seed| {
             let mut bytes = [0u8; 32];
             bytes[..4].copy_from_slice(&seed.to_be_bytes());
-            nostr::EventId::from_byte_array(bytes)
+            nostr::event::EventId::from_byte_array(bytes)
         })
         .collect()
 }
@@ -114,12 +114,12 @@ pub fn assert_a_range_ends_only_when_a_whole_walk_owes_nothing(
 /// dropped uncovered (Rule 12). Shared by both ledgers' tests.
 pub fn assert_a_stale_read_never_settles_a_later_range(ledger: &dyn RefusedRedeliveryLedger) {
     let circle = GroupId::new(vec![9; 32]);
-    let ids = |from: u32, to: u32| -> Vec<nostr::EventId> {
+    let ids = |from: u32, to: u32| -> Vec<nostr::event::EventId> {
         (from..to)
             .map(|seed| {
                 let mut bytes = [0u8; 32];
                 bytes[..4].copy_from_slice(&seed.to_be_bytes());
-                nostr::EventId::from_byte_array(bytes)
+                nostr::event::EventId::from_byte_array(bytes)
             })
             .collect()
     };
@@ -148,8 +148,8 @@ pub fn assert_a_stale_read_never_settles_a_later_range(ledger: &dyn RefusedRedel
     );
 }
 
-fn id(seed: u8) -> nostr::EventId {
-    nostr::EventId::from_byte_array([seed; 32])
+fn id(seed: u8) -> nostr::event::EventId {
+    nostr::event::EventId::from_byte_array([seed; 32])
 }
 
 /// One refused id that no sweep can discharge, swept once a minute for forty
@@ -298,7 +298,11 @@ pub fn assert_no_id_can_be_minted_to_the_front_of_the_queue(ledger: &dyn Refused
     // …and ahead of whatever is minted afterwards, however low.
     ledger.tried(&circle, &[id(2), id(1)], 0, false);
     ledger.resolve(&circle, &[id(2), id(1)]);
-    assert!(ledger.record(&circle, &[nostr::EventId::from_byte_array([0; 32])], 0));
+    assert!(ledger.record(
+        &circle,
+        &[nostr::event::EventId::from_byte_array([0; 32])],
+        0
+    ));
     assert!(
         ledger.owed(&circle, 1, 0) == [genuine],
         "an id minted after one that had already had its turn was asked for ahead of it",
@@ -312,11 +316,11 @@ pub fn assert_a_clock_stepped_back_leaves_nothing_waiting(ledger: &dyn RefusedRe
     const YEAR: i64 = 365 * 24 * 3600;
     let circle = GroupId::new(vec![5; 32]);
     let cap = u32::try_from(MAX_REFUSED_IDS_PER_GROUP).unwrap();
-    let ids: Vec<nostr::EventId> = (0..=cap)
+    let ids: Vec<nostr::event::EventId> = (0..=cap)
         .map(|seed| {
             let mut bytes = [0u8; 32];
             bytes[..4].copy_from_slice(&seed.to_be_bytes());
-            nostr::EventId::from_byte_array(bytes)
+            nostr::event::EventId::from_byte_array(bytes)
         })
         .collect();
     assert!(ledger.record(&circle, &ids, YEAR));
@@ -348,11 +352,11 @@ pub fn assert_a_clock_stepped_back_leaves_nothing_waiting(ledger: &dyn RefusedRe
 pub fn assert_the_owed_range_keeps_its_own_schedule(ledger: &dyn RefusedRedeliveryLedger) {
     let circle = GroupId::new(vec![4; 32]);
     let cap = u32::try_from(MAX_REFUSED_IDS_PER_GROUP).unwrap();
-    let ids: Vec<nostr::EventId> = (0..=cap)
+    let ids: Vec<nostr::event::EventId> = (0..=cap)
         .map(|seed| {
             let mut bytes = [0u8; 32];
             bytes[..4].copy_from_slice(&seed.to_be_bytes());
-            nostr::EventId::from_byte_array(bytes)
+            nostr::event::EventId::from_byte_array(bytes)
         })
         .collect();
     assert!(ledger.record(&circle, &ids, 1_000));

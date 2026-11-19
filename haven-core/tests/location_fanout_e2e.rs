@@ -56,7 +56,7 @@ async fn sealed(
     driver: &Publishing<'_, ScriptedFanout>,
     member: &CircleMember,
     group: &GroupId,
-) -> (nostr::Event, Vec<String>) {
+) -> (nostr::event::Event, Vec<String>) {
     let outcome = driver
         .seal_location(&member.circle, group, &fix())
         .await
@@ -69,7 +69,7 @@ async fn sealed(
 
 /// Where the driver's clock must be set for `event` to expire `before_ms`
 /// later.
-fn before_expiry(event: &nostr::Event, before_ms: u64) -> u64 {
+fn before_expiry(event: &nostr::event::Event, before_ms: u64) -> u64 {
     let expires_ms = event
         .tags
         .expiration()

@@ -34,7 +34,12 @@ use haven_core::relay::{
 };
 use nostr::secp256k1::schnorr::Signature;
 use nostr::{
-    Event, EventBuilder, Filter, JsonUtil as _, Keys, Kind, Metadata, PublicKey, Tag, Timestamp,
+    event::{Event, EventBuilder, Kind, Tag},
+    filter::Filter,
+    key::{Keys, PublicKey},
+    nips::nip01::Metadata,
+    types::Timestamp,
+    JsonUtil as _,
 };
 use tempfile::TempDir;
 
@@ -319,7 +324,8 @@ async fn a_forgery_under_the_genuine_lists_id_does_not_cost_the_genuine_list() {
     let manager = RelayManager::new();
     let attacker_list = |genuine: &Event| {
         rewritten(genuine, |event| {
-            event.tags = nostr::Tags::from_list(relay_tag("relay", "wss://attacker.example.com"));
+            event.tags =
+                nostr::event::Tags::from_list(relay_tag("relay", "wss://attacker.example.com"));
         })
     };
 

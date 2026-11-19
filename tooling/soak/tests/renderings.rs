@@ -404,7 +404,8 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
             group_id: needle_bytes(),
         },
         Forgery::Rewrap {
-            source: nostr::EventId::from_slice(&needle_bytes()).expect("32 bytes is an event id"),
+            source: nostr::event::EventId::from_slice(&needle_bytes())
+                .expect("32 bytes is an event id"),
             offset_secs: 86_400,
         },
         Forgery::MalformedDoubleH {
@@ -416,7 +417,8 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
         // The event id and the baked-in epoch are both needle-planted, so the
         // sweep proves the rendering carries neither.
         Forgery::FutureInnerHeader {
-            source: nostr::EventId::from_slice(&needle_bytes()).expect("32 bytes is an event id"),
+            source: nostr::event::EventId::from_slice(&needle_bytes())
+                .expect("32 bytes is an event id"),
             inner_epoch: NEEDLE_COUNT_U64,
         },
         Forgery::OutsiderSeal {

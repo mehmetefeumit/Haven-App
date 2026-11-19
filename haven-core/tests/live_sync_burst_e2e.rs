@@ -57,7 +57,13 @@ use haven_core::relay::live_sync::{
 };
 use haven_core::relay::maintenance::build_kp_maintenance_events;
 use nostr::util::BoxedFuture;
-use nostr::{Alphabet, Event, Filter, Keys, SingleLetterTag, Timestamp};
+use nostr::{
+    event::Event,
+    filter::{Filter, SingleLetterTag},
+    key::Keys,
+    types::Timestamp,
+    Alphabet,
+};
 use nostr_relay_builder::builder::{PolicyResult, QueryPolicy, WritePolicy};
 use nostr_relay_builder::{LocalRelay, MockRelay, RelayBuilder};
 use nostr_sdk::Client;
@@ -167,7 +173,7 @@ impl WritePolicy for HoldEngineCommitOk {
         _addr: &'a std::net::SocketAddr,
     ) -> BoxedFuture<'a, PolicyResult> {
         Box::pin(async move {
-            if event.kind != nostr::Kind::Custom(445)
+            if event.kind != nostr::event::Kind::Custom(445)
                 || self.seen.fetch_add(1, Ordering::AcqRel) == 0
             {
                 return PolicyResult::Accept;
@@ -1287,7 +1293,7 @@ async fn a_self_remove_auto_commit_is_not_made_by_a_burst_and_is_made_by_the_for
             reader
                 .fetch_events(
                     Filter::new()
-                        .kind(nostr::Kind::Custom(445))
+                        .kind(nostr::event::Kind::Custom(445))
                         .custom_tag(SingleLetterTag::lowercase(Alphabet::H), hex),
                     Duration::from_secs(5),
                 )
@@ -1422,7 +1428,7 @@ async fn mdk_drops_for_good_a_commit_taken_in_before_the_proposal_it_commits() {
     let commit = reader
         .fetch_events(
             Filter::new()
-                .kind(nostr::Kind::Custom(445))
+                .kind(nostr::event::Kind::Custom(445))
                 .custom_tag(SingleLetterTag::lowercase(Alphabet::H), fx.hex()),
             Duration::from_secs(5),
         )
@@ -1709,7 +1715,7 @@ async fn a_burst_that_did_not_settle_every_endpoint_advances_only_with_the_silen
     );
     let stream = group_cursor_stream(&fx.hex());
     let before_epoch = epoch(&fx.bob, &fx.mls_group_id).await;
-    let slow = nostr::RelayUrl::parse(&slow_url).expect("a relay url");
+    let slow = nostr::types::RelayUrl::parse(&slow_url).expect("a relay url");
 
     core.pause_subscriptions().await.expect("pause");
     let anchored = fx
@@ -1796,7 +1802,7 @@ async fn a_relay_left_out_of_coverage_is_asked_from_its_floor_by_the_next_sessio
     }));
     slow_relay.run().await.expect("local relay runs");
     let slow_url = slow_relay.url().await.to_string();
-    let slow = nostr::RelayUrl::parse(&slow_url).expect("a relay url");
+    let slow = nostr::types::RelayUrl::parse(&slow_url).expect("a relay url");
     let fx = build_circle(vec![fast_url.clone(), slow_url.clone()], false).await;
     let specs = [CircleSpec {
         group_id_hex: fx.hex(),
@@ -1936,7 +1942,7 @@ async fn a_single_relays_reissue_keeps_the_buckets_other_relays_in_coverage() {
     }));
     slow_relay.run().await.expect("local relay runs");
     let slow_url = slow_relay.url().await.to_string();
-    let slow = nostr::RelayUrl::parse(&slow_url).expect("a relay url");
+    let slow = nostr::types::RelayUrl::parse(&slow_url).expect("a relay url");
     let fx = build_circle(vec![closer_url.clone(), slow_url.clone()], false).await;
     let fix = |latitude: f64| {
         let (alice, group) = (Arc::clone(&fx.alice), fx.mls_group_id.clone());
@@ -2037,7 +2043,7 @@ async fn the_foreground_releases_a_silent_relay_after_the_eose_wait_without_a_ti
     }));
     slow_relay.run().await.expect("local relay runs");
     let slow_url = slow_relay.url().await.to_string();
-    let slow = nostr::RelayUrl::parse(&slow_url).expect("a relay url");
+    let slow = nostr::types::RelayUrl::parse(&slow_url).expect("a relay url");
     let fx = build_circle(vec![fast_url.clone(), slow_url.clone()], false).await;
     let core = LiveSyncCore::new_local(
         Arc::clone(&fx.bob),

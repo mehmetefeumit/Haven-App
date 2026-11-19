@@ -12,7 +12,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use nostr::SubscriptionId;
+use nostr::message::SubscriptionId;
 
 use super::planes::PlaneKind;
 

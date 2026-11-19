@@ -15,7 +15,7 @@
 //! produces byte-identical output, because it calls [`canonicalize`] for the
 //! final form.
 
-use nostr::RelayUrl;
+use nostr::types::RelayUrl;
 
 /// Whether Haven may open a socket to `url`, or name it to another client:
 /// `wss`, or — in a debug build with the loopback opt-in armed — plaintext `ws`
@@ -48,7 +48,7 @@ pub fn is_encrypted(url: &RelayUrl) -> bool {
 /// Canonicalizes an already-parsed relay URL to Haven's normal form.
 ///
 /// Lowercases the scheme and authority while preserving path/query/fragment
-/// case, then strips a sole trailing slash on the root path. `nostr::RelayUrl`
+/// case, then strips a sole trailing slash on the root path. `nostr::types::RelayUrl`
 /// does some canonicalization but does not lowercase the host on every
 /// nostr-sdk version and may preserve the root's trailing slash, either of
 /// which would defeat a set comparison.

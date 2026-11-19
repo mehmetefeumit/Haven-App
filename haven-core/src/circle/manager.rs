@@ -30,7 +30,10 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use nostr::{Event, EventId, Keys, PublicKey};
+use nostr::{
+    event::{Event, EventId},
+    key::{Keys, PublicKey},
+};
 
 use super::contamination::ContaminationSource;
 use super::error::{CircleError, Result};
@@ -5871,8 +5874,8 @@ impl CircleManager {
         &self,
         kind: u16,
         d_tag: &str,
-        event_id: &nostr::EventId,
-        pubkey: &nostr::PublicKey,
+        event_id: &nostr::event::EventId,
+        pubkey: &nostr::key::PublicKey,
         published_at: i64,
     ) -> Result<()> {
         self.storage
@@ -5888,7 +5891,7 @@ impl CircleManager {
         &self,
         kind: u16,
         d_tag: &str,
-        pubkey: &nostr::PublicKey,
+        pubkey: &nostr::key::PublicKey,
     ) -> Result<Option<super::storage_relay_prefs::PublishedEventRecord>> {
         self.storage.last_published_event(kind, d_tag, pubkey)
     }
@@ -7297,7 +7300,7 @@ mod tests {
             .await;
 
         assert_eq!(folded.proposals.len(), 1, "the proposal reaches the caller");
-        assert_eq!(folded.proposals[0].kind, nostr::Kind::Custom(445));
+        assert_eq!(folded.proposals[0].kind, nostr::event::Kind::Custom(445));
         assert!(recorded.is_empty(), "and nothing was invented beside it");
     }
 
@@ -10254,7 +10257,7 @@ mod tests {
 
     /// Alice's commit rotating the circle's routing id to `rotated`, as
     /// another client's admin would make it, confirmed on her side.
-    async fn alice_rotates_to(tp: &TwoPartyCircle, rotated: [u8; 32]) -> nostr::Event {
+    async fn alice_rotates_to(tp: &TwoPartyCircle, rotated: [u8; 32]) -> nostr::event::Event {
         use crate::nostr::mls::types::{AppComponentData, SendIntent};
         use cgka_traits::app_components::{
             encode_nostr_routing_v1, NostrRoutingV1, NOSTR_ROUTING_COMPONENT_ID,
@@ -10820,8 +10823,8 @@ mod tests {
 
     fn leaky_proposal() -> Event {
         let keys = Keys::generate();
-        nostr::EventBuilder::new(nostr::Kind::Custom(445), PROPOSAL_CONTENT)
-            .tag(nostr::Tag::custom(
+        nostr::event::EventBuilder::new(nostr::event::Kind::Custom(445), PROPOSAL_CONTENT)
+            .tag(nostr::event::Tag::custom(
                 nostr::TagKind::custom("h"),
                 [PROPOSAL_H_TAG],
             ))
@@ -11683,10 +11686,11 @@ mod tests {
             .seal_location_for_test(&tp.mls_group_id, &LocationMessage::new(1.0, 2.0))
             .await
             .expect("bob sends");
-        let forged = nostr::EventBuilder::new(real.kind, "ZGVmaW5pdGVseSBub3QgY2lwaGVydGV4dA==")
-            .tags(real.tags.clone())
-            .sign_with_keys(&Keys::generate())
-            .expect("sign the undecryptable event");
+        let forged =
+            nostr::event::EventBuilder::new(real.kind, "ZGVmaW5pdGVseSBub3QgY2lwaGVydGV4dA==")
+                .tags(real.tags.clone())
+                .sign_with_keys(&Keys::generate())
+                .expect("sign the undecryptable event");
         let _ = tp.alice.ingest_for_test(&forged).await;
 
         assert_eq!(
@@ -12221,13 +12225,14 @@ mod tests {
         for index in 0..200_u32 {
             let content =
                 base64::engine::general_purpose::STANDARD.encode(index.to_be_bytes().repeat(24));
-            let envelope = nostr::EventBuilder::new(nostr::Kind::Custom(445), content)
-                .tag(nostr::Tag::custom(
-                    nostr::TagKind::custom("h"),
-                    [hex::encode(tp.nostr_group_id)],
-                ))
-                .sign_with_keys(&Keys::generate())
-                .expect("sign");
+            let envelope =
+                nostr::event::EventBuilder::new(nostr::event::Kind::Custom(445), content)
+                    .tag(nostr::event::Tag::custom(
+                        nostr::TagKind::custom("h"),
+                        [hex::encode(tp.nostr_group_id)],
+                    ))
+                    .sign_with_keys(&Keys::generate())
+                    .expect("sign");
             let ingest = session
                 .process_event(&envelope)
                 .await
@@ -13165,18 +13170,18 @@ mod tests {
         // The same ciphertext with its expiration an hour in the past,
         // re-signed by a throwaway key — the shape a replaying relay, or a
         // member stamping a past expiration, produces.
-        let past = nostr::Timestamp::now().as_secs() - 3600;
-        let tags: Vec<nostr::Tag> = event
+        let past = nostr::types::Timestamp::now().as_secs() - 3600;
+        let tags: Vec<nostr::event::Tag> = event
             .tags
             .iter()
             .map(|t| match t.as_standardized() {
                 Some(nostr::TagStandard::Expiration(_)) => {
-                    nostr::Tag::expiration(nostr::Timestamp::from(past))
+                    nostr::event::Tag::expiration(nostr::types::Timestamp::from(past))
                 }
                 _ => t.clone(),
             })
             .collect();
-        let replayed = nostr::EventBuilder::new(event.kind, event.content.clone())
+        let replayed = nostr::event::EventBuilder::new(event.kind, event.content.clone())
             .tags(tags)
             .sign_with_keys(&Keys::generate())
             .expect("re-sign the event");
@@ -13576,7 +13581,7 @@ mod tests {
             "a location 445 carries exactly the expiry request and the routing tag"
         );
         for (what, event) in [("commit", &commit), ("proposal", &proposal)] {
-            assert_eq!(event.kind, nostr::Kind::Custom(445));
+            assert_eq!(event.kind, nostr::event::Kind::Custom(445));
             assert_eq!(
                 tags(event),
                 vec![h.clone()],

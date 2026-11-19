@@ -49,8 +49,11 @@ use haven_core::relay::live_sync::{
 };
 use haven_core::relay::maintenance::build_kp_maintenance_events;
 use nostr::{
-    Alphabet, Event, EventBuilder, EventId, Keys, Kind, RelayUrl, SingleLetterTag, Tag, TagKind,
-    TagStandard, Timestamp,
+    event::{Event, EventBuilder, EventId, Kind, Tag},
+    filter::SingleLetterTag,
+    key::Keys,
+    types::{RelayUrl, Timestamp},
+    Alphabet, TagKind, TagStandard,
 };
 use nostr_relay_builder::MockRelay;
 use nostr_sdk::Client;
@@ -235,8 +238,9 @@ async fn delivered_445_never_sets_the_cursor_but_eose_does() {
     let relay_url = RelayUrl::parse(&url).expect("the mock relay's url parses");
 
     let dir = TempDir::new().unwrap();
-    let circle =
-        Arc::new(CircleManager::new_unencrypted(dir.path(), &nostr::Keys::generate()).unwrap());
+    let circle = Arc::new(
+        CircleManager::new_unencrypted(dir.path(), &nostr::key::Keys::generate()).unwrap(),
+    );
     // A session lists the ids of circles its manager holds.
     circle.keep_circle_row_for_test([0x8A; 32]);
     let group_hex = hex::encode([0x8Au8; 32]);

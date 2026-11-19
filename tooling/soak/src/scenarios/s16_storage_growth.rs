@@ -119,7 +119,7 @@ use std::time::Duration;
 use haven_core::nostr::mls::storage::{processed_transport_id_count_for_test, StorageConfig};
 use haven_core::nostr::mls::types::{GroupId, MessageId, MessageState, OpenMlsContentKind};
 use haven_core::nostr::mls::{max_rewind_commits, DEFAULT_MAX_PAST_EPOCHS};
-use nostr::{Event, EventId};
+use nostr::event::{Event, EventId};
 
 use crate::nemesis::types::Fault;
 use crate::oracle::undecryptable::{self, StoredRow};

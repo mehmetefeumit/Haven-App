@@ -12,7 +12,7 @@
 use std::fmt;
 use std::future::Future;
 
-use nostr::EventId;
+use nostr::event::EventId;
 use std::time::Duration;
 
 use serde::Serialize;

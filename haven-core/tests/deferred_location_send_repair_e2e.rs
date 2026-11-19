@@ -42,7 +42,7 @@ use haven_core::nostr::mls::types::{
     UNRESOLVABLE_INPUT_MAX_AGE_SECS,
 };
 use haven_core::relay::maintenance::build_kp_maintenance_events;
-use nostr::Keys;
+use nostr::key::Keys;
 use tempfile::TempDir;
 
 const GROUP_RELAY: &str = "wss://group.example.com";
@@ -140,7 +140,7 @@ async fn send_and_receive(
     group_id: &GroupId,
     lat: f64,
     lon: f64,
-) -> (nostr::Event, [u8; 32], Vec<String>) {
+) -> (nostr::event::Event, [u8; 32], Vec<String>) {
     let sent = from
         .seal_location_for_test(group_id, &LocationMessage::new(lat, lon))
         .await
@@ -160,7 +160,10 @@ async fn send_and_receive(
 
 /// Asserts a recovered send is a real routed kind-445, not merely a value the
 /// call returned.
-fn assert_well_formed_445(sent: &(nostr::Event, [u8; 32], Vec<String>), nostr_group_id: [u8; 32]) {
+fn assert_well_formed_445(
+    sent: &(nostr::event::Event, [u8; 32], Vec<String>),
+    nostr_group_id: [u8; 32],
+) {
     let (event, ngid, relays) = sent;
     assert_eq!(event.kind.as_u16(), 445, "the group-message kind");
     assert_eq!(*ngid, nostr_group_id, "routed to this circle");

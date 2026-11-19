@@ -35,7 +35,7 @@ use std::time::Duration;
 
 use haven_core::nostr::mls::types::GroupId;
 use haven_core::relay::live_sync::{group_cursor_stream, BacklogOutcome, Claim};
-use nostr::{Event, RelayUrl};
+use nostr::{event::Event, types::RelayUrl};
 use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::clock::{millis_to_secs, WallNow};

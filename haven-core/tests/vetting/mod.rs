@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use nostr::util::BoxedFuture;
-use nostr::{Event, Filter};
+use nostr::{event::Event, filter::Filter};
 use nostr_relay_builder::builder::RelayBuilder;
 use nostr_relay_builder::prelude::{PolicyResult, WritePolicy};
 use nostr_relay_builder::LocalRelay;
@@ -108,10 +108,10 @@ pub async fn probe_read_without_auth(client: &Client, url: &str, filter: Filter)
         loop {
             match notifications.recv().await {
                 Ok(RelayPoolNotification::Message { message, .. }) => match message {
-                    nostr::RelayMessage::Auth { .. } => {
+                    nostr::message::RelayMessage::Auth { .. } => {
                         return Verdict::Fail("relay issued a NIP-42 AUTH challenge".to_string());
                     }
-                    nostr::RelayMessage::Closed { message, .. } => {
+                    nostr::message::RelayMessage::Closed { message, .. } => {
                         return Verdict::Fail(format!(
                             "relay CLOSED the REQ: {}",
                             relay_text(&message)
@@ -120,7 +120,7 @@ pub async fn probe_read_without_auth(client: &Client, url: &str, filter: Filter)
                     // EOSE is the only affirmative answer: the relay served a
                     // stored-events query to an unauthenticated client and said
                     // so. An EVENT alone would too, but EOSE always follows.
-                    nostr::RelayMessage::EndOfStoredEvents(_) => return Verdict::Pass,
+                    nostr::message::RelayMessage::EndOfStoredEvents(_) => return Verdict::Pass,
                     _ => {}
                 },
                 Ok(_) => {}

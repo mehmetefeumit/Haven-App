@@ -28,7 +28,7 @@ use haven_core::relay::fanout::{DriveMode, FanoutClock, FanoutSend, Publishing};
 use haven_core::relay::live_sync::{EngineProcessor, EventBus};
 use haven_core::relay::maintenance::build_kp_maintenance_events;
 use haven_core::relay::{allow_ws_loopback_for_test, RelayManager};
-use nostr::{Event, Keys};
+use nostr::{event::Event, key::Keys};
 use nostr_relay_builder::MockRelay;
 use tempfile::TempDir;
 
@@ -376,7 +376,7 @@ async fn a_queued_removal_in_the_way_is_set_aside_and_told_by_the_catch_up_plane
 
     let stored = relay_mgr
         .fetch_events(
-            nostr::Filter::new().kind(nostr::Kind::Custom(445)),
+            nostr::filter::Filter::new().kind(nostr::event::Kind::Custom(445)),
             std::slice::from_ref(&url),
             None,
         )

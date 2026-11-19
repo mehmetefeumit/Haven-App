@@ -16,7 +16,7 @@ use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use nostr::{EventId, Filter};
+use nostr::{event::EventId, filter::Filter};
 use nostr_relay_builder::MockRelay;
 use nostr_sdk::{Client, RelayPoolNotification};
 

@@ -4,7 +4,11 @@
 //! maintenance sends and judged by maintenance's own rules, so the relay
 //! settings page can never call a relay healthy that the next tick would heal.
 
-use nostr::{Event, Filter, Kind, PublicKey};
+use nostr::{
+    event::{Event, Kind},
+    filter::Filter,
+    key::PublicKey,
+};
 
 use super::key_package::{
     kp_event_d_tag, kp_event_is_pre_migration, RelayKpEntry, RelayKpPerRelay, RelayKpSnapshot,
@@ -261,7 +265,11 @@ mod tests {
     use crate::relay::maintenance::KeyPackageLifetime;
     use crate::relay::recording_front::RecordingFront;
     use crate::relay::scripted_relay::{Frame, ScriptedRelay};
-    use nostr::{EventBuilder, Keys, Tag, Timestamp};
+    use nostr::{
+        event::{EventBuilder, Tag},
+        key::Keys,
+        types::Timestamp,
+    };
     use OwnEventPresence::{Current, Missing, NoAnswer, NotExpected, Outdated};
 
     const VALID: TrackedKpLifetime = TrackedKpLifetime::Known(KeyPackageLifetime::new(0, u64::MAX));

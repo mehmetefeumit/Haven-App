@@ -30,7 +30,7 @@ use helpers::stranded::{
     unopenable_at, unopened_retryable,
 };
 use helpers::{setup_circle, CircleMember};
-use nostr::{Event, EventId};
+use nostr::event::{Event, EventId};
 use nostr_relay_builder::prelude::{
     BoxedFuture, MemoryDatabase, MemoryDatabaseOptions, PolicyResult, QueryPolicy, RateLimit,
 };
@@ -56,7 +56,7 @@ impl Asked {
 impl QueryPolicy for Asked {
     fn admit_query<'a>(
         &'a self,
-        query: &'a nostr::Filter,
+        query: &'a nostr::filter::Filter,
         _addr: &'a std::net::SocketAddr,
     ) -> BoxedFuture<'a, PolicyResult> {
         Box::pin(async move {
@@ -348,7 +348,7 @@ async fn an_outsiders_refused_flood_cannot_keep_a_members_commit_from_being_fetc
     // commit's own second is the one-second pile-up no `until` reaches past
     // (`a_pile_up_dated_in_one_second_…`), which a fast machine would mint
     // here by chance.
-    let below = nostr::Timestamp::from(nostr::Timestamp::now().as_secs() - 1);
+    let below = nostr::types::Timestamp::from(nostr::types::Timestamp::now().as_secs() - 1);
     for index in 0..FLOOD {
         let forged = unopenable_at(
             &like,
@@ -672,7 +672,7 @@ async fn a_pile_up_dated_in_one_second_cannot_keep_a_commit_below_it_from_being_
                 .publish_event(&commits[1], std::slice::from_ref(&url))
                 .await
                 .expect("the relay holds the commit");
-            let above = nostr::Timestamp::from(commits[1].created_at.as_secs() + 1);
+            let above = nostr::types::Timestamp::from(commits[1].created_at.as_secs() + 1);
             for index in 0..PILE {
                 let content = base64::engine::general_purpose::STANDARD.encode(
                     u32::try_from(index)
@@ -680,10 +680,10 @@ async fn a_pile_up_dated_in_one_second_cannot_keep_a_commit_below_it_from_being_
                         .to_be_bytes()
                         .repeat(24),
                 );
-                let piled = nostr::EventBuilder::new(commits[1].kind, content)
+                let piled = nostr::event::EventBuilder::new(commits[1].kind, content)
                     .tags(commits[1].tags.iter().cloned())
                     .custom_created_at(above)
-                    .sign_with_keys(&nostr::Keys::generate())
+                    .sign_with_keys(&nostr::key::Keys::generate())
                     .expect("sign");
                 publisher
                     .publish_event(&piled, std::slice::from_ref(&url))

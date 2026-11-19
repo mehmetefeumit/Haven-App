@@ -79,7 +79,7 @@ use std::fmt;
 use std::sync::{OnceLock, PoisonError, RwLock};
 
 use hmac::{Hmac, Mac};
-use nostr::PublicKey;
+use nostr::key::PublicKey;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use sha2::Sha256;
@@ -354,7 +354,7 @@ fn normalise_relay_url(value: &str) -> String {
 mod tests {
     use std::sync::Mutex;
 
-    use nostr::prelude::ToBech32 as _;
+    use nostr::nips::nip19::ToBech32 as _;
 
     use super::{
         alias, bucket, circle, event, key_package, peer, relay, salt_cell, subscription,
@@ -449,7 +449,7 @@ mod tests {
         // guards against is `normalise`'s `PublicKey::parse` path collapsing two
         // distinct valid keys onto one normalised form, which a raw-bytes
         // comparison would never exercise.
-        let other = nostr::Keys::generate().public_key().to_hex();
+        let other = nostr::key::Keys::generate().public_key().to_hex();
         assert_ne!(other, HEX_PUBKEY, "test vector collision — regenerate");
         assert_ne!(
             peer(PeerPubkey(HEX_PUBKEY)).to_string(),
@@ -457,7 +457,7 @@ mod tests {
         );
         // ...and the npub spelling of that same second key must land on the
         // same handle as its own hex spelling, not on the first key's.
-        let other_npub = nostr::PublicKey::parse(&other)
+        let other_npub = nostr::key::PublicKey::parse(&other)
             .expect("generated key parses")
             .to_bech32()
             .expect("encodes as npub");

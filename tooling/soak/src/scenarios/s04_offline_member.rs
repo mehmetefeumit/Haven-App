@@ -34,7 +34,7 @@ use std::time::Duration;
 
 use haven_core::nostr::mls::types::{ConvergedRoster, GroupId};
 use haven_core::nostr::mls::DEFAULT_MAX_PAST_EPOCHS;
-use nostr::Event;
+use nostr::event::Event;
 
 use crate::oracle::undecryptable::{self, StoredRow};
 use crate::oracle::vacuity::{ExpectationFloor, Observed};

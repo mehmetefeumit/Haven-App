@@ -15,7 +15,7 @@ pub mod inbox;
 
 use std::collections::BTreeMap;
 
-use nostr::SubscriptionId;
+use nostr::message::SubscriptionId;
 use sha2::{Digest, Sha256};
 
 use super::config::SUB_ID_PREFIX_BYTES;

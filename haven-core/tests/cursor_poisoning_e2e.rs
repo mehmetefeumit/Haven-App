@@ -95,7 +95,12 @@ use haven_core::relay::live_sync::{
 };
 use haven_core::relay::maintenance::build_kp_maintenance_events;
 use haven_core::relay::{allow_ws_loopback_for_test, RelayManager};
-use nostr::{Event, EventBuilder, Keys, Tag, TagStandard, Timestamp};
+use nostr::{
+    event::{Event, EventBuilder, Tag},
+    key::Keys,
+    types::Timestamp,
+    TagStandard,
+};
 use nostr_relay_builder::MockRelay;
 use tempfile::TempDir;
 
@@ -272,7 +277,7 @@ fn rewrap(observed: &Event, created_at_secs: u64, expired: bool) -> Event {
 /// ("exactly one h tag") before the engine, the signature, or any key material
 /// is involved. Minting it needs nothing but the circle's public routing id.
 fn malformed_445(h: &str, created_at_secs: u64) -> Event {
-    EventBuilder::new(nostr::Kind::Custom(445), "b3BhcXVl")
+    EventBuilder::new(nostr::event::Kind::Custom(445), "b3BhcXVl")
         .tags(vec![
             Tag::parse(["h", h]).unwrap(),
             Tag::parse(["h", &hex::encode([0x11u8; 32])]).unwrap(),
@@ -287,7 +292,7 @@ fn malformed_445(h: &str, created_at_secs: u64) -> Event {
 /// v0.10.4 a terminal `Ignored { InvalidEncoding }`, since no later context can
 /// make such bytes valid.
 fn undecodable_445(h: &str, created_at_secs: u64) -> Event {
-    EventBuilder::new(nostr::Kind::Custom(445), "!!!!not-base64!!!!")
+    EventBuilder::new(nostr::event::Kind::Custom(445), "!!!!not-base64!!!!")
         .tags(vec![Tag::parse(["h", h]).unwrap()])
         .custom_created_at(Timestamp::from(created_at_secs))
         .sign_with_keys(&Keys::generate())
@@ -1156,7 +1161,7 @@ async fn catchup_a_window_of_only_undecryptable_events_still_advances() {
     // Valid base64, routed at the circle's public `#h`, but not this group's
     // ciphertext — the engine reports `Stale { PeelFailed }`.
     let junk = EventBuilder::new(
-        nostr::Kind::Custom(445),
+        nostr::event::Kind::Custom(445),
         "bm90LWEtY2lwaGVydGV4dC1qdXN0LXBhZGRlZC1nYXJiYWdlLWJ5dGVz",
     )
     .tags(vec![Tag::parse(["h", &fx.group_hex()]).unwrap()])

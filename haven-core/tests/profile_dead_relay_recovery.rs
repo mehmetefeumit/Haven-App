@@ -22,7 +22,7 @@ use haven_core::profile::{
     ProfileRelaySalt,
 };
 use haven_core::relay::RelayManager;
-use nostr::{Keys, Metadata};
+use nostr::{key::Keys, nips::nip01::Metadata};
 use nostr_relay_builder::prelude::{LocalRelay, RelayBuilder};
 
 /// Fixed salt — assignment must never depend on a random draw, or a failure

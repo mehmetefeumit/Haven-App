@@ -22,7 +22,7 @@
 //! The probe events cannot be taken for a real message: every Haven read names
 //! the `#h` of a group it holds, the probe's `h` is 32 fresh `OsRng` bytes, and
 //! its content is random bytes that fail authentication under every key. They
-//! are built here with `nostr::EventBuilder`, never through the peeler or MDK.
+//! are built here with `nostr::event::EventBuilder`, never through the peeler or MDK.
 //!
 //! # Why this never runs in CI
 //!
@@ -59,8 +59,11 @@ use haven_core::relay::scripted_relay::ScriptedRelay;
 use haven_core::relay::{allow_ws_loopback_for_test, NegProbe, RelayManager};
 use nostr::nips::nip09::EventDeletionRequest;
 use nostr::{
-    Alphabet, Event, EventBuilder, EventId, Filter, Keys, Kind, SingleLetterTag, Tag, TagKind,
-    Timestamp,
+    event::{Event, EventBuilder, EventId, Kind, Tag},
+    filter::{Filter, SingleLetterTag},
+    key::Keys,
+    types::Timestamp,
+    Alphabet, TagKind,
 };
 use nostr_relay_builder::builder::{RelayBuilder, RelayBuilderNip42, RelayBuilderNip42Mode};
 use nostr_sdk::Client;

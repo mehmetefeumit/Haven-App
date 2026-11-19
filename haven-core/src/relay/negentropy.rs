@@ -29,7 +29,10 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use nostr::{Event, EventId, RelayUrl};
+use nostr::{
+    event::{Event, EventId},
+    types::RelayUrl,
+};
 use tokio::time::Instant;
 
 use super::RelayManager;

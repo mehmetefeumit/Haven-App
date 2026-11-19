@@ -30,7 +30,7 @@ use haven_core::nostr::mls::SessionManager;
 use haven_core::relay::live_sync::{group_cursor_stream, CircleSpec, LiveSyncCore};
 use haven_core::relay::maintenance::build_kp_maintenance_events;
 use haven_core::relay::{allow_ws_loopback_for_test, RelayManager};
-use nostr::{Event, Keys};
+use nostr::{event::Event, key::Keys};
 use nostr_relay_builder::{LocalRelay, RelayBuilder};
 use tempfile::TempDir;
 
@@ -952,8 +952,8 @@ async fn a_routing_rotation_onto_another_circles_id_holds_both_circles() {
 
     // Traffic addressed to the shared id is MDK's to give to either circle:
     // it is routed to neither, so none reaches the other circle's relays.
-    let addressed = nostr::EventBuilder::new(nostr::Kind::Custom(445), "ciphertext")
-        .tag(nostr::Tag::parse(["h", &hex::encode(own.nostr_group_id)]).expect("an h tag"))
+    let addressed = nostr::event::EventBuilder::new(nostr::event::Kind::Custom(445), "ciphertext")
+        .tag(nostr::event::Tag::parse(["h", &hex::encode(own.nostr_group_id)]).expect("an h tag"))
         .sign_with_keys(&Keys::generate())
         .expect("signed");
     assert_eq!(
@@ -1165,7 +1165,7 @@ async fn each_leave_goes_to_its_own_relays(
         .await
         .expect("the admin's leave carries on");
     let calls = transport.calls();
-    let events: std::collections::HashSet<nostr::EventId> =
+    let events: std::collections::HashSet<nostr::event::EventId> =
         calls.iter().map(|call| call.event_id).collect();
     let sent = to(calls);
     // Two events at least: the hand-over, then the admin's own proposal.
@@ -1370,7 +1370,11 @@ async fn a_welcome_naming_another_circles_routing_id_holds_both_circles() {
 /// A circle at `good` another client's admin founded, rotated onto `id` and
 /// then invited `device` to, and the id of the Welcome `device` holds, not
 /// yet accepted.
-async fn invited_onto(device: &Member, id: [u8; 32], good: &str) -> (Foreign, nostr::EventId) {
+async fn invited_onto(
+    device: &Member,
+    id: [u8; 32],
+    good: &str,
+) -> (Foreign, nostr::event::EventId) {
     let dir = TempDir::new().expect("temp dir");
     let foreign_keys = Keys::generate();
     let session = SessionManager::new_unencrypted(dir.path(), &foreign_keys).expect("session");
@@ -1712,9 +1716,9 @@ async fn a_shared_id_is_nobodys(device: &Member, joined: &GroupId, shared: [u8; 
 /// authored then. The inner MLS message — what the engine authenticates — is
 /// untouched.
 fn dated(event: &Event, created_at: u64) -> Event {
-    nostr::EventBuilder::new(event.kind, event.content.clone())
+    nostr::event::EventBuilder::new(event.kind, event.content.clone())
         .tags(event.tags.clone())
-        .custom_created_at(nostr::Timestamp::from(created_at))
+        .custom_created_at(nostr::types::Timestamp::from(created_at))
         .sign_with_keys(&Keys::generate())
         .expect("signed")
 }
@@ -1746,7 +1750,7 @@ async fn a_rotation_applied_days_after_it_was_made_asks_the_new_id_from_the_rota
         })
         .expect("the commit is pending");
     let rotated: [u8; 32] = rand::random();
-    let made_at = nostr::Timestamp::now().as_secs() - 3 * 86_400;
+    let made_at = nostr::types::Timestamp::now().as_secs() - 3 * 86_400;
     let rotation = dated(&foreign.rotate(rotated).await, made_at);
     device
         .circle

@@ -83,7 +83,10 @@
 //!
 //! [`RelayManager`]: crate::relay::RelayManager
 
-use nostr::{EventBuilder, Keys, Kind, Tag};
+use nostr::{
+    event::{EventBuilder, Kind, Tag},
+    key::Keys,
+};
 use rand::rngs::OsRng;
 use rand::RngCore;
 
@@ -151,7 +154,7 @@ pub struct TrackedKpSlot<'a> {
 /// account's pre-reset self — no v0.10.4 client mints one, and none can open
 /// it.
 #[must_use]
-pub fn kp_event_is_pre_migration(event: &nostr::Event) -> bool {
+pub fn kp_event_is_pre_migration(event: &nostr::event::Event) -> bool {
     BASE64.decode(&event.content).is_ok_and(|bytes| {
         cgka_engine::key_package_metadata(
             &KeyPackage::new(bytes).with_protocol_profile(ProtocolProfile::Legacy),
@@ -165,7 +168,7 @@ pub fn kp_event_is_pre_migration(event: &nostr::Event) -> bool {
 #[derive(Clone)]
 pub(crate) struct KeyPackageCandidate {
     /// The event, as fetched.
-    pub(crate) event: nostr::Event,
+    pub(crate) event: nostr::event::Event,
     /// The package it carries, for the target's admission rule.
     pub(crate) key_package: KeyPackage,
     last_resort: bool,
@@ -184,7 +187,10 @@ impl KeyPackageCandidate {
     /// capability tag equals, exactly and without repeats, what the package
     /// decodes to. Every one of the seven tags appears exactly once
     /// (`transports/nostr.md:63-65`).
-    pub(crate) fn validate(event: &nostr::Event, account: &nostr::PublicKey) -> Option<Self> {
+    pub(crate) fn validate(
+        event: &nostr::event::Event,
+        account: &nostr::key::PublicKey,
+    ) -> Option<Self> {
         if event.kind != Kind::Custom(KIND_MARMOT_KEY_PACKAGE) || event.pubkey != *account {
             return None;
         }
@@ -258,11 +264,11 @@ impl KeyPackageCandidate {
 
 /// The values of the one tag named `name`, or `None` when the event carries
 /// none or more than one.
-fn only_tag<'a>(event: &'a nostr::Event, name: &str) -> Option<&'a [String]> {
+fn only_tag<'a>(event: &'a nostr::event::Event, name: &str) -> Option<&'a [String]> {
     let mut tags = event
         .tags
         .iter()
-        .map(nostr::Tag::as_slice)
+        .map(nostr::event::Tag::as_slice)
         .filter(|tag| tag.first().map(String::as_str) == Some(name));
     let tag = tags.next()?;
     tags.next().is_none().then(|| &tag[1..])
@@ -271,8 +277,8 @@ fn only_tag<'a>(event: &'a nostr::Event, name: &str) -> Option<&'a [String]> {
 /// Whether `event` is a kind-30443 of `account` carrying a pre-migration
 /// (Legacy) package of that account: a peer who has not updated yet.
 pub(crate) fn is_pre_migration_key_package_of(
-    event: &nostr::Event,
-    account: &nostr::PublicKey,
+    event: &nostr::event::Event,
+    account: &nostr::key::PublicKey,
 ) -> bool {
     event.kind == Kind::Custom(KIND_MARMOT_KEY_PACKAGE)
         && event.pubkey == *account
@@ -697,7 +703,7 @@ pub enum KpSlotRetirement {
 /// recognise.
 #[must_use]
 pub fn find_adoptable_kp_slot<'a>(
-    events: impl IntoIterator<Item = &'a nostr::Event>,
+    events: impl IntoIterator<Item = &'a nostr::event::Event>,
     tracked_kp_bytes: &[u8],
 ) -> Option<String> {
     if tracked_kp_bytes.is_empty() {
@@ -721,7 +727,7 @@ pub fn find_adoptable_kp_slot<'a>(
 /// decisions below do. A `d` is a public Nostr identifier, but it is a
 /// per-account coordinate: never log one (Security Rule 4).
 #[must_use]
-pub fn kp_event_d_tag(event: &nostr::Event) -> Option<String> {
+pub fn kp_event_d_tag(event: &nostr::event::Event) -> Option<String> {
     event.tags.iter().find_map(|t| {
         let s = t.as_slice();
         (s.len() >= 2 && s[0] == D_TAG).then(|| s[1].clone())
@@ -833,7 +839,7 @@ pub fn decide_kp_slot_retirement(
 #[derive(Clone)]
 pub struct KpMaintenanceEvents {
     /// The signed kind-30443 event to publish.
-    pub event: nostr::Event,
+    pub event: nostr::event::Event,
     /// The package the event carries.
     pub key_package: KeyPackage,
     /// The stable NIP-33 `d` the event was built with.
@@ -916,14 +922,14 @@ pub fn is_conformant_slot_id(d: &str) -> bool {
 /// Negative or absent `prev_max` falls through to `now` (a pre-epoch stamp is
 /// not a meaningful floor).
 #[must_use]
-pub fn monotonic_kp_created_at(prev_max: Option<i64>, now_secs: u64) -> nostr::Timestamp {
+pub fn monotonic_kp_created_at(prev_max: Option<i64>, now_secs: u64) -> nostr::types::Timestamp {
     match prev_max {
         // `prev >= 0` makes the cast value-preserving.
         #[allow(clippy::cast_sign_loss)]
         Some(prev) if prev >= 0 => {
-            nostr::Timestamp::from_secs((prev as u64).saturating_add(1).max(now_secs))
+            nostr::types::Timestamp::from_secs((prev as u64).saturating_add(1).max(now_secs))
         }
-        _ => nostr::Timestamp::from_secs(now_secs),
+        _ => nostr::types::Timestamp::from_secs(now_secs),
     }
 }
 
@@ -946,9 +952,9 @@ fn build_key_package_event(
     keys: &Keys,
     kp_bytes: &[u8],
     d: &str,
-    created_at: nostr::Timestamp,
+    created_at: nostr::types::Timestamp,
     own_kp_relays: &[String],
-) -> PublisherResult<nostr::Event> {
+) -> PublisherResult<nostr::event::Event> {
     let key_package =
         KeyPackage::new(kp_bytes.to_vec()).with_protocol_profile(ProtocolProfile::Current);
     // Decoding also validates the leaf (incl. the account-identity proof), and
@@ -1048,7 +1054,7 @@ pub async fn build_kp_maintenance_events(
                     keys,
                     package.bytes(),
                     &d_tag,
-                    nostr::Timestamp::from_secs(created_at),
+                    nostr::types::Timestamp::from_secs(created_at),
                     own_kp_relays,
                 )
                 .ok()
@@ -1162,8 +1168,8 @@ pub fn build_kp_slot_repoint_event(
 pub fn build_kp_slot_retraction(
     keys: &Keys,
     orphan_slot_ids: &[String],
-    observed_event_ids: &[nostr::EventId],
-) -> PublisherResult<nostr::Event> {
+    observed_event_ids: &[nostr::event::EventId],
+) -> PublisherResult<nostr::event::Event> {
     if orphan_slot_ids.is_empty() {
         return Err(PublisherError::Build(
             "no orphaned key package slot to retract".to_owned(),
@@ -2199,7 +2205,7 @@ mod tests {
         kp.bytes().to_vec()
     }
 
-    fn tag_value<'a>(event: &'a nostr::Event, name: &str) -> Option<&'a str> {
+    fn tag_value<'a>(event: &'a nostr::event::Event, name: &str) -> Option<&'a str> {
         event
             .tags
             .iter()
@@ -2215,7 +2221,7 @@ mod tests {
             &keys,
             &kp,
             "d-stable",
-            nostr::Timestamp::from_secs(7_000),
+            nostr::types::Timestamp::from_secs(7_000),
             &own(),
         )
         .expect("build");
@@ -2257,7 +2263,10 @@ mod tests {
     }
 
     /// The values of the one tag named `name`, which must appear exactly once.
-    fn multi_value_tag(event: &nostr::Event, name: &str) -> std::collections::BTreeSet<String> {
+    fn multi_value_tag(
+        event: &nostr::event::Event,
+        name: &str,
+    ) -> std::collections::BTreeSet<String> {
         let tags: Vec<_> = event
             .tags
             .iter()
@@ -2278,9 +2287,14 @@ mod tests {
     #[test]
     fn kp_event_tags_equal_decoded_metadata() {
         let (keys, kp) = kp_bytes_from_session();
-        let event =
-            build_key_package_event(&keys, &kp, "d-stable", nostr::Timestamp::now(), &own())
-                .expect("build");
+        let event = build_key_package_event(
+            &keys,
+            &kp,
+            "d-stable",
+            nostr::types::Timestamp::now(),
+            &own(),
+        )
+        .expect("build");
         let meta = cgka_engine::key_package::key_package_metadata(
             &KeyPackage::new(kp).with_protocol_profile(ProtocolProfile::Current),
         )
@@ -2324,9 +2338,14 @@ mod tests {
     #[test]
     fn kp_event_has_each_required_tag_exactly_once_and_no_extras() {
         let (keys, kp) = kp_bytes_from_session();
-        let event =
-            build_key_package_event(&keys, &kp, "d-stable", nostr::Timestamp::now(), &own())
-                .expect("build");
+        let event = build_key_package_event(
+            &keys,
+            &kp,
+            "d-stable",
+            nostr::types::Timestamp::now(),
+            &own(),
+        )
+        .expect("build");
         let mut names: Vec<&str> = event
             .tags
             .iter()
@@ -2361,9 +2380,14 @@ mod tests {
     fn kp_event_has_no_client_or_encoding_tag() {
         let (keys, kp) = kp_bytes_from_session();
         let relays = vec!["wss://secret-own-relay.example.com".to_string()];
-        let event =
-            build_key_package_event(&keys, &kp, "d-stable", nostr::Timestamp::now(), &relays)
-                .expect("build");
+        let event = build_key_package_event(
+            &keys,
+            &kp,
+            "d-stable",
+            nostr::types::Timestamp::now(),
+            &relays,
+        )
+        .expect("build");
         for absent in ["client", "encoding", "relays"] {
             assert_eq!(tag_value(&event, absent), None, "{absent} tag");
         }
@@ -2376,9 +2400,14 @@ mod tests {
     fn a_built_event_is_a_valid_candidate_and_a_retagged_copy_is_not() {
         type Retag<'a> = &'a dyn Fn(Vec<Vec<String>>) -> Vec<Vec<String>>;
         let (keys, kp) = kp_bytes_from_session();
-        let event =
-            build_key_package_event(&keys, &kp, "d-stable", nostr::Timestamp::now(), &own())
-                .expect("build");
+        let event = build_key_package_event(
+            &keys,
+            &kp,
+            "d-stable",
+            nostr::types::Timestamp::now(),
+            &own(),
+        )
+        .expect("build");
         assert!(KeyPackageCandidate::validate(&event, &keys.public_key()).is_some());
 
         let retagged = |edit: &dyn Fn(Vec<Vec<String>>) -> Vec<Vec<String>>| {
@@ -2450,7 +2479,7 @@ mod tests {
             &Keys::generate(),
             &kp,
             "d-stable",
-            nostr::Timestamp::now(),
+            nostr::types::Timestamp::now(),
             &own(),
         )
         .expect_err("another account's package must not be signed");
@@ -2460,7 +2489,7 @@ mod tests {
     #[test]
     fn build_key_package_event_rejects_empty_d() {
         let (keys, kp) = kp_bytes_from_session();
-        let err = build_key_package_event(&keys, &kp, "", nostr::Timestamp::now(), &own())
+        let err = build_key_package_event(&keys, &kp, "", nostr::types::Timestamp::now(), &own())
             .expect_err("empty d must fail");
         assert_eq!(err.to_string(), "failed to build event");
     }
@@ -2798,9 +2827,14 @@ mod tests {
     fn the_adoptable_slot_is_the_one_carrying_our_own_package() {
         let (keys, kp) = kp_bytes_from_session();
         let fresh = conformant_d(0x77);
-        let ours =
-            build_key_package_event(&keys, &kp, &fresh, nostr::Timestamp::from_secs(10), &own())
-                .expect("ours");
+        let ours = build_key_package_event(
+            &keys,
+            &kp,
+            &fresh,
+            nostr::types::Timestamp::from_secs(10),
+            &own(),
+        )
+        .expect("ours");
         // Same account, DIFFERENT package, also in a conformant slot: adopting
         // it would point tracking at material this engine does not hold.
         let other_kp = kp_bytes_for(&keys);
@@ -2808,7 +2842,7 @@ mod tests {
             &keys,
             &other_kp,
             &conformant_d(0x78),
-            nostr::Timestamp::from_secs(11),
+            nostr::types::Timestamp::from_secs(11),
             &own(),
         )
         .expect("other");
@@ -2834,7 +2868,7 @@ mod tests {
             &keys,
             &kp,
             &legacy_d(0x79),
-            nostr::Timestamp::from_secs(10),
+            nostr::types::Timestamp::from_secs(10),
             &own(),
         )
         .expect("legacy");
@@ -2850,7 +2884,7 @@ mod tests {
             &keys,
             &kp,
             &conformant_d(0x7a),
-            nostr::Timestamp::from_secs(1),
+            nostr::types::Timestamp::from_secs(1),
             &own(),
         )
         .expect("ours");

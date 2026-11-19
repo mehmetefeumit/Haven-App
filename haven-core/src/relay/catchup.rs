@@ -364,7 +364,11 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use nostr::{Event, EventId, Filter, Kind, Timestamp};
+use nostr::{
+    event::{Event, EventId, Kind},
+    filter::Filter,
+    types::Timestamp,
+};
 
 use crate::circle::{CircleManager, DirectoryReconcile};
 use crate::nostr::mls::types::{
@@ -1289,7 +1293,7 @@ async fn ingest_judged(
 /// `TransportDeferred` is retained and retried by the engine itself.
 pub(crate) async fn cursor_verdict(
     circle_mgr: &CircleManager,
-    id: &nostr::EventId,
+    id: &nostr::event::EventId,
     outcome: IngestOutcome,
     left_object_unpersisted: bool,
 ) -> ReceiveOnlyOutcome {
@@ -1864,7 +1868,7 @@ pub(crate) async fn fetch_ids(
         .limit(ids.len());
     if let Some(routing_hex) = routing_hex {
         filter = filter.custom_tag(
-            nostr::SingleLetterTag::lowercase(nostr::Alphabet::H),
+            nostr::filter::SingleLetterTag::lowercase(nostr::Alphabet::H),
             routing_hex,
         );
     }
@@ -1928,7 +1932,7 @@ impl Refetch<'_> {
     /// one event the engine can open, among any number it cannot.
     async fn by_id(&self) {
         let session = self.circle_mgr.session();
-        let mut alone: Vec<nostr::EventId> = Vec::new();
+        let mut alone: Vec<nostr::event::EventId> = Vec::new();
         while Instant::now() < self.deadline && !self.relays.is_empty() {
             // Read for each REQ: what the last one left waiting is no longer
             // due, and what a new epoch made due again is.
@@ -1957,7 +1961,7 @@ impl Refetch<'_> {
                 .into_iter()
                 .map(|(_, event)| event)
                 .collect();
-            let mut discharged: Vec<nostr::EventId> = Vec::new();
+            let mut discharged: Vec<nostr::event::EventId> = Vec::new();
             let mut no_room = 0;
             for event in &events {
                 let (verdict, left) = ingest_judged(self.circle_mgr, self.plane, event).await;
@@ -2860,9 +2864,11 @@ mod tests {
         };
 
         let dir = tempfile::TempDir::new().expect("temp dir");
-        let circle =
-            crate::circle::CircleManager::new_unencrypted(dir.path(), &nostr::Keys::generate())
-                .expect("circle manager");
+        let circle = crate::circle::CircleManager::new_unencrypted(
+            dir.path(),
+            &nostr::key::Keys::generate(),
+        )
+        .expect("circle manager");
         let group = GroupId::new([0x5a; 32]);
         let refused = || IngestOutcome::ResourceRefused {
             group_id: group.clone(),
@@ -2885,8 +2891,13 @@ mod tests {
             (ignored(), false, O::Applied),
         ] {
             assert_eq!(
-                super::cursor_verdict(&circle, &nostr::EventId::all_zeros(), outcome, unpersisted)
-                    .await,
+                super::cursor_verdict(
+                    &circle,
+                    &nostr::event::EventId::all_zeros(),
+                    outcome,
+                    unpersisted
+                )
+                .await,
                 verdict,
                 "the cursor's verdict for an engine answer (unpersisted: {unpersisted})",
             );
@@ -3282,7 +3293,7 @@ mod tests {
     /// length and the timestamps are read by the summary, so the filler events
     /// are clones — a page of 500 real signatures would cost far more than the
     /// property is worth.
-    fn page(count: usize, oldest_secs: i64) -> Vec<nostr::Event> {
+    fn page(count: usize, oldest_secs: i64) -> Vec<nostr::event::Event> {
         let at = |secs: i64| {
             EventBuilder::new(Kind::Custom(445), "b3BhcXVl")
                 .custom_created_at(Timestamp::from(u64::try_from(secs).unwrap()))
@@ -3296,7 +3307,7 @@ mod tests {
 
     /// A relay that FINISHED answering: it served `events` and then signalled
     /// end-of-stored-events, so this page is the whole of what it holds here.
-    fn answered(url: &str, events: Vec<nostr::Event>) -> RelayFetchOutcome {
+    fn answered(url: &str, events: Vec<nostr::event::Event>) -> RelayFetchOutcome {
         RelayFetchOutcome {
             relay_url: url.to_string(),
             responded: true,
@@ -3309,7 +3320,7 @@ mod tests {
     /// end-of-stored-events ever did. Byte-for-byte an `answered` page in its
     /// content — which is the entire reason `drained` has to be carried
     /// alongside it.
-    fn cut_off(url: &str, events: Vec<nostr::Event>) -> RelayFetchOutcome {
+    fn cut_off(url: &str, events: Vec<nostr::event::Event>) -> RelayFetchOutcome {
         RelayFetchOutcome {
             drained: false,
             ..answered(url, events)
@@ -3318,7 +3329,7 @@ mod tests {
 
     /// The state a previous round would have left behind after `url` served
     /// `page`: every id already seen, and `url` still being drained.
-    fn after_serving(url: &str, served: &[nostr::Event]) -> ChaseState {
+    fn after_serving(url: &str, served: &[nostr::event::Event]) -> ChaseState {
         ChaseState {
             chasing: std::iter::once(url.to_string()).collect(),
             silent: HashSet::new(),
@@ -3899,12 +3910,16 @@ mod tests {
 
     use crate::circle::CircleManager;
     use crate::relay::RelayManager;
-    use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+    use nostr::{
+        event::{EventBuilder, Kind, Tag},
+        key::Keys,
+        types::Timestamp,
+    };
     use tempfile::TempDir;
 
     /// A `kind:445` routed at `h`, minted by a throwaway key that belongs to no
     /// member — exactly what any relay observer can produce.
-    fn unauthenticated_445(h: &str, expired: bool) -> nostr::Event {
+    fn unauthenticated_445(h: &str, expired: bool) -> nostr::event::Event {
         let mut tags = vec![Tag::parse(["h", h]).unwrap()];
         if expired {
             tags.push(Tag::expiration(Timestamp::from(
@@ -3989,7 +4004,7 @@ mod tests {
     /// conformant relay serves it to a `#h` subscription (or fetch) for either
     /// value, and the pure pre-engine transport parse then refuses it —
     /// "exactly one h tag" — without touching key material.
-    fn malformed_445(h: &str) -> nostr::Event {
+    fn malformed_445(h: &str) -> nostr::event::Event {
         EventBuilder::new(Kind::Custom(445), "b3BhcXVl")
             .tags(vec![
                 Tag::parse(["h", h]).unwrap(),
@@ -4059,7 +4074,7 @@ mod tests {
     use crate::nostr::mls::types::GroupId;
     use crate::nostr::mls::SessionManager;
     use crate::relay::maintenance::build_kp_maintenance_events;
-    use nostr::Event;
+    use nostr::event::Event;
 
     /// See `live_sync::processor::tests::DIR_READ_AT` for why this is a fixed
     /// far-past constant rather than a real clock reading.

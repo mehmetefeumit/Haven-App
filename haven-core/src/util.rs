@@ -177,7 +177,7 @@ fn forbidden_forms(needle: &str) -> Vec<String> {
     // a rendering that re-encoded the value would otherwise pass.
     if let Ok(bytes) = hex::decode(needle) {
         forms.push(BASE64.encode(&bytes));
-        if let Ok(pubkey) = nostr::PublicKey::from_slice(&bytes) {
+        if let Ok(pubkey) = nostr::key::PublicKey::from_slice(&bytes) {
             forms.extend(pubkey.to_bech32().ok());
         }
     }

@@ -7,7 +7,12 @@
 
 use std::cmp::Ordering;
 
-use nostr::{Event, JsonUtil, Kind, Metadata, PublicKey};
+use nostr::{
+    event::{Event, Kind},
+    key::PublicKey,
+    nips::nip01::Metadata,
+    JsonUtil,
+};
 
 use super::types::{ProfileMetadata, ProfileState};
 
@@ -79,7 +84,11 @@ fn replaces(candidate: &Event, current: &Event) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::{EventBuilder, Keys, Tag, Timestamp};
+    use nostr::{
+        event::{EventBuilder, Tag},
+        key::Keys,
+        types::Timestamp,
+    };
 
     /// Builds a signed kind-0 event with an explicit `created_at`.
     fn kind0(keys: &Keys, content: &str, created_at: u64) -> Event {

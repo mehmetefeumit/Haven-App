@@ -18,7 +18,10 @@ use haven_core::relay::maintenance::{
     RelayListPerRelay, RelayListSnapshot, TrackedKpLifetime, TrackedKpSlot,
 };
 use haven_core::relay::RelayManager;
-use nostr::{EventBuilder, Keys, Kind, Tag};
+use nostr::{
+    event::{EventBuilder, Kind, Tag},
+    key::Keys,
+};
 use nostr_relay_builder::MockRelay;
 
 // Dark Matter port (DM-5a): the KP maintenance decision core dropped the
@@ -51,7 +54,7 @@ fn decide_fresh(snap: &RelayKpSnapshot, stored_d: Option<&str>) -> KpMaintenance
 }
 
 /// Extracts a kind-30443 event's NIP-33 `d` tag (mirrors the FFI helper).
-fn kp_d_tag(ev: &nostr::Event) -> String {
+fn kp_d_tag(ev: &nostr::event::Event) -> String {
     ev.tags
         .iter()
         .find_map(|t| {
@@ -62,7 +65,7 @@ fn kp_d_tag(ev: &nostr::Event) -> String {
 }
 
 /// Extracts a relay-list event's `["relay", <url>]` URLs (mirrors the FFI).
-fn list_urls(ev: &nostr::Event) -> Vec<String> {
+fn list_urls(ev: &nostr::event::Event) -> Vec<String> {
     ev.tags
         .iter()
         .filter_map(|t| {
@@ -75,7 +78,7 @@ fn list_urls(ev: &nostr::Event) -> Vec<String> {
 /// Builds a signed kind-30443 `KeyPackage`-shaped event with a given `d`, so a
 /// probe finds a canonical on the relay. The content is opaque (these tests
 /// exercise the discovery/heal wiring, not MLS material).
-fn kp_30443(keys: &Keys, d: &str) -> nostr::Event {
+fn kp_30443(keys: &Keys, d: &str) -> nostr::event::Event {
     EventBuilder::new(Kind::Custom(30443), "opaque-kp")
         .tags([Tag::parse(["d", d]).unwrap()])
         .sign_with_keys(keys)
@@ -87,10 +90,10 @@ fn kp_30443(keys: &Keys, d: &str) -> nostr::Event {
 /// healthy; last-resort KPs never expire.)
 async fn kp_snapshot(
     mgr: &RelayManager,
-    author: nostr::PublicKey,
+    author: nostr::key::PublicKey,
     relays: &[String],
 ) -> RelayKpSnapshot {
-    let filter = nostr::Filter::new()
+    let filter = nostr::filter::Filter::new()
         .kind(Kind::Custom(30443))
         .author(author)
         .limit(64);
@@ -122,7 +125,7 @@ async fn kp_snapshot(
 /// each responder's `healthy` verdict against `configured`.
 async fn list_snapshot(
     mgr: &RelayManager,
-    author: nostr::PublicKey,
+    author: nostr::key::PublicKey,
     relay_type: RelayType,
     probe_relays: &[String],
     configured: &[String],
@@ -134,7 +137,7 @@ async fn list_snapshot(
     // category that is never published is meaningless — so unwrap loudly rather
     // than substituting a placeholder kind, which would silently probe (and,
     // read the other way, invite publishing) the profile plane.
-    let filter = nostr::Filter::new()
+    let filter = nostr::filter::Filter::new()
         .kind(relay_type.to_kind().expect(
             "relay-list maintenance only probes publishable categories; \
              RelayType::Profile is local-only and has no wire kind",
@@ -174,7 +177,7 @@ async fn list_snapshot(
 /// that relay (and NOT the other) finds it. (Simulates a package present on one
 /// own relay but not another.) Returns once the relay has acknowledged storing
 /// it, so a probe issued next reads it.
-async fn seed_event_on(relay: &str, event: &nostr::Event) {
+async fn seed_event_on(relay: &str, event: &nostr::event::Event) {
     let client = nostr_sdk::Client::builder().build();
     client.add_relay(relay).await.unwrap();
     client.connect().await;
@@ -235,7 +238,7 @@ async fn test20_kp_partial_drop_heals_b_only_a_untouched() {
 
     // Re-probe: B now serves the same-`d` canonical; A's original event id is
     // unchanged (no republish reached A).
-    let filter = nostr::Filter::new()
+    let filter = nostr::filter::Filter::new()
         .kind(Kind::Custom(30443))
         .author(author)
         .limit(64);

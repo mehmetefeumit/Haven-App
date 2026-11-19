@@ -28,7 +28,7 @@ use haven_core::location::LocationMessage;
 use haven_core::nostr::mls::types::{GroupId, LocationMessageResult};
 use haven_core::relay::live_sync::{CircleSpec, LiveSyncCore};
 use haven_core::relay::maintenance::build_kp_maintenance_events;
-use nostr::{Event, Keys, RelayUrl};
+use nostr::{event::Event, key::Keys, types::RelayUrl};
 use nostr_relay_builder::MockRelay;
 use nostr_sdk::Client;
 use tempfile::TempDir;

@@ -59,7 +59,11 @@ use haven_core::relay::{
 };
 use nostr::util::BoxedFuture;
 use nostr::{
-    Alphabet, EventBuilder, Filter, JsonUtil, Keys, Kind, Metadata, SingleLetterTag, Tag, TagKind,
+    event::{EventBuilder, Kind, Tag},
+    filter::{Filter, SingleLetterTag},
+    key::Keys,
+    nips::nip01::Metadata,
+    Alphabet, JsonUtil, TagKind,
 };
 use nostr_relay_builder::builder::RelayBuilder;
 use nostr_relay_builder::prelude::{PolicyResult, QueryPolicy};
@@ -253,7 +257,7 @@ async fn counting_relay() -> (LocalRelay, String, Arc<AtomicUsize>) {
 /// Only its ROUTING matters here — publishing it is what registers the circle
 /// relay in the shared client's pool — so the "ciphertext" is a literal and the
 /// group id is a throwaway constant.
-fn stand_in_circle_event() -> nostr::Event {
+fn stand_in_circle_event() -> nostr::event::Event {
     EventBuilder::new(Kind::Custom(445), "opaque-ciphertext")
         .tags([Tag::custom(
             TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H)),

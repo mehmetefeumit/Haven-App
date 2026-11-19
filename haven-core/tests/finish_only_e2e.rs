@@ -1363,7 +1363,7 @@ impl FanoutSend for HeldAtTheTake<'_> {
 
     async fn publish_location(
         &self,
-        event: &nostr::Event,
+        event: &nostr::event::Event,
         targets: &[String],
     ) -> haven_core::relay::RelayResult<haven_core::relay::PublishResult> {
         self.inner.publish_location(event, targets).await
@@ -1375,7 +1375,7 @@ async fn standing(
     member: &CircleMember,
     group: &GroupId,
 ) -> Vec<(
-    nostr::EventId,
+    nostr::event::EventId,
     Vec<u8>,
     FanoutMls,
     Vec<FanoutTargetStatus>,
@@ -1765,7 +1765,7 @@ async fn a_departure_due_with_its_leave() -> (
     Vec<CircleMember>,
     GroupId,
     ScriptedFanout,
-    nostr::Event,
+    nostr::event::Event,
 ) {
     let fx = setup_circle(3, &[ONE]).await;
     let leave = leave_of(&fx, 1).await;
@@ -2023,12 +2023,14 @@ async fn an_outsiders_flood_on_the_routing_tag_holds_no_background_send() {
     for _ in 0..3 {
         // Valid base64 of more than a nonce and a tag, sealed by no key the
         // circle holds.
-        let junk = nostr::EventBuilder::new(nostr::Kind::Custom(445), "A".repeat(40))
-            .tags([nostr::Tag::custom(
-                nostr::TagKind::SingleLetter(nostr::SingleLetterTag::lowercase(nostr::Alphabet::H)),
+        let junk = nostr::event::EventBuilder::new(nostr::event::Kind::Custom(445), "A".repeat(40))
+            .tags([nostr::event::Tag::custom(
+                nostr::TagKind::SingleLetter(nostr::filter::SingleLetterTag::lowercase(
+                    nostr::Alphabet::H,
+                )),
                 [routing.clone()],
             )])
-            .sign_with_keys(&nostr::Keys::generate())
+            .sign_with_keys(&nostr::key::Keys::generate())
             .expect("sign");
         let _ = finish_only
             .ingest_for_poll(&admin.circle, &junk)
@@ -2389,7 +2391,8 @@ async fn the_next_eviction_of_a_cascade_is_left_due_by_the_narrow_confirm_that_b
         staged_ref(&admin, &group).await.is_some() && sent.len() == 1,
         "premise: the first eviction is recorded and was sent once",
     );
-    let eviction = nostr::Event::from_json(&sent[0].payload).expect("the event that was sent");
+    let eviction =
+        nostr::event::Event::from_json(&sent[0].payload).expect("the event that was sent");
 
     // The rest of the circle applies it, and the next member leaves.
     for member in [second, witness] {

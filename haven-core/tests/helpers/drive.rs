@@ -18,7 +18,7 @@ use haven_core::nostr::mls::types::{
 use haven_core::relay::fanout::scripted::ScriptedFanout;
 use haven_core::relay::fanout::UnrecordedPublisher;
 use haven_core::relay::fanout::{DriveMode, FanoutClock, ModeSource, Publishing};
-use nostr::Event;
+use nostr::event::Event;
 use tokio::sync::Notify;
 
 use super::{CircleFixture, CircleMember};

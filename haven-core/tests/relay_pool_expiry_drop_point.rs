@@ -14,7 +14,12 @@ use std::time::Duration;
 use futures::{SinkExt, StreamExt};
 use haven_core::location::LOCATION_MESSAGE_RETENTION_SECS;
 use haven_core::relay::{RelayManager, TOTAL_LOSS_SKEW_SECS};
-use nostr::{Event, EventBuilder, Filter, Keys, Kind, Tag, Timestamp};
+use nostr::{
+    event::{Event, EventBuilder, Kind, Tag},
+    filter::Filter,
+    key::Keys,
+    types::Timestamp,
+};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 

@@ -421,7 +421,8 @@ async fn o2_fails_a_send_held_by_unread_input_that_never_ends() {
     // in. Every read O2 makes is still cheerful, so this reaches the send
     // attempt, which waits out unread input before it seals — and must then
     // grade a hold that never ends rather than wait past it.
-    let never_taken_in = nostr::EventId::from_slice(&[7; 32]).expect("32 bytes is an event id");
+    let never_taken_in =
+        nostr::event::EventId::from_slice(&[7; 32]).expect("32 bytes is an event id");
     world
         .device(alice)
         .expect("alice")
@@ -468,7 +469,7 @@ fn relay_set(world: &World) -> Vec<String> {
 /// moment it crossed the relay, and the engine answers a second ingest of one
 /// MLS message with `Stale { AlreadySeen }` — so the retention edge would be
 /// graded on a duplicate rather than on the window.
-async fn sealed_now(world: &World, device: DeviceTag, group: &GroupId) -> nostr::Event {
+async fn sealed_now(world: &World, device: DeviceTag, group: &GroupId) -> nostr::event::Event {
     let sender = world.device(device).expect("a device");
     let (event, _, _) = sender
         .manager()
@@ -940,8 +941,8 @@ async fn o7_reds_on_an_inbox_request_sent_to_a_location_plane() {
     o7_clean(&mut world).await;
     let (alice, _) = pair(&world);
     let device = world.device(alice).expect("alice");
-    let own_inbox = nostr::Filter::new()
-        .kind(nostr::Kind::GiftWrap)
+    let own_inbox = nostr::filter::Filter::new()
+        .kind(nostr::event::Kind::GiftWrap)
         .pubkey(device.keys.public_key());
     let location = world.relays()[0].url_for(alice).to_owned();
     let _ = device
@@ -1094,7 +1095,9 @@ async fn o7_reds_on_a_close_naming_a_subscription_its_relay_was_never_sent() {
     client
         .send_msg_to(
             [url.as_str()],
-            nostr::ClientMessage::close(nostr::SubscriptionId::new("never-opened")),
+            nostr::message::ClientMessage::close(nostr::message::SubscriptionId::new(
+                "never-opened",
+            )),
         )
         .await
         .expect("the CLOSE is sent");
@@ -1157,9 +1160,9 @@ async fn o7_answers_rig_broken_when_the_plane_record_is_full() {
     world.relays()[0].ledger().set_plane_caps(0, 0);
     // One more distinct, plane-legal shape: the circle's own `#h`, asked again.
     let device = world.device(alice).expect("alice");
-    let h = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
-    let again = nostr::Filter::new()
-        .kind(nostr::Kind::Custom(445))
+    let h = nostr::filter::SingleLetterTag::lowercase(nostr::Alphabet::H);
+    let again = nostr::filter::Filter::new()
+        .kind(nostr::event::Kind::Custom(445))
         .custom_tag(h, world.circles()[0].group_id_hex());
     let location = world.relays()[0].url_for(alice).to_owned();
     let _ = device

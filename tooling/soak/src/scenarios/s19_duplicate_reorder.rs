@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use haven_core::relay::fanout::{FanoutClock as _, WallClock};
 use haven_core::relay::live_sync::LiveSyncEvent;
-use nostr::{Event, EventId};
+use nostr::event::{Event, EventId};
 use tokio::sync::broadcast::error::TryRecvError;
 use tokio::sync::broadcast::Receiver;
 use tokio::time::{Instant, MissedTickBehavior};
@@ -359,7 +359,7 @@ async fn served_order<T: TimelineSink, L: LogDrain>(
     let mut agreed: Option<Vec<usize>> = None;
     for relay in world.relays() {
         let order: Vec<usize> = relay
-            .stored_page(nostr::Filter::new().ids(published.iter().copied()))
+            .stored_page(nostr::filter::Filter::new().ids(published.iter().copied()))
             .await?
             .iter()
             .filter_map(|event| published.iter().position(|id| *id == event.id))

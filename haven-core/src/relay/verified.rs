@@ -12,7 +12,7 @@
 //! `T-POOL-VERIFY-CACHE`; guarded by `scripts/ci/check_engine_client_options.sh`.
 
 use nostr::util::BoxedFuture;
-use nostr::{Event, RelayUrl, SubscriptionId};
+use nostr::{event::Event, message::SubscriptionId, types::RelayUrl};
 use nostr_sdk::pool::monitor::Monitor;
 use nostr_sdk::pool::policy::{AdmitPolicy, AdmitStatus, PolicyError};
 use nostr_sdk::{Client, ClientOptions};
@@ -81,7 +81,13 @@ mod tests {
 
     use nostr::secp256k1::schnorr::Signature;
     use nostr::secp256k1::Message;
-    use nostr::{EventBuilder, Filter, JsonUtil as _, Keys, Kind, Tag, Timestamp};
+    use nostr::{
+        event::{EventBuilder, Kind, Tag},
+        filter::Filter,
+        key::Keys,
+        types::Timestamp,
+        JsonUtil as _,
+    };
     use nostr_sdk::RelayPoolOptions;
 
     use super::*;

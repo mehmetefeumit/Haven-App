@@ -43,7 +43,7 @@ use haven_core::relay::live_sync::{
     SyncStatusReason,
 };
 use haven_core::relay::maintenance::build_kp_maintenance_events;
-use nostr::{Event, Keys};
+use nostr::{event::Event, key::Keys};
 use nostr_relay_builder::builder::{PolicyResult, QueryPolicy};
 use nostr_relay_builder::{LocalRelay, MockRelay, RelayBuilder};
 use nostr_sdk::Client;
@@ -219,7 +219,7 @@ async fn second_after_cursor(engine_circle: &CircleManager, circle: &str) -> Opt
         .ok()
         .flatten()?;
     for _ in 0..20 {
-        let now_secs = nostr::Timestamp::now().as_secs();
+        let now_secs = nostr::types::Timestamp::now().as_secs();
         let now_ms = i64::try_from(now_secs)
             .unwrap_or(i64::MAX)
             .saturating_mul(1000);
@@ -233,12 +233,12 @@ async fn second_after_cursor(engine_circle: &CircleManager, circle: &str) -> Opt
 
 /// Every filter a relay was asked with, and the socket that asked.
 #[derive(Debug, Clone, Default)]
-struct RecordedReqs(Arc<std::sync::Mutex<Vec<(std::net::SocketAddr, nostr::Filter)>>>);
+struct RecordedReqs(Arc<std::sync::Mutex<Vec<(std::net::SocketAddr, nostr::filter::Filter)>>>);
 
 impl QueryPolicy for RecordedReqs {
     fn admit_query<'a>(
         &'a self,
-        query: &'a nostr::Filter,
+        query: &'a nostr::filter::Filter,
         addr: &'a std::net::SocketAddr,
     ) -> nostr_sdk::prelude::BoxedFuture<'a, PolicyResult> {
         self.0
@@ -295,7 +295,7 @@ async fn engine_receives_routes_and_processes_a_kind445_over_a_real_relay() {
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     let mut bus = engine.bus().subscribe();
-    let opened = nostr::Timestamp::now().as_secs();
+    let opened = nostr::types::Timestamp::now().as_secs();
     engine
         .start(&[fx.spec(&url)], &[])
         .await
@@ -426,7 +426,7 @@ async fn the_receiver_of_a_peers_relay_change_listens_where_the_circle_now_lives
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     let mut bus = engine.bus().subscribe();
-    let opened = nostr::Timestamp::now().as_secs();
+    let opened = nostr::types::Timestamp::now().as_secs();
     engine
         .start(&[fx.spec(&old_url)], &[])
         .await
@@ -533,7 +533,7 @@ async fn the_receiver_of_a_routing_rotation_listens_under_the_new_id_and_the_pri
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     let mut bus = engine.bus().subscribe();
-    let opened = nostr::Timestamp::now().as_secs();
+    let opened = nostr::types::Timestamp::now().as_secs();
     engine
         .start(&[fx.spec(&url)], &[])
         .await
@@ -851,7 +851,7 @@ async fn a_move_fails_on_one_of_two_circles(fault_on_first: bool) -> bool {
         followed(&engine, seen).await;
     })
     .await;
-    let moving_relay = nostr::RelayUrl::parse(moving_url).expect("a relay url");
+    let moving_relay = nostr::types::RelayUrl::parse(moving_url).expect("a relay url");
     assert!(
         engine
             .relays_in_pool_for_test()
@@ -937,8 +937,8 @@ async fn a_relay_a_circle_left_keeps_its_standing_req_for_a_day_and_no_longer() 
         .await
         .expect("the admin changes the circle's relays");
     let (old_relay, new_relay) = (
-        nostr::RelayUrl::parse(&old_url).expect("a relay url"),
-        nostr::RelayUrl::parse(&new_url).expect("a relay url"),
+        nostr::types::RelayUrl::parse(&old_url).expect("a relay url"),
+        nostr::types::RelayUrl::parse(&new_url).expect("a relay url"),
     );
     // The session follows the change by itself.
     followed(&engine, seen).await;
@@ -1040,7 +1040,7 @@ async fn a_relay_a_circle_left_is_let_go_when_its_day_ends_with_nothing_asking()
         .await
         .expect("the admin changes the circle's relays");
     followed(&engine, seen).await;
-    let old_relay = nostr::RelayUrl::parse(&old_url).expect("a relay url");
+    let old_relay = nostr::types::RelayUrl::parse(&old_url).expect("a relay url");
     assert!(
         engine.relays_in_pool_for_test().await.contains(&old_relay),
         "premise: within the day the circle listens at the relay it left",
@@ -1150,8 +1150,8 @@ async fn a_burst_open_moves_a_circle_whose_routing_changed_while_paused() {
         .expect("the admin changes the circle's relays");
     followed(&engine, seen).await;
     let (old_relay, new_relay) = (
-        nostr::RelayUrl::parse(&old_url).expect("a relay url"),
-        nostr::RelayUrl::parse(&new_url).expect("a relay url"),
+        nostr::types::RelayUrl::parse(&old_url).expect("a relay url"),
+        nostr::types::RelayUrl::parse(&new_url).expect("a relay url"),
     );
     assert!(
         engine.relays_in_pool_for_test().await.contains(&old_relay),
@@ -1310,7 +1310,7 @@ async fn engine_multiplexes_two_circles_and_drops_unsubscribed_h() {
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     let mut bus = engine.bus().subscribe();
-    let opened = nostr::Timestamp::now().as_secs();
+    let opened = nostr::types::Timestamp::now().as_secs();
     engine
         .start(&[fx_a.spec(&url), fx_b.spec(&url)], &[])
         .await
@@ -1326,8 +1326,8 @@ async fn engine_multiplexes_two_circles_and_drops_unsubscribed_h() {
     // A 445 for a circle the engine never subscribed to; must be filtered out.
     publish(
         &url,
-        &nostr::EventBuilder::new(nostr::Kind::Custom(445), "opaque-ciphertext")
-            .tags([nostr::Tag::parse(["h", &hex_unsubscribed]).unwrap()])
+        &nostr::event::EventBuilder::new(nostr::event::Kind::Custom(445), "opaque-ciphertext")
+            .tags([nostr::event::Tag::parse(["h", &hex_unsubscribed]).unwrap()])
             .sign_with_keys(&Keys::generate())
             .unwrap(),
     )
@@ -1345,11 +1345,11 @@ async fn engine_multiplexes_two_circles_and_drops_unsubscribed_h() {
     // so these are the engine's. A filter that names no kind, or names 445,
     // can be answered with a group event — whether or not it names a circle.
     let asked = asked.0.lock().expect("the record of requests").clone();
-    let can_match_445 = |filter: &nostr::Filter| {
+    let can_match_445 = |filter: &nostr::filter::Filter| {
         filter
             .kinds
             .as_ref()
-            .is_none_or(|kinds| kinds.contains(&nostr::Kind::Custom(445)))
+            .is_none_or(|kinds| kinds.contains(&nostr::event::Kind::Custom(445)))
     };
     assert_eq!(
         asked
@@ -1359,7 +1359,7 @@ async fn engine_multiplexes_two_circles_and_drops_unsubscribed_h() {
         1,
         "group events are asked for by ONE filter: none beside it, with or without an #h"
     );
-    let h = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
+    let h = nostr::filter::SingleLetterTag::lowercase(nostr::Alphabet::H);
     let group_reqs: Vec<_> = asked
         .into_iter()
         .filter(|(_, filter)| filter.generic_tags.contains_key(&h))
@@ -1409,7 +1409,7 @@ async fn engine_resume_after_background_re_anchors_and_still_delivers() {
         admin_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
-    let opened = nostr::Timestamp::now().as_secs();
+    let opened = nostr::types::Timestamp::now().as_secs();
     engine.start(&[fx.spec(&url)], &[]).await.expect("start");
     assert!(
         subscription_established(&circle, &[fx.hex()], opened).await,
@@ -1488,7 +1488,7 @@ async fn a_start_no_relay_has_answered_is_not_an_established_subscription() {
         Keys::generate().public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
-    let opened = nostr::Timestamp::now().as_secs();
+    let opened = nostr::types::Timestamp::now().as_secs();
     engine
         .start(
             &[CircleSpec {
@@ -1522,8 +1522,9 @@ async fn subscription_health_reports_healthy_over_a_connected_relay() {
     let url = relay.url().await.to_string();
 
     let dir = TempDir::new().unwrap();
-    let circle =
-        Arc::new(CircleManager::new_unencrypted(dir.path(), &nostr::Keys::generate()).unwrap());
+    let circle = Arc::new(
+        CircleManager::new_unencrypted(dir.path(), &nostr::key::Keys::generate()).unwrap(),
+    );
     // A session lists the ids of circles its manager holds.
     circle.keep_circle_row_for_test([0x11; 32]);
     let engine = LiveSyncCore::new_local(
@@ -1586,8 +1587,9 @@ async fn a_relay_that_is_down_does_not_reanchor_the_session_and_owes_its_floor()
     let hex = hex::encode([0x22u8; 32]);
 
     let dir = TempDir::new().unwrap();
-    let circle =
-        Arc::new(CircleManager::new_unencrypted(dir.path(), &nostr::Keys::generate()).unwrap());
+    let circle = Arc::new(
+        CircleManager::new_unencrypted(dir.path(), &nostr::key::Keys::generate()).unwrap(),
+    );
     // A session lists the ids of circles its manager holds.
     circle.keep_circle_row_for_test([0x22; 32]);
     let engine = LiveSyncCore::new_local(
@@ -1662,7 +1664,7 @@ async fn a_relay_that_is_down_does_not_reanchor_the_session_and_owes_its_floor()
         );
     }
     assert!(!reanchored, "the tick announced a re-anchor");
-    let dead = nostr::RelayUrl::parse(&dead_url).expect("a relay url");
+    let dead = nostr::types::RelayUrl::parse(&dead_url).expect("a relay url");
     assert!(
         circle.relay_floor_for_test(&hex, dead.as_str()).is_some(),
         "the relay left out of the circle's coverage owes it no floor"
@@ -1693,7 +1695,7 @@ async fn a_session_started_into_a_burst_reads_as_one_and_keeps_the_starts_inbox_
         let admin_keys = Keys::generate();
         let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &admin_keys).unwrap());
         let fx = real_circle(&circle, &admin_keys, std::slice::from_ref(&url)).await;
-        let now = i64::try_from(nostr::Timestamp::now().as_secs()).unwrap();
+        let now = i64::try_from(nostr::types::Timestamp::now().as_secs()).unwrap();
         if has_cursor {
             circle
                 .advance_sync_cursor(STREAM_INBOX_1059, now * 1000)
@@ -1724,7 +1726,7 @@ async fn a_session_started_into_a_burst_reads_as_one_and_keeps_the_starts_inbox_
                     filter
                         .kinds
                         .as_ref()
-                        .is_some_and(|kinds| kinds.contains(&nostr::Kind::GiftWrap))
+                        .is_some_and(|kinds| kinds.contains(&nostr::event::Kind::GiftWrap))
                 })
                 .and_then(|(_, filter)| filter.since)
                 .and_then(|since| i64::try_from(since.as_secs()).ok());

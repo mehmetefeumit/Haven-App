@@ -15,7 +15,7 @@ use haven_core::location::LocationMessage;
 use haven_core::nostr::mls::types::LocationMessageResult;
 use haven_core::relay::live_sync::{EngineProcessor, EventBus, LiveSyncEvent};
 use haven_core::relay::maintenance::build_kp_maintenance_events;
-use nostr::{Event, Keys};
+use nostr::{event::Event, key::Keys};
 use tempfile::TempDir;
 
 fn senders(rx: &mut tokio::sync::broadcast::Receiver<LiveSyncEvent>) -> Vec<String> {

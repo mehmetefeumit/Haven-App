@@ -69,7 +69,7 @@ pub(crate) fn note(url: &str) {
 /// A dial outside `world`, or a relay of `world` never dialled.
 pub fn dials_cover_exactly(dials: &[String], world: &[String]) -> Result<(), String> {
     let norm = |url: &String| {
-        nostr::RelayUrl::parse(url).map_or_else(
+        nostr::types::RelayUrl::parse(url).map_or_else(
             |_| url.clone(),
             |url| url.as_str_without_trailing_slash().to_owned(),
         )

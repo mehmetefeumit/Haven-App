@@ -17,7 +17,7 @@ use base64::Engine;
 use haven_core::circle::{RelayType, KEY_PACKAGE_KIND};
 use haven_core::nostr::mls::SessionManager;
 use haven_core::relay::build_relay_list_event;
-use nostr::{Keys, Kind};
+use nostr::{event::Kind, key::Keys};
 
 use helpers::{cleanup_dir, create_key_package_event, unique_temp_dir};
 

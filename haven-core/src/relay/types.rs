@@ -2,7 +2,7 @@
 //!
 //! This module defines types for relay status and publish results.
 
-use nostr::{Event, EventId};
+use nostr::event::{Event, EventId};
 
 /// Connection status for a relay.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -2028,8 +2028,8 @@ fn redact_directory_err(e: impl std::fmt::Display) -> String {
 /// would. Both halves are pinned below: skipping a parse that does not happen
 /// would buy nothing, and it would silently change what the fallback means.
 fn hex_to_npub(hex: &str) -> String {
-    use nostr::prelude::ToBech32 as _;
-    nostr::PublicKey::parse(hex)
+    use nostr::nips::nip19::ToBech32 as _;
+    nostr::key::PublicKey::parse(hex)
         .ok()
         .and_then(|pk| pk.to_bech32().ok())
         .unwrap_or_else(|| hex.to_string())
@@ -2044,9 +2044,9 @@ fn member_key_packages(
     members
         .into_iter()
         .map(|m| {
-            let key_package_event: nostr::Event = serde_json::from_str(&m.key_package_json)
+            let key_package_event: nostr::event::Event = serde_json::from_str(&m.key_package_json)
                 .map_err(|e| format!("Invalid key package JSON: {e}"))?;
-            if nostr::PublicKey::parse(&m.author_npub).ok() != Some(key_package_event.pubkey) {
+            if nostr::key::PublicKey::parse(&m.author_npub).ok() != Some(key_package_event.pubkey) {
                 return Err("Key package author does not match the member".to_string());
             }
             Ok(haven_core::circle::MemberKeyPackage {
@@ -2896,10 +2896,10 @@ const PROFILE_RELAY_LIST_UNPUBLISHABLE: &str =
 /// `None` for it). This is the single choke point every publish/unpublish/
 /// maintenance path funnels through, so the profile category can never acquire
 /// a wire form by accident.
-fn relay_list_wire_kind(relay_type: RelayTypeFfi) -> Result<nostr::Kind, String> {
+fn relay_list_wire_kind(relay_type: RelayTypeFfi) -> Result<nostr::event::Kind, String> {
     match relay_type {
-        RelayTypeFfi::Inbox => Ok(nostr::Kind::InboxRelays),
-        RelayTypeFfi::Nip65 => Ok(nostr::Kind::RelayList),
+        RelayTypeFfi::Inbox => Ok(nostr::event::Kind::InboxRelays),
+        RelayTypeFfi::Nip65 => Ok(nostr::event::Kind::RelayList),
         // FAIL-CLOSED — never a `_ =>` default and never mapped onto `Nip65`.
         RelayTypeFfi::Profile => Err(PROFILE_RELAY_LIST_UNPUBLISHABLE.to_string()),
     }
@@ -2910,10 +2910,10 @@ fn relay_list_wire_kind(relay_type: RelayTypeFfi) -> Result<nostr::Kind, String>
 /// kind-10002 `r` tags for the NIP-65 KeyPackage-discovery list (W2).
 fn build_relay_list_event_for(
     relay_type: RelayTypeFfi,
-    keys: &nostr::Keys,
+    keys: &nostr::key::Keys,
     urls: &[String],
     created_at: Option<i64>,
-) -> Result<nostr::Event, String> {
+) -> Result<nostr::event::Event, String> {
     match relay_type {
         RelayTypeFfi::Inbox => haven_core::relay::build_relay_list_event(
             keys,
@@ -2940,9 +2940,9 @@ fn build_relay_list_event_for(
 /// strictly supersedes the previous list across clock skew.
 fn build_relay_list_unpublish_for(
     relay_type: RelayTypeFfi,
-    keys: &nostr::Keys,
+    keys: &nostr::key::Keys,
     last_published_at: Option<i64>,
-) -> Result<nostr::Event, String> {
+) -> Result<nostr::event::Event, String> {
     match relay_type {
         RelayTypeFfi::Inbox => haven_core::relay::build_unpublish_event(
             keys,
@@ -3070,7 +3070,7 @@ impl std::fmt::Debug for BuiltUnpublishFfi {
 }
 
 /// Serializes a group-evolving commit event to JSON for the Dart publish path.
-fn commit_event_to_json(event: &nostr::Event) -> Result<String, String> {
+fn commit_event_to_json(event: &nostr::event::Event) -> Result<String, String> {
     serde_json::to_string(event).map_err(|e| format!("Failed to serialize commit event: {e}"))
 }
 
@@ -3153,7 +3153,7 @@ const _: fn() = || {
 /// relay-list event, for drift detection in
 /// [`RelayManagerFfi::maintain_relay_list_category`]. Never logged.
 #[inline]
-fn relay_list_urls(event: &nostr::Event) -> Vec<String> {
+fn relay_list_urls(event: &nostr::event::Event) -> Vec<String> {
     event
         .tags
         .iter()
@@ -3168,7 +3168,7 @@ fn relay_list_urls(event: &nostr::Event) -> Vec<String> {
 /// relay-list event, for drift detection on the KeyPackage-discovery list under
 /// Dark Matter (W2; NIP-65 tags relays as `r`, NOT the `relay` form 10050 uses).
 #[inline]
-fn nip65_relay_list_urls(event: &nostr::Event) -> Vec<String> {
+fn nip65_relay_list_urls(event: &nostr::event::Event) -> Vec<String> {
     event
         .tags
         .iter()
@@ -3191,7 +3191,7 @@ fn nip65_relay_list_urls(event: &nostr::Event) -> Vec<String> {
 #[inline]
 fn relay_list_urls_for(
     relay_type: RelayTypeFfi,
-    event: &nostr::Event,
+    event: &nostr::event::Event,
 ) -> Result<Vec<String>, String> {
     match relay_type {
         RelayTypeFfi::Inbox => Ok(relay_list_urls(event)),
@@ -3211,8 +3211,8 @@ fn relay_list_urls_for(
 /// pass for ours.
 fn retain_own_events(
     outcomes: &mut [haven_core::relay::RelayFetchOutcome],
-    own: &nostr::PublicKey,
-    kind: nostr::Kind,
+    own: &nostr::key::PublicKey,
+    kind: nostr::event::Kind,
 ) {
     for outcome in outcomes {
         outcome
@@ -3279,15 +3279,15 @@ where
 /// wrong length or malformed key. Wraps the input in `Zeroizing` so an
 /// early-return path never leaks the secret (Security Rule 7/9).
 ///
-/// [`Keys`]: nostr::Keys
-fn keys_from_secret_bytes(identity_secret_bytes: Vec<u8>) -> Result<nostr::Keys, String> {
+/// [`Keys`]: nostr::key::Keys
+fn keys_from_secret_bytes(identity_secret_bytes: Vec<u8>) -> Result<nostr::key::Keys, String> {
     let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
     if identity_secret_bytes.len() != 32 {
         return Err("Invalid secret bytes length".to_string());
     }
-    let secret_key = nostr::SecretKey::from_slice(&identity_secret_bytes)
+    let secret_key = nostr::key::SecretKey::from_slice(&identity_secret_bytes)
         .map_err(|e| format!("Invalid secret key: {e}"))?;
-    Ok(nostr::Keys::new(secret_key))
+    Ok(nostr::key::Keys::new(secret_key))
 }
 
 impl CircleManagerFfi {
@@ -3369,7 +3369,7 @@ impl CircleManagerFfi {
         self_pubkey_hex: String,
     ) -> Result<LeavePlanFfi, String> {
         let group_id = GroupId::from_slice(&mls_group_id);
-        let self_pk = nostr::PublicKey::from_hex(&self_pubkey_hex)
+        let self_pk = nostr::key::PublicKey::from_hex(&self_pubkey_hex)
             .map_err(|_| "Invalid self_pubkey_hex".to_string())?;
         let plan = self
             .inner
@@ -3564,7 +3564,7 @@ impl CircleManagerFfi {
         let keys = keys_from_secret_bytes(identity_secret_bytes)?;
 
         // Parse the gift-wrapped event
-        let gift_wrap_event: nostr::Event = serde_json::from_str(&gift_wrap_event_json)
+        let gift_wrap_event: nostr::event::Event = serde_json::from_str(&gift_wrap_event_json)
             .map_err(|e| format!("Invalid gift wrap event JSON: {e}"))?;
 
         // Genuinely async — the Dark Matter peeler previews the welcome (peel
@@ -3621,7 +3621,7 @@ impl CircleManagerFfi {
         &self,
         gift_wrap_id: Vec<u8>,
     ) -> Result<AcceptInvitationOutcomeFfi, String> {
-        let event_id = nostr::EventId::from_slice(&gift_wrap_id)
+        let event_id = nostr::event::EventId::from_slice(&gift_wrap_id)
             .map_err(|e| format!("Invalid gift-wrap id: {e}"))?;
         match self.inner.accept_invitation(&event_id).await {
             Ok(joined) => Ok(AcceptInvitationOutcomeFfi {
@@ -3651,7 +3651,7 @@ impl CircleManagerFfi {
         &self,
         gift_wrap_id: Vec<u8>,
     ) -> Result<RejoinOffersOutcomeFfi, String> {
-        let event_id = nostr::EventId::from_slice(&gift_wrap_id)
+        let event_id = nostr::event::EventId::from_slice(&gift_wrap_id)
             .map_err(|e| format!("Invalid gift-wrap id: {e}"))?;
         match self.inner.rejoin_offers_for_invitation(&event_id).await {
             Ok(offers) => Ok(RejoinOffersOutcomeFfi {
@@ -3684,7 +3684,7 @@ impl CircleManagerFfi {
         gift_wrap_id: Vec<u8>,
         local_state_token: Vec<u8>,
     ) -> Result<AcceptInvitationOutcomeFfi, String> {
-        let event_id = nostr::EventId::from_slice(&gift_wrap_id)
+        let event_id = nostr::event::EventId::from_slice(&gift_wrap_id)
             .map_err(|e| format!("Invalid gift-wrap id: {e}"))?;
         match self
             .inner
@@ -3711,7 +3711,7 @@ impl CircleManagerFfi {
     /// `gift_wrap_id`, and the invitation with them: nothing on the wire,
     /// and redelivery opens none again.
     pub async fn decline_group_rejoin(&self, gift_wrap_id: Vec<u8>) -> Result<(), String> {
-        let event_id = nostr::EventId::from_slice(&gift_wrap_id)
+        let event_id = nostr::event::EventId::from_slice(&gift_wrap_id)
             .map_err(|e| format!("Invalid gift-wrap id: {e}"))?;
         self.inner
             .decline_group_rejoin(&event_id)
@@ -3743,7 +3743,7 @@ impl CircleManagerFfi {
         key_package_json: String,
         mls_group_id: Option<Vec<u8>>,
     ) -> Result<KeyPackageAdmissionFfi, String> {
-        let event: nostr::Event = serde_json::from_str(&key_package_json)
+        let event: nostr::event::Event = serde_json::from_str(&key_package_json)
             .map_err(|_| "Invalid key package event".to_string())?;
         let group_id = mls_group_id.map(|id| GroupId::from_slice(&id));
         Ok(self
@@ -3773,7 +3773,7 @@ impl CircleManagerFfi {
     /// Rule 10), with the replacement offer MDK holds for that gift wrap, and
     /// marks the gift wrap resolved so a re-poll never re-surfaces it.
     pub async fn decline_invitation(&self, gift_wrap_id: Vec<u8>) -> Result<(), String> {
-        let event_id = nostr::EventId::from_slice(&gift_wrap_id)
+        let event_id = nostr::event::EventId::from_slice(&gift_wrap_id)
             .map_err(|e| format!("Invalid gift-wrap id: {e}"))?;
         self.inner
             .decline_invitation(&event_id)
@@ -3806,23 +3806,23 @@ impl CircleManagerFfi {
         if event_ids.is_empty() {
             return Err("No event IDs provided for deletion".to_string());
         }
-        let secret_key = nostr::SecretKey::from_slice(&identity_secret_bytes)
+        let secret_key = nostr::key::SecretKey::from_slice(&identity_secret_bytes)
             .map_err(|e| format!("Invalid secret key: {e}"))?;
-        let keys = nostr::Keys::new(secret_key);
+        let keys = nostr::key::Keys::new(secret_key);
 
-        let ids: Vec<nostr::EventId> = event_ids
+        let ids: Vec<nostr::event::EventId> = event_ids
             .iter()
             .map(|id| {
                 // Neither the id nor the parse detail: an event id is an
                 // identifier, and an FFI error string is a place Rule 15 names
                 // explicitly. The caller knows which ids it passed.
-                nostr::EventId::from_hex(id)
+                nostr::event::EventId::from_hex(id)
                     .map_err(|_| "Invalid event ID in the deletion list".to_string())
             })
             .collect::<Result<Vec<_>, String>>()?;
 
         let deletion = nostr::nips::nip09::EventDeletionRequest::new().ids(ids);
-        let event = nostr::EventBuilder::delete(deletion)
+        let event = nostr::event::EventBuilder::delete(deletion)
             .sign_with_keys(&keys)
             .map_err(|e| format!("Failed to sign deletion event: {e}"))?;
 
@@ -4288,7 +4288,7 @@ impl CircleManagerFfi {
 
     /// Adds a relay to one category (idempotent).
     ///
-    /// The URL is normalized via `nostr::RelayUrl::parse`; duplicates are
+    /// The URL is normalized via `nostr::types::RelayUrl::parse`; duplicates are
     /// silent no-ops. `ws://` and credential-bearing URLs are rejected with a
     /// `CircleError::InvalidRelayInput`, whose `RelayInputRejection` sentence
     /// reaches Dart verbatim and is what `_mapStorageError` routes the
@@ -4475,9 +4475,9 @@ impl CircleManagerFfi {
         if identity_secret_bytes.len() != 32 {
             return Err("Invalid secret bytes length".to_string());
         }
-        let secret_key = nostr::SecretKey::from_slice(&identity_secret_bytes)
+        let secret_key = nostr::key::SecretKey::from_slice(&identity_secret_bytes)
             .map_err(|e| format!("Invalid secret key: {e}"))?;
-        let keys = nostr::Keys::new(secret_key);
+        let keys = nostr::key::Keys::new(secret_key);
 
         let core_type = haven_core::circle::RelayType::from(relay_type);
         // Dark Matter W2: the recorded / on-wire kind is 10002 for Nip65, 10050
@@ -4597,9 +4597,9 @@ impl CircleManagerFfi {
         event_id_hex: String,
         published_at_secs: i64,
     ) -> Result<(), String> {
-        let pubkey = nostr::PublicKey::parse(&identity_pubkey_hex)
+        let pubkey = nostr::key::PublicKey::parse(&identity_pubkey_hex)
             .map_err(|e| format!("Invalid pubkey: {e}"))?;
-        let event_id = nostr::EventId::from_hex(&event_id_hex)
+        let event_id = nostr::event::EventId::from_hex(&event_id_hex)
             .map_err(|e| format!("Invalid event id: {e}"))?;
         let inner = self.inner.clone();
         let now = published_at_secs;
@@ -4632,9 +4632,9 @@ impl CircleManagerFfi {
         if identity_secret_bytes.len() != 32 {
             return Err("Invalid secret bytes length".to_string());
         }
-        let secret_key = nostr::SecretKey::from_slice(&identity_secret_bytes)
+        let secret_key = nostr::key::SecretKey::from_slice(&identity_secret_bytes)
             .map_err(|e| format!("Invalid secret key: {e}"))?;
-        let keys = nostr::Keys::new(secret_key);
+        let keys = nostr::key::Keys::new(secret_key);
         let pubkey = keys.public_key();
 
         let core_type = haven_core::circle::RelayType::from(relay_type);
@@ -4725,9 +4725,9 @@ impl CircleManagerFfi {
         if identity_secret_bytes.len() != 32 {
             return Err("Invalid secret bytes length".to_string());
         }
-        let secret_key = nostr::SecretKey::from_slice(&identity_secret_bytes)
+        let secret_key = nostr::key::SecretKey::from_slice(&identity_secret_bytes)
             .map_err(|e| format!("Invalid secret key: {e}"))?;
-        let keys = nostr::Keys::new(secret_key);
+        let keys = nostr::key::Keys::new(secret_key);
         let pubkey = keys.public_key();
 
         if dropped_relays.is_empty() {
@@ -4903,7 +4903,7 @@ const PROFILE_RETRACTION_UNVERIFIED: &str =
 /// Returns the current Unix time in whole seconds, saturating (never negative).
 #[cfg(not(test))]
 fn profile_now_secs() -> i64 {
-    i64::try_from(nostr::Timestamp::now().as_secs()).unwrap_or(i64::MAX)
+    i64::try_from(nostr::types::Timestamp::now().as_secs()).unwrap_or(i64::MAX)
 }
 
 #[cfg(test)]
@@ -4920,7 +4920,7 @@ fn profile_now_secs() -> i64 {
     let ahead = PROFILE_CLOCK_AHEAD_SECS
         .try_with(|ahead| ahead.load(std::sync::atomic::Ordering::SeqCst))
         .unwrap_or(0);
-    i64::try_from(nostr::Timestamp::now().as_secs())
+    i64::try_from(nostr::types::Timestamp::now().as_secs())
         .unwrap_or(i64::MAX)
         .saturating_add(ahead)
 }
@@ -5012,7 +5012,7 @@ fn profile_stamp_lists(outcome: &AssignedFetch) -> ProfileStampLists {
         misses: outcome
             .missed
             .iter()
-            .map(nostr::PublicKey::to_hex)
+            .map(nostr::key::PublicKey::to_hex)
             .collect(),
     }
 }
@@ -5347,13 +5347,14 @@ impl CircleManagerFfi {
         // normalize the caller's hex to lowercase before dedup/query — otherwise
         // an uppercase input never matches its stored row (bug LOW-6).
         let mut all_hex: Vec<String> = Vec::with_capacity(pubkeys_hex.len());
-        let mut parsed: Vec<(String, nostr::PublicKey)> = Vec::with_capacity(pubkeys_hex.len());
+        let mut parsed: Vec<(String, nostr::key::PublicKey)> =
+            Vec::with_capacity(pubkeys_hex.len());
         for hex in pubkeys_hex {
             let hex = normalize_pubkey_hex(&hex);
             if all_hex.contains(&hex) {
                 continue;
             }
-            if let Ok(pk) = nostr::PublicKey::from_hex(&hex) {
+            if let Ok(pk) = nostr::key::PublicKey::from_hex(&hex) {
                 all_hex.push(hex.clone());
                 parsed.push((hex, pk));
             }
@@ -5380,7 +5381,7 @@ impl CircleManagerFfi {
                     .inner
                     .profile_relay_salt()
                     .map_err(redact_profile_err)?;
-                let requests: Vec<(nostr::PublicKey, u8)> = due
+                let requests: Vec<(nostr::key::PublicKey, u8)> = due
                     .iter()
                     .filter_map(|(hex, attempt)| {
                         parsed
@@ -5489,7 +5490,7 @@ impl CircleManagerFfi {
         pubkey: String,
         max_age_secs: i64,
     ) -> Result<Option<ProfileMetadataFfi>, String> {
-        let Ok(parsed) = nostr::PublicKey::parse(&pubkey) else {
+        let Ok(parsed) = nostr::key::PublicKey::parse(&pubkey) else {
             return Ok(None);
         };
         let hex = parsed.to_hex();
@@ -5537,7 +5538,7 @@ impl CircleManagerFfi {
     /// signed by the secret Dart hands in. Nothing else re-derives one from the
     /// other, so a wrong secret would sign one account's staged edit — or its
     /// retraction — with another account's key.
-    fn ensure_own_identity(&self, keys: &nostr::Keys) -> Result<(), String> {
+    fn ensure_own_identity(&self, keys: &nostr::key::Keys) -> Result<(), String> {
         if keys.public_key().to_hex() == self.own_pubkey_hex {
             Ok(())
         } else {
@@ -5568,7 +5569,7 @@ impl CircleManagerFfi {
     async fn own_profile_to_retract(
         &self,
         relay: &haven_core::relay::RelayManager,
-        own_pk: nostr::PublicKey,
+        own_pk: nostr::key::PublicKey,
         pool: &[String],
         published_here: bool,
         now: i64,
@@ -5830,7 +5831,7 @@ impl CircleManagerFfi {
         let mut order: Vec<String> = Vec::with_capacity(pubkeys_hex.len());
         for hex in pubkeys_hex {
             let hex = normalize_pubkey_hex(&hex);
-            if nostr::PublicKey::from_hex(&hex).is_ok() && !order.contains(&hex) {
+            if nostr::key::PublicKey::from_hex(&hex).is_ok() && !order.contains(&hex) {
                 order.push(hex);
             }
         }
@@ -6087,7 +6088,7 @@ impl CircleManagerFfi {
             return Ok(report);
         }
 
-        let own_pk = nostr::PublicKey::from_hex(&self.own_pubkey_hex)
+        let own_pk = nostr::key::PublicKey::from_hex(&self.own_pubkey_hex)
             .map_err(|_| PROFILE_IDENTITY_MISMATCH.to_string())?;
         // Only a saved edit is signed. A pass that re-sends what the pool
         // already serves is given no key (Rule 9).
@@ -6214,7 +6215,7 @@ impl CircleManagerFfi {
         force: bool,
         now: i64,
     ) -> Result<ProfileMetadataFfi, String> {
-        let own_pk = nostr::PublicKey::from_hex(&pubkey_hex)
+        let own_pk = nostr::key::PublicKey::from_hex(&pubkey_hex)
             .map_err(|_| "Invalid pubkey_hex".to_string())?;
         // Canonical lowercase key (matches how fetched rows are keyed), so the
         // newer-wins gate and the winning-row re-read line up.
@@ -6424,7 +6425,7 @@ impl CircleManagerFfi {
             .last_published_event(0, "", &own_pk)
             .map_err(redact_profile_err)?
         {
-            let deletion = build_nip09_deletion(&keys, last.event_id, nostr::Kind::Metadata)
+            let deletion = build_nip09_deletion(&keys, last.event_id, nostr::event::Kind::Metadata)
                 .map_err(redact_profile_err)?;
             // A deletion that no relay honors must not fail the whole op.
             let _ = publish_metadata(&relay, &deletion, &write_relays).await;
@@ -7629,7 +7630,7 @@ impl IngestOutcomeFfi {
 /// [`RelayManagerFfi::publish_location_driven`] and to nothing else.
 #[frb(opaque)]
 pub struct SealedLocationFfi {
-    event: nostr::Event,
+    event: nostr::event::Event,
 }
 
 /// The signed event a sealed location carries, as JSON, for an integration
@@ -8359,8 +8360,8 @@ impl<'a> Driving<'a> {
     }
 }
 
-fn pubkey_of(text: &str) -> Result<nostr::PublicKey, String> {
-    nostr::PublicKey::parse(text).map_err(|_| "Invalid public key".to_string())
+fn pubkey_of(text: &str) -> Result<nostr::key::PublicKey, String> {
+    nostr::key::PublicKey::parse(text).map_err(|_| "Invalid public key".to_string())
 }
 
 impl RelayManagerFfi {
@@ -8608,7 +8609,7 @@ impl RelayManagerFfi {
         event_json: String,
         foreground: bool,
     ) -> Result<IngestOutcomeFfi, String> {
-        let event = <nostr::Event as nostr::JsonUtil>::from_json(&event_json)
+        let event = <nostr::event::Event as nostr::JsonUtil>::from_json(&event_json)
             .map_err(|_| "Invalid event".to_string())?;
         let driving = Driving::new(&self.inner, circle, foreground);
         IngestOutcomeFfi::answer(
@@ -8924,7 +8925,7 @@ struct KpRetirementInputs<'a> {
     snapshot: &'a haven_core::relay::maintenance::RelayKpSnapshot,
     /// The kind-30443 events the probe actually returned. Needed only to
     /// recognise a replacement this device published but failed to record.
-    probed: &'a [nostr::Event],
+    probed: &'a [nostr::event::Event],
     /// The tracked package, read once with its lifetime so the `d`, the bytes
     /// and the lifetime verdict all describe the same package.
     tracked: Option<&'a haven_core::nostr::mls::TrackedKeyPackage>,
@@ -9181,12 +9182,12 @@ impl RelayManagerFfi {
             refused: Some(refusal),
             clock_rejected: None,
         };
-        let event: nostr::Event = serde_json::from_str(&event_json)
+        let event: nostr::event::Event = serde_json::from_str(&event_json)
             .map_err(|_| refused(PublishRefusalFfi::InvalidEvent))?;
         if event.kind.as_u16() == haven_core::nostr::KIND_GROUP_MESSAGE {
             return Err(refused(PublishRefusalFfi::GroupMessage));
         }
-        if event.kind == nostr::Kind::GiftWrap {
+        if event.kind == nostr::event::Kind::GiftWrap {
             return Err(refused(PublishRefusalFfi::GiftWrap));
         }
         let result = self
@@ -9251,7 +9252,8 @@ impl RelayManagerFfi {
             own_presence, read_kp_lifetime, OwnRelayLists, TrackedKpLifetime,
         };
 
-        let own = nostr::PublicKey::parse(&own_pubkey).map_err(|_| "Invalid pubkey".to_string())?;
+        let own =
+            nostr::key::PublicKey::parse(&own_pubkey).map_err(|_| "Invalid pubkey".to_string())?;
         let circle_mgr = circle.inner.clone();
         // Read before the probe: a tick that promotes a newer package meanwhile
         // leaves it in the same slot, newer, which still reads current.
@@ -9412,17 +9414,17 @@ impl RelayManagerFfi {
         relays: Vec<String>,
         since: Option<i64>,
     ) -> Result<Vec<String>, String> {
-        let pk = nostr::PublicKey::parse(&recipient_pubkey)
+        let pk = nostr::key::PublicKey::parse(&recipient_pubkey)
             .map_err(|e| format!("Invalid recipient pubkey: {e}"))?;
 
-        let mut filter = nostr::Filter::new()
-            .kind(nostr::Kind::GiftWrap)
+        let mut filter = nostr::filter::Filter::new()
+            .kind(nostr::event::Kind::GiftWrap)
             .pubkey(pk)
             .limit(100);
 
         if let Some(ts) = since {
             let secs = u64::try_from(ts).map_err(|_| "since timestamp must be non-negative")?;
-            filter = filter.since(nostr::Timestamp::from(secs));
+            filter = filter.since(nostr::types::Timestamp::from(secs));
         }
 
         let events = self
@@ -9465,21 +9467,21 @@ impl RelayManagerFfi {
         relays: Vec<String>,
         since: Option<i64>,
     ) -> Result<Vec<RelayGiftWrapFetchFfi>, String> {
-        let pk = nostr::PublicKey::parse(&recipient_pubkey)
+        let pk = nostr::key::PublicKey::parse(&recipient_pubkey)
             .map_err(|e| format!("Invalid recipient pubkey: {e}"))?;
 
         // The per-relay count is shown to the user as exact, so the cap is a
         // generous flood-guard rather than a paging limit: a real inbox holds
         // far fewer than this many gift wraps in its 96-hour lookback window, so
         // the headline "N new invitations" is not silently truncated.
-        let mut filter = nostr::Filter::new()
-            .kind(nostr::Kind::GiftWrap)
+        let mut filter = nostr::filter::Filter::new()
+            .kind(nostr::event::Kind::GiftWrap)
             .pubkey(pk)
             .limit(1000);
 
         if let Some(ts) = since {
             let secs = u64::try_from(ts).map_err(|_| "since timestamp must be non-negative")?;
-            filter = filter.since(nostr::Timestamp::from(secs));
+            filter = filter.since(nostr::types::Timestamp::from(secs));
         }
 
         let outcomes = self
@@ -9692,8 +9694,8 @@ impl RelayManagerFfi {
 
         // PER-RELAY probe of OWN relays for kind-30443 authored by self, so a
         // PARTIAL drop (present on A, dropped from B) is visible + healed on B.
-        let filter = nostr::Filter::new()
-            .kind(nostr::Kind::Custom(30443))
+        let filter = nostr::filter::Filter::new()
+            .kind(nostr::event::Kind::Custom(30443))
             .author(own_pk)
             .limit(64);
         let mut relay_errors: usize = 0;
@@ -9707,7 +9709,7 @@ impl RelayManagerFfi {
                 Vec::new()
             }
         };
-        retain_own_events(&mut per_relay, &own_pk, nostr::Kind::Custom(30443));
+        retain_own_events(&mut per_relay, &own_pk, nostr::event::Kind::Custom(30443));
 
         // Build the snapshot from RESPONDING relays only (non-responders are
         // excluded structurally, C4).
@@ -9831,7 +9833,7 @@ impl RelayManagerFfi {
         })
         .await?
         {
-            let probed: Vec<nostr::Event> = per_relay
+            let probed: Vec<nostr::event::Event> = per_relay
                 .iter()
                 .filter(|o| o.responded)
                 .flat_map(|o| o.events.iter().cloned())
@@ -10019,7 +10021,7 @@ impl RelayManagerFfi {
     async fn mint_key_package(
         &self,
         circle_mgr: &Arc<CoreCircleManager>,
-        keys: &nostr::Keys,
+        keys: &nostr::key::Keys,
         plan: KpMintPlan<'_>,
         relay_errors: &mut usize,
     ) -> Result<(haven_core::relay::maintenance::KpMaintenanceAction, usize), String> {
@@ -10050,7 +10052,7 @@ impl RelayManagerFfi {
     async fn publish_and_promote(
         &self,
         circle_mgr: &Arc<CoreCircleManager>,
-        event: &nostr::Event,
+        event: &nostr::event::Event,
         targets: &[String],
         relay_errors: &mut usize,
     ) -> StagedPublish {
@@ -10138,7 +10140,7 @@ impl RelayManagerFfi {
     async fn retire_malformed_kp_slot(
         &self,
         circle_mgr: &Arc<CoreCircleManager>,
-        keys: &nostr::Keys,
+        keys: &nostr::key::Keys,
         inputs: KpRetirementInputs<'_>,
         relay_errors: &mut usize,
     ) -> Option<KpRetirementTick> {
@@ -10317,7 +10319,7 @@ impl RelayManagerFfi {
     /// scrub, which is the state the migration is trying to reach.
     async fn retract_kp_slots(
         &self,
-        keys: &nostr::Keys,
+        keys: &nostr::key::Keys,
         snapshot: &haven_core::relay::maintenance::RelayKpSnapshot,
         orphans: &[String],
         targets: &[String],
@@ -10326,12 +10328,12 @@ impl RelayManagerFfi {
         if orphans.is_empty() {
             return true;
         }
-        let observed: Vec<nostr::EventId> = snapshot
+        let observed: Vec<nostr::event::EventId> = snapshot
             .responders
             .iter()
             .flat_map(|r| r.canonical.iter())
             .filter(|e| orphans.iter().any(|d| d == &e.d_tag))
-            .filter_map(|e| nostr::EventId::from_hex(&e.event_id).ok())
+            .filter_map(|e| nostr::event::EventId::from_hex(&e.event_id).ok())
             .collect();
 
         let deletion = match haven_core::relay::maintenance::build_kp_slot_retraction(
@@ -10413,9 +10415,9 @@ impl RelayManagerFfi {
             if identity_secret_bytes.len() != 32 {
                 return Err("Invalid secret bytes length".to_string());
             }
-            let secret_key = nostr::SecretKey::from_slice(&identity_secret_bytes)
+            let secret_key = nostr::key::SecretKey::from_slice(&identity_secret_bytes)
                 .map_err(|e| format!("Invalid secret key: {e}"))?;
-            let keys = nostr::Keys::new(secret_key);
+            let keys = nostr::key::Keys::new(secret_key);
             let pk = keys.public_key();
             (keys, pk)
         };
@@ -10448,8 +10450,8 @@ impl RelayManagerFfi {
     async fn maintain_relay_list_category(
         &self,
         circle_mgr: &Arc<CoreCircleManager>,
-        keys: &nostr::Keys,
-        own_pk: &nostr::PublicKey,
+        keys: &nostr::key::Keys,
+        own_pk: &nostr::key::PublicKey,
         relay_type: haven_core::circle::RelayType,
     ) -> haven_core::relay::maintenance::RelayListCategoryOutcome {
         use haven_core::relay::maintenance::{
@@ -10523,7 +10525,10 @@ impl RelayManagerFfi {
         // B only. The own relays lead the targets, so a position below
         // `configured.len()` is an own relay.
         let targets = relay_list_targets(&configured);
-        let filter = nostr::Filter::new().kind(kind).author(*own_pk).limit(4);
+        let filter = nostr::filter::Filter::new()
+            .kind(kind)
+            .author(*own_pk)
+            .limit(4);
         let mut per_relay = match self.inner.fetch_events_per_relay(filter, &targets).await {
             Ok(v) => v,
             Err(_) => {
@@ -10682,16 +10687,16 @@ impl RelayManagerFfi {
 
         let group_id_hex: String = nostr_group_id.iter().map(|b| format!("{b:02x}")).collect();
 
-        let mut filter = nostr::Filter::new()
-            .kind(nostr::Kind::Custom(445))
+        let mut filter = nostr::filter::Filter::new()
+            .kind(nostr::event::Kind::Custom(445))
             .custom_tag(
-                nostr::SingleLetterTag::lowercase(nostr::Alphabet::H),
+                nostr::filter::SingleLetterTag::lowercase(nostr::Alphabet::H),
                 group_id_hex,
             );
 
         if let Some(ts) = since {
             let secs = u64::try_from(ts).map_err(|_| "since timestamp must be non-negative")?;
-            filter = filter.since(nostr::Timestamp::from(secs));
+            filter = filter.since(nostr::types::Timestamp::from(secs));
         }
 
         if let Some(lim) = limit {
@@ -10954,8 +10959,8 @@ mod tests {
             "app Dart reaches a sealed location's event: {callers:?}"
         );
         let sealed = super::SealedLocationFfi {
-            event: nostr::EventBuilder::new(nostr::Kind::Custom(445), "ciphertext")
-                .sign_with_keys(&nostr::Keys::generate())
+            event: nostr::event::EventBuilder::new(nostr::event::Kind::Custom(445), "ciphertext")
+                .sign_with_keys(&nostr::key::Keys::generate())
                 .expect("signed"),
         };
         assert_eq!(
@@ -10988,7 +10993,7 @@ mod tests {
         const SAID: &str = "blocked: relay-authored canary 51d3";
         let refused = haven_core::relay::fanout::LocationPublish::Sent(Ok(
             haven_core::relay::PublishResult {
-                event_id: nostr::EventId::all_zeros(),
+                event_id: nostr::event::EventId::all_zeros(),
                 accepted_by: Vec::new(),
                 rejected_by: vec![("wss://relay.example.com".to_string(), SAID.to_string())],
                 failed: Vec::new(),
@@ -11017,7 +11022,7 @@ mod tests {
         use haven_core::relay::fanout::LocationPublish as P;
         use haven_core::relay::RelayError;
         let result = |accepted: bool| haven_core::relay::PublishResult {
-            event_id: nostr::EventId::all_zeros(),
+            event_id: nostr::event::EventId::all_zeros(),
             accepted_by: if accepted {
                 vec!["wss://relay.example.com".to_string()]
             } else {
@@ -11327,7 +11332,9 @@ mod tests {
     fn known_cached(pubkey_hex: &str) -> CachedProfile {
         CachedProfile {
             pubkey_hex: pubkey_hex.to_string(),
-            metadata: ProfileMetadata::from_metadata(nostr::Metadata::new().name("alice")),
+            metadata: ProfileMetadata::from_metadata(
+                nostr::nips::nip01::Metadata::new().name("alice"),
+            ),
             state: ProfileState::Known,
             event_created_at: 1,
             fetched_at: 100,
@@ -11417,8 +11424,8 @@ mod tests {
     /// under one confirmed account must never invite another.
     #[test]
     fn a_key_package_confirmed_for_one_account_never_invites_another() {
-        let (signer, confirmed) = (nostr::Keys::generate(), nostr::Keys::generate());
-        let event = nostr::EventBuilder::new(nostr::Kind::Custom(30443), "")
+        let (signer, confirmed) = (nostr::key::Keys::generate(), nostr::key::Keys::generate());
+        let event = nostr::event::EventBuilder::new(nostr::event::Kind::Custom(30443), "")
             .sign_with_keys(&signer)
             .expect("sign");
         let member = |author_npub: String| MemberKeyPackageFfi {
@@ -11428,7 +11435,7 @@ mod tests {
             nip65_write_relays: Vec::new(),
             author_npub,
         };
-        let npub = |keys: &nostr::Keys| hex_to_npub(&keys.public_key().to_hex());
+        let npub = |keys: &nostr::key::Keys| hex_to_npub(&keys.public_key().to_hex());
 
         for refused in [npub(&confirmed), String::new(), "not-a-key".to_string()] {
             assert!(
@@ -11470,7 +11477,7 @@ mod tests {
         // to remove.
         let off_curve = "00".repeat(32);
         assert!(
-            nostr::PublicKey::from_hex(&off_curve)
+            nostr::key::PublicKey::from_hex(&off_curve)
                 .expect("32 well-formed bytes")
                 .xonly()
                 .is_err(),
@@ -11661,7 +11668,7 @@ mod tests {
         // The two fields must name the SAME key: the npub is what a human
         // compares and the hex is what the code compares, so a mismatch would
         // let an impersonation check pass against a key nobody verified.
-        use nostr::prelude::FromBech32 as _;
+        use nostr::nips::nip19::FromBech32 as _;
         let hex = "7e7e9c42a91bfef19fa929e5fda1b72e0ebc1a4c1141673e2794234d86addf4e";
         let ffi = InvitationFfi::from(&CoreInvitation {
             mls_group_id: GroupId::from_slice(&[7u8; 32]),
@@ -11669,7 +11676,7 @@ mod tests {
             inviter_pubkey: hex.to_string(),
             invited_at: 42,
         });
-        let decoded = nostr::PublicKey::from_bech32(&ffi.inviter_npub).expect("valid npub");
+        let decoded = nostr::key::PublicKey::from_bech32(&ffi.inviter_npub).expect("valid npub");
         assert_eq!(decoded.to_hex(), ffi.inviter_pubkey);
     }
 
@@ -11991,7 +11998,7 @@ mod tests {
     /// identity as a HARD construction requirement (DM-4), so `new` now demands
     /// the secret bytes; the keys never touch a real network here.
     fn wipe_test_secret_bytes() -> Vec<u8> {
-        nostr::Keys::generate()
+        nostr::key::Keys::generate()
             .secret_key()
             .to_secret_bytes()
             .to_vec()
@@ -12382,18 +12389,18 @@ mod tests {
         // Wire kind per category.
         assert_eq!(
             relay_list_wire_kind(RelayTypeFfi::Inbox),
-            Ok(nostr::Kind::InboxRelays)
+            Ok(nostr::event::Kind::InboxRelays)
         );
         assert_eq!(
             relay_list_wire_kind(RelayTypeFfi::Nip65),
-            Ok(nostr::Kind::RelayList)
+            Ok(nostr::event::Kind::RelayList)
         );
         assert_eq!(
-            nostr::Kind::RelayList.as_u16(),
+            nostr::event::Kind::RelayList.as_u16(),
             10002,
             "Nip65 publishes kind 10002, not the retired 10051"
         );
-        assert_eq!(nostr::Kind::InboxRelays.as_u16(), 10050);
+        assert_eq!(nostr::event::Kind::InboxRelays.as_u16(), 10050);
 
         // Storage slot: Nip65 ↔ the persisted KeyPackage slot (W2, no migration).
         assert_eq!(
@@ -12410,7 +12417,7 @@ mod tests {
         );
 
         // The actually-built signed event carries kind 10002 for Nip65.
-        let keys = nostr::Keys::generate();
+        let keys = nostr::key::Keys::generate();
         let ev = build_relay_list_event_for(
             RelayTypeFfi::Nip65,
             &keys,
@@ -12420,7 +12427,7 @@ mod tests {
         .expect("build nip65 relay-list event");
         assert_eq!(
             ev.kind,
-            nostr::Kind::RelayList,
+            nostr::event::Kind::RelayList,
             "Nip65 relay-list event must be kind 10002"
         );
     }
@@ -12439,7 +12446,7 @@ mod tests {
     /// test can catch that.
     #[test]
     fn profile_relay_category_is_structurally_unpublishable() {
-        let keys = nostr::Keys::generate();
+        let keys = nostr::key::Keys::generate();
         let urls = vec!["wss://relay.example".to_string()];
 
         // 1. The wire-kind choke point every publish path funnels through.
@@ -12464,7 +12471,7 @@ mod tests {
         // 4. The on-relay URL extractor used by the maintenance healer. An
         //    empty Vec here would read as "the list was dropped from this
         //    relay" and could drive the healer into publishing one.
-        let probe = nostr::EventBuilder::new(nostr::Kind::RelayList, "")
+        let probe = nostr::event::EventBuilder::new(nostr::event::Kind::RelayList, "")
             .sign_with_keys(&keys)
             .expect("sign probe event");
         assert!(
@@ -12504,9 +12511,9 @@ mod tests {
 
     /// Builds an `AssignedFetch` with one author in each bucket.
     fn three_bucket_outcome() -> (AssignedFetch, String, String, String) {
-        let resolved_pk = nostr::Keys::generate().public_key();
-        let missed_pk = nostr::Keys::generate().public_key();
-        let unattempted_pk = nostr::Keys::generate().public_key();
+        let resolved_pk = nostr::key::Keys::generate().public_key();
+        let missed_pk = nostr::key::Keys::generate().public_key();
+        let unattempted_pk = nostr::key::Keys::generate().public_key();
         let outcome = AssignedFetch {
             resolved: vec![known_cached(&resolved_pk.to_hex())],
             missed: vec![missed_pk],
@@ -12553,7 +12560,7 @@ mod tests {
             resolved: Vec::new(),
             missed: Vec::new(),
             unattempted: (0..4)
-                .map(|_| nostr::Keys::generate().public_key())
+                .map(|_| nostr::key::Keys::generate().public_key())
                 .collect(),
         };
         let lists = profile_stamp_lists(&outcome);
@@ -12992,7 +12999,7 @@ pub struct FfiGroupSpec {
 #[frb(opaque)]
 pub struct LiveSyncFfi {
     circle: Arc<CoreCircleManager>,
-    own_pubkey: nostr::PublicKey,
+    own_pubkey: nostr::key::PublicKey,
 }
 
 impl LiveSyncFfi {
@@ -13003,7 +13010,7 @@ impl LiveSyncFfi {
     /// Returns an error if `own_pubkey_hex` is not a valid Nostr public key.
     pub fn new_instance(circle: &CircleManagerFfi, own_pubkey_hex: String) -> Result<Self, String> {
         validate_pubkey_hex(&own_pubkey_hex, "own_pubkey")?;
-        let pk = nostr::PublicKey::from_hex(&normalize_pubkey_hex(&own_pubkey_hex))
+        let pk = nostr::key::PublicKey::from_hex(&normalize_pubkey_hex(&own_pubkey_hex))
             .map_err(|e| e.to_string())?;
         Ok(Self {
             circle: Arc::clone(&circle.inner),
@@ -14220,7 +14227,7 @@ mod maintenance_real_ffi_tests {
         ProfileMetadata, ProfileState, ProfileSyncOutcomeFfi, RelayManagerFfi, RelayTypeFfi,
     };
     use haven_core::circle::RelayType;
-    use nostr::{Keys, Kind};
+    use nostr::{event::Kind, key::Keys};
     use nostr_relay_builder::MockRelay;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
@@ -14275,12 +14282,12 @@ mod maintenance_real_ffi_tests {
     /// it a lookup of another account's relay lists or `KeyPackage` falls
     /// back to the production indexers — real public hosts.
     struct DiscoveryPlane {
-        asked: std::sync::Arc<std::sync::Mutex<Vec<nostr::PublicKey>>>,
+        asked: std::sync::Arc<std::sync::Mutex<Vec<nostr::key::PublicKey>>>,
     }
 
     impl DiscoveryPlane {
         /// How many `REQ`s named `account` as an author.
-        fn asked_about(&self, account: &nostr::PublicKey) -> usize {
+        fn asked_about(&self, account: &nostr::key::PublicKey) -> usize {
             self.asked
                 .lock()
                 .expect("the record of queries")
@@ -14291,12 +14298,12 @@ mod maintenance_real_ffi_tests {
     }
 
     #[derive(Debug)]
-    struct RecordAuthors(std::sync::Arc<std::sync::Mutex<Vec<nostr::PublicKey>>>);
+    struct RecordAuthors(std::sync::Arc<std::sync::Mutex<Vec<nostr::key::PublicKey>>>);
 
     impl nostr_relay_builder::builder::QueryPolicy for RecordAuthors {
         fn admit_query<'a>(
             &'a self,
-            query: &'a nostr::Filter,
+            query: &'a nostr::filter::Filter,
             _addr: &'a std::net::SocketAddr,
         ) -> nostr_sdk::prelude::BoxedFuture<'a, nostr_relay_builder::builder::PolicyResult>
         {
@@ -14428,7 +14435,7 @@ mod maintenance_real_ffi_tests {
     impl nostr_relay_builder::builder::QueryPolicy for CountEveryQuery {
         fn admit_query<'a>(
             &'a self,
-            _query: &'a nostr::Filter,
+            _query: &'a nostr::filter::Filter,
             _addr: &'a std::net::SocketAddr,
         ) -> nostr_sdk::prelude::BoxedFuture<'a, nostr_relay_builder::builder::PolicyResult>
         {
@@ -14502,7 +14509,7 @@ mod maintenance_real_ffi_tests {
     impl nostr_relay_builder::builder::WritePolicy for RejectWritesWhenFlipped {
         fn admit_event<'a>(
             &'a self,
-            event: &'a nostr::Event,
+            event: &'a nostr::event::Event,
             _addr: &'a std::net::SocketAddr,
         ) -> nostr_sdk::prelude::BoxedFuture<'a, nostr_relay_builder::builder::PolicyResult>
         {
@@ -14533,7 +14540,7 @@ mod maintenance_real_ffi_tests {
     impl nostr_relay_builder::builder::WritePolicy for HoldKeyPackagesUntilOpened {
         fn admit_event<'a>(
             &'a self,
-            event: &'a nostr::Event,
+            event: &'a nostr::event::Event,
             _addr: &'a std::net::SocketAddr,
         ) -> nostr_sdk::prelude::BoxedFuture<'a, nostr_relay_builder::builder::PolicyResult>
         {
@@ -14602,7 +14609,7 @@ mod maintenance_real_ffi_tests {
             .expect("track the publication");
     }
 
-    fn kp_d_tag(ev: &nostr::Event) -> Option<String> {
+    fn kp_d_tag(ev: &nostr::event::Event) -> Option<String> {
         ev.tags.iter().find_map(|t| {
             let s = t.as_slice();
             (s.len() >= 2 && s[0] == "d").then(|| s[1].clone())
@@ -14617,14 +14624,17 @@ mod maintenance_real_ffi_tests {
     /// harmless here and carries the marker `check_engine_client_options.sh`
     /// allowlists it by.
     pub(super) async fn fetch_by_kind(
-        author: nostr::PublicKey,
+        author: nostr::key::PublicKey,
         kind: Kind,
         relay: &str,
-    ) -> Vec<nostr::Event> {
+    ) -> Vec<nostr::event::Event> {
         let client = nostr_sdk::Client::builder().build(); // test witness
         client.add_relay(relay).await.expect("add relay"); // e2e helper
         client.connect().await;
-        let filter = nostr::Filter::new().kind(kind).author(author).limit(64);
+        let filter = nostr::filter::Filter::new()
+            .kind(kind)
+            .author(author)
+            .limit(64);
         let events = client
             .fetch_events(filter, Duration::from_secs(5))
             .await
@@ -16320,9 +16330,9 @@ mod maintenance_real_ffi_tests {
     async fn welcome_to(
         inviter: &CircleManagerFfi,
         inviter_keys: &Keys,
-        key_package: &nostr::Event,
+        key_package: &nostr::event::Event,
         name: &str,
-    ) -> nostr::Event {
+    ) -> nostr::event::Event {
         use haven_core::nostr::mls::types::{LocationGroupConfig, PublishWork};
         let created = inviter
             .inner
@@ -16356,7 +16366,7 @@ mod maintenance_real_ffi_tests {
     }
 
     /// Whether `circle`'s user accepting the held `invitation` joined.
-    async fn accepted(circle: &CircleManagerFfi, invitation: &nostr::Event) -> bool {
+    async fn accepted(circle: &CircleManagerFfi, invitation: &nostr::event::Event) -> bool {
         circle
             .accept_invitation(invitation.id.to_bytes().to_vec())
             .await
@@ -16374,8 +16384,8 @@ mod maintenance_real_ffi_tests {
         dir: DataDir,
         circle: Option<CircleManagerFfi>,
         relay_mgr: RelayManagerFfi,
-        published: nostr::Event,
-        invitations: Vec<nostr::Event>,
+        published: nostr::event::Event,
+        invitations: Vec<nostr::event::Event>,
         _inviters: Vec<(DataDir, CircleManagerFfi)>,
     }
 
@@ -16477,7 +16487,7 @@ mod maintenance_real_ffi_tests {
 
         /// Another account invites this one with `key_package`; the index of
         /// the invitation, not yet shown to the invitee.
-        async fn invited_again(&mut self, tag: &str, key_package: &nostr::Event) -> usize {
+        async fn invited_again(&mut self, tag: &str, key_package: &nostr::event::Event) -> usize {
             let inviter_keys = Keys::generate();
             let inviter_dir = DataDir::new(tag);
             let inviter = CircleManagerFfi::new(inviter_dir.as_str(), secret_bytes(&inviter_keys))
@@ -16497,7 +16507,7 @@ mod maintenance_real_ffi_tests {
         }
 
         /// The one `KeyPackage` the relay serves right now.
-        async fn serving(&self) -> nostr::Event {
+        async fn serving(&self) -> nostr::event::Event {
             self.served("one KeyPackage is served", |_| true).await
         }
 
@@ -16515,7 +16525,11 @@ mod maintenance_real_ffi_tests {
         }
 
         /// The one KeyPackage the relay serves, once `want` holds of it.
-        async fn served(&self, what: &str, want: impl Fn(&nostr::Event) -> bool) -> nostr::Event {
+        async fn served(
+            &self,
+            what: &str,
+            want: impl Fn(&nostr::event::Event) -> bool,
+        ) -> nostr::event::Event {
             fetch_until(
                 self.keys.public_key(),
                 Kind::Custom(30443),
@@ -17310,7 +17324,7 @@ mod maintenance_real_ffi_tests {
             .expect("RelayManagerFfi::new_instance");
         let discovery = haven_core::relay::discovery_relays();
         let publisher = haven_core::relay::RelayManager::new();
-        let publish = |event: nostr::Event| {
+        let publish = |event: nostr::event::Event| {
             let (publisher, discovery) = (&publisher, &discovery);
             async move {
                 assert!(
@@ -17325,9 +17339,10 @@ mod maintenance_real_ffi_tests {
         };
 
         let stranded = Keys::generate();
-        let write = nostr::Tag::parse(["r", dead_loopback_relay().as_str()]).expect("an r tag");
+        let write =
+            nostr::event::Tag::parse(["r", dead_loopback_relay().as_str()]).expect("an r tag");
         publish(
-            nostr::EventBuilder::new(Kind::RelayList, "")
+            nostr::event::EventBuilder::new(Kind::RelayList, "")
                 .tags([write])
                 .sign_with_keys(&stranded)
                 .expect("sign the 10002"),
@@ -17366,7 +17381,7 @@ mod maintenance_real_ffi_tests {
             .expect("the fetch runs");
         assert_eq!(lookup.verdict, super::MemberLookupVerdictFfi::Found);
         let member = lookup.member.expect("a found lookup carries the member");
-        let found: nostr::Event =
+        let found: nostr::event::Event =
             serde_json::from_str(&member.key_package_json).expect("the package parses");
         assert_eq!(found.id, package.id);
         assert_eq!(
@@ -17407,7 +17422,7 @@ mod maintenance_real_ffi_tests {
         keys: &Keys,
         own: &[String],
         d: &str,
-    ) -> (nostr::Event, Vec<u8>) {
+    ) -> (nostr::event::Event, Vec<u8>) {
         let events = haven_core::relay::maintenance::build_kp_maintenance_events(
             circle.inner.session(),
             keys,
@@ -17518,7 +17533,7 @@ mod maintenance_real_ffi_tests {
         .await;
         assert_eq!(
             Some(served[0].as_json()),
-            tracked.published.as_ref().map(nostr::Event::as_json),
+            tracked.published.as_ref().map(nostr::event::Event::as_json),
             "the served event is the tracked one, byte for byte"
         );
         assert_eq!(kp_d_tag(&served[0]), Some(tracked.slot.clone()), "one slot");
@@ -17542,12 +17557,12 @@ mod maintenance_real_ffi_tests {
     /// an OK-acked write is already stored, so the first attempt normally
     /// suffices. The bound only covers a read racing the write's own connection.
     async fn fetch_until(
-        author: nostr::PublicKey,
+        author: nostr::key::PublicKey,
         kind: Kind,
         relay: &str,
         what: &str,
-        want: impl Fn(&[nostr::Event]) -> bool,
-    ) -> Vec<nostr::Event> {
+        want: impl Fn(&[nostr::event::Event]) -> bool,
+    ) -> Vec<nostr::event::Event> {
         for _ in 0..25 {
             let events = fetch_by_kind(author, kind, relay).await;
             if want(&events) {
@@ -17558,7 +17573,11 @@ mod maintenance_real_ffi_tests {
     }
 
     /// Whether a kind-5 deletion addresses the addressable coordinate of `d`.
-    fn deletes_slot(deletion: &nostr::Event, author: nostr::PublicKey, d: &str) -> bool {
+    fn deletes_slot(
+        deletion: &nostr::event::Event,
+        author: nostr::key::PublicKey,
+        d: &str,
+    ) -> bool {
         let want = format!("30443:{}:{d}", author.to_hex());
         deletion
             .tags
@@ -18613,7 +18632,8 @@ mod maintenance_real_ffi_tests {
         // "of this account" in a pre-fix slot that borrows the relay list's id.
         let mut forged = relay_list.clone();
         forged.kind = Kind::Custom(30443);
-        forged.tags = nostr::Tags::from_list(vec![nostr::Tag::identifier(legacy_slot_id())]);
+        forged.tags =
+            nostr::event::Tags::from_list(vec![nostr::event::Tag::identifier(legacy_slot_id())]);
         hostile.answer(
             |filter| {
                 filter
@@ -18667,13 +18687,13 @@ mod maintenance_real_ffi_tests {
         let (hostile, honest) = (ScriptedRelay::start(), ScriptedRelay::start());
         let both = vec![hostile.url().to_owned(), honest.url().to_owned()];
         let recipient = Keys::generate().public_key();
-        let genuine = nostr::EventBuilder::new(Kind::GiftWrap, "b3BhcXVl")
-            .tag(nostr::Tag::public_key(recipient))
+        let genuine = nostr::event::EventBuilder::new(Kind::GiftWrap, "b3BhcXVl")
+            .tag(nostr::event::Tag::public_key(recipient))
             .sign_with_keys(&Keys::generate())
             .expect("sign the wrap");
         let mut forged = genuine.clone();
         forged.content = "Zm9yZ2Vk".to_owned();
-        let asks_for_wraps = |filter: &nostr::Filter| {
+        let asks_for_wraps = |filter: &nostr::filter::Filter| {
             filter
                 .kinds
                 .as_ref()
@@ -18694,7 +18714,8 @@ mod maintenance_real_ffi_tests {
         );
         let is_the_genuine_wrap_alone = |wraps: &[String]| {
             wraps.len() == 1
-                && serde_json::from_str::<nostr::Event>(&wraps[0]).is_ok_and(|wrap| wrap == genuine)
+                && serde_json::from_str::<nostr::event::Event>(&wraps[0])
+                    .is_ok_and(|wrap| wrap == genuine)
         };
 
         let relay_mgr = RelayManagerFfi::new_instance()
@@ -18747,7 +18768,7 @@ mod maintenance_real_ffi_tests {
 
         fn save_event<'a>(
             &'a self,
-            event: &'a nostr::Event,
+            event: &'a nostr::event::Event,
         ) -> nostr_relay_builder::prelude::BoxedFuture<
             'a,
             Result<
@@ -18760,7 +18781,7 @@ mod maintenance_real_ffi_tests {
 
         fn check_id<'a>(
             &'a self,
-            event_id: &'a nostr::EventId,
+            event_id: &'a nostr::event::EventId,
         ) -> nostr_relay_builder::prelude::BoxedFuture<
             'a,
             Result<
@@ -18773,17 +18794,17 @@ mod maintenance_real_ffi_tests {
 
         fn event_by_id<'a>(
             &'a self,
-            event_id: &'a nostr::EventId,
+            event_id: &'a nostr::event::EventId,
         ) -> nostr_relay_builder::prelude::BoxedFuture<
             'a,
-            Result<Option<nostr::Event>, nostr_relay_builder::prelude::DatabaseError>,
+            Result<Option<nostr::event::Event>, nostr_relay_builder::prelude::DatabaseError>,
         > {
             self.0.event_by_id(event_id)
         }
 
         fn count(
             &self,
-            filter: nostr::Filter,
+            filter: nostr::filter::Filter,
         ) -> nostr_relay_builder::prelude::BoxedFuture<
             '_,
             Result<usize, nostr_relay_builder::prelude::DatabaseError>,
@@ -18793,7 +18814,7 @@ mod maintenance_real_ffi_tests {
 
         fn query(
             &self,
-            mut filter: nostr::Filter,
+            mut filter: nostr::filter::Filter,
         ) -> nostr_relay_builder::prelude::BoxedFuture<
             '_,
             Result<
@@ -18808,7 +18829,7 @@ mod maintenance_real_ffi_tests {
 
         fn delete(
             &self,
-            filter: nostr::Filter,
+            filter: nostr::filter::Filter,
         ) -> nostr_relay_builder::prelude::BoxedFuture<
             '_,
             Result<(), nostr_relay_builder::prelude::DatabaseError>,
@@ -18842,9 +18863,9 @@ mod maintenance_real_ffi_tests {
     }
 
     /// A validly signed 30443 in slot `d`, signed by `signer`.
-    fn signed_key_package_event(signer: &Keys, d: &str, content: &str) -> nostr::Event {
-        nostr::EventBuilder::new(Kind::Custom(30443), content)
-            .tag(nostr::Tag::parse(["d", d]).expect("d tag"))
+    fn signed_key_package_event(signer: &Keys, d: &str, content: &str) -> nostr::event::Event {
+        nostr::event::EventBuilder::new(Kind::Custom(30443), content)
+            .tag(nostr::event::Tag::parse(["d", d]).expect("d tag"))
             .sign_with_keys(signer)
             .expect("sign")
     }
@@ -18969,7 +18990,7 @@ mod maintenance_real_ffi_tests {
             &own,
         )
         .expect("build the repoint event");
-        copy.event = nostr::EventBuilder::new(copy.event.kind, copy.event.content.clone())
+        copy.event = nostr::event::EventBuilder::new(copy.event.kind, copy.event.content.clone())
             .tags(copy.event.tags.clone())
             .sign_with_keys(&Keys::generate())
             .expect("re-sign our package elsewhere");
@@ -19034,8 +19055,8 @@ mod maintenance_real_ffi_tests {
             )
             .await
             .expect("seed the foreign slot");
-        let own_note = nostr::EventBuilder::new(Kind::TextNote, "")
-            .tag(nostr::Tag::parse(["d", planted.as_str()]).expect("d tag"))
+        let own_note = nostr::event::EventBuilder::new(Kind::TextNote, "")
+            .tag(nostr::event::Tag::parse(["d", planted.as_str()]).expect("d tag"))
             .sign_with_keys(&keys)
             .expect("sign");
         relay_mgr
@@ -19081,8 +19102,8 @@ mod maintenance_real_ffi_tests {
             .add_user_relay(url.clone(), RelayTypeFfi::Inbox)
             .await
             .expect("register own inbox relay");
-        let foreign_list = nostr::EventBuilder::new(Kind::InboxRelays, "")
-            .tag(nostr::Tag::parse(["relay", url.as_str()]).expect("relay tag"))
+        let foreign_list = nostr::event::EventBuilder::new(Kind::InboxRelays, "")
+            .tag(nostr::event::Tag::parse(["relay", url.as_str()]).expect("relay tag"))
             .sign_with_keys(&Keys::generate())
             .expect("sign");
         relay_mgr
@@ -19135,9 +19156,9 @@ mod maintenance_real_ffi_tests {
                     .await
                     .expect("register a key-package relay");
                 let list = |names: &str, at: u64| {
-                    nostr::EventBuilder::new(Kind::InboxRelays, "")
-                        .tag(nostr::Tag::parse(["relay", names]).expect("relay tag"))
-                        .custom_created_at(nostr::Timestamp::from_secs(at))
+                    nostr::event::EventBuilder::new(Kind::InboxRelays, "")
+                        .tag(nostr::event::Tag::parse(["relay", names]).expect("relay tag"))
+                        .custom_created_at(nostr::types::Timestamp::from_secs(at))
                         .sign_with_keys(&keys)
                         .expect("sign")
                 };
@@ -19209,12 +19230,12 @@ mod maintenance_real_ffi_tests {
 
     /// Records the id and kind of every event a relay is offered, in order.
     #[derive(Debug)]
-    struct RecordWrites(std::sync::Arc<std::sync::Mutex<Vec<(nostr::EventId, Kind)>>>);
+    struct RecordWrites(std::sync::Arc<std::sync::Mutex<Vec<(nostr::event::EventId, Kind)>>>);
 
     impl nostr_relay_builder::builder::WritePolicy for RecordWrites {
         fn admit_event<'a>(
             &'a self,
-            event: &'a nostr::Event,
+            event: &'a nostr::event::Event,
             _addr: &'a std::net::SocketAddr,
         ) -> nostr_sdk::prelude::BoxedFuture<'a, nostr_relay_builder::builder::PolicyResult>
         {
@@ -19858,7 +19879,9 @@ mod maintenance_real_ffi_tests {
             .inner
             .upsert_profile_if_newer(&CachedProfile {
                 pubkey_hex: stranger_hex.clone(),
-                metadata: ProfileMetadata::from_metadata(nostr::Metadata::new().name("stranger")),
+                metadata: ProfileMetadata::from_metadata(
+                    nostr::nips::nip01::Metadata::new().name("stranger"),
+                ),
                 state: ProfileState::Known,
                 event_created_at: 1,
                 fetched_at: profile_now_secs(),
@@ -19922,7 +19945,9 @@ mod maintenance_real_ffi_tests {
             .inner
             .upsert_profile_if_newer(&CachedProfile {
                 pubkey_hex: known.clone(),
-                metadata: ProfileMetadata::from_metadata(nostr::Metadata::new().name("known")),
+                metadata: ProfileMetadata::from_metadata(
+                    nostr::nips::nip01::Metadata::new().name("known"),
+                ),
                 state: ProfileState::Known,
                 event_created_at: 1,
                 fetched_at: profile_now_secs(),
@@ -19964,7 +19989,7 @@ mod maintenance_real_ffi_tests {
     // ------------------------------------------------------------------------
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_batched_cached_read_answers_per_pubkey_exactly_as_the_single_one_does() {
-        use nostr::prelude::ToBech32 as _;
+        use nostr::nips::nip19::ToBech32 as _;
 
         let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
         install_test_seams();
@@ -19980,7 +20005,9 @@ mod maintenance_real_ffi_tests {
             .inner
             .upsert_profile(&CachedProfile {
                 pubkey_hex: resolved.to_hex(),
-                metadata: ProfileMetadata::from_metadata(nostr::Metadata::new().name("alice")),
+                metadata: ProfileMetadata::from_metadata(
+                    nostr::nips::nip01::Metadata::new().name("alice"),
+                ),
                 state: ProfileState::Known,
                 event_created_at: 1_000,
                 fetched_at: 2_000,
@@ -20158,13 +20185,13 @@ mod maintenance_real_ffi_tests {
         }
 
         /// This account's profile `content`, signed, stamped after `after`.
-        fn profile(&self, content: &str, after: Option<u64>) -> nostr::Event {
+        fn profile(&self, content: &str, after: Option<u64>) -> nostr::event::Event {
             use nostr::JsonUtil as _;
 
             haven_core::profile::build_metadata_event(
                 &self.keys,
                 &ProfileMetadata::from_metadata(
-                    nostr::Metadata::from_json(content).expect("metadata"),
+                    nostr::nips::nip01::Metadata::from_json(content).expect("metadata"),
                 ),
                 after,
             )
@@ -20173,7 +20200,7 @@ mod maintenance_real_ffi_tests {
 
         /// Makes `event` the profile this device holds as the one it last
         /// published: the dated row and the record of the publish.
-        fn hold_as_published(&self, event: &nostr::Event) {
+        fn hold_as_published(&self, event: &nostr::event::Event) {
             use nostr::JsonUtil as _;
 
             let now = profile_now_secs();
@@ -20182,7 +20209,7 @@ mod maintenance_real_ffi_tests {
                 .upsert_profile(&CachedProfile {
                     pubkey_hex: self.own_hex(),
                     metadata: ProfileMetadata::from_metadata(
-                        nostr::Metadata::from_json(&event.content).expect("metadata"),
+                        nostr::nips::nip01::Metadata::from_json(&event.content).expect("metadata"),
                     ),
                     state: ProfileState::Known,
                     event_created_at: i64::try_from(event.created_at.as_secs())
@@ -20201,7 +20228,7 @@ mod maintenance_real_ffi_tests {
         /// and otherwise as one that holds nothing.
         fn count_requests(
             &self,
-            event: &nostr::Event,
+            event: &nostr::event::Event,
             serves: fn(usize) -> bool,
         ) -> [std::sync::Arc<std::sync::atomic::AtomicUsize>; 3] {
             use haven_core::relay::scripted_relay::Frame;
@@ -20228,7 +20255,7 @@ mod maintenance_real_ffi_tests {
         }
 
         /// Every profile event the pool has taken, relay by relay.
-        fn profiles_sent(&self) -> Vec<nostr::Event> {
+        fn profiles_sent(&self) -> Vec<nostr::event::Event> {
             self.pool
                 .iter()
                 .flat_map(haven_core::relay::scripted_relay::ScriptedRelay::published)
@@ -20248,7 +20275,7 @@ mod maintenance_real_ffi_tests {
     }
 
     /// The fields of a profile event's content, by name.
-    fn profile_fields(event: &nostr::Event) -> std::collections::BTreeMap<String, String> {
+    fn profile_fields(event: &nostr::event::Event) -> std::collections::BTreeMap<String, String> {
         serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&event.content)
             .expect("a profile's content is a JSON object")
             .into_iter()
@@ -20445,7 +20472,10 @@ mod maintenance_real_ffi_tests {
     /// that was deleted.
     async fn delete_with_one_relay_refusing(
         fx: &ScriptedProfilePool,
-    ) -> (std::sync::Arc<std::sync::atomic::AtomicBool>, nostr::Event) {
+    ) -> (
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        nostr::event::Event,
+    ) {
         let deleted = fx.profile(DELETED_PROFILE, None);
         fx.hold_as_published(&deleted);
         let refusing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -20767,7 +20797,9 @@ mod maintenance_real_ffi_tests {
         assert_profile_pool_is_local(&circle, 3);
         let held = CachedProfile {
             pubkey_hex: own_hex.clone(),
-            metadata: ProfileMetadata::from_metadata(nostr::Metadata::new().display_name("Old")),
+            metadata: ProfileMetadata::from_metadata(
+                nostr::nips::nip01::Metadata::new().display_name("Old"),
+            ),
             state: ProfileState::Known,
             event_created_at: profile_now_secs(),
             fetched_at: profile_now_secs(),
@@ -20781,7 +20813,7 @@ mod maintenance_real_ffi_tests {
             .record_published_event(
                 0,
                 "",
-                &nostr::EventId::all_zeros(),
+                &nostr::event::EventId::all_zeros(),
                 &keys.public_key(),
                 profile_now_secs(),
             )
@@ -20959,7 +20991,9 @@ mod maintenance_real_ffi_tests {
     }
 
     /// The distinct events among `sent`, by id.
-    fn distinct_ids(sent: &[nostr::Event]) -> std::collections::BTreeSet<nostr::EventId> {
+    fn distinct_ids(
+        sent: &[nostr::event::Event],
+    ) -> std::collections::BTreeSet<nostr::event::EventId> {
         sent.iter().map(|event| event.id).collect()
     }
 
@@ -21205,7 +21239,7 @@ mod maintenance_real_ffi_tests {
             .record_published_event(
                 0,
                 "",
-                &nostr::EventId::all_zeros(),
+                &nostr::event::EventId::all_zeros(),
                 &fx.keys.public_key(),
                 profile_now_secs(),
             )
@@ -22936,7 +22970,9 @@ mod maintenance_real_ffi_tests {
                 .iter()
                 .filter_map(|(_, _, _, text)| serde_json::from_str::<serde_json::Value>(text).ok())
                 .filter(|value| value.get(0).and_then(serde_json::Value::as_str) == Some("EVENT"))
-                .filter_map(|value| serde_json::from_value::<nostr::Event>(value[1].clone()).ok())
+                .filter_map(|value| {
+                    serde_json::from_value::<nostr::event::Event>(value[1].clone()).ok()
+                })
                 .chain(std::iter::once(legacy.event.clone()))
             {
                 table.index_event(&event.id.to_hex(), event.kind.as_u16(), None);
@@ -22990,7 +23026,9 @@ mod maintenance_real_ffi_tests {
 
         let kind0 = haven_core::profile::build_metadata_event(
             &keys,
-            &ProfileMetadata::from_metadata(nostr::Metadata::new().display_name("Quiet Wanderer")),
+            &ProfileMetadata::from_metadata(
+                nostr::nips::nip01::Metadata::new().display_name("Quiet Wanderer"),
+            ),
             None,
         )
         .expect("a kind 0");
@@ -23035,7 +23073,7 @@ mod member_directory_real_ffi_tests {
         CircleManagerFfi, DirectoryTierFfi, MemberKeyPackageFfi, RelayManagerFfi, RelayTypeFfi,
     };
     use haven_core::circle::DIRECTORY_RETENTION_SECS;
-    use nostr::{Keys, Kind};
+    use nostr::{event::Kind, key::Keys};
     use nostr_relay_builder::MockRelay;
 
     /// The start of the current UTC day, in Unix seconds.
@@ -23124,7 +23162,7 @@ mod member_directory_real_ffi_tests {
     // ------------------------------------------------------------------------
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn the_ranked_read_offers_a_confirmed_co_member_and_sweeps_its_own_window() {
-        use nostr::prelude::ToBech32 as _;
+        use nostr::nips::nip19::ToBech32 as _;
 
         let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
         install_test_seams();
@@ -23250,7 +23288,7 @@ mod member_directory_real_ffi_tests {
         let other_keys = Keys::generate();
         let other = published_member(&url, &other_keys).await;
         let package = haven_core::nostr::mls::SessionManager::key_package_from_event(
-            &<nostr::Event as nostr::JsonUtil>::from_json(&other.key_package_json)
+            &<nostr::event::Event as nostr::JsonUtil>::from_json(&other.key_package_json)
                 .expect("a key package event"),
         )
         .expect("a key package");
@@ -23913,9 +23951,9 @@ mod log_anonymity_tests {
             "IngestOutcomeFfi",
         );
         let sealed = || super::SealedLocationFfi {
-            event: nostr::EventBuilder::new(nostr::Kind::Custom(445), TEXT)
-                .tag(nostr::Tag::custom(nostr::TagKind::h(), [HEX_ID]))
-                .sign_with_keys(&nostr::Keys::generate())
+            event: nostr::event::EventBuilder::new(nostr::event::Kind::Custom(445), TEXT)
+                .tag(nostr::event::Tag::custom(nostr::TagKind::h(), [HEX_ID]))
+                .sign_with_keys(&nostr::key::Keys::generate())
                 .expect("signed"),
         };
         assert_debug_redacted!(sealed(), "SealedLocationFfi", NEEDLES);
@@ -24347,7 +24385,7 @@ mod log_anonymity_tests {
         let _guard = super::SHARED_KEYRING_TEST_LOCK.blocking_lock();
         super::maintenance_real_ffi_tests::install_test_seams();
         let dir = super::maintenance_real_ffi_tests::DataDir::new("alias_manager");
-        let secret = nostr::Keys::generate()
+        let secret = nostr::key::Keys::generate()
             .secret_key()
             .to_secret_bytes()
             .to_vec();
@@ -24462,10 +24500,10 @@ mod driver_real_ffi_tests {
         LocationMessageResultKindFfi, LocationPublishFfi, MemberKeyPackageFfi, PublishStatusFfi,
         ReceiveVerdictFfi, RefusalFfi, RelayManagerFfi, RepairKindFfi,
     };
-    use nostr::Keys;
+    use nostr::key::Keys;
     use nostr_relay_builder::MockRelay;
 
-    async fn package_of(keys: &Keys, relay: &str) -> nostr::Event {
+    async fn package_of(keys: &Keys, relay: &str) -> nostr::event::Event {
         let dir = DataDir::new("driver_package");
         let member = haven_core::circle::CircleManager::new_unencrypted(
             std::path::Path::new(&dir.as_str()),
@@ -24548,7 +24586,7 @@ mod driver_real_ffi_tests {
 
         // A change asked for away from the foreground is refused, typed.
         let carol = Keys::generate();
-        let carol_member = |event: &nostr::Event| MemberKeyPackageFfi {
+        let carol_member = |event: &nostr::event::Event| MemberKeyPackageFfi {
             key_package_json: serde_json::to_string(event).expect("json"),
             inbox_relays: vec![url.clone()],
             nip65_relays: Vec::new(),
@@ -24702,7 +24740,12 @@ mod publish_event_ffi_tests {
         allow_ws_loopback_for_test, DeviceClockComplaintFfi, PublishFailureFfi, PublishRefusalFfi,
         PublishResultFfi, RelayManagerFfi,
     };
-    use nostr::{EventBuilder, Filter, JsonUtil, Keys, Kind};
+    use nostr::{
+        event::{EventBuilder, Kind},
+        filter::Filter,
+        key::Keys,
+        JsonUtil,
+    };
     use nostr_relay_builder::MockRelay;
 
     /// What a relay at `url` holds of `kind`.

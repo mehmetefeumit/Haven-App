@@ -33,7 +33,7 @@ use haven_core::relay::live_sync::{
 };
 use haven_core::relay::maintenance::build_kp_maintenance_events;
 use haven_core::relay::{allow_ws_loopback_for_test, RelayManager};
-use nostr::{Event, Keys};
+use nostr::{event::Event, key::Keys};
 use nostr_relay_builder::MockRelay;
 use tempfile::TempDir;
 
@@ -347,8 +347,8 @@ async fn an_unprocessable_event_reports_no_circle_unrecoverable() {
     let mut rx = bus.subscribe();
     let processor = EngineProcessor::new(Arc::clone(&fx.alice), bus);
 
-    let junk = nostr::EventBuilder::new(nostr::Kind::Custom(445), "not-ciphertext")
-        .tag(nostr::Tag::custom(
+    let junk = nostr::event::EventBuilder::new(nostr::event::Kind::Custom(445), "not-ciphertext")
+        .tag(nostr::event::Tag::custom(
             nostr::TagKind::custom("h"),
             [hex::encode(fx.nostr_group_id)],
         ))

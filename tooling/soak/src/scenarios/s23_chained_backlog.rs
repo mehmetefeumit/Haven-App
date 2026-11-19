@@ -15,7 +15,7 @@
 //!
 //! # The mechanism
 //!
-//! 1. A relay serves a stored page NEWEST FIRST (`nostr::Event`'s `Ord` is
+//! 1. A relay serves a stored page NEWEST FIRST (`nostr::event::Event`'s `Ord` is
 //!    `created_at` descending, ties by id), so the returning device ingests
 //!    the newer commit of the pair before the older.
 //! 2. A kind-445 commit's outer layer is keyed at its committer's PRE-commit
@@ -82,7 +82,10 @@
 use std::time::Duration;
 
 use haven_core::nostr::mls::types::GroupId;
-use nostr::{Event, EventId, Filter};
+use nostr::{
+    event::{Event, EventId},
+    filter::Filter,
+};
 
 use crate::clock::WallNow;
 use crate::oracle::vacuity::{ExpectationFloor, Observed};

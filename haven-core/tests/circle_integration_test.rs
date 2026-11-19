@@ -98,7 +98,7 @@ mod circle_manager_lifecycle_tests {
         // Directory should not exist yet
         assert!(!dir.exists());
 
-        let _manager = CircleManager::new_unencrypted(&dir, &nostr::Keys::generate())
+        let _manager = CircleManager::new_unencrypted(&dir, &nostr::key::Keys::generate())
             .expect("should create manager");
 
         // Directory should now exist
@@ -119,7 +119,7 @@ mod circle_manager_lifecycle_tests {
 
         assert!(!nested_dir.exists());
 
-        let _manager = CircleManager::new_unencrypted(&nested_dir, &nostr::Keys::generate())
+        let _manager = CircleManager::new_unencrypted(&nested_dir, &nostr::key::Keys::generate())
             .expect("should create manager");
 
         assert!(nested_dir.exists());
@@ -135,7 +135,7 @@ mod circle_manager_lifecycle_tests {
         let dir = unique_temp_dir("mgr_existing");
         std::fs::create_dir_all(&dir).unwrap();
 
-        let _manager = CircleManager::new_unencrypted(&dir, &nostr::Keys::generate())
+        let _manager = CircleManager::new_unencrypted(&dir, &nostr::key::Keys::generate())
             .expect("should create manager");
 
         assert!(dir.exists());
@@ -164,7 +164,7 @@ mod circle_manager_lifecycle_tests {
         // (as an old seeder left it). Handles are dropped before the next open
         // so the database is never held twice.
         {
-            let _manager = CircleManager::new_unencrypted(&dir, &nostr::Keys::generate())
+            let _manager = CircleManager::new_unencrypted(&dir, &nostr::key::Keys::generate())
                 .expect("first launch");
         }
         {
@@ -183,8 +183,8 @@ mod circle_manager_lifecycle_tests {
         }
 
         // Launch 2 must prune it during construction.
-        let manager =
-            CircleManager::new_unencrypted(&dir, &nostr::Keys::generate()).expect("second launch");
+        let manager = CircleManager::new_unencrypted(&dir, &nostr::key::Keys::generate())
+            .expect("second launch");
         assert!(
             !manager
                 .list_user_relays(haven_core::circle::RelayType::Profile)
@@ -211,7 +211,7 @@ mod circle_manager_lifecycle_tests {
     #[tokio::test]
     async fn manager_get_circles_returns_empty_initially() {
         let dir = unique_temp_dir("mgr_empty_circles");
-        let manager = CircleManager::new_unencrypted(&dir, &nostr::Keys::generate())
+        let manager = CircleManager::new_unencrypted(&dir, &nostr::key::Keys::generate())
             .expect("should create manager");
 
         let circles = manager.get_circles().await.expect("should get circles");
@@ -246,7 +246,7 @@ mod circle_manager_lifecycle_tests {
     #[tokio::test]
     async fn group_epoch_error_never_leaks_the_queried_group_id() {
         let dir = unique_temp_dir("mgr_epoch_no_leak");
-        let manager = CircleManager::new_unencrypted(&dir, &nostr::Keys::generate())
+        let manager = CircleManager::new_unencrypted(&dir, &nostr::key::Keys::generate())
             .expect("should create manager");
 
         // A group this manager has never seen, so the lookup misses.
@@ -287,7 +287,7 @@ mod circle_manager_lifecycle_tests {
     #[tokio::test]
     async fn outgoing_location_expiry_error_never_leaks_the_queried_group_id() {
         let dir = unique_temp_dir("mgr_expiry_no_leak");
-        let manager = CircleManager::new_unencrypted(&dir, &nostr::Keys::generate())
+        let manager = CircleManager::new_unencrypted(&dir, &nostr::key::Keys::generate())
             .expect("should create manager");
 
         let unknown = [0xcd_u8; 32];
@@ -318,7 +318,7 @@ mod circle_manager_lifecycle_tests {
     #[tokio::test]
     async fn manager_get_visible_circles_returns_empty_initially() {
         let dir = unique_temp_dir("mgr_empty_visible");
-        let manager = CircleManager::new_unencrypted(&dir, &nostr::Keys::generate())
+        let manager = CircleManager::new_unencrypted(&dir, &nostr::key::Keys::generate())
             .expect("should create manager");
 
         let circles = manager
@@ -333,7 +333,7 @@ mod circle_manager_lifecycle_tests {
     #[tokio::test]
     async fn manager_get_circle_nonexistent_returns_none() {
         let dir = unique_temp_dir("mgr_get_none");
-        let manager = CircleManager::new_unencrypted(&dir, &nostr::Keys::generate())
+        let manager = CircleManager::new_unencrypted(&dir, &nostr::key::Keys::generate())
             .expect("should create manager");
 
         let fake_id = GroupId::from_slice(&[99; 32]);
@@ -357,7 +357,7 @@ mod contact_management_tests {
     #[test]
     fn set_contact_creates_new_contact() {
         let dir = unique_temp_dir("contact_create");
-        let manager = CircleManager::new_unencrypted(&dir, &nostr::Keys::generate())
+        let manager = CircleManager::new_unencrypted(&dir, &nostr::key::Keys::generate())
             .expect("should create manager");
 
         let contact = manager
@@ -376,7 +376,7 @@ mod contact_management_tests {
     #[test]
     fn set_contact_with_minimal_data() {
         let dir = unique_temp_dir("contact_minimal");
-        let manager = CircleManager::new_unencrypted(&dir, &nostr::Keys::generate())
+        let manager = CircleManager::new_unencrypted(&dir, &nostr::key::Keys::generate())
             .expect("should create manager");
 
         let contact = manager
@@ -393,7 +393,7 @@ mod contact_management_tests {
     #[test]
     fn set_contact_with_no_display_name() {
         let dir = unique_temp_dir("contact_no_name");
-        let manager = CircleManager::new_unencrypted(&dir, &nostr::Keys::generate())
+        let manager = CircleManager::new_unencrypted(&dir, &nostr::key::Keys::generate())
             .expect("should create manager");
 
         let contact = manager
@@ -410,7 +410,7 @@ mod contact_management_tests {
     #[test]
     fn get_contact_retrieves_saved_contact() {
         let dir = unique_temp_dir("contact_get");
-        let manager = CircleManager::new_unencrypted(&dir, &nostr::Keys::generate())
+        let manager = CircleManager::new_unencrypted(&dir, &nostr::key::Keys::generate())
             .expect("should create manager");
 
         manager
@@ -432,7 +432,7 @@ mod contact_management_tests {
     #[test]
     fn get_contact_nonexistent_returns_none() {
         let dir = unique_temp_dir("contact_get_none");
-        let manager = CircleManager::new_unencrypted(&dir, &nostr::Keys::generate())
+        let manager = CircleManager::new_unencrypted(&dir, &nostr::key::Keys::generate())
             .expect("should create manager");
 
         let result = manager
@@ -446,7 +446,7 @@ mod contact_management_tests {
     #[test]
     fn set_contact_updates_existing_contact() {
         let dir = unique_temp_dir("contact_update");
-        let manager = CircleManager::new_unencrypted(&dir, &nostr::Keys::generate())
+        let manager = CircleManager::new_unencrypted(&dir, &nostr::key::Keys::generate())
             .expect("should create manager");
 
         let contact1 = manager
@@ -473,7 +473,7 @@ mod contact_management_tests {
     #[test]
     fn get_all_contacts_returns_all_saved_contacts() {
         let dir = unique_temp_dir("contact_get_all");
-        let manager = CircleManager::new_unencrypted(&dir, &nostr::Keys::generate())
+        let manager = CircleManager::new_unencrypted(&dir, &nostr::key::Keys::generate())
             .expect("should create manager");
 
         // Create multiple contacts
@@ -503,7 +503,7 @@ mod contact_management_tests {
     #[test]
     fn get_all_contacts_returns_empty_when_none_exist() {
         let dir = unique_temp_dir("contact_get_all_empty");
-        let manager = CircleManager::new_unencrypted(&dir, &nostr::Keys::generate())
+        let manager = CircleManager::new_unencrypted(&dir, &nostr::key::Keys::generate())
             .expect("should create manager");
 
         let contacts = manager.get_all_contacts().expect("should get all contacts");
@@ -515,7 +515,7 @@ mod contact_management_tests {
     #[test]
     fn delete_contact_removes_contact() {
         let dir = unique_temp_dir("contact_delete");
-        let manager = CircleManager::new_unencrypted(&dir, &nostr::Keys::generate())
+        let manager = CircleManager::new_unencrypted(&dir, &nostr::key::Keys::generate())
             .expect("should create manager");
 
         manager
@@ -539,7 +539,7 @@ mod contact_management_tests {
     #[test]
     fn delete_contact_nonexistent_succeeds() {
         let dir = unique_temp_dir("contact_delete_nonexistent");
-        let manager = CircleManager::new_unencrypted(&dir, &nostr::Keys::generate())
+        let manager = CircleManager::new_unencrypted(&dir, &nostr::key::Keys::generate())
             .expect("should create manager");
 
         // Deleting non-existent contact should not error
@@ -553,7 +553,7 @@ mod contact_management_tests {
     #[test]
     fn contact_with_unicode_display_name() {
         let dir = unique_temp_dir("contact_unicode");
-        let manager = CircleManager::new_unencrypted(&dir, &nostr::Keys::generate())
+        let manager = CircleManager::new_unencrypted(&dir, &nostr::key::Keys::generate())
             .expect("should create manager");
 
         let contact = manager
@@ -571,7 +571,7 @@ mod contact_management_tests {
     #[test]
     fn contact_with_long_notes() {
         let dir = unique_temp_dir("contact_long_notes");
-        let manager = CircleManager::new_unencrypted(&dir, &nostr::Keys::generate())
+        let manager = CircleManager::new_unencrypted(&dir, &nostr::key::Keys::generate())
             .expect("should create manager");
 
         let long_notes = "This is a very long note field that contains a lot of information about the contact. It might include their background, how we met, important details to remember, and various other pieces of information that are relevant to our relationship.".to_string();
@@ -1234,7 +1234,7 @@ mod mls_dependent_tests {
 
     use haven_core::nostr::mls::types::LocationMessageResult;
     use haven_core::relay::maintenance::build_kp_maintenance_events;
-    use nostr::Keys;
+    use nostr::key::Keys;
 
     // ── Construction helpers (manager identity == its keys) ───────────────────
 
@@ -1248,14 +1248,22 @@ mod mls_dependent_tests {
 
     /// Mints a signed kind-30443 `KeyPackage` event for `manager` (whose identity
     /// MUST be `keys`), via the real DM-2b publish path.
-    async fn kp_event(manager: &CircleManager, keys: &Keys, relays: &[String]) -> nostr::Event {
+    async fn kp_event(
+        manager: &CircleManager,
+        keys: &Keys,
+        relays: &[String],
+    ) -> nostr::event::Event {
         build_kp_maintenance_events(manager.session(), keys, relays, None, None)
             .await
             .expect("build key package event")
             .event
     }
 
-    const fn member(kp: nostr::Event, inbox: Vec<String>, nip65: Vec<String>) -> MemberKeyPackage {
+    const fn member(
+        kp: nostr::event::Event,
+        inbox: Vec<String>,
+        nip65: Vec<String>,
+    ) -> MemberKeyPackage {
         MemberKeyPackage {
             key_package_event: kp,
             inbox_relays: inbox,
@@ -1381,7 +1389,7 @@ mod mls_dependent_tests {
         group_id: &GroupId,
         lat: f64,
         lon: f64,
-    ) -> nostr::Event {
+    ) -> nostr::event::Event {
         let loc = sentinel_location(lat, lon);
         let (event, _ngid, _relays) = manager
             .seal_location_for_test(group_id, &loc)
@@ -1394,7 +1402,7 @@ mod mls_dependent_tests {
     /// `sender_keys` decoding to `(lat, lon)`.
     async fn assert_decrypts_to_location(
         receiver: &CircleManager,
-        event: &nostr::Event,
+        event: &nostr::event::Event,
         sender_keys: &Keys,
         lat: f64,
         lon: f64,
@@ -2104,7 +2112,7 @@ mod mls_dependent_tests {
             .add_members_for_test(&group_id, &[member(charlie_kp, relays.clone(), vec![])])
             .await
             .expect("alice adds charlie, and a relay acks it");
-        assert_eq!(add.kind, nostr::Kind::Custom(445));
+        assert_eq!(add.kind, nostr::event::Kind::Custom(445));
 
         let bob_add = s
             .bob_manager
@@ -2131,7 +2139,7 @@ mod mls_dependent_tests {
             .remove_members_for_test(&group_id, &[charlie_keys.public_key().to_hex()])
             .await
             .expect("alice removes charlie, and a relay acks it");
-        assert_eq!(remove.kind, nostr::Kind::Custom(445));
+        assert_eq!(remove.kind, nostr::event::Kind::Custom(445));
 
         let bob_remove = s
             .bob_manager

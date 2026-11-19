@@ -7,9 +7,9 @@
 
 use std::sync::Arc;
 
-use nostr::prelude::Event;
+use nostr::event::Event;
 #[cfg(any(test, feature = "test-utils"))]
-use nostr::prelude::UnsignedEvent;
+use nostr::event::UnsignedEvent;
 
 use super::manager::SessionManager;
 use super::types::{GroupId, ScreenedIngest};
@@ -150,7 +150,7 @@ impl std::fmt::Debug for MlsGroupContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::Keys;
+    use nostr::key::Keys;
     use std::env;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};

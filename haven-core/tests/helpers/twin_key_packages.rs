@@ -17,7 +17,7 @@ use cgka_traits::app_components::{
     decode_components_list, encode_components_list, ACCOUNT_IDENTITY_PROOF_COMPONENT_ID,
     APP_COMPONENTS_COMPONENT_ID,
 };
-use nostr::Keys;
+use nostr::key::Keys;
 use openmls::prelude::tls_codec::{Deserialize as _, Serialize as _};
 use openmls::prelude::{
     AppDataDictionaryExtension, BasicCredential, Capabilities, Ciphersuite, CredentialWithKey,

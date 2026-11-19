@@ -43,7 +43,7 @@ fn cleanup_dir(dir: &PathBuf) {
 
 fn new_session(prefix: &str) -> (SessionManager, PathBuf) {
     let dir = unique_temp_dir(prefix);
-    let keys = nostr::Keys::generate();
+    let keys = nostr::key::Keys::generate();
     let session =
         SessionManager::new_unencrypted(&dir, &keys).expect("should create session manager");
     (session, dir)
@@ -396,7 +396,7 @@ mod production_storage_tests {
     #[ignore = "requires system keyring - run with --ignored flag"]
     fn session_manager_encrypted_creates_successfully() {
         let dir = unique_temp_dir("prod_manager_encrypted");
-        let keys = nostr::Keys::generate();
+        let keys = nostr::key::Keys::generate();
         assert!(
             SessionManager::new(&dir, &keys).is_ok(),
             "SessionManager should open with a keyring"
@@ -408,7 +408,7 @@ mod production_storage_tests {
     #[ignore = "requires system keyring - run with --ignored flag"]
     async fn circle_manager_encrypted_creates_successfully() {
         let dir = unique_temp_dir("prod_circle_encrypted");
-        let keys = nostr::Keys::generate();
+        let keys = nostr::key::Keys::generate();
         let manager = CircleManager::new(&dir, &keys, None).expect("circle manager with keyring");
         assert!(manager.get_circles().await.unwrap().is_empty());
         assert!(manager.get_all_contacts().unwrap().is_empty());
@@ -559,7 +559,7 @@ mod selfremove_eviction_tests {
         let commit = captured_commit.expect("the eviction surfaced a publishable auto-commit");
         assert_eq!(
             commit.kind,
-            nostr::Kind::Custom(445),
+            nostr::event::Kind::Custom(445),
             "the auto-commit is a kind-445 group message ready for the circle's relays"
         );
         helpers::assert_no_raw_mls_group_id_leak(&commit, g.group_id.as_slice(), &g.nostr_group_id);

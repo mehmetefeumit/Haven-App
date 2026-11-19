@@ -38,7 +38,7 @@ use haven_core::nostr::mls::storage::openmls_group_keys_for_test;
 use haven_core::nostr::mls::{SessionManager, StorageConfig};
 use haven_core::sqlcipher_init;
 use haven_core::tiles::TileCacheStorage;
-use nostr::Keys;
+use nostr::key::Keys;
 
 const RAW_KEY: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 /// More openers than any shipped process has isolates.

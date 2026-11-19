@@ -140,7 +140,7 @@ use cgka_traits::{
     TransportEndpointFailure, TransportEndpointFailureKind, TransportEndpointRejectionCategory,
 };
 use nostr::message::MachineReadablePrefix;
-use nostr::{EventId, PublicKey, RelayMessage, RelayUrl};
+use nostr::{event::EventId, key::PublicKey, message::RelayMessage, types::RelayUrl};
 use nostr_sdk::pool::relay::RelayNotification;
 use tokio::sync::broadcast::{error::TryRecvError, Receiver};
 use transport_nostr_adapter::NostrRelayClient;
@@ -887,7 +887,7 @@ pub trait FanoutSend: Send + Sync {
     /// call, and never makes one wait.
     async fn publish_location(
         &self,
-        event: &nostr::Event,
+        event: &nostr::event::Event,
         targets: &[String],
     ) -> RelayResult<PublishResult>;
 }
@@ -3258,7 +3258,7 @@ pub enum LocationSeal {
     /// Encrypted for the circle's current epoch: publish `event` to `relays`.
     Sealed {
         /// The kind-445 event.
-        event: Box<nostr::Event>,
+        event: Box<nostr::event::Event>,
         /// The circle's public routing id.
         nostr_group_id: [u8; 32],
         /// The circle's relays.
@@ -3524,7 +3524,7 @@ pub trait UnrecordedPublisher: Send + Sync {
     /// Publishes `event` to `relays`; resolves to `true` iff ≥1 relay OK-acked.
     fn publish_unrecorded<'a>(
         &'a self,
-        event: &'a nostr::Event,
+        event: &'a nostr::event::Event,
         relays: &'a [String],
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>>;
 }
@@ -3536,7 +3536,7 @@ pub trait UnrecordedPublisher: Send + Sync {
 impl UnrecordedPublisher for super::RelayManager {
     fn publish_unrecorded<'a>(
         &'a self,
-        event: &'a nostr::Event,
+        event: &'a nostr::event::Event,
         relays: &'a [String],
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
         Box::pin(async move {
@@ -3664,7 +3664,11 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
     /// has that publisher's longest run left, and for no longer than the
     /// wake lasts. `None` when it was not begun or the wake ended first:
     /// either way nothing says a relay took it.
-    async fn send_unrecorded(&self, event: &nostr::Event, relays: &[String]) -> Option<bool> {
+    async fn send_unrecorded(
+        &self,
+        event: &nostr::event::Event,
+        relays: &[String],
+    ) -> Option<bool> {
         if self.mode.mode() != DriveMode::Full || !self.allows(PUBLISHER_BUDGET_MS) {
             return None;
         }
@@ -4012,7 +4016,7 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
     pub async fn create_circle(
         &self,
         circle: &CircleManager,
-        sender_keys: &nostr::Keys,
+        sender_keys: &nostr::key::Keys,
         members: Vec<MemberKeyPackage>,
         config: &crate::circle::CircleConfig,
     ) -> Result<CreateOutcome, CircleError> {
@@ -4654,7 +4658,7 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
     pub async fn ingest_for_poll(
         &self,
         circle: &CircleManager,
-        event: &nostr::Event,
+        event: &nostr::event::Event,
     ) -> Result<PollOutcome, CircleError> {
         let mut pass = Pass::default();
         if let Some(group_id) = circle.group_of_event(event) {
@@ -4871,7 +4875,7 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
     pub async fn publish_location(
         &self,
         circle: &CircleManager,
-        event: &nostr::Event,
+        event: &nostr::event::Event,
     ) -> LocationPublish {
         let message = MessageId::new(event.id.as_bytes().to_vec());
         let Some(_driving) = Driving::claim_message(&message) else {
@@ -5261,7 +5265,7 @@ pub mod scripted {
         TransportEndpoint, TransportEndpointFailure, TransportEndpointFailureKind,
         TransportEndpointRejectionCategory,
     };
-    use nostr::{EventId, RelayUrl};
+    use nostr::{event::EventId, types::RelayUrl};
     use tokio::sync::Semaphore;
 
     use crate::relay::{PublishResult, RelayResult};
@@ -5322,7 +5326,7 @@ pub mod scripted {
         /// The relay URLs exactly as the driver passed them.
         pub targets: Vec<String>,
         /// The event it was asked to send.
-        pub event: nostr::Event,
+        pub event: nostr::event::Event,
     }
 
     #[derive(Default)]
@@ -5475,13 +5479,13 @@ pub mod scripted {
     /// lands a change.
     #[derive(Default)]
     pub struct Accepting {
-        sent: Mutex<Vec<nostr::Event>>,
-        handed: Mutex<Vec<nostr::Event>>,
+        sent: Mutex<Vec<nostr::event::Event>>,
+        handed: Mutex<Vec<nostr::event::Event>>,
     }
 
     impl Accepting {
         /// Each event sent under a record, once, in the order first sent.
-        pub fn sent(&self) -> Vec<nostr::Event> {
+        pub fn sent(&self) -> Vec<nostr::event::Event> {
             self.sent
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -5490,7 +5494,7 @@ pub mod scripted {
 
         /// What was published with no record — a Welcome, a proposal — in
         /// order.
-        pub fn handed(&self) -> Vec<nostr::Event> {
+        pub fn handed(&self) -> Vec<nostr::event::Event> {
             self.handed
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -5510,7 +5514,8 @@ pub mod scripted {
             message: &TransportMessage,
             _taken: Taken,
         ) -> FanoutTargetOutcome {
-            if let Ok(event) = <nostr::Event as nostr::JsonUtil>::from_json(&message.payload) {
+            if let Ok(event) = <nostr::event::Event as nostr::JsonUtil>::from_json(&message.payload)
+            {
                 let mut sent = self.sent.lock().unwrap_or_else(PoisonError::into_inner);
                 if !sent.iter().any(|kept| kept.id == event.id) {
                     sent.push(event);
@@ -5521,7 +5526,7 @@ pub mod scripted {
 
         async fn publish_location(
             &self,
-            event: &nostr::Event,
+            event: &nostr::event::Event,
             targets: &[String],
         ) -> RelayResult<PublishResult> {
             Ok(PublishResult {
@@ -5536,7 +5541,7 @@ pub mod scripted {
     impl crate::relay::fanout::UnrecordedPublisher for Accepting {
         fn publish_unrecorded<'a>(
             &'a self,
-            event: &'a nostr::Event,
+            event: &'a nostr::event::Event,
             _relays: &'a [String],
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
             self.handed
@@ -5573,7 +5578,7 @@ pub mod scripted {
 
         async fn publish_location(
             &self,
-            _event: &nostr::Event,
+            _event: &nostr::event::Event,
             _targets: &[String],
         ) -> RelayResult<PublishResult> {
             Err(crate::relay::RelayError::AllRelaysFailed)
@@ -5583,7 +5588,7 @@ pub mod scripted {
     impl crate::relay::fanout::UnrecordedPublisher for Refusing {
         fn publish_unrecorded<'a>(
             &'a self,
-            _event: &'a nostr::Event,
+            _event: &'a nostr::event::Event,
             _relays: &'a [String],
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
             Box::pin(async { false })
@@ -5614,7 +5619,7 @@ pub mod scripted {
 
         async fn publish_location(
             &self,
-            _event: &nostr::Event,
+            _event: &nostr::event::Event,
             _targets: &[String],
         ) -> RelayResult<PublishResult> {
             Err(crate::relay::RelayError::AllRelaysFailed)
@@ -5624,7 +5629,7 @@ pub mod scripted {
     impl crate::relay::fanout::UnrecordedPublisher for Inert {
         fn publish_unrecorded<'a>(
             &'a self,
-            _event: &'a nostr::Event,
+            _event: &'a nostr::event::Event,
             _relays: &'a [String],
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
             Box::pin(async { false })
@@ -5709,7 +5714,7 @@ pub mod scripted {
 
         async fn publish_location(
             &self,
-            event: &nostr::Event,
+            event: &nostr::event::Event,
             targets: &[String],
         ) -> RelayResult<PublishResult> {
             let (parking, answer) = {
@@ -5791,7 +5796,7 @@ impl<T: FanoutSend> FanoutSend for RelayMappedFanout<T> {
 
     async fn publish_location(
         &self,
-        event: &nostr::Event,
+        event: &nostr::event::Event,
         targets: &[String],
     ) -> RelayResult<PublishResult> {
         let routed: Vec<String> = targets.iter().map(|target| (self.route)(target)).collect();
@@ -5991,10 +5996,13 @@ mod tests {
     const BEFORE_EVERY_SIGNING: u64 = 0;
 
     fn fanout_message() -> TransportMessage {
-        let event = nostr::EventBuilder::new(nostr::Kind::Custom(KIND_GROUP_MESSAGE), "ciphertext")
-            .tag(nostr::Tag::parse(["h", &"ab".repeat(32)]).expect("an h tag"))
-            .sign_with_keys(&nostr::Keys::generate())
-            .expect("sign");
+        let event = nostr::event::EventBuilder::new(
+            nostr::event::Kind::Custom(KIND_GROUP_MESSAGE),
+            "ciphertext",
+        )
+        .tag(nostr::event::Tag::parse(["h", &"ab".repeat(32)]).expect("an h tag"))
+        .sign_with_keys(&nostr::key::Keys::generate())
+        .expect("sign");
         SessionManager::event_to_transport_message(&event).expect("a kind-445 event converts")
     }
 

@@ -22,7 +22,7 @@ use haven_core::relay::maintenance::{
     TrackedKpLifetime, TrackedKpSlot,
 };
 use helpers::twin_key_packages::{expired_lifetime, mint_like, pre_migration, Minted, Twin};
-use nostr::{JsonUtil as _, Keys};
+use nostr::{key::Keys, JsonUtil as _};
 use openmls::prelude::OpenMlsProvider;
 use openmls_rust_crypto::RustCrypto;
 use storage_sqlite::SqliteAccountStorage;

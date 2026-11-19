@@ -12,8 +12,8 @@
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use nostr::filter::Filter;
 use nostr::util::BoxedFuture;
-use nostr::Filter;
 use nostr_relay_builder::builder::{
     PolicyResult, QueryPolicy, RateLimit, RelayBuilder, RelayBuilderNip42, RelayBuilderNip42Mode,
 };

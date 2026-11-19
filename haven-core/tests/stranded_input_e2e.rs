@@ -108,7 +108,7 @@ async fn sealed_at(
     group: &GroupId,
     latitude: f64,
     timestamp: chrono::DateTime<chrono::Utc>,
-) -> nostr::Event {
+) -> nostr::event::Event {
     let mut location = haven_core::location::LocationMessage::new(latitude, 2.0);
     location.timestamp = timestamp;
     sender
@@ -474,7 +474,7 @@ async fn seal_or_deferral(
     member: &CircleMember,
     group: &GroupId,
     latitude: f64,
-) -> Option<nostr::Event> {
+) -> Option<nostr::event::Event> {
     let sealed = member
         .circle
         .seal_location_for_test(
@@ -592,7 +592,7 @@ async fn an_outsiders_flood_cannot_keep_a_stranded_removal_from_being_handed_bac
              unread input: an outsider keeps a note standing for as long as it likes",
         );
         let mut owed = admin.session().refused_redeliveries(&group, usize::MAX);
-        let mut refused: Vec<nostr::EventId> = forged.iter().map(|event| event.id).collect();
+        let mut refused: Vec<nostr::event::EventId> = forged.iter().map(|event| event.id).collect();
         owed.sort_unstable();
         refused.sort_unstable();
         assert!(
@@ -814,7 +814,7 @@ async fn a_stop_at_the_cap_does_not_keep_what_the_engine_erred_on_from_being_tri
     // `assert!`, not `assert_eq!`: an id is never formatted (Security Rule 15).
     assert!(
         admin.session().refused_redeliveries(&group, 8)
-            == [nostr::EventId::from_byte_array(damaged)],
+            == [nostr::event::EventId::from_byte_array(damaged)],
         "an entry that could be handed back to nobody ended without its id being owed a refetch",
     );
 

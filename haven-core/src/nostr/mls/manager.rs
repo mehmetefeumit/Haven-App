@@ -34,7 +34,12 @@ use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
-use nostr::{Event, JsonUtil, Keys, Kind, PublicKey, RelayUrl, Timestamp, UnsignedEvent};
+use nostr::{
+    event::{Event, Kind, UnsignedEvent},
+    key::{Keys, PublicKey},
+    types::{RelayUrl, Timestamp},
+    JsonUtil,
+};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use tokio::sync::Mutex;
@@ -887,7 +892,7 @@ pub trait RefusedRedeliveryLedger: Send + Sync {
     /// ([`Self::settle_owed_range`]). Answers whether every one of them is
     /// on record now: a caller that holds the event's only other copy keeps
     /// it when this says no.
-    fn record(&self, group_id: &GroupId, ids: &[nostr::EventId], now_secs: i64) -> bool;
+    fn record(&self, group_id: &GroupId, ids: &[nostr::event::EventId], now_secs: i64) -> bool;
     /// Owes a refetch of `group_id`'s history up to `now_secs`, as an
     /// overflow of [`Self::record`] does: the range is opened, or widened and
     /// its generation bumped, so a pass that read it before ends nothing. What
@@ -900,18 +905,24 @@ pub trait RefusedRedeliveryLedger: Send + Sync {
     /// turn is ahead of every id recorded after — an order nobody who mints
     /// ids can put theirs first in. A clock that reads earlier than an id
     /// was last tried at has been stepped back, and that id is due.
-    fn owed(&self, group_id: &GroupId, limit: usize, now_secs: i64) -> Vec<nostr::EventId>;
+    fn owed(&self, group_id: &GroupId, limit: usize, now_secs: i64) -> Vec<nostr::event::EventId>;
     /// Marks `ids` asked for at `now_secs` and still owed: each waits twice
     /// as long as it last did. `wholesale` says the engine had no room for
     /// anything the request brought back: the circle's other ids that have
     /// already been asked for since they last became due at once then wait
     /// at least as long as the soonest of these. One not yet asked for keeps
     /// its turn — it may be the one the engine can open.
-    fn tried(&self, group_id: &GroupId, ids: &[nostr::EventId], now_secs: i64, wholesale: bool);
+    fn tried(
+        &self,
+        group_id: &GroupId,
+        ids: &[nostr::event::EventId],
+        now_secs: i64,
+        wholesale: bool,
+    );
     /// Every id `group_id` owes a refetch of, whether its wait is over or not.
-    fn owed_ids(&self, group_id: &GroupId) -> HashSet<nostr::EventId>;
+    fn owed_ids(&self, group_id: &GroupId) -> HashSet<nostr::event::EventId>;
     /// Discharges `ids`: delivered, or proven gone from every relay asked.
-    fn resolve(&self, group_id: &GroupId, ids: &[nostr::EventId]);
+    fn resolve(&self, group_id: &GroupId, ids: &[nostr::event::EventId]);
     /// `group_id` has reached a new epoch: what the engine could not open or
     /// had no room for it may take now, so every owed id and the owed range
     /// are due at once. Nothing ends here: what was refused for want of room
@@ -985,7 +996,7 @@ struct InMemoryRefusedLedger(std::sync::Mutex<InMemoryRefused>);
 
 #[derive(Default)]
 struct InMemoryRefused {
-    ids: HashMap<GroupId, HashMap<nostr::EventId, OwedId>>,
+    ids: HashMap<GroupId, HashMap<nostr::event::EventId, OwedId>>,
     ranges: HashMap<GroupId, InMemoryRange>,
     /// Outlives a settled range, so a range owed again after one is cleared
     /// never reuses a generation a pass still holds.
@@ -1057,7 +1068,7 @@ struct OwedId {
 }
 
 impl RefusedRedeliveryLedger for InMemoryRefusedLedger {
-    fn record(&self, group_id: &GroupId, ids: &[nostr::EventId], now_secs: i64) -> bool {
+    fn record(&self, group_id: &GroupId, ids: &[nostr::event::EventId], now_secs: i64) -> bool {
         let mut held = self.held();
         let mut seq = held.recorded;
         let owed = held.ids.entry(group_id.clone()).or_default();
@@ -1092,7 +1103,7 @@ impl RefusedRedeliveryLedger for InMemoryRefusedLedger {
         true
     }
 
-    fn owed(&self, group_id: &GroupId, limit: usize, now_secs: i64) -> Vec<nostr::EventId> {
+    fn owed(&self, group_id: &GroupId, limit: usize, now_secs: i64) -> Vec<nostr::event::EventId> {
         let mut owed: Vec<_> = self
             .held()
             .ids
@@ -1108,7 +1119,13 @@ impl RefusedRedeliveryLedger for InMemoryRefusedLedger {
         owed.into_iter().take(limit).map(|(_, id)| id).collect()
     }
 
-    fn tried(&self, group_id: &GroupId, ids: &[nostr::EventId], now_secs: i64, wholesale: bool) {
+    fn tried(
+        &self,
+        group_id: &GroupId,
+        ids: &[nostr::event::EventId],
+        now_secs: i64,
+        wholesale: bool,
+    ) {
         let mut held = self.held();
         let mut seq = held.recorded;
         if let Some(owed) = held.ids.get_mut(group_id) {
@@ -1145,7 +1162,7 @@ impl RefusedRedeliveryLedger for InMemoryRefusedLedger {
         }
     }
 
-    fn resolve(&self, group_id: &GroupId, ids: &[nostr::EventId]) {
+    fn resolve(&self, group_id: &GroupId, ids: &[nostr::event::EventId]) {
         let mut held = self.held();
         if let Some(owed) = held.ids.get_mut(group_id) {
             for id in ids {
@@ -1157,7 +1174,7 @@ impl RefusedRedeliveryLedger for InMemoryRefusedLedger {
         }
     }
 
-    fn owed_ids(&self, group_id: &GroupId) -> HashSet<nostr::EventId> {
+    fn owed_ids(&self, group_id: &GroupId) -> HashSet<nostr::event::EventId> {
         self.held()
             .ids
             .get(group_id)
@@ -4008,7 +4025,8 @@ impl SessionManager {
         let recorded: Vec<Vec<u8>> = held
             .into_iter()
             .filter(|id| {
-                nostr::EventId::from_slice(id).is_ok_and(|event| self.engine_processed(&event))
+                nostr::event::EventId::from_slice(id)
+                    .is_ok_and(|event| self.engine_processed(&event))
             })
             .collect();
         let mut unread = self.unread();
@@ -4033,7 +4051,11 @@ impl SessionManager {
 
     /// As the pager holding back `commits` of `group_id`.
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn hold_pager_commits_for_test(&self, group_id: &GroupId, commits: &[nostr::EventId]) {
+    pub fn hold_pager_commits_for_test(
+        &self,
+        group_id: &GroupId,
+        commits: &[nostr::event::EventId],
+    ) {
         self.hold_pager_commits(group_id, commits);
     }
 
@@ -4044,7 +4066,7 @@ impl SessionManager {
     pub(crate) fn hold_pager_commits<'a>(
         &self,
         group_id: &GroupId,
-        commits: impl IntoIterator<Item = &'a nostr::EventId>,
+        commits: impl IntoIterator<Item = &'a nostr::event::EventId>,
     ) {
         self.unread()
             .pager
@@ -4182,7 +4204,7 @@ impl SessionManager {
         &self,
         routing_id: &[u8; 32],
         until: u64,
-    ) -> Option<HashSet<nostr::EventId>> {
+    ) -> Option<HashSet<nostr::event::EventId>> {
         let session = self.reading().await;
         let inventory = self
             .message_store
@@ -4196,7 +4218,7 @@ impl SessionManager {
             inventory?
                 .items
                 .into_iter()
-                .map(|item| nostr::EventId::from_byte_array(item.event_id))
+                .map(|item| nostr::event::EventId::from_byte_array(item.event_id))
                 .collect(),
         )
     }
@@ -4211,7 +4233,7 @@ impl SessionManager {
     pub async fn record_neg_items_for_test(
         &self,
         routing_id: [u8; 32],
-        items: &[(nostr::EventId, u64)],
+        items: &[(nostr::event::EventId, u64)],
     ) {
         let session = self.reading().await;
         for (id, created_at) in items {
@@ -4230,7 +4252,10 @@ impl SessionManager {
 
     /// What MDK's inventory holds of `routing_id`'s window ending now.
     #[cfg(any(test, feature = "test-utils"))]
-    pub async fn neg_inventory_for_test(&self, routing_id: [u8; 32]) -> HashSet<nostr::EventId> {
+    pub async fn neg_inventory_for_test(
+        &self,
+        routing_id: [u8; 32],
+    ) -> HashSet<nostr::event::EventId> {
         self.neg_inventory(&routing_id, Timestamp::now().as_secs())
             .await
             .unwrap_or_default()
@@ -4260,13 +4285,19 @@ impl SessionManager {
     }
 
     /// Where `routing_id`'s by-id batch last ended, if anywhere.
-    pub(crate) async fn neg_replay_cursor(&self, routing_id: &[u8; 32]) -> Option<nostr::EventId> {
+    pub(crate) async fn neg_replay_cursor(
+        &self,
+        routing_id: &[u8; 32],
+    ) -> Option<nostr::event::EventId> {
         let session = self.reading().await;
         let cursor = self.message_store.transport_reconciliation_replay_cursor(
             &TransportReconciliationRoute::Group(*routing_id),
         );
         drop(session);
-        cursor.ok().flatten().map(nostr::EventId::from_byte_array)
+        cursor
+            .ok()
+            .flatten()
+            .map(nostr::event::EventId::from_byte_array)
     }
 
     /// Records that `routing_id`'s by-id batch ended at `last`, before the
@@ -4274,7 +4305,7 @@ impl SessionManager {
     pub(crate) async fn neg_advance_replay_cursor(
         &self,
         routing_id: &[u8; 32],
-        last: &nostr::EventId,
+        last: &nostr::event::EventId,
     ) {
         let session = self.reading().await;
         let _ = self
@@ -9919,7 +9950,7 @@ impl SessionManager {
                 | GroupEvent::GroupHydrationRecovered { .. } => None,
             })
             .collect();
-        let mut refused: HashMap<GroupId, Vec<nostr::EventId>> = HashMap::new();
+        let mut refused: HashMap<GroupId, Vec<nostr::event::EventId>> = HashMap::new();
         for event in events {
             match event {
                 GroupEvent::EpochChanged { group_id, .. }
@@ -10035,7 +10066,7 @@ impl SessionManager {
                 } => {
                     // A transport message id is the Nostr event id's bytes
                     // (MDK v0.10.4 `transport-nostr-peeler/src/event.rs:40`).
-                    if let Ok(id) = nostr::EventId::from_slice(message_id.as_slice()) {
+                    if let Ok(id) = nostr::event::EventId::from_slice(message_id.as_slice()) {
                         refused.entry(group_id.clone()).or_default().push(id);
                     }
                 }
@@ -10621,7 +10652,7 @@ impl SessionManager {
                 self.commit_notes.end(&kept.id);
                 return held;
             }
-            if nostr::EventId::from_slice(kept.id.as_slice()).is_ok_and(|id| {
+            if nostr::event::EventId::from_slice(kept.id.as_slice()).is_ok_and(|id| {
                 self.refused_ledger
                     .record(group_id, &[id], self.ledger_now_secs())
             }) {
@@ -10854,7 +10885,11 @@ impl SessionManager {
     /// cursor is held for it. One row is read. Its circle is told by a scan
     /// of its own where no look has flagged it — once between two looks,
     /// however often a relay serves the event again.
-    pub(crate) async fn holds_stranded(&self, group_id: &GroupId, id: &nostr::EventId) -> bool {
+    pub(crate) async fn holds_stranded(
+        &self,
+        group_id: &GroupId,
+        id: &nostr::event::EventId,
+    ) -> bool {
         let id = MessageId::new(id.as_bytes().to_vec());
         let session = self.reading().await;
         let stranded = replays_nothing(&self.message_store, &session, group_id) == Some(true)
@@ -11433,13 +11468,13 @@ impl SessionManager {
 
     /// Every id `group_id` owes a refetch of, due or not: the NIP-77 pass
     /// leaves them to the ledger's own schedule.
-    pub(crate) fn refused_owes(&self, group_id: &GroupId) -> HashSet<nostr::EventId> {
+    pub(crate) fn refused_owes(&self, group_id: &GroupId) -> HashSet<nostr::event::EventId> {
         self.refused_ledger.owed_ids(group_id)
     }
 
     /// [`Self::refused_owes`].
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn refused_owes_for_test(&self, group_id: &GroupId) -> HashSet<nostr::EventId> {
+    pub fn refused_owes_for_test(&self, group_id: &GroupId) -> HashSet<nostr::event::EventId> {
         self.refused_owes(group_id)
     }
 
@@ -11459,7 +11494,11 @@ impl SessionManager {
     /// for again until the wait that earned has passed
     /// ([`refetch_spacing_secs`]).
     #[must_use]
-    pub fn refused_redeliveries(&self, group_id: &GroupId, limit: usize) -> Vec<nostr::EventId> {
+    pub fn refused_redeliveries(
+        &self,
+        group_id: &GroupId,
+        limit: usize,
+    ) -> Vec<nostr::event::EventId> {
         self.refused_ledger
             .owed(group_id, limit, self.ledger_now_secs())
     }
@@ -11470,7 +11509,7 @@ impl SessionManager {
     pub fn refused_redeliveries_tried(
         &self,
         group_id: &GroupId,
-        ids: &[nostr::EventId],
+        ids: &[nostr::event::EventId],
         wholesale: bool,
     ) {
         if !ids.is_empty() {
@@ -11481,7 +11520,7 @@ impl SessionManager {
 
     /// Discharges refused ids that were delivered again, or that every relay
     /// asked answered without.
-    pub fn resolve_refused_redeliveries(&self, group_id: &GroupId, ids: &[nostr::EventId]) {
+    pub fn resolve_refused_redeliveries(&self, group_id: &GroupId, ids: &[nostr::event::EventId]) {
         if !ids.is_empty() {
             self.refused_ledger.resolve(group_id, ids);
         }
@@ -11520,7 +11559,7 @@ impl SessionManager {
     /// Whether the engine recorded `event` as processed — so an ingest of it
     /// that then erred left its verdict behind, and nothing of it is owed.
     #[must_use]
-    pub fn engine_processed(&self, event: &nostr::EventId) -> bool {
+    pub fn engine_processed(&self, event: &nostr::event::EventId) -> bool {
         self.message_store
             .has_processed_transport_id(&MessageId::new(event.as_bytes().to_vec()))
             .unwrap_or(false)
@@ -11545,7 +11584,7 @@ impl SessionManager {
     /// Whether MDK still retains the intent of this device's commit
     /// `commit` (its own-commit record, mdk#1734).
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn own_commit_intent_retained_for_test(&self, commit: &nostr::EventId) -> bool {
+    pub fn own_commit_intent_retained_for_test(&self, commit: &nostr::event::EventId) -> bool {
         self.message_store
             .own_commit_intent(&MessageId::new(commit.as_bytes().to_vec()))
             .is_ok_and(|record| record.is_some())
@@ -11653,7 +11692,7 @@ impl SessionManager {
     /// Records `ids` as refused in `group_id` now, as an engine announcement
     /// would.
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn record_refused_for_test(&self, group_id: &GroupId, ids: &[nostr::EventId]) {
+    pub fn record_refused_for_test(&self, group_id: &GroupId, ids: &[nostr::event::EventId]) {
         let _ = self
             .refused_ledger
             .record(group_id, ids, self.ledger_now_secs());
@@ -12469,7 +12508,7 @@ impl SessionManager {
 
     /// The group a processed Welcome joined, if this device still holds it
     /// live — not removed, unrecoverable or disbanded.
-    async fn live_group_joined_by(&self, gift_wrap_id: &nostr::EventId) -> Option<GroupId> {
+    async fn live_group_joined_by(&self, gift_wrap_id: &nostr::event::EventId) -> Option<GroupId> {
         let message_id = MessageId::new(gift_wrap_id.to_bytes().to_vec());
         let group_id = {
             let _session = self.reading().await;
@@ -12702,7 +12741,7 @@ impl SessionManager {
     ///
     /// Returns an error if the promotion or a deletion fails; nothing is
     /// promoted then.
-    pub async fn promote_key_package(&self, acked: &nostr::EventId) -> Result<bool> {
+    pub async fn promote_key_package(&self, acked: &nostr::event::EventId) -> Result<bool> {
         let mut session = self.engine().await?;
         let Some(mut state) = session.key_package_lifecycle().map_err(map_mls_err)? else {
             return Ok(false);
@@ -15907,7 +15946,7 @@ fn encode_admin_policy_v1(admins: &[[u8; 32]]) -> Result<Vec<u8>> {
 /// hashtag the pre-cutover rumor carried is read by no receiver anywhere — not
 /// MDK, not White Noise, not Haven's own gate on a current-kind rumor.
 fn location_rumor(sender: PublicKey, content: String) -> UnsignedEvent {
-    nostr::EventBuilder::new(Kind::Custom(KIND_LOCATION_UPDATE), content).build(sender)
+    nostr::event::EventBuilder::new(Kind::Custom(KIND_LOCATION_UPDATE), content).build(sender)
 }
 
 /// Extracts the inner `content` of a `MarmotAppEvent` JSON payload **only when
@@ -16142,11 +16181,11 @@ mod tests {
     /// bound ends it. A founding record names its circle and no commit.
     #[test]
     fn a_welcomes_bound_is_its_key_packages_not_after_when_sooner() {
-        let invitee = nostr::Keys::generate().public_key().to_hex();
-        let now_secs = nostr::Timestamp::now().as_secs();
-        let wrap = nostr::EventBuilder::new(nostr::Kind::GiftWrap, "sealed")
-            .tag(nostr::Tag::parse(["p", &invitee]).expect("a p tag"))
-            .sign_with_keys(&nostr::Keys::generate())
+        let invitee = nostr::key::Keys::generate().public_key().to_hex();
+        let now_secs = nostr::types::Timestamp::now().as_secs();
+        let wrap = nostr::event::EventBuilder::new(nostr::event::Kind::GiftWrap, "sealed")
+            .tag(nostr::event::Tag::parse(["p", &invitee]).expect("a p tag"))
+            .sign_with_keys(&nostr::key::Keys::generate())
             .expect("signed");
         let message = SessionManager::event_to_transport_message(&wrap).expect("a Welcome");
         let group = GroupId::new(vec![0x4e; 32]);
@@ -16182,11 +16221,12 @@ mod tests {
     #[test]
     fn the_oldest_kept_instant_is_read_from_every_row_or_none() {
         let stored = |secs: u64| {
-            let event = nostr::EventBuilder::new(nostr::Kind::Custom(445), "ciphertext")
-                .tag(nostr::Tag::parse(["h", &"ab".repeat(32)]).expect("an h tag"))
-                .custom_created_at(nostr::Timestamp::from(secs))
-                .sign_with_keys(&nostr::Keys::generate())
-                .expect("signed");
+            let event =
+                nostr::event::EventBuilder::new(nostr::event::Kind::Custom(445), "ciphertext")
+                    .tag(nostr::event::Tag::parse(["h", &"ab".repeat(32)]).expect("an h tag"))
+                    .custom_created_at(nostr::types::Timestamp::from(secs))
+                    .sign_with_keys(&nostr::key::Keys::generate())
+                    .expect("signed");
             StoredMessagePayload::raw_transport(
                 SessionManager::event_to_transport_message(&event).expect("converts"),
             )
@@ -16322,12 +16362,12 @@ mod tests {
 
     // ── The in-memory refused ledger keeps the durable one's promises ─────────
 
-    fn refused_ids(seeds: std::ops::Range<u16>) -> Vec<nostr::EventId> {
+    fn refused_ids(seeds: std::ops::Range<u16>) -> Vec<nostr::event::EventId> {
         seeds
             .map(|seed| {
                 let mut bytes = [0u8; 32];
                 bytes[..2].copy_from_slice(&seed.to_be_bytes());
-                nostr::EventId::from_byte_array(bytes)
+                nostr::event::EventId::from_byte_array(bytes)
             })
             .collect()
     }
@@ -16886,10 +16926,8 @@ mod tests {
         let owed = session.refused_redeliveries(&circle, 8);
         assert!(
             owed.len() == 2
-                && [&handed_back, &other]
-                    .iter()
-                    .all(|id| owed
-                        .contains(&nostr::EventId::from_slice(id.as_slice()).expect("an id"))),
+                && [&handed_back, &other].iter().all(|id| owed
+                    .contains(&nostr::event::EventId::from_slice(id.as_slice()).expect("an id"))),
             "an object the engine let go was not owed its refetch",
         );
         assert!(
@@ -17396,7 +17434,7 @@ mod tests {
         }
     }
     use cgka_traits::types::EpochId;
-    use nostr::Tag;
+    use nostr::event::Tag;
     use std::env;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -17424,8 +17462,8 @@ mod tests {
         let (manager, dir) = open_manager();
         let route = [0x5a; 32];
         let other = [0x11; 32];
-        let stranger = nostr::EventBuilder::new(Kind::Custom(445), "b3BhcXVl")
-            .tags([nostr::Tag::parse(["h", &hex::encode(route)]).unwrap()])
+        let stranger = nostr::event::EventBuilder::new(Kind::Custom(445), "b3BhcXVl")
+            .tags([nostr::event::Tag::parse(["h", &hex::encode(route)]).unwrap()])
             .sign_with_keys(&Keys::generate())
             .unwrap();
         let ingested = manager.process_event(&stranger).await;
@@ -17447,10 +17485,10 @@ mod tests {
             .await
             .expect("the inventory reads")
             .is_empty());
-        let refused = nostr::EventBuilder::new(Kind::Custom(445), "b3BhcXVl")
+        let refused = nostr::event::EventBuilder::new(Kind::Custom(445), "b3BhcXVl")
             .tags([
-                nostr::Tag::parse(["h", &hex::encode(route)]).unwrap(),
-                nostr::Tag::parse(["h", &hex::encode(other)]).unwrap(),
+                nostr::event::Tag::parse(["h", &hex::encode(route)]).unwrap(),
+                nostr::event::Tag::parse(["h", &hex::encode(other)]).unwrap(),
             ])
             .sign_with_keys(&Keys::generate())
             .unwrap();
@@ -17479,10 +17517,10 @@ mod tests {
     #[test]
     fn an_event_with_many_routing_tags_is_judged_under_one_routing() {
         let (manager, dir) = open_manager();
-        let tags: Vec<nostr::Tag> = (0..200u8)
-            .map(|seed| nostr::Tag::parse(["h", &hex::encode([seed; 32])]).unwrap())
+        let tags: Vec<nostr::event::Tag> = (0..200u8)
+            .map(|seed| nostr::event::Tag::parse(["h", &hex::encode([seed; 32])]).unwrap())
             .collect();
-        let many = nostr::EventBuilder::new(Kind::Custom(445), "bWFueQ")
+        let many = nostr::event::EventBuilder::new(Kind::Custom(445), "bWFueQ")
             .tags(tags)
             .sign_with_keys(&Keys::generate())
             .unwrap();
@@ -17811,9 +17849,10 @@ mod tests {
     #[test]
     fn key_package_from_event_decodes_base64_content() {
         let keys = Keys::generate();
-        let event = nostr::EventBuilder::new(Kind::Custom(30443), BASE64.encode(b"kp-bytes"))
-            .sign_with_keys(&keys)
-            .expect("sign");
+        let event =
+            nostr::event::EventBuilder::new(Kind::Custom(30443), BASE64.encode(b"kp-bytes"))
+                .sign_with_keys(&keys)
+                .expect("sign");
         let kp = SessionManager::key_package_from_event(&event).expect("parse");
         assert_eq!(kp.bytes(), b"kp-bytes");
         assert!(kp.source.is_some());
@@ -17825,8 +17864,9 @@ mod tests {
     #[test]
     fn location_result_from_message_received_extracts_inner_content() {
         let sender = MemberId::new(vec![0xAB; 32]);
-        let inner = nostr::EventBuilder::new(Kind::Custom(KIND_LOCATION_UPDATE), r#"{"lat":1.5}"#)
-            .build(Keys::generate().public_key());
+        let inner =
+            nostr::event::EventBuilder::new(Kind::Custom(KIND_LOCATION_UPDATE), r#"{"lat":1.5}"#)
+                .build(Keys::generate().public_key());
         let payload = inner.as_json().into_bytes();
         let event = GroupEvent::MessageReceived {
             group_id: GroupId::new(vec![7, 7, 7]),
@@ -18039,7 +18079,7 @@ mod tests {
         // them on the map is gone — and with it the one sender-forgeable pair
         // (any client lifting `#location` into a `t` tag) the gate admitted.
         let payload = location_payload();
-        let rumor = nostr::EventBuilder::new(Kind::Custom(MDK_CHAT_KIND), payload)
+        let rumor = nostr::event::EventBuilder::new(Kind::Custom(MDK_CHAT_KIND), payload)
             .tags([Tag::hashtag("location")])
             .build(Keys::generate().public_key());
         let content = folded_location_content(&rumor);
@@ -18058,19 +18098,19 @@ mod tests {
         let cases = [
             (
                 "White Noise chat message",
-                nostr::EventBuilder::new(Kind::Custom(9), "hey").build(sender),
+                nostr::event::EventBuilder::new(Kind::Custom(9), "hey").build(sender),
             ),
             (
                 "reaction",
-                nostr::EventBuilder::new(Kind::Custom(7), "+").build(sender),
+                nostr::event::EventBuilder::new(Kind::Custom(7), "+").build(sender),
             ),
             (
                 "group system row",
-                nostr::EventBuilder::new(Kind::Custom(1210), "{}").build(sender),
+                nostr::event::EventBuilder::new(Kind::Custom(1210), "{}").build(sender),
             ),
             (
                 "a kind-9 chat message wearing an unrelated hashtag",
-                nostr::EventBuilder::new(Kind::Custom(9), "hey")
+                nostr::event::EventBuilder::new(Kind::Custom(9), "hey")
                     .tags([Tag::hashtag("nostr")])
                     .build(sender),
             ),
@@ -18098,7 +18138,8 @@ mod tests {
         );
         let sender = Keys::generate().public_key();
         for kind in [7u16, 1210, 1, 25443] {
-            let rumor = nostr::EventBuilder::new(Kind::Custom(kind), payload.clone()).build(sender);
+            let rumor =
+                nostr::event::EventBuilder::new(Kind::Custom(kind), payload.clone()).build(sender);
             let content = folded_location_content(&rumor);
             assert!(
                 content.is_empty() && !parses_as_a_marker(&content),
@@ -18107,7 +18148,8 @@ mod tests {
         }
         // Including under the chat kind: that is a White Noise chat message,
         // not a Haven rumor.
-        let chat = nostr::EventBuilder::new(Kind::Custom(MDK_CHAT_KIND), payload).build(sender);
+        let chat =
+            nostr::event::EventBuilder::new(Kind::Custom(MDK_CHAT_KIND), payload).build(sender);
         assert!(folded_location_content(&chat).is_empty());
     }
 
@@ -18119,7 +18161,7 @@ mod tests {
         let payload = location_payload();
         let sender = Keys::generate().public_key();
         for kind in [MDK_CHAT_KIND, 7u16, 1210, 25443] {
-            let rumor = nostr::EventBuilder::new(Kind::Custom(kind), payload.clone())
+            let rumor = nostr::event::EventBuilder::new(Kind::Custom(kind), payload.clone())
                 .tags([Tag::hashtag("location")])
                 .build(sender);
             let content = folded_location_content(&rumor);
@@ -18160,7 +18202,7 @@ mod tests {
     /// A signed `kind:445` routed at `h`, minted by a throwaway key that belongs
     /// to no member — what any observer of a circle's public `#h` can produce.
     fn signed_445(tags: Vec<Tag>, content: &str) -> Event {
-        nostr::EventBuilder::new(Kind::Custom(445), content)
+        nostr::event::EventBuilder::new(Kind::Custom(445), content)
             .tags(tags)
             .sign_with_keys(&Keys::generate())
             .expect("sign 445")
@@ -18231,7 +18273,7 @@ mod tests {
                 // transport carries 445 (and the gift wrap), nothing else, so a
                 // rumor kind escaping onto a relay is screened before the engine.
                 "a kind the transport does not carry",
-                nostr::EventBuilder::new(Kind::Custom(KIND_LOCATION_UPDATE), "hi")
+                nostr::event::EventBuilder::new(Kind::Custom(KIND_LOCATION_UPDATE), "hi")
                     .tags(vec![h_tag(&good_h)])
                     .sign_with_keys(&Keys::generate())
                     .expect("sign the inner kind as an outer event"),

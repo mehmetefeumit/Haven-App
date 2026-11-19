@@ -34,7 +34,7 @@ use haven_core::relay::maintenance::{
     TrackedKpLifetime, TrackedKpSlot,
 };
 use haven_core::relay::RelayManager;
-use nostr::{Keys, Kind};
+use nostr::{event::Kind, key::Keys};
 use nostr_relay_builder::MockRelay;
 
 use helpers::{cleanup_dir, unique_temp_dir};
@@ -69,7 +69,7 @@ impl Drop for Device {
 }
 
 /// Extracts a kind-30443 event's NIP-33 `d` tag (mirrors the FFI helper).
-fn kp_d_tag(ev: &nostr::Event) -> String {
+fn kp_d_tag(ev: &nostr::event::Event) -> String {
     ev.tags
         .iter()
         .find_map(|t| {
@@ -82,10 +82,10 @@ fn kp_d_tag(ev: &nostr::Event) -> String {
 /// The FFI's per-relay snapshot construction, verbatim.
 async fn kp_snapshot(
     mgr: &RelayManager,
-    author: nostr::PublicKey,
+    author: nostr::key::PublicKey,
     relays: &[String],
 ) -> RelayKpSnapshot {
-    let filter = nostr::Filter::new()
+    let filter = nostr::filter::Filter::new()
         .kind(Kind::Custom(30443))
         .author(author)
         .limit(64);
@@ -115,16 +115,16 @@ async fn kp_snapshot(
 /// Every kind-30443 the relay currently serves for `author`, newest first.
 async fn fetch_slot(
     mgr: &RelayManager,
-    author: nostr::PublicKey,
+    author: nostr::key::PublicKey,
     relays: &[String],
     d: &str,
-) -> Vec<nostr::Event> {
-    let filter = nostr::Filter::new()
+) -> Vec<nostr::event::Event> {
+    let filter = nostr::filter::Filter::new()
         .kind(Kind::Custom(30443))
         .author(author)
         .limit(64);
     let per_relay = mgr.fetch_events_per_relay(filter, relays).await.unwrap();
-    let mut events: Vec<nostr::Event> = per_relay
+    let mut events: Vec<nostr::event::Event> = per_relay
         .into_iter()
         .flat_map(|o| o.events)
         .filter(|e| kp_d_tag(e) == d)
@@ -140,17 +140,17 @@ async fn fetch_slot(
 /// write is already stored, so the first attempt normally suffices.
 async fn served_until(
     mgr: &RelayManager,
-    author: nostr::PublicKey,
+    author: nostr::key::PublicKey,
     relays: &[String],
     what: &str,
-    want: impl Fn(&[nostr::Event]) -> bool,
-) -> Vec<nostr::Event> {
+    want: impl Fn(&[nostr::event::Event]) -> bool,
+) -> Vec<nostr::event::Event> {
     for _ in 0..25 {
-        let filter = nostr::Filter::new()
+        let filter = nostr::filter::Filter::new()
             .kind(Kind::Custom(30443))
             .author(author)
             .limit(64);
-        let served: Vec<nostr::Event> = mgr
+        let served: Vec<nostr::event::Event> = mgr
             .fetch_events_per_relay(filter, relays)
             .await
             .unwrap()
@@ -477,15 +477,15 @@ async fn a_reset_account_replaces_its_old_slot_in_place() {
     let mgr = RelayManager::new();
 
     let old_slot = "c".repeat(64);
-    let pre_reset = nostr::EventBuilder::new(
+    let pre_reset = nostr::event::EventBuilder::new(
         Kind::Custom(30443),
         nostr::base64::Engine::encode(
             &nostr::base64::engine::general_purpose::STANDARD,
             helpers::twin_key_packages::pre_migration(&dev.keys),
         ),
     )
-    .tags([nostr::Tag::identifier(old_slot.clone())])
-    .custom_created_at(nostr::Timestamp::from_secs(1_700_000_000))
+    .tags([nostr::event::Tag::identifier(old_slot.clone())])
+    .custom_created_at(nostr::types::Timestamp::from_secs(1_700_000_000))
     .sign_with_keys(&dev.keys)
     .expect("sign");
     mgr.publish_event(&pre_reset, &own)
@@ -502,7 +502,7 @@ async fn a_reset_account_replaces_its_old_slot_in_place() {
 
     // The FFI's snapshot, with the pre-migration reading it takes per event.
     let probe = || async {
-        let filter = nostr::Filter::new()
+        let filter = nostr::filter::Filter::new()
             .kind(Kind::Custom(30443))
             .author(dev.keys.public_key())
             .limit(64);

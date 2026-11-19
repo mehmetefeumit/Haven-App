@@ -17,8 +17,8 @@ use helpers::{create_key_package_event, setup_two_party_group_capturing_welcome}
 fn evolution(
     work: &[PublishWork],
 ) -> (
-    nostr::Event,
-    Vec<nostr::Event>,
+    nostr::event::Event,
+    Vec<nostr::event::Event>,
     haven_core::nostr::mls::types::PendingStateRef,
 ) {
     work.iter()

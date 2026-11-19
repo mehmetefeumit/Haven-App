@@ -771,7 +771,7 @@ async fn nothing_but_the_driver_sends_an_event_that_has_a_fanout_row() {
     let fx = setup_circle(2, &[ONE, TWO]).await;
     let id = stage_removal(&fx).await;
     let frozen = row(fx.admin(), &id).await;
-    let event = nostr::Event::from_json(&frozen.payload).expect("the frozen event");
+    let event = nostr::event::Event::from_json(&frozen.payload).expect("the frozen event");
     let targets = [ONE.to_string(), TWO.to_string()];
     // Every publish path of a fresh relay manager refuses the event and
     // registers no relay for it.
@@ -1243,13 +1243,15 @@ async fn a_proven_rejection_everywhere_rolls_back_and_re_arms_the_self_remove() 
 
 // ── W9b tail: one row per commit, bound by its origin ────────────────────────
 
-fn commit_event_id(effects: &haven_core::nostr::mls::types::SessionEffects) -> nostr::EventId {
+fn commit_event_id(
+    effects: &haven_core::nostr::mls::types::SessionEffects,
+) -> nostr::event::EventId {
     effects
         .publish
         .iter()
         .find_map(|work| match work {
             PublishWork::GroupEvolution { msg, .. } | PublishWork::AutoPublish { msg, .. } => {
-                nostr::EventId::from_slice(msg.id.as_slice()).ok()
+                nostr::event::EventId::from_slice(msg.id.as_slice()).ok()
             }
             _ => None,
         })
@@ -1277,7 +1279,7 @@ async fn serve_deadlines(member: &CircleMember, group: &GroupId) {
 }
 
 /// A location `sender` seals for `group`.
-async fn location_from(sender: &CircleMember, group: &GroupId) -> nostr::Event {
+async fn location_from(sender: &CircleMember, group: &GroupId) -> nostr::event::Event {
     sender
         .circle
         .seal_location_for_test(
@@ -1956,7 +1958,7 @@ async fn a_peer_applies_the_frozen_event_a_confirmed_drive_sent() {
     assert_eq!(drive(&fx, &transport, &id).await, FanoutStatus::Confirmed);
 
     let sent = transport.calls();
-    let event = nostr::Event::from_json(&sent[0].payload).expect("the frozen event");
+    let event = nostr::event::Event::from_json(&sent[0].payload).expect("the frozen event");
     assert!(event.verify().is_ok());
     let tags: Vec<&str> = event
         .tags
@@ -2055,8 +2057,8 @@ async fn an_invites_welcome_is_handed_over_by_its_commits_confirm_and_by_nothing
         let sent = transport.calls();
         assert!(
             sent.iter()
-                .all(|call| nostr::Event::from_json(&call.payload)
-                    .is_ok_and(|event| event.kind == nostr::Kind::Custom(445))),
+                .all(|call| nostr::event::Event::from_json(&call.payload)
+                    .is_ok_and(|event| event.kind == nostr::event::Kind::Custom(445))),
             "something other than the commit was sent",
         );
         let outstanding = session
@@ -2173,7 +2175,7 @@ async fn traffic_buffered_behind_a_pending_commit_is_delivered_by_either_resolut
 
 /// The leaver's eviction a peer committed from `fx`'s current epoch, with the
 /// leave proposal it commits.
-async fn a_peers_eviction(fx: &CircleFixture) -> (nostr::Event, nostr::Event) {
+async fn a_peers_eviction(fx: &CircleFixture) -> (nostr::event::Event, nostr::event::Event) {
     let (peer, leaver) = (&fx.members[1], &fx.members[2]);
     let leave = leaver
         .session()
@@ -2229,7 +2231,10 @@ async fn a_peers_eviction(fx: &CircleFixture) -> (nostr::Event, nostr::Event) {
 }
 
 /// What the driver's seal answers for `member`'s circle now.
-async fn driver_seal(member: &CircleMember, group: &GroupId) -> Result<nostr::Event, SendHeld> {
+async fn driver_seal(
+    member: &CircleMember,
+    group: &GroupId,
+) -> Result<nostr::event::Event, SendHeld> {
     let (transport, outbox, clock) = (
         ScriptedFanout::default(),
         helpers::drive::Recorder::acking(true),

@@ -172,7 +172,7 @@ async fn staged_ref(member: &CircleMember, group: &GroupId) -> Option<PendingSta
     }
 }
 
-async fn commit_state(member: &CircleMember, event: nostr::EventId) -> Option<MessageState> {
+async fn commit_state(member: &CircleMember, event: nostr::event::EventId) -> Option<MessageState> {
     member
         .session()
         .stored_message_record_for_test(&MessageId::new(event.to_bytes().to_vec()))
@@ -195,13 +195,13 @@ async fn settled_members(member: &CircleMember, group: &GroupId) -> Option<usize
     }
 }
 
-fn commit_event_id(effects: &SessionEffects) -> nostr::EventId {
+fn commit_event_id(effects: &SessionEffects) -> nostr::event::EventId {
     effects
         .publish
         .iter()
         .find_map(|work| match work {
             PublishWork::GroupEvolution { msg, .. } | PublishWork::AutoPublish { msg, .. } => {
-                nostr::EventId::from_slice(msg.id.as_slice()).ok()
+                nostr::event::EventId::from_slice(msg.id.as_slice()).ok()
             }
             _ => None,
         })
@@ -242,7 +242,7 @@ async fn can_send(member: &CircleMember, group: &GroupId) -> bool {
 
 /// A location `sender` seals for `group` now. A sender that cannot seal is a
 /// failed test, never a reader who "cannot read".
-async fn sealed_by(sender: &CircleMember, group: &GroupId) -> nostr::Event {
+async fn sealed_by(sender: &CircleMember, group: &GroupId) -> nostr::event::Event {
     sender
         .circle
         .seal_location_for_test(
@@ -255,7 +255,7 @@ async fn sealed_by(sender: &CircleMember, group: &GroupId) -> nostr::Event {
 }
 
 /// Whether `reader` reads `event`.
-async fn opens(reader: &CircleMember, event: &nostr::Event) -> bool {
+async fn opens(reader: &CircleMember, event: &nostr::event::Event) -> bool {
     reader
         .circle
         .ingest_for_test(event)
@@ -603,7 +603,7 @@ async fn a_kill_between_relay_ack_and_local_confirm_converges_on_one_branch() {
         );
         let on_the_relay = relay.calls().remove(0);
         let second_commit =
-            nostr::Event::from_json(&on_the_relay.payload).expect("the frozen event");
+            nostr::event::Event::from_json(&on_the_relay.payload).expect("the frozen event");
         assert!(
             !can_send(&second, &group).await,
             "premise: the circle's send path is shut while the commit is staged",
@@ -925,7 +925,7 @@ async fn the_fanout_registry_is_rebuilt_before_anything_can_publish() {
     let fx = setup_circle(2, &[ONE, TWO]).await;
     let id = stage_removal(&fx).await;
     let frozen = row(fx.admin(), &id).await;
-    let event = nostr::Event::from_json(&frozen.payload).expect("the frozen event");
+    let event = nostr::event::Event::from_json(&frozen.payload).expect("the frozen event");
     let (admin, _others, _group) = split(fx);
     let CircleMember { circle, keys, dir } = admin;
     drop(circle);
@@ -1767,7 +1767,7 @@ async fn a_removal_a_kill_left_staged_with_no_record_is_given_one_at_the_open() 
             // A peer applies the very event the relay holds, and reads what
             // the repaired device seals afterwards; the removed member
             // cannot.
-            let event = nostr::Event::from_json(&sent[0].payload).expect("the frozen event");
+            let event = nostr::event::Event::from_json(&sent[0].payload).expect("the frozen event");
             let (peer, removed) = (&others[0], &others[1]);
             peer.session()
                 .process_event_settled_for_test(&event)
@@ -2282,7 +2282,7 @@ async fn a_member_removed_by_a_resumed_removal_can_no_longer_read() {
     assert!(due.error.is_none());
     assert_eq!(due.driven[0].1.status, FanoutStatus::Confirmed);
     let sent = transport.calls();
-    let event = nostr::Event::from_json(&sent.last().expect("sent again").payload)
+    let event = nostr::event::Event::from_json(&sent.last().expect("sent again").payload)
         .expect("the frozen event");
 
     peer.session()

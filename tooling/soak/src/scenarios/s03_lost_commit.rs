@@ -72,7 +72,7 @@ use std::time::Duration;
 
 use haven_core::nostr::mls::types::GroupId;
 use haven_core::relay::live_sync::Claim;
-use nostr::{Event, EventId};
+use nostr::event::{Event, EventId};
 
 use crate::nemesis::types::{DropClass, Fault};
 use crate::oracle::quiescence::{self, Settled};

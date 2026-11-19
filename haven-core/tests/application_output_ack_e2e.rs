@@ -21,7 +21,7 @@ use haven_core::relay::live_sync::{EngineProcessor, EventBus};
 use haven_core::relay::maintenance::build_kp_maintenance_events;
 use haven_core::relay::RelayManager;
 use helpers::{assert_no_needles, capture_haven_log};
-use nostr::{Event, Keys};
+use nostr::{event::Event, key::Keys};
 use tempfile::TempDir;
 
 /// Alice's circle with Bob joined, and one location Bob sent into it.

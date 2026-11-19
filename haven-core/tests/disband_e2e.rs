@@ -208,7 +208,7 @@ async fn inbound_disband_stops_send_and_receive_for_that_circle_only() {
     );
     assert_eq!(
         core.relays_in_pool_for_test().await,
-        [nostr::RelayUrl::parse(elsewhere.url()).expect("a relay url")],
+        [nostr::types::RelayUrl::parse(elsewhere.url()).expect("a relay url")],
         "the REQ left is not the other circle's",
     );
     let _ = core.stop().await;
@@ -242,7 +242,9 @@ async fn the_fanout_driver_tolerates_rows_deleted_by_disband() {
         .calls()
         .into_iter()
         .find(|call| call.target == ONE)
-        .map(|call| <nostr::Event as nostr::JsonUtil>::from_json(&call.payload).expect("event"));
+        .map(|call| {
+            <nostr::event::Event as nostr::JsonUtil>::from_json(&call.payload).expect("event")
+        });
     let admin = Arc::new(admin);
     // TWO is owed again later: the drive that sends to it parks there.
     clock.set(60 * 60 * 1_000);

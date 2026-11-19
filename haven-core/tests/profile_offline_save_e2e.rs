@@ -27,7 +27,7 @@ use haven_core::profile::{
 };
 use haven_core::relay::allow_ws_loopback_for_test;
 use image::{codecs::jpeg::JpegEncoder, RgbImage};
-use nostr::{JsonUtil as _, Keys, Metadata};
+use nostr::{key::Keys, nips::nip01::Metadata, JsonUtil as _};
 use tempfile::TempDir;
 
 /// Exactly `PROFILE_POOL_MIN`, so the pool RESOLVES (this is an offline test,

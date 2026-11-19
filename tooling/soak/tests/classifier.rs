@@ -78,7 +78,11 @@ use haven_soak::rig::{
 };
 use nostr::util::BoxedFuture;
 use nostr::{
-    Alphabet, Event, EventBuilder, EventId, Keys, Kind, SingleLetterTag, Tag, TagKind, Timestamp,
+    event::{Event, EventBuilder, EventId, Kind, Tag},
+    filter::SingleLetterTag,
+    key::Keys,
+    types::Timestamp,
+    Alphabet, TagKind,
 };
 use nostr_relay_builder::builder::{PolicyResult, WritePolicy};
 use nostr_relay_builder::{LocalRelay, RelayBuilder};

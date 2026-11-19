@@ -18,7 +18,11 @@ use haven_core::profile::{
     build_metadata_event, fetch_profiles_assigned, AssignedFetch, ProfileMetadata, ProfileRelaySalt,
 };
 use haven_core::relay::{allow_ws_loopback_for_test, RelayManager};
-use nostr::{JsonUtil, Keys, Metadata, PublicKey};
+use nostr::{
+    key::{Keys, PublicKey},
+    nips::nip01::Metadata,
+    JsonUtil,
+};
 use nostr_relay_builder::builder::{RelayBuilder, RelayBuilderNip42, RelayBuilderNip42Mode};
 use nostr_relay_builder::{LocalRelay, MockRelay};
 use nostr_sdk::Client;

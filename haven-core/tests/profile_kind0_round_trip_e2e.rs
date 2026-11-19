@@ -23,7 +23,13 @@ use haven_core::profile::{
     ProfileEdits, ProfileMetadata, ProfileRelaySalt, ProfileState,
 };
 use haven_core::relay::{allow_ws_loopback_for_test, RelayManager};
-use nostr::{Event, EventBuilder, JsonUtil, Keys, Kind, Metadata, PublicKey, Timestamp};
+use nostr::{
+    event::{Event, EventBuilder, Kind},
+    key::{Keys, PublicKey},
+    nips::nip01::Metadata,
+    types::Timestamp,
+    JsonUtil,
+};
 use nostr_relay_builder::MockRelay;
 use nostr_sdk::Client;
 

@@ -20,7 +20,12 @@ use haven_core::relay::maintenance::{
 use haven_core::relay::{
     allow_ws_loopback_for_test, set_discovery_relays_for_test, MemberLookup, RelayManager,
 };
-use nostr::{Event, EventBuilder, Filter, Keys, Kind, PublicKey, Tag, Timestamp};
+use nostr::{
+    event::{Event, EventBuilder, Kind, Tag},
+    filter::Filter,
+    key::{Keys, PublicKey},
+    types::Timestamp,
+};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -367,13 +372,13 @@ async fn an_invitees_relays_are_dialled_for_the_lookup_and_never_kept_in_the_sha
         picked.id, own.id,
         "only the write relay holds it, so it was really dialled"
     );
-    let write = nostr::RelayUrl::parse(&write).unwrap();
+    let write = nostr::types::RelayUrl::parse(&write).unwrap();
     assert!(
         manager
             .get_relay_status()
             .await
             .iter()
-            .all(|status| nostr::RelayUrl::parse(&status.url).ok().as_ref() != Some(&write)),
+            .all(|status| nostr::types::RelayUrl::parse(&status.url).ok().as_ref() != Some(&write)),
         "the invitee's relay stayed in the shared pool"
     );
 }
@@ -653,7 +658,10 @@ impl Inviter {
 
 /// The id of the package selected for `asked` from the discovery plane: for
 /// the invite target whose rule is `rule`, or with no target in mind.
-async fn selected(asked: &str, rule: Option<&KeyPackageAdmissionRule>) -> Option<nostr::EventId> {
+async fn selected(
+    asked: &str,
+    rule: Option<&KeyPackageAdmissionRule>,
+) -> Option<nostr::event::EventId> {
     match rule {
         Some(rule) => RelayManager::lookup_member_for_invite(asked, rule)
             .await

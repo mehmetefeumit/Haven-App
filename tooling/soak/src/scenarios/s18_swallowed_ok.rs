@@ -43,7 +43,7 @@ use std::time::Duration;
 use haven_core::location::LocationMessage;
 use haven_core::nostr::mls::types::{EpochState, GroupId};
 use haven_core::relay::fanout::{LocationPublish, LocationSeal, SendHeld};
-use nostr::{Event, EventId};
+use nostr::event::{Event, EventId};
 
 use crate::nemesis::types::{DropClass, Fault};
 use crate::oracle::bounds;
@@ -378,8 +378,8 @@ async fn handshakes_since<T: TimelineSink, L: LogDrain>(
     for plane in world.relays() {
         for event in plane
             .stored_page(
-                nostr::Filter::new()
-                    .kind(nostr::Kind::Custom(445))
+                nostr::filter::Filter::new()
+                    .kind(nostr::event::Kind::Custom(445))
                     .since(commit.created_at),
             )
             .await?

@@ -30,8 +30,12 @@ use haven_soak::rig::{
 };
 use haven_soak::timeline::Timeline;
 use nostr::{
-    ClientMessage, Event, EventBuilder, EventId, Filter, JsonUtil, Keys, Kind, RelayMessage,
-    RelayUrl, SubscriptionId, Tag, Timestamp,
+    event::{Event, EventBuilder, EventId, Kind, Tag},
+    filter::Filter,
+    key::Keys,
+    message::{ClientMessage, RelayMessage, SubscriptionId},
+    types::{RelayUrl, Timestamp},
+    JsonUtil,
 };
 use nostr_sdk::{Client, RelayPoolNotification, RelayStatus};
 use tokio::io::AsyncReadExt;

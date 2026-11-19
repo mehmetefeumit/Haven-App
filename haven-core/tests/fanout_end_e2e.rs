@@ -127,7 +127,7 @@ async fn staged_ref(member: &CircleMember, group: &GroupId) -> Option<PendingSta
     }
 }
 
-async fn commit_state(member: &CircleMember, event: nostr::EventId) -> Option<MessageState> {
+async fn commit_state(member: &CircleMember, event: nostr::event::EventId) -> Option<MessageState> {
     member
         .session()
         .stored_message_record_for_test(&MessageId::new(event.to_bytes().to_vec()))
@@ -151,13 +151,13 @@ async fn settled_members(member: &CircleMember, group: &GroupId) -> Option<usize
     }
 }
 
-fn commit_event_id(effects: &SessionEffects) -> nostr::EventId {
+fn commit_event_id(effects: &SessionEffects) -> nostr::event::EventId {
     effects
         .publish
         .iter()
         .find_map(|work| match work {
             PublishWork::GroupEvolution { msg, .. } | PublishWork::AutoPublish { msg, .. } => {
-                nostr::EventId::from_slice(msg.id.as_slice()).ok()
+                nostr::event::EventId::from_slice(msg.id.as_slice()).ok()
             }
             _ => None,
         })
@@ -251,7 +251,7 @@ async fn serve_deadlines(member: &CircleMember, group: &GroupId) {
 }
 
 /// A location `sender` seals for `group` now.
-async fn location_from(sender: &CircleMember, group: &GroupId) -> Option<nostr::Event> {
+async fn location_from(sender: &CircleMember, group: &GroupId) -> Option<nostr::event::Event> {
     sender
         .circle
         .seal_location_for_test(
@@ -265,7 +265,7 @@ async fn location_from(sender: &CircleMember, group: &GroupId) -> Option<nostr::
 
 /// A location sealed through the driver in the full mode, no relay taken:
 /// the mode whose send runs the engine's own preflight.
-async fn full_location_from(sender: &CircleMember, group: &GroupId) -> Option<nostr::Event> {
+async fn full_location_from(sender: &CircleMember, group: &GroupId) -> Option<nostr::event::Event> {
     use haven_core::relay::fanout::{scripted::Inert, LocationSeal, Publishing, WallClock};
     let publishing: Publishing<'_, Inert> = Publishing {
         fanout: &Inert,
@@ -359,7 +359,7 @@ async fn drive(
 fn calls_to(
     calls: &[haven_core::relay::fanout::scripted::Call],
     target: &str,
-    event: nostr::EventId,
+    event: nostr::event::EventId,
 ) -> usize {
     calls
         .iter()
@@ -1433,8 +1433,8 @@ async fn an_eviction_a_confirms_own_fold_releases_is_recorded_and_driven_in_the_
     transport.calls();
 
     // The relay took it: the member applies it and proposes to leave.
-    let commit =
-        <nostr::Event as nostr::JsonUtil>::from_json(&frozen.payload).expect("the frozen event");
+    let commit = <nostr::event::Event as nostr::JsonUtil>::from_json(&frozen.payload)
+        .expect("the frozen event");
     leaver
         .session()
         .process_event_settled_for_test(&commit)
@@ -1586,7 +1586,7 @@ impl FanoutSend for Slow<'_> {
 
     async fn publish_location(
         &self,
-        event: &nostr::Event,
+        event: &nostr::event::Event,
         targets: &[String],
     ) -> haven_core::relay::RelayResult<haven_core::relay::PublishResult> {
         self.inner.publish_location(event, targets).await
@@ -2449,7 +2449,7 @@ impl FanoutSend for FailingConfirmAfter<'_> {
 
     async fn publish_location(
         &self,
-        event: &nostr::Event,
+        event: &nostr::event::Event,
         targets: &[String],
     ) -> haven_core::relay::RelayResult<haven_core::relay::PublishResult> {
         self.inner.publish_location(event, targets).await
@@ -2777,7 +2777,7 @@ async fn stage_eviction(
     admin: &CircleMember,
     leaver: &CircleMember,
     group: &GroupId,
-) -> nostr::EventId {
+) -> nostr::event::EventId {
     let leave = leaver
         .session()
         .leave_group(group)
@@ -2930,7 +2930,7 @@ struct StaleBound {
     admin: CircleMember,
     group: GroupId,
     stale: FanoutId,
-    second: nostr::EventId,
+    second: nostr::event::EventId,
 }
 
 async fn a_second_commit_bound_to_a_stale_record() -> StaleBound {
@@ -3567,7 +3567,7 @@ async fn a_relay_that_takes_a_newer_commit_is_sent_the_older_one_it_owes_in_the_
     )
     .await;
     assert!(due.error.is_none());
-    let sent: Vec<(String, nostr::EventId)> = transport
+    let sent: Vec<(String, nostr::event::EventId)> = transport
         .calls()
         .into_iter()
         .map(|call| (call.target, call.event_id))
@@ -3615,7 +3615,7 @@ async fn two_circles_on_one_failing_relay_are_woken_on_the_relays_one_schedule()
     let clock = Clock::at(0);
 
     let mut now = 0;
-    let mut calls: Vec<(u64, nostr::EventId)> = Vec::new();
+    let mut calls: Vec<(u64, nostr::event::EventId)> = Vec::new();
     for wake in 0..14 {
         clock.set(now);
         let due = drive_due(

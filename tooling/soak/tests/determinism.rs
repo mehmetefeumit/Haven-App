@@ -29,7 +29,7 @@ use haven_soak::profiles::{ProfileName, ProfileSpec, WorldShape};
 use haven_soak::relay::{planes_for, SimRelay};
 use haven_soak::rig::{install_process_globals, CapturedLine, LogDrain, SimWorld, TimelineSink};
 use haven_soak::timeline::Timeline;
-use nostr::EventId;
+use nostr::event::EventId;
 
 /// A log drain for a world whose logs are not the subject.
 ///

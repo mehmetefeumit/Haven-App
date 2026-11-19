@@ -66,7 +66,7 @@ pub async fn make_admins(
 }
 
 /// `by`'s commit of `effects`, confirmed: its event.
-pub async fn confirmed(by: &CircleMember, effects: &SessionEffects) -> nostr::Event {
+pub async fn confirmed(by: &CircleMember, effects: &SessionEffects) -> nostr::event::Event {
     let (event, pending) = staged(effects);
     by.session()
         .confirm_published(pending)

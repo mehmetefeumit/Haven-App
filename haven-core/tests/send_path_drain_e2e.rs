@@ -16,7 +16,7 @@ use haven_core::location::LocationMessage;
 use haven_core::nostr::mls::types::{GroupId, PublishWork};
 use haven_core::nostr::mls::SessionManager;
 use haven_core::relay::maintenance::build_kp_maintenance_events;
-use nostr::{Event, Keys};
+use nostr::{event::Event, key::Keys};
 use tempfile::TempDir;
 
 const GROUP_RELAY: &str = "wss://group.example.com";

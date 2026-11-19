@@ -40,7 +40,7 @@ use haven_core::relay::live_sync::{
     CircleSpec, EngineProcessor, EventBus, GroupProcessOutcome, LiveSyncCore, LiveSyncEvent,
 };
 use haven_core::relay::maintenance::build_kp_maintenance_events;
-use nostr::{Event, Keys};
+use nostr::{event::Event, key::Keys};
 use nostr_relay_builder::MockRelay;
 use tempfile::TempDir;
 
@@ -640,11 +640,11 @@ fn undecryptable(routing: &[u8; 32]) -> Event {
     use rand::RngCore as _;
     let mut bytes = [0u8; 96];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
-    nostr::EventBuilder::new(
-        nostr::Kind::Custom(445),
+    nostr::event::EventBuilder::new(
+        nostr::event::Kind::Custom(445),
         base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes),
     )
-    .tag(nostr::Tag::custom(
+    .tag(nostr::event::Tag::custom(
         nostr::TagKind::custom("h"),
         [hex::encode(routing)],
     ))

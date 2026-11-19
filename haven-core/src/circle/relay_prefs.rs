@@ -62,7 +62,7 @@
 //! event builder, so no present or future caller can publish this list by
 //! forgetting a policy check — the type system makes them handle it.
 
-use nostr::Kind;
+use nostr::event::Kind;
 
 /// Category of relay preference managed per user.
 ///
@@ -133,7 +133,7 @@ impl RelayType {
     /// pick a placeholder and rely on every call site remembering a separate
     /// "is this publishable?" check. Anyone who forgets publishes the profile
     /// plane. Returning `None` moves that check into the type system: there is
-    /// no `Kind` to hand an [`nostr::EventBuilder`], so the omission is a
+    /// no `Kind` to hand an [`nostr::event::EventBuilder`], so the omission is a
     /// compile error rather than a silent, signed, public privacy leak.
     ///
     /// Callers that hold a `Result` should map `None` to an error; callers that

@@ -17,7 +17,10 @@
 use std::fmt;
 
 use haven_core::nostr::KIND_GROUP_MESSAGE;
-use nostr::{Event, Kind, TagKind};
+use nostr::{
+    event::{Event, Kind},
+    TagKind,
+};
 use serde::{Serialize, Serializer};
 use sha2::{Digest, Sha256};
 
@@ -26,7 +29,7 @@ use crate::rig::{sim_magnitude, DeviceTag, KillKind, RelayTag};
 
 /// A NIP-01 machine-readable `CLOSED` / `OK` prefix.
 ///
-/// Mirrors `nostr::MachineReadablePrefix`'s literals rather than depending on
+/// Mirrors `nostr::message::MachineReadablePrefix`'s literals rather than depending on
 /// the type: these are the bytes a relay puts on the wire, and the rig asserts
 /// byte fidelity against them. The in-crate test parses every
 /// [`Self::as_str`] back through the nostr parser, so a drift in the upstream
@@ -751,7 +754,11 @@ mod tests {
 
     #[test]
     fn a_frames_class_is_read_off_the_wire_and_names_the_products_own_discriminator() {
-        use nostr::{EventBuilder, Keys, Tag, Timestamp};
+        use nostr::{
+            event::{EventBuilder, Tag},
+            key::Keys,
+            types::Timestamp,
+        };
 
         let keys = Keys::generate();
         let application = EventBuilder::new(Kind::Custom(KIND_GROUP_MESSAGE), "x")

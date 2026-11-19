@@ -29,7 +29,7 @@ use helpers::drive::{
     wait_out_the_engine, ManualClock, Recorder, MINUTE_MS, SECOND_MS,
 };
 use helpers::{setup_circle, CircleFixture, CircleMember};
-use nostr::{Event, JsonUtil as _};
+use nostr::{event::Event, JsonUtil as _};
 
 const ONE: &str = "wss://one.poll-canary2c6a.example.com";
 const TWO: &str = "wss://two.poll-canary2c6a.example.com";
@@ -992,10 +992,11 @@ async fn a_kill_after_the_entrys_drive_confirmed_leaves_the_commit_applied_and_t
     transport.answer(ONE, [Answer::Accepted]);
     let id = hex::encode(helpers::drive::ngid(&admin, &group).await);
     // Addressed to the circle, and of a kind the screen refuses.
-    let rejected = nostr::EventBuilder::new(nostr::Kind::TextNote, "not a group message")
-        .tag(nostr::Tag::parse(["h", &id]).expect("an h tag"))
-        .sign_with_keys(&nostr::Keys::generate())
-        .expect("signed");
+    let rejected =
+        nostr::event::EventBuilder::new(nostr::event::Kind::TextNote, "not a group message")
+            .tag(nostr::event::Tag::parse(["h", &id]).expect("an h tag"))
+            .sign_with_keys(&nostr::key::Keys::generate())
+            .expect("signed");
     let polled = through(&transport, &outbox, &clock, &FULL)
         .ingest_for_poll(&admin.circle, &rejected)
         .await
@@ -1930,7 +1931,10 @@ async fn an_admin_change_whose_foreground_ends_in_its_hand_back_records_no_commi
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn no_outsider_authored_group_event_makes_the_poll_err_or_hold() {
     use base64::Engine as _;
-    use nostr::{EventBuilder, Keys, Kind, Tag};
+    use nostr::{
+        event::{EventBuilder, Kind, Tag},
+        key::Keys,
+    };
     let fx = setup_circle(2, &[ONE]).await;
     let other = setup_circle(2, &[ONE]).await;
     let (admin, others, group) = split(fx);

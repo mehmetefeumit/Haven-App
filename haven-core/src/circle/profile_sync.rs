@@ -54,7 +54,10 @@
 //! of the race observes the committed state and reports
 //! [`ProfileSyncOutcome::NothingPending`].
 
-use nostr::{Event, Keys, PublicKey};
+use nostr::{
+    event::Event,
+    key::{Keys, PublicKey},
+};
 
 use super::error::Result;
 use super::manager::CircleManager;

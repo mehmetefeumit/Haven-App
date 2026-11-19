@@ -22,7 +22,7 @@
 
 use std::collections::BTreeSet;
 
-use nostr::PublicKey;
+use nostr::key::PublicKey;
 
 use super::error::{CircleError, Result};
 use crate::log_alias::{self, PeerPubkey};
@@ -155,13 +155,13 @@ pub fn select_successor(
 
 #[cfg(test)]
 mod tests {
-    use nostr::ToBech32;
+    use nostr::nips::nip19::ToBech32;
 
     use super::*;
 
     fn sorted_pks(n: usize) -> Vec<PublicKey> {
         let mut keys: Vec<PublicKey> = (0..n)
-            .map(|_| nostr::Keys::generate().public_key())
+            .map(|_| nostr::key::Keys::generate().public_key())
             .collect();
         keys.sort();
         keys
@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn select_successor_returns_none_when_alone() {
-        let self_key = nostr::Keys::generate().public_key();
+        let self_key = nostr::key::Keys::generate().public_key();
         let mut members = BTreeSet::new();
         members.insert(self_key);
         assert!(select_successor(&members, &self_key).is_none());
@@ -197,7 +197,7 @@ mod tests {
 
     #[test]
     fn select_successor_returns_none_for_empty_membership() {
-        let self_key = nostr::Keys::generate().public_key();
+        let self_key = nostr::key::Keys::generate().public_key();
         let members = BTreeSet::new();
         assert!(select_successor(&members, &self_key).is_none());
     }

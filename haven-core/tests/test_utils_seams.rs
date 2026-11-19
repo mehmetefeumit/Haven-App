@@ -99,7 +99,13 @@ use haven_core::nostr::mls::types::{
 use haven_core::nostr::mls::StorageConfig;
 use haven_core::relay::live_sync::{group_cursor_stream, LiveSyncCore};
 use haven_core::relay::maintenance::build_kp_maintenance_events;
-use nostr::{Alphabet, Event, EventBuilder, Keys, Kind, SingleLetterTag, Tag, TagKind, Timestamp};
+use nostr::{
+    event::{Event, EventBuilder, Kind, Tag},
+    filter::SingleLetterTag,
+    key::Keys,
+    types::Timestamp,
+    Alphabet, TagKind,
+};
 use tempfile::TempDir;
 
 mod helpers;

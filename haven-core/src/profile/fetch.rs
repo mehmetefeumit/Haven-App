@@ -84,7 +84,11 @@ use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use futures::stream::{self, StreamExt};
-use nostr::{Event, Filter, Kind, PublicKey};
+use nostr::{
+    event::{Event, Kind},
+    filter::Filter,
+    key::PublicKey,
+};
 use rand::rngs::OsRng;
 use rand::seq::SliceRandom;
 use rand::Rng;
@@ -566,7 +570,7 @@ fn partition_outcome(requests: &[(PublicKey, u8)], cycle: Cycle) -> AssignedFetc
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::{EventBuilder, JsonUtil, Keys, Timestamp};
+    use nostr::{event::EventBuilder, key::Keys, types::Timestamp, JsonUtil};
 
     fn keys_n(n: usize) -> Vec<Keys> {
         (0..n).map(|_| Keys::generate()).collect()
@@ -1412,8 +1416,8 @@ mod tests {
     use crate::relay::scripted_relay::{Frame, ScriptedRelay};
 
     fn same_relay(a: &str, b: &str) -> bool {
-        nostr::RelayUrl::parse(a).expect("a relay url")
-            == nostr::RelayUrl::parse(b).expect("a relay url")
+        nostr::types::RelayUrl::parse(a).expect("a relay url")
+            == nostr::types::RelayUrl::parse(b).expect("a relay url")
     }
 
     #[test]

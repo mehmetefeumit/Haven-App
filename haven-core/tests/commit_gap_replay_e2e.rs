@@ -47,7 +47,7 @@ use haven_core::relay::fanout::scripted::{Answer, ScriptedFanout};
 use haven_core::relay::fanout::{DriveMode, ResumeOutcome};
 use haven_core::relay::maintenance::build_kp_maintenance_events;
 use haven_core::relay::retick::MAX_CONVERGENCE_RETICKS;
-use nostr::{Event, JsonUtil, Keys};
+use nostr::{event::Event, key::Keys, JsonUtil};
 use tempfile::TempDir;
 
 mod helpers;

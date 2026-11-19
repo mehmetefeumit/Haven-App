@@ -10,7 +10,10 @@ use cgka_engine::account_identity_proof::account_identity_proof_extension;
 use haven_core::nostr::mls::{HavenIdentityProofSigner, SessionManager};
 use haven_core::relay::maintenance::kp_event_is_pre_migration;
 use helpers::{cleanup_dir, create_key_package_event, unique_temp_dir};
-use nostr::{EventBuilder, Keys, Kind, Tag};
+use nostr::{
+    event::{EventBuilder, Kind, Tag},
+    key::Keys,
+};
 use openmls::prelude::tls_codec::Serialize as _;
 use openmls::prelude::*;
 use openmls_basic_credential::SignatureKeyPair;
@@ -18,7 +21,7 @@ use openmls_rust_crypto::OpenMlsRustCrypto;
 
 /// A kind-30443 carrying a package whose leaf binds the account with the
 /// pre-migration proof extension (0xF2F1), built the way a v0.9.x engine did.
-fn pre_migration_key_package_event(keys: &Keys) -> nostr::Event {
+fn pre_migration_key_package_event(keys: &Keys) -> nostr::event::Event {
     let ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
     let provider = OpenMlsRustCrypto::default();
     let signer = SignatureKeyPair::new(ciphersuite.signature_algorithm()).expect("signer");

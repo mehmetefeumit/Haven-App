@@ -28,7 +28,7 @@
 // and holds it for the whole (single-statement or transactional) operation.
 #![allow(clippy::significant_drop_tightening)]
 
-use nostr::{Event, JsonUtil, Metadata, PublicKey};
+use nostr::{event::Event, key::PublicKey, nips::nip01::Metadata, JsonUtil};
 use rusqlite::{params, Connection, OptionalExtension};
 use zeroize::Zeroizing;
 
@@ -1293,7 +1293,10 @@ impl CircleManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::{EventBuilder, Keys, Kind};
+    use nostr::{
+        event::{EventBuilder, Kind},
+        key::Keys,
+    };
 
     use crate::avatar::StagedPicture;
 
@@ -1352,12 +1355,12 @@ mod tests {
 
     /// A signed blank of `keys` and the pool its wipe records: one relay,
     /// which took it, unless a test says otherwise.
-    fn blank_of(keys: &nostr::Keys) -> (nostr::Event, Vec<String>) {
+    fn blank_of(keys: &nostr::key::Keys) -> (nostr::event::Event, Vec<String>) {
         let blank = crate::profile::build_blank_metadata_event(keys, None).expect("blank");
         (blank, vec!["wss://a.example".to_string()])
     }
 
-    fn ts_of(event: &nostr::Event) -> i64 {
+    fn ts_of(event: &nostr::event::Event) -> i64 {
         i64::try_from(event.created_at.as_secs()).expect("a timestamp")
     }
 
@@ -1940,9 +1943,9 @@ mod tests {
         // cost an avatar re-download, never a member's resolved NAME.
         let storage = CircleStorage::in_memory().unwrap();
         let evicted = pk(0);
-        let md = Metadata::new()
-            .name("Ada")
-            .picture(nostr::Url::parse(&format!("https://blossom.example/{evicted}")).unwrap());
+        let md = Metadata::new().name("Ada").picture(
+            nostr::types::Url::parse(&format!("https://blossom.example/{evicted}")).unwrap(),
+        );
         storage
             .upsert_profile(&CachedProfile {
                 pubkey_hex: evicted.clone(),
@@ -2222,7 +2225,7 @@ mod tests {
     #[test]
     fn wipe_all_profiles_clears_both_tables() {
         let storage = CircleStorage::in_memory().unwrap();
-        let keys = nostr::Keys::generate();
+        let keys = nostr::key::Keys::generate();
         let me = keys.public_key();
         let me_hex = me.to_hex();
         storage
@@ -2281,7 +2284,7 @@ mod tests {
             "profile_publish_debt",
         ] {
             let storage = CircleStorage::in_memory().unwrap();
-            let keys = nostr::Keys::generate();
+            let keys = nostr::key::Keys::generate();
             let me = keys.public_key();
             let me_hex = me.to_hex();
             let held = known_profile(&me_hex, "old", 5, 5);
@@ -2333,7 +2336,7 @@ mod tests {
         // profile. The fetch path must hold it to be superseded, and the
         // retraction gate must stay armed for the blank that IS published.
         let storage = CircleStorage::in_memory().unwrap();
-        let keys = nostr::Keys::generate();
+        let keys = nostr::key::Keys::generate();
         let own = keys.public_key().to_hex();
         let (blank, pool) = blank_of(&keys);
         storage
@@ -2364,7 +2367,7 @@ mod tests {
         // refused blank is itself what the outbox then owes, on the ladder.
         for fully_acked in [true, false] {
             let storage = CircleStorage::in_memory().unwrap();
-            let keys = nostr::Keys::generate();
+            let keys = nostr::key::Keys::generate();
             let own = keys.public_key().to_hex();
             storage
                 .stage_own_profile_edits(
@@ -3145,7 +3148,7 @@ mod tests {
 
         // Wiping with no salt stored leaves none (the retraction path can run
         // on an install that never fetched a member's profile).
-        let keys = nostr::Keys::generate();
+        let keys = nostr::key::Keys::generate();
         let me = keys.public_key();
         let (blank, pool) = blank_of(&keys);
         let wipe = || storage.wipe_all_profiles(&me, &blank, &pool, &pool, 1);
@@ -3385,13 +3388,13 @@ mod tests {
         // over it: the ledger holds the blank, byte for byte, and the relays
         // that took it.
         let pool = vec!["wss://a.example".to_string(), "wss://b.example".to_string()];
-        let build = |previous: u64| -> (nostr::Keys, nostr::Event) {
-            let keys = nostr::Keys::generate();
+        let build = |previous: u64| -> (nostr::key::Keys, nostr::event::Event) {
+            let keys = nostr::key::Keys::generate();
             let blank =
                 crate::profile::build_blank_metadata_event(&keys, Some(previous)).expect("blank");
             (keys, blank)
         };
-        let owed_before_the_wipe = |storage: &CircleStorage, keys: &nostr::Keys| {
+        let owed_before_the_wipe = |storage: &CircleStorage, keys: &nostr::key::Keys| {
             let own = keys.public_key().to_hex();
             storage
                 .stage_own_profile_edits(

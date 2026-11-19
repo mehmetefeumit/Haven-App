@@ -11,7 +11,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 use haven_core::circle::CircleManager;
 use haven_core::relay::maintenance::build_kp_maintenance_events;
 use haven_core::relay::{allow_ws_loopback_for_test, set_discovery_relays_for_test, RelayManager};
-use nostr::{Event, EventBuilder, Filter, Keys, Kind, PublicKey, Tag};
+use nostr::{
+    event::{Event, EventBuilder, Kind, Tag},
+    filter::Filter,
+    key::{Keys, PublicKey},
+};
 use nostr_relay_builder::prelude::{
     BoxedFuture, MemoryDatabase, MemoryDatabaseOptions, NostrDatabase, PolicyResult, QueryPolicy,
 };

@@ -17,8 +17,8 @@
 
 use haven_core::nostr::encryption::encrypt_nip44;
 use haven_core::nostr::NostrError;
+use nostr::key::Keys;
 use nostr::nips::nip44::{self, v2::ErrorV2, Version};
-use nostr::Keys;
 use zeroize::Zeroizing;
 
 /// The ceiling as the dependency spells its private constant.

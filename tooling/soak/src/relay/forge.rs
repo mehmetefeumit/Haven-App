@@ -23,7 +23,12 @@
 
 use std::borrow::Cow;
 
-use nostr::{Event, EventBuilder, EventId, Keys, Kind, Tag, TagStandard, Timestamp};
+use nostr::{
+    event::{Event, EventBuilder, EventId, Kind, Tag},
+    key::Keys,
+    types::Timestamp,
+    TagStandard,
+};
 
 use crate::rig::{RigError, Step};
 

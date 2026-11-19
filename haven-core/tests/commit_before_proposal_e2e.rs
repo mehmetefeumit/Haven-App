@@ -42,7 +42,11 @@ use helpers::drive::{
     ManualClock, Recorder, HOUR_MS,
 };
 use helpers::{setup_circle, CircleFixture, CircleMember};
-use nostr::{Event, Filter, Kind, RelayUrl, Timestamp};
+use nostr::{
+    event::{Event, Kind},
+    filter::Filter,
+    types::{RelayUrl, Timestamp},
+};
 use nostr_relay_builder::prelude::{
     BoxedFuture, MemoryDatabase, MemoryDatabaseOptions, NostrDatabase, PolicyResult, QueryPolicy,
 };
@@ -1089,10 +1093,10 @@ async fn a_seal_racing_the_next_page_of_a_chase_is_held() {
 /// A `kind:445` under `group`'s routing id, signed by a stranger, dated
 /// `at`, with `content`: nothing a member's exporter opens.
 fn stranger_445(h: &str, at: u64, content: &str) -> Event {
-    nostr::EventBuilder::new(Kind::Custom(445), content)
-        .tags(vec![nostr::Tag::parse(["h", h]).expect("an h tag")])
+    nostr::event::EventBuilder::new(Kind::Custom(445), content)
+        .tags(vec![nostr::event::Tag::parse(["h", h]).expect("an h tag")])
         .custom_created_at(Timestamp::from(at))
-        .sign_with_keys(&nostr::Keys::generate())
+        .sign_with_keys(&nostr::key::Keys::generate())
         .expect("signed")
 }
 
@@ -1206,13 +1210,13 @@ async fn a_buried_proposal_and_its_commit_are_taken_in_proposal_first() {
     let above = departure.late_leave.created_at.as_secs() + 1;
     let pile: Vec<Event> = (0..500)
         .map(|i| {
-            nostr::EventBuilder::new(Kind::Custom(445), format!("cGlsZQ-{i}"))
+            nostr::event::EventBuilder::new(Kind::Custom(445), format!("cGlsZQ-{i}"))
                 .tags(vec![
-                    nostr::Tag::parse(["h", &routing]).expect("an h tag"),
-                    nostr::Tag::parse(["h", &hex::encode([0x11u8; 32])]).expect("an h tag"),
+                    nostr::event::Tag::parse(["h", &routing]).expect("an h tag"),
+                    nostr::event::Tag::parse(["h", &hex::encode([0x11u8; 32])]).expect("an h tag"),
                 ])
                 .custom_created_at(Timestamp::from(above))
-                .sign_with_keys(&nostr::Keys::generate())
+                .sign_with_keys(&nostr::key::Keys::generate())
                 .expect("signed")
         })
         .collect();

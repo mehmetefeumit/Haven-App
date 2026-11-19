@@ -61,7 +61,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use nostr::{Event, JsonUtil, RelayUrl, SubscriptionId};
+use nostr::{event::Event, message::SubscriptionId, types::RelayUrl, JsonUtil};
 use tokio::sync::{watch, Notify};
 use tokio::time::Instant;
 
@@ -741,7 +741,7 @@ pub struct EngineProcessor {
     /// The group events the worker has taken in, held or ingested, in the
     /// order they arrived.
     #[cfg(any(test, feature = "test-utils"))]
-    taken_in: Mutex<Vec<nostr::EventId>>,
+    taken_in: Mutex<Vec<nostr::event::EventId>>,
 }
 
 /// A plane that is gone holds no legacy send back — its own hold, never one
@@ -1355,7 +1355,7 @@ impl EngineProcessor {
             session.owe_advance(&owed);
             return;
         };
-        let now_secs = i64::try_from(nostr::Timestamp::now().as_secs()).unwrap_or(i64::MAX);
+        let now_secs = i64::try_from(nostr::types::Timestamp::now().as_secs()).unwrap_or(i64::MAX);
         let mut directory = None;
         for group_id in owed.iter().filter(|group_id| {
             circles
@@ -1987,7 +1987,7 @@ impl EngineProcessor {
     /// queued is made.
     async fn attempt_queued_changes(&self, now_ms: u64, pass: &dyn ModeSource) {
         let holding = self.circle.session().groups_holding_queued_changes().await;
-        let now_secs = i64::try_from(nostr::Timestamp::now().as_secs()).unwrap_or(i64::MAX);
+        let now_secs = i64::try_from(nostr::types::Timestamp::now().as_secs()).unwrap_or(i64::MAX);
         let mut directory = None;
         for group_id in &holding {
             if pass.mode() != DriveMode::Full {
@@ -2034,7 +2034,8 @@ impl EngineProcessor {
         if !replayed.is_empty() {
             // A resolution has no source event: the local clock, as for the
             // session's open-time advance.
-            let now_secs = i64::try_from(nostr::Timestamp::now().as_secs()).unwrap_or(i64::MAX);
+            let now_secs =
+                i64::try_from(nostr::types::Timestamp::now().as_secs()).unwrap_or(i64::MAX);
             self.route_results(replayed, now_secs);
         }
         retry_after_ms
@@ -2488,7 +2489,7 @@ impl EngineProcessor {
 
     /// Records one group event the worker has taken in.
     #[cfg(any(test, feature = "test-utils"))]
-    pub(super) fn note_taken_in_for_test(&self, id: nostr::EventId) {
+    pub(super) fn note_taken_in_for_test(&self, id: nostr::event::EventId) {
         self.taken_in
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -2499,7 +2500,7 @@ impl EngineProcessor {
     /// order they arrived — before any ordering of a held batch.
     #[cfg(any(test, feature = "test-utils"))]
     #[must_use]
-    pub fn group_events_taken_in_for_test(&self) -> Vec<nostr::EventId> {
+    pub fn group_events_taken_in_for_test(&self) -> Vec<nostr::event::EventId> {
         self.taken_in
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -2642,7 +2643,7 @@ mod tests {
     use crate::nostr::mls::types::{EpochId, GroupEvent, MessageId};
     use crate::relay::cursor::STREAM_GROUP_445;
     use crate::relay::maintenance::build_kp_maintenance_events;
-    use nostr::Keys;
+    use nostr::key::Keys;
     use tempfile::TempDir;
 
     /// A `(relay, sub)` key for the coverage tests.
@@ -3039,7 +3040,7 @@ mod tests {
         let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &keys).unwrap());
         let processor = EngineProcessor::new(circle, EventBus::new());
         let proposal = || {
-            nostr::EventBuilder::text_note("sealed")
+            nostr::event::EventBuilder::text_note("sealed")
                 .sign_with_keys(&Keys::generate())
                 .expect("a signed event")
         };

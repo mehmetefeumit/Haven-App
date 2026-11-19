@@ -42,7 +42,7 @@ use haven_core::relay::fanout::{
 use haven_core::relay::maintenance::build_kp_maintenance_events;
 use haven_core::relay::{RelayManager, RelayResult};
 use nostr::util::BoxedFuture;
-use nostr::{Event, Keys};
+use nostr::{event::Event, key::Keys};
 use nostr_relay_builder::builder::{PolicyResult, WritePolicy};
 use nostr_relay_builder::{LocalRelay, MockRelay, RelayBuilder};
 use tempfile::TempDir;

@@ -17,7 +17,7 @@ use std::io::Cursor;
 use haven_core::avatar::{process_own_avatar, StagedPicture};
 use haven_core::profile::{download_profile_picture, upload_profile_picture};
 use image::{codecs::jpeg::JpegEncoder, RgbImage};
-use nostr::Keys;
+use nostr::key::Keys;
 
 /// Resolves the live Blossom base URL from the env gate, or `None` (skip).
 fn blossom_url() -> Option<url::Url> {

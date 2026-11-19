@@ -32,7 +32,12 @@
 
 use chrono::Utc;
 use nostr::nips::nip01::Coordinate;
-use nostr::{nips::nip09::EventDeletionRequest, EventBuilder, EventId, Keys, Kind, Tag, Timestamp};
+use nostr::{
+    event::{EventBuilder, EventId, Kind, Tag},
+    key::Keys,
+    nips::nip09::EventDeletionRequest,
+    types::Timestamp,
+};
 
 use crate::circle::relay_prefs::RelayType;
 
@@ -121,7 +126,7 @@ pub(crate) fn dedup_key(url: &str) -> String {
 /// on the way in; this is the write that makes it public.
 fn refuse_undialable(urls: &[String]) -> PublisherResult<()> {
     let dialable = |url: &String| {
-        nostr::RelayUrl::parse(url).is_ok_and(|url| crate::relay::url_norm::may_dial(&url))
+        nostr::types::RelayUrl::parse(url).is_ok_and(|url| crate::relay::url_norm::may_dial(&url))
     };
     if urls.iter().all(dialable) {
         Ok(())
@@ -148,7 +153,7 @@ pub fn build_relay_list_event(
     relay_type: RelayType,
     urls: &[String],
     created_at: Option<i64>,
-) -> PublisherResult<nostr::Event> {
+) -> PublisherResult<nostr::event::Event> {
     refuse_undialable(urls)?;
     let tags: Vec<Tag> = urls
         .iter()
@@ -201,7 +206,7 @@ pub fn build_nip65_relay_list_event(
     keys: &Keys,
     urls: &[String],
     created_at: Option<i64>,
-) -> PublisherResult<nostr::Event> {
+) -> PublisherResult<nostr::event::Event> {
     refuse_undialable(urls)?;
     let tags: Vec<Tag> = urls
         .iter()
@@ -239,7 +244,7 @@ pub fn build_unpublish_event(
     keys: &Keys,
     relay_type: RelayType,
     last_published_at: Option<i64>,
-) -> PublisherResult<nostr::Event> {
+) -> PublisherResult<nostr::event::Event> {
     let created_at_secs = superseding_created_at(last_published_at);
     let created_at_u = u64::try_from(created_at_secs).unwrap_or(0);
     // Fail closed — see the rationale in `build_relay_list_event`. An unpublish
@@ -299,7 +304,7 @@ pub fn build_nip09_deletion(
     keys: &Keys,
     event_id: EventId,
     kind: Kind,
-) -> PublisherResult<nostr::Event> {
+) -> PublisherResult<nostr::event::Event> {
     let coordinate = Coordinate::new(kind, keys.public_key());
     let request = EventDeletionRequest::new()
         .ids(vec![event_id])
@@ -313,7 +318,7 @@ pub fn build_nip09_deletion(
 mod tests {
     use super::*;
     use crate::circle::default_relays;
-    use nostr::Kind;
+    use nostr::event::Kind;
 
     fn keys() -> Keys {
         Keys::generate()
@@ -550,7 +555,7 @@ mod tests {
     #[test]
     fn build_nip09_references_id_and_address_coordinate() {
         let k = keys();
-        let dummy = nostr::EventBuilder::new(Kind::TextNote, "")
+        let dummy = nostr::event::EventBuilder::new(Kind::TextNote, "")
             .sign_with_keys(&k)
             .unwrap();
         let deletion = build_nip09_deletion(&k, dummy.id, Kind::InboxRelays).unwrap();

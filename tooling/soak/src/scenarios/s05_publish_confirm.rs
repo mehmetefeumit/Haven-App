@@ -72,7 +72,7 @@ use haven_core::relay::fanout::{FanoutClock as _, WallClock};
 use haven_core::relay::live_sync::{
     GroupProcessOutcome, Lifecycle, LiveSyncEvent, StopOutcome, SyncStatusReason,
 };
-use nostr::{Event, Kind};
+use nostr::event::{Event, Kind};
 use tokio::sync::broadcast::error::TryRecvError;
 use tokio::sync::broadcast::Receiver;
 use tokio::time::Instant;
@@ -995,7 +995,7 @@ async fn after_reopen<T: TimelineSink, L: LogDrain>(
     world: &mut ScenarioWorld<T, L>,
     committer: DeviceTag,
     circle: &SimCircle,
-    commit: nostr::EventId,
+    commit: nostr::event::EventId,
 ) -> Result<(bool, bool), RigError> {
     let owing = *circle.nostr_group_id();
     let survived =
@@ -1090,11 +1090,11 @@ async fn commits_besides<T: TimelineSink, L: LogDrain>(
     world: &ScenarioWorld<T, L>,
     circle: &SimCircle,
     proposal: &Event,
-) -> Result<Vec<nostr::EventId>, RigError> {
+) -> Result<Vec<nostr::event::EventId>, RigError> {
     let mut commits = Vec::new();
     for plane in world.relays() {
         for event in plane
-            .stored_page(nostr::Filter::new().kind(Kind::Custom(445)))
+            .stored_page(nostr::filter::Filter::new().kind(Kind::Custom(445)))
             .await?
         {
             let routed = event.tags.iter().any(|tag| {
@@ -1211,7 +1211,7 @@ async fn swallow_every_plane<T: TimelineSink, L: LogDrain>(
 /// Whether any plane holds `id` or acknowledged it.
 async fn published_anywhere<T: TimelineSink, L: LogDrain>(
     world: &ScenarioWorld<T, L>,
-    id: &nostr::EventId,
+    id: &nostr::event::EventId,
 ) -> Result<bool, RigError> {
     for plane in world.relays() {
         if plane.stored(id).await? || plane.witnessed_ok(id) {

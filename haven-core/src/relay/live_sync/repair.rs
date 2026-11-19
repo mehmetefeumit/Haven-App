@@ -54,7 +54,7 @@ use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use nostr::message::MachineReadablePrefix;
-use nostr::{RelayUrl, SubscriptionId};
+use nostr::{message::SubscriptionId, types::RelayUrl};
 use rand::rngs::OsRng;
 use rand::Rng;
 use tokio::sync::Notify;

@@ -30,7 +30,11 @@ use haven_core::nostr::mls::SessionManager;
 use haven_core::relay::fanout::FanoutTargetOutcome;
 use haven_core::relay::scripted_relay::{ScriptedRelay, Verdict};
 use haven_core::relay::RelayManager;
-use nostr::{EventBuilder, Filter, Keys, Kind, Tag};
+use nostr::{
+    event::{EventBuilder, Kind, Tag},
+    filter::Filter,
+    key::Keys,
+};
 use nostr_relay_builder::builder::{RelayBuilder, RelayBuilderNip42, RelayBuilderNip42Mode};
 use nostr_relay_builder::LocalRelay;
 use nostr_sdk::{Client, ClientOptions};
@@ -38,12 +42,12 @@ use nostr_sdk::{Client, ClientOptions};
 /// A signed kind-445 event in the shape the engine's are, as the transport
 /// message a fanout row freezes.
 fn fanout_message() -> TransportMessage {
-    fanout_message_signed_at(nostr::Timestamp::now())
+    fanout_message_signed_at(nostr::types::Timestamp::now())
 }
 
 /// [`fanout_message`], signed at `at`: a recorded commit sent again hours
 /// after it was signed carries the instant it was signed.
-fn fanout_message_signed_at(at: nostr::Timestamp) -> TransportMessage {
+fn fanout_message_signed_at(at: nostr::types::Timestamp) -> TransportMessage {
     let event = EventBuilder::new(Kind::Custom(445), "ciphertext")
         .tag(Tag::parse(["h", &"ab".repeat(32)]).expect("an h tag"))
         .custom_created_at(at)
@@ -531,7 +535,7 @@ async fn the_publish_client_never_answers_a_nip42_challenge() {
 }
 
 /// How many events with `id` the relay at `url` serves `client`.
-async fn held_copies(client: &Client, url: &str, id: nostr::EventId) -> usize {
+async fn held_copies(client: &Client, url: &str, id: nostr::event::EventId) -> usize {
     client
         .fetch_events_from(
             [url],
@@ -808,7 +812,7 @@ async fn a_refusal_of_an_old_resend_as_too_old_blames_no_clock() {
     let blamed_for = |signed_secs_ago: u64| async move {
         let relay = ScriptedRelay::start();
         relay.on_publish(|_| Verdict::Refuse("blocked: event too old".to_string()));
-        let at = nostr::Timestamp::from(NOW - signed_secs_ago);
+        let at = nostr::types::Timestamp::from(NOW - signed_secs_ago);
         match publish_through(
             &RelayManager::at_for_test(NOW),
             relay.url(),

@@ -59,7 +59,7 @@
 // connection lock once at the top and holds it for the whole operation.
 #![allow(clippy::significant_drop_tightening)]
 
-use nostr::{Event, JsonUtil, PublicKey};
+use nostr::{event::Event, key::PublicKey, JsonUtil};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::error::{CircleError, Result};
@@ -1222,7 +1222,7 @@ fn decode_pending_edits(edits_json: &str) -> PendingEdits {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::Keys;
+    use nostr::key::Keys;
 
     fn storage() -> CircleStorage {
         CircleStorage::in_memory().expect("in-memory storage must initialize")
@@ -1557,9 +1557,9 @@ mod tests {
             .stage_own_profile_edits(&pubkey_hex, &bio_edit("new bio"), 1_001)
             .unwrap();
         let published = ProfileMetadata::from_metadata(
-            nostr::Metadata::new()
+            nostr::nips::nip01::Metadata::new()
                 .display_name("Alice")
-                .website(nostr::Url::parse("https://w.example.com").unwrap()),
+                .website(nostr::types::Url::parse("https://w.example.com").unwrap()),
         );
         let event = kind0_at(&keys, &published, 1_002);
         let pool = relays(&["a"]);
@@ -1760,8 +1760,8 @@ mod tests {
             .stage_own_profile_picture(&pubkey_hex, &picture, 1_000)
             .unwrap();
         let merged = ProfileMetadata::from_metadata(
-            nostr::Metadata::new()
-                .picture(nostr::Url::parse("https://blossom.example/abc").unwrap()),
+            nostr::nips::nip01::Metadata::new()
+                .picture(nostr::types::Url::parse("https://blossom.example/abc").unwrap()),
         );
         let event = kind0_at(&keys, &merged, 1_001);
         let pool = relays(&["a"]);
@@ -1930,7 +1930,7 @@ mod tests {
         let fetched = CachedProfile {
             pubkey_hex: hex(),
             metadata: ProfileMetadata::from_metadata(
-                nostr::Metadata::new()
+                nostr::nips::nip01::Metadata::new()
                     .display_name("Other Client")
                     .about("bio from elsewhere"),
             ),
@@ -1962,7 +1962,9 @@ mod tests {
         let member = "cd".repeat(32);
         let fetched = CachedProfile {
             pubkey_hex: member.clone(),
-            metadata: ProfileMetadata::from_metadata(nostr::Metadata::new().display_name("Bob")),
+            metadata: ProfileMetadata::from_metadata(
+                nostr::nips::nip01::Metadata::new().display_name("Bob"),
+            ),
             state: ProfileState::Known,
             event_created_at: 5_000,
             fetched_at: 5_000,
@@ -1994,7 +1996,7 @@ mod tests {
         let fetched = CachedProfile {
             pubkey_hex: pubkey_hex.clone(),
             metadata: ProfileMetadata::from_metadata(
-                nostr::Metadata::new().display_name("Other Client"),
+                nostr::nips::nip01::Metadata::new().display_name("Other Client"),
             ),
             state: ProfileState::Known,
             event_created_at: i64::try_from(FAR).unwrap() + 5_000,
@@ -2040,7 +2042,7 @@ mod tests {
             .upsert_profile(&CachedProfile {
                 pubkey_hex: pubkey_hex.clone(),
                 metadata: ProfileMetadata::from_metadata(
-                    nostr::Metadata::new().display_name("Imported"),
+                    nostr::nips::nip01::Metadata::new().display_name("Imported"),
                 ),
                 state: ProfileState::Known,
                 event_created_at: 4_000,
@@ -2085,7 +2087,7 @@ mod tests {
     // retry pacing.
     // ======================================================================
 
-    use nostr::{Event, JsonUtil, ToBech32};
+    use nostr::{event::Event, nips::nip19::ToBech32, JsonUtil};
 
     /// Far enough ahead of the wall clock that the profile builder stamps
     /// exactly `FAR + offset`, so an event's `created_at` is a test input.
@@ -2094,14 +2096,14 @@ mod tests {
     const NOW: i64 = 1_001;
 
     fn meta(name: &str) -> ProfileMetadata {
-        ProfileMetadata::from_metadata(nostr::Metadata::new().display_name(name))
+        ProfileMetadata::from_metadata(nostr::nips::nip01::Metadata::new().display_name(name))
     }
 
     fn meta_with_picture(name: &str, url: &str) -> ProfileMetadata {
         ProfileMetadata::from_metadata(
-            nostr::Metadata::new()
+            nostr::nips::nip01::Metadata::new()
                 .display_name(name)
-                .picture(nostr::Url::parse(url).expect("a url")),
+                .picture(nostr::types::Url::parse(url).expect("a url")),
         )
     }
 
@@ -2135,7 +2137,7 @@ mod tests {
         complete: bool,
     ) -> Result<CachedProfile> {
         let merged = ProfileMetadata::from_metadata(
-            nostr::Metadata::from_json(&event.content).expect("content is metadata"),
+            nostr::nips::nip01::Metadata::from_json(&event.content).expect("content is metadata"),
         );
         storage.commit_profile_sync(&ProfileSyncCommit {
             pubkey: &keys.public_key(),

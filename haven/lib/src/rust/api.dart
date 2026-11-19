@@ -711,7 +711,7 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
 
   /// Adds a relay to one category (idempotent).
   ///
-  /// The URL is normalized via `nostr::RelayUrl::parse`; duplicates are
+  /// The URL is normalized via `nostr::types::RelayUrl::parse`; duplicates are
   /// silent no-ops. `ws://` and credential-bearing URLs are rejected with a
   /// `CircleError::InvalidRelayInput`, whose `RelayInputRejection` sentence
   /// reaches Dart verbatim and is what `_mapStorageError` routes the

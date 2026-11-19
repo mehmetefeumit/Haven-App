@@ -4,7 +4,12 @@
 //! so all circles sharing a relay set are served by one subscription on one
 //! socket.
 
-use nostr::{Alphabet, Filter, Kind, SingleLetterTag, Timestamp};
+use nostr::{
+    event::Kind,
+    filter::{Filter, SingleLetterTag},
+    types::Timestamp,
+    Alphabet,
+};
 
 /// The group-message kind this plane subscribes to (MIP-04 `kind:445`).
 ///
@@ -27,7 +32,7 @@ pub const GROUP_EVENT_KIND: Kind = Kind::Custom(445);
 ///
 /// let f = group_filter(&["aa00".to_string(), "bb11".to_string()], 1_000);
 /// // One filter multiplexes both circles' `#h` values.
-/// assert!(f.kinds.as_ref().unwrap().contains(&nostr::Kind::Custom(445)));
+/// assert!(f.kinds.as_ref().unwrap().contains(&nostr::event::Kind::Custom(445)));
 /// ```
 #[must_use]
 pub fn group_filter(group_ids_hex: &[String], since_secs: i64) -> Filter {

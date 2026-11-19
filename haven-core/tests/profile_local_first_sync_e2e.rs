@@ -48,11 +48,15 @@ use haven_core::profile::{
 use haven_core::relay::scripted_relay::{Frame, ScriptedRelay, Verdict};
 use haven_core::relay::{allow_ws_loopback_for_test, normalize_relay_url, RelayManager};
 use image::{codecs::jpeg::JpegEncoder, RgbImage};
-use nostr::prelude::ToBech32 as _;
+use nostr::nips::nip19::ToBech32 as _;
 use nostr::util::BoxedFuture;
 use nostr::{
-    Event, EventBuilder, Filter, JsonUtil as _, Keys, Kind, Metadata, PublicKey, RelayUrl,
-    Timestamp,
+    event::{Event, EventBuilder, Kind},
+    filter::Filter,
+    key::{Keys, PublicKey},
+    nips::nip01::Metadata,
+    types::{RelayUrl, Timestamp},
+    JsonUtil as _,
 };
 use nostr_relay_builder::builder::RelayBuilder;
 use nostr_relay_builder::prelude::{PolicyResult, QueryPolicy, WritePolicy};
@@ -1264,7 +1268,7 @@ async fn a_second_timestamp_refusal_does_not_resign_again() {
 
     // A relay that refuses everything as too old is hostile or broken: it may
     // cost the healthy relays one fresh event, never one per pass.
-    let offered: Arc<Mutex<Vec<nostr::EventId>>> = Arc::default();
+    let offered: Arc<Mutex<Vec<nostr::event::EventId>>> = Arc::default();
     let log = Arc::clone(&offered);
     sc.relay.on_publish(move |event| {
         log.lock()

@@ -47,7 +47,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use nostr::filter::MatchEventOptions;
-use nostr::{Event, EventId, Filter, SubscriptionId};
+use nostr::{
+    event::{Event, EventId},
+    filter::Filter,
+    message::SubscriptionId,
+};
 use serde_json::Value;
 
 use crate::rig::{sim_magnitude, DeviceTag, EventTag};
@@ -839,20 +843,25 @@ mod tests {
     #[test]
     fn an_injection_goes_to_every_subscription_that_asked_for_it_and_no_other() {
         let ledger = Ledger::new();
-        let event = nostr::EventBuilder::new(nostr::Kind::Custom(445), "x")
-            .tags(vec![
-                nostr::Tag::parse(["h", &hex::encode([7u8; 32])]).expect("a tag")
+        let event = nostr::event::EventBuilder::new(nostr::event::Kind::Custom(445), "x")
+            .tags(vec![nostr::event::Tag::parse([
+                "h",
+                &hex::encode([7u8; 32]),
             ])
-            .sign_with_keys(&nostr::Keys::generate())
+            .expect("a tag")])
+            .sign_with_keys(&nostr::key::Keys::generate())
             .expect("signs");
 
         let wanted = SubscriptionId::new("wants-445s");
         let other = SubscriptionId::new("wants-profiles");
         ledger.note_req(
             wanted.clone(),
-            vec![Filter::new().kind(nostr::Kind::Custom(445))],
+            vec![Filter::new().kind(nostr::event::Kind::Custom(445))],
         );
-        ledger.note_req(other, vec![Filter::new().kind(nostr::Kind::Metadata)]);
+        ledger.note_req(
+            other,
+            vec![Filter::new().kind(nostr::event::Kind::Metadata)],
+        );
 
         assert_eq!(
             ledger.subscriptions_matching(&event),
@@ -861,7 +870,10 @@ mod tests {
         );
 
         // A re-issued REQ replaces its own filters, as a relay's does.
-        ledger.note_req(wanted, vec![Filter::new().kind(nostr::Kind::Metadata)]);
+        ledger.note_req(
+            wanted,
+            vec![Filter::new().kind(nostr::event::Kind::Metadata)],
+        );
         assert!(
             ledger.subscriptions_matching(&event).is_empty(),
             "an injection nobody subscribed for is a fault that did not fire"
@@ -986,11 +998,11 @@ mod tests {
     /// A forged 445 under a key belonging to nobody, its `#h` a planted
     /// routing id.
     fn an_injected_event() -> Event {
-        nostr::EventBuilder::new(nostr::Kind::Custom(445), "x")
+        nostr::event::EventBuilder::new(nostr::event::Kind::Custom(445), "x")
             .tags(vec![
-                nostr::Tag::parse(["h", &"cd".repeat(32)]).expect("a tag")
+                nostr::event::Tag::parse(["h", &"cd".repeat(32)]).expect("a tag")
             ])
-            .sign_with_keys(&nostr::Keys::generate())
+            .sign_with_keys(&nostr::key::Keys::generate())
             .expect("signs")
     }
 

@@ -19,7 +19,7 @@
 use haven_core::circle::{CircleConfig, CircleManager, MemberKeyPackage};
 use haven_core::location::LocationMessage;
 use haven_core::relay::maintenance::build_kp_maintenance_events;
-use nostr::Keys;
+use nostr::key::Keys;
 use tempfile::TempDir;
 
 mod helpers;

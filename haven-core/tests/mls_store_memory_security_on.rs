@@ -8,7 +8,7 @@
 //! in its binary: no other open can set it first.
 
 use haven_core::nostr::mls::SessionManager;
-use nostr::Keys;
+use nostr::key::Keys;
 
 #[test]
 fn the_production_mls_store_turns_cipher_memory_security_on() {

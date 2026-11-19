@@ -343,7 +343,11 @@ pub fn publish_retry_is_hopeless(any_accepted: bool, rejections: &[(String, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+    use nostr::{
+        event::{EventBuilder, Kind, Tag},
+        key::Keys,
+        types::Timestamp,
+    };
 
     // ---------------------------------------------------------------------
     // The threshold. Pinned against BOTH bounds it is derived from, so a

@@ -37,7 +37,12 @@ use haven_core::relay::live_sync::{
 };
 use haven_core::relay::maintenance::build_kp_maintenance_events;
 use haven_core::relay::{allow_ws_loopback_for_test, RelayManager};
-use nostr::{Event, EventBuilder, EventId, Keys, Kind, Tag, TagKind, Timestamp};
+use nostr::{
+    event::{Event, EventBuilder, EventId, Kind, Tag},
+    key::Keys,
+    types::Timestamp,
+    TagKind,
+};
 use nostr_relay_builder::prelude::{
     BoxedFuture, MemoryDatabase, MemoryDatabaseOptions, PolicyResult, QueryPolicy,
 };
@@ -513,7 +518,7 @@ impl IdsAsked {
 impl QueryPolicy for IdsAsked {
     fn admit_query<'a>(
         &'a self,
-        query: &'a nostr::Filter,
+        query: &'a nostr::filter::Filter,
         _addr: &'a std::net::SocketAddr,
     ) -> BoxedFuture<'a, PolicyResult> {
         Box::pin(async move {
@@ -1419,7 +1424,7 @@ struct WindowWithheld;
 impl QueryPolicy for WindowWithheld {
     fn admit_query<'a>(
         &'a self,
-        query: &'a nostr::Filter,
+        query: &'a nostr::filter::Filter,
         _addr: &'a std::net::SocketAddr,
     ) -> BoxedFuture<'a, PolicyResult> {
         Box::pin(async move {
@@ -1453,7 +1458,7 @@ impl std::fmt::Debug for RefusalDuringRangePass {
 impl QueryPolicy for RefusalDuringRangePass {
     fn admit_query<'a>(
         &'a self,
-        query: &'a nostr::Filter,
+        query: &'a nostr::filter::Filter,
         _addr: &'a std::net::SocketAddr,
     ) -> BoxedFuture<'a, PolicyResult> {
         Box::pin(async move {
@@ -1870,14 +1875,17 @@ type ByIdAsk = (Vec<EventId>, bool);
 impl QueryPolicy for ByIdAsks {
     fn admit_query<'a>(
         &'a self,
-        query: &'a nostr::Filter,
+        query: &'a nostr::filter::Filter,
         _addr: &'a std::net::SocketAddr,
     ) -> BoxedFuture<'a, PolicyResult> {
         Box::pin(async move {
             if let Some(ids) = &query.ids {
-                let routed = query
-                    .generic_tags
-                    .contains_key(&nostr::SingleLetterTag::lowercase(nostr::Alphabet::H));
+                let routed =
+                    query
+                        .generic_tags
+                        .contains_key(&nostr::filter::SingleLetterTag::lowercase(
+                            nostr::Alphabet::H,
+                        ));
                 self.0
                     .lock()
                     .unwrap()

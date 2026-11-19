@@ -63,7 +63,7 @@ use haven_core::relay::fanout::{
     drive_due, drive_one, DriveMode, FanoutClock, FanoutStatus, WallClock,
 };
 use haven_core::relay::live_sync::StopOutcome;
-use nostr::{Event, JsonUtil as _};
+use nostr::{event::Event, JsonUtil as _};
 
 use crate::nemesis::types::Fault;
 

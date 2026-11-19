@@ -116,7 +116,7 @@ use haven_core::nostr::mls::types::{
     ConvergedRoster, GroupId, LocationMessageResult, MessageId, MessageState, ScreenedIngest,
 };
 use haven_core::nostr::mls::SessionManager;
-use nostr::Event;
+use nostr::event::Event;
 
 use crate::nemesis::types::{DropClass, Fault};
 use crate::oracle::undecryptable::{self, Probe};

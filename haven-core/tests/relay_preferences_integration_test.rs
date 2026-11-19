@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use haven_core::circle::{CircleStorage, RelayType, PRODUCTION_DEFAULT_RELAYS};
 use haven_core::relay::dedup_relay_targets;
-use nostr::Kind;
+use nostr::event::Kind;
 use proptest::prelude::*;
 
 // Counter for unique test paths so parallel test runs don't collide.

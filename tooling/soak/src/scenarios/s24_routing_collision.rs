@@ -46,7 +46,11 @@ use haven_core::nostr::KIND_GROUP_MESSAGE;
 use haven_core::relay::fanout::{
     drive_one, DriveMode, FanoutClock as _, FanoutStatus, LeaveStatus, LocationSeal, WallClock,
 };
-use nostr::{Alphabet, Event, Filter, JsonUtil as _, Kind, SingleLetterTag};
+use nostr::{
+    event::{Event, Kind},
+    filter::{Filter, SingleLetterTag},
+    Alphabet, JsonUtil as _,
+};
 
 use crate::nemesis::types::DropClass;
 use crate::oracle::vacuity::{ExpectationFloor, Observed};

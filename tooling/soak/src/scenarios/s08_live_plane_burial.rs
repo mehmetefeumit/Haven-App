@@ -154,7 +154,10 @@ use haven_core::nostr::mls::types::GroupId;
 use haven_core::relay::catchup::{run_catchup_all_circles, CATCHUP_MAX_EVENTS_PER_PAGE};
 use haven_core::relay::live_sync::group_cursor_stream;
 use haven_core::relay::live_sync::planes::group::group_filter;
-use nostr::{Event, EventId, Filter};
+use nostr::{
+    event::{Event, EventId},
+    filter::Filter,
+};
 use tokio::time::Instant;
 
 use crate::clock::WallNow;

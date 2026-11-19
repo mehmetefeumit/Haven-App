@@ -35,7 +35,7 @@ use haven_core::relay::fanout::{
 };
 use haven_core::relay::live_sync::{EngineProcessor, EventBus, LiveDriver, LiveSyncEvent};
 use haven_core::relay::maintenance::build_kp_maintenance_events;
-use nostr::{Event, Keys};
+use nostr::{event::Event, key::Keys};
 use tempfile::TempDir;
 
 mod helpers;
@@ -233,7 +233,7 @@ struct Cascading {
     group: GroupId,
     peers: Vec<Arc<Device>>,
     queue: Mutex<VecDeque<Arc<Device>>>,
-    sent: Mutex<Vec<nostr::EventId>>,
+    sent: Mutex<Vec<nostr::event::EventId>>,
 }
 
 #[async_trait::async_trait]

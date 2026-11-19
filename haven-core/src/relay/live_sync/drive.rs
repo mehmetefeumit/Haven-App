@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
 use cgka_traits::TransportEndpoint;
-use nostr::Event;
+use nostr::event::Event;
 use tokio::sync::watch;
 
 use crate::nostr::mls::types::{FanoutEndpointFailure, TransportMessage};
@@ -355,7 +355,7 @@ impl FanoutSend for Leashed<'_> {
 
     async fn publish_location(
         &self,
-        event: &nostr::Event,
+        event: &nostr::event::Event,
         targets: &[String],
     ) -> crate::relay::RelayResult<crate::relay::PublishResult> {
         // Given up when the session is stopped: nothing says a relay took it.
@@ -615,8 +615,8 @@ mod tests {
             inner: &relay,
             leash: &leash,
         };
-        let event = nostr::EventBuilder::new(nostr::Kind::Custom(445), "sealed")
-            .sign_with_keys(&nostr::Keys::generate())
+        let event = nostr::event::EventBuilder::new(nostr::event::Kind::Custom(445), "sealed")
+            .sign_with_keys(&nostr::key::Keys::generate())
             .expect("a signed event");
         assert!(
             !publisher
@@ -654,8 +654,8 @@ mod tests {
             inner: &outbox,
             leash: &leash,
         };
-        let event = nostr::EventBuilder::new(nostr::Kind::Custom(445), "sealed")
-            .sign_with_keys(&nostr::Keys::generate())
+        let event = nostr::event::EventBuilder::new(nostr::event::Kind::Custom(445), "sealed")
+            .sign_with_keys(&nostr::key::Keys::generate())
             .expect("a signed event");
         let relays = ["wss://relay.example.com".to_owned()];
         assert!(publisher.publish_unrecorded(&event, &relays).await);
@@ -703,8 +703,8 @@ mod tests {
             inner: &outbox,
             leash: &leash,
         };
-        let event = nostr::EventBuilder::new(nostr::Kind::Custom(445), "sealed")
-            .sign_with_keys(&nostr::Keys::generate())
+        let event = nostr::event::EventBuilder::new(nostr::event::Kind::Custom(445), "sealed")
+            .sign_with_keys(&nostr::key::Keys::generate())
             .expect("a signed event");
         let relays = ["wss://relay.example.com".to_owned()];
         {

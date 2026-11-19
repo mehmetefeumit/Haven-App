@@ -102,7 +102,7 @@ use haven_core::relay::catchup::{
 };
 use haven_core::relay::live_sync::group_cursor_stream;
 use haven_core::relay::negentropy::NEG_ROUTES_PER_PASS;
-use nostr::{Event, Timestamp};
+use nostr::{event::Event, types::Timestamp};
 use tokio::time::Instant;
 
 use crate::clock::WallNow;

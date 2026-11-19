@@ -32,7 +32,11 @@ use haven_core::relay::negentropy::{
 use haven_core::relay::{allow_ws_loopback_for_test, RelayManager};
 use helpers::neg_wire::{Dir, Frame, NegPolicy, NegWire};
 use helpers::{assert_no_needles, assert_some_line_from, capture_haven_log, haven_core_lines};
-use nostr::{Event, EventBuilder, Keys, Kind, Tag, Timestamp};
+use nostr::{
+    event::{Event, EventBuilder, Kind, Tag},
+    key::Keys,
+    types::Timestamp,
+};
 use nostr_relay_builder::prelude::{MemoryDatabase, MemoryDatabaseOptions, NostrDatabase};
 use nostr_relay_builder::{LocalRelay, RelayBuilder};
 use tempfile::TempDir;
@@ -58,7 +62,7 @@ struct HeldQueries {
 impl nostr_relay_builder::builder::QueryPolicy for HeldQueries {
     fn admit_query<'a>(
         &'a self,
-        _query: &'a nostr::Filter,
+        _query: &'a nostr::filter::Filter,
         _addr: &'a std::net::SocketAddr,
     ) -> nostr::util::BoxedFuture<'a, nostr_relay_builder::builder::PolicyResult> {
         Box::pin(async move {

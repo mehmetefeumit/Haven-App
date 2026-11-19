@@ -17,7 +17,11 @@ use haven_core::nostr::mls::types::{
     PendingStateRef, PublishWork, ScreenedIngest, SessionEffects,
 };
 use haven_core::nostr::mls::{SessionManager, StorageConfig};
-use nostr::{Event, EventBuilder, Keys, Timestamp};
+use nostr::{
+    event::{Event, EventBuilder},
+    key::Keys,
+    types::Timestamp,
+};
 
 use super::drive::{epoch, leave_of, sealed_by, wait_out_the_engine};
 use super::{CircleFixture, CircleMember};

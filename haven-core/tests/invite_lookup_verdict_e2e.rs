@@ -23,8 +23,13 @@ use haven_core::relay::scripted_relay::{Frame, ScriptedRelay};
 use haven_core::relay::{set_discovery_relays_for_test, MemberLookup, RelayManager};
 use helpers::twin_key_packages::pre_migration;
 use helpers::{assert_no_needles, assert_some_line_from, capture_haven_log, haven_core_lines};
-use nostr::prelude::ToBech32 as _;
-use nostr::{Event, EventBuilder, Filter, Keys, Kind, PublicKey, Tag, Timestamp};
+use nostr::nips::nip19::ToBech32 as _;
+use nostr::{
+    event::{Event, EventBuilder, Kind, Tag},
+    filter::Filter,
+    key::{Keys, PublicKey},
+    types::Timestamp,
+};
 use tempfile::TempDir;
 
 /// The discovery plane of this binary: two indexers, installed once.

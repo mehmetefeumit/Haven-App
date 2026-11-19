@@ -99,7 +99,7 @@ impl FanoutClock for Clock {
 /// acknowledges it, unless told to withhold.
 #[derive(Default)]
 struct Outbox {
-    handed: Mutex<Vec<(nostr::Event, Vec<String>)>>,
+    handed: Mutex<Vec<(nostr::event::Event, Vec<String>)>>,
     /// Recipients whose Welcome no relay acknowledges.
     unacknowledged: Mutex<Vec<String>>,
     /// Whose roster to read as each Welcome is handed over, and for whom.
@@ -153,13 +153,13 @@ impl Outbox {
         self.unacknowledged.lock().expect("outbox").clear();
     }
 
-    fn handed(&self) -> Vec<(nostr::Event, Vec<String>)> {
+    fn handed(&self) -> Vec<(nostr::event::Event, Vec<String>)> {
         std::mem::take(&mut self.handed.lock().expect("outbox"))
     }
 }
 
 /// The identity a gift wrap is addressed to.
-fn recipient_of(event: &nostr::Event) -> Option<String> {
+fn recipient_of(event: &nostr::event::Event) -> Option<String> {
     event.tags.iter().find_map(|tag| {
         let tag = tag.as_slice();
         (tag.len() >= 2 && tag[0] == "p").then(|| tag[1].clone())
@@ -169,7 +169,7 @@ fn recipient_of(event: &nostr::Event) -> Option<String> {
 impl UnrecordedPublisher for Outbox {
     fn publish_unrecorded<'a>(
         &'a self,
-        event: &'a nostr::Event,
+        event: &'a nostr::event::Event,
         relays: &'a [String],
     ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         Box::pin(async move {
@@ -221,7 +221,9 @@ impl UnrecordedPublisher for Outbox {
     }
 }
 
-fn welcomes(handed: &[(nostr::Event, Vec<String>)]) -> Vec<&(nostr::Event, Vec<String>)> {
+fn welcomes(
+    handed: &[(nostr::event::Event, Vec<String>)],
+) -> Vec<&(nostr::event::Event, Vec<String>)> {
     handed
         .iter()
         .filter(|(event, _)| event.kind.as_u16() == 1059)
@@ -286,7 +288,7 @@ async fn staged_ref(member: &CircleMember, group: &GroupId) -> Option<PendingSta
     }
 }
 
-async fn commit_state(member: &CircleMember, event: nostr::EventId) -> Option<MessageState> {
+async fn commit_state(member: &CircleMember, event: nostr::event::EventId) -> Option<MessageState> {
     member
         .session()
         .stored_message_record_for_test(&MessageId::new(event.to_bytes().to_vec()))
@@ -303,7 +305,7 @@ async fn roster(member: &CircleMember, group: &GroupId) -> Vec<String> {
         .expect("the roster")
 }
 
-async fn seal(sender: &CircleMember, group: &GroupId) -> Option<nostr::Event> {
+async fn seal(sender: &CircleMember, group: &GroupId) -> Option<nostr::event::Event> {
     sender
         .circle
         .seal_location_for_test(
@@ -320,7 +322,7 @@ async fn can_send(member: &CircleMember, group: &GroupId) -> bool {
 }
 
 /// Whether `reader` reads the location `event` carries.
-async fn opens(reader: &CircleMember, event: &nostr::Event) -> bool {
+async fn opens(reader: &CircleMember, event: &nostr::event::Event) -> bool {
     reader
         .circle
         .ingest_for_test(event)
@@ -501,8 +503,8 @@ async fn a_removal_is_applied_in_its_own_call_on_a_relays_acknowledgement() {
 
     // It removes: what is sealed afterwards the remaining member reads and
     // the removed member does not.
-    let commit =
-        <nostr::Event as nostr::JsonUtil>::from_json(&sent[0].payload).expect("the frozen event");
+    let commit = <nostr::event::Event as nostr::JsonUtil>::from_json(&sent[0].payload)
+        .expect("the frozen event");
     others[0]
         .session()
         .process_event_settled_for_test(&commit)
@@ -1112,7 +1114,7 @@ async fn the_deferred_send_repair_in_a_wake(
     CircleMember,
     GroupId,
     String,
-    Vec<(nostr::Event, Vec<String>)>,
+    Vec<(nostr::event::Event, Vec<String>)>,
     usize,
 ) {
     use haven_core::nostr::mls::types::SendIntent;
@@ -1249,7 +1251,7 @@ struct Gated {
     bob: CircleMember,
     carol: CircleMember,
     group: GroupId,
-    opens_the_gate: nostr::Event,
+    opens_the_gate: nostr::event::Event,
 }
 
 async fn a_circle_whose_changes_queue() -> Gated {
@@ -1754,7 +1756,7 @@ struct GatedFour {
     group: GroupId,
     /// Alice's first commit: Bob holds only her second, and applies both
     /// once this one reaches him.
-    first: nostr::Event,
+    first: nostr::event::Event,
 }
 
 /// What Alice's second commit — the one Bob holds from an epoch he has not
@@ -1916,7 +1918,8 @@ async fn a_due_eviction_is_staged_and_driven_past_a_queued_change_that_cannot_be
         .unwrap_or_else(|_| panic!("premise: the removal is applied"));
     assert_eq!(applied.status, FanoutStatus::Confirmed);
     let sent = transport.calls();
-    let removal = <nostr::Event as nostr::JsonUtil>::from_json(&sent[0].payload).expect("event");
+    let removal =
+        <nostr::event::Event as nostr::JsonUtil>::from_json(&sent[0].payload).expect("event");
     dave.session()
         .process_event_settled_for_test(&removal)
         .await
@@ -3612,10 +3615,10 @@ async fn an_invite_applied_with_its_welcome_still_as_staged_says_a_reinvite_is_o
 /// `MLSMessage` in base64 as its content; the wrap's and the seal's
 /// `created_at` tweaked no more than NIP-59's two days into the past.
 fn welcome_shape(
-    wrap: &nostr::Event,
-    invitee: &nostr::Keys,
-    sender: &nostr::PublicKey,
-    key_package: nostr::EventId,
+    wrap: &nostr::event::Event,
+    invitee: &nostr::key::Keys,
+    sender: &nostr::key::PublicKey,
+    key_package: nostr::event::EventId,
     relays: &[&str],
 ) -> Result<(), &'static str> {
     use base64::Engine as _;
@@ -3637,8 +3640,8 @@ fn welcome_shape(
     if &wrap.pubkey == sender {
         return Err("the wrap is signed by the inviter, not a one-time key");
     }
-    let now = nostr::Timestamp::now().as_secs();
-    let tweaked = |created_at: nostr::Timestamp| {
+    let now = nostr::types::Timestamp::now().as_secs();
+    let tweaked = |created_at: nostr::types::Timestamp| {
         let at = created_at.as_secs();
         at <= now + 60 && at + 2 * 86_400 + 60 >= now
     };
@@ -3654,7 +3657,7 @@ fn welcome_shape(
     }
     let seal = nip44::decrypt(invitee.secret_key(), &wrap.pubkey, &wrap.content)
         .map_err(|_| "the wrap does not open")?;
-    let seal = <nostr::Event as nostr::JsonUtil>::from_json(seal).map_err(|_| "no seal")?;
+    let seal = <nostr::event::Event as nostr::JsonUtil>::from_json(seal).map_err(|_| "no seal")?;
     if seal.kind.as_u16() != 13 || seal.verify().is_err() {
         return Err("not a signed seal");
     }
@@ -3738,16 +3741,17 @@ async fn welcome_rumor_unsigned_one_e_one_relays_and_wrap_one_p() {
         Ok(())
     );
 
-    let two_e = nostr::EventBuilder::new(nostr::Kind::Custom(444), "AAEAAw==")
+    let two_e = nostr::event::EventBuilder::new(nostr::event::Kind::Custom(444), "AAEAAw==")
         .tags([
-            nostr::Tag::event(key_package),
-            nostr::Tag::event(key_package),
-            nostr::Tag::custom(nostr::TagKind::custom("relays"), [ONE]),
+            nostr::event::Tag::event(key_package),
+            nostr::event::Tag::event(key_package),
+            nostr::event::Tag::custom(nostr::TagKind::custom("relays"), [ONE]),
         ])
         .build(admin.keys.public_key());
-    let forged = nostr::EventBuilder::gift_wrap(&admin.keys, &invitee.keys.public_key(), two_e, [])
-        .await
-        .expect("a wrap");
+    let forged =
+        nostr::event::EventBuilder::gift_wrap(&admin.keys, &invitee.keys.public_key(), two_e, [])
+            .await
+            .expect("a wrap");
     assert_eq!(
         welcome_shape(
             &forged,
@@ -3758,17 +3762,17 @@ async fn welcome_rumor_unsigned_one_e_one_relays_and_wrap_one_p() {
         ),
         Err("the rumor does not carry exactly one e, the KeyPackage's"),
     );
-    let one_e = nostr::EventBuilder::new(nostr::Kind::Custom(444), "AAEAAw==")
+    let one_e = nostr::event::EventBuilder::new(nostr::event::Kind::Custom(444), "AAEAAw==")
         .tags([
-            nostr::Tag::event(key_package),
-            nostr::Tag::custom(nostr::TagKind::custom("relays"), [ONE]),
+            nostr::event::Tag::event(key_package),
+            nostr::event::Tag::custom(nostr::TagKind::custom("relays"), [ONE]),
         ])
         .build(admin.keys.public_key());
-    let two_p = nostr::EventBuilder::gift_wrap(
+    let two_p = nostr::event::EventBuilder::gift_wrap(
         &admin.keys,
         &invitee.keys.public_key(),
         one_e,
-        [nostr::Tag::public_key(admin.keys.public_key())],
+        [nostr::event::Tag::public_key(admin.keys.public_key())],
     )
     .await
     .expect("a wrap");
@@ -3926,7 +3930,7 @@ async fn a_founding_welcome_is_recorded_before_create_returns_and_before_any_sen
     let [returned] =
         <[_; 1]>::try_from(created.welcome_events).unwrap_or_else(|_| panic!("one Welcome"));
     assert_eq!(
-        <nostr::Event as nostr::JsonUtil>::from_json(&record.payload).expect("an event"),
+        <nostr::event::Event as nostr::JsonUtil>::from_json(&record.payload).expect("an event"),
         returned.event,
         "the record does not hold the engine's exact Welcome",
     );
@@ -5854,7 +5858,7 @@ struct HalfMadeDeparture {
     leaver: CircleMember,
     group: GroupId,
     /// The leaver's proposal: what any other member needs to commit it.
-    leave: nostr::Event,
+    leave: nostr::event::Event,
 }
 
 async fn a_departure_left_half_made_by_a_kill() -> HalfMadeDeparture {
@@ -5931,7 +5935,11 @@ async fn a_departure_left_half_made_by_a_kill_on(relays: &[&str]) -> HalfMadeDep
 /// `member` commits the departure `leave` announces — the engine's own
 /// eviction, applied as on a relay's acknowledgement — and hands back the
 /// commit for the others.
-async fn evicts(member: &CircleMember, group: &GroupId, leave: &nostr::Event) -> nostr::Event {
+async fn evicts(
+    member: &CircleMember,
+    group: &GroupId,
+    leave: &nostr::event::Event,
+) -> nostr::event::Event {
     member
         .session()
         .process_event(leave)

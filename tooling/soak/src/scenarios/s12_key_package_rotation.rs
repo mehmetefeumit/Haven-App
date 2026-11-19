@@ -126,7 +126,12 @@ use haven_core::relay::maintenance::{
     KpMaintenanceEvents, RelayKpEntry, RelayKpPerRelay, RelayKpSnapshot, TrackedKpLifetime,
     TrackedKpSlot, KIND_MARMOT_KEY_PACKAGE,
 };
-use nostr::{Event, Filter, JsonUtil as _, Keys, Kind};
+use nostr::{
+    event::{Event, Kind},
+    filter::Filter,
+    key::Keys,
+    JsonUtil as _,
+};
 use openmls::prelude::tls_codec::Deserialize as _;
 use openmls::prelude::{
     AppDataDictionaryExtension, BasicCredential, CredentialWithKey, Extension,

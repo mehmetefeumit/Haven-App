@@ -567,7 +567,7 @@ impl std::fmt::Debug for Invitation {
 #[derive(Clone)]
 pub struct MemberKeyPackage {
     /// The key package event (kind 30443 or legacy kind 443).
-    pub key_package_event: nostr::Event,
+    pub key_package_event: nostr::event::Event,
     /// Relay URLs from the member's inbox relay list (kind 10050): where
     /// their Welcome goes.
     pub inbox_relays: Vec<String>,
@@ -606,7 +606,7 @@ pub struct GiftWrappedWelcome {
     /// Relay URLs to publish this Welcome to (recipient's inbox relays).
     pub recipient_relays: Vec<String>,
     /// The gift-wrapped event (kind 1059), ready to publish.
-    pub event: nostr::Event,
+    pub event: nostr::event::Event,
 }
 
 impl std::fmt::Debug for GiftWrappedWelcome {
@@ -1018,10 +1018,11 @@ mod tests {
 
     #[test]
     fn member_key_package_debug_redacts_the_event_and_relays() {
-        let keys = nostr::Keys::generate();
-        let signed_event = nostr::EventBuilder::new(nostr::Kind::Custom(443), "test-content")
-            .sign_with_keys(&keys)
-            .unwrap();
+        let keys = nostr::key::Keys::generate();
+        let signed_event =
+            nostr::event::EventBuilder::new(nostr::event::Kind::Custom(443), "test-content")
+                .sign_with_keys(&keys)
+                .unwrap();
 
         let mkp = MemberKeyPackage {
             key_package_event: signed_event,
@@ -1070,10 +1071,11 @@ mod tests {
 
     #[test]
     fn gift_wrapped_welcome_debug_redacts_recipient_and_event() {
-        let keys = nostr::Keys::generate();
-        let signed_event = nostr::EventBuilder::new(nostr::Kind::Custom(1059), "wrapped-content")
-            .sign_with_keys(&keys)
-            .unwrap();
+        let keys = nostr::key::Keys::generate();
+        let signed_event =
+            nostr::event::EventBuilder::new(nostr::event::Kind::Custom(1059), "wrapped-content")
+                .sign_with_keys(&keys)
+                .unwrap();
 
         let gww = GiftWrappedWelcome {
             recipient_pubkey: RECIPIENT_PUBKEY.to_string(),

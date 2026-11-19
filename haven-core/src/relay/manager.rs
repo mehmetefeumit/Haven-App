@@ -18,9 +18,13 @@ use std::time::Duration;
 use cgka_traits::app_components::{is_loopback_host, is_public_ip};
 use cgka_traits::TransportEndpoint;
 #[cfg(debug_assertions)]
-use nostr::Url;
+use nostr::types::Url;
 use nostr::{
-    ClientMessage, Event, EventId, Filter, Kind, PublicKey, RelayMessage, RelayUrl, SubscriptionId,
+    event::{Event, EventId, Kind},
+    filter::Filter,
+    key::PublicKey,
+    message::{ClientMessage, RelayMessage, SubscriptionId},
+    types::RelayUrl,
 };
 use nostr_sdk::pool::relay::{RelayNotification, RelayServiceFlags, ReqExitPolicy};
 // The pool's own per-socket status, aliased because `super::types` exports a
@@ -597,7 +601,7 @@ pub struct RelayManager {
 type SecondsClock = Arc<dyn Fn() -> u64 + Send + Sync>;
 
 fn device_clock() -> SecondsClock {
-    Arc::new(|| nostr::Timestamp::now().as_secs())
+    Arc::new(|| nostr::types::Timestamp::now().as_secs())
 }
 
 /// How long ago `event` was signed by `clock`, read each time it is asked.
@@ -1334,7 +1338,7 @@ impl RelayManager {
     /// Extracts the dialable relay URLs from `"relay"` tags — the
     /// `["relay", "<url>"]` format of the kind-10050 inbox list — capped: see
     /// [`retain_dialable_foreign_relays`].
-    fn extract_relay_tag_urls(tags: &nostr::Tags) -> Vec<String> {
+    fn extract_relay_tag_urls(tags: &nostr::event::Tags) -> Vec<String> {
         retain_dialable_foreign_relays(tags.iter().filter_map(|tag| {
             let values = tag.as_slice();
             (values.len() >= 2 && values[0] == "relay").then(|| values[1].as_str())
@@ -1384,7 +1388,7 @@ impl RelayManager {
     /// - "write" only → exclude (recipient doesn't read here)
     ///
     /// Kept only if dialable, and capped: see [`retain_dialable_foreign_relays`].
-    fn extract_nip65_read_relays(tags: &nostr::Tags) -> Vec<String> {
+    fn extract_nip65_read_relays(tags: &nostr::event::Tags) -> Vec<String> {
         retain_dialable_foreign_relays(tags.iter().filter_map(|tag| {
             let values = tag.as_slice();
             let write_only = values.len() >= 3 && values[2] == "write";
@@ -1403,7 +1407,7 @@ impl RelayManager {
     /// Kept only if dialable, and capped: see [`retain_dialable_foreign_relays`].
     /// This is the set another user's `KeyPackage` is fetched from (Marmot
     /// `transports/nostr.md:297-302`).
-    pub(crate) fn extract_nip65_write_relays(tags: &nostr::Tags) -> Vec<String> {
+    pub(crate) fn extract_nip65_write_relays(tags: &nostr::event::Tags) -> Vec<String> {
         retain_dialable_foreign_relays(tags.iter().filter_map(|tag| {
             let values = tag.as_slice();
             let read_only = values.len() >= 3 && values[2] == "read";
@@ -2004,7 +2008,7 @@ impl RelayManager {
             &[hex::encode(routing_id)],
             i64::try_from(since).unwrap_or(0),
         )
-        .until(nostr::Timestamp::from(until))
+        .until(nostr::types::Timestamp::from(until))
         .limit(NEG_SET_LIMIT);
         let options = nostr_sdk::SyncOptions::new()
             .initial_timeout(NEG_NEGOTIATION_WAIT)
@@ -3029,7 +3033,7 @@ mod tests {
 
     fn dummy_publish_result(accepted: bool) -> PublishResult {
         PublishResult {
-            event_id: nostr::EventId::from_slice(&[0u8; 32]).expect("32-byte id"),
+            event_id: nostr::event::EventId::from_slice(&[0u8; 32]).expect("32-byte id"),
             accepted_by: if accepted {
                 vec!["wss://relay.example.com".to_string()]
             } else {
@@ -3153,7 +3157,7 @@ mod tests {
     /// A no-acceptance result whose relays all rejected with `reason`.
     fn rejected_publish_result(reasons: &[&str]) -> PublishResult {
         PublishResult {
-            event_id: nostr::EventId::from_slice(&[0u8; 32]).expect("32-byte id"),
+            event_id: nostr::event::EventId::from_slice(&[0u8; 32]).expect("32-byte id"),
             accepted_by: vec![],
             rejected_by: reasons
                 .iter()
@@ -3393,7 +3397,7 @@ mod tests {
     /// One relay's clock complaint, plus optionally one relay that said nothing.
     fn clock_rejection_harvest(with_a_silent_relay: bool) -> PublishResult {
         PublishResult {
-            event_id: nostr::EventId::from_slice(&[0u8; 32]).expect("32-byte id"),
+            event_id: nostr::event::EventId::from_slice(&[0u8; 32]).expect("32-byte id"),
             accepted_by: vec![],
             rejected_by: vec![(
                 "wss://answered.example.com".to_string(),
@@ -3453,7 +3457,7 @@ mod tests {
         // that is how the caller learns the edit is only partially covered and
         // must stay pending.
         let harvest = PublishResult {
-            event_id: nostr::EventId::from_slice(&[0u8; 32]).expect("32-byte id"),
+            event_id: nostr::event::EventId::from_slice(&[0u8; 32]).expect("32-byte id"),
             accepted_by: vec!["wss://took-it.example.com".to_string()],
             rejected_by: vec![(
                 "wss://refused.example.com".to_string(),
@@ -3487,7 +3491,7 @@ mod tests {
     #[tokio::test]
     async fn profile_publish_fails_when_no_relay_accepted() {
         let harvest = PublishResult {
-            event_id: nostr::EventId::from_slice(&[0u8; 32]).expect("32-byte id"),
+            event_id: nostr::event::EventId::from_slice(&[0u8; 32]).expect("32-byte id"),
             accepted_by: vec![],
             rejected_by: vec![(
                 "wss://refused.example.com".to_string(),
@@ -3610,8 +3614,8 @@ mod tests {
         ])
         .expect("ws:// loopback urls validate with the opt-in installed");
 
-        let event = nostr::EventBuilder::new(Kind::TextNote, "harvest me")
-            .sign_with_keys(&nostr::Keys::generate())
+        let event = nostr::event::EventBuilder::new(Kind::TextNote, "harvest me")
+            .sign_with_keys(&nostr::key::Keys::generate())
             .expect("sign");
 
         let manager = RelayManager::new();
@@ -3642,12 +3646,12 @@ mod tests {
     // ------------------------------------------------------------------
 
     /// Helper to build a `Tags` from a vec of parsed tags.
-    fn make_tags(tag_data: Vec<Vec<&str>>) -> nostr::Tags {
-        let tags: Vec<nostr::Tag> = tag_data
+    fn make_tags(tag_data: Vec<Vec<&str>>) -> nostr::event::Tags {
+        let tags: Vec<nostr::event::Tag> = tag_data
             .into_iter()
-            .map(|t| nostr::Tag::parse(t).expect("should parse tag"))
+            .map(|t| nostr::event::Tag::parse(t).expect("should parse tag"))
             .collect();
-        nostr::Tags::from_list(tags)
+        nostr::event::Tags::from_list(tags)
     }
 
     #[test]
@@ -3698,7 +3702,7 @@ mod tests {
 
     #[test]
     fn nip65_empty_tags_returns_empty() {
-        let tags = nostr::Tags::from_list(vec![]);
+        let tags = nostr::event::Tags::from_list(vec![]);
         let relays = RelayManager::extract_nip65_read_relays(&tags);
         assert!(relays.is_empty());
     }
@@ -3766,7 +3770,7 @@ mod tests {
 
     #[test]
     fn nip65_write_empty_tags_returns_empty() {
-        let tags = nostr::Tags::from_list(vec![]);
+        let tags = nostr::event::Tags::from_list(vec![]);
         let relays = RelayManager::extract_nip65_write_relays(&tags);
         assert!(relays.is_empty());
     }
@@ -3818,7 +3822,7 @@ mod tests {
 
     #[test]
     fn relay_tag_empty_returns_empty() {
-        let tags = nostr::Tags::from_list(vec![]);
+        let tags = nostr::event::Tags::from_list(vec![]);
         let relays = RelayManager::extract_relay_tag_urls(&tags);
         assert!(relays.is_empty());
     }
@@ -3926,7 +3930,7 @@ mod tests {
 
     /// A real, valid kind-30443 of `keys`'s account in slot `d`: a package its
     /// own session minted, tagged by the production builder.
-    async fn published_key_package(keys: &nostr::Keys, d: &str) -> Event {
+    async fn published_key_package(keys: &nostr::key::Keys, d: &str) -> Event {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let session = SessionManager::new_unencrypted(dir.path(), keys).expect("session");
         crate::relay::maintenance::build_kp_maintenance_events(
@@ -3943,10 +3947,15 @@ mod tests {
 
     /// `event` re-signed by `keys` as `kind` at `created_at_secs`, tags and
     /// content untouched.
-    fn restamped(keys: &nostr::Keys, event: &Event, kind: Kind, created_at_secs: u64) -> Event {
-        nostr::EventBuilder::new(kind, event.content.clone())
+    fn restamped(
+        keys: &nostr::key::Keys,
+        event: &Event,
+        kind: Kind,
+        created_at_secs: u64,
+    ) -> Event {
+        nostr::event::EventBuilder::new(kind, event.content.clone())
             .tags(event.tags.clone())
-            .custom_created_at(nostr::Timestamp::from_secs(created_at_secs))
+            .custom_created_at(nostr::types::Timestamp::from_secs(created_at_secs))
             .sign_with_keys(keys)
             .expect("event signing must succeed for tests")
     }
@@ -4062,13 +4071,13 @@ mod tests {
 
     #[test]
     fn pick_keypackage_returns_none_for_empty_input() {
-        let account = nostr::Keys::generate().public_key();
+        let account = nostr::key::Keys::generate().public_key();
         assert!(RelayManager::pick_keypackage_from_events(&account, vec![], None).is_none());
     }
 
     #[tokio::test]
     async fn pick_keypackage_prefers_30443_over_443_even_when_443_is_newer() {
-        let keys = nostr::Keys::generate();
+        let keys = nostr::key::Keys::generate();
         let kp = published_key_package(&keys, &slot(1)).await;
         let canonical_old = restamped(&keys, &kp, Kind::Custom(30443), 1_000);
         let legacy_new = restamped(&keys, &kp, Kind::MlsKeyPackage, 9_000);
@@ -4082,7 +4091,7 @@ mod tests {
     /// Within one slot the newest event is the slot (`transports/nostr.md:304-307`).
     #[tokio::test]
     async fn pick_keypackage_picks_the_newest_event_of_a_slot() {
-        let keys = nostr::Keys::generate();
+        let keys = nostr::key::Keys::generate();
         let kp = published_key_package(&keys, &slot(1)).await;
         let old = restamped(&keys, &kp, Kind::Custom(30443), 1_000);
         let new = restamped(&keys, &kp, Kind::Custom(30443), 5_000);
@@ -4097,7 +4106,7 @@ mod tests {
     /// older one may name material its owner already deleted.
     #[tokio::test]
     async fn an_invalid_newest_event_never_revives_the_one_it_replaced() {
-        let keys = nostr::Keys::generate();
+        let keys = nostr::key::Keys::generate();
         let kp = published_key_package(&keys, &slot(1)).await;
         let valid_old = restamped(&keys, &kp, Kind::Custom(30443), 1_000);
         let mut hollow = kp;
@@ -4111,7 +4120,7 @@ mod tests {
     /// them the choice of package.
     #[tokio::test]
     async fn pick_keypackage_breaks_a_timestamp_tie_by_the_lower_id_in_any_order() {
-        let keys = nostr::Keys::generate();
+        let keys = nostr::key::Keys::generate();
         let (first, second) = (
             published_key_package(&keys, &slot(1)).await,
             published_key_package(&keys, &slot(1)).await,
@@ -4131,7 +4140,7 @@ mod tests {
         // A 443-only result (un-migrated member) is NOT usable — a 443
         // KeyPackage cannot be processed by the engine, so selection must
         // resolve to None rather than return an unprocessable KP.
-        let keys = nostr::Keys::generate();
+        let keys = nostr::key::Keys::generate();
         let kp = published_key_package(&keys, &slot(1)).await;
         let legacy = restamped(&keys, &kp, Kind::MlsKeyPackage, 1_000);
 
@@ -4144,7 +4153,7 @@ mod tests {
 
     #[tokio::test]
     async fn pick_keypackage_ignores_unrelated_kinds() {
-        let keys = nostr::Keys::generate();
+        let keys = nostr::key::Keys::generate();
         let kp = published_key_package(&keys, &slot(1)).await;
         let unrelated = restamped(&keys, &kp, Kind::TextNote, 9_000);
 
@@ -4158,7 +4167,7 @@ mod tests {
     /// Content that is no `KeyPackage` is no candidate, however it is signed.
     #[tokio::test]
     async fn pick_keypackage_ignores_a_30443_that_carries_no_key_package() {
-        let keys = nostr::Keys::generate();
+        let keys = nostr::key::Keys::generate();
         let mut hollow = published_key_package(&keys, &slot(1)).await;
         hollow.content = String::new();
         let hollow = restamped(&keys, &hollow, Kind::Custom(30443), 9_000);
@@ -4174,7 +4183,7 @@ mod tests {
     /// in any arrival order.
     #[tokio::test]
     async fn across_slots_the_fresher_package_wins_then_the_lower_ref() {
-        let keys = nostr::Keys::generate();
+        let keys = nostr::key::Keys::generate();
         let one = published_key_package(&keys, &slot(1)).await;
         let two = published_key_package(&keys, &slot(2)).await;
 
@@ -4215,11 +4224,11 @@ mod tests {
 
     /// `event` as another app would have published it: the same package and
     /// tags plus that app's `client` label, signed at `created_at_secs`.
-    fn client_tagged(keys: &nostr::Keys, event: &Event, created_at_secs: u64) -> Event {
+    fn client_tagged(keys: &nostr::key::Keys, event: &Event, created_at_secs: u64) -> Event {
         let mut labelled = event.clone();
         labelled
             .tags
-            .push(nostr::Tag::parse(["client", "another-app"]).expect("tag"));
+            .push(nostr::event::Tag::parse(["client", "another-app"]).expect("tag"));
         restamped(keys, &labelled, Kind::Custom(30443), created_at_secs)
     }
 
@@ -4228,7 +4237,7 @@ mod tests {
     /// fresher the labelled one is, and whichever the relay answers first.
     #[tokio::test]
     async fn an_unlabelled_package_is_preferred_to_a_fresher_one_another_app_labelled() {
-        let keys = nostr::Keys::generate();
+        let keys = nostr::key::Keys::generate();
         let own = published_key_package(&keys, &slot(1)).await;
         let foreign = published_key_package(&keys, &slot(2)).await;
 
@@ -4248,7 +4257,7 @@ mod tests {
     /// An account that only uses another app stays invitable.
     #[tokio::test]
     async fn a_labelled_package_is_selected_when_it_is_the_only_one() {
-        let keys = nostr::Keys::generate();
+        let keys = nostr::key::Keys::generate();
         let foreign = published_key_package(&keys, &slot(1)).await;
         let labelled = client_tagged(&keys, &foreign, 9_000);
         assert_eq!(
@@ -4261,7 +4270,7 @@ mod tests {
     /// spec's order decides — the label tier is the same for both.
     #[tokio::test]
     async fn the_label_tier_leaves_equals_to_the_spec_order_in_any_arrival_order() {
-        let keys = nostr::Keys::generate();
+        let keys = nostr::key::Keys::generate();
         let one = published_key_package(&keys, &slot(1)).await;
         let two = published_key_package(&keys, &slot(2)).await;
 
@@ -4466,9 +4475,9 @@ mod tests {
     /// A signed kind-445 event in the shape the engine's are, as the transport
     /// message a fanout row freezes.
     fn fanout_message() -> TransportMessage {
-        let event = nostr::EventBuilder::new(Kind::Custom(KIND_GROUP_MESSAGE), "ciphertext")
-            .tag(nostr::Tag::parse(["h", &"ab".repeat(32)]).expect("an h tag"))
-            .sign_with_keys(&nostr::Keys::generate())
+        let event = nostr::event::EventBuilder::new(Kind::Custom(KIND_GROUP_MESSAGE), "ciphertext")
+            .tag(nostr::event::Tag::parse(["h", &"ab".repeat(32)]).expect("an h tag"))
+            .sign_with_keys(&nostr::key::Keys::generate())
             .expect("sign");
         SessionManager::event_to_transport_message(&event).expect("a kind-445 event converts")
     }
@@ -5268,8 +5277,8 @@ mod tests {
 
     /// A signed note nobody reads, for driving one publish.
     fn throwaway_note(content: &str) -> Event {
-        nostr::EventBuilder::new(Kind::TextNote, content)
-            .sign_with_keys(&nostr::Keys::generate())
+        nostr::event::EventBuilder::new(Kind::TextNote, content)
+            .sign_with_keys(&nostr::key::Keys::generate())
             .expect("sign")
     }
 
@@ -5981,7 +5990,7 @@ mod tests {
                         &[0xab; 32],
                         &url,
                         0,
-                        nostr::Timestamp::now().as_secs(),
+                        nostr::types::Timestamp::now().as_secs(),
                         ends
                     )
                     .await,
@@ -6865,7 +6874,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn every_fetch_primitive_leaves_no_subscription_registered() {
         let _ = allow_ws_loopback_for_test();
-        let refused_author = nostr::Keys::generate().public_key();
+        let refused_author = nostr::key::Keys::generate().public_key();
         let server =
             LocalRelay::new(RelayBuilder::default().query_policy(RefuseAuthor(refused_author)));
         server.run().await.expect("local relay runs");
@@ -6884,7 +6893,7 @@ mod tests {
 
         let presence = crate::relay::maintenance::own_presence(
             &manager,
-            &nostr::Keys::generate().public_key(),
+            &nostr::key::Keys::generate().public_key(),
             &crate::relay::maintenance::OwnRelayLists {
                 inbox: &relays,
                 key_package: &relays,
@@ -7284,9 +7293,9 @@ mod tests {
             crate::relay::scripted_relay::Verdict::Refuse("blocked: event too old".to_string())
         });
         let signed_at = |secs: u64, content: &str| {
-            nostr::EventBuilder::new(Kind::TextNote, content)
-                .custom_created_at(nostr::Timestamp::from(secs))
-                .sign_with_keys(&nostr::Keys::generate())
+            nostr::event::EventBuilder::new(Kind::TextNote, content)
+                .custom_created_at(nostr::types::Timestamp::from(secs))
+                .sign_with_keys(&nostr::key::Keys::generate())
                 .expect("sign")
         };
         let result = RelayManager::at_for_test(NOW)

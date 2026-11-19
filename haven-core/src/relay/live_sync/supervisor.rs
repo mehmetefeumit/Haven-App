@@ -56,7 +56,12 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use nostr::{Event, Kind, PublicKey, RelayMessage, RelayUrl, SubscriptionId};
+use nostr::{
+    event::{Event, Kind},
+    key::PublicKey,
+    message::{RelayMessage, SubscriptionId},
+    types::RelayUrl,
+};
 use nostr_sdk::RelayPoolNotification;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc, oneshot, watch, RwLock};
@@ -106,7 +111,7 @@ pub struct RawEvent {
 /// by this ordering. Do not read the paragraph above as covering it.
 ///
 /// `RawEvent` is boxed so the channel's slot size is set by the small EOSE
-/// variant rather than by a whole `nostr::Event`: the queue is bounded at
+/// variant rather than by a whole `nostr::event::Event`: the queue is bounded at
 /// [`super::config`]'s worker cap and a `try_send` that finds it full DROPS the
 /// signal, so keeping the per-slot cost low is what keeps that cap meaningful.
 ///
@@ -1014,11 +1019,16 @@ async fn ingest_group_event(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::{Alphabet, EventBuilder, Keys, Kind, SingleLetterTag};
+    use nostr::{
+        event::{EventBuilder, Kind},
+        filter::SingleLetterTag,
+        key::Keys,
+        Alphabet,
+    };
 
     fn commit_event_with_h(h_value: &str) -> Event {
         EventBuilder::new(Kind::Custom(445), "ciphertext")
-            .tags(vec![nostr::Tag::custom(
+            .tags(vec![nostr::event::Tag::custom(
                 nostr::TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H)),
                 [h_value],
             )])
@@ -1054,9 +1064,9 @@ mod tests {
         assert_eq!(extract_group_id_hex(&ev), None);
     }
 
-    fn giftwrap_routed_to(recipient: &nostr::PublicKey) -> Event {
+    fn giftwrap_routed_to(recipient: &nostr::key::PublicKey) -> Event {
         EventBuilder::new(Kind::GiftWrap, "sealed")
-            .tags(vec![nostr::Tag::public_key(*recipient)])
+            .tags(vec![nostr::event::Tag::public_key(*recipient)])
             .sign_with_keys(&Keys::generate())
             .unwrap()
     }
@@ -1101,7 +1111,7 @@ mod tests {
         assert!(!plane_wants_event(&ctx, &no_h, &stranger));
         // Right routing tag, wrong kind: the group REQ asked for 445 only.
         let wrong_kind = EventBuilder::new(Kind::Custom(446), "x")
-            .tags(vec![nostr::Tag::custom(
+            .tags(vec![nostr::event::Tag::custom(
                 nostr::TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H)),
                 ["aa00"],
             )])
@@ -1133,7 +1143,7 @@ mod tests {
         // Our `#p`, but not a gift wrap: the inbox consumer peels with NIP-59
         // alone, so anything else on this REQ is a relay speaking out of turn.
         let wrong_kind = EventBuilder::new(Kind::Custom(445), "x")
-            .tags(vec![nostr::Tag::public_key(own)])
+            .tags(vec![nostr::event::Tag::public_key(own)])
             .sign_with_keys(&Keys::generate())
             .unwrap();
         assert!(!plane_wants_event(&ctx, &wrong_kind, &own));
@@ -1227,7 +1237,7 @@ mod tests {
             // repair, so acting on it would be a relay-triggered work lever.
             RelayMessage::Notice(std::borrow::Cow::Borrowed("hello")),
             RelayMessage::Ok {
-                event_id: nostr::EventId::all_zeros(),
+                event_id: nostr::event::EventId::all_zeros(),
                 status: false,
                 message: std::borrow::Cow::Borrowed("rejected"),
             },
@@ -1258,7 +1268,12 @@ mod supervisor_isolation_tests {
     use std::time::Duration;
 
     use nostr::{
-        Alphabet, EventBuilder, Keys, Kind, RelayUrl, SingleLetterTag, SubscriptionId, Tag, TagKind,
+        event::{EventBuilder, Kind, Tag},
+        filter::SingleLetterTag,
+        key::Keys,
+        message::SubscriptionId,
+        types::RelayUrl,
+        Alphabet, TagKind,
     };
     use nostr_sdk::RelayPoolNotification;
     use tempfile::TempDir;
@@ -1321,7 +1336,7 @@ mod supervisor_isolation_tests {
     }
 
     /// A `kind:445` carrying `#h = group_hex`, with `content`.
-    fn event_445(group_hex: &str, content: &str) -> nostr::Event {
+    fn event_445(group_hex: &str, content: &str) -> nostr::event::Event {
         EventBuilder::new(Kind::Custom(445), content)
             .tags(vec![Tag::custom(
                 TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H)),
@@ -1332,10 +1347,10 @@ mod supervisor_isolation_tests {
     }
 
     /// `event` as the relay-message notification the receiver forwards.
-    fn relay_event_notification(event: nostr::Event) -> RelayPoolNotification {
+    fn relay_event_notification(event: nostr::event::Event) -> RelayPoolNotification {
         RelayPoolNotification::Message {
             relay_url: RelayUrl::parse("wss://relay.example").unwrap(),
-            message: nostr::RelayMessage::Event {
+            message: nostr::message::RelayMessage::Event {
                 subscription_id: std::borrow::Cow::Owned(SubscriptionId::new("s")),
                 event: std::borrow::Cow::Owned(event),
             },
@@ -1385,13 +1400,13 @@ mod supervisor_isolation_tests {
             own,
         ));
 
-        let wrap_for = |recipient: nostr::PublicKey| {
+        let wrap_for = |recipient: nostr::key::PublicKey| {
             EventBuilder::new(Kind::GiftWrap, "sealed")
                 .tags(vec![Tag::public_key(recipient)])
                 .sign_with_keys(&Keys::generate())
                 .unwrap()
         };
-        let deliver = |event: nostr::Event| {
+        let deliver = |event: nostr::event::Event| {
             RawSignal::Event(Box::new(RawEvent {
                 relay_url: RelayUrl::parse(&relay).unwrap(),
                 subscription_id: sub.clone(),
@@ -1849,7 +1864,7 @@ mod supervisor_isolation_tests {
 
         let closed = |message: &'static str| RelayPoolNotification::Message {
             relay_url: RelayUrl::parse("wss://relay.example").unwrap(),
-            message: nostr::RelayMessage::Closed {
+            message: nostr::message::RelayMessage::Closed {
                 subscription_id: std::borrow::Cow::Owned(SubscriptionId::new("s")),
                 message: std::borrow::Cow::Borrowed(message),
             },
@@ -1930,7 +1945,7 @@ mod supervisor_isolation_tests {
         let relay_url = RelayUrl::parse("wss://relay.example").unwrap();
         btx.send(RelayPoolNotification::Message {
             relay_url: relay_url.clone(),
-            message: nostr::RelayMessage::Closed {
+            message: nostr::message::RelayMessage::Closed {
                 subscription_id: std::borrow::Cow::Owned(SubscriptionId::new("s")),
                 message: std::borrow::Cow::Borrowed(""),
             },
@@ -1938,7 +1953,7 @@ mod supervisor_isolation_tests {
         .unwrap();
         btx.send(RelayPoolNotification::Message {
             relay_url,
-            message: nostr::RelayMessage::EndOfStoredEvents(std::borrow::Cow::Owned(
+            message: nostr::message::RelayMessage::EndOfStoredEvents(std::borrow::Cow::Owned(
                 SubscriptionId::new("after_the_drop"),
             )),
         })
@@ -2196,7 +2211,12 @@ mod stored_replay_tests {
     use std::time::Duration;
 
     use nostr::{
-        Alphabet, EventBuilder, Keys, Kind, RelayUrl, SingleLetterTag, SubscriptionId, Tag, TagKind,
+        event::{EventBuilder, Kind, Tag},
+        filter::SingleLetterTag,
+        key::Keys,
+        message::SubscriptionId,
+        types::RelayUrl,
+        Alphabet, TagKind,
     };
     use tempfile::TempDir;
     use tokio::sync::{broadcast, mpsc, RwLock};

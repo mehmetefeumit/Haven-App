@@ -28,7 +28,12 @@
 //! No group identifiers ever appear here: kind-0 events carry no `h` tag and
 //! no group id (test-pinned).
 
-use nostr::{Event, EventBuilder, Keys, Metadata, Timestamp};
+use nostr::{
+    event::{Event, EventBuilder},
+    key::Keys,
+    nips::nip01::Metadata,
+    types::Timestamp,
+};
 
 use super::error::{ProfileError, Result};
 use super::merge::enforce_name_rule;
@@ -228,7 +233,7 @@ mod tests {
     // `Kind` is used only by the assertions below — importing it at file scope
     // would make it dead code in a release build now that the relay-resolution
     // helpers have moved out of this module.
-    use nostr::{JsonUtil, Kind};
+    use nostr::{event::Kind, JsonUtil};
 
     fn md_from(json: &str) -> ProfileMetadata {
         ProfileMetadata::from_metadata(Metadata::from_json(json).expect("valid json"))

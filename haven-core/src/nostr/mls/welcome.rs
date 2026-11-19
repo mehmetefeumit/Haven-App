@@ -28,7 +28,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use nostr::{Event, EventId};
+use nostr::event::{Event, EventId};
 
 use crate::log_alias::{self, bucket, EventIdHex};
 
@@ -249,7 +249,10 @@ impl std::fmt::Debug for PendingWelcomeStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::{EventBuilder, Keys, Kind};
+    use nostr::{
+        event::{EventBuilder, Kind},
+        key::Keys,
+    };
 
     /// Builds a throwaway signed event to stand in for a held 1059 in store
     /// mechanics tests. (A real gift wrap is produced by the peeler; the store

@@ -19,7 +19,7 @@ use std::sync::Mutex;
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use nostr::EventId;
+use nostr::event::EventId;
 
 use super::error::{CircleError, Result};
 use super::types::{
@@ -5673,7 +5673,7 @@ mod tests {
         storage.save_circle(&circle).unwrap();
 
         // Per-group dedup row bound to this circle's mls_group_id.
-        let ours = nostr::EventId::from_byte_array([0x11; 32]);
+        let ours = nostr::event::EventId::from_byte_array([0x11; 32]);
         storage
             .record_gift_wrap_dedup_for_test(&ours, circle.mls_group_id.as_slice(), 1_000_000)
             .unwrap();
@@ -5727,12 +5727,12 @@ mod tests {
         let circle = create_test_circle(1);
         storage.save_circle(&circle).unwrap();
 
-        let failed = nostr::EventId::from_byte_array([0x33; 32]);
+        let failed = nostr::event::EventId::from_byte_array([0x33; 32]);
         storage
             .record_gift_wrap_failure(&failed, 1_000_000)
             .unwrap();
 
-        let theirs = nostr::EventId::from_byte_array([0x22; 32]);
+        let theirs = nostr::event::EventId::from_byte_array([0x22; 32]);
         storage
             .record_gift_wrap_dedup_for_test(&theirs, &[0x99u8; 32], 1_000_000)
             .unwrap();
@@ -5774,7 +5774,7 @@ mod tests {
     #[test]
     fn is_gift_wrap_processed_returns_none_for_unknown_id() {
         let storage = CircleStorage::in_memory().unwrap();
-        let wrapper_id = nostr::EventId::all_zeros();
+        let wrapper_id = nostr::event::EventId::all_zeros();
 
         let result = storage.is_gift_wrap_processed(&wrapper_id).unwrap();
 
@@ -5790,7 +5790,7 @@ mod tests {
 
         // Use a distinct byte pattern so the test doesn't collide with all-zero IDs.
         let wrapper_bytes = [0xCA; 32];
-        let wrapper_id = nostr::EventId::from_byte_array(wrapper_bytes);
+        let wrapper_id = nostr::event::EventId::from_byte_array(wrapper_bytes);
 
         let circle = create_test_circle(1);
         let membership = create_test_membership(1);
@@ -5825,7 +5825,7 @@ mod tests {
     #[test]
     fn record_processed_invitation_also_persists_circle_and_membership() {
         let storage = CircleStorage::in_memory().unwrap();
-        let wrapper_id = nostr::EventId::from_byte_array([0xBB; 32]);
+        let wrapper_id = nostr::event::EventId::from_byte_array([0xBB; 32]);
         let circle = create_test_circle(2);
         let membership = create_test_membership(2);
         let now = 1_700_000_001_i64;
@@ -5852,7 +5852,7 @@ mod tests {
     #[test]
     fn record_processed_invitation_duplicate_wrapper_id_is_rejected() {
         let storage = CircleStorage::in_memory().unwrap();
-        let wrapper_id = nostr::EventId::from_byte_array([0xDD; 32]);
+        let wrapper_id = nostr::event::EventId::from_byte_array([0xDD; 32]);
 
         // First call with circle-1 succeeds.
         let circle1 = create_test_circle(1);
@@ -5907,7 +5907,7 @@ mod tests {
     #[test]
     fn record_gift_wrap_failure_stores_empty_group_id_sentinel() {
         let storage = CircleStorage::in_memory().unwrap();
-        let wrapper_id = nostr::EventId::from_byte_array([0xEE; 32]);
+        let wrapper_id = nostr::event::EventId::from_byte_array([0xEE; 32]);
 
         storage
             .record_gift_wrap_failure(&wrapper_id, 1_700_000_000)
@@ -5935,7 +5935,7 @@ mod tests {
     #[test]
     fn record_gift_wrap_failure_does_not_overwrite_success_row() {
         let storage = CircleStorage::in_memory().unwrap();
-        let wrapper_id = nostr::EventId::from_byte_array([0xAB; 32]);
+        let wrapper_id = nostr::event::EventId::from_byte_array([0xAB; 32]);
         let circle = create_test_circle(7);
         let membership = create_test_membership(7);
 
@@ -5966,7 +5966,7 @@ mod tests {
     #[test]
     fn record_gift_wrap_failure_is_idempotent() {
         let storage = CircleStorage::in_memory().unwrap();
-        let wrapper_id = nostr::EventId::from_byte_array([0x77; 32]);
+        let wrapper_id = nostr::event::EventId::from_byte_array([0x77; 32]);
 
         // Two consecutive failure sentinels for the same wrapper must both
         // succeed (INSERT OR IGNORE) — e.g., poller may retry across sessions
@@ -6016,13 +6016,13 @@ mod tests {
         let retention = CircleStorage::PROCESSED_GIFT_WRAP_RETENTION_SECS;
 
         // Fresh row (1 day old) — must survive.
-        let fresh_id = nostr::EventId::from_byte_array([0x01; 32]);
+        let fresh_id = nostr::event::EventId::from_byte_array([0x01; 32]);
         storage
             .record_gift_wrap_failure(&fresh_id, now - 24 * 3600)
             .unwrap();
 
         // Expired row (retention + 1 day old) — must be pruned.
-        let stale_id = nostr::EventId::from_byte_array([0x02; 32]);
+        let stale_id = nostr::event::EventId::from_byte_array([0x02; 32]);
         storage
             .record_gift_wrap_failure(&stale_id, now - retention - 24 * 3600)
             .unwrap();
@@ -6054,7 +6054,7 @@ mod tests {
             // 32-byte big-endian counter → distinct wrapper ids.
             let mut bytes = [0u8; 32];
             bytes[24..].copy_from_slice(&i.to_be_bytes());
-            let id = nostr::EventId::from_byte_array(bytes);
+            let id = nostr::event::EventId::from_byte_array(bytes);
             // processed_at increases with i so higher i = newer.
             storage
                 .record_gift_wrap_failure(&id, now - total + i)
@@ -6075,14 +6075,14 @@ mod tests {
         newest[24..].copy_from_slice(&(total - 1).to_be_bytes());
         assert!(
             storage
-                .is_gift_wrap_processed(&nostr::EventId::from_byte_array(oldest))
+                .is_gift_wrap_processed(&nostr::event::EventId::from_byte_array(oldest))
                 .unwrap()
                 .is_none(),
             "oldest over-cap row must be evicted"
         );
         assert!(
             storage
-                .is_gift_wrap_processed(&nostr::EventId::from_byte_array(newest))
+                .is_gift_wrap_processed(&nostr::event::EventId::from_byte_array(newest))
                 .unwrap()
                 .is_some(),
             "newest row must be retained under the cap"
@@ -6094,7 +6094,7 @@ mod tests {
         let storage = CircleStorage::in_memory().unwrap();
         let now = 1_700_000_000_i64;
 
-        let id = nostr::EventId::from_byte_array([0x33; 32]);
+        let id = nostr::event::EventId::from_byte_array([0x33; 32]);
         storage.record_gift_wrap_failure(&id, now - 60).unwrap();
 
         let removed = storage.prune_processed_gift_wraps(now).unwrap();
@@ -6107,7 +6107,7 @@ mod tests {
         let storage = CircleStorage::in_memory().unwrap();
 
         for i in 0..3u8 {
-            let id = nostr::EventId::from_byte_array([0xA0 + i; 32]);
+            let id = nostr::event::EventId::from_byte_array([0xA0 + i; 32]);
             storage
                 .record_gift_wrap_failure(&id, 1_700_000_000)
                 .unwrap();
@@ -6116,7 +6116,7 @@ mod tests {
         storage.wipe_all_processed_gift_wraps().unwrap();
 
         for i in 0..3u8 {
-            let id = nostr::EventId::from_byte_array([0xA0 + i; 32]);
+            let id = nostr::event::EventId::from_byte_array([0xA0 + i; 32]);
             assert!(
                 storage.is_gift_wrap_processed(&id).unwrap().is_none(),
                 "wipe must remove every dedup row"
@@ -6824,7 +6824,7 @@ mod proptest_gift_wrap {
             group_id_bytes in prop::array::uniform32(0u8..),
         ) {
             let storage = CircleStorage::in_memory().unwrap();
-            let wrapper_id = nostr::EventId::from_byte_array(wrapper_bytes);
+            let wrapper_id = nostr::event::EventId::from_byte_array(wrapper_bytes);
 
             // Build a circle whose mls_group_id is exactly `group_id_bytes`.
             let circle = Circle {
