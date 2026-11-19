@@ -507,8 +507,9 @@ class _StubMaintenanceService extends MaintenanceService {
   }) async => outcome;
 
   @override
-  Future<RelayListMaintenanceResult> maintainRelayList() async =>
-      relayListsCurrent;
+  Future<RelayListMaintenanceResult> maintainRelayList({
+    required bool foreground,
+  }) async => relayListsCurrent;
 
   @override
   Future<KeyPackageMaintenanceOutcome> maintainKeyPackage() async =>

@@ -3789,7 +3789,11 @@ before and E-A2 is unchanged (pinned by `maintenance_scheduler_provider_test.dar
 keeps the nominal deadline"). Foreground retries, like the onboarding "Finishing setup…" wait, are outside this
 model's subject. What each relay-list tick adds is the lookup relays (OD-B): it also probes the six discovery relays
 and republishes the same list to any that misses it — three more dials on a default install, whose three seed
-relays are also lookup relays, six on custom lists.
+relays are also lookup relays, six on custom lists. The gift-wrap read the Relays page warns from — one
+identity-authenticated connection per inbox relay — is asked only by a pass made while the lifecycle reads `resumed`,
+never by a burst's fold, so it adds nothing to the row below (pinned by `maintenance_scheduler_provider_test.dart`, "a
+relay-list fold claims no foreground, even with the app resumed", and `haven/rust_builder/src/api.rs`
+`only_a_foreground_pass_asks_the_inbox_relays_for_gift_wraps_via_real_ffi`).
 
 | Case | What it adds | **ESTIMATED** |
 |---|---|---|

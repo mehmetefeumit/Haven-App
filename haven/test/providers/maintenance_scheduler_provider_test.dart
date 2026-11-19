@@ -101,9 +101,15 @@ class _FakeMaintenanceService extends MaintenanceService {
   /// an own relay; set it to drive the relay-list retry ladder.
   RelayListMaintenanceResult relayListOutcome = relayListsCurrent;
 
+  /// The foreground claim each relay-list tick carried, in call order.
+  final List<bool> relayListClaims = [];
+
   @override
-  Future<RelayListMaintenanceResult> maintainRelayList() async {
+  Future<RelayListMaintenanceResult> maintainRelayList({
+    required bool foreground,
+  }) async {
     relayListCalls++;
+    relayListClaims.add(foreground);
     if (relayListGate != null) await _gated(relayListGate!);
     return relayListOutcome;
   }
@@ -889,6 +895,35 @@ void main() {
       test('a resumed app claims the foreground', () async {
         final fake = await tickIn(AppLifecycleState.resumed);
         expect(fake.healthClaims, [true]);
+      });
+
+      // Only a relay-list pass that claims the foreground asks the inbox
+      // relays for gift wraps (P4), so the claim is the strict read too.
+      Future<List<bool>> relayListTickIn(AppLifecycleState? state) async {
+        binding.resetInternalState();
+        if (state != null) binding.handleAppLifecycleStateChanged(state);
+        final fake = _FakeMaintenanceService();
+        final container = _containerWith(fake);
+        addTearDown(container.dispose);
+        await container
+            .read(maintenanceSchedulerProvider.notifier)
+            .triggerRelayListTickForTest();
+        return fake.relayListClaims;
+      }
+
+      test('a relay-list tick claims the foreground only when '
+          'resumed', () async {
+        expect(await relayListTickIn(AppLifecycleState.resumed), [true]);
+        expect(
+          await relayListTickIn(AppLifecycleState.paused),
+          [false],
+          reason: 'a timer that fires after the pause is no foreground',
+        );
+        expect(
+          await relayListTickIn(null),
+          [false],
+          reason: 'an unset lifecycle is no claim',
+        );
       });
 
       test('the owed re-invites are asked for on the tick, with the strict '
@@ -2423,6 +2458,24 @@ void main() {
 
       expect(fake.kpCalls, 0);
       expect(fake.relayListCalls, 0);
+    });
+
+    test('a relay-list fold claims no foreground, even with the app '
+        'resumed', () async {
+      // A burst is never the foreground: its fold asks no inbox relay for
+      // gift wraps, whatever the lifecycle reads when it lands.
+      final binding = TestWidgetsFlutterBinding.ensureInitialized()
+        ..handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      final fake = _FakeMaintenanceService();
+      final container = _containerWith(fake, clock: () => t0);
+      addTearDown(container.dispose);
+
+      await container
+          .read(maintenanceSchedulerProvider.notifier)
+          .runRelayListIfDue(t0.add(const Duration(minutes: 1)));
+
+      expect(binding.lifecycleState, AppLifecycleState.resumed);
+      expect(fake.relayListClaims, [false]);
     });
 
     test('a task whose deadline has passed is folded in', () async {

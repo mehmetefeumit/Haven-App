@@ -859,11 +859,19 @@ abstract class RelayService {
   /// 10050. `circle` is the circle-manager FFI handle; the secret bytes are
   /// consumed by the FFI and zeroized Rust-side.
   ///
+  /// [foreground] is the caller's claim that the app's lifecycle reads
+  /// `resumed`: pass `appIsResumed()` and nothing looser, and `false` from a
+  /// background burst. Only with it does the pass also ask each own inbox
+  /// relay for this account's gift wraps, on identity connections of its
+  /// own, for the Relays page's refusal warning; without it the board keeps
+  /// the last answers.
+  ///
   /// Best-effort — returns [RelayListMaintenanceResult.failed] on failure
   /// rather than throwing.
   Future<RelayListMaintenanceResult> maintainRelayList({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,
+    required bool foreground,
   });
 
   /// Runs an M8 subscription-health maintenance tick (engine-coupled).

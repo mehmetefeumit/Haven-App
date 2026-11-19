@@ -3445,6 +3445,7 @@ class _MutableMockRelayService implements RelayService {
   Future<RelayListMaintenanceResult> maintainRelayList({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,
+    required bool foreground,
   }) async => relayListsCurrent;
 
   @override
@@ -3551,6 +3552,7 @@ class _PauseRacingRelayService implements RelayService {
   Future<RelayListMaintenanceResult> maintainRelayList({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,
+    required bool foreground,
   }) async => relayListsCurrent;
 
   @override
@@ -3648,6 +3650,7 @@ class _SinceCapturingRelayService implements RelayService {
   Future<RelayListMaintenanceResult> maintainRelayList({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,
+    required bool foreground,
   }) async => relayListsCurrent;
 
   @override

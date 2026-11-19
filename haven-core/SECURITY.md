@@ -507,11 +507,14 @@ never hidden:
   `InboxReadFfi::Refused`; only an `EOSE` is `Served`, and an unreached or
   unfinished read is neither. The relay's text is read for its prefix and
   never kept (Rule 15).
-- **The relay settings board.** Each relay-list maintenance pass, beside its
+- **The relay settings board.** Each relay-list maintenance pass asked for
+  while the app's lifecycle reads `resumed`, beside its
   inbox-list probe, asks each relay of the inbox list, and no other, the live plane's own inbox read
   — this account's gift wraps by `#p`, from now, `limit` 1 — and writes how
   each answered onto the own-relay board's `inbox_reads`, apart from the
-  kind-10050 cells (`OwnRelayBoard::ask_inbox_reads`); like the rest of the
+  kind-10050 cells (`OwnRelayBoard::ask_inbox_reads`); a background burst's
+  fold, and any pass asked for while the app is not resumed, asks none and
+  keeps the last answers, so the read adds no background connection (P4); like the rest of the
   pass it asks nothing while the storage-reset notice is unanswered, and an
   inbox list edit forgets every answer. It discloses nothing the inbox REQ does not already
   send that relay.

@@ -246,6 +246,8 @@ class SyntheticUser {
         final lists = await relayManager.maintainRelayList(
           circle: user.circleManager,
           identitySecretBytes: secret,
+          // A peer with no Relays page has no refusal to warn of.
+          foreground: false,
         );
         final inbox = lists.inbox;
         final inboxServed = inbox.action == RelayListActionFfi.republished ||

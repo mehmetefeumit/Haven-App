@@ -8365,6 +8365,7 @@ fn wire__crate__api__RelayManagerFfi_maintain_relay_list_impl(
                 flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>,
             >>::sse_decode(&mut deserializer);
             let api_identity_secret_bytes = <Vec<u8>>::sse_decode(&mut deserializer);
+            let api_foreground = <bool>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, String>(
@@ -8403,6 +8404,7 @@ fn wire__crate__api__RelayManagerFfi_maintain_relay_list_impl(
                             &*api_that_guard,
                             &*api_circle_guard,
                             api_identity_secret_bytes,
+                            api_foreground,
                         )
                         .await?;
                         Ok(output_ok)

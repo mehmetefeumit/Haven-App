@@ -110,6 +110,7 @@ class _RecordingRelayService implements RelayService {
   Future<RelayListMaintenanceResult> maintainRelayList({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,
+    required bool foreground,
   }) async => const RelayListMaintenanceResult.failed();
 
   @override
