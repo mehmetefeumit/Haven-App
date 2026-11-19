@@ -4,7 +4,8 @@
 //! `LiveSyncCore` engines, a real relay — applies a seeded schedule of faults
 //! to them, and grades what survives. Nothing here is a mock of the subject:
 //! the only test doubles are the *environment* (the relay plane, the timeline
-//! and the log drain), which is why they are traits.
+//! and the log drain), which is why they are traits, and the radio between
+//! the devices' mesh engines ([`rig::mesh`]).
 //!
 //! # Rule 15 applies to the rig's own output
 //!

@@ -55,6 +55,8 @@ library;
 
 import 'package:flutter/foundation.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/mesh_radio.dart';
+import 'package:haven/src/services/mesh_service.dart' show kMeshIntroSeenKey;
 import 'package:haven/src/utils/log_alias.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -76,14 +78,20 @@ class PendingMlsWipeService {
   /// Both parameters are required for testability. Production callers obtain
   /// a [SharedPreferences] instance via [SharedPreferences.getInstance] and a
   /// [CircleService] instance from the Riverpod provider.
+  ///
+  /// [meshRadio] is the Bluetooth mesh's radio where the build and the
+  /// platform have one: a retried wipe stops it first.
   const PendingMlsWipeService({
     required SharedPreferences prefs,
     required CircleService circleService,
+    MeshRadio? meshRadio,
   }) : _prefs = prefs,
-       _circleService = circleService;
+       _circleService = circleService,
+       _meshRadio = meshRadio;
 
   final SharedPreferences _prefs;
   final CircleService _circleService;
+  final MeshRadio? _meshRadio;
 
   // ---------------------------------------------------------------------------
   // Marker access
@@ -102,6 +110,9 @@ class PendingMlsWipeService {
   Future<void> setPending() async {
     try {
       await _prefs.setBool(kPendingMlsWipeKey, true);
+      // With the marker, so a logout that dies after this cannot leave it to
+      // the next identity, who reads the Bluetooth mesh's disclosure afresh.
+      await _prefs.remove(kMeshIntroSeenKey);
     } on Object catch (e) {
       // A failure to set the marker is logged but must not block identity
       // deletion.  Use runtimeType only — never log `e` itself (could carry
@@ -167,6 +178,16 @@ class PendingMlsWipeService {
       '[SECURITY][PendingMlsWipeService] pending MLS wipe detected on launch — '
       'retrying wipe before any DB is opened',
     );
+
+    try {
+      // The mesh service keeps a copy of the deadline to come back by itself
+      // after a restart; the logout this retries may have died before it
+      // cleared it, and it must not outlive the identity.
+      await _meshRadio?.stop();
+    } on Object {
+      // A service left running finds no engine at its next entry and stops
+      // itself.
+    }
 
     try {
       await _circleService.wipeAllMlsState();

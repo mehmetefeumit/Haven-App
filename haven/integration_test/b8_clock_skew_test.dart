@@ -1211,6 +1211,8 @@ _publishLocationDriven({
     final answer = await pool.publishLocationDriven(
       circle: alice.circleManager,
       sealed: sealed.sealed,
+      // No relay receive precedes this send: nothing is passed on.
+      received: false,
     );
     debugPrint(
       // log-scan-ok: a closed LocationPublishFfi variant name
@@ -1264,6 +1266,7 @@ _publishViaProductionPath({
       publish = await relayService.publishLocation(
         circle: alice.circleManager,
         sealed: sealed,
+        received: false,
       );
     }
   } on Object catch (e) {

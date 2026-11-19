@@ -7,6 +7,11 @@
 #   - Android: one job per ABI (arm64, arm, x64). Each architecture gets its
 #     own runner because a combined multi-ABI build has exhausted a default
 #     runner's disk.
+#   - Android with the Bluetooth mesh's flag: one x64 build with
+#     `--dart-define=HAVEN_MESH=true`, the only compile of that shape. Its
+#     merged manifest holds the mesh's entries, and the ABI legs' holds none
+#     of them (docs/BLUETOOTH_MESH_M3_DESIGN.md §N.3). The APK is checked and
+#     not uploaded: nothing ships from it.
 #   - iOS: debug build, no codesign.
 #
 # # Why these jobs pass no HAVEN_LIVE_SYNC
@@ -164,6 +169,15 @@ jobs:
           unzip -q -o build/app/outputs/flutter-apk/app-debug.apk 'lib/*/librust_lib_haven.so' -d "${RUNNER_TEMP}/apk-lib"
           bash ../scripts/ci/check_sqlcipher_logger_omitted.sh "${RUNNER_TEMP}/apk-lib/lib"
 
+      # Of the library just unpacked: its exported Java_* symbols are the
+      # radio's pinned native methods and the keyring's one — Kotlin finds a
+      # native method by name at its first call — and it imports no
+      # __android_log_* symbol newer than the oldest Android Haven runs on,
+      # which would stop the library loading there (the log lever finds its
+      # API-30 functions at run time for that reason).
+      - name: Probe the library's JNI exports and liblog imports
+        run: bash ../scripts/ci/check_mesh_radio_symbols.sh "${RUNNER_TEMP}/apk-lib/lib"
+
       # Saved ONLY from a successful build: a cache written by a build that died
       # mid-resolution would carry exactly the gaps that made it fail, and every
       # lane restoring it would inherit them. This job is the single writer of
@@ -191,12 +205,118 @@ jobs:
             ~/.gradle/wrapper
           key: ${{ steps.gradle-cache-restore.outputs.cache-primary-key }}
 
+      # The APK just built passed no HAVEN_MESH, as every lane's and every
+      # release's: its merged manifest — the app's, every plugin's and every
+      # dependency's — names no Bluetooth permission, feature or broadcast, no
+      # connected-device foreground service and no component of the mesh.
+      # Behind the cache's save: it reads the APK, and what it finds is no
+      # reason to leave the other lanes a colder cache.
+      - name: Check the manifest declares nothing of the mesh
+        run: bash ../scripts/ci/check_mesh_manifest.sh build/app/outputs/flutter-apk/app-debug.apk off
+
       - name: Upload APK
         uses: actions/upload-artifact@v6
         with:
           name: app-debug-${{ matrix.arch }}
           path: haven/build/app/outputs/flutter-apk/app-debug.apk
           retention-days: 7
+
+  android-mesh:
+    name: Android (x64, mesh on)
+    # HAVEN_LIVE_SYNC-INTENT: production-default — see the header. The one
+    # define this job passes is the mesh's; its receive path is the shipped
+    # default, as the ABI legs' is.
+    runs-on: ubuntu-latest
+    # As the ABI legs: one build of the same kind, and the same reasons.
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: haven
+
+    steps:
+      - name: Free disk space
+        working-directory: /
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/graalvm
+          sudo rm -rf /usr/local/lib/android/sdk/system-images
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # As the ABI legs.
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: haven-core
+          key: android-mesh
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      # Restore-only: the ABI legs are the single writer of this key
+      # (check_gradle_build_hardened.sh). Capped and fail-open, as there.
+      - name: Restore Gradle dependency cache
+        uses: actions/cache/restore@v4
+        timeout-minutes: 2
+        continue-on-error: true
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/wrapper
+          key: gradle-deps-${{ runner.os }}-${{ hashFiles('haven/android/**/*.gradle*', 'haven/rust_builder/**/*.gradle*', 'haven/android/gradle/wrapper/gradle-wrapper.properties', 'haven/pubspec.lock') }}
+          restore-keys: |
+            gradle-deps-${{ runner.os }}-
+
+      # The flag reaches Gradle as the `dart-defines` property, where
+      # app/build.gradle.kts reads it once: this build merges the mesh's
+      # manifest and writes BuildConfig.HAVEN_MESH = true. It is also the one
+      # compile of the app's Kotlin and Dart with the flag on.
+      - name: Build APK (x64, HAVEN_MESH)
+        run: ../scripts/ci/build_apk_with_retry.sh android-x64 --dart-define=HAVEN_MESH=true
+
+      # Every entry of app/src/mesh/AndroidManifest.xml, once, with its
+      # attributes — BLUETOOTH_SCAN flagged neverForLocation, the two legacy
+      # permissions up to API 30 — so the switch merged the file, and merged
+      # it whole; nothing else of the mesh, from any manifest; and, by
+      # aapt2's badging, no Bluetooth feature Play would read as required:
+      # the legacy permissions imply one unless it is declared not required.
+      - name: Check the manifest declares the mesh's entries
+        run: bash ../scripts/ci/check_mesh_manifest.sh build/app/outputs/flutter-apk/app-debug.apk on
+
+      # As the ABI legs' probe, on the library of the build whose Kotlin
+      # declares the native methods.
+      - name: Probe the library's JNI exports and liblog imports
+        run: |
+          unzip -q -o build/app/outputs/flutter-apk/app-debug.apk 'lib/*/librust_lib_haven.so' -d "${RUNNER_TEMP}/apk-lib"
+          bash ../scripts/ci/check_mesh_radio_symbols.sh "${RUNNER_TEMP}/apk-lib/lib"
+
+      # The four radio modes MeshRadioConstants.kt holds as bare integers,
+      # against the android.jar this build compiled with: no compiler ties
+      # them, and a wrong one is a valid mode at a higher duty or power.
+      - name: Check the radio's modes are the SDK's
+        run: bash ../scripts/ci/check_mesh_radio_constants.sh
 
   ios:
     name: iOS

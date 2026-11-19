@@ -51,6 +51,14 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"
 # sits in `#[cfg(test)]`. Dev-only, and only ever dev-only (check 2): the crate
 # also builds the recording wire proxy.
 planes = { package = "haven-local-relay", path = "../../tooling/e2e/local-relay" }
+# The host half of the radio's JNI shim (`src/mesh_jni.rs`; the Android half is
+# below): the shim is compiled into the test build too, which type-checks every
+# export against `jni` on a machine with no Android target.
+jni = "0.21"
+# The host half of the log lever (`src/log_lever.rs`; the Android half is
+# below), for the same type-check: `dlopen` and `dlsym`. A host that is not
+# Unix cannot build this crate's tests; CI's test jobs are Linux.
+libc = "0.2"
 
 # MDK's SQLCipher 4.17 source (tracked exception T-LIBSQLITE-PATCH). Only a
 # root's `[patch]` applies, and none is inherited through the haven-core path
@@ -58,6 +66,14 @@ planes = { package = "haven-local-relay", path = "../../tooling/e2e/local-relay"
 # `=0.38.1` pin in haven-core resolves the crates.io SQLCipher 4.14 build.
 [patch.crates-io]
 libsqlite3-sys = { git = "https://github.com/rusqlite/rusqlite.git", rev = "5ae7fdf83085c595fd54f977b3a56ccacabaf16b" }
+
+# The Bluetooth mesh engine's clock (`mesh_clock_ms` in src/api.rs): one that
+# keeps running while the device sleeps, which `std::time::Instant` does not.
+# The version every lockfile already resolves, so no lockfile gains a crate; but
+# only the desktop Linux keyring built it before, so Android and iOS now compile
+# `rustix` and `errno` (and `linux-raw-sys` on Android) for the first time.
+[target.'cfg(any(target_os = "android", target_os = "linux", target_vendor = "apple"))'.dependencies]
+rustix = { version = "1", features = ["time"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "0.2", features = ["keychain"] }
@@ -88,3 +104,12 @@ android-native-keyring-store = "0.5"
 # FRB's later call a no-op. If a future `cargo update` ever split the version,
 # the U1 CI secret-scan is the backstop. See `init_app` in src/api.rs.
 android_logger = "0.15"
+# The radio's JNI shim (`src/mesh_jni.rs`). The 0.21 line
+# `android-native-keyring-store` already resolves, so the lockfile gains an edge
+# and no package; 0.22 changes the API and would add one.
+jni = "0.21"
+# The log lever (`src/log_lever.rs`) finds `liblog`'s API-30 functions with
+# `dlopen` and `dlsym`: imported, they would stop the library loading on
+# Android 6 to 10. The version the lockfile already resolves: an edge, no
+# package.
+libc = "0.2"

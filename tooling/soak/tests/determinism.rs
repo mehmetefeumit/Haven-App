@@ -202,6 +202,14 @@ async fn event_handles_are_bijective_and_never_reused() {
 
     let sender = world.devices()[0].tag;
     let group = world.circles()[0].mls_group_id().clone();
+    // A device that has just started holds its seals until its REQs' stored
+    // replay is in and its entry's NIP-77 pass has ended (Security Rule 10).
+    world
+        .device(sender)
+        .expect("the sending device")
+        .take_in_replay()
+        .await
+        .expect("an engine runs");
     let mut ids: Vec<EventId> = Vec::new();
     for step in 0..3_u8 {
         let device = world.device(sender).expect("the sending device");

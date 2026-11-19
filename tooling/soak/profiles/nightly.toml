@@ -48,7 +48,12 @@
 # read, a key-package round trip per member (1 108.75 s): the priced run
 # became 5 891 s, 6 191 s with the margin, so the budget rose to the next
 # whole minute, 6 240 s (104 min), and the deadline (114 min) and the lane's
-# caps with it. The budget is not
+# caps with it. S27 and S28 joined with the PR profile (the Bluetooth mesh's
+# two scenarios, three arms at 39.75 s — the closing round and the one wait
+# of theirs that may run out): the priced run became 6 010.25 s, 6 310.25 s
+# with the margin, so the budget rose to the next whole minute, 6 360 s
+# (106 min), and the deadline (116 min) with it; the lane's step cap and job
+# cap already hold that deadline. The budget is not
 # lowered with the price: the rule (PLAN §2) moves it only when the priced run
 # outgrows it.
 #
@@ -57,8 +62,8 @@
 # it to `soak-core.yml`'s own literal in both directions, and that literal's
 # step cap and job cap move with it (`check_e2e_step_timeout_ordering.sh`).
 name = "nightly"
-run_budget_secs = 6240
-deadline_secs = 6840
+run_budget_secs = 6360
+deadline_secs = 6960
 margin_secs = 300
 duration_secs = 900
 tick_ms = 250
@@ -177,3 +182,11 @@ arms = ["collided-circles-leave-apart"]
 [[scenarios]]
 id = "S26"
 arms = ["identity-planes-under-faults"]
+
+[[scenarios]]
+id = "S27"
+arms = ["mesh-off-then-on"]
+
+[[scenarios]]
+id = "S28"
+arms = ["bridged-to-the-far-member", "removed-member-finds-nothing"]

@@ -14,6 +14,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/locale_provider.dart';
+import 'package:haven/src/providers/mesh_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/background_catchup_worker.dart';
 import 'package:haven/src/services/background_location_manager.dart';
@@ -79,6 +80,7 @@ class BackgroundSharingNotifier extends StateNotifier<bool> {
     IosLocationAuthService? iosLocationAuth,
     IosBackgroundSessionService? iosBackgroundSession,
     bool? isIOS,
+    void Function()? onSharingStopped,
   }) : _ensurePermissions =
            ensurePermissions ?? BackgroundLocationManager.ensurePermissions,
        _isAndroid = isAndroid ?? Platform.isAndroid,
@@ -86,6 +88,7 @@ class BackgroundSharingNotifier extends StateNotifier<bool> {
        _iosBackgroundSession =
            iosBackgroundSession ?? createIosBackgroundSessionService(),
        _isIOS = isIOS ?? Platform.isIOS,
+       _onSharingStopped = onSharingStopped,
        super(false) {
     unawaited(_load().whenComplete(_markLoaded));
     loaded = _loaded.future;
@@ -127,6 +130,10 @@ class BackgroundSharingNotifier extends StateNotifier<bool> {
   ///
   /// Overridable in tests via the constructor parameter.
   final bool _isIOS;
+
+  /// Told when the user turns sharing off, so that a location sealed before
+  /// it is withdrawn from every carrier that has not sent it yet.
+  final void Function()? _onSharingStopped;
 
   Future<void> _load() async {
     try {
@@ -324,6 +331,7 @@ class BackgroundSharingNotifier extends StateNotifier<bool> {
       if (_isIOS) {
         unawaited(_iosBackgroundSession.disarm());
       }
+      _onSharingStopped?.call();
     }
 
     return null;
@@ -340,6 +348,8 @@ final backgroundSharingProvider =
       return BackgroundSharingNotifier(
         iosLocationAuth: ref.read(iosLocationAuthServiceProvider),
         iosBackgroundSession: ref.read(iosBackgroundSessionServiceProvider),
+        onSharingStopped: () =>
+            unawaited(ref.read(meshProvider.notifier).sharingStopped()),
       );
     });
 

@@ -61,6 +61,15 @@
 /// `location_access_provider_test.dart`'s "clears even when the position
 /// stream NEVER revives".
 ///
+/// ## A stream can also be dead while the verdict never changes
+///
+/// The recovery edge needs a verdict to change. A subscription that faulted
+/// over an outage shorter than a probe, or that was registered and never
+/// delivered a fix, leaves every probe answering `available` — and the map's
+/// own dot and the motion-triggered publish frozen until the next pause and
+/// resume. `LocationAccessNotifier._rearmFixlessStream` re-subscribes such a
+/// stream once, and a delivered fix is the only thing that earns another.
+///
 /// ## Fail-quiet, never fail-loud
 ///
 /// Every probe failure degrades to a state that shows the user LESS, never a
@@ -251,6 +260,10 @@ class LocationAccessNotifier extends Notifier<LocationAccessStatus> {
   /// event settles back onto the normal cadence instead of probing forever.
   int _contradictedProbesLeft = 0;
 
+  /// Whether the one re-subscribe a fix-less subscription is worth has been
+  /// spent. Restored ONLY by a delivered fix — see [_rearmFixlessStream].
+  bool _streamRearmSpent = false;
+
   @override
   LocationAccessStatus build() {
     ref
@@ -274,6 +287,19 @@ class LocationAccessNotifier extends Notifier<LocationAccessStatus> {
     AsyncValue<Position>? previous,
     AsyncValue<Position> next,
   ) {
+    if (next.isLoading) {
+      // A (re)subscribe is in flight. Tested FIRST: a rebuild re-delivers the
+      // previous error or fix with `isLoading` set, and reading that as an
+      // event of the new subscription would log a fault that did not happen
+      // and restore [_streamRearmSpent] with no fix behind it.
+      //
+      // The rechecks a fault was owed went with the subscription that faulted.
+      _contradictedProbesLeft = 0;
+      // Armed so a stream that never delivers a first fix is still noticed;
+      // the current verdict is not disturbed.
+      _armWatchdog();
+      return;
+    }
     if (next is AsyncError<Position>) {
       // Type only — a raw stream error must never reach the UI (Security
       // Rule 8) and must not be trusted to name the cause either; the probe
@@ -295,18 +321,14 @@ class LocationAccessNotifier extends Notifier<LocationAccessStatus> {
       // A delivered fix settles the contradiction in the probe's favour: the
       // stream is demonstrably alive, so stop paying for fast rechecks.
       _contradictedProbesLeft = 0;
+      _streamRearmSpent = false;
       _lastFixAt = clock.now();
       // Touch the timestamp, do not re-create the timer: an armed watchdog
       // already re-arms itself for the remainder when it fires (see
       // [_armWatchdog]), and Android delivers a fix every second.
       if (!(_watchdog?.isActive ?? false)) _armWatchdog();
       _apply(LocationAccessStatus.available, restartStream: false);
-      return;
     }
-    // AsyncLoading: a (re)subscribe is in flight. Arm the watchdog so a stream
-    // that never delivers a first fix is still noticed, but do not disturb the
-    // current verdict.
-    _armWatchdog();
   }
 
   /// Stops the silence watchdog until something re-arms it.
@@ -357,7 +379,11 @@ class LocationAccessNotifier extends Notifier<LocationAccessStatus> {
   /// stuck on screen after the user has already fixed the problem. The re-arm
   /// therefore lives in a `finally`, and the platform reads it depends on are
   /// wrapped rather than assumed infallible.
-  Future<void> refresh() async {
+  Future<void> refresh() => _probe(fromWatchdog: false);
+
+  /// [refresh], told who asked: only the watchdog's own probes may
+  /// re-subscribe a fix-less stream (see [_rearmFixlessStream]).
+  Future<void> _probe({required bool fromWatchdog}) async {
     // A watchdog tick, an app resume and a button tap can all land after
     // teardown (rapid logout unmounts the map mid-probe). Reading any provider
     // from a disposed container throws, and this runs unawaited, so the throw
@@ -367,7 +393,11 @@ class LocationAccessNotifier extends Notifier<LocationAccessStatus> {
     try {
       final status = await _diagnose();
       if (_disposed || generation != _generation) return;
+      // Read before [_apply]: a verdict that just CHANGED to available has
+      // taken the recovery edge, which re-subscribes by itself.
+      final confirmed = status == state;
       _apply(status, restartStream: true);
+      if (fromWatchdog && confirmed) _rearmFixlessStream();
     } on Object catch (e) {
       // Type only (Security Rule 8). `_diagnose` already handles the platform
       // calls it makes; this catches everything else a probe touches — every
@@ -563,12 +593,69 @@ class LocationAccessNotifier extends Notifier<LocationAccessStatus> {
     // provider does not come back on its own, so without this the map would
     // stay frozen for the rest of the session even though access is fine.
     //
-    // Never while suspended: the invalidate cancels the running subscription
-    // SYNCHRONOUSLY but defers the rebuild to a frame, and frames are off
-    // while the app is paused — so on iOS it would withdraw the background
-    // session that keeps the process executable and rebuild it only at the
-    // next resume. `_onResumed` re-establishes the stream directly.
-    if (restartStream && !_suspended) ref.invalidate(locationStreamProvider);
+    // Never while suspended: this cancels the running subscription, and the
+    // stream that replaces it starts no platform session while the app is not
+    // foregrounded (see `locationStreamProvider`) — so on iOS it would
+    // withdraw the background session that keeps the process executable until
+    // the next resume. `_onResumed` re-establishes the stream directly.
+    if (restartStream && !_suspended) _resubscribe();
+  }
+
+  /// Replaces the position subscription and takes the rebuild's loading event
+  /// HERE.
+  ///
+  /// Left pending, the rebuild runs inside whichever `state` read comes next —
+  /// the one in [_armWatchdog] — and re-enters [_onPositionEvent] halfway
+  /// through arming: a second timer under the one being armed, and the
+  /// recheck budget cleared between its test and its decrement.
+  void _resubscribe() {
+    ref
+      ..invalidate(locationStreamProvider)
+      ..read(locationStreamProvider);
+  }
+
+  /// Re-subscribes, ONCE, a position stream the platform says Haven may read
+  /// and that has delivered nothing.
+  ///
+  /// The foreground twin of the background isolate's
+  /// `_scheduleStreamErrorRearm`. A subscription can be dead while every probe
+  /// answers `available`, so the recovery edge in [_apply] never fires and
+  /// the map's own dot and the motion-triggered publish stay frozen until the
+  /// next pause and resume. Two ways in:
+  ///
+  ///   * it FAULTED and the cause was gone by the time the probe looked — the
+  ///     Android client has already called `removeUpdates` and never
+  ///     re-registers (library doc). Re-subscribed on the LAST contradicted
+  ///     recheck, never at the fault: a provider that died is still
+  ///     reconnecting then (`kStreamErrorRearmDelay` has the capture), and a
+  ///     re-listen that early meets the same refusal;
+  ///   * it was registered and has been SILENT since — one whole watchdog
+  ///     interval without a first fix.
+  ///
+  /// Only the stream's own state is consulted: anything but a settled
+  /// `AsyncData` means the newest subscription's last word was not a fix. A
+  /// device that delivered one and then sat still is therefore never touched
+  /// — and neither is a platform subscription `resumeStream()` swapped in
+  /// under a provider still showing the fix from before the pause, which this
+  /// cannot tell from one that is merely still.
+  ///
+  /// `_everGranted` is what makes `available` mean "the platform said yes":
+  /// before the disclosure, and for a permission never yet granted, that
+  /// verdict is only the notifier staying quiet (see [classify]), and there is
+  /// no stream to bring back.
+  ///
+  /// ONE attempt, restored only by a delivered fix. Unbounded, a user with no
+  /// fix (indoors, GPS cold) would pay a GPS session teardown every watchdog
+  /// interval for the whole session.
+  void _rearmFixlessStream() {
+    if (state.isBlocked || !_everGranted || _contradictedProbesLeft > 0) return;
+    // Same rule, same reason, as the recovery edge in [_apply].
+    if (_suspended || _streamRearmSpent) return;
+    final stream = ref.read(locationStreamProvider);
+    if (stream is AsyncData<Position> && !stream.isLoading) return;
+    _streamRearmSpent = true;
+    debugPrint('[LocationAccess] no fix on this subscription — re-subscribing');
+    _resubscribe();
   }
 
   /// (Re-)arms the silence watchdog. Never throws — see [refresh].
@@ -638,7 +725,7 @@ class LocationAccessNotifier extends Notifier<LocationAccessStatus> {
         _armFor(interval - quiet, interval);
         return;
       }
-      unawaited(refresh());
+      unawaited(_probe(fromWatchdog: true));
     });
   }
 }

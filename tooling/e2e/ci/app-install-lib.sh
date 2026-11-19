@@ -67,12 +67,52 @@
 # before it installed. Its probe can only err towards the barrier: anything but
 # a `package:` line reads as absent.
 #
+# ## Below API 34: Android 10, the one older release a lane boots
+#
+# Neither command above exists before Android 14: android13-release's
+# ActivityManagerShellCommand has no `wait-for-broadcast-barrier` and its
+# PackageManagerShellCommand no `wait-for-handler`; android14-release has both
+# (read 2026-11-14 on the aosp-mirror/platform_frameworks_base branches). The
+# race does exist on Android 10, in the same two steps (android10-release):
+#
+#   * a target package's PACKAGE_ADDED makes the overlay manager compare the
+#     new package's resource dirs with the enabled framework overlays and, where
+#     they differ, tell ActivityManager — `updateAndRefreshOverlaysForTarget`
+#     (om/OverlayManagerServiceImpl.java:297-360), then `onOverlaysChanged` ->
+#     `updateAssets` -> `scheduleApplicationInfoChanged`
+#     (om/OverlayManagerService.java:866-869, :943-951);
+#   * the send is posted to the package manager's handler
+#     (`sendPackageBroadcast`, pm/PackageManagerService.java:12969-12991) from
+#     the very callback that then answers the installer (:2103-2108), so as
+#     `adb install` returns the broadcast may not exist yet.
+#
+# So an API 29 guest is given the same two halves, by the two commands that
+# release has. `pm trim-caches 0` drains the handler: it posts to that same
+# handler and waits for its observer (`freeStorageAndNotify`, :4748-4768;
+# pm/PackageManagerShellCommand.java:2199-2244), and freeing zero bytes returns
+# before it touches anything (:4800), so it is a round trip through the queue
+# and nothing else. `am wait-for-broadcast-idle` then waits until every
+# broadcast queue is empty (am/ActivityManagerShellCommand.java:289;
+# am/ActivityManagerService.java:18639-18667; `isIdle`, am/BroadcastQueue.java
+# :1889-1892). Coarser than API 34's barrier — it waits for every broadcast,
+# not for those queued before it — and inside the same bound. The verdict line,
+# the two controls and every refusal are the same.
+#
+# Which pair a guest is asked for is its `ro.build.version.sdk`: 29 the pair
+# above; anything else, an unreadable level included, API 34's — which a guest
+# without those commands fails, by name. Android 11 to 13 have been read for
+# the commands they lack and for nothing else, so they are refused rather than
+# guessed at. MEASURED: an API 29 guest answers 255/255 to API 34's pair, and
+# 255/255 to the two controls (CI run 43586443164, the first to boot one).
+# READ, NOT RUN: the pair above. The codes it prints on success, or what the
+# refusal says the guest said of it, settle that.
+#
 # FAIL CLOSED, never best-effort. A failed install, a barrier command this
-# runner could not execute at all, a device that cannot run the barrier (the
-# commands arrived in API 34), a guest that reports no exit codes or answers 0
-# to a command it cannot have, and a queue still backed up after
-# INSTALL_BARRIER_SECS each return non-zero with the reason named, and the
-# caller fails the lane: driving anyway is the silent ten-minute hang this
+# runner could not execute at all, a device that cannot run the barrier (API
+# 34's commands on a guest of API 30 to 33), a guest that reports no exit
+# codes or answers 0 to a command it cannot have, and a queue still backed up
+# after INSTALL_BARRIER_SECS each return non-zero with the reason named, and
+# the caller fails the lane: driving anyway is the silent ten-minute hang this
 # exists to remove. The bound is ~3.5x the worst backlog above, and it is a term
 # in every lane's worst case, which is why it is a constant here and not an
 # argument: no lane can tighten it to fit a budget.
@@ -103,6 +143,25 @@ _app_install_present() {
   grep -q '^package:' <<<"${out}"
 }
 
+# _app_install_words — stdin what the barrier's commands printed; stdout at
+# most four of its lines, each cut to 120 characters of letters, digits and
+# plain punctuation, joined by ` | `. What a guest says of a command it does
+# not have names that command faster than its exit code does (CI run
+# 43586443164: an API 29 guest answered 255/255 and the log said nothing
+# more); the shape is fixed so that whatever else a guest prints does not
+# reach the log whole.
+_app_install_words() {
+  LC_ALL=C awk '
+    /^haven-barrier-rc / || /^[ \t]*$/ { next }
+    n < 4 {
+      line = substr($0, 1, 120)
+      gsub(/[^A-Za-z0-9 _.,:;()=\/-]/, "?", line)
+      out = out (n++ ? " | " : "") line
+    }
+    END { print (n ? out : "nothing") }
+  '
+}
+
 # install_app <device> <apk> — install <apk> over whatever is on <device>. When
 # the package was absent the install is fresh, and its broadcasts are flushed
 # before this returns. Non-zero, with the reason on stderr, otherwise.
@@ -110,8 +169,10 @@ _app_install_present() {
 # Explicit returns throughout: callers run this from `||` or `if !`, where
 # errexit no longer reaches inside.
 install_app() {
-  local device="$1" apk="$2" fresh=1 rc=0 out verdict
+  local device="$1" apk="$2" fresh=1 rc=0 out verdict sdk
   local drain barrier ctl_cmd ctl_am
+  local drain_cmd="cmd package wait-for-handler --timeout $(( INSTALL_BARRIER_SECS * 1000 ))"
+  local barrier_cmd='am wait-for-broadcast-barrier --flush-broadcast-loopers'
   if _app_install_present "${device}"; then
     fresh=0
     echo "  installing ${apk} over the installed ${APP_INSTALL_PKG} (a replace:" \
@@ -136,6 +197,15 @@ install_app() {
          "${APP_INSTALL_PKG} is not on ${device}." >&2
     return 1
   fi
+  # Android 10 has neither command and is given its own pair (the header,
+  # "Below API 34"). The idle wait prints every queue it waits on; that stays
+  # on the guest unless the wait FAILS, when it is what says why.
+  sdk="$(adb -s "${device}" shell getprop ro.build.version.sdk 2>/dev/null \
+    | tr -d '\r')" || true
+  if [[ "${sdk}" == 29 ]]; then
+    drain_cmd='pm trim-caches 0'
+    barrier_cmd='o=$(am wait-for-broadcast-idle 2>&1) || { r=$?; echo "$o"; (exit $r); }'
+  fi
   echo "  fresh install: flushing its broadcasts (up to ${INSTALL_BARRIER_SECS} s)..."
   # `;` and not `&&`, so a half that fails still reports its own code rather
   # than vanishing into a short circuit. The controls' output is dropped on the
@@ -149,8 +219,7 @@ install_app() {
   # status (255). A guest that answers otherwise is refused below WITH the codes
   # it gave, so one run settles it either way.
   out="$(timeout "${INSTALL_BARRIER_SECS}" adb -s "${device}" shell \
-    "cmd package wait-for-handler --timeout $(( INSTALL_BARRIER_SECS * 1000 ))" \
-    '; h=$?; am wait-for-broadcast-barrier --flush-broadcast-loopers; b=$?;' \
+    "${drain_cmd}" '; h=$?;' "${barrier_cmd}"'; b=$?;' \
     'cmd package haven-not-a-command >/dev/null 2>&1; c=$?;' \
     'am haven-not-a-command >/dev/null 2>&1; a=$?;' \
     'echo; echo "haven-barrier-rc $h $b $c $a"' 2>&1)" || rc=$?
@@ -208,8 +277,11 @@ install_app() {
   if (( drain != 0 || barrier != 0 )); then
     echo "ERROR: the install barrier failed on ${device}: the package-manager" \
          "handler drain exited ${drain} and the broadcast barrier exited" \
-         "${barrier}. A guest that predates either command reports non-zero;" \
-         "refusing to drive an unflushed fresh install." >&2
+         "${barrier}. A guest that predates either command reports non-zero:" \
+         "API 34 and later have this pair, API 29 one of its own, and no" \
+         "release between them has been given one. Refusing to drive an" \
+         "unflushed fresh install. What its commands said:" \
+         "$(_app_install_words <<<"${out}")" >&2
     return 1
   fi
   echo "  install broadcasts flushed (handler/barrier rc ${drain}/${barrier}," \
@@ -506,7 +578,7 @@ EOF
 # floor: a floor lets a fixture be deleted and the suite stay green, which is
 # how a prose count once reported success here. Change it only in the commit
 # that adds or removes a fixture.
-readonly APP_INSTALL_SELF_TEST_FIXTURES=80
+readonly APP_INSTALL_SELF_TEST_FIXTURES=95
 
 # The calls install_fresh and install_app make on the stub device, verbatim —
 # transcribed here rather than shared with the code, so that changing either
@@ -518,6 +590,11 @@ readonly _AI_INSTALL='-s emulator-5554 install -r /tmp/fixture.apk'
 readonly _AI_REMOTE='cmd package wait-for-handler --timeout 120000 ; h=$?; am wait-for-broadcast-barrier --flush-broadcast-loopers; b=$?; cmd package haven-not-a-command >/dev/null 2>&1; c=$?; am haven-not-a-command >/dev/null 2>&1; a=$?; echo; echo "haven-barrier-rc $h $b $c $a"'
 readonly _AI_BARRIER="-s emulator-5554 shell ${_AI_REMOTE}"
 readonly _AI_BOUND="timeout 120 adb ${_AI_BARRIER}"
+# The question that picks the pair, and the pair an Android 10 guest is asked.
+readonly _AI_SDK='-s emulator-5554 shell getprop ro.build.version.sdk'
+readonly _AI_REMOTE_Q='pm trim-caches 0 ; h=$?; o=$(am wait-for-broadcast-idle 2>&1) || { r=$?; echo "$o"; (exit $r); }; b=$?; cmd package haven-not-a-command >/dev/null 2>&1; c=$?; am haven-not-a-command >/dev/null 2>&1; a=$?; echo; echo "haven-barrier-rc $h $b $c $a"'
+readonly _AI_BARRIER_Q="-s emulator-5554 shell ${_AI_REMOTE_Q}"
+readonly _AI_BOUND_Q="timeout 120 adb ${_AI_BARRIER_Q}"
 
 _ai_write_stubs() {
   mkdir -p "${tmp}/bin"
@@ -525,7 +602,12 @@ _ai_write_stubs() {
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${STUB_CALLS}"
 case "$*" in
-  *"wait-for-broadcast-barrier"*)
+  *" shell getprop ro.build.version.sdk")
+    # The guest's API level, as `getprop` prints it; `none` is a guest that
+    # does not answer.
+    [[ "${STUB_SDK}" != none ]] || exit 1
+    echo "${STUB_SDK}" ;;
+  *"wait-for-broadcast-"*)
     # The verdict line is this file's own protocol, so playing it is modelling,
     # not remembering: <drain> <barrier> <cmd control> <am control>, where a
     # control is the rc of a command the guest cannot have. flushed's 255 is
@@ -538,6 +620,18 @@ case "$*" in
       # always assumed one can: the verdict is the same verdict.
       crlf)        printf 'haven-barrier-rc 0 0 255 255\r\n' ;;
       no-handler)  echo "haven-barrier-rc 255 0 255 255" ;;
+      # A guest that says why. `Unknown command: <cmd>` is what AOSP's
+      # handleDefaultCommands prints (read in source, as the controls' rc is);
+      # the rest is CONSTRUCTED: an escape sequence, a line past the cut, and a
+      # fifth line, none of which may reach the log as printed.
+      says)
+        echo "Unknown command: wait-for-handler"
+        printf 'colour \033[31mred\033[0m and a `tick` and $HOME\n'
+        printf 'long %s end-of-long-line\n' "$(printf 'x%.0s' $(seq 1 150))"
+        echo
+        echo "fourth line"
+        echo "fifth line is not said"
+        echo "haven-barrier-rc 255 0 255 255" ;;
       no-barrier)  echo "haven-barrier-rc 0 255 255 255" ;;
       lying-shell) echo "haven-barrier-rc 0 0 0 0" ;;
       truncated)   echo "haven-barrier-rc 0 0" ;;
@@ -627,6 +721,8 @@ STUB
 #         <barrier flushed|alt-codes|no-handler|no-barrier|lying-shell|mute|
 #                  unrunnable|offline|wedged>
 #         [<probe clean|noise|noise-once>] [<uninstall ok|stuck>]
+# The guest's API level is `ai_sdk` in the caller's scope: 34 unless a fixture
+# says otherwise.
 # Runs `<function> emulator-5554 /tmp/fixture.apk` on the stub device and
 # leaves its rc in ai_rc, its calls in ${tmp}/calls and its stderr in ${tmp}/err.
 _ai_run() {
@@ -640,7 +736,7 @@ _ai_run() {
     export PATH="${tmp}/bin:${PATH}" STUB_CALLS="${tmp}/calls" \
       STUB_STATE="${tmp}/installed" STUB_INSTALL="$3" STUB_BARRIER="$4" \
       STUB_PROBE="${5:-clean}" STUB_UNINSTALL="${6:-ok}" \
-      STUB_REAL_TIMEOUT="${real_timeout}"
+      STUB_SDK="${ai_sdk:-34}" STUB_REAL_TIMEOUT="${real_timeout}"
     "$1" emulator-5554 /tmp/fixture.apk
   ) >/dev/null 2>"${tmp}/err" || ai_rc=$?
 }
@@ -759,7 +855,8 @@ _ai_suite_fresh() {
   _ai_run install_fresh present ok flushed
   _ai_expect_ok 1
   _ai_expect_calls 1b "${_AI_STOP}" "${_AI_UNINSTALL}" "${_AI_PROBE}" \
-    "${_AI_PROBE}" "${_AI_INSTALL}" "${_AI_PROBE}" "${_AI_BOUND}" "${_AI_BARRIER}"
+    "${_AI_PROBE}" "${_AI_INSTALL}" "${_AI_PROBE}" "${_AI_SDK}" "${_AI_BOUND}" \
+    "${_AI_BARRIER}"
 
   # (1c) THE PATH EVERY LANE TAKES FIRST: a freshly booted guest with nothing to
   #      clear, so the uninstall fails for want of anything to remove. Its rc
@@ -768,7 +865,8 @@ _ai_suite_fresh() {
   _ai_run install_fresh absent ok flushed
   _ai_expect_ok 1c
   _ai_expect_calls 1d "${_AI_STOP}" "${_AI_UNINSTALL}" "${_AI_PROBE}" \
-    "${_AI_PROBE}" "${_AI_INSTALL}" "${_AI_PROBE}" "${_AI_BOUND}" "${_AI_BARRIER}"
+    "${_AI_PROBE}" "${_AI_INSTALL}" "${_AI_PROBE}" "${_AI_SDK}" "${_AI_BOUND}" \
+    "${_AI_BARRIER}"
 
   # (1e) An uninstall that leaves the package fails, by name, before installing:
   #      over it the install would be a replace keeping the earlier target's
@@ -814,7 +912,7 @@ _ai_suite_app() {
   _ai_run install_app absent ok flushed
   _ai_expect_ok 5
   _ai_expect_calls 5b "${_AI_PROBE}" "${_AI_INSTALL}" "${_AI_PROBE}" \
-    "${_AI_BOUND}" "${_AI_BARRIER}"
+    "${_AI_SDK}" "${_AI_BOUND}" "${_AI_BARRIER}"
 
   # (5c) The control rcs are read as a class, never as values: a guest that
   #      refuses an unknown command with some other pair passes just the same.
@@ -841,7 +939,7 @@ _ai_suite_app() {
   _ai_run install_app present ok flushed noise-once
   _ai_expect_ok 7
   _ai_expect_calls 7b "${_AI_PROBE}" "${_AI_INSTALL}" "${_AI_PROBE}" \
-    "${_AI_BOUND}" "${_AI_BARRIER}"
+    "${_AI_SDK}" "${_AI_BOUND}" "${_AI_BARRIER}"
 
   # (7c) A device whose probe never answers cannot show the fresh install
   #      landed, and fails closed.
@@ -888,6 +986,23 @@ _ai_suite_app() {
   _ai_expect_refused 8k
   _ai_expect_named 8l 'nothing was asked of emulator-5554'
 
+  # (8o) What the guest said of the commands it refused is in the refusal: at
+  #      most four lines, each cut, in letters, digits and plain punctuation.
+  _ai_run install_app absent ok says
+  _ai_expect_refused 8o
+  _ai_expect_named 8p 'What its commands said: Unknown command: wait-for-handler \| colour \?\?31mred\?\?0m and a \?tick\? and \?HOME \| long x+ \| fourth line$'
+  ran=$(( ran + 1 ))
+  if grep -qE 'fifth line|end-of-long-line|haven-barrier-rc' "${tmp}/err" \
+     || grep -q $'\033' "${tmp}/err"; then
+    echo "SELF-TEST FAIL (8q): the refusal carries more of the guest's words" \
+         "than its fixed shape allows:" >&2
+    sed 's/^/    /' "${tmp}/err" >&2
+    fail=1
+  fi
+  # (8r) ...and a guest that said nothing is said to have said nothing.
+  _ai_run install_app absent ok no-barrier
+  _ai_expect_named 8r 'What its commands said: nothing$'
+
   # (8m) A transport that dropped mid-barrier fails as the device-level refusal
   #      it is, carrying what adb said.
   _ai_run install_app absent ok offline
@@ -901,6 +1016,43 @@ _ai_suite_app() {
   # (10) A failed replace fails.
   _ai_run install_app present failed flushed
   _ai_expect_refused 10
+
+  # (12) AN ANDROID 10 GUEST, which has neither of API 34's commands: a fresh
+  #      install is flushed by that release's own pair — the handler drained by
+  #      a zero-byte `trim-caches`, the queues waited idle — under the same
+  #      bound, on the same device, with the same controls.
+  local ai_sdk=29
+  _ai_run install_app absent ok flushed
+  _ai_expect_ok 12
+  _ai_expect_calls 12b "${_AI_PROBE}" "${_AI_INSTALL}" "${_AI_PROBE}" \
+    "${_AI_SDK}" "${_AI_BOUND_Q}" "${_AI_BARRIER_Q}"
+
+  # (12c) ...and it fails closed in the same words when its pair does: a half
+  #       that exits non-zero, and a queue that never goes idle.
+  _ai_run install_app absent ok no-handler
+  _ai_expect_refused 12c
+  _ai_expect_named 12d 'handler drain exited 255'
+  _ai_run install_app absent ok wedged
+  _ai_expect_refused 12e
+  _ai_expect_named 12f 'still queued after 120 s'
+
+  # (13) A release between the two has been given no pair: it is asked for API
+  #      34's, lacks it, and is refused by name rather than guessed at.
+  ai_sdk=30
+  _ai_run install_app absent ok no-handler
+  _ai_expect_refused 13
+  _ai_expect_named 13b 'no release between them has been given one'
+  _ai_expect_calls 13c "${_AI_PROBE}" "${_AI_INSTALL}" "${_AI_PROBE}" \
+    "${_AI_SDK}" "${_AI_BOUND}" "${_AI_BARRIER}"
+
+  # (13d) A guest that does not say its level is asked for API 34's pair too:
+  #       the doubt resolves towards the stricter barrier.
+  ai_sdk=none
+  _ai_run install_app absent ok flushed
+  _ai_expect_ok 13d
+  _ai_expect_calls 13e "${_AI_PROBE}" "${_AI_INSTALL}" "${_AI_PROBE}" \
+    "${_AI_SDK}" "${_AI_BOUND}" "${_AI_BARRIER}"
+  ai_sdk=34
 
   # (11) The bound: ~3.5x the worst backlog on record (34 s). Every lane's
   #      budget carries it at this value; it is never tightened to fit one.

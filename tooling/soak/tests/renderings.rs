@@ -374,6 +374,7 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
         Fault::Unanswering,
         Fault::WithholdEose,
         Fault::RefusesNegentropy,
+        Fault::WithholdNegentropy,
         Fault::Heal,
     ] {
         add(&mut out, "nemesis/types.rs::Fault", format!("{fault:?}"));

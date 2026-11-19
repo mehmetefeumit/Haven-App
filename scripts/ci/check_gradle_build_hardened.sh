@@ -11,6 +11,12 @@
 #       `flutter build apk`,
 # and exactly ONE job in the repo WRITES that cache key.
 #
+# One build site builds no APK and so has no wrapper to go through:
+# scripts/ci/run_mesh_jvm_tests.sh, the JVM-only Gradle build of the mesh
+# radio's pure Kotlin. It resolves its plugins and libraries from the same
+# repositories, so (1) binds it like the others; its only retry is Gradle's
+# own, of a rate-limited download (haven/android/mesh-jvm/gradle.properties).
+#
 # # The cache must never redden a lane (C6)
 #
 # Every restore step carries BOTH a `timeout-minutes` and `continue-on-error:
@@ -119,7 +125,11 @@ readonly CANON_SAVE_KEY="\${{ steps.${CANON_RESTORE_ID}.outputs.cache-primary-ke
 # processes escape sequences first, so `\.` arrives as a bare `.` AND warns on
 # the way (gawk does; mawk silently differs). A bracket expression means the
 # same thing to both and survives the hand-off intact.
-readonly BUILD_SITE_RE='build_apk_with_retry[.]sh|build-integration-apks[.]sh|build-b3-real-gps-apk[.]sh|build-kp-rotation-apk[.]sh|build_release[.]sh (apk|appbundle)'
+#
+# `run_mesh_jvm_tests.sh` builds no APK and funnels into no wrapper; it is
+# listed because it is a Gradle build all the same, and a lane that ran it cold
+# would be rate-limited like any other.
+readonly BUILD_SITE_RE='build_apk_with_retry[.]sh|build-integration-apks[.]sh|build-b3-real-gps-apk[.]sh|build-kp-rotation-apk[.]sh|build_release[.]sh (apk|appbundle)|run_mesh_jvm_tests[.]sh'
 
 # A build that does NOT go through the wrapper. `flutter build apk` in a
 # workflow's command position is the whole of it — the iOS lanes build through
@@ -310,7 +320,7 @@ check_repo() { # $1 = workflow dir
     printf '[%s] FAIL: %d violation(s).\n' "${SCRIPT_NAME}" "${violations}" >&2
     return 1
   fi
-  log "OK — ${checked_files} workflow(s), ${total_jobs} Gradle-building job(s): each restores the canonical cache before its first build and builds through the classified retry; exactly one job writes the key."
+  log "OK — ${checked_files} workflow(s), ${total_jobs} Gradle-building job(s): each restores the canonical cache before its first build, and none builds an APK outside the classified retry; exactly one job writes the key."
   return 0
 }
 
@@ -318,7 +328,7 @@ check_repo() { # $1 = workflow dir
 # Self-test: hermetic workflow fixtures in a temp dir. Each negative differs
 # from the positive by exactly the property under test.
 # ---------------------------------------------------------------------------
-readonly SELF_TEST_FIXTURES=14
+readonly SELF_TEST_FIXTURES=15
 
 # emit_restore [id] — the id is emitted only when asked, because in the repo
 # only the WRITER's restore carries one (the readers have nothing to read it).
@@ -560,6 +570,22 @@ run_self_test() {
   _case 14 1 "${d}"
   [[ "${LAST_OUT}" == *"resolves to nothing"* ]] || { echo "SELF-TEST FAIL (14): a save reading an id no restore declares must be named" >&2; failures=1; }
 
+  # (15) The one build site that builds no APK — the JVM tests of the mesh
+  #      radio — owes the cache like the others: with the restore it passes,
+  #      without it it is C1.
+  ran=$(( ran + 1 ))
+  d="${tmp}/jvm"; mkdir -p "${d}"; write_writer_file "${d}"
+  { echo "name: A"; echo "jobs:"; echo "  lane:"; echo "    runs-on: ubuntu-latest"
+    echo "    steps:"; emit_restore
+    echo "      - name: Run the tests"; echo "        run: bash scripts/ci/run_mesh_jvm_tests.sh"; } > "${d}/a.yml"
+  _case 15 0 "${d}"
+  d="${tmp}/jvm-cold"; mkdir -p "${d}"; write_writer_file "${d}"
+  { echo "name: A"; echo "jobs:"; echo "  lane:"; echo "    runs-on: ubuntu-latest"
+    echo "    steps:"
+    echo "      - name: Run the tests"; echo "        run: bash scripts/ci/run_mesh_jvm_tests.sh"; } > "${d}/a.yml"
+  _case "15b" 1 "${d}"
+  [[ "${LAST_OUT}" == *"C1"* ]] || { echo "SELF-TEST FAIL (15b): the JVM test build with no cache must be reported as C1" >&2; failures=1; }
+
   if (( failures )); then
     echo "${SCRIPT_NAME}: SELF-TEST FAILED" >&2
     return 1
@@ -568,7 +594,7 @@ run_self_test() {
     echo "${SCRIPT_NAME}: SELF-TEST FAILED — ran ${ran} fixture(s), expected exactly ${SELF_TEST_FIXTURES}; a fixture was added or removed without moving the pin" >&2
     return 1
   fi
-  echo "${SCRIPT_NAME}: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: a hardened lane passes; a building job with no cache, one whose restore lands after its build, a bare \`flutter build apk\`, a non-canonical key, a second writer and a save without if: success() are each caught and named; a bare build quoted in a COMMENT is prose and passes, which is what makes the bare-build case about code; an exemption is honoured only when it carries a reason; a writer that saves the wrong key, or a step pointed at the wrong path, is caught too; and C6 catches each half on its own — a restore capped but not fail-open, and one fail-open but uncapped — while a save spelling the canonical output expression over a restore that declares no matching id is caught as the dangling reference it is)."
+  echo "${SCRIPT_NAME}: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: a hardened lane passes; a building job with no cache, one whose restore lands after its build, a bare \`flutter build apk\`, a non-canonical key, a second writer and a save without if: success() are each caught and named; a bare build quoted in a COMMENT is prose and passes, which is what makes the bare-build case about code; an exemption is honoured only when it carries a reason; a writer that saves the wrong key, or a step pointed at the wrong path, is caught too; and C6 catches each half on its own — a restore capped but not fail-open, and one fail-open but uncapped — while a save spelling the canonical output expression over a restore that declares no matching id is caught as the dangling reference it is; and the JVM test build of the mesh radio, which builds no APK, passes with the restore and is C1 without it)."
   return 0
 }
 

@@ -500,12 +500,13 @@ fn the_fake_models_exactly_the_verbs_the_lane_scripts_invoke() {
 /// No self-test writes a fake of its own again.
 ///
 /// Five did, and all five accepted every argv. The pin is behavioural in shape:
-/// each of the five names the shared fake, and none of them makes one
+/// each script listed names the shared fake, and none of them makes one
 /// executable, which is the one line an inline fake cannot do without.
 ///
-/// The first four source `logscan-gate.sh` and take its resolved constant;
-/// `scan-logs.sh` does not source it, so it resolves the same fixture beside
-/// itself. Either spelling names ONE file, which is the point.
+/// Every one but `scan-logs.sh` sources `logscan-gate.sh` and takes its
+/// resolved constant; `scan-logs.sh` does not source it, so it resolves the
+/// same fixture beside itself. Either spelling names ONE file, which is the
+/// point.
 #[test]
 fn every_gate_self_test_injects_the_one_shared_fake() {
     let root = repo_root();
@@ -523,6 +524,7 @@ fn every_gate_self_test_injects_the_one_shared_fake() {
             "run-b9-network-reconnect.sh",
             "fake_bin=\"${LOGSCAN_FAKE_BIN}\"",
         ),
+        ("run-mesh-lever.sh", "fake_bin=\"${LOGSCAN_FAKE_BIN}\""),
         (
             "scan-logs.sh",
             "fake=\"${script_dir}/fixtures/fake-haven-logscan.sh\"",

@@ -36,8 +36,12 @@
 #   HAVEN_LIVE_SYNC  'true' or 'false'. MANDATORY — there is deliberately no
 #                    default; see below.
 #
+# Optional env:
+#   HAVEN_MESH       'true' or 'false'; unset is 'false'. See below.
+#
 # Output:
-#   /tmp/integration-apks/<basename>.apk for each target.
+#   /tmp/integration-apks/<basename>.apk for each target, or
+#   /tmp/integration-apks/<basename>.mesh.apk under HAVEN_MESH=true.
 
 set -euo pipefail
 
@@ -81,6 +85,29 @@ if [[ ! "${HAVEN_LIVE_SYNC}" =~ ^(true|false)$ ]]; then
 fi
 readonly LIVE_SYNC_DEFINE="--dart-define=HAVEN_LIVE_SYNC=${HAVEN_LIVE_SYNC}"
 
+# Optional mesh define — off unless asked for, the opposite of the one above.
+#
+# `meshEnabled` is `bool.fromEnvironment('HAVEN_MESH')` and the Gradle switch
+# reads the same define (haven/android/app/build.gradle.kts), so a build that
+# passes nothing is the build that ships: no mesh in Dart, no mesh manifest.
+# 'false' therefore passes NO define rather than `HAVEN_MESH=false`: the APK is
+# then byte for byte what every other caller of this script builds, which is
+# what the mesh lane's flag-off control is a control OF. 'true' passes the one
+# define and stages the APK under its own name, so the mesh lane can build one
+# target both ways without the second build replacing the first.
+#
+# Validated for the reason HAVEN_LIVE_SYNC is: the expansion at the build site
+# is unquoted, and any other word here would be a build nobody designed.
+if [[ ! "${HAVEN_MESH:-false}" =~ ^(true|false)$ ]]; then
+  echo "ERROR: HAVEN_MESH must be exactly 'true' or 'false' when set (got '${HAVEN_MESH}')." >&2
+  exit 2
+fi
+if [[ "${HAVEN_MESH:-false}" == true ]]; then
+  readonly MESH_DEFINE="--dart-define=HAVEN_MESH=true" APK_SUFFIX=".mesh"
+else
+  readonly MESH_DEFINE="" APK_SUFFIX=""
+fi
+
 readonly OUT_DIR="/tmp/integration-apks"
 readonly BUILD_APK="build/app/outputs/flutter-apk/app-debug.apk"
 
@@ -104,10 +131,11 @@ build_target_apk() {
   # compiles the large debug haven-core Rust lib for four ABIs (arm/arm64 + the
   # debug-forced x86/x64), which — with the NDK strip pass — has exhausted the
   # runner disk.
-  # shellcheck disable=SC2086  # LIVE_SYNC_DEFINE is one validated word.
+  # shellcheck disable=SC2086  # LIVE_SYNC_DEFINE is one validated word; MESH_DEFINE is one or none.
   "${BUILD_WRAPPER}" android-x64 \
     --target="${target}" \
     ${LIVE_SYNC_DEFINE} \
+    ${MESH_DEFINE} \
     --dart-define=HAVEN_E2E_RELAY="${RELAY_URL}"
 }
 
@@ -156,7 +184,7 @@ for target in "${TARGETS[@]}"; do
   fi
 
   base="$(basename "${target}" .dart)"
-  dest="${OUT_DIR}/${base}.apk"
+  dest="${OUT_DIR}/${base}${APK_SUFFIX}.apk"
 
   echo "============================================================"
   echo "Building ${target} -> ${dest}"

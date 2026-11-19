@@ -32,6 +32,7 @@ what keeps that true).
 | `launch-gate-android.yml` | the RELEASE APKs built by `scripts/build_release.sh apk` (R8, AOT, obfuscated) — or, in `release-build.yml`, the tag's exact signed artifacts — cold-launched from the launcher: fresh, after a cold relaunch, and installed over the previous non-yanked release and v0.1.13 with their data kept; `check_apk_loadable.sh` on all three APKs. Only the log-privacy-gated summaries are uploaded, never logcat or a UI dump (failure mode 26) | `run-launch-gate-android.sh` under `run-with-deadline.sh` on an api-34 x86_64 AVD in airplane mode, behind the host egress guard | none — offline by design: a release build knows only production relays |
 | `launch-gate-ios.yml` | the production `main()` in the Release native configuration (debug Dart: the simulator runs nothing else) on a simulator: fresh, cold relaunch, and installed over the previous release's simulator build; `check_ios_app_loadable.sh` on the app (failure mode 27) | `run-launch-gate-ios.sh` driving a standalone XCUITest bundle (`tooling/e2e/ios-launch-gate`) | none — egress blocked by pf (or a hosts sinkhole) |
 | `e2e-integration.yml` | seven component targets (`smoke_test`, `app_test`, `keyring_test`, …), one after another; the lane's one manifest is sealed from the host needles before the first target, and every target's captures and the aggregate go through `scan-logs.sh` (failure mode 13) | `run-integration-tests.sh` → `run-single-avd-scenario.sh` per target, on one AVD | strfry container reset per target, `ws://10.0.2.2:7777` |
+| `e2e-mesh.yml` | the Bluetooth mesh lane, push A: `mesh_lever_test.dart` on API 34 without the mesh flag (S0) and with it (the probe), and with it on API 29 (S2) — the first lane below API 34. Captures are kept raw off the artifact, published with every Bluetooth address and the adapter's name replaced, platform dumps as skeletons only, all of it through `scan-logs.sh` (failure mode 29) | `run-mesh-lever.sh <leg>…` under `reactivecircus/android-emulator-runner`; the target reports and holds, the runner reads the device (`dumpsys`, `am`, `pm`, the log buffers) and releases it | strfry container, `ws://10.0.2.2:7777` (the scenario harness pins every relay plane to it; what the app sends at start for the seeded identity goes there and nowhere else) |
 
 `e2e-android.yml` / `e2e-ios.yml` take a `live_sync` boolean input (default
 **false**) and always pass `--dart-define=HAVEN_LIVE_SYNC=<input>`, so a lane
@@ -1878,6 +1879,200 @@ Reading a red:
   at most 52 s each). The relaunch first waits for no pass to be running,
   then for the session registry to read the database free, each at most two
   passes.
+
+## Failure mode 29 — the mesh lane (`E2E Mesh`): reading its verdict, and its probe
+
+`e2e_mesh_lever` (API 34: legs `s0`, then `probe`) and `e2e_mesh_refusal` (API
+29: leg `s2`) end on one of five codes, the runner's own
+(`tooling/e2e/ci/run-mesh-lever.sh`), folded 1 > 2 > 3 > 4 > 0:
+
+| rc | The step log ends with | It means | Who fixes it |
+|---|---|---|---|
+| 0 | `MESH LANE PASS` | every promise of push A held and every measurement was taken | — |
+| 0 | `MESH LANE PASS WITH A STATED LIMIT`, with `LIMIT (<leg>): …` lines, a notice on the run and `<leg>.verdict=limited` | everything the leg could judge held, and something its name promises could NOT be judged on this image — see "S2 and its image" below. Not a plain pass: read the limit | nobody; it is the owner's to accept (Q-22) |
+| 1 | `MESH LANE RED`, with `RED (<leg>): …` lines; or `log-privacy gate tripped (…): the per-leg gate of <leg> …` / `… the exit scan …` | a promise is broken — a turn-on that did not end `failed`, or that sent the radio's `start`, a mesh component the platform knows, a method behind the log lever that answers, a stored copy, a Bluetooth-tagged line from Haven's process that is no plant, a line of Haven's that carries a Bluetooth address, Haven's process dying, a suite that failed after the target started (`the suite on the device FAILED`: the app's failure, or the target's, never the platform's) or a drive the tool ended — or the scanner found a leak (failure mode 13) | the app |
+| 2 | `MESH LANE BROKEN`, `BROKEN (<leg>): …`; or `MESH-LANE-FAIL (rc 2)` | the lane drove the wrong build, or an APK was never staged | the workflow |
+| 3 | `MESH LANE UNUSABLE`, `UNUSABLE (<leg>): …`; or `MESH-LANE-FAIL (rc 3)` | the platform, the emulator or the capture would not answer: the target never reported, a dump had no heading, `am` said nothing, `run-as` did not list, the planted `flutter` line (P2) is missing, the target's hold ran out, the target never reached its hold at all (`never reached '[mesh] READY'`), the turn-on never reached `bluetoothOn`, a probe measurement could not be taken, the fresh install's barrier did not run. **Nothing was proved either way.** | the lane, not the app |
+| 4 | the scanner's `META-FLOOR` | a capture proves too little (failure mode 13) | the lane |
+
+**Do not open a product issue from an rc 3**, and do not make a control
+optional to turn it green: each UNUSABLE line names the one reading that failed,
+and the raw capture it was made over is deliberately not in the artifact (it
+holds the emulator's Bluetooth address). What the artifact has: the device log
+with every address replaced, of the events buffer only the entries Haven's own
+process wrote, the drive transcript whole, the dumps' skeletons and the
+verdict file — which is written last and gated by
+itself, so a red run still has it. Reproduce on an emulator instead:
+`bash tooling/e2e/ci/run-mesh-lever.sh s0` with both APKs staged under
+`/tmp/integration-apks`, and read `/tmp/mesh-raw/`.
+
+**The answers.** Every leg prints `  mesh-answer: <leg>.<key>=<value>` lines in
+the drive step, and writes the same lines to `verdict.<legs>.log` in the
+artifact (`verdict.s0-probe.log`, `verdict.s2.log`).
+Values are fixed words and numbers; a value the runner does not know is written
+`other`. The probe's, and what each decides for the push that makes the log
+lever reachable (`docs/BLUETOOTH_MESH_M3_DESIGN.md` §O.2.3, §O.7):
+
+| Key | Values | Decides |
+|---|---|---|
+| `<leg>.le_feature`, `<leg>.bt_service` (every leg) | `yes` `no`; `present` `absent` | on the probe, `le_feature=no`: the mesh is unsupported on this image; the lever's slice needs another. On `s2`: see "S2 and its image" |
+| `probe.bt_on`, `probe.bt_state`, `probe.bt_on_after_s` | `yes` `no`; the manager's word; seconds | the lane's boot is a cold boot of an AVD made in the same job (`e2e-mesh.yml`, "The boot is a cold boot"), and on it the API 34 adapter read `yes`, `ON`, `0` (run 43586443164). `no`: no adapter on a hosted runner, the lever's slice is unusable until one enables, and §O.2.3's pinned-emulator fall-back is the next thing to build |
+| `probe.p1`, `probe.p1_call` | `present` `absent` `foreign`; `ok` `nolib` `nosym` `refused` | `absent`: a DEBUG line under a platform Bluetooth tag is not written with no lever at all — the lever's "absent afterwards" would prove nothing, and the plant is redesigned first |
+| `probe.p1v`, `probe.p1e`, `probe.p4`, `probe.p5` | as `p1` | the same line at VERBOSE, at ERROR, and under `BluetoothGattServer` and `BluetoothAdapter`, where the lever's slice will also plant: `absent` at one of them means a line missing there later is not evidence of the lever |
+| `probe.p2` | `present` | anything else is rc 3: the plant call or the capture is dead |
+| `probe.p3`, `probe.p3_call` | as P1 | `absent` or `nosym`: the events buffer has no control; the lever's slice reports it "not read" |
+| `probe.buffer_<name>_kib`, `probe.buffer_<name>_read`, `probe.buffers_readable` | KiB or `unread`; `yes` `empty` `no`; a count | per buffer, whether logd answers for its size and whether a shell is HANDED an entry of it — the second is what says the lever's slice can read it (`security`, `kernel` and `stats` are the doubtful ones). Fewer than five sizes of main, system, crash, radio, events is rc 3 |
+| `probe.adapter_address_readable`, `probe.adapter_address_shape`, `probe.adapter_label_readable` | `yes` `no`; `mac` `other` `none` | `no`: that class of identifier is reported "not searched" in the events buffer, never silently skipped |
+| `probe.setprop_log_tag` | `yes` `no` | `no`: the lever's slice drops its `log.tag` clause and says so |
+| `probe.dump_services`, `probe.dump_notification`, `probe.dump_bluetooth` | `kept` | the skeletons `dump-*.probe.skel.log`: what the lever's parsers are written against |
+| `probe.supported`, `probe.ui_button`, `probe.turn_on`, `probe.turn_on_bluetooth_on`, `probe.turn_on_ms`, `probe.bt_tag_lines`, `probe.address_lines` | `true`; 1; `failed`; `missing`; ms; 0; 0 | what Haven promises of push A on this image; a different value is rc 1 or rc 3, named in the log. `turn_on_bluetooth_on` is what the turn-on's own `bluetoothOn` was answered: `missing` is the unanswered method |
+| `<leg>.wall_s` | seconds | the lane's deadlines (`e2e-mesh.yml`), which are worst cases until this has history |
+
+**A drive that failed: the `mesh-failure` lines.** A leg whose `flutter drive`
+failed, or whose suite reported a failure, prints `  mesh-failure (<leg>):
+key=value` lines under "the <leg> drive did not complete cleanly": `thrown=`
+the type the test framework says was thrown, `exception=` a class a line opens
+with, `assertion=` and `frame=` a `package:` path and line, `target_frame=` a
+line of the drive target itself, `missing_plugin=<method>@<channel>`,
+`url_alone_lines=` / `url_alone_host=` / `url_dial_failure_lines=`, `suite=failed`,
+`timed_out=yes`, `drive_lost_app=yes`. They are read out of the RAW transcript
+and the target's own device-log lines in closed shapes — never an exception's
+message — because the transcript is withheld whenever the gate trips on it,
+which is exactly when it is wanted. Start from `target_frame` (where the
+target was) and the first `frame=package:haven/…` (what threw).
+
+**`the target never reached '[mesh] READY'` (rc 3, or rc 1 with a failed
+drive).** The target ended before its hold — the lane's first run did, inside
+the probe's turn-on (run 43586443164) — so the host read nothing of the app:
+one sentence stands for every reading it did not make. What the probe measures
+of the PLATFORM needs no app and is still taken and answered (`probe.buffer_*`,
+`probe.setprop_log_tag`, `probe.adapter_*`, `probe.dump_*`). Read the
+`mesh-failure` lines.
+
+**`RED (<leg>): the suite on the device FAILED`.** The app, or the lane's
+target, threw under test; the platform did not refuse anything (that is what
+an `UNUSABLE` line is). Read the `mesh-failure` lines above it. The lane's
+second run was this, in the probe: `thrown=assertion`, frames in
+`draggable_scrollable_sheet.dart` — the map re-inflating the circles sheet
+with a controller already attached when mesh availability turned true — a
+defect in `haven/lib` that this lane found (run 44486540042).
+`RED … flutter drive exited non-zero … the suite … reported no failure` is
+the other kind: the tool, or its connection to the app.
+
+**`log-privacy gate tripped`: which gate, and whose line.** Three kinds of
+gate read this lane's logs, and a leak deletes what its gate scanned and
+nothing else:
+
+- each leg's own, under `== <leg>: the leg's own log-privacy gate …`, over
+  that leg's device log, events slice and drive transcript;
+- one a file for each dump's skeleton and for the verdict file;
+- the exit scan, over what is left.
+
+The run's last `ERROR:` says which found a leak. For a leg's gate,
+`mesh-leak (<leg>): file=<drive|logcat|events> from=<class> shape=<word>
+rule=<id> …` lines
+under the scanner's own `LEAK:` lines say WHOSE text each hit was: `own:<tag>`
+a line Haven's code wrote under that tag; `host` a line of the tool's
+(`flutter drive`'s own, or the test reporter's closing report); and, in the
+transcript, `platform:<tag>` a line a plugin or the platform wrote under
+Haven's pid (`FlutterSecureStorage`, `AndroidRuntime`, `DEBUG`, `System.err`
+and the like), `platform:process` the runtime's lines under the process's own
+name, `platform:other` any other tag. `shape=` is the KIND of line, one of
+five words decided on the whole message: `java-frame` (a Java stack frame —
+`at <path>(<File>.java:<n>)`, `(Native Method)`, `(Unknown Source)`),
+`java-exception-head` (a dotted class name ending `Exception` or `Error`,
+alone or before its message; the message is not read), `avc-audit` (the
+kernel's SELinux `avc: denied|granted { … } for …` record), `dart-frame`,
+and `other` for anything else, a sentence that merely holds ` at ` included.
+Read the two together: `from=platform:KeyStore shape=java-frame rule=S8` is
+a stack frame the platform logged under `KeyStore`, on which the key-blob
+rule fired; `from=own:flutter shape=java-frame` is a line Haven's Dart wrote
+that looks like one. Neither word changes the verdict. Never the text. One known cause that is not an identifier: Flutter's failure report
+for a FRAMEWORK assertion ends "please report this assertion by filing a bug
+on GitHub:" and then the URL alone on its own line, which the scanner's S13
+reads as a relay host a line wrap left alone (`[S13] tag=flutter`; seen in
+both runs, reproduced on the real scanner). `url_alone_host=github.com`
+among the `mesh-failure` lines is that case: fix the failure, and the leak
+line goes with it.
+
+**`mesh-leak (<leg>): file=drive from=platform:…` — a line that is not under
+one of Haven's tags.** `flutter drive` forwards every device-log line of the
+app's pid, the plugins' and the runtime's with Haven's own, and the lane
+gates the whole transcript, every rule on every line, as every lane does. So
+a hit there is a red, and the leg's device log and events slice go with the
+transcript: they hold the same lines. It is NOT thereby known to be harmless
+platform text. A crash's message (`AndroidRuntime`), a native abort's
+(`DEBUG`, `libc` — a Rust panic's own words), a `System.err` print and a
+plugin's line about Haven's data are all under tags the scanner's policy
+does not call Haven's own, and can carry what Haven wrote. The class says
+where to look, not what was said: reproduce on an emulator and read the raw
+transcript (`/tmp/mesh-raw/drive.<leg>.raw`, never uploaded). Then either
+the cause is removed at its source, or — if the line is the platform's own
+furniture and the owner agrees — it is the scanner's to learn, not this
+lane's to set aside. On Android 10 four lines tripped `S8` in the lane's second and third runs, and
+a fifth `S10` in the third; the third named their tags (`platform:KeyStore`
+for the four, `platform:other` for the fifth). **What they say is still not
+known**: that they are Java stack frames of a `KeyStore exception` trace and
+a kernel `avc` record is an inference, and the next run's `shape=` word is
+what confirms or refutes it. Until the owner decides, S2 is expected red. Whether platform text under Haven's
+pid should be rule-scanned in a transcript at all is an open question for
+the owner (`docs/BLUETOOTH_MESH_M3_DESIGN.md` §O.7).
+
+**`sink class logcat holds N line(s), below its declared floor of 2000`
+(rc 4).** A leg's device log is captured from before its install to the end
+of its drive; a quiet image and a short drive can still fall under the
+scanner's floor (1 581 on API 29 when the capture began at the drive, run
+44486540042). The floor is the scanner's and the owner's; do not lower it
+from the lane. Read the count in the line and take it to §O.7.
+
+**S2 and its image.** `supported` is false below Android 11 and on a phone
+with no Bluetooth LE. `s2.le_feature=yes`: the Android 11 gate is what
+answered, `s2.api_gate_exercised=yes`, a plain pass. `s2.le_feature=no`: the
+answer would be false with the gate deleted, so the gate was NOT shown on a
+device — `s2.api_gate_exercised=no`, `s2.verdict=limited` — and rests on the
+JVM test `PoliciesTest.belowApiThirtyAStartIsUnsupportedAndTouchesNothing`;
+what the leg did show is that the flag-on build installs and runs on Android
+10 and offers nothing of the mesh. On such an image Android 10 starts no
+Bluetooth service, and `s2.bt_service=absent` is the answer where a Bluetooth
+dump would have been.
+
+**`P1: a DEBUG line … is not in the log`.** On `s0` (rc 1): either a log lever
+is in a process that must have none, or the platform drops the line; read
+`probe.p1` of the same run — same job, same image: `absent` there too means
+the platform, and the plant, not the app, is what has to change. On `s2` it is
+a `LIMIT`, not a red, and **the probe cannot say why**: it runs Android 14 and
+`s2` Android 10. Nothing in the lane separates the two causes there; no lever
+can exist below API 30, and what is lost is the witness "no Bluetooth-tagged
+line from Haven's process", reported `s2.bt_tag_lines=unjudged`.
+
+**`the turn-on was not asked` / `without ever asking 'bluetoothOn'` (rc 3).**
+The first: `pm grant` of the three Bluetooth permissions did not take, so the
+system's dialog would have answered; the target does not ask under a dialog.
+The second: the turn-on failed before it reached the method push A leaves
+unanswered — the notices' words, the permission question — so where a turn-on
+ends was not shown. Both are the lane's, not the app's.
+
+**`MESH-LANE-FAIL (rc 3): the fresh install … did not complete` on `s2`.** The
+install's barrier: an API 29 guest is asked `pm trim-caches 0` and `am
+wait-for-broadcast-idle` (`app-install-lib.sh`, "Below API 34"), and the ERROR
+line above it prints the four exit codes the guest gave and, after `What its
+commands said:`, up to four lines of what the guest printed, cut and reduced to
+letters, digits and plain punctuation. A non-zero first or second code means
+that release does not have the command as it was read from source — the
+guest's words name which; `255/255` for the last two is what an unknown
+command answers. Measured so far: an API 29 guest answers `255/255` to API
+34's pair (run 43586443164); its own pair has not yet run.
+
+**A skeleton tripped the scanner (rc 1, `LEAK: …dump-…skel.log`,
+`probe.dump_<name>=withheld`).** A value survived `mesh_skeleton`'s masking.
+The dump is the platform's, not Haven's, but the gate is right to refuse it:
+add the shape to the skeleton with a fixture, never an allowlist entry. Only
+that skeleton is deleted — each has a gate of its own. (The second run's was
+`Name : value` / `name = value` / `name:value` in `dumpsys bluetooth_manager`,
+`[S10]`; the skeleton's key rule takes all three now.) A `LEAK:` line that
+names `logcat.<leg>.log` with a `tag=` of Haven's, `logcat-events.<leg>.log` (Haven's own entries and nothing
+else) or `flutter-drive.<leg>.log` is Haven's to answer for, as in any lane
+(failure mode 13).
 
 ## What these lanes do NOT cover
 

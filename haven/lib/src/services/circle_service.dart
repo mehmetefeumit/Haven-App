@@ -985,19 +985,33 @@ abstract class CircleService {
   /// are driven: from a leave's intent on — or while a change awaits its
   /// relays, or a departure is owed — nothing is sealed ([LocationSendHeld]).
   ///
+  /// With [meshOnly] the fix is sealed for the Bluetooth mesh alone: no relay
+  /// is called and nothing is driven, the send that follows reaches no relay
+  /// ([LocationPublishFfi.meshOnly]), and nothing is sealed unless the mesh
+  /// is on.
+  ///
   /// Throws [CircleServiceException] when the driver answers an error that
   /// is no typed outcome.
   Future<LocationSeal> sealLocation({
     required List<int> mlsGroupId,
     required double latitude,
     required double longitude,
+    bool meshOnly = false,
   });
 
   /// Sends [seal] once, to the relays its record names, and ends its record
   /// whatever was answered.
   ///
+  /// [received] is the caller's word that this drive's relay receive of the
+  /// circle was answered to the end before this call: only then, and only
+  /// with the Bluetooth mesh on, are fellow members' mesh updates passed on
+  /// to the relays that took this send.
+  ///
   /// Throws [CircleServiceException] when the driver could not be asked.
-  Future<LocationPublishFfi> publishSealedLocation(LocationSealed seal);
+  Future<LocationPublishFfi> publishSealedLocation(
+    LocationSealed seal, {
+    required bool received,
+  });
 
   /// Ingests a received kind-445 through the fanout driver: the engine takes
   /// it in, records and drives whatever it stages on the way (a receive-side

@@ -22,6 +22,7 @@ import 'package:haven/src/services/circle_service.dart'
 import 'package:haven/src/services/geolocator_location_service.dart';
 import 'package:haven/src/services/location_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
+import 'package:haven/src/services/mesh_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/services/publish_stagger.dart';
 import 'package:haven/src/services/publish_wake_lock.dart';
@@ -387,11 +388,16 @@ class FakeNostrRelayService extends Fake implements NostrRelayService {
     foreground: foreground,
   );
 
+  /// The `received` word each send carried, in order.
+  final List<bool> publishReceived = [];
+
   @override
   Future<LocationPublishFfi> publishLocation({
     required CircleManagerFfi circle,
     required SealedLocationFfi sealed,
+    required bool received,
   }) async {
+    publishReceived.add(received);
     final location = sealed as FakeSealedLocation;
     await _record(location.eventJson, location.relays, publishedLocations);
     return publishAnswer ??
@@ -823,6 +829,9 @@ class BackgroundTaskHarness {
 
   /// Builds and brings up a handler.
   ///
+  /// [meshBuild] is whether the build has the Bluetooth mesh, and [mesh] the
+  /// mesh's entries it then drives.
+  ///
   /// [circles] is the roster the manager serves. With [identityPubkey] `null`
   /// no identity is loaded. [manager] defaults to a [FakeCircleManager] over
   /// [circles] and is injected via `overrideCircleManager` while
@@ -839,6 +848,8 @@ class BackgroundTaskHarness {
     FakeLocationService? location,
     FakeLocationEventService? events,
     PublishStagger? stagger,
+    MeshService? mesh,
+    bool meshBuild = false,
     String dataDir = 'test-data-dir',
   }) async {
     final theManager = manager ?? FakeCircleManager(circles: circles);
@@ -848,7 +859,9 @@ class BackgroundTaskHarness {
     final theEvents = events ?? FakeLocationEventService();
     final handler = BackgroundLocationTaskHandler(
       stagger: stagger ?? PublishStagger.none(),
+      mesh: meshBuild,
     )
+      ..overrideMeshService = mesh
       ..overrideRelayService = theRelay
       ..overrideLocationSharingService = theSharing
       ..overrideLocationService = theLocation

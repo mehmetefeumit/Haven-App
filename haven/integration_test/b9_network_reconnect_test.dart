@@ -1238,6 +1238,7 @@ void main() {
             final answer = await driver.publishLocation(
               circle: manager,
               sealed: sealed,
+              received: false,
             );
             if (answer != LocationPublishFfi.accepted) {
               debugPrint('$kPublishAfterIdleDeadMarker reason=unacked');

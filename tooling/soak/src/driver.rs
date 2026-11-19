@@ -571,6 +571,7 @@ impl Run {
         let mut world =
             SimWorld::build(shape, schedule, planes, timeline.clone(), self.logs.clone()).await?;
         self.logs.attribute_to(world.id());
+        world.seed_with(self.seed);
         // Attached, not merely called: a circle an ARM builds later declares
         // itself through the same seam.
         world.declare_to(Arc::clone(&self.needles) as Arc<dyn DeclareSink>)?;

@@ -108,6 +108,11 @@ class _FakeLocationService implements LocationService {
 
   StreamController<Position>? _corpse;
 
+  /// When set, `isLocationServiceEnabled()` does not answer until it
+  /// completes: a probe held IN FLIGHT, which is the only way a verdict can
+  /// land after `suspend()` has already cancelled every timer.
+  Completer<void>? holdServiceCheck;
+
   @override
   Stream<Position> getLocationStream() {
     streamSubscriptions++;
@@ -130,6 +135,7 @@ class _FakeLocationService implements LocationService {
   @override
   Future<bool> isLocationServiceEnabled() async {
     serviceChecks++;
+    await holdServiceCheck?.future;
     if (serviceCheckError != null) throw serviceCheckError!;
     final flipAfter = flipServiceEnabledAfterChecks;
     if (flipAfter != null && serviceChecks > flipAfter) return false;
@@ -707,6 +713,295 @@ void main() {
   });
 
   // -------------------------------------------------------------------------
+  // A stream that is dead while every probe says access is fine
+  // -------------------------------------------------------------------------
+
+  group('a fix-less stream is re-subscribed, once', () {
+    // Production cadences on the fake clock: every assertion below is about
+    // WHEN a re-subscribe happens, so the two delays must be tellable apart.
+    const interval = kLocationAccessProbeInterval;
+    const retry = kLocationAccessContradictedRetryDelay;
+
+    void fault() => service.controller.addError(
+          StateError('provider disabled'),
+          StackTrace.empty,
+        );
+
+    _timedTest(
+        'a faulted stream the probe calls healthy is re-subscribed on the '
+        'LAST recheck, and a fix restores the one attempt', (async) {
+      // ENTRY A, as CI captured it: the platform reports location services
+      // off for an instant, the plugin errors the stream and calls
+      // `removeUpdates`, and by the time the probe looks everything reads
+      // fine. No verdict ever changes, so the recovery edge never fires and
+      // the subscription stays dead until the app is paused and resumed.
+      //
+      // The slow cadence cannot fire in this test, so every re-subscribe here
+      // belongs to the fault path.
+      final container = harness(
+        probeInterval: _watchdogDisabled,
+        contradictedRetry: retry,
+      );
+      establishAccess(container, async);
+      final checksBefore = service.serviceChecks;
+
+      fault();
+      async.flushMicrotasks();
+      expect(
+        service.streamSubscriptions,
+        1,
+        reason: 'not at the fault: a provider that just died is still '
+            'reconnecting, and a re-listen now meets the same refusal',
+      );
+
+      async.elapse(retry * 4);
+      expect(service.streamSubscriptions, 1, reason: 'nor on an early recheck');
+
+      async.elapse(retry);
+      expect(
+        service.streamSubscriptions,
+        2,
+        reason: 'the last recheck still says access is fine and no fix has '
+            'come: only a new subscription can bring the stream back',
+      );
+      expect(service.streamCancellations, 1);
+      expect(container.read(locationAccessProvider),
+          LocationAccessStatus.available);
+      expect(
+        service.serviceChecks - checksBefore,
+        6,
+        reason: 'the probe the fault fired plus its five rechecks. The '
+            're-subscribe is not a second fault: it re-delivers the old error '
+            'as a refresh, and that must buy no probe and no recheck',
+      );
+
+      // The new subscription delivers, which proves it and restores the
+      // attempt: the next fault is recovered the same way.
+      service.controller.add(_position());
+      async.flushMicrotasks();
+      fault();
+      async.elapse(retry * 5);
+      expect(service.streamSubscriptions, 3);
+      expect(container.read(locationAccessProvider),
+          LocationAccessStatus.available);
+    });
+
+    _timedTest('a re-armed stream that faults again is left alone', (async) {
+      // The bound. A provider the re-listen meets still dead errors at once;
+      // re-subscribing on that would spin (fault, recheck, re-subscribe,
+      // fault) for as long as the platform kept saying access was fine.
+      final container = harness(
+        probeInterval: interval,
+        contradictedRetry: retry,
+      );
+      establishAccess(container, async);
+      fault();
+      async.elapse(retry * 5);
+      expect(service.streamSubscriptions, 2);
+
+      fault();
+      async.elapse(const Duration(minutes: 5));
+
+      expect(
+        service.streamSubscriptions,
+        2,
+        reason: 'one attempt per subscription that has not delivered: five '
+            'minutes of rechecks and watchdog probes must not buy another',
+      );
+      expect(container.read(locationAccessProvider),
+          LocationAccessStatus.available);
+    });
+
+    _timedTest(
+        'a stream that never delivers a first fix is re-subscribed after one '
+        'whole interval, and never again', (async) {
+      // ENTRY B: registered, never errored, never closed, never delivered,
+      // while one-shot reads made seconds later were answered.
+      final container = harness(probeInterval: interval);
+
+      async.elapse(interval - const Duration(milliseconds: 1));
+      expect(
+        service.streamSubscriptions,
+        1,
+        reason: 'a first fix is allowed a whole interval to arrive',
+      );
+
+      async.elapse(const Duration(milliseconds: 1));
+      expect(service.streamSubscriptions, 2);
+      expect(service.streamCancellations, 1);
+
+      async.elapse(const Duration(minutes: 5));
+      expect(
+        service.streamSubscriptions,
+        2,
+        reason: 'a user with no fix (indoors, GPS cold) must not pay a GPS '
+            'session teardown every interval for the whole session',
+      );
+      expect(container.read(locationAccessProvider),
+          LocationAccessStatus.available);
+    });
+
+    _timedTest('a stream that delivers is never re-subscribed', (async) {
+      final container = harness(probeInterval: interval);
+
+      // Moving: a fix every ten seconds for ten intervals.
+      for (var i = 0; i < 30; i++) {
+        service.controller.add(_position());
+        async.elapse(const Duration(seconds: 10));
+      }
+      expect(service.streamSubscriptions, 1);
+
+      // Then still. Silence AFTER a fix is a phone on a desk, and the probes
+      // below are the watchdog seeing exactly that and leaving it alone.
+      final checksBefore = service.serviceChecks;
+      async.elapse(interval * 10);
+      expect(service.serviceChecks, greaterThan(checksBefore));
+      expect(service.streamSubscriptions, 1);
+      expect(service.streamCancellations, 0);
+      expect(container.read(locationAccessProvider),
+          LocationAccessStatus.available);
+    });
+
+    _timedTest(
+        'nothing is re-subscribed while suspended, nor by the resume probe',
+        (async) {
+      // A re-subscribe cancels the running subscription, and the stream that
+      // replaces it starts no platform session while the app is not
+      // foregrounded: on iOS that withdraws the session keeping the process
+      // alive until the next resume.
+      //
+      // `suspend()` cancels the timers, so the only verdict that can land
+      // while suspended is one already in flight. Hold it there.
+      final container = harness(probeInterval: interval);
+      final notifier = container.read(locationAccessProvider.notifier);
+      final held = Completer<void>();
+      service.holdServiceCheck = held;
+      async.elapse(interval);
+      expect(service.serviceChecks, 1, reason: 'the watchdog probe is out');
+
+      notifier.suspend();
+      service.holdServiceCheck = null;
+      held.complete();
+      async.flushMicrotasks();
+      expect(service.permissionChecks, 1, reason: 'and it has now answered');
+      async.elapse(const Duration(minutes: 5));
+      expect(service.streamSubscriptions, 1);
+      expect(service.streamCancellations, 0);
+
+      // `_onResumed` restarts the platform subscription itself
+      // (`resumeStream()`) and then calls these two. A re-subscribe from this
+      // probe would tear down what that call had just started.
+      notifier.resume();
+      unawaited(notifier.refresh());
+      async.flushMicrotasks();
+      expect(service.streamSubscriptions, 1);
+
+      // The attempt was withheld, not spent.
+      async.elapse(interval);
+      expect(service.streamSubscriptions, 2);
+    });
+
+    _timedTest('a blocked stream is left to the recovery edge', (async) {
+      final container = harness(probeInterval: interval);
+      service.serviceEnabled = false;
+
+      async.elapse(const Duration(minutes: 5));
+
+      expect(container.read(locationAccessProvider),
+          LocationAccessStatus.serviceDisabled);
+      expect(
+        service.streamSubscriptions,
+        1,
+        reason: 'no access, so nothing a new subscription could deliver',
+      );
+    });
+
+    _timedTest(
+        'the fix a recovery edge re-delivers is not a fix on the new '
+        'subscription', (async) {
+      final container = harness(probeInterval: interval);
+      establishAccess(container, async);
+      service.serviceEnabled = false;
+      async.elapse(interval);
+      expect(container.read(locationAccessProvider),
+          LocationAccessStatus.serviceDisabled);
+
+      service.serviceEnabled = true;
+      async.elapse(interval);
+      expect(container.read(locationAccessProvider),
+          LocationAccessStatus.available);
+      expect(service.streamSubscriptions, 2, reason: 'the recovery edge');
+
+      // The rebuilt provider still shows the fix from BEFORE the outage.
+      // Counting that as delivery would call a silent subscription healthy.
+      async.elapse(interval);
+      expect(service.streamSubscriptions, 3);
+      async.elapse(const Duration(minutes: 5));
+      expect(service.streamSubscriptions, 3);
+    });
+
+    _timedTest(
+        'the subscription the recovery edge made is given a whole interval',
+        (async) {
+      // A fault the probe AGREED with leaves its fast rechecks unspent while
+      // blocked. Carried over the recovery they would call the new
+      // subscription dead five seconds into its life, and every location
+      // off/on would cost a second teardown before a first fix could land.
+      final container = harness(
+        probeInterval: interval,
+        contradictedRetry: retry,
+      );
+      establishAccess(container, async);
+      service.serviceEnabled = false;
+      fault();
+      async.flushMicrotasks();
+      expect(container.read(locationAccessProvider),
+          LocationAccessStatus.serviceDisabled);
+
+      service.serviceEnabled = true;
+      async.elapse(interval);
+      expect(container.read(locationAccessProvider),
+          LocationAccessStatus.available);
+      expect(service.streamSubscriptions, 2, reason: 'the recovery edge');
+
+      async.elapse(interval - const Duration(milliseconds: 1));
+      expect(service.streamSubscriptions, 2);
+      async.elapse(const Duration(milliseconds: 1));
+      expect(
+        service.streamSubscriptions,
+        3,
+        reason: 'silent for a whole interval: it gets its one attempt too',
+      );
+      async.elapse(const Duration(minutes: 5));
+      expect(service.streamSubscriptions, 3);
+    });
+
+    _timedTest(
+        'a permission never granted is not a stream to bring back', (async) {
+      // First run: the stream errors because there is no permission yet, and
+      // the notifier answers `available` only to stay quiet. Re-subscribing
+      // on that would spend the attempt on a listen that cannot succeed.
+      final container = harness(
+        probeInterval: interval,
+        contradictedRetry: retry,
+      );
+      service.permission = LocationPermissionStatus.denied;
+      fault();
+
+      async.elapse(const Duration(minutes: 5));
+      expect(container.read(locationAccessProvider),
+          LocationAccessStatus.available);
+      expect(service.streamSubscriptions, 1);
+
+      // Granted with no lifecycle event to restart the stream: the next
+      // watchdog probe reads the grant, and the attempt is still there.
+      service.permission = LocationPermissionStatus.whileInUse;
+      async.elapse(interval);
+      expect(service.streamSubscriptions, 2);
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // Cause discrimination
   // -------------------------------------------------------------------------
 
@@ -1084,9 +1379,9 @@ void main() {
 
     _timedTest('suspend() stops probing until resume() lets it back', (async) {
       // The app is paused: nobody can see the banner, and a recovery edge
-      // fired while backgrounded would invalidate `locationStreamProvider` —
-      // which cancels the running platform subscription NOW and can only
-      // rebuild it at the next frame, i.e. at resume.
+      // fired while backgrounded would re-subscribe `locationStreamProvider` —
+      // which cancels the running platform subscription NOW, and the stream
+      // that replaces it starts no platform session until resume.
       final container = harness();
       service.serviceEnabled = false;
       _settle(async);
@@ -1196,9 +1491,10 @@ void main() {
 
     _timedTest('a recovery edge while suspended does not touch the stream',
         (async) {
-      // `_apply`'s recovery edge invalidates `locationStreamProvider`. While
-      // the app is paused that cancels the running subscription synchronously
-      // and defers the rebuild to a frame — so on iOS it would withdraw the
+      // `_apply`'s recovery edge re-subscribes `locationStreamProvider`. While
+      // the app is paused that cancels the running subscription, and the
+      // stream that replaces it starts no platform session — so on iOS it
+      // would withdraw the
       // background session keeping the process executable and restore it only
       // at the next resume, and with sharing off it would also throw away the
       // cached fix the publish path serves from.

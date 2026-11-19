@@ -454,9 +454,148 @@ async fn epoch_of<T: TimelineSink, L: LogDrain>(
 
 #[cfg(test)]
 mod tests {
-    use super::ARMS;
+    use haven_core::relay::fanout::{before_next_change_drive_for_test, hold_fanout_row_for_test};
+
+    use super::{
+        admin_leaves, await_condition, bounds, grade_attributed, rotate_onto, routing_of, Event,
+        Finding, Kind, ScenarioWorld, SimCircle, Verdict, ARMS, KIND_GROUP_MESSAGE,
+    };
+    use crate::nemesis::types::Schedule;
     use crate::oracle::Recovery;
+    use crate::profiles::WorldShape;
+    use crate::relay::SimRelay;
+    use crate::rig::doubles::{RecordingTimeline, StubDrain};
+    use crate::rig::{DeviceTag, SimWorld};
     use crate::scenarios::WithheldAcks;
+
+    /// A handshake under routing id `h`, by nobody.
+    fn handshake(h: &str) -> Event {
+        nostr::EventBuilder::new(Kind::Custom(KIND_GROUP_MESSAGE), "unasked")
+            .tag(nostr::Tag::custom(nostr::TagKind::h(), [h.to_owned()]))
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("a signed event")
+    }
+
+    /// Plants `event` on `plane` as one `device`'s own endpoint handed over
+    /// and the plane's store kept, and answers whether the store took it.
+    async fn plant(plane: &SimRelay, device: DeviceTag, event: &Event) -> bool {
+        plane.ledger().note_published(Some(device), event.id);
+        plane.store(std::slice::from_ref(event)).await == Ok(1)
+    }
+
+    /// The device's engine makes a handshake nobody asked for while the
+    /// admin leaves Y — one onto Y's plane, one onto X's, both under the id
+    /// the two circles share. Neither is a step of the leave, so neither is
+    /// among what the leave sent, and each plane's is reported as made
+    /// unasked for its own circle.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_handshake_made_unasked_during_a_leave_is_reported_on_its_own_plane() {
+        let shape = WorldShape {
+            members: 2,
+            circles: 1,
+            relays: 2,
+            account_relays: 1,
+            profile_relays: 0,
+        };
+        let world: ScenarioWorld<RecordingTimeline, StubDrain> = SimWorld::build(
+            &shape,
+            Schedule::new(Vec::new()),
+            crate::relay::planes_for(&shape)
+                .await
+                .expect("the relay planes start"),
+            RecordingTimeline::default(),
+            StubDrain::default(),
+        )
+        .await
+        .expect("the world builds");
+        let admin = world.devices()[0].tag;
+        let urls = world.relay_urls();
+        let (x_plane, y_plane) = (1, 0);
+        let x: SimCircle = world
+            .build_extra_circle_on(&urls[x_plane..=x_plane])
+            .await
+            .expect("circle X builds");
+        let y: SimCircle = world
+            .build_extra_circle_on(&urls[y_plane..=y_plane])
+            .await
+            .expect("circle Y builds");
+        let shared = routing_of(&world, admin, &y).await.expect("Y's routing");
+        let rotated = rotate_onto(&world, admin, &x, shared)
+            .await
+            .expect("X is moved onto Y's routing id");
+        // As the arm: the member takes the rotation in, and both route X by
+        // Y's id before either circle is left.
+        let member = world.devices()[1].tag;
+        let _ = world
+            .ingest(member, &rotated)
+            .await
+            .expect("the member ingests");
+        let routed = await_condition(bounds::round_trip(Recovery::Undisturbed), || async {
+            for device in [admin, member] {
+                if routing_of(&world, device, &x).await? != shared {
+                    let _ = world.resume(device).await?;
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        })
+        .await
+        .expect("the routing reads");
+        let shared_hex = hex::encode(shared);
+        let (unasked_y, unasked_x) = (handshake(&shared_hex), handshake(&shared_hex));
+
+        // Held at its hand-over — unless the admin's own engine has taken it
+        // already — so both are handed over during the leave. The engine
+        // runs, as in the arm: a collided circle is left only beside one.
+        let (hand_over, handed) = tokio::sync::oneshot::channel();
+        before_next_change_drive_for_test(y.mls_group_id(), move |id| {
+            let _ = hand_over.send(hold_fanout_row_for_test(id));
+        });
+        let (left, planted) = tokio::join!(admin_leaves(&world, admin, &y, y_plane), async {
+            let hold = handed.await.expect("the leave reaches its hand-over");
+            let planted = plant(&world.relays()[y_plane], admin, &unasked_y).await
+                && plant(&world.relays()[x_plane], admin, &unasked_x).await;
+            drop(hold);
+            planted
+        });
+        let (_, asked_y) = left.expect("the leave is driven");
+        let mut graded = Vec::new();
+        let planes = [
+            (x_plane, &x, std::slice::from_ref(&rotated)),
+            (y_plane, &y, asked_y.as_slice()),
+        ];
+        grade_attributed(&world, &shared_hex, planes, &mut graded)
+            .await
+            .expect("the planes read");
+        let unasked_for = |circle: &SimCircle| {
+            graded.iter().any(|(_, verdict)| {
+                matches!(
+                    verdict,
+                    Verdict::Failed(Finding::UnaskedHandshake { circle: flagged })
+                        if *flagged == circle.tag
+                )
+            })
+        };
+        let listed = asked_y
+            .iter()
+            .any(|event| event.id == unasked_y.id || event.id == unasked_x.id);
+
+        assert!(
+            routed && planted,
+            "premise: the circles collided, and two handshakes were planted during the \
+             admin's leave (collided {routed}, planted {planted})"
+        );
+        assert!(
+            !listed && graded.len() == 2 && unasked_for(&y) && unasked_for(&x),
+            "a handshake made unasked during the leave was taken for the leave's, or not \
+             reported for its own circle (among what the leave sent {listed}, reported for Y \
+             {}, reported for X {})",
+            unasked_for(&y),
+            unasked_for(&x)
+        );
+
+        world.teardown().await.expect("teardown");
+    }
 
     #[test]
     fn the_arm_breaks_no_relay_and_withholds_nothing() {

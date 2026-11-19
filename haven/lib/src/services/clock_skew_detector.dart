@@ -222,7 +222,8 @@ class ClockSkewDetector {
   /// relay refused for something other than its time (the relays judged the
   /// event and blamed nothing about its clock); one no relay took with at
   /// least one blaming its timestamp raises it in that direction; one no
-  /// relay was reached for, or that was not sent, says nothing either way.
+  /// relay was reached for, or that was not sent to a relay, says nothing
+  /// either way.
   void recordLocationPublish(LocationPublishFfi publish) {
     switch (publish) {
       case LocationPublishFfi.accepted || LocationPublishFfi.refused:
@@ -237,7 +238,8 @@ class ClockSkewDetector {
           LocationPublishFfi.expired ||
           LocationPublishFfi.superseded ||
           LocationPublishFfi.ended ||
-          LocationPublishFfi.inFlight:
+          LocationPublishFfi.inFlight ||
+          LocationPublishFfi.meshOnly:
         break;
     }
   }

@@ -79,6 +79,7 @@ void main() {
         LocationPublishFfi.superseded,
         LocationPublishFfi.ended,
         LocationPublishFfi.inFlight,
+        LocationPublishFfi.meshOnly,
         null,
       ]) {
         expect(

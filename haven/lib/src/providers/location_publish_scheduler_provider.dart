@@ -134,6 +134,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/mesh_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/providers/sharing_health_provider.dart';
 import 'package:haven/src/rust/api.dart';
@@ -455,7 +456,15 @@ class LocationPublishSchedulerNotifier extends Notifier<void>
   /// stall ceiling, when the coordinator itself supersedes it.
   Future<void> _dispatchBurst(List<_BurstTarget> burst, int generation) {
     final sink = _tickSink;
-    if (sink == null) return _publishBurst(burst, generation);
+    if (sink == null) {
+      // The mesh rides the tick behind its relay publishes, and off the
+      // chain: nothing a relay is sent waits on it or fails with it.
+      return _publishBurst(burst, generation).whenComplete(() {
+        if (_isCurrent(generation) && _active) {
+          unawaited(ref.read(meshProvider.notifier).drive());
+        }
+      });
+    }
     // Every circle is handed over BEFORE the first await, so they all reach the
     // coordinator's due set while it is still empty and one burst carries them
     // — the joins it is built for. The ticks that queue a burst of their own
@@ -508,9 +517,16 @@ class LocationPublishSchedulerNotifier extends Notifier<void>
       generation,
     );
     if (fix == null) return;
+    // One word to the map's ripple a pass, at its first hand-off to the
+    // mesh, however many circles it sends for.
+    var handedOff = false;
     for (var i = 0; i < order.length; i++) {
       if (!_isCurrent(generation) || !_active) return;
-      await _pacedPublish(order[i].key, generation, gaps[i], fix);
+      if (await _pacedPublish(order[i].key, generation, gaps[i], fix) &&
+          !handedOff) {
+        handedOff = true;
+        noteMeshHandOff(ref);
+      }
     }
   }
 
@@ -530,7 +546,7 @@ class LocationPublishSchedulerNotifier extends Notifier<void>
   /// stays PER CIRCLE for the same reason it exists at all — inside a burst it
   /// is what stops one wedged circle from taking its siblings' publishes with
   /// it.
-  Future<void> _pacedPublish(
+  Future<bool> _pacedPublish(
     String circleKey,
     int generation,
     Duration gap,
@@ -541,7 +557,7 @@ class LocationPublishSchedulerNotifier extends Notifier<void>
       final elapsed = DateTime.now().difference(last);
       if (elapsed < gap) {
         await Future<void>.delayed(gap - elapsed);
-        if (!_isCurrent(generation) || !_active) return;
+        if (!_isCurrent(generation) || !_active) return false;
       }
     }
     // Re-read AFTER the wait, never before it: the wait is seconds long, and a
@@ -550,15 +566,26 @@ class LocationPublishSchedulerNotifier extends Notifier<void>
     // as the gap in which exactly that happens. The burst sink re-reads at the
     // same point, through [eligibleCircle].
     final circle = _circles[circleKey];
-    if (circle == null) return;
+    if (circle == null) return false;
     _lastChainPublishAt = DateTime.now();
-    await _publishCircle(circle, generation, fix: fix).timeout(
+    // No relay receive is part of a foreground tick, so it can point to none
+    // that completed before this send: nothing the mesh brought is passed on
+    // to a relay from here.
+    return _publishCircle(
+      circle,
+      generation,
+      fix: fix,
+      received: false,
+    ).timeout(
       _publishLinkTimeout,
-      onTimeout: () => debugPrint(
-        '[LocationPublishScheduler] per-circle publish exceeded '
-        '${_publishLinkTimeout.inSeconds}s — abandoning the link so the '
-        'chain keeps moving',
-      ),
+      onTimeout: () {
+        debugPrint(
+          '[LocationPublishScheduler] per-circle publish exceeded '
+          '${_publishLinkTimeout.inSeconds}s — abandoning the link so the '
+          'chain keeps moving',
+        );
+        return false;
+      },
     );
   }
 
@@ -596,12 +623,23 @@ class LocationPublishSchedulerNotifier extends Notifier<void>
   /// It never opens a window of its own: every plane takes ONE fix per burst,
   /// and a per-circle window here is what would put a variable acquisition
   /// inside the decorrelation gap (see [_publishBurst]).
-  Future<void> _publishCircle(
+  ///
+  /// [received] and [meshOnly] are [BurstPublisher.publishInBurst]'s. A seal
+  /// for the mesh alone asks no relay, so nothing of it — a hold and a
+  /// failure included — is a verdict on the relay plane, and the health model
+  /// hears none of it.
+  ///
+  /// Answers whether the send got past the send-time check, which is where
+  /// the core leaves the sealed location for the Bluetooth mesh: a send a
+  /// relay took or did not, and one for the mesh alone.
+  Future<bool> _publishCircle(
     Circle circle,
     int generation, {
     required BurstFix fix,
+    required bool received,
+    bool meshOnly = false,
   }) async {
-    if (!_isCurrent(generation) || !_active) return;
+    if (!_isCurrent(generation) || !_active) return false;
     try {
       final service = ref.read(locationSharingServiceProvider);
       final outcome = await service.publishLocation(
@@ -609,26 +647,36 @@ class LocationPublishSchedulerNotifier extends Notifier<void>
         nostrGroupId: circle.nostrGroupId,
         latitude: fix.latitude,
         longitude: fix.longitude,
+        received: received,
+        meshOnly: meshOnly,
       );
+      if (meshOnly) return outcome is LocationPublishMeshOnly;
       switch (outcome) {
         // A send no relay took delivered nothing: recorded, so the
         // sharing-health model can see the plane die.
         case LocationPublishSent(:final acked):
           _recordPublishOutcome(circle, acked: acked);
+          return true;
         // A held send is NOT a publish failure: nothing was rejected, the core
         // held the circle's sends. It gets its own health verdict so the
         // banner can name the real cause, and no relay verdict.
         case LocationPublishDeferred():
           debugPrint('[LocationPublishScheduler] send held by the core');
           _recordDeferredSend(circle);
+          return false;
         // Another send of the same location is under way: nothing to say.
         case LocationPublishInFlight():
-          break;
+          return false;
+        // Handed to the mesh alone: no relay was asked, so there is neither
+        // a relay verdict nor a held send to record.
+        case LocationPublishMeshOnly():
+          return true;
       }
     } on Object catch (e) {
       debugPrint('[LocationPublishScheduler] per-circle publish failed: '
           '${e.runtimeType}');
-      _recordPublishOutcome(circle, acked: false);
+      if (!meshOnly) _recordPublishOutcome(circle, acked: false);
+      return false;
     }
   }
 
@@ -750,8 +798,18 @@ class LocationPublishSchedulerNotifier extends Notifier<void>
   }
 
   @override
-  Future<void> publishInBurst(Circle circle, BurstFix fix) =>
-      _publishCircle(circle, _generation, fix: fix);
+  Future<void> publishInBurst(
+    Circle circle,
+    BurstFix fix, {
+    required bool received,
+    required bool meshOnly,
+  }) => _publishCircle(
+    circle,
+    _generation,
+    fix: fix,
+    received: received,
+    meshOnly: meshOnly,
+  );
 
   // --- Test seams (mirror MaintenanceSchedulerNotifier) --------------------
 

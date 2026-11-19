@@ -19,7 +19,7 @@
 use serde::Deserialize;
 use std::fmt;
 
-/// The `pr` profile: the four scenarios the PR lane runs.
+/// The `pr` profile: the six scenarios the PR lane runs.
 const PR_TOML: &str = include_str!("../profiles/pr.toml");
 /// The `nightly` profile.
 const NIGHTLY_TOML: &str = include_str!("../profiles/nightly.toml");
@@ -30,7 +30,7 @@ const WEEKLY_TOML: &str = include_str!("../profiles/weekly.toml");
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProfileName {
-    /// The per-PR lane: minutes, four scenarios, one relay.
+    /// The per-PR lane: minutes, six scenarios, one relay.
     Pr,
     /// The nightly lane: the scenarios whose bounds do not fit a PR budget.
     Nightly,
@@ -277,8 +277,11 @@ mod tests {
     }
 
     #[test]
-    fn the_pr_profile_runs_the_four_scenarios_it_is_pinned_to() {
-        assert_eq!(pr().scenario_ids(), vec!["S01", "S06", "S11", "S13"]);
+    fn the_pr_profile_runs_the_six_scenarios_it_is_pinned_to() {
+        assert_eq!(
+            pr().scenario_ids(),
+            vec!["S01", "S06", "S11", "S13", "S27", "S28"]
+        );
         assert_eq!(
             pr().arms("S01").map(<[String]>::len),
             Some(1),

@@ -24,7 +24,7 @@ mod proxy;
 pub use forge::{mint, mint_dated, past_expiration, Forgery};
 pub use ledger::{
     plane_instant, EndpointId, Ledger, NegFrame, PlaneFrame, PlaneHighWater, PlaneRecord,
-    PLANE_IDS_CAP, PLANE_SHAPES_CAP,
+    CLIENT_VERBS, PLANE_IDS_CAP, PLANE_SHAPES_CAP,
 };
 pub use policies::{oversize_message, NativeClosed, OVERSIZE_PREFIX};
 pub use proxy::NEG_REFUSAL;
@@ -379,6 +379,10 @@ impl RelayPlane for SimRelay {
     fn plane_ledger(&self) -> Option<&Ledger> {
         Some(&self.ledger)
     }
+
+    async fn stored_events(&self, filter: Filter) -> Result<Vec<Event>, RigError> {
+        self.stored_page(filter).await
+    }
 }
 
 impl SimRelay {
@@ -545,6 +549,10 @@ async fn apply_inner(
         }
         Fault::RefusesNegentropy => {
             edit_all(endpoints, |state| state.refuse_negentropy = true);
+            Ok(())
+        }
+        Fault::WithholdNegentropy => {
+            edit_all(endpoints, |state| state.withhold_negentropy = true);
             Ok(())
         }
         // A heal restores BEHAVIOUR, endpoint included. It cannot restore a

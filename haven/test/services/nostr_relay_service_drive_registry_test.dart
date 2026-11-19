@@ -141,10 +141,22 @@ class _Pool implements RelayManagerFfi {
   }) => _park(const SealOutcomeFfi(replayed: [], errored: false));
 
   @override
+  Future<SealOutcomeFfi> sealLocationForMeshDriven({
+    required CircleManagerFfi circle,
+    required List<int> mlsGroupId,
+    required LocationMessage location,
+  }) => _park(const SealOutcomeFfi(replayed: [], errored: false));
+
+  @override
   Future<LocationPublishFfi> publishLocationDriven({
     required CircleManagerFfi circle,
     required SealedLocationFfi sealed,
+    required bool received,
   }) => _park(LocationPublishFfi.accepted);
+
+  @override
+  Future<MeshDriveFfi> meshDriveDriven({required CircleManagerFfi circle}) =>
+      _park(const MeshDriveFfi(replayed: [], errored: false, more: false));
 
   @override
   Future<LeaveOutcomeFfi> leaveDriven({
@@ -248,7 +260,15 @@ void main() {
       longitude: 2,
       foreground: true,
     ),
-    'publishLocation': (s) => s.publishLocation(circle: o, sealed: o),
+    'sealLocationForMesh': (s) => s.sealLocationForMesh(
+      circle: o,
+      mlsGroupId: g,
+      latitude: 1,
+      longitude: 2,
+    ),
+    'publishLocation': (s) =>
+        s.publishLocation(circle: o, sealed: o, received: false),
+    'meshDrive': (s) => s.meshDrive(circle: o),
     'leave': (s) => s.leave(circle: o, mlsGroupId: g, foreground: true),
     'resumeLeave': (s) =>
         s.resumeLeave(circle: o, mlsGroupId: g, foreground: true),

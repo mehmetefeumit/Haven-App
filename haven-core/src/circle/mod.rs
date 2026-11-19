@@ -42,6 +42,7 @@ mod storage_contamination;
 mod storage_kept_input;
 mod storage_key_packages;
 mod storage_member_directory;
+mod storage_mesh;
 mod storage_profile;
 mod storage_profile_sync;
 mod storage_refused;
@@ -74,6 +75,7 @@ pub use storage_member_directory::{
     DirectoryEntry, DirectoryTier, DIRECTORY_PURGE_NEVER, DIRECTORY_RETENTION_DAYS,
     DIRECTORY_RETENTION_SECS,
 };
+pub use storage_mesh::MeshCounts;
 pub use storage_profile::{CachedProfileView, PROFILE_MISS_BACKOFF_SECS};
 pub use storage_profile_sync::{ProfileDebt, ProfilePendingState, ProfileSyncCommit};
 pub use storage_relay_prefs::{PublishedEventRecord, UserRelayRow};

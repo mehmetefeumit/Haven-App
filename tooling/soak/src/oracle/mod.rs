@@ -400,6 +400,24 @@ pub enum Finding {
         /// Whose engine.
         device: DeviceTag,
     },
+    /// With the Bluetooth mesh on, a device's relay path was not what it is
+    /// with it off: a frame it sent a relay, a seal's or a send's answer, a
+    /// cursor, a relay call from a mesh drive, or an update the mesh carried
+    /// that no send-time check had passed.
+    RelayPathMoved {
+        /// Whose relay path; `None` for a frame on a plane's canonical
+        /// endpoint, which no device's engine dials.
+        device: Option<DeviceTag>,
+    },
+    /// A device passed a fellow member's update on to a relay past one of the
+    /// bridge's gates: in a drive whose relay receive had not completed, or
+    /// after it took in a removal the update was sealed before.
+    BridgedPastItsGate {
+        /// Who passed it on.
+        device: DeviceTag,
+        /// In which circle.
+        circle: CircleTag,
+    },
     /// The engine refused a send, classified.
     SendRefused {
         /// Who was sending.
@@ -554,6 +572,8 @@ impl Finding {
             Self::SilentRelayStalled { .. } => "silent-relay-stalled",
             Self::HeldEventLost { .. } => "held-event-lost",
             Self::ResubscribeUnbounded { .. } => "resubscribe-unbounded",
+            Self::RelayPathMoved { .. } => "relay-path-moved",
+            Self::BridgedPastItsGate { .. } => "bridged-past-its-gate",
             Self::SendRefused { .. } => "send-refused",
             Self::RetentionEdgeRefused { .. } => "retention-edge-refused",
             Self::RetentionWindowOverrun { .. } => "retention-window-overrun",
@@ -605,6 +625,7 @@ impl Finding {
             Self::CommitPending { device }
             | Self::BacklogUnsettled { device }
             | Self::ResubscribeUnbounded { device } => vec![device.to_string()],
+            Self::RelayPathMoved { device } => device.iter().map(ToString::to_string).collect(),
             Self::RosterDiverged { circle }
             | Self::EpochDiverged { circle }
             | Self::BranchDiverged { circle }
@@ -626,6 +647,7 @@ impl Finding {
             | Self::CursorHeld { device, circle }
             | Self::SilentRelayStalled { device, circle }
             | Self::HeldEventLost { device, circle }
+            | Self::BridgedPastItsGate { device, circle }
             | Self::SendRefused { device, circle, .. } => {
                 vec![device.to_string(), circle.to_string()]
             }
@@ -659,6 +681,8 @@ impl Finding {
             | Self::SilentRelayStalled { .. }
             | Self::HeldEventLost { .. }
             | Self::ResubscribeUnbounded { .. }
+            | Self::RelayPathMoved { .. }
+            | Self::BridgedPastItsGate { .. }
             | Self::SendRefused { .. }
             | Self::RetentionEdgeRefused { .. }
             | Self::RetentionWindowOverrun { .. }
@@ -744,6 +768,13 @@ impl fmt::Display for Finding {
             }
             Self::ResubscribeUnbounded { device } => {
                 write!(f, "a health tick re-subscribed for a relay that was down ({device})")
+            }
+            Self::RelayPathMoved { device } => {
+                let endpoint = device.map_or_else(|| "canonical".to_owned(), |d| d.to_string());
+                write!(f, "the relay path differs with the mesh on ({endpoint})")
+            }
+            Self::BridgedPastItsGate { device, circle } => {
+                write!(f, "an update was passed on to a relay past a gate of the bridge ({device}, {circle})")
             }
             Self::SendRefused {
                 device,
@@ -2081,6 +2112,8 @@ mod tests {
             | Finding::SilentRelayStalled { .. }
             | Finding::HeldEventLost { .. }
             | Finding::ResubscribeUnbounded { .. }
+            | Finding::RelayPathMoved { .. }
+            | Finding::BridgedPastItsGate { .. }
             | Finding::SendRefused { .. }
             | Finding::UnaccountedOutcome
             | Finding::UnnamedRow
@@ -2162,6 +2195,10 @@ mod tests {
             Finding::SilentRelayStalled { device, circle },
             Finding::HeldEventLost { device, circle },
             Finding::ResubscribeUnbounded { device },
+            Finding::RelayPathMoved {
+                device: Some(device),
+            },
+            Finding::BridgedPastItsGate { device, circle },
             Finding::SendRefused {
                 device: DeviceTag::new(0),
                 circle: CircleTag::new(0),

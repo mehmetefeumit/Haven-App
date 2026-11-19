@@ -3,8 +3,9 @@
 //!
 //! Everything under this module is the *subject's* machinery driven for real —
 //! a `SimDevice` is a genuine MLS store behind a genuine `LiveSyncCore`, not a
-//! stand-in. The only doubles in this crate are the environment planes
-//! ([`plane`]), which is why they are traits.
+//! stand-in. The only doubles in this crate are the environment: the planes a
+//! world is generic over ([`plane`]), which is why they are traits, and the
+//! radio between mesh engines ([`mesh`]).
 //!
 //! # Handles
 //!
@@ -26,6 +27,7 @@ pub mod declare;
 pub mod device;
 #[cfg(test)]
 pub mod doubles;
+pub mod mesh;
 pub mod plane;
 pub mod restart;
 pub mod world;
@@ -40,6 +42,7 @@ use tokio::time::{Instant, MissedTickBehavior};
 pub use circle::{PacingClock, PublishVerdict, SimCircle};
 pub use declare::DeclareSink;
 pub use device::{DeviceLedger, SimDevice};
+pub use mesh::MeshPlane;
 pub use plane::{
     CapturedLine, LogDrain, RelayPlane, TimelineRecord, TimelineSink, AFTER_KILL_REMOVAL_PUBLISHED,
     AFTER_KILL_REMOVAL_REPORTED, AFTER_KILL_SENDS_RESUMED, AFTER_KILL_SEND_CLASSIFIED,

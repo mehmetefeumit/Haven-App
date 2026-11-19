@@ -55,12 +55,13 @@ fn every_fault() -> Vec<Fault> {
         Fault::Unanswering,
         Fault::WithholdEose,
         Fault::RefusesNegentropy,
+        Fault::WithholdNegentropy,
         Fault::Heal,
     ]
 }
 
 /// The number of `Fault` variants, pinned.
-const FAULT_VARIANTS: usize = 19;
+const FAULT_VARIANTS: usize = 20;
 
 /// A distinct ordinal per `Fault` variant: the exhaustiveness proof.
 const fn fault_index(fault: &Fault) -> usize {
@@ -84,6 +85,7 @@ const fn fault_index(fault: &Fault) -> usize {
         Fault::Unanswering => 16,
         Fault::WithholdEose => 17,
         Fault::RefusesNegentropy => 18,
+        Fault::WithholdNegentropy => 19,
     }
 }
 

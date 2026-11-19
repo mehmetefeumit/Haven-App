@@ -17,10 +17,12 @@
 //!
 //! * [`EphemeralKeypair`] — `secret_bytes: [u8; 32]`, `#[derive(ZeroizeOnDrop)]`
 //! * [`IdentityKeypair`]  — `secret_bytes: [u8; 32]`, `#[derive(ZeroizeOnDrop)]`
+//! * [`MeshKey`]          — `bytes: [u8; 32]`, `#[derive(ZeroizeOnDrop)]`
 //!
 //! Plus the two image types whose plaintext buffers are wrapped rather than
 //! derived, because the struct around them is not secret-only:
-//! [`ProcessedAvatar`] and [`ProfilePicture`] (RM-Z2 below).
+//! [`ProcessedAvatar`] and [`ProfilePicture`] (RM-Z2 below), and the stored
+//! form of a mesh key, [`StoredMeshKey`] (RM-Z3).
 //!
 //! All *other* secret material in the crate is either held by MDK / `nostr`
 //! types (never owned by a haven-core struct — the `get_stored_exporter_secret`
@@ -34,7 +36,9 @@
 //! trait bound or type projection, and nothing is instantiated at runtime.
 
 use haven_core::avatar::ProcessedAvatar;
+use haven_core::mesh::packet::MeshKey;
 use haven_core::nostr::identity::IdentityKeypair;
+use haven_core::nostr::mls::StoredMeshKey;
 use haven_core::nostr::EphemeralKeypair;
 use haven_core::profile::ProfilePicture;
 use zeroize::{ZeroizeOnDrop, Zeroizing};
@@ -58,6 +62,7 @@ const fn assert_zeroize_on_drop<T: ZeroizeOnDrop>() {}
 fn secret_bearing_types_are_zeroize_on_drop() {
     assert_zeroize_on_drop::<EphemeralKeypair>();
     assert_zeroize_on_drop::<IdentityKeypair>();
+    assert_zeroize_on_drop::<MeshKey>();
 }
 
 /// RM-Z2 (image pipeline): every plaintext image byte buffer the pipeline owns
@@ -79,3 +84,12 @@ const _: fn(ProcessedAvatar) -> Zeroizing<Vec<u8>> = |a| a.canonical;
 const _: fn(ProcessedAvatar) -> Zeroizing<Vec<u8>> = |a| a.thumbnail;
 const _: fn(ProfilePicture) -> Zeroizing<Vec<u8>> = |p| p.canonical;
 const _: fn(ProfilePicture) -> Zeroizing<Vec<u8>> = |p| p.thumbnail;
+
+/// RM-Z3 (mesh keys): a circle's group-event exporter secret, on its way to
+/// and from the circle store, stays `Zeroizing<[u8; 32]>`.
+///
+/// `StoredMeshKey` also carries an epoch and a routing id, so the obligation
+/// lives on the field, held by a projection as in RM-Z2. The ring's own entry
+/// is private to the session manager and has its witness beside it
+/// (`nostr::mls::manager::mesh`).
+const _: fn(StoredMeshKey) -> Zeroizing<[u8; 32]> = |key| key.exporter;

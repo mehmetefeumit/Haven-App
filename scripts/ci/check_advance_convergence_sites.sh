@@ -119,7 +119,7 @@ readonly REREAD_STEPS=(
   'send_location_staging|[.]send[(]'
   'departure_holds_a_send|away_hold[(]'
   'leave_group_staging|send_leave[(]'
-  'process_event_staging|[.]ingest[(]'
+  'staging_ingest|[.]ingest[(]'
   'repair_self_update_staging|send_self_update_now[(]'
   'post_join_self_update_staging|send_self_update_now[(]'
   'change_admin_policy_staging|send_admin_policy_now[(]'
@@ -555,7 +555,7 @@ pub(crate) async fn leave_group_staging(&self, g: &G, still: Still) {
     let left = Self::send_leave(&mut s, g).await;
     self.stage_commits(&mut s, left, mode).await
 }
-pub(crate) async fn process_event_staging(&self, e: &E, still: Still) {
+async fn staging_ingest(&self, e: &E, still: Still, from_mesh: bool) {
     let mut s = self.engine().await?;
     let ahead = self.hand_back_stranded(&mut s, g).await?;
     let mode = if still.holds() { still.decided() } else { DriveMode::FinishOnly };

@@ -493,12 +493,20 @@ class MockCircleService implements CircleService {
   /// When set, [publishSealedLocation] throws it.
   Exception? publishSealedThrows;
 
+  /// The `received` word each [publishSealedLocation] carried, in order.
+  final List<bool> publishReceived = [];
+
+  /// The `meshOnly` word each [sealLocation] carried, in order.
+  final List<bool> sealMeshOnly = [];
+
   @override
   Future<LocationSeal> sealLocation({
     required List<int> mlsGroupId,
     required double latitude,
     required double longitude,
+    bool meshOnly = false,
   }) async {
+    sealMeshOnly.add(meshOnly);
     encryptedMlsGroupIds.add(mlsGroupId);
     encryptCallTimes.add(DateTime.now());
     methodCalls.add('sealLocation');
@@ -534,8 +542,12 @@ class MockCircleService implements CircleService {
   }
 
   @override
-  Future<LocationPublishFfi> publishSealedLocation(LocationSealed seal) async {
+  Future<LocationPublishFfi> publishSealedLocation(
+    LocationSealed seal, {
+    required bool received,
+  }) async {
     methodCalls.add('publishSealedLocation');
+    publishReceived.add(received);
     final boom = publishSealedThrows;
     if (boom != null) throw boom;
     if (publishAnswers.isEmpty) return LocationPublishFfi.accepted;

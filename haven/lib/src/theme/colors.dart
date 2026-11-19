@@ -40,6 +40,19 @@ abstract final class HavenStatusColors {
   static const Color away = Color(0xFFD97706);
 }
 
+/// The Bluetooth mesh's colour: the mesh button while mesh is on, and the
+/// aura on the map.
+abstract final class HavenMeshColors {
+  /// Mesh is on. The blue of the status series' green, amber and red. One
+  /// value for both themes: it is laid over the basemap, which is chosen
+  /// independently of the theme.
+  static const Color active = Color(0xFF2563EB);
+
+  /// [active] where it is drawn thin over a dark basemap, on which that blue
+  /// is too close to the ground to be seen: the same hue, lighter.
+  static const Color activeOnDark = Color(0xFF60A5FA);
+}
+
 /// Achromatic primary used as the backbone of the color scheme.
 ///
 /// Near-black in light theme; the dark theme inverts to near-white via

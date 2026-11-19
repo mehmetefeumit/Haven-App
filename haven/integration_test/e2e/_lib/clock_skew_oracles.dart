@@ -67,9 +67,10 @@ String? checkFastClockRejectionClassified(
     LocationPublishFfi.expired ||
     LocationPublishFfi.superseded ||
     LocationPublishFfi.ended ||
-    LocationPublishFfi.inFlight =>
-      'the sealed location was not sent (${publish.name}), so the lane '
-          'cannot judge the classification of a refusal.',
+    LocationPublishFfi.inFlight ||
+    LocationPublishFfi.meshOnly =>
+      'the sealed location was not sent to a relay (${publish.name}), so '
+          'the lane cannot judge the classification of a refusal.',
   };
 }
 
