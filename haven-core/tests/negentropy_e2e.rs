@@ -66,7 +66,13 @@ impl nostr_relay_builder::builder::QueryPolicy for HeldQueries {
         &'a self,
         _query: &'a nostr::filter::Filter,
         _addr: &'a std::net::SocketAddr,
-    ) -> nostr::util::BoxedFuture<'a, nostr_relay_builder::builder::PolicyResult> {
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = nostr_relay_builder::builder::PolicyResult>
+                + Send
+                + 'a,
+        >,
+    > {
         Box::pin(async move {
             let _ = self.open.clone().wait_for(|open| *open).await;
             nostr_relay_builder::builder::PolicyResult::Accept

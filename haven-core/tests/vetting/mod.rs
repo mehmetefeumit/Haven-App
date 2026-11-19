@@ -6,10 +6,11 @@
 
 #![allow(dead_code)]
 
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::time::Duration;
 
-use nostr::util::BoxedFuture;
 use nostr::{event::Event, filter::Filter};
 use nostr_relay_builder::builder::RelayBuilder;
 use nostr_relay_builder::prelude::{PolicyResult, WritePolicy};
@@ -185,7 +186,7 @@ impl WritePolicy for RefuseEveryWrite {
         &'a self,
         _event: &'a Event,
         _addr: &'a SocketAddr,
-    ) -> BoxedFuture<'a, PolicyResult> {
+    ) -> Pin<Box<dyn Future<Output = PolicyResult> + Send + 'a>> {
         Box::pin(async { PolicyResult::Reject("restricted: not on the allowlist".to_string()) })
     }
 }

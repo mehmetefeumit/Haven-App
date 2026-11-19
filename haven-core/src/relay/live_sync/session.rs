@@ -7467,7 +7467,13 @@ mod tests {
             &'a self,
             query: &'a Filter,
             _addr: &'a std::net::SocketAddr,
-        ) -> nostr::util::BoxedFuture<'a, nostr_relay_builder::builder::PolicyResult> {
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = nostr_relay_builder::builder::PolicyResult>
+                    + Send
+                    + 'a,
+            >,
+        > {
             Box::pin(async move {
                 self.seen
                     .lock()
@@ -8317,7 +8323,13 @@ mod tests {
             &'a self,
             _query: &'a Filter,
             _addr: &'a std::net::SocketAddr,
-        ) -> nostr::util::BoxedFuture<'a, nostr_relay_builder::builder::PolicyResult> {
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = nostr_relay_builder::builder::PolicyResult>
+                    + Send
+                    + 'a,
+            >,
+        > {
             Box::pin(async {
                 nostr_relay_builder::builder::PolicyResult::Reject("auth-required: no".to_string())
             })

@@ -638,7 +638,13 @@ mod tests {
             &'a self,
             _query: &'a Filter,
             _addr: &'a std::net::SocketAddr,
-        ) -> nostr::util::BoxedFuture<'a, nostr_relay_builder::prelude::PolicyResult> {
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = nostr_relay_builder::prelude::PolicyResult>
+                    + Send
+                    + 'a,
+            >,
+        > {
             self.seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Box::pin(async {
                 nostr_relay_builder::prelude::PolicyResult::Reject(
@@ -663,7 +669,13 @@ mod tests {
             &'a self,
             _query: &'a Filter,
             _addr: &'a std::net::SocketAddr,
-        ) -> nostr::util::BoxedFuture<'a, nostr_relay_builder::prelude::PolicyResult> {
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = nostr_relay_builder::prelude::PolicyResult>
+                    + Send
+                    + 'a,
+            >,
+        > {
             self.seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Box::pin(async { nostr_relay_builder::prelude::PolicyResult::Accept })
         }
@@ -1073,7 +1085,13 @@ mod tests {
             &'a self,
             _query: &'a Filter,
             _addr: &'a std::net::SocketAddr,
-        ) -> nostr::util::BoxedFuture<'a, nostr_relay_builder::prelude::PolicyResult> {
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = nostr_relay_builder::prelude::PolicyResult>
+                    + Send
+                    + 'a,
+            >,
+        > {
             self.arrivals
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)

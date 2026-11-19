@@ -32,7 +32,9 @@
 //! gate and releases it explicitly.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -49,7 +51,6 @@ use haven_core::relay::scripted_relay::{Frame, ScriptedRelay, Verdict};
 use haven_core::relay::{allow_ws_loopback_for_test, normalize_relay_url, RelayManager};
 use image::{codecs::jpeg::JpegEncoder, RgbImage};
 use nostr::nips::nip19::ToBech32 as _;
-use nostr::util::BoxedFuture;
 use nostr::{
     event::{Event, EventBuilder, Kind},
     filter::Filter,
@@ -185,7 +186,7 @@ impl WritePolicy for LedgerWritePolicy {
         &'a self,
         event: &'a Event,
         _addr: &'a SocketAddr,
-    ) -> BoxedFuture<'a, PolicyResult> {
+    ) -> Pin<Box<dyn Future<Output = PolicyResult> + Send + 'a>> {
         Box::pin(async move {
             let author = event.pubkey.to_hex();
             // Both locks are released before the await below — a std guard held
@@ -231,7 +232,7 @@ impl QueryPolicy for LedgerQueryPolicy {
         &'a self,
         query: &'a Filter,
         _addr: &'a SocketAddr,
-    ) -> BoxedFuture<'a, PolicyResult> {
+    ) -> Pin<Box<dyn Future<Output = PolicyResult> + Send + 'a>> {
         if let Some(authors) = &query.authors {
             let mut queried = self
                 .ledger

@@ -11,7 +11,9 @@
 //! a check made after the pool's de-duplication could not promise. Tracker
 //! `T-POOL-VERIFY-CACHE`; guarded by `scripts/ci/check_engine_client_options.sh`.
 
-use nostr::util::BoxedFuture;
+use std::future::Future;
+use std::pin::Pin;
+
 use nostr::{event::Event, message::SubscriptionId, types::RelayUrl};
 use nostr_sdk::pool::monitor::Monitor;
 use nostr_sdk::pool::policy::{AdmitPolicy, AdmitStatus, PolicyError};
@@ -32,7 +34,7 @@ impl AdmitPolicy for VerifiedEvents {
         _relay_url: &'a RelayUrl,
         _subscription_id: &'a SubscriptionId,
         event: &'a Event,
-    ) -> BoxedFuture<'a, Result<AdmitStatus, PolicyError>> {
+    ) -> Pin<Box<dyn Future<Output = Result<AdmitStatus, PolicyError>> + Send + 'a>> {
         // `verify`, never `verify_signature`: a signature covers the claimed id
         // alone, so it still holds over fields swapped under a genuine id.
         let status = if event.verify().is_ok() {
@@ -49,7 +51,7 @@ impl AdmitPolicy for VerifiedEvents {
     fn admit_connection<'a>(
         &'a self,
         relay_url: &'a RelayUrl,
-    ) -> BoxedFuture<'a, Result<AdmitStatus, PolicyError>> {
+    ) -> Pin<Box<dyn Future<Output = Result<AdmitStatus, PolicyError>> + Send + 'a>> {
         super::dial_witness::note(relay_url.as_str());
         Box::pin(async move { Ok(AdmitStatus::Success) })
     }

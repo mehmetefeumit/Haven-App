@@ -76,7 +76,6 @@ use haven_soak::rig::{
     install_process_globals, poll_until, CircleTag, DeviceTag, PublishVerdict, RelayPlane,
     RelayTag, RigError, SimCircle, SimDevice, Step,
 };
-use nostr::util::BoxedFuture;
 use nostr::{
     event::{Event, EventBuilder, EventId, Kind, Tag},
     filter::SingleLetterTag,
@@ -86,6 +85,7 @@ use nostr::{
 };
 use nostr_relay_builder::builder::{PolicyResult, WritePolicy};
 use nostr_relay_builder::{LocalRelay, RelayBuilder};
+use std::pin::Pin;
 
 // ── A fault-free relay plane ────────────────────────────────────────────────
 
@@ -101,7 +101,7 @@ impl WritePolicy for AcceptLedger {
         &'a self,
         event: &'a Event,
         _addr: &'a SocketAddr,
-    ) -> BoxedFuture<'a, PolicyResult> {
+    ) -> Pin<Box<dyn Future<Output = PolicyResult> + Send + 'a>> {
         Box::pin(async move {
             self.accepted.lock().unwrap().push(event.id);
             PolicyResult::Accept

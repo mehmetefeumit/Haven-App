@@ -41,7 +41,6 @@ use haven_core::relay::fanout::{
 };
 use haven_core::relay::maintenance::build_kp_maintenance_events;
 use haven_core::relay::{RelayManager, RelayResult};
-use nostr::util::BoxedFuture;
 use nostr::{event::Event, key::Keys};
 use nostr_relay_builder::builder::{PolicyResult, WritePolicy};
 use nostr_relay_builder::{LocalRelay, MockRelay, RelayBuilder};
@@ -101,7 +100,7 @@ impl WritePolicy for RejectEverything {
         &'a self,
         _event: &'a Event,
         _addr: &'a SocketAddr,
-    ) -> BoxedFuture<'a, PolicyResult> {
+    ) -> Pin<Box<dyn Future<Output = PolicyResult> + Send + 'a>> {
         Box::pin(async { PolicyResult::Reject("test relay refuses this event".to_string()) })
     }
 }
@@ -122,7 +121,7 @@ impl WritePolicy for NeverAnswer {
         &'a self,
         _event: &'a Event,
         _addr: &'a SocketAddr,
-    ) -> BoxedFuture<'a, PolicyResult> {
+    ) -> Pin<Box<dyn Future<Output = PolicyResult> + Send + 'a>> {
         Box::pin(async {
             std::future::pending::<()>().await;
             PolicyResult::Accept

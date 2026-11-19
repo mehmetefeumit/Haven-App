@@ -42,7 +42,9 @@
 //! gap over two real in-process relays, by counting the requests each one is
 //! asked to serve.
 
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -57,7 +59,6 @@ use haven_core::profile::{
 use haven_core::relay::{
     allow_ws_loopback_for_test, normalize_relay_url, RelayManager, PRODUCTION_DISCOVERY_RELAYS,
 };
-use nostr::util::BoxedFuture;
 use nostr::{
     event::{EventBuilder, Kind, Tag},
     filter::{Filter, SingleLetterTag},
@@ -228,7 +229,7 @@ impl QueryPolicy for CountingQueryPolicy {
         &'a self,
         _query: &'a Filter,
         _addr: &'a SocketAddr,
-    ) -> BoxedFuture<'a, PolicyResult> {
+    ) -> Pin<Box<dyn Future<Output = PolicyResult> + Send + 'a>> {
         self.seen.fetch_add(1, Ordering::SeqCst);
         Box::pin(async { PolicyResult::Accept })
     }

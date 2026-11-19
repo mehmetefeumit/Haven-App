@@ -44,6 +44,8 @@
 //! [`poll_until`] — so a slow machine lengthens a wait and can never flip a
 //! verdict.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -56,7 +58,6 @@ use haven_core::relay::live_sync::{
     SyncStatusReason,
 };
 use haven_core::relay::maintenance::build_kp_maintenance_events;
-use nostr::util::BoxedFuture;
 use nostr::{
     event::Event,
     filter::{Filter, SingleLetterTag},
@@ -134,7 +135,7 @@ impl QueryPolicy for RecordingQueries {
         &'a self,
         query: &'a Filter,
         _addr: &'a std::net::SocketAddr,
-    ) -> BoxedFuture<'a, PolicyResult> {
+    ) -> Pin<Box<dyn Future<Output = PolicyResult> + Send + 'a>> {
         Box::pin(async move {
             self.seen.lock().expect("record a REQ").push(query.clone());
             PolicyResult::Accept
@@ -171,7 +172,7 @@ impl WritePolicy for HoldEngineCommitOk {
         &'a self,
         event: &'a Event,
         _addr: &'a std::net::SocketAddr,
-    ) -> BoxedFuture<'a, PolicyResult> {
+    ) -> Pin<Box<dyn Future<Output = PolicyResult> + Send + 'a>> {
         Box::pin(async move {
             if event.kind != nostr::event::Kind::Custom(445)
                 || self.seen.fetch_add(1, Ordering::AcqRel) == 0
@@ -224,7 +225,7 @@ impl QueryPolicy for GatedQueries {
         &'a self,
         _query: &'a Filter,
         _addr: &'a std::net::SocketAddr,
-    ) -> BoxedFuture<'a, PolicyResult> {
+    ) -> Pin<Box<dyn Future<Output = PolicyResult> + Send + 'a>> {
         Box::pin(async move {
             let mut open = self.open.clone();
             // Bounded only so a broken test can never hang; the verdict is
@@ -247,7 +248,7 @@ impl QueryPolicy for GatedRecordingQueries {
         &'a self,
         query: &'a Filter,
         _addr: &'a std::net::SocketAddr,
-    ) -> BoxedFuture<'a, PolicyResult> {
+    ) -> Pin<Box<dyn Future<Output = PolicyResult> + Send + 'a>> {
         Box::pin(async move {
             self.seen.lock().expect("record a REQ").push(query.clone());
             let mut open = self.open.clone();
@@ -715,7 +716,7 @@ async fn a_closed_queued_before_pause_does_not_reopen_a_req_while_paused() {
             &'a self,
             _query: &'a Filter,
             _addr: &'a std::net::SocketAddr,
-        ) -> BoxedFuture<'a, PolicyResult> {
+        ) -> Pin<Box<dyn Future<Output = PolicyResult> + Send + 'a>> {
             Box::pin(async { PolicyResult::Reject("closed by policy".to_string()) })
         }
     }
@@ -1888,7 +1889,7 @@ impl QueryPolicy for CloseTheFirst {
         &'a self,
         _query: &'a Filter,
         _addr: &'a std::net::SocketAddr,
-    ) -> BoxedFuture<'a, PolicyResult> {
+    ) -> Pin<Box<dyn Future<Output = PolicyResult> + Send + 'a>> {
         Box::pin(async move {
             if self.asked.fetch_add(1, Ordering::SeqCst) == 0 {
                 PolicyResult::Reject("closed by policy".to_string())
