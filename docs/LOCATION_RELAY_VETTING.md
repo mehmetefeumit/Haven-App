@@ -36,9 +36,9 @@ kind-445 older than 30 days.
 
 ### Why the probe checks what it checks
 
-* **L1 — a signer-less `#h` read.** Haven's receive planes hold no signer and
-  never answer a NIP-42 challenge for a circle's `#h` REQ (Security Rule 16,
-  owner decision D1a). A relay that challenges on read is not degraded for a
+* **L1 — a signer-less `#h` read.** No client that carries a circle's `#h`
+  REQ holds a signer or answers a NIP-42 challenge (Security Rule 16, owner
+  decision D1a). A relay that challenges on read is not degraded for a
   circle, it is inert — and inert silently: the members' fixes simply never
   arrive.
 * **Criterion (c) on write.** A relay that answers a kind-445 `auth-required:`

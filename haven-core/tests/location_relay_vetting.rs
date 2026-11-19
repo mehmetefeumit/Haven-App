@@ -3,9 +3,9 @@
 //! A new circle's relays are three drawn from `PRODUCTION_LOCATION_RELAYS`, and
 //! every one of them must do four things no reading of the list can settle:
 //!
-//! * L1 — serve a signer-less `#h` read. Haven's receive planes hold no signer
-//!   and never authenticate (Security Rule 16), so a relay that challenges is
-//!   inert for a circle;
+//! * L1 — serve a signer-less `#h` read. No client that carries a circle's
+//!   `#h` REQ holds a signer or authenticates (Security Rule 16), so a relay
+//!   that challenges is inert for a circle;
 //! * L2 — keep a location-shaped kind-445 (`h` + NIP-40 `expiration`) from a
 //!   key it has never seen, and serve it back by `#h`: every location is sent
 //!   under a fresh key (Security Rule 2);

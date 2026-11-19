@@ -2,9 +2,11 @@
 //! kind-1059 reads to a client that does not authenticate
 //! (`fixtures/relay_read_gating_2026-11-16.json`).
 //!
-//! An inviter delivers a Welcome to the invitee's inbox relays; Haven never
-//! answers NIP-42 (Security Rule 16), so a seeded inbox relay that takes the
-//! gift wrap but gates reading it back strands every invitation sent there.
+//! An inviter delivers a Welcome to the invitee's inbox relays, and the seed
+//! holds only relays that serve it back with no proof of identity: Haven's own
+//! inbox reads answer NIP-42 (Security Rule 16), but a client of the invitee
+//! that does not would find nothing on a seeded relay that gates gift-wrap
+//! reads.
 //! CI must not dial public relays, so this holds the RECORD and the CONSTANTS
 //! together: re-seeding with an unprobed relay, or one the record shows
 //! gating gift-wrap reads, is a red test. No network.

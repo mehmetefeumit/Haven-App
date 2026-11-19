@@ -395,9 +395,10 @@ impl CircleStorage {
     /// inbox seed: that relay's row goes and any seed relay missing is added
     /// (startup migration, once per install).
     ///
-    /// A Welcome sent to that relay is acknowledged and then never served back
-    /// to this device, which does not authenticate (Security Rule 16). The
-    /// stored rows are compared, canonicalised, as a SET with
+    /// That relay serves a Welcome back only to a reader that answers its
+    /// NIP-42 challenge, and the inbox seed prefers relays that need no such
+    /// proof ([`crate::circle::PRODUCTION_INBOX_RELAYS`]). The stored rows are
+    /// compared, canonicalised, as a SET with
     /// [`RETIRED_INBOX_SEED`]: an inbox list the user changed in any way — a
     /// relay added or removed — is theirs and is left alone. The sentinel is
     /// written either way, in the same transaction, so the check never runs

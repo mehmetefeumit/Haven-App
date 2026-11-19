@@ -3,7 +3,8 @@
 //! serves them only to a client that authenticates — as `relay.damus.io` does
 //! under strfry's default `restrictedReadKinds`. The invitee's own inbox reads
 //! answer that relay's NIP-42 challenge with the identity key (owner-directed
-//! 2026-11-16); nothing else Haven sends ever does.
+//! 2026-11-16); no relay here refuses a write, so nothing else Haven sends
+//! does.
 //!
 //! The invitee's lists go in through the user path and out through the
 //! product's relay-list and `KeyPackage` maintenance; the inviter finds them

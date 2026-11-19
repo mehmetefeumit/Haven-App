@@ -756,10 +756,10 @@ mod tests {
         }
     }
 
-    /// Haven never authenticates, so a gated relay refuses every re-issue:
-    /// a minute, doubling, capped at an hour — never the 30 s throttle,
-    /// which would ask a relay that has said no a hundred and twenty times an
-    /// hour.
+    /// A relay that still refuses once the inbox socket has answered its
+    /// challenge refuses every re-issue: a minute, doubling, capped at an
+    /// hour — never the 30 s throttle, which would ask a relay that has said
+    /// no a hundred and twenty times an hour.
     #[test]
     fn a_read_gated_key_backs_off_from_a_minute_to_an_hour() {
         let mut s = RepairSchedule::default();

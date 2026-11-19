@@ -1,6 +1,6 @@
 {
   "probed_on": "2026-11-16",
-  "method": "Read-only. One WebSocket per filter, from a client that never answers NIP-42 AUTH, as Haven's never does (Security Rule 16). Each REQ names a freshly generated random pubkey (#p for kinds 1059 and 4, authors for kinds 30443, 10002 and 10050), so no event of any real account was asked for and nothing was published. A filter's result is 'served' when the relay ended it with EOSE, 'gated' when it answered AUTH and then CLOSED. Software and version are the relay's NIP-11 document.",
+  "method": "Read-only. One WebSocket per filter, from a client that never answers NIP-42 AUTH, as Haven's anonymous clients never do (Security Rule 16). Each REQ names a freshly generated random pubkey (#p for kinds 1059 and 4, authors for kinds 30443, 10002 and 10050), so no event of any real account was asked for and nothing was published. A filter's result is 'served' when the relay ended it with EOSE, 'gated' when it answered AUTH and then CLOSED. Software and version are the relay's NIP-11 document.",
   "kinds_probed": [1059, 4, 30443, 10002, 10050],
   "relays": [
     {

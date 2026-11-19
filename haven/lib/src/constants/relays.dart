@@ -28,8 +28,10 @@ const fallbackDefaultRelays = <String>[
 /// in `haven-core/src/circle/types.rs` — a CHECKED invariant
 /// (`scripts/ci/check_profile_privacy_boundaries.sh` check 13). It is
 /// [`fallbackDefaultRelays`] less every relay that withholds gift-wrap
-/// (kind 1059) reads from a client that does not authenticate, as Haven never
-/// does: a Welcome delivered there is never read, then `relay.ditto.pub`, whose
+/// (kind 1059) reads from a client that does not authenticate — the seed
+/// prefers relays that serve a Welcome back with no proof of identity, so an
+/// inbox does not depend on authentication succeeding, nor on every client of
+/// the invitee answering the challenge — then `relay.ditto.pub`, whose
 /// other relay software keeps one implementation's default from gating every
 /// seeded inbox. Used by
 /// `InboxRelaysNotifier` when the relay-preferences storage seed transiently

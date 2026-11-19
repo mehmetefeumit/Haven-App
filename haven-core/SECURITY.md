@@ -150,7 +150,10 @@ save — see *Public Nostr Profiles* below), three additional exposures apply:
 user's KeyPackage list, seeded from `PRODUCTION_DEFAULT_RELAYS`, and Inbox
 list, seeded from `PRODUCTION_INBOX_RELAYS` — the same relays less
 `relay.damus.io`, which takes a kind 1059 and then serves it only to a client
-that answers NIP-42 AUTH, which Haven never does (Rule 16; probed 2026-11-16,
+that answers NIP-42 AUTH (Haven's own inbox reads do, "The identity's NIP-42
+connections" below, but an inbox there depends on that succeeding and is
+unreadable to a client that does not answer, so the seed prefers relays that
+need no identity proof; probed 2026-11-16,
 `tests/fixtures/relay_read_gating_2026-11-16.json`, pinned by
 `tests/inbox_seed_read_gating.rs`), then `relay.ditto.pub`, whose other relay
 software keeps one implementation's default config from gating every seeded
@@ -2808,7 +2811,8 @@ Android service's resume claims `false` and only finishes.
   thirty sends a relay a day — so a relay that never answers holds back
   neither the inbox's other relays, one of which may be the only one its
   invitee can read (a relay may take a gift wrap and serve it only to a client
-  that authenticates, which Haven never does), nor another invitee's Welcome
+  that authenticates, and the invitee's may not answer, or be refused), nor
+  another invitee's Welcome
   (`fanout_change_e2e::{a_welcome_goes_to_every_due_inbox_relay_and_one_acknowledgement_completes_it,
   a_relay_that_never_answers_holds_back_no_other_welcome_of_the_create}`,
   `welcome_gated_inbox_e2e`). The price is that a pass, and the create or
@@ -4108,9 +4112,12 @@ instants, so its invitations arrive on the next foreground; both are stated unde
 (`liveSyncEnabled = false`): there, Welcome events are polled on a
 foreground timer jittered uniformly over `[90, 150] s` (2 minutes nominal) — from the inbox list only (`inboxRelaysProvider`: the stored
 list kind 10050 is built from, or the compile-time seed while seeding has
-failed), over the engine's own 96 h
-window (widened from 49 h by decision 231: a wider `since` on the same REQ,
-asking each inbox relay for more stored wraps, and no new REQ) — the resume hook in `map_shell.dart` performs an immediate
+failed), over the engine's cold-start window, 7 days
+(`INBOX_GIFTWRAP_LOOKBACK_SECS`, read through the bridge: NIP-59's two days of
+backdating plus the 72 h hold on an unanswered invitation; a wider `since` on
+the same REQ, asking each inbox relay for more stored wraps, and no new REQ),
+each relay read on a connection of its own that answers its NIP-42 challenge
+("The identity's NIP-42 connections") — the resume hook in `map_shell.dart` performs an immediate
 fetch on app foregrounding, and background polling is not active on either
 platform — invitation discovery is foreground- or resume-driven only.
 
@@ -5288,10 +5295,13 @@ threat model is honest:
   relay learns **that you are online, and which circles you watch, for as long
   as that connection is held** — a continuous presence signal the previous
   short-poll model exposed only in bursts; this is irreducible while a live
-  connection is held. Because one connection serves both your circle
-  subscriptions (`#h`) and your invitation inbox (`#p`, keyed to your stable
-  public key), a relay that is in **both** a circle's relay set and your inbox
-  relay set can link your public key to that circle for the session. We
+  connection is held. Your circle subscriptions (`#h`) and your invitation
+  inbox (`#p`, keyed to your stable public key) ride separate connections,
+  and the inbox one answers a relay's NIP-42 challenge with your identity key
+  ("The live plane's inbox socket"), but both leave from the same device
+  address at the same times, so a relay that is in **both** a circle's relay
+  set and your inbox relay set can still link your public key to that circle
+  for the session. We
   minimize exposure by: (a) connecting **only** to relays you configured (never
   a discovery/default relay — the engine client sets no `.gossip(...)`, so
   NIP-65 gossip is off, PSI-8); (b) scoping subscriptions to exactly your
@@ -5300,9 +5310,10 @@ threat model is honest:
   IDs from a **per-session random salt never written to disk**
   (`generate_session_salt`, an ephemeral `Zeroizing<[u8; 16]>`), so a relay
   cannot link your subscriptions across app sessions (PSI-2); and (e)
-  **disabling NIP-42 authentication** on the receive connection
-  (`automatic_authentication(false)`), so your signing identity is never sent
-  to a relay over this socket. The live engine's **receive client publishes
+  **disabling NIP-42 authentication** on the connections that carry your
+  circle subscriptions (`automatic_authentication(false)`), so your signing
+  identity is never sent to a relay over them; only the inbox socket answers
+  a challenge, and it carries the `#p` REQ alone. The live engine's **receive client publishes
   nothing**: what the live session sends — the engine's convergence auto-commits
   (per MIP-03), the post-join self-update, a leave's proposal, and a recorded
   commit or Welcome sent again byte for byte — leaves through the fanout driver
@@ -5312,8 +5323,10 @@ threat model is honest:
   commit sent again, or confirmed on a stored acknowledgement), and every
   background plane, the OS wake included, carries a leave on (see "Scheduled
   background wakes (M7)"); a resubscribe re-issues REQs and publishes nothing.
-  The receive client never holds your private
-  Nostr signing key, and never sends key material or your real MLS group
+  The engine pool's client never holds your private
+  Nostr signing key — the inbox socket's holds it only inside `Nip42Signer`,
+  which signs the answer to a challenge and nothing else — and neither sends
+  key material or your real MLS group
   identifier over the wire (only the pseudonymous `nostr_group_id`). To also
   hide your IP / online-presence from the relay operator, run Haven behind a
   VPN or Tor (e.g. Mullvad).

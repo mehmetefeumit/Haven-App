@@ -565,9 +565,10 @@ hold.
 
 `relay.damus.io` takes a gift wrap from anybody and serves kind 1059 only to a
 reader that has authenticated (NIP-42) — strfry's default
-`restrictedReadKinds` — and Haven's live plane never authenticates (Security
-Rule 16). A Welcome sent to the first inbox relay alone, when that relay is the
-gated one, is stored and never read live. S27's `gated-inbox-welcome` plays it with an
+`restrictedReadKinds`. Haven's live inbox socket answers that challenge
+(Security Rule 16), but a relay can still refuse the read, and S27's gate is
+such a relay: it accepts no answer. A Welcome sent to the first inbox relay
+alone, when that relay is the gated one, is stored and never read live. S27's `gated-inbox-welcome` plays it with an
 arm-applied proxy fault, `AuthGatedReads` (never in the random generator): a
 `REQ` whose every filter names only kind 1059 and such a `NEG-OPEN` are answered
 `AUTH` then strfry's `CLOSED "ERROR: auth-required: …"` (`NEG-ERR`) and never
@@ -584,7 +585,8 @@ published, and founds a circle through its driver with THAT list — never
 plane reads it from the second relay, the bus hands up the gift wrap, and the
 invitee processes and accepts it — never through `driver.unrecorded()`. Then
 both relays are gated and the admin invites again: the product's anonymous
-per-relay read — answering no challenge, as the live plane does — is typed
+per-relay read (`RelayManager::fetch_events_per_relay`, answering no
+challenge) is typed
 `refused` on both with nothing served, both relays acknowledged the
 Welcome, neither delivered it, and the bus never handed it up — anchored on
 what the planes recorded, never on elapsed time. The Invitations page's own
