@@ -1167,7 +1167,7 @@ mod tests {
 
     /// The inbox seed is the account seed, in its order, less the one relay
     /// that gates gift-wrap reads, then a relay of another implementation (the
-    /// fixture's record is pinned by `tests/inbox_seed_read_gating.rs`).
+    /// fixture's record is pinned by `tests/inbox_default_read_gating.rs`).
     #[test]
     fn the_inbox_seed_is_the_account_seed_less_read_gated_relays_then_ditto() {
         let less_gated: Vec<&str> = PRODUCTION_DEFAULT_RELAYS

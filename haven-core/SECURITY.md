@@ -155,7 +155,7 @@ connections" below, but an inbox there depends on that succeeding and is
 unreadable to a client that does not answer, so the seed prefers relays that
 need no identity proof; probed 2026-11-16,
 `tests/fixtures/relay_read_gating_2026-11-16.json`, pinned by
-`tests/inbox_seed_read_gating.rs`), then `relay.ditto.pub`, whose other relay
+`tests/inbox_default_read_gating.rs`), then `relay.ditto.pub`, whose other relay
 software keeps one implementation's default config from gating every seeded
 inbox (owner-directed 2026-11-16; the same test holds that the seed spans two
 implementations); an install whose stored inbox list was still exactly the

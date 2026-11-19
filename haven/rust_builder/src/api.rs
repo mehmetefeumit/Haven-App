@@ -15800,7 +15800,7 @@ mod maintenance_real_ffi_tests {
     struct InboxReadWorld {
         relay_mgr: RelayManagerFfi,
         circle: CircleManagerFfi,
-        secret: Vec<u8>,
+        secret: zeroize::Zeroizing<Vec<u8>>,
         front: haven_core::relay::recording_front::RecordingFront,
         kp_relay: haven_core::relay::scripted_relay::ScriptedRelay,
         _inbox_relay: haven_core::relay::scripted_relay::ScriptedRelay,
@@ -15819,10 +15819,10 @@ mod maintenance_real_ffi_tests {
             inbox_relay.serve_kept();
             kp_relay.serve_kept();
             let front = RecordingFront::start(inbox_relay.url());
-            let secret = secret_bytes(&Keys::generate());
+            let secret = zeroize::Zeroizing::new(secret_bytes(&Keys::generate()));
             let dir = DataDir::new(name);
-            let circle =
-                CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
+            let circle = CircleManagerFfi::new(dir.as_str(), secret.to_vec())
+                .expect("CircleManagerFfi::new");
             let relay_mgr = RelayManagerFfi::new_instance()
                 .await
                 .expect("RelayManagerFfi::new_instance");
@@ -15848,7 +15848,7 @@ mod maintenance_real_ffi_tests {
 
         async fn pass(&self, foreground: bool) {
             self.relay_mgr
-                .maintain_relay_list(&self.circle, self.secret.clone(), foreground)
+                .maintain_relay_list(&self.circle, self.secret.to_vec(), foreground)
                 .await
                 .expect("maintain_relay_list must not error");
         }
