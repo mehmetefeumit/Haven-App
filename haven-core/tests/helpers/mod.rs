@@ -38,7 +38,6 @@ use haven_core::nostr::mls::types::{
     WelcomeAcceptance,
 };
 use haven_core::nostr::mls::SessionManager;
-use haven_core::nostr::NostrError;
 use haven_core::relay::maintenance::build_kp_maintenance_events;
 use nostr::nips::nip19::ToBech32 as _;
 use nostr::{
@@ -304,30 +303,6 @@ pub async fn advance_epoch_to_at_least(
          target={target_epoch})"
     );
     epoch
-}
-
-/// Asserts a `NostrError` is a genuine MLS decryption/processing failure and NOT
-/// a "group not found" error.
-///
-/// DM note: the engine redacts hex sequences in error strings (Rule 6/8) and its
-/// decrypt-failure taxonomy differs from old MDK, so this checks the surviving
-/// distinction — a `MdkError` that is not a group-not-found — rather than the old
-/// substring set.
-pub fn assert_is_decryption_failure(err: &NostrError, context: &str) {
-    match err {
-        NostrError::MdkError(msg) => {
-            let lower = msg.to_lowercase();
-            assert!(
-                !lower.contains("group not found") && !lower.contains("unknown group"),
-                "{context}: failure must be a decryption/processing error, not \
-                 group-not-found (got MdkError: {msg:?})"
-            );
-        }
-        NostrError::Decryption(_) | NostrError::InvalidEvent(_) => {}
-        other => {
-            panic!("{context}: expected a decryption/processing error, got {other:?}")
-        }
-    }
 }
 
 /// Asserts a published kind:445 `event` leaks NO raw MLS group ID — not in any

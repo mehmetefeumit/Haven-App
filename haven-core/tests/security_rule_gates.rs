@@ -5265,9 +5265,10 @@ fn mdks_visitor_admission_rule_and_record_before_processing_are_what_haven_count
         "matchself.storage.with_transaction(|_storage|{\
          self.persist_openmls_wire_message_with_processed_transport_id(",
     );
-    let processed = ingest[recorded..]
-        .find("mls_group.process_message(&provider,proto)")
-        .expect("the message is no longer processed after its record is written");
+    let processed = sources::the_one(
+        &ingest[recorded..],
+        "mls_group.process_message(&provider,proto)})})?{",
+    );
     assert!(
         ingest[recorded + processed..].contains(
             "self.update_stored_message_state(&msg.id,MessageState::Retryable)?;\
@@ -5319,12 +5320,15 @@ fn mdk_marks_a_proposal_processed_only_where_a_commit_consumes_it() {
         "MDK no longer writes a pass's dispositions with the group record they move",
     );
     let publish = squash(&mdk_source("cgka-engine", "src/publish.rs"));
-    let confirm = publish
-        .find("self.storage.with_transaction(|storage|->Result<(),EngineError>{")
-        .expect("the confirm no longer runs in one transaction");
-    let written = publish[confirm..]
-        .find("storage.put_group(&g)?;")
-        .expect("the confirm no longer writes the group record");
+    let confirm = sources::the_one(
+        &publish,
+        "self.storage.with_transaction(|storage|->Result<(),EngineError>{\
+         letmutown_commit_stamp=None;",
+    );
+    let written = sources::the_one(
+        &publish[confirm..],
+        "storage.put_group(&g)?;crate::capability_manager::cache_self_capabilities(",
+    );
     let confirm = &publish[confirm..confirm + written];
     assert!(
         confirm.contains("mark_consumed_proposal_records_processed(")
@@ -5535,16 +5539,18 @@ fn mdk_fanout_pacing_constants_have_not_drifted() {
             "const TRANSPORT_FANOUT_RETENTION_SECS: u64 = ",
             FANOUT_BOUND_MS / 1_000,
         ),
+        // Declared twice, alike; this is the plain confirm's.
         (
-            "const MAX_CONFIRM_ATTEMPTS: u32 = ",
+            "async fn confirm_published_retrying(\n        &mut self,\n        \
+             pending: PendingStateRef,\n    ) -> AccountResult<SessionEffects> {\n        \
+             const MAX_CONFIRM_ATTEMPTS: u32 = ",
             u64::from(CONFIRM_ATTEMPTS),
         ),
     ] {
-        let value = source
-            .split(declaration)
-            .nth(1)
-            .and_then(|rest| rest.split(';').next())
-            .unwrap_or_else(|| panic!("MDK's host no longer declares `{declaration}…`"));
+        let value = source[sources::the_one(&source, declaration) + declaration.len()..]
+            .split(';')
+            .next()
+            .unwrap_or_default();
         assert_eq!(
             product(value),
             ours,

@@ -22,14 +22,6 @@ pub enum NostrError {
     #[error("MLS group operation failed")]
     MlsGroup(String),
 
-    /// Encryption operation failed.
-    #[error("Encryption failed")]
-    Encryption(String),
-
-    /// Decryption operation failed.
-    #[error("Decryption failed")]
-    Decryption(String),
-
     /// Key derivation failed.
     #[error("Key derivation failed")]
     KeyDerivation(String),
@@ -200,8 +192,6 @@ impl NostrError {
     pub const fn code(&self) -> &'static str {
         match self {
             Self::MlsGroup(_) => "mls-group",
-            Self::Encryption(_) => "encryption",
-            Self::Decryption(_) => "decryption",
             Self::KeyDerivation(_) => "key-derivation",
             Self::Signing(_) => "signing",
             Self::Serialization(_) => "serialization",
@@ -250,14 +240,6 @@ mod tests {
             (
                 NostrError::MlsGroup(payload.to_owned()),
                 "MLS group operation failed",
-            ),
-            (
-                NostrError::Encryption(payload.to_owned()),
-                "Encryption failed",
-            ),
-            (
-                NostrError::Decryption(payload.to_owned()),
-                "Decryption failed",
             ),
             (
                 NostrError::KeyDerivation(payload.to_owned()),
@@ -362,18 +344,6 @@ mod tests {
     fn error_display_mls_group() {
         let err = NostrError::MlsGroup("test error".to_string());
         assert_eq!(err.to_string(), "MLS group operation failed");
-    }
-
-    #[test]
-    fn error_display_encryption() {
-        let err = NostrError::Encryption("cipher failed".to_string());
-        assert_eq!(err.to_string(), "Encryption failed");
-    }
-
-    #[test]
-    fn error_display_decryption() {
-        let err = NostrError::Decryption("invalid mac".to_string());
-        assert_eq!(err.to_string(), "Decryption failed");
     }
 
     #[test]

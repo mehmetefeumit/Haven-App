@@ -322,6 +322,28 @@ impl std::fmt::Debug for IdentityKeypair {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nostr::keys::{bytes32, BIP340_VECTORS};
+
+    /// The stored secret and its backup are the user's account only while the
+    /// dependency derives the same public key from them: pinned against
+    /// BIP-340's published vectors, on both the storage and the nsec path.
+    #[test]
+    fn a_secret_derives_its_bip340_public_key_from_bytes_and_from_nsec() {
+        for (secret, public) in BIP340_VECTORS {
+            let stored = IdentityKeypair::from_secret_bytes(bytes32(secret))
+                .expect("a published secret is valid");
+            assert!(
+                stored.pubkey_bytes() == bytes32(public),
+                "a BIP-340 secret derived another public key"
+            );
+            let restored = IdentityKeypair::from_nsec(&stored.export_nsec().expect("nsec"))
+                .expect("the backup imports");
+            assert!(
+                restored.pubkey_bytes() == bytes32(public),
+                "a BIP-340 secret's nsec derived another public key"
+            );
+        }
+    }
 
     #[test]
     fn generate_produces_valid_keypair() {

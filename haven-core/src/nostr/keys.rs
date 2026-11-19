@@ -167,9 +167,53 @@ impl std::fmt::Debug for EphemeralKeypair {
     }
 }
 
+/// Secret key → x-only public key, from BIP-340's published
+/// `test-vectors.csv`, indices 0–3. Index 3's full point has odd y, so the
+/// x-only reduction is exercised as well as the plain derivation.
+#[cfg(test)]
+pub const BIP340_VECTORS: [(&str, &str); 4] = [
+    (
+        "0000000000000000000000000000000000000000000000000000000000000003",
+        "F9308A019258C31049344F85F89D5229B531C845836F99B08601F113BCE036F9",
+    ),
+    (
+        "B7E151628AED2A6ABF7158809CF4F3C762E7160F38B4DA56A784D9045190CFEF",
+        "DFF1D77F2A671C5F36183726DB2341BE58FEAE1DA2DECED843240F7B502BA659",
+    ),
+    (
+        "C90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B14E5C9",
+        "DD308AFEC5777E13121FA72B9CC1B7CC0139715309B086C960E18FD969774EB8",
+    ),
+    (
+        "0B432B2677937381AEF05BB02A66ECD012773062CF3FA2549E44F58ED2401710",
+        "25D1DFF95105F5253C4022F628A996AD3A0D95FBF21D468A1B33F8C160D8F517",
+    ),
+];
+
+/// `hex` as 32 bytes.
+#[cfg(test)]
+pub fn bytes32(hex: &str) -> [u8; 32] {
+    hex::decode(hex).expect("hex").try_into().expect("32 bytes")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A dependency that derived another public key from the same secret
+    /// would make every stored identity a different account.
+    #[test]
+    fn from_bytes_derives_the_bip340_public_key() {
+        for (secret, public) in BIP340_VECTORS {
+            let derived = EphemeralKeypair::from_bytes(bytes32(secret))
+                .expect("a published secret is valid")
+                .pubkey_bytes();
+            assert!(
+                derived == bytes32(public),
+                "a BIP-340 secret derived another public key"
+            );
+        }
+    }
 
     #[test]
     fn generate_produces_valid_keypair() {
