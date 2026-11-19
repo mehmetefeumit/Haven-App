@@ -309,7 +309,7 @@ flutter|lib/src/services/background_catchup_worker.dart|30  # measured 32.94% (2
 # nostr_relay_preferences_service.dart sat at literal 0.00% when first pinned
 # — 88 instrumented lines, none executed by any test, invisible to the 50%
 # gate — and has since been fully covered, so it is pinned exactly at 100.
-flutter|lib/src/services/nostr_circle_service.dart|69       # measured 71.94% (382/531)
+flutter|lib/src/services/nostr_circle_service.dart|72       # measured 74.63% (403/540)
 flutter|lib/src/services/nostr_identity_service.dart|61     # measured 63.56% (75/118)
 flutter|lib/src/services/nostr_profile_service.dart|63      # measured 65.54% (97/148)
 flutter|lib/src/services/nostr_relay_service.dart|71        # measured 73.72% (230/312); was 0 (0.63%, 1/158)

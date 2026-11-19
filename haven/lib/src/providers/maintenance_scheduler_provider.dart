@@ -808,10 +808,12 @@ class MaintenanceSchedulerNotifier extends Notifier<void>
         if (!_isCurrent(generation)) return;
       }
       // The strict read, at the call: only a pass in front of the user pays
-      // for the gift-wrap read's identity connections (P4).
-      result = await ref
-          .read(maintenanceServiceProvider)
-          .maintainRelayList(foreground: !burst && appIsResumed());
+      // for the gift-wrap read's identity connections (P4); a burst's fold
+      // claims nothing, whatever the lifecycle reads.
+      final maintenance = ref.read(maintenanceServiceProvider);
+      result = burst
+          ? await maintenance.maintainRelayList(foreground: false)
+          : await maintenance.maintainRelayList(foreground: appIsResumed());
       debugPrint(
         '[Maintenance] relay-list tick: inbox=${result.inbox.action.name}, '
         'keyPackage=${result.keyPackage.action.name}',
