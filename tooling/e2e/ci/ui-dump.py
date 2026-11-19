@@ -63,15 +63,39 @@ partly inside the root's.
       `topResumedActivity=` (API 29+) or `mResumedActivity:` /
       `ResumedActivity:`; `resumed none` and rc 3 when no line names one.
 
-  ui-dump.py focused --dumpsys <file>
+  ui-dump.py focused --dumpsys <file> [--package <ours>]
       The window holding INPUT focus on the default display, from `dumpsys
       input` — where the next key goes and, since the dispatcher focuses only
       a visible window, proof the window is on screen: `focused
-      <package>/<class>` for an activity's window, `focused other` for a
-      window that is no activity's (its name is not printed), `focused none`
-      while no window has focus; rc 3 when no dispatcher state is in the
-      text. Read from the current state only, never from the copy the
-      dispatcher keeps of its state at the last ANR.
+      <package>/<class>` for an activity's window, `focused none` while no
+      window has focus, and for a window that is no activity's `focused
+      window:<kind>` in fixed words, its title never printed (an app may
+      title a window with anything):
+          not-responding-<whose>  the system's "isn't responding" dialog
+          app-error-<whose>       the system's "keeps stopping" dialog
+          dialog-<whose>          a window titled only by its package (an
+                                  untitled Dialog or popup of that app)
+          notification-shade | status-bar | input-method | other
+      <whose> is ours (--package, or a process of it), systemui, system or
+      app. A window's title is the component for an activity (Window.
+      setWindowManager's appName) and the package when untitled
+      (WindowState.getWindowTag); the error dialogs title themselves
+      "Application Not Responding: <process>" and "Application Error:
+      <process>" (AOSP android14-release AppNotRespondingDialog,
+      AppErrorDialog). rc 3 when no dispatcher state is in the text. Read
+      from the current state only, never from the copy the dispatcher keeps
+      of its state at the last ANR.
+
+  ui-dump.py trace --events <file> --since <epoch> --package <ours>
+      What the activity manager recorded from <epoch> on, from `logcat -d -b
+      events -v epoch`, as one line of fixed words: `trace <token>...` or
+      `trace none`. +<Name> an activity created, -<Name>(<reason>) one
+      finished, crash(<whose>:<exception class>), anr(<whose>). <Name> is the
+      class's simple name for our package and the system picker packages,
+      `other` for any other; a reason that is not a short lower-case phrase
+      reads `other`. No URI, message, pid, token or process name is printed:
+      wm_create_activity carries the intent's URI and am_crash the
+      exception's message.
 
   ui-dump.py --self-test
 
@@ -315,8 +339,37 @@ WINDOW_COMPONENT_RES = (
 )
 
 
-def focused(dumpsys_text):
-    """'<package>/<class>', 'other' or 'none'; None without dispatcher state."""
+SYSTEMUI = "com.android.systemui"
+PACKAGE_NAME_RE = re.compile(r"^[A-Za-z][\w]*(\.[A-Za-z][\w]*)+$")
+FIXED_WINDOWS = {"NotificationShade": "notification-shade", "StatusBar": "status-bar",
+                 "InputMethod": "input-method"}
+
+
+def whose(process, ours):
+    """A process or package name in fixed words; the name itself is never printed."""
+    base = process.split(":", 1)[0]
+    if ours and base == ours:
+        return "ours"
+    if base == SYSTEMUI:
+        return "systemui"
+    if base in ("system", "android", "system_server"):
+        return "system"
+    return "app"
+
+
+def window_kind(title, ours):
+    for prefix, kind in (("Application Not Responding: ", "not-responding"), ("Application Error: ", "app-error")):
+        if title.startswith(prefix):
+            return f"window:{kind}-{whose(title[len(prefix):], ours)}"
+    if title in FIXED_WINDOWS:
+        return f"window:{FIXED_WINDOWS[title]}"
+    if PACKAGE_NAME_RE.match(title):
+        return f"window:dialog-{whose(title, ours)}"
+    return "window:other"
+
+
+def focused(dumpsys_text, ours=None):
+    """'<package>/<class>', 'window:<kind>' or 'none'; None without dispatcher state."""
     lines = dumpsys_text.splitlines()
     try:
         start = [line.strip() for line in lines].index("Input Dispatcher State:")
@@ -340,9 +393,54 @@ def focused(dumpsys_text):
                 component = pattern.match(match.group(2))
                 if component:
                     return component.group(1)
-            return "other"
+            title = match.group(2)
+            pre_s = re.match(r"^Window\{[0-9a-f]+ u\d+ (.*)\}$", title)
+            title = pre_s.group(1) if pre_s else re.sub(r"^[0-9a-f]+ ", "", title, count=1)
+            return window_kind(title, ours)
         return "none"
     return None
+
+
+# `<epoch>.<ms>  <pid>  <tid> I <tag>: [<fields>]`, the fields comma-separated;
+# every field before the one each reader stops at is a number or a name, so
+# none of them can hold a comma.
+EVENT_RE = re.compile(r"^\s*(\d+)\.\d+\s+\d+\s+\d+\s+\w\s+(wm|am)_(create_activity|finish_activity|crash|anr)\s*: \[(.*)\]\s*$")
+PICKER_PACKAGE_RE = re.compile(r"^com(\.google)?\.android\.(providers\.media(\.module)?|documentsui|gms)$")
+CLASS_NAME_RE = re.compile(r"^[A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*)*$")
+REASON_RE = re.compile(r"^[a-z][a-z -]{0,39}$")
+TRACE_MAX_TOKENS = 24
+
+
+def activity_name(component, ours):
+    package, _, cls = component.partition("/")
+    if not cls or not CLASS_NAME_RE.match(cls.lstrip(".")):
+        return "other"
+    if package == ours or PICKER_PACKAGE_RE.match(package):
+        return cls.rsplit(".", 1)[-1]
+    return "other"
+
+
+def trace(events_text, since, ours):
+    tokens = []
+    for line in events_text.splitlines():
+        match = EVENT_RE.match(line)
+        if not match or int(match.group(1)) < since:
+            continue
+        what, fields = match.group(3), match.group(4).split(",")
+        if what == "create_activity" and len(fields) >= 4:
+            tokens.append(f"+{activity_name(fields[3], ours)}")
+        elif what == "finish_activity" and len(fields) >= 5:
+            reason = ",".join(fields[4:])
+            reason = reason.replace(" ", "-") if REASON_RE.match(reason) else "other"
+            tokens.append(f"-{activity_name(fields[3], ours)}({reason})")
+        elif what == "crash" and len(fields) >= 5:
+            exception = fields[4] if CLASS_NAME_RE.match(fields[4]) else "other"
+            tokens.append(f"crash({whose(fields[2], ours)}:{exception})")
+        elif what == "anr" and len(fields) >= 3:
+            tokens.append(f"anr({whose(fields[2], ours)})")
+    if len(tokens) > TRACE_MAX_TOKENS:
+        tokens = tokens[:TRACE_MAX_TOKENS] + [f"+{len(tokens) - TRACE_MAX_TOKENS}-more"]
+    return " ".join(tokens) or "none"
 
 
 def main(argv, stdout=sys.stdout):
@@ -411,18 +509,28 @@ def main(argv, stdout=sys.stdout):
         print(f"resumed {component or 'none'}", file=stdout)
         return 0 if component else 3
     if command == "focused":
-        if set(opts) != {"dumpsys"}:
+        if "dumpsys" not in opts or not set(opts) <= {"dumpsys", "package"}:
             raise Usage("focused needs --dumpsys")
         try:
             with open(opts["dumpsys"], encoding="utf-8", errors="replace") as handle:
                 text = handle.read()
         except OSError:
             text = ""
-        window = focused(text)
+        window = focused(text, opts.get("package"))
         if window is None:
             print("focused unknown", file=stdout)
             return 3
         print(f"focused {window}", file=stdout)
+        return 0
+    if command == "trace":
+        if set(opts) != {"events", "since", "package"} or not opts["since"].isdigit():
+            raise Usage("trace needs --events, --since <epoch seconds> and --package")
+        try:
+            with open(opts["events"], encoding="utf-8", errors="replace") as handle:
+                text = handle.read()
+        except OSError:
+            text = ""
+        print(f"trace {trace(text, int(opts['since']), opts['package'])}", file=stdout)
         return 0
     raise Usage(f"unknown command {command!r}")
 
@@ -431,7 +539,7 @@ def main(argv, stdout=sys.stdout):
 # Self-test: hermetic dumps in the shape uiautomator writes, run through main()
 # exactly as the runner calls it.
 # ---------------------------------------------------------------------------
-SELF_TEST_CASES = 43
+SELF_TEST_CASES = 54
 PKG = "com.oblivioustech.haven"
 SECRET_NAME = "Quiet Wanderer"
 
@@ -674,9 +782,9 @@ def self_test():
              focused_run(dispatcher("  FocusedWindows: <none>\n")) == (0, "focused none"))
         case("(39) another display's focus is not the default display's",
              focused_run(dispatcher(f"  FocusedWindows:\n    displayId=2, name='4f2e1c0 {picker_window}'\n")) == (0, "focused none"))
-        case("(40) a focused window that is no activity's is `other`, its name withheld",
+        case("(40) a focused system window that is no activity's is named in fixed words",
              focused_run(dispatcher("  FocusedWindows:\n    displayId=0, name='77e1 NotificationShade'\n"))
-             == (0, "focused other"))
+             == (0, "focused window:notification-shade"))
         case("(41) the state kept from the last ANR never stands in for the current one",
              focused_run(dispatcher("  FocusedWindows: <none>\n",
                                     "\nInput Dispatcher State at time of last ANR:\n  FocusedWindows:\n"
@@ -688,6 +796,72 @@ def self_test():
              == (0, "focused com.oblivioustech.haven/com.yalantis.ucrop.UCropActivity"))
         case("(43) text without dispatcher state (adb gave nothing) is rc 3",
              focused_run("") == (3, "focused unknown"))
+
+        def focused_ours(title):
+            path = os.path.join(tmp, "input.txt")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(dispatcher(f"  FocusedWindows:\n    displayId=0, name='{title}'\n"))
+            captured = io.StringIO()
+            rc = main(["focused", "--dumpsys", path, "--package", PKG], captured)
+            return rc, captured.getvalue().strip()
+
+        case("(44) our \"isn't responding\" dialog over the picker is not-responding-ours, no name printed",
+             focused_ours(f"5a1 Application Not Responding: {PKG}") == (0, "focused window:not-responding-ours"))
+        case("(45) System UI's \"isn't responding\" dialog is not-responding-systemui",
+             focused_ours("5a1 Application Not Responding: com.android.systemui") == (0, "focused window:not-responding-systemui"))
+        case("(46) a crash dialog for a process of ours is app-error-ours; another app's is app-error-app",
+             focused_ours(f"5a1 Application Error: {PKG}:remote") == (0, "focused window:app-error-ours")
+             and focused_ours("5a1 Application Error: com.example.other") == (0, "focused window:app-error-app"))
+        case("(47) a window titled only by its package is that app's dialog; without --package ours is not claimed",
+             focused_ours(f"5a1 {PKG}") == (0, "focused window:dialog-ours")
+             and focused_ours("5a1 com.google.android.providers.media.module") == (0, "focused window:dialog-app")
+             and focused_run(dispatcher(f"  FocusedWindows:\n    displayId=0, name='5a1 {PKG}'\n")) == (0, "focused window:dialog-app"))
+        rc, out = focused_ours(f"5a1 {SECRET_NAME} wrote this")
+        case("(48) a window titled with free text is window:other, and nothing of the title is printed",
+             (rc, out) == (0, "focused window:other") and SECRET_NAME not in out)
+        case("(49) the pre-S shape of an error dialog's name is classified too",
+             focused_ours(f"Window{{2d3b u0 Application Not Responding: {PKG}}}") == (0, "focused window:not-responding-ours"))
+
+        def trace_run(text, since="1000", ours=PKG):
+            path = os.path.join(tmp, "events.txt")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(text)
+            captured = io.StringIO()
+            try:
+                rc = main(["trace", "--events", path, "--since", since, "--package", ours], captured)
+            except Usage:
+                return 2, ""
+            return rc, captured.getvalue().strip()
+
+        def ev(at, tag, fields):
+            return f"{at}.123   500   600 I {tag}: [{fields}]\n"
+
+        picker_component = "com.google.android.providers.media.module/com.android.providers.media.photopicker.PhotoPickerActivity"
+        ucrop_component = f"{PKG}/com.yalantis.ucrop.UCropActivity"
+        secret_uri = "content://media/picker/0/com.android.providers.media.photopicker/media/1000000018"
+        round_events = (ev(999, "wm_create_activity", f"0,1,42,{PKG}/.MainActivity,android.intent.action.MAIN,NULL,NULL,270532608")
+                        + "11-19 11:20:22.000   500   600 I wm_create_activity: [0,9,42,com.example.x/.Y,NULL,NULL,NULL,0]\n"
+                        + ev(1001, "wm_create_activity", f"0,77,42,{picker_component},android.provider.action.PICK_IMAGES,image/*,NULL,0")
+                        + ev(1002, "wm_finish_activity", f"0,77,42,{picker_component},app-request")
+                        + ev(1003, "wm_create_activity", f"0,78,42,{ucrop_component},NULL,NULL,{secret_uri},0")
+                        + ev(1003, "wm_finish_activity", f"0,78,42,{ucrop_component},app-request"))
+        rc, out = trace_run(round_events)
+        case("(50) a round's activities, from --since on, in fixed words; no URI, token or older line",
+             (rc, out) == (0, "trace +PhotoPickerActivity -PhotoPickerActivity(app-request) +UCropActivity -UCropActivity(app-request)")
+             and "content:" not in out and "MainActivity" not in out)
+        rc, out = trace_run(ev(1004, "am_crash", f"0,4242,{PKG},952745540,java.lang.NoClassDefFoundError,Failed resolution of: Landroidx/a, named {SECRET_NAME},UCropActivity.java,120,0")
+                            + ev(1005, "am_anr", "0,812,com.android.systemui,551144,Input dispatching timed out (5001ms, waited for a window)"))
+        case("(51) a crash is its exception class only and an ANR whose only; no message, pid or process name",
+             (rc, out) == (0, "trace crash(ours:java.lang.NoClassDefFoundError) anr(systemui)") and SECRET_NAME not in out)
+        rc, out = trace_run(ev(1001, "wm_create_activity", "0,5,9,com.example.other/.Secret,NULL,NULL,NULL,0")
+                            + ev(1001, "wm_finish_activity", f"0,5,9,{ucrop_component},Reason {SECRET_NAME}!"))
+        case("(52) another app's component and a reason that is not a short lower-case phrase read `other`",
+             (rc, out) == (0, "trace +other -UCropActivity(other)") and SECRET_NAME not in out)
+        case("(53) no event since --since is `trace none`; a since that is no number is a usage error",
+             trace_run(round_events, since="2000") == (0, "trace none") and trace_run("", since="soon")[0] == 2)
+        rc, out = trace_run("".join(ev(1001, "wm_create_activity", f"0,{n},9,{ucrop_component},NULL,NULL,NULL,0") for n in range(30)))
+        case("(54) a trace is bounded: past the cap it says how many more",
+             rc == 0 and out.split()[-1] == "+6-more" and len(out.split()) == 1 + 24 + 1)
     if ran != SELF_TEST_CASES:
         print(f"SELF-TEST FAIL: ran {ran} cases, expected {SELF_TEST_CASES}", file=sys.stderr)
         failed += 1

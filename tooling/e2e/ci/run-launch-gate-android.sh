@@ -43,6 +43,12 @@
 #               APPLY_SECS, the error SnackBar never, and it must still show
 #               after a cold restart (read back from SQLCipher).
 #
+# Between the picker and uCrop Haven is resumed (photo-picker-lib.sh,
+# "between"); the error SnackBar seen then ends the round at once, and a
+# Haven that stays in front ends it at the uCrop bound. A failed round's
+# summary line carries `events=[...]`: the activities the activity manager
+# created and finished during it, a crash's exception class and an ANR's
+# owner, in fixed words (ui-dump.py trace).
 # A run in which no leg reached MAP is rc 2: the hand-off path went untested.
 #
 # # Offline, and why that is the right network
@@ -89,17 +95,23 @@
 #      after onboarding, kept a debug log plant, or did not replace the
 #      previous release; a photo tap opened no picker or a known wrong one
 #      (DocumentsUI, the GET_CONTENT alias, the Play services picker; API
-#      33+), uCrop never returned, the photo save was
+#      33+), Haven showed its photo-failure SnackBar or stayed in front
+#      instead of opening uCrop, Haven's own "isn't responding" dialog held
+#      the picker's focus, uCrop never returned, the photo save was
 #      refused or did not show within APPLY_SECS, or was gone after a cold
 #      restart
 #   2  usage or harness: a missing input; a picker screen the selectors do
 #      not know (its resource ids are printed) or an activity the picker
 #      rules do not know (its component is printed); background sharing would not
 #      turn on while Android showed the battery/notification snack the
-#      grants were meant to prevent; no leg reached MapShell
+#      grants were meant to prevent; no leg reached MapShell; the gallery
+#      fixtures could not be seeded although the device answered (a push or
+#      query it refused, or a media store that never listed them)
 #   3  infrastructure: the device went away, never booted, is not en-US,
-#      would not go offline, or never indexed the gallery fixtures — nothing
-#      about the app is known
+#      would not go offline, gave no answer while the gallery was seeded, or
+#      never attached its shared storage, or another process's "isn't
+#      responding" or "keeps stopping" dialog held the picker's or uCrop's
+#      focus — nothing about the app is known
 #   4  the upgrade source is unusable: the previous release itself failed
 #      before the candidate was installed (yank it in
 #      scripts/ci/launch_gate_yanked_releases.txt)
@@ -599,12 +611,26 @@ settle_watch() {
 PHOTO_ONBOARDING='-'
 PHOTO_MAP='-'
 
+PHOTO_ARB=''
+
 # The library's hook, called every tick of a round: the process launched for
 # this leg must still be the one running (alive ends the run otherwise).
 pp_hook_alive() { alive; }
 
+# The library's hook while uCrop is awaited and MainActivity is in front:
+# Haven showing its photo-failure SnackBar is the pick or the crop editor
+# failing, decided now; anything else waits on. The SnackBar stays up 4 s
+# (Flutter's default), longer than one read.
+pp_hook_home() {
+  observe "${PHOTO_ARB}" || return 0
+  [[ "${OBS_FG}" == "${PKG}" ]] || return 0
+  seen "${KEY_PHOTO_ERROR}" || return 0
+  PP_MSG="Haven showed its photo-failure message (${KEY_PHOTO_ERROR}) instead of the crop editor: the pick, the copy of the picked photo or the crop editor failed"
+  return 1
+}
+
 photo_summary() {
-  PHOTO_SUMMARY="onboarding=${PHOTO_ONBOARDING} map=${PHOTO_MAP} picker=${PP_PICKER} ucrop=${PP_UCROP}"
+  PHOTO_SUMMARY="onboarding=${PHOTO_ONBOARDING} map=${PHOTO_MAP} picker=${PP_PICKER} ucrop=${PP_UCROP} events=[${PP_TRACE}]"
 }
 
 # photo_round <arb> <onboarding|identity> — from a settled screen of ours on
@@ -617,6 +643,7 @@ photo_round() {
     target="${KEY_EDIT_PHOTO}"; shown="${KEY_VIEW_PHOTO}"; index=1
   fi
   STATE="photo round (${surface})"
+  PHOTO_ARB="${arb}"
   tap "${target}"
   pp_round "${DEVICE}" "${PRIV}" pick "${index}" "${API_LEVEL}" || rc=$?
   photo_summary
@@ -933,9 +960,9 @@ preconditions() {
 gallery() {
   API_LEVEL="$(dev shell getprop ro.build.version.sdk 2>/dev/null | tr -d '\r' || true)"
   [[ "${API_LEVEL}" =~ ^[0-9]+$ ]] || verdict 3 "ro.build.version.sdk did not read as a number"
-  if ! pp_seed_gallery "${DEVICE}" "${PRIV}"; then
-    verdict 3 "the media store did not list both gallery fixtures within ${PP_MEDIA_SECS} s"
-  fi
+  local rc=0
+  pp_seed_gallery "${DEVICE}" "${PRIV}" || rc=$?
+  (( rc == 0 )) || verdict "${rc}" "gallery (API ${API_LEVEL}): ${PP_MSG}"
   say "gallery seeded (API ${API_LEVEL})"
 }
 
@@ -1014,7 +1041,7 @@ finish() {
 # overrides only for scenarios that must run one out; every other verdict
 # comes from what the stub shows, not from time.
 # ---------------------------------------------------------------------------
-readonly SELF_TEST_FIXTURES=90
+readonly SELF_TEST_FIXTURES=112
 readonly ST_NAME='Quiet Wanderer Fixture'
 # What a picker thumbnail's description says in the stub: a date, which no
 # transcript or summary may carry.
@@ -1082,11 +1109,23 @@ focus_of() { # <advance: 1 on a dumpsys read>
   if [[ "${STUB_NEVER_FOCUSED:-}" == "${scr}" ]] || (( reads <= ${STUB_FOCUS_LAG:-1} )); then echo none; return; fi
   component_of "${scr}"
 }
+# STUB_FOCUS_WINDOW=<title>: a window that is no activity's (an error dialog)
+# holds the focus the picker or uCrop does not.
 focus_dump() {
   local f; f="$(focus_of 1)"
   echo 'Input Dispatcher State:'
-  if [[ "${f}" == none ]]; then echo '  FocusedWindows: <none>'
+  if [[ "${f}" == none && -n "${STUB_FOCUS_WINDOW:-}" ]]; then printf "  FocusedWindows:\n    displayId=0, name='5a1 %s'\n" "${STUB_FOCUS_WINDOW}"
+  elif [[ "${f}" == none ]]; then echo '  FocusedWindows: <none>'
   else printf "  FocusedWindows:\n    displayId=0, name='4f2e1c0 %s'\n" "${f}"; fi
+}
+# The activity manager's events, as `logcat -b events -v epoch` prints them
+# (wm_create_activity carries the intent's URI, which no summary may show).
+ev() { # <create|finish> <screen>
+  if [[ "$1" == create ]]; then
+    printf '%s.250   500   600 I wm_create_activity: [0,77,42,%s,NULL,NULL,content://media/picker/0/x/media/1000000018,0]\n' "${STUB_NOW:-1000}" "$(component_of "$2")"
+  else
+    printf '%s.500   500   600 I wm_finish_activity: [0,77,42,%s,app-request]\n' "${STUB_NOW:-1000}" "$(component_of "$2")"
+  fi >> "${S}/events.log"
 }
 # An input to a system screen whose window does not hold focus: dropped, as
 # the dispatcher drops a key no window took in time, and recorded so the
@@ -1107,7 +1146,8 @@ body_of() {
         body+="$(node android.widget.Button '' 'Change profile photo' '[440,400][640,600]')$(node android.widget.Button 'Remove' '' '[440,650][640,720]')"
       else
         body+="$(node android.widget.Button '' 'Add profile photo' '[440,400][640,600]')"
-      fi ;;
+      fi
+      [[ -z "$(get refused)" ]] || body+="$(node android.view.View 'Could not update your photo. Please try again.' '' '[40,2100][1040,2300]')" ;;
     finishing) body="$(node android.widget.EditText "$(get shown_name)" '' '[40,900][1040,1000]')$(node android.view.View '' 'Finishing setup…' '[40,2200][1040,2300]')" ;;
     held) body="$(node android.widget.EditText "$(get shown_name)" '' '[40,900][1040,1000]')$(node android.view.View 'Couldn&apos;t finish setting up your account. Check your connection and try again.' '' '[40,1100][1040,1200]')$(node android.widget.Button 'Retry' '' '[40,2200][1040,2300]')" ;;
     name_error) body="$(node android.view.View 'Couldn’t save that name. Please try again.' '' '[40,2000][1040,2100]')" ;;
@@ -1183,7 +1223,7 @@ launch() {
     rm -f "${S}/pid"
   else
     put pid $(( $(get pidseq) + 1 )); put pidseq "$(get pid)"
-    rm -f "${S}/leaving" "${S}/onb_photo" "${S}/refused" "${S}/applying"
+    rm -f "${S}/leaving" "${S}/onb_photo" "${S}/refused" "${S}/applying" "${S}/bounce"
     [[ -z "${STUB_PHOTO_LOST:-}" ]] || rm -f "${S}/data/photo"
     # Declining the foreground disclosure is asked again on every launch;
     # one agreed to is not.
@@ -1250,7 +1290,7 @@ tap() {
     create)
       if (( y >= 400 && y <= 600 )) && [[ -z "$(get onb_photo)" ]]; then
         rm -f "${S}/leaving"
-        [[ -n "${STUB_PICKER_NEVER:-}" ]] || { put trip_from create; put screen picker; }
+        [[ -n "${STUB_PICKER_NEVER:-}" ]] || { put trip_from create; put screen picker; ev create picker; }
         return 0
       fi
       (( y >= 2200 && y <= 2300 )) || return 0
@@ -1272,7 +1312,7 @@ tap() {
       put identity_dumps 0; put screen identity ;;
     identity) (( y >= 500 && y <= 560 && x >= 280 && x <= 560 )) || return 0
       rm -f "${S}/leaving"
-      [[ -n "${STUB_PICKER_NEVER:-}" ]] || { put trip_from identity; put screen picker; } ;;
+      [[ -n "${STUB_PICKER_NEVER:-}" ]] || { put trip_from identity; put screen picker; ev create picker; } ;;
     location) (( y >= 300 && y <= 450 )) || return 0
       put screen disclosure ;;
     disclosure) (( x >= 540 && y >= 2000 && y <= 2100 )) || return 0
@@ -1287,9 +1327,16 @@ tap() {
           tt "	at com.yalantis.ucrop.UCropActivity.onCreate(UCropActivity.java:120)"; } >> "${S}/crash.log"
         rm -f "${S}/pid"; put screen blank; return 0
       fi
-      put screen ucrop ;;
+      # The picker finishes on the tap, and Haven is resumed until it starts
+      # uCrop: the first STUB_PICK_BOUNCE activity reads find MainActivity.
+      # STUB_PICK_SILENT: it never does (a pick that came back empty).
+      # STUB_UCROP_ERROR: uCrop opens and closes itself between two reads and
+      # Haven shows its photo-failure SnackBar.
+      ev finish picker; put screen "$(get trip_from)"
+      if [[ -n "${STUB_UCROP_ERROR:-}" ]]; then ev create ucrop; ev finish ucrop; put refused 1; return 0; fi
+      [[ -n "${STUB_PICK_SILENT:-}" ]] || put bounce "${STUB_PICK_BOUNCE:-1}" ;;
     ucrop) (( x >= 900 && y >= 100 && y <= 240 )) || return 0
-      [[ -n "${STUB_UCROP_NEVER:-}" ]] || crop_done ;;
+      [[ -n "${STUB_UCROP_NEVER:-}" ]] || { ev finish ucrop; crop_done; } ;;
   esac
 }
 keyevent() {
@@ -1298,6 +1345,48 @@ keyevent() {
     picker) put screen "$(get trip_from)" ;;
     identity|location) put screen settings ;;
   esac
+}
+# The shared storage and its media store, in AOSP's order: sys.boot_completed
+# reads 1 before the system user unlocks, and the storage is mounted, then
+# attached by MediaProvider, only on that unlock. Until then a push finds no
+# /sdcard and the query is refused (Volume external_primary not found).
+# STUB_STORAGE_LATE=<n> is that window, the first n queries — the API-35 run
+# reached the gallery inside it — and STUB_STORAGE_NEVER keeps it open. A
+# pushed file's row stays pending, which the query hides, for
+# STUB_PENDING_READS queries: its FUSE release not yet handled.
+storage_up() {
+  local n; n="$(get media_reads)"
+  [[ -z "${STUB_STORAGE_NEVER:-}" ]] && (( ${n:-0} >= ${STUB_STORAGE_LATE:-0} ))
+}
+media_push() { # <local> <remote>
+  if ! storage_up; then echo "adb: error: failed to copy: remote secure_mkdirs() failed: No such file or directory" >&2; exit 1; fi
+  if [[ -n "${STUB_PUSH_REFUSED:-}" ]]; then echo "adb: error: failed to copy: remote Permission denied" >&2; exit 1; fi
+  cp "$1" "${S}/media.$(basename "$2")"; put media_pending "${STUB_PENDING_READS:-0}"; exit 0
+}
+# The query must reach the device as ONE word, or the device shell would
+# re-split its WHERE clause: any other argv answers nothing.
+media_query() {
+  local up=1 n pending f rows=0
+  storage_up || up=0
+  n="$(get media_reads)"; put media_reads $(( ${n:-0} + 1 ))
+  [[ -z "${STUB_MEDIA_SILENT:-}" ]] || exit 0
+  (( $# == 1 )) && [[ "$1" == "content query --uri content://media/external/images/media --projection _display_name --where \"_display_name LIKE 'haven-gate-%'\"" ]] || exit 0
+  if [[ -n "${STUB_MEDIA_REFUSED:-}" ]]; then
+    printf 'Error while accessing provider:media\njava.lang.SecurityException: Permission Denial\n' >&2; exit 0
+  fi
+  if (( ! up )); then
+    printf 'Error while accessing provider:media\njava.lang.IllegalArgumentException: Volume external_primary not found\n' >&2; exit 0
+  fi
+  pending="$(get media_pending)"
+  if [[ -z "${STUB_MEDIA_NEVER:-}" ]] && (( ${pending:-0} == 0 )); then
+    for f in "${S}"/media.haven-gate-*.png; do
+      [[ -f "${f}" ]] || continue
+      echo "Row: ${rows} _display_name=${f##*/media.}"; rows=$(( rows + 1 ))
+    done
+  fi
+  (( ${pending:-0} == 0 )) || put media_pending $(( pending - 1 ))
+  (( rows > 0 )) || echo 'No result found.'
+  exit 0
 }
 case "${1:-}" in
   wait-for-device) exit 0 ;;
@@ -1320,23 +1409,12 @@ case "${1:-}" in
       "logcat -d -b events") cat "${S}/events.log" ;;
     esac; exit 0 ;;
   exec-out) dump; exit 0 ;;
-  push) cp "$2" "${S}/media.$(basename "$3")"; exit 0 ;;
+  push) media_push "$2" "$3" ;;
   shell) shift ;;
   *) exit 9 ;;
 esac
 cmd="$*"
-# The media-store query must reach the device as ONE word, or the device shell
-# would re-split its WHERE clause: refuse any other argv, as the device would
-# by matching nothing.
-if [[ "${cmd}" == "content query "* ]]; then
-  if (( $# == 1 )) && [[ "${cmd}" == "content query --uri content://media/external/images/media --projection _display_name --where \"_display_name LIKE 'haven-gate-%'\"" ]] \
-     && [[ -z "${STUB_MEDIA_NEVER:-}" ]]; then
-    for f in "${S}"/media.haven-gate-*.png; do
-      [[ -f "${f}" ]] && echo "Row: 0 _display_name=${f##*/media.}"
-    done
-  fi
-  exit 0
-fi
+if [[ "${cmd}" == "content query "* ]]; then media_query "$@"; fi
 case "${cmd}" in
   "pm path ${PKG}") [[ -f "${S}/installed" ]] && echo "package:/data/app/~~x==/${PKG}-y==/base.apk"; exit 0 ;;
   "cmd package wait-for-handler"*) echo; echo "haven-barrier-rc 0 0 255 255" ;;
@@ -1364,7 +1442,12 @@ case "${cmd}" in
   "logcat -d | grep -c logscan-plant-") echo "${STUB_PLANTS:-0}" ;;
   "getprop ro.build.version.sdk") echo "${STUB_API:-34}" ;;
   "touch -t "*|"content call "*) : ;;
-  "dumpsys activity activities") resumed_line ;;
+  "dumpsys activity activities")
+    if [[ -n "$(get bounce)" ]]; then
+      if (( $(get bounce) > 0 )); then put bounce $(( $(get bounce) - 1 )); else rm -f "${S}/bounce"; put screen ucrop; ev create ucrop; fi
+    fi
+    resumed_line ;;
+  "date +%s && logcat -d -b events -v epoch") echo "${STUB_NOW:-1000}"; cat "${S}/events.log" ;;
   "dumpsys input") focus_dump ;;
   "input keyevent 4") keyevent ;;
   "dumpsys package ${PKG} | grep -c 'android.permission."*": granted=true'") echo "${STUB_GRANTED:-1}" ;;
@@ -1428,7 +1511,7 @@ print(json.dumps({k[0]: "Get Started", k[1]: "Create My Identity", k[2]: "Not no
       HAVEN_LOGSCAN=true HAVEN_LOGSCAN_BIN="${LOGSCAN_FAKE_BIN}" FAKE_SEAL_ARGV="${tmp}/seal.argv" \
       GITHUB_RUN_ID="launch-gate-self-test-$$-${ran}" GITHUB_RUN_ATTEMPT=1 LAUNCH_GATE_SCREEN_SECS=3 LAUNCH_GATE_FINISH_SECS=3 \
       LAUNCH_GATE_OFFLINE_SECS=2 LAUNCH_GATE_PROCESS_SECS=2 LAUNCH_GATE_SETTLE_SECS=1 LAUNCH_GATE_APPLY_SECS=3 \
-      PHOTO_MEDIA_SECS=2 PHOTO_PICKER_SECS=3 PHOTO_UCROP_SECS=3 PHOTO_RETURN_SECS=3 "$@" \
+      PHOTO_STORAGE_SECS=2 PHOTO_MEDIA_SECS=2 PHOTO_PICKER_SECS=3 PHOTO_UCROP_SECS=3 PHOTO_RETURN_SECS=3 "$@" \
       bash "${BASH_SOURCE[0]}" "${tmp}/cand" "${tmp}/prev" 2>&1)" || rc=$?
     if (( rc == want_rc )); then
       printf '  PASS %s\n' "${label}"
@@ -1445,6 +1528,11 @@ print(json.dumps({k[0]: "Get Started", k[1]: "Create My Identity", k[2]: "Not no
     # …nor what a picker thumbnail's description says.
     if grep -qF -- "${ST_PICKER_DESC}" <<<"${out}" || grep -rqF -- "${ST_PICKER_DESC}" "${tmp}/out" 2>/dev/null; then
       printf '  FAIL %s: a picker thumbnail description reached the transcript or a summary\n' "${label}" >&2
+      fails=1
+    fi
+    # …nor the URI an activity was started with (the events buffer has it).
+    if grep -qF -- 'content://' <<<"${out}" || grep -rqF -- 'content://' "${tmp}/out" 2>/dev/null; then
+      printf '  FAIL %s: a content URI reached the transcript or a summary\n' "${label}" >&2
       fails=1
     fi
     # …nor does a screen digest, which hashes that name (no 64-hex string at all).
@@ -1617,14 +1705,43 @@ print(json.dumps({k[0]: "Get Started", k[1]: "Create My Identity", k[2]: "Not no
   # every scenario makes), and the trip still completes.
   _scenario "a picker and uCrop that take focus late get no input before they hold it" 0 setup-held map STUB_FOCUS_LAG=4
   _taps "…and the trip still makes its 21 taps"
+  # CI run 44503460373: the picker finished on the thumbnail tap and the gate
+  # read MainActivity, resumed while image_picker copied the photo and before
+  # uCrop started, as Haven having come back without the crop editor.
+  _scenario "Haven resumed between the picker and uCrop is the trip going on, not a failure" 0 setup-held map STUB_PICK_BOUNCE=3
+  _has "…and both rounds apply" "photo: onboarding=ok map=ok picker=photopicker-rid ucrop=rid"
+  _scenario "a pick after which Haven stays in front without uCrop is a product failure at the bound" 1 setup-held map STUB_PICK_SILENT=1
+  _has "…named as such" "photo round (onboarding): the crop editor did not open within 3 s of the pick: Haven came back from the picker and stayed in front"
+  _has "…with what the activity manager recorded: the picker came and went, uCrop never started" "events=[+PhotoPickerActivity -PhotoPickerActivity(app-request)]"
+  _scenario "uCrop closing itself under Haven's photo-failure SnackBar is a product failure, named at once" 1 setup-held map STUB_UCROP_ERROR=1
+  _has "…named by the SnackBar Haven showed" "Haven showed its photo-failure message (avatarPickerUpdateError) instead of the crop editor"
+  _has "…and the trace shows uCrop opened and closed between two reads" "events=[+PhotoPickerActivity -PhotoPickerActivity(app-request) +UCropActivity -UCropActivity(app-request)]"
+  _scenario "Haven's \"isn't responding\" dialog over the picker is a product failure" 1 setup-held map STUB_NEVER_FOCUSED=picker "STUB_FOCUS_WINDOW=Application Not Responding: com.oblivioustech.haven"
+  _has "…named as such" "input focus was on Haven's \"isn't responding\" dialog over the picker for 3 s: Haven failed while the picker was open"
+  _scenario "System UI's \"isn't responding\" dialog over the picker is infrastructure" 3 setup-held map STUB_NEVER_FOCUSED=picker "STUB_FOCUS_WINDOW=Application Not Responding: com.android.systemui"
+  _has "…named as such" "input focus was on System UI's \"isn't responding\" dialog over the picker for 3 s"
   _scenario "a picker whose window never takes focus gets no input and is a harness failure" 2 setup-held map STUB_NEVER_FOCUSED=picker
   _has "…named as such" "the system picker was resumed but its window never took input focus within 3 s (focus on no window), so no input was sent to it"
   _scenario "uCrop, Haven's own, never taking focus is a product failure" 1 setup-held map STUB_NEVER_FOCUSED=ucrop
   _has "…named as such" "uCrop, Haven's own activity, was resumed but its window never took input focus"
   ARB_PREV="${arb_now}" _scenario "a run in which no leg reached MapShell is rc 2" 2 setup-held setup-held
   _has "…naming the untested hand-off path" "no leg reached MapShell"
-  _scenario "a gallery the media store never indexes is infrastructure" 3 setup-held map STUB_MEDIA_NEVER=1
-  _has "…named as such" "the media store did not list both gallery fixtures"
+  # The gallery is seeded right after sys.boot_completed, which AOSP sets
+  # before the system user's storage is mounted: the API-35 run got there
+  # first, and its first push failed at once.
+  _scenario "shared storage attached only after the gate reaches the gallery is waited for, then seeded" 0 setup-held map \
+    STUB_API=35 STUB_STORAGE_LATE=3 STUB_PENDING_READS=2
+  _has "…and the gallery is seeded on API 35" "gallery seeded (API 35)"
+  _scenario "shared storage that never attaches is infrastructure" 3 setup-held map STUB_STORAGE_NEVER=1
+  _has "…named as such" "the media store had no shared storage attached within 2 s"
+  _scenario "a media-store query adb never answers is infrastructure" 3 setup-held map STUB_MEDIA_SILENT=1
+  _has "…named as such" "adb gave no answer to the media-store query within 2 s"
+  _scenario "a media-store query the device refuses is a harness failure" 2 setup-held map STUB_MEDIA_REFUSED=1
+  _has "…named as such" "the media store refused the gallery query for 2 s though adb answered"
+  _scenario "a push the device refuses, its storage attached, is a harness failure" 2 setup-held map STUB_PUSH_REFUSED=1
+  _has "…named as such" "the device refused a gallery fixture's push into /sdcard/Pictures"
+  _scenario "a media store that answers but never lists the fixtures is a harness failure" 2 setup-held map STUB_MEDIA_NEVER=1
+  _has "…named as such, with the API level" "gallery (API 34): the media store answered but never listed both gallery fixtures"
   _scenario "background sharing held off by the battery snack is a harness precondition, rc 2" 2 setup-held map STUB_BG_SNACK=1
   _has "…named as such" "harness precondition: background sharing did not turn on"
   _scenario "background sharing that does not turn on with everything granted is a product failure" 1 setup-held map STUB_BG_STUCK=1

@@ -17,6 +17,12 @@
 #   uCrop      com.yalantis.ucrop.UCropActivity, in Haven's own process and
 #              opaque: MainActivity is stopped, Flutter says `paused`, and with
 #              background sharing on MapShell takes its Android pause branch.
+#   between    the picker finishes on the tap (single select:
+#              PhotosTabFragment.onItemClick -> setResultAndFinishSelf), so
+#              MainActivity is RESUMED while image_picker copies the file on a
+#              background executor (ImagePickerDelegate.onActivityResult) and
+#              until Dart's next call starts uCrop. Seeing it then is the trip
+#              going on, not Haven coming back without uCrop.
 #   return     image_cropper answers from onActivityResult, before onResume.
 #
 # A resumed activity is read from `dumpsys activity activities` (ui-dump.py
@@ -43,10 +49,19 @@
 # # Contract
 #
 # The caller defines `pp_hook_alive` (return 0 to go on, non-zero to abort the
-# round; the launch gate's ends the run itself when the app died). Results:
+# round; the launch gate's ends the run itself when the app died), and may
+# define `pp_hook_home`, called on each read that finds MainActivity in front
+# while uCrop is awaited: non-zero, with PP_MSG set, ends the round as a
+# product failure (the launch gate's reads Haven's photo-failure SnackBar).
+# Results:
 #
-#   pp_seed_gallery <device> <dir>     0, or 3 when the media store never lists
-#                                      both photos (infrastructure)
+#   pp_seed_gallery <device> <dir>     0; 2 harness (a fixture the host could
+#                                      not write, a push or a query the device
+#                                      refused, both photos never listed
+#                                      though the media store answered); 3
+#                                      infrastructure (adb gave no answer, or
+#                                      the shared storage never attached).
+#                                      PP_MSG says why in fixed words.
 #   pp_clear_gallery <device>          best effort, always 0
 #   pp_round <device> <dir> <pick|cancel> <index> <api>
 #       0 done; 1 product; 2 harness (a screen the selectors do not know, or
@@ -60,7 +75,11 @@
 #       measured): it starts before uCrop can resume and ends after Haven
 #       did, so it is an UPPER bound on the time Haven was away.
 #       PP_FOCUS_WAIT is the seconds from the picker seen resumed to its
-#       window seen focused (-1 when not reached).
+#       window seen focused (-1 when not reached). After a failed round
+#       PP_TRACE is what the activity manager recorded from shortly before
+#       the round (ui-dump.py trace: activities created and finished, a
+#       crash's exception class, an ANR's owner, in fixed words), `unread`
+#       when adb gave none, `-` otherwise.
 #
 # Nothing this prints or returns carries what a node says: a thumbnail's
 # description can hold a date. Component names and resource ids are developer
@@ -84,11 +103,15 @@ readonly PP_FIXTURE_B='haven-gate-b.png'
 readonly PP_MEDIA_DIR='/sdcard/Pictures'
 # The bounds. PHOTO_* overrides exist for the self-tests, whose stub device
 # answers at once; no workflow sets them.
+readonly PP_STORAGE_SECS="${PHOTO_STORAGE_SECS:-60}"  # the shared storage attached by the media store
 readonly PP_MEDIA_SECS="${PHOTO_MEDIA_SECS:-60}"    # both photos listed by the media store
 readonly PP_PICKER_SECS="${PHOTO_PICKER_SECS:-60}"  # tap -> picker resumed; picker -> focused, thumbnail tapped (or BACK sent)
 readonly PP_UCROP_SECS="${PHOTO_UCROP_SECS:-60}"    # thumbnail -> uCrop resumed; uCrop -> focused, crop tapped
 readonly PP_RETURN_SECS="${PHOTO_RETURN_SECS:-60}"  # crop (or cancel) -> MainActivity resumed
 readonly PP_ADB_SECS="${PHOTO_ADB_SECS:-10}"        # one adb read
+# PP_TRACE opens this long before the round's first read: the caller's tap,
+# the step before it, starts the trip.
+readonly PP_TRACE_LOOKBACK_SECS=5
 readonly PP_DUMP_SECS="${PHOTO_DUMP_SECS:-15}"      # one uiautomator dump
 
 _PP_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -99,6 +122,8 @@ PP_PICKER='-'
 PP_UCROP='-'
 PP_DWELL=-1
 PP_FOCUS_WAIT=-1
+PP_TRACE='-'
+_PP_ROUND_AT=0
 PP_TAP_AT=''
 PP_RESUMED=''
 PP_FOCUSED=''
@@ -110,30 +135,102 @@ PP_FIND_XY=()
 # pp_seed_gallery <device> <dir> — the two fixtures in the shared Pictures
 # directory, indexed. Deterministic files and dates (make-avatar-fixture.py),
 # so the grid is the same two photos in the same order every run.
+#
+# sys.boot_completed reads 1 before the system user is unlocked
+# (ActivityManagerService.finishBooting sets it, then calls
+# UserController.onBootComplete, which first allows the unlock), and that
+# user's shared storage is mounted only on the unlock
+# (StorageManagerService.onUserUnlocking), then attached by MediaProvider. A
+# push in between finds no /sdcard, so nothing is pushed until the media store
+# answers for the storage: until it has attached the volume, MediaProvider
+# refuses the query ("Volume external_primary not found").
 pp_seed_gallery() {
-  local device="$1" dir="$2" deadline listed f
-  python3 -I "${_PP_LIB_DIR}/make-avatar-fixture.py" --variant a --out "${dir}/${PP_FIXTURE_A}" || return 3
-  python3 -I "${_PP_LIB_DIR}/make-avatar-fixture.py" --variant b --out "${dir}/${PP_FIXTURE_B}" || return 3
-  for f in "${PP_FIXTURE_A}" "${PP_FIXTURE_B}"; do
-    adb -s "${device}" push "${dir}/${f}" "${PP_MEDIA_DIR}/${f}" >/dev/null 2>&1 || return 3
+  local device="$1" dir="$2" attach_by list_by seen=''
+  PP_MSG=''
+  if ! python3 -I "${_PP_LIB_DIR}/make-avatar-fixture.py" --variant a --out "${dir}/${PP_FIXTURE_A}" \
+     || ! python3 -I "${_PP_LIB_DIR}/make-avatar-fixture.py" --variant b --out "${dir}/${PP_FIXTURE_B}"; then
+    PP_MSG='the host could not write the gallery fixtures'
+    return 2
+  fi
+  attach_by=$(( SECONDS + PP_STORAGE_SECS ))
+  while (( SECONDS < attach_by )); do
+    _pp_media_read "${device}" "${dir}"
+    [[ "${_PP_MEDIA}" == silent ]] || seen="${_PP_MEDIA}"
+    [[ "${_PP_MEDIA}" != listed ]] || break
   done
+  [[ "${seen}" == listed ]] || { _pp_seed_failed "${seen}" "${PP_STORAGE_SECS}"; return $?; }
+  _pp_push "${device}" "${dir}" "${PP_FIXTURE_A}" || return $?
+  _pp_push "${device}" "${dir}" "${PP_FIXTURE_B}" || return $?
   adb -s "${device}" shell touch -t 202601020000.00 "${PP_MEDIA_DIR}/${PP_FIXTURE_A}" >/dev/null 2>&1 || true
   adb -s "${device}" shell touch -t 202601010000.00 "${PP_MEDIA_DIR}/${PP_FIXTURE_B}" >/dev/null 2>&1 || true
   # MediaProvider's scan_volume reports nothing either way (it logs an unknown
   # volume and returns an empty Bundle), so what decides is the query below.
   adb -s "${device}" shell content call --uri content://media --method scan_volume --arg external_primary >/dev/null 2>&1 || true
-  deadline=$(( SECONDS + PP_MEDIA_SECS ))
-  while (( SECONDS < deadline )); do
-    # One device command string: the device shell re-splits the words, so the
-    # WHERE clause must reach it quoted.
-    listed="$(timeout "${PP_ADB_SECS}" adb -s "${device}" shell \
-      "content query --uri content://media/external/images/media --projection _display_name --where \"_display_name LIKE 'haven-gate-%'\"" \
-      2>/dev/null | tr -d '\r' || true)"
-    if grep -q "_display_name=${PP_FIXTURE_A}" <<<"${listed}" && grep -q "_display_name=${PP_FIXTURE_B}" <<<"${listed}"; then
+  # A row a push creates is IS_PENDING, which the query hides, until
+  # MediaProvider handles the file's FUSE release, sent after close returns.
+  seen=''
+  list_by=$(( SECONDS + PP_MEDIA_SECS ))
+  while (( SECONDS < list_by )); do
+    _pp_media_read "${device}" "${dir}"
+    [[ "${_PP_MEDIA}" == silent ]] || seen="${_PP_MEDIA}"
+    if grep -qF "_display_name=${PP_FIXTURE_A}" <<<"${_PP_LISTED}" && grep -qF "_display_name=${PP_FIXTURE_B}" <<<"${_PP_LISTED}"; then
       return 0
     fi
   done
+  _pp_seed_failed "${seen}" "${PP_MEDIA_SECS}"
+}
+
+# _pp_media_read <device> <dir> — one read of the fixtures' rows. _PP_MEDIA is
+# `listed` (the media store answered; _PP_LISTED holds the rows it named),
+# `attaching` (MediaProvider has not attached the primary shared volume),
+# `refused` (it refused the query otherwise) or `silent` (no provider answer:
+# adb timed out or failed). The error words are MediaProvider's
+# VolumeNotFoundException and the `content` command's (Content.java).
+_pp_media_read() {
+  local device="$1" dir="$2" err
+  _PP_MEDIA=silent
+  # One device command string: the device shell re-splits the words, so the
+  # WHERE clause must reach it quoted.
+  _PP_LISTED="$(timeout "${PP_ADB_SECS}" adb -s "${device}" shell \
+    "content query --uri content://media/external/images/media --projection _display_name --where \"_display_name LIKE 'haven-gate-%'\"" \
+    2> "${dir}/pp-media.err" | tr -d '\r' || true)"
+  err="$(tr -d '\r' < "${dir}/pp-media.err")"
+  rm -f "${dir}/pp-media.err"
+  if grep -q -e '^Row: ' -e '^No result found\.$' <<<"${_PP_LISTED}"; then
+    _PP_MEDIA=listed
+  elif grep -qF 'Volume external_primary not found' <<<"${err}"; then
+    _PP_MEDIA=attaching
+  elif grep -qF 'Error while accessing provider:media' <<<"${err}"; then
+    _PP_MEDIA=refused
+  fi
+}
+
+# _pp_push <device> <dir> <name> — one fixture into the shared Pictures
+# directory: 0, 2 when the device refused it and is still there, 3 when adb
+# gave no answer or the device went away.
+_pp_push() {
+  local device="$1" dir="$2" name="$3" rc=0
+  timeout "${PP_ADB_SECS}" adb -s "${device}" push "${dir}/${name}" "${PP_MEDIA_DIR}/${name}" >/dev/null 2>&1 || rc=$?
+  (( rc != 0 )) || return 0
+  if (( rc != 124 )) && [[ "$(timeout "${PP_ADB_SECS}" adb -s "${device}" get-state 2>/dev/null | tr -d '\r' || true)" == device ]]; then
+    PP_MSG="the device refused a gallery fixture's push into ${PP_MEDIA_DIR}, its shared storage attached"
+    return 2
+  fi
+  PP_MSG="adb gave no answer to a gallery fixture's push into ${PP_MEDIA_DIR}"
   return 3
+}
+
+# _pp_seed_failed <class> <secs> — PP_MSG and the verdict for a media-store
+# window that closed with <class> the last answer _pp_media_read had (empty:
+# none). An answer the harness cannot use is its own failure (2); a device
+# that never answered, or whose storage never attached, is infrastructure.
+_pp_seed_failed() {
+  case "$1" in
+    listed) PP_MSG="the media store answered but never listed both gallery fixtures within $2 s of their push"; return 2 ;;
+    refused) PP_MSG="the media store refused the gallery query for $2 s though adb answered"; return 2 ;;
+    attaching) PP_MSG="the media store had no shared storage attached within $2 s"; return 3 ;;
+    *) PP_MSG="adb gave no answer to the media-store query within $2 s"; return 3 ;;
+  esac
 }
 
 # pp_clear_gallery <device> — the fixtures out of the media store and the
@@ -160,17 +257,25 @@ pp_resumed() {
 }
 
 # pp_focused <device> <dir> — PP_FOCUSED: the component whose window holds
-# input focus on the default display, `other` (a window that is no
-# activity's), `none`, or '' when adb gave no answer.
+# input focus on the default display, `window:<kind>` (a window that is no
+# activity's, in ui-dump.py's fixed words), `none`, or '' when adb gave no
+# answer.
 pp_focused() {
   local device="$1" dir="$2" out
   PP_FOCUSED=''
   timeout "${PP_ADB_SECS}" adb -s "${device}" shell dumpsys input \
     > "${dir}/pp-input.txt" 2>/dev/null || true
-  out="$(python3 -I "${_PP_LIB_DIR}/ui-dump.py" focused --dumpsys "${dir}/pp-input.txt" 2>/dev/null || true)"
+  out="$(python3 -I "${_PP_LIB_DIR}/ui-dump.py" focused --dumpsys "${dir}/pp-input.txt" --package "${PP_PKG}" 2>/dev/null || true)"
   rm -f "${dir}/pp-input.txt"
   [[ "${out}" == 'focused '* && "${out}" != 'focused unknown' ]] || return 0
   PP_FOCUSED="${out#focused }"
+}
+
+# _pp_whose <ours|systemui|system|app> — an owner in fixed words.
+_pp_whose() {
+  case "$1" in
+    ours) echo "Haven's" ;; systemui) echo "System UI's" ;; system) echo "the system's" ;; *) echo "another app's" ;;
+  esac
 }
 
 # _pp_focus_words <focus> — a PP_FOCUSED value in fixed words, for a message.
@@ -178,7 +283,13 @@ _pp_focus_words() {
   case "$1" in
     '') echo 'unread (adb gave no answer)' ;;
     none) echo 'on no window' ;;
-    other) echo 'on a window that is no activity'"'"'s' ;;
+    window:not-responding-*) echo "on $(_pp_whose "${1#window:not-responding-}") \"isn't responding\" dialog" ;;
+    window:app-error-*) echo "on $(_pp_whose "${1#window:app-error-}") \"keeps stopping\" dialog" ;;
+    window:dialog-*) echo "on an untitled window of $(_pp_whose "${1#window:dialog-}")" ;;
+    window:notification-shade) echo 'on the notification shade' ;;
+    window:status-bar) echo 'on the status bar' ;;
+    window:input-method) echo 'on the keyboard' ;;
+    window:*) echo 'on a window that is no activity'"'"'s' ;;
     *) echo "on $1" ;;
   esac
 }
@@ -298,13 +409,21 @@ _pp_pick_thumbnail() { # <device> <dir> <index> <api>
 }
 
 # _pp_unfocused_picker <last focus read> — a resumed picker whose window
-# never took input focus: the system's own window never became ready, which
-# nothing in Haven decides.
+# never took input focus. The system's error dialogs sit above every app
+# window and take focus while they are up: Haven's own "isn't responding"
+# or "keeps stopping" dialog is Haven failing; another process's is the
+# device's, which says nothing about Haven. Any other window is the
+# system's own window never becoming ready, which nothing in Haven decides.
 _pp_unfocused_picker() {
-  if [[ -z "$1" ]]; then
-    PP_MSG="adb never named the focused window within ${PP_PICKER_SECS} s of the picker resuming"
-    return 3
-  fi
+  case "$1" in
+    '') PP_MSG="adb never named the focused window within ${PP_PICKER_SECS} s of the picker resuming"; return 3 ;;
+    window:not-responding-ours|window:app-error-ours)
+      PP_MSG="input focus was $(_pp_focus_words "$1") over the picker for ${PP_PICKER_SECS} s: Haven failed while the picker was open"
+      return 1 ;;
+    window:not-responding-*|window:app-error-*)
+      PP_MSG="input focus was $(_pp_focus_words "$1") over the picker for ${PP_PICKER_SECS} s: the device is struggling, which says nothing about Haven; re-run"
+      return 3 ;;
+  esac
   PP_MSG="harness: the system picker was resumed but its window never took input focus within ${PP_PICKER_SECS} s (focus $(_pp_focus_words "$1")), so no input was sent to it"
   return 2
 }
@@ -362,16 +481,21 @@ _pp_await_cancelled() { # <device> <dir> <api>
 }
 
 # Phase 3: the thumbnail opened uCrop. A picker that asks to confirm a single
-# pick (newer picker builds) gets one tap on its Add/Done/Select.
+# pick (newer picker builds) gets one tap on its Add/Done/Select. MainActivity
+# in front is the hand-over from the picker to uCrop (see "between" above),
+# so it ends the wait only through pp_hook_home or at the bound.
 _pp_await_ucrop() { # <device> <dir> <api>
-  local device="$1" dir="$2" api="$3" deadline confirmed=0
+  local device="$1" dir="$2" api="$3" deadline confirmed=0 front=''
   deadline=$(( SECONDS + PP_UCROP_SECS ))
   while (( SECONDS < deadline )); do
     pp_hook_alive || return 4
     pp_resumed "${device}" "${dir}"
+    [[ -z "${PP_RESUMED}" ]] || front="${PP_RESUMED}"
     case "${PP_RESUMED}" in
       "${PP_UCROP_ACTIVITY}") return 0 ;;
-      "${PP_MAIN}") PP_MSG="the crop editor never opened: Haven came back from the picker without it"; return 1 ;;
+      "${PP_MAIN}")
+        if declare -F pp_hook_home >/dev/null && ! pp_hook_home; then return 1; fi
+        continue ;;
       '') continue ;;
     esac
     if (( ! confirmed )) && _pp_is_picker "${PP_RESUMED}" "${api}" \
@@ -381,11 +505,15 @@ _pp_await_ucrop() { # <device> <dir> <api>
       confirmed=1
     fi
   done
-  if _pp_is_picker "${PP_RESUMED}" "${api}"; then
+  if [[ "${front}" == "${PP_MAIN}" ]]; then
+    PP_MSG="the crop editor did not open within ${PP_UCROP_SECS} s of the pick: Haven came back from the picker and stayed in front"
+    return 1
+  fi
+  if _pp_is_picker "${front}" "${api}"; then
     PP_MSG="harness: the picker stayed in front ${PP_UCROP_SECS} s after the thumbnail tap (rids: ${PP_FIND_RIDS:-none})"
     return 2
   fi
-  PP_MSG="the crop editor did not open within ${PP_UCROP_SECS} s of the pick (front: ${PP_RESUMED:-unknown})"
+  PP_MSG="the crop editor did not open within ${PP_UCROP_SECS} s of the pick (front: ${front:-unknown})"
   return 1
 }
 
@@ -415,7 +543,13 @@ _pp_crop() { # <device> <dir>
   if (( ! focused )); then
     case "${last}" in
       '') PP_MSG="adb never named the focused window within ${PP_UCROP_SECS} s of uCrop resuming"; return 3 ;;
-      other|none|"${PP_PKG}/"*) PP_MSG="uCrop, Haven's own activity, was resumed but its window never took input focus within ${PP_UCROP_SECS} s (focus $(_pp_focus_words "${last}"))"; return 1 ;;
+      window:not-responding-ours|window:app-error-ours) ;;
+      window:not-responding-*|window:app-error-*)
+        PP_MSG="input focus was $(_pp_focus_words "${last}") over uCrop for ${PP_UCROP_SECS} s: the device is struggling, which says nothing about Haven; re-run"
+        return 3 ;;
+    esac
+    case "${last}" in
+      window:*|none|"${PP_PKG}/"*) PP_MSG="uCrop, Haven's own activity, was resumed but its window never took input focus within ${PP_UCROP_SECS} s (focus $(_pp_focus_words "${last}"))"; return 1 ;;
       *) PP_MSG="harness: another app's window held input focus over uCrop for ${PP_UCROP_SECS} s (focus $(_pp_focus_words "${last}"))"; return 2 ;;
     esac
   fi
@@ -436,10 +570,35 @@ _pp_await_main() { # <device> <dir> <what>
   return 1
 }
 
+# _pp_trace <device> <dir> — PP_TRACE: the device's clock and its events
+# buffer in one read; the round began as many seconds before that clock as
+# this host has counted since.
+_pp_trace() {
+  local device="$1" dir="$2" out now
+  PP_TRACE='unread'
+  timeout "${PP_ADB_SECS}" adb -s "${device}" shell 'date +%s && logcat -d -b events -v epoch' \
+    2>/dev/null | tr -d '\r' > "${dir}/pp-events.txt" || true
+  now="$(head -n 1 "${dir}/pp-events.txt")"
+  if [[ "${now}" =~ ^[0-9]+$ ]]; then
+    out="$(python3 -I "${_PP_LIB_DIR}/ui-dump.py" trace --events "${dir}/pp-events.txt" --package "${PP_PKG}" \
+      --since "$(( now - (SECONDS - _PP_ROUND_AT) - PP_TRACE_LOOKBACK_SECS ))" 2>/dev/null || true)"
+    [[ "${out}" != 'trace '* ]] || PP_TRACE="${out#trace }"
+  fi
+  rm -f "${dir}/pp-events.txt"
+}
+
 # pp_round <device> <dir> <pick|cancel> <index> <api> — after the caller's tap.
 pp_round() {
+  local device="$1" dir="$2" rc=0
+  PP_MSG=''; PP_PICKER='-'; PP_UCROP='-'; PP_DWELL=-1; PP_FOCUS_WAIT=-1; PP_TRACE='-'
+  _PP_ROUND_AT="${SECONDS}"
+  _pp_round "$@" || rc=$?
+  if (( rc != 0 && rc != 4 )); then _pp_trace "${device}" "${dir}"; fi
+  return "${rc}"
+}
+
+_pp_round() {
   local device="$1" dir="$2" act="$3" index="$4" api="$5" rc=0
-  PP_MSG=''; PP_PICKER='-'; PP_UCROP='-'; PP_DWELL=-1; PP_FOCUS_WAIT=-1
   _pp_await_picker "${device}" "${dir}" "${api}" || return
   if [[ "${act}" == cancel ]]; then
     _pp_cancel "${device}" "${dir}" "${api}" || return

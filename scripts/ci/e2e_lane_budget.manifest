@@ -55,29 +55,41 @@ lib tooling/e2e/ci/app-install-lib.sh
 barrier */timeout:INSTALL_BARRIER_SECS#1 charge INSTALL_BARRIER_SECS
 
 lib tooling/e2e/ci/photo-picker-lib.sh
-# The gallery: each poll is one bounded adb read inside the wall-clock window.
-seed pp_seed_gallery/timeout:PP_ADB_SECS#1 charge PP_MEDIA_SECS + PP_ADB_SECS
+# The gallery: two wall-clock windows of bounded media-store reads — the shared
+# storage attached, then both photos listed — and between them two pushes,
+# each a bounded push and, after a refusal, one bounded device-state read.
+seed-storage pp_seed_gallery/_pp_media_read#1/timeout:PP_ADB_SECS#1 charge PP_STORAGE_SECS + PP_ADB_SECS
+seed-push pp_seed_gallery/_pp_push#*/timeout:PP_ADB_SECS#1 charge PP_ADB_SECS
+seed-push-state pp_seed_gallery/_pp_push#*/timeout:PP_ADB_SECS#2 charge PP_ADB_SECS
+seed-list pp_seed_gallery/_pp_media_read#2/timeout:PP_ADB_SECS#1 charge PP_MEDIA_SECS + PP_ADB_SECS
 # A round is five wall-clock windows in a row, each charged its bound, the
 # read that can start just before it, and one PP_ADB_SECS more for the
 # caller's per-tick liveness read (pp_hook_alive, which this analysis cannot
 # follow into the caller).
-round-picker pp_round/_pp_await_picker#1/pp_resumed#1/timeout:PP_ADB_SECS#1 charge PP_PICKER_SECS + PP_ADB_SECS + PP_ADB_SECS
+# The one read that closes a failed round (_pp_trace): the device's clock and
+# its events buffer.
+round-trace pp_round/_pp_trace#1/timeout:PP_ADB_SECS#1 charge PP_ADB_SECS
+round-picker pp_round/_pp_round#1/_pp_await_picker#1/pp_resumed#1/timeout:PP_ADB_SECS#1 charge PP_PICKER_SECS + PP_ADB_SECS + PP_ADB_SECS
 # Phases 2 and 4 make ONE bounded read per pass — the focus until the window
 # holds it, then the dump — so the dump, the larger, is the pass's charge.
-round-thumb pp_round/_pp_pick_thumbnail#1/pp_find#1/timeout:PP_DUMP_SECS#1 charge PP_PICKER_SECS + PP_DUMP_SECS + PP_ADB_SECS
-round-thumb-focus pp_round/_pp_pick_thumbnail#1/pp_focused#1/timeout:PP_ADB_SECS#1 within round-thumb a pass reads the focus or the dump, never both
-round-ucrop pp_round/_pp_await_ucrop#1/pp_resumed#1/timeout:PP_ADB_SECS#1 charge PP_UCROP_SECS + PP_ADB_SECS + PP_DUMP_SECS + PP_ADB_SECS
-round-confirm pp_round/_pp_await_ucrop#1/pp_find#1/timeout:PP_DUMP_SECS#1 within round-ucrop both reads of one pass are in round-ucrop's charge
-round-crop pp_round/_pp_crop#1/pp_find#1/timeout:PP_DUMP_SECS#1 charge PP_UCROP_SECS + PP_DUMP_SECS + PP_ADB_SECS
-round-crop-focus pp_round/_pp_crop#1/pp_focused#1/timeout:PP_ADB_SECS#1 within round-crop a pass reads the focus or the dump, never both
-round-return pp_round/_pp_await_main#1/pp_resumed#1/timeout:PP_ADB_SECS#1 charge PP_RETURN_SECS + PP_ADB_SECS + PP_ADB_SECS
-round-return-cancel pp_round/_pp_await_cancelled#1/pp_resumed#1/timeout:PP_ADB_SECS#1 within round-return a round either cancels or picks, and both wait for MainActivity in the same window
+round-thumb pp_round/_pp_round#1/_pp_pick_thumbnail#1/pp_find#1/timeout:PP_DUMP_SECS#1 charge PP_PICKER_SECS + PP_DUMP_SECS + PP_ADB_SECS
+round-thumb-focus pp_round/_pp_round#1/_pp_pick_thumbnail#1/pp_focused#1/timeout:PP_ADB_SECS#1 within round-thumb a pass reads the focus or the dump, never both
+round-ucrop pp_round/_pp_round#1/_pp_await_ucrop#1/pp_resumed#1/timeout:PP_ADB_SECS#1 charge PP_UCROP_SECS + PP_ADB_SECS + PP_DUMP_SECS + PP_ADB_SECS
+round-confirm pp_round/_pp_round#1/_pp_await_ucrop#1/pp_find#1/timeout:PP_DUMP_SECS#1 within round-ucrop both reads of one pass are in round-ucrop's charge
+# A pass that finds MainActivity in front makes no confirm read but calls the
+# caller's pp_hook_home in its place: the launch gate's is one uiautomator
+# dump (DUMP_SECS, equal to PP_DUMP_SECS), which this analysis cannot follow
+# into the caller either.
+round-crop pp_round/_pp_round#1/_pp_crop#1/pp_find#1/timeout:PP_DUMP_SECS#1 charge PP_UCROP_SECS + PP_DUMP_SECS + PP_ADB_SECS
+round-crop-focus pp_round/_pp_round#1/_pp_crop#1/pp_focused#1/timeout:PP_ADB_SECS#1 within round-crop a pass reads the focus or the dump, never both
+round-return pp_round/_pp_round#1/_pp_await_main#1/pp_resumed#1/timeout:PP_ADB_SECS#1 charge PP_RETURN_SECS + PP_ADB_SECS + PP_ADB_SECS
+round-return-cancel pp_round/_pp_round#1/_pp_await_cancelled#1/pp_resumed#1/timeout:PP_ADB_SECS#1 within round-return a round either cancels or picks, and both wait for MainActivity in the same window
 # A cancel round never reaches phases 2-4, which pp_round's budget pays all
 # the same. Its BACK window and the one focus read after its return window
 # are booked inside one of those unspent charges: the picker phase's, the one
 # no other wait is booked in.
-round-cancel pp_round/_pp_cancel#1/pp_focused#1/timeout:PP_ADB_SECS#1 within round-picker a cancel round skips the thumbnail, uCrop and crop windows, each larger than this one
-round-cancel-verdict pp_round/_pp_await_cancelled#1/pp_focused#1/timeout:PP_ADB_SECS#1 within round-picker the one read after a cancel's return window, in a round that skips the thumbnail, uCrop and crop windows
+round-cancel pp_round/_pp_round#1/_pp_cancel#1/pp_focused#1/timeout:PP_ADB_SECS#1 within round-picker a cancel round skips the thumbnail, uCrop and crop windows, each larger than this one
+round-cancel-verdict pp_round/_pp_round#1/_pp_await_cancelled#1/pp_focused#1/timeout:PP_ADB_SECS#1 within round-picker the one read after a cancel's return window, in a round that skips the thumbnail, uCrop and crop windows
 # The fixtures out of the media store and off the disk: two bounded adb calls.
 clear-query pp_clear_gallery/timeout:PP_ADB_SECS#1 charge PP_ADB_SECS
 clear-files pp_clear_gallery/timeout:PP_ADB_SECS#2 charge PP_ADB_SECS

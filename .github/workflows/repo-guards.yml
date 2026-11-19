@@ -2256,8 +2256,9 @@ jobs:
       # rounds too: a save refused after the crop, a uCrop crash, a picker the
       # selectors do not know (rc 2) or that is not the Photo Picker (rc 1), a
       # photo that is late or lost after a restart, background sharing that
-      # will not turn on, no leg reaching MapShell (rc 2), an unindexed gallery
-      # (rc 3) — and no picker description ever reaches a transcript.
+      # will not turn on, no leg reaching MapShell (rc 2), a gallery the device
+      # would not seed (rc 2) or never answered for (rc 3) — and no picker
+      # description ever reaches a transcript.
       - name: E2E harness self-test (Android launch gate)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         timeout-minutes: 8

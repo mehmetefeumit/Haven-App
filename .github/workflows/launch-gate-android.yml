@@ -277,16 +277,16 @@ jobs:
     # The job cap is the sum of every step cap this job can run, plus its
     # uncapped work (check_e2e_step_timeout_ordering.sh C6):
     #   scanner 10 + candidate download 5 + SDK 11 + AVD cache 10 +
-    #   snapshot 15 + emulator 112 + egress report 5 + guard teardown 5 +
-    #   dex check 5 + manifest initializers 5 + scan 5 + upload 5          = 193
-    #   + uncapped 2.5                                                = 195.5 -> 196
+    #   snapshot 15 + emulator 114 + egress report 5 + guard teardown 5 +
+    #   dex check 5 + manifest initializers 5 + scan 5 + upload 5          = 195
+    #   + uncapped 2.5                                                = 197.5 -> 198
     # The uncapped figure is the one measured on the single job this one was
     # split from (its build half is the candidate job now, so it overstates):
     # release-build's Android job, 2.3 min outside its capped build step (run
     # 43585389047), and the incident repro's emulator job, 0.2 min outside its
     # emulator step (run 43589953220). Re-measure from this job's runs.
     # job-uncapped-minutes: 2.5 (2 runs of the jobs this one joins, worst 43585389047)
-    timeout-minutes: 196
+    timeout-minutes: 198
     env:
       # The runner gates its summaries through the identifier scanner, sealing
       # the display name the app generated (logscan-gate.sh, host profile).
@@ -378,16 +378,16 @@ jobs:
 
       # The legs, under the egress guard (installed inside the script, after the
       # action's own SDK work and boot) and an attributable inner deadline:
-      # 102m is scripts/ci/check_e2e_lane_budget.sh's sum over the runner's own
-      # constants and photo-picker-lib.sh's (`--explain` prints it: 6079 s with
-      # the 180 s allowance; the two photo trips at their bounds are 850 s of
+      # 104m is scripts/ci/check_e2e_lane_budget.sh's sum over the runner's own
+      # constants and photo-picker-lib.sh's (`--explain` prints it: 6209 s with
+      # the 180 s allowance; the two photo trips at their bounds are 870 s of
       # it, background sharing and the Identity page 470 s, the second cold
       # reopen 385 s). The step cap is that deadline + 1 (run-with-deadline's
       # kill grace) + 7 (emulator-boot-timeout) + 2 (the action's own setup and
       # teardown), as e2e-android.yml derives its own.
       - name: Run the launch gate on the emulator
         id: gate
-        timeout-minutes: 112
+        timeout-minutes: 114
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
@@ -400,7 +400,7 @@ jobs:
             -noaudio -no-boot-anim -camera-back none
           disable-animations: true
           emulator-boot-timeout: 420
-          script: bash tooling/e2e/ci/run-with-deadline.sh 102m "launch-gate-android api-34" -- bash -c 'bash tooling/e2e/ci/setup-network-guard.sh install && bash tooling/e2e/ci/run-launch-gate-android.sh /tmp/launch-gate/candidate /tmp/launch-gate/previous'
+          script: bash tooling/e2e/ci/run-with-deadline.sh 104m "launch-gate-android api-34" -- bash -c 'bash tooling/e2e/ci/setup-network-guard.sh install && bash tooling/e2e/ci/run-launch-gate-android.sh /tmp/launch-gate/candidate /tmp/launch-gate/previous'
 
       - name: Report egress observations
         if: always()
@@ -472,16 +472,16 @@ jobs:
     # The job cap is the sum of every step cap this job can run, plus its
     # uncapped work (check_e2e_step_timeout_ordering.sh C6):
     #   scanner 10 + candidate download 5 + SDK 11 + AVD cache 10 +
-    #   snapshot 15 + emulator 112 + egress report 5 + guard teardown 5 +
-    #   scan 5 + upload 5                                    = 183
-    #   + uncapped 2.5                                                = 185.5 -> 186
+    #   snapshot 15 + emulator 114 + egress report 5 + guard teardown 5 +
+    #   scan 5 + upload 5                                    = 185
+    #   + uncapped 2.5                                                = 187.5 -> 188
     # The uncapped figure is the one measured on the single job this one was
     # split from (its build half is the candidate job now, so it overstates):
     # release-build's Android job, 2.3 min outside its capped build step (run
     # 43585389047), and the incident repro's emulator job, 0.2 min outside its
     # emulator step (run 43589953220). Re-measure from this job's runs.
     # job-uncapped-minutes: 2.5 (2 runs of the jobs this one joins, worst 43585389047)
-    timeout-minutes: 186
+    timeout-minutes: 188
     env:
       # The runner gates its summaries through the identifier scanner, sealing
       # the display name the app generated (logscan-gate.sh, host profile).
@@ -574,16 +574,16 @@ jobs:
 
       # The legs, under the egress guard (installed inside the script, after the
       # action's own SDK work and boot) and an attributable inner deadline:
-      # 102m is scripts/ci/check_e2e_lane_budget.sh's sum over the runner's own
-      # constants and photo-picker-lib.sh's (`--explain` prints it: 6079 s with
-      # the 180 s allowance; the two photo trips at their bounds are 850 s of
+      # 104m is scripts/ci/check_e2e_lane_budget.sh's sum over the runner's own
+      # constants and photo-picker-lib.sh's (`--explain` prints it: 6209 s with
+      # the 180 s allowance; the two photo trips at their bounds are 870 s of
       # it, background sharing and the Identity page 470 s, the second cold
       # reopen 385 s). The step cap is that deadline + 1 (run-with-deadline's
       # kill grace) + 7 (emulator-boot-timeout) + 2 (the action's own setup and
       # teardown), as e2e-android.yml derives its own.
       - name: Run the launch gate on the emulator
         id: gate
-        timeout-minutes: 112
+        timeout-minutes: 114
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 35
@@ -596,7 +596,7 @@ jobs:
             -noaudio -no-boot-anim -camera-back none
           disable-animations: true
           emulator-boot-timeout: 420
-          script: bash tooling/e2e/ci/run-with-deadline.sh 102m "launch-gate-android api-35" -- bash -c 'bash tooling/e2e/ci/setup-network-guard.sh install && bash tooling/e2e/ci/run-launch-gate-android.sh /tmp/launch-gate/candidate /tmp/launch-gate/previous'
+          script: bash tooling/e2e/ci/run-with-deadline.sh 104m "launch-gate-android api-35" -- bash -c 'bash tooling/e2e/ci/setup-network-guard.sh install && bash tooling/e2e/ci/run-launch-gate-android.sh /tmp/launch-gate/candidate /tmp/launch-gate/previous'
 
       - name: Report egress observations
         if: always()

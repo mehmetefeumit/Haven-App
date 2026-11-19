@@ -111,16 +111,17 @@ const int _sidecarDumpSecs = 15;
 const int _sidecarAdbSecs = 10;
 
 /// The sidecar's whole trip at its bounds — five windows, each with the
-/// reads that can start at its end, as the lane budget prices `pp_round` —
-/// plus 30 s for its marker poll and this side's own reaction. Below it this
-/// side could give up while the sidecar is still inside its own bounds.
+/// reads that can start at its end, and the events read that closes a failed
+/// round, as the lane budget prices `pp_round` — plus 30 s for its marker
+/// poll and this side's own reaction. Below it this side could give up while
+/// the sidecar is still inside its own bounds.
 const Duration _tripBound = Duration(
   seconds:
       2 * _sidecarPickerSecs +
       2 * _sidecarUcropSecs +
       _sidecarReturnSecs +
       3 * _sidecarDumpSecs +
-      8 * _sidecarAdbSecs +
+      9 * _sidecarAdbSecs +
       30,
 );
 

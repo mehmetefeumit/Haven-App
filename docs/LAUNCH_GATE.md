@@ -130,7 +130,16 @@ one thumbnail (`icon_thumbnail`, a `Photo…` description as the Compose
 picker's fallback), uCrop (`com.yalantis.ucrop.UCropActivity`, its
 `menu_crop` action polled until the image has loaded, its `Crop` description
 as fallback), and MainActivity again. Then Haven must show the photo within
-`APPLY_SECS` and never `avatarPickerUpdateError`.
+`APPLY_SECS` and never `avatarPickerUpdateError`. MainActivity is also
+resumed BETWEEN the picker and uCrop — the picker finishes on the tap, and
+image_picker copies the photo and Dart starts uCrop only after that — so
+seeing it there is the trip going on: the round waits for uCrop to its bound,
+ending at once only if Haven shows `avatarPickerUpdateError` instead (CI run
+44503460373 read that hand-over as "the crop editor never opened"). A window
+that is no activity's holding the focus is named by kind and owner, never by
+its title (`ui-dump.py focused`): the system's "isn't responding" or "keeps
+stopping" dialog for Haven over the picker is a product failure, for another
+process infrastructure.
 
 - **onboarding** (fresh leg): on the create screen, before "Create My
   Identity": Add profile photo → pick → crop → *Change profile photo* and
@@ -208,16 +217,19 @@ running). That is why a v0.1.14-shaped candidate's red names
 | rc | Class | Meaning | What to do |
 |---|---|---|---|
 | 0 | pass | every leg passed | — |
-| 1 | product | the candidate crashed, stalled, lost data, showed the intro after onboarding, kept a debug log plant, or did not replace the previous release; a photo tap opened no picker, or (API 33+) a known wrong picker — DocumentsUI, the GET_CONTENT alias, the Play services picker; uCrop did not return or its window never took input focus; the photo save was refused after the crop (`avatarPickerUpdateError`: root cause A's class), did not show within `APPLY_SECS`, or was gone after a cold restart; background sharing did not turn on with everything granted | fix the app; never re-run to green |
-| 2 | usage or harness | a missing input (directory, ARB key); a picker or uCrop screen no selector knows (the summary lists the resource ids it does have: update the selectors for that system image), a system picker whose window never took input focus, or an activity the picker rules do not know (its component is listed: a newer Photopicker module, say); background sharing held off while Android showed the battery or notification snack the grants were meant to prevent; no leg reached MapShell | fix the workflow or the selectors; never re-run to green |
-| 3 | infrastructure | the device went away, never booted, is not en-US, would not go offline, never indexed the gallery fixtures, or would not take a permission grant or the battery exemption | re-run the job ("Re-run failed jobs" works: the launch jobs read the candidate hand-off, which is named by the run, not the attempt) |
+| 1 | product | the candidate crashed, stalled, lost data, showed the intro after onboarding, kept a debug log plant, or did not replace the previous release; a photo tap opened no picker, or (API 33+) a known wrong picker — DocumentsUI, the GET_CONTENT alias, the Play services picker; Haven showed `avatarPickerUpdateError` or stayed in front instead of opening uCrop; Haven's own "isn't responding" or "keeps stopping" dialog held the picker's focus; uCrop did not return or its window never took input focus; the photo save was refused after the crop (`avatarPickerUpdateError`: root cause A's class), did not show within `APPLY_SECS`, or was gone after a cold restart; background sharing did not turn on with everything granted | fix the app; never re-run to green |
+| 2 | usage or harness | a missing input (directory, ARB key); a picker or uCrop screen no selector knows (the summary lists the resource ids it does have: update the selectors for that system image), a system picker whose window never took input focus, or an activity the picker rules do not know (its component is listed: a newer Photopicker module, say); background sharing held off while Android showed the battery or notification snack the grants were meant to prevent; no leg reached MapShell; the gallery fixtures could not be seeded though the device answered (a push or a media-store query it refused, or a media store that never listed them) | fix the workflow or the selectors; never re-run to green |
+| 3 | infrastructure | the device went away, never booted, is not en-US, would not go offline, gave no answer while the gallery was seeded or never attached its shared storage, would not take a permission grant or the battery exemption, or showed another process's "isn't responding" or "keeps stopping" dialog over the picker or uCrop | re-run the job ("Re-run failed jobs" works: the launch jobs read the candidate hand-off, which is named by the run, not the attempt) |
 | 4 | upgrade source unusable | the previous release itself failed before the candidate was installed | add it to `scripts/ci/launch_gate_yanked_releases.txt` with the reason |
 
 The step prints one `::error::` line naming the leg, the state reached, the
 last observation (visible label keys, foreground package, EditText count) and
 the class, plus the root cause of a crash. The summary
-(`launch-gate-summary.log`, with a `photo:` line naming which rounds applied
-and which picker and uCrop selector matched) and, only when there is crash
+(`launch-gate-summary.log`, with a `photo:` line naming which rounds applied,
+which picker and uCrop selector matched and, after a failed round,
+`events=[...]`: the activities the activity manager created and finished
+during it, a crash's exception class and an ANR's owner, in fixed words from
+`ui-dump.py trace` — no URI, message, pid or process name) and, only when there is crash
 evidence, the crash
 summary (`crash-summary.log`: exception lines, `at` frames, native frames as
 `#nn pc <offset> <library>`, random install paths removed) are the only files
@@ -297,7 +309,8 @@ debug logging.
 Every wait polls a condition under a readonly bound in the runner (boot 60 s,
 offline 30 s, `am start -W` 60 s, each screen 60 s, the finish wait 120 s, the
 settle watch 30 s, a dump 15 s, a definite process read after a launch or a
-stop 20 s, an adb read 10 s) or in `photo-picker-lib.sh` (the gallery 60 s;
+stop 20 s, an adb read 10 s) or in `photo-picker-lib.sh` (the gallery: 60 s
+for the shared storage to attach, then 60 s for both photos to be listed;
 tap → picker, picker → thumbnail, thumbnail → uCrop, uCrop → crop, crop →
 MainActivity 60 s each); nothing sleeps. After the crop the photo has
 `APPLY_SECS` = 40 s: the product's worst case, not its usual one — a crop that
@@ -307,7 +320,7 @@ waits up to `kHandoffEndWait` (10 s) and the open up to `handoverTimeout`
 `mls_session_handover.dart`. A shorter bound would race a correct build's slow
 path; the no-stall promise inside the grace is the Flutter fake_async tests'.
 `scripts/ci/check_e2e_lane_budget.sh --explain` sums them with the install
-barriers into each emulator step's 102-minute deadline (6079 s with the
+barriers into each emulator step's 104-minute deadline (6209 s with the
 allowance). A healthy run spends a few minutes in the emulator step.
 
 ### Running the pieces locally
