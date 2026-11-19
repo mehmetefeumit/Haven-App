@@ -223,9 +223,6 @@ class AppLocalizationsAr extends AppLocalizations {
   String get relaySettingsTitle => 'المُرحِّلات';
 
   @override
-  String get relaySettingsCheckRelaysTooltip => 'فحص المُرحِّلات';
-
-  @override
   String get relaySettingsNoIdentityTitle => 'لا توجد هوية';
 
   @override
@@ -239,21 +236,10 @@ class AppLocalizationsAr extends AppLocalizations {
   String get relaySettingsInboxTitle => 'مُرحِّلات صندوق الوارد';
 
   @override
-  String get relaySettingsInboxSubtitle => 'حيث تصلك الدعوات (kind 10050)';
-
-  @override
   String get relaySettingsKeyPackageTitle => 'مُرحِّلات KeyPackage الخاصة بي';
 
   @override
-  String get relaySettingsKeyPackageSubtitle =>
-      'حيث يجد الآخرون المفاتيح التي يحتاجونها لدعوتك (kind 10002)';
-
-  @override
   String get relaySettingsProfileTitle => 'مُرحِّلات ملفي الشخصي';
-
-  @override
-  String get relaySettingsProfileSubtitle =>
-      'حيث يُبحَث عن ملفك الشخصي العام ويُنشَر. تبقى هذه المُرحِّلات منفصلة عن بقية مُرحِّلاتك، ولا تُنشَر قائمة هذه المُرحِّلات أبدًا (kind 0)';
 
   @override
   String get relaySettingsProfileUnderflowTitle =>
@@ -329,9 +315,6 @@ class AppLocalizationsAr extends AppLocalizations {
   String get relaySettingsStatusChecking => 'جارٍ الفحص';
 
   @override
-  String get relaySettingsStatusUnreachable => 'تعذّر الوصول';
-
-  @override
   String relaySettingsKindLine(String kind, String status) {
     return '$kind: $status';
   }
@@ -358,26 +341,174 @@ class AppLocalizationsAr extends AppLocalizations {
   String get relaySettingsLookupTitle => 'مُرحِّلات البحث';
 
   @override
-  String get relaySettingsLookupSubtitle =>
-      'مُرحِّلات عامة يبحث فيها الآخرون عنك. يحتفظ Haven هنا بنسخة من قوائم مُرحِّلاتك ليتمكّن الناس من دعوتك.';
-
-  @override
-  String get relaySettingsRepublish => 'إعادة النشر';
-
-  @override
-  String get relaySettingsRepublishDone =>
-      'أصبح لدى كل مُرحِّل استجاب ما يحتاج إليه الآخرون لدعوتك';
-
-  @override
-  String get relaySettingsRepublishIncomplete =>
-      'لا تزال بعض المُرحِّلات تفتقر إلى ما يحتاج إليه الآخرون لدعوتك';
-
-  @override
-  String get relaySettingsRepublishHeld =>
+  String get relaySettingsPublishingHeld =>
       'لن ينشر Haven إعدادات المُرحِّلات الخاصة بك ولا مفتاح الدعوة قبل تجاوز تنبيه إعدادات المُرحِّلات';
 
   @override
   String get relaySettingsStatusNotChecked => 'لم يُفحَص';
+
+  @override
+  String get relaySettingsPresencePublishing => 'جارٍ النشر…';
+
+  @override
+  String get relaySettingsPresenceRefused => 'رفض المُرحِّل';
+
+  @override
+  String get relaySettingsPresenceUnconfirmed => 'لم يؤكّد المُرحِّل';
+
+  @override
+  String get relaySettingsPresenceNoAnswer => 'تعذّر الفحص';
+
+  @override
+  String get relaySettingsPresenceHeld => 'النشر متوقّف مؤقتًا';
+
+  @override
+  String relaySettingsInfoTooltip(String section) {
+    return 'حول $section';
+  }
+
+  @override
+  String get relaySettingsInboxInfoWhat =>
+      'عندما يدعوك أحد إلى دائرة، تُسلَّم الدعوة إلى هذه المُرحِّلات. والمُرحِّلات خوادم مستقلة تمرّر الرسائل. ويفحصها Haven بحثًا عن دعوات جديدة.';
+
+  @override
+  String get relaySettingsInboxInfoKeeps =>
+      'يحفظ Haven هنا قائمة صندوق الوارد الخاصة بك، وهي ملاحظة علنية قصيرة تبيّن المُرحِّلات التي تمثّل صندوق الوارد لديك، ليعرف الناس أين يرسلون الدعوات. وتُرسَل نسخة منها أيضًا إلى مُرحِّلات البحث في أسفل هذه الصفحة. وتُختَم الدعوات بحيث لا يستطيع فتحها أحد سواك.';
+
+  @override
+  String get relaySettingsInboxInfoMissing =>
+      'يبحث مستخدمو Haven عن قائمة صندوق الوارد الخاصة بك على مُرحِّلات البحث، وقد تبحث عنها تطبيقات أخرى على مُرحِّلاتك أنت، لذا يحتفظ Haven بنسخة منها على هذه وتلك. ويُظهر كل صف ما إذا كان لدى ذلك المُرحِّل الإصدار الحالي.';
+
+  @override
+  String get relaySettingsInboxInfoActions =>
+      'يمكنك إضافة مُرحِّلات تحظى بثقتك، وإزالة ما لم يعد يلزمك منها. ولا يسمح لك Haven بإزالة آخر مُرحِّل في هذه القائمة. وكل مُرحِّل في هذه القائمة علني: يمكن لأي شخص رؤيته في قائمة صندوق الوارد الخاصة بك. وعند إزالة مُرحِّل، يطلب منه Haven حذف قائمتك القديمة.';
+
+  @override
+  String get relaySettingsInboxInfoTechnical =>
+      'للمهتمّين بالتفاصيل التقنية: قائمة صندوق الوارد الخاصة بك حدث Nostr من النوع kind 10050، وتصل الدعوات في صورة أحداث مغلّفة كهدايا (gift wrap) من النوع kind 1059.';
+
+  @override
+  String get relaySettingsKeyPackageInfoWhat =>
+      'لكي يضيفك من يدعوك إلى دائرة، يحتاج إلى مفتاح الدعوة الخاص بك، ويُسمّى KeyPackage. ويحفظه Haven على هذه المُرحِّلات ليتمكّن الآخرون من دعوتك ولو كان هاتفك مغلقًا.';
+
+  @override
+  String get relaySettingsKeyPackageInfoKeeps =>
+      'يحفظ Haven هنا شيئين: KeyPackage الخاص بك، وقائمة المُرحِّلات الخاصة بك، وهي ملاحظة علنية قصيرة تبيّن المُرحِّلات التي تحمل KeyPackage الخاص بك. وتُرسَل نسخة من قائمة المُرحِّلات أيضًا إلى مُرحِّلات البحث. أما KeyPackage الخاص بك فلا يُرسَل إلا إلى المُرحِّلات الموجودة في هذه القائمة. وبعد استخدامه، يضع Haven مكانه واحدًا جديدًا، ويجدّده من حين إلى آخر.';
+
+  @override
+  String get relaySettingsKeyPackageInfoMissing =>
+      'يُظهر كل صف ما إذا كان لدى ذلك المُرحِّل KeyPackage الحالي الخاص بك وقائمة المُرحِّلات الحالية. وإذا لم يكن لدى مُرحِّل KeyPackage الخاص بك، أو كان يحمل KeyPackage قديمًا استبدله Haven، فقد لا يتمكّن الذين يبحثون عنه هناك من دعوتك.';
+
+  @override
+  String get relaySettingsKeyPackageInfoActions =>
+      'يمكنك إضافة مُرحِّلات أو إزالتها. ولا يسمح لك Haven بإزالة آخر مُرحِّل في هذه القائمة. وكل مُرحِّل في هذه القائمة علني: يمكن لأي شخص رؤيته في قائمة المُرحِّلات الخاصة بك. وعند إزالة مُرحِّل، يطلب منه Haven حذف قائمة المُرحِّلات القديمة الخاصة بك.';
+
+  @override
+  String get relaySettingsKeyPackageInfoTechnical =>
+      'للمهتمّين بالتفاصيل التقنية: KeyPackage حدث Marmot من النوع kind 30443، وقائمة المُرحِّلات حدث NIP-65 من النوع kind 10002.';
+
+  @override
+  String get relaySettingsProfileInfoWhat =>
+      'عند حفظ اسم أو صورة، يرسل Haven ملفك الشخصي العام إلى هذه المُرحِّلات. ويبحث Haven هنا أيضًا عن أسماء الأعضاء الآخرين وصورهم.';
+
+  @override
+  String get relaySettingsProfileInfoKeeps =>
+      'يمكن لأي شخص الاطلاع على ملفك الشخصي على هذه المُرحِّلات. أما صورتك نفسها فتُخزَّن على خادم صور منفصل، ويحمل ملفك الشخصي عنوانها على الويب.';
+
+  @override
+  String get relaySettingsProfileInfoPrivacy =>
+      'لا يرسل Haven ملفك الشخصي إلا إلى هذه المُرحِّلات، ويُبقيها منفصلة عن المُرحِّلات التي تحمل دعواتك. ولأن ملفك الشخصي علني، يمكن لتطبيقات أخرى نسخه إلى أماكن أخرى. ويحفظ Haven هذه القائمة على هاتفك ولا ينشرها أبدًا. وأي مُرحِّل هنا يحمل أيضًا حركة بيانات Haven الأخرى الخاصة بك يُميَّز بعلامة تحذير.';
+
+  @override
+  String get relaySettingsProfileInfoActions =>
+      'يمكنك إضافة مُرحِّلات. ولا يمكن إزالة مُرحِّلات الملف الشخصي المدمجة في Haven، لأن Haven يعيد إضافتها دائمًا. ولا يعرض هذا القسم رمزًا لكل مُرحِّل؛ وتعرض صفحة الهوية الملف الشخصي الذي حفظته.';
+
+  @override
+  String get relaySettingsProfileInfoTechnical =>
+      'للمهتمّين بالتفاصيل التقنية: ملفك الشخصي حدث Nostr من النوع kind 0، وتُخزَّن الصورة على خادم Blossom.';
+
+  @override
+  String get relaySettingsLookupInfoWhat =>
+      'مُرحِّلات البحث مُرحِّلات علنية معروفة على نطاق واسع، تبحث فيها التطبيقات عن مُرحِّلات شخص ما حين لا تعرف سوى حسابه. وقد اختارها Haven، وهي نفسها لدى كل من يستخدم Haven. ويستخدمها Haven أيضًا للعثور على من تشملهم دعواتك.';
+
+  @override
+  String get relaySettingsLookupInfoKeeps =>
+      'لكي يتمكّن من لا يعرف سوى حسابك من دعوتك مع ذلك، ينسخ Haven إلى هنا قائمة صندوق الوارد وقائمة المُرحِّلات الخاصتين بك، دون أي تغيير. وإذا ذكرت هاتان القائمتان مُرحِّلًا خاصًا، فإن اسمه يظهر هنا أيضًا. وفي هذا الدور، لا ينسخ Haven إلى هنا سوى هاتين القائمتين. وبعض مُرحِّلات البحث هي أيضًا من مُرحِّلات صندوق الوارد ومُرحِّلات KeyPackage الافتراضية في Haven؛ وما دامت في قوائمك، فإنها تحمل أيضًا ما تصفه تلك الأقسام.';
+
+  @override
+  String get relaySettingsLookupInfoMissing =>
+      'يُظهر كل صف ما إذا كان لدى ذلك المُرحِّل الإصدار الحالي من القائمتين كلتيهما. وإذا خلا أحد مُرحِّلات البحث منهما أو كان يحمل إصدارات قديمة منهما، فقد لا يجدك من يبحثون هناك. وقد يظهر المُرحِّل نفسه في أكثر من قسم؛ إذ يعرض كل قسم ما يحتاج إليه ذلك الدور فقط.';
+
+  @override
+  String get relaySettingsLookupInfoActions =>
+      'هذه القائمة مدمجة في Haven، لذا لا يمكنك تغييرها هنا. أما قائمة صندوق الوارد وقائمة KeyPackage أعلاه فالتحكّم فيهما بيدك.';
+
+  @override
+  String get relaySettingsLookupInfoTechnical =>
+      'للمهتمّين بالتفاصيل التقنية: ينسخ Haven أحداثك من النوعين kind 10050 وkind 10002 إلى هذه المُرحِّلات؛ أما kind 30443 فلا يُرسَل إلا إلى مُرحِّلات KeyPackage الخاصة بك.';
+
+  @override
+  String get relaySettingsLegendTitle => 'ماذا تعني الرموز';
+
+  @override
+  String get relaySettingsLegendCurrent =>
+      'تم النشر: لدى هذا المُرحِّل الإصدار الحالي.';
+
+  @override
+  String get relaySettingsLegendPublishing =>
+      'جارٍ النشر: أرسل Haven العنصر وينتظر تأكيد المُرحِّل.';
+
+  @override
+  String get relaySettingsLegendChecking =>
+      'جارٍ الفحص، أو لم يُفحَص بعد: يسأل Haven المُرحِّل عمّا لديه، أو لم يسأله بعد.';
+
+  @override
+  String get relaySettingsLegendNotOnRelay =>
+      'ليس على هذا المُرحِّل بعد: إما أنه غير موجود، أو أنه إصدار قديم، أو أن المُرحِّل رفضه، أو أن المُرحِّل لم يؤكّده. ويمكنك الضغط على الرمز لمعرفة أيّها. ويعاود Haven المحاولة في فحصه التالي: نحو كل 10 دقائق بالنسبة إلى KeyPackage الخاص بك، وكل 30 دقيقة بالنسبة إلى قوائمك، ما دام Haven مفتوحًا، وكذلك في كل مرة يبدأ فيها Haven. وإذا ظل أحد مُرحِّلاتك يُظهر هذا الرمز، فيمكنك وضع مُرحِّل آخر مكانه.';
+
+  @override
+  String get relaySettingsLegendNoAnswer =>
+      'تعذّر الفحص: لم يُجب المُرحِّل، ربما لانقطاع اتصالك بالإنترنت أو لتوقّف المُرحِّل عن العمل. ويعاود Haven سؤاله في فحصه التالي.';
+
+  @override
+  String get relaySettingsLegendHeld =>
+      'النشر متوقّف مؤقتًا: لا ينشر Haven هذا العنصر في الوقت الحالي، وتوضّح ملاحظة في هذه الصفحة السبب.';
+
+  @override
+  String get relaySettingsHeldNoRelays =>
+      'ليس لدى Haven مكان ينشر فيه أي قائمة أعلاه لا تحتوي على مُرحِّلات. ويمكنك استعادة الإعدادات الافتراضية في كل قائمة فارغة لنشرها من جديد.';
+
+  @override
+  String get relaySettingsHeldNotYetPublished =>
+      'لم ينشر Haven بعدُ إحدى قوائم المُرحِّلات الخاصة بك، وسيفعل ذلك في فحصه التالي.';
+
+  @override
+  String relaySettingsCheckSettled(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other:
+          'انتهى فحص المُرحِّلات. عدد المُرحِّلات التي لم يُتأكَّد من أنها محدَّثة: $count.',
+      many:
+          'انتهى فحص المُرحِّلات. عدد المُرحِّلات التي لم يُتأكَّد من أنها محدَّثة: $count.',
+      few:
+          'انتهى فحص المُرحِّلات. عدد المُرحِّلات التي لم يُتأكَّد من أنها محدَّثة: $count.',
+      two: 'انتهى فحص المُرحِّلات. مُرحِّلان لم يُتأكَّد من أنهما محدَّثان.',
+      one: 'انتهى فحص المُرحِّلات. مُرحِّل واحد لم يُتأكَّد من أنه محدَّث.',
+      zero: 'انتهى فحص المُرحِّلات. كل شيء محدَّث.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String relaySettingsAddedRelayUpToDate(String relay) {
+    return 'المُرحِّل $relay محدَّث.';
+  }
+
+  @override
+  String relaySettingsAddedRelayNotUpToDate(String relay) {
+    return 'لم يُتأكَّد من أن المُرحِّل $relay محدَّث. والسبب موضّح في صفّه.';
+  }
 
   @override
   String get relaySettingsEmptyTitle => 'لا توجد مُرحِّلات مُهيّأة';
@@ -1530,63 +1661,6 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get refreshRingAnnouncementNoInbox => 'لا يوجد صندوق وارد مُهيَّأ';
-
-  @override
-  String refreshRingSemanticAllFound(int total) {
-    final intl.NumberFormat totalNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String totalString = totalNumberFormat.format(total);
-
-    String _temp0 = intl.Intl.pluralLogic(
-      total,
-      locale: localeName,
-      other: '$totalString مُرحِّل يحتوي على بياناتك',
-      many: '$totalString مُرحِّلًا يحتوي على بياناتك',
-      few: '$totalString مُرحِّلات تحتوي على بياناتك',
-      two: 'المُرحِّلان يحتويان على بياناتك',
-      one: 'المُرحِّل يحتوي على بياناتك',
-      zero: 'جميع المُرحِّلات تحتوي على بياناتك',
-    );
-    return '$_temp0';
-  }
-
-  @override
-  String get refreshRingSemanticNoneFound =>
-      'لا يوجد مُرحِّل يحتوي على بياناتك';
-
-  @override
-  String refreshRingSemanticPartialFound(int ok, int total) {
-    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
-      localeName,
-    );
-    final String okString = okNumberFormat.format(ok);
-    final intl.NumberFormat totalNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String totalString = totalNumberFormat.format(total);
-
-    return '$okString من أصل $totalString مُرحِّل يحتوي على بياناتك';
-  }
-
-  @override
-  String get refreshRingAnnouncementAllFound =>
-      'جميع المُرحِّلات تحتوي على بياناتك';
-
-  @override
-  String refreshRingAnnouncementPartialFound(int ok, int total) {
-    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
-      localeName,
-    );
-    final String okString = okNumberFormat.format(ok);
-    final intl.NumberFormat totalNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String totalString = totalNumberFormat.format(total);
-
-    return '$okString من أصل $totalString مُرحِّل يحتوي على بياناتك';
-  }
-
-  @override
-  String get refreshRingAnnouncementNoneFound =>
-      'لا يوجد مُرحِّل يحتوي على بياناتك';
 
   @override
   String get identityTitle => 'الهوية';

@@ -220,9 +220,6 @@ class AppLocalizationsHi extends AppLocalizations {
   String get relaySettingsTitle => 'रिले';
 
   @override
-  String get relaySettingsCheckRelaysTooltip => 'रिले जाँचें';
-
-  @override
   String get relaySettingsNoIdentityTitle => 'कोई पहचान नहीं';
 
   @override
@@ -236,22 +233,10 @@ class AppLocalizationsHi extends AppLocalizations {
   String get relaySettingsInboxTitle => 'मेरे इनबॉक्स रिले';
 
   @override
-  String get relaySettingsInboxSubtitle =>
-      'जहाँ निमंत्रण आप तक पहुँचते हैं (kind 10050)';
-
-  @override
   String get relaySettingsKeyPackageTitle => 'मेरे KeyPackage रिले';
 
   @override
-  String get relaySettingsKeyPackageSubtitle =>
-      'जहाँ दूसरे लोग आपको आमंत्रित करने के लिए ज़रूरी कुंजियाँ पाते हैं (kind 10002)';
-
-  @override
   String get relaySettingsProfileTitle => 'मेरे प्रोफ़ाइल रिले';
-
-  @override
-  String get relaySettingsProfileSubtitle =>
-      'जहाँ आपकी सार्वजनिक प्रोफ़ाइल खोजी जाती है और प्रकाशित होती है। ये रिले आपके बाकी रिले से अलग रखे जाते हैं, और इन रिले की सूची कभी प्रकाशित नहीं होती (kind 0)';
 
   @override
   String get relaySettingsProfileUnderflowTitle =>
@@ -318,9 +303,6 @@ class AppLocalizationsHi extends AppLocalizations {
   String get relaySettingsStatusChecking => 'जाँच हो रही है';
 
   @override
-  String get relaySettingsStatusUnreachable => 'पहुँच नहीं सका';
-
-  @override
   String relaySettingsKindLine(String kind, String status) {
     return '$kind: $status';
   }
@@ -347,26 +329,170 @@ class AppLocalizationsHi extends AppLocalizations {
   String get relaySettingsLookupTitle => 'खोज रिले';
 
   @override
-  String get relaySettingsLookupSubtitle =>
-      'सार्वजनिक रिले, जहाँ दूसरे लोग आपको खोजते हैं। Haven यहाँ आपकी रिले सूचियों की एक कॉपी रखता है ताकि लोग आपको आमंत्रित कर सकें।';
-
-  @override
-  String get relaySettingsRepublish => 'फिर से प्रकाशित करें';
-
-  @override
-  String get relaySettingsRepublishDone =>
-      'जवाब देने वाले हर रिले पर अब वह सब है जो दूसरों को आपको आमंत्रित करने के लिए चाहिए';
-
-  @override
-  String get relaySettingsRepublishIncomplete =>
-      'कुछ रिले पर अब भी वह नहीं है जो दूसरों को आपको आमंत्रित करने के लिए चाहिए';
-
-  @override
-  String get relaySettingsRepublishHeld =>
+  String get relaySettingsPublishingHeld =>
       'जब तक आप रिले सेटिंग्स वाली सूचना से आगे न बढ़ें, तब तक Haven आपकी रिले सेटिंग्स या निमंत्रण कुंजी प्रकाशित नहीं करेगा';
 
   @override
   String get relaySettingsStatusNotChecked => 'जाँचा नहीं गया';
+
+  @override
+  String get relaySettingsPresencePublishing => 'प्रकाशन जारी है…';
+
+  @override
+  String get relaySettingsPresenceRefused => 'रिले ने इसे अस्वीकार कर दिया';
+
+  @override
+  String get relaySettingsPresenceUnconfirmed => 'रिले ने पुष्टि नहीं की';
+
+  @override
+  String get relaySettingsPresenceNoAnswer => 'जाँच नहीं हो सकी';
+
+  @override
+  String get relaySettingsPresenceHeld => 'होल्ड पर';
+
+  @override
+  String relaySettingsInfoTooltip(String section) {
+    return '$section के बारे में';
+  }
+
+  @override
+  String get relaySettingsInboxInfoWhat =>
+      'जब कोई आपको किसी सर्कल में आमंत्रित करता है, तो निमंत्रण इन रिले पर पहुँचाया जाता है। रिले स्वतंत्र सर्वर होते हैं जो संदेशों को आगे पहुँचाते हैं। Haven नए निमंत्रणों के लिए इन्हें जाँचता है।';
+
+  @override
+  String get relaySettingsInboxInfoKeeps =>
+      'Haven आपकी इनबॉक्स सूची यहाँ रखता है। यह एक छोटा सार्वजनिक नोट है जो बताता है कि कौन-से रिले आपके इनबॉक्स हैं, ताकि लोगों को पता रहे कि निमंत्रण कहाँ भेजने हैं। इसकी एक कॉपी इसी पेज पर नीचे दिए गए खोज रिले पर भी जाती है। निमंत्रण इस तरह सील किए जाते हैं कि सिर्फ़ आप ही उन्हें खोल सकें।';
+
+  @override
+  String get relaySettingsInboxInfoMissing =>
+      'Haven इस्तेमाल करने वाले लोग आपकी इनबॉक्स सूची खोज रिले पर ढूँढते हैं, और दूसरे ऐप इसे आपके अपने रिले पर ढूँढ सकते हैं, इसलिए Haven दोनों जगह इसकी एक कॉपी रखता है। हर पंक्ति दिखाती है कि उस रिले के पास मौजूदा संस्करण है या नहीं।';
+
+  @override
+  String get relaySettingsInboxInfoActions =>
+      'आपके भरोसे के रिले इस सूची में जोड़े जा सकते हैं, और जो रिले अब नहीं चाहिए उन्हें हटाया जा सकता है। Haven आपको इस सूची का आखिरी रिले हटाने नहीं देगा। इस सूची का हर रिले सार्वजनिक है: कोई भी उसे आपकी इनबॉक्स सूची में देख सकता है। किसी रिले को हटाने पर, Haven उससे आपकी पुरानी सूची मिटाने का अनुरोध करता है।';
+
+  @override
+  String get relaySettingsInboxInfoTechnical =>
+      'तकनीकी जानकारी में रुचि रखने वालों के लिए: आपकी इनबॉक्स सूची kind 10050 का एक Nostr इवेंट है, और निमंत्रण kind 1059 के गिफ़्ट-रैप किए गए इवेंट के रूप में आते हैं।';
+
+  @override
+  String get relaySettingsKeyPackageInfoWhat =>
+      'आपको किसी सर्कल में जोड़ने के लिए, आमंत्रित करने वाले व्यक्ति को आपकी निमंत्रण कुंजी चाहिए, जिसे KeyPackage कहते हैं। Haven इसे इन रिले पर रखता है, ताकि आपका फ़ोन बंद होने पर भी लोग आपको आमंत्रित कर सकें।';
+
+  @override
+  String get relaySettingsKeyPackageInfoKeeps =>
+      'Haven यहाँ दो चीज़ें रखता है: आपका KeyPackage, और आपकी रिले सूची, यानी एक छोटा सार्वजनिक नोट जो बताता है कि कौन-से रिले आपका KeyPackage रखते हैं। रिले सूची की एक कॉपी खोज रिले पर भी जाती है। आपका KeyPackage सिर्फ़ इसी सूची के रिले पर जाता है। इस्तेमाल हो जाने के बाद Haven उसकी जगह एक नया KeyPackage रख देता है, और समय-समय पर उसे नया भी करता है।';
+
+  @override
+  String get relaySettingsKeyPackageInfoMissing =>
+      'हर पंक्ति दिखाती है कि उस रिले के पास आपका मौजूदा KeyPackage और रिले सूची है या नहीं। अगर किसी रिले पर आपका KeyPackage मौजूद नहीं है, या उस पर कोई पुराना KeyPackage है जिसे Haven बदल चुका है, तो वहाँ उसे ढूँढने वाले लोग शायद आपको आमंत्रित न कर पाएँ।';
+
+  @override
+  String get relaySettingsKeyPackageInfoActions =>
+      'इस सूची में रिले जोड़े या हटाए जा सकते हैं। Haven आपको इस सूची का आखिरी रिले हटाने नहीं देगा। इस सूची का हर रिले सार्वजनिक है: कोई भी उसे आपकी रिले सूची में देख सकता है। किसी रिले को हटाने पर, Haven उससे आपकी पुरानी रिले सूची मिटाने का अनुरोध करता है।';
+
+  @override
+  String get relaySettingsKeyPackageInfoTechnical =>
+      'तकनीकी जानकारी में रुचि रखने वालों के लिए: KeyPackage kind 30443 का एक Marmot इवेंट है, और रिले सूची kind 10002 का एक NIP-65 इवेंट है।';
+
+  @override
+  String get relaySettingsProfileInfoWhat =>
+      'कोई नाम या फ़ोटो सहेजने पर, Haven आपकी सार्वजनिक प्रोफ़ाइल इन रिले पर भेजता है। Haven दूसरे सदस्यों के नाम और फ़ोटो भी यहीं खोजता है।';
+
+  @override
+  String get relaySettingsProfileInfoKeeps =>
+      'कोई भी इन रिले पर आपकी प्रोफ़ाइल खोज सकता है। आपकी फ़ोटो खुद एक अलग छवि सर्वर पर रखी जाती है, और आपकी प्रोफ़ाइल में उसका वेब पता होता है।';
+
+  @override
+  String get relaySettingsProfileInfoPrivacy =>
+      'Haven आपकी प्रोफ़ाइल सिर्फ़ इन रिले पर भेजता है, जिन्हें वह आपके निमंत्रण पहुँचाने वाले रिले से अलग रखता है। आपकी प्रोफ़ाइल सार्वजनिक है, इसलिए दूसरे ऐप इसे कहीं और कॉपी कर सकते हैं। Haven यह सूची आपके फ़ोन पर रखता है और इसे कभी प्रकाशित नहीं करता। यहाँ जिस रिले पर आपका दूसरा Haven ट्रैफ़िक भी जाता है, उस पर चेतावनी का निशान लगा होता है।';
+
+  @override
+  String get relaySettingsProfileInfoActions =>
+      'इस सूची में रिले जोड़े जा सकते हैं। Haven में पहले से शामिल प्रोफ़ाइल रिले हटाए नहीं जा सकते, क्योंकि Haven उन्हें हमेशा वापस जोड़ देता है। इस सेक्शन में किसी रिले के लिए कोई निशान नहीं दिखता; आपने जो प्रोफ़ाइल सहेजी है, वह आपके पहचान पेज पर दिखती है।';
+
+  @override
+  String get relaySettingsProfileInfoTechnical =>
+      'तकनीकी जानकारी में रुचि रखने वालों के लिए: आपकी प्रोफ़ाइल kind 0 का एक Nostr इवेंट है, और फ़ोटो एक Blossom सर्वर पर रखी जाती है।';
+
+  @override
+  String get relaySettingsLookupInfoWhat =>
+      'खोज रिले जाने-माने सार्वजनिक रिले हैं, जहाँ ऐप किसी व्यक्ति के रिले तब ढूँढते हैं जब वे उस व्यक्ति का सिर्फ़ खाता जानते हैं। इन्हें Haven ने चुना है, और Haven इस्तेमाल करने वाले सभी लोगों के लिए ये एक जैसे हैं। Haven इनका इस्तेमाल उन लोगों को ढूँढने के लिए भी करता है जिन्हें आप आमंत्रित करें।';
+
+  @override
+  String get relaySettingsLookupInfoKeeps =>
+      'जो व्यक्ति सिर्फ़ आपका खाता जानता है, वह भी आपको आमंत्रित कर सके, इसके लिए Haven आपकी इनबॉक्स सूची और आपकी रिले सूची को बिना बदले यहाँ कॉपी करता है। अगर इन सूचियों में किसी निजी रिले का नाम है, तो वह नाम यहाँ भी दिखता है। इस भूमिका में Haven यहाँ सिर्फ़ यही दो सूचियाँ कॉपी करता है। कुछ खोज रिले Haven के डिफ़ॉल्ट इनबॉक्स और KeyPackage रिले भी हैं; जब तक वे आपकी सूचियों में हैं, उन पर वह सब भी रहता है जिसके बारे में वे सेक्शन बताते हैं।';
+
+  @override
+  String get relaySettingsLookupInfoMissing =>
+      'हर पंक्ति दिखाती है कि उस रिले के पास दोनों सूचियों का मौजूदा संस्करण है या नहीं। अगर किसी खोज रिले पर ये सूचियाँ मौजूद नहीं हैं या उनके पुराने संस्करण हैं, तो वहाँ खोजने वाले लोग शायद आपको न ढूँढ पाएँ। एक ही रिले एक से ज़्यादा सेक्शन में दिख सकता है; हर सेक्शन सिर्फ़ वही दिखाता है जो उस भूमिका के लिए ज़रूरी है।';
+
+  @override
+  String get relaySettingsLookupInfoActions =>
+      'यह सूची Haven में पहले से शामिल है, इसलिए इसे यहाँ बदला नहीं जा सकता। ऊपर दी गई इनबॉक्स और KeyPackage सूचियाँ आपके नियंत्रण में हैं।';
+
+  @override
+  String get relaySettingsLookupInfoTechnical =>
+      'तकनीकी जानकारी में रुचि रखने वालों के लिए: Haven आपके kind 10050 और kind 10002 इवेंट इन रिले पर कॉपी करता है; kind 30443 सिर्फ़ आपके KeyPackage रिले पर जाता है।';
+
+  @override
+  String get relaySettingsLegendTitle => 'निशानों का मतलब';
+
+  @override
+  String get relaySettingsLegendCurrent =>
+      'प्रकाशित: इस रिले के पास मौजूदा संस्करण है।';
+
+  @override
+  String get relaySettingsLegendPublishing =>
+      'प्रकाशन जारी है: Haven ने इसे भेज दिया है और रिले की पुष्टि का इंतज़ार कर रहा है।';
+
+  @override
+  String get relaySettingsLegendChecking =>
+      'जाँच हो रही है, या अभी जाँचा नहीं गया: Haven रिले से पूछ रहा है कि उसके पास क्या है, या अभी तक उससे पूछा नहीं है।';
+
+  @override
+  String get relaySettingsLegendNotOnRelay =>
+      'अभी इस रिले पर नहीं: यह मौजूद नहीं है, पुराना संस्करण है, रिले ने इसे अस्वीकार कर दिया, या रिले ने पुष्टि नहीं की। इनमें से कौन-सी बात है, यह देखने के लिए किसी निशान पर टैप करें। Haven अपनी अगली जाँच पर फिर से कोशिश करता है: जब तक Haven खुला है, आपके KeyPackage के लिए लगभग हर 10 मिनट में और आपकी सूचियों के लिए हर 30 मिनट में, और हर बार जब Haven शुरू होता है। अगर आपका कोई रिले बार-बार यही दिखाता है, तो उसे किसी दूसरे रिले से बदला जा सकता है।';
+
+  @override
+  String get relaySettingsLegendNoAnswer =>
+      'जाँच नहीं हो सकी: रिले ने जवाब नहीं दिया, शायद इसलिए कि आप ऑफ़लाइन हैं या रिले काम नहीं कर रहा। Haven अपनी अगली जाँच पर फिर से पूछता है।';
+
+  @override
+  String get relaySettingsLegendHeld =>
+      'होल्ड पर: Haven फ़िलहाल इसे प्रकाशित नहीं कर रहा है। इस पेज पर दी गई एक सूचना बताती है कि क्यों।';
+
+  @override
+  String get relaySettingsHeldNoRelays =>
+      'ऊपर की जिस सूची में कोई रिले नहीं है, उसे प्रकाशित करने के लिए Haven के पास कोई जगह नहीं है। हर खाली सूची को फिर से प्रकाशित करने के लिए उस पर डिफ़ॉल्ट बहाल करें।';
+
+  @override
+  String get relaySettingsHeldNotYetPublished =>
+      'Haven ने आपकी एक रिले सूची अभी तक प्रकाशित नहीं की है। वह अपनी अगली जाँच पर ऐसा करेगा।';
+
+  @override
+  String relaySettingsCheckSettled(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other:
+          'रिले जाँच पूरी हुई। $count रिले के अप-टू-डेट होने की पुष्टि नहीं हुई है।',
+      one:
+          'रिले जाँच पूरी हुई। 1 रिले के अप-टू-डेट होने की पुष्टि नहीं हुई है।',
+      zero: 'रिले जाँच पूरी हुई। सब कुछ अप-टू-डेट है।',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String relaySettingsAddedRelayUpToDate(String relay) {
+    return '$relay अप-टू-डेट है।';
+  }
+
+  @override
+  String relaySettingsAddedRelayNotUpToDate(String relay) {
+    return '$relay के अप-टू-डेट होने की पुष्टि नहीं हुई है। इसकी पंक्ति बताती है कि क्यों।';
+  }
 
   @override
   String get relaySettingsEmptyTitle => 'कोई रिले कॉन्फ़िगर नहीं है';
@@ -1460,58 +1586,6 @@ class AppLocalizationsHi extends AppLocalizations {
 
   @override
   String get refreshRingAnnouncementNoInbox => 'कोई इनबॉक्स कॉन्फ़िगर नहीं है';
-
-  @override
-  String refreshRingSemanticAllFound(int total) {
-    final intl.NumberFormat totalNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String totalString = totalNumberFormat.format(total);
-
-    String _temp0 = intl.Intl.pluralLogic(
-      total,
-      locale: localeName,
-      other: 'सभी $totalString रिले में आपका डेटा है',
-      one: 'रिले में आपका डेटा है',
-    );
-    return '$_temp0';
-  }
-
-  @override
-  String get refreshRingSemanticNoneFound =>
-      'किसी भी रिले में आपका डेटा नहीं है';
-
-  @override
-  String refreshRingSemanticPartialFound(int ok, int total) {
-    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
-      localeName,
-    );
-    final String okString = okNumberFormat.format(ok);
-    final intl.NumberFormat totalNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String totalString = totalNumberFormat.format(total);
-
-    return '$totalString में से $okString रिले में आपका डेटा है';
-  }
-
-  @override
-  String get refreshRingAnnouncementAllFound => 'सभी रिले में आपका डेटा है';
-
-  @override
-  String refreshRingAnnouncementPartialFound(int ok, int total) {
-    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
-      localeName,
-    );
-    final String okString = okNumberFormat.format(ok);
-    final intl.NumberFormat totalNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String totalString = totalNumberFormat.format(total);
-
-    return '$totalString में से $okString रिले में आपका डेटा है';
-  }
-
-  @override
-  String get refreshRingAnnouncementNoneFound =>
-      'किसी भी रिले में आपका डेटा नहीं है';
 
   @override
   String get identityTitle => 'पहचान';

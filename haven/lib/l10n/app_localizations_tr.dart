@@ -222,9 +222,6 @@ class AppLocalizationsTr extends AppLocalizations {
   String get relaySettingsTitle => 'Aktarıcılar';
 
   @override
-  String get relaySettingsCheckRelaysTooltip => 'Aktarıcıları denetle';
-
-  @override
   String get relaySettingsNoIdentityTitle => 'Kimlik Yok';
 
   @override
@@ -238,22 +235,10 @@ class AppLocalizationsTr extends AppLocalizations {
   String get relaySettingsInboxTitle => 'Gelen Kutusu Aktarıcılarım';
 
   @override
-  String get relaySettingsInboxSubtitle =>
-      'kind 10050, davetlerin size ulaştığı yer';
-
-  @override
   String get relaySettingsKeyPackageTitle => 'KeyPackage Aktarıcılarım';
 
   @override
-  String get relaySettingsKeyPackageSubtitle =>
-      'kind 10002, sizi davet etmek için gereken anahtarları başkalarının bulduğu yer';
-
-  @override
   String get relaySettingsProfileTitle => 'Profil Aktarıcılarım';
-
-  @override
-  String get relaySettingsProfileSubtitle =>
-      'kind 0, herkese açık profilinizin sorgulandığı ve yayımlandığı yer — bu aktarıcılar diğer aktarıcılarınızdan ayrı tutulur ve profil aktarıcılarınızın listesi hiçbir zaman yayımlanmaz';
 
   @override
   String get relaySettingsProfileUnderflowTitle =>
@@ -321,9 +306,6 @@ class AppLocalizationsTr extends AppLocalizations {
   String get relaySettingsStatusChecking => 'Denetleniyor';
 
   @override
-  String get relaySettingsStatusUnreachable => 'Ulaşılamıyor';
-
-  @override
   String relaySettingsKindLine(String kind, String status) {
     return '$kind: $status';
   }
@@ -350,26 +332,170 @@ class AppLocalizationsTr extends AppLocalizations {
   String get relaySettingsLookupTitle => 'Sorgu aktarıcıları';
 
   @override
-  String get relaySettingsLookupSubtitle =>
-      'Başkalarının sizi bulmak için baktığı herkese açık aktarıcılar. İnsanların sizi davet edebilmesi için Haven, aktarıcı listelerinizin bir kopyasını burada tutar.';
-
-  @override
-  String get relaySettingsRepublish => 'Yeniden yayımla';
-
-  @override
-  String get relaySettingsRepublishDone =>
-      'Yanıt veren her aktarıcıda artık başkalarının sizi davet etmek için ihtiyaç duyduğu her şey var';
-
-  @override
-  String get relaySettingsRepublishIncomplete =>
-      'Bazı aktarıcılarda başkalarının sizi davet etmek için ihtiyaç duyduğu şeyler hâlâ eksik';
-
-  @override
-  String get relaySettingsRepublishHeld =>
+  String get relaySettingsPublishingHeld =>
       'Aktarıcı ayarları bilgilendirmesini geçene kadar Haven aktarıcı ayarlarınızı ve davet anahtarınızı yayımlamaz';
 
   @override
   String get relaySettingsStatusNotChecked => 'Denetlenmedi';
+
+  @override
+  String get relaySettingsPresencePublishing => 'Yayımlanıyor…';
+
+  @override
+  String get relaySettingsPresenceRefused => 'Aktarıcı reddetti';
+
+  @override
+  String get relaySettingsPresenceUnconfirmed => 'Aktarıcı onaylamadı';
+
+  @override
+  String get relaySettingsPresenceNoAnswer => 'Denetlenemedi';
+
+  @override
+  String get relaySettingsPresenceHeld => 'Beklemede';
+
+  @override
+  String relaySettingsInfoTooltip(String section) {
+    return '$section hakkında';
+  }
+
+  @override
+  String get relaySettingsInboxInfoWhat =>
+      'Biri sizi bir çevreye davet ettiğinde davet bu aktarıcılara iletilir. Aktarıcılar, mesajları ileten bağımsız sunuculardır. Haven yeni davetler için bu aktarıcıları denetler.';
+
+  @override
+  String get relaySettingsInboxInfoKeeps =>
+      'Haven, Gelen Kutusu listenizi burada tutar. Bu liste, hangi aktarıcıların gelen kutunuz olduğunu belirten kısa ve herkese açık bir nottur; böylece insanlar davetleri nereye göndereceklerini bilir. Bir kopyası da bu sayfanın aşağısındaki sorgu aktarıcılarına gider. Davetler, yalnızca sizin açabileceğiniz şekilde mühürlenir.';
+
+  @override
+  String get relaySettingsInboxInfoMissing =>
+      'Haven kullanan kişiler Gelen Kutusu listenizi sorgu aktarıcılarında arar, diğer uygulamalar ise onu kendi aktarıcılarınızda arayabilir; bu yüzden Haven her ikisinde de bir kopya tutar. Her satır, o aktarıcıda güncel sürümün bulunup bulunmadığını gösterir.';
+
+  @override
+  String get relaySettingsInboxInfoActions =>
+      'Güvendiğiniz aktarıcıları ekleyebilir, artık istemediklerinizi kaldırabilirsiniz. Haven, bu listedeki son aktarıcıyı kaldırmanıza izin vermez. Bu listedeki her aktarıcı herkese açıktır: Herkes onu Gelen Kutusu listenizde görebilir. Bir aktarıcıyı kaldırdığınızda Haven, ondan eski listenizi silmesini ister.';
+
+  @override
+  String get relaySettingsInboxInfoTechnical =>
+      'Teknik ayrıntıları merak edenler için: Gelen Kutusu listeniz kind 10050 türündeki bir Nostr olayıdır; davetler ise kind 1059 türündeki, gift wrap ile sarılmış olaylar olarak gelir.';
+
+  @override
+  String get relaySettingsKeyPackageInfoWhat =>
+      'Sizi bir çevreye eklemek için, davet eden kişinin KeyPackage adı verilen davet anahtarınıza ihtiyacı vardır. Haven bu anahtarı bu aktarıcılarda tutar; böylece telefonunuz kapalıyken bile insanlar sizi davet edebilir.';
+
+  @override
+  String get relaySettingsKeyPackageInfoKeeps =>
+      'Haven burada iki şey tutar: davet anahtarınız (KeyPackage) ve aktarıcı listeniz. Aktarıcı listesi, davet anahtarınızı hangi aktarıcıların tuttuğunu belirten kısa ve herkese açık bir nottur. Aktarıcı listesinin bir kopyası sorgu aktarıcılarına da gider. Davet anahtarınız yalnızca bu listedeki aktarıcılara gider. Davet anahtarınız kullanıldıktan sonra Haven onu yenisiyle değiştirir; ayrıca zaman zaman yeniler.';
+
+  @override
+  String get relaySettingsKeyPackageInfoMissing =>
+      'Her satır, o aktarıcıda KeyPackage ve aktarıcı listenizin güncel sürümlerinin bulunup bulunmadığını gösterir. Bir aktarıcıda davet anahtarınız yoksa ya da Haven\'ın yenisiyle değiştirdiği eski bir anahtar duruyorsa, onu orada arayan kişiler sizi davet edemeyebilir.';
+
+  @override
+  String get relaySettingsKeyPackageInfoActions =>
+      'Aktarıcı ekleyebilir veya kaldırabilirsiniz. Haven, bu listedeki son aktarıcıyı kaldırmanıza izin vermez. Bu listedeki her aktarıcı herkese açıktır: Herkes onu aktarıcı listenizde görebilir. Bir aktarıcıyı kaldırdığınızda Haven, ondan eski aktarıcı listenizi silmesini ister.';
+
+  @override
+  String get relaySettingsKeyPackageInfoTechnical =>
+      'Teknik ayrıntıları merak edenler için: KeyPackage, kind 30443 türündeki bir Marmot olayıdır; aktarıcı listesi ise kind 10002 türündeki bir NIP-65 olayıdır.';
+
+  @override
+  String get relaySettingsProfileInfoWhat =>
+      'Bir ad veya fotoğraf kaydettiğinizde Haven, herkese açık profilinizi bu aktarıcılara gönderir. Haven diğer üyelerin adlarını ve fotoğraflarını da burada arar.';
+
+  @override
+  String get relaySettingsProfileInfoKeeps =>
+      'Herkes profilinizi bu aktarıcılarda arayıp bulabilir. Fotoğrafınızın kendisi ayrı bir fotoğraf sunucusunda saklanır; profilinizde ise onun web adresi bulunur.';
+
+  @override
+  String get relaySettingsProfileInfoPrivacy =>
+      'Haven profilinizi yalnızca bu aktarıcılara gönderir ve bunları davetlerinizi taşıyan aktarıcılardan ayrı tutar. Profiliniz herkese açık olduğundan diğer uygulamalar onu başka yerlere kopyalayabilir. Haven bu listeyi telefonunuzda tutar ve asla yayımlamaz. Burada, diğer Haven trafiğinizi de taşıyan bir aktarıcı bir uyarıyla işaretlenir.';
+
+  @override
+  String get relaySettingsProfileInfoActions =>
+      'Aktarıcı ekleyebilirsiniz. Haven\'ın yerleşik profil aktarıcıları kaldırılamaz, çünkü Haven onları her zaman geri ekler. Bu bölüm aktarıcıların yanında simge göstermez; kaydettiğiniz profil Kimlik sayfanızda gösterilir.';
+
+  @override
+  String get relaySettingsProfileInfoTechnical =>
+      'Teknik ayrıntıları merak edenler için: Profiliniz kind 0 türündeki bir Nostr olayıdır; fotoğraf ise bir Blossom sunucusunda saklanır.';
+
+  @override
+  String get relaySettingsLookupInfoWhat =>
+      'Sorgu aktarıcıları, uygulamaların bir kişinin yalnızca hesabını bildiklerinde onun aktarıcılarını aradıkları, iyi bilinen herkese açık aktarıcılardır. Bunları Haven seçti ve Haven kullanan herkes için aynıdırlar. Haven, davet ettiğiniz kişileri bulmak için de bunları kullanır.';
+
+  @override
+  String get relaySettingsLookupInfoKeeps =>
+      'Yalnızca hesabınızı bilen biri de sizi davet edebilsin diye Haven, Gelen Kutusu listenizi ve aktarıcı listenizi değiştirmeden buraya kopyalar. Bu listelerde özel bir aktarıcının adı geçiyorsa, o ad burada da görünür. Haven bu rolde buraya yalnızca bu iki listeyi kopyalar. Bazı sorgu aktarıcıları aynı zamanda Haven\'ın varsayılan Gelen Kutusu ve KeyPackage aktarıcılarıdır; bu aktarıcılar listelerinizde bulundukları sürece o bölümlerde anlatılanları da tutarlar.';
+
+  @override
+  String get relaySettingsLookupInfoMissing =>
+      'Her satır, o aktarıcıda iki listenin de güncel sürümünün bulunup bulunmadığını gösterir. Bir sorgu aktarıcısında bu listeler yoksa ya da eski sürümleri duruyorsa, orada arama yapan kişiler sizi bulamayabilir. Bir aktarıcı birden fazla bölümde görünebilir; her bölüm yalnızca o rolün gerektirdiklerini gösterir.';
+
+  @override
+  String get relaySettingsLookupInfoActions =>
+      'Bu liste Haven\'da yerleşik olarak gelir; bu yüzden onu burada değiştiremezsiniz. Yukarıdaki Gelen Kutusu ve KeyPackage listelerini ise siz yönetirsiniz.';
+
+  @override
+  String get relaySettingsLookupInfoTechnical =>
+      'Teknik ayrıntıları merak edenler için: Haven, kind 10050 ve kind 10002 olaylarınızı bu aktarıcılara kopyalar; kind 30443 yalnızca KeyPackage aktarıcılarınıza gider.';
+
+  @override
+  String get relaySettingsLegendTitle => 'Simgelerin anlamı';
+
+  @override
+  String get relaySettingsLegendCurrent =>
+      'Yayımlandı: Bu aktarıcıda güncel sürüm var.';
+
+  @override
+  String get relaySettingsLegendPublishing =>
+      'Yayımlanıyor: Haven gönderdi ve aktarıcının onaylamasını bekliyor.';
+
+  @override
+  String get relaySettingsLegendChecking =>
+      'Denetleniyor veya henüz denetlenmedi: Haven aktarıcıya elinde ne olduğunu soruyor ya da henüz sormadı.';
+
+  @override
+  String get relaySettingsLegendNotOnRelay =>
+      'Bu aktarıcıda henüz yok: Eksik, eski sürüm, aktarıcı reddetti ya da aktarıcı onaylamadı durumlarından biri. Hangisi olduğunu görmek için bir simgeye dokunun. Haven bir sonraki denetiminde yeniden dener. Denetim, Haven açıkken KeyPackage için yaklaşık 10 dakikada bir, listeleriniz için 30 dakikada bir ve Haven her açıldığında yapılır. Aktarıcılarınızdan biri bunu göstermeyi sürdürürse onu başka bir aktarıcıyla değiştirebilirsiniz.';
+
+  @override
+  String get relaySettingsLegendNoAnswer =>
+      'Denetlenemedi: Aktarıcı yanıt vermedi; belki çevrimdışısınız ya da aktarıcı çalışmıyor. Haven bir sonraki denetiminde yeniden sorar.';
+
+  @override
+  String get relaySettingsLegendHeld =>
+      'Beklemede: Haven bunu şimdilik yayımlamıyor. Nedenini bu sayfadaki bir not açıklıyor.';
+
+  @override
+  String get relaySettingsHeldNoRelays =>
+      'Haven\'ın, yukarıda aktarıcısı olmayan bir listeyi yayımlayabileceği bir yer yok. Yeniden yayımlamak için boş olan her listede \"Varsayılanları geri yükle\" düğmesine dokunun.';
+
+  @override
+  String get relaySettingsHeldNotYetPublished =>
+      'Haven aktarıcı listelerinizden birini henüz yayımlamadı. Bir sonraki denetiminde yayımlayacak.';
+
+  @override
+  String relaySettingsCheckSettled(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other:
+          'Aktarıcı denetimi tamamlandı. $count aktarıcının güncel olduğu doğrulanmadı.',
+      one:
+          'Aktarıcı denetimi tamamlandı. 1 aktarıcının güncel olduğu doğrulanmadı.',
+      zero: 'Aktarıcı denetimi tamamlandı. Her şey güncel.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String relaySettingsAddedRelayUpToDate(String relay) {
+    return '$relay aktarıcısı güncel.';
+  }
+
+  @override
+  String relaySettingsAddedRelayNotUpToDate(String relay) {
+    return '$relay aktarıcısının güncel olduğu doğrulanmadı. Nedeni kendi satırında yazıyor.';
+  }
 
   @override
   String get relaySettingsEmptyTitle => 'Yapılandırılmış aktarıcı yok';
@@ -1462,59 +1588,6 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get refreshRingAnnouncementNoInbox => 'Gelen kutusu yapılandırılmadı';
-
-  @override
-  String refreshRingSemanticAllFound(int total) {
-    final intl.NumberFormat totalNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String totalString = totalNumberFormat.format(total);
-
-    String _temp0 = intl.Intl.pluralLogic(
-      total,
-      locale: localeName,
-      other: '$totalString aktarıcının tümünde verileriniz var',
-      one: 'Aktarıcıda verileriniz var',
-    );
-    return '$_temp0';
-  }
-
-  @override
-  String get refreshRingSemanticNoneFound =>
-      'Hiçbir aktarıcıda verileriniz yok';
-
-  @override
-  String refreshRingSemanticPartialFound(int ok, int total) {
-    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
-      localeName,
-    );
-    final String okString = okNumberFormat.format(ok);
-    final intl.NumberFormat totalNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String totalString = totalNumberFormat.format(total);
-
-    return '$totalString aktarıcıdan $okString tanesinde verileriniz var';
-  }
-
-  @override
-  String get refreshRingAnnouncementAllFound =>
-      'Tüm aktarıcılarda verileriniz var';
-
-  @override
-  String refreshRingAnnouncementPartialFound(int ok, int total) {
-    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
-      localeName,
-    );
-    final String okString = okNumberFormat.format(ok);
-    final intl.NumberFormat totalNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String totalString = totalNumberFormat.format(total);
-
-    return '$totalString aktarıcıdan $okString tanesinde verileriniz var';
-  }
-
-  @override
-  String get refreshRingAnnouncementNoneFound =>
-      'Hiçbir aktarıcıda verileriniz yok';
 
   @override
   String get identityTitle => 'Kimlik';

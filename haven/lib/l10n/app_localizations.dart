@@ -480,12 +480,6 @@ abstract class AppLocalizations {
   /// **'Relays'**
   String get relaySettingsTitle;
 
-  /// Tooltip on the refresh button that re-checks reachability of all configured relays.
-  ///
-  /// In en, this message translates to:
-  /// **'Check relays'**
-  String get relaySettingsCheckRelaysTooltip;
-
   /// Title of the empty state shown on the relay settings page when no identity exists yet.
   ///
   /// In en, this message translates to:
@@ -510,35 +504,17 @@ abstract class AppLocalizations {
   /// **'My Inbox Relays'**
   String get relaySettingsInboxTitle;
 
-  /// Subtitle of the Inbox relays section. 'kind 10050' is a Nostr event-kind identifier, intentionally English (not translated).
-  ///
-  /// In en, this message translates to:
-  /// **'Where invitations reach you (kind 10050)'**
-  String get relaySettingsInboxSubtitle;
-
   /// Heading of the KeyPackage relays section on the relay settings page.
   ///
   /// In en, this message translates to:
   /// **'My KeyPackage Relays'**
   String get relaySettingsKeyPackageTitle;
 
-  /// Subtitle of the KeyPackage relays section. 'kind 10002' is a Nostr event-kind identifier, intentionally English (not translated). This list no longer carries the public profile — kind-0 profile lookups/publish moved to the separate, local-only Profile relays section below (relaySettingsProfileSubtitle) so the two planes stay on disjoint relays. Do not reintroduce a 'your public profile is published' clause here. The keys it names are what storageResetAcknowledgeFailed calls the user's 'invitation key'; the two terms are to be aligned in a later copy pass, so do not change either one alone.
-  ///
-  /// In en, this message translates to:
-  /// **'Where others find the keys they need to invite you (kind 10002)'**
-  String get relaySettingsKeyPackageSubtitle;
-
   /// Heading of the Profile relays section on the relay settings page. This is a local-only category (kind-0 profile lookups/publish), kept separate from the Inbox and KeyPackage categories.
   ///
   /// In en, this message translates to:
   /// **'My Profile Relays'**
   String get relaySettingsProfileTitle;
-
-  /// Subtitle of the Profile relays section. 'kind 0' is a Nostr event-kind identifier, intentionally English (not translated). Explains that this list is local-only policy, unlike the other two sections' published lists.
-  ///
-  /// In en, this message translates to:
-  /// **'Where your public profile is looked up and published. These relays are kept separate from your other relays, and the profile relay list itself is never published (kind 0)'**
-  String get relaySettingsProfileSubtitle;
 
   /// Title of the warning banner shown at the top of the Profile relays section when the profile-plane relay pool has underflowed (too few relays remain to safely look up profiles — see ProfilePoolStatusFfi.isUnderflow). Only shown while true; the banner disappears on its own once enough relays are restored.
   ///
@@ -624,55 +600,49 @@ abstract class AppLocalizations {
   /// **'Remove {url}'**
   String relaySettingsRemoveTooltip(String url);
 
-  /// Relay status label: a reachability check is in progress.
+  /// Exact state of one item on a relay row (spoken inside relaySettingsKindLine, and shown when the user taps the symbol): Haven is asking this relay what it has. Shown as a dashed circle.
   ///
   /// In en, this message translates to:
   /// **'Checking'**
   String get relaySettingsStatusChecking;
 
-  /// Relay status label: the relay could not be reached or returned an error.
-  ///
-  /// In en, this message translates to:
-  /// **'Can\'t reach'**
-  String get relaySettingsStatusUnreachable;
-
-  /// One line under a relay's address on the Relay settings page: which of the user's published items it is about, and whether this relay has it, e.g. 'KeyPackage: Published'. Rows show one such line per item that relay should hold, and a screen reader reads the address and its lines as one sentence. Reorder or change the separator if this locale needs it.
+  /// What a screen reader says for one status symbol on a relay row of the Relay settings page: which of the user's published items it is about, and its exact state, e.g. 'KeyPackage: Published'. A screen reader reads the address and one of these per item as one sentence. Reorder or change the separator if this locale needs it.
   ///
   /// In en, this message translates to:
   /// **'{kind}: {status}'**
   String relaySettingsKindLine(String kind, String status);
 
-  /// Item name in a relay row's status line (relaySettingsKindLine): the user's invitation key, kind 30443. Keep this locale's established rendering of 'KeyPackage' (the same term as the KeyPackage section title).
+  /// Short label shown beside a status symbol on a relay row, and spoken in relaySettingsKindLine: the user's invitation key, kind 30443. Keep this locale's established rendering of 'KeyPackage' (the same term as the KeyPackage section title).
   ///
   /// In en, this message translates to:
   /// **'KeyPackage'**
   String get relaySettingsKindKeyPackage;
 
-  /// Item name in a relay row's status line (relaySettingsKindLine): the user's published list of their KeyPackage relays (kind 10002), which inviters read to find the KeyPackage. 'relay' is a Nostr term of art — keep this locale's established rendering.
+  /// Short label shown beside a status symbol on a relay row, and spoken in relaySettingsKindLine: the user's published list of their KeyPackage relays (kind 10002), which inviters read to find the KeyPackage. 'relay' is a Nostr term of art — keep this locale's established rendering.
   ///
   /// In en, this message translates to:
   /// **'Relay list'**
   String get relaySettingsKindRelayList;
 
-  /// Item name in a relay row's status line (relaySettingsKindLine): the user's published list of their Inbox relays (kind 10050), where others send invitations. Use the same word for 'Inbox' as the Inbox section title.
+  /// Short label shown beside a status symbol on a relay row, and spoken in relaySettingsKindLine: the user's published list of their Inbox relays (kind 10050), where others send invitations. Use the same word for 'Inbox' as the Inbox section title.
   ///
   /// In en, this message translates to:
   /// **'Inbox list'**
   String get relaySettingsKindInboxList;
 
-  /// Status in a relay row's line (relaySettingsKindLine): this relay has the current version of the item.
+  /// Exact state of one item on a relay row (spoken inside relaySettingsKindLine, and shown when the user taps the symbol): this relay has the current version of the item. Shown as a green check.
   ///
   /// In en, this message translates to:
   /// **'Published'**
   String get relaySettingsPresencePublished;
 
-  /// Status in a relay row's line (relaySettingsKindLine): this relay answered and does not have the item. Distinct from 'Can't reach' (relaySettingsStatusUnreachable), where the relay did not answer.
+  /// Exact state of one item on a relay row (spoken inside relaySettingsKindLine, and shown when the user taps the symbol): this relay answered and does not have the item. Shown as a red cross. Distinct from relaySettingsPresenceNoAnswer, where the relay did not answer.
   ///
   /// In en, this message translates to:
   /// **'Missing'**
   String get relaySettingsPresenceMissing;
 
-  /// Status in a relay row's line (relaySettingsKindLine): this relay has an older version of the item that Haven would replace (for a KeyPackage, one this phone can no longer use).
+  /// Exact state of one item on a relay row (spoken inside relaySettingsKindLine, and shown when the user taps the symbol): this relay has an older version of the item that Haven replaces. Shown as a red cross.
   ///
   /// In en, this message translates to:
   /// **'Old version'**
@@ -684,41 +654,245 @@ abstract class AppLocalizations {
   /// **'Lookup relays'**
   String get relaySettingsLookupTitle;
 
-  /// Caption under the Lookup relays section title. States what is sent there and why: only the user's relay lists (not their invitation key), so people who only have their public key can invite them.
-  ///
-  /// In en, this message translates to:
-  /// **'Public relays where others look you up. Haven keeps a copy of your relay lists here so people can invite you.'**
-  String get relaySettingsLookupSubtitle;
-
-  /// Button on the Relay settings page, shown when a relay is missing one of the user's published items or has an old version. Publishes them again and checks every relay again.
-  ///
-  /// In en, this message translates to:
-  /// **'Republish'**
-  String get relaySettingsRepublish;
-
-  /// Snackbar after Republish (relaySettingsRepublish) when every relay that answered has the current version of every item it should hold.
-  ///
-  /// In en, this message translates to:
-  /// **'Every relay that answered now has what others need to invite you'**
-  String get relaySettingsRepublishDone;
-
-  /// Snackbar after Republish (relaySettingsRepublish) when a relay that answered is still missing an item or has an old version. Must not name a relay or a technical cause.
-  ///
-  /// In en, this message translates to:
-  /// **'Some relays still don\'t have what others need to invite you'**
-  String get relaySettingsRepublishIncomplete;
-
-  /// Snackbar after Republish (relaySettingsRepublish) while the one-time notice that this update reset the relay settings is unanswered: Haven publishes the user's relay settings (their relay lists) and invitation key (the key others need to invite them) only after the user presses Continue on that notice or comes back from Relay settings. This is a promise the code keeps, so keep its scope exact, as in storageResetAcknowledgeFailed: do NOT widen it to 'nothing is published' — the public profile, invitations the user sends and location still go out. Reuse this locale's wording of storageResetAcknowledgeFailed's middle sentence.
+  /// Note on the Relay settings page while the one-time notice that this update reset the relay settings is unanswered: Haven publishes the user's relay settings (their relay lists) and invitation key (the key others need to invite them) only after the user presses Continue on that notice or comes back from Relay settings. This is a promise the code keeps, so keep its scope exact, as in storageResetAcknowledgeFailed: do NOT widen it to 'nothing is published' — the public profile, invitations the user sends and location still go out. Reuse this locale's wording of storageResetAcknowledgeFailed's middle sentence.
   ///
   /// In en, this message translates to:
   /// **'Haven won’t publish your relay settings or invitation key until you continue past the relay settings notice'**
-  String get relaySettingsRepublishHeld;
+  String get relaySettingsPublishingHeld;
 
-  /// Relay status label: the relay has not been checked yet.
+  /// Exact state of one item on a relay row (spoken inside relaySettingsKindLine, and shown when the user taps the symbol): Haven has not asked this relay about the item yet in this session. Shown as a dashed circle, like relaySettingsStatusChecking.
   ///
   /// In en, this message translates to:
   /// **'Not checked'**
   String get relaySettingsStatusNotChecked;
+
+  /// Exact state of one item on a relay row (spoken inside relaySettingsKindLine, and shown when the user taps the symbol): Haven has sent the item to this relay and is waiting for the relay to confirm it. Shown as an up arrow inside a moving ring.
+  ///
+  /// In en, this message translates to:
+  /// **'Publishing…'**
+  String get relaySettingsPresencePublishing;
+
+  /// Exact state of one item on a relay row (spoken inside relaySettingsKindLine, and shown when the user taps the symbol): Haven sent the item and this relay answered that it will not keep it. Shown as a red cross, like relaySettingsPresenceMissing. 'it' is the item named before it (KeyPackage, Relay list or Inbox list).
+  ///
+  /// In en, this message translates to:
+  /// **'Relay refused it'**
+  String get relaySettingsPresenceRefused;
+
+  /// Exact state of one item on a relay row (spoken inside relaySettingsKindLine, and shown when the user taps the symbol): the relay did not have the item, Haven sent it, and the relay never confirmed it kept it. Shown as a red cross. Not a refusal: keep it distinct from relaySettingsPresenceRefused.
+  ///
+  /// In en, this message translates to:
+  /// **'Relay didn\'t confirm'**
+  String get relaySettingsPresenceUnconfirmed;
+
+  /// Exact state of one item on a relay row (spoken inside relaySettingsKindLine, and shown when the user taps the symbol): the relay did not answer, or did not finish answering, so Haven cannot tell whether it has the item. Shown as an amber question mark. Not an error: distinct from relaySettingsPresenceMissing, where the relay answered and lacks the item.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t check'**
+  String get relaySettingsPresenceNoAnswer;
+
+  /// Exact state of one item on a relay row (spoken inside relaySettingsKindLine, and shown when the user taps the symbol): Haven is not publishing this item for now; a note on the page says why (relaySettingsPublishingHeld, relaySettingsHeldNoRelays or relaySettingsHeldNotYetPublished). Shown as a pause symbol.
+  ///
+  /// In en, this message translates to:
+  /// **'On hold'**
+  String get relaySettingsPresenceHeld;
+
+  /// Tooltip and screen-reader name of the circled question-mark button beside each section title on the Relay settings page; it opens a panel explaining that section. {section} is that section's title exactly as shown (e.g. relaySettingsInboxTitle). Reorder if this locale needs it.
+  ///
+  /// In en, this message translates to:
+  /// **'About {section}'**
+  String relaySettingsInfoTooltip(String section);
+
+  /// Inbox relays info panel, paragraph 1 of 5: what these relays are for. Written for readers with no technical background. 'relay' is a Nostr term of art: keep this locale's established rendering.
+  ///
+  /// In en, this message translates to:
+  /// **'When someone invites you to a circle, the invitation is delivered to these relays. Relays are independent servers that pass messages along. Haven checks them for new invitations.'**
+  String get relaySettingsInboxInfoWhat;
+
+  /// Inbox relays info panel, paragraph 2 of 5: what Haven stores on these relays (the kind-10050 inbox list) and that a copy goes to the lookup relays. 'Sealed so that only you can open them' refers to the gift-wrap encryption to the user's own key; it is a privacy promise tracked in docs/privacy/privacy_invariants.json. Do not strengthen it to 'nobody can see you received an invitation'.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven keeps your inbox list here. It is a short public note that says which relays are your inbox, so people know where to send invitations. A copy also goes to the lookup relays further down this page. Invitations are sealed so that only you can open them.'**
+  String get relaySettingsInboxInfoKeeps;
+
+  /// Inbox relays info panel, paragraph 3 of 5: why the list is kept on each relay, and that each row's symbol says whether that relay has the current version.
+  ///
+  /// In en, this message translates to:
+  /// **'People using Haven look up your inbox list on the lookup relays, and other apps may look for it on your own relays, so Haven keeps a copy on both. Each row shows whether that relay has the current version.'**
+  String get relaySettingsInboxInfoMissing;
+
+  /// Inbox relays info panel, paragraph 4 of 5: what the user can do (removing the last relay on the list is refused, so the list never becomes empty through a removal), plus the disclosure that every relay on this list is public and linked to their account (privacy manifest disclosure). 'asks it to delete' is deliberate: a relay may ignore the request, so never translate it as 'deletes'.
+  ///
+  /// In en, this message translates to:
+  /// **'You can add relays you trust and remove ones you no longer want. Haven won\'t let you remove the last relay on this list. Every relay on this list is public: anyone can see it in your inbox list. When you remove a relay, Haven asks it to delete your old list.'**
+  String get relaySettingsInboxInfoActions;
+
+  /// Inbox relays info panel, paragraph 5 of 5, shown in smaller type for experts. 'Nostr', 'kind 10050' and 'kind 1059' are intentionally English identifiers: keep them in Latin script.
+  ///
+  /// In en, this message translates to:
+  /// **'For the technically curious: your inbox list is a Nostr event of kind 10050, and invitations arrive as gift-wrapped events of kind 1059.'**
+  String get relaySettingsInboxInfoTechnical;
+
+  /// KeyPackage relays info panel, paragraph 1 of 5. Introduces 'invitation key' (the term relaySettingsPublishingHeld and storageResetAcknowledgeFailed use) as the plain name of the KeyPackage. Keep this locale's established rendering of 'KeyPackage'. Correct only by omission: never add 'public profile', 'your profile is published' or 'name and photo' (privacy manifest forbidden additions).
+  ///
+  /// In en, this message translates to:
+  /// **'To add you to a circle, the person inviting you needs your invitation key, called a KeyPackage. Haven keeps it on these relays so people can invite you even while your phone is off.'**
+  String get relaySettingsKeyPackageInfoWhat;
+
+  /// KeyPackage relays info panel, paragraph 2 of 5: the two items stored here (kind 30443 KeyPackage, kind 10002 relay list). 'goes only to the relays on this list' is an exact promise: do not reword it as 'is never on a lookup relay', because one relay can be on both lists. Correct only by omission: never add 'public profile', 'your profile is published' or 'name and photo'.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven keeps two things here: your KeyPackage, and your relay list, a short public note that says which relays hold your KeyPackage. A copy of the relay list also goes to the lookup relays. Your KeyPackage goes only to the relays on this list. After it has been used, Haven replaces it with a fresh one, and it renews it from time to time.'**
+  String get relaySettingsKeyPackageInfoKeeps;
+
+  /// KeyPackage relays info panel, paragraph 3 of 5: what each row's symbols say, and what a missing or old KeyPackage means. 'may not be able to' is deliberate: keep it a possibility, not a certainty.
+  ///
+  /// In en, this message translates to:
+  /// **'Each row shows whether that relay has your current KeyPackage and relay list. If a relay is missing your KeyPackage, or holds an old one Haven has replaced, people who look for it there may not be able to invite you.'**
+  String get relaySettingsKeyPackageInfoMissing;
+
+  /// KeyPackage relays info panel, paragraph 4 of 5: user actions (removing the last relay on the list is refused, so the list never becomes empty through a removal) plus the disclosure that the list is public (privacy manifest disclosure). 'asks it to delete' is deliberate: a relay may ignore the request, so never translate it as 'deletes'.
+  ///
+  /// In en, this message translates to:
+  /// **'You can add or remove relays. Haven won\'t let you remove the last relay on this list. Every relay on this list is public: anyone can see it in your relay list. When you remove a relay, Haven asks it to delete your old relay list.'**
+  String get relaySettingsKeyPackageInfoActions;
+
+  /// KeyPackage relays info panel, paragraph 5 of 5, smaller type. 'Marmot', 'NIP-65', 'kind 30443' and 'kind 10002' are intentionally English identifiers: keep them in Latin script.
+  ///
+  /// In en, this message translates to:
+  /// **'For the technically curious: the KeyPackage is a Marmot event of kind 30443, and the relay list is a NIP-65 event of kind 10002.'**
+  String get relaySettingsKeyPackageInfoTechnical;
+
+  /// Profile relays info panel, paragraph 1 of 5: what these relays carry (the public profile) and that member profiles are read from them. Says what happens when the user saves; never add that Haven keeps the profile up to date by itself.
+  ///
+  /// In en, this message translates to:
+  /// **'When you save a name or photo, Haven sends your public profile to these relays. Haven also looks up other members\' names and photos here.'**
+  String get relaySettingsProfileInfoWhat;
+
+  /// Profile relays info panel, paragraph 2 of 5: the profile is public; the photo is hosted elsewhere and the profile only links to it.
+  ///
+  /// In en, this message translates to:
+  /// **'Anyone can look up your profile on these relays. Your photo itself is stored on a separate photo server, and your profile holds its web address.'**
+  String get relaySettingsProfileInfoKeeps;
+
+  /// Profile relays info panel, paragraph 3 of 5. 'keeps this list on your phone and never publishes it' is a privacy promise tracked in docs/privacy/privacy_invariants.json: keep it exact. Keep 'other apps can copy it elsewhere': the profile is public. The warning sentence refers to the triangle icon of relaySettingsProfileContaminationTooltip.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven sends your profile only to these relays, which it keeps apart from the relays that carry your invitations. Because your profile is public, other apps can copy it elsewhere. Haven keeps this list on your phone and never publishes it. A relay here that also carries your other Haven traffic is marked with a warning.'**
+  String get relaySettingsProfileInfoPrivacy;
+
+  /// Profile relays info panel, paragraph 4 of 5: the built-in relays are not removable, and why Profile rows carry no status symbols. Must not suggest that the user needs to check or retry anything, and must not hint at work done in the background.
+  ///
+  /// In en, this message translates to:
+  /// **'You can add relays. Haven\'s built-in profile relays can\'t be removed, because Haven always adds them back. This section shows no symbol for each relay; your Identity page shows the profile you saved.'**
+  String get relaySettingsProfileInfoActions;
+
+  /// Profile relays info panel, paragraph 5 of 5, smaller type. 'Nostr', 'kind 0' and 'Blossom' are intentionally English identifiers: keep them in Latin script.
+  ///
+  /// In en, this message translates to:
+  /// **'For the technically curious: your profile is a Nostr event of kind 0, and the photo is stored on a Blossom server.'**
+  String get relaySettingsProfileInfoTechnical;
+
+  /// Lookup relays info panel, paragraph 1 of 5: what lookup (discovery) relays are; built into Haven.
+  ///
+  /// In en, this message translates to:
+  /// **'Lookup relays are well-known public relays where apps look for someone\'s relays when they know only that person\'s account. Haven chose them, and they are the same for everyone who uses Haven. Haven also uses them to find the people you invite.'**
+  String get relaySettingsLookupInfoWhat;
+
+  /// Lookup relays info panel, paragraph 2 of 5: what is copied here and why, including that a private relay named in the lists becomes visible (privacy manifest disclosure). Keep 'unchanged' and the private-relay sentence. 'In this role' matters: a lookup relay that is also on the user's own lists also holds what those sections describe.
+  ///
+  /// In en, this message translates to:
+  /// **'So that someone who knows only your account can still invite you, Haven copies your inbox list and your relay list here, unchanged. If those lists name a private relay, that name is visible here too. In this role, Haven copies only those two lists here. Some lookup relays are also Haven\'s default inbox and KeyPackage relays; while they are on your lists, they also hold what those sections describe.'**
+  String get relaySettingsLookupInfoKeeps;
+
+  /// Lookup relays info panel, paragraph 3 of 5: what each row's symbols say, the consequence of a missing list, and why the same relay can show different items in different sections.
+  ///
+  /// In en, this message translates to:
+  /// **'Each row shows whether that relay has the current version of both lists. If a lookup relay is missing them or has old versions, people who search there may not find you. A relay can appear in more than one section; each section shows only what that role needs.'**
+  String get relaySettingsLookupInfoMissing;
+
+  /// Lookup relays info panel, paragraph 4 of 5: the list is read-only. Use the same words for 'inbox' and 'KeyPackage' as the section titles.
+  ///
+  /// In en, this message translates to:
+  /// **'This list is built into Haven, so you can\'t change it here. You control the inbox and KeyPackage lists above.'**
+  String get relaySettingsLookupInfoActions;
+
+  /// Lookup relays info panel, paragraph 5 of 5, smaller type. The kind numbers are intentionally English identifiers: keep them in Latin script.
+  ///
+  /// In en, this message translates to:
+  /// **'For the technically curious: Haven copies your kind 10050 and kind 10002 events to these relays; kind 30443 goes only to your KeyPackage relays.'**
+  String get relaySettingsLookupInfoTechnical;
+
+  /// Heading of the symbol legend at the end of the Inbox, KeyPackage and Lookup info panels.
+  ///
+  /// In en, this message translates to:
+  /// **'What the symbols mean'**
+  String get relaySettingsLegendTitle;
+
+  /// Legend line beside the green check symbol. Start with the same word as relaySettingsPresencePublished.
+  ///
+  /// In en, this message translates to:
+  /// **'Published: this relay has the current version.'**
+  String get relaySettingsLegendCurrent;
+
+  /// Legend line beside the up arrow in a moving ring. Start with the same word as relaySettingsPresencePublishing.
+  ///
+  /// In en, this message translates to:
+  /// **'Publishing: Haven has sent it and is waiting for the relay to confirm.'**
+  String get relaySettingsLegendPublishing;
+
+  /// Legend line beside the dashed circle, which stands for both relaySettingsStatusChecking and relaySettingsStatusNotChecked.
+  ///
+  /// In en, this message translates to:
+  /// **'Checking, or not checked yet: Haven is asking the relay what it has, or has not asked it yet.'**
+  String get relaySettingsLegendChecking;
+
+  /// Legend line beside the red cross, which stands for four states (relaySettingsPresenceMissing, relaySettingsPresenceOutdated, relaySettingsPresenceRefused, relaySettingsPresenceUnconfirmed). The retry times are promises the code keeps: keep 'about', the two intervals, 'while Haven is open' and 'each time Haven starts'. Never add that the user does not need to do anything: a relay that always refuses stays this way until it is replaced.
+  ///
+  /// In en, this message translates to:
+  /// **'Not on this relay yet: it is missing, it is an old version, the relay refused it, or the relay didn\'t confirm. Tap a symbol to see which. Haven tries again at its next check: about every 10 minutes for your KeyPackage and every 30 minutes for your lists while Haven is open, and each time Haven starts. If one of your relays keeps showing this, you can replace it.'**
+  String get relaySettingsLegendNotOnRelay;
+
+  /// Legend line beside the amber question mark. Start with the same words as relaySettingsPresenceNoAnswer. Not an error: nothing is known to be wrong.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t check: the relay didn\'t answer, perhaps because you\'re offline or it\'s down. Haven asks again at its next check.'**
+  String get relaySettingsLegendNoAnswer;
+
+  /// Legend line beside the pause symbol. Start with the same words as relaySettingsPresenceHeld.
+  ///
+  /// In en, this message translates to:
+  /// **'On hold: Haven isn\'t publishing this for now. A note on this page says why.'**
+  String get relaySettingsLegendHeld;
+
+  /// Note on the Relay settings page, shown once, while one or both of the user's relay lists (Inbox, KeyPackage) are empty, so Haven publishes nothing for them; it must read true whether one list or both are empty. Each section offers 'Restore defaults' (relaySettingsRestoreDefaults).
+  ///
+  /// In en, this message translates to:
+  /// **'Haven has nowhere to publish a list above that has no relays. Restore defaults on each empty list to publish it again.'**
+  String get relaySettingsHeldNoRelays;
+
+  /// Note on the Relay settings page while one of the user's relay lists is held back by a setting stored by an older version of Haven, which opening this page turns on. Neutral: there is nothing for the user to switch or do.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven hasn\'t published one of your relay lists yet. It does so at its next check.'**
+  String get relaySettingsHeldNotYetPublished;
+
+  /// Screen-reader announcement on the Relay settings page when Haven has finished checking and publishing to the relays. {count} is how many relays have an item that is not confirmed up to date (missing, old, refused, not confirmed, could not be checked, or on hold). Never names a relay.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =0{Relay check finished. Everything is up to date.} =1{Relay check finished. 1 relay isn\'t confirmed up to date.} other{Relay check finished. {count} relays aren\'t confirmed up to date.}}'**
+  String relaySettingsCheckSettled(int count);
+
+  /// Screen-reader announcement when a relay the user has just added has been checked and has every item it should hold. {relay} is the relay's address as shown on its row.
+  ///
+  /// In en, this message translates to:
+  /// **'{relay} is up to date.'**
+  String relaySettingsAddedRelayUpToDate(String relay);
+
+  /// Screen-reader announcement when a relay the user has just added has been checked and an item there is not confirmed up to date. {relay} is the relay's address as shown on its row.
+  ///
+  /// In en, this message translates to:
+  /// **'{relay} isn\'t confirmed up to date. Its row says why.'**
+  String relaySettingsAddedRelayNotUpToDate(String relay);
 
   /// Title of the empty state shown when a relay category has no relays.
   ///
@@ -2159,42 +2333,6 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'No inbox configured'**
   String get refreshRingAnnouncementNoInbox;
-
-  /// Accessibility label on the Relay Settings refresh ring when every relay holds the user's published data (KeyPackage / relay lists). The 'hasData' vocabulary, distinct from the Invitations 'responded' wording, because on this page a relay can answer yet still be missing the data.
-  ///
-  /// In en, this message translates to:
-  /// **'{total, plural, =1{The relay has your data} other{All {total} relays have your data}}'**
-  String refreshRingSemanticAllFound(int total);
-
-  /// Accessibility label on the Relay Settings refresh ring when no relay holds the user's data (missing everywhere, or unreachable).
-  ///
-  /// In en, this message translates to:
-  /// **'No relays have your data'**
-  String get refreshRingSemanticNoneFound;
-
-  /// Accessibility label on the Relay Settings refresh ring when only some relays hold the user's data, e.g. '2 of 3 relays have your data'. A partial result always has at least two relays, so no singular form is needed.
-  ///
-  /// In en, this message translates to:
-  /// **'{ok} of {total} relays have your data'**
-  String refreshRingSemanticPartialFound(int ok, int total);
-
-  /// Screen-reader announcement when every relay holds the user's data at the end of a Relay Settings check.
-  ///
-  /// In en, this message translates to:
-  /// **'All relays have your data'**
-  String get refreshRingAnnouncementAllFound;
-
-  /// Screen-reader announcement when only some relays hold the user's data at the end of a Relay Settings check, e.g. '2 of 3 relays have your data'. A partial result always has at least two relays, so no singular form is needed.
-  ///
-  /// In en, this message translates to:
-  /// **'{ok} of {total} relays have your data'**
-  String refreshRingAnnouncementPartialFound(int ok, int total);
-
-  /// Screen-reader announcement when no relay holds the user's data at the end of a Relay Settings check.
-  ///
-  /// In en, this message translates to:
-  /// **'No relays have your data'**
-  String get refreshRingAnnouncementNoneFound;
 
   /// Title of the Identity management page (AppBar).
   ///

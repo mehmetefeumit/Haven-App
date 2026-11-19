@@ -704,8 +704,8 @@ if [[ "${1:-}" == "--self-test" ]]; then
   st_tmp="$(mktemp -d)"
   trap 'rm -rf "${st_tmp}"' EXIT
 
-  # Check 9b: a seeded generator fails, in production or test code; OsRng and
-  # prose do not.
+  # Check 9b: a seeded or thread-local generator fails, in production or test
+  # code; OsRng, SysRng and prose do not.
   printf '%s\n' 'use rand::rngs::OsRng;' '// never StdRng::seed_from_u64 here' \
     'pick(&pool, &mut rand::rngs::OsRng)' 'order.shuffle(&mut UnwrapErr(rand::rngs::SysRng));' \
     'let ms = rng.random_range(JITTER); rng.fill_bytes(&mut buf);' \

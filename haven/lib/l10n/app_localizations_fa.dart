@@ -221,9 +221,6 @@ class AppLocalizationsFa extends AppLocalizations {
   String get relaySettingsTitle => 'رله‌ها';
 
   @override
-  String get relaySettingsCheckRelaysTooltip => 'بررسی رله‌ها';
-
-  @override
   String get relaySettingsNoIdentityTitle => 'بدون هویت';
 
   @override
@@ -237,22 +234,10 @@ class AppLocalizationsFa extends AppLocalizations {
   String get relaySettingsInboxTitle => 'رله‌های صندوق ورودی من';
 
   @override
-  String get relaySettingsInboxSubtitle =>
-      'جایی که دعوت‌ها به تو می‌رسند (kind 10050)';
-
-  @override
   String get relaySettingsKeyPackageTitle => 'رله‌های KeyPackage من';
 
   @override
-  String get relaySettingsKeyPackageSubtitle =>
-      'جایی که دیگران کلیدهای لازم برای دعوت کردنت را پیدا می‌کنند (kind 10002)';
-
-  @override
   String get relaySettingsProfileTitle => 'رله‌های نمایهٔ من';
-
-  @override
-  String get relaySettingsProfileSubtitle =>
-      'جایی که نمایهٔ عمومی‌ات جست‌وجو و منتشر می‌شود. این رله‌ها جدا از رله‌های دیگرت نگه داشته می‌شوند و فهرست رله‌های نمایه‌ات هرگز منتشر نمی‌شود (kind 0)';
 
   @override
   String get relaySettingsProfileUnderflowTitle =>
@@ -319,9 +304,6 @@ class AppLocalizationsFa extends AppLocalizations {
   String get relaySettingsStatusChecking => 'در حال بررسی';
 
   @override
-  String get relaySettingsStatusUnreachable => 'در دسترس نیست';
-
-  @override
   String relaySettingsKindLine(String kind, String status) {
     return '$kind: $status';
   }
@@ -348,26 +330,168 @@ class AppLocalizationsFa extends AppLocalizations {
   String get relaySettingsLookupTitle => 'رله‌های جست‌وجو';
 
   @override
-  String get relaySettingsLookupSubtitle =>
-      'رله‌های عمومی‌ای که دیگران تو را در آن‌ها جست‌وجو می‌کنند. Haven یک نسخه از فهرست‌های رله‌ات را روی این رله‌ها نگه می‌دارد تا دیگران بتوانند دعوتت کنند.';
-
-  @override
-  String get relaySettingsRepublish => 'انتشار دوباره';
-
-  @override
-  String get relaySettingsRepublishDone =>
-      'هر رله‌ای که پاسخ داد، حالا آنچه را دیگران برای دعوت کردنت لازم دارند در خود دارد';
-
-  @override
-  String get relaySettingsRepublishIncomplete =>
-      'برخی رله‌ها هنوز آنچه را دیگران برای دعوت کردنت لازم دارند در خود ندارند';
-
-  @override
-  String get relaySettingsRepublishHeld =>
+  String get relaySettingsPublishingHeld =>
       'تا وقتی از اطلاعیهٔ تنظیمات رله‌ها نگذری و ادامه ندهی، Haven تنظیمات رله‌ها و کلید دعوتت را منتشر نمی‌کند';
 
   @override
   String get relaySettingsStatusNotChecked => 'بررسی نشده';
+
+  @override
+  String get relaySettingsPresencePublishing => 'در حال انتشار…';
+
+  @override
+  String get relaySettingsPresenceRefused => 'رله نپذیرفت';
+
+  @override
+  String get relaySettingsPresenceUnconfirmed => 'رله تأیید نکرد';
+
+  @override
+  String get relaySettingsPresenceNoAnswer => 'بررسی ممکن نشد';
+
+  @override
+  String get relaySettingsPresenceHeld => 'موقتاً متوقف';
+
+  @override
+  String relaySettingsInfoTooltip(String section) {
+    return 'دربارهٔ $section';
+  }
+
+  @override
+  String get relaySettingsInboxInfoWhat =>
+      'وقتی کسی تو را به حلقه‌ای دعوت می‌کند، دعوت به این رله‌ها تحویل داده می‌شود. رله‌ها سرورهای مستقلی هستند که پیام‌ها را دست‌به‌دست می‌کنند. Haven این رله‌ها را برای یافتن دعوت‌های تازه بررسی می‌کند.';
+
+  @override
+  String get relaySettingsInboxInfoKeeps =>
+      'Haven فهرست صندوق ورودی‌ات را اینجا نگه می‌دارد. این فهرست یادداشت عمومی کوتاهی است که می‌گوید کدام رله‌ها صندوق ورودی تو هستند، تا دیگران بدانند دعوت‌ها را کجا بفرستند. یک نسخه از آن به رله‌های جست‌وجو در پایین همین صفحه هم فرستاده می‌شود. دعوت‌ها طوری مهروموم می‌شوند که فقط خودت بتوانی بازشان کنی.';
+
+  @override
+  String get relaySettingsInboxInfoMissing =>
+      'کسانی که از Haven استفاده می‌کنند، در رله‌های جست‌وجو دنبال فهرست صندوق ورودی‌ات می‌گردند و برنامه‌های دیگر ممکن است در رله‌های خودت دنبالش بگردند؛ برای همین Haven یک نسخه از آن را روی هر دو نگه می‌دارد. هر ردیف نشان می‌دهد که آیا آن رله نسخهٔ کنونی را دارد یا نه.';
+
+  @override
+  String get relaySettingsInboxInfoActions =>
+      'می‌توانی رله‌هایی را که به آن‌ها اعتماد داری اضافه کنی و رله‌هایی را که دیگر نمی‌خواهی حذف کنی. Haven اجازه نمی‌دهد آخرین رلهٔ این فهرست را حذف کنی. همهٔ رله‌های این فهرست عمومی‌اند: هر کسی می‌تواند آن‌ها را در فهرست صندوق ورودی‌ات ببیند. وقتی رله‌ای را حذف می‌کنی، Haven از آن می‌خواهد فهرست قدیمی‌ات را پاک کند.';
+
+  @override
+  String get relaySettingsInboxInfoTechnical =>
+      'برای علاقه‌مندان به جزئیات فنی: فهرست صندوق ورودی‌ات یک رویداد Nostr با kind 10050 است و دعوت‌ها به‌شکل رویدادهای gift wrap با kind 1059 می‌رسند.';
+
+  @override
+  String get relaySettingsKeyPackageInfoWhat =>
+      'کسی که تو را دعوت می‌کند، برای افزودنت به حلقه به کلید دعوتت نیاز دارد که KeyPackage نام دارد. Haven آن را روی این رله‌ها نگه می‌دارد تا دیگران حتی وقتی گوشی‌ات خاموش است هم بتوانند دعوتت کنند.';
+
+  @override
+  String get relaySettingsKeyPackageInfoKeeps =>
+      'Haven دو چیز را اینجا نگه می‌دارد: KeyPackage تو، و فهرست رله‌هایت، یعنی یادداشت عمومی کوتاهی که می‌گوید کدام رله‌ها KeyPackage تو را نگه می‌دارند. یک نسخه از فهرست رله‌ها به رله‌های جست‌وجو هم فرستاده می‌شود. KeyPackage تو فقط به رله‌های همین فهرست فرستاده می‌شود. Haven پس از استفاده‌شدن آن، یک KeyPackage تازه جایش می‌گذارد و هر از چندی هم آن را نو می‌کند.';
+
+  @override
+  String get relaySettingsKeyPackageInfoMissing =>
+      'هر ردیف نشان می‌دهد که آیا آن رله نسخهٔ کنونی KeyPackage و فهرست رله‌هایت را دارد یا نه. اگر رله‌ای KeyPackage تو را نداشته باشد، یا KeyPackage قدیمی‌ای را نگه دارد که Haven جایگزینش کرده است، کسانی که آنجا دنبالش می‌گردند ممکن است نتوانند دعوتت کنند.';
+
+  @override
+  String get relaySettingsKeyPackageInfoActions =>
+      'می‌توانی رله اضافه یا حذف کنی. Haven اجازه نمی‌دهد آخرین رلهٔ این فهرست را حذف کنی. همهٔ رله‌های این فهرست عمومی‌اند: هر کسی می‌تواند آن‌ها را در فهرست رله‌هایت ببیند. وقتی رله‌ای را حذف می‌کنی، Haven از آن می‌خواهد نسخهٔ قدیمی فهرست رله‌هایت را پاک کند.';
+
+  @override
+  String get relaySettingsKeyPackageInfoTechnical =>
+      'برای علاقه‌مندان به جزئیات فنی: KeyPackage یک رویداد Marmot با kind 30443 است و فهرست رله‌ها یک رویداد NIP-65 با kind 10002 است.';
+
+  @override
+  String get relaySettingsProfileInfoWhat =>
+      'وقتی نام یا عکسی ذخیره می‌کنی، Haven نمایهٔ عمومی‌ات را به این رله‌ها می‌فرستد. Haven نام و عکس اعضای دیگر را هم در همین رله‌ها جست‌وجو می‌کند.';
+
+  @override
+  String get relaySettingsProfileInfoKeeps =>
+      'هر کسی می‌تواند نمایه‌ات را در این رله‌ها جست‌وجو کند. خود عکست روی یک سرور عکس جداگانه ذخیره می‌شود و نمایه‌ات نشانی وب آن را در خود دارد.';
+
+  @override
+  String get relaySettingsProfileInfoPrivacy =>
+      'Haven نمایه‌ات را فقط به این رله‌ها می‌فرستد و آن‌ها را از رله‌هایی که دعوت‌هایت را حمل می‌کنند جدا نگه می‌دارد. چون نمایه‌ات عمومی است، برنامه‌های دیگر می‌توانند آن را جای دیگری کپی کنند. Haven این فهرست را روی گوشی‌ات نگه می‌دارد و هرگز منتشرش نمی‌کند. رله‌ای در اینجا که بقیهٔ ترافیک تو در Haven را هم حمل می‌کند، با یک هشدار مشخص شده است.';
+
+  @override
+  String get relaySettingsProfileInfoActions =>
+      'می‌توانی رله اضافه کنی. رله‌های نمایه‌ای را که در خود Haven گنجانده شده‌اند نمی‌توان حذف کرد، چون Haven همیشه دوباره اضافه‌شان می‌کند. این بخش برای هر رله نمادی نشان نمی‌دهد؛ صفحهٔ «هویت» نمایه‌ای را که ذخیره کرده‌ای نشان می‌دهد.';
+
+  @override
+  String get relaySettingsProfileInfoTechnical =>
+      'برای علاقه‌مندان به جزئیات فنی: نمایه‌ات یک رویداد Nostr با kind 0 است و عکس روی یک سرور Blossom ذخیره می‌شود.';
+
+  @override
+  String get relaySettingsLookupInfoWhat =>
+      'رله‌های جست‌وجو رله‌های عمومی شناخته‌شده‌ای هستند که برنامه‌ها، وقتی فقط حساب کسی را می‌شناسند، در آن‌ها دنبال رله‌های او می‌گردند. Haven آن‌ها را انتخاب کرده است و برای همهٔ کسانی که از Haven استفاده می‌کنند یکسان‌اند. Haven برای پیدا کردن کسانی که دعوتشان می‌کنی هم از آن‌ها استفاده می‌کند.';
+
+  @override
+  String get relaySettingsLookupInfoKeeps =>
+      'برای اینکه کسی که فقط حساب تو را می‌شناسد هم بتواند دعوتت کند، Haven فهرست صندوق ورودی و فهرست رله‌هایت را بدون تغییر اینجا کپی می‌کند. اگر در این فهرست‌ها نام یک رلهٔ خصوصی آمده باشد، آن نام اینجا هم دیده می‌شود. Haven در این نقش فقط همین دو فهرست را اینجا کپی می‌کند. برخی از رله‌های جست‌وجو، رله‌های پیش‌فرض Haven برای صندوق ورودی و KeyPackage هم هستند؛ تا وقتی در فهرست‌های تو باشند، آنچه را آن بخش‌ها توضیح می‌دهند هم نگه می‌دارند.';
+
+  @override
+  String get relaySettingsLookupInfoMissing =>
+      'هر ردیف نشان می‌دهد که آیا آن رله نسخهٔ کنونی هر دو فهرست را دارد یا نه. اگر یک رلهٔ جست‌وجو آن‌ها را نداشته باشد یا نسخه‌های قدیمی‌شان را داشته باشد، کسانی که آنجا جست‌وجو می‌کنند ممکن است تو را پیدا نکنند. یک رله می‌تواند در بیش از یک بخش دیده شود؛ هر بخش فقط چیزی را نشان می‌دهد که آن نقش لازم دارد.';
+
+  @override
+  String get relaySettingsLookupInfoActions =>
+      'این فهرست در خود Haven گنجانده شده است، پس نمی‌توانی اینجا تغییرش دهی. فهرست‌های صندوق ورودی و KeyPackage در بالا در اختیار خودت هستند.';
+
+  @override
+  String get relaySettingsLookupInfoTechnical =>
+      'برای علاقه‌مندان به جزئیات فنی: Haven رویدادهای kind 10050 و kind 10002 تو را روی این رله‌ها کپی می‌کند؛ kind 30443 فقط به رله‌های KeyPackage تو می‌رود.';
+
+  @override
+  String get relaySettingsLegendTitle => 'معنای نمادها';
+
+  @override
+  String get relaySettingsLegendCurrent =>
+      'منتشر شده: این رله نسخهٔ کنونی را دارد.';
+
+  @override
+  String get relaySettingsLegendPublishing =>
+      'در حال انتشار: Haven آن را فرستاده و منتظر است رله تأییدش کند.';
+
+  @override
+  String get relaySettingsLegendChecking =>
+      'در حال بررسی، یا هنوز بررسی نشده: Haven دارد از رله می‌پرسد چه چیزهایی دارد، یا هنوز از آن نپرسیده است.';
+
+  @override
+  String get relaySettingsLegendNotOnRelay =>
+      'هنوز روی این رله نیست: یا موجود نیست، یا نسخهٔ قدیمی است، یا رله آن را نپذیرفت، یا رله تأییدش نکرد. برای اینکه ببینی کدام است، روی نماد ضربه بزن. Haven در بررسی بعدی‌اش دوباره تلاش می‌کند: تا وقتی Haven باز است، تقریباً هر ۱۰ دقیقه یک بار برای KeyPackage تو و هر ۳۰ دقیقه یک بار برای فهرست‌هایت، و نیز هر بار که Haven اجرا می‌شود. اگر یکی از رله‌هایت مدام این را نشان می‌دهد، می‌توانی آن را با رلهٔ دیگری عوض کنی.';
+
+  @override
+  String get relaySettingsLegendNoAnswer =>
+      'بررسی ممکن نشد: رله پاسخ نداد، شاید چون آفلاین هستی یا رله از کار افتاده است. Haven در بررسی بعدی‌اش دوباره می‌پرسد.';
+
+  @override
+  String get relaySettingsLegendHeld =>
+      'موقتاً متوقف: Haven فعلاً این را منتشر نمی‌کند. یادداشتی در همین صفحه دلیلش را می‌گوید.';
+
+  @override
+  String get relaySettingsHeldNoRelays =>
+      'Haven برای فهرستی از فهرست‌های بالا که هیچ رله‌ای ندارد، جایی برای انتشار ندارد. در هر فهرست خالی «بازگرداندن پیش‌فرض‌ها» را بزن تا دوباره منتشر شود.';
+
+  @override
+  String get relaySettingsHeldNotYetPublished =>
+      'Haven هنوز یکی از فهرست‌های رله‌ات را منتشر نکرده است. این کار را در بررسی بعدی‌اش انجام می‌دهد.';
+
+  @override
+  String relaySettingsCheckSettled(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'بررسی رله‌ها تمام شد. به‌روز بودن $count رله تأیید نشده است.',
+      one: 'بررسی رله‌ها تمام شد. به‌روز بودن یک رله تأیید نشده است.',
+      zero: 'بررسی رله‌ها تمام شد. همه‌چیز به‌روز است.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String relaySettingsAddedRelayUpToDate(String relay) {
+    return 'رلهٔ $relay به‌روز است.';
+  }
+
+  @override
+  String relaySettingsAddedRelayNotUpToDate(String relay) {
+    return 'به‌روز بودن رلهٔ $relay تأیید نشده است. ردیف آن دلیلش را نشان می‌دهد.';
+  }
 
   @override
   String get relaySettingsEmptyTitle => 'هیچ رله‌ای تنظیم نشده';
@@ -1455,58 +1579,6 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get refreshRingAnnouncementNoInbox => 'صندوق ورودی پیکربندی نشده است';
-
-  @override
-  String refreshRingSemanticAllFound(int total) {
-    final intl.NumberFormat totalNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String totalString = totalNumberFormat.format(total);
-
-    String _temp0 = intl.Intl.pluralLogic(
-      total,
-      locale: localeName,
-      other: 'همهٔ $totalString رله داده‌هایت را دارند',
-      one: 'رله داده‌هایت را دارد',
-    );
-    return '$_temp0';
-  }
-
-  @override
-  String get refreshRingSemanticNoneFound => 'هیچ رله‌ای داده‌هایت را ندارد';
-
-  @override
-  String refreshRingSemanticPartialFound(int ok, int total) {
-    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
-      localeName,
-    );
-    final String okString = okNumberFormat.format(ok);
-    final intl.NumberFormat totalNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String totalString = totalNumberFormat.format(total);
-
-    return '$okString از $totalString رله داده‌هایت را دارند';
-  }
-
-  @override
-  String get refreshRingAnnouncementAllFound =>
-      'همهٔ رله‌ها داده‌هایت را دارند';
-
-  @override
-  String refreshRingAnnouncementPartialFound(int ok, int total) {
-    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
-      localeName,
-    );
-    final String okString = okNumberFormat.format(ok);
-    final intl.NumberFormat totalNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String totalString = totalNumberFormat.format(total);
-
-    return '$okString از $totalString رله داده‌هایت را دارند';
-  }
-
-  @override
-  String get refreshRingAnnouncementNoneFound =>
-      'هیچ رله‌ای داده‌هایت را ندارد';
 
   @override
   String get identityTitle => 'هویت';

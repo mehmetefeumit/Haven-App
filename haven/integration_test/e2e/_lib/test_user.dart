@@ -112,17 +112,24 @@ class TestUser {
   ///
   /// ## Privacy guard
   ///
-  /// Every URL in [relays], [profileRelays] and [locationRelayUrl] must
-  /// resolve to a loopback / emulator-host address. Public relays are
-  /// rejected to prevent a misconfigured
+  /// Every URL in [relays], [profileRelays], [discoveryRelays] and
+  /// [locationRelayUrl] must resolve to a loopback / emulator-host address.
+  /// Public relays are rejected to prevent a misconfigured
   /// `--dart-define=HAVEN_E2E_RELAY=wss://relay.damus.io` from publishing
   /// test seed pubkeys to a public relay. Override the guard by passing
   /// `allowPublicRelay: true`, only with explicit user authorization and
   /// non-sentinel seeds.
+  ///
+  /// [discoveryRelays] — the lookup (discovery) plane, for a target that
+  /// asserts on it. Omitted, the plane falls back to [relays]
+  /// (`discovery.rs`), which silently makes the default relay a lookup relay
+  /// too; a target that needs the two apart passes its own here, the one
+  /// install site, for the same install-once reason as [profileRelays].
   static Future<void> bootstrapProcess({
     required List<String> relays,
     bool allowPublicRelay = false,
     List<String>? profileRelays,
+    List<String>? discoveryRelays,
   }) async {
     if (!allowPublicRelay) {
       // Every plane, not just the circle plane: the location pool is where a
@@ -136,7 +143,12 @@ class TestUser {
       // `_parseProfileRelayPool` also enforces >= PROFILE_POOL_MIN distinct
       // entries and disjointness from the circle relay); this is the floor
       // every caller gets for free.
-      final allUrls = <String>[...relays, ...?profileRelays, locationRelayUrl];
+      final allUrls = <String>[
+        ...relays,
+        ...?profileRelays,
+        ...?discoveryRelays,
+        locationRelayUrl,
+      ];
       for (var i = 0; i < allUrls.length; i++) {
         if (!_isLoopback(allUrls[i])) {
           throw StateError(
@@ -193,6 +205,9 @@ class TestUser {
     allowWsLoopbackForTest();
     // Redirect every relay-resolution call site to the hermetic strfry.
     setDefaultRelaysForTest(relays: relays);
+    if (discoveryRelays != null) {
+      setDiscoveryRelaysForTest(relays: discoveryRelays);
+    }
     // Without it every UI-created circle is picked from the real public
     // location pool. Unguarded like the default override: install-once.
     setLocationRelaysForTest(relays: const [locationRelayUrl]);
