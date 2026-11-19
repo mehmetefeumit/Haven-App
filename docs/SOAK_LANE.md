@@ -192,20 +192,34 @@ a leave made beside a running engine (`SimWorld::change`, `SimWorld::leave`)
 meets the same race: the device's engine drives every stored record, and can
 take one the call staged before the call's own drive does. The product then
 answers by the record, and the rig reads what that drive carried where it left
-it: a commit or a proposal off its record while one is stored and, once
-acknowledged and ended, off the store of the plane the device's own endpoint
-handed it to during the call; an add's Welcome the engine delivered, off the
-invitee's inbox plane, as the one gift wrap addressed to them that the device
-handed over during the call. A change names its commit only when the record and
-the plane together hold one event, and a Welcome only when it is the one wrap,
-so "no commit" from a change still means nothing was staged, outside the cases
-that have no such reading and leave `Changed::commit` empty: a commit that
-drive rolled back or set aside; an applied commit whose record has ended and
-which no plane's store holds (a store wiped mid-call); a device that recorded
-or handed over more than one handshake of the circle meanwhile (its engine
-staged a commit of its own); and a plane that keeps no ledger (the in-crate
-test double), where a test that reads the commit stops the device's engine
-first, as S14 does. MDK's windows (15 s grace, 60 s quiet, up to 30 s jitter) are served on
+it, and returns only what it can tell is the call's own. The circle's routing
+id and relays are read before the call, and a plane is read only where it is
+one of those relays. A change's commit is read off its record while one is
+stored and, once applied and ended, off the plane, as a handshake the device's
+own endpoint handed over during the call and the plane's store kept; it is
+named only when the record and the plane together hold one event. An add's
+Welcome the engine delivered is read off the invitee's inbox plane, as the one
+gift wrap addressed to them that the device handed over during the call. A
+leave makes up to two commits and a proposal, and the engine can make a
+handshake of its own for the circle meanwhile, so a leave's steps are counted
+from what the product says of the circle — each admin step no longer due was
+applied, a leave proposed for the first time recorded its proposal — and what
+was read beside the call is added to what the leave's driver sent only when it
+is exactly the steps that driver did not send: the proposal's record once a
+relay was tried for it, and each handshake on the circle's own planes. One
+event more or fewer adds none, and a commit still pending beside the call is
+no counted step, the leave's own included: nothing tells it from one of the
+engine's with the leave's queued behind it. So "no
+commit" from a change still means nothing was staged, outside the cases that
+leave `Changed::commit` empty: a commit that drive rolled back or set aside; a
+device that recorded or handed over more than one handshake of the circle
+meanwhile (its engine staged a commit of its own); and a plane that keeps no
+ledger (the in-crate test double), where a test that reads the commit stops
+the device's engine first, as S14 does. An applied commit whose record has
+ended and which no plane's store holds (a store wiped mid-call) is left empty
+too, unless the device recorded or handed over exactly one other handshake of
+the circle during the call: that one is then named in its place, because
+nothing the rig reads tells the two apart. MDK's windows (15 s grace, 60 s quiet, up to 30 s jitter) are served on
 the joiner's injectable session clock, set a day ahead for that one drive and
 given back after it; when an earlier circle's post-join on the same device
 still spaces this one, the drive runs at the instant the session names. No scenario's measured phase therefore meets a joiner's
