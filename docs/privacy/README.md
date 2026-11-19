@@ -214,7 +214,7 @@ with a reason. The map shape makes the reason mandatory.
 
 Three entries carry `forbidden_additions` — strings that are honest only because
 of what they do **not** say, each with an `@description` naming the exact
-forbidden clause. `relaySettingsKeyPackageSubtitle` must stay silent about the
+forbidden clause. `relaySettingsKeyPackageInfoWhat` must stay silent about the
 public profile; `locationSettingsToggleSubtitle` must never say "when the app is
 closed"; `avatarPickerPhotoRemoved` must never read as a deletion promise, which
 it is not (no Blossom DELETE exists). The gate asserts the ARB value does not

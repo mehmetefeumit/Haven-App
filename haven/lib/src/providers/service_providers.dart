@@ -739,6 +739,12 @@ final maintenanceServiceProvider = Provider<MaintenanceService>((ref) {
       }
       return circleService.getCircleManagerFfi();
     },
+    currentCircleManager: () {
+      final circleService = ref.read(circleServiceProvider);
+      return circleService is NostrCircleService
+          ? circleService.currentCircleManagerFfi
+          : null;
+    },
     // Resolved per tick (not at construction): if `identityNotifierProvider`
     // is disposed by a concurrent logout when a tick fires, this `ref.read`
     // may throw — that is caught by `MaintenanceService._withSecret`, which

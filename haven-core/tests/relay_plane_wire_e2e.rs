@@ -51,13 +51,13 @@ use haven_core::relay::fanout::{
 };
 use haven_core::relay::live_sync::{CircleSpec, LiveSyncCore};
 use haven_core::relay::maintenance::{
-    build_kp_maintenance_events, kp_event_d_tag, own_presence, read_kp_lifetime, OwnEventPresence,
-    OwnRelayLists,
+    build_kp_maintenance_events, kp_event_d_tag, names_configured_list, probe_verdict,
+    read_kp_lifetime, serves_tracked_package, Probed,
 };
 use haven_core::relay::recording_front::{RecordedFrame, RecordingFront};
 use haven_core::relay::{
     allow_ws_loopback_for_test, build_nip65_relay_list_event, build_relay_list_event,
-    set_discovery_relays_for_test, MemberLookup, RelayManager,
+    set_discovery_relays_for_test, MemberLookup, RelayFetchOutcome, RelayManager,
 };
 use haven_local_relay::planes::frame::Frame;
 use haven_local_relay::planes::judge::{judge, Class, Finding, Judgement, Observed};
@@ -65,7 +65,9 @@ use haven_local_relay::planes::policy::{Plane, Row, Verb};
 use haven_local_relay::planes::table::{List, PlaneTable, RelayIx, RelayMatch, RoutingEnd};
 use helpers::{assert_no_needles, assert_some_line_from, capture_haven_log, haven_core_lines};
 use nostr::prelude::ToBech32 as _;
-use nostr::{Alphabet, Event, EventBuilder, Filter, Keys, Kind, SingleLetterTag, Tag, Timestamp};
+use nostr::{
+    Alphabet, Event, EventBuilder, Filter, Keys, Kind, PublicKey, SingleLetterTag, Tag, Timestamp,
+};
 use nostr_relay_builder::prelude::{MemoryDatabase, MemoryDatabaseOptions, NostrDatabase};
 use nostr_relay_builder::{LocalRelay, RelayBuilder};
 use tempfile::TempDir;
@@ -549,6 +551,19 @@ fn junk(h: &str, count: usize, secs: u64) -> Vec<Event> {
         .collect()
 }
 
+/// What the maintenance passes' probe of `kind` reads from each of `relays`.
+async fn own_probe(
+    pool: &RelayManager,
+    own: &PublicKey,
+    kind: Kind,
+    limit: usize,
+    relays: &[String],
+) -> Vec<RelayFetchOutcome> {
+    pool.fetch_events_per_relay(Filter::new().kind(kind).author(*own).limit(limit), relays)
+        .await
+        .expect("the per-relay read never fails as a whole")
+}
+
 /// What the relay-list heal sends `relay` for `lists`: the probe of the
 /// author's own list, then the list.
 async fn heal_onto(device: &Device, relay: &str, lists: &[&Event]) {
@@ -712,7 +727,7 @@ async fn lifecycle_then_plants(watch: &DialWatch, needles: &mut Vec<String>) {
 
     // Step 1: each account's own traffic on its own lists. Bob's key package
     // to his key-package relay; Alice's key package and relay lists, and the
-    // relay settings check of her own relays and the lookup relay.
+    // maintenance passes' probes of her own relays and the lookup relay.
     w.next();
     let bob_kp = bob.key_package(&w.url(R::BWrite)).await;
     bob.pool
@@ -754,26 +769,53 @@ async fn lifecycle_then_plants(watch: &DialWatch, needles: &mut Vec<String>) {
         replacement_owed: false,
         consumed_but_held: false,
     };
-    let (inbox, key_packages, lookup) = ([w.url(R::AInbox)], [w.url(R::AKp)], [w.url(R::Disc)]);
-    let rows = Box::pin(own_presence(
+    // The maintenance passes' probes, judged as they judge them for the
+    // relay settings board: each kind asked only where it is expected.
+    let own = alice.keys.public_key();
+    let (inbox, key_packages) = ([w.url(R::AInbox)], [w.url(R::AKp)]);
+    let relay_lists = Box::pin(own_probe(
         &alice.pool,
-        &alice.keys.public_key(),
-        &OwnRelayLists {
-            inbox: &inbox,
-            key_package: &key_packages,
-            lookup: &lookup,
-        },
-        Some(&tracked),
-        lifetime,
+        &own,
+        Kind::RelayList,
+        4,
+        &[w.url(R::AKp), w.url(R::Disc)],
     ))
     .await;
+    let inbox_lists = Box::pin(own_probe(
+        &alice.pool,
+        &own,
+        Kind::InboxRelays,
+        4,
+        &[w.url(R::AInbox), w.url(R::Disc)],
+    ))
+    .await;
+    let packages = Box::pin(own_probe(
+        &alice.pool,
+        &own,
+        Kind::Custom(30443),
+        64,
+        &key_packages,
+    ))
+    .await;
+    let judged = |answers: &[RelayFetchOutcome], kind, current: &dyn Fn(&[&Event]) -> bool| {
+        answers
+            .iter()
+            .map(|answer| probe_verdict(answer, &own, kind, current))
+            .collect::<Vec<_>>()
+    };
     assert!(
-        rows[0].inbox_relay_list == OwnEventPresence::Current
-            && rows[1].key_package == OwnEventPresence::Current
-            && rows[1].relay_list == OwnEventPresence::Current
-            && rows[2].relay_list == OwnEventPresence::Current
-            && rows[2].inbox_relay_list == OwnEventPresence::Current,
-        "the relay settings check does not find what was just published",
+        judged(
+            &relay_lists,
+            Kind::RelayList,
+            &|mine| names_configured_list(mine, &key_packages)
+        ) == [Probed::Current; 2]
+            && judged(&inbox_lists, Kind::InboxRelays, &|mine| {
+                names_configured_list(mine, &inbox)
+            }) == [Probed::Current; 2]
+            && judged(&packages, Kind::Custom(30443), &|mine| {
+                serves_tracked_package(mine, Some(&tracked), lifetime)
+            }) == [Probed::Current],
+        "the relay settings board does not find what was just published",
     );
 
     // Step 2: Alice looks her invitees up, as an invite does.

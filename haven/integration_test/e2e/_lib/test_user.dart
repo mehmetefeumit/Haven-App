@@ -118,17 +118,24 @@ class TestUser {
   /// with the private-address download opt-in beside it. Omit it and neither
   /// is installed.
   ///
-  /// Every URL in [relays], [profileRelays], [blossomServers] and
-  /// [locationRelayUrl] must resolve to a loopback / emulator-host address. Public relays are
-  /// rejected to prevent a misconfigured
+  /// Every URL in [relays], [profileRelays], [discoveryRelays],
+  /// [blossomServers] and [locationRelayUrl] must resolve to a loopback /
+  /// emulator-host address. Public relays are rejected to prevent a misconfigured
   /// `--dart-define=HAVEN_E2E_RELAY=wss://relay.damus.io` from publishing
   /// test seed pubkeys to a public relay. Override the guard by passing
   /// `allowPublicRelay: true`, only with explicit user authorization and
   /// non-sentinel seeds.
+  ///
+  /// [discoveryRelays] — the lookup (discovery) plane, for a target that
+  /// asserts on it. Omitted, the plane falls back to [relays]
+  /// (`discovery.rs`), which silently makes the default relay a lookup relay
+  /// too; a target that needs the two apart passes its own here, the one
+  /// install site, for the same install-once reason as [profileRelays].
   static Future<void> bootstrapProcess({
     required List<String> relays,
     bool allowPublicRelay = false,
     List<String>? profileRelays,
+    List<String>? discoveryRelays,
     List<String>? blossomServers,
   }) async {
     if (blossomServers != null && blossomServers.isEmpty) {
@@ -149,6 +156,7 @@ class TestUser {
       final allUrls = <String>[
         ...relays,
         ...?profileRelays,
+        ...?discoveryRelays,
         ...?blossomServers,
         locationRelayUrl,
       ];
@@ -208,6 +216,9 @@ class TestUser {
     allowWsLoopbackForTest();
     // Redirect every relay-resolution call site to the hermetic strfry.
     setDefaultRelaysForTest(relays: relays);
+    if (discoveryRelays != null) {
+      setDiscoveryRelaysForTest(relays: discoveryRelays);
+    }
     // Without it every UI-created circle is picked from the real public
     // location pool. Unguarded like the default override: install-once.
     setLocationRelaysForTest(relays: const [locationRelayUrl]);

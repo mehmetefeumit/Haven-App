@@ -1335,8 +1335,8 @@ fn a_limit_beyond_its_row_is_unknown() {
 }
 
 /// R4: an account reads each of its own kinds off the list that kind is
-/// published to, whatever the `limit`; the relay settings check sends
-/// maintenance's probes, so no shape is admitted on the other own list.
+/// published to, whatever the `limit`; the Relays page's board is fed by
+/// maintenance's own probes, so no shape is admitted on the other own list.
 #[test]
 fn an_own_kind_is_read_off_its_own_list_only() {
     let w = world();

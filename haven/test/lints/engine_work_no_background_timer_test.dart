@@ -218,6 +218,10 @@ const _allowedSites = <String, int>{
   'lib/src/providers/profile_sync_provider.dart#'
           'OwnProfileSyncController._armFrom':
       1,
+  // The Relays page's read of the own-relay board: a mutex read of state the
+  // maintenance passes write, armed only while the app is in front and the
+  // page watches it. It starts no pass, opens no session and reaches no relay.
+  'lib/src/providers/relay_status_provider.dart#RelayStatusNotifier.timer': 1,
   'lib/src/providers/sharing_health_provider.dart#'
           'SharingHealthNotifier._derive':
       1,
@@ -272,7 +276,7 @@ const _allowedSites = <String, int>{
 
 /// The sum of [_allowedSites]: a second pin, so an edit that moves a count
 /// from one site to another is still a visible change of this number.
-const _allowedTotal = 46;
+const _allowedTotal = 47;
 
 /// The sites of [_allowedSites] that reach the MLS or the live-sync engine,
 /// reviewed by hand: the existing wakes. A timer's callback reaches through

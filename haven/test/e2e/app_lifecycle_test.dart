@@ -43,6 +43,7 @@ const _targets = <String, int>{
   'integration_test/b1_fgs_live_foreground_test.dart': 1,
   'integration_test/b9_network_reconnect_test.dart': 1,
   'integration_test/ios_bg_publish_test.dart': 1,
+  'integration_test/relay_management_status_test.dart': 1,
 };
 
 /// The targets that mount the app and do NOT take the helper: each runs only

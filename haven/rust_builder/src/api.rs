@@ -792,8 +792,8 @@ impl LocationEventService {
         }
     }
 
-    /// Returns a jittered publish interval in seconds using the Rust-side
-    /// CSPRNG (`OsRng`), sampled uniformly in
+    /// Returns a jittered publish interval in seconds from the OS CSPRNG
+    /// (`OsRng`, drawn in `haven_core::location`), sampled uniformly in
     /// `[nominal_secs * 0.6, nominal_secs * 1.4]` (40% spread).
     ///
     /// Callers pass the nominal interval (typically 120 s) and rearm their
@@ -1782,6 +1782,7 @@ use haven_core::circle::{
     DirectoryTier as CoreDirectoryTier, Invitation as CoreInvitation,
 };
 use haven_core::nostr::mls::types::{GroupId, GroupIdExt};
+use haven_core::relay::maintenance::Coalesced;
 
 /// Circle information (FFI-friendly).
 ///
@@ -3141,6 +3142,12 @@ pub struct CircleManagerFfi {
     /// under this identity's signature, so a wrong key would publish one
     /// account's edit as another's.
     own_pubkey_hex: String,
+    /// One `KeyPackage` maintenance pass for every request made while one
+    /// waits for its turn ([`RelayManagerFfi::maintain_key_package`]).
+    kp_passes: Coalesced<Result<KpMaintenanceOutcomeFfi, String>>,
+    /// One relay-list maintenance pass for every request made while one
+    /// waits for its turn ([`RelayManagerFfi::maintain_relay_list`]).
+    relay_list_passes: Coalesced<Result<RelayListMaintenanceOutcomeFfi, String>>,
 }
 
 // Compile-time assertion: the refactor above is only sound if the core
@@ -3150,57 +3157,6 @@ const _: fn() = || {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<CoreCircleManager>();
 };
-
-/// Extracts the `["relay", <url>]` URLs from a probed kind-10050 (Inbox)
-/// relay-list event, for drift detection in
-/// [`RelayManagerFfi::maintain_relay_list_category`]. Never logged.
-#[inline]
-fn relay_list_urls(event: &nostr::Event) -> Vec<String> {
-    event
-        .tags
-        .iter()
-        .filter_map(|t| {
-            let s = t.as_slice();
-            (s.len() >= 2 && s[0] == "relay").then(|| s[1].clone())
-        })
-        .collect()
-}
-
-/// Extracts the `["r", <url>]` URLs from a probed kind-10002 (NIP-65)
-/// relay-list event, for drift detection on the KeyPackage-discovery list under
-/// Dark Matter (W2; NIP-65 tags relays as `r`, NOT the `relay` form 10050 uses).
-#[inline]
-fn nip65_relay_list_urls(event: &nostr::Event) -> Vec<String> {
-    event
-        .tags
-        .iter()
-        .filter_map(|t| {
-            let s = t.as_slice();
-            (s.len() >= 2 && s[0] == "r").then(|| s[1].clone())
-        })
-        .collect()
-}
-
-/// The on-relay URL extractor for a relay-list category's wire form: `relay`
-/// tags for Inbox (10050), `r` tags for the NIP-65 KeyPackage list (10002).
-///
-/// # Errors
-///
-/// Fails closed for [`RelayTypeFfi::Profile`]: that category has no wire form,
-/// so there is nothing on any relay to extract. Returning an empty `Vec` here
-/// instead would read as "the list was dropped from this relay" and could drive
-/// the maintenance healer into publishing one.
-#[inline]
-fn relay_list_urls_for(
-    relay_type: RelayTypeFfi,
-    event: &nostr::Event,
-) -> Result<Vec<String>, String> {
-    match relay_type {
-        RelayTypeFfi::Inbox => Ok(relay_list_urls(event)),
-        RelayTypeFfi::Nip65 => Ok(nip65_relay_list_urls(event)),
-        RelayTypeFfi::Profile => Err(PROFILE_RELAY_LIST_UNPUBLISHABLE.to_string()),
-    }
-}
 
 /// Keeps only the events `own` signed as `kind` in a probe of the user's own
 /// relays.
@@ -3249,14 +3205,27 @@ fn own_relays_seeding_once(
 }
 
 /// Where a relay list goes: `own`, the account's own relays for its category,
-/// first, then every dialable lookup relay not among them — an inviter holding
-/// only a bare pubkey looks the lists up there (owner-directed 2026-11-12).
-/// Never a `KeyPackage`'s targets.
+/// first, then every lookup relay not among them — an inviter holding only a
+/// bare pubkey looks the lists up there (owner-directed 2026-11-12). Never a
+/// `KeyPackage`'s targets.
 fn relay_list_targets(own: &[String]) -> Vec<String> {
-    let lookup = haven_core::relay::discovery_relays()
-        .into_iter()
-        .filter(|url| haven_core::relay::url_norm::may_dial_str(url));
-    haven_core::relay::dedup_relay_targets(&own.iter().cloned().chain(lookup).collect::<Vec<_>>())
+    haven_core::relay::dedup_relay_targets(
+        &own.iter()
+            .cloned()
+            .chain(lookup_relays())
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// The lookup relays a relay list goes to: every dialable discovery relay.
+/// The board reports these, so the page's lookup rows are the relays asked.
+fn lookup_relays() -> Vec<String> {
+    haven_core::relay::dedup_relay_targets(
+        &haven_core::relay::discovery_relays()
+            .into_iter()
+            .filter(|url| haven_core::relay::url_norm::may_dial_str(url))
+            .collect::<Vec<_>>(),
+    )
 }
 
 #[inline]
@@ -3292,6 +3261,28 @@ fn keys_from_secret_bytes(identity_secret_bytes: Vec<u8>) -> Result<nostr::Keys,
     Ok(nostr::Keys::new(secret_key))
 }
 
+/// Judges each own relay's kind-30443 answer into its board cell against
+/// `tracked`, by maintenance's own rule.
+fn judge_key_packages(
+    pass: &mut haven_core::relay::maintenance::OwnPass<'_>,
+    answers: &[haven_core::relay::RelayFetchOutcome],
+    own: &nostr::PublicKey,
+    tracked: Option<&haven_core::nostr::mls::TrackedKeyPackage>,
+    lifetime: haven_core::relay::maintenance::TrackedKpLifetime,
+) {
+    use haven_core::relay::maintenance::{
+        probe_verdict, serves_tracked_package, KIND_MARMOT_KEY_PACKAGE,
+    };
+    pass.judge(answers, |answer| {
+        probe_verdict(
+            answer,
+            own,
+            nostr::Kind::Custom(KIND_MARMOT_KEY_PACKAGE),
+            &|mine| serves_tracked_package(mine, tracked, lifetime),
+        )
+    });
+}
+
 impl CircleManagerFfi {
     /// Creates a new circle manager bound to the device identity.
     ///
@@ -3322,6 +3313,8 @@ impl CircleManagerFfi {
             .map(|inner| Self {
                 inner: Arc::new(inner),
                 own_pubkey_hex,
+                kp_passes: Coalesced::default(),
+                relay_list_passes: Coalesced::default(),
             })
             .map_err(|e| e.to_string())
     }
@@ -4415,6 +4408,25 @@ impl CircleManagerFfi {
             .map_err(|e| e.to_string())
         })
         .await
+    }
+
+    /// What each own relay and lookup relay serves of this account's
+    /// `KeyPackage`, relay list and inbox relay list, as the maintenance
+    /// passes ([`RelayManagerFfi::maintain_key_package`],
+    /// [`RelayManagerFfi::maintain_relay_list`]) last found and left it —
+    /// cells turn as each relay answers, so a page polling this sees a pass
+    /// as it runs. A lock read: no network, never waits on a pass.
+    #[frb(sync)]
+    #[must_use]
+    pub fn own_relay_board(&self) -> OwnRelayBoardFfi {
+        let board = self.inner.own_relay_board().snapshot();
+        OwnRelayBoardFfi {
+            running: board.running,
+            lookup_relays: lookup_relays(),
+            key_package: board.key_package.into(),
+            relay_list: board.relay_list.into(),
+            inbox_relay_list: board.inbox_relay_list.into(),
+        }
     }
 
     /// Returns the deduplicated publish targets for `relay_type` — the
@@ -6959,85 +6971,160 @@ impl std::fmt::Debug for RelayRejectionFfi {
     }
 }
 
-/// What one relay serves of one of the user's own events
-/// (`haven_core::relay::maintenance::OwnEventPresence`).
+/// What one relay serves of one of the user's own events, or what became of
+/// what a maintenance pass sent it (`haven_core::relay::maintenance::OwnCell`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OwnEventPresenceFfi {
-    /// The relay is on no list this kind is published to, and was not asked.
-    NotExpected,
-    /// It serves what maintenance would leave in place.
+pub enum OwnRelayStatusFfi {
+    /// Asked; the answer is not judged yet.
+    Checking,
+    /// It serves what maintenance would leave in place, or it returned `OK
+    /// true` for what the pass sent it.
     Current,
-    /// It serves an event of this account that maintenance would replace.
-    Outdated,
+    /// Sent; its `OK` has not arrived.
+    Publishing,
     /// It answered in full and holds nothing of this account's.
     Missing,
-    /// It could not be reached, or did not finish its answer.
+    /// It serves an event of this account that maintenance would replace.
+    Outdated,
+    /// It returned `OK false` for what the pass sent it.
+    Refused,
+    /// Proven not to serve it, then sent it, and no `OK` came.
+    Unconfirmed,
+    /// It could not be reached or did not finish its answer.
     NoAnswer,
 }
 
-impl From<haven_core::relay::maintenance::OwnEventPresence> for OwnEventPresenceFfi {
-    fn from(presence: haven_core::relay::maintenance::OwnEventPresence) -> Self {
-        use haven_core::relay::maintenance::OwnEventPresence as P;
-        match presence {
-            P::NotExpected => Self::NotExpected,
-            P::Current => Self::Current,
-            P::Outdated => Self::Outdated,
-            P::Missing => Self::Missing,
-            P::NoAnswer => Self::NoAnswer,
+impl From<haven_core::relay::maintenance::OwnCell> for OwnRelayStatusFfi {
+    fn from(cell: haven_core::relay::maintenance::OwnCell) -> Self {
+        use haven_core::relay::maintenance::OwnCell as C;
+        match cell {
+            C::Checking => Self::Checking,
+            C::Current => Self::Current,
+            C::Publishing => Self::Publishing,
+            C::Missing => Self::Missing,
+            C::Outdated => Self::Outdated,
+            C::Refused => Self::Refused,
+            C::Unconfirmed => Self::Unconfirmed,
+            C::NoAnswer => Self::NoAnswer,
         }
     }
 }
 
-/// One relay of the reachability check and what it serves of the user's own
-/// `KeyPackage` (30443), relay list (10002) and inbox relay list (10050).
-#[derive(Clone)]
-pub struct OwnRelayPresenceFfi {
+/// Why Haven publishes nothing of a kind right now
+/// (`haven_core::relay::maintenance::OwnHold`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnPublishHoldFfi {
+    /// The storage-reset notice is unanswered.
+    AwaitingResetAcknowledgement,
+    /// The list it is published to is empty.
+    NoRelaysConfigured,
+    /// The stored publish setting for this list is off: an install that
+    /// stored it so before publishing became unconditional, until the relay
+    /// settings switch it back on.
+    PublishingSuppressed,
+}
+
+impl From<haven_core::relay::maintenance::OwnHold> for OwnPublishHoldFfi {
+    fn from(hold: haven_core::relay::maintenance::OwnHold) -> Self {
+        use haven_core::relay::maintenance::OwnHold as H;
+        match hold {
+            H::AwaitingResetAcknowledgement => Self::AwaitingResetAcknowledgement,
+            H::NoRelaysConfigured => Self::NoRelaysConfigured,
+            H::PublishingSuppressed => Self::PublishingSuppressed,
+        }
+    }
+}
+
+/// One relay's cell of one kind on the own-relay board.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OwnRelayCellFfi {
     /// The configured or lookup entry, verbatim.
     pub relay_url: String,
-    /// On the user's own inbox or `KeyPackage` list.
-    pub own: bool,
-    /// A lookup (discovery) relay.
-    pub lookup: bool,
-    /// The handshake succeeded for at least one of its probes.
-    pub reachable: bool,
-    /// Kind 30443.
-    pub key_package: OwnEventPresenceFfi,
-    /// Kind 10002.
-    pub relay_list: OwnEventPresenceFfi,
-    /// Kind 10050.
-    pub inbox_relay_list: OwnEventPresenceFfi,
+    /// What it serves.
+    pub status: OwnRelayStatusFfi,
 }
 
 /// Redacting `Debug`: a relay URL is a fingerprint of a customised pool, so
 /// the relay is named by a salted handle (Rule 15).
-impl std::fmt::Debug for OwnRelayPresenceFfi {
+impl std::fmt::Debug for OwnRelayCellFfi {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OwnRelayPresenceFfi")
+        f.debug_struct("OwnRelayCellFfi")
             .field(
                 "relay",
                 &haven_core::log_alias::relay(RelayUrl(&self.relay_url)),
             )
-            .field("own", &self.own)
-            .field("lookup", &self.lookup)
-            .field("reachable", &self.reachable)
-            .field("key_package", &self.key_package)
-            .field("relay_list", &self.relay_list)
-            .field("inbox_relay_list", &self.inbox_relay_list)
+            .field("status", &self.status)
             .finish()
     }
 }
 
-impl From<haven_core::relay::maintenance::OwnRelayPresence> for OwnRelayPresenceFfi {
-    fn from(row: haven_core::relay::maintenance::OwnRelayPresence) -> Self {
+/// One kind of the own-relay board: kind 30443, 10002 or 10050.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnKindBoardFfi {
+    /// Why nothing of this kind is published now; `cells` is then empty.
+    pub hold: Option<OwnPublishHoldFfi>,
+    /// How long ago the last pass of this kind ended; `None` before one has
+    /// in this process.
+    pub checked_secs_ago: Option<u32>,
+    /// The relays that pass asked. A relay of the user's lists with no cell
+    /// has not been checked yet.
+    pub cells: Vec<OwnRelayCellFfi>,
+}
+
+impl From<haven_core::relay::maintenance::OwnKindSnapshot> for OwnKindBoardFfi {
+    fn from(kind: haven_core::relay::maintenance::OwnKindSnapshot) -> Self {
         Self {
-            relay_url: row.relay_url,
-            own: row.own,
-            lookup: row.lookup,
-            reachable: row.reachable,
-            key_package: row.key_package.into(),
-            relay_list: row.relay_list.into(),
-            inbox_relay_list: row.inbox_relay_list.into(),
+            hold: kind.hold.map(Into::into),
+            checked_secs_ago: kind
+                .checked_secs_ago
+                .map(|secs| u32::try_from(secs).unwrap_or(u32::MAX)),
+            cells: kind
+                .cells
+                .into_iter()
+                .map(|cell| OwnRelayCellFfi {
+                    relay_url: cell.relay_url,
+                    status: cell.status.into(),
+                })
+                .collect(),
         }
+    }
+}
+
+/// What each own relay and lookup relay serves of the user's own events, as
+/// the maintenance passes last found and left it
+/// ([`CircleManagerFfi::own_relay_board`]).
+#[derive(Clone, PartialEq, Eq)]
+pub struct OwnRelayBoardFfi {
+    /// A maintenance pass is running or waiting for its turn.
+    pub running: bool,
+    /// The lookup relays the relay-list pass asks, as it asks them.
+    pub lookup_relays: Vec<String>,
+    /// Kind 30443, on the `KeyPackage` list.
+    pub key_package: OwnKindBoardFfi,
+    /// Kind 10002, on the `KeyPackage` list and the lookup relays.
+    pub relay_list: OwnKindBoardFfi,
+    /// Kind 10050, on the inbox list and the lookup relays.
+    pub inbox_relay_list: OwnKindBoardFfi,
+}
+
+/// Redacting `Debug`: each lookup relay is named by a salted handle, as each
+/// cell's relay is (Rule 15).
+impl std::fmt::Debug for OwnRelayBoardFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OwnRelayBoardFfi")
+            .field("running", &self.running)
+            .field(
+                "lookup_relays",
+                &self
+                    .lookup_relays
+                    .iter()
+                    .map(|url| haven_core::log_alias::relay(RelayUrl(url)))
+                    .collect::<Vec<_>>(),
+            )
+            .field("key_package", &self.key_package)
+            .field("relay_list", &self.relay_list)
+            .field("inbox_relay_list", &self.inbox_relay_list)
+            .finish()
     }
 }
 
@@ -8915,6 +9002,9 @@ struct KpMintPlan<'a> {
 struct KpRetirementInputs<'a> {
     /// This tick's presence snapshot (responding own relays only).
     snapshot: &'a haven_core::relay::maintenance::RelayKpSnapshot,
+    /// Every own relay's answer to this tick's probe, which the board's
+    /// cells are judged from.
+    answers: &'a [haven_core::relay::RelayFetchOutcome],
     /// The kind-30443 events the probe actually returned. Needed only to
     /// recognise a replacement this device published but failed to record.
     probed: &'a [nostr::Event],
@@ -9223,71 +9313,6 @@ impl RelayManagerFfi {
             .map_err(|e| e.to_string())
     }
 
-    // ==================== Event Checking ====================
-
-    /// The relay settings check: what each relay of the user's own inbox and
-    /// `KeyPackage` lists, and each lookup relay, serves of this account's
-    /// kind 30443, 10002 and 10050, judged as maintenance judges them
-    /// ([`own_presence`]). One row per relay, the inbox list first, then the
-    /// `KeyPackage` list, then the lookup relays.
-    ///
-    /// Only reads: unlike maintenance it does not wait for the storage-reset
-    /// notice, which holds back what is published, not what is asked.
-    ///
-    /// [`own_presence`]: haven_core::relay::maintenance::own_presence
-    pub async fn check_own_reachability(
-        &self,
-        circle: &CircleManagerFfi,
-        own_pubkey: String,
-    ) -> Result<Vec<OwnRelayPresenceFfi>, String> {
-        use haven_core::relay::maintenance::{
-            own_presence, read_kp_lifetime, OwnRelayLists, TrackedKpLifetime,
-        };
-
-        let own = nostr::PublicKey::parse(&own_pubkey).map_err(|_| "Invalid pubkey".to_string())?;
-        let circle_mgr = circle.inner.clone();
-        // Read before the probe: a tick that promotes a newer package meanwhile
-        // leaves it in the same slot, newer, which still reads current.
-        let tracked = circle_mgr
-            .session()
-            .tracked_key_package()
-            .await
-            .map_err(|_| "Could not read the KeyPackage record".to_string())?;
-        let tracked_lifetime = tracked
-            .as_ref()
-            .map_or(TrackedKpLifetime::Absent, |t| read_kp_lifetime(&t.package));
-        let (inbox, key_package) = run_blocking({
-            let mgr = circle_mgr.clone();
-            move || {
-                let list = |relay_type| {
-                    mgr.list_user_relays(relay_type)
-                        .map(|user| haven_core::relay::dedup_relay_targets(&user))
-                        .map_err(|_| "Could not read the relay lists".to_string())
-                };
-                Ok((
-                    list(haven_core::circle::RelayType::Inbox)?,
-                    list(haven_core::circle::RelayType::KeyPackage)?,
-                ))
-            }
-        })
-        .await?;
-        let lookup = haven_core::relay::discovery_relays();
-
-        let rows = own_presence(
-            &self.inner,
-            &own,
-            &OwnRelayLists {
-                inbox: &inbox,
-                key_package: &key_package,
-                lookup: &lookup,
-            },
-            tracked.as_ref(),
-            tracked_lifetime,
-        )
-        .await;
-        Ok(rows.into_iter().map(OwnRelayPresenceFfi::from).collect())
-    }
-
     // ==================== Event Fetching ====================
 
     /// Looks a person up to invite them: their `KeyPackage` with their relay
@@ -9593,6 +9618,11 @@ impl RelayManagerFfi {
     /// recorded Welcome* ever sent to it. The slot survives, so the
     /// replacement reuses it.
     ///
+    /// Writes the own-relay board as it goes ([`CircleManagerFfi::own_relay_board`]),
+    /// and sends each relay at most one offer of each event, settled by that
+    /// relay's own `OK`. It runs under the account's one maintenance lock, and
+    /// a request made while a pass of its kind waits for that lock joins it.
+    ///
     /// Returns a presence-only [`KpMaintenanceOutcomeFfi`] (counters + enum).
     ///
     /// [`decide_kp_maintenance`]: haven_core::relay::maintenance::decide_kp_maintenance
@@ -9601,21 +9631,41 @@ impl RelayManagerFfi {
         circle: &CircleManagerFfi,
         identity_secret_bytes: Vec<u8>,
     ) -> Result<KpMaintenanceOutcomeFfi, String> {
-        use haven_core::relay::maintenance::{
-            decide_kp_maintenance, kp_event_d_tag, kp_event_is_pre_migration, read_kp_lifetime,
-            KpMaintenanceAction, KpMaintenanceDecision, KpMaintenanceOutcome, RelayKpEntry,
-            RelayKpPerRelay, RelayKpSnapshot, TrackedKpLifetime, TrackedKpSlot,
-        };
-
+        let _running = circle.inner.own_relay_board().running();
         let keys = keys_from_secret_bytes(identity_secret_bytes)?;
-        let own_pk = keys.public_key();
-        let circle_mgr = circle.inner.clone();
-        let session = circle_mgr.session();
-        // One tick at a time for this account, from here to the promotion
+        // One pass at a time for this account, from the sweep to the promotion
         // (the slot retirement included): two that overlap each stage their
         // own replacement, and the second promotion deletes the first's key
         // while a relay still serves it.
-        let _tick = session.key_package_tick().await;
+        circle
+            .kp_passes
+            .run(
+                circle.inner.session().own_relays_tick(),
+                self.key_package_pass(circle, &keys),
+            )
+            .await
+    }
+
+    /// [`Self::maintain_key_package`] once its turn has come.
+    async fn key_package_pass(
+        &self,
+        circle: &CircleManagerFfi,
+        keys: &nostr::Keys,
+    ) -> Result<KpMaintenanceOutcomeFfi, String> {
+        use haven_core::relay::maintenance::{
+            decide_kp_maintenance, kp_event_d_tag, kp_event_is_pre_migration, read_kp_lifetime,
+            KpMaintenanceAction, KpMaintenanceDecision, KpMaintenanceOutcome, OfferMode, OwnHold,
+            OwnKind, RelayKpEntry, RelayKpPerRelay, RelayKpSnapshot, TrackedKpLifetime,
+            TrackedKpSlot,
+        };
+
+        let own_pk = keys.public_key();
+        let circle_mgr = circle.inner.clone();
+        let session = circle_mgr.session();
+        let board = circle_mgr.own_relay_board();
+        // Before the list is read: an edit landing after the read supersedes
+        // this pass's every write.
+        let seen = board.generation(OwnKind::KeyPackage);
 
         // ── Step 4a: the transport-INDEPENDENT half, first ───────────────────
         //
@@ -9643,10 +9693,10 @@ impl RelayManagerFfi {
         };
         // Read ONCE, after the sweep, so the `d`, the bytes and the lifetime
         // verdict all describe the same package.
-        let tracked = session
-            .tracked_key_package()
-            .await
-            .map_err(|e| e.to_string())?;
+        let tracked = session.tracked_key_package().await.map_err(|e| {
+            board.clear(OwnKind::KeyPackage);
+            e.to_string()
+        })?;
         let tracked_lifetime = tracked
             .as_ref()
             .map_or(TrackedKpLifetime::Absent, |t| read_kp_lifetime(&t.package));
@@ -9655,6 +9705,11 @@ impl RelayManagerFfi {
         // waits for the storage-reset notice; so does this tick's relay work.
         // The `not_after` purge above never waits.
         if !circle_mgr.storage_reset_acknowledged() {
+            board.hold(
+                OwnKind::KeyPackage,
+                seen,
+                OwnHold::AwaitingResetAcknowledgement,
+            );
             return Ok(KpMaintenanceOutcomeFfi::from(KpMaintenanceOutcome {
                 action: KpMaintenanceAction::AwaitingResetAcknowledgement,
                 expired_init_key_purged,
@@ -9668,9 +9723,11 @@ impl RelayManagerFfi {
             let mgr = circle_mgr.clone();
             move || own_relays_seeding_once(&mgr, haven_core::circle::RelayType::KeyPackage)
         })
-        .await?;
+        .await
+        .inspect_err(|_| board.clear(OwnKind::KeyPackage))?;
 
         if own_relays.is_empty() {
+            board.hold(OwnKind::KeyPackage, seen, OwnHold::NoRelaysConfigured);
             // Reached only when the seed failed. `relays_targeted: 0` is what
             // tells the caller this is the await-user-action case and NOT
             // "every relay was unreachable" — both otherwise land on
@@ -9682,6 +9739,7 @@ impl RelayManagerFfi {
             }));
         }
         let relays_targeted = own_relays.len();
+        let mut pass = board.begin(OwnKind::KeyPackage, seen, &own_relays);
 
         // PER-RELAY probe of OWN relays for kind-30443 authored by self, so a
         // PARTIAL drop (present on A, dropped from B) is visible + healed on B.
@@ -9701,6 +9759,13 @@ impl RelayManagerFfi {
             }
         };
         retain_own_events(&mut per_relay, &own_pk, nostr::Kind::Custom(30443));
+        judge_key_packages(
+            &mut pass,
+            &per_relay,
+            &own_pk,
+            tracked.as_ref(),
+            tracked_lifetime,
+        );
 
         // Build the snapshot from RESPONDING relays only (non-responders are
         // excluded structurally, C4).
@@ -9769,7 +9834,7 @@ impl RelayManagerFfi {
                 ));
             }
             let published = self
-                .publish_and_promote(&circle_mgr, pending, &targets, &mut relay_errors)
+                .publish_and_promote(&circle_mgr, &mut pass, pending, &targets, &mut relay_errors)
                 .await;
             // Signed by a clock that has since been set back: its `created_at`
             // is ahead of every relay for good, so the same bytes can never be
@@ -9794,7 +9859,7 @@ impl RelayManagerFfi {
                     prev_created_at,
                     action: KpMaintenanceAction::RepublishedStableD,
                 };
-                self.mint_key_package(&circle_mgr, &keys, plan, &mut relay_errors)
+                self.mint_key_package(&circle_mgr, keys, plan, &mut pass, &mut relay_errors)
                     .await?
                     .1
             } else {
@@ -9832,13 +9897,15 @@ impl RelayManagerFfi {
             let retirement = self
                 .retire_malformed_kp_slot(
                     &circle_mgr,
-                    &keys,
+                    keys,
                     KpRetirementInputs {
                         snapshot: &snapshot,
+                        answers: &per_relay,
                         probed: &probed,
                         tracked: tracked.as_ref(),
                         tracked_lifetime,
                     },
+                    &mut pass,
                     &mut relay_errors,
                 )
                 .await;
@@ -9930,6 +9997,14 @@ impl RelayManagerFfi {
                         tracked_lifetime = tracked
                             .as_ref()
                             .map_or(TrackedKpLifetime::Absent, |t| read_kp_lifetime(&t.package));
+                        // The cells were judged against the record before it.
+                        judge_key_packages(
+                            &mut pass,
+                            &per_relay,
+                            &own_pk,
+                            tracked.as_ref(),
+                            tracked_lifetime,
+                        );
                         continue;
                     }
                 }
@@ -9947,14 +10022,21 @@ impl RelayManagerFfi {
                     });
                     match frozen {
                         Some(event) => {
-                            let healed = match self.inner.publish_event(event, targets).await {
-                                Ok(_) => targets.len(),
-                                Err(_) => {
-                                    relay_errors += 1;
-                                    log::debug!("[maintain_key_package] 30443 publish failed");
-                                    0
-                                }
-                            };
+                            let healed = pass
+                                .offer(
+                                    &self.inner,
+                                    event,
+                                    targets,
+                                    OfferMode::Heal,
+                                    haven_core::relay::OFFER_ACK_TIMEOUT,
+                                )
+                                .await
+                                .accepted
+                                .len();
+                            if healed == 0 {
+                                relay_errors += 1;
+                                log::debug!("[maintain_key_package] 30443 publish failed");
+                            }
                             (KpMaintenanceAction::RepublishedStableD, healed)
                         }
                         None => {
@@ -9963,8 +10045,14 @@ impl RelayManagerFfi {
                                 targets,
                                 KpMaintenanceAction::RepublishedFreshD,
                             );
-                            self.mint_key_package(&circle_mgr, &keys, plan, &mut relay_errors)
-                                .await?
+                            self.mint_key_package(
+                                &circle_mgr,
+                                keys,
+                                plan,
+                                &mut pass,
+                                &mut relay_errors,
+                            )
+                            .await?
                         }
                     }
                 }
@@ -9977,7 +10065,7 @@ impl RelayManagerFfi {
                         targets,
                         KpMaintenanceAction::RepublishedStableD,
                     );
-                    self.mint_key_package(&circle_mgr, &keys, plan, &mut relay_errors)
+                    self.mint_key_package(&circle_mgr, keys, plan, &mut pass, &mut relay_errors)
                         .await?
                 }
                 KpMaintenanceDecision::Rotate {
@@ -9991,7 +10079,7 @@ impl RelayManagerFfi {
                         KpMaintenanceAction::RotatedExpiringMaterial
                     };
                     let plan = mint(Some(existing_d.as_str()), targets, action);
-                    self.mint_key_package(&circle_mgr, &keys, plan, &mut relay_errors)
+                    self.mint_key_package(&circle_mgr, keys, plan, &mut pass, &mut relay_errors)
                         .await?
                 }
             };
@@ -10014,6 +10102,7 @@ impl RelayManagerFfi {
         circle_mgr: &Arc<CoreCircleManager>,
         keys: &nostr::Keys,
         plan: KpMintPlan<'_>,
+        pass: &mut haven_core::relay::maintenance::OwnPass<'_>,
         relay_errors: &mut usize,
     ) -> Result<(haven_core::relay::maintenance::KpMaintenanceAction, usize), String> {
         let staged = haven_core::relay::maintenance::build_kp_maintenance_events(
@@ -10026,7 +10115,7 @@ impl RelayManagerFfi {
         .await
         .map_err(|e| format!("build (mint) key package events: {e}"))?;
         let healed = self
-            .publish_and_promote(circle_mgr, &staged.event, plan.targets, relay_errors)
+            .publish_and_promote(circle_mgr, pass, &staged.event, plan.targets, relay_errors)
             .await
             .acknowledged_by();
         Ok((plan.action, healed))
@@ -10037,30 +10126,41 @@ impl RelayManagerFfi {
     /// of every package it supersedes (`foundation/key-packages.md`'s FIRST
     /// deletion bound).
     ///
-    /// `publish_event` returns `Ok` only when at least one relay OK-ACKED, so
-    /// promotion means acked, never merely sent: the account is never left
-    /// with a deleted key and nothing published.
+    /// Promotion follows a relay's `OK true` and nothing less, so promotion
+    /// means acked, never merely sent: the account is never left with a
+    /// deleted key and nothing published. The board's cells settle against
+    /// whichever package the record names once the promotion is decided.
     async fn publish_and_promote(
         &self,
         circle_mgr: &Arc<CoreCircleManager>,
+        pass: &mut haven_core::relay::maintenance::OwnPass<'_>,
         event: &nostr::Event,
         targets: &[String],
         relay_errors: &mut usize,
     ) -> StagedPublish {
-        if let Err(refusal) = self.inner.publish_event(event, targets).await {
+        let offered = pass
+            .offer(
+                &self.inner,
+                event,
+                targets,
+                haven_core::relay::maintenance::OfferMode::Mint,
+                haven_core::relay::OFFER_ACK_TIMEOUT,
+            )
+            .await;
+        if offered.accepted.is_empty() {
+            pass.settle_rest(false);
             *relay_errors += 1;
             log::debug!("[maintain_key_package] 30443 publish failed");
-            return if matches!(
-                refusal,
-                haven_core::relay::RelayError::DeviceClockRejected { .. }
-            ) {
+            return if offered.clock.is_some() {
                 StagedPublish::RefusedForItsClock
             } else {
                 StagedPublish::Unacknowledged
             };
         }
         let session = circle_mgr.session();
-        if matches!(session.promote_key_package(&event.id).await, Ok(true)) {
+        let promoted = matches!(session.promote_key_package(&event.id).await, Ok(true));
+        pass.settle_rest(promoted);
+        if promoted {
             let replacement_consumed = matches!(
                 session.tracked_key_package().await,
                 Ok(Some(tracked)) if tracked.consumed_but_held
@@ -10074,7 +10174,7 @@ impl RelayManagerFfi {
         } else {
             *relay_errors += 1;
         }
-        StagedPublish::Acknowledged(targets.len())
+        StagedPublish::Acknowledged(offered.accepted.len())
     }
 
     /// Runs the ONE-TIME retirement of a malformed (pre-width-fix) kind-30443
@@ -10094,9 +10194,9 @@ impl RelayManagerFfi {
     /// # The ordering, which is the whole safety argument
     ///
     /// 1. Publish the replacement FIRST, into a fresh binding-shaped slot, and
-    ///    treat it as landed only when a relay OK-ACKED it (`publish_event`
-    ///    returns `Ok` on nothing less — Rule 13's discipline applied to the
-    ///    reachability plane).
+    ///    treat it as landed only when a relay OK-ACKED it (an `OK true` and
+    ///    nothing less — Rule 13's discipline applied to the reachability
+    ///    plane).
     /// 2. Only then record it and publish the NIP-09 retraction of the orphaned
     ///    coordinate.
     /// 3. Latch the sentinel only when both landed. Any earlier failure leaves
@@ -10133,15 +10233,18 @@ impl RelayManagerFfi {
         circle_mgr: &Arc<CoreCircleManager>,
         keys: &nostr::Keys,
         inputs: KpRetirementInputs<'_>,
+        pass: &mut haven_core::relay::maintenance::OwnPass<'_>,
         relay_errors: &mut usize,
     ) -> Option<KpRetirementTick> {
         use haven_core::relay::maintenance::{
             build_kp_slot_repoint_event, decide_kp_slot_retirement, find_adoptable_kp_slot,
-            kp_event_d_tag, KpMaintenanceAction, KpSlotRetirement, TrackedKpLifetime,
+            kp_event_d_tag, read_kp_lifetime, KpMaintenanceAction, KpSlotRetirement, OfferMode,
+            TrackedKpLifetime,
         };
 
         let KpRetirementInputs {
             snapshot,
+            answers,
             probed,
             tracked,
             tracked_lifetime,
@@ -10193,6 +10296,19 @@ impl RelayManagerFfi {
                     log::debug!("[maintain_key_package] slot retirement record failed");
                     return unfinished(KpMaintenanceAction::SeededD, 0);
                 }
+                // The cells were judged against the record before it.
+                if let Ok(adopted) = session.tracked_key_package().await {
+                    let lifetime = adopted
+                        .as_ref()
+                        .map_or(TrackedKpLifetime::Absent, |t| read_kp_lifetime(&t.package));
+                    judge_key_packages(
+                        pass,
+                        answers,
+                        &keys.public_key(),
+                        adopted.as_ref(),
+                        lifetime,
+                    );
+                }
                 (KpMaintenanceAction::SeededD, 0, orphans, targets)
             }
             KpSlotRetirement::Repoint { orphans, targets } => {
@@ -10208,26 +10324,34 @@ impl RelayManagerFfi {
                         return unfinished(KpMaintenanceAction::RepublishedFreshD, 0);
                     };
                     // PUBLISH-FIRST: nothing is recorded until a relay acked.
-                    if self
-                        .inner
-                        .publish_event(&moved.event, &targets)
+                    let acked = pass
+                        .offer(
+                            &self.inner,
+                            &moved.event,
+                            &targets,
+                            OfferMode::Mint,
+                            haven_core::relay::OFFER_ACK_TIMEOUT,
+                        )
                         .await
-                        .is_err()
-                    {
+                        .accepted
+                        .len();
+                    if acked == 0 {
+                        pass.settle_rest(false);
                         *relay_errors += 1;
                         log::debug!("[maintain_key_package] slot repoint publish failed");
                         return unfinished(KpMaintenanceAction::RepublishedFreshD, 0);
                     }
-                    if session
+                    let recorded = session
                         .repoint_key_package_slot(&moved.d_tag, &moved.event)
                         .await
-                        .is_err()
-                    {
+                        .is_ok();
+                    pass.settle_rest(recorded);
+                    if !recorded {
                         *relay_errors += 1;
                         log::debug!("[maintain_key_package] slot retirement record failed");
-                        return unfinished(KpMaintenanceAction::RepublishedFreshD, targets.len());
+                        return unfinished(KpMaintenanceAction::RepublishedFreshD, acked);
                     }
-                    targets.len()
+                    acked
                 } else {
                     let plan = KpMintPlan {
                         existing_d: None,
@@ -10236,7 +10360,7 @@ impl RelayManagerFfi {
                         action: KpMaintenanceAction::RepublishedFreshD,
                     };
                     match self
-                        .mint_key_package(circle_mgr, keys, plan, relay_errors)
+                        .mint_key_package(circle_mgr, keys, plan, pass, relay_errors)
                         .await
                     {
                         Ok((_, healed)) if healed > 0 => healed,
@@ -10390,6 +10514,11 @@ impl RelayManagerFfi {
     /// union. When the toggle is off it skips (no publish).
     /// `record_published_event` after a successful publish.
     ///
+    /// Writes the own-relay board as it goes ([`CircleManagerFfi::own_relay_board`]),
+    /// and sends each relay at most one offer of each event, settled by that
+    /// relay's own `OK`. It runs under the account's one maintenance lock, and
+    /// a request made while a pass of its kind waits for that lock joins it.
+    ///
     /// Returns a presence-only [`RelayListMaintenanceOutcomeFfi`].
     ///
     /// [`build_relay_list_event`]: haven_core::relay::build_relay_list_event
@@ -10399,35 +10528,40 @@ impl RelayManagerFfi {
         circle: &CircleManagerFfi,
         identity_secret_bytes: Vec<u8>,
     ) -> Result<RelayListMaintenanceOutcomeFfi, String> {
-        use haven_core::relay::maintenance::RelayListMaintenanceOutcome;
+        let _running = circle.inner.own_relay_board().running();
+        let keys = keys_from_secret_bytes(identity_secret_bytes)?;
+        circle
+            .relay_list_passes
+            .run(
+                circle.inner.session().own_relays_tick(),
+                self.relay_list_pass(&circle.inner, &keys),
+            )
+            .await
+    }
 
-        let (keys, own_pk) = {
-            let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
-            if identity_secret_bytes.len() != 32 {
-                return Err("Invalid secret bytes length".to_string());
-            }
-            let secret_key = nostr::SecretKey::from_slice(&identity_secret_bytes)
-                .map_err(|e| format!("Invalid secret key: {e}"))?;
-            let keys = nostr::Keys::new(secret_key);
-            let pk = keys.public_key();
-            (keys, pk)
-        };
+    /// [`Self::maintain_relay_list`] once its turn has come.
+    async fn relay_list_pass(
+        &self,
+        circle_mgr: &Arc<CoreCircleManager>,
+        keys: &nostr::Keys,
+    ) -> Result<RelayListMaintenanceOutcomeFfi, String> {
+        use haven_core::circle::RelayType;
+        use haven_core::relay::maintenance::{OwnKind, RelayListMaintenanceOutcome};
 
-        let circle_mgr = circle.inner.clone();
         let key_package = self
             .maintain_relay_list_category(
-                &circle_mgr,
-                &keys,
-                &own_pk,
-                haven_core::circle::RelayType::KeyPackage,
+                circle_mgr,
+                keys,
+                RelayType::KeyPackage,
+                OwnKind::RelayList,
             )
             .await;
         let inbox = self
             .maintain_relay_list_category(
-                &circle_mgr,
-                &keys,
-                &own_pk,
-                haven_core::circle::RelayType::Inbox,
+                circle_mgr,
+                keys,
+                RelayType::Inbox,
+                OwnKind::InboxRelayList,
             )
             .await;
 
@@ -10436,20 +10570,27 @@ impl RelayManagerFfi {
         ))
     }
 
-    /// Runs [`Self::maintain_relay_list`] for one category. Fail-soft: any
-    /// error is tallied into `relay_errors`, never propagated.
+    /// Runs [`Self::maintain_relay_list`] for one category, whose list is
+    /// `own_kind` on the board. Fail-soft: any error is tallied into
+    /// `relay_errors`, never propagated.
     async fn maintain_relay_list_category(
         &self,
         circle_mgr: &Arc<CoreCircleManager>,
         keys: &nostr::Keys,
-        own_pk: &nostr::PublicKey,
         relay_type: haven_core::circle::RelayType,
+        own_kind: haven_core::relay::maintenance::OwnKind,
     ) -> haven_core::relay::maintenance::RelayListCategoryOutcome {
         use haven_core::relay::maintenance::{
-            decide_relay_list, list_relay_healthy, own_list_confirmed, RelayListAction,
-            RelayListCategoryOutcome, RelayListDecision, RelayListPerRelay, RelayListSnapshot,
+            decide_relay_list, names_configured_list, own_list_confirmed, probe_verdict, OfferMode,
+            OwnHold, Probed, RelayListAction, RelayListCategoryOutcome, RelayListDecision,
+            RelayListPerRelay, RelayListSnapshot,
         };
 
+        let own_pk = &keys.public_key();
+        let board = circle_mgr.own_relay_board();
+        // Before the list is read: an edit landing after the read supersedes
+        // this pass's every write.
+        let seen = board.generation(own_kind);
         let mut relay_errors: usize = 0;
 
         // No relay list (10050/10002) is published before the reset notice is
@@ -10457,6 +10598,7 @@ impl RelayManagerFfi {
         // user's choice.
         let reset_acknowledged = circle_mgr.storage_reset_acknowledged();
         if !reset_acknowledged {
+            board.hold(own_kind, seen, OwnHold::AwaitingResetAcknowledgement);
             return RelayListCategoryOutcome::no_publish(
                 RelayListAction::AwaitingResetAcknowledgement,
             );
@@ -10486,6 +10628,7 @@ impl RelayManagerFfi {
         let (publish_enabled, configured) = match prep {
             Ok(v) => v,
             Err(_) => {
+                board.clear(own_kind);
                 return RelayListCategoryOutcome {
                     relay_errors: 1,
                     ..RelayListCategoryOutcome::no_publish(RelayListAction::Suppressed)
@@ -10495,9 +10638,11 @@ impl RelayManagerFfi {
 
         // Fast paths before any network probe.
         if !publish_enabled {
+            board.hold(own_kind, seen, OwnHold::PublishingSuppressed);
             return RelayListCategoryOutcome::no_publish(RelayListAction::Suppressed);
         }
         if configured.is_empty() {
+            board.hold(own_kind, seen, OwnHold::NoRelaysConfigured);
             return RelayListCategoryOutcome::no_publish(RelayListAction::NothingConfigured);
         }
 
@@ -10516,6 +10661,7 @@ impl RelayManagerFfi {
         // B only. The own relays lead the targets, so a position below
         // `configured.len()` is an own relay.
         let targets = relay_list_targets(&configured);
+        let mut pass = board.begin(own_kind, seen, &targets);
         let filter = nostr::Filter::new().kind(kind).author(*own_pk).limit(4);
         let mut per_relay = match self.inner.fetch_events_per_relay(filter, &targets).await {
             Ok(v) => v,
@@ -10532,21 +10678,21 @@ impl RelayManagerFfi {
         // every other author's) — the page's first event: newest `created_at`,
         // lower id on a tie, the one NIP-01 keeps. An absent list ⇒ empty
         // on-relay set ⇒ unhealthy. Non-responders are excluded structurally.
+        // Healthy is exactly the board's current, judged once for both.
+        let verdicts = pass.judge(&per_relay, |answer| {
+            probe_verdict(answer, own_pk, kind, &|mine| {
+                names_configured_list(mine, &configured)
+            })
+        });
         let mut responders: Vec<RelayListPerRelay> = Vec::new();
-        for (at, outcome) in per_relay.iter().enumerate() {
+        for (at, (outcome, verdict)) in per_relay.iter().zip(&verdicts).enumerate() {
             if !outcome.responded {
                 continue;
             }
-            let on_relay_urls = outcome
-                .events
-                .first()
-                .and_then(|e| relay_list_urls_for(ffi_type, e).ok())
-                .unwrap_or_default();
-            let healthy = list_relay_healthy(&on_relay_urls, &configured);
             responders.push(RelayListPerRelay {
                 relay_url: outcome.relay_url.clone(),
                 own: at < configured.len(),
-                healthy,
+                healthy: *verdict == Probed::Current,
             });
         }
         let responders_probed = responders.len();
@@ -10615,33 +10761,39 @@ impl RelayManagerFfi {
                 let event_id = event.id;
                 let created_at = i64::try_from(event.created_at.as_secs()).unwrap_or(0);
 
-                match self.inner.publish_event(&event, &targets).await {
-                    Ok(published) => {
-                        let pk = *own_pk;
-                        // Single per-kind published_events row (NOT per-relay):
-                        // the replaceable list is one addressable event.
-                        let rec = run_blocking({
-                            let mgr = circle_mgr.clone();
-                            move || {
-                                mgr.record_published_event(kind_u16, "", &event_id, &pk, created_at)
-                                    .map_err(|e| e.to_string())
-                            }
-                        })
-                        .await;
-                        if rec.is_err() {
-                            relay_errors += 1;
+                let offered = pass
+                    .offer(
+                        &self.inner,
+                        &event,
+                        &targets,
+                        OfferMode::Heal,
+                        haven_core::relay::OFFER_ACK_TIMEOUT,
+                    )
+                    .await;
+                if offered.accepted.is_empty() {
+                    log::debug!("[maintain_relay_list] publish failed");
+                    unpublished(RelayListAction::Unacknowledged)
+                } else {
+                    let pk = *own_pk;
+                    // Single per-kind published_events row (NOT per-relay):
+                    // the replaceable list is one addressable event.
+                    let rec = run_blocking({
+                        let mgr = circle_mgr.clone();
+                        move || {
+                            mgr.record_published_event(kind_u16, "", &event_id, &pk, created_at)
+                                .map_err(|e| e.to_string())
                         }
-                        RelayListCategoryOutcome {
-                            action: RelayListAction::Republished,
-                            responders_probed,
-                            relays_healed: targets.len(),
-                            relay_errors,
-                            own_confirmed: own_list_confirmed(&snapshot, &published.accepted_by),
-                        }
+                    })
+                    .await;
+                    if rec.is_err() {
+                        relay_errors += 1;
                     }
-                    Err(_) => {
-                        log::debug!("[maintain_relay_list] publish failed");
-                        unpublished(RelayListAction::Unacknowledged)
+                    RelayListCategoryOutcome {
+                        action: RelayListAction::Republished,
+                        responders_probed,
+                        relays_healed: offered.accepted.len(),
+                        relay_errors,
+                        own_confirmed: own_list_confirmed(&snapshot, &offered.accepted),
                     }
                 }
             }
@@ -12454,18 +12606,7 @@ mod tests {
             "no empty-replacement may ever be built for the profile plane",
         );
 
-        // 4. The on-relay URL extractor used by the maintenance healer. An
-        //    empty Vec here would read as "the list was dropped from this
-        //    relay" and could drive the healer into publishing one.
-        let probe = nostr::EventBuilder::new(nostr::Kind::RelayList, "")
-            .sign_with_keys(&keys)
-            .expect("sign probe event");
-        assert!(
-            relay_list_urls_for(RelayTypeFfi::Profile, &probe).is_err(),
-            "there is no wire form to extract for the profile plane",
-        );
-
-        // 5. The core type carries the same property, so the two layers cannot
+        // 4. The core type carries the same property, so the two layers cannot
         //    drift: the storage slot round-trips, and the core has no kind.
         assert_eq!(
             haven_core::circle::RelayType::from(RelayTypeFfi::Profile),
@@ -12480,7 +12621,7 @@ mod tests {
             "RelayType::Profile must have no publishable kind",
         );
 
-        // 6. And it is NOT silently aliased onto a publishable category.
+        // 5. And it is NOT silently aliased onto a publishable category.
         assert_ne!(RelayTypeFfi::Profile, RelayTypeFfi::Nip65);
         assert_ne!(RelayTypeFfi::Profile, RelayTypeFfi::Inbox);
         assert_ne!(
@@ -14209,7 +14350,8 @@ mod live_sync_ffi_tests {
 mod maintenance_real_ffi_tests {
     use super::{
         allow_ws_loopback_for_test, hex_to_npub, profile_now_secs, use_in_memory_keyring_for_test,
-        CachedProfile, CircleManagerFfi, KpMaintenanceActionFfi, OwnProfileRelayAnswerFfi,
+        CachedProfile, CircleManagerFfi, KpMaintenanceActionFfi, OwnKindBoardFfi,
+        OwnProfileRelayAnswerFfi, OwnPublishHoldFfi, OwnRelayBoardFfi, OwnRelayStatusFfi,
         ProfileMetadata, ProfileState, ProfileSyncOutcomeFfi, RelayManagerFfi, RelayTypeFfi,
     };
     use haven_core::circle::RelayType;
@@ -15251,40 +15393,76 @@ mod maintenance_real_ffi_tests {
             .expect("maintain_key_package must not error")
     }
 
-    async fn reachability(
-        relay_mgr: &RelayManagerFfi,
-        circle: &CircleManagerFfi,
-        keys: &Keys,
-    ) -> Vec<super::OwnRelayPresenceFfi> {
-        relay_mgr
-            .check_own_reachability(circle, keys.public_key().to_hex())
-            .await
-            .expect("the reachability check runs")
+    /// `relay`'s cell in `kind`, as the board names it: the list's spelling.
+    fn cell(kind: &OwnKindBoardFfi, relay: &str) -> Option<OwnRelayStatusFfi> {
+        kind.cells
+            .iter()
+            .find(|cell| cell.relay_url == relay)
+            .map(|cell| cell.status)
     }
 
-    /// The relay settings check reads, per relay and per kind, what the
-    /// maintenance ticks publish: missing before, current after; an own relay
-    /// that cannot be reached is no answer, never missing.
+    /// Yields until the board satisfies `done`: a condition, never a time.
+    async fn board_until(
+        circle: &CircleManagerFfi,
+        done: impl Fn(&OwnRelayBoardFfi) -> bool,
+    ) -> OwnRelayBoardFfi {
+        loop {
+            let board = circle.own_relay_board();
+            if done(&board) {
+                return board;
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Both maintenance passes, as the publisher runs them: relay lists, then
+    /// the `KeyPackage`.
+    async fn both_passes(relay_mgr: &RelayManagerFfi, circle: &CircleManagerFfi, secret: &[u8]) {
+        relay_mgr
+            .maintain_relay_list(circle, secret.to_vec())
+            .await
+            .expect("maintain_relay_list must not error");
+        circle_maintain(relay_mgr, circle, secret.to_vec()).await;
+    }
+
+    /// The events of `kind` a scripted relay kept.
+    fn kept(
+        relay: &haven_core::relay::scripted_relay::ScriptedRelay,
+        kind: Kind,
+    ) -> Vec<nostr::Event> {
+        relay
+            .published()
+            .into_iter()
+            .filter(|event| event.kind == kind)
+            .collect()
+    }
+
+    /// The board reads, per relay and per kind, what the maintenance passes
+    /// found and did: nothing before a pass, current after; an own relay that
+    /// cannot be reached is no answer, never missing; a lookup relay holds no
+    /// `KeyPackage` cell; and the lookup rows are the relays the pass asked.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn the_reachability_check_reads_what_maintenance_published_via_real_ffi() {
-        use super::OwnEventPresenceFfi::{Current, Missing, NoAnswer, NotExpected};
+    async fn the_board_reads_what_the_maintenance_passes_found_and_did_via_real_ffi() {
+        use haven_core::relay::scripted_relay::ScriptedRelay;
+        use OwnRelayStatusFfi::{Current, NoAnswer};
 
         let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
         install_test_seams();
-        let inbox_relay = MockRelay::run().await.expect("start MockRelay");
-        let kp_relay = MockRelay::run().await.expect("start MockRelay");
+        let (inbox_relay, kp_relay) = (ScriptedRelay::start(), ScriptedRelay::start());
+        inbox_relay.serve_kept();
+        kp_relay.serve_kept();
         let keys = Keys::generate();
         let secret = secret_bytes(&keys);
-        let dir = DataDir::new("reachability");
+        let dir = DataDir::new("board");
         let circle =
             CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
         let relay_mgr = RelayManagerFfi::new_instance()
             .await
             .expect("RelayManagerFfi::new_instance");
         for (url, relay_type) in [
-            (inbox_relay.url().await.to_string(), RelayTypeFfi::Inbox),
+            (inbox_relay.url().to_owned(), RelayTypeFfi::Inbox),
             (dead_loopback_relay(), RelayTypeFfi::Inbox),
-            (kp_relay.url().await.to_string(), RelayTypeFfi::Nip65),
+            (kp_relay.url().to_owned(), RelayTypeFfi::Nip65),
         ] {
             circle
                 .add_user_relay(url, relay_type)
@@ -15299,113 +15477,80 @@ mod maintenance_real_ffi_tests {
         };
         let [inbox, dead] = <[String; 2]>::try_from(stored(RelayType::Inbox)).expect("two");
         let [key_package] = <[String; 1]>::try_from(stored(RelayType::KeyPackage)).expect("one");
-        let [lookup] = <[String; 1]>::try_from(haven_core::relay::discovery_relays()).expect("one");
-        let shape = |row: &super::OwnRelayPresenceFfi| {
-            (
-                row.relay_url.clone(),
-                row.own,
-                row.lookup,
-                row.reachable,
-                [row.key_package, row.relay_list, row.inbox_relay_list],
-            )
-        };
+        let lookup = haven_core::relay::discovery_relays();
 
-        let before = reachability(&relay_mgr, &circle, &keys).await;
+        let before = circle.own_relay_board();
         assert_eq!(
-            before.iter().map(shape).collect::<Vec<_>>(),
-            [
-                (
-                    inbox.clone(),
-                    true,
-                    false,
-                    true,
-                    [NotExpected, NotExpected, Missing]
-                ),
-                (
-                    dead.clone(),
-                    true,
-                    false,
-                    false,
-                    [NotExpected, NotExpected, NoAnswer]
-                ),
-                (
-                    key_package.clone(),
-                    true,
-                    false,
-                    true,
-                    [Missing, Missing, NotExpected]
-                ),
-                (
-                    lookup.clone(),
-                    false,
-                    true,
-                    true,
-                    [NotExpected, Missing, Missing]
-                ),
-            ],
-            "nothing is published yet, and a lookup relay is never asked for a KeyPackage",
+            before.lookup_relays, lookup,
+            "the lookup rows are the relays asked"
         );
+        assert!(!before.running);
+        for kind in [
+            &before.key_package,
+            &before.relay_list,
+            &before.inbox_relay_list,
+        ] {
+            assert_eq!(
+                (kind.hold, kind.checked_secs_ago, kind.cells.len()),
+                (None, None, 0),
+                "nothing is known before a pass"
+            );
+        }
 
-        relay_mgr
-            .maintain_relay_list(&circle, secret.clone())
-            .await
-            .expect("maintain_relay_list must not error");
-        circle_maintain(&relay_mgr, &circle, secret).await;
+        both_passes(&relay_mgr, &circle, &secret).await;
 
-        let after = reachability(&relay_mgr, &circle, &keys).await;
+        let after = circle.own_relay_board();
+        assert!(!after.running);
+        let inbox_cells = [&inbox, &dead, &lookup[0]].map(|url| cell(&after.inbox_relay_list, url));
+        assert_eq!(inbox_cells, [Some(Current), Some(NoAnswer), Some(Current)]);
         assert_eq!(
-            after[..3].iter().map(shape).collect::<Vec<_>>(),
-            [
-                (
-                    inbox,
-                    true,
-                    false,
-                    true,
-                    [NotExpected, NotExpected, Current]
-                ),
-                (
-                    dead,
-                    true,
-                    false,
-                    false,
-                    [NotExpected, NotExpected, NoAnswer]
-                ),
-                (
-                    key_package,
-                    true,
-                    false,
-                    true,
-                    [Current, Current, NotExpected]
-                ),
-            ],
+            [&key_package, &lookup[0]].map(|url| cell(&after.relay_list, url)),
+            [Some(Current), Some(Current)]
         );
         assert_eq!(
-            (after[3].relay_url.as_str(), after[3].key_package),
-            (lookup.as_str(), NotExpected)
+            after
+                .key_package
+                .cells
+                .iter()
+                .map(|cell| (cell.relay_url.as_str(), cell.status))
+                .collect::<Vec<_>>(),
+            [(key_package.as_str(), Current)],
+            "a KeyPackage is asked for on the KeyPackage list only"
         );
-
-        inbox_relay.shutdown();
-        kp_relay.shutdown();
+        for kind in [
+            &after.key_package,
+            &after.relay_list,
+            &after.inbox_relay_list,
+        ] {
+            assert!(kind.checked_secs_ago.is_some() && kind.hold.is_none());
+        }
+        assert_eq!(kept(&inbox_relay, Kind::Custom(30443)).len(), 0);
     }
 
     /// An older package of this account in the tracked slot is not this
-    /// device's current one: the check reads it outdated, and one maintenance
-    /// tick, republishing the tracked event, makes it current.
+    /// device's current one: the pass sends the relay the tracked event, its
+    /// cell reads publishing until the relay's `OK`, then current, and the
+    /// relay holds the tracked bytes.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn an_older_package_in_the_slot_reads_outdated_until_one_tick_heals_it_via_real_ffi() {
+    async fn an_older_package_in_the_slot_is_healed_and_current_only_on_the_relays_ok_via_real_ffi()
+    {
+        use haven_core::relay::scripted_relay::{ScriptedRelay, Verdict};
+        use nostr::JsonUtil as _;
+
         let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
         install_test_seams();
-        let relay = MockRelay::run().await.expect("start MockRelay");
+        let relay = ScriptedRelay::start();
+        relay.serve_kept();
         let keys = Keys::generate();
         let secret = secret_bytes(&keys);
-        let dir = DataDir::new("reachability_heal");
+        let dir = DataDir::new("board_heal");
         let circle =
             CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
         let relay_mgr = RelayManagerFfi::new_instance()
             .await
             .expect("RelayManagerFfi::new_instance");
         circle
-            .add_user_relay(relay.url().await.to_string(), RelayTypeFfi::Nip65)
+            .add_user_relay(relay.url().to_owned(), RelayTypeFfi::Nip65)
             .await
             .expect("register own NIP-65 relay");
         let own = circle
@@ -15437,29 +15582,500 @@ mod maintenance_real_ffi_tests {
         .await
         .expect("mint the tracked package into the same slot");
         track_published(&circle, &tracked).await;
-        let key_package = |rows: &[super::OwnRelayPresenceFfi]| {
-            rows.iter()
-                .find(|row| row.relay_url == own[0])
-                .expect("the own relay's row")
+        let (release, released) = tokio::sync::watch::channel(false);
+        relay.on_publish(move |_| Verdict::HoldThen(released.clone(), Box::new(Verdict::Keep)));
+
+        let (tick, ()) = tokio::join!(circle_maintain(&relay_mgr, &circle, secret), async {
+            board_until(&circle, |board| {
+                cell(&board.key_package, &own[0]) == Some(OwnRelayStatusFfi::Publishing)
+            })
+            .await;
+            release.send(true).expect("the relay listens");
+        });
+        assert_eq!(tick.action, KpMaintenanceActionFfi::RepublishedStableD);
+        assert_eq!(tick.relays_healed, 1);
+        assert_eq!(
+            cell(&circle.own_relay_board().key_package, &own[0]),
+            Some(OwnRelayStatusFfi::Current)
+        );
+        assert_eq!(
+            kept(&relay, Kind::Custom(30443))
+                .last()
+                .map(nostr::Event::as_json),
+            Some(tracked.event.as_json()),
+            "a heal sends the tracked event byte for byte"
+        );
+    }
+
+    /// Adding a `KeyPackage` relay forgets every relay-list cell at once (each
+    /// was judged against the old list); then one pass of each kind sends a
+    /// new 10002 to every own and lookup relay, the tracked `KeyPackage`'s own
+    /// bytes to the new relay only, and the inbox relays nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn adding_a_kp_relay_republishes_the_list_everywhere_and_the_package_only_to_it_via_real_ffi(
+    ) {
+        use haven_core::relay::scripted_relay::ScriptedRelay;
+        use nostr::JsonUtil as _;
+        use OwnRelayStatusFfi::Current;
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let [inbox_relay, kp_relay, added] = [(); 3].map(|()| ScriptedRelay::start());
+        for relay in [&inbox_relay, &kp_relay, &added] {
+            relay.serve_kept();
+        }
+        let keys = Keys::generate();
+        let secret = secret_bytes(&keys);
+        let dir = DataDir::new("board_add");
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        circle
+            .add_user_relay(inbox_relay.url().to_owned(), RelayTypeFfi::Inbox)
+            .await
+            .expect("an inbox relay");
+        circle
+            .add_user_relay(kp_relay.url().to_owned(), RelayTypeFfi::Nip65)
+            .await
+            .expect("a KeyPackage relay");
+        both_passes(&relay_mgr, &circle, &secret).await;
+        let lookup = haven_core::relay::discovery_relays();
+        let green = circle.own_relay_board();
+        assert_eq!(
+            cell(&green.relay_list, kp_relay.url()),
+            Some(Current),
+            "premise"
+        );
+        let tracked = circle
+            .inner
+            .session()
+            .tracked_key_package()
+            .await
+            .expect("read the record")
+            .and_then(|tracked| tracked.published)
+            .expect("a published package");
+        let inbox_lists_before = kept(&inbox_relay, Kind::InboxRelays).len();
+        let kp_packages_before = kept(&kp_relay, Kind::Custom(30443)).len();
+
+        circle
+            .add_user_relay(added.url().to_owned(), RelayTypeFfi::Nip65)
+            .await
+            .expect("the user adds a KeyPackage relay");
+        let edited = circle.own_relay_board();
+        assert!(
+            edited.relay_list.cells.is_empty(),
+            "no relay list reads current against a list that changed: {edited:?}"
+        );
+        assert_eq!(
+            edited.key_package.cells.len(),
+            1,
+            "a KeyPackage stays what it was on every relay but the one added"
+        );
+        assert_eq!(
+            cell(&edited.inbox_relay_list, inbox_relay.url()),
+            Some(Current)
+        );
+
+        both_passes(&relay_mgr, &circle, &secret).await;
+
+        let after = circle.own_relay_board();
+        for url in [kp_relay.url(), added.url(), lookup[0].as_str()] {
+            assert_eq!(
+                cell(&after.relay_list, url),
+                Some(Current),
+                "10002 on {url}"
+            );
+        }
+        for url in [kp_relay.url(), added.url()] {
+            assert_eq!(
+                cell(&after.key_package, url),
+                Some(Current),
+                "30443 on {url}"
+            );
+        }
+        assert_eq!(
+            kept(&added, Kind::Custom(30443))
+                .iter()
+                .map(nostr::Event::as_json)
+                .collect::<Vec<_>>(),
+            [tracked.as_json()],
+            "the new relay got the tracked event itself, once: a heal signs nothing"
+        );
+        assert_eq!(
+            kept(&kp_relay, Kind::Custom(30443)).len(),
+            kp_packages_before,
+            "a relay already serving the package is sent nothing"
+        );
+        let mut configured = circle
+            .inner
+            .list_user_relays(RelayType::KeyPackage)
+            .expect("the stored list");
+        configured.sort();
+        let names_both = |list: &nostr::Event| {
+            let mut named: Vec<String> = list
+                .tags
+                .iter()
+                .filter(|tag| tag.as_slice()[0] == "r")
+                .map(|tag| tag.as_slice()[1].clone())
+                .collect();
+            named.sort();
+            named == configured
+        };
+        for relay in [&kp_relay, &added] {
+            assert!(
+                kept(relay, Kind::RelayList).last().is_some_and(names_both),
+                "every own KeyPackage relay serves the 10002 naming both"
+            );
+        }
+        let on_lookup = fetch_by_kind(keys.public_key(), Kind::RelayList, &lookup[0]).await;
+        assert!(
+            on_lookup.iter().any(names_both),
+            "the lookup relay got the new 10002"
+        );
+        assert_eq!(
+            kept(&inbox_relay, Kind::InboxRelays).len(),
+            inbox_lists_before,
+            "an unchanged inbox list is sent nowhere"
+        );
+
+        // An inbox edit forgets every inbox-list cell and nothing else; a
+        // KeyPackage relay removed takes its KeyPackage cell with it.
+        let cells = |kind: &OwnKindBoardFfi| kind.cells.clone();
+        circle
+            .add_user_relay(dead_loopback_relay(), RelayTypeFfi::Inbox)
+            .await
+            .expect("the user adds an inbox relay");
+        let inbox_edit = circle.own_relay_board();
+        assert!(inbox_edit.inbox_relay_list.cells.is_empty());
+        assert_eq!(cells(&inbox_edit.relay_list), cells(&after.relay_list));
+        assert_eq!(cells(&inbox_edit.key_package), cells(&after.key_package));
+        circle
+            .remove_user_relay(added.url().to_owned(), RelayTypeFfi::Nip65)
+            .await
+            .expect("the user removes the relay again");
+        let removed = circle.own_relay_board();
+        assert!(removed.relay_list.cells.is_empty());
+        assert_eq!(
+            removed
                 .key_package
+                .cells
+                .iter()
+                .map(|cell| cell.relay_url.as_str())
+                .collect::<Vec<_>>(),
+            [kp_relay.url()]
+        );
+    }
+
+    /// Until the storage-reset notice is acknowledged every kind is held: no
+    /// relay is even asked, and the board says why. Acknowledging it lifts
+    /// the hold at the next pass.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn awaiting_the_reset_notice_holds_every_kind_and_probes_nothing_via_real_ffi() {
+        use haven_core::relay::scripted_relay::ScriptedRelay;
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let relay = ScriptedRelay::start();
+        relay.serve_kept();
+        let keys = Keys::generate();
+        let secret = secret_bytes(&keys);
+        let dir = DataDir::new("board_reset");
+        plant_pre_migration_store(&dir);
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        for relay_type in [RelayTypeFfi::Inbox, RelayTypeFfi::Nip65] {
+            circle
+                .add_user_relay(relay.url().to_owned(), relay_type)
+                .await
+                .expect("register an own relay");
+        }
+
+        both_passes(&relay_mgr, &circle, &secret).await;
+        let held = circle.own_relay_board();
+        for kind in [&held.key_package, &held.relay_list, &held.inbox_relay_list] {
+            assert_eq!(
+                kind.hold,
+                Some(OwnPublishHoldFfi::AwaitingResetAcknowledgement)
+            );
+            assert!(kind.cells.is_empty() && kind.checked_secs_ago.is_some());
+        }
+        assert_eq!(relay.connections(), 0, "a held pass asks no relay anything");
+
+        super::acknowledge_storage_reset(dir.as_str()).expect("acknowledge");
+        both_passes(&relay_mgr, &circle, &secret).await;
+        let lifted = circle.own_relay_board();
+        for kind in [
+            &lifted.key_package,
+            &lifted.relay_list,
+            &lifted.inbox_relay_list,
+        ] {
+            assert_eq!(kind.hold, None);
+            assert_eq!(cell(kind, relay.url()), Some(OwnRelayStatusFfi::Current));
+        }
+    }
+
+    /// A list whose stored publish setting is off is held, and that list
+    /// alone: the other is checked as ever.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_list_stored_as_unpublished_is_held_and_the_other_checked_via_real_ffi() {
+        use haven_core::relay::scripted_relay::ScriptedRelay;
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let relay = ScriptedRelay::start();
+        relay.serve_kept();
+        let keys = Keys::generate();
+        let secret = secret_bytes(&keys);
+        let dir = DataDir::new("board_suppressed");
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        for relay_type in [RelayTypeFfi::Inbox, RelayTypeFfi::Nip65] {
+            circle
+                .add_user_relay(relay.url().to_owned(), relay_type)
+                .await
+                .expect("register an own relay");
+        }
+        circle
+            .set_publish_relay_list(RelayTypeFfi::Inbox, false)
+            .await
+            .expect("store the setting");
+
+        relay_mgr
+            .maintain_relay_list(&circle, secret)
+            .await
+            .expect("maintain_relay_list must not error");
+        let board = circle.own_relay_board();
+        assert_eq!(
+            board.inbox_relay_list.hold,
+            Some(OwnPublishHoldFfi::PublishingSuppressed)
+        );
+        assert!(board.inbox_relay_list.cells.is_empty());
+        assert_eq!(
+            (board.relay_list.hold, cell(&board.relay_list, relay.url())),
+            (None, Some(OwnRelayStatusFfi::Current))
+        );
+        assert!(
+            kept(&relay, Kind::InboxRelays).is_empty(),
+            "a held list is sent nowhere"
+        );
+    }
+
+    /// A relay that refuses the list reads refused while the others turn
+    /// current, and the pass counts as healed only the relays that said
+    /// `OK true`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_refusing_relay_reads_refused_and_only_acks_count_as_healed_via_real_ffi() {
+        use haven_core::relay::scripted_relay::ScriptedRelay;
+        use OwnRelayStatusFfi::{Current, Refused};
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let [keeping, refusing, kp_relay] = [(); 3].map(|()| ScriptedRelay::start());
+        for relay in [&keeping, &kp_relay] {
+            relay.serve_kept();
+        }
+        refusing.refuse(|_| true);
+        let keys = Keys::generate();
+        let secret = secret_bytes(&keys);
+        let dir = DataDir::new("board_refused");
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        for (relay, relay_type) in [
+            (&keeping, RelayTypeFfi::Inbox),
+            (&refusing, RelayTypeFfi::Inbox),
+            (&kp_relay, RelayTypeFfi::Nip65),
+        ] {
+            circle
+                .add_user_relay(relay.url().to_owned(), relay_type)
+                .await
+                .expect("register an own relay");
+        }
+        let lookup = haven_core::relay::discovery_relays();
+
+        let lists = relay_mgr
+            .maintain_relay_list(&circle, secret)
+            .await
+            .expect("maintain_relay_list must not error");
+        let board = circle.own_relay_board();
+        assert_eq!(
+            [keeping.url(), refusing.url(), lookup[0].as_str()]
+                .map(|url| cell(&board.inbox_relay_list, url)),
+            [Some(Current), Some(Refused), Some(Current)]
+        );
+        assert_eq!(
+            lists.inbox.relays_healed, 2,
+            "three relays were sent the list and two said OK true"
+        );
+        assert!(lists.inbox.own_confirmed);
+        assert_eq!(refusing.offers(), 1, "one offer per relay per pass");
+    }
+
+    /// The passes take one lock, so a `KeyPackage` pass requested while a
+    /// relay-list pass holds a relay's `OK` waits — observed waiting, its kind
+    /// untouched — and runs once that pass is done.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_passes_never_interleave_on_the_board_via_real_ffi() {
+        use haven_core::relay::scripted_relay::{ScriptedRelay, Verdict};
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let (inbox_relay, kp_relay) = (ScriptedRelay::start(), ScriptedRelay::start());
+        inbox_relay.serve_kept();
+        kp_relay.serve_kept();
+        let (release, released) = tokio::sync::watch::channel(false);
+        kp_relay.on_publish(move |_| Verdict::HoldThen(released.clone(), Box::new(Verdict::Keep)));
+        let keys = Keys::generate();
+        let secret = secret_bytes(&keys);
+        let dir = DataDir::new("board_lock");
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        circle
+            .add_user_relay(inbox_relay.url().to_owned(), RelayTypeFfi::Inbox)
+            .await
+            .expect("an inbox relay");
+        circle
+            .add_user_relay(kp_relay.url().to_owned(), RelayTypeFfi::Nip65)
+            .await
+            .expect("a KeyPackage relay");
+
+        let lists = relay_mgr.maintain_relay_list(&circle, secret.clone());
+        let package = circle_maintain(&relay_mgr, &circle, secret.clone());
+        tokio::pin!(lists, package);
+        let (lists, ()) = tokio::join!(&mut lists, async {
+            board_until(&circle, |board| {
+                cell(&board.relay_list, kp_relay.url()) == Some(OwnRelayStatusFfi::Publishing)
+            })
+            .await;
+            assert!(circle.inner.session().own_relays_tick_held_for_test());
+            tokio::select! {
+                biased;
+                _ = &mut package => panic!("the KeyPackage pass ran inside the relay-list pass"),
+                () = std::future::ready(()) => {}
+            }
+            let board = circle.own_relay_board();
+            assert!(board.running);
+            assert!(
+                board.key_package.cells.is_empty(),
+                "the waiting pass wrote nothing: {board:?}"
+            );
+            release.send(true).expect("the relay listens");
+        });
+        lists.expect("maintain_relay_list must not error");
+        let tick = package.await;
+        assert_eq!(tick.action, KpMaintenanceActionFfi::RepublishedFreshD);
+        let board = circle.own_relay_board();
+        assert!(!board.running);
+        assert_eq!(
+            cell(&board.key_package, kp_relay.url()),
+            Some(OwnRelayStatusFfi::Current)
+        );
+    }
+
+    /// Requests made while a pass waits for its turn join that pass: three
+    /// relay-list requests behind a running pass cost one more pass, not
+    /// three, and all three get its outcome.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn requests_behind_a_running_pass_join_one_pending_pass_via_real_ffi() {
+        use haven_core::relay::recording_front::RecordingFront;
+        use haven_core::relay::scripted_relay::{ScriptedRelay, Verdict};
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let (inbox_relay, kp_relay) = (ScriptedRelay::start(), ScriptedRelay::start());
+        inbox_relay.serve_kept();
+        kp_relay.serve_kept();
+        let (release, released) = tokio::sync::watch::channel(false);
+        kp_relay.on_publish(move |_| Verdict::HoldThen(released.clone(), Box::new(Verdict::Keep)));
+        let front = RecordingFront::start(kp_relay.url());
+        let keys = Keys::generate();
+        let secret = secret_bytes(&keys);
+        let dir = DataDir::new("board_coalesce");
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        circle
+            .add_user_relay(inbox_relay.url().to_owned(), RelayTypeFfi::Inbox)
+            .await
+            .expect("an inbox relay");
+        circle
+            .add_user_relay(front.url().to_owned(), RelayTypeFfi::Nip65)
+            .await
+            .expect("a KeyPackage relay");
+        let relay_list_reqs = || {
+            front
+                .frames()
+                .iter()
+                .filter_map(|frame| serde_json::from_str::<serde_json::Value>(&frame.text).ok())
+                .filter(|message| message[0] == "REQ" && message[2]["kinds"][0] == 10002)
+                .count()
         };
 
+        let running = relay_mgr.maintain_relay_list(&circle, secret.clone());
+        tokio::pin!(running);
+        let mut joined: Vec<_> = (0..3)
+            .map(|_| Box::pin(relay_mgr.maintain_relay_list(&circle, secret.clone())))
+            .collect();
+        let (first, ()) = tokio::join!(&mut running, async {
+            board_until(&circle, |board| {
+                cell(&board.relay_list, front.url()) == Some(OwnRelayStatusFfi::Publishing)
+            })
+            .await;
+            for request in &mut joined {
+                tokio::select! {
+                    biased;
+                    _ = request.as_mut() => panic!("a request ran before its turn"),
+                    () = std::future::ready(()) => {}
+                }
+            }
+            release.send(true).expect("the relay listens");
+        });
+        let first = first.expect("maintain_relay_list must not error");
+        let mut rest = Vec::new();
+        for request in joined {
+            rest.push(request.await.expect("maintain_relay_list must not error"));
+        }
         assert_eq!(
-            key_package(&reachability(&relay_mgr, &circle, &keys).await),
-            super::OwnEventPresenceFfi::Outdated,
-        );
-        let tick = circle_maintain(&relay_mgr, &circle, secret).await;
-        assert_eq!(
-            tick.action,
-            KpMaintenanceActionFfi::RepublishedStableD,
-            "premise: the tick heals the slot with the tracked event"
+            relay_list_reqs(),
+            2,
+            "the running pass and ONE pass for all three"
         );
         assert_eq!(
-            key_package(&reachability(&relay_mgr, &circle, &keys).await),
-            super::OwnEventPresenceFfi::Current,
+            first.key_package.action,
+            super::RelayListActionFfi::Republished
         );
-
-        relay.shutdown();
+        for outcome in &rest {
+            assert_eq!(
+                (
+                    outcome.key_package.action,
+                    outcome.key_package.relays_healed
+                ),
+                (
+                    rest[0].key_package.action,
+                    rest[0].key_package.relays_healed
+                ),
+                "the joined requests share one outcome"
+            );
+        }
+        assert_eq!(
+            rest[0].key_package.action,
+            super::RelayListActionFfi::AlreadyCurrent
+        );
     }
 
     // ------------------------------------------------------------------------
@@ -17460,7 +18076,7 @@ mod maintenance_real_ffi_tests {
                     .expect("a KeyPackage reaches the relay")
                     .forget();
                 assert!(
-                    circle.inner.session().key_package_tick_held_for_test(),
+                    circle.inner.session().own_relays_tick_held_for_test(),
                     "the tick whose publish is in flight still holds the account's tick lock"
                 );
                 gate.close();
@@ -23508,7 +24124,7 @@ mod log_anonymity_tests {
         InMemoryStorage, InvitationFfi, LastKnownLocationFfi, LeavePlanFfi, LeavePlanKindFfi,
         LocationMessage, LocationMessageResultFfi, LocationMessageResultKindFfi, LogAliasClassFfi,
         MemberKeyPackageFfi, MemberLookupFfi, MemberLookupVerdictFfi, NostrIdentityManager,
-        OwnProfileRelayAnswerFfi, OwnRelayPresenceFfi, ProfileMetadataFfi, ProfilePictureRefFfi,
+        OwnProfileRelayAnswerFfi, OwnRelayCellFfi, ProfileMetadataFfi, ProfilePictureRefFfi,
         PublicIdentity, RejoinOfferFfi, RejoinOffersOutcomeFfi, RelayConnectionStatusFfi,
         RelayGiftWrapFetchFfi, RelayManagerFfi, RelayRejectionFfi, SignedLocationEventFfi,
         SkipReasonFfi,
@@ -24277,17 +24893,30 @@ mod log_anonymity_tests {
     }
 
     #[test]
-    fn own_relay_presence_ffi_debug_redacts_the_url() {
-        let row = OwnRelayPresenceFfi {
+    fn own_relay_cell_ffi_debug_redacts_the_url() {
+        let cell = OwnRelayCellFfi {
             relay_url: RELAY.to_string(),
-            own: true,
-            lookup: true,
-            reachable: true,
-            key_package: super::OwnEventPresenceFfi::Current,
-            relay_list: super::OwnEventPresenceFfi::Outdated,
-            inbox_relay_list: super::OwnEventPresenceFfi::NoAnswer,
+            status: super::OwnRelayStatusFfi::Refused,
         };
-        assert_debug_redacted!(row, "OwnRelayPresenceFfi", NEEDLES);
+        assert_debug_redacted!(cell, "OwnRelayCellFfi", NEEDLES);
+        let kind = super::OwnKindBoardFfi {
+            hold: None,
+            checked_secs_ago: Some(3),
+            cells: vec![cell],
+        };
+        let board = super::OwnRelayBoardFfi {
+            running: true,
+            lookup_relays: vec![RELAY.to_string()],
+            key_package: kind.clone(),
+            relay_list: kind.clone(),
+            inbox_relay_list: kind,
+        };
+        assert_debug_redacted!(
+            board,
+            "OwnRelayBoardFfi",
+            marker = "OwnRelayCellFfi",
+            NEEDLES
+        );
     }
 
     #[test]

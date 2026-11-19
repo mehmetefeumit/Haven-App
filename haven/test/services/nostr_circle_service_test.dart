@@ -114,11 +114,6 @@ class _StubRelayService implements RelayService {
   }) => throw UnimplementedError();
 
   @override
-  Future<List<OwnRelayPresenceFfi>> checkOwnReachability({
-    required String ownPubkey,
-  }) => throw UnimplementedError();
-
-  @override
   Future<void> disconnectRelay(String url) async {}
 }
 
@@ -712,6 +707,35 @@ void main() {
   // -------------------------------------------------------------------------
 
   group('NostrCircleService - Initialization', () {
+    test('the current handle is null before an open, and asking for it opens '
+        'nothing', () async {
+      var keyringCalls = 0;
+      final service = NostrCircleService(
+        relayService: _StubRelayService(),
+        dataDirectoryProvider: _ThrowingDataDirectoryProvider(),
+        keyringInitializer: () async => keyringCalls++,
+      );
+
+      for (var i = 0; i < 3; i++) {
+        expect(service.currentCircleManagerFfi, isNull);
+      }
+      await pumpEventQueue();
+      expect(keyringCalls, 0, reason: 'no open was started');
+    });
+
+    test('the current handle is the open one, and none once released',
+        () async {
+      final manager = _FakeManager();
+      final service = NostrCircleService.withInjectedManager(
+        relayService: _StubRelayService(),
+        injectedManager: manager,
+      );
+
+      expect(service.currentCircleManagerFfi, same(manager));
+      service.releaseForHandoff();
+      expect(service.currentCircleManagerFfi, isNull);
+    });
+
     test('keyring initializer is called during initialize()', () async {
       var keyringCallCount = 0;
       final dataDir = _ThrowingDataDirectoryProvider();

@@ -19,6 +19,7 @@ library;
 
 import 'package:flutter/foundation.dart';
 
+import 'package:haven/src/models/own_relay_board.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/circle_change_driver.dart';
 import 'package:haven/src/services/circle_service.dart'
@@ -36,11 +37,13 @@ class MaintenanceService {
     required Future<CircleManagerFfi> Function() circleManagerFactory,
     required Future<List<int>> Function() identitySecretBytes,
     required RelayService relayService,
+    CircleManagerFfi? Function()? currentCircleManager,
     CircleChangeDriver? changeDriver,
     void Function(List<LocationMessageResultFfi> replayed)? onReplayed,
     DateTime Function() clock = DateTime.now,
     LeaverBackstop? leaverBackstop,
   }) : _circleManagerFactory = circleManagerFactory,
+       _currentCircleManager = currentCircleManager,
        _identitySecretBytes = identitySecretBytes,
        _relayService = relayService,
        _changeDriver =
@@ -53,6 +56,7 @@ class MaintenanceService {
        _leaverBackstop = leaverBackstop ?? LeaverBackstop(clock: clock);
 
   final Future<CircleManagerFfi> Function() _circleManagerFactory;
+  final CircleManagerFfi? Function()? _currentCircleManager;
   final Future<List<int>> Function() _identitySecretBytes;
   final RelayService _relayService;
   final CircleChangeDriver? _changeDriver;
@@ -230,6 +234,23 @@ class MaintenanceService {
     }
   }
 
+  /// What the own-relay passes found and are doing, or `null` while no
+  /// session is open or the read failed.
+  ///
+  /// Never opens a session: the Relays page reads this every half second, and
+  /// an open that fails latches nothing, so each read would re-run the keyring
+  /// set-up and the database open.
+  OwnRelayBoard? ownRelayBoard() {
+    final circle = _currentCircleManager?.call();
+    if (circle == null) return null;
+    try {
+      return ownRelayBoardOf(circle.ownRelayBoard());
+    } on Object catch (e) {
+      debugPrint('[Maintenance] board read failed: ${e.runtimeType}');
+      return null;
+    }
+  }
+
   /// Resolves the circle handle + a scrubbed-in-`finally` secret buffer, runs
   /// [op], and returns `onFailure(phase)` if any step throws (fail-soft).
   ///
@@ -281,4 +302,43 @@ enum _MaintenancePhase {
 
   /// Running the task itself (the FFI call).
   task,
+}
+
+/// The board as the Dart side reads it.
+@visibleForTesting
+OwnRelayBoard ownRelayBoardOf(OwnRelayBoardFfi board) {
+  OwnKindBoard kind(OwnKindBoardFfi k) => OwnKindBoard(
+    hold: switch (k.hold) {
+      null => null,
+      OwnPublishHoldFfi.awaitingResetAcknowledgement =>
+        OwnPublishHold.awaitingResetAcknowledgement,
+      OwnPublishHoldFfi.noRelaysConfigured => OwnPublishHold.noRelaysConfigured,
+      OwnPublishHoldFfi.publishingSuppressed =>
+        OwnPublishHold.publishingSuppressed,
+    },
+    checkedSecsAgo: k.checkedSecsAgo,
+    cells: [
+      for (final c in k.cells)
+        OwnRelayCell(
+          relayUrl: c.relayUrl,
+          status: switch (c.status) {
+            OwnRelayStatusFfi.checking => OwnRelayStatus.checking,
+            OwnRelayStatusFfi.current => OwnRelayStatus.current,
+            OwnRelayStatusFfi.publishing => OwnRelayStatus.publishing,
+            OwnRelayStatusFfi.missing => OwnRelayStatus.missing,
+            OwnRelayStatusFfi.outdated => OwnRelayStatus.outdated,
+            OwnRelayStatusFfi.refused => OwnRelayStatus.refused,
+            OwnRelayStatusFfi.unconfirmed => OwnRelayStatus.unconfirmed,
+            OwnRelayStatusFfi.noAnswer => OwnRelayStatus.noAnswer,
+          },
+        ),
+    ],
+  );
+  return OwnRelayBoard(
+    running: board.running,
+    lookupRelays: board.lookupRelays,
+    keyPackage: kind(board.keyPackage),
+    relayList: kind(board.relayList),
+    inboxRelayList: kind(board.inboxRelayList),
+  );
 }

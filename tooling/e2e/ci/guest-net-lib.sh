@@ -62,7 +62,7 @@ wifi_is_off() {
 #   wlan0  0002000A / 00FFFFFF  ->  10.0.2.0/24   RTF_UP
 #
 # In CI run 30964250098 rejecting that table failed five lanes (e2e_android poll
-# + live-sync, e2e_integration, e2e_relay_customization, e2e_profile_android) on
+# + live-sync, e2e_integration, e2e_relay_management, e2e_profile_android) on
 # every boot: not a race, a gate that could never pass.
 #
 # So it stays permissive AND stays advisory (warn-and-drive, in the runner). It

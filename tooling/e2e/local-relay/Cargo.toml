@@ -40,6 +40,13 @@ path = "src/bin/wire_proxy.rs"
 name = "haven-wire-planes"
 path = "src/bin/wire_planes.rs"
 
+# The relay-management lane's misbehaving relay (src/fault.rs): refuses,
+# drops, stalls or never completes the handshake, per mode. Test-harness only,
+# held out of every app build by scripts/ci/check_wire_proxy_test_only.sh.
+[[bin]]
+name = "haven-fault-relay"
+path = "src/bin/fault_relay.rs"
+
 [dependencies]
 # Pinned to the 0.44 line to match the app's nostr 0.44.x wire format.
 nostr-relay-builder = "0.44"
