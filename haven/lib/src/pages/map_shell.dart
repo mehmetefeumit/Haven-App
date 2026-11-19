@@ -1030,6 +1030,20 @@ class MapShell extends ConsumerStatefulWidget {
   /// `initState` and cannot be pumped in `flutter test` (CLAUDE.md), so this is
   /// what lets a widget test compose the REAL banner over the REAL sheet at
   /// the REAL offsets and hit-test the result.
+  ///
+  /// ## Why every layer is keyed
+  ///
+  /// The list grows and shrinks at run time: the mesh layers arrive when the
+  /// radio answers and leave when it says this phone cannot run the mesh. A
+  /// `Stack` whose list changes length keeps, between the two ends that still
+  /// line up, only its KEYED children; an unkeyed one there is built again
+  /// from nothing — and the new circles sheet attached itself to the shell's
+  /// one sheet controller before the old one let go of it: a framework
+  /// assertion in a debug build, and with assertions compiled out the old
+  /// sheet's dispose detaches the controller from the new sheet and disposes
+  /// the new sheet's extent. Every layer wrapped here is keyed here; the
+  /// three passed through unwrapped take [mapLayerKey], [sheetLayerKey] and
+  /// [debugLayerKey] from the caller.
   @visibleForTesting
   static List<Widget> buildLayers({
     required double topPadding,
@@ -1053,14 +1067,19 @@ class MapShell extends ConsumerStatefulWidget {
       // covers the map controls. It places itself in its corner. Above the
       // map page's own loading scrim and error overlay too, as the two
       // buttons below are: the mesh needs neither tiles nor a fix.
-      if (meshButton != null) Positioned.fill(child: meshButton),
+      if (meshButton != null)
+        Positioned.fill(
+          key: const ValueKey('map_shell_mesh_button'),
+          child: meshButton,
+        ),
 
       // Dim overlay (animated based on sheet expansion)
-      Positioned.fill(child: dimOverlay),
+      Positioned.fill(key: const ValueKey('map_shell_dim'), child: dimOverlay),
 
       // Invitations button (top leading edge; mirrors to the right in RTL,
       // respects safe area)
       PositionedDirectional(
+        key: const ValueKey('map_shell_invitations'),
         top: topPadding + HavenSpacing.sm,
         start: HavenSpacing.base,
         child: invitationsButton,
@@ -1069,6 +1088,7 @@ class MapShell extends ConsumerStatefulWidget {
       // Settings button (top trailing edge; mirrors to the left in RTL,
       // respects safe area)
       PositionedDirectional(
+        key: const ValueKey('map_shell_settings'),
         top: topPadding + HavenSpacing.sm,
         end: HavenSpacing.base,
         child: settingsButton,
@@ -1080,7 +1100,11 @@ class MapShell extends ConsumerStatefulWidget {
       // The mesh's aura: above the sheet, so the whole window is framed
       // whatever the sheet's height, and under the banners, so a warning is
       // never tinted. It takes no touch.
-      if (meshAura != null) Positioned.fill(child: meshAura),
+      if (meshAura != null)
+        Positioned.fill(
+          key: const ValueKey('map_shell_mesh_aura'),
+          child: meshAura,
+        ),
 
       // Status banners: tell the user, WHILE it is happening, that their
       // location sharing has stopped and what to do about it. Render nothing
@@ -1092,6 +1116,7 @@ class MapShell extends ConsumerStatefulWidget {
       // beneath is untouched, so circle members stay visible and useful
       // throughout the outage.
       PositionedDirectional(
+        key: const ValueKey('map_shell_banners'),
         top: topPadding + _kStatusBannerTop,
         start: HavenSpacing.base,
         end: HavenSpacing.base,
@@ -1106,6 +1131,18 @@ class MapShell extends ConsumerStatefulWidget {
       if (debugOverlay != null) debugOverlay,
     ];
   }
+
+  /// The map's key in [buildLayers]' list.
+  @visibleForTesting
+  static const Key mapLayerKey = ValueKey('map_shell_map');
+
+  /// The circles sheet's key in [buildLayers]' list.
+  @visibleForTesting
+  static const Key sheetLayerKey = ValueKey('map_shell_sheet');
+
+  /// The debug log overlay's key in [buildLayers]' list.
+  @visibleForTesting
+  static const Key debugLayerKey = ValueKey('map_shell_debug');
 
   @override
   ConsumerState<MapShell> createState() => _MapShellState();
@@ -3308,7 +3345,7 @@ class _MapShellState extends ConsumerState<MapShell>
             children: MapShell.buildLayers(
               topPadding: mediaQuery.padding.top,
               bottomPadding: mediaQuery.padding.bottom,
-              map: const MapPage(),
+              map: const MapPage(key: MapShell.mapLayerKey),
               dimOverlay: DimOverlay(
                 opacity: _sheetExpansion,
                 onDismiss: _collapseSheet,
@@ -3317,6 +3354,7 @@ class _MapShellState extends ConsumerState<MapShell>
               settingsButton: const SettingsFloatingButton(),
               statusBanners: const MapStatusBanners(),
               circlesSheet: CirclesBottomSheet(
+                key: MapShell.sheetLayerKey,
                 controller: _sheetController,
                 onExpansionChanged: (expansion) {
                   setState(() => _sheetExpansion = expansion);
@@ -3328,6 +3366,7 @@ class _MapShellState extends ConsumerState<MapShell>
               // Debug builds only.
               debugOverlay: kDebugMode
                   ? Consumer(
+                      key: MapShell.debugLayerKey,
                       builder: (context, ref, _) {
                         final logState = ref.watch(debugLogProvider);
                         if (!logState.isVisible) return const SizedBox.shrink();
