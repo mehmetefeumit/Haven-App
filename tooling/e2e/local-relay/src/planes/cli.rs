@@ -21,7 +21,8 @@ use std::path::PathBuf;
 use serde_json::Value;
 
 use super::frame::{Event, Frame};
-use super::judge::{judge, Class, Finding, Judgement, Observed};
+use super::judge::{judge_answered, AuthDemand, Class, Finding, Judgement, Observed};
+
 use super::policy::{export_json, overlap_rule, OverlapRule, Plane, Role, Row, Verb};
 use super::table::{explicit_port, List, PlaneTable, RelayIx, RelayMatch};
 use crate::frame::SENTINEL_VERB;
@@ -576,6 +577,8 @@ fn build_table<'a>(
 #[derive(Default)]
 struct Collected {
     judged: Vec<Judged>,
+    /// Each relay's `OK false auth-required:` for an event id, and when.
+    demands: Vec<(RelayIx, u64, String)>,
     client_frames: usize,
     undeclared: usize,
     unresolvable: usize,
@@ -604,6 +607,9 @@ fn collect(snapshot: &[Line], harness: &HashSet<String>, port_ix: &Ports<'_>) ->
             .and_then(|listen| listen.parse::<SocketAddr>().ok())
             .and_then(|addr| port_ix.get(&addr.port()).filter(|(_, l)| l.addr == addr));
         if !line.c2r {
+            if let (Some((relay, _)), Some(id)) = (declared, auth_demand(&line.frame)) {
+                out.demands.push((*relay, seq as u64, id));
+            }
             if let Some((_, listen)) = declared {
                 for event in events_of(line) {
                     for role in &listen.roles {
@@ -636,6 +642,20 @@ fn collect(snapshot: &[Line], harness: &HashSet<String>, port_ix: &Ports<'_>) ->
         });
     }
     out
+}
+
+/// The event id of a relay's `["OK", <id>, false, "auth-required: …"]`, read
+/// by its machine-readable prefix alone: what licenses one authenticated
+/// resend of that event to that relay (owner decisions D1b, D1c).
+fn auth_demand(frame: &Value) -> Option<String> {
+    match frame.as_array()?.as_slice() {
+        [verb, id, Value::Bool(false), message]
+            if verb == "OK" && message.as_str()?.starts_with("auth-required:") =>
+        {
+            Some(id.as_str()?.to_owned())
+        }
+        _ => None,
+    }
 }
 
 /// One report line's grouping: rule, violation or not, class, row, frame
@@ -753,7 +773,16 @@ fn judge_journal(args: &Args, report: &mut Report<'_>) -> Result<(), Failure> {
             "the snapshot holds no client frame outside the harness; nothing was judged",
         ));
     }
-    let judgement = judge(
+    let demands: Vec<AuthDemand<'_>> = collected
+        .demands
+        .iter()
+        .map(|(relay, at, id)| AuthDemand {
+            relay: *relay,
+            at: *at,
+            id,
+        })
+        .collect();
+    let judgement = judge_answered(
         &table,
         collected.judged.iter().map(|j| Observed {
             relay: j.relay,
@@ -762,6 +791,7 @@ fn judge_journal(args: &Args, report: &mut Report<'_>) -> Result<(), Failure> {
             at: j.at,
             frame: &j.frame,
         }),
+        &demands,
     )
     .map_err(|_| {
         (

@@ -141,14 +141,35 @@ impl UnrecordedPublisher for Recorder {
         &'a self,
         event: &'a Event,
         relays: &'a [String],
-    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move {
-            self.handed
-                .lock()
-                .expect("recorder")
-                .push((event.clone(), relays.to_vec()));
-            self.acks
-        })
+    ) -> Pin<Box<dyn Future<Output = Vec<haven_core::relay::fanout::UnrecordedAnswer>> + Send + 'a>>
+    {
+        let acked: std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> = {
+            Box::pin(async move {
+                self.handed
+                    .lock()
+                    .expect("recorder")
+                    .push((event.clone(), relays.to_vec()));
+                self.acks
+            })
+        };
+        Box::pin(
+            async move { haven_core::relay::fanout::UnrecordedAnswer::all(relays, acked.await) },
+        )
+    }
+
+    fn publish_authenticated<'a>(
+        &'a self,
+        _signer: std::sync::Arc<haven_core::relay::nip42::Nip42Signer>,
+        _event: &'a nostr::Event,
+        _relay: &'a str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = haven_core::relay::identity::AuthSendOutcome>
+                + Send
+                + 'a,
+        >,
+    > {
+        haven_core::relay::fanout::scripted::not_resent()
     }
 }
 

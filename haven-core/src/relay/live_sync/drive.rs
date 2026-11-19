@@ -33,8 +33,10 @@ use tokio::sync::watch;
 use crate::nostr::mls::types::{FanoutEndpointFailure, TransportMessage};
 use crate::relay::fanout::{
     interrupted, DriveMode, FanoutClock, FanoutSend, FanoutTargetOutcome, InFlight, ModeSource,
-    Taken, UnrecordedPublisher, WallClock,
+    Taken, UnrecordedAnswer, UnrecordedPublisher, WallClock,
 };
+use crate::relay::identity::AuthSendOutcome;
+use crate::relay::nip42::Nip42Signer;
 use crate::relay::RelayManager;
 
 /// What the caller of a session entry says of the app at the moment it
@@ -192,12 +194,13 @@ pub struct LiveDriver {
 }
 
 impl LiveDriver {
-    /// The product's driver: `pool`'s fanout transport and its publish
-    /// ladder, on the device's clock.
+    /// The product's driver: `pool`'s fanout transport, answering a relay's
+    /// `auth-required:` as `signer`'s identity, and its publish ladder, on the
+    /// device's clock.
     #[must_use]
-    pub fn over(pool: &Arc<RelayManager>) -> Self {
+    pub fn over(pool: &Arc<RelayManager>, signer: Arc<Nip42Signer>) -> Self {
         Self {
-            fanout: Arc::new(pool.fanout_transport()),
+            fanout: Arc::new(pool.fanout_transport().authenticating(signer)),
             publisher: Arc::clone(pool) as Arc<dyn UnrecordedPublisher>,
             clock: Arc::new(WallClock),
         }
@@ -380,19 +383,41 @@ impl UnrecordedPublisher for LeashedPublisher<'_> {
         &'a self,
         event: &'a Event,
         relays: &'a [String],
-    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Vec<UnrecordedAnswer>> + Send + 'a>> {
         Box::pin(async move {
             // Counted before the mode is read, as a fanout call is at its
             // mark: a pause either waits for the publish or finds it never
             // begun.
             let _counted = self.leash.in_flight.map(InFlight::count);
+            let unanswered = vec![UnrecordedAnswer::Unanswered; relays.len()];
             if self.leash.mode() != DriveMode::Full {
-                return false;
+                return unanswered;
             }
             tokio::select! {
                 biased;
-                acked = self.inner.publish_unrecorded(event, relays) => acked,
-                () = self.leash.halted() => false,
+                answers = self.inner.publish_unrecorded(event, relays) => answers,
+                () = self.leash.halted() => unanswered,
+            }
+        })
+    }
+
+    fn publish_authenticated<'a>(
+        &'a self,
+        signer: Arc<Nip42Signer>,
+        event: &'a Event,
+        relay: &'a str,
+    ) -> Pin<Box<dyn Future<Output = AuthSendOutcome> + Send + 'a>> {
+        Box::pin(async move {
+            // As the anonymous send: counted, in the full mode alone, and
+            // given up when the session is stopped.
+            let _counted = self.leash.in_flight.map(InFlight::count);
+            if self.leash.mode() != DriveMode::Full {
+                return AuthSendOutcome::NotSent;
+            }
+            tokio::select! {
+                biased;
+                outcome = self.inner.publish_authenticated(signer, event, relay) => outcome,
+                () = self.leash.halted() => AuthSendOutcome::Unanswered,
             }
         })
     }
@@ -551,11 +576,26 @@ mod tests {
         fn publish_unrecorded<'a>(
             &'a self,
             _event: &'a Event,
-            _relays: &'a [String],
-        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+            relays: &'a [String],
+        ) -> Pin<Box<dyn Future<Output = Vec<UnrecordedAnswer>> + Send + 'a>> {
             self.handed.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async { true })
+            Box::pin(async { UnrecordedAnswer::all(relays, true) })
         }
+
+        fn publish_authenticated<'a>(
+            &'a self,
+            _signer: Arc<Nip42Signer>,
+            _event: &'a Event,
+            _relay: &'a str,
+        ) -> Pin<Box<dyn Future<Output = AuthSendOutcome> + Send + 'a>> {
+            self.handed.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { AuthSendOutcome::Accepted })
+        }
+    }
+
+    /// The identity's signer, as a session holds it.
+    fn signer() -> Arc<Nip42Signer> {
+        Arc::new(Nip42Signer::new(&nostr::Keys::generate()))
     }
 
     /// A relay the pass was still waiting for when the foreground ended is
@@ -622,6 +662,11 @@ mod tests {
             !publisher
                 .publish_unrecorded(&event, &["wss://relay.example.com".to_owned()])
                 .await
+                .contains(&UnrecordedAnswer::Accepted)
+                && publisher
+                    .publish_authenticated(signer(), &event, "wss://relay.example.com")
+                    .await
+                    == AuthSendOutcome::NotSent
                 && relay.handed.load(Ordering::SeqCst) == 0,
             "a burst's pass published something that has no record",
         );
@@ -658,14 +703,33 @@ mod tests {
             .sign_with_keys(&nostr::Keys::generate())
             .expect("a signed event");
         let relays = ["wss://relay.example.com".to_owned()];
-        assert!(publisher.publish_unrecorded(&event, &relays).await);
+        assert!(publisher
+            .publish_unrecorded(&event, &relays)
+            .await
+            .contains(&UnrecordedAnswer::Accepted));
+        assert_eq!(
+            publisher
+                .publish_authenticated(signer(), &event, &relays[0])
+                .await,
+            AuthSendOutcome::Accepted
+        );
         for after in [Lifecycle::Background, Lifecycle::Foreground] {
             cell.set(after);
-            assert!(!publisher.publish_unrecorded(&event, &relays).await);
+            assert!(!publisher
+                .publish_unrecorded(&event, &relays)
+                .await
+                .contains(&UnrecordedAnswer::Accepted));
+            assert_eq!(
+                publisher
+                    .publish_authenticated(signer(), &event, &relays[0])
+                    .await,
+                AuthSendOutcome::NotSent,
+                "a pass that outlived the foreground signed in to a relay",
+            );
         }
         assert_eq!(
             outbox.handed.load(Ordering::SeqCst),
-            1,
+            2,
             "a pass that outlived the foreground published something that has no record",
         );
     }
@@ -678,11 +742,23 @@ mod tests {
         fn publish_unrecorded<'a>(
             &'a self,
             _event: &'a Event,
-            _relays: &'a [String],
-        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+            relays: &'a [String],
+        ) -> Pin<Box<dyn Future<Output = Vec<UnrecordedAnswer>> + Send + 'a>> {
             Box::pin(async move {
                 self.0.notified().await;
-                true
+                UnrecordedAnswer::all(relays, true)
+            })
+        }
+
+        fn publish_authenticated<'a>(
+            &'a self,
+            _signer: Arc<Nip42Signer>,
+            _event: &'a Event,
+            _relay: &'a str,
+        ) -> Pin<Box<dyn Future<Output = AuthSendOutcome> + Send + 'a>> {
+            Box::pin(async move {
+                self.0.notified().await;
+                AuthSendOutcome::Accepted
             })
         }
     }
@@ -719,14 +795,36 @@ mod tests {
                 "a pause found the publish under way ended"
             );
             outbox.0.notify_one();
-            assert!(publish.await);
+            assert!(publish.await.contains(&UnrecordedAnswer::Accepted));
+        }
+        {
+            cell.set(Lifecycle::Foreground);
+            let leash = Leash::counted(&cell, &in_flight, None);
+            let publisher = LeashedPublisher {
+                inner: &outbox,
+                leash: &leash,
+            };
+            let resend = publisher.publish_authenticated(signer(), &event, &relays[0]);
+            tokio::pin!(resend);
+            assert!(futures::poll!(&mut resend).is_pending());
+            assert_eq!(
+                in_flight.now(),
+                1,
+                "an authenticated resend under way was not counted"
+            );
+            outbox.0.notify_one();
+            assert_eq!(resend.await, AuthSendOutcome::Accepted);
+            cell.set(Lifecycle::Background);
         }
         assert_eq!(
             in_flight.now(),
             0,
             "an answered publish left its count behind"
         );
-        assert!(!publisher.publish_unrecorded(&event, &relays).await);
+        assert!(!publisher
+            .publish_unrecorded(&event, &relays)
+            .await
+            .contains(&UnrecordedAnswer::Accepted));
         assert_eq!(
             in_flight.now(),
             0,

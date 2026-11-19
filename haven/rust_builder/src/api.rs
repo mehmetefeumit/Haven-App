@@ -8443,7 +8443,9 @@ struct Driving<'a> {
 impl<'a> Driving<'a> {
     fn new(relays: &'a CoreRelayManager, circle: &'a CircleManagerFfi, foreground: bool) -> Self {
         Self {
-            transport: relays.fanout_transport(),
+            transport: relays
+                .fanout_transport()
+                .authenticating(circle.inner.nip42_signer()),
             clock: haven_core::relay::fanout::WallClock,
             mode: haven_core::relay::fanout::Claimed::new(&circle.inner, foreground),
             relays,

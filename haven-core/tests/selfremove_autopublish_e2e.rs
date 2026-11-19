@@ -317,7 +317,8 @@ async fn relay_manager_publisher_acks_only_on_a_real_relay_ok() {
     assert!(
         publisher
             .publish_unrecorded(&commit, std::slice::from_ref(&url))
-            .await,
+            .await
+            .contains(&haven_core::relay::fanout::UnrecordedAnswer::Accepted),
         "a relay that OK-acks the commit must resolve to an ack"
     );
 
@@ -327,7 +328,8 @@ async fn relay_manager_publisher_acks_only_on_a_real_relay_ok() {
     assert!(
         !publisher
             .publish_unrecorded(&commit, &["http://not-a-relay.example".to_string()])
-            .await,
+            .await
+            .contains(&haven_core::relay::fanout::UnrecordedAnswer::Accepted),
         "an unusable relay set must resolve to NO ack"
     );
 }

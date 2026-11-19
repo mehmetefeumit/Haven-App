@@ -83,9 +83,11 @@ pub struct SimRelay {
     _relay: LocalRelay,
 }
 
-/// Starts every plane a world of `shape` runs over, healthy, each role's
-/// tags minted after the last role's: location from `simrelay#0`, so an arm's
-/// handles keep their meaning, then account, then profile.
+/// Starts every plane a world of `shape` runs over, healthy.
+///
+/// Each role's tags are minted after the last role's: location from
+/// `simrelay#0`, so an arm's handles keep their meaning, then account, then
+/// profile.
 ///
 /// # Errors
 ///

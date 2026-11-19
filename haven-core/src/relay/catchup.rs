@@ -1504,7 +1504,9 @@ async fn run_catchup_in(
     drive_mode: &DriveMode,
 ) -> CatchupOutcome {
     let clock = WallClock;
-    let transport = relay_mgr.fanout_transport();
+    let transport = relay_mgr
+        .fanout_transport()
+        .authenticating(circle_mgr.nip42_signer());
     let budget_ms = max_duration_secs.min(MAX_SWEEP_SECS) * 1_000;
     let publishing: Publishing<'_, dyn FanoutSend + '_> = Publishing {
         fanout: &transport,
@@ -1785,7 +1787,9 @@ pub async fn run_refused_refetch(
     let mut out = CatchupOutcome::default();
     let deadline = sweep_deadline(max_duration_secs);
     let clock = WallClock;
-    let transport = relay_mgr.fanout_transport();
+    let transport = relay_mgr
+        .fanout_transport()
+        .authenticating(circle_mgr.nip42_signer());
     let publishing: Publishing<'_, dyn FanoutSend + '_> = Publishing {
         fanout: &transport,
         publisher: relay_mgr,

@@ -124,15 +124,58 @@ struct Judge<'t> {
     negs: HashMap<u64, HashSet<String>>,
     ephemeral: HashMap<String, String>,
     conns: BTreeMap<u64, Carried>,
+    /// Each relay's `auth-required:` demands, by event id: the earliest
+    /// instant.
+    demanded: HashMap<(RelayIx, &'t str), u64>,
+    /// Each admitted kind-1059 or kind-445 event, by relay and id: the plane
+    /// it was admitted on.
+    resendable: HashMap<(RelayIx, String), Plane>,
 }
 
 /// What one connection carried, for [`Row::Auth22242`]'s binding: its
-/// answers, and every frame other than an answer or a `CLOSE` with the key
-/// whose own gift wraps it reads, if it is such a read.
+/// answers; the answers off the author's own inbox list, with what each
+/// would be refused as if no resend licenses it; and every frame other than
+/// an answer or a `CLOSE`, with the key whose own gift wraps it reads, if it
+/// is such a read, and the event it publishes, if it is an `EVENT`.
 #[derive(Default)]
 struct Carried {
-    answers: Vec<(usize, RelayIx, String)>,
-    others: Vec<(usize, RelayIx, Verb, Option<String>)>,
+    answers: Vec<Answer>,
+    deferred: Vec<(usize, RelayIx, Class)>,
+    others: Vec<Other>,
+}
+
+/// One frame of a connection other than an answer or a `CLOSE`.
+struct Other {
+    index: usize,
+    relay: RelayIx,
+    verb: Verb,
+    /// The key whose own gift wraps it reads, if it is such a read.
+    read: Option<String>,
+    /// The event it publishes, if it is an `EVENT`.
+    published: Option<String>,
+}
+
+/// One answer to a challenge on a connection.
+struct Answer {
+    index: usize,
+    relay: RelayIx,
+    key: String,
+    at: u64,
+}
+
+/// A relay's `OK false` with the `auth-required:` prefix for an event.
+///
+/// What licenses one write-only authenticated resend of that event to that
+/// relay (owner decisions D1b and D1c). Read off the relay→client stream,
+/// which the judge's frames do not carry.
+#[derive(Clone, Copy)]
+pub struct AuthDemand<'a> {
+    /// The relay that answered.
+    pub relay: RelayIx,
+    /// When, in the table's ordinal.
+    pub at: u64,
+    /// The event id it refused for want of authentication.
+    pub id: &'a str,
 }
 
 /// Judges `frames` against `table`.
@@ -145,18 +188,43 @@ pub fn judge<'a>(
     table: &PlaneTable,
     frames: impl IntoIterator<Item = Observed<'a>>,
 ) -> Result<Judgement, Unusable> {
+    judge_answered(table, frames, &[])
+}
+
+/// [`judge`], with the relays' `auth-required:` demands.
+///
+/// An answer to a challenge off the author's own inbox list is admitted only
+/// as the one write-only resend such a demand licenses ([`Row::Auth22242`]).
+///
+/// # Errors
+///
+/// As [`judge`].
+pub fn judge_answered<'a>(
+    table: &PlaneTable,
+    frames: impl IntoIterator<Item = Observed<'a>>,
+    demands: &[AuthDemand<'_>],
+) -> Result<Judgement, Unusable> {
     table.validate()?;
+    let mut demanded: HashMap<(RelayIx, &str), u64> = HashMap::new();
+    for demand in demands {
+        let at = demanded
+            .entry((demand.relay, demand.id))
+            .or_insert(demand.at);
+        *at = (*at).min(demand.at);
+    }
     let mut judge = Judge {
         table,
         reqs: HashMap::new(),
         negs: HashMap::new(),
         ephemeral: HashMap::new(),
         conns: BTreeMap::new(),
+        demanded,
+        resendable: HashMap::new(),
     };
     let mut out = Judgement::default();
     for (index, obs) in frames.into_iter().enumerate() {
         judge.carry(index, &obs);
-        match judge.frame(&obs) {
+        match judge.frame(index, &obs) {
             Ok(admitted) => {
                 for (row, plane) in admitted {
                     *out.hits.entry((obs.relay, row, plane)).or_default() += 1;
@@ -171,7 +239,11 @@ pub fn judge<'a>(
             }),
         }
     }
-    out.findings.extend(judge.shared_answers());
+    let (findings, resends) = judge.shared_answers();
+    out.findings.extend(findings);
+    for (relay, plane) in resends {
+        *out.hits.entry((relay, Row::Auth22242, plane)).or_default() += 1;
+    }
     out.findings.sort_by_key(|f| (f.relay, f.index));
     Ok(out)
 }
@@ -246,11 +318,16 @@ fn opened(open: Option<&HashSet<String>>, sub: &str) -> Result<Vec<(Row, Plane)>
 }
 
 impl Judge<'_> {
-    fn frame(&mut self, obs: &Observed<'_>) -> Result<Vec<(Row, Plane)>, Reject> {
+    fn frame(&mut self, index: usize, obs: &Observed<'_>) -> Result<Vec<(Row, Plane)>, Reject> {
         match obs.frame {
             Frame::Event(event) => {
                 let row = event_row(event, Verb::Event).ok_or(UNKNOWN)?;
                 let plane = self.event(row, event, obs)?;
+                if matches!(event.kind, 445 | 1059) {
+                    self.resendable
+                        .entry((obs.relay, event.id.clone()))
+                        .or_insert(plane);
+                }
                 Ok(vec![(row, plane)])
             }
             Frame::Req { sub, filters } => {
@@ -281,17 +358,25 @@ impl Judge<'_> {
             Frame::Auth(event) => {
                 let row = event_row(event, Verb::Auth).ok_or(UNKNOWN)?;
                 self.account_author(row, event, obs)?;
-                require(
-                    self.table.has_list(Plane::OwnInbox, &event.pubkey),
-                    row,
-                    Class::NoGroundTruth,
-                )?;
-                require(
-                    self.own(Plane::OwnInbox, &event.pubkey, obs),
-                    row,
-                    Class::CrossedEvent,
-                )?;
-                Ok(vec![(row, Plane::OwnInbox)])
+                if self.table.has_list(Plane::OwnInbox, &event.pubkey)
+                    && self.own(Plane::OwnInbox, &event.pubkey, obs)
+                {
+                    return Ok(vec![(row, Plane::OwnInbox)]);
+                }
+                // Off the author's own inbox list, an answer stands only as a
+                // write-only resend, decided with its whole connection
+                // (`shared_answers`).
+                let refused = if self.table.has_list(Plane::OwnInbox, &event.pubkey) {
+                    Class::CrossedEvent
+                } else {
+                    Class::NoGroundTruth
+                };
+                self.conns
+                    .entry(obs.conn)
+                    .or_default()
+                    .deferred
+                    .push((index, obs.relay, refused));
+                Ok(Vec::new())
             }
             Frame::Other(_) => Err(UNKNOWN),
         }
@@ -301,9 +386,12 @@ impl Judge<'_> {
     fn carry(&mut self, index: usize, obs: &Observed<'_>) {
         let carried = self.conns.entry(obs.conn).or_default();
         match obs.frame {
-            Frame::Auth(event) => carried
-                .answers
-                .push((index, obs.relay, event.pubkey.clone())),
+            Frame::Auth(event) => carried.answers.push(Answer {
+                index,
+                relay: obs.relay,
+                key: event.pubkey.clone(),
+                at: obs.at,
+            }),
             Frame::Close(_) => {}
             frame => {
                 let own_read = match frame {
@@ -320,17 +408,28 @@ impl Judge<'_> {
                     }
                     _ => None,
                 };
-                carried
-                    .others
-                    .push((index, obs.relay, frame.verb(), own_read));
+                let published = match frame {
+                    Frame::Event(event) => Some(event.id.clone()),
+                    _ => None,
+                };
+                carried.others.push(Other {
+                    index,
+                    relay: obs.relay,
+                    verb: frame.verb(),
+                    read: own_read,
+                    published,
+                });
             }
         }
     }
 
     /// [`Row::Auth22242`]'s connection binding, over every connection once
     /// all of it is seen: a frame a connection carried before its answer
-    /// counts as much as one after it.
-    fn shared_answers(&self) -> Vec<Finding> {
+    /// counts as much as one after it. A connection is an own inbox read, or
+    /// one write-only resend ([`Self::resend`]); anything else is a crossing.
+    /// Returns the findings, and each resend's relay and the plane its event
+    /// was admitted on.
+    fn shared_answers(&self) -> (Vec<Finding>, Vec<(RelayIx, Plane)>) {
         let finding = |(index, relay, verb): (usize, RelayIx, Verb)| Finding {
             index,
             relay,
@@ -339,16 +438,34 @@ impl Judge<'_> {
             class: Class::AuthOnSharedConnection,
         };
         let mut out = Vec::new();
+        let mut resends = Vec::new();
         for carried in self.conns.values() {
-            let Some((_, _, key)) = carried.answers.first() else {
+            let Some(first) = carried.answers.first() else {
                 continue;
             };
-            if carried.answers.iter().any(|(_, _, other)| other != key) {
+            let one_key = carried.answers.iter().all(|answer| answer.key == first.key);
+            if let Some(plane) = self.resend(carried).filter(|_| one_key) {
+                resends.push((first.relay, plane));
+                continue;
+            }
+            out.extend(
+                carried
+                    .deferred
+                    .iter()
+                    .map(|(index, relay, class)| Finding {
+                        index: *index,
+                        relay: *relay,
+                        verb: Verb::Auth,
+                        row: Some(Row::Auth22242),
+                        class: *class,
+                    }),
+            );
+            if !one_key {
                 out.extend(
                     carried
                         .answers
                         .iter()
-                        .map(|(index, relay, _)| finding((*index, *relay, Verb::Auth))),
+                        .map(|answer| finding((answer.index, answer.relay, Verb::Auth))),
                 );
                 continue;
             }
@@ -356,11 +473,59 @@ impl Judge<'_> {
                 carried
                     .others
                     .iter()
-                    .filter(|(_, _, _, read)| read.as_ref() != Some(key))
-                    .map(|(index, relay, verb, _)| finding((*index, *relay, *verb))),
+                    .filter(|other| other.read.as_ref() != Some(&first.key))
+                    .map(|other| finding((other.index, other.relay, other.verb))),
             );
         }
-        out
+        (out, resends)
+    }
+
+    /// Whether `carried` is one write-only authenticated resend (owner
+    /// decisions D1b and D1c), and the plane its event was admitted on: its
+    /// relay answered `auth-required:` for a kind-1059 or kind-445 event this
+    /// judge admitted there, at or before the connection's first answer; and
+    /// the connection carried nothing but answers and that one event. With a
+    /// journal that keeps one copy of each event per relay, the event may
+    /// appear on the connection that first sent it alone.
+    fn resend(&self, carried: &Carried) -> Option<Plane> {
+        let first = carried.answers.first()?;
+        if carried
+            .answers
+            .iter()
+            .any(|answer| answer.relay != first.relay)
+        {
+            return None;
+        }
+        let mut published = carried.others.iter().map(|other| {
+            (other.verb == Verb::Event && other.relay == first.relay)
+                .then_some(other.published.as_deref())
+                .flatten()
+        });
+        let licensed = |id: &str| {
+            self.demanded
+                .get(&(first.relay, id))
+                .is_some_and(|at| *at <= first.at)
+                .then(|| self.resendable.get(&(first.relay, id.to_owned())).copied())
+                .flatten()
+        };
+        match published.next() {
+            Some(Some(id)) => {
+                if published.any(|other| other != Some(id)) {
+                    return None;
+                }
+                licensed(id)
+            }
+            Some(None) => None,
+            None => {
+                if carried.deferred.is_empty() {
+                    return None;
+                }
+                self.demanded
+                    .keys()
+                    .filter(|(relay, _)| *relay == first.relay)
+                    .find_map(|(_, id)| licensed(id))
+            }
+        }
     }
 
     /// The circle checks every `h`-bound row shares: a routing exists, and a

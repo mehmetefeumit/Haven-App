@@ -494,8 +494,8 @@ pub static ROWS: [RowSpec; 17] = [
         optional: &[],
         limit: Limit::Any,
         author: Author::Account,
-        roles: &[Role::Inbox],
-        admitted_on: "the author's own inbox list current at the instant, on a connection that carries nothing else but `REQ-1059-P` reads of the author's own gift wraps and their `CLOSE`s",
+        roles: &[Role::Inbox, Role::Location],
+        admitted_on: "the author's own inbox list current at the instant, on a connection that carries nothing else but `REQ-1059-P` reads of the author's own gift wraps and their `CLOSE`s; or (owner decisions D1b, D1c) a relay that answered a kind-1059 or kind-445 event `auth-required:` at or before it, on a connection that carries nothing else but that one event",
     },
 ];
 

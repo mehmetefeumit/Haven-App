@@ -113,6 +113,13 @@ pub enum RelayError {
     /// ([`crate::relay::fanout::is_owned`]).
     #[error("The event is sent by its durable fanout only")]
     FanoutOwned,
+
+    /// No relay took the event, and every relay asked answered its anonymous
+    /// send `auth-required:` — read off the relay's own `OK` frame by its
+    /// machine-readable prefix, never its words. A resend of the same bytes
+    /// on the same unauthenticated socket is answered the same.
+    #[error("Every relay asked for authentication")]
+    AuthRequired,
 }
 
 impl RelayError {
@@ -133,6 +140,7 @@ impl RelayError {
             Self::Fetch(_) => "fetch",
             Self::NoEventsFound => "no-events-found",
             Self::FanoutOwned => "fanout-owned",
+            Self::AuthRequired => "auth-required",
         }
     }
 }

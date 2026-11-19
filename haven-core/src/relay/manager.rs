@@ -35,8 +35,10 @@ use url::Host;
 use super::clock_skew;
 use super::discovery::discovery_relays;
 use super::error::{InvalidUrlReason, RelayError, RelayResult};
-use super::fanout::{self, FanoutTargetOutcome};
-use super::identity::{with_identity_relay, AuthTracker, AuthVerdict, IdentityUse, AUTH_WAIT};
+use super::fanout::{self, FanoutTargetOutcome, UnrecordedAnswer};
+use super::identity::{
+    self, with_identity_relay, AuthSendOutcome, AuthTracker, AuthVerdict, IdentityUse, AUTH_WAIT,
+};
 use super::maintenance::key_package::{
     is_pre_migration_key_package_of, kp_event_d_tag, KeyPackageCandidate,
 };
@@ -210,11 +212,23 @@ const PROFILE_PUBLISH_ACK_TIMEOUT: Duration = Duration::from_secs(6);
 /// did, the late relay's copy is an extra archive.
 const LOCATION_ACK_WINDOW: Duration = Duration::from_secs(5);
 
+/// The `OK` window of an authenticated resend: one to a relay that answered
+/// an anonymous send `auth-required:` (owner decisions D1b, D1c). The
+/// location's own, so a location's resend fits the window its send is
+/// priced in.
+pub const AUTH_RETRY_ACK: Duration = LOCATION_ACK_WINDOW;
+
+/// The longest one authenticated resend takes, in milliseconds
+/// ([`identity::auth_send_ceiling`]): what every budget a resend can run
+/// inside adds.
+pub const AUTH_RETRY_MS: u64 = identity::auth_send_ceiling(AUTH_RETRY_ACK).as_secs() * 1_000;
+
 /// The longest one location send holds the radio: the connect and the
-/// acknowledgement window, once. What a location's record must have left
+/// acknowledgement window, once, and then at most one authenticated resend
+/// to the relays that asked for one. What a location's record must have left
 /// before its expiration for a send to be begun.
 pub const LOCATION_SEND_MS: u64 =
-    (CONNECTION_TIMEOUT.as_secs() + LOCATION_ACK_WINDOW.as_secs()) * 1_000;
+    (CONNECTION_TIMEOUT.as_secs() + LOCATION_ACK_WINDOW.as_secs()) * 1_000 + AUTH_RETRY_MS;
 /// `DEFAULT_TIMEOUT` stands in for the pool's own `WAIT_FOR_OK_TIMEOUT`
 /// (`nostr-relay-pool-0.44.3 relay/constants.rs:10`), which is `pub(super)` and
 /// so unreachable from here; the two are both 10 s, and a crate bump that
@@ -478,6 +492,9 @@ where
                     return Err(last_err);
                 }
             }
+            // Hopeless as a clock refusal is: the relays asked for what an
+            // anonymous resend cannot give.
+            Err(RelayError::AuthRequired) => return Err(RelayError::AuthRequired),
             Err(e) => last_err = e,
         }
         if i + 1 < attempts {
@@ -501,6 +518,9 @@ enum AckOutcome {
     /// relay-controlled reason is carried for
     /// [`clock_skew::classify_publish_outcome`] and never rendered.
     Refused(String),
+    /// [`Self::Refused`], where the relay's own `OK` frame for the event said
+    /// `auth-required:` by its machine-readable prefix.
+    AuthRequired(String),
     /// No answer inside the ack bound (or the relay was not in the pool).
     Unanswered,
 }
@@ -528,9 +548,18 @@ async fn send_to_one(
     let Ok(relay) = client.relay(url.as_str()).await else {
         return (url.to_string(), AckOutcome::Unanswered);
     };
+    // Taken before the send: the prefix is read off the relay's own frame.
+    let mut heard = relay.notifications();
     match tokio::time::timeout(bound, relay.send_event(event)).await {
         Ok(Ok(_)) => (url.to_string(), AckOutcome::Accepted),
-        Ok(Err(e)) => (url.to_string(), AckOutcome::Refused(e.to_string())),
+        Ok(Err(e)) => {
+            let reason = e.to_string();
+            if UnrecordedAnswer::heard(&mut heard, &event.id) == UnrecordedAnswer::AuthRequired {
+                (url.to_string(), AckOutcome::AuthRequired(reason))
+            } else {
+                (url.to_string(), AckOutcome::Refused(reason))
+            }
+        }
         Err(_) => (url.to_string(), AckOutcome::Unanswered),
     }
 }
@@ -675,6 +704,7 @@ impl RelayManager {
             relay_client: Arc::clone(relay_client),
             gates: Arc::clone(&self.fanout_gates),
             clock: Arc::clone(&self.clock),
+            signer: None,
         }
     }
 
@@ -692,6 +722,7 @@ impl RelayManager {
             relay_client,
             gates: Arc::clone(&self.fanout_gates),
             clock: Arc::clone(&self.clock),
+            signer: None,
         }
     }
 
@@ -778,10 +809,11 @@ impl RelayManager {
 
     /// Publishes an event to the specified relays, with a retry ladder.
     ///
-    /// The path for a signed event no fanout record holds: a founding
-    /// circle's Welcome gift wraps, the relay-removal scrub, key packages,
-    /// relay lists, and the one send of a proposal no record could be written
-    /// for. Each is lost for good if this call gives up, so they pay
+    /// The path for a signed event no fanout record holds: the relay-removal
+    /// scrub, key packages, relay lists — and, read relay by relay
+    /// ([`Self::publish_unrecorded_answers`]), a Welcome and the one send of a
+    /// proposal no record could be written for. Each is lost for good if this
+    /// call gives up, so they pay
     /// [`MAX_PUBLISH_ATTEMPTS`]. A commit never comes here: it leaves only
     /// through the fanout driver, and an event a record holds is refused
     /// (Security Rule 13). Locations take
@@ -848,6 +880,107 @@ impl RelayManager {
         .await
     }
 
+    /// [`Self::publish_event`], answered relay by relay: what each of
+    /// `relays` did with `event`, in their order, read off that relay's own
+    /// `OK` frames on this pool ([`UnrecordedAnswer::heard`]).
+    ///
+    /// The publisher of what has no record (a Welcome, a proposal no record
+    /// could be written for). Its ladder ends at once when no relay took the
+    /// event and every relay answered `auth-required:`
+    /// ([`RelayError::AuthRequired`]). Nothing here authenticates: a relay
+    /// that asked is answered, if at all, by [`Self::publish_authenticated`].
+    /// An event a fanout record holds, or a relay this device may not dial, is
+    /// sent nothing, and every relay is unanswered.
+    pub async fn publish_unrecorded_answers(
+        &self,
+        event: &Event,
+        relays: &[String],
+    ) -> Vec<UnrecordedAnswer> {
+        if Self::refuse_fanout_owned(event).is_err() {
+            return vec![UnrecordedAnswer::Unanswered; relays.len()];
+        }
+        let Ok(relay_urls) = Self::validate_relay_urls(relays) else {
+            return vec![UnrecordedAnswer::Unanswered; relays.len()];
+        };
+        let heard = Arc::new(std::sync::Mutex::new(vec![
+            UnrecordedAnswer::Unanswered;
+            relays.len()
+        ]));
+
+        let client = self.client.clone();
+        let gates = Arc::clone(&self.fanout_gates);
+        let _ = publish_with_retry(
+            MAX_PUBLISH_ATTEMPTS,
+            PUBLISH_RETRY_BACKOFF,
+            age_on(&self.clock, event),
+            |_| {
+                let (client, gates, heard) =
+                    (client.clone(), Arc::clone(&gates), Arc::clone(&heard));
+                let relay_urls = relay_urls.clone();
+                let event = event.clone();
+                async move {
+                    // As `publish_event`: never beside a fanout call to these relays.
+                    let _no_fanout_call = hold_fanout_gates(&gates, &relay_urls).await;
+                    let (result, this_attempt) =
+                        Self::try_publish_once_heard(&client, &relay_urls, &event).await;
+                    let accepted_by: &[String] = result
+                        .as_ref()
+                        .map_or(&[], |result| result.accepted_by.as_slice());
+                    let mut all = heard
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    for ((seen, answer), url) in
+                        all.iter_mut().zip(this_attempt.iter()).zip(&relay_urls)
+                    {
+                        *seen = seen.merge(*answer);
+                        if accepted_by.iter().any(|by| *by == url.to_string()) {
+                            *seen = UnrecordedAnswer::Accepted;
+                        }
+                    }
+                    drop(all);
+                    if !this_attempt.is_empty()
+                        && this_attempt
+                            .iter()
+                            .all(|answer| *answer == UnrecordedAnswer::AuthRequired)
+                    {
+                        return Err(RelayError::AuthRequired);
+                    }
+                    result
+                }
+            },
+        )
+        .await;
+        let answers = heard
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        answers
+    }
+
+    /// One authenticated resend of `event` to `relay` as `signer`'s
+    /// identity, on a connection of its own that holds that relay alone,
+    /// write-only, and is closed when the call ends
+    /// ([`identity::send_signed_once_authenticated`]).
+    ///
+    /// For a relay that answered this event's anonymous publish
+    /// `auth-required:` (owner decision D1b). The publish client is not
+    /// touched and never holds a signer. An event a fanout record holds, or a
+    /// relay this device may not dial, is sent nothing.
+    pub async fn publish_authenticated(
+        &self,
+        signer: Arc<Nip42Signer>,
+        event: &Event,
+        relay: &str,
+    ) -> AuthSendOutcome {
+        if Self::refuse_fanout_owned(event).is_err() {
+            return AuthSendOutcome::NotSent;
+        }
+        let Ok(url) = Self::validate_single_relay_url(relay) else {
+            return AuthSendOutcome::NotSent;
+        };
+        identity::send_signed_once_authenticated(signer, &url, event, AUTH_RETRY_ACK).await
+    }
+
     /// Performs a single connect-and-publish attempt.
     ///
     /// Returns `Ok` with a [`PublishResult`] that may be unsuccessful
@@ -860,8 +993,32 @@ impl RelayManager {
         relay_urls: &[RelayUrl],
         event: &Event,
     ) -> RelayResult<PublishResult> {
+        Self::try_publish_once_heard(client, relay_urls, event)
+            .await
+            .0
+    }
+
+    /// [`Self::try_publish_once`], with what each relay's own `OK` frames
+    /// said, in `relay_urls`' order.
+    async fn try_publish_once_heard(
+        client: &Client,
+        relay_urls: &[RelayUrl],
+        event: &Event,
+    ) -> (RelayResult<PublishResult>, Vec<UnrecordedAnswer>) {
         // Add relays, connect, and wait for WebSocket handshakes.
         Self::add_relays_and_connect(client, relay_urls).await;
+
+        // Taken before the send, so no answer to it precedes them.
+        let mut heard = Vec::with_capacity(relay_urls.len());
+        for url in relay_urls {
+            heard.push(
+                client
+                    .relay(url.as_str())
+                    .await
+                    .ok()
+                    .map(|relay| relay.notifications()),
+            );
+        }
 
         let sent = tokio::time::timeout(
             DEFAULT_TIMEOUT,
@@ -874,6 +1031,27 @@ impl RelayManager {
         // attempt is worth nothing unless it dials a live one.
         recover_wedged_publish_sockets(client, relay_urls).await;
 
+        let answers = heard
+            .iter_mut()
+            .map(|heard| {
+                heard
+                    .as_mut()
+                    .map_or(UnrecordedAnswer::Unanswered, |heard| {
+                        UnrecordedAnswer::heard(heard, &event.id)
+                    })
+            })
+            .collect();
+        (Self::publish_result(event, sent), answers)
+    }
+
+    /// What one pooled send came to, as [`Self::try_publish_once`] returns it.
+    fn publish_result(
+        event: &Event,
+        sent: Result<
+            Result<nostr_sdk::pool::Output<EventId>, nostr_sdk::client::Error>,
+            tokio::time::error::Elapsed,
+        >,
+    ) -> RelayResult<PublishResult> {
         let send_result = sent
             .map_err(|_| {
                 log::warn!(
@@ -1092,18 +1270,23 @@ impl RelayManager {
         relays: &[String],
     ) -> RelayResult<PublishResult> {
         Self::refuse_fanout_owned(event)?;
-        Self::send_location(&self.client, &self.clock, event, relays).await
+        Self::send_location(&self.client, &self.clock, event, relays, None).await
     }
 
     /// [`Self::publish_location_event`] without the refusal of an event that
     /// has a fanout record: the one send the record's own driver makes
     /// ([`FanoutTransport`]), on the same pool, in the same window, read by
     /// the same classifier.
+    ///
+    /// With `signer`, a relay that answered `auth-required:` is sent the same
+    /// event once more as that identity when no relay took it
+    /// ([`Self::authenticate_location`]).
     async fn send_location(
         client: &Client,
         clock: &SecondsClock,
         event: &Event,
         relays: &[String],
+        signer: Option<&Arc<Nip42Signer>>,
     ) -> RelayResult<PublishResult> {
         let relay_urls = Self::validate_relay_urls(relays)?;
 
@@ -1127,17 +1310,68 @@ impl RelayManager {
                 // partition — one ack is a success, no ack is classified for a
                 // clock verdict before it collapses to `AllRelaysFailed`.
                 async move {
-                    Ok(Self::try_publish_once_harvesting(
-                        &client,
-                        &relay_urls,
-                        &event,
-                        LOCATION_ACK_WINDOW,
-                    )
-                    .await)
+                    let (mut result, asked) =
+                        Self::harvest_heard(&client, &relay_urls, &event, LOCATION_ACK_WINDOW)
+                            .await;
+                    if let Some(signer) = signer.filter(|_| !result.is_success()) {
+                        Self::authenticate_location(
+                            signer,
+                            clock,
+                            &relay_urls,
+                            &asked,
+                            &event,
+                            &mut result,
+                        )
+                        .await;
+                    }
+                    Ok(result)
                 }
             },
         )
         .await
+    }
+
+    /// The one authenticated resend of a location no relay took: to each
+    /// relay that `asked` for it (`auth-required:`), at once, and only while
+    /// the whole resend ends before the event's expiration, read on `clock`
+    /// just before it is begun. An event with no expiration is not resent.
+    ///
+    /// A relay that took it moves from `rejected_by` to `accepted_by`.
+    async fn authenticate_location(
+        signer: &Arc<Nip42Signer>,
+        clock: &SecondsClock,
+        relay_urls: &[RelayUrl],
+        asked: &[bool],
+        event: &Event,
+        result: &mut PublishResult,
+    ) {
+        let Some(expires) = event.tags.expiration() else {
+            return;
+        };
+        if clock().saturating_add(AUTH_RETRY_MS / 1_000) >= expires.as_secs() {
+            return;
+        }
+        let resends = relay_urls
+            .iter()
+            .zip(asked)
+            .filter(|(_, asked)| **asked)
+            .map(|(url, _)| async move {
+                let outcome = identity::send_signed_once_authenticated(
+                    Arc::clone(signer),
+                    url,
+                    event,
+                    AUTH_RETRY_ACK,
+                )
+                .await;
+                (url, outcome)
+            });
+        for (url, outcome) in futures::future::join_all(resends).await {
+            if outcome == AuthSendOutcome::Accepted {
+                let url = url.to_string();
+                result.rejected_by.retain(|(by, _)| *by != url);
+                result.accepted_by.push(url);
+            }
+        }
     }
 
     /// Performs a single connect-and-publish attempt that waits for EVERY
@@ -1170,6 +1404,19 @@ impl RelayManager {
         event: &Event,
         ack_timeout: Duration,
     ) -> PublishResult {
+        Self::harvest_heard(client, relay_urls, event, ack_timeout)
+            .await
+            .0
+    }
+
+    /// [`Self::try_publish_once_harvesting`], with whether each relay, in
+    /// `relay_urls`' order, answered `auth-required:`.
+    async fn harvest_heard(
+        client: &Client,
+        relay_urls: &[RelayUrl],
+        event: &Event,
+        ack_timeout: Duration,
+    ) -> (PublishResult, Vec<bool>) {
         // Add relays, connect, and wait for WebSocket handshakes.
         Self::add_relays_and_connect(client, relay_urls).await;
 
@@ -1180,7 +1427,11 @@ impl RelayManager {
         // A silent relay is EITHER slow or holding this event unsent forever;
         // only the second is freed here, and only after the ack window closed.
         recover_wedged_publish_sockets(client, relay_urls).await;
-        Self::fold_harvest(event, outcomes)
+        let asked = outcomes
+            .iter()
+            .map(|(_, outcome)| matches!(outcome, AckOutcome::AuthRequired(_)))
+            .collect();
+        (Self::fold_harvest(event, outcomes), asked)
     }
 
     /// Folds each relay's [`AckOutcome`] into a [`PublishResult`].
@@ -1191,7 +1442,9 @@ impl RelayManager {
         for (url, outcome) in outcomes {
             match outcome {
                 AckOutcome::Accepted => accepted_by.push(url),
-                AckOutcome::Refused(reason) => rejected_by.push((url, reason)),
+                AckOutcome::Refused(reason) | AckOutcome::AuthRequired(reason) => {
+                    rejected_by.push((url, reason));
+                }
                 AckOutcome::Unanswered => failed.push(url),
             }
         }
@@ -2540,12 +2793,39 @@ async fn hold_fanout_gates(
 /// Publishes one fanout event to one relay through MDK's relay client, on
 /// Haven's publish pool ([`RelayManager::fanout_transport`]).
 ///
+/// A relay that answers a send `auth-required:` is sent the same signed event
+/// once more on a connection of its own, as the identity [`Self::authenticating`]
+/// names (owner decision D1c); the publish client and MDK's client never hold a
+/// signer.
+///
 /// No `Debug`: it holds the publish client, whose own names every relay.
 pub struct FanoutTransport {
     client: Client,
     relay_client: Arc<dyn NostrRelayClient>,
     gates: FanoutGates,
     clock: SecondsClock,
+    signer: Option<Arc<Nip42Signer>>,
+}
+
+/// The authenticated resend of one fanout call: to the call's own relay, as
+/// the transport's identity ([`identity::send_signed_once_authenticated`]).
+struct IdentityResend<'a> {
+    signer: &'a Arc<Nip42Signer>,
+    url: &'a RelayUrl,
+}
+
+impl fanout::AuthRetry for IdentityResend<'_> {
+    fn resend<'a>(
+        &'a self,
+        event: &'a Event,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = AuthSendOutcome> + Send + 'a>> {
+        Box::pin(identity::send_signed_once_authenticated(
+            Arc::clone(self.signer),
+            self.url,
+            event,
+            AUTH_RETRY_ACK,
+        ))
+    }
 }
 
 #[async_trait::async_trait]
@@ -2568,11 +2848,37 @@ impl fanout::FanoutSend for FanoutTransport {
         event: &Event,
         targets: &[String],
     ) -> RelayResult<PublishResult> {
-        RelayManager::send_location(&self.client, &self.clock, event, targets).await
+        RelayManager::send_location(
+            &self.client,
+            &self.clock,
+            event,
+            targets,
+            self.signer.as_ref(),
+        )
+        .await
     }
 }
 
 impl FanoutTransport {
+    /// This transport, answering a relay's `auth-required:` with one
+    /// authenticated resend as `signer`'s identity: of a recorded event inside
+    /// the call ([`fanout::publish_to_target`]), and of a location no relay
+    /// took. Every product entry builds its transport through this.
+    #[must_use]
+    pub fn authenticating(self, signer: Arc<Nip42Signer>) -> Self {
+        Self {
+            signer: Some(signer),
+            ..self
+        }
+    }
+
+    /// Whether this transport answers `auth-required:` with an authenticated
+    /// resend ([`Self::authenticating`]).
+    #[must_use]
+    pub const fn authenticates(&self) -> bool {
+        self.signer.is_some()
+    }
+
     /// Takes `target`'s relay for one fanout call, or `None` when another
     /// send held it for the whole of [`fanout::GATE_WAIT_SECS`].
     ///
@@ -2638,12 +2944,21 @@ impl FanoutTransport {
             .await
             .ok()
             .map(|relay| relay.notifications());
+        // Inside this call, under this relay's gate: one attempt, stored once,
+        // resolved by what both connections heard.
+        let resend = self.signer.as_ref().map(|signer| IdentityResend {
+            signer,
+            url: &relay_urls[0],
+        });
         let outcome = fanout::publish_to_target(
             self.relay_client.as_ref(),
             &target,
             message,
             heard,
             (self.clock)(),
+            resend
+                .as_ref()
+                .map(|resend| resend as &dyn fanout::AuthRetry),
         )
         .await;
         // MDK's client adds a target it does not find in the pool through the
@@ -5013,6 +5328,7 @@ mod tests {
             relay_client: Arc::new(LeavesAnEventUnread(relay.clone())),
             gates: FanoutGates::default(),
             clock: device_clock(),
+            signer: None,
         };
         let _ = fanned_out(&wedging, target).await;
         assert_eq!(
@@ -5299,6 +5615,7 @@ mod tests {
             relay_client: Arc::new(AddsItsTargetAgain(manager.client.clone())),
             gates: FanoutGates::default(),
             clock: device_clock(),
+            signer: None,
         };
         let _ = fanned_out(&racing, relay.url()).await;
         let held = manager
@@ -6634,8 +6951,8 @@ mod tests {
              an event: {faults:?}",
         );
         for expected in [
-            "try_publish_once",
-            "try_publish_once_harvesting",
+            "try_publish_once_heard",
+            "harvest_heard",
             "offer_harvest",
             "publish_event_background",
             "send_to_one",
@@ -6660,6 +6977,9 @@ mod tests {
         let takes_an_event = |function: &ScannedFn| {
             function.code.contains("(&self,event:&Event,")
                 || function.code.contains("(&self,event:Event,")
+                || function
+                    .code
+                    .contains("(&self,signer:Arc<Nip42Signer>,event:&Event,")
         };
         let publishers: Vec<ScannedFn> = scan_production_functions(include_str!("manager.rs"))
             .into_iter()
@@ -6670,6 +6990,8 @@ mod tests {
             names,
             [
                 "publish_event",
+                "publish_unrecorded_answers",
+                "publish_authenticated",
                 "publish_profile_event",
                 "offer_profile_event",
                 "publish_location_event",
@@ -6697,7 +7019,8 @@ mod tests {
             let body = function.code.split_once('{').map_or("", |(_, body)| body);
             assert!(
                 body.starts_with("Self::refuse_fanout_owned(event)?;")
-                    || body.starts_with("Self::refuse_fanout_owned(&event)?;"),
+                    || body.starts_with("Self::refuse_fanout_owned(&event)?;")
+                    || body.starts_with("ifSelf::refuse_fanout_owned(event).is_err(){"),
                 "`{}` can send an event that has a fanout row: a second sender's \
                  relay answers would be counted as the fanout's own",
                 function.name,

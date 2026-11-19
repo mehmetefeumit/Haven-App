@@ -384,12 +384,15 @@ async fn await_refused_reads(front: &RecordingFront, pubkey: &str, n: usize) {
     .await;
 }
 
-/// Haven answers a relay's challenge only on an own inbox read's connection
+/// Haven answers a relay's challenge only on an identity connection
 /// (owner-directed 2026-11-16): every connection that sent an `AUTH` sent
-/// nothing but valid answers under one key, `CLOSE`s and `REQ`s for that
-/// key's gift wraps — no `EVENT` and no other `REQ` — so neither the publish
-/// client nor a group plane ever authenticated.
-fn assert_only_own_inbox_reads_authenticated(world: &World) {
+/// nothing but valid answers under one key and either `CLOSE`s and `REQ`s for
+/// that key's gift wraps — an own inbox read — or one write-only resend
+/// (D1b/D1c): one signed kind-1059 or kind-445 event, the bytes another
+/// connection of the same relay sent first, once to draw the challenge and
+/// once after the answer, and no `REQ`. So neither the publish client nor a
+/// group plane ever authenticated.
+fn assert_only_identity_connections_authenticated(world: &World) {
     for front in world.fronts() {
         let frames = front.frames();
         let answering: std::collections::BTreeSet<usize> = frames
@@ -412,6 +415,9 @@ fn assert_only_own_inbox_reads_authenticated(world: &World) {
                 .collect();
             let [signer] = <[_; 1]>::try_from(signers.into_iter().collect::<Vec<_>>())
                 .unwrap_or_else(|_| panic!("one connection answers under one key"));
+            if is_a_write_only_resend(&frames, conn, &on) {
+                continue;
+            }
             for frame in on {
                 let verb = json(frame).and_then(|frame| frame[0].as_str().map(str::to_owned));
                 assert!(
@@ -423,6 +429,45 @@ fn assert_only_own_inbox_reads_authenticated(world: &World) {
             }
         }
     }
+}
+
+/// Whether connection `conn`'s frames `on` are one write-only authenticated
+/// resend: `EVENT`, `AUTH`, `EVENT` — or `AUTH`, `EVENT` for a relay that
+/// challenges on connect — every `EVENT` the same verified kind-1059 or
+/// kind-445 event, which another connection of the same relay, one that
+/// answered no challenge, sent before it.
+fn is_a_write_only_resend(frames: &[RecordedFrame], conn: usize, on: &[&RecordedFrame]) -> bool {
+    let parsed: Vec<serde_json::Value> = on.iter().filter_map(|frame| json(frame)).collect();
+    let verbs: Vec<&str> = parsed
+        .iter()
+        .filter_map(|frame| frame[0].as_str())
+        .collect();
+    if verbs != ["EVENT", "AUTH", "EVENT"] && verbs != ["AUTH", "EVENT"] {
+        return false;
+    }
+    let sent: Vec<nostr::Event> = parsed
+        .iter()
+        .filter(|frame| frame[0] == "EVENT")
+        .filter_map(|frame| nostr::JsonUtil::from_json(frame[1].to_string()).ok())
+        .collect();
+    let Some(first) = sent.first() else {
+        return false;
+    };
+    let answering: std::collections::BTreeSet<usize> = frames
+        .iter()
+        .filter(|frame| json(frame).is_some_and(|frame| frame[0] == "AUTH"))
+        .map(|frame| frame.conn)
+        .collect();
+    let sent_anonymously_first = frames
+        .iter()
+        .take_while(|frame| frame.conn != conn)
+        .filter(|frame| !answering.contains(&frame.conn))
+        .filter_map(json)
+        .any(|frame| frame[0] == "EVENT" && frame[1]["id"].as_str() == Some(&first.id.to_hex()));
+    first.verify().is_ok()
+        && matches!(first.kind.as_u16(), 445 | 1059)
+        && sent.iter().all(|event| event == first)
+        && sent_anonymously_first
 }
 
 /// How many challenges `pubkey` answered on this front.
@@ -720,7 +765,7 @@ async fn first_inbox_relay_gates_reads(world: &World, alice: &Account) -> Vec<u8
     join(alice, &bob, &invitation, &group).await;
     // The page fetch's read before its answer, and the live session's REQ.
     await_refused_reads(&world.gated.front, &bob.hex(), 2).await;
-    assert_only_own_inbox_reads_authenticated(world);
+    assert_only_identity_connections_authenticated(world);
     group
 }
 
@@ -755,7 +800,7 @@ async fn every_inbox_relay_gates_reads(world: &World, alice: &Account) {
             "premise: each gated relay was read after the invitee's answer",
         );
     }
-    assert_only_own_inbox_reads_authenticated(world);
+    assert_only_identity_connections_authenticated(world);
 }
 
 /// (b') An inbox whose one relay refuses gift-wrap reads even once the reader
@@ -800,7 +845,7 @@ async fn an_inbox_relay_refusing_after_authentication_serves_nothing(
         answers_from(&world.refusing.front, &bob.hex()) == 1,
         "the refusal came after the invitee answered the relay's challenge",
     );
-    assert_only_own_inbox_reads_authenticated(world);
+    assert_only_identity_connections_authenticated(world);
 }
 
 /// (c) An invitee that has never had a circle starts its session with none,
@@ -846,7 +891,7 @@ async fn a_fresh_invitee_hears_a_welcome_live(world: &World, alice: &Account, gr
     );
     let invitation = take_in(alice, &bob, &wrap).await;
     join(alice, &bob, &invitation, &group).await;
-    assert_only_own_inbox_reads_authenticated(world);
+    assert_only_identity_connections_authenticated(world);
 }
 
 /// (d) An inviter that fetched a `KeyPackage` just before the invitee's
@@ -973,7 +1018,7 @@ async fn a_superseded_key_package_opens_only_within_its_grace(
             "premise: the gated relay was sent the Welcome, and took it",
         );
     }
-    assert_only_own_inbox_reads_authenticated(world);
+    assert_only_identity_connections_authenticated(world);
 }
 
 /// (e) A Welcome stored before the invitee's session starts — sent while the
@@ -1060,5 +1105,5 @@ async fn a_welcome_stored_before_the_session_reaches_it(world: &World, alice: &A
     );
     // Each session's inbox REQ.
     await_refused_reads(&world.gated.front, &pubkey, 2).await;
-    assert_only_own_inbox_reads_authenticated(world);
+    assert_only_identity_connections_authenticated(world);
 }

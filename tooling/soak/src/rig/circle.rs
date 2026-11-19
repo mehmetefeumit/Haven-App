@@ -15,13 +15,16 @@
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use haven_core::circle::{CircleConfig, MemberKeyPackage};
 use haven_core::nostr::mls::types::{GroupId, TransportMessage};
 use haven_core::nostr::mls::SessionManager;
-use haven_core::relay::fanout::UnrecordedPublisher;
+use haven_core::relay::fanout::{UnrecordedAnswer, UnrecordedPublisher};
+use haven_core::relay::identity::AuthSendOutcome;
+use haven_core::relay::nip42::Nip42Signer;
+
 use haven_core::relay::fanout::{
     Claimed, EvolutionStatus, FanoutClock, FanoutSend, FanoutTargetOutcome, Publishing,
     RelayMappedFanout, Taken, RESUME_BUDGET_MS,
@@ -366,14 +369,28 @@ impl UnrecordedPublisher for MappedPublisher<'_> {
         &'b self,
         event: &'b Event,
         relays: &'b [String],
-    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'b>> {
+    ) -> Pin<Box<dyn Future<Output = Vec<UnrecordedAnswer>> + Send + 'b>> {
         Box::pin(async move {
             self.sent
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(event.clone());
             let mapped: Vec<String> = relays.iter().map(|relay| (self.map)(relay)).collect();
-            self.relays.publish_unrecorded(event, &mapped).await
+            self.relays.publish_unrecorded_answers(event, &mapped).await
+        })
+    }
+
+    fn publish_authenticated<'b>(
+        &'b self,
+        signer: Arc<Nip42Signer>,
+        event: &'b Event,
+        relay: &'b str,
+    ) -> Pin<Box<dyn Future<Output = AuthSendOutcome> + Send + 'b>> {
+        Box::pin(async move {
+            let mapped = (self.map)(relay);
+            self.relays
+                .publish_authenticated(signer, event, &mapped)
+                .await
         })
     }
 }

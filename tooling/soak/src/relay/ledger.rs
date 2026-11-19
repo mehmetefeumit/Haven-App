@@ -129,6 +129,11 @@ pub struct PlaneRecord {
     /// Every event this plane carried, was seeded with or forged: its id,
     /// kind and `#h`, for the judge's event index.
     pub events: Vec<(String, u16, Option<String>)>,
+    /// Each `OK false auth-required:` the plane wrote towards a client: the
+    /// endpoint, the event id and when, in [`plane_instant`]'s order — what
+    /// licenses one authenticated resend of that event (owner decisions D1b,
+    /// D1c).
+    pub demands: Vec<(EndpointId, String, u64)>,
     /// Whether a cap was hit, so the record is incomplete.
     pub full: bool,
 }
@@ -155,6 +160,9 @@ impl fmt::Debug for PlaneHighWater {
 struct PlaneLog {
     first_seen: HashMap<(EndpointId, u64, String), u64>,
     events: BTreeMap<String, (u16, Option<String>)>,
+    /// Each `OK false auth-required:` written towards the client: the
+    /// endpoint, the event id and when.
+    demands: Vec<(EndpointId, String, u64)>,
     shapes: usize,
     shapes_cap: usize,
     ids_cap: usize,
@@ -166,6 +174,7 @@ impl Default for PlaneLog {
         Self {
             first_seen: HashMap::new(),
             events: BTreeMap::new(),
+            demands: Vec::new(),
             shapes: 0,
             shapes_cap: PLANE_SHAPES_CAP,
             ids_cap: PLANE_IDS_CAP,
@@ -623,6 +632,17 @@ impl Ledger {
         });
     }
 
+    /// Records a relay's `OK false auth-required:` for `event_id`, written
+    /// towards the client on `endpoint`.
+    pub(crate) fn note_auth_demand(&self, endpoint: EndpointId, event_id: EventId) {
+        self.with(|inner| {
+            inner
+                .planes
+                .demands
+                .push((endpoint, event_id.to_hex(), plane_instant()));
+        });
+    }
+
     pub(crate) fn note_delivered(&self, device: Option<DeviceTag>, event_id: EventId) {
         self.with(|inner| {
             inner.tag(event_id);
@@ -685,6 +705,7 @@ impl Ledger {
                     .iter()
                     .map(|(id, (kind, h))| (id.clone(), *kind, h.clone()))
                     .collect(),
+                demands: inner.planes.demands.clone(),
                 full: inner.planes.full,
             }
         })
@@ -1190,6 +1211,28 @@ mod tests {
         assert_eq!(
             format!("{:?}", EndpointId::Alias(dev, 4)),
             "Alias(simdev#2, 4)"
+        );
+    }
+
+    /// The plane record hands O7 every `auth-required:` demand a plane wrote
+    /// towards a client, on the endpoint it went out on, in order: the
+    /// licence for one authenticated resend (owner decisions D1b, D1c).
+    #[test]
+    fn the_plane_record_keeps_each_auth_required_demand_on_its_endpoint() {
+        let ledger = Ledger::new();
+        let own = EndpointId::Own(DeviceTag::new(1));
+        ledger.note_auth_demand(own, an_event_id(7));
+        ledger.note_auth_demand(EndpointId::Canonical, an_event_id(8));
+        let demands = ledger.plane_record().demands;
+        assert_eq!(demands.len(), 2);
+        assert_eq!(
+            (demands[0].0, demands[0].1.as_str()),
+            (own, hex::encode([7u8; 32]).as_str())
+        );
+        assert_eq!(demands[1].0, EndpointId::Canonical);
+        assert!(
+            demands[0].2 <= demands[1].2,
+            "the demands are not in their order"
         );
     }
 }

@@ -1608,9 +1608,10 @@ async fn a_drive_stops_at_its_wake_budget_and_loses_nothing() {
     let clock = Clock::at(0);
     assert_eq!(
         ROW_BUDGET_MS,
-        (GATE_WAIT_SECS + MDK_CALL_CEILING_SECS + 6) * SECOND_MS,
+        (GATE_WAIT_SECS + MDK_CALL_CEILING_SECS + 6) * SECOND_MS + haven_core::relay::AUTH_RETRY_MS,
         "a row's budget is the wait for its relay, MDK's ceiling for the call, \
-         and the six deadlines of a second each its resolution's fold may wait out",
+         the authenticated resend made inside that call, and the six deadlines \
+         of a second each its resolution's fold may wait out",
     );
     let transport = Slow {
         inner: &scripted,

@@ -579,6 +579,7 @@ async fn serve(
     ));
     let connection = Connection {
         device: endpoint.device(),
+        id: endpoint,
         state,
         ledger,
         subscriptions,
@@ -650,6 +651,7 @@ async fn pump_to_client(
     let mut held = HeldPages::new();
     let endpoint = Endpoint {
         device: connection.device,
+        id: connection.id,
         state: &connection.state,
         ledger: &connection.ledger,
         subscriptions: &connection.subscriptions,
@@ -887,6 +889,7 @@ fn record(frame: &Frame, ledger: &Ledger, endpoint: EndpointId, conn: u64) {
 /// [`Endpoint`] borrows, held for the life of the socket.
 struct Connection {
     device: Option<DeviceTag>,
+    id: EndpointId,
     state: Arc<RwLock<FaultState>>,
     ledger: Ledger,
     subscriptions: Arc<Mutex<Subscriptions>>,
@@ -897,6 +900,8 @@ struct Connection {
 #[derive(Clone, Copy)]
 struct Endpoint<'a> {
     device: Option<DeviceTag>,
+    /// The endpoint it is, for the plane record.
+    id: EndpointId,
     state: &'a RwLock<FaultState>,
     ledger: &'a Ledger,
     /// The subscriptions this connection opened and has not closed.
@@ -958,6 +963,9 @@ async fn deliver(
                         return false;
                     }
                     ledger.note_ok(event_id, status, &message);
+                    if !status && message.starts_with("auth-required:") {
+                        ledger.note_auth_demand(endpoint.id, event_id);
+                    }
                     return true;
                 }
                 RelayMessage::Event {

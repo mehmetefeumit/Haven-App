@@ -40,7 +40,7 @@
 use std::collections::BTreeSet;
 
 use haven_local_relay::planes::frame::Frame;
-use haven_local_relay::planes::judge::{judge, Class, Observed};
+use haven_local_relay::planes::judge::{judge_answered, AuthDemand, Class, Observed};
 use haven_local_relay::planes::policy::Row;
 use haven_local_relay::planes::table::{List, PlaneTable, RelayIx, RelayMatch, RoutingEnd};
 
@@ -79,10 +79,14 @@ struct Seen {
     frame: PlaneFrame,
 }
 
+/// Each relay's `OK false auth-required:`: the relay, when, the event id.
+type Demands = Vec<(RelayIx, u64, String)>;
+
 /// The ground truth and the frames, built once per grading.
 struct Evidence {
     table: PlaneTable,
     seen: Vec<Seen>,
+    demands: Demands,
     senders: Vec<(DeviceTag, String)>,
     full: Option<RelayTag>,
     roles: Vec<(RelayIx, PlaneRole)>,
@@ -113,7 +117,16 @@ pub fn plane_containment<R: RelayPlane, T: TimelineSink, L: LogDrain>(
         .iter()
         .map(|seen| Frame::parse(&seen.frame.text))
         .collect();
-    let judgement = judge(
+    let demands: Vec<AuthDemand<'_>> = evidence
+        .demands
+        .iter()
+        .map(|(relay, at, id)| AuthDemand {
+            relay: *relay,
+            at: *at,
+            id,
+        })
+        .collect();
+    let judgement = judge_answered(
         &evidence.table,
         evidence
             .seen
@@ -126,6 +139,7 @@ pub fn plane_containment<R: RelayPlane, T: TimelineSink, L: LogDrain>(
                 at: seen.frame.at,
                 frame,
             }),
+        &demands,
     )
     .map_err(|_| RigError::ShapeMismatch)?;
 
@@ -228,10 +242,11 @@ fn evidence<R: RelayPlane, T: TimelineSink, L: LogDrain>(world: &SimWorld<R, T, 
         .collect();
     lists(world, &mut table, &senders);
     routings(world, &mut table, &mut roles, &senders);
-    let (seen, full) = frames(world, &mut table, planes);
+    let (seen, demands, full) = frames(world, &mut table, planes);
     Evidence {
         table,
         seen,
+        demands,
         senders,
         full,
         roles,
@@ -327,13 +342,15 @@ fn routings<R: RelayPlane, T: TimelineSink, L: LogDrain>(
 
 /// Every plane's recorded frames, each on the relay it was sent to — an alias
 /// endpoint's on the address its slot stands for — in arrival order, with the
-/// plane's indexed events, and the first plane whose record is full.
+/// plane's indexed events; each `auth-required:` demand a plane wrote, on the
+/// same relay; and the first plane whose record is full.
 fn frames<R: RelayPlane, T: TimelineSink, L: LogDrain>(
     world: &SimWorld<R, T, L>,
     table: &mut PlaneTable,
     planes: Vec<(&R, RelayIx)>,
-) -> (Vec<Seen>, Option<RelayTag>) {
+) -> (Vec<Seen>, Demands, Option<RelayTag>) {
     let mut seen = Vec::new();
+    let mut demands = Vec::new();
     let mut full = None;
     for (plane, ix) in planes {
         let Some(ledger) = plane.plane_ledger() else {
@@ -346,17 +363,22 @@ fn frames<R: RelayPlane, T: TimelineSink, L: LogDrain>(
         for (id, kind, h) in &record.events {
             table.index_event(id, *kind, h.as_deref());
         }
+        let relay_of = |table: &mut PlaneTable, endpoint: EndpointId| match endpoint {
+            EndpointId::Canonical | EndpointId::Own(_) => Some(ix),
+            EndpointId::Alias(device, slot) => world
+                .device(device)
+                .ok()
+                .and_then(|owner| owner.alias_address(slot))
+                .or_else(|| plane.alias_urls_for(device).get(usize::from(slot)).cloned())
+                .and_then(|address| ix_of(table, &address)),
+        };
+        for (endpoint, id, at) in record.demands {
+            if let Some(relay) = relay_of(table, endpoint) {
+                demands.push((relay, at, id));
+            }
+        }
         for frame in record.frames {
-            let relay = match frame.endpoint {
-                EndpointId::Canonical | EndpointId::Own(_) => Some(ix),
-                EndpointId::Alias(device, slot) => world
-                    .device(device)
-                    .ok()
-                    .and_then(|owner| owner.alias_address(slot))
-                    .or_else(|| plane.alias_urls_for(device).get(usize::from(slot)).cloned())
-                    .and_then(|address| ix_of(table, &address)),
-            };
-            if let Some(relay) = relay {
+            if let Some(relay) = relay_of(table, frame.endpoint) {
                 seen.push(Seen {
                     relay,
                     plane: plane.tag(),
@@ -367,7 +389,7 @@ fn frames<R: RelayPlane, T: TimelineSink, L: LogDrain>(
         }
     }
     seen.sort_by_key(|seen| seen.frame.at);
-    (seen, full)
+    (seen, demands, full)
 }
 
 #[cfg(test)]

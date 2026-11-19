@@ -1055,10 +1055,27 @@ impl<M: Fn(&str) -> String + Send + Sync> crate::relay::fanout::UnrecordedPublis
         &'a self,
         event: &'a nostr::Event,
         relays: &'a [String],
-    ) -> std::pin::Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+    ) -> std::pin::Pin<
+        Box<dyn Future<Output = Vec<crate::relay::fanout::UnrecordedAnswer>> + Send + 'a>,
+    > {
         Box::pin(async move {
             let mapped: Vec<String> = relays.iter().map(|relay| (self.map)(relay)).collect();
-            self.pool.publish_unrecorded(event, &mapped).await
+            self.pool.publish_unrecorded_answers(event, &mapped).await
+        })
+    }
+
+    fn publish_authenticated<'a>(
+        &'a self,
+        signer: Arc<crate::relay::nip42::Nip42Signer>,
+        event: &'a nostr::Event,
+        relay: &'a str,
+    ) -> std::pin::Pin<Box<dyn Future<Output = crate::relay::identity::AuthSendOutcome> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let mapped = (self.map)(relay);
+            self.pool
+                .publish_authenticated(signer, event, &mapped)
+                .await
         })
     }
 }
@@ -1075,7 +1092,7 @@ impl LiveSyncCore {
     /// any other publish riding it between its send and its relay's answer.
     #[must_use]
     pub fn new_local(circle: Arc<CircleManager>, drive_pool: Arc<RelayManager>) -> Self {
-        let driver = LiveDriver::over(&drive_pool);
+        let driver = LiveDriver::over(&drive_pool, circle.nip42_signer());
         Self::assemble(circle, driver, Some(drive_pool))
     }
 
@@ -1107,7 +1124,9 @@ impl LiveSyncCore {
         let (to_fanout, to_pool, to_dial) = (Arc::clone(&map), Arc::clone(&map), map);
         let driver = LiveDriver {
             fanout: Arc::new(crate::relay::fanout::RelayMappedFanout::new(
-                drive_pool.fanout_transport(),
+                drive_pool
+                    .fanout_transport()
+                    .authenticating(circle.nip42_signer()),
                 move |relay| to_fanout(relay),
             )),
             publisher: Arc::new(RelayMappedPool {
@@ -5343,9 +5362,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let keys = Keys::generate();
         let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &keys).unwrap());
+        let signer = circle.nip42_signer();
         let driven = LiveSyncCore::new_local_with_driver_for_test(
             circle,
-            LiveDriver::over(&Arc::new(RelayManager::new())),
+            LiveDriver::over(&Arc::new(RelayManager::new()), signer),
         );
         assert_eq!(driven.drive_pool_connected_relays().await, None);
     }

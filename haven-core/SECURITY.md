@@ -192,7 +192,16 @@ judged with everything its connection carried, before and after it: any frame
 there but a `CLOSE` or a `REQ-1059-P` read of the answering key's own gift
 wraps, or an answer under a second key, is a crossing
 (`plane-auth-shared-connection`), since the answer ties that key to the whole
-connection. A relay holding several
+connection. The one other connection an answer may stand on is a write-only
+resend (owner decisions D1b, D1c, "A relay that asks for authentication to
+take a write" below): its relay answered a kind-1059 or kind-445 event
+`OK false auth-required:` at or before the answer — read off the relay's own
+answers, which the judge is handed beside the client's frames
+(`judge_answered`; the E2E journal's relay-side `OK`s) — and the connection
+carries nothing but answers under one key and that one event; anywhere else,
+an answer off the author's own inbox list is a crossing. The soak hands the
+judge no relay answers: none of its relays refuses a write for want of
+authentication, so a resend there would be a crossing. A relay holding several
 roles admits their union: an account's inbox and key-package lists may share a
 relay; an own list with a location or discovery relay, and an invitee's list
 with any relay, only when the world or lane being judged declares the pair;
@@ -219,7 +228,7 @@ when it was sent; a circle's routing counts from the commit's staging.
 | `REQ-10050-A` | REQ | 10050 | `kinds`, `authors` | `limit` | at most 64 | - | one author: the sender's own inbox list or a discovery relay when it is the sender; otherwise a discovery relay or the author's inbox list |
 | `REQ-0-A` | REQ | 0 | `kinds`, `authors` | `limit` | at most 4 | - | one author, a profile relay |
 | `NEG-445-H` | NEG-OPEN | 445 | `kinds`, `#h`, `since`, `until`, `limit` | none | at most 16384 | - | one `#h` circle whose routing stands; opening message `6100000200` |
-| `AUTH-22242` | AUTH | 22242 | `challenge`, `relay` | none | - | an account | the author's own inbox list current at the instant, on a connection that carries nothing else but `REQ-1059-P` reads of the author's own gift wraps and their `CLOSE`s |
+| `AUTH-22242` | AUTH | 22242 | `challenge`, `relay` | none | - | an account | the author's own inbox list current at the instant, on a connection that carries nothing else but `REQ-1059-P` reads of the author's own gift wraps and their `CLOSE`s; or (owner decisions D1b, D1c) a relay that answered a kind-1059 or kind-445 event `auth-required:` at or before it, on a connection that carries nothing else but that one event |
 
 Three proofs judge with it: **L1a / L1b** on every pull request — L1a,
 `every_relay_plane_receives_only_its_own_traffic_across_a_circle_lifecycle`
@@ -470,8 +479,11 @@ scan is of text and does not read `tests/`, where the NIP-42 control client
 holds a signer on purpose.
 `the_publish_client_holds_no_signer_and_never_authenticates` pins both, and
 `the_publish_client_never_answers_a_nip42_challenge` shows the effect against a
-relay that demands authentication to write. The fanout transport therefore
-treats `auth-required:` as a refusal that cannot change, not as an outage.
+relay that demands authentication to write. On the publish client alone,
+`auth-required:` is therefore a refusal that cannot change; it is no longer
+terminal for the product's fanout transport, which answers it with one
+authenticated resend on a connection of its own (below, "A relay that asks for
+authentication to take a write").
 
 ### A relay that gates gift-wrap reads behind NIP-42
 
@@ -606,6 +618,65 @@ is ever sent on an engine socket (`live_sync_inbox_socket_e2e`).
   circles that relay carries, as it could link the `#p` REQ before. Haven
   creates no circle on a relay of the account's own lists; a circle another
   client created, or a relay list the user chose, can share one.
+
+### A relay that asks for authentication to take a write
+
+Owner-directed (2026-11-16, decisions D1b and D1c, White Noise parity). Every
+send is anonymous first, and nothing authenticates pre-emptively. A relay that
+answers an `EVENT` `OK false` with the `auth-required:` prefix — read off that
+relay's own `OK` frame on the publish client by machine-readable prefix, never
+its words — is sent the same signed event once more on a per-call identity
+connection (`relay::identity::send_signed_once_authenticated`): that relay
+alone, write-only, `reconnect(false)`, shut down when the call ends. The
+publish client and MDK's relay client never hold a signer, and the resent
+event is byte for byte the one the anonymous send carried — a kind-445 event
+is still signed by its one-time key (Rule 2); only the connection is
+authenticated, by a kind-22242 answer under the identity key.
+
+- **A recorded kind-445 event** (a commit, a proposal with a record): the
+  resend is made inside the same `FanoutTransport::publish` call, under that
+  relay's gate, after MDK's call met `auth-required:` — proven or not — so the
+  target is resolved once, by both phases together (`fanout::after_resend`):
+  an `OK true` or `duplicate:` on either connection is the acknowledgement;
+  a refusal only when the anonymous call was refused on every attempt AND the
+  resend sent nothing after authenticating (the answer to the challenge
+  failed, none came, or the relay did not accept it within `AUTH_WAIT`) or was
+  refused for everything it sent; a resend left unanswered, or an anonymous
+  phase that was not proven, is possibly exposed and is sent again unchanged;
+  a resend that could not be made after a proven anonymous refusal leaves the
+  relay owed as an unreachable one is (`RetryableUnavailable` with no
+  category), never refused. A transport built without `.authenticating(…)`
+  keeps the old reading — proven `auth-required:` is a refusal — and no
+  shipped entry builds one (`every_fanout_transport_shipped_code_builds_authenticates`).
+  A row's budget (`ROW_BUDGET_MS`, 53 s) includes the resend's longest run
+  (`AUTH_RETRY_MS`, 22 s: connect, two 5 s `OK` windows, the 7 s wait for
+  authentication).
+- **A Welcome** (D1b): the publish ladder stops at the first attempt every
+  relay answered `auth-required:` (`RelayError::AuthRequired`). That relay is
+  sent the gift wrap once more as the inviter, unless a relay has already
+  taken that Welcome in the same pass — read just before the dial, since a
+  resend then only discloses who sent it. The relay's turn is one answer, and
+  its next turn starts anonymous again. A proposal no record could be written
+  for goes the same way when no relay took it.
+- **A location**: one anonymous attempt per relay, and — only when no relay
+  took it — one authenticated attempt to each relay that asked, begun only if
+  it ends before the event's NIP-40 `expiration`. `LOCATION_SEND_MS` (32 s)
+  prices both.
+
+What it discloses, plainly. A relay that demands authentication to accept a
+circle's kind-445 events learns which identity sends into that routing id,
+when, and from which address — the linkage Haven's anonymous publishing
+otherwise denies it, accepted by the owner for D1c. A relay that demands it
+for a gift wrap learns which identity sent that wrap, so that the inviter
+wrote to the invitee's inbox at that time (D1b); the wrap's content stays
+sealed. Haven's own circles never put such a relay on the location pool
+(`docs/LOCATION_RELAY_VETTING.md`, criterion (c)); the linkage arises with a
+circle another client made, a relay list the user named, or an invitee's
+inbox. The identity connection and any anonymous socket to the same relay
+come from the same address at the same time, so the separation is
+cryptographic, not network-level. Nothing on these paths logs a relay, the
+challenge, the identity or an event id (Rule 15; `auth_retry_e2e` captures
+the logs of an authenticated resend and asserts each is absent).
 
 ### What a relay's refusal has to prove before the fanout may act on it
 
@@ -1481,8 +1552,9 @@ a location whose record cannot be WRITTEN is not handed out to be sent at
 all (`a_location_whose_record_cannot_be_written_is_never_handed_out`), and
 one whose record cannot be DELETED after its send is, to the next process,
 a record it did not seal, deleted unsent. No record is sent within one
-send's window — ten seconds, the connect and the acknowledgement wait — of
-its NIP-40 `expiration`, and the first drive at or after that instant
+send's window — thirty-two seconds, the connect and the acknowledgement wait
+and the one authenticated resend to a relay that asked for it — of its NIP-40
+`expiration`, and the first drive at or after that instant
 deletes it, in any mode, with no relay contacted
 (`an_application_fanout_ends_at_its_expiration_and_never_blocks`); a
 configuration that drives nothing leaves it in the store, unsendable, until
@@ -1493,7 +1565,10 @@ A commit's driver does not see a location's record: it is not counted in a
 relay's pacing, holds no change of the circle, is taken up only after every
 commit and proposal, and a drive never touches one whose send is under way
 (`a_concurrent_drive_never_touches_an_in_flight_location`). On these
-entries no relay is offered a location's event twice.
+entries no relay is offered a location's event twice anonymously; a relay
+that answered `auth-required:` is offered it once more as the identity, only
+when no relay took it and only if the resend ends before the expiration.
+
 
 **What the engine leaves stranded is detected, said, and handed back**
 (`docs/MDK_UPSTREAM_TRACKER.md` T-PARKED-REPLAY). While a commit of this

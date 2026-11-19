@@ -249,12 +249,33 @@ impl UnrecordedPublisher for RecordingRelay {
     fn publish_unrecorded<'a>(
         &'a self,
         event: &'a Event,
-        _relays: &'a [String],
-    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move {
-            self.published.lock().unwrap().push(event.clone());
-            true
-        })
+        relays: &'a [String],
+    ) -> Pin<Box<dyn Future<Output = Vec<haven_core::relay::fanout::UnrecordedAnswer>> + Send + 'a>>
+    {
+        let acked: std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> = {
+            Box::pin(async move {
+                self.published.lock().unwrap().push(event.clone());
+                true
+            })
+        };
+        Box::pin(
+            async move { haven_core::relay::fanout::UnrecordedAnswer::all(relays, acked.await) },
+        )
+    }
+
+    fn publish_authenticated<'a>(
+        &'a self,
+        _signer: std::sync::Arc<haven_core::relay::nip42::Nip42Signer>,
+        _event: &'a nostr::Event,
+        _relay: &'a str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = haven_core::relay::identity::AuthSendOutcome>
+                + Send
+                + 'a,
+        >,
+    > {
+        haven_core::relay::fanout::scripted::not_resent()
     }
 }
 

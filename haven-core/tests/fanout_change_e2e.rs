@@ -177,60 +177,90 @@ impl UnrecordedPublisher for Outbox {
         &'a self,
         event: &'a nostr::Event,
         relays: &'a [String],
-    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move {
-            let watched = self.watched.lock().expect("outbox").clone();
-            if let Some((circle, group, invitee)) = watched.filter(|_| event.kind.as_u16() == 1059)
-            {
-                let roster = circle.session().member_pubkeys(&group).await;
-                if !roster.is_ok_and(|roster| roster.contains(&invitee)) {
-                    self.sent_early.store(true, Ordering::SeqCst);
+    ) -> Pin<Box<dyn Future<Output = Vec<haven_core::relay::fanout::UnrecordedAnswer>> + Send + 'a>>
+    {
+        let acked: std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> = {
+            Box::pin(async move {
+                let watched = self.watched.lock().expect("outbox").clone();
+                if let Some((circle, group, invitee)) =
+                    watched.filter(|_| event.kind.as_u16() == 1059)
+                {
+                    let roster = circle.session().member_pubkeys(&group).await;
+                    if !roster.is_ok_and(|roster| roster.contains(&invitee)) {
+                        self.sent_early.store(true, Ordering::SeqCst);
+                    }
                 }
-            }
-            self.handed
-                .lock()
-                .expect("outbox")
-                .push((event.clone(), relays.to_vec()));
-            let beside = self.drives_beside.lock().expect("outbox").take();
-            if let Some(circle) = beside {
-                let _ = through(&ScriptedFanout::default(), &Self::default(), &Clock::at(0))
-                    .resume(&circle)
-                    .await;
-            }
-            let ends = self.ends_record.lock().expect("outbox").take();
-            if let Some((circle, welcome)) = ends {
-                circle
-                    .session()
-                    .delete_welcome_record_for_test(&welcome)
-                    .await;
-            }
-            let refuses = self.refuses_marks.lock().expect("outbox").take();
-            if let Some((db, key)) = refuses {
-                set_stored_message_write_fault_for_test(&db, &key, true).expect("arm");
-            }
-            let sets_aside = self.sets_aside.lock().expect("outbox").take();
-            if let Some((circle, group, epoch)) = sets_aside {
-                let commit = circle
-                    .session()
-                    .stored_convergence_input_for_test(&group, OpenMlsContentKind::Commit, epoch)
-                    .await
-                    .expect("the commit's own row");
-                circle
-                    .session()
-                    .stage_convergence_input_for_test(&commit, MessageState::ConvergenceDeferred, 0)
-                    .await
-                    .expect("the commit is restated");
-            }
-            let stalls = self.stalls.lock().expect("outbox").clone();
-            if let Some((_, clock)) = stalls.filter(|(relay, _)| relays == [relay.as_str()]) {
-                clock
-                    .offset
-                    .fetch_add(PUBLISHER_BUDGET_MS, Ordering::SeqCst);
-                return false;
-            }
-            let withheld = self.unacknowledged.lock().expect("outbox");
-            !recipient_of(event).is_some_and(|recipient| withheld.contains(&recipient))
-        })
+                self.handed
+                    .lock()
+                    .expect("outbox")
+                    .push((event.clone(), relays.to_vec()));
+                let beside = self.drives_beside.lock().expect("outbox").take();
+                if let Some(circle) = beside {
+                    let _ = through(&ScriptedFanout::default(), &Self::default(), &Clock::at(0))
+                        .resume(&circle)
+                        .await;
+                }
+                let ends = self.ends_record.lock().expect("outbox").take();
+                if let Some((circle, welcome)) = ends {
+                    circle
+                        .session()
+                        .delete_welcome_record_for_test(&welcome)
+                        .await;
+                }
+                let refuses = self.refuses_marks.lock().expect("outbox").take();
+                if let Some((db, key)) = refuses {
+                    set_stored_message_write_fault_for_test(&db, &key, true).expect("arm");
+                }
+                let sets_aside = self.sets_aside.lock().expect("outbox").take();
+                if let Some((circle, group, epoch)) = sets_aside {
+                    let commit = circle
+                        .session()
+                        .stored_convergence_input_for_test(
+                            &group,
+                            OpenMlsContentKind::Commit,
+                            epoch,
+                        )
+                        .await
+                        .expect("the commit's own row");
+                    circle
+                        .session()
+                        .stage_convergence_input_for_test(
+                            &commit,
+                            MessageState::ConvergenceDeferred,
+                            0,
+                        )
+                        .await
+                        .expect("the commit is restated");
+                }
+                let stalls = self.stalls.lock().expect("outbox").clone();
+                if let Some((_, clock)) = stalls.filter(|(relay, _)| relays == [relay.as_str()]) {
+                    clock
+                        .offset
+                        .fetch_add(PUBLISHER_BUDGET_MS, Ordering::SeqCst);
+                    return false;
+                }
+                let withheld = self.unacknowledged.lock().expect("outbox");
+                !recipient_of(event).is_some_and(|recipient| withheld.contains(&recipient))
+            })
+        };
+        Box::pin(
+            async move { haven_core::relay::fanout::UnrecordedAnswer::all(relays, acked.await) },
+        )
+    }
+
+    fn publish_authenticated<'a>(
+        &'a self,
+        _signer: std::sync::Arc<haven_core::relay::nip42::Nip42Signer>,
+        _event: &'a nostr::Event,
+        _relay: &'a str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = haven_core::relay::identity::AuthSendOutcome>
+                + Send
+                + 'a,
+        >,
+    > {
+        haven_core::relay::fanout::scripted::not_resent()
     }
 }
 

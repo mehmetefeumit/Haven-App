@@ -287,7 +287,9 @@ enum PausedRelayOwner {
 ///
 ///  * the single-attempt location publish it is already inside —
 ///    [kBurstPublishSecs] (`LOCATION_PUBLISH_ATTEMPTS` is 1, so
-///    `CONNECTION_TIMEOUT` 5 s + `LOCATION_ACK_WINDOW` 5 s);
+///    `CONNECTION_TIMEOUT` 5 s + `LOCATION_ACK_WINDOW` 5 s, and the one
+///    authenticated resend a relay that asked for it is given, 22 s);
+
 ///  * its own `settleBeforePause`, capped at [kBurstSettleCapSecs]; and
 ///  * the BOUNDED prefix of its `pauseSubscriptions` —
 ///    [kPauseBoundedSteps] × [kRelayLifecycleOpSecs] = 40 s.

@@ -161,7 +161,10 @@ async fn broken_transport() -> (String, tokio::task::JoinHandle<()>) {
 async fn relay_manager_verdict(event: &Event, relays: &[String]) -> bool {
     let manager = RelayManager::new();
     let publisher: &dyn UnrecordedPublisher = &manager;
-    publisher.publish_unrecorded(event, relays).await
+    publisher
+        .publish_unrecorded(event, relays)
+        .await
+        .contains(&haven_core::relay::fanout::UnrecordedAnswer::Accepted)
 }
 
 /// A real staged `kind:445` commit, so the relays see the event shape this path
@@ -273,9 +276,29 @@ impl UnrecordedPublisher for OutcomePublisher {
     fn publish_unrecorded<'a>(
         &'a self,
         _event: &'a Event,
-        _relays: &'a [String],
-    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move { self.0.is_ack() })
+        relays: &'a [String],
+    ) -> Pin<Box<dyn Future<Output = Vec<haven_core::relay::fanout::UnrecordedAnswer>> + Send + 'a>>
+    {
+        let acked: std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> =
+            { Box::pin(async move { self.0.is_ack() }) };
+        Box::pin(
+            async move { haven_core::relay::fanout::UnrecordedAnswer::all(relays, acked.await) },
+        )
+    }
+
+    fn publish_authenticated<'a>(
+        &'a self,
+        _signer: std::sync::Arc<haven_core::relay::nip42::Nip42Signer>,
+        _event: &'a nostr::Event,
+        _relay: &'a str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = haven_core::relay::identity::AuthSendOutcome>
+                + Send
+                + 'a,
+        >,
+    > {
+        haven_core::relay::fanout::scripted::not_resent()
     }
 }
 
@@ -473,7 +496,8 @@ async fn create_never_rolls_back() {
         let publisher = OutcomePublisher(outcome);
         let acked = publisher
             .publish_unrecorded(&welcome.event, &welcome.recipient_relays)
-            .await;
+            .await
+            .contains(&haven_core::relay::fanout::UnrecordedAnswer::Accepted);
         assert_eq!(
             acked,
             outcome.is_ack(),

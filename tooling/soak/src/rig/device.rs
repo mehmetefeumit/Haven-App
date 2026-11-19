@@ -427,7 +427,12 @@ impl SimDevice {
     /// reaches a fanout call exactly as it reaches every other publish.
     #[must_use]
     pub fn fanout_transport(&self) -> RelayMappedFanout<FanoutTransport> {
-        RelayMappedFanout::new(self.relays.fanout_transport(), self.endpoint_route())
+        let transport = self.relays.fanout_transport();
+        let transport = match &self.circle {
+            Some(circle) => transport.authenticating(circle.nip42_signer()),
+            None => transport,
+        };
+        RelayMappedFanout::new(transport, self.endpoint_route())
     }
 
     /// Each stored (canonical) relay address mapped to this device's own

@@ -3615,12 +3615,38 @@ impl UnrecordedPublisher for Ladder {
     fn publish_unrecorded<'a>(
         &'a self,
         event: &'a Event,
-        _relays: &'a [String],
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move {
-            self.0.lock().expect("ladder").push(event.clone());
-            true
-        })
+        relays: &'a [String],
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Vec<haven_core::relay::fanout::UnrecordedAnswer>>
+                + Send
+                + 'a,
+        >,
+    > {
+        let acked: std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> = {
+            Box::pin(async move {
+                self.0.lock().expect("ladder").push(event.clone());
+                true
+            })
+        };
+        Box::pin(
+            async move { haven_core::relay::fanout::UnrecordedAnswer::all(relays, acked.await) },
+        )
+    }
+
+    fn publish_authenticated<'a>(
+        &'a self,
+        _signer: std::sync::Arc<haven_core::relay::nip42::Nip42Signer>,
+        _event: &'a nostr::Event,
+        _relay: &'a str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = haven_core::relay::identity::AuthSendOutcome>
+                + Send
+                + 'a,
+        >,
+    > {
+        haven_core::relay::fanout::scripted::not_resent()
     }
 }
 
@@ -3746,11 +3772,10 @@ async fn a_removal_owed_after_a_departure_is_published_promptly_from_catchup() {
             .await,
         Err(RelayError::FanoutOwned)
     ));
-    assert!(
-        !relay_mgr
-            .publish_unrecorded(&eviction, std::slice::from_ref(&url))
-            .await
-    );
+    assert!(!relay_mgr
+        .publish_unrecorded(&eviction, std::slice::from_ref(&url))
+        .await
+        .contains(&haven_core::relay::fanout::UnrecordedAnswer::Accepted));
     let Some(EpochState::PendingPublish(staged)) = fx.alice.session().epoch_state(&group).await
     else {
         panic!("premise");
@@ -3813,9 +3838,11 @@ async fn the_foreground_sweep_sends_an_owed_removal_through_the_apps_own_transpo
     let proposal = bob_leaves(&fx, &relay_mgr, &url).await;
 
     // The budget bounds the whole sweep, drives included, and a record is
-    // begun only with a row's longest run still left in it: thirty-one
-    // seconds. Nothing here waits that long; the relay answers at once.
-    let out = run_catchup_in_foreground(&fx.alice, &relay_mgr, 45).await;
+    // begun only with a row's longest run still left in it: fifty-three
+    // seconds, the authenticated resend a relay that asks for one is made
+    // inside the call included. Nothing here waits that long; the relay
+    // answers at once.
+    let out = run_catchup_in_foreground(&fx.alice, &relay_mgr, 60).await;
 
     assert!(
         !roster(&fx.alice, &fx.mls_group_id).await.contains(&bob_hex),
