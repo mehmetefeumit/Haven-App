@@ -41,7 +41,7 @@
 /// the sidecar checks the branch's marker in the logcat.
 library;
 
-import 'dart:async' show StreamController, StreamSubscription;
+import 'dart:async' show StreamController;
 import 'dart:convert' show jsonDecode;
 import 'dart:io' show Directory, File, HttpClient;
 
@@ -78,6 +78,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '_lib/app_lifecycle.dart';
 import '_lib/fake_location_service.dart';
+import '_lib/kind0_ledger.dart';
 import '_lib/pump_helpers.dart';
 import '_lib/scenario_harness.dart';
 import '_lib/synthetic_user.dart' show SyntheticUser;
@@ -359,18 +360,7 @@ void main() {
             'kinds': const <int>[0],
           })
           .listen(kind0OnCircleRelay.add);
-      final seen = <int, List<TestRelayEvent>>{
-        for (var i = 0; i < profilePool.length; i++) i: <TestRelayEvent>[],
-      };
-      final poolWatches = <StreamSubscription<TestRelayEvent>>[
-        for (var i = 0; i < profilePool.length; i++)
-          profilePool[i]
-              .events(<String, dynamic>{
-                'kinds': const <int>[0],
-                'authors': <String>[aliceHex],
-              })
-              .listen(seen[i]!.add),
-      ];
+      final aliceKind0 = Kind0Ledger(profilePool, aliceHex);
 
       try {
         final prefs = await SharedPreferences.getInstance();
@@ -455,9 +445,15 @@ void main() {
         // ---- Display name N1 through the save button. --------------------
         await _saveDisplayName(tester, l10n, _nameOne);
         edits++;
-        await _kind0OnEveryRelay(profilePool, aliceHex, 'name one', (c) {
-          return c['display_name'] == _nameOne && c['name'] == _nameOne;
-        });
+        await _kind0OnEveryRelay(
+          aliceKind0,
+          profilePool,
+          aliceHex,
+          'name one',
+          (c) {
+            return c['display_name'] == _nameOne && c['name'] == _nameOne;
+          },
+        );
 
         // ---- Round 1: the first photo. ------------------------------------
         await _expectBackgroundSharing(tester, container);
@@ -472,6 +468,7 @@ void main() {
         );
         edits++;
         final first = await _kind0OnEveryRelay(
+          aliceKind0,
           profilePool,
           aliceHex,
           'photo one',
@@ -498,11 +495,17 @@ void main() {
         // ---- Display name N2: `name` follows (owner decision 4). ----------
         await _saveDisplayName(tester, l10n, _nameTwo);
         edits++;
-        await _kind0OnEveryRelay(profilePool, aliceHex, 'name two', (c) {
-          return c['display_name'] == _nameTwo &&
-              c['name'] == _nameTwo &&
-              c['picture'] == pictureOne;
-        });
+        await _kind0OnEveryRelay(
+          aliceKind0,
+          profilePool,
+          aliceHex,
+          'name two',
+          (c) {
+            return c['display_name'] == _nameTwo &&
+                c['name'] == _nameTwo &&
+                c['picture'] == pictureOne;
+          },
+        );
 
         // ---- Round 2: replace the photo. ----------------------------------
         await _expectBackgroundSharing(tester, container);
@@ -517,6 +520,7 @@ void main() {
         );
         edits++;
         await _kind0OnEveryRelay(
+          aliceKind0,
           profilePool,
           aliceHex,
           'photo two',
@@ -527,8 +531,8 @@ void main() {
         );
         final bobSeesTwo = await _bobDownloads(bob, aliceHex);
         expect(
-          bobSeesTwo,
-          isNot(bobSeesOne),
+          bobSeesTwo != bobSeesOne,
+          isTrue,
           reason: 'Bob must see the replacement, not the first photo',
         );
         debugPrint('[e2e_photo_ui] ROUND 2 — photo replaced');
@@ -554,6 +558,7 @@ void main() {
         );
         edits++;
         await _kind0OnEveryRelay(
+          aliceKind0,
           profilePool,
           aliceHex,
           'photo removed',
@@ -573,6 +578,7 @@ void main() {
         );
         edits++;
         await _kind0OnEveryRelay(
+          aliceKind0,
           profilePool,
           aliceHex,
           'photo re-added',
@@ -581,17 +587,10 @@ void main() {
         debugPrint('$_kEndMarker$round');
 
         // ---- The accounting. ----------------------------------------------
-        for (var i = 0; i < profilePool.length; i++) {
-          expect(
-            seen[i]!.map((e) => e.id).toSet(),
-            hasLength(edits),
-            reason:
-                '${logAliasHandle(LogAliasClass.relay, profilePool[i].url)} '
-                'must hold one distinct kind-0 per edit '
-                '(${magnitudeBucket(edits)} edits): more means a pass signed '
-                'again for an edit it had already published.',
-          );
-        }
+        await aliceKind0.expectOnePerEdit(
+          edits: edits,
+          timeout: _kind0WaitDeadline,
+        );
         expect(
           kind0OnCircleRelay,
           isEmpty,
@@ -608,9 +607,7 @@ void main() {
         }
       } finally {
         await circleWatch.cancel();
-        for (final w in poolWatches) {
-          await w.cancel();
-        }
+        await aliceKind0.cancel();
         WidgetsBinding.instance.removeObserver(life);
         await life.close();
         semantics.dispose();
@@ -764,8 +761,10 @@ String? _pictureOn(Map<String, dynamic> content, String base) {
 }
 
 /// Waits for a kind-0 of Alice's matching [matcher] on EVERY profile relay
-/// (each peer reads its own salted pick of them), and returns its content.
+/// (each peer reads its own salted pick of them), records it in [ledger] as
+/// one edit's event, and returns its content.
 Future<Map<String, dynamic>> _kind0OnEveryRelay(
+  Kind0Ledger ledger,
   List<TestRelay> pool,
   String authorHex,
   String step,
@@ -793,11 +792,7 @@ Future<Map<String, dynamic>> _kind0OnEveryRelay(
       }
     }),
   );
-  expect(
-    events.map((e) => e.id).toSet(),
-    hasLength(1),
-    reason: '$step: every relay must hold the same signed kind-0',
-  );
+  ledger.recordEdit(events, step);
   return _content(events.first);
 }
 

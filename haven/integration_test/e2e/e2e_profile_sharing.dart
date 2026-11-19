@@ -103,10 +103,11 @@
 /// 7. **A device clock behind the server's still uploads.** With the
 ///    primary's clock 90 s ahead, a new photo lands on the PRIMARY: the
 ///    token's expiration (10 min) outlives the skew; a 60 s token would not.
-/// 8. **One kind-0 per edit.** Each pool relay saw exactly one distinct
-///    kind-0 per edit made (2, 4, 6, 7, then 5), and the primary refused
-///    nothing it was not told to. (A pass whose upload FAILS on every server
-///    is the Rust sync tests' to prove: no device step can make one.)
+/// 8. **One kind-0 per edit.** Every pool relay serves one signed kind-0 per
+///    edit made (2, 4, 6, 7, then 5), each its own, and none delivered any
+///    other; the primary refused nothing it was not told to. (A pass whose
+///    upload FAILS on every server is the Rust sync tests' to prove: no
+///    device step can make one.)
 /// 5. **A deletes the public profile.** B's forced re-fetch falls back to a
 ///    blank profile (no stale name), i.e. the member tile would render the
 ///    npub prefix + initials. No crash, no stale data.
@@ -130,12 +131,11 @@
 ///   curated PUBLIC pool instead of the hermetic one.
 library;
 
-import 'dart:async' show StreamSubscription;
 import 'dart:convert' show jsonDecode;
 import 'dart:io' show HttpClient, ZLibEncoder;
 import 'dart:typed_data' show ByteData, Uint8List;
 
-import 'package:flutter/foundation.dart' show debugPrint;
+import 'package:flutter/foundation.dart' show debugPrint, listEquals;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/main.dart';
@@ -164,6 +164,7 @@ import '_lib/circle_creation.dart'
     show createCircleDelivered, settleLiveSession;
 import '_lib/coordination.dart';
 import '_lib/fake_location_service.dart';
+import '_lib/kind0_ledger.dart';
 import '_lib/plane_store_check.dart';
 import '_lib/pump_helpers.dart';
 import '_lib/scenario_harness.dart';
@@ -1150,21 +1151,11 @@ void main() {
           })
           .listen(kind0OnCircleRelay.add);
 
-      // Freshness watch on the PROFILE plane, one buffer per pool member.
-      // Publishing is unconditional, so what keeps these empty through step 1
-      // is simply that Alice has not saved a name or photo yet.
-      final aliceKind0OnPool = <int, List<TestRelayEvent>>{
-        for (var i = 0; i < profilePool.length; i++) i: <TestRelayEvent>[],
-      };
-      final poolKind0Watches = <StreamSubscription<TestRelayEvent>>[
-        for (var i = 0; i < profilePool.length; i++)
-          profilePool[i]
-              .events(<String, dynamic>{
-                'kinds': const <int>[0],
-                'authors': <String>[aliceHex],
-              })
-              .listen(aliceKind0OnPool[i]!.add),
-      ];
+      // Freshness watch on the PROFILE plane, one per pool member, which
+      // also accounts the kind-0s per edit (step 8). Publishing is
+      // unconditional, so what keeps them empty through step 1 is simply that
+      // Alice has not saved a name or photo yet.
+      final aliceKind0 = Kind0Ledger(profilePool, aliceHex);
 
       try {
         // -------------------------------------------------------------------
@@ -1266,8 +1257,8 @@ void main() {
         // -------------------------------------------------------------------
         for (var i = 0; i < profilePool.length; i++) {
           expect(
-            aliceKind0OnPool[i],
-            isEmpty,
+            aliceKind0.deliveredAny(i),
+            isFalse,
             reason:
                 'Profile relay '
                 '${logAliasHandle(LogAliasClass.relay, profilePool[i].url)} '
@@ -1298,8 +1289,8 @@ void main() {
         final published = await profileService.setOwnAvatar(_testPng);
         final pictureHash = published.pictureHash;
         expect(
-          pictureHash,
-          isNotNull,
+          pictureHash != null,
+          isTrue,
           reason:
               "setOwnAvatar must return the sanitized bytes' sha256 "
               'immediately — a LOCAL content hash, not a network response.',
@@ -1310,7 +1301,7 @@ void main() {
         //
         // Bob's fetch goes FIRST because it is the only real network barrier
         // available here: it is a live REQ/EOSE against a pool relay, whereas
-        // the `aliceKind0OnPool` buffers below are fed by subscriptions and,
+        // the `aliceKind0` watches below are fed by subscriptions and,
         // checked straight after a purely local save, would only prove
         // "nothing has arrived YET". Running them behind a completed
         // round-trip is what turns them into evidence.
@@ -1320,8 +1311,8 @@ void main() {
         );
         for (var i = 0; i < profilePool.length; i++) {
           expect(
-            aliceKind0OnPool[i],
-            isEmpty,
+            aliceKind0.deliveredAny(i),
+            isFalse,
             reason:
                 'a LOCAL save (updateOwnProfile/setOwnAvatar) must '
                 'publish NOTHING — '
@@ -1424,15 +1415,9 @@ void main() {
         );
         // One signed event, broadcast — so every member must be serving the
         // SAME event, not merely something that matches.
-        expect(
-          publishedKind0s.map((e) => e.id).toSet(),
-          hasLength(1),
-          reason: 'All pool relays must hold the same published kind-0.',
-        );
-        final publishedKind0 = publishedKind0s.first;
+        aliceKind0.recordEdit(publishedKind0s, 'STEP 2 (name + picture)');
         final originalPictureUrl =
-            _contentJson(publishedKind0)['picture'] as String;
-        expect(originalPictureUrl, isNotEmpty);
+            _contentJson(publishedKind0s.first)['picture'] as String;
 
         // (b) The blob is retrievable from Blossom (BUD-02 GET /<sha256>).
         await _assertBlobRetrievable(_blossomUrl, pictureHash);
@@ -1502,12 +1487,12 @@ void main() {
           reason: 'cached bytes match the current kind-0 picture URL',
         );
         expect(
-          aliceWithPicture.pictureSha256Hex,
-          isNotNull,
+          aliceWithPicture.pictureSha256Hex?.length == 64,
+          isTrue,
           reason:
-              'a member with current cached bytes must expose the decode key',
+              'a member with current cached bytes must expose the decode key '
+              '(a sha256, 64 hex digits)',
         );
-        expect(aliceWithPicture.pictureSha256Hex, hasLength(64));
         debugPrint('[e2e_profile] STEP 3 — Bob resolved name + photo OK');
 
         // -------------------------------------------------------------------
@@ -1551,10 +1536,11 @@ void main() {
           (e) => _contentJson(e)['display_name'] == _aliceEditedName,
           'STEP 4 (name-only edit)',
         );
+        aliceKind0.recordEdit(editedKind0s, 'STEP 4 (name-only edit)');
         for (var i = 0; i < editedKind0s.length; i++) {
           expect(
-            _contentJson(editedKind0s[i])['picture'],
-            originalPictureUrl,
+            _contentJson(editedKind0s[i])['picture'] == originalPictureUrl,
+            isTrue,
             reason:
                 'Name-only edit must not clobber the picture URL (merge) '
                 '— violated on '
@@ -1587,8 +1573,8 @@ void main() {
         );
         expect(bobPhotoAfter, isNotNull);
         expect(
-          bobPhotoAfter,
-          bobPhotoBefore,
+          listEquals(bobPhotoAfter, bobPhotoBefore),
+          isTrue,
           reason: 'Same picture bytes before/after the name-only edit.',
         );
         debugPrint('[e2e_profile] STEP 4 — new name + preserved photo OK');
@@ -1624,11 +1610,7 @@ void main() {
           },
           'STEP 6 (fallback upload)',
         );
-        expect(
-          fallbackKind0s.map((e) => e.id).toSet(),
-          hasLength(1),
-          reason: 'one signed kind-0 for the fallback photo, on every relay.',
-        );
+        aliceKind0.recordEdit(fallbackKind0s, 'STEP 6 (fallback upload)');
         final refusedAfterFault =
             (await _blossomStats(_blossomUrl))['refused']
                 as Map<String, dynamic>;
@@ -1650,8 +1632,8 @@ void main() {
         );
         expect(bobFallbackPhoto, isNotNull);
         expect(
-          bobFallbackPhoto,
-          isNot(bobPhotoBefore),
+          listEquals(bobFallbackPhoto, bobPhotoBefore),
+          isFalse,
           reason: 'Bob must hold the NEW photo, fetched from the fallback.',
         );
         debugPrint(
@@ -1671,13 +1653,16 @@ void main() {
         } finally {
           await _blossomControl(_blossomUrl, 'clock?skew=0');
         }
-        await _awaitKind0AcrossPool(profilePool, aliceHex, (e) {
+        final skewKind0s = await _awaitKind0AcrossPool(profilePool, aliceHex, (
+          e,
+        ) {
           final picture = _contentJson(e)['picture'] as String?;
           return picture != null &&
               Uri.parse(picture).authority ==
                   Uri.parse(_blossomUrl).authority &&
               picture != originalPictureUrl;
         }, 'STEP 7 (upload under a 90 s clock skew)');
+        aliceKind0.recordEdit(skewKind0s, 'STEP 7 (upload under clock skew)');
         final statsAfterSkew = await _blossomStats(_blossomUrl);
         expect(
           (statsAfterSkew['uploads_ok'] as int) - okBeforeSkew,
@@ -1691,7 +1676,10 @@ void main() {
         // -------------------------------------------------------------------
         // STEP 8 — one kind-0 per edit, and no refusal nobody asked for.
         // -------------------------------------------------------------------
-        _expectKind0PerEdit(aliceKind0OnPool, profilePool, edits: 4);
+        await aliceKind0.expectOnePerEdit(
+          edits: 4,
+          timeout: _kind0WaitDeadline,
+        );
         final refusedAfterSkew =
             statsAfterSkew['refused'] as Map<String, dynamic>;
         for (final entry in refusedAfterSkew.entries) {
@@ -1718,12 +1706,15 @@ void main() {
         // would leave the deleted profile live on precisely the relays some
         // peers are assigned to read from — and here it would make the
         // assertion below a coin flip on Bob's salt.
-        await _awaitKind0AcrossPool(profilePool, aliceHex, (e) {
+        final blankKind0s = await _awaitKind0AcrossPool(profilePool, aliceHex, (
+          e,
+        ) {
           final c = _contentJson(e);
           return c['display_name'] == null &&
               c['name'] == null &&
               c['picture'] == null;
         }, 'STEP 5 (blank retraction republish)');
+        aliceKind0.recordEdit(blankKind0s, 'STEP 5 (blank retraction)');
 
         final afterDelete = await bob.user.circleManager.fetchMemberProfiles(
           pubkeysHex: <String>[aliceHex],
@@ -1743,7 +1734,10 @@ void main() {
             expect(p.name, isNull, reason: 'No stale name after delete.');
           }
         }
-        _expectKind0PerEdit(aliceKind0OnPool, profilePool, edits: 5);
+        await aliceKind0.expectOnePerEdit(
+          edits: 5,
+          timeout: _kind0WaitDeadline,
+        );
         debugPrint('[e2e_profile] STEP 5 — delete → npub fallback OK');
 
         // -------------------------------------------------------------------
@@ -1792,9 +1786,7 @@ void main() {
         );
       } finally {
         await circleRelayKind0Watch.cancel();
-        for (final w in poolKind0Watches) {
-          await w.cancel();
-        }
+        await aliceKind0.cancel();
       }
     },
     timeout: const Timeout(_outerTestTimeout),
@@ -1943,25 +1935,6 @@ Future<void> _blossomControl(String base, String path) async {
     );
   } finally {
     client.close(force: true);
-  }
-}
-
-/// Each pool relay saw exactly [edits] distinct kind-0 events from Alice: an
-/// edit signs one event, and a re-send of it carries the same id.
-void _expectKind0PerEdit(
-  Map<int, List<TestRelayEvent>> seen,
-  List<TestRelay> pool, {
-  required int edits,
-}) {
-  for (var i = 0; i < pool.length; i++) {
-    expect(
-      seen[i]!.map((e) => e.id).toSet(),
-      hasLength(edits),
-      reason:
-          '${logAliasHandle(LogAliasClass.relay, pool[i].url)} must hold '
-          'one distinct kind-0 per edit made so far — more means a pass '
-          'signed a new event for an edit already published.',
-    );
   }
 }
 
