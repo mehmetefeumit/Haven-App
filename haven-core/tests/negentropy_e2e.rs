@@ -1571,6 +1571,13 @@ async fn a_stop_during_a_foreground_pass_drains_and_dials_nothing() {
 /// stretch between the pass's dial and its fetch where it reads no fence —
 /// ends the pass there: the stop drains every task, and no session is opened
 /// after it, even once the slow relay answers the dial.
+///
+/// The pass ends at its dial one of two ways, and nothing outside the drive
+/// task tells them apart: the stop's cancel drops it, or — when the stop
+/// lands inside a poll of the drive task already past its cancel check, which
+/// no premise read from here can rule out — the stop's own close of the drive
+/// pool cuts the dial under it and the pass gives up there. So what is held
+/// is what the wire shows, never which way it went.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stop_while_a_foreground_pass_dials_opens_no_session_after_it() {
     let (open, held) = tokio::sync::watch::channel(true);
@@ -1581,12 +1588,14 @@ async fn a_stop_while_a_foreground_pass_dials_opens_no_session_after_it() {
     let circle = pair.circle(&urls).await;
     let _ = start_clock(&pair.bob);
     let core = entry_waiting_for_its_replay(&pair, &circle, &urls, &open).await;
+    let before = wire.connections();
     wire.hold_new_connections();
     open.send(true).expect("the entry's replay comes in");
     assert!(
         poll_until(|| wire.held() == 1).await,
         "premise: the pass is dialling the relay"
     );
+    let dialled = wire.connections();
 
     let stopped = core.stop().await;
     wire.release_connections();
@@ -1602,8 +1611,17 @@ async fn a_stop_while_a_foreground_pass_dials_opens_no_session_after_it() {
         "a foreground pass kept the session's tasks past its stop"
     );
     assert_eq!(
-        processor.for_test().negentropy_steps().1,
-        0,
+        processor.for_test().negentropy_steps().0,
+        1,
+        "a pass began after the stop"
+    );
+    assert_eq!(
+        wire.connections(),
+        dialled,
+        "a socket was opened after the stop"
+    );
+    assert!(
+        wire.frames().iter().all(|frame| frame.conn < before),
         "the pass ran on past the stop instead of ending where it stood"
     );
     assert!(
