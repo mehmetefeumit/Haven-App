@@ -1,0 +1,37 @@
+# I3 — every method of MDK's `NostrRelayClient`, `TransportAdapter` and
+# `NostrTransportAdapter`. `refused`: check_publish_client_no_subscription.sh
+# refuses a call of it planted in a copy of the tree. `allowed`: the publish
+# plane Haven's fanout drives, for the reason given.
+cgka_traits::transport_adapter::TransportAdapter::activate_account refused
+cgka_traits::transport_adapter::TransportAdapter::deactivate_account refused
+cgka_traits::transport_adapter::TransportAdapter::publish refused
+cgka_traits::transport_adapter::TransportAdapter::receive refused
+cgka_traits::transport_adapter::TransportAdapter::sync_account_groups refused
+transport_nostr_adapter::NostrRelayClient::publish_event allowed # the publish plane: reached only from MDK's fanout driver over the publish client RelayManager::fanout_transport hands it (check 11); it subscribes to nothing
+transport_nostr_adapter::NostrRelayClient::publish_events allowed # the publish plane: reached only from MDK's fanout driver over the publish client RelayManager::fanout_transport hands it (check 11); it subscribes to nothing
+transport_nostr_adapter::NostrRelayClient::publish_events_with_timings allowed # the publish plane: reached only from MDK's fanout driver over the publish client RelayManager::fanout_transport hands it (check 11); it subscribes to nothing
+transport_nostr_adapter::NostrRelayClient::subscribe refused
+transport_nostr_adapter::NostrRelayClient::unsubscribe refused
+transport_nostr_adapter::NostrRelayClient::unsubscribe_account refused
+transport_nostr_adapter::NostrTransportAdapter::account_subscription_attempt refused
+transport_nostr_adapter::NostrTransportAdapter::account_subscription_eose refused
+transport_nostr_adapter::NostrTransportAdapter::activate_account refused
+transport_nostr_adapter::NostrTransportAdapter::deactivate_account refused
+transport_nostr_adapter::NostrTransportAdapter::deliver_local_publish refused
+transport_nostr_adapter::NostrTransportAdapter::delivery_spread refused
+transport_nostr_adapter::NostrTransportAdapter::handle_reconciled_event refused
+transport_nostr_adapter::NostrTransportAdapter::handle_relay_eose refused
+transport_nostr_adapter::NostrTransportAdapter::handle_relay_event refused
+transport_nostr_adapter::NostrTransportAdapter::install_group_maintenance_subscription refused
+transport_nostr_adapter::NostrTransportAdapter::metrics refused
+transport_nostr_adapter::NostrTransportAdapter::new refused
+transport_nostr_adapter::NostrTransportAdapter::observe_relay_event refused
+transport_nostr_adapter::NostrTransportAdapter::publish refused
+transport_nostr_adapter::NostrTransportAdapter::receive refused
+transport_nostr_adapter::NostrTransportAdapter::record_reconciliation refused
+transport_nostr_adapter::NostrTransportAdapter::relay_sync refused
+transport_nostr_adapter::NostrTransportAdapter::remove_group_maintenance_subscription refused
+transport_nostr_adapter::NostrTransportAdapter::resolve_relay_labels refused
+transport_nostr_adapter::NostrTransportAdapter::subscription_any_eose refused
+transport_nostr_adapter::NostrTransportAdapter::subscription_synced refused
+transport_nostr_adapter::NostrTransportAdapter::sync_account_groups refused

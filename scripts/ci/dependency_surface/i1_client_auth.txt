@@ -1,0 +1,22 @@
+# I1 — every public function and field of nostr-sdk `src/client/**` and of
+# nostr-relay-pool whose name says auth or signer. `refused`: check 11 of
+# check_engine_client_options.sh refuses it, proved by planting `x.NAME(true)`,
+# `Owner::NAME(x, true)` or `x.NAME = y` in a copy of the tree. `allowed`: needs
+# no ban, for the reason given (Security Rule 16). Neither check 11 nor this list
+# sees a `ClientMessage::auth` built by hand and sent through `send_msg_to`.
+nostr_relay_pool::pool::builder::RelayPoolBuilder.__signer refused
+nostr_relay_pool::pool::options::RelayPoolOptions::automatic_authentication refused
+nostr_relay_pool::shared::SharedState::automatic_authentication refused
+nostr_relay_pool::shared::SharedState::has_signer allowed # reads whether a signer is set; sets none
+nostr_relay_pool::shared::SharedState::is_auto_authentication_enabled allowed # reads the switch; changes nothing
+nostr_relay_pool::shared::SharedState::set_signer refused
+nostr_relay_pool::shared::SharedState::signer refused
+nostr_relay_pool::shared::SharedState::unset_signer refused
+nostr_sdk::client::Client::automatic_authentication refused
+nostr_sdk::client::Client::has_signer allowed # reads whether a signer is set; sets none (the_publish_client_holds_no_signer_and_never_authenticates reads it back)
+nostr_sdk::client::Client::set_signer refused
+nostr_sdk::client::Client::signer refused
+nostr_sdk::client::Client::unset_signer refused
+nostr_sdk::client::builder::ClientBuilder.signer refused
+nostr_sdk::client::builder::ClientBuilder::signer refused
+nostr_sdk::client::options::ClientOptions::automatic_authentication refused

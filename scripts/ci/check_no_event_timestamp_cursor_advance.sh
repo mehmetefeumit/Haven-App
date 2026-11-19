@@ -78,18 +78,26 @@
 #      anything. Reading a cursor and RESETTING one (which can only lower it, to
 #      unseeded) stay allowed: neither can raise a floor.
 #
+# Usage:
+#   bash scripts/ci/check_no_event_timestamp_cursor_advance.sh
+#   bash scripts/ci/check_no_event_timestamp_cursor_advance.sh --self-test
+#
 # Exit codes:
-#   0  all checks pass
-#   1  a banned symbol is present
+#   0  all checks pass (or the self-test passed)
+#   1  a banned symbol is present (or the self-test failed)
 #   2  expected paths missing (misconfiguration)
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REPO_ROOT="${REPO_ROOT_OVERRIDE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 FFI_SRC_DIR="${REPO_ROOT}/haven/rust_builder/src"
 DART_LIB_DIR="${REPO_ROOT}/haven/lib"
 DART_TEST_DIR="${REPO_ROOT}/haven/test"
 DART_E2E_DIR="${REPO_ROOT}/haven/integration_test"
+
+# How many fixtures the self-test runs. Pinned, because a fixture that stops
+# running is the one way a deleted check reports success.
+readonly SELF_TEST_FIXTURES=12
 
 log() {
   printf '\033[1;34m[check_no_event_timestamp_cursor_advance]\033[0m %s\n' "$*"
@@ -100,64 +108,137 @@ fail() {
   exit 1
 }
 
-for d in "${FFI_SRC_DIR}" "${DART_LIB_DIR}" "${DART_TEST_DIR}" "${DART_E2E_DIR}"; do
-  [[ -d "${d}" ]] || { echo "ERROR: ${d} not found" >&2; exit 2; }
-done
+run_check() {
+  local d hits
+  for d in "${FFI_SRC_DIR}" "${DART_LIB_DIR}" "${DART_TEST_DIR}" "${DART_E2E_DIR}"; do
+    [[ -d "${d}" ]] || { echo "ERROR: ${d} not found" >&2; exit 2; }
+  done
+
+  # -------------------------------------------------------------------------
+  # Check 1: the removed FFI method stays removed.
+  # -------------------------------------------------------------------------
+  log "Scanning haven/rust_builder/src for the removed group-cursor FFI advance ..."
+  hits="$(grep -rnF 'cursor_advance_group_to_event' "${FFI_SRC_DIR}" 2>/dev/null || true)"
+  if [[ -n "${hits}" ]]; then
+    printf '%s\n' "${hits}" >&2
+    fail "the group-cursor-to-event FFI advance is back. It writes a sync cursor from an inbound event's unauthenticated created_at; group cursors are advanced in haven-core only, anchored on the local instant an observation window opened."
+  fi
+
+  # -------------------------------------------------------------------------
+  # Check 2: the removed Dart service method + its FFI binding stay removed.
+  # -------------------------------------------------------------------------
+  log "Scanning haven/lib, haven/test and haven/integration_test for the removed Dart group-cursor advance ..."
+  hits="$(grep -rnE 'advanceGroupCursorToEventSecs|cursorAdvanceGroupToEvent' \
+    "${DART_LIB_DIR}" "${DART_TEST_DIR}" "${DART_E2E_DIR}" 2>/dev/null || true)"
+  if [[ -n "${hits}" ]]; then
+    printf '%s\n' "${hits}" >&2
+    fail "a Dart group-cursor advance is back. The poll path must derive NO cursor from an event timestamp; the per-circle group cursor is owned by haven-core's catch-up sweep and live-sync EOSE anchor."
+  fi
+
+  # -------------------------------------------------------------------------
+  # Check 3: the removed inbox FFI method stays removed.
+  # -------------------------------------------------------------------------
+  log "Scanning haven/rust_builder/src for the removed inbox-cursor FFI advance ..."
+  hits="$(grep -rnF 'cursor_advance_inbox_to_wrap' "${FFI_SRC_DIR}" 2>/dev/null || true)"
+  if [[ -n "${hits}" ]]; then
+    printf '%s\n' "${hits}" >&2
+    fail "the inbox-cursor-to-gift-wrap FFI advance is back. It writes the inbox REQ floor from a kind:1059 wrapper's unauthenticated created_at, which anyone who knows this user's published npub can choose; future-dated it pins every later floor at now, where NIP-59's mandatory backdating hides every genuine invitation. The inbox cursor is advanced in haven-core only, on the inbox REQ's EOSE, to that REQ's local open time."
+  fi
+
+  # -------------------------------------------------------------------------
+  # Check 4: the removed Dart inbox service method + its FFI binding stay removed.
+  # -------------------------------------------------------------------------
+  log "Scanning haven/lib, haven/test and haven/integration_test for the removed Dart inbox-cursor advance ..."
+  hits="$(grep -rnE 'advanceInboxCursorToWrapSecs|cursorAdvanceInboxToWrap' \
+    "${DART_LIB_DIR}" "${DART_TEST_DIR}" "${DART_E2E_DIR}" 2>/dev/null || true)"
+  if [[ -n "${hits}" ]]; then
+    printf '%s\n' "${hits}" >&2
+    fail "a Dart inbox-cursor advance is back. Dart must derive NO cursor from a gift-wrap timestamp; the inbox cursor is owned by haven-core's live-sync EOSE anchor."
+  fi
+
+  # -------------------------------------------------------------------------
+  # Check 5: no FFI entry point may RAISE a sync cursor, or name a stream key.
+  #
+  # The behavioural half of the guard: renaming a method does not evade it, and
+  # it bans the whole class rather than the two instances that existed.
+  # -------------------------------------------------------------------------
+  log "Scanning haven/rust_builder/src for any cursor-raising primitive or stream key ..."
+  hits="$(grep -rnE 'advance_sync_cursor|seed_sync_cursor_if_unset|STREAM_GROUP_445|STREAM_INBOX_1059' \
+    "${FFI_SRC_DIR}" 2>/dev/null || true)"
+  if [[ -n "${hits}" ]]; then
+    printf '%s\n' "${hits}" >&2
+    fail "the FFI crate raises a sync cursor (or names a cursor stream key). A cursor advance is earned by a COMPLETED OBSERVATION WINDOW, and only haven-core's receive planes observe one; this boundary sees single events and caller-supplied numbers, which are evidence of nothing. Reading a cursor and resetting one to unseeded remain allowed. Cursor advances belong in haven_core::relay::catchup and live_sync::anchor."
+  fi
+
+  log "OK: no cursor advance is derived from an event timestamp, and no FFI entry point raises a cursor."
+}
 
 # ---------------------------------------------------------------------------
-# Check 1: the removed FFI method stays removed.
+# Self-test: whole trees through the real entry point, one plant per banned
+# symbol in a scanned root, and the reads and resets the guard allows.
 # ---------------------------------------------------------------------------
-log "Scanning haven/rust_builder/src for the removed group-cursor FFI advance ..."
-hits="$(grep -rnF 'cursor_advance_group_to_event' "${FFI_SRC_DIR}" 2>/dev/null || true)"
-if [[ -n "${hits}" ]]; then
-  printf '%s\n' "${hits}" >&2
-  fail "the group-cursor-to-event FFI advance is back. It writes a sync cursor from an inbound event's unauthenticated created_at; group cursors are advanced in haven-core only, anchored on the local instant an observation window opened."
-fi
+self_test() {
+  local tmp fails=0 checked=0 t
+  tmp="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '${tmp}'" RETURN
 
-# ---------------------------------------------------------------------------
-# Check 2: the removed Dart service method + its FFI binding stay removed.
-# ---------------------------------------------------------------------------
-log "Scanning haven/lib, haven/test and haven/integration_test for the removed Dart group-cursor advance ..."
-hits="$(grep -rnE 'advanceGroupCursorToEventSecs|cursorAdvanceGroupToEvent' \
-  "${DART_LIB_DIR}" "${DART_TEST_DIR}" "${DART_E2E_DIR}" 2>/dev/null || true)"
-if [[ -n "${hits}" ]]; then
-  printf '%s\n' "${hits}" >&2
-  fail "a Dart group-cursor advance is back. The poll path must derive NO cursor from an event timestamp; the per-circle group cursor is owned by haven-core's catch-up sweep and live-sync EOSE anchor."
-fi
+  _tree() { # <tree>
+    mkdir -p "$1/haven/rust_builder/src" "$1/haven/lib" "$1/haven/test" "$1/haven/integration_test"
+    printf 'pub fn cursor_read(s: &Store) -> u64 { s.read_sync_cursor() }\npub fn cursor_reset(s: &Store) { s.reset_sync_cursor() }\n' \
+      >"$1/haven/rust_builder/src/api.rs"
+    printf 'Future<int> readCursor() => cursorRead();\n' >"$1/haven/lib/relay_service.dart"
+    printf 'void main() {}\n' >"$1/haven/test/relay_test.dart"
+    printf 'void main() {}\n' >"$1/haven/integration_test/app_test.dart"
+  }
+  _case() { # _case <label> <want-rc> <tree>
+    local label="$1" want="$2" got=0
+    checked=$(( checked + 1 ))
+    REPO_ROOT_OVERRIDE="$3" bash "${BASH_SOURCE[0]}" >/dev/null 2>&1 || got=$?
+    if [[ "${got}" -eq "${want}" ]]; then
+      printf '  \033[1;32mPASS\033[0m %s\n' "${label}"
+    else
+      printf '  \033[1;31mFAIL\033[0m %s (want rc=%d, got rc=%d)\n' "${label}" "${want}" "${got}" >&2
+      fails=1
+    fi
+  }
+  _plant() { # <label> <file under the tree> <line>
+    t="${tmp}/plant-${checked}"; _tree "${t}"
+    printf '%s\n' "$3" >>"${t}/$2"
+    _case "$1" 1 "${t}"
+  }
 
-# ---------------------------------------------------------------------------
-# Check 3: the removed inbox FFI method stays removed.
-# ---------------------------------------------------------------------------
-log "Scanning haven/rust_builder/src for the removed inbox-cursor FFI advance ..."
-hits="$(grep -rnF 'cursor_advance_inbox_to_wrap' "${FFI_SRC_DIR}" 2>/dev/null || true)"
-if [[ -n "${hits}" ]]; then
-  printf '%s\n' "${hits}" >&2
-  fail "the inbox-cursor-to-gift-wrap FFI advance is back. It writes the inbox REQ floor from a kind:1059 wrapper's unauthenticated created_at, which anyone who knows this user's published npub can choose; future-dated it pins every later floor at now, where NIP-59's mandatory backdating hides every genuine invitation. The inbox cursor is advanced in haven-core only, on the inbox REQ's EOSE, to that REQ's local open time."
-fi
+  echo "check_no_event_timestamp_cursor_advance.sh --self-test"
+  t="${tmp}/ok"; _tree "${t}"
+  _case "reading and resetting a cursor pass" 0 "${t}"
 
-# ---------------------------------------------------------------------------
-# Check 4: the removed Dart inbox service method + its FFI binding stay removed.
-# ---------------------------------------------------------------------------
-log "Scanning haven/lib, haven/test and haven/integration_test for the removed Dart inbox-cursor advance ..."
-hits="$(grep -rnE 'advanceInboxCursorToWrapSecs|cursorAdvanceInboxToWrap' \
-  "${DART_LIB_DIR}" "${DART_TEST_DIR}" "${DART_E2E_DIR}" 2>/dev/null || true)"
-if [[ -n "${hits}" ]]; then
-  printf '%s\n' "${hits}" >&2
-  fail "a Dart inbox-cursor advance is back. Dart must derive NO cursor from a gift-wrap timestamp; the inbox cursor is owned by haven-core's live-sync EOSE anchor."
-fi
+  _plant "(1) the group FFI advance fails" haven/rust_builder/src/api.rs 'pub fn cursor_advance_group_to_event(secs: u64) {}'
+  _plant "(2) the Dart group advance in haven/lib fails" haven/lib/relay_service.dart 'Future<void> advanceGroupCursorToEventSecs(int s) async {}'
+  _plant "(2) its binding in haven/test fails" haven/test/relay_test.dart '// cursorAdvanceGroupToEvent(secs: 1);'
+  _plant "(3) the inbox FFI advance fails" haven/rust_builder/src/api.rs 'pub fn cursor_advance_inbox_to_wrap(secs: u64) {}'
+  _plant "(4) the Dart inbox advance in haven/integration_test fails" haven/integration_test/app_test.dart 'await advanceInboxCursorToWrapSecs(1);'
+  _plant "(4) its binding in haven/lib fails" haven/lib/relay_service.dart 'cursorAdvanceInboxToWrap(secs: 1);'
+  _plant "(5) an FFI call of advance_sync_cursor fails" haven/rust_builder/src/api.rs 'fn raise(s: &Store) { s.advance_sync_cursor(STREAM, 9) }'
+  _plant "(5) an FFI call of seed_sync_cursor_if_unset fails" haven/rust_builder/src/api.rs 'fn seed(s: &Store) { s.seed_sync_cursor_if_unset(STREAM, 9) }'
+  _plant "(5) the FFI naming STREAM_GROUP_445 fails" haven/rust_builder/src/api.rs 'use haven_core::relay::cursor::STREAM_GROUP_445;'
+  _plant "(5) the FFI naming STREAM_INBOX_1059 fails" haven/rust_builder/src/api.rs 'use haven_core::relay::cursor::STREAM_INBOX_1059;'
 
-# ---------------------------------------------------------------------------
-# Check 5: no FFI entry point may RAISE a sync cursor, or name a stream key.
-#
-# The behavioural half of the guard: renaming a method does not evade it, and
-# it bans the whole class rather than the two instances that existed.
-# ---------------------------------------------------------------------------
-log "Scanning haven/rust_builder/src for any cursor-raising primitive or stream key ..."
-hits="$(grep -rnE 'advance_sync_cursor|seed_sync_cursor_if_unset|STREAM_GROUP_445|STREAM_INBOX_1059' \
-  "${FFI_SRC_DIR}" 2>/dev/null || true)"
-if [[ -n "${hits}" ]]; then
-  printf '%s\n' "${hits}" >&2
-  fail "the FFI crate raises a sync cursor (or names a cursor stream key). A cursor advance is earned by a COMPLETED OBSERVATION WINDOW, and only haven-core's receive planes observe one; this boundary sees single events and caller-supplied numbers, which are evidence of nothing. Reading a cursor and resetting one to unseeded remain allowed. Cursor advances belong in haven_core::relay::catchup and live_sync::anchor."
-fi
+  t="${tmp}/missing"; _tree "${t}"; rm -r "${t}/haven/integration_test"
+  _case "a missing root is a misconfiguration" 2 "${t}"
 
-log "OK: no cursor advance is derived from an event timestamp, and no FFI entry point raises a cursor."
+  if (( fails )); then
+    echo "self-test: FAILED" >&2
+    return 1
+  fi
+  if (( checked != SELF_TEST_FIXTURES )); then
+    echo "self-test: ran ${checked} fixture(s), expected exactly ${SELF_TEST_FIXTURES}. A fixture was added or removed without moving the pin — the one way a deleted fixture reports success." >&2
+    return 1
+  fi
+  echo "self-test: OK (${checked}/${SELF_TEST_FIXTURES} fixtures)"
+}
+
+case "${1:-}" in
+  --self-test) self_test ;;
+  '') run_check ;;
+  *) echo "usage: $(basename "$0") [--self-test]" >&2; exit 2 ;;
+esac

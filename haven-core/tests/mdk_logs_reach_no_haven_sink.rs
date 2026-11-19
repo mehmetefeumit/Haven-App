@@ -6,9 +6,11 @@
 //! enabling `tracing/log` would forward every MDK event into the `log` facade
 //! Haven's platform loggers read. This drives a session end to end — open, mint
 //! a `KeyPackage`, create, invite, join, send, receive — under the in-process
-//! capture and asserts no record came from an MDK crate. Adding
-//! `tracing = { version = "0.1", features = ["log"] }` to the dev-dependencies
-//! turns it red.
+//! capture and asserts every record came from Haven, from this test or from
+//! openmls: an allowlist, because a list of MDK's crate names passes a crate
+//! MDK renames or adds (`marmot_session`, `fs_private`) while watching nothing.
+//! Adding `tracing = { version = "0.1", features = ["log"] }` to the
+//! dev-dependencies turns it red.
 //!
 //! openmls is not MDK: it logs through `log` directly
 //! (`openmls-0.8.1/src/ciphersuite/secret.rs:81`), so its records do reach this
@@ -25,7 +27,8 @@ use tempfile::TempDir;
 mod helpers;
 use helpers::{assert_no_needles, assert_some_line_from, capture_haven_log};
 
-const MDK_TARGETS: [&str; 4] = ["cgka_", "storage_sqlite", "transport_nostr", "marmot"];
+/// The only crates a captured record may come from.
+const ALLOWED_TARGETS: [&str; 3] = ["haven_core", "mdk_logs_reach_no_haven_sink", "openmls"];
 const CIRCLE_NAME: &str = "Needle Circle Quillon";
 const RELAY: &str = "wss://needle-relay-quillon.example.com";
 
@@ -83,14 +86,14 @@ async fn no_mdk_log_record_reaches_the_haven_log_sink() {
     }))
     .await;
 
-    let mdk: Vec<_> = lines
+    let foreign: Vec<_> = lines
         .iter()
-        .filter(|l| MDK_TARGETS.iter().any(|t| l.target.starts_with(t)))
+        .filter(|l| !ALLOWED_TARGETS.iter().any(|t| l.target.starts_with(t)))
         .map(|l| &l.target)
         .collect();
     assert!(
-        mdk.is_empty(),
-        "MDK records reached the log sink from {mdk:?}"
+        foreign.is_empty(),
+        "records from a dependency other than openmls reached the log sink from {foreign:?}"
     );
 
     assert_some_line_from(&lines, "openmls");

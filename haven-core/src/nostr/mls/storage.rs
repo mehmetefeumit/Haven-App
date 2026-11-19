@@ -692,7 +692,17 @@ pub fn set_stored_message_write_fault_for_test(
         "DROP TRIGGER IF EXISTS haven_stored_message_write_fault;"
     };
     conn.execute_batch(sql)
-        .map_err(|_| storage_err("set the stored-message write fault"))
+        .map_err(|_| storage_err("set the stored-message write fault"))?;
+    if !armed {
+        return Ok(());
+    }
+    prove_fault_bites(
+        &conn,
+        "prove the stored-message write fault bites",
+        "cgka_messages",
+        &[],
+        None,
+    )
 }
 
 /// [`set_stored_message_write_fault_for_test`], sparing the one stored row
@@ -726,7 +736,17 @@ pub fn set_stored_message_write_fault_sparing_for_test(
         "DROP TRIGGER IF EXISTS haven_stored_message_write_fault_sparing;".to_owned()
     };
     conn.execute_batch(&sql)
-        .map_err(|_| storage_err("set the stored-message write fault"))
+        .map_err(|_| storage_err("set the stored-message write fault"))?;
+    if !armed {
+        return Ok(());
+    }
+    prove_fault_bites(
+        &conn,
+        "prove the sparing stored-message write fault bites",
+        "cgka_messages",
+        &["id"],
+        None,
+    )
 }
 
 /// Arms or disarms an abort on the write of every stored message row that
@@ -761,7 +781,17 @@ pub fn set_new_stored_message_fault_for_test(
         "DROP TRIGGER IF EXISTS haven_new_stored_message_fault;"
     };
     conn.execute_batch(sql)
-        .map_err(|_| storage_err("set the new-stored-message fault"))
+        .map_err(|_| storage_err("set the new-stored-message fault"))?;
+    if !armed {
+        return Ok(());
+    }
+    prove_fault_bites(
+        &conn,
+        "prove the new-stored-message fault bites",
+        "cgka_messages",
+        &["id"],
+        Some("INSERT INTO cgka_messages (id) VALUES (randomblob(32))"),
+    )
 }
 
 /// Arms or disarms an abort on every first storing of the one event `row`
@@ -802,7 +832,27 @@ pub fn set_new_stored_message_fault_naming_for_test(
             .to_owned()
     };
     conn.execute_batch(&sql)
-        .map_err(|_| storage_err("set the new-stored-message fault"))
+        .map_err(|_| storage_err("set the new-stored-message fault"))?;
+    if !armed {
+        return Ok(());
+    }
+    let id = hex::encode(row);
+    prove_fault_bites(
+        &conn,
+        "prove the named new-stored-message fault bites",
+        "cgka_messages",
+        &["id"],
+        Some(&format!("INSERT INTO cgka_messages (id) VALUES (X'{id}')")),
+    )?;
+    prove_fault_bites(
+        &conn,
+        "prove the named processed-id fault bites",
+        "cgka_processed_transport_ids",
+        &["id"],
+        Some(&format!(
+            "INSERT INTO cgka_processed_transport_ids (id) VALUES (X'{id}')"
+        )),
+    )
 }
 
 /// Arms or disarms an abort on every state change of the one stored row
@@ -838,7 +888,17 @@ pub fn set_stored_message_write_fault_naming_for_test(
         "DROP TRIGGER IF EXISTS haven_stored_message_write_fault_naming;".to_owned()
     };
     conn.execute_batch(&sql)
-        .map_err(|_| storage_err("set the stored-message write fault"))
+        .map_err(|_| storage_err("set the stored-message write fault"))?;
+    if !armed {
+        return Ok(());
+    }
+    prove_fault_bites(
+        &conn,
+        "prove the named stored-message write fault bites",
+        "cgka_messages",
+        &["id"],
+        None,
+    )
 }
 
 /// Arms or disarms an abort on the deletion of every stored message row.
@@ -867,7 +927,17 @@ pub fn set_stored_message_delete_fault_for_test(
         "DROP TRIGGER IF EXISTS haven_stored_message_delete_fault;"
     };
     conn.execute_batch(sql)
-        .map_err(|_| storage_err("set the stored-message delete fault"))
+        .map_err(|_| storage_err("set the stored-message delete fault"))?;
+    if !armed {
+        return Ok(());
+    }
+    prove_fault_bites(
+        &conn,
+        "prove the stored-message delete fault bites",
+        "cgka_messages",
+        &[],
+        None,
+    )
 }
 
 /// Makes each of the next `writes` peel attempts outlast MDK's background
@@ -912,8 +982,14 @@ pub fn slow_deferred_peel_writes_for_test(
             [writes],
         )
     })
-    .map(|_| ())
-    .map_err(|_| storage_err("arm the slow deferred-peel writes"))
+    .map_err(|_| storage_err("arm the slow deferred-peel writes"))?;
+    prove_fault_bites(
+        &conn,
+        "prove the slow deferred-peel writes bite",
+        "cgka_messages",
+        &["state", "deferred_peel"],
+        None,
+    )
 }
 
 /// How many of the writes [`slow_deferred_peel_writes_for_test`] armed are
@@ -1004,7 +1080,17 @@ pub fn set_commit_retirement_fault_for_test(
         "DROP TRIGGER IF EXISTS haven_commit_retirement_fault;".to_owned()
     };
     conn.execute_batch(&sql)
-        .map_err(|_| storage_err("set the commit-retirement fault"))
+        .map_err(|_| storage_err("set the commit-retirement fault"))?;
+    if !armed {
+        return Ok(());
+    }
+    prove_fault_bites(
+        &conn,
+        "prove the commit-retirement fault bites",
+        "cgka_messages",
+        &["id", "state"],
+        None,
+    )
 }
 
 /// An engine write [`set_engine_write_fault_for_test`] can make fail.
@@ -1075,7 +1161,20 @@ pub fn set_engine_write_fault_for_test(
         format!("DROP TRIGGER IF EXISTS haven_write_fault_{table}_{op};")
     };
     conn.execute_batch(&sql)
-        .map_err(|_| storage_err("set the engine write fault"))
+        .map_err(|_| storage_err("set the engine write fault"))?;
+    if !armed {
+        return Ok(());
+    }
+    // A BEFORE INSERT trigger fires before any constraint is checked, so an
+    // empty row reaches it; a delete needs a row this probe cannot make.
+    let probe = (op == "INSERT").then(|| format!("INSERT INTO {table} DEFAULT VALUES"));
+    prove_fault_bites(
+        &conn,
+        "prove the engine write fault bites",
+        table,
+        &[],
+        probe.as_deref(),
+    )
 }
 
 /// Arms (or disarms) an abort on every Welcome delivery record written past
@@ -1112,7 +1211,18 @@ pub fn set_welcome_record_write_fault_for_test(
         "DROP TRIGGER IF EXISTS haven_welcome_record_fault;".to_owned()
     };
     conn.execute_batch(&sql)
-        .map_err(|_| storage_err("set the Welcome record write fault"))
+        .map_err(|_| storage_err("set the Welcome record write fault"))?;
+    if !armed {
+        return Ok(());
+    }
+    // It fires only past `landing` more records: nothing to probe yet.
+    prove_fault_bites(
+        &conn,
+        "prove the Welcome record write fault bites",
+        "cgka_transport_fanout",
+        &[],
+        None,
+    )
 }
 
 /// Arms or disarms an abort on the write of one epoch's retained anchor: the
@@ -1151,7 +1261,19 @@ pub fn set_epoch_anchor_write_fault_for_test(
         "DROP TRIGGER IF EXISTS haven_epoch_anchor_write_fault;".to_owned()
     };
     conn.execute_batch(&sql)
-        .map_err(|_| storage_err("set the epoch-anchor write fault"))
+        .map_err(|_| storage_err("set the epoch-anchor write fault"))?;
+    if !armed {
+        return Ok(());
+    }
+    prove_fault_bites(
+        &conn,
+        "prove the epoch-anchor write fault bites",
+        "cgka_group_snapshots",
+        &["name"],
+        Some(&format!(
+            "INSERT INTO cgka_group_snapshots (name) VALUES ('openmls-retained-anchor-{epoch}')"
+        )),
+    )
 }
 
 /// Arms or disarms an abort on every write of a fanout row whose stored
@@ -1185,7 +1307,20 @@ pub fn set_fanout_write_fault_naming_for_test(
         "DROP TRIGGER IF EXISTS haven_fanout_write_fault_naming;".to_owned()
     };
     conn.execute_batch(&sql)
-        .map_err(|_| storage_err("set the fanout write fault"))
+        .map_err(|_| storage_err("set the fanout write fault"))?;
+    if !armed {
+        return Ok(());
+    }
+    prove_fault_bites(
+        &conn,
+        "prove the fanout write fault bites",
+        "cgka_outbound_fanout",
+        &["record"],
+        Some(&format!(
+            "INSERT INTO cgka_outbound_fanout (record) VALUES (X'{}')",
+            hex::encode(needle)
+        )),
+    )
 }
 
 /// How many outer transport ids the engine holds as processed for `group`.
@@ -1272,6 +1407,62 @@ fn open_tamper_connection(db_path: &Path, key: &SqlCipherKey) -> Result<rusqlite
     conn.pragma_update(None, "key", key.as_secret_str())
         .map_err(|_| storage_err("apply the SQLCipher key"))?;
     Ok(conn)
+}
+
+/// Proves an armed fault still bites, and leaves the store as arming it did.
+///
+/// `SQLite` refuses a trigger on a table that does not exist but accepts one
+/// whose condition reads a column that does not, and that trigger never
+/// fires: after a dependency bump renames a column, every test that armed it
+/// would pass on a store that answers. So each column the condition reads must
+/// be one `table` has; and where a `probe` statement can meet the condition
+/// without disturbing anything, it runs inside a savepoint that is rolled back
+/// and must be refused by the trigger itself.
+///
+/// What this does not prove: that the engine still makes the write the seam
+/// assumes. A seam on an update or a delete gets the column check alone, and a
+/// probe shows only that the trigger fires on the shape given here. That the
+/// engine's own call fails is each test's assertion, never this function's.
+#[cfg(any(test, feature = "test-utils"))]
+fn prove_fault_bites(
+    conn: &rusqlite::Connection,
+    seam: &'static str,
+    table: &str,
+    columns: &[&str],
+    probe: Option<&str>,
+) -> Result<()> {
+    let present = conn
+        .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))
+        .and_then(|mut names| {
+            names
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()
+        })
+        .map_err(|_| storage_err(seam))?;
+    if present.is_empty()
+        || columns
+            .iter()
+            .any(|column| !present.iter().any(|p| p == column))
+    {
+        return Err(storage_err(seam));
+    }
+    let Some(probe) = probe else {
+        return Ok(());
+    };
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .and_then(|()| conn.execute_batch("SAVEPOINT haven_fault_probe"))
+        .map_err(|_| storage_err(seam))?;
+    let refused = conn.execute_batch(probe);
+    conn.execute_batch("ROLLBACK TO haven_fault_probe; RELEASE haven_fault_probe")
+        .map_err(|_| storage_err(seam))?;
+    match refused {
+        Err(rusqlite::Error::SqliteFailure(code, _))
+            if code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER =>
+        {
+            Ok(())
+        }
+        _ => Err(storage_err(seam)),
+    }
 }
 
 /// Counts the writes to the fanout table since the last call.

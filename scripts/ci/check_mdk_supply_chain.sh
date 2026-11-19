@@ -36,16 +36,25 @@
 #      more is a feature nobody reviewed, and `nostr-sdk` missing from one
 #      lockfile is a root that builds another adapter than the one Haven's
 #      fanout calls.
+#   6. The crates resolved from a repository named `mdk` (MDK's, or a fork's)
+#      are exactly MDK_ALLOWED: an MDK crate nobody listed fails, and so does a
+#      listed one that is gone. A denylist passes a crate it has never heard
+#      of; MDK renames and adds crates between releases.
 #
 # A feature that only gates code adds no dependency, so the lockfile cannot
 # show it. `--adapter-features` asks cargo instead: in each of the three roots
-# the adapter's enabled features must be exactly `default` and `sdk`. It needs
-# cargo and the resolved sources, so it runs in rust-check.yml, not in the
-# pure-grep guard job; its parsing is covered by the self-test.
+# the adapter's enabled features must be exactly `default` and `sdk`.
+# `--nostr-features` does the same for `nostr` and `nostr-sdk` in the shipped
+# root, against the sets recorded below: a feature turned on by any crate is
+# code Haven ships that nobody reviewed. Both need cargo and the resolved
+# sources, so they run in rust-check.yml, not in the pure-grep guard job; their
+# parsing is covered by the self-test. Both resolve for the host target only: a
+# feature turned on for an Android or Apple target alone is not seen.
 #
 # Usage:
 #   bash scripts/ci/check_mdk_supply_chain.sh
 #   bash scripts/ci/check_mdk_supply_chain.sh --adapter-features
+#   bash scripts/ci/check_mdk_supply_chain.sh --nostr-features
 #   bash scripts/ci/check_mdk_supply_chain.sh --self-test
 #
 # Exit codes:
@@ -62,12 +71,32 @@ readonly -a LOCKFILES=(haven-core/Cargo.lock haven/rust_builder/Cargo.lock tooli
 
 # How many fixtures the self-test runs. Pinned, because a fixture that stops
 # running is the one way a deleted check reports success.
-readonly SELF_TEST_FIXTURES=18
+readonly SELF_TEST_FIXTURES=22
 
 # What the adapter links with `sdk` on and nothing else (its Cargo.toml at the
 # pinned rev: every non-optional dependency, plus `nostr-sdk`).
 readonly ADAPTER_DEPS='async-trait cgka-traits hex nostr nostr-sdk serde serde_json sha2 tokio tracing transport-nostr-peeler'
 readonly ADAPTER_FEATURES='default sdk'
+
+# The rust-nostr features the shipped root builds (`cargo tree -e
+# features,no-dev` in haven/rust_builder, recorded 2026-11-19 on nostr 0.44.8 /
+# nostr-sdk 0.44.1).
+readonly NOSTR_FEATURES='default nip44 nip49 nip59 std'
+readonly NOSTR_SDK_FEATURES='default nip44 nip59'
+readonly NOSTR_FEATURES_ROOT='haven/rust_builder'
+
+# Every crate Haven's graph may resolve from a repository named `mdk`, and why.
+readonly MDK_SOURCE_RE='^git[+]https://github[.]com/[^/]+/mdk([.]git)?[?#]'
+readonly -a MDK_ALLOWED=(
+  'cgka-engine|named directly: cgka-session takes its types without re-exporting them'
+  'cgka-session|the account-device session Haven opens'
+  'cgka-traits|the engine, storage and transport traits and types'
+  'fs-private|creates the stores'"'"' files at their final mode; a dependency of cgka-engine, cgka-session and storage-sqlite'
+  'marmot-forensics|a required dependency of cgka-session and cgka-engine; its recorder is never installed (check_no_forensic_recorder.sh)'
+  'storage-sqlite|the SQLCipher store'
+  'transport-nostr-adapter|the KeyPackage event template and, behind `sdk`, the relay client the fanout publishes through'
+  'transport-nostr-peeler|the kind-445 and gift-wrap peeler'
+)
 
 # Crates from the mdk workspace (or its uniffi surface) that must NEVER enter
 # Haven's graph. `uniffi` itself is listed because any uniffi binding layer
@@ -138,19 +167,28 @@ dep_names() { # <lockfile> <crate>
   ' "$1" | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//'
 }
 
-# stdin: `cargo tree -e features -i transport-nostr-adapter`. Prints the
-# adapter's enabled features, sorted, on one line.
-adapter_features() {
-  { grep -oE 'transport-nostr-adapter feature "[^"]+"' || true; } \
+# stdin: `cargo tree -e features -i <crate>`. Prints <crate>'s enabled
+# features, sorted, on one line.
+features_of() { # <crate>
+  { grep -oE "(^|[^A-Za-z0-9_-])$1 feature \"[^\"]+\"" || true; } \
     | sed -E 's/.*"([^"]+)"/\1/' | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ $//'
 }
 
-# stdin as adapter_features; <label> names the root in the message.
+# stdin as features_of; <label> names the root in the message.
 judge_adapter_features() { # <label>
   local got
-  got="$(adapter_features)"
+  got="$(features_of transport-nostr-adapter)"
   if [[ "${got}" != "${ADAPTER_FEATURES}" ]]; then
     fail "transport-nostr-adapter is built with feature(s) '${got}' in $1, not exactly '${ADAPTER_FEATURES}'. \`sdk\` is its relay client, which Haven's fanout hands the publish client; any other feature is MDK code nobody reviewed for Security Rules 15 and 16, and without \`sdk\` that root builds an adapter the fanout cannot call."
+  fi
+}
+
+# stdin as features_of.
+judge_nostr_features() { # <crate> <recorded>
+  local got
+  got="$(features_of "$1")"
+  if [[ "${got}" != "$2" ]]; then
+    fail "$1 is built with feature(s) '${got}' in ${NOSTR_FEATURES_ROOT}, not the recorded '$2'. A feature any crate in the graph turns on is rust-nostr code Haven ships; review what it adds (Security Rules 15 and 16), then record the new set here."
   fi
 }
 
@@ -202,6 +240,23 @@ check_lockfile() { # <repo-relative lockfile>
     fi
   done
 
+  # Check 6: the MDK crates are exactly the listed ones.
+  local allowed="" entry resolved
+  for entry in "${MDK_ALLOWED[@]}"; do allowed+="${entry%%|*}"$'\n'; done
+  resolved="$(awk -v re="${MDK_SOURCE_RE}" '
+    /^\[/ { pkg = ($0 == "[[package]]"); n = ""; next }
+    pkg && /^name = / { n = $3; gsub(/"/, "", n) }
+    pkg && /^source = / { s = $3; gsub(/"/, "", s); if (s ~ re) print n }
+  ' "${lockfile}" | LC_ALL=C sort -u)"
+  got="$(LC_ALL=C comm -13 <(LC_ALL=C sort <<<"${allowed}" | grep .) <(grep . <<<"${resolved}" || true) | tr '\n' ' ')"
+  if [[ -n "${got}" ]]; then
+    fail "MDK crate(s) nobody listed in ${rel}: ${got}— add each to MDK_ALLOWED with the reason Haven links it, after reviewing it (Security Rules 15 and 16)"
+  fi
+  got="$(LC_ALL=C comm -23 <(LC_ALL=C sort <<<"${allowed}" | grep .) <(grep . <<<"${resolved}" || true) | tr '\n' ' ')"
+  if [[ -n "${got}" ]]; then
+    fail "listed MDK crate(s) missing from ${rel}: ${got}— a renamed or dropped crate leaves every check keyed to its name reading nothing; move MDK_ALLOWED with the pin"
+  fi
+
   # Check 5: the adapter links its relay client and nothing unreviewed.
   got="$(dep_names "${lockfile}" transport-nostr-adapter)"
   if [[ "${got}" != "${ADAPTER_DEPS}" ]]; then
@@ -222,6 +277,21 @@ run_adapter_features() {
   log "OK: transport-nostr-adapter is built with exactly '${ADAPTER_FEATURES}' in ${#LOCKFILES[@]} roots."
 }
 
+run_nostr_features() {
+  local crate want tree
+  for crate in nostr nostr-sdk; do
+    want="${NOSTR_FEATURES}"
+    [[ "${crate}" == nostr-sdk ]] && want="${NOSTR_SDK_FEATURES}"
+    log "Asking cargo for ${crate}'s features in ${NOSTR_FEATURES_ROOT} ..."
+    if ! tree="$(cd "${REPO_ROOT}/${NOSTR_FEATURES_ROOT}" && cargo tree --locked -e features,no-dev -i "${crate}")"; then
+      echo "ERROR: cargo could not print ${crate}'s feature tree in ${NOSTR_FEATURES_ROOT}" >&2
+      exit 2
+    fi
+    judge_nostr_features "${crate}" "${want}" <<<"${tree}"
+  done
+  log "OK: nostr and nostr-sdk are built with exactly the recorded features in ${NOSTR_FEATURES_ROOT}."
+}
+
 run_check() {
   local pins="${REPO_ROOT}/scripts/ci/mdk_pins.env" rel
   [[ -f "${pins}" ]] || { echo "ERROR: ${pins} not found" >&2; exit 2; }
@@ -231,7 +301,7 @@ run_check() {
     log "Checking ${rel} ..."
     check_lockfile "${rel}"
   done
-  log "OK: MDK supply chain holds its shape in ${#LOCKFILES[@]} lockfiles — six Dark Matter crates on the pinned rev, no forbidden layers, no legacy mdk-*, one libsqlite3-sys from the pinned source, the adapter linking its relay client and nothing else."
+  log "OK: MDK supply chain holds its shape in ${#LOCKFILES[@]} lockfiles — six Dark Matter crates on the pinned rev, no MDK crate outside MDK_ALLOWED, no forbidden layers, no legacy mdk-*, one libsqlite3-sys from the pinned source, the adapter linking its relay client and nothing else."
 }
 
 # ---------------------------------------------------------------------------
@@ -269,6 +339,7 @@ self_test() {
   local c; for c in "${REQUIRED_CRATES[@]:0:5}"; do GOOD+=("${c}|0.9.4|${MDK}"); done
   GOOD+=("transport-nostr-adapter|0.9.4|${MDK}|${ADAPTER_DEPS}")
   GOOD+=("libsqlite3-sys|0.30.1|${REG}" "rusqlite|0.32.1|${REG}")
+  GOOD+=("marmot-forensics|0.9.4|${MDK}" "fs-private|0.9.4|${MDK}")
   _tree() { # <tree> <spec>... — every lockfile GOOD, the soak one GOOD + <spec>...
     local t="$1" rel; shift
     mkdir -p "${t}/scripts/ci"
@@ -342,6 +413,14 @@ self_test() {
   printf 'dependencies = [\n "marmot-account",\n]\n' >>"${t}/tooling/soak/Cargo.lock"
   _case "a forbidden name that is not a package name passes" 0 "${t}"
 
+  # Check 6, both directions: the MDK crate set is an allowlist.
+  t="${tmp}/unlisted-mdk"; _tree "${t}" "marmot-session|0.10.4|${MDK}"
+  _case "an MDK crate nobody listed fails" 1 "${t}"
+
+  t="${tmp}/listed-gone"; _tree "${t}"
+  _lock "${t}/haven/rust_builder/Cargo.lock" "${GOOD[@]:0:9}"
+  _case "a listed MDK crate missing from one lockfile fails" 1 "${t}"
+
   t="${tmp}/no-lock"; _tree "${t}"
   rm "${t}/tooling/soak/Cargo.lock"
   _case "a missing lockfile is a misconfiguration" 2 "${t}"
@@ -380,6 +459,35 @@ self_test() {
 └── transport-nostr-adapter feature \"quic\""
   _features "features: a tree that names no adapter feature fails" 1 'error: package ID specification `transport-nostr-adapter` did not match any packages'
 
+  # --nostr-features: the judgement over real `cargo tree -e features,no-dev -i
+  # nostr` output (haven/rust_builder, 2026-11-19), and that output with one
+  # feature more.
+  local NOSTR_TREE='nostr v0.44.8
+├── nostr feature "default"
+│   └── haven-core v0.1.0 (/work/haven-core)
+├── nostr feature "nip44"
+│   ├── nostr feature "nip59"
+│   │   └── cgka-engine v0.10.4 (https://github.com/marmot-protocol/mdk?rev=fcc85edd8dbd07c8293c899ee52230f72c54c897#fcc85edd)
+│   └── nostr-sdk feature "nip44"
+├── nostr feature "nip49"
+│   └── transport-nostr-peeler v0.10.4 (https://github.com/marmot-protocol/mdk?rev=fcc85edd8dbd07c8293c899ee52230f72c54c897#fcc85edd)
+└── nostr feature "std"
+    └── haven-core v0.1.0 (/work/haven-core) (*)'
+  _nostr() { # <label> <want-rc> <tree text>
+    local label="$1" want="$2" got=0
+    checked=$(( checked + 1 ))
+    ( judge_nostr_features nostr "${NOSTR_FEATURES}" <<<"$3" ) >/dev/null 2>&1 || got=$?
+    if [[ "${got}" -eq "${want}" ]]; then
+      printf '  \033[1;32mPASS\033[0m %s\n' "${label}"
+    else
+      printf '  \033[1;31mFAIL\033[0m %s (want rc=%d, got rc=%d)\n' "${label}" "${want}" "${got}" >&2
+      fails=1
+    fi
+  }
+  _nostr "nostr features: the recorded set passes (another crate's feature lines are not nostr's)" 0 "${NOSTR_TREE}"
+  _nostr "nostr features: a feature nobody recorded fails" 1 "${NOSTR_TREE}
+└── nostr feature \"nip46\""
+
   if (( fails )); then
     echo "self-test: FAILED" >&2
     return 1
@@ -394,6 +502,7 @@ self_test() {
 case "${1:-}" in
   --self-test) self_test ;;
   --adapter-features) run_adapter_features ;;
+  --nostr-features) run_nostr_features ;;
   '') run_check ;;
-  *) echo "usage: $(basename "$0") [--adapter-features | --self-test]" >&2; exit 2 ;;
+  *) echo "usage: $(basename "$0") [--adapter-features | --nostr-features | --self-test]" >&2; exit 2 ;;
 esac

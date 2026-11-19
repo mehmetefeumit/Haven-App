@@ -66,14 +66,14 @@ pub fn subscribe_ladder() -> Duration {
 /// = `60 + 3 + 60` seconds, from `nostr-relay-pool-0.44.3/src/relay/constants.rs:23`,
 /// `:24` and `:12`.
 ///
-/// # Why this one is a literal and the grep step is its control
+/// # Why this one is a literal and `tests/pool_constants.rs` is its control
 ///
 /// All three of those constants are `pub(super)`, so no expression in this crate
 /// can name them: the value is written out here with the citation above it. A
 /// test that re-computed `60 + 3 + 60` would be asserting this file against
-/// itself, which is why the `soak-tooling` job's grep of the vendored
-/// `constants.rs` — not a unit test — is what actually holds this honest. The
-/// in-crate case exists only so `--self-test` enumerates every bound.
+/// itself, which is why `tests/pool_constants.rs`, reading their values from the
+/// vendored `constants.rs` this root resolves, is what actually holds this
+/// honest. The in-crate case exists only so `--self-test` enumerates every bound.
 #[must_use]
 pub const fn pool_reconnect() -> Duration {
     Duration::from_secs(123)
@@ -91,7 +91,7 @@ pub const fn pool_reconnect() -> Duration {
 /// A literal with its citation for exactly [`pool_reconnect`]'s reason: all
 /// three constants are private to their module, so no expression in this crate
 /// can name them and a test that recomputed `3 × 10 + 2 × 2` would be asserting
-/// this file against itself. The `soak-tooling` grep step against that source is
+/// this file against itself. `tests/pool_constants.rs`, reading that source, is
 /// the control. The connection timeout is deliberately NOT in the sum — under a
 /// swallowed acknowledgement the socket connects and it is only the `OK` that
 /// never comes, which is what makes this 34 s rather than the 49 s an
@@ -146,8 +146,8 @@ pub const fn fanout_resend_after_silence() -> Duration {
 /// and a test that recomputed `1 × 5` would be asserting this file against
 /// itself. Two things hold it honest instead — haven-core carries its own
 /// `const _: () = assert!(LOCATION_PUBLISH_ATTEMPTS == 1, …)` beside the
-/// constant, which is a COMPILE error the day the single attempt grows, and the
-/// `soak-tooling` grep step against that source. As with
+/// constant, which is a COMPILE error the day the single attempt grows, and
+/// `tests/pool_constants.rs`, reading that source. As with
 /// [`withheld_publish_ladder`], the connection timeout is deliberately not in
 /// the sum: under a swallowed acknowledgement the socket connects and it is
 /// only the `OK` that never comes.
@@ -163,7 +163,7 @@ pub const fn location_publish_window() -> Duration {
 /// `CONNECTION_TIMEOUT + PROFILE_PUBLISH_ACK_TIMEOUT` = 5 + 6 = **11 s**
 /// (`haven-core/src/relay/manager.rs:121`, `:193`). A literal with its
 /// citation for [`pool_reconnect`]'s reason: the relay manager's module is
-/// private, so no expression here can name them; the `soak-tooling` grep step
+/// private, so no expression here can name them; `tests/pool_constants.rs`
 /// is the control.
 #[must_use]
 pub const fn profile_offer() -> Duration {
@@ -175,7 +175,7 @@ pub const fn profile_offer() -> Duration {
 /// The publish ladder (`PUBLISH_LADDER_MS` = 3 × (5 + 10) + 2 × 2 = 49 s) and
 /// the lookup's connect and default wait (`CONNECTION_TIMEOUT +
 /// DEFAULT_TIMEOUT` = 15 s), `haven-core/src/relay/manager.rs:149`, `:121`,
-/// `:50`; literals and grep-guarded for [`profile_offer`]'s reason.
+/// `:50`; literals, held by `tests/pool_constants.rs`, for [`profile_offer`]'s reason.
 #[must_use]
 pub const fn key_package_round_trip() -> Duration {
     Duration::from_secs(49 + 15)
@@ -493,8 +493,8 @@ pub enum BoundDefect {
 /// [`profile_offer`] and [`key_package_round_trip`] — because their
 /// source constants are private to their own modules (`pub(super)` in the
 /// pinned pool crate, plain `const` in `haven-core`'s relay manager), so a case
-/// would compare this file to itself. The `soak-tooling` grep step against
-/// those sources is their control, as their docs say; what IS checked here is
+/// would compare this file to itself. `tests/pool_constants.rs`, reading
+/// those sources, is their control, as their docs say; what IS checked here is
 /// the relation between the publish ladders, which does not need any of those
 /// constants to be nameable.
 ///

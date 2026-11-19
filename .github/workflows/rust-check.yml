@@ -663,63 +663,14 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: bash scripts/ci/check_mdk_supply_chain.sh --adapter-features
 
-      # The rig derives S01's and S17's liveness bounds from nostr-relay-pool's
-      # own reconnect constants, and S26's from the relay manager's. They are private to that crate, so the rig
-      # carries its own copies; this step is what stops the two drifting — it
-      # reads the VENDORED source cargo just resolved, not a doc.
-      - name: Reconnect constants still say what the bounds assume
-        run: |
-          set -euo pipefail
-          # Depth 5 under registry/src: index / crate / src / relay / file.
-          # sort -V, because 0.44.10 sorts before 0.44.3 lexically.
-          src="$(find "${CARGO_HOME:-${HOME}/.cargo}/registry/src" \
-                   -maxdepth 5 -type f -path '*nostr-relay-pool-*/src/relay/constants.rs' \
-                   | sort -V | tail -1)"
-          if [[ -z "${src}" ]]; then
-            echo "::error::nostr-relay-pool's vendored constants.rs was not found, so the rig's reconnect bounds are pinned against nothing. This is a broken guard, not a passing one."
-            exit 2
-          fi
-          status=0
-          for want in \
-            'DEFAULT_CONNECTION_TIMEOUT' \
-            'MAX_RETRY_INTERVAL' \
-            'JITTER_RANGE'; do
-            grep -qE "^pub(\((crate|super)\))? const ${want}" "${src}" || {
-              echo "::error::${want} is gone from nostr-relay-pool's constants.rs; tooling/soak/src/oracle/bounds.rs derives a liveness bound from it."
-              status=1
-            }
-          done
-          grep -nE '^pub(\((crate|super)\))? const (DEFAULT_CONNECTION_TIMEOUT|MAX_RETRY_INTERVAL|JITTER_RANGE)' "${src}" || true
-          # Same for the two private haven-core constants behind
-          # `location_publish_window()`: one attempt, a 5 s ack window.
-          # Anchored at the workspace: this job's steps run from tooling/soak.
-          loc="${GITHUB_WORKSPACE}/haven-core/src/relay/manager.rs"
-          if [[ ! -f "${loc}" ]]; then
-            echo "::error::haven-core's relay manager was not found, so location_publish_window() is pinned against nothing. This is a broken guard, not a passing one."
-            exit 2
-          fi
-          grep -qE '^const LOCATION_ACK_WINDOW: Duration = Duration::from_secs\(5\);' "${loc}" || {
-            echo "::error::LOCATION_ACK_WINDOW is no longer 5 s in haven-core/src/relay/manager.rs; tooling/soak/src/oracle/bounds.rs::location_publish_window derives from it."
-            status=1
-          }
-          grep -qE '^const LOCATION_PUBLISH_ATTEMPTS: u32 = 1;' "${loc}" || {
-            echo "::error::LOCATION_PUBLISH_ATTEMPTS is no longer 1 in haven-core/src/relay/manager.rs; tooling/soak/src/oracle/bounds.rs::location_publish_window assumes a single attempt."
-            status=1
-          }
-          # And the ones behind `profile_offer()` and
-          # `key_package_round_trip()` (S26's identity-plane turn).
-          for want in \
-            '^pub const CONNECTION_TIMEOUT: Duration = Duration::from_secs\(5\);' \
-            '^const DEFAULT_TIMEOUT: Duration = Duration::from_secs\(10\);' \
-            '^const MAX_PUBLISH_ATTEMPTS: u32 = 3;' \
-            '^const PUBLISH_RETRY_BACKOFF: Duration = Duration::from_secs\(2\);' \
-            '^const PROFILE_PUBLISH_ACK_TIMEOUT: Duration = Duration::from_secs\(6\);'; do
-            grep -qE "${want}" "${loc}" || {
-              echo "::error::a relay-manager constant moved in haven-core/src/relay/manager.rs; tooling/soak/src/oracle/bounds.rs::profile_offer / key_package_round_trip derive from it."
-              status=1
-            }
-          done
-          exit "${status}"
+      # The rust-nostr features the shipped root builds, against the sets
+      # recorded in the guard: a feature any crate turns on is code Haven ships
+      # that nobody reviewed. Its fixtures run with the guard's self-test. The
+      # rig's literal bounds are re-derived from the relay pool's and the relay
+      # manager's own constants by `cargo test` below (tests/pool_constants.rs).
+      - name: nostr and nostr-sdk are built with the recorded features
+        working-directory: ${{ github.workspace }}
+        run: bash scripts/ci/check_mdk_supply_chain.sh --nostr-features
 
       # As in haven-core: built before the transcript exists, `id` for the
       # scan steps' `if:`.

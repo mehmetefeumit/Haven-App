@@ -365,20 +365,29 @@
 #
 #   MDK supply-chain shape            scripts/ci/check_mdk_supply_chain.sh
 #     Every lockfile that builds haven-core (haven-core, rust_builder, soak)
-#     must hold exactly the six Dark Matter crates, on the rev pinned in
-#     scripts/ci/mdk_pins.env — no forbidden uniffi/app/account/QUIC/agent
+#     must hold the six Dark Matter crates, on the rev pinned in
+#     scripts/ci/mdk_pins.env, and from any repository named `mdk` exactly the
+#     crates its allowlist names — no forbidden uniffi/app/account/QUIC/agent
 #     crates, no legacy mdk-* crates, one libsqlite3-sys from the pinned
 #     source, and the Nostr adapter depending on exactly what its relay
 #     client (feature `sdk`) links. Its fixtures plant each direction in a
 #     lockfile other than haven-core's, so a guard that went back to reading
-#     one lockfile fails. The feature set itself is asked of cargo in
-#     rust-check.yml (`--adapter-features`); its judgement's fixtures run here.
+#     one lockfile fails. The adapter's and nostr / nostr-sdk's feature sets
+#     are asked of cargo in rust-check.yml (`--adapter-features`,
+#     `--nostr-features`); their judgements' fixtures run here.
 #
 #   One MLS universe                  scripts/ci/check_lockfile_universe.sh
 #     Those three lockfiles must resolve the same (version, source) for every
-#     openmls, MDK, SQLite and nostr crate, from the pinned sources. Version
-#     alone cannot tell a git fork from the crates.io release of the same
-#     number, which is the hole the soak job's old one-version step had.
+#     openmls, MDK, SQLite and nostr crate, from the pinned sources, and each
+#     must hold every one of them: a crate that is renamed or gone fails
+#     rather than being compared with nothing. Version alone cannot tell a git
+#     fork from the crates.io release of the same number, which is the hole
+#     the soak job's old one-version step had.
+#
+#   Cross builds are locked           scripts/ci/check_cross_check_locked.sh
+#     Every cargo call in cross-check.yml carries `--locked`, so the Apple,
+#     Windows and Android checks build only what the committed lockfile, and
+#     so the lockfile guards, hold.
 #
 #   No tracing sink                   scripts/ci/check_no_tracing_sink.sh
 #     MDK logs through `tracing` with values Rule 15 forbids in a log. No
@@ -1167,6 +1176,12 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_no_exporter_label_override.sh
 
+      # Fixtures: the hook named under each scanned root (one in a comment),
+      # a tree that describes it without naming it, and a missing root.
+      - name: Exporter-label override guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_no_exporter_label_override.sh --self-test
+
       - name: No KeyPackage lifetime override
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_no_kp_lifetime_override.sh
@@ -1217,6 +1232,12 @@ jobs:
       - name: No cursor advance from an event timestamp
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_no_event_timestamp_cursor_advance.sh
+
+      # Fixtures: each of the five checks' banned symbols planted where it
+      # scans, a cursor read and reset that pass, and a missing root.
+      - name: Event-timestamp cursor guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_no_event_timestamp_cursor_advance.sh --self-test
 
       - name: Relay pools keep the options each of them needs
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
@@ -1343,6 +1364,17 @@ jobs:
       - name: Lockfile universe guard self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_lockfile_universe.sh --self-test
+
+      - name: Cross builds resolve from the committed lockfile
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_cross_check_locked.sh
+
+      # Fixtures: the flag before or after the target, one call without it, one
+      # naming a toolchain without it, a look-alike flag, a workflow with no
+      # cargo call, and none at all.
+      - name: Cross-check lock guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_cross_check_locked.sh --self-test
 
       - name: No tracing sink
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}

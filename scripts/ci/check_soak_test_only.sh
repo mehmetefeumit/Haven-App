@@ -109,7 +109,10 @@
 #      print a real MLS group id and absolute epochs (`EngineError::ForkedEpoch`
 #      carries `group_id`, `last_stable` and `conflicting_epoch`), and the rig's
 #      own crate-local Debug test cannot see a rendering of a type it does not
-#      define. The engine's typed errors are MATCHED here, never formatted.
+#      define. The engine's typed errors are MATCHED here, never formatted. The
+#      crate paths are read from `tooling/soak/Cargo.lock` — every crate from a
+#      repository named `mdk` and every `nostr*` / `openmls*` crate — so an MDK
+#      crate that is renamed or added is covered without an edit here.
 #
 #      What a per-invocation scan cannot see, stated so nobody reads more into
 #      a green run: a foreign value bound to a local name (`let e = …;
@@ -186,7 +189,7 @@ readonly SEAM_TEST='haven-core/tests/test_utils_seams.rs'
 readonly SEAM_SOCKET_TEST='haven-core/tests/test_utils_seams_sockets.rs'
 # Equality pin: a fixture added or removed without moving this line is a
 # self-test that no longer says what it runs.
-readonly SELF_TEST_FIXTURES=59
+readonly SELF_TEST_FIXTURES=61
 
 # Trees that ship. `haven/integration_test` and `tooling/` are deliberately
 # absent: that is the harness, and it is where the rig belongs.
@@ -241,7 +244,7 @@ readonly FEATURE_FREE_FILES=(
 # are handed to awk through `-v`, which consumes a backslash before the regex
 # engine ever sees it (check_no_identifier_logging.sh's header records the same
 # trap), and a bare `{` in an ERE starts an interval.
-readonly FOREIGN_RE='haven_core::|haven-core|cgka_session::|cgka_traits::|cgka_engine::|nostr::|nostr_sdk::|nostr_relay_builder::|nostr_database::|openmls|SessionError|EngineError|IngestOutcome|StaleReason|ScreenedIngest|MessageState|StoredMessageProbe|EpochId|GroupId|CircleRotationState|StopOutcome|LiveSyncEvent|OpenMlsGroupKey|ConvergedRoster|RelayKpSnapshot|RelayKpPerRelay|RelayKpEntry|KpMaintenanceDecision|IngestEffects|KeyPackageMetadata|GroupContextSnapshot|StoredKeyPackageBundle|OutboundFanout|PublishWork'
+readonly FOREIGN_RE='haven_core::|haven-core|openmls|SessionError|EngineError|IngestOutcome|StaleReason|ScreenedIngest|MessageState|StoredMessageProbe|EpochId|GroupId|CircleRotationState|StopOutcome|LiveSyncEvent|OpenMlsGroupKey|ConvergedRoster|RelayKpSnapshot|RelayKpPerRelay|RelayKpEntry|KpMaintenanceDecision|IngestEffects|KeyPackageMetadata|GroupContextSnapshot|StoredKeyPackageBundle|OutboundFanout|PublishWork'
 readonly DEBUG_FMT_RE='[{][A-Za-z0-9_]*:[#]?x?[?][}]|dbg![(]'
 
 # Debug-app e2e hooks: `cfg(debug_assertions)`, with a fail-closed
@@ -574,11 +577,31 @@ check_profile_trap_is_armed() {
   return "${rc}"
 }
 
+# `name::|…` for every MDK, rust-nostr and OpenMLS crate the soak lockfile
+# resolves (haven-core's, for the seam tests, while the crate is absent), as
+# Rust spells it; empty when there is no lockfile.
+foreign_crates_re() { # foreign_crates_re <root>
+  local lock="$1/${SOAK_DIR}/Cargo.lock"
+  [[ -d "$1/${SOAK_DIR}" ]] || lock="$1/haven-core/Cargo.lock"
+  [[ -f "${lock}" ]] || return 0
+  awk '
+    function flush() {
+      if (n != "" && (s ~ /^git[+]https:[/][/]github[.]com[/][^/]+[/]mdk([.]git)?[?#]/ || n ~ /^(nostr|openmls)/)) {
+        gsub(/-/, "_", n); print n "::"
+      }
+    }
+    /^\[/ { flush(); n = ""; s = ""; pkg = ($0 == "[[package]]"); next }
+    pkg && /^name = /   { n = $3; gsub(/"/, "", n) }
+    pkg && /^source = / { s = $3; gsub(/"/, "", s) }
+    END { flush() }
+  ' "${lock}" | sort -u | paste -sd'|'
+}
+
 # Prints `<file>:<line>` for every Debug-format rendering of a foreign value.
 # Full-line comments are dropped; a line (or the line above it) carrying
 # `// log-scan-ok: <reason>` is a reviewed exception. The reason is mandatory.
-debug_format_hits() { # debug_format_hits <file>
-  awk -v fmt="${DEBUG_FMT_RE}" -v foreign="${FOREIGN_RE}" '
+debug_format_hits() { # debug_format_hits <file> <foreign-re>
+  awk -v fmt="${DEBUG_FMT_RE}" -v foreign="$2" '
     {
       raw = $0
       line = $0
@@ -605,9 +628,15 @@ check_no_foreign_debug_format() {
     log "check 5 is inert: neither ${SOAK_DIR}/src nor ${SEAM_TEST} is in the tree yet."
     return 0
   fi
+  local crates
+  crates="$(foreign_crates_re "${root}")"
+  if [[ "${crates}" != *"::"* ]]; then
+    fail "the lockfile check 5 reads (${SOAK_DIR}/Cargo.lock, or haven-core's while the crate is absent) names no MDK, rust-nostr or OpenMLS crate, or is missing: check 5 would know no crate path to look for."
+    return 1
+  fi
   for f in "${files[@]}"; do
     n=$(( n + 1 ))
-    hits="$(debug_format_hits "${f}")"
+    hits="$(debug_format_hits "${f}" "${FOREIGN_RE}|${crates}")"
     if [[ -n "${hits}" ]]; then
       printf '%s\n' "${hits}" >&2
       fail "${f#"${root}/"} renders a haven_core/cgka/nostr/openmls value through the Debug format family. Those impls print a real MLS group id and absolute epochs; match the typed error, never format it. A reviewed exception says why on the line: // log-scan-ok: <reason>."
@@ -791,6 +820,24 @@ fn every_timeline_field_has_a_privacy_class() {
     assert_eq!(classified().len(), DECLARED_FIELDS);
 }
 RS
+    tee "${r}/${SOAK_DIR}/Cargo.lock" > "${r}/haven-core/Cargo.lock" <<'LOCK'
+version = 4
+
+[[package]]
+name = "cgka-session"
+version = "0.10.4"
+source = "git+https://github.com/marmot-protocol/mdk?rev=fcc85edd8dbd07c8293c899ee52230f72c54c897#fcc85edd8dbd07c8293c899ee52230f72c54c897"
+
+[[package]]
+name = "nostr-sdk"
+version = "0.44.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "serde"
+version = "1.0.228"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+LOCK
     printf '#[test]\nfn seams() {}\n' > "${r}/${SEAM_TEST}"
     printf '#[test]\nfn sockets() {}\n' > "${r}/${SEAM_SOCKET_TEST}"
   }
@@ -960,6 +1007,19 @@ TOML
       >> "${mdkfix}/${SOAK_DIR}/src/lib.rs"
     _case "a {v:?} of MDK's ${mdk_type} fails" 1 check_no_foreign_debug_format "${mdkfix}"
   done
+
+  # The crate paths come from the soak lockfile: an MDK crate no list here
+  # names is covered once the lockfile resolves it, and a lockfile that names
+  # none leaves the check knowing nothing.
+  local renamed="${tmp}/renamed"; _mk "${renamed}"
+  printf '\n[[package]]\nname = "marmot-session"\nversion = "0.16.0"\nsource = "git+https://github.com/marmot-protocol/mdk?rev=0123#0123"\n' \
+    >> "${renamed}/${SOAK_DIR}/Cargo.lock"
+  printf 'fn f(v: marmot_session::Outcome) { println!("{v:?}"); }\n' >> "${renamed}/${SOAK_DIR}/src/lib.rs"
+  _case "a {v:?} of a crate the soak lockfile resolves from mdk fails" 1 check_no_foreign_debug_format "${renamed}"
+
+  local nolock="${tmp}/nolock"; _mk "${nolock}"
+  rm "${nolock}/${SOAK_DIR}/Cargo.lock"
+  _case "a soak tree with no lockfile is BROKEN, not clean" 1 check_no_foreign_debug_format "${nolock}"
 
   local local_dbg="${tmp}/localdbg"; _mk "${local_dbg}"
   printf 'fn f(t: SimTag) { println!("{t:?}"); }\n' >> "${local_dbg}/${SOAK_DIR}/src/lib.rs"

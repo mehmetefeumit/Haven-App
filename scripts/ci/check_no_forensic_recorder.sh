@@ -7,7 +7,11 @@
 # The engine defaults to a no-op recorder, so the trail exists only if Haven
 # installs one. The install paths are the session and engine builders'
 # `.recorder(..)`, `AccountDeviceSession::set_audit_recorder` and the engine's
-# `set_recorder`, and every one of them takes a `ForensicRecorder`.
+# `set_recorder`, and every one of them takes a `ForensicRecorder`; a
+# configuration struct's `recorder: Some(..)` is the one shape with no call.
+# `haven-core/tests/dependency_surface.rs` (I4) plants every MDK function and
+# field named for a recorder and asserts this guard refuses it, so a renamed
+# install path fails there instead of passing here.
 #
 # Same flat shape as check_no_kp_lifetime_override.sh: none of the tokens below
 # appears in any file under the scanned roots, comments included. Prose can say
@@ -30,10 +34,12 @@ set -euo pipefail
 REPO_ROOT="${REPO_ROOT_OVERRIDE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 readonly -a SCAN_ROOTS=(haven-core/src haven-core/tests haven/rust_builder/src tooling/soak/src tooling/soak/tests)
 readonly -a TOKENS=(set_recorder set_audit_recorder ForensicRecorder JsonlRecorder marmot_forensics '.recorder(')
+# Extended regular expressions, for the spellings no fixed string pins.
+readonly -a TOKEN_RES=('recorder:[[:space:]]*Some')
 
 # How many fixtures the self-test runs. Pinned, because a fixture that stops
 # running is the one way a deleted check reports success.
-readonly SELF_TEST_FIXTURES=8
+readonly SELF_TEST_FIXTURES=9
 
 log() {
   printf '\033[1;34m[check_no_forensic_recorder]\033[0m %s\n' "$*"
@@ -41,12 +47,13 @@ log() {
 
 run_check() {
   local root hits
-  local -a patterns=()
   for root in "${SCAN_ROOTS[@]}"; do
     [[ -d "${REPO_ROOT}/${root}" ]] || { echo "ERROR: ${REPO_ROOT}/${root} not found" >&2; return 2; }
   done
-  for root in "${TOKENS[@]}"; do patterns+=(-e "${root}"); done
-  hits="$(cd "${REPO_ROOT}" && grep -rnF "${patterns[@]}" "${SCAN_ROOTS[@]}" 2>/dev/null || true)"
+  local -a fixed=() extended=()
+  for root in "${TOKENS[@]}"; do fixed+=(-e "${root}"); done
+  for root in "${TOKEN_RES[@]}"; do extended+=(-e "${root}"); done
+  hits="$(cd "${REPO_ROOT}" && { grep -rnF "${fixed[@]}" "${SCAN_ROOTS[@]}"; grep -rnE "${extended[@]}" "${SCAN_ROOTS[@]}"; } 2>/dev/null || true)"
   if [[ -n "${hits}" ]]; then
     printf '%s\n' "${hits}" >&2
     printf '\033[1;31m[check_no_forensic_recorder] FAIL:\033[0m an MDK forensic recorder is named above — its rows carry raw group ids and relay URLs, and Haven installs none (Rule 15).\n' >&2
@@ -85,7 +92,7 @@ self_test() {
 
   # One plant per token, rotated across the roots so each root is proven read.
   local i=0
-  for token in "${TOKENS[@]}"; do
+  for token in "${TOKENS[@]}" 'recorder:  Some('; do
     t="${tmp}/plant-${i}"; _tree "${t}"
     r="${SCAN_ROOTS[$(( i % ${#SCAN_ROOTS[@]} ))]}"
     printf '// session.%s\n' "${token}" >"${t}/${r}/planted.rs"

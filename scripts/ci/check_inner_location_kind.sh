@@ -110,7 +110,7 @@
 # kind 445 at all, so they are off the map with or without the arm. The next MDK
 # bump therefore moves every peer that can still interoperate onto a post-cutover
 # build, and the arm becomes dead code whose only remaining effect is to widen
-# what the receive gate accepts. So: while `haven-core/Cargo.toml` pins the CGKA
+# what the receive gate accepts. So: while `scripts/ci/mdk_pins.env` pins the CGKA
 # crates at LEGACY_WINDOW_MDK_REV below, the arm may exist; the moment that rev
 # changes, it must be gone — which makes the deletion an obligation CI states at
 # exactly the commit that earns it, with nothing to remember and no date to rot.
@@ -149,7 +149,7 @@ readonly KIND_CONST="KIND_LOCATION_UPDATE"
 readonly LEGACY_CONST="LEGACY_KIND_LOCATION_UPDATE"
 readonly EVENT_RS="haven-core/src/nostr/event.rs"
 readonly MANAGER_RS="haven-core/src/nostr/mls/manager.rs"
-readonly CARGO_TOML="haven-core/Cargo.toml"
+readonly MDK_PINS="scripts/ci/mdk_pins.env"
 readonly PROD_DIRS=("haven-core/src" "haven/rust_builder/src")
 
 # The CGKA rev the legacy receive arm's window is defined by (check 6). Bumping
@@ -475,18 +475,18 @@ reserved number does not unreserve it, and a constant hides it from check 4:"
   fi
 
   # --- Check 6: the legacy receive arm expires with the MDK pin -------------
-  local cargo="${root}/${CARGO_TOML}"
-  if [[ ! -f "${cargo}" ]]; then
-    fail_msg "[6] ${CARGO_TOML} not found — the MDK pin is the whole of what bounds the \
+  local pins="${root}/${MDK_PINS}"
+  if [[ ! -f "${pins}" ]]; then
+    fail_msg "[6] ${MDK_PINS} not found — the MDK pin is the whole of what bounds the \
 legacy kind-9 receive window, so without it this check is scanning nothing."
     fail=1
   else
     local rev
-    rev="$(sed -nE 's/^[[:space:]]*cgka-session[[:space:]]*=.*[[:space:]]rev[[:space:]]*=[[:space:]]*"([0-9a-f]+)".*/\1/p' \
-      "${cargo}" | head -1)"
-    if [[ -z "${rev}" ]]; then
-      fail_msg "[6] no \`cgka-session … rev = \"…\"\` pin in ${CARGO_TOML}. That rev is what \
-dates the legacy kind-9 receive arm; a dependency declaration this check cannot read leaves \
+    # shellcheck source=mdk_pins.env
+    rev="$( (unset HAVEN_MDK_REV; set +u; . "${pins}" >/dev/null 2>&1; printf '%s' "${HAVEN_MDK_REV:-}") )"
+    if [[ ! "${rev}" =~ ^[0-9a-f]{40}$ ]]; then
+      fail_msg "[6] no 40-hex \`HAVEN_MDK_REV\` in ${MDK_PINS}. That rev is what \
+dates the legacy kind-9 receive arm; a pin this check cannot read leaves \
 the arm with no expiry at all."
       fail=1
     elif [[ "${rev}" != "${LEGACY_WINDOW_MDK_REV}" ]]; then
@@ -546,9 +546,9 @@ fn location_rumor(sender: PublicKey, content: String) -> UnsignedEvent {
 }'
 
   # The MDK pin every fixture gets unless it is testing check 6, in which case
-  # it names `haven-core/Cargo.toml` as its extra file and overwrites this.
-  local good_cargo="[dependencies]
-cgka-session = { git = \"https://github.com/marmot-protocol/mdk\", rev = \"${LEGACY_WINDOW_MDK_REV}\" }"
+  # it names `scripts/ci/mdk_pins.env` as its extra file and overwrites this.
+  local good_pins="HAVEN_MDK_REV=${LEGACY_WINDOW_MDK_REV}
+HAVEN_MDK_SOURCE=\"git+https://github.com/marmot-protocol/mdk?rev=\${HAVEN_MDK_REV}#\${HAVEN_MDK_REV}\""
 
   # The expected CHECK MARKER is asserted alongside the exit code, not just the
   # code: a fixture that goes red for an unrelated reason reports coverage of a
@@ -560,10 +560,10 @@ cgka-session = { git = \"https://github.com/marmot-protocol/mdk\", rev = \"${LEG
     checked=$(( checked + 1 ))
     local root="${tmp}/case"
     rm -rf "${root}"
-    mkdir -p "${root}/haven-core/src/nostr/mls" "${root}/haven/rust_builder/src"
+    mkdir -p "${root}/haven-core/src/nostr/mls" "${root}/haven/rust_builder/src" "${root}/scripts/ci"
     printf '%s\n' "${event}" > "${root}/${EVENT_RS}"
     printf '%s\n' "${manager}" > "${root}/${MANAGER_RS}"
-    printf '%s\n' "${good_cargo}" > "${root}/${CARGO_TOML}"
+    printf '%s\n' "${good_pins}" > "${root}/${MDK_PINS}"
     [[ -n "${extra_rel}" ]] && printf '%s\n' "${extra}" > "${root}/${extra_rel}"
     out="$( ( run_checks "${root}" ) 2>&1 )" || got=$?
     if [[ "${got}" -ne "${want}" ]]; then
@@ -727,25 +727,22 @@ fn unused_decoy() -> Kind { Kind::Custom(KIND_LOCATION_UPDATE) }'
     "${good_event}
 pub const LEGACY_KIND_LOCATION_UPDATE: u16 = 9;" \
     "${good_manager}" \
-    "${CARGO_TOML}" \
-    '[dependencies]
-cgka-session = { git = "https://github.com/marmot-protocol/mdk", rev = "0123456789abcdef0123456789abcdef01234567" }'
+    "${MDK_PINS}" \
+    'HAVEN_MDK_REV=0123456789abcdef0123456789abcdef01234567'
 
   # (21) ...and the same bump with the arm deleted is exactly what this check
   #      asks for, so it must be silent.
   _case "a bumped MDK rev with the legacy kind deleted passes" 0 "" \
     "${good_event}" "${good_manager}" \
-    "${CARGO_TOML}" \
-    '[dependencies]
-cgka-session = { git = "https://github.com/marmot-protocol/mdk", rev = "0123456789abcdef0123456789abcdef01234567" }'
+    "${MDK_PINS}" \
+    'HAVEN_MDK_REV=0123456789abcdef0123456789abcdef01234567'
 
   # (22) Fail-closed: a manifest this check cannot read leaves the arm with no
   #      expiry at all, which is the state finding 5 was filed about.
   _case "an unreadable MDK pin FAILS" 1 "[6]" \
     "${good_event}" "${good_manager}" \
-    "${CARGO_TOML}" \
-    '[dependencies]
-nostr = "0.44"'
+    "${MDK_PINS}" \
+    'HAVEN_OPENMLS_SOURCE="registry+https://github.com/rust-lang/crates.io-index"'
 
   # (23) FALSE-POSITIVE DIRECTION, and the shipped one: a reserved kind may be
   #      DECLARED and compared against an inbound kind — that is the receive-only

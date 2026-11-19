@@ -474,8 +474,8 @@ grep ERE and Rust `regex` differ.
 | I2 | Constructors (`new\|builder\|default\|with_*`) on `Client`, `ClientBuilder`, `RelayPool`, `RelayPoolBuilder`, `Relay`, plus any `impl` of a `Relay\|Client\|Pool` type | check 11 `_CLIENT_CONSTRUCTION` | P0 |
 | I4 | `pub fn` / fields matching `recorder` in every MDK-sourced crate | `check_no_forensic_recorder.sh` `TOKENS` (`:32`) | P0 |
 | I3 | Methods of `NostrRelayClient` / `TransportAdapter` / `NostrTransportAdapter` | `check_publish_client_no_subscription.sh` | P1 |
-| I5 | `pub fn (open\|in_memory)…` in `storage-sqlite` and `cgka-session` | `check_sqlcipher_first_use_gate.sh` | P1 |
-| I6 | The variant list, in declaration order, of every MDK and rust-nostr enum that `haven-core/src` or `haven/rust_builder/src` names (64 today; each resolved through its `use` path, since `Error` is ambiguous across crates) | S0.5: every use of those enums outside an exhaustive `match` | P0 |
+| I5 | `pub fn (open\|in_memory)…` in `storage-sqlite` and `cgka-session`, and the free function `open_hardened_sqlcipher`, which the gate did not list before this step | `check_sqlcipher_first_use_gate.sh` | P0 |
+| I6 | The variant list, in declaration order, of every MDK and rust-nostr enum that `haven-core/src` or `haven/rust_builder/src` names (67 today; each resolved through its `use` path, since `Error` is ambiguous across crates) | S0.5: every use of those enums outside an exhaustive `match` | P0 |
 
 I6 is a reviewed set like the others: a variant added, removed or renamed fails
 the test and names the enum. The test runs offline, in seconds, in
@@ -550,10 +550,18 @@ changes only the values.
 tests use; P1 for the rest.
 - Each seam is a trigger installed by a fault seam in
   `haven-core/src/nostr/mls/storage.rs` (`set_*_fault_for_test`, `:681-1381`).
-- After arming, the seam makes one engine call that must now fail, and asserts
-  the failure.
-- A trigger on a table MDK no longer writes would otherwise leave
-  "store does not answer" tests passing vacuously after 87 migrations.
+- SQLite refuses a trigger on a table that does not exist, but accepts one
+  whose condition reads a column that does not, and that trigger never fires.
+  So a renamed column would leave "store does not answer" tests passing
+  vacuously after 87 migrations.
+- When armed, each seam (`prove_fault_bites`) checks that every column its
+  trigger's condition reads exists. Where an insert can meet the condition
+  without disturbing the store, it also runs a probe insert inside a savepoint
+  that is rolled back, and requires the trigger itself to refuse it.
+- What it does not prove: that the engine still makes the write the seam
+  assumes. Update and delete seams get the column check alone. That the
+  engine's own call fails stays each test's assertion; a renumbered state value
+  or a renamed snapshot name shows only through the tests that arm the seam.
 
 **Self-tests for guards that have none.**
 - **P0** (Security Rules):

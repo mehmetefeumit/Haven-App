@@ -256,7 +256,7 @@ set -uo pipefail
 LITERAL_FREE="$(cat "$(dirname "${BASH_SOURCE[0]}")/lib/literal_free.awk")"
 readonly LITERAL_FREE
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REPO_ROOT="${REPO_ROOT_OVERRIDE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 CORE_SRC_DIR="${REPO_ROOT}/haven-core/src"
 FFI_SRC_DIR="${REPO_ROOT}/haven/rust_builder/src"
 SOAK_SRC_DIR="${REPO_ROOT}/tooling/soak/src"
@@ -839,13 +839,23 @@ check_ffi_sync_reads_cannot_panic() { # <api.rs>
 #         `set_signer` or to a builder's `signer` (`ClientBuilder::signer`,
 #         passed as a function) are refused with the plain call, and so is a
 #         write to a builder's public `signer` field (`builder.signer = …`,
-#         `nostr-sdk-0.44.1/src/client/builder.rs:26`); a path THROUGH a
+#         `nostr-sdk-0.44.1/src/client/builder.rs:26`) or to the pool
+#         builder's hidden one (`.__signer = …`, or `__signer: …` in a
+#         struct literal, `nostr-relay-pool-0.44.3/src/pool/builder.rs:33`);
+#         a path THROUGH a
 #         module named `signer` (`nostr::signer::…`) is not one, and neither
 #         is a comparison (`.signer == …`). With a signer the pool
 #         answers a relay's NIP-42 challenge with the identity key on a socket
 #         that carries a circle's routing id, and MDK's relay client signs an
 #         unsigned non-445 event it is handed
-#         (`transport-nostr-adapter/src/sdk_client.rs:668-682`);
+#         (`transport-nostr-adapter/src/sdk_client.rs:668-682`). Every public
+#         function and field of the client and pool crates named for a signer
+#         or for authentication is listed, with this check refusing it or the
+#         reason it needs no ban, in
+#         `scripts/ci/dependency_surface/i1_client_auth.txt`, and every
+#         relay-client constructor in `i2_client_constructors.txt`;
+#         `haven-core/tests/dependency_surface.rs` fails when either surface
+#         moves and runs this script over a planted copy of each refused one;
 #       * no relay client is told to authenticate: every
 #         `automatic_authentication(` is `automatic_authentication(false)`.
 #         Two things can be changed on a client AFTER it is built — its signer
@@ -1071,7 +1081,7 @@ check_relay_events_verified() { # <core-src-dir> <ffi-src-dir> <soak-src-dir>
     if [[ "${view}" == *".database()"* ]]; then
       lfail "(11) ${rel} reads a client's database (\`.database()\`). The pool's database is a second source of relay events; Haven reads a relay only through a fetch or a notification of a client verified_client() built."
     fi
-    if grep -qE '(^|[^A-Za-z0-9_])(un)?set_signer([^A-Za-z0-9_]|$)|\.signer(::<|\(|=[^=])|::signer(::<|[^A-Za-z0-9_:]|$)' <<<"${view}"; then
+    if grep -qE '(^|[^A-Za-z0-9_])(un)?set_signer([^A-Za-z0-9_]|$)|\.(__)?signer(::<|\(|=[^=])|(^|[^A-Za-z0-9_])__signer:|::signer(::<|[^A-Za-z0-9_:]|$)' <<<"${view}"; then
       lfail "(11) ${rel} gives a relay client a signer (\`set_signer\` / \`.signer(\` / \`::signer(\` / \`.signer =\`). No relay client of Haven's holds a key: with one the pool answers a relay's NIP-42 challenge with it — on the publish client that is the identity key, bound by its signature to a circle's routing id, the device's address and the time — and MDK's relay client signs an unsigned non-445 event it is handed. Events are signed where they are built, never by a client."
     fi
     if (( $(grep -o 'automatic_authentication(' <<<"${view}" | wc -l) != $(grep -o 'automatic_authentication(false)' <<<"${view}" | wc -l) )); then
@@ -1171,7 +1181,7 @@ fi
 # hide under the slack.
 # ---------------------------------------------------------------------------
 self_test() {
-  local -r SELF_TEST_FIXTURES=103
+  local -r SELF_TEST_FIXTURES=105
   local tmp fails=0 checked=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -2087,6 +2097,12 @@ fn styled(d: &Design) -> Look { d.designer().look() }'
     builder.signer = Some(keys.into_nostr_signer());
     builder
 }'
+
+  _fixture 'a signer written to the pool builder'"'"'s hidden field fails' 1 'session.rs gives a relay client a signer' \
+    _append "${session}" 'fn signing(builder: &mut PoolBuilder, signer: Signer) { builder.__signer = Some(signer); }'
+
+  _fixture 'a signer given in a pool builder struct literal fails' 1 'session.rs gives a relay client a signer' \
+    _append "${session}" 'fn signing(base: PoolBuilder, signer: Signer) -> PoolBuilder { PoolBuilder { __signer: Some(signer), ..base } }'
 
   _fixture 'a comparison of two signer fields still passes' 0 '' \
     _append "${session}" 'fn same(a: &Options, b: &Options) -> bool { a.signer == b.signer }'

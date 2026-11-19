@@ -1,0 +1,12 @@
+# I4 — every public function and field of every MDK crate whose name says
+# recorder. `refused`: check_no_forensic_recorder.sh refuses `x.NAME(y)` or
+# `NAME: Some(x)` planted in a copy of the tree. `allowed`: installs no recorder,
+# for the reason given (Security Rule 15).
+cgka_engine::engine::Engine::audit_recorder_health allowed # acts on a recorder already installed; installs none
+cgka_engine::engine::Engine::audit_recorder_path allowed # reads where an installed recorder writes; installs none
+cgka_engine::engine::Engine::rotate_audit_recorder allowed # acts on a recorder already installed; installs none
+cgka_engine::engine::Engine::set_recorder refused
+cgka_engine::engine::EngineBuilder::recorder refused
+cgka_session::AccountDeviceSession::set_audit_recorder refused
+cgka_session::SessionConfig::recorder refused
+marmot_forensics::audit::AuditEvent.recorder_session_id allowed # a field of an audit row, not a way to install a recorder

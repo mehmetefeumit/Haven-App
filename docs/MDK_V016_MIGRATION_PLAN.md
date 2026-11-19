@@ -17,7 +17,7 @@ shipped behaviour until the stage that delivers it is marked done below.
 
 | Stage | State |
 |---|---|
-| 0 — safety net | in progress: steps 2 (timing-dependent tests), 3 (exhaustive decisions over MDK enums), 4 (refactors that already work on 0.44) and 7 (soak-rig seams) done; step 5 (guards that fail closed) in progress; steps 6, 8, 9 and 10 not started |
+| 0 — safety net | in progress: steps 2 (timing-dependent tests), 3 (exhaustive decisions over MDK enums), 4 (refactors that already work on 0.44), 5 (guards that fail closed) and 7 (soak-rig seams) done; step 8 (previous-release fixtures) in progress; steps 6, 9 and 10 not started |
 | 1 — dependency move | not started |
 | 2 — onto the runtime | not started; needs owner rulings R0, C1, C2 first |
 

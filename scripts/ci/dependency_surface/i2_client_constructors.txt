@@ -1,0 +1,32 @@
+# I2 — every public function of a relay-client type of nostr-sdk `src/client/**`
+# and nostr-relay-pool (a type whose name, less `Builder`, ends in Client, Pool
+# or Relay) that returns one. `refused`: check 11 refuses `Owner::NAME()`
+# planted in a copy of the tree. `allowed`: builds nothing without the policy,
+# for the reason given (Security Rule 16).
+nostr_relay_pool::pool::RelayPool::__get_or_add_relay allowed # a relay of an existing pool, which that pool admits through its own policy
+nostr_relay_pool::pool::RelayPool::builder refused
+nostr_relay_pool::pool::RelayPool::default refused
+nostr_relay_pool::pool::RelayPool::new refused
+nostr_relay_pool::pool::RelayPool::relay allowed # a handle onto a relay the pool already holds; builds nothing
+nostr_relay_pool::pool::RelayPool::stealth_clone allowed # a handle onto the same pool and its policy (atomic_destructor::StealthClone)
+nostr_relay_pool::pool::builder::RelayPoolBuilder::admit_policy refused
+nostr_relay_pool::pool::builder::RelayPoolBuilder::build refused
+nostr_relay_pool::pool::builder::RelayPoolBuilder::default refused
+nostr_relay_pool::pool::builder::RelayPoolBuilder::monitor refused
+nostr_relay_pool::pool::builder::RelayPoolBuilder::new refused
+nostr_relay_pool::pool::builder::RelayPoolBuilder::opts refused
+nostr_relay_pool::pool::builder::RelayPoolBuilder::websocket_transport refused
+nostr_sdk::client::Client::builder refused
+nostr_sdk::client::Client::default refused
+nostr_sdk::client::Client::new refused
+nostr_sdk::client::Client::relay allowed # a handle onto a relay the client already holds; builds nothing
+nostr_sdk::client::builder::ClientBuilder::admit_policy refused
+nostr_sdk::client::builder::ClientBuilder::build refused
+nostr_sdk::client::builder::ClientBuilder::database refused
+nostr_sdk::client::builder::ClientBuilder::default refused
+nostr_sdk::client::builder::ClientBuilder::gossip refused
+nostr_sdk::client::builder::ClientBuilder::monitor refused
+nostr_sdk::client::builder::ClientBuilder::new refused
+nostr_sdk::client::builder::ClientBuilder::opts refused
+nostr_sdk::client::builder::ClientBuilder::signer refused
+nostr_sdk::client::builder::ClientBuilder::websocket_transport refused

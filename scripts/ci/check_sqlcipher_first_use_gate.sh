@@ -21,8 +21,10 @@
 #       string literals dropped, `frb_generated` excluded), each mention of
 #       `Connection::open*`, of `open*` / `in_memory*` on `SqliteAccountStorage`,
 #       `SqliteStorage` (its deprecated alias) or `SqliteSharedStorage`, and of
-#       `AccountDeviceSession::open*` — called or merely named, as in
-#       `.map(Connection::open)`, and through a qualified path as well
+#       `AccountDeviceSession::open*`, and of MDK's free `open_hardened_sqlcipher`
+#       (the list `scripts/ci/dependency_surface/i5_sqlite_openers.txt` keeps
+#       complete) — called or merely named, as in `.map(Connection::open)`, and
+#       through a qualified path as well
 #       (`<Connection>::open`) — sits in a function that calls
 #       `sqlcipher_init::ensure(` BEFORE it. A function ends at its closing
 #       brace, and a declaration without a body at its `;`, so nothing after
@@ -60,7 +62,7 @@ LITERAL_FREE="$(cat "$(dirname "${BASH_SOURCE[0]}")/lib/literal_free.awk")"
 readonly LITERAL_FREE
 
 SCRIPT_NAME="check_sqlcipher_first_use_gate"
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REPO_ROOT="${REPO_ROOT_OVERRIDE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 readonly SCAN_DIRS=(
   "haven-core/src" "haven-core/tests" "haven/rust_builder/src"
   "tooling/soak/src" "tooling/soak/tests"
@@ -71,7 +73,7 @@ readonly ANCHORS=(
   "haven-core/src/circle/storage.rs:new"
   "haven-core/src/tiles/storage.rs:open_keyed_connection"
 )
-readonly SELF_TEST_FIXTURES=34
+readonly SELF_TEST_FIXTURES=36
 
 log() { printf '\033[1;34m[%s]\033[0m %s\n' "${SCRIPT_NAME}" "$*"; }
 fail_msg() { printf '\033[1;31m[%s] FAIL:\033[0m %s\n' "${SCRIPT_NAME}" "$*" >&2; }
@@ -122,7 +124,7 @@ open_sites() { # open_sites <file>
     }
     BEGIN {
       left = "(^|[^A-Za-z0-9_])"
-      site = left "(Connection>?::open[a-z_]*|(SqliteAccountStorage|SqliteStorage|SqliteSharedStorage)>?::(open|in_memory)[a-z_]*|AccountDeviceSession>?::open[a-z_]*)"
+      site = left "(Connection>?::open[a-z_]*|(SqliteAccountStorage|SqliteStorage|SqliteSharedStorage)>?::(open|in_memory)[a-z_]*|AccountDeviceSession>?::open[a-z_]*|open_hardened_sqlcipher)"
       gate = "sqlcipher_init::ensure[(]"
       depth = 0; in_fn = 0
     }
@@ -311,6 +313,15 @@ fn keyed() {
   _case "an ungated open in the soak rig FAILS" 1 "tooling/soak/src/store.rs" \
 'fn peek(path: &Path) -> rusqlite::Connection {
     rusqlite::Connection::open_with_flags(path, flags).unwrap()
+}'
+  _case "MDK's free hardened opener, ungated, FAILS" 1 "haven-core/src/extra.rs" \
+'fn raw(p: &Path, k: &SqlCipherKey) -> Result<Connection> {
+    storage_sqlite::open_hardened_sqlcipher(p, k).map_err(e)
+}'
+  _case "MDK's free hardened opener behind the gate passes" 0 "haven-core/src/extra.rs" \
+'fn raw(p: &Path, k: &SqlCipherKey) -> Result<Connection> {
+    crate::sqlcipher_init::ensure()?;
+    open_hardened_sqlcipher(p, k).map_err(e)
 }'
   _case "a gate that no longer opens a connection FAILS" 1 "${GATE_FILE}" \
 'pub fn ensure() -> rusqlite::Result<()> {

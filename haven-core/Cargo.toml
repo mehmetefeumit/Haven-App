@@ -271,6 +271,12 @@ tokio-tungstenite = { version = "0.26", default-features = false, features = ["h
 # relay-plane proof judges with). Dev-only, and only ever dev-only: the crate
 # also builds the recording wire proxy (`check_wire_proxy_test_only.sh` check 2).
 haven-local-relay = { path = "../tooling/e2e/local-relay" }
+# `tests/dependency_surface.rs` reads the public surface of the MDK and
+# rust-nostr sources Haven's guards scan for: a parser, because a column-0 `}`
+# heuristic misses nested items, and a token reader for paths inside macro
+# calls. Both are already in the graph through the derive macros: zero new crates.
+syn = { version = "2", default-features = false, features = ["full", "parsing"] }
+proc-macro2 = { version = "1", default-features = false }
 # Enable test-utils feature for integration tests
 haven-core = { path = ".", features = ["test-utils"] }
 

@@ -236,8 +236,8 @@ fn bounds_are_the_products_own_constants_recomputed() {
     );
     // `pool_reconnect` has no case here on purpose: its three constants are
     // `pub(super)` in the pinned pool crate, so a test could only compare this
-    // crate to itself. The soak-tooling grep of the vendored `constants.rs` is
-    // its control, and `self_check` covers everything that CAN be re-derived.
+    // crate to itself. `tests/pool_constants.rs`, reading the vendored
+    // `constants.rs`, is its control, and `self_check` covers everything that CAN be re-derived.
     assert!(
         bounds::pool_reconnect() > bounds::subscribe_ladder(),
         "a pool reconnect is the slowest term in any recovery path"

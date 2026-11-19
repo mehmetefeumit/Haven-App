@@ -1,0 +1,13 @@
+# I5 — every public function of storage-sqlite and cgka-session whose name
+# starts with `open` or `in_memory`. `refused`: check_sqlcipher_first_use_gate.sh
+# refuses it called with no `sqlcipher_init::ensure()` before it, planted in a
+# copy of the tree. `allowed`: opens nothing, for the reason given.
+cgka_session::AccountDeviceSession::open refused
+cgka_session::AccountDeviceSession::open_timings refused
+storage_sqlite::connection::SqliteAccountStorage::in_memory refused
+storage_sqlite::connection::SqliteAccountStorage::in_memory_with_options refused
+storage_sqlite::connection::SqliteAccountStorage::open_encrypted refused
+storage_sqlite::connection::SqliteAccountStorage::open_encrypted_with_options refused
+storage_sqlite::connection::open_hardened_sqlcipher refused
+storage_sqlite::shared::SqliteSharedStorage::in_memory refused
+storage_sqlite::shared::SqliteSharedStorage::open refused

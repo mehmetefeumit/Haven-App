@@ -30,11 +30,11 @@ jobs:
 
       - name: Check macOS (aarch64-apple-darwin)
         working-directory: haven/rust_builder
-        run: cargo check --target aarch64-apple-darwin
+        run: cargo check --locked --target aarch64-apple-darwin
 
       - name: Check iOS (aarch64-apple-ios)
         working-directory: haven/rust_builder
-        run: cargo check --target aarch64-apple-ios
+        run: cargo check --locked --target aarch64-apple-ios
 
   windows:
     name: Windows (x64)
@@ -58,7 +58,7 @@ jobs:
 
       - name: Check Windows (x86_64-pc-windows-msvc)
         working-directory: haven/rust_builder
-        run: cargo check --target x86_64-pc-windows-msvc
+        run: cargo check --locked --target x86_64-pc-windows-msvc
 
   android:
     name: Android (arm64)
@@ -106,4 +106,4 @@ jobs:
 
       - name: Check Android (aarch64-linux-android)
         working-directory: haven/rust_builder
-        run: cargo check --target aarch64-linux-android
+        run: cargo check --locked --target aarch64-linux-android

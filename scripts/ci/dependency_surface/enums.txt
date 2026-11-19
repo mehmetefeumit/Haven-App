@@ -1,0 +1,687 @@
+# I6 — every MDK and rust-nostr enum haven-core/src or haven/rust_builder/src
+# names, at its defining path, with its variants in declaration order
+# (haven-core/tests/dependency_surface.rs). A decision over one of these outside
+# an exhaustive `match` takes a new variant into its default unseen; a change
+# here is where each such use is re-read (docs/mdk-v0.16/stage0.md, S0.5 item 4).
+cgka_engine::openmls_projection::OpenMlsContentKind
+    Application
+    Proposal
+    Commit
+    Welcome
+    Other
+cgka_session::PublishWork
+    ApplicationMessage
+    Proposal
+    GroupEvolution
+    GroupCreated
+    FoundingGroupCreated
+    AutoPublish
+cgka_session::SessionError
+    Storage
+    Engine
+cgka_traits::capabilities::Capability
+    Proposal
+    Extension
+    AppComponent
+cgka_traits::capabilities::RequirementLevel
+    Required
+    Optional
+    TransportRequired
+cgka_traits::convergence_pass::ConvergencePassPhase
+    Collecting
+    Frozen
+    Resolving
+    Completed
+cgka_traits::engine::GroupEvent
+    GroupCreated
+    GroupJoined
+    TransportObjectResourceRefused
+    MessageReceived
+    AppMessageInvalidated
+    GroupStateChanged
+    GroupHydrationQuarantined
+    EpochChanged
+    CommitRolledBack
+    GroupStateInvalidated
+    GroupStateRevalidated
+    GroupUnrecoverable
+    PendingCommitRecovered
+    GroupHydrationRecovered
+cgka_traits::engine::GroupStateChange
+    MemberAdded
+    MemberRemoved
+    MemberLeft
+    AdminAdded
+    AdminRemoved
+    GroupRenamed
+    GroupAvatarChanged
+    MessageRetentionChanged
+    GroupDisbanded
+cgka_traits::engine::GroupStateInvalidationReason
+    SupersededByBranchSelection
+cgka_traits::engine::SendIntent
+    AppMessage
+    Invite
+    RemoveMembers
+    Leave
+    SelfUpdate
+    UpdateAppComponents
+    UpdateGroupData
+    EnableDisbanding
+    Disband
+cgka_traits::engine::SupersededIntentKind
+    GroupProfile
+    AppComponents
+    RemoveMembers
+    Invite
+cgka_traits::engine::SupersededIntentOutcome
+    Reissued
+    Conflict
+    AlreadySatisfied
+    ReinviteRequired
+    Abandoned
+    NotMember
+cgka_traits::engine_state::EpochState
+    Stable
+    PendingPublish
+    Merging
+    Recovering
+    Unrecoverable
+    Disbanded
+cgka_traits::error::EngineError
+    UnknownGroup
+    GroupNotHydrated
+    UnknownPending
+    NotAMember
+    NotGroupAdmin
+    UnknownMember
+    InvalidCredentialIdentity
+    AdminCannotSelfRemove
+    LeaveAlreadyRequested
+    AdminDepletion
+    MissingRequiredCapabilities
+    DisbandingUnsupportedMembers
+    DisbandingNotEnabled
+    UnsupportedCiphersuite
+    InvalidAppMessagePayload
+    InvalidAccountIdentityProof
+    InvalidKeyPackageLifetime
+    InvalidKeyPackageCapabilities
+    AppMessageEpochMismatch
+    AppMessageEpochUnsettled
+    ForkedEpoch
+    QueuedOutboundAtCapacity
+    GroupUnrecoverableRepairRequired
+    InvalidTransition
+    Storage
+    Peeler
+    Serialize
+    InvalidWelcome
+    MissingWelcomeKeyPackage
+    WelcomeAlreadyProcessed
+    Backend
+    Other
+cgka_traits::error::PeelerError
+    Malformed
+    InvalidSignature
+    WrongRecipient
+    DecryptFailed
+    StaleEpoch
+    MissingContext
+    WrapFailed
+    Backend
+cgka_traits::group::ProtocolProfile
+    Legacy
+    Current
+cgka_traits::ingest::DeferralLineage
+    Uncontested
+    ContestedFork
+cgka_traits::ingest::InboundResourceLimit
+    TransportDeferredCapacity
+    TransportDeferredRetryBudget
+    TransportDeferredResidenceBudget
+cgka_traits::ingest::IngestOutcome
+    Processed
+    Buffered
+    Ignored
+    LocalState
+    TransportDeferred
+    ResourceRefused
+    Stale
+    Rejected
+cgka_traits::ingest::InputRejectionCategory
+    Duplicate
+    OwnEcho
+    WrongRecipient
+    UnknownGroup
+    InvalidEncoding
+    InvalidSignature
+    UnsupportedRequiredFeature
+    AuthorizationFailed
+    MissingWelcomeKeyPackage
+cgka_traits::ingest::LocalIngestState
+    RejoinConfirmationRequired
+    Removed
+    Quarantined
+cgka_traits::ingest::PeeledContent
+    MlsMessage
+    Welcome
+cgka_traits::ingest::ProposalRejectionCategory
+    AuthorizationFailed
+    UnsupportedProposal
+    InvalidEncoding
+    InvalidSignature
+    InvalidSelfRemove
+cgka_traits::ingest::StaleReason
+    AlreadySeen
+    AlreadyAtEpoch
+    NotForThisClient
+    UnknownGroup
+    OwnEcho
+    PreMembership
+    PredatesLocalCopy
+    BeyondAnchor
+    BeyondRollbackHorizon
+    BeyondAppRetention
+    LosingBranch
+    InvalidAgainstCanonicalState
+    SelfEvicted
+    Quarantined
+cgka_traits::maintenance::GroupEvolutionPhase
+    Preparing
+    Prepared
+    Attempting
+    Confirmed
+    SupersededByConvergence
+cgka_traits::maintenance::GroupEvolutionSemantic
+    SelfUpdate
+    Invite
+    RemoveMembers
+    UpdateAppComponents
+    LegacyRecovery
+cgka_traits::maintenance::MaintenancePhase
+    CatchUp
+    EoseTimeout
+    Grace
+    Quiet
+    Jitter
+    Overdue
+    Paused
+    ClockSkewBlocked
+    PendingPublication
+    Fanout
+    Retry
+    SupersededByConvergence
+    Complete
+    Failed
+cgka_traits::maintenance::MaintenanceTrigger
+    PostJoin
+    Periodic
+    Manual
+cgka_traits::maintenance::PeriodicMaintenancePolicy
+    EnabledForNewGroups
+    Disabled
+cgka_traits::maintenance::TransportFanoutAttemptState
+    Unattempted
+    Accepted
+    AttemptedFailed
+    PolicyProhibited
+cgka_traits::message::MessageState
+    Sent
+    Created
+    Processed
+    Failed
+    Retryable
+    ConvergenceDeferred
+    PeelDeferred
+    EpochInvalidated
+cgka_traits::message::StoredMessagePayload
+    RawTransport
+    OutboundWelcome
+    StagedInviteWelcome
+    OpenMlsWire
+    SignedOpenMlsWire
+    OwnCommitWire
+cgka_traits::peeler::GroupMessageMetadata
+    Application
+    CommitOrProposal
+cgka_traits::storage::StorageError
+    NotFound
+    AlreadyExists
+    SnapshotMissing
+    TimelineCursorExpired
+    Busy
+    Corruption
+    Capacity
+    Closed
+    UnsupportedSchemaVersion
+    Backend
+    Serialization
+cgka_traits::transport::TransportEnvelope
+    GroupMessage
+    Welcome
+cgka_traits::transport_adapter::FanoutMlsState
+    NotApplicable
+    Pending
+    Confirmed
+    RolledBack
+cgka_traits::transport_adapter::FanoutPendingKind
+    GroupEvolution
+    CreateGroup
+    Disband
+cgka_traits::transport_adapter::FanoutTargetStatus
+    NotAttempted
+    Attempting
+    Accepted
+    Failed
+    PossiblyExposed
+    RetryableUnavailable
+cgka_traits::transport_adapter::TransportAdapterError
+    AccountNotActive
+    Closed
+    InvalidInboundEncoding
+    InvalidInboundSignature
+    PublishTargetMismatch
+    Subscription
+    Publish
+    PublishEndpoints
+    Backend
+    Other
+cgka_traits::transport_adapter::TransportEndpointFailureKind
+    TerminalRejected
+    NotExposed
+    PossiblyExposed
+    RetryableUnavailable
+cgka_traits::transport_adapter::TransportEndpointRejectionCategory
+    Duplicate
+    Pow
+    Blocked
+    RateLimited
+    Invalid
+    Error
+    Unsupported
+    AuthRequired
+    Restricted
+cgka_traits::transport_adapter::TransportPublishTarget
+    Group
+    Inbox
+nostr::event::kind::Kind
+    Metadata
+    TextNote
+    RecommendRelay
+    ContactList
+    OpenTimestamps
+    EncryptedDirectMessage
+    EventDeletion
+    Repost
+    GenericRepost
+    Comment
+    Reaction
+    BadgeAward
+    ChannelCreation
+    ChannelMetadata
+    ChannelMessage
+    ChannelHideMessage
+    ChannelMuteUser
+    PublicChatReserved45
+    PublicChatReserved46
+    PublicChatReserved47
+    PublicChatReserved48
+    PublicChatReserved49
+    MlsKeyPackage
+    MlsWelcome
+    MlsGroupMessage
+    RepoState
+    GitPatch
+    GitIssue
+    GitReply
+    GitStatusOpen
+    GitStatusApplied
+    GitStatusClosed
+    GitStatusDraft
+    WalletConnectInfo
+    Reporting
+    Label
+    ZapPrivateMessage
+    ZapRequest
+    ZapReceipt
+    MuteList
+    PinList
+    Bookmarks
+    Communities
+    PublicChats
+    BlockedRelays
+    SearchRelays
+    SimpleGroups
+    Interests
+    Emojis
+    InboxRelays
+    MlsKeyPackageRelays
+    RelayList
+    Authentication
+    WalletConnectRequest
+    WalletConnectResponse
+    WalletConnectNotification
+    NostrConnect
+    LiveEvent
+    LiveEventMessage
+    ProfileBadges
+    BadgeDefinition
+    Seal
+    GiftWrap
+    PrivateDirectMessage
+    SetStall
+    SetProduct
+    JobFeedback
+    FollowSet
+    RelaySet
+    BookmarkSet
+    ArticlesCurationSet
+    VideosCurationSet
+    InterestSet
+    EmojiSet
+    ReleaseArtifactSet
+    LongFormTextNote
+    GitRepoAnnouncement
+    FileMetadata
+    BlossomAuth
+    HttpAuth
+    ApplicationSpecificData
+    Torrent
+    TorrentComment
+    PeerToPeerOrder
+    RequestToVanish
+    UserStatus
+    VoiceMessage
+    VoiceMessageReply
+    CashuWallet
+    CashuWalletUnspentProof
+    CashuWalletSpendingHistory
+    CashuWalletQuote
+    CashuNutZapInfo
+    CashuNutZap
+    CodeSnippet
+    Poll
+    PollResponse
+    ChatMessage
+    Thread
+    WebBookmark
+    Custom
+nostr::event::tag::kind::TagKind
+    Aes256Gcm
+    Alt
+    Amount
+    Anon
+    Blurhash
+    Bolt11
+    Challenge
+    Client
+    Clone
+    Commit
+    Head
+    ContentWarning
+    CurrentParticipants
+    Dependency
+    Description
+    Dim
+    Emoji
+    Encrypted
+    Ends
+    Expiration
+    Extension
+    File
+    Image
+    License
+    Lnurl
+    Magnet
+    Maintainers
+    Method
+    MlsProtocolVersion
+    MlsCiphersuite
+    MlsExtensions
+    Name
+    Nonce
+    Option
+    Payload
+    PollType
+    Preimage
+    Protected
+    Proxy
+    PublishedAt
+    Recording
+    Relay
+    Relays
+    Repository
+    Request
+    Response
+    Runtime
+    Server
+    Size
+    Starts
+    Status
+    Streaming
+    Subject
+    Summary
+    Title
+    Thumb
+    TotalParticipants
+    Tracker
+    Url
+    Web
+    Word
+    SingleLetter
+    Custom
+nostr::event::tag::standard::TagStandard
+    Event
+    Quote
+    QuoteAddress
+    EventReport
+    GitHead
+    GitClone
+    GitCommit
+    GitEarliestUniqueCommitId
+    GitMaintainers
+    PublicKey
+    PublicKeyReport
+    PublicKeyLiveEvent
+    Reference
+    RelayMetadata
+    Hashtag
+    Geohash
+    Identifier
+    ExternalContent
+    ExternalIdentity
+    Coordinate
+    Kind
+    Nip73Kind
+    Relay
+    Relays
+    AllRelays
+    PollEndsAt
+    PollOption
+    PollResponse
+    PollType
+    POW
+    Client
+    ContentWarning
+    Expiration
+    Subject
+    Challenge
+    Title
+    Image
+    Thumb
+    Summary
+    Description
+    Bolt11
+    Preimage
+    Amount
+    Lnurl
+    Name
+    PublishedAt
+    Url
+    MimeType
+    Aes256Gcm
+    Server
+    Sha256
+    Size
+    Dim
+    Magnet
+    Blurhash
+    Streaming
+    Recording
+    Starts
+    Ends
+    LiveEventStatus
+    CurrentParticipants
+    TotalParticipants
+    AbsoluteURL
+    Method
+    Payload
+    Anon
+    Proxy
+    Emoji
+    Encrypted
+    Request
+    DataVendingMachineStatus
+    LabelNamespace
+    Label
+    Dependency
+    Extension
+    License
+    Runtime
+    Repository
+    Protected
+    Alt
+    Web
+    Word
+nostr::filter::Alphabet
+    A
+    B
+    C
+    D
+    E
+    F
+    G
+    H
+    I
+    J
+    K
+    L
+    M
+    N
+    O
+    P
+    Q
+    R
+    S
+    T
+    U
+    V
+    W
+    X
+    Y
+    Z
+nostr::message::client::ClientMessage
+    Event
+    Req
+    Count
+    Close
+    Auth
+    NegOpen
+    NegMsg
+    NegClose
+nostr::message::relay::MachineReadablePrefix
+    Duplicate
+    Pow
+    Blocked
+    RateLimited
+    Invalid
+    Error
+    Unsupported
+    AuthRequired
+    Restricted
+nostr::message::relay::RelayMessage
+    Event
+    Ok
+    EndOfStoredEvents
+    Notice
+    Closed
+    Auth
+    Count
+    NegMsg
+    NegErr
+nostr_database::Backend
+    Memory
+    RocksDB
+    LMDB
+    SQLite
+    IndexedDB
+    Custom
+nostr_database::DatabaseEventStatus
+    Saved
+    Deleted
+    NotExistent
+nostr_database::SaveEventStatus
+    Success
+    Rejected
+nostr_database::error::DatabaseError
+    Backend
+    NotSupported
+nostr_relay_builder::builder::PolicyResult
+    Accept
+    Reject
+nostr_relay_builder::error::Error
+    IO
+    Tor
+    AlreadyRunning
+nostr_relay_pool::monitor::MonitorNotification
+    StatusChanged
+nostr_relay_pool::policy::AdmitStatus
+    Success
+    Rejected
+nostr_relay_pool::policy::PolicyError
+    Backend
+nostr_relay_pool::pool::RelayPoolNotification
+    Event
+    Message
+    Shutdown
+nostr_relay_pool::relay::RelayNotification
+    Event
+    Message
+    RelayStatus
+    Authenticated
+    AuthenticationFailed
+    Shutdown
+nostr_relay_pool::relay::options::ReqExitPolicy
+    ExitOnEOSE
+    WaitForEvents
+    WaitForEventsAfterEOSE
+    WaitDurationAfterEOSE
+nostr_relay_pool::relay::options::SyncDirection
+    Up
+    Down
+    Both
+nostr_relay_pool::relay::status::RelayStatus
+    Initialized
+    Pending
+    Connecting
+    Connected
+    Disconnected
+    Terminated
+    Banned
+    Sleeping
+storage_sqlite::connection::SqliteJournalMode
+    Wal
+    Delete
+storage_sqlite::transport_reconciliation::TransportReconciliationRoute
+    Inbox
+    Group
+transport_nostr_adapter::NostrSubscription
+    AccountInbox
+    Group
+    GroupMaintenance
+transport_nostr_peeler::error::NostrPeelerError
+    Malformed
+    InvalidSignature
+    UnsupportedKind
+    MissingTag
