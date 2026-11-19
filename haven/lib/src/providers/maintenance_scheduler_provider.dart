@@ -377,13 +377,14 @@ class MaintenanceSchedulerNotifier extends Notifier<void>
   }
 
   /// Runs a relay-list tick if one is due at [now] — the relay-list half of
-  /// [runKeyPackageIfDue], with the same reasoning.
+  /// [runKeyPackageIfDue], with the same reasoning. A burst is never the
+  /// foreground, so the fold asks no inbox relay for gift wraps.
   @override
   Future<void> runRelayListIfDue(DateTime now) async {
     if (_disposed) return;
     final dueAt = _relayListDueAt;
     if (dueAt == null || now.isBefore(dueAt)) return;
-    await _runRelayListTick(_generation);
+    await _runRelayListTick(_generation, burst: true);
   }
 
   /// A burst's leave carry-on: a burst is never the foreground.
@@ -793,7 +794,7 @@ class MaintenanceSchedulerNotifier extends Notifier<void>
 
   // --- Relay-list task ------------------------------------------------------
 
-  Future<void> _runRelayListTick(int generation) async {
+  Future<void> _runRelayListTick(int generation, {bool burst = false}) async {
     if (!_isCurrent(generation)) return;
     if (_relayListInFlight) {
       return;
@@ -806,7 +807,11 @@ class MaintenanceSchedulerNotifier extends Notifier<void>
         await _awaitLoginPublishSettled();
         if (!_isCurrent(generation)) return;
       }
-      result = await ref.read(maintenanceServiceProvider).maintainRelayList();
+      // The strict read, at the call: only a pass in front of the user pays
+      // for the gift-wrap read's identity connections (P4).
+      result = await ref
+          .read(maintenanceServiceProvider)
+          .maintainRelayList(foreground: !burst && appIsResumed());
       debugPrint(
         '[Maintenance] relay-list tick: inbox=${result.inbox.action.name}, '
         'keyPackage=${result.keyPackage.action.name}',

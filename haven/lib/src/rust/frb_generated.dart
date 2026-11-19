@@ -787,6 +787,7 @@ abstract class RustLibApi extends BaseApi {
     required RelayManagerFfi that,
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,
+    required bool foreground,
   });
 
   Future<RelayManagerFfi> crateApiRelayManagerFfiNewInstance();
@@ -6552,6 +6553,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     required RelayManagerFfi that,
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,
+    required bool foreground,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -6566,6 +6568,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             serializer,
           );
           sse_encode_list_prim_u_8_loose(identitySecretBytes, serializer);
+          sse_encode_bool(foreground, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -6578,7 +6581,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiRelayManagerFfiMaintainRelayListConstMeta,
-        argValues: [that, circle, identitySecretBytes],
+        argValues: [that, circle, identitySecretBytes, foreground],
         apiImpl: this,
       ),
     );
@@ -6587,7 +6590,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiRelayManagerFfiMaintainRelayListConstMeta =>
       const TaskConstMeta(
         debugName: "RelayManagerFfi_maintain_relay_list",
-        argNames: ["that", "circle", "identitySecretBytes"],
+        argNames: ["that", "circle", "identitySecretBytes", "foreground"],
       );
 
   @override
@@ -17740,9 +17743,14 @@ class RelayManagerFfiImpl extends RustOpaque implements RelayManagerFfi {
   /// and sends each relay at most one offer of each event, settled by that
   /// relay's own `OK`. It runs under the account's one maintenance lock, and
   /// a request made while a pass of its kind waits for that lock joins it.
-  /// Beside the inbox list's pass, it asks each own inbox relay for this
-  /// account's gift wraps and writes how each answered onto the board, which
-  /// the relay settings page warns from when one refuses.
+  /// Beside the inbox list's pass, a pass asked for in the `foreground` asks
+  /// each own inbox relay for this account's gift wraps and writes how each
+  /// answered onto the board, which the relay settings page warns from when
+  /// one refuses. `foreground` is the caller's claim: `true` ONLY when the
+  /// app's lifecycle reads `resumed` at the call, so no background burst
+  /// opens those identity connections (P4); without it the board keeps the
+  /// last answers. A foreground request joining a pass that has not begun
+  /// still gets its read.
   ///
   /// Returns a presence-only [`RelayListMaintenanceOutcomeFfi`].
   ///
@@ -17751,10 +17759,12 @@ class RelayManagerFfiImpl extends RustOpaque implements RelayManagerFfi {
   Future<RelayListMaintenanceOutcomeFfi> maintainRelayList({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,
+    required bool foreground,
   }) => RustLib.instance.api.crateApiRelayManagerFfiMaintainRelayList(
     that: this,
     circle: circle,
     identitySecretBytes: identitySecretBytes,
+    foreground: foreground,
   );
 
   /// Publishes a signed event that is neither a group message nor a gift

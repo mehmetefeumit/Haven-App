@@ -211,7 +211,9 @@ async fn invitee(world: &World, tag: &str, inbox: &[&str], key_packages: &[&str]
 
     let lists = within(
         "the relay-list tick",
-        world.relays.maintain_relay_list(&bob.circle, bob.secret()),
+        world
+            .relays
+            .maintain_relay_list(&bob.circle, bob.secret(), true),
     )
     .await
     .expect("the relay-list tick runs");

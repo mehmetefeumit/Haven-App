@@ -26,6 +26,7 @@ library;
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
@@ -56,6 +57,9 @@ class _RecordingRelay extends MockRelayService {
   /// Both tasks, in call order.
   final List<String> calls = [];
 
+  /// The foreground claim each relay-list tick carried, in call order.
+  final List<bool> relayListClaims = [];
+
   /// When set, the relay-list task parks on it.
   Completer<void>? relayListGate;
 
@@ -80,9 +84,11 @@ class _RecordingRelay extends MockRelayService {
   Future<RelayListMaintenanceResult> maintainRelayList({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,
+    required bool foreground,
   }) async {
     relayListCalls++;
     calls.add('relayList');
+    relayListClaims.add(foreground);
     await relayListGate?.future;
     return relayListsCurrent;
   }
@@ -223,6 +229,34 @@ void main() {
       addTearDown(container.dispose);
       return container;
     }
+
+    // Only a run in front of the user asks the inbox relays for gift wraps;
+    // the claim is the strict lifecycle read, taken at the call.
+    group('the foreground claim it hands the relay-list pass', () {
+      final binding = TestWidgetsFlutterBinding.ensureInitialized();
+
+      tearDown(
+        () =>
+            binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed),
+      );
+
+      Future<List<bool>> runIn(AppLifecycleState? state) async {
+        binding.resetInternalState();
+        if (state != null) binding.handleAppLifecycleStateChanged(state);
+        final relay = _RecordingRelay();
+        await containerFor(relay).read(keyPackagePublisherProvider.future);
+        return relay.relayListClaims;
+      }
+
+      test('a resumed app claims the foreground', () async {
+        expect(await runIn(AppLifecycleState.resumed), [true]);
+      });
+
+      test('a paused app, or an unset lifecycle, claims none', () async {
+        expect(await runIn(AppLifecycleState.paused), [false]);
+        expect(await runIn(null), [false]);
+      });
+    });
 
     test('publishes the relay lists before the KeyPackage', () async {
       // `transports/nostr.md`: the kind 10002 says where the KeyPackage goes,

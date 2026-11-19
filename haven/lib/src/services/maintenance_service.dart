@@ -201,11 +201,17 @@ class MaintenanceService {
   ///
   /// Returns [RelayListMaintenanceResult.failed] on any failure — never
   /// throws, and never a value that reads as a current list.
-  Future<RelayListMaintenanceResult> maintainRelayList() async {
+  ///
+  /// [foreground] is the caller's claim, handed on untouched: see
+  /// [RelayService.maintainRelayList].
+  Future<RelayListMaintenanceResult> maintainRelayList({
+    required bool foreground,
+  }) async {
     return _withSecret(
       (circle, secret) => _relayService.maintainRelayList(
         circle: circle,
         identitySecretBytes: secret,
+        foreground: foreground,
       ),
       onFailure: (_) => const RelayListMaintenanceResult.failed(),
       opKind: 'relay-list',

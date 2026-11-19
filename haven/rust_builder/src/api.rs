@@ -3211,6 +3211,10 @@ pub struct CircleManagerFfi {
     /// One relay-list maintenance pass for every request made while one
     /// waits for its turn ([`RelayManagerFfi::maintain_relay_list`]).
     relay_list_passes: Coalesced<Result<RelayListMaintenanceOutcomeFfi, String>>,
+    /// A foreground relay-list request asked for the gift-wrap read and no
+    /// pass has begun since: the next pass to begin takes it, whichever
+    /// request started it.
+    inbox_read_asked: std::sync::atomic::AtomicBool,
 }
 
 // Compile-time assertion: the refactor above is only sound if the core
@@ -3378,6 +3382,7 @@ impl CircleManagerFfi {
                 own_pubkey_hex,
                 kp_passes: Coalesced::default(),
                 relay_list_passes: Coalesced::default(),
+                inbox_read_asked: std::sync::atomic::AtomicBool::new(false),
             })
             .map_err(|e| e.to_string())
     }
@@ -10662,9 +10667,14 @@ impl RelayManagerFfi {
     /// and sends each relay at most one offer of each event, settled by that
     /// relay's own `OK`. It runs under the account's one maintenance lock, and
     /// a request made while a pass of its kind waits for that lock joins it.
-    /// Beside the inbox list's pass, it asks each own inbox relay for this
-    /// account's gift wraps and writes how each answered onto the board, which
-    /// the relay settings page warns from when one refuses.
+    /// Beside the inbox list's pass, a pass asked for in the `foreground` asks
+    /// each own inbox relay for this account's gift wraps and writes how each
+    /// answered onto the board, which the relay settings page warns from when
+    /// one refuses. `foreground` is the caller's claim: `true` ONLY when the
+    /// app's lifecycle reads `resumed` at the call, so no background burst
+    /// opens those identity connections (P4); without it the board keeps the
+    /// last answers. A foreground request joining a pass that has not begun
+    /// still gets its read.
     ///
     /// Returns a presence-only [`RelayListMaintenanceOutcomeFfi`].
     ///
@@ -10674,14 +10684,21 @@ impl RelayManagerFfi {
         &self,
         circle: &CircleManagerFfi,
         identity_secret_bytes: Vec<u8>,
+        foreground: bool,
     ) -> Result<RelayListMaintenanceOutcomeFfi, String> {
         let _running = circle.inner.own_relay_board().running();
         let keys = keys_from_secret_bytes(identity_secret_bytes)?;
+        if foreground {
+            // Before the request's ticket, so the pass that serves it sees it.
+            circle
+                .inbox_read_asked
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         circle
             .relay_list_passes
             .run(
                 circle.inner.session().own_relays_tick(),
-                self.relay_list_pass(&circle.inner, &keys),
+                self.relay_list_pass(&circle.inner, &keys, &circle.inbox_read_asked),
             )
             .await
     }
@@ -10691,9 +10708,12 @@ impl RelayManagerFfi {
         &self,
         circle_mgr: &Arc<CoreCircleManager>,
         keys: &nostr::Keys,
+        inbox_read_asked: &std::sync::atomic::AtomicBool,
     ) -> Result<RelayListMaintenanceOutcomeFfi, String> {
         use haven_core::circle::RelayType;
         use haven_core::relay::maintenance::{OwnKind, RelayListMaintenanceOutcome};
+
+        let read_inbox = inbox_read_asked.swap(false, std::sync::atomic::Ordering::SeqCst);
 
         let key_package = self
             .maintain_relay_list_category(
@@ -10712,7 +10732,7 @@ impl RelayManagerFfi {
                 RelayType::Inbox,
                 OwnKind::InboxRelayList,
             ),
-            Self::ask_own_inbox_reads(circle_mgr),
+            Self::ask_own_inbox_reads(circle_mgr, read_inbox),
         );
 
         Ok(RelayListMaintenanceOutcomeFfi::from(
@@ -10727,15 +10747,18 @@ impl RelayManagerFfi {
     ///
     /// Like every kind of the pass, it asks nothing while the storage-reset
     /// notice is unanswered; then, and when the list cannot be read, it
-    /// forgets the answers.
+    /// forgets the answers. Unless `read`, it asks nothing and keeps them.
     ///
     /// [`OwnRelayBoard::ask_inbox_reads`]: haven_core::relay::maintenance::OwnRelayBoard::ask_inbox_reads
-    async fn ask_own_inbox_reads(circle_mgr: &Arc<CoreCircleManager>) {
+    async fn ask_own_inbox_reads(circle_mgr: &Arc<CoreCircleManager>, read: bool) {
         let board = circle_mgr.own_relay_board();
         // Before the list is read, as each kind's pass takes its generation.
         let seen = board.inbox_reads_generation();
         if !circle_mgr.storage_reset_acknowledged() {
             board.clear_inbox_reads();
+            return;
+        }
+        if !read {
             return;
         }
         let inbox = run_blocking({
@@ -15603,7 +15626,7 @@ mod maintenance_real_ffi_tests {
     /// the `KeyPackage`.
     async fn both_passes(relay_mgr: &RelayManagerFfi, circle: &CircleManagerFfi, secret: &[u8]) {
         relay_mgr
-            .maintain_relay_list(circle, secret.to_vec())
+            .maintain_relay_list(circle, secret.to_vec(), true)
             .await
             .expect("maintain_relay_list must not error");
         circle_maintain(relay_mgr, circle, secret.to_vec()).await;
@@ -15727,7 +15750,7 @@ mod maintenance_real_ffi_tests {
             .expect("the user removes the dead relay");
         assert!(circle.own_relay_board().inbox_reads.is_empty());
         relay_mgr
-            .maintain_relay_list(&circle, secret.clone())
+            .maintain_relay_list(&circle, secret.clone(), true)
             .await
             .expect("maintain_relay_list must not error");
         assert_eq!(
@@ -15749,6 +15772,178 @@ mod maintenance_real_ffi_tests {
             .iter()
             .map(|cell| (cell.relay_url.as_str(), cell.read))
             .collect()
+    }
+
+    /// The `REQ`s for gift wraps (kind 1059) a recording front passed on.
+    fn gift_wrap_reqs(front: &haven_core::relay::recording_front::RecordingFront) -> usize {
+        front
+            .frames()
+            .iter()
+            .filter_map(|frame| serde_json::from_str::<serde_json::Value>(&frame.text).ok())
+            .filter(|message| {
+                message[0] == "REQ"
+                    && message.as_array().is_some_and(|parts| {
+                        parts.iter().skip(2).any(|filter| {
+                            filter["kinds"]
+                                .as_array()
+                                .is_some_and(|kinds| kinds.contains(&1059.into()))
+                        })
+                    })
+            })
+            .count()
+    }
+
+    /// An account with one inbox relay, behind a recording front, and one
+    /// `KeyPackage` relay.
+    /// Fields drop in order: the store before its directory, the keyring
+    /// lock last.
+    struct InboxReadWorld {
+        relay_mgr: RelayManagerFfi,
+        circle: CircleManagerFfi,
+        secret: Vec<u8>,
+        front: haven_core::relay::recording_front::RecordingFront,
+        kp_relay: haven_core::relay::scripted_relay::ScriptedRelay,
+        _inbox_relay: haven_core::relay::scripted_relay::ScriptedRelay,
+        _dir: DataDir,
+        _keyring_guard: tokio::sync::MutexGuard<'static, ()>,
+    }
+
+    impl InboxReadWorld {
+        async fn new(name: &str) -> Self {
+            use haven_core::relay::recording_front::RecordingFront;
+            use haven_core::relay::scripted_relay::ScriptedRelay;
+
+            let keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+            install_test_seams();
+            let (inbox_relay, kp_relay) = (ScriptedRelay::start(), ScriptedRelay::start());
+            inbox_relay.serve_kept();
+            kp_relay.serve_kept();
+            let front = RecordingFront::start(inbox_relay.url());
+            let secret = secret_bytes(&Keys::generate());
+            let dir = DataDir::new(name);
+            let circle =
+                CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
+            let relay_mgr = RelayManagerFfi::new_instance()
+                .await
+                .expect("RelayManagerFfi::new_instance");
+            circle
+                .add_user_relay(front.url().to_owned(), RelayTypeFfi::Inbox)
+                .await
+                .expect("an inbox relay");
+            circle
+                .add_user_relay(kp_relay.url().to_owned(), RelayTypeFfi::Nip65)
+                .await
+                .expect("a KeyPackage relay");
+            Self {
+                _keyring_guard: keyring_guard,
+                _dir: dir,
+                _inbox_relay: inbox_relay,
+                kp_relay,
+                front,
+                secret,
+                circle,
+                relay_mgr,
+            }
+        }
+
+        async fn pass(&self, foreground: bool) {
+            self.relay_mgr
+                .maintain_relay_list(&self.circle, self.secret.clone(), foreground)
+                .await
+                .expect("maintain_relay_list must not error");
+        }
+
+        fn inbox(&self) -> String {
+            let [inbox] = <[String; 1]>::try_from(
+                self.circle
+                    .inner
+                    .list_user_relays(RelayType::Inbox)
+                    .expect("the stored list"),
+            )
+            .expect("one inbox relay");
+            inbox
+        }
+    }
+
+    /// The gift-wrap read is the foreground's (P4): a pass asked for in the
+    /// background checks the inbox list but sends no own inbox relay a
+    /// gift-wrap `REQ` and leaves the board's answers as they were — none
+    /// before a foreground pass, that pass's after it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn only_a_foreground_pass_asks_the_inbox_relays_for_gift_wraps_via_real_ffi() {
+        let world = InboxReadWorld::new("inbox_read_foreground").await;
+        let inbox = world.inbox();
+
+        world.pass(false).await;
+        let board = world.circle.own_relay_board();
+        assert_eq!(
+            cell(&board.inbox_relay_list, &inbox),
+            Some(OwnRelayStatusFfi::Current),
+            "the background pass checked the inbox list"
+        );
+        assert!(board.inbox_reads.is_empty(), "and wrote no read");
+        assert_eq!(gift_wrap_reqs(&world.front), 0, "nor asked for one");
+
+        world.pass(true).await;
+        let served = [(inbox.as_str(), super::InboxReadFfi::Served)];
+        assert_eq!(inbox_reads(&world.circle.own_relay_board()), served);
+        assert_eq!(gift_wrap_reqs(&world.front), 1);
+
+        world.pass(false).await;
+        assert_eq!(
+            inbox_reads(&world.circle.own_relay_board()),
+            served,
+            "a background pass keeps the last answers"
+        );
+        assert_eq!(gift_wrap_reqs(&world.front), 1, "and asks nothing");
+    }
+
+    /// A foreground request that joins a pass a background request is
+    /// waiting for gets its read from that pass; the pass already running
+    /// when it was made, a background one, asks none.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_foreground_request_joining_a_background_pass_gets_its_read_via_real_ffi() {
+        use haven_core::relay::scripted_relay::Verdict;
+
+        let world = InboxReadWorld::new("inbox_read_joined").await;
+        let inbox = world.inbox();
+        let (release, released) = tokio::sync::watch::channel(false);
+        world
+            .kp_relay
+            .on_publish(move |_| Verdict::HoldThen(released.clone(), Box::new(Verdict::Keep)));
+
+        let running = world.pass(false);
+        tokio::pin!(running);
+        // The background request first, so the pass it waits for is the one
+        // the foreground request joins.
+        let mut joined = [Box::pin(world.pass(false)), Box::pin(world.pass(true))];
+        tokio::join!(&mut running, async {
+            board_until(&world.circle, |board| {
+                cell(&board.relay_list, world.kp_relay.url()) == Some(OwnRelayStatusFfi::Publishing)
+            })
+            .await;
+            for request in &mut joined {
+                tokio::select! {
+                    biased;
+                    () = request.as_mut() => panic!("a request ran before its turn"),
+                    () = std::future::ready(()) => {}
+                }
+            }
+            release.send(true).expect("the relay listens");
+        });
+        for request in joined {
+            request.await;
+        }
+
+        assert_eq!(
+            gift_wrap_reqs(&world.front),
+            1,
+            "one read, by the pass the foreground request joined"
+        );
+        assert_eq!(
+            inbox_reads(&world.circle.own_relay_board()),
+            [(inbox.as_str(), super::InboxReadFfi::Served)]
+        );
     }
 
     /// An older package of this account in the tracked slot is not this
@@ -16074,7 +16269,7 @@ mod maintenance_real_ffi_tests {
             .expect("store the setting");
 
         relay_mgr
-            .maintain_relay_list(&circle, secret)
+            .maintain_relay_list(&circle, secret, true)
             .await
             .expect("maintain_relay_list must not error");
         let board = circle.own_relay_board();
@@ -16129,7 +16324,7 @@ mod maintenance_real_ffi_tests {
         let lookup = haven_core::relay::discovery_relays();
 
         let lists = relay_mgr
-            .maintain_relay_list(&circle, secret)
+            .maintain_relay_list(&circle, secret, true)
             .await
             .expect("maintain_relay_list must not error");
         let board = circle.own_relay_board();
@@ -16177,7 +16372,7 @@ mod maintenance_real_ffi_tests {
             .await
             .expect("a KeyPackage relay");
 
-        let lists = relay_mgr.maintain_relay_list(&circle, secret.clone());
+        let lists = relay_mgr.maintain_relay_list(&circle, secret.clone(), true);
         let package = circle_maintain(&relay_mgr, &circle, secret.clone());
         tokio::pin!(lists, package);
         let (lists, ()) = tokio::join!(&mut lists, async {
@@ -16251,10 +16446,10 @@ mod maintenance_real_ffi_tests {
                 .count()
         };
 
-        let running = relay_mgr.maintain_relay_list(&circle, secret.clone());
+        let running = relay_mgr.maintain_relay_list(&circle, secret.clone(), true);
         tokio::pin!(running);
         let mut joined: Vec<_> = (0..3)
-            .map(|_| Box::pin(relay_mgr.maintain_relay_list(&circle, secret.clone())))
+            .map(|_| Box::pin(relay_mgr.maintain_relay_list(&circle, secret.clone(), true)))
             .collect();
         let (first, ()) = tokio::join!(&mut running, async {
             board_until(&circle, |board| {
@@ -16381,7 +16576,7 @@ mod maintenance_real_ffi_tests {
         // WorkManager all drive these two entry points) and the user-edit
         // publish path.
         let lists = relay_mgr
-            .maintain_relay_list(&circle, secret.clone())
+            .maintain_relay_list(&circle, secret.clone(), true)
             .await
             .expect("relay-list tick");
         for category in [lists.inbox, lists.key_package] {
@@ -16412,7 +16607,7 @@ mod maintenance_real_ffi_tests {
 
         super::acknowledge_storage_reset(dir.as_str()).expect("acknowledge");
         let lists = relay_mgr
-            .maintain_relay_list(&circle, secret.clone())
+            .maintain_relay_list(&circle, secret.clone(), true)
             .await
             .expect("relay-list tick");
         assert_eq!(lists.inbox.action, super::RelayListActionFfi::Republished);
@@ -16466,7 +16661,7 @@ mod maintenance_real_ffi_tests {
         super::acknowledge_storage_reset(dir.as_str()).expect("acknowledge");
 
         let lists = relay_mgr
-            .maintain_relay_list(&circle, secret)
+            .maintain_relay_list(&circle, secret, true)
             .await
             .expect("relay-list tick");
         assert_eq!(lists.inbox.action, super::RelayListActionFfi::Republished);
@@ -20128,7 +20323,7 @@ mod maintenance_real_ffi_tests {
             .expect("seed the foreign list");
 
         let outcome = relay_mgr
-            .maintain_relay_list(&circle, secret)
+            .maintain_relay_list(&circle, secret, true)
             .await
             .expect("maintain_relay_list must not error");
         assert_eq!(
@@ -20209,7 +20404,7 @@ mod maintenance_real_ffi_tests {
                 let outcome = RelayManagerFfi::new_instance()
                     .await
                     .expect("RelayManagerFfi::new_instance")
-                    .maintain_relay_list(&circle, secret)
+                    .maintain_relay_list(&circle, secret, true)
                     .await
                     .expect("maintain_relay_list must not error");
                 let healed_here = relay
@@ -20292,7 +20487,7 @@ mod maintenance_real_ffi_tests {
         }
 
         let lists = relay_mgr
-            .maintain_relay_list(&circle, secret.clone())
+            .maintain_relay_list(&circle, secret.clone(), true)
             .await
             .expect("the relay-list tick");
         let kp = circle_maintain(&relay_mgr, &circle, secret.clone()).await;
@@ -20337,7 +20532,7 @@ mod maintenance_real_ffi_tests {
         // Every relay now serves what it should: nothing is republished, and
         // the healthy own relay alone confirms each.
         let again = relay_mgr
-            .maintain_relay_list(&circle, secret.clone())
+            .maintain_relay_list(&circle, secret.clone(), true)
             .await
             .expect("the second relay-list tick");
         for list in [again.key_package, again.inbox] {
@@ -20366,7 +20561,7 @@ mod maintenance_real_ffi_tests {
 
         // The onboarding race: a publish before anything seeded the defaults.
         let lists = relay_mgr
-            .maintain_relay_list(&circle, secret.clone())
+            .maintain_relay_list(&circle, secret.clone(), true)
             .await
             .expect("the relay-list tick");
         for relay_type in [RelayType::KeyPackage, RelayType::Inbox] {
@@ -20427,7 +20622,7 @@ mod maintenance_real_ffi_tests {
             "the last relay of a category cannot be removed"
         );
         let edited = relay_mgr
-            .maintain_relay_list(&circle, secret)
+            .maintain_relay_list(&circle, secret, true)
             .await
             .expect("the relay-list tick after the edit");
         assert_eq!(
@@ -20488,7 +20683,7 @@ mod maintenance_real_ffi_tests {
             .expect("the lookup relay takes it");
 
         let lists = relay_mgr
-            .maintain_relay_list(&circle, secret)
+            .maintain_relay_list(&circle, secret, true)
             .await
             .expect("the relay-list tick");
         assert_eq!(
@@ -23928,7 +24123,7 @@ mod maintenance_real_ffi_tests {
                 .expect("the publish toggle");
         }
         let healed = relay_mgr
-            .maintain_relay_list(&circle, secret.clone())
+            .maintain_relay_list(&circle, secret.clone(), true)
             .await
             .expect("the relay-list tick");
         assert!(
