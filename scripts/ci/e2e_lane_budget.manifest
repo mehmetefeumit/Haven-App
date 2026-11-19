@@ -322,9 +322,9 @@ logscan */lib:logscan_gate#1 charge @
 # ---------------------------------------------------------------------------
 # The Android release launch gate: three legs of install, cold launches and
 # screen polls on one AVD, no drive. Every wait is a bounded adb read inside a
-# wall-clock loop (SECONDS < deadline), so each loop is charged its bound plus
-# the one read that can start just before it, and the reads that share a loop
-# with the dump are within the dump's charge.
+# wall-clock loop (`date +%s` elapsed < bound), so each loop is charged its
+# bound plus the one read that can start just before it, and the reads that
+# share a loop with the dump are within the dump's charge.
 # ---------------------------------------------------------------------------
 
 unit tooling/e2e/ci/run-launch-gate-android.sh
