@@ -223,9 +223,6 @@ class AppLocalizationsFr extends AppLocalizations {
   String get relaySettingsTitle => 'Relais';
 
   @override
-  String get relaySettingsCheckRelaysTooltip => 'Vérifier les relais';
-
-  @override
   String get relaySettingsNoIdentityTitle => 'Aucune identité';
 
   @override
@@ -240,22 +237,10 @@ class AppLocalizationsFr extends AppLocalizations {
   String get relaySettingsInboxTitle => 'Mes relais de réception';
 
   @override
-  String get relaySettingsInboxSubtitle =>
-      'Là où les invitations vous parviennent (kind 10050)';
-
-  @override
   String get relaySettingsKeyPackageTitle => 'Mes relais KeyPackage';
 
   @override
-  String get relaySettingsKeyPackageSubtitle =>
-      'Là où les autres trouvent les clés dont ils ont besoin pour vous inviter (kind 10002)';
-
-  @override
   String get relaySettingsProfileTitle => 'Mes relais de profil';
-
-  @override
-  String get relaySettingsProfileSubtitle =>
-      'Là où votre profil public est consulté et publié. Ces relais restent séparés de vos autres relais, et la liste de vos relais de profil n\'est jamais publiée (kind 0)';
 
   @override
   String get relaySettingsProfileUnderflowTitle =>
@@ -326,9 +311,6 @@ class AppLocalizationsFr extends AppLocalizations {
   String get relaySettingsStatusChecking => 'Vérification';
 
   @override
-  String get relaySettingsStatusUnreachable => 'Injoignable';
-
-  @override
   String relaySettingsKindLine(String kind, String status) {
     return '$kind : $status';
   }
@@ -355,26 +337,172 @@ class AppLocalizationsFr extends AppLocalizations {
   String get relaySettingsLookupTitle => 'Relais de recherche';
 
   @override
-  String get relaySettingsLookupSubtitle =>
-      'Relais publics sur lesquels les autres vous recherchent. Haven y conserve une copie de vos listes de relais afin que l\'on puisse vous inviter.';
-
-  @override
-  String get relaySettingsRepublish => 'Republier';
-
-  @override
-  String get relaySettingsRepublishDone =>
-      'Tous les relais qui ont répondu disposent désormais de ce dont les autres ont besoin pour vous inviter';
-
-  @override
-  String get relaySettingsRepublishIncomplete =>
-      'Certains relais ne disposent toujours pas de ce dont les autres ont besoin pour vous inviter';
-
-  @override
-  String get relaySettingsRepublishHeld =>
+  String get relaySettingsPublishingHeld =>
       'Haven ne publiera ni vos paramètres de relais ni votre clé d\'invitation tant que vous n\'aurez pas répondu au message sur les paramètres de relais';
 
   @override
   String get relaySettingsStatusNotChecked => 'Non vérifié';
+
+  @override
+  String get relaySettingsPresencePublishing => 'publication…';
+
+  @override
+  String get relaySettingsPresenceRefused => 'le relais a refusé';
+
+  @override
+  String get relaySettingsPresenceUnconfirmed => 'le relais n\'a pas confirmé';
+
+  @override
+  String get relaySettingsPresenceNoAnswer => 'vérification impossible';
+
+  @override
+  String get relaySettingsPresenceHeld => 'en pause';
+
+  @override
+  String relaySettingsInfoTooltip(String section) {
+    return 'À propos de « $section »';
+  }
+
+  @override
+  String get relaySettingsInboxInfoWhat =>
+      'Quand quelqu\'un vous invite à rejoindre un cercle, l\'invitation est remise à ces relais. Les relais sont des serveurs indépendants qui font circuler les messages. Haven les consulte pour y trouver de nouvelles invitations.';
+
+  @override
+  String get relaySettingsInboxInfoKeeps =>
+      'Haven conserve ici votre liste de relais de réception. C\'est une courte note publique qui indique quels relais vous servent de boîte de réception, afin que l\'on sache où vous envoyer des invitations. Une copie est aussi envoyée aux relais de recherche, plus bas sur cette page. Les invitations sont scellées de sorte que vous soyez la seule personne à pouvoir les ouvrir.';
+
+  @override
+  String get relaySettingsInboxInfoMissing =>
+      'Les personnes qui utilisent Haven cherchent votre liste de relais de réception sur les relais de recherche, et d\'autres applications peuvent la chercher sur vos propres relais : Haven en garde donc une copie aux deux endroits. Chaque ligne indique si le relais concerné possède la version actuelle.';
+
+  @override
+  String get relaySettingsInboxInfoActions =>
+      'Vous pouvez ajouter des relais en qui vous avez confiance et supprimer ceux dont vous ne voulez plus. Haven ne vous laissera pas supprimer le dernier relais de cette liste. Tous les relais de cette liste sont publics : n\'importe qui peut les voir dans votre liste de relais de réception. Lorsque vous supprimez un relais, Haven lui demande d\'effacer votre ancienne liste.';
+
+  @override
+  String get relaySettingsInboxInfoTechnical =>
+      'Détail technique, pour les esprits curieux : votre liste de relais de réception est un événement Nostr de kind 10050, et les invitations arrivent sous forme d\'événements emballés (« gift wrap ») de kind 1059.';
+
+  @override
+  String get relaySettingsKeyPackageInfoWhat =>
+      'Pour vous ajouter à un cercle, la personne qui vous invite a besoin de votre clé d\'invitation, appelée KeyPackage. Haven la conserve sur ces relais pour que l\'on puisse vous inviter même quand votre téléphone est éteint.';
+
+  @override
+  String get relaySettingsKeyPackageInfoKeeps =>
+      'Haven conserve ici deux choses : votre KeyPackage et votre liste de relais, une courte note publique qui indique quels relais détiennent votre KeyPackage. Une copie de la liste de relais est aussi envoyée aux relais de recherche. Votre KeyPackage n\'est envoyé qu\'aux relais de cette liste. Une fois qu\'il a servi, Haven le remplace par un nouveau, et le renouvelle aussi de temps en temps.';
+
+  @override
+  String get relaySettingsKeyPackageInfoMissing =>
+      'Chaque ligne indique si le relais concerné possède la version actuelle de votre KeyPackage et de votre liste de relais. Si un relais n\'a pas votre KeyPackage, ou en détient un ancien que Haven a remplacé, les personnes qui l\'y cherchent risquent de ne pas pouvoir vous inviter.';
+
+  @override
+  String get relaySettingsKeyPackageInfoActions =>
+      'Vous pouvez ajouter ou supprimer des relais. Haven ne vous laissera pas supprimer le dernier relais de cette liste. Tous les relais de cette liste sont publics : n\'importe qui peut les voir dans votre liste de relais. Lorsque vous supprimez un relais, Haven lui demande d\'effacer votre ancienne liste de relais.';
+
+  @override
+  String get relaySettingsKeyPackageInfoTechnical =>
+      'Détail technique, pour les esprits curieux : le KeyPackage est un événement Marmot de kind 30443, et la liste de relais est un événement NIP-65 de kind 10002.';
+
+  @override
+  String get relaySettingsProfileInfoWhat =>
+      'Quand vous enregistrez un nom ou une photo, Haven envoie votre profil public à ces relais. Haven y consulte aussi les noms et les photos des autres membres.';
+
+  @override
+  String get relaySettingsProfileInfoKeeps =>
+      'N\'importe qui peut consulter votre profil sur ces relais. Votre photo elle-même est stockée sur un serveur de photos distinct, et votre profil contient son adresse web.';
+
+  @override
+  String get relaySettingsProfileInfoPrivacy =>
+      'Haven n\'envoie votre profil qu\'à ces relais, qu\'il garde séparés de ceux qui transportent vos invitations. Votre profil étant public, d\'autres applications peuvent le copier ailleurs. Haven conserve cette liste sur votre téléphone et ne la publie jamais. Un relais de cette liste qui transporte aussi votre autre trafic Haven est signalé par un avertissement.';
+
+  @override
+  String get relaySettingsProfileInfoActions =>
+      'Vous pouvez ajouter des relais. Les relais de profil intégrés à Haven ne peuvent pas être supprimés, car Haven les rajoute toujours. Cette section n\'affiche pas de symbole par relais ; votre page Identité montre le profil que vous avez enregistré.';
+
+  @override
+  String get relaySettingsProfileInfoTechnical =>
+      'Détail technique, pour les esprits curieux : votre profil est un événement Nostr de kind 0, et la photo est stockée sur un serveur Blossom.';
+
+  @override
+  String get relaySettingsLookupInfoWhat =>
+      'Les relais de recherche sont des relais publics bien connus, où les applications cherchent les relais d\'une personne lorsqu\'elles ne connaissent que son compte. Haven les a choisis, et ce sont les mêmes pour toutes les personnes qui utilisent Haven. Haven s\'en sert aussi pour trouver les personnes que vous invitez.';
+
+  @override
+  String get relaySettingsLookupInfoKeeps =>
+      'Pour qu\'une personne qui ne connaît que votre compte puisse quand même vous inviter, Haven copie ici, sans les modifier, votre liste de relais de réception et votre liste de relais. Si ces listes mentionnent un relais privé, ce nom est également visible ici. Dans ce rôle, Haven ne copie ici que ces deux listes. Certains relais de recherche sont aussi les relais de réception et KeyPackage par défaut de Haven ; tant qu\'ils figurent dans vos listes, ils détiennent aussi ce que décrivent ces sections.';
+
+  @override
+  String get relaySettingsLookupInfoMissing =>
+      'Chaque ligne indique si le relais concerné possède la version actuelle des deux listes. Si un relais de recherche ne les a pas, ou en a d\'anciennes versions, les personnes qui y font des recherches risquent de ne pas vous trouver. Un même relais peut apparaître dans plusieurs sections ; chaque section n\'affiche que ce dont ce rôle a besoin.';
+
+  @override
+  String get relaySettingsLookupInfoActions =>
+      'Cette liste est intégrée à Haven : vous ne pouvez donc pas la modifier ici. Ce sont les listes de relais de réception et de relais KeyPackage, plus haut, que vous contrôlez.';
+
+  @override
+  String get relaySettingsLookupInfoTechnical =>
+      'Détail technique, pour les esprits curieux : Haven copie vos événements de kind 10050 et de kind 10002 sur ces relais ; le kind 30443 n\'est envoyé qu\'à vos relais KeyPackage.';
+
+  @override
+  String get relaySettingsLegendTitle => 'Signification des symboles';
+
+  @override
+  String get relaySettingsLegendCurrent =>
+      'À jour : ce relais possède la version actuelle.';
+
+  @override
+  String get relaySettingsLegendPublishing =>
+      'Publication : Haven a envoyé l\'élément et attend que le relais le confirme.';
+
+  @override
+  String get relaySettingsLegendChecking =>
+      'Vérification, ou non vérifié : Haven demande au relais ce qu\'il possède, ou ne le lui a pas encore demandé.';
+
+  @override
+  String get relaySettingsLegendNotOnRelay =>
+      'Pas encore sur ce relais : l\'élément y est introuvable, il s\'agit d\'une ancienne version, le relais l\'a refusé, ou le relais n\'a pas confirmé. Appuyez sur un symbole pour savoir de quel cas il s\'agit. Haven réessaie à sa prochaine vérification : environ toutes les 10 minutes pour votre KeyPackage et toutes les 30 minutes pour vos listes tant que Haven est ouvert, ainsi qu\'à chaque démarrage de Haven. Si l\'un de vos relais continue d\'afficher ce symbole, vous pouvez le remplacer.';
+
+  @override
+  String get relaySettingsLegendNoAnswer =>
+      'Vérification impossible : le relais n\'a pas répondu, peut-être parce que vous êtes hors ligne ou qu\'il est en panne. Haven l\'interroge de nouveau à sa prochaine vérification.';
+
+  @override
+  String get relaySettingsLegendHeld =>
+      'En pause : Haven ne publie pas cet élément pour l\'instant. Une note sur cette page en indique la raison.';
+
+  @override
+  String get relaySettingsHeldNoRelays =>
+      'Haven n\'a nulle part où publier une liste ci-dessus qui ne contient aucun relais. Rétablissez les valeurs par défaut de chaque liste vide pour la publier à nouveau.';
+
+  @override
+  String get relaySettingsHeldNotYetPublished =>
+      'Haven n\'a pas encore publié l\'une de vos listes de relais. Il le fera lors de sa prochaine vérification.';
+
+  @override
+  String relaySettingsCheckSettled(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other:
+          'Vérification des relais terminée. $count relais ne sont pas confirmés comme étant à jour.',
+      many:
+          'Vérification des relais terminée. $count relais ne sont pas confirmés comme étant à jour.',
+      one:
+          'Vérification des relais terminée. $count relais n\'est pas confirmé comme étant à jour.',
+      zero: 'Vérification des relais terminée. Tout est à jour.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String relaySettingsAddedRelayUpToDate(String relay) {
+    return '$relay est à jour.';
+  }
+
+  @override
+  String relaySettingsAddedRelayNotUpToDate(String relay) {
+    return '$relay n\'est pas confirmé comme étant à jour. Sa ligne indique pourquoi.';
+  }
 
   @override
   String get relaySettingsEmptyTitle => 'Aucun relais configuré';
@@ -1503,59 +1631,6 @@ class AppLocalizationsFr extends AppLocalizations {
   @override
   String get refreshRingAnnouncementNoInbox =>
       'Aucune boîte de réception configurée';
-
-  @override
-  String refreshRingSemanticAllFound(int total) {
-    final intl.NumberFormat totalNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String totalString = totalNumberFormat.format(total);
-
-    String _temp0 = intl.Intl.pluralLogic(
-      total,
-      locale: localeName,
-      other: 'Les $totalString relais ont vos données',
-      many: 'Les $totalString relais ont vos données',
-      one: 'Le relais a vos données',
-    );
-    return '$_temp0';
-  }
-
-  @override
-  String get refreshRingSemanticNoneFound => 'Aucun relais n\'a vos données';
-
-  @override
-  String refreshRingSemanticPartialFound(int ok, int total) {
-    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
-      localeName,
-    );
-    final String okString = okNumberFormat.format(ok);
-    final intl.NumberFormat totalNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String totalString = totalNumberFormat.format(total);
-
-    return '$okString relais sur $totalString ont vos données';
-  }
-
-  @override
-  String get refreshRingAnnouncementAllFound =>
-      'Tous les relais ont vos données';
-
-  @override
-  String refreshRingAnnouncementPartialFound(int ok, int total) {
-    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
-      localeName,
-    );
-    final String okString = okNumberFormat.format(ok);
-    final intl.NumberFormat totalNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String totalString = totalNumberFormat.format(total);
-
-    return '$okString relais sur $totalString ont vos données';
-  }
-
-  @override
-  String get refreshRingAnnouncementNoneFound =>
-      'Aucun relais n\'a vos données';
 
   @override
   String get identityTitle => 'Identité';

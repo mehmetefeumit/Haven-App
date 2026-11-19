@@ -44,7 +44,7 @@
 #   STRFRY_CONFIG        Config file name under tooling/e2e (default:
 #                        strfry.conf, NIP-77 off). `strfry-negentropy.conf`
 #                        is the same with NIP-77 on, for the
-#                        relay-customization lane's second relay.
+#                        relay-management lane's second relay.
 #   STRFRY_READY_TIMEOUT Seconds to wait for the relay to come up
 #                        (default: 60).
 #   STRFRY_PULL_ATTEMPTS Number of `docker pull` attempts (with linear

@@ -32,7 +32,7 @@ const String defaultStrfryUrl = String.fromEnvironment(
 
 /// URL of the SECOND hermetic strfry instance (relay R2).
 ///
-/// Distinct from [defaultStrfryUrl] (R1). The relay-customization tests add
+/// Distinct from [defaultStrfryUrl] (R1). The relay-management lane's tests add
 /// R2 to the user's relay preferences and then assert that events (kind 30443,
 /// 10002, 10050, 445) actually land on R2. Using a physically separate relay
 /// process makes the proof definitive: if the production add-relay path

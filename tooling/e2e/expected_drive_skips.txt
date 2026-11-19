@@ -13,7 +13,7 @@
 #   RUNTIME  `drive_log_reports_test_failure()`, which every E2E lane already
 #            reaches on its drive log — directly in most runners, and through a
 #            delegate in the four that carry the rows below:
-#            run-integration-tests.sh and run-relay-customization.sh drive each
+#            run-integration-tests.sh and run-relay-management.sh drive each
 #            target via run-single-avd-scenario.sh; run-b7-ios-auth-tier.sh via
 #            run-ios-sim-scenario.sh; and run-ios-sim-scenario.sh itself, which
 #            drives ios_bg_mirror_test.dart and reaches the predicate only
@@ -157,7 +157,7 @@ integration_test/ios_bg_mirror_test.dart|iOS-only wiring proof; skipped on non-i
 #
 #   encryption_pipeline_test.dart          .github/workflows/e2e-integration.yml
 #   circle_service_remove_member_test.dart .github/workflows/e2e-integration.yml
-#   relay_*_test.dart                      .github/workflows/e2e-relay-customization.yml
+#   relay_*_test.dart                      .github/workflows/e2e-relay-management.yml
 #
 # Nothing is lost by these being unreachable: they are hatches, not proofs. What
 # CI does not exercise here is the PLATFORM keyring binding, which the on-device

@@ -7,7 +7,7 @@
 #
 # `reactivecircus/android-emulator-runner` opens each of its runs with an
 # "Install Android SDK" group of bare `sdkmanager --install` calls, tried once.
-# In CI run 35524002720 (e2e-relay-customization) the emulator's download
+# In CI run 35524002720 (e2e-relay-customization, now e2e-relay-management) the emulator's download
 # failed — `Warning: Failed to download package!` — sdkmanager exited non-zero,
 # and the action stopped there. What it PRINTED last was its unconditional
 # teardown, `adb -s emulator-5554 emu kill` -> "could not connect to TCP port

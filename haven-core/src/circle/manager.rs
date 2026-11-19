@@ -225,6 +225,9 @@ pub struct CircleManager {
     /// than a `cfg`-split field, and a field that exists only under test is a
     /// field the shipped code path is not the one being measured.
     convergence_reticks: std::sync::atomic::AtomicUsize,
+    /// What each own relay serves of the user's own events, as the
+    /// maintenance passes last found it — see [`Self::own_relay_board`].
+    own_relay_board: crate::relay::maintenance::OwnRelayBoard,
     pub(crate) storage: Arc<CircleStorage>,
 }
 
@@ -325,6 +328,7 @@ impl CircleManager {
             held_at_open,
             held_polled_back: std::sync::atomic::AtomicBool::new(held_at_open == 0),
             convergence_reticks: std::sync::atomic::AtomicUsize::new(0),
+            own_relay_board: crate::relay::maintenance::OwnRelayBoard::default(),
             storage,
         })
     }
@@ -464,6 +468,7 @@ impl CircleManager {
             held_at_open,
             held_polled_back: std::sync::atomic::AtomicBool::new(held_at_open == 0),
             convergence_reticks: std::sync::atomic::AtomicUsize::new(0),
+            own_relay_board: crate::relay::maintenance::OwnRelayBoard::default(),
             storage,
         })
     }
@@ -5730,7 +5735,9 @@ impl CircleManager {
         url: &str,
         relay_type: super::relay_prefs::RelayType,
     ) -> Result<()> {
-        self.storage.add_user_relay(url, relay_type)
+        self.storage.add_user_relay(url, relay_type)?;
+        self.relay_list_edited(relay_type, Some(url));
+        Ok(())
     }
 
     /// See [`CircleStorage::remove_user_relay`].
@@ -5745,7 +5752,9 @@ impl CircleManager {
         url: &str,
         relay_type: super::relay_prefs::RelayType,
     ) -> Result<bool> {
-        self.storage.remove_user_relay(url, relay_type)
+        let removed = self.storage.remove_user_relay(url, relay_type)?;
+        self.relay_list_edited(relay_type, Some(url));
+        Ok(removed)
     }
 
     /// See [`CircleStorage::restore_defaults_for`] (non-destructive).
@@ -5757,7 +5766,9 @@ impl CircleManager {
         &self,
         relay_type: super::relay_prefs::RelayType,
     ) -> Result<()> {
-        self.storage.restore_defaults_for(relay_type)
+        self.storage.restore_defaults_for(relay_type)?;
+        self.relay_list_edited(relay_type, None);
+        Ok(())
     }
 
     /// See [`CircleStorage::wipe_and_reset_defaults_for`] (destructive).
@@ -5769,7 +5780,38 @@ impl CircleManager {
         &self,
         relay_type: super::relay_prefs::RelayType,
     ) -> Result<()> {
-        self.storage.wipe_and_reset_defaults_for(relay_type)
+        self.storage.wipe_and_reset_defaults_for(relay_type)?;
+        self.relay_list_edited(relay_type, None);
+        Ok(())
+    }
+
+    /// The own-relay board ([`crate::relay::maintenance::OwnRelayBoard`]):
+    /// written by the maintenance passes, read by the relay settings page.
+    #[must_use]
+    pub const fn own_relay_board(&self) -> &crate::relay::maintenance::OwnRelayBoard {
+        &self.own_relay_board
+    }
+
+    /// Forgets what the board says of a list that just changed, in the same
+    /// call as the write: a relay list is current only when it names exactly
+    /// the configured list, so every cell of its kind was judged against the
+    /// old one. A `KeyPackage` stays what it was on every relay but the one
+    /// added or removed (`edited`; every relay for a restore or a wipe).
+    fn relay_list_edited(&self, relay_type: super::relay_prefs::RelayType, edited: Option<&str>) {
+        use super::relay_prefs::RelayType;
+        use crate::relay::maintenance::OwnKind;
+        let board = &self.own_relay_board;
+        match relay_type {
+            RelayType::KeyPackage => {
+                board.clear(OwnKind::RelayList);
+                match edited {
+                    Some(relay) => board.forget(OwnKind::KeyPackage, relay),
+                    None => board.clear(OwnKind::KeyPackage),
+                }
+            }
+            RelayType::Inbox => board.clear(OwnKind::InboxRelayList),
+            RelayType::Profile => {}
+        }
     }
 
     /// See [`CircleStorage::get_publish_kp_relay_list`].
@@ -8612,6 +8654,53 @@ mod tests {
             directory_of(&manager),
             vec![(member_hex, DirectoryTier::Current)]
         );
+    }
+
+    /// A restore or a wipe may change every entry of the list it resets, so
+    /// it forgets every cell of that list's kinds, the `KeyPackage` cells of a
+    /// `KeyPackage`-list reset included, and nothing of the other list.
+    #[tokio::test]
+    async fn a_restore_or_a_wipe_forgets_every_cell_of_the_kinds_its_list_carries() {
+        use crate::circle::relay_prefs::RelayType;
+        use crate::relay::maintenance::{OwnKind, Probed};
+        let relays = [
+            "wss://a.example.com".to_owned(),
+            "wss://b.example.com".to_owned(),
+        ];
+        let answers: Vec<_> = relays
+            .iter()
+            .map(|relay_url| crate::relay::RelayFetchOutcome {
+                relay_url: relay_url.clone(),
+                responded: true,
+                drained: true,
+                events: Vec::new(),
+            })
+            .collect();
+        let resets: [fn(&CircleManager, RelayType) -> Result<()>; 2] = [
+            CircleManager::restore_relay_defaults_for,
+            CircleManager::wipe_and_reset_relay_defaults_for,
+        ];
+        for reset in resets {
+            let (manager, _keys, _dir) = create_test_manager();
+            let board = manager.own_relay_board();
+            for kind in [
+                OwnKind::KeyPackage,
+                OwnKind::RelayList,
+                OwnKind::InboxRelayList,
+            ] {
+                let mut pass = board.begin(kind, board.generation(kind), &relays);
+                pass.judge(&answers, |_| Probed::Current);
+            }
+
+            reset(&manager, RelayType::KeyPackage).expect("reset the KeyPackage list");
+            let after = board.snapshot();
+            assert!(after.key_package.cells.is_empty(), "{after:?}");
+            assert!(after.relay_list.cells.is_empty(), "{after:?}");
+            assert_eq!(after.inbox_relay_list.cells.len(), 2, "{after:?}");
+
+            reset(&manager, RelayType::Inbox).expect("reset the inbox list");
+            assert!(board.snapshot().inbox_relay_list.cells.is_empty());
+        }
     }
 
     // ── Welcome-delivery cascade ─────────────────────────────────────────────

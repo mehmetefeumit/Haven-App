@@ -332,6 +332,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  OwnPublishHoldFfi dco_decode_box_autoadd_own_publish_hold_ffi(dynamic raw);
+
+  @protected
   ProfileMetadataFfi dco_decode_box_autoadd_profile_metadata_ffi(dynamic raw);
 
   @protected
@@ -520,7 +523,7 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<MemberKeyPackageFfi> dco_decode_list_member_key_package_ffi(dynamic raw);
 
   @protected
-  List<OwnRelayPresenceFfi> dco_decode_list_own_relay_presence_ffi(dynamic raw);
+  List<OwnRelayCellFfi> dco_decode_list_own_relay_cell_ffi(dynamic raw);
 
   @protected
   List<int> dco_decode_list_prim_u_8_loose(dynamic raw);
@@ -639,6 +642,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  OwnPublishHoldFfi? dco_decode_opt_box_autoadd_own_publish_hold_ffi(
+    dynamic raw,
+  );
+
+  @protected
   ProfileMetadataFfi? dco_decode_opt_box_autoadd_profile_metadata_ffi(
     dynamic raw,
   );
@@ -681,13 +689,22 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List? dco_decode_opt_list_prim_u_8_strict(dynamic raw);
 
   @protected
-  OwnEventPresenceFfi dco_decode_own_event_presence_ffi(dynamic raw);
+  OwnKindBoardFfi dco_decode_own_kind_board_ffi(dynamic raw);
 
   @protected
   OwnProfileRelayAnswerFfi dco_decode_own_profile_relay_answer_ffi(dynamic raw);
 
   @protected
-  OwnRelayPresenceFfi dco_decode_own_relay_presence_ffi(dynamic raw);
+  OwnPublishHoldFfi dco_decode_own_publish_hold_ffi(dynamic raw);
+
+  @protected
+  OwnRelayBoardFfi dco_decode_own_relay_board_ffi(dynamic raw);
+
+  @protected
+  OwnRelayCellFfi dco_decode_own_relay_cell_ffi(dynamic raw);
+
+  @protected
+  OwnRelayStatusFfi dco_decode_own_relay_status_ffi(dynamic raw);
 
   @protected
   ProfileMetadataFfi dco_decode_profile_metadata_ffi(dynamic raw);
@@ -1120,6 +1137,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  OwnPublishHoldFfi sse_decode_box_autoadd_own_publish_hold_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   ProfileMetadataFfi sse_decode_box_autoadd_profile_metadata_ffi(
     SseDeserializer deserializer,
   );
@@ -1368,7 +1390,7 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  List<OwnRelayPresenceFfi> sse_decode_list_own_relay_presence_ffi(
+  List<OwnRelayCellFfi> sse_decode_list_own_relay_cell_ffi(
     SseDeserializer deserializer,
   );
 
@@ -1517,6 +1539,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  OwnPublishHoldFfi? sse_decode_opt_box_autoadd_own_publish_hold_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   ProfileMetadataFfi? sse_decode_opt_box_autoadd_profile_metadata_ffi(
     SseDeserializer deserializer,
   );
@@ -1569,9 +1596,7 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List? sse_decode_opt_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
-  OwnEventPresenceFfi sse_decode_own_event_presence_ffi(
-    SseDeserializer deserializer,
-  );
+  OwnKindBoardFfi sse_decode_own_kind_board_ffi(SseDeserializer deserializer);
 
   @protected
   OwnProfileRelayAnswerFfi sse_decode_own_profile_relay_answer_ffi(
@@ -1579,7 +1604,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  OwnRelayPresenceFfi sse_decode_own_relay_presence_ffi(
+  OwnPublishHoldFfi sse_decode_own_publish_hold_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  OwnRelayBoardFfi sse_decode_own_relay_board_ffi(SseDeserializer deserializer);
+
+  @protected
+  OwnRelayCellFfi sse_decode_own_relay_cell_ffi(SseDeserializer deserializer);
+
+  @protected
+  OwnRelayStatusFfi sse_decode_own_relay_status_ffi(
     SseDeserializer deserializer,
   );
 
@@ -2118,6 +2154,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_own_publish_hold_ffi(
+    OwnPublishHoldFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_profile_metadata_ffi(
     ProfileMetadataFfi self,
     SseSerializer serializer,
@@ -2433,8 +2475,8 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  void sse_encode_list_own_relay_presence_ffi(
-    List<OwnRelayPresenceFfi> self,
+  void sse_encode_list_own_relay_cell_ffi(
+    List<OwnRelayCellFfi> self,
     SseSerializer serializer,
   );
 
@@ -2623,6 +2665,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_own_publish_hold_ffi(
+    OwnPublishHoldFfi? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_profile_metadata_ffi(
     ProfileMetadataFfi? self,
     SseSerializer serializer,
@@ -2686,8 +2734,8 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  void sse_encode_own_event_presence_ffi(
-    OwnEventPresenceFfi self,
+  void sse_encode_own_kind_board_ffi(
+    OwnKindBoardFfi self,
     SseSerializer serializer,
   );
 
@@ -2698,8 +2746,26 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  void sse_encode_own_relay_presence_ffi(
-    OwnRelayPresenceFfi self,
+  void sse_encode_own_publish_hold_ffi(
+    OwnPublishHoldFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_own_relay_board_ffi(
+    OwnRelayBoardFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_own_relay_cell_ffi(
+    OwnRelayCellFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_own_relay_status_ffi(
+    OwnRelayStatusFfi self,
     SseSerializer serializer,
   );
 

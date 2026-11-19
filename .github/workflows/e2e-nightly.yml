@@ -40,9 +40,9 @@ jobs:
     name: E2E Integration Tests (Android, nightly)
     uses: ./.github/workflows/e2e-integration.yml
 
-  # The two-relay relay-customization tests — identical lane to the PR
-  # gate (boots two distinct hermetic strfry relays to prove relay
-  # customization is honored).
-  e2e-relay-customization:
-    name: E2E Relay Customization (Android, nightly)
-    uses: ./.github/workflows/e2e-relay-customization.yml
+  # The relay-management lane — identical lane to the PR gate (boots two
+  # distinct hermetic strfry relays to prove relay customization is honored,
+  # plus the fault relays the relay-status target reads every state from).
+  e2e-relay-management:
+    name: E2E Relay Management (Android, nightly)
+    uses: ./.github/workflows/e2e-relay-management.yml

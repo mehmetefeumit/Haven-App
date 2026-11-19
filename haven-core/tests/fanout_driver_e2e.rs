@@ -31,7 +31,7 @@ use haven_core::relay::fanout::{
     disown_for_test, drive_one, is_owned, DriveMode, FanoutClock, FanoutStatus, LocationSeal,
     SendHeld,
 };
-use haven_core::relay::{RelayError, RelayManager};
+use haven_core::relay::{RelayError, RelayManager, OFFER_ACK_TIMEOUT};
 use helpers::{assert_no_needles, capture_haven_log, setup_circle, CircleFixture, CircleMember};
 use nostr::JsonUtil as _;
 
@@ -784,7 +784,11 @@ async fn nothing_but_the_driver_sends_an_event_that_has_a_fanout_row() {
             let location = relays.publish_location_event(&event, &targets).await;
             let background = relays.publish_event_background(event.clone(), &targets);
             let legacy_ladder = relays.publish_unrecorded(&event, &targets).await;
+            let offer = relays
+                .offer_event_to(&event, &targets[0], OFFER_ACK_TIMEOUT)
+                .await;
             matches!(ladder, Err(RelayError::FanoutOwned))
+                && matches!(offer, Err(RelayError::FanoutOwned))
                 && matches!(profile, Err(RelayError::FanoutOwned))
                 && matches!(location, Err(RelayError::FanoutOwned))
                 && matches!(background, Err(RelayError::FanoutOwned))

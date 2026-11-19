@@ -562,6 +562,12 @@
 #     receive path with nothing pointing back at the create. The soak rig's
 #     staged commits must be resolved on a witnessed ack (Security Rule 13).
 #
+#   Relay status states covered       scripts/ci/check_relay_status_states_covered.sh
+#     The relay-management device target maps every KindPresence value, in one
+#     exhaustive switch, to "seen on the device" or to a named L1/L2 test; each
+#     cited test must exist as a definition (never a comment), so a renamed or
+#     deleted test cannot leave a Relays-page state proved by nothing.
+#
 #   Handoff convergence sees a fork   scripts/ci/check_e2e_handoff_convergence_oracle.sh
 #     When the admin leaves a 3-member circle both remaining peers auto-commit
 #     her SelfRemove, so a fork leaves them on the SAME epoch number with the
@@ -635,7 +641,7 @@
 #     reaches Gradle through scripts/ci/build_apk_with_retry.sh — never a bare
 #     `flutter build apk`, which would retry a compile error and, worse, retry
 #     a full disk into a green build. Exactly ONE job writes the key, because
-#     the relay-customization lane wipes ~/.gradle/caches by design and a
+#     the relay-management lane wipes ~/.gradle/caches by design and a
 #     second writer could publish that hole to everyone. A cold classpath
 #     resolution is what HTTP 429'd a lane into a red job that ran no test
 #     (CI run 35622556197, and run 30732662493 before it).
@@ -1851,7 +1857,7 @@ jobs:
 
       # The inner deadline itself. Its critical fixture is exit-code
       # PASS-THROUGH: if a genuine test failure were ever reported as 124,
-      # run-relay-customization.sh's timeout-only retry would start retrying
+      # run-relay-management.sh's timeout-only retry would start retrying
       # real reds and a failing lane could flake green.
       - name: E2E harness self-test (inner deadline wrapper)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
@@ -1871,9 +1877,17 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/run-integration-tests.sh --self-test
 
-      - name: E2E harness self-test (relay-customization leak gate)
+      - name: E2E harness self-test (relay-management leak gate)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash tooling/e2e/ci/run-relay-customization.sh --self-test
+        run: bash tooling/e2e/ci/run-relay-management.sh --self-test
+
+      - name: Relay status states covered (every Relays-page state proved)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_relay_status_states_covered.sh
+
+      - name: Relay status states guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_relay_status_states_covered.sh --self-test
 
       - name: E2E harness self-test (background-catchup leak gate)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}

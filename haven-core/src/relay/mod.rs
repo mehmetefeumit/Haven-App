@@ -64,7 +64,7 @@ pub use error::{InvalidUrlReason, RelayError, RelayResult};
 pub use manager::NegProbe;
 pub use manager::{
     allow_ws_loopback_for_test, ws_loopback_allowed_for_test, FanoutTransport, MemberLookup,
-    Nip65Relays, RelayManager,
+    Nip65Relays, RelayManager, SendAck, OFFER_ACK_TIMEOUT,
 };
 pub(crate) use manager::{foreign_relay_dialable, retain_dialable_foreign_relays};
 pub use publishers::{

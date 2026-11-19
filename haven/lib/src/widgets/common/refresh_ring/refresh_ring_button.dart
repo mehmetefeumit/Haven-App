@@ -1,17 +1,14 @@
-/// The shared "segmented refresh ring" — one app-bar control used by both the
-/// Invitations page and the Relay Settings page.
+/// The "segmented refresh ring" — the Invitations page's app-bar control.
 ///
 /// Tapping the control morphs the refresh icon into a ring of independent arc
 /// segments, one per relay being contacted. Each arc animates gray (not yet
-/// contacted) → amber (in flight) → green (responded with its data) / red
-/// (unreachable or missing data), so the user watches the refresh fill in,
-/// relay by relay. A successful all-green result holds briefly, then fades
-/// back to the calm icon; a result with any problem stays put until the next
-/// refresh so it is never missed.
+/// contacted) → amber (in flight) → green (responded) / red (unreachable), so
+/// the user watches the refresh fill in, relay by relay. A successful
+/// all-green result holds briefly, then fades back to the calm icon; a result
+/// with any problem stays put until the next refresh so it is never missed.
 ///
-/// The widget is intentionally page-agnostic: it speaks only the shared
-/// [RelayRingSlotState] vocabulary and never sees a relay URL, so it can drive
-/// both flows and can never leak relay identities into the semantics tree.
+/// The widget speaks only the [RelayRingSlotState] vocabulary and never sees a
+/// relay URL, so it can never leak relay identities into the semantics tree.
 library;
 
 import 'dart:async';
@@ -81,20 +78,6 @@ const Duration _kHoldDuration = Duration(milliseconds: 2500);
 /// arcs (WCAG 1.4.1).
 const double _kPendingStrokeWidth = 2;
 
-/// The accessibility vocabulary a host flow uses for the ring's outcome.
-///
-/// The painter and geometry are identical across flows; only the spoken /
-/// labelled meaning of a green vs red segment differs, so each call site picks
-/// the wording that is factually correct for it.
-enum RefreshRingVocabulary {
-  /// Invitations inbox poll: green = the relay answered, red = unreachable.
-  responded,
-
-  /// Relay-event check: green = the relay holds the user's data, red = it does
-  /// not (missing events) or could not be reached.
-  hasData,
-}
-
 /// An app-bar refresh control that visualizes a per-relay refresh as a ring of
 /// independent arc segments.
 class RefreshRingButton extends StatefulWidget {
@@ -105,7 +88,6 @@ class RefreshRingButton extends StatefulWidget {
     required this.tooltip,
     this.noInbox = false,
     this.onNoInbox,
-    this.vocabulary = RefreshRingVocabulary.responded,
     super.key,
   });
 
@@ -130,10 +112,6 @@ class RefreshRingButton extends StatefulWidget {
 
   /// Destination for a tap while [noInbox] is `true` (opens relay settings).
   final VoidCallback? onNoInbox;
-
-  /// The wording used for the screen-reader label and announcements, so the
-  /// spoken outcome is accurate for the flow (see [RefreshRingVocabulary]).
-  final RefreshRingVocabulary vocabulary;
 
   @override
   State<RefreshRingButton> createState() => _RefreshRingButtonState();
@@ -343,26 +321,13 @@ class _RefreshRingButtonState extends State<RefreshRingButton>
     // drop the outcome announcement.
     if (_settled(oldSlots) || !_settled(newSlots)) return;
     final l10n = AppLocalizations.of(context);
-    final hasData = widget.vocabulary == RefreshRingVocabulary.hasData;
     if (_allOk(newSlots)) {
-      _announce(
-        hasData
-            ? l10n.refreshRingAnnouncementAllFound
-            : l10n.refreshRingAnnouncementAllOk,
-      );
+      _announce(l10n.refreshRingAnnouncementAllOk);
     } else if (newSlots.every((s) => s == RelayRingSlotState.error)) {
-      _announce(
-        hasData
-            ? l10n.refreshRingAnnouncementNoneFound
-            : l10n.refreshRingAnnouncementAllError,
-      );
+      _announce(l10n.refreshRingAnnouncementAllError);
     } else {
       final ok = newSlots.where((s) => s == RelayRingSlotState.ok).length;
-      _announce(
-        hasData
-            ? l10n.refreshRingAnnouncementPartialFound(ok, newSlots.length)
-            : l10n.refreshRingAnnouncementPartial(ok, newSlots.length),
-      );
+      _announce(l10n.refreshRingAnnouncementPartial(ok, newSlots.length));
     }
   }
 
@@ -379,7 +344,6 @@ class _RefreshRingButtonState extends State<RefreshRingButton>
 
   String _semanticsLabel(AppLocalizations l10n) {
     final slots = widget.slots;
-    final hasData = widget.vocabulary == RefreshRingVocabulary.hasData;
     if (widget.noInbox && widget.onNoInbox != null) {
       return l10n.refreshRingSemanticNoInbox;
     }
@@ -390,23 +354,14 @@ class _RefreshRingButtonState extends State<RefreshRingButton>
             (s) => s == RelayRingSlotState.ok || s == RelayRingSlotState.error,
           )
           .length;
-      // "checked" is accurate for both flows, so the checking label is shared.
       return l10n.refreshRingSemanticChecking(resolved, slots.length);
     }
-    if (_allOk(slots)) {
-      return hasData
-          ? l10n.refreshRingSemanticAllFound(slots.length)
-          : l10n.refreshRingSemanticAllOk(slots.length);
-    }
+    if (_allOk(slots)) return l10n.refreshRingSemanticAllOk(slots.length);
     if (slots.every((s) => s == RelayRingSlotState.error)) {
-      return hasData
-          ? l10n.refreshRingSemanticNoneFound
-          : l10n.refreshRingSemanticAllError;
+      return l10n.refreshRingSemanticAllError;
     }
     final ok = slots.where((s) => s == RelayRingSlotState.ok).length;
-    return hasData
-        ? l10n.refreshRingSemanticPartialFound(ok, slots.length)
-        : l10n.refreshRingSemanticPartial(ok, slots.length);
+    return l10n.refreshRingSemanticPartial(ok, slots.length);
   }
 
   _RingGlyph _settledGlyph() {
