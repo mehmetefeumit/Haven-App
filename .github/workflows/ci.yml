@@ -294,12 +294,14 @@ jobs:
   # own lane will rest on. `e2e_mesh_lever` (API 34): a build WITHOUT the flag
   # has no mesh channel, button or component (S0), then a build WITH it is
   # probed — does the image have Bluetooth LE, does the adapter come on after
-  # the lanes' snapshot boot, is a line planted under a platform Bluetooth tag
-  # read back — each answer a fixed word in its verdict file, and its turn-on
+  # the lane's boot, is a line planted under a platform Bluetooth tag read
+  # back — each answer a fixed word in its verdict file, and its turn-on
   # ends `failed` with nothing stored. `e2e_mesh_refusal` (API 29, the first
-  # lane below API 34): the flag-on build starts on Android 10 and offers
-  # nothing of the mesh. A probe that could not take a measurement is rc 3,
-  # unusable — not green, and not a finding about Haven.
+  # lane below API 34): the flag-on build installs and starts on Android 10
+  # and offers nothing of the mesh; on an image with no Bluetooth LE feature
+  # it says the Android 11 gate was not exercised and is green with that limit
+  # stated. A probe that could not take a measurement is rc 3, unusable — not
+  # green, and not a finding about Haven.
   e2e-mesh:
     name: E2E Mesh (Android)
     needs: [rust]

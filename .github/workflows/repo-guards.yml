@@ -2191,8 +2191,11 @@ jobs:
       # pinned: the redaction that takes every Bluetooth address and the
       # adapter's name out of what is uploaded, the dump skeleton that keeps
       # no value, the markers the drive target and the runner share, and the
-      # gate ahead of the one echo of a drive log. About 7 s: the three legs'
-      # suites run side by side.
+      # gate ahead of the one echo of a drive log. Also the shapes of the
+      # lane's first run on CI: a target that ended before its hold, an app
+      # gone when the host reads, why a drive failed in closed shapes, which
+      # gate found a leak. About 13 s on four idle cores: four suites run
+      # beside the serial checks.
       - name: E2E harness self-test (mesh lane oracle)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/run-mesh-lever.sh --self-test

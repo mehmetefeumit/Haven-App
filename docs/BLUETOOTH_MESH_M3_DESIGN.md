@@ -5453,8 +5453,11 @@ an hour alone. *(b) The engine names its slot* (recommended): one
 more entry in Rust and its JNI export, as O.6 specifies it; the alarm
 is armed for the slot, the scan's restart and the reminder — 30 to 60
 an hour with or without peers — the slot on time, the tick served by
-whatever woke the phone. A change to the bridge, its fixture and the
-twelve pinned exports, with its own review. *(c) No alarm sooner than
+whatever woke the phone. A link's stall leaves the alarm with the
+tick, and needs none: what is overdue, the engine's or the core's, is
+taken down at the next wake before anything new is judged (O.6). A
+change to the bridge, its fixture and the twelve pinned exports, with
+its own review. *(c) No alarm sooner than
 the shortest slot, sixty seconds, with no change to Rust*: about as
 few alarms as (b), but a slot may be up to a minute late whenever a
 peer is near and the phone asleep, and the later a slot may be, the
@@ -5713,7 +5716,18 @@ open.*
   boot or a sticky restart would then bring the mesh back with nobody
   asking, for up to twelve hours. The notice is §B.5's, "by anything
   else … the stopped notice": the mesh ended while the phone was off,
-  and nothing else says so.
+  and nothing else says so. **That end is the service's, made under
+  the lock** (the re-review's second point). As fixed for L1 the
+  receiver cleared the flag and posted the notice itself, on what it
+  had read, outside `ServiceStarts`' lock: a start made in between —
+  the mesh turned on as a late broadcast was handled — had its flag
+  cleared and the stopped notice posted beside it. `MeshService.end`
+  runs under `ServiceStarts.idle`, so not at all where a start is
+  live, and reads the flag and the deadline again there
+  (`ReceiverPolicy.ended`): a start that has come and gone since,
+  stopped by the user, left its flag clear and is owed no notice. A
+  clause of `anAlarmThatFindsNoServiceStartsNoneAndEndsAMeshWhoseTimeIsUp`;
+  the guard pins the receiver's call and the whole of `end`.
 - **Everything the receiver does is inside `RadioEnd.each`** (the
   review's M3). O.1.8 has the start alone there; but the refusal names
   `MeshNative`, whose initializer loads the library, and calls the
@@ -5825,8 +5839,8 @@ with none of them.
 | An emission slot — `next_emit_ms` (`engine.rs:818-820`, `:890`) | every 60 to 120 s, drawn | one packet, a location or a cover packet, into the store | **must keep its time.** Plan §5.1 and D-2: slot times are "independent of the times the relays see", which is what keeps a neighbour who also watches the relays from tying a phone to its circle. A slot that is overdue is served by whatever wakes the phone next — and on a phone that shares, that may be the location service's own publish |
 | The tick — `next_tick_ms` (`engine.rs:822-825`, `:927-950`) | every 5 s while there is a link, a dial or a recent peer | announces what is new to every link, reviews requests, forgets peers, rotates and plans links | **nothing is lost.** What it would act on arrives as an input that woke the phone — a frame, which holds it through the next tick; a sighting; a link's change — or is an emission, and the call that runs an overdue slot runs the overdue tick behind it (`clock`, `:811-826`), so the packet is announced in the same pump |
 | The greeting — `hello_ms` (`engine.rs:864-880`) | 7.5 to 22.5 minutes, with a link | a new `HELLO` value | the old value stands until the next wake, a slot at most; what is drawn does not depend on when (T-PRIV-4) |
-| A stalled link (`engine.rs:914-925`) | 30 s after a link with no greeting | the link is closed | it keeps its place until the next wake |
-| The core's own: a frame in flight (10 s) or refused (50 ms), a connection not yet a link (10 s) | after an input | the link is closed, or the frame offered again | the link keeps its place until the next wake |
+| A stalled link (`engine.rs:914-925`) | 30 s after a link with no greeting | the link is closed | the stall is inside the engine's wake, so as built the alarm comes for it. Where it is late — the alarm delivered late, or Q-24's (b) — the link is closed at the next wake, and before the engine judges a new link: `link_up` runs the clock first (`:560-582`) |
+| The core's own: a frame in flight (10 s) or refused (50 ms), a connection not yet a link (10 s) | after an input | the link is closed, or the frame offered again | not a term of the alarm. The connection stays up until the next thing that wakes the phone — the engine's wake at the latest — and is taken down there *before* that thing is judged: nobody is turned away for a place that is overdue (below) |
 | A dial's steps (`GattClientSteps`, its own timer) | 300 ms, 25 s | the dial is made again, or given up | asked at every alarm; a dial is given up at its next callback too |
 
 *Decided, and built.*
@@ -5836,6 +5850,59 @@ with none of them.
   restart, the reminder. The core's own times of a frame and of a
   connection are the thread's timer's alone (`RadioPort.wakeAt(inMs,
   asleepInMs)`; `onlyWhatMustComeWhileThePhoneSleepsIsATermOfTheAlarm`).
+- **What is overdue is taken down before an input is judged, and
+  neither a connection's ten seconds nor a link's stall is made a term
+  of the alarm for it** (the re-review's first point). With those
+  times out of the alarm, a phone that sleeps reads them only when
+  something wakes it — and as fixed for M2 it read them *behind* the
+  input that woke it: four subscribers whose MTU never came kept the
+  core's four places past their ten seconds, and the fifth, a real
+  peer, was cancelled for a place that was overdue; so was a ninth
+  link beside one whose frame never completed. `MeshRadioCore.input`
+  now takes down what is overdue first
+  (`whatIsOverdueIsTakenDownBeforeANewcomerIsJudged`). All but the
+  input's own link, which the input judges first, as it always did: a
+  connection whose MTU is what woke the phone becomes a link —
+  cancelled first it would still be told to the engine, a link with no
+  connection behind it — and a completion that waited out a sleep is a
+  completion (`aLinksOwnInputIsReadBeforeItsTimeIsHeldAgainstIt`).
+  *Why no alarm for the ten seconds.* (1) They never bounded how long
+  a stranger holds a connection to the phone: a device that connects
+  and never subscribes is not Haven's and is never closed (§N.2.3),
+  and one that is cancelled connects again. They bound the four
+  places, and a place is now free the moment anybody asks for one.
+  (2) What the late close costs is a connection left up on a phone
+  that sleeps, until the next alarm: a slot away, 120 s at most — as
+  built five seconds, with a link, a dial or a recent peer. ESTIMATED:
+  the controller's events for up to four idle connections, and no wake
+  of the host. (3) An alarm for it would hand every device in range a
+  second wake of the phone, ten seconds behind each subscription it
+  makes — the cadence M2 took out, at a stranger's choosing (Q-24).
+  *The stall* is inside the engine's wake, so as built the alarm does
+  come for it, and the engine takes down every stalled link before it
+  judges a new one: `link_up` and `poll` run its clock first
+  (`engine.rs:560-582`, `:727-730`). **Under Q-24's option (b) all of
+  this holds as it stands**: the stall leaves the alarm with the tick,
+  a stalled link is closed at the next wake, a slot away at most, and
+  the core's own times are read as above. *One residue, older than
+  this push* (unit 4's): the core counts its eight links before it
+  asks the engine. With all eight held — four taken and four dialled,
+  each by a peer that never greets — and their thirty seconds gone
+  while the phone slept, one newcomer is closed with the engine not
+  asked; the pump behind it takes the stalled links down, and the next
+  is admitted. As built that needs an alarm the platform delivered
+  late; under (b), a sleep of thirty seconds.
+- **With the pump's budget spent the alarm is still the engine's
+  wake** (the re-review's third point). As fixed for M2 a spent budget
+  did not ask the engine and put the deadline in its wake's place: the
+  pump comes back at once, by the timer — which does not count asleep —
+  and a phone that slept first had no alarm nearer than the scan's
+  restart or the reminder, with the engine's output still waiting. The
+  engine is now asked whatever the budget, the timer for at once and
+  the alarm for the engine's wake
+  (`thePumpStopsAtItsBudgetAndComesBack`, where "the engine's wake is
+  not asked" became "the alarm asked for is the engine's wake"); an
+  engine that has ended is seen in that pump too.
 - **An alarm holds the phone until its two bodies have run, not for a
   time.** `WakePlan.wakeHold` at the alarm, `wakeDone` at the end of
   the second body: the lock goes back to what a frame's hold still
@@ -5905,7 +5972,13 @@ again in the source it cites.
   channel keeping the one fact only it has — a start asked for and not
   yet heard of — and posting such a stop behind that start, answered
   when the start's own stop is over: a decision for `core/`, with its
-  JVM test, as `ServiceStarts` is.
+  JVM test, as `ServiceStarts` is. **And a start command not yet
+  delivered is no live start to the receiver's end either**: a boot's
+  broadcast handled behind a turn-on clears the flag of the mesh
+  before it and posts its stopped notice — both true as made — and the
+  start then stores its own. Whether a turn-on takes a stopped notice
+  down is `start`'s to settle: today a `sync` does and a start does
+  not.
 - **Check 19 is turned round**, `ENTRIES` goes to eleven, and S1's
   oracle is written against the probe's fixtures (O.3).
 - **What the lane must prove before the flag flips**: a foreground
@@ -5914,7 +5987,14 @@ again in the source it cites.
   adapter's, the screen's and the bond's broadcasts delivered; a tap
   through the alias taken once, and not from an intent replayed;
   `notImplemented` ending a turn-on at `failed` (push A's probe); the
-  twelve-hour stop reached with the screen off and no peer.
+  twelve-hour stop reached with the screen off and no peer. **And the
+  re-review's two**: a silent central blocks no inbound link with the
+  screen off — four that subscribe and never become links, then a
+  fifth more than ten seconds on, on a phone that sleeps, is taken
+  (*Power*, above; only JVM tests say so today); and the receiver's
+  end is in place under the lock — the guard's pin of `end` kept, and
+  on the emulator a start made as a broadcast finds the time up keeps
+  its flag and has no stopped notice beside it.
 
 *API levels.* Every platform member the six files call is in API 36's
 `android.jar` under the signature used (`javap`, the copy named below).
@@ -5936,7 +6016,7 @@ notification channels (26).
 
 *Proved here* — by a compiler, tests and a reader of text.
 
-- The 76 JVM tests (`run_mesh_jvm_tests.sh`).
+- The 78 JVM tests (`run_mesh_jvm_tests.sh`).
 - The mesh's Kotlin and `MainActivity.kt` type-check with no warning,
   warnings being errors and the extended ones on, in a scratch Gradle
   build with the JVM build's Kotlin: against copies of API 36's, 35's
@@ -5948,15 +6028,18 @@ notification channels (26).
   `mesh_radio_test.dart`, which now reads `ChannelWords.kt` and holds
   both channels, the eleven methods, the six keys and every word of an
   answer to what the Dart side asks and reads (§N.2's unit-6 row).
-- `check_mesh_radio.sh`: check 15 widened, checks 18 and 19 new, 445
-  self-test fixtures (280, 151 with the push and fourteen with its
-  security review). **Mutation passes**, as the code stands after that
-  review: 151 changes to the new clauses, each dropping a pin, a count,
-  a name or a file — 145 fail a named fixture with the unchanged tree
-  still passing, six fail the unchanged tree (an equality moved alone);
-  93 changes to the new pure code, each failing a named JVM test;
-  eight to the Dart seam and to `ChannelWords.kt`'s words, each failing
-  a named Dart test (run with the push; that code is unchanged).
+- `check_mesh_radio.sh`: check 15 widened, checks 18 and 19 new, 448
+  self-test fixtures (280, 151 with the push, fourteen with its
+  security review and three with the re-review). **Mutation passes**,
+  as the code stands after the re-review: 152 changes to the new
+  clauses, each dropping a pin, a count, a name or a file — 146 fail a
+  named fixture with the unchanged tree still passing, six fail the
+  unchanged tree (an equality moved alone); 113 changes to the new
+  pure code, each failing a named JVM test — 38 of them to what the
+  re-review changed, among them a connection's and a frame's times
+  put back among the alarm's terms; eight to the Dart seam and to
+  `ChannelWords.kt`'s words, each failing a named Dart test (run with
+  the push; that code is unchanged).
 
 *What only CI's compile proves, and has not yet* (`build-check.yml`, at
 `compileDebugKotlin`, the three legs and `android-mesh`): that the six
@@ -5981,16 +6064,23 @@ unchanged and still expects no component.
 | `notImplemented` reads on the Dart side as no native end | a turn-on that does not end at `failed` |
 | A dialog asked for under a dialog is answered by the first; a request cancelled under another plugin's dialog comes back with no results | a permission read as refused for good |
 | An alarm's two bodies run within its bound, and a lock released behind them lets the phone sleep | the phone held five seconds an alarm, or a body cut short |
+| The completion of a frame sent in an alarm's bodies reaches the mesh thread before the phone sleeps behind them, or ahead of the next alarm's bodies | a link dropped at the next wake for a frame that was delivered |
+| A connection left up past its ten seconds on a phone that sleeps costs no wake of the host | more than the ESTIMATED cost of leaving it out of the alarm (*Power*) |
 | On Android 13 the untyped `getParcelableExtra` hands back the device of a bond-state broadcast | no pairing ended there |
 | Lint, the shrinker and a release build take the files | the tag's build fails |
 
 ### O.7 As built — push A, part 2: the lane (2026-11-14)
 
 O.3's push A, its lane: S0, the probe and S2, the runner and its
-self-test, `HAVEN_MESH` in the build script, and O.2.7's rows. **Nothing
-of it has run on an emulator**: this machine has none. What is proved
-here is the runner's reading and judging of text, by fixtures; what the
-first CI run proves is listed last. No product code changed: nothing
+self-test, `HAVEN_MESH` in the build script, and O.2.7's rows; revised
+the same day for an independent review of it and for its first run on
+CI, 43586443164 (the last paragraphs say what each changed). **The lane
+as it stands here has not run**: this machine has no emulator. Of that
+first run, S0 passed, the probe was red and S2 never installed; what it
+settled about the platform is in "What the first run settled", and where
+a fact contradicted this section the fact is what is written. What is
+proved here is the runner's reading and judging of text, by fixtures;
+what only a run proves is listed last. No product code changed: nothing
 under `haven/lib`, `haven/android/app/src/main`, `haven-core` or
 `haven/rust_builder`. Plan §16 has the same in short.
 
@@ -6002,62 +6092,158 @@ under `haven/lib`, `haven/android/app/src/main`, `haven-core` or
   `true` passes `--dart-define=HAVEN_MESH=true` and stages the APK as
   `<target>.mesh.apk`, so one target is built both ways.
 - **`it/mesh_lever_test.dart`** — one target for all three legs. It
-  does not know its leg: it mounts the app past onboarding as
-  `it/app_test.dart` does, and prints one `[mesh] …` line a fact — its
-  own `debugPrint`s (Q-20 (a)). In order: the build's flag and its pid;
+  does not know its leg: it mounts the app on the scenario harness
+  every lane uses (`ScenarioHarness.bootstrap`, a seeded identity in the
+  production store, every relay plane pinned to the lane's relay; the
+  two location disclosures left unaccepted, so nothing shares a
+  location and no location dialog can stand under the turn-on's own
+  question), and prints one `[mesh] …` line a fact — its own
+  `debugPrint`s (Q-20 (a)). In order: the build's flag and its pid;
   the tree (the map shell, the count of `MeshButton`), counted once
   `meshSupportedProvider` has answered; the channel, by a
   `MethodChannel` of its own on `haven.app/mesh_radio` — all eleven
   methods in a build without the flag, and in one with it the four
   that answer and touch nothing (`permission`, `status`, `supported`,
-  `takeAction`) and the three behind the lever; three plants; the
-  turn-on a user makes (`MeshNotifier.turnOn`), timed; the status
-  after; then it stays alive until the runner makes a file in the app's
-  data directory, or 240 s. The plants are `dart:ffi` to `liblog.so`:
+  `takeAction`) and the three behind the lever; seven plants; the
+  turn-on a user makes (`MeshNotifier.turnOn`); the status after; then
+  it stays alive until the runner makes a file in the app's data
+  directory, or 240 s. The plants are `dart:ffi` to `liblog.so`:
   `__android_log_buf_write` for a DEBUG line under `BluetoothGatt`
-  (P1) and an INFO line under `flutter` (P2), `__android_log_bswrite`
-  for a string event (P3), each found with `providesSymbol` first.
-- **`ci/run-mesh-lever.sh <leg>…`** — legs `s0`, `probe`, `s2`,
-  `adapter`. Per leg: a fresh install; the two device logs (`adb
-  logcat -v threadtime`, and `-b events`); the drive in the background;
-  at the target's `READY` the host reads the device, then releases the
-  target with `run-as … touch`; the oracle over complete captures.
-  Exit codes 0 pass, 1 a promise broken or a leak, 2 the lane drove the
-  wrong thing, 3 unusable, 4 the scanner's meta floor, folded
-  1 > 2 > 3 > 4 > 0.
+  (P1), an INFO line under `flutter` (P2), and four more at the
+  priorities and tags S1 will plant at — VERBOSE and ERROR under
+  `BluetoothGatt`, DEBUG under `BluetoothGattServer` and under
+  `BluetoothAdapter`; `__android_log_bswrite` for a string event (P3);
+  each function found with `providesSymbol` first. **Where the turn-on
+  ended is observed**: for its duration the test binding's messenger
+  hands every outgoing message on to the platform untouched
+  (`allMessagesHandler`, to `delegate.send`) and two facts are kept —
+  what `bluetoothOn` was answered on the radio's channel, and whether
+  `start` was ever sent.
+- **`ci/run-mesh-lever.sh <leg>…`** — legs `s0`, `probe`, `s2`. Per
+  leg: what the image is (`pm list features`, `service check`), and in
+  the probe the adapter asked on; a fresh install; the two device logs
+  (`adb logcat -v threadtime`, and `-b events`); the drive in the
+  background; at the target's `READY` the host reads the **app**, then
+  releases the target with `run-as … touch`; after the drive, whatever
+  became of it, the probe reads the **platform** — the buffers, the
+  property, the adapter's settings, the dumps' skeletons, none of which
+  is asked of Haven's app; the oracle over complete captures. A drive
+  that failed prints why as `mesh-failure (<leg>): key=value` lines
+  (below). Exit codes 0 pass, 1 a promise broken or a leak, 2 the lane
+  drove the wrong thing, 3 unusable, 4 the scanner's meta floor, folded
+  1 > 2 > 3 > 4 > 0; and within 0 a leg's verdict word is `pass` or
+  `limited` (below).
+- **`ci/app-install-lib.sh`** — the barrier a fresh install waits
+  behind has a second form, for an API 29 guest (below).
 - **`wf/e2e-mesh.yml`**, called from `ci.yml` stage 4 as `e2e-mesh`,
-  `needs: [rust]`: `e2e_mesh_lever` (API 34: `s0 probe`, then — only
-  where the probe answers that Bluetooth did not come on — a second
-  boot with `-no-snapshot-load` and the leg `adapter`), and
-  `e2e_mesh_refusal` (API 29: `s2`). Both run `check_mesh_manifest.sh`
-  over the APKs they are about to install.
+  `needs: [rust]`: `e2e_mesh_lever` (API 34: `s0 probe`) and
+  `e2e_mesh_refusal` (API 29: `s2`). Each makes its AVD in the job,
+  gives it a first boot in one step and boots it again to drive; it
+  keeps no AVD cache (below). Both run `check_mesh_manifest.sh` over
+  the APKs they are about to install.
 
-*The oracle.* A miss of a **control** is unusable (rc 3), never a pass:
-the target's `PHASE` line under the `flutter` tag, written by the pid it
-names; that pid equal to the host's `pidof`; `RELEASED` and `DONE`, no
-`HOLD_EXPIRED`; **P2 present under that pid**; every dump with its
+*The oracle.* Every value it reads out of a capture or of the host's
+facts — a marker's field, a count, a pid — passes one filter before it
+is compared or printed: up to nine digits, or a word of a fixed list;
+anything else is `other`. Only the lines of **the target's own pid**
+are read as its markers: the pid whose `PHASE` line names itself. A
+miss of a **control** is unusable (rc 3), never a pass: that `PHASE`
+line; the target reaching its hold at all — where it did not, one
+sentence stands for every reading the host never made, and the probe's
+measurements of the platform are judged all the same; its pid equal to
+the host's `pidof`; `RELEASED` and `DONE`, no `HOLD_EXPIRED`; **P2
+present under that pid**; every dump with its
 heading (`Package [<pkg>]` and the launcher activity; `ACTIVITY MANAGER
 SERVICES`; `Current Notification Manager state`; `Bluetooth Status` or
-a `state:` line); `am` with an answer; `run-as`'s listing behind a
-sentinel; the map on screen before a count of buttons means anything.
-**Red** (rc 1), in every leg: a turn-on that does not end `failed`; a
-status that is not `stopped`, not wanted, before or after it; a line
-of `dumpsys package` naming a component under `.mesh.`; `am
-start-foreground-service`, `am startservice` or `am start` of the
-alias answering anything but that no such component exists; a
-`MeshService` in `dumpsys activity services`; the mesh's channel id in
-`dumpsys notification`; Haven's package in `dumpsys bluetooth_manager`;
-the stored copy `haven_mesh.xml`; **a line under a tag opening
-`Bluetooth`, from Haven's pid, that is not the plant** — judged only
-where P1 is present, which is what shows such a line would be in the
-capture; the platform's record of Haven's process dying; a drive that
-failed after the target started. S0 besides: all eleven methods
-missing, nothing answered, no button, no Bluetooth permission
-requested, P1 present. S2: `supported` false, no button, P1 present,
-the three methods missing and the four answering. The probe: the three
-missing and the four answering, `supported` equal to the image's LE
-feature, one button where supported, the turn-on under 60 s (past it
-the permission question, not the missing method, is what ended it).
+a `state:` line — owed only where the image has a Bluetooth service);
+`am` with an answer; `run-as`'s listing behind a sentinel; the map on
+screen before a count of buttons means anything; a turn-on that
+reported where it ended, and that did ask `bluetoothOn`. **Red**
+(rc 1), in every leg: a turn-on that does not end `failed`; one during
+which `start` was sent, or `bluetoothOn` answered; a status that is not
+`stopped`, not wanted, before or after it; a line of `dumpsys package`
+naming a component under `.mesh.`; `am start-foreground-service`, `am
+startservice` or `am start` of the alias answering anything but that no
+such component exists; a `MeshService` in `dumpsys activity services`;
+the mesh's channel id in `dumpsys notification`; Haven's package in
+`dumpsys bluetooth_manager`; the stored copy `haven_mesh.xml`; **a line
+under a tag opening `Bluetooth`, from Haven's pid, that is not a
+plant** — judged only where P1 is present, which is what shows such a
+line would be in the capture; **a line from Haven's pid, under any tag
+and in either buffer, that carries a Bluetooth address shape**, counted
+over the raw captures; the platform's record of Haven's process dying;
+a drive that failed after the target started. S0 besides: all eleven
+methods missing, nothing answered, no button, no Bluetooth permission
+requested, P1 present, and a turn-on that asked the radio nothing. S2:
+`supported` false, no button, the three methods missing and the four
+answering. The probe: the three missing and the four answering,
+`supported` equal to the image's LE feature, one button where
+supported.
+
+*S2, and a leg that passes with a stated limit.* `StartPolicy.supported`
+is `api >= 30 && le`. On an API 29 image **with** the Bluetooth LE
+feature, `supported=false` is the Android 11 gate answering, and S2
+shows it. On one **without**, the answer is false with the gate
+deleted: the gate is not exercised, and Android 10 does not even start
+a Bluetooth service there (`SystemServer.java:1066-1075`,
+android10-release), so `dumpsys bluetooth_manager` has nothing to
+answer. Which image the hosted runner gives is not known until the
+lane has run. So S2 records `s2.le_feature` and `s2.bt_service` and
+states what it showed on the image it had:
+
+| The image | `s2.api_gate_exercised` | S2 shows | Verdict word |
+|---|---|---|---|
+| has Bluetooth LE | `yes` | the gate, on a device; no mesh UI; nothing started or stored; the library loads below API 30 | `pass` |
+| has none | `no` | everything but the gate: the flag-on build installs and runs on Android 10 — the point of an image below API 30, since the lever's symbols must not be link-time imports — answers `supported=false`, draws no mesh UI, starts and stores nothing. The gate rests on `PoliciesTest.belowApiThirtyAStartIsUnsupportedAndTouchesNothing` alone | `limited` |
+| could not be read | `unread` | nothing | rc 3 |
+
+`limited` is rc 0 with a `LIMIT (s2): …` line, a notice on the run's
+summary page and the answer above; never the word `pass`. **Chosen over
+a non-green code**: a job red or unusable on every run by construction
+is one nobody reads, and what the leg does show on such an image is
+real. **Chosen over a plain green**: that would claim the gate. A
+missing Bluetooth dump on an image with no Bluetooth service is likewise
+an answer (`s2.bt_service=absent`), not unusable. The same form holds
+S2's P1: nothing in the lane says what Android 10 does with a DEBUG line
+under a platform tag — the probe is API 34, where it is written — so P1
+absent on S2 is a limit on the "no Bluetooth-tagged line" witness, where
+on S0 it is red and the probe of the same job and image says whether the
+platform is why. *For the owner, with Q-22:* **is a `limited` S2
+acceptable as the required check, or must the API gate be shown on a
+device before push B — which, if the hosted API 29 image has no
+Bluetooth LE, means an image that has (an API 29 image of another
+flavour, or a patched feature list), or dropping S2's gate claim for
+good?** Recommended: accept `limited`, since the gate is one pure
+comparison with a JVM test and no device can add to it but the library's
+loading, which S2 shows either way.
+
+*The install barrier below API 34.* `install_fresh` waits for the fresh
+install's `PACKAGE_ADDED` to be delivered before anything launches the
+app, by `cmd package wait-for-handler` and `am
+wait-for-broadcast-barrier`. Neither exists before Android 14
+(`ActivityManagerShellCommand.java` and
+`PackageManagerShellCommand.java` at android13-release have neither;
+android14-release has both), so on API 29 every S2 would have ended at
+the install. The race it closes does exist on Android 10
+(android10-release): a target package's `PACKAGE_ADDED` makes the
+overlay manager compare its resource dirs with the enabled framework
+overlays and tell ActivityManager where they differ
+(`OverlayManagerServiceImpl.java:297-360`;
+`OverlayManagerService.java:866-869`, `:943-951`), and the send is
+posted to the package manager's handler from the callback that then
+answers the installer (`PackageManagerService.java:12969-12991`,
+`:2103-2108`). An API 29 guest is therefore given the same two halves
+with what that release has: `pm trim-caches 0`, which posts to that
+handler and waits for its observer and frees nothing (`:4748-4768`,
+`:4800`; `PackageManagerShellCommand.java:2199-2244`), then `am
+wait-for-broadcast-idle` (`ActivityManagerService.java:18639-18667`).
+The pair is picked by the guest's `ro.build.version.sdk`; API 30 to 33
+are given neither and are refused by name; API 34 and later are
+unchanged. A refusal now says what the guest's commands printed, at most
+four lines of it, cut and reduced to letters, digits and plain
+punctuation. **Measured**: an API 29 guest answers 255/255 to API 34's
+pair and 255/255 to the two unknown-command controls (run 43586443164,
+which asked it for that pair). **Read, not run**: its own pair.
 
 *The probe's answers.* In the job `e2e_mesh_lever`, step "Run the
 flag-off control and the probe on the emulator", as `  mesh-answer:
@@ -6068,16 +6254,19 @@ is a number or one of a fixed list of words; anything else is written
 
 | O.2.3's row | Key | Read by |
 |---|---|---|
-| The image declares Bluetooth LE | `probe.le_feature` | `pm list features` |
-| Bluetooth comes on after the snapshot boot | `probe.bt_on`, `probe.bt_state`, `probe.bt_on_after_s`; and after the cold boot `adapter.bt_on` in `verdict.adapter.log` | `cmd bluetooth_manager enable`, then the first `state:` line of `dumpsys bluetooth_manager`, every 2 s for 60 s |
+| The image declares Bluetooth LE | `<leg>.le_feature`, in every leg | `pm list features` |
+| (the Bluetooth service exists) | `<leg>.bt_service`, in every leg | `service check bluetooth_manager` |
+| Bluetooth comes on after the lane's boot, which is a cold one | `probe.bt_on`, `probe.bt_state`, `probe.bt_on_after_s` | `cmd bluetooth_manager enable`, then the first `state:` line of `dumpsys bluetooth_manager`, every 2 s for 60 s |
 | P1 | `probe.p1`, `probe.p1_call` | the token as a whole message under `BluetoothGatt` and Haven's pid, in the main capture |
+| (the same at S1's other priorities and tags) | `probe.p1v` (VERBOSE), `probe.p1e` (ERROR), `probe.p4` (`BluetoothGattServer`), `probe.p5` (`BluetoothAdapter`) | as P1; answers in every leg |
 | (the control) | `probe.p2` | the same under `flutter` |
 | P3 | `probe.p3`, `probe.p3_call` (`nosym`: the look-up failed) | the token under Haven's pid in the events capture |
-| Which buffers a shell reads | `probe.buffer_<name>_kib` for eight, `probe.buffers_readable` of the five | `logcat -g -b <name>` |
+| Which buffers a shell reads | for each of eight: `probe.buffer_<name>_kib` — logd answers for its size — and `probe.buffer_<name>_read` — a shell is handed an entry (`yes`), none is there (`empty`), the read fails (`no`); `probe.buffers_readable` of the five | `logcat -g -b <name>`; `logcat -v threadtime -d -b <name> -t 1` and its exit code |
 | The adapter's address and name | `probe.adapter_address_readable`, `probe.adapter_address_shape`, `probe.adapter_label_readable` | `settings get secure …`; never printed |
-| A shell can set a log property | `probe.setprop_log_tag` | `setprop log.tag.BluetoothGatt VERBOSE`, read back, cleared — after the plants, so P1 was written with no property |
+| A shell can set a log property | `probe.setprop_log_tag` | `setprop log.tag.BluetoothGatt VERBOSE`, read back, cleared — after the drive, so the plants were written with no property |
 | API 29 under the action | the job `e2e_mesh_refusal` itself, `s2.verdict` | — |
 | The text of three dumps | `probe.dump_services`, `…_notification`, `…_bluetooth`; the artifact's `dump-*.probe.skel.log` | below |
+| (where a turn-on ends) | `<leg>.turn_on`, `<leg>.turn_on_bluetooth_on` | the target's own channel traffic |
 | Wall time | `<leg>.wall_s` | the runner's clock |
 
 *Where it differs from this section, and why.*
@@ -6096,13 +6285,24 @@ is a number or one of a fixed list of words; anything else is written
   `adb`, held in two shell variables, never printed, and used to
   **redact**. The class that searches them under Haven's pid alone is
   still the two-emulator slice's to add (O.2.6).
-- **What is uploaded is not what is captured.** An emulator's address
+- **What is published is not what is captured.** An emulator's address
   and adapter name are identifiers all the same (Rule 15). The raw
   captures and dumps stay in a directory the workflow never uploads
-  and the gate is never handed; the copies in the artifact have every
-  address shape — six pairs, the platform's own `XX:XX:XX:XX:…` — and
-  this adapter's name and address, bare and in both cases, replaced
-  by `<bt-addr>` and `<bt-name>`. The oracle reads the raw ones.
+  and the gate is never handed. Published: the device log whole, as
+  every lane publishes it, with every address shape — six pairs, the
+  platform's own `XX:XX:XX:XX:…` — and this adapter's name and
+  address replaced; **of the events buffer, only the entries Haven's
+  pid wrote** — the lane needs that buffer for its own planted event
+  and, in S1, for what Haven's process puts there, and every other
+  process's events are evidence of nothing here; the drive
+  transcript. Where a shell is not given the address (`settings get`
+  answers `null`), a bare one cannot be searched for, so every run of
+  exactly twelve hex digits is replaced too — on every line **but
+  Haven's own**: a truncated id has that shape and must reach the
+  scanner. Left by that: a bare address in a line Haven's own process
+  wrote, on an image that will not say its address; the oracle's
+  address-shape count does not see the bare form either, and no build
+  of push A can read an address at all. S1 owes it with O.2.6's class.
 - **A dump is kept as a skeleton** (O.2.3 has "kept as the runner's
   parser fixtures"). As text, a platform dump fails the scanner on
   platform furniture — a synthetic `dumpsys bluetooth_manager` gave
@@ -6112,31 +6312,32 @@ is a number or one of a fixed list of words; anything else is written
   masks every value: a word with a digit, a URI, a path, a run of 24
   or more base64 characters, and the rest of a line after a key that
   names what a user or a device chose. It is what a parser is written
-  against; three synthetic skeletons and a verdict file passed the
-  real scanner and the key-material floor. The services dump kept is
-  the whole device's: Haven has no service to show a record's shape.
+  against. The services dump kept is the whole device's: Haven has no
+  service to show a record's shape. A skeleton that still trips the
+  scanner is reported as any hit is: rc 1, the file withheld.
 - **S0's host half asks `am`, not only `dumpsys package`** (O.2.5).
   That dump lists a component only where it has an intent filter: the
   receiver would be there, the service and the alias would not. So
   the service is asked of `am start-foreground-service` and `am
   startservice`, the alias of `am start`, and the same three are
   asked in the probe and S2: no build of push A may declare one.
-- **"No Bluetooth API is touched" has a second witness**, beyond
+- **"No Bluetooth API is touched" has two more witnesses**, beyond
   O.2.5's three dumps: no line from Haven's pid under a tag opening
-  `Bluetooth` but the plant. Its positive control is P1 itself.
-- **P1 is one line, at DEBUG; P3 is reported in S0 and S2, not
-  required.** O.2.4's further tags and priorities are S1's. O.2.5 has
-  "every plant present" in S0 and S2; P3 is itself unsettled until
-  the probe (O-12), so there it is an answer. P1 absent beside P2
-  present is red in S0 and S2 — a lever, or a platform that drops the
-  line; the same run's `probe.p1` says which.
-- **The turn-on is asked in every leg, and timed.** In S0 it ends
-  `failed` with no mesh service to ask; in S2 at the unanswered
-  method, as in the probe — Android 10 has no permission to ask
-  first. In the probe the runner grants the three Bluetooth
-  permissions with `pm grant`, and the target asks for nothing where
-  `permission` does not read `granted`: under the system's dialog the
-  answer would be the dialog's two minutes.
+  `Bluetooth` but the plants, whose positive control is P1 itself;
+  and no line from Haven's pid carrying an address shape.
+- **P3 is reported in S0 and S2, not required.** O.2.5 has "every
+  plant present" there; P3 is itself unsettled until the probe
+  (O-12), so it is an answer. P1 absent beside P2 present is red in
+  S0, where the probe of the same job says whether the platform is
+  why, and a stated limit in S2, where nothing does.
+- **The turn-on is asked in every leg, and where it ended is seen.**
+  In S0 it ends `failed` having asked the radio nothing; in a build
+  with the flag it must have asked `bluetoothOn` and been answered by
+  nobody, and never have sent `start`. One that failed sooner — no
+  words for the notices, a permission question that did not come back
+  — is unusable, not a pass. In the probe the runner grants the three
+  Bluetooth permissions with `pm grant`, and the target asks for
+  nothing where `permission` does not read `granted`.
 - **The target is released by a file, not by a wait.** `flutter drive`
   removes the app when the target ends, so everything the host reads
   must be read while it runs. The file is made with `run-as`, which a
@@ -6147,99 +6348,253 @@ is a number or one of a fixed list of words; anything else is written
   runner once for every job and cannot see which branch a mode takes;
   a loop over the arguments is what it counts. Two legs are
   over-charged for it, on the safe side: `s0` and `s2` for the
-  adapter's 60 s, and `adapter` for a whole drive it does not make
-  (an 18-minute deadline on a leg its own wait bounds at 60 s).
-- **The second fall-back, a pinned emulator, is not built.** The SDK
-  step verifies the emulator binary it installed, and
-  `check_android_sdk_provisioned.sh` exists so that no lane boots
-  another; a build pinned through the action's `emulator-build` would
-  be one nothing verified, and this section has 36.4.9's version, not
-  its build number. If both boots answer no, that is next.
-- **S2 does not switch Bluetooth on.** Whether an API 29 image has a
-  controller at all is not known; the claim made is that the manager
-  does not name Haven, with the adapter in whatever state it boots.
-- **The lane starts a relay**, as its neighbours do, so that the app
-  mounts as it does in `e2e-integration.yml`; it is listed in
-  `KNOWN_UNWIRED_LANES` with that reason.
+  adapter's 60 s.
+- **There is no snapshot boot, so O-6's question does not arise, and
+  neither fall-back is built.** O-6 and O.2.3 took the lanes to boot a
+  cached snapshot and asked whether an adapter comes on after one. No
+  boot of this lane loads one: its emulator steps pass
+  `-no-snapshot-save`, as the neighbours' they were copied from do, and
+  the emulator said so in both jobs ("Device 'cache' does not have the
+  requested snapshot 'default_boot'", "performing a cold boot"). On
+  that cold boot the API 34 adapter was on at once. The leg `adapter`
+  and the second-boot step the lane first carried measured nothing the
+  probe had not, and are removed; the pinned emulator stays unbuilt —
+  the SDK step verifies the emulator binary it installed, and a pinned
+  build would be one nothing verified (`check_android_sdk_provisioned.sh`).
+  If a later image's adapter answers `no`, that is next.
+- **The lane keeps no AVD cache.** What the neighbours' `AVD cache`
+  holds is an AVD's disk as a whole job left it — not a snapshot — and
+  a lane whose subject is device state (the Bluetooth switch, the
+  notification channels, the installed package) must not start from
+  what another run left. One step makes the AVD and takes a new
+  device's first boot (27 s on API 29 and 32 s on API 34 in the first
+  run), the next boots it again and drives: the shape S0 passed on.
+- **S2 does not switch Bluetooth on.** The claim made is that the
+  manager, where the image has one, does not name Haven, with the
+  adapter in whatever state it boots.
+- **The lane starts a relay and the target runs on the scenario
+  harness.** The target first mounted the app with a stand-in identity,
+  as `it/app_test.dart` does; the probe's first run ended inside its
+  turn-on (below), and the harness every scenario lane uses is what the
+  target stands on now. The lane is listed in `KNOWN_UNWIRED_LANES`:
+  it runs no recording proxy.
 - **Q-22, not answered: built as (a).** Each job is a required-shaped
   check from this push. S0 and the probe share a job (O.2.7), so a
   probe that could not measure — rc 3 — reddens the job S0 is in. An
-  answer the next push will not like (`probe.bt_on=no`) does not.
-- **The job caps' uncapped term is borrowed**: neither job has run, so
-  each declares `e2e_permission_revocation`'s measured 4.1 minutes,
-  whose uncapped steps these are, one for one.
+  answer the next push will not like (`probe.bt_on=no`) does not, and
+  neither does a `limited` S2.
+- **The job caps' uncapped term is borrowed**: neither job has a green
+  run, so each declares `e2e_permission_revocation`'s measured 4.1
+  minutes, whose uncapped steps these are less the AVD cache.
 
 *O.2.7's rows, as met.* `check_logscan_wired_everywhere.sh`: a
-`RUNNER_PINS` row and its fixture; both jobs declare `HAVEN_LOGSCAN`
-and the `host` profile, build the scanner, rotate and discard.
+`RUNNER_PINS` row and its fixture; both jobs declare `HAVEN_LOGSCAN` and
+the `host` profile, build the scanner, rotate and discard.
 `check_wire_oracle_lane_reachable.sh`: the runner in
 `LOGSCAN_RUNNER_RE`, both jobs in `KNOWN_UNWIRED_LANES`.
 `cli_contract.rs`: the runner in the shared-fake list.
 `check_android_sdk_provisioned.sh`, `check_gradle_build_hardened.sh`,
 `check_live_sync_define_declared.sh`: by the workflow's shape.
 `check_e2e_step_timeout_ordering.sh`, `check_e2e_lane_budget.sh`: the
-three drive steps and nine claims in `e2e_lane_budget.manifest`; the
-check's own sums are 1887 s under a 32-minute deadline and 1065 s
-under 18. The harness self-tests: a step in `repo-guards.yml`, about
-seven seconds. `check_wire_proxy_test_only.sh`: nothing but `.log`
-files in the upload. `docs/E2E_TROUBLESHOOTING.md`: the lane's row and
-failure mode 26. **One row O.2.7 did not have**:
+two drive steps and nine claims in `e2e_lane_budget.manifest`; the
+check's own sums are 1887 s under a 32-minute deadline and 1065 s under
+18, and the job caps are 115 and 101 minutes. The harness self-tests: a
+step in `repo-guards.yml`. `check_wire_proxy_test_only.sh`: nothing but
+`.log` files in the upload. `docs/E2E_TROUBLESHOOTING.md`: the lane's
+row and failure mode 26. **One row O.2.7 did not have**:
 `haven/test/e2e/app_lifecycle_test.dart`, which holds every target that
 mounts the app to one of three tables. The mesh target is in the one
 that is true of it — its lane compiles the live-sync engine out, so
 there is no session to claim the foreground for — and so does not take
-the lifecycle helper, as that table requires. The table's check read
-one `HAVEN_LIVE_SYNC` line a workflow; this lane has two jobs and says
-it in each, so the check now holds every declaration to `"false"` and
-requires one — a `"true"` in either job, or none, still fails it (both
-tried). **Also changed for it**: the guards job's cap, 20 to 30
-minutes — it took 17 min 04 s on `1b5fa0e`; no guard pins that number.
+the lifecycle helper, as that table requires. The table's check read one
+`HAVEN_LIVE_SYNC` line a workflow; this lane has two jobs and says it in
+each, so the check now holds every declaration to `"false"` and requires
+one — a `"true"` in either job, or none, still fails it (both tried).
+**And one the first CI run found**: `check_no_committed_secrets.sh`
+reads any UUID written out in a tracked file as a committed key, and the
+skeleton's fixture had one; it is put together at run time now, as the
+mesh's Kotlin builds its own. That guard is not among the 67 the
+pre-commit set runs, which is how it was missed: every step of the
+guards job is run here now (below). **And one that run found**:
+`check_no_identifier_logging.sh` reads a variable named `id` in a log
+call as an identifier, and the target's loop over its four further
+plants printed one by that name; it is renamed. **Also changed for it**:
+the guards job's cap, 20 to 30 minutes — it took 17 min 04 s on
+`1b5fa0e`; no guard pins that number.
 
 *Proved here.*
 
-- The runner's `--self-test`: 373 checks. The three legs' passing
+- The runner's `--self-test`: 530 checks. The three legs' passing
   captures; for each leg, one fixture a clause, each required to fail
-  with the finding that names its cause; the probe answering rather
-  than judging (Bluetooth not on, P1 absent, the event's symbol
-  missing, no LE feature: each rc 0 with its word); every unusable
-  branch, among them an empty capture, markers and plants under
-  another pid, a dump with no heading, a hold that ran out; the
-  redaction and the skeleton over planted values; the markers, the
-  hold and the release file read out of the target's source and held
-  to the runner's; the gate ahead of the one echo of a drive log.
-  Under `gawk` and `mawk`.
-- **A mutation pass**: 100 changes to the readers and the oracle,
-  each silencing or loosening one check. 97 failed a fixture; three,
-  all in the skeleton — a digit-free blob, the word a cell is found
-  by, the redaction ahead of the masking — did not, were each given
-  one, and fail it.
+  with the finding that names its cause; the probe answering rather than
+  judging; S2 on an image with the LE feature, without it and with it
+  unread; a limit beside a red; every unusable branch, among them an
+  empty capture, markers and plants under another pid, a dump with no
+  heading, a hold that ran out, a turn-on that did not say where it
+  ended; **the first run's shapes** — a target that ended before its
+  hold, in each leg, with the platform read all the same; an app gone
+  when the host reads; why a drive ended, out of a transcript with a
+  framework failure report in it, in closed shapes and with nothing of
+  an exception's own text; which gate found a leak; a marker another
+  process wrote, which is not read; values that are no word, which are
+  not printed; the redaction, the twelve-digit rule and its exception,
+  the slice of the events buffer, the skeleton; the markers, the plants,
+  the hold and the release file read out of the target's source and held
+  to the runner's; the gate ahead of the one echo of a drive log. Under
+  `gawk` and `mawk`.
+- **Mutation passes.** Over the readers and the oracle as first built:
+  100 changes, 97 failing a fixture, the three that did not — all in the
+  skeleton — each given one. Over them as they now stand: 155 changes,
+  153 failing a fixture; of the two that did not, one — a marker of the
+  target's own under another tag — was given a fixture and fails it now,
+  and the other was a test the slice of the events buffer already makes
+  redundant, which is removed. One change — searching for a name shorter
+  than four characters — is caught by its fixture only after the
+  redactor has looped on an empty name until its memory is taken away;
+  the guard it removes is what ends that loop, and says so now.
+- `app-install-lib.sh --self-test`, 95 fixtures (80 before), with the
+  API 29 pair, its refusals, a guest between the two, and what a
+  refusal says of the guest's own words; eleven changes to the new
+  branches — four to the choice of pair, seven to what a refusal says
+  — each failing a fixture.
+- Every step of the guards job (`repo-guards.yml`, "Static checks"), run
+  here: all 180 `run:` steps pass; the other two, the checkout and the
+  Dart setup, are `uses:` steps.
 - Every lane-policing guard and its self-test, the 67 source guards,
-  `check_privacy_invariants.sh`, every workflow parsed as YAML,
-  `flutter analyze` with no error and no warning, the whole Dart
-  suite (6201 passed, 5 skipped, none failed), and `cli_contract.rs`'s
-  test of the shared fake.
-- The skeleton and the target's own lines under the real scanner, as
-  above. **Not** a device log: the scanner's `logcat` class wants a
-  whole capture.
+  `check_privacy_invariants.sh`, every workflow parsed as YAML, `flutter
+  analyze` with no error and no warning, the whole Dart suite (6201
+  passed, 5 skipped, as before it), and `cli_contract.rs`'s test of the
+  shared fake.
+- The published shapes under the real scanner and the key-material
+  floor: three synthetic skeletons, a verdict file with every key,
+  the target's own lines, and an events slice — clean; the raw
+  synthetic dump they came from, seven structural hits; and the same
+  set with the four closing lines of Flutter's report of a framework
+  assertion added under `flutter` — `LEAK: … [S13] tag=flutter ×1`,
+  the first run's finding, reproduced (below).
 
-*What only the first CI run proves* — everything that is Android's:
+*What the first run settled* (43586443164, of `1a8e782`; API 34
+`google_apis` x86_64 under emulator 37.2.13.0, build 16740729; read
+from the two jobs' logs). Each is a measurement the next push may rest
+on, for that image and that emulator:
+
+| Question | Answer | Where |
+|---|---|---|
+| The boot | cold, in every step of both jobs; no snapshot exists to load | the emulator's own lines |
+| The image declares Bluetooth LE (O.2.3) | yes | `probe.le_feature=yes` |
+| The adapter comes on (O-6) | at once: `probe.bt_on=yes`, `probe.bt_state=ON`, `probe.bt_on_after_s=0` | the probe |
+| A DEBUG line under `BluetoothGatt`, written through `liblog` from Dart with no property set, is in the log (O-11) | yes, in both builds | `s0.p1=present`, `probe.p1=present`, `p1_call=ok` |
+| `__android_log_bswrite` answers an app, and its event is read back by pid (O-12) | yes | `s0.p3=present`, `p3_call=ok`; the same in the probe |
+| `liblog.so` opens from Dart; the control line is read back | yes | `p2=present` in both |
+| A build without the flag: eleven methods missing, no button, a turn-on that ends `failed` | held; S0 `pass`, its cue 14 s after the drive began, 23 s in all | `s0.verdict=pass`, `s0.wall_s=23` |
+| A build with the flag: `supported`, one button, four methods answering and three missing, no Bluetooth-tagged line of Haven's | held as far as the target got | `probe.supported=true`, `probe.ui_button=1`, `probe.bt_tag_lines=0`, no red on the channel |
+| `pm grant` of the three Bluetooth permissions takes | yes | `probe.permission=granted` |
+| `run-as`, `am`, `service check`, the three dumps' headings on API 34 | read, in S0 | S0 passed over them |
+| A short drive's capture clears the scanner's floors | yes: 10 287 lines, clean | S0's gate |
+| The install barrier on API 34 | 0/0, controls 255/255 | S0, the probe |
+| An API 29 `google_apis` image provisions and boots under the action | yes, in 17.8 s and 17.6 s (API 34: 26.4 s and 20.2 s) | the emulator's own lines |
+| An API 29 guest has API 34's barrier commands | no: 255/255 | the same job, rc 3 at the install |
+
+Not settled by it, because the probe ended first and read nothing of
+the device afterwards: which buffers a shell reads, whether it can set
+the property, whether it is handed the adapter's address and name, the
+dumps' skeletons, and where a turn-on ends on a device. And nothing of
+API 29 past its boot.
+
+*What the first run found wrong, and what was done.*
+
+- **The probe's target ended inside its turn-on** — after its plants,
+  before its `TURN_ON` line — and the drive exited 1. **Why is not
+  established**: the transcript that says was withheld by the gate
+  (next), and nothing here can run a device. What is known: the
+  product's turn-on, run on the host against the real `AndroidMeshRadio`
+  over a channel that leaves `bluetoothOn` unanswered, ends `failed`,
+  prints nothing and throws nothing; the turn-on is the one step in
+  which the activity leaves the foreground and returns, because
+  `MeshChannel` asks the platform its permission question even where
+  the answer is already yes; S0 has no such step and passed; and the
+  target then mounted the map over a **stand-in** identity with Rust
+  holding none, which no lane had taken through a resume. So the
+  target stands on the scenario harness now, with a real identity, as
+  the targets that take the map through a pause and back do
+  (`it/b1_fgs_live_foreground_test.dart` among them). That is a change
+  made on the evidence, not a proven fix; the next run's
+  `mesh-failure` lines name what threw either way.
+- **A failed drive could not say why.** The leg's own gate tripped on
+  its captures (two `[S13] tag=flutter` hits) and withheld device log
+  and transcript both, as it must. Now a failed drive prints, from the
+  **raw** transcript and the target's own lines, `mesh-failure`
+  lines of closed shapes: the type the framework says was thrown, a
+  class a line opens with, an assertion's `package:` path and line,
+  the stack's frames, the target's own frame, a missing method and
+  its channel, whether a line was a URL alone and whether its host is
+  one of six public ones or `other`, a time-out, a lost app. Never an
+  exception's message.
+- **What the two hits were is inferred, not read**: the raw capture is
+  gone. S13 fires on a `flutter` line that is a URL and nothing else.
+  Flutter's report of an assertion inside the framework ends "please
+  report this assertion by filing a bug on GitHub:" and then the URL
+  on a line of its own, and this harness prints an error the framework
+  caught twice — at throw time (`installThrowTimeErrorLogging`) and in
+  the binding's closing report — which would be the two hits; fed to
+  the real scanner here, that line gives exactly `LEAK … [S13]
+  tag=flutter ×1`. S13's other shape — a line that says a dial failed
+  and carries a URL — is not excluded; the `mesh-failure` lines count
+  each (`url_alone_lines`, `url_dial_failure_lines`) and say whether
+  a lone URL's host is a public one. Nothing in `haven/lib` was found
+  that prints a URL on this path: its logging there prints an error's
+  type. The scanner
+  reading a framework's public link as a relay host is the scanner's
+  to answer, and no allowlist entry was added for it.
+- **A target that died made twenty findings**, among them "a shell
+  reads 0 of the five log buffers" of a device nobody had asked. The
+  host's readings are split: the app's at the cue, the platform's
+  after the drive whatever became of it; and a target that never
+  reached its hold is one sentence.
+- **`probe.boot=snapshot` was written, not measured**, and was false.
+  The key is gone; the boot is what the emulator's own lines say.
+- **The run's last word said only that "the log-privacy gate
+  tripped"**, beside an exit scan that was clean — the leg's gate had
+  deleted what it found. It now says which gate found the leak.
+- **S2 never installed** (the review's first finding, confirmed by
+  the run): the helper asked an API 29 guest for API 34's pair.
+- **The AVD cache and the "snapshot" step did nothing they were named
+  for.** Removed and renamed (above).
+
+*What only a run proves, still* — everything that is Android's and was
+not reached:
 
 | It rests on | If it is false, the run shows |
 |---|---|
-| The flag-on and flag-off APKs of one target build in one step, and `check_mesh_manifest.sh` passes on an integration-test APK | the build step red, before any emulator |
-| An API 29 `google_apis` image provisions, boots under the action and completes a `flutter drive` | `e2e_mesh_refusal` red at provisioning or boot, or `s2` unusable: "never reported" |
-| The app mounts the map with a stand-in identity and no permission granted, as in `app_test.dart`, on both images | `UNUSABLE: the map was not on screen`, or a drive that failed |
-| `liblog.so` opens from Dart and `__android_log_buf_write` writes under a tag of the caller's choosing | `p2=absent`, rc 3 in every leg |
-| A DEBUG line under `BluetoothGatt` is written with no property set (O-11) | `probe.p1=absent`; S0 and S2 red on P1 |
-| `__android_log_bswrite` answers a look-up from an app (O-12) | `probe.p3_call=nosym` — an answer |
-| `run-as` runs for the debug build, in its data directory, and Dart sees the file | `HOLD_EXPIRED`, rc 3, four minutes a leg |
-| The words of `am` for a component that does not exist, and the four dumps' headings, on API 29 and 34 | `am_…=unread` or `…_dump=unread`, rc 3 |
-| `pm grant` of the three Bluetooth permissions takes, and a request for permissions already held answers at once | `the turn-on was not asked`, or `ms to fail`, rc 3 |
-| `cmd bluetooth_manager enable` exists, and the manager's dump has a `state:` line | `probe.bt_on=unread`, rc 3 |
-| A capture of a short drive clears the scanner's floors (2 000 lines of device log, the two shape plants) | the scanner's rc 4 or rc 3 |
+| On API 29, `pm trim-caches 0` and `am wait-for-broadcast-idle` exist, exit 0 and return inside the bound | `MESH-LANE-FAIL (rc 3)`: "the fresh install … did not complete", with the four codes and the guest's own words |
+| The flag-on build's native library loads on API 29 and a `flutter drive` completes there | `s2` red or unusable, with `mesh-failure` lines |
+| The API 29 image declares Bluetooth LE | `s2.api_gate_exercised=no`, `s2.verdict=limited` — an answer |
+| The scenario harness mounts the map on both images with no location disclosure accepted, and no system dialog stands under the turn-on | `mesh-failure` lines with the target's frame; or `UNUSABLE: the turn-on failed without ever asking 'bluetoothOn'` |
+| The app survives the turn-on's permission question and its return to the foreground | the first run's shape again: no `TURN_ON` line, and now the type and frames of what threw |
+| The test binding's messenger passes a message on to the platform through `delegate.send` and sees its reply | `UNUSABLE: the turn-on failed without ever asking 'bluetoothOn'`, or a drive that failed |
+| The words of `am`, of `service check`, and the dumps' headings on API 29 | `am_…=unread`, `bt_service=unread` or `…_dump=unread`, rc 3 |
+| A shell reads the five documented buffers, and `logcat -d -b <name> -t 1` reports as read here | `probe.buffers_readable` below five, or `buffer_<name>_read=unread`: rc 3 |
 | A real dump's skeleton passes the scanner | rc 1, `LEAK: …skel.log` — a value the masking missed |
-| The step that reads `probe.bt_on` out of the verdict file hands it to the cold-boot step's condition | the cold-boot step does not run though `probe.bt_on=no` |
+| The first-boot step and the drive step's boot, with no AVD cache, stay inside their caps | a step cap, named by the step |
 
-*Still unproved after it* (O.2.8 stands): everything of the service on
-Android, the lever, and whatever a second boot or a pinned emulator
-would answer if the first says no.
+*What the review changed* (independent, of `1a8e782`; each read again
+in the code). **The install on API 29** — certain, and the run then
+showed it: S2 could not install; the helper has an Android 10 form
+now. **S2's promise** — the leg could pass with the gate unproved on
+an image without Bluetooth LE, and be unusable for ever on one without
+a Bluetooth service: `le_feature` and `bt_service` are answers in
+every leg, and `limited` exists. **What is published** — the events
+buffer whole, of every process: only Haven's entries now. **Low**:
+where a turn-on ended was inferred from its duration and is now
+observed; the text sent a reader of S2's P1 to the probe, which runs
+another release; a finding printed parsed values unfiltered, and read
+the last `flutter` marker of any pid; a bare address was not redacted
+where the address could not be read; the adapter's answer was lost to
+a probe that ended early, which keyed a second boot — there is no
+second boot now, and the adapter's answer is in the step log the
+moment it is read. **Gaps for push B**: a buffer's size is not its
+readability; the plants at S1's other priorities and tags. Not
+disagreed with: none of it.
+
+*Still unproved after a green run* (O.2.8 stands): everything of the
+service on Android, and the lever.

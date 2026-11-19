@@ -13,12 +13,13 @@
 ///    turn-on a user makes ends `failed` with nothing started;
 ///  * a flag-on build on API 29 (S2): `supported` is false.
 ///
-/// Three lines are planted in the device's log through `liblog`, the library
+/// Seven lines are planted in the device's log through `liblog`, the library
 /// `android.util.Log` ends in: one under a platform Bluetooth tag, one under
-/// `flutter` by the same call, one string event. Each carries a token minted
-/// here, random per run and naming nothing; the runner reads them back under
-/// this process's pid. None of it exists in `haven/lib`: the product has no
-/// marker and no test surface (§O.4, Q-20).
+/// `flutter` by the same call, one string event, and four more under platform
+/// Bluetooth tags at the priorities the lever's own lane will plant at. Each
+/// carries a token minted here, random per run and naming nothing; the runner
+/// reads them back under this process's pid. None of it exists in
+/// `haven/lib`: the product has no marker and no test surface (§O.4, Q-20).
 ///
 /// The markers are fixed words and numbers. Nothing a channel answers is
 /// printed but the words `mesh_radio.dart` defines for it.
@@ -34,15 +35,23 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/main.dart';
-import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/constants/location.dart'
+    show
+        kLocationDisclosureAcceptedKey,
+        kLocationDisclosureBackgroundAcceptedKey;
+import 'package:haven/src/pages/map_shell.dart';
+import 'package:haven/src/providers/identity_provider.dart'
+    show identityProvider;
 import 'package:haven/src/providers/mesh_provider.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
-import 'package:haven/src/rust/frb_generated.dart';
-import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/mesh_radio.dart' show kMeshRadioBound;
 import 'package:haven/src/widgets/map/mesh_button.dart';
 import 'package:integration_test/integration_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
+import 'e2e/_lib/pump_helpers.dart' show pumpUntilFound;
+import 'e2e/_lib/scenario_harness.dart' show ScenarioHarness;
+import 'e2e/_lib/test_user.dart' show TestUser, aliceSeed;
 import 'e2e/_lib/throw_time_error_capture.dart';
 
 // ---------------------------------------------------------------------------
@@ -127,6 +136,17 @@ const Duration _supportedBound = Duration(seconds: 30);
 const int _logIdMain = 0;
 const int _priorityDebug = 3;
 const int _priorityInfo = 4;
+
+const int _priorityVerbose = 2;
+const int _priorityError = 6;
+
+/// The plants beyond P1, P2 and P3: id, priority, tag.
+const List<(String, int, String)> _morePlants = <(String, int, String)>[
+  ('p1v', _priorityVerbose, 'BluetoothGatt'),
+  ('p1e', _priorityError, 'BluetoothGatt'),
+  ('p4', _priorityDebug, 'BluetoothGattServer'),
+  ('p5', _priorityDebug, 'BluetoothAdapter'),
+];
 
 /// The event tag of the planted string event: a number no platform event
 /// uses, so the entry is this target's and nobody else's.
@@ -256,23 +276,31 @@ Future<String> _status() async {
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
-  setUpAll(() async {
-    try {
-      await RustLib.init();
-    } on Object catch (e) {
-      // Idempotent; see `app_test.dart`.
-      debugPrint('[mesh] RustLib.init() note: ${e.runtimeType}');
-    }
-  });
-
   testWidgets(
     'the mesh, as this build and this Android release have it',
     (tester) async {
       installThrowTimeErrorLogging();
       debugPrint('$kPhaseMarker flag=${meshEnabled ? 'on' : 'off'} pid=$pid');
 
-      // The app past onboarding, as `app_test.dart` mounts it: the map is
-      // where the mesh button is, in a build and on a phone that has one.
+      // The app as a user has it, by the harness every scenario lane uses:
+      // the Rust bridge up, every relay plane pinned to the lane's hermetic
+      // relay, a real identity in the production store. A stubbed identity
+      // is not enough for this target: the turn-on's permission question
+      // takes the activity out of the foreground and back (`MeshChannel`
+      // asks the platform even where the answer is already yes), and the
+      // map's resume path then runs against whatever identity Rust holds.
+      // The lane's first run ended inside that turn-on (CI run 43586443164).
+      final ctx = await ScenarioHarness.bootstrap();
+      addTearDown(ctx.relay.dispose);
+      await TestUser.preSeedIdentityAndSkipOnboarding(seed: aliceSeed);
+      // Nothing here shares a location, and no location dialog may be on
+      // screen when the turn-on asks its own question: the platform answers
+      // a second request "cancelled". So the two disclosures stay unaccepted,
+      // as on a fresh install.
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(kLocationDisclosureAcceptedKey);
+      await prefs.remove(kLocationDisclosureBackgroundAcceptedKey);
+
       // The lane compiles the live-sync engine out, so there is no session to
       // claim the foreground for (`test/e2e/app_lifecycle_test.dart`).
       await tester.pumpWidget(
@@ -283,26 +311,22 @@ void main() {
                 const OnboardingFlags(introSeen: true, completed: true),
               ),
             ),
-            identityProvider.overrideWith(
-              (ref) async => Identity(
-                pubkeyHex:
-                    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-                    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                npub:
-                    'npub1'
-                    '0000000000000000000000000000'
-                    '000000000000000000000000000000',
-                createdAt: DateTime.utc(2024),
-              ),
-            ),
           ],
           child: const HavenApp(),
         ),
       );
-      await tester.pump();
+      // Never pumpAndSettle: the map's periodic timers keep the frame queue
+      // busy for good.
+      await pumpUntilFound(
+        tester,
+        find.byType(MapShell),
+        description: 'MapShell after pumpWidget',
+      );
       final container = ProviderScope.containerOf(
         tester.element(find.byType(HavenApp)),
+        listen: false,
       );
+      await container.read(identityProvider.future);
 
       // The button is drawn only once the radio has said the phone can run
       // the mesh, so the tree is counted behind that answer.
@@ -367,19 +391,59 @@ void main() {
       debugPrint('$kPlantMarker id=p1 token=$p1 call=$wrote1');
       debugPrint('$kPlantMarker id=p2 token=$p2 call=$wrote2');
       debugPrint('$kPlantMarker id=p3 token=$p3 call=$wrote3');
+      // The other priorities and tags the lever's own lane will plant at: a
+      // line missing there later must be the lever's doing, so whether each
+      // is written with no lever at all is asked now.
+      for (final (plant, priority, tag) in _morePlants) {
+        final token = _mintToken(plant, rng);
+        final wrote = _plantLine(priority, tag, token);
+        debugPrint('$kPlantMarker id=$plant token=$token call=$wrote');
+      }
 
       // The turn-on a user makes. In push A it cannot succeed in any build;
-      // how it ended, and how long it took, are the runner's to judge. Asked
-      // only where the system would show no dialog: under one, the answer
-      // would be the dialog's bound and not the channel's.
+      // how it ended is the runner's to judge. Asked only where the system
+      // would show no dialog: under one, the answer would be the dialog's
+      // bound and not the channel's.
+      //
+      // WHERE it ended is observed, not inferred: every message the turn-on
+      // sends the radio's channel is passed on to the platform untouched, and
+      // two facts are kept — what `bluetoothOn` was answered, and whether
+      // `start` was ever sent.
+      var bluetoothOn = 'unasked';
+      var start = 'unasked';
       if (!meshEnabled || permission == 'granted') {
+        final messenger = tester.binding.defaultBinaryMessenger
+          ..allMessagesHandler = (channel, handler, message) {
+            final sent = handler != null
+                ? handler(message)
+                : tester.binding.defaultBinaryMessenger.delegate.send(
+                    channel,
+                    message,
+                  );
+            if (channel != _radio.name) return sent;
+            final method = _radio.codec.decodeMethodCall(message).method;
+            if (method == 'start') start = 'asked';
+            if (method != 'bluetoothOn') return sent;
+            return (sent ?? Future<ByteData?>.value()).then((reply) {
+              bluetoothOn = reply == null ? 'missing' : 'answered';
+              return reply;
+            });
+          };
         final took = Stopwatch()..start();
-        final outcome = await container.read(meshProvider.notifier).turnOn();
+        final MeshTurnOn outcome;
+        try {
+          outcome = await container.read(meshProvider.notifier).turnOn();
+        } finally {
+          messenger.allMessagesHandler = null;
+        }
         debugPrint(
-          '$kTurnOnMarker ended=${outcome.name} ms=${took.elapsedMilliseconds}',
+          '$kTurnOnMarker ended=${outcome.name} ms=${took.elapsedMilliseconds} '
+          'bt_on=$bluetoothOn start=$start',
         );
       } else {
-        debugPrint('$kTurnOnMarker ended=skipped ms=0');
+        debugPrint(
+          '$kTurnOnMarker ended=skipped ms=0 bt_on=$bluetoothOn start=$start',
+        );
       }
       final after = await _status();
       debugPrint('$kAfterMarker $after');

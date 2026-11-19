@@ -19,7 +19,7 @@
 #                                     a fixed word or a number — whether the
 #                                     image has Bluetooth LE, whether the
 #                                     adapter comes on after this lane's
-#                                     snapshot boot, whether a line planted
+#                                     boot, whether a line planted
 #                                     under a platform Bluetooth tag and a
 #                                     planted string event are read back, which
 #                                     buffers and settings a shell reads, the
@@ -27,9 +27,17 @@
 #                                     promises of push A whatever the platform
 #                                     says: the turn-on a user makes ends
 #                                     `failed`, with nothing stored
-#   e2e_mesh_refusal  API 29   S2     the flag-on build STARTS on Android 10 —
-#                                     the first lane below API 34 — and offers
-#                                     nothing of the mesh
+#   e2e_mesh_refusal  API 29   S2     the flag-on build INSTALLS AND STARTS on
+#                                     Android 10 — the first lane below API 34
+#                                     — and offers nothing of the mesh. Whether
+#                                     that also shows the Android 11 gate
+#                                     depends on the image: `supported` is
+#                                     false on a phone with no Bluetooth LE
+#                                     too, so on an image without the feature
+#                                     the leg says the gate was NOT exercised
+#                                     (`s2.api_gate_exercised=no`, verdict
+#                                     word `limited`, a notice on the run) and
+#                                     is green with that limit stated
 #
 # # Reading the probe
 #
@@ -42,27 +50,40 @@
 #
 # A probe that could not TAKE a measurement is rc 3, UNUSABLE: not green, and
 # not a finding about Haven. An answer push B will not like — `probe.bt_on=no`
-# — is rc 0: the probe measured.
+# — is rc 0: the probe measured. A leg that could not judge something its name
+# promises, for a reason that is the image's, is rc 0 and says `limited`.
 #
-# # The fall-back boot
+# A drive that failed says why in the step log, as `mesh-failure (<leg>):
+# key=value` lines — the thrown type, an assertion's file and line, the
+# stack's frames — read out of the raw transcript, because the transcript
+# itself is withheld whenever the log-privacy gate trips on it.
 #
-# The lanes boot a cached snapshot. Whether an adapter comes on after one was
-# found nowhere (§O-6), so when the probe answers `probe.bt_on=no` the job
-# boots the same AVD again WITHOUT loading the snapshot and asks the adapter
-# alone (`adapter.bt_on` in `verdict.adapter.log`). §O.2.3's second fall-back,
-# a pinned older emulator, is NOT built here: this tree's SDK step verifies the
-# emulator binary it installed, and a pinned build would be a binary nothing
-# verified (check_android_sdk_provisioned.sh). If both boots answer no, that is
-# the next thing to build, and S1 is unusable until an adapter enables.
+# # The boot is a cold boot
+#
+# Every boot of this lane is a cold boot of an AVD made in the same job. §O
+# took the lanes to boot a cached snapshot, and asked whether an adapter comes
+# on after one (§O-6); the lane's first run settled what the boot is: its
+# emulator steps, like the neighbours' they were copied from, pass
+# `-no-snapshot-save`, and nothing is there to load ("Device 'cache' does not
+# have the requested snapshot 'default_boot'", run 43586443164, both jobs).
+# What the neighbours' `AVD cache` holds is an AVD's disk as a whole job left
+# it, and a lane whose subject is device state — the Bluetooth switch, the
+# notification channels, the installed package — must not start from what
+# another run left. So this lane keeps NO AVD cache: one step makes the AVD
+# and takes its first boot, the next boots it again and drives. On that boot
+# the API 34 adapter is on at once (`probe.bt_on=yes`, `probe.bt_on_after_s=0`,
+# same run), so §O.2.3's fall-backs — a boot without the snapshot, a pinned
+# older emulator — have nothing to fall back from and are not built.
 #
 # # Log anonymity
 #
 # An emulator's Bluetooth address and adapter name are identifiers all the
 # same. The runner keeps its raw captures in a directory that is never
-# uploaded, publishes copies with every address shape and the adapter's own
-# name and address replaced by a fixed word, keeps a platform dump only as a
-# skeleton of its lines, and runs everything it publishes through the gate
-# (run-mesh-lever.sh header).
+# uploaded; publishes the device log with every address shape and the
+# adapter's own name and address replaced by a fixed word, and of the events
+# buffer only the entries Haven's own process wrote; keeps a platform dump
+# only as a skeleton of its lines; and runs everything it publishes through
+# the gate (run-mesh-lever.sh header).
 #
 # # Architecture mirrors e2e-permission-revocation.yml
 #
@@ -77,20 +98,19 @@ jobs:
   e2e_mesh_lever:
     name: e2e_mesh_lever
     runs-on: ubuntu-latest
-    # Two APK builds of one target + boot + a step that runs two drives. The
-    # job cap must clear the SUM of the step caps (e2e-android.yml states the
-    # rule): Build the runtime log scanner 10 + Restore Gradle dependency cache
-    # 2 + Build mesh test APKs 30 + Provision the Android SDK 11 (derived in
-    # that script) + Create AVD snapshot (on an AVD-cache miss) 15 + the drive
-    # step 42 (derived there) + the cold-boot step 28 (derived there; it runs
-    # only when the probe answers that Bluetooth did not come on) = 138, + the
-    # most the work no step cap bounds has taken. THIS job has no history: its
-    # uncapped steps are e2e-permission-revocation.yml's, one for one
-    # (checkout, free disk space, Java, Rust, the cargo cache, Flutter, pub
-    # get, KVM, the AVD cache, strfry, the uploads), so that job's figure is
-    # declared until this one has runs of its own: 4.1, taken as 5 = 143 -> 145.
+    # Two APK builds of one target + two boots + a step that runs two drives.
+    # The job cap must clear the SUM of the step caps (e2e-android.yml states
+    # the rule): Build the runtime log scanner 10 + Restore Gradle dependency
+    # cache 2 + Build mesh test APKs 30 + Provision the Android SDK 11 (derived
+    # in that script) + Create the AVD and take its first boot 15 + the drive
+    # step 42 (derived there) = 110, + the most the work no step cap bounds
+    # has taken. THIS job has one run and no green one: its uncapped steps are
+    # e2e-permission-revocation.yml's less the AVD cache (checkout, free disk
+    # space, Java, Rust, the cargo cache, Flutter, pub get, KVM, strfry, the
+    # uploads), so that job's figure is declared until this one has green
+    # history: 4.1, taken as 5 = 115.
     # job-uncapped-minutes: 4.1 (33 runs of e2e_permission_revocation whose uncapped steps these are, worst 32646436116)
-    timeout-minutes: 145
+    timeout-minutes: 115
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
       # The runtime identifier scanner (Security Rule 15). `host`: this lane
@@ -205,21 +225,13 @@ jobs:
         timeout-minutes: 11
         run: bash tooling/e2e/ci/provision-android-sdk.sh 34 google_apis x86_64
 
-      - name: AVD cache
-        uses: actions/cache@v4
-        id: avd-cache
-        with:
-          path: |
-            ~/.android/avd/*
-            ~/.android/adb*
-          # Shared with the other Android E2E lanes: the AVD snapshot is
-          # byte-identical (same api/arch/target/profile). That the probe runs
-          # on the very snapshot the lanes boot is the point of its first
-          # measurement (§O-6).
-          key: avd-api34-x86_64-google_apis-single-v1
-
-      - name: Create AVD snapshot
-        if: steps.avd-cache.outputs.cache-hit != 'true'
+      # No AVD cache (the header, "The boot is a cold boot"). Always runs: the
+      # AVD is made here and takes a new device's first boot here, so that the
+      # boot the lane drives on is not the one doing that work. Nothing is
+      # saved but the AVD's own disk: `-no-snapshot-save`, as every lane.
+      # Bounded as the siblings' step is; to its echo the step took 27 s on
+      # API 29 and 32 s on API 34 in run 43586443164.
+      - name: Create the AVD and take its first boot
         timeout-minutes: 15
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -233,11 +245,10 @@ jobs:
             -noaudio -no-boot-anim -camera-back none
           disable-animations: false
           emulator-boot-timeout: 420
-          script: echo "Generated AVD snapshot for caching."
+          script: echo "AVD created and booted once."
 
-      # The target mounts the map with the app's own providers, as
-      # app_test.dart does in e2e-integration.yml, so it gets the relay that
-      # lane has: a dial that fails is a line this lane has no use for.
+      # The target runs on the scenario harness every lane uses, which pins
+      # every relay plane to this relay and opens its own connection to it.
       - name: Start strfry relay
         env:
           STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
@@ -277,10 +288,10 @@ jobs:
       #   + the unbounded relay, adb, install, dump, scan and oracle work,
       #     3 min: the check's one allowance                 = 31m27s -> 32m.
       # A healthy leg is far inside it: the target reports, holds while the
-      # runner reads the device, and ends — a minute or two (ESTIMATED from the
-      # neighbours' launch times; this lane has not run). Revise against p95
-      # once it has green history; each leg's wall time is in its answers
-      # (`<leg>.wall_s`).
+      # runner reads the device, and ends — S0 took 23 s in run 43586443164,
+      # this lane's one measurement, taken before the target moved onto the
+      # scenario harness. Revise against p95 once it has green history; each
+      # leg's wall time is in its answers (`<leg>.wall_s`).
       #
       # -memory 6144 matches the sibling Android lanes.
       - name: Run the flag-off control and the probe on the emulator
@@ -300,42 +311,6 @@ jobs:
           disable-animations: true
           emulator-boot-timeout: 420
           script: bash tooling/e2e/ci/run-with-deadline.sh 32m "e2e-mesh lever drive" -- bash tooling/e2e/ci/run-mesh-lever.sh s0 probe
-
-      # What the probe answered about the adapter, read from its scanned
-      # verdict file: `no` is what sends the job through the cold boot below.
-      # An answer that is neither word leaves the output empty, and no boot
-      # follows a probe that did not measure.
-      - name: Read the probe's answer on the adapter
-        id: adapter
-        run: |
-          answer="$(grep -m 1 -oE '^probe\.bt_on=(yes|no)$' /tmp/mesh-logs/verdict.s0-probe.log || true)"
-          echo "bt_on=${answer#probe.bt_on=}" >> "${GITHUB_OUTPUT}"
-
-      # §O.2.3's first fall-back: the same AVD, booted WITHOUT its snapshot,
-      # and the adapter asked on again. No app and no device log: the answer
-      # (`adapter.bt_on`) and the Bluetooth dump's skeleton.
-      #
-      # BOUNDS: 18m inner deadline; 28m = 18 + 1 + 7 + 2. The deadline is one
-      # whole leg's (63 + 822 + 180 = 1065 s -> 18m), though this leg drives
-      # nothing and is bounded in fact by its 60 s adapter wait: the budget
-      # check reads the runner once for every job and charges each positional
-      # leg alike (scripts/ci/e2e_lane_budget.manifest).
-      - name: Ask the adapter again after a cold boot
-        if: steps.adapter.outputs.bt_on == 'no'
-        timeout-minutes: 28
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 34
-          arch: x86_64
-          target: google_apis
-          profile: pixel_6
-          force-avd-creation: false
-          emulator-options: >-
-            -no-snapshot-load -no-snapshot-save -no-window -gpu swiftshader_indirect
-            -noaudio -no-boot-anim -camera-back none -memory 6144
-          disable-animations: true
-          emulator-boot-timeout: 420
-          script: bash tooling/e2e/ci/run-with-deadline.sh 18m "e2e-mesh adapter after a cold boot" -- bash tooling/e2e/ci/run-mesh-lever.sh adapter
 
       - name: Capture host + emulator diagnostics
         if: failure()
@@ -413,14 +388,14 @@ jobs:
   e2e_mesh_refusal:
     name: e2e_mesh_refusal
     runs-on: ubuntu-latest
-    # One APK build + boot + one drive. The sum of the step caps: Build the
-    # runtime log scanner 10 + Restore Gradle dependency cache 2 + Build mesh
-    # test APK 30 + Provision the Android SDK 11 + Create AVD snapshot 15 + the
-    # drive step 28 (derived there) = 96, + the uncapped work, declared from
-    # e2e-permission-revocation.yml's steps as in the job above: 4.1, taken as
-    # 5 = 101 -> 103.
+    # One APK build + two boots + one drive. The sum of the step caps: Build
+    # the runtime log scanner 10 + Restore Gradle dependency cache 2 + Build
+    # mesh test APK 30 + Provision the Android SDK 11 + Create the AVD and take
+    # its first boot 15 + the drive step 28 (derived there) = 96, + the
+    # uncapped work, declared from e2e-permission-revocation.yml's steps as in
+    # the job above: 4.1, taken as 5 = 101.
     # job-uncapped-minutes: 4.1 (33 runs of e2e_permission_revocation whose uncapped steps these are, worst 32646436116)
-    timeout-minutes: 103
+    timeout-minutes: 101
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
       HAVEN_LOGSCAN: "true"
@@ -499,25 +474,16 @@ jobs:
           sudo udevadm trigger --name-match=kvm
 
       # API 29: Android 10, the last release below the one the mesh starts on.
-      # The first image in this tree that is not API 34; whether it boots
-      # under the action is itself one of the probe's questions (§O.2.3).
+      # The first image in this tree that is not API 34. It provisions and
+      # boots under the action (17.6 s, run 43586443164); the fresh install
+      # waits behind the barrier that release has (app-install-lib.sh, "Below
+      # API 34"), which no run has yet exercised.
       - name: Provision the Android SDK
         timeout-minutes: 11
         run: bash tooling/e2e/ci/provision-android-sdk.sh 29 google_apis x86_64
 
-      - name: AVD cache
-        uses: actions/cache@v4
-        id: avd-cache
-        with:
-          path: |
-            ~/.android/avd/*
-            ~/.android/adb*
-          # This job's own: no other lane boots this image, so it is the one
-          # writer and the one reader of the key.
-          key: avd-api29-x86_64-google_apis-single-v1
-
-      - name: Create AVD snapshot
-        if: steps.avd-cache.outputs.cache-hit != 'true'
+      # As in the job above: no AVD cache, and a first boot of its own.
+      - name: Create the AVD and take its first boot
         timeout-minutes: 15
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -531,7 +497,7 @@ jobs:
             -noaudio -no-boot-anim -camera-back none
           disable-animations: false
           emulator-boot-timeout: 420
-          script: echo "Generated AVD snapshot for caching."
+          script: echo "AVD created and booted once."
 
       - name: Start strfry relay
         env:
