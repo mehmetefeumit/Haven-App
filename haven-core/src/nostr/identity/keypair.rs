@@ -83,7 +83,7 @@ impl IdentityKeypair {
     pub fn generate() -> Self {
         let keys = Keys::generate();
 
-        let secret_bytes = keys.secret_key().secret_bytes();
+        let secret_bytes = keys.secret_key().to_secret_bytes();
         let pubkey_bytes = keys.public_key().to_bytes();
 
         Self {
@@ -113,16 +113,12 @@ impl IdentityKeypair {
     /// assert!(keypair.is_ok());
     /// ```
     pub fn from_secret_bytes(secret_bytes: [u8; 32]) -> Result<Self, IdentityError> {
-        let secret_key = Secp256k1SecretKey::from_slice(&secret_bytes)
+        let secret_key = NostrSecretKey::from_slice(&secret_bytes)
             .map_err(|e| IdentityError::KeyDerivation(e.to_string()))?;
-
-        let keypair = Keypair::from_secret_key(&SECP, &secret_key);
-        let (public_key, _parity) = keypair.x_only_public_key();
-        let pubkey_bytes = public_key.serialize();
 
         Ok(Self {
             secret_bytes,
-            pubkey_bytes,
+            pubkey_bytes: Keys::new(secret_key).public_key().to_bytes(),
         })
     }
 
@@ -151,7 +147,7 @@ impl IdentityKeypair {
     pub fn from_nsec(nsec: &str) -> Result<Self, IdentityError> {
         let keys = Keys::parse(nsec).map_err(|e| IdentityError::InvalidNsec(e.to_string()))?;
 
-        let secret_bytes = keys.secret_key().secret_bytes();
+        let secret_bytes = keys.secret_key().to_secret_bytes();
         let pubkey_bytes = keys.public_key().to_bytes();
 
         Ok(Self {

@@ -6,7 +6,8 @@
 
 use std::sync::LazyLock;
 
-use nostr::secp256k1::{rand::rngs::OsRng, Keypair, Message, Secp256k1, SecretKey};
+use nostr::key::{Keys, SecretKey as NostrSecretKey};
+use nostr::secp256k1::{Keypair, Message, Secp256k1, SecretKey};
 use zeroize::ZeroizeOnDrop;
 
 use crate::nostr::error::{NostrError, Result};
@@ -65,16 +66,11 @@ impl EphemeralKeypair {
     /// Uses the operating system's secure random number generator.
     #[must_use]
     pub fn generate() -> Self {
-        let keypair = Keypair::new(&SECP, &mut OsRng);
-
-        // Extract and store the secret key bytes for proper zeroization
-        let secret_bytes = keypair.secret_key().secret_bytes();
-        let (public_key, _parity) = keypair.x_only_public_key();
-        let pubkey_bytes = public_key.serialize();
+        let keys = Keys::generate();
 
         Self {
-            secret_bytes,
-            pubkey_bytes,
+            secret_bytes: keys.secret_key().to_secret_bytes(),
+            pubkey_bytes: keys.public_key().to_bytes(),
         }
     }
 
@@ -98,15 +94,12 @@ impl EphemeralKeypair {
     /// assert!(keypair.is_ok());
     /// ```
     pub fn from_bytes(secret_bytes: [u8; 32]) -> Result<Self> {
-        let secret_key = SecretKey::from_slice(&secret_bytes)
+        let secret_key = NostrSecretKey::from_slice(&secret_bytes)
             .map_err(|e| NostrError::KeyDerivation(e.to_string()))?;
-        let keypair = Keypair::from_secret_key(&SECP, &secret_key);
-        let (public_key, _parity) = keypair.x_only_public_key();
-        let pubkey_bytes = public_key.serialize();
 
         Ok(Self {
             secret_bytes,
-            pubkey_bytes,
+            pubkey_bytes: Keys::new(secret_key).public_key().to_bytes(),
         })
     }
 
