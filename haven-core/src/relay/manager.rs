@@ -132,8 +132,8 @@ pub const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
 /// previous WebSocket was closed on background — races the 5 s connection
 /// handshake against the per-event `OK` acknowledgement. When the handshake
 /// loses that race the relay never acknowledges in time, `accepted_by` comes
-/// back empty, and the event (a welcome, a key package, a relay list) is
-/// silently dropped. Retrying re-drives
+/// back empty, and the event (a welcome, a relay-removal scrub) is silently
+/// dropped. Retrying re-drives
 /// [`RelayManager::add_relays_and_connect`] — a fast no-op once the socket is
 /// warm — and republishes the **same** event id, which relays dedupe by id, so
 /// the retry is idempotent and lands on the now-established connection.
@@ -198,6 +198,11 @@ const PROFILE_PUBLISH_RETRY_BACKOFF: Duration = Duration::from_secs(1);
 /// timeout bounds it regardless of that fact.
 const PROFILE_PUBLISH_ACK_TIMEOUT: Duration = Duration::from_secs(6);
 
+/// Per-relay bound on ONE relay's `OK` for [`RelayManager::offer_event_to`]:
+/// the profile plane's, for the same reason — strictly inside the pool's own
+/// 10 s wait, so this is the deadline that fires.
+pub const OFFER_ACK_TIMEOUT: Duration = PROFILE_PUBLISH_ACK_TIMEOUT;
+
 /// Per-relay bound on ONE relay's `OK` for a kind-445 LOCATION publish.
 ///
 /// Tighter again than the profile plane's window, and strictly tighter than
@@ -237,8 +242,8 @@ const _: () = assert!(
 /// a location's does not: the next tick publishes a *fresher* position within
 /// 168 s, so a second attempt spends a second radio wake re-sending a stale
 /// one. That is the opposite trade from a COMMIT, which is neither superseded
-/// nor re-sendable later — commits, welcomes, key packages and profiles keep
-/// [`MAX_PUBLISH_ATTEMPTS`] (Security Rule 13).
+/// nor re-sendable later (Security Rule 13), and from a Welcome, which keeps
+/// [`MAX_PUBLISH_ATTEMPTS`].
 ///
 /// The single attempt still runs through [`publish_with_retry`] so the ladder
 /// keeps supplying the error contract Dart already handles — zero acks →
@@ -504,6 +509,23 @@ enum AckOutcome {
     /// [`clock_skew::classify_publish_outcome`] and never rendered.
     Refused(String),
     /// No answer inside the ack bound (or the relay was not in the pool).
+    Unanswered,
+}
+
+/// What ONE relay did with [`RelayManager::offer_event_to`]. Fieldless but for
+/// the clock verdict: the relay's own words never leave the call (Rule 8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendAck {
+    /// The relay returned `OK true`, `duplicate:` included.
+    Accepted,
+    /// The relay returned `OK false`; `clock` is what that refusal said about
+    /// this device's clock ([`clock_skew::on_this_clock`]).
+    Refused {
+        /// The refusal's clock complaint, when it is about this clock.
+        clock: Option<clock_skew::DeviceClockComplaint>,
+    },
+    /// No `OK` within the bound: not connected, the socket went away, or
+    /// silence.
     Unanswered,
 }
 
@@ -781,10 +803,13 @@ impl RelayManager {
     /// Publishes an event to the specified relays, with a retry ladder.
     ///
     /// The path for a signed event no fanout record holds: a founding
-    /// circle's Welcome gift wraps, the relay-removal scrub, key packages,
-    /// relay lists, and the one send of a proposal no record could be written
-    /// for. Each is lost for good if this call gives up, so they pay
-    /// [`MAX_PUBLISH_ATTEMPTS`]. A commit never comes here: it leaves only
+    /// circle's Welcome gift wraps, the relay-removal scrub, the `KeyPackage`
+    /// slot retraction, and the one send of a proposal no record could be
+    /// written for. Each is lost for good if this call gives up, so they pay
+    /// [`MAX_PUBLISH_ATTEMPTS`]. The account's own `KeyPackage` and relay
+    /// lists are not among them: every maintenance pass re-checks each relay
+    /// and offers them once where they are missing
+    /// ([`offer_event_to`](Self::offer_event_to)). A commit never comes here: it leaves only
     /// through the fanout driver, and an event a record holds is refused
     /// (Security Rule 13). Locations take
     /// [`publish_location_event`](Self::publish_location_event).
@@ -1031,6 +1056,59 @@ impl RelayManager {
         .await)
     }
 
+    /// Offers `event` to ONE relay once, after its own connect, and reports
+    /// what that relay did ([`SendAck`]): the own-event planes (kinds 30443,
+    /// 10002 and 10050), which show the user each relay's answer.
+    ///
+    /// Only an `OK false` is [`SendAck::Refused`]; a failed connect, a socket
+    /// that went away mid-wait and silence past `ack` are all
+    /// [`SendAck::Unanswered`], because a relay that never answered did not
+    /// refuse. That is stricter than the profile and location planes'
+    /// [`send_to_one`], whose callers fold every error into a refusal. The
+    /// relay's text is read for a clock complaint here and dropped (Rules 8,
+    /// 15). No in-call retry: the send follows its own connect, so the
+    /// cold-socket race [`MAX_PUBLISH_ATTEMPTS`] covers cannot occur, and the
+    /// next maintenance pass owns every retry. Held off any fanout call to the
+    /// same relay, as [`Self::publish_event`] is.
+    ///
+    /// # Errors
+    ///
+    /// Only before the relay is dialled: an event a fanout record holds, or a
+    /// relay URL that may not be dialled.
+    pub async fn offer_event_to(
+        &self,
+        event: &Event,
+        target: &str,
+        ack: Duration,
+    ) -> RelayResult<SendAck> {
+        Self::refuse_fanout_owned(event)?;
+        let url = [Self::validate_single_relay_url(target)?];
+        Self::register_publish_relays(&self.client, &url).await;
+        let _no_fanout_call = hold_fanout_gates(&self.fanout_gates, &url).await;
+        let answered = if self
+            .client
+            .try_connect_relay(url[0].as_str(), CONNECTION_TIMEOUT)
+            .await
+            .is_err()
+        {
+            SendAck::Unanswered
+        } else if let Ok(relay) = self.client.relay(url[0].as_str()).await {
+            match tokio::time::timeout(ack, relay.send_event(event)).await {
+                Ok(Ok(_)) => SendAck::Accepted,
+                Ok(Err(nostr_sdk::pool::relay::Error::RelayMessage(reason))) => SendAck::Refused {
+                    clock: clock_skew::classify_clock_refusal(&reason).and_then(|complaint| {
+                        clock_skew::on_this_clock(complaint, age_on(&self.clock, event)())
+                    }),
+                },
+                Ok(Err(_)) | Err(_) => SendAck::Unanswered,
+            }
+        } else {
+            SendAck::Unanswered
+        };
+        recover_wedged_publish_sockets(&self.client, &url).await;
+        Ok(answered)
+    }
+
     /// Per relay concurrently: connect within `connect`, then send and wait
     /// `ack` for its `OK`. The relays must already be registered.
     async fn offer_harvest(
@@ -1072,9 +1150,9 @@ impl RelayManager {
     ///
     /// # NEVER for anything carrying a `PendingStateRef` (Security Rule 13)
     ///
-    /// Commits, welcomes, proposals, key packages, relay lists and profiles
-    /// keep [`publish_event`](Self::publish_event)'s 3-attempt ladder. A
-    /// location that misses is superseded by the next tick; a commit that is
+    /// Welcomes and proposals keep [`publish_event`](Self::publish_event)'s
+    /// 3-attempt ladder, commits the fanout driver. A location that misses is
+    /// superseded by the next tick; a commit that is
     /// neither confirmed nor rolled back forks the group. Nothing that resolves
     /// a `PendingStateRef` may be published through here, and nothing on this
     /// path takes one — pinned by
@@ -1219,8 +1297,8 @@ impl RelayManager {
     /// Publishes an event in the background without waiting for relay acknowledgment.
     ///
     /// Spawns a `tokio::spawn` task to perform the publish. Failures are
-    /// logged but not returned to the caller. Suitable for location updates
-    /// and key package re-publishes where the periodic timer ensures retries.
+    /// logged but not returned to the caller. Suitable only for an event a
+    /// periodic timer re-sends.
     ///
     /// # Errors
     ///
@@ -5600,8 +5678,8 @@ mod tests {
     /// A target wedged on the first attempt is freed, and the SAME publish
     /// lands on the next one.
     ///
-    /// This is the whole point of the mitigation: an MLS commit, a welcome or a
-    /// key package is lost for good if the ladder gives up (Security Rule 13),
+    /// This is the whole point of the mitigation: a welcome or a relay-removal
+    /// scrub is lost for good if the ladder gives up (Security Rule 13),
     /// and before this every attempt after the first queued into the same dead
     /// channel — three attempts, ~49 s of timeouts, zero bytes sent.
     #[tokio::test]
@@ -6426,6 +6504,7 @@ mod tests {
             "try_publish_once",
             "try_publish_once_harvesting",
             "offer_harvest",
+            "offer_event_to",
             "publish_event_background",
             "send_to_one",
             "publish",
@@ -6461,6 +6540,7 @@ mod tests {
                 "publish_event",
                 "publish_profile_event",
                 "offer_profile_event",
+                "offer_event_to",
                 "publish_location_event",
                 "publish_event_background",
                 "publish_location"
@@ -6890,27 +6970,6 @@ mod tests {
             .await
             .expect("the relay answers");
         assert_no_long_lived_subscription(&manager, "fetch_events").await;
-
-        let presence = crate::relay::maintenance::own_presence(
-            &manager,
-            &nostr::key::Keys::generate().public_key(),
-            &crate::relay::maintenance::OwnRelayLists {
-                inbox: &relays,
-                key_package: &relays,
-                lookup: &[],
-            },
-            None,
-            crate::relay::maintenance::TrackedKpLifetime::Absent,
-        )
-        .await;
-        let missing = crate::relay::maintenance::OwnEventPresence::Missing;
-        assert!(
-            presence[0].key_package == missing
-                && presence[0].relay_list == missing
-                && presence[0].inbox_relay_list == missing,
-            "each of the three REQs was answered in full: {presence:?}",
-        );
-        assert_no_long_lived_subscription(&manager, "own_presence").await;
 
         let drained = manager
             .fetch_events_per_relay(answered, &relays)
@@ -7685,5 +7744,180 @@ mod tests {
             CONNECTION_TIMEOUT + crate::profile::PROFILE_AUTHOR_FETCH_TIMEOUT,
             "the soak oracle's bound for an own-profile read drifted from the dial it waits on"
         );
+    }
+
+    // ---- the own-event offer --------------------------------------------------
+
+    /// A case of the offer test: what it is, the relay's verdict, the answer.
+    type OfferCase = (&'static str, fn() -> Verdict, SendAck);
+
+    /// Each relay's own answer, and only an `OK false` is a refusal: a relay
+    /// that hung up, went silent or could not be reached never answered.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn offer_event_to_reports_only_an_ok_false_as_a_refusal() {
+        let _ = allow_ws_loopback_for_test();
+        let manager = RelayManager::new();
+        let offered = |verdict: fn() -> Verdict| {
+            let manager = &manager;
+            async move {
+                let relay = ScriptedRelay::start();
+                relay.on_publish(move |_| verdict());
+                let sent = manager
+                    .offer_event_to(
+                        &throwaway_note("own"),
+                        relay.url(),
+                        Duration::from_millis(300),
+                    )
+                    .await
+                    .expect("the relay may be dialled");
+                (sent, relay.offers())
+            }
+        };
+        let cases: [OfferCase; 7] = [
+            ("OK true", || Verdict::Keep, SendAck::Accepted),
+            (
+                "OK true, duplicate",
+                || Verdict::KeepSaying("duplicate: already have it".to_string()),
+                SendAck::Accepted,
+            ),
+            (
+                "OK false",
+                || Verdict::Refuse("blocked: not here".to_string()),
+                SendAck::Refused { clock: None },
+            ),
+            (
+                "OK false naming the timestamp",
+                || {
+                    Verdict::Refuse(
+                        "invalid: event creation date is too far off from the current time"
+                            .to_string(),
+                    )
+                },
+                SendAck::Refused {
+                    clock: Some(clock_skew::DeviceClockComplaint::Unspecified),
+                },
+            ),
+            (
+                "OK false naming the timestamp under another prefix",
+                || {
+                    Verdict::Refuse(
+                        "rate-limited: event creation date is too far off from the current time"
+                            .to_string(),
+                    )
+                },
+                SendAck::Refused { clock: None },
+            ),
+            ("a hang-up", || Verdict::HangUp, SendAck::Unanswered),
+            ("silence", || Verdict::KeepSilently, SendAck::Unanswered),
+        ];
+        for (case, verdict, expected) in cases {
+            assert_eq!(
+                offered(verdict).await,
+                (expected, 1),
+                "{case}: one offer, this answer"
+            );
+        }
+        assert_eq!(
+            manager
+                .offer_event_to(
+                    &throwaway_note("own"),
+                    &dead_relay_for_offer().await,
+                    OFFER_ACK_TIMEOUT
+                )
+                .await
+                .expect("the relay may be dialled"),
+            SendAck::Unanswered,
+            "a relay that refused the connection never answered the event",
+        );
+        assert!(
+            matches!(
+                manager
+                    .offer_event_to(
+                        &throwaway_note("own"),
+                        "ws://insecure.relay.example.com",
+                        OFFER_ACK_TIMEOUT
+                    )
+                    .await,
+                Err(RelayError::InvalidUrl(_))
+            ),
+            "a relay that may not be dialled is refused before anything is sent",
+        );
+    }
+
+    /// An offer is under way to a relay only while no fanout call to it is,
+    /// as a ladder publish is.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_own_event_offer_waits_for_a_fanout_call_to_the_same_relay() {
+        let _ = allow_ws_loopback_for_test();
+        let relay = ScriptedRelay::start();
+        let manager = RelayManager::new();
+        let url = RelayManager::validate_single_relay_url(relay.url()).expect("a relay url");
+        let fanout_call =
+            hold_fanout_gates(&manager.fanout_gates, std::slice::from_ref(&url)).await;
+        let gate = Arc::clone(
+            manager
+                .fanout_gates
+                .lock()
+                .expect("gates")
+                .get(&url)
+                .expect("the relay has a gate"),
+        );
+        let handles = Arc::strong_count(&gate);
+        let note = throwaway_note("own");
+        let offer = manager.offer_event_to(&note, relay.url(), OFFER_ACK_TIMEOUT);
+        tokio::pin!(offer);
+        tokio::select! {
+            biased;
+            _ = &mut offer => panic!("an offer ran to a relay while a fanout call to it was under way"),
+            () = someone_waits_at(&gate, handles) => {}
+        }
+        assert_eq!(
+            relay.connections(),
+            0,
+            "the offer dialled before it had the relay"
+        );
+        drop(fanout_call);
+        assert_eq!(
+            offer.await.expect("the relay may be dialled"),
+            SendAck::Accepted
+        );
+        assert!(relay.published().iter().any(|event| event.id == note.id));
+    }
+
+    /// The relay's own words never reach a log: neither the relay nor what it
+    /// said is named, whatever it said (Rule 15).
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_own_event_offer_logs_neither_the_relay_nor_its_refusal() {
+        use nostr::nips::nip19::ToBech32 as _;
+        let _ = allow_ws_loopback_for_test();
+        let relay = ScriptedRelay::start();
+        let npub = nostr::Keys::generate()
+            .public_key()
+            .to_bech32()
+            .expect("an npub");
+        let refusal = format!("blocked: {npub} is banned here");
+        let said = refusal.clone();
+        relay.on_publish(move |_| Verdict::Refuse(said.clone()));
+        let port = relay.url().rsplit(':').next().expect("a port").to_owned();
+        let manager = RelayManager::new();
+        let lines = capture_log_lines(async {
+            let sent = manager
+                .offer_event_to(&throwaway_note("own"), relay.url(), OFFER_ACK_TIMEOUT)
+                .await;
+            assert_eq!(sent.ok(), Some(SendAck::Refused { clock: None }));
+        })
+        .await;
+        assert!(
+            !lines.is_empty(),
+            "nothing was captured, so this proves nothing"
+        );
+        for line in &lines {
+            assert!(
+                !line.contains(&npub)
+                    && !line.contains(&format!("127.0.0.1:{port}"))
+                    && !line.contains("banned"),
+                "an offer named the relay or what it said: {line}",
+            );
+        }
     }
 }

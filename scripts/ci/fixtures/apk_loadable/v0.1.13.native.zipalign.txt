@@ -1,0 +1,20 @@
+# Fixture for scripts/ci/check_apk_loadable.sh --self-test. Lines starting with
+# '#' are this header; the self-test strips them, nothing else is changed.
+#
+# REAL output, not an emulation: `zipalign -c -v -P 16 4 <apk>` (build-tools 36.1.0 for Linux)
+# run on the published v0.1.13 app-arm64-v8a-release.apk (sha256
+# 4768831c361f67f79d325948359a237a8cd53da9e31e2a5cf0b2ec9efa7a2f53).
+#
+# Excerpted, never edited: the first two lines, every lib/ line, the last two.
+Verifying alignment of app-arm64-v8a-release.apk (4)...
+      87 META-INF/com/android/build/gradle/app-metadata.properties (OK - compressed)
+ 1622016 lib/arm64-v8a/libapp.so (OK)
+ 9830400 lib/arm64-v8a/libbarhopper_v3.so (OK)
+14778368 lib/arm64-v8a/libdartjni.so (OK)
+14909440 lib/arm64-v8a/libdatastore_shared_counter.so (OK)
+14925824 lib/arm64-v8a/libflutter.so (OK)
+26689536 lib/arm64-v8a/libimage_processing_util_jni.so (OK)
+26722304 lib/arm64-v8a/librust_lib_haven.so (OK)
+68206592 lib/arm64-v8a/libsurface_util_jni.so (OK)
+71334588 resources.arsc (OK)
+Verification successful

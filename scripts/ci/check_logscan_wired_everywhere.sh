@@ -216,7 +216,7 @@ declare -A RUNNER_PINS=(
   ['run-ios-sim-scenario.sh']='SELF-TEST FAIL (S2): the transcript is echoed at top level'
   ['run-ios-bg-publish.sh']='G4 the real run gates the preserved log between the copy and the drive'
   ['run-integration-tests.sh']='SELF-TEST FAIL (wiring): this runner echoes a captured log itself; only the AVD runner may, after its gate'
-  ['run-relay-customization.sh']='SELF-TEST FAIL (wiring): this runner echoes a captured log itself; only the AVD runner may, after its gate'
+  ['run-relay-management.sh']='SELF-TEST FAIL (wiring): this runner echoes a captured log itself; only the AVD runner may, after its gate'
   ['run-m7-background-catchup.sh']='SELF-TEST FAIL (wiring): a captured log is echoed outside echo_log_tail/drive_target, i.e. before any gate'
   ['run-b1-fgs-publish.sh']='SELF-TEST FAIL (67): the drive log must be echoed exactly once, after the'
   ['run-b3-real-gps.sh']='_case "the drive log is echoed only after the log-privacy gate"'
@@ -230,6 +230,8 @@ declare -A RUNNER_PINS=(
   # property directly: the gate call exists at a command position AND no
   # reading command names a `.log` anywhere in the file. That is the same
   # invariant the ordering pins above express, at its limit.
+  ['run-launch-gate-ios.sh']='the summary is echoed only after the log-privacy gate'
+  ['run-launch-gate-android.sh']='the crash summary is echoed only after the log-privacy gate'
   ['run-soak-core.sh']='_case "the log-privacy gate runs and no captured log is ever echoed"'
 )
 

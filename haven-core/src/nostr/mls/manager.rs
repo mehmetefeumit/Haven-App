@@ -710,9 +710,9 @@ pub struct SessionManager {
     /// [`CommitNotes`]. Durable when the session was opened over a
     /// `CircleManager`'s store.
     commit_notes: Arc<dyn CommitNotes>,
-    /// One `KeyPackage` maintenance tick at a time — see
-    /// [`Self::key_package_tick`].
-    key_package_tick: Mutex<()>,
+    /// One own-relay maintenance pass at a time — see
+    /// [`Self::own_relays_tick`].
+    own_relays_tick: Mutex<()>,
     /// Commits a plain rollback rewound whose own stored row could not be
     /// retired, and so has no rolled-back fanout row to say so: retired
     /// before the engine is next handed over ([`Self::engine`]).
@@ -1599,7 +1599,7 @@ impl SessionManager {
             eviction_retick_hold: std::sync::Mutex::new(HashMap::new()),
             refused_ledger: Arc::new(InMemoryRefusedLedger::default()),
             commit_notes,
-            key_package_tick: Mutex::new(()),
+            own_relays_tick: Mutex::new(()),
             unretired: std::sync::Mutex::new(cleared),
             unrecorded: std::sync::Mutex::new(Vec::new()),
             dropped_removals: std::sync::Mutex::new(Vec::new()),
@@ -12637,24 +12637,27 @@ impl SessionManager {
             .map_err(map_mls_err)
     }
 
-    /// Admits one `KeyPackage` maintenance tick at a time; a tick holds the
-    /// guard from its expiry sweep to its promotion.
+    /// Admits one own-relay maintenance pass — `KeyPackage` or relay lists —
+    /// at a time; a `KeyPackage` pass holds the guard from its expiry sweep to
+    /// its promotion.
     ///
-    /// Two ticks that overlap each read the record before the other stages.
-    /// Both then mint, MDK moves the first staged package into its retained
-    /// list (`cgka-engine/src/maintenance.rs:58-70`), and the promotion of
-    /// the second deletes the first's private material while a relay goes on
-    /// serving it: a package peers can select and this device cannot open.
-    /// Always taken before the session lock, never while holding it.
-    pub async fn key_package_tick(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.key_package_tick.lock().await
+    /// Two `KeyPackage` ticks that overlap each read the record before the
+    /// other stages. Both then mint, MDK moves the first staged package into
+    /// its retained list (`cgka-engine/src/maintenance.rs:58-70`), and the
+    /// promotion of the second deletes the first's private material while a
+    /// relay goes on serving it: a package peers can select and this device
+    /// cannot open. The relay-list pass takes it too, so the passes never
+    /// interleave on the own-relay board. Always taken before the session lock,
+    /// never while holding it.
+    pub async fn own_relays_tick(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.own_relays_tick.lock().await
     }
 
-    /// Whether a maintenance tick holds [`Self::key_package_tick`] right now.
+    /// Whether a maintenance pass holds [`Self::own_relays_tick`] right now.
     #[cfg(any(test, feature = "test-utils"))]
     #[must_use]
-    pub fn key_package_tick_held_for_test(&self) -> bool {
-        self.key_package_tick.try_lock().is_err()
+    pub fn own_relays_tick_held_for_test(&self) -> bool {
+        self.own_relays_tick.try_lock().is_err()
     }
 
     /// The `KeyPackage` this device tracks, read from MDK's durable lifecycle

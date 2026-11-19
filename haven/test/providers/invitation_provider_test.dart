@@ -973,11 +973,6 @@ class _MockRelayService implements RelayService {
   }) async => [];
 
   @override
-  Future<List<OwnRelayPresenceFfi>> checkOwnReachability({
-    required String ownPubkey,
-  }) async => const [];
-
-  @override
   Future<void> disconnectRelay(String url) async {}
 }
 

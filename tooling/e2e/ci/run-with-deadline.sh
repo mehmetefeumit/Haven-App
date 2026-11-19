@@ -50,7 +50,7 @@
 # Exit codes:
 #   0..123, 125+  the command's own exit code, passed through untouched. A
 #                 genuine test failure MUST stay distinguishable from a hang;
-#                 callers such as run-relay-customization.sh retry on 124 only.
+#                 callers such as run-relay-management.sh retry on 124 only.
 #   124           the deadline fired (SIGTERM, or SIGKILL after the grace).
 #   2             misuse (bad deadline, missing `--`, no command) — the caller
 #                 is broken, not the thing being run.
@@ -170,7 +170,7 @@ run_with_deadline() {
   # 124 = coreutils killed it at the deadline. 137 = 128+SIGKILL, i.e. the
   # command ignored SIGTERM and coreutils escalated after the grace. Both are
   # "the deadline fired"; they are normalised to 124 so every caller has ONE
-  # timeout code to key on (run-relay-customization.sh's cold-attach retry and
+  # timeout code to key on (run-relay-management.sh's cold-attach retry and
   # run-single-avd-scenario.sh's no-retry-on-hang rule both test for 124).
   if (( rc == 124 )); then
     # ...but 124 is also what the command returns when ITS OWN inner `timeout`
@@ -255,7 +255,7 @@ self_test() {
     run_with_deadline 1s slow-lane -- sleep 5
 
   # 3. A genuine failure passes its own code through. If this ever returned
-  #    124, run-relay-customization.sh would retry real assertion failures and
+  #    124, run-relay-management.sh would retry real assertion failures and
   #    a red could flake green — the single most damaging regression possible
   #    in this file.
   _case "failing command -> own rc, no banner" 3 "" \

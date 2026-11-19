@@ -33,10 +33,12 @@
 //!
 //! # Targeted republish
 //!
-//! Only the RESPONDING relays that are unhealthy (missing or drifted) are
-//! republish targets. Non-responders are NEVER targeted (you cannot write to an
-//! unreachable relay, and a blind full-fan-out on a flapping relay is a
-//! per-tick write storm). Healthy responders are skipped (a NIP-33 same-`d`
+//! Every RESPONDING relay not proven to serve the current list is a republish
+//! target: missing, drifted, or one that took the `REQ` and never ended its
+//! answer, so nothing it said proves what it holds. Non-responders (no
+//! handshake) are NEVER targeted (you cannot write to an unreachable relay,
+//! and a blind full-fan-out on a flapping relay is a per-tick write storm).
+//! Healthy responders are skipped (a NIP-33 same-`d`
 //! re-assert to a healthy relay would be harmless but wasteful). This is
 //! strictly more precise than a full re-fan-out, gives an honest
 //! `relays_healed` count, and reduces write/correlation surface (PSI-8).
@@ -94,7 +96,7 @@ pub struct RelayListPerRelay {
     pub own: bool,
     /// Whether this relay serves a current (newest), non-drifted list that
     /// matches the configured relay set. `false` when the list is absent,
-    /// stale, or enumerates a different set.
+    /// stale, enumerates a different set, or the relay never ended its answer.
     pub healthy: bool,
 }
 
@@ -167,7 +169,7 @@ pub enum RelayListDecision {
 ///    [`RelayListDecision::NoOp`] (fail-closed; retry next tick — never a blind
 ///    republish we cannot even confirm is needed).
 /// 4. **≥1 responding unhealthy relay** ⇒ [`RelayListDecision::Republish`] to
-///    exactly those relays (missing or drifted on the wire).
+///    exactly those relays (missing, drifted, or not proven either way).
 /// 5. **Every responder healthy** ⇒ [`RelayListDecision::NoOp`].
 #[must_use]
 pub fn decide_relay_list(snapshot: &RelayListSnapshot) -> RelayListDecision {

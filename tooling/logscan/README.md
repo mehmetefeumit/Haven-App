@@ -635,7 +635,7 @@ counting them keeps the floor a true lower bound rather than an aspiration.
 Every Android lane's floor is now that number: background-catchup and
 FGS-publish `drive=9` (both keep the app running, so both carry the ninth
 line), KeyPackage-rotation / real-GPS / provider-toggle / clock-skew /
-network-reconnect `drive=8`, integration, relay-customization, and the core
+network-reconnect `drive=8`, integration, relay-management, and the core
 flow and profile Android lanes `drive=18` (each target is gated as
 `--sink drive=<final>,<full>` and a floor sums its class's files, so it is twice
 the per-slice 9, the runner's own `===== flutter drive attempt …` banner

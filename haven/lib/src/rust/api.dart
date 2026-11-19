@@ -6,9 +6,9 @@
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `acknowledged_by`, `answer_standing`, `answer`, `answer`, `answer`, `answer`, `build_relay_list_event_for`, `build_relay_list_unpublish_for`, `commit_event_to_json`, `convert_location_result`, `count`, `current_cache`, `current_picture_hash`, `delete_circles_db_files`, `delete_db_files`, `delete_mls_session_db_files`, `delete_tile_db_files`, `ensure_own_identity`, `fetch_my_profile_at`, `foreground_claim`, `from_cached`, `from_report`, `from_state`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hex_to_npub`, `keys_from_secret_bytes`, `leave_intent_stands`, `lifecycle_in`, `live_event_to_ffi`, `live_lifecycle_of`, `live_session_core`, `logscan_plant_token`, `maintain_relay_list_category`, `maintenance_now_secs`, `mark_kp_slot_retirement_done`, `max_log_level`, `member_key_packages`, `mint_key_package`, `new`, `nip65_relay_list_urls`, `no_network`, `now_ms`, `now_secs`, `own_cached_view`, `own_profile_to_retract`, `own_relays_seeding_once`, `platform_init_keyring`, `profile_now_secs`, `profile_picture_delay`, `profile_stamp_lists`, `profile_view`, `pubkey_of`, `publish_and_promote`, `publishing`, `redact_directory_err`, `redact_profile_err`, `refusal_of`, `reinstall_after_timed_out_stop`, `relay_list_targets`, `relay_list_urls_for`, `relay_list_urls`, `relay_list_wire_kind`, `remove_circles_db_key`, `remove_file_strict`, `remove_keyring_entry`, `remove_keyring_key`, `remove_mls_session_db_key`, `remove_tiles_db_key`, `retain_own_events`, `retire_malformed_kp_slot`, `retract_kp_slots`, `run_blocking`, `start_session_as`, `sync_reason_to_ffi`, `tile_err_to_string`, `unknown`, `usable_profile_pool`
+// These functions are ignored because they are not marked as `pub`: `acknowledged_by`, `answer_standing`, `answer`, `answer`, `answer`, `answer`, `build_relay_list_event_for`, `build_relay_list_unpublish_for`, `commit_event_to_json`, `convert_location_result`, `count`, `current_cache`, `current_picture_hash`, `delete_circles_db_files`, `delete_db_files`, `delete_mls_session_db_files`, `delete_tile_db_files`, `ensure_own_identity`, `fetch_my_profile_at`, `foreground_claim`, `from_cached`, `from_report`, `from_state`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hex_to_npub`, `judge_key_packages`, `key_package_pass`, `keys_from_secret_bytes`, `leave_intent_stands`, `lifecycle_in`, `live_event_to_ffi`, `live_lifecycle_of`, `live_session_core`, `logscan_plant_token`, `lookup_relays`, `maintain_relay_list_category`, `maintenance_now_secs`, `mark_kp_slot_retirement_done`, `max_log_level`, `member_key_packages`, `mint_key_package`, `new`, `no_network`, `now_ms`, `now_secs`, `own_cached_view`, `own_profile_to_retract`, `own_relays_seeding_once`, `platform_init_keyring`, `profile_now_secs`, `profile_picture_delay`, `profile_stamp_lists`, `profile_view`, `pubkey_of`, `publish_and_promote`, `publishing`, `redact_directory_err`, `redact_profile_err`, `refusal_of`, `reinstall_after_timed_out_stop`, `relay_list_pass`, `relay_list_targets`, `relay_list_wire_kind`, `remove_circles_db_key`, `remove_file_strict`, `remove_keyring_entry`, `remove_keyring_key`, `remove_mls_session_db_key`, `remove_tiles_db_key`, `retain_own_events`, `retire_malformed_kp_slot`, `retract_kp_slots`, `run_blocking`, `start_session_as`, `sync_reason_to_ffi`, `tile_err_to_string`, `unknown`, `usable_profile_pool`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Driving`, `InMemoryStorage`, `KpMintPlan`, `KpRetirementInputs`, `KpRetirementTick`, `ProfileStampLists`, `StagedPublish`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`, `default`
 
 /// Returns the per-process log handle for `value`, e.g. `circle#a91f3c`.
@@ -936,8 +936,8 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// been pointless if the avatar fetch handed the same set over anyway.
   ///
   /// So this call:
-  /// * **shuffles** the order every cycle from the OS CSPRNG (`rand::OsRng`;
-  ///   `thread_rng` is banned), so arrival order carries no roster ordering
+  /// * **shuffles** the order every cycle from the OS CSPRNG (`SysRng`;
+  ///   `rand::rng` is banned), so arrival order carries no roster ordering
   ///   and a newly added member does not appear at a stable position;
   /// * runs the downloads **one at a time**, never concurrently, so there is
   ///   no burst to fingerprint;
@@ -1215,6 +1215,14 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// Returns an error if the circle has no live MLS group or the component
   /// cannot be read; the caller hides the segment rather than surfacing it.
   Future<BigInt> outgoingLocationExpirySecs({required List<int> mlsGroupId});
+
+  /// What each own relay and lookup relay serves of this account's
+  /// `KeyPackage`, relay list and inbox relay list, as the maintenance
+  /// passes ([`RelayManagerFfi::maintain_key_package`],
+  /// [`RelayManagerFfi::maintain_relay_list`]) last found and left it —
+  /// cells turn as each relay answers, so a page polling this sees a pass
+  /// as it runs. A lock read: no network, never waits on a pass.
+  OwnRelayBoardFfi ownRelayBoard();
 
   /// Classifies the leave operation — see [`LeavePlanFfi`] for the
   /// Flutter-side state machine.
@@ -2022,8 +2030,8 @@ abstract class LocationEventService implements RustOpaqueInterface {
   static Future<LocationEventService> default_() =>
       RustLib.instance.api.crateApiLocationEventServiceDefault();
 
-  /// Returns a jittered publish interval in seconds using the Rust-side
-  /// CSPRNG (`OsRng`), sampled uniformly in
+  /// Returns a jittered publish interval in seconds from the OS CSPRNG
+  /// (`OsRng`, drawn in `haven_core::location`), sampled uniformly in
   /// `[nominal_secs * 0.6, nominal_secs * 1.4]` (40% spread).
   ///
   /// Callers pass the nominal interval (typically 120 s) and rearm their
@@ -2174,21 +2182,6 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
     required List<int> mlsGroupId,
     required String successor,
     required bool foreground,
-  });
-
-  /// The relay settings check: what each relay of the user's own inbox and
-  /// `KeyPackage` lists, and each lookup relay, serves of this account's
-  /// kind 30443, 10002 and 10050, judged as maintenance judges them
-  /// ([`own_presence`]). One row per relay, the inbox list first, then the
-  /// `KeyPackage` list, then the lookup relays.
-  ///
-  /// Only reads: unlike maintenance it does not wait for the storage-reset
-  /// notice, which holds back what is published, not what is asked.
-  ///
-  /// [`own_presence`]: haven_core::relay::maintenance::own_presence
-  Future<List<OwnRelayPresenceFfi>> checkOwnReachability({
-    required CircleManagerFfi circle,
-    required String ownPubkey,
   });
 
   /// What the user needs to know first about the circle of
@@ -2431,6 +2424,11 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
   /// recorded Welcome* ever sent to it. The slot survives, so the
   /// replacement reuses it.
   ///
+  /// Writes the own-relay board as it goes ([`CircleManagerFfi::own_relay_board`]),
+  /// and sends each relay at most one offer of each event, settled by that
+  /// relay's own `OK`. It runs under the account's one maintenance lock, and
+  /// a request made while a pass of its kind waits for that lock joins it.
+  ///
   /// Returns a presence-only [`KpMaintenanceOutcomeFfi`] (counters + enum).
   ///
   /// [`decide_kp_maintenance`]: haven_core::relay::maintenance::decide_kp_maintenance
@@ -2460,6 +2458,11 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
   /// [`build_relay_list_event`] to the responders that lack it. No default
   /// union. When the toggle is off it skips (no publish).
   /// `record_published_event` after a successful publish.
+  ///
+  /// Writes the own-relay board as it goes ([`CircleManagerFfi::own_relay_board`]),
+  /// and sends each relay at most one offer of each event, settled by that
+  /// relay's own `OK`. It runs under the account's one maintenance lock, and
+  /// a request made while a pass of its kind waits for that lock joins it.
   ///
   /// Returns a presence-only [`RelayListMaintenanceOutcomeFfi`].
   ///
@@ -4369,23 +4372,32 @@ enum MemberLookupVerdictFfi {
   lookupIncomplete,
 }
 
-/// What one relay serves of one of the user's own events
-/// (`haven_core::relay::maintenance::OwnEventPresence`).
-enum OwnEventPresenceFfi {
-  /// The relay is on no list this kind is published to, and was not asked.
-  notExpected,
+/// One kind of the own-relay board: kind 30443, 10002 or 10050.
+class OwnKindBoardFfi {
+  /// Why nothing of this kind is published now; `cells` is then empty.
+  final OwnPublishHoldFfi? hold;
 
-  /// It serves what maintenance would leave in place.
-  current,
+  /// How long ago the last pass of this kind ended; `None` before one has
+  /// in this process.
+  final int? checkedSecsAgo;
 
-  /// It serves an event of this account that maintenance would replace.
-  outdated,
+  /// The relays that pass asked. A relay of the user's lists with no cell
+  /// has not been checked yet.
+  final List<OwnRelayCellFfi> cells;
 
-  /// It answered in full and holds nothing of this account's.
-  missing,
+  const OwnKindBoardFfi({this.hold, this.checkedSecsAgo, required this.cells});
 
-  /// It could not be reached, or did not finish its answer.
-  noAnswer,
+  @override
+  int get hashCode => hold.hashCode ^ checkedSecsAgo.hashCode ^ cells.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is OwnKindBoardFfi &&
+          runtimeType == other.runtimeType &&
+          hold == other.hold &&
+          checkedSecsAgo == other.checkedSecsAgo &&
+          cells == other.cells;
 }
 
 /// What the profile relays answered about the local user's OWN kind-0 on one
@@ -4404,35 +4416,43 @@ enum OwnProfileRelayAnswerFfi {
   absent,
 }
 
-/// One relay of the reachability check and what it serves of the user's own
-/// `KeyPackage` (30443), relay list (10002) and inbox relay list (10050).
-class OwnRelayPresenceFfi {
-  /// The configured or lookup entry, verbatim.
-  final String relayUrl;
+/// Why Haven publishes nothing of a kind right now
+/// (`haven_core::relay::maintenance::OwnHold`).
+enum OwnPublishHoldFfi {
+  /// The storage-reset notice is unanswered.
+  awaitingResetAcknowledgement,
 
-  /// On the user's own inbox or `KeyPackage` list.
-  final bool own;
+  /// The list it is published to is empty.
+  noRelaysConfigured,
 
-  /// A lookup (discovery) relay.
-  final bool lookup;
+  /// The stored publish setting for this list is off: an install that
+  /// stored it so before publishing became unconditional, until the relay
+  /// settings switch it back on.
+  publishingSuppressed,
+}
 
-  /// The handshake succeeded for at least one of its probes.
-  final bool reachable;
+/// What each own relay and lookup relay serves of the user's own events, as
+/// the maintenance passes last found and left it
+/// ([`CircleManagerFfi::own_relay_board`]).
+class OwnRelayBoardFfi {
+  /// A maintenance pass is running or waiting for its turn.
+  final bool running;
 
-  /// Kind 30443.
-  final OwnEventPresenceFfi keyPackage;
+  /// The lookup relays the relay-list pass asks, as it asks them.
+  final List<String> lookupRelays;
 
-  /// Kind 10002.
-  final OwnEventPresenceFfi relayList;
+  /// Kind 30443, on the `KeyPackage` list.
+  final OwnKindBoardFfi keyPackage;
 
-  /// Kind 10050.
-  final OwnEventPresenceFfi inboxRelayList;
+  /// Kind 10002, on the `KeyPackage` list and the lookup relays.
+  final OwnKindBoardFfi relayList;
 
-  const OwnRelayPresenceFfi({
-    required this.relayUrl,
-    required this.own,
-    required this.lookup,
-    required this.reachable,
+  /// Kind 10050, on the inbox list and the lookup relays.
+  final OwnKindBoardFfi inboxRelayList;
+
+  const OwnRelayBoardFfi({
+    required this.running,
+    required this.lookupRelays,
     required this.keyPackage,
     required this.relayList,
     required this.inboxRelayList,
@@ -4440,10 +4460,8 @@ class OwnRelayPresenceFfi {
 
   @override
   int get hashCode =>
-      relayUrl.hashCode ^
-      own.hashCode ^
-      lookup.hashCode ^
-      reachable.hashCode ^
+      running.hashCode ^
+      lookupRelays.hashCode ^
       keyPackage.hashCode ^
       relayList.hashCode ^
       inboxRelayList.hashCode;
@@ -4451,15 +4469,64 @@ class OwnRelayPresenceFfi {
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
-      other is OwnRelayPresenceFfi &&
+      other is OwnRelayBoardFfi &&
           runtimeType == other.runtimeType &&
-          relayUrl == other.relayUrl &&
-          own == other.own &&
-          lookup == other.lookup &&
-          reachable == other.reachable &&
+          running == other.running &&
+          lookupRelays == other.lookupRelays &&
           keyPackage == other.keyPackage &&
           relayList == other.relayList &&
           inboxRelayList == other.inboxRelayList;
+}
+
+/// One relay's cell of one kind on the own-relay board.
+class OwnRelayCellFfi {
+  /// The configured or lookup entry, verbatim.
+  final String relayUrl;
+
+  /// What it serves.
+  final OwnRelayStatusFfi status;
+
+  const OwnRelayCellFfi({required this.relayUrl, required this.status});
+
+  @override
+  int get hashCode => relayUrl.hashCode ^ status.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is OwnRelayCellFfi &&
+          runtimeType == other.runtimeType &&
+          relayUrl == other.relayUrl &&
+          status == other.status;
+}
+
+/// What one relay serves of one of the user's own events, or what became of
+/// what a maintenance pass sent it (`haven_core::relay::maintenance::OwnCell`).
+enum OwnRelayStatusFfi {
+  /// Asked; the answer is not judged yet.
+  checking,
+
+  /// It serves what maintenance would leave in place, or it returned `OK
+  /// true` for what the pass sent it.
+  current,
+
+  /// Sent; its `OK` has not arrived.
+  publishing,
+
+  /// It answered in full and holds nothing of this account's.
+  missing,
+
+  /// It serves an event of this account that maintenance would replace.
+  outdated,
+
+  /// It returned `OK false` for what the pass sent it.
+  refused,
+
+  /// Proven not to serve it, then sent it, and no `OK` came.
+  unconfirmed,
+
+  /// It could not be reached or did not finish its answer.
+  noAnswer,
 }
 
 /// A member's public Nostr profile (kind-0 metadata), FFI-friendly.

@@ -175,6 +175,9 @@ readonly PRODUCTION_TREES=(
 # one frame. HAVEN_NEEDLE_DIR is here as a name that must
 # exist NOWHERE: the needle directory is a constant so the path bans below can
 # name it, and an override would make the subject of those bans relocatable.
+# haven-fault-relay and its HAVEN_FAULT_ control verbs (the relay-management
+# lane's misbehaving relay) belong to the harness alone: a shipped app that knew
+# them could switch a relay's behaviour or read back what it was offered.
 readonly FORBIDDEN_TOKENS=(
   'haven-wire-proxy'
   'haven_local_relay'
@@ -186,6 +189,8 @@ readonly FORBIDDEN_TOKENS=(
   'HAVEN_NEEDLE_DECL'
   'HAVEN_WIRE_CANARY_MANIFEST'
   'HAVEN_NEEDLE_DIR'
+  'haven-fault-relay'
+  'HAVEN_FAULT_'
 )
 
 # Manifests and wrappers that decide what gets built into a shipped artifact.

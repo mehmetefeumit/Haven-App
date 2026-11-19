@@ -365,10 +365,11 @@ is_emulator_step() {
 # emulator budget from a step that never boots one would be noise, and noise in
 # a guard is how guards get disabled.
 is_simulator_body() {
-  [[ "$1" == *"--self-test"* ]] && return 1
+  [[ "$1" == *"--self-test"* || "$1" == *"--release-egress"* ]] && return 1
   [[ "$1" == *"run-ios-sim-scenario.sh"* || "$1" == *"boot-ios-sim.sh"* \
      || "$1" == *"run-b7-ios-auth-tier.sh"* \
-     || "$1" == *"run-b4-ios-real-gps.sh"* ]]
+     || "$1" == *"run-b4-ios-real-gps.sh"* \
+     || "$1" == *"run-launch-gate-ios.sh"* ]]
 }
 # The SOAK lane runs on a plain `ubuntu-latest` `run:` step: no emulator action
 # to recognise, no simulator harness in the body. Before this predicate existed
