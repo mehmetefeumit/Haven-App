@@ -4789,8 +4789,10 @@ Security Rule 5 for this material — no init key outlives its use:
 - **One maintenance tick at a time.** Two overlapping ticks would each mint,
   and the second promotion would delete the first package's key while a relay
   still served it. The tick holds a per-account lock from its sweep to its
-  promotion (`SessionManager::key_package_tick`;
-  `tc17_overlapping_ticks_publish_one_key_package_into_one_slot_via_real_ffi`).
+  promotion (`SessionManager::own_relays_tick`;
+  `tc17_overlapping_ticks_publish_one_key_package_into_one_slot_via_real_ffi`),
+  which the relay-list pass takes too
+  (`concurrent_passes_never_interleave_on_the_board_via_real_ffi`).
 - **Superseded ⇒ deleted at the confirmed replacement.** A replacement is
   staged, signed once, and republished unchanged until a relay acknowledges
   it; on that acknowledgement the superseded package's private material is

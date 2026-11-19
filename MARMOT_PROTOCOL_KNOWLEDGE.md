@@ -444,7 +444,8 @@ in the template's order, with the values a Haven package carries today:
   replacement, or at the first maintenance tick at or after its `not_after`, whichever comes
   first. Rotation, a lost bundle and the `not_after` deletion do not wait.
 - **One tick at a time**: `maintain_key_package` holds a per-account lock
-  (`SessionManager::key_package_tick`) from its expiry sweep to its promotion.
+  (`SessionManager::own_relays_tick`, which `maintain_relay_list` takes too) from its expiry
+  sweep to its promotion.
 - **Where the tracked package lives**: in MDK's durable `KeyPackageLifecycleState`, inside the
   encrypted MLS database — Haven keeps no table of its own (`TrackedKeyPackage`,
   `nostr/mls/manager.rs`). The record holds the package, its slot and the **signed event exactly

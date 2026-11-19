@@ -3521,11 +3521,6 @@ class _MutableMockRelayService implements RelayService {
   }) async => [];
 
   @override
-  Future<List<OwnRelayPresenceFfi>> checkOwnReachability({
-    required String ownPubkey,
-  }) async => const [];
-
-  @override
   Future<void> disconnectRelay(String url) async {}
 }
 
@@ -3630,11 +3625,6 @@ class _PauseRacingRelayService implements RelayService {
   }) async => [];
 
   @override
-  Future<List<OwnRelayPresenceFfi>> checkOwnReachability({
-    required String ownPubkey,
-  }) async => const [];
-
-  @override
   Future<void> disconnectRelay(String url) async {}
 }
 
@@ -3727,11 +3717,6 @@ class _SinceCapturingRelayService implements RelayService {
     required List<String> relays,
     DateTime? since,
   }) async => [];
-
-  @override
-  Future<List<OwnRelayPresenceFfi>> checkOwnReachability({
-    required String ownPubkey,
-  }) async => const [];
 
   @override
   Future<void> disconnectRelay(String url) async {}

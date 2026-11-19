@@ -713,8 +713,10 @@ out), so it is read immediately after each fetch to catch the `subscribe_to` cla
 invisible there, are covered by the socket actually reaching `Sleeping`, which reads the unfiltered map. The code
 is safe on the timeout path either way — the same `CLOSE` runs — but that path is REASONED, not pinned, and any
 later claim to the contrary is a doc regression. `publish_event` (3-attempt
-ladder) stays for commits, welcomes, proposals, KP, relay lists, profile (Rule 13: "acked means acked" — an
-`Ok(EventId)` from `Relay::send_event` IS a relay OK, `inner.rs:1350`). ENGINE pool untouched in P1 (§2.3 trap); the
+ladder) stays for welcomes and proposals (Rule 13: "acked means acked" — an
+`Ok(EventId)` from `Relay::send_event` IS a relay OK, `inner.rs:1350`); commits leave through the fanout driver,
+the profile has its own ladder, and since 2026-11-16 the own KP and relay lists take one `offer_event_to` per relay
+per maintenance pass, the pass re-checking each relay and the next pass owning every retry. ENGINE pool untouched in P1 (§2.3 trap); the
 guard pins that `session.rs` gains no `.ping(false)` / `.sleep_when_idle(` CALL (the bare word appears in two kept
 comments, `:1536`, `:1933`) until P4's state machine owns it. Presence metadata strictly decreases; the engine's 55 s
 ping on iOS-bg remains until P4 (stated honestly in P1's docs).
@@ -2355,8 +2357,10 @@ coalescing (P5); the location owner (P3); any wire change.
   One constant survives every round unchanged: **`kBurstPublishBudget = 10 s` was right all along**, because
   `LOCATION_PUBLISH_ATTEMPTS == 1` (pinned by a compile-time assert in `haven-core/src/relay/manager.rs`), so 10 s
   is `CONNECTION_TIMEOUT` + `LOCATION_ACK_WINDOW` for the WHOLE ladder. Only its "per attempt" doc was wrong. The
-  ≈ 49 s three-attempt ladder belongs to commits and KeyPackages — i.e. to the maintenance fold — which is exactly
-  why the fold is excluded.
+  maintenance fold's own sends are longer than one location send — a probe of up to `CONNECTION_TIMEOUT` +
+  `DEFAULT_TIMEOUT` per kind, then one `offer_event_to` per relay of up to `CONNECTION_TIMEOUT` +
+  `OFFER_ACK_TIMEOUT` (11 s; since 2026-11-16, in place of the ≈ 49 s three-attempt ladder, which the NIP-09 slot
+  retraction alone keeps) — which is exactly why the fold is excluded.
 - **What advances the inbox fold counter — RECORDED 2026-09-07. §5.4 was silent on both halves, and each changes
   what OD4-b's `k` actually buys.**
   **(i) A JOINED tick does not advance it, and cannot.** A tick landing while a burst is joinable returns the

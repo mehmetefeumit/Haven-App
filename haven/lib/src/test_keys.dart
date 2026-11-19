@@ -148,9 +148,43 @@ abstract final class WidgetKeys {
     'storage_reset_open_relay_settings',
   );
 
-  /// "Republish" on the Relay settings page, shown when a relay that answered
-  /// misses one of the account's expected events or serves an old one.
-  static const Key relaySettingsRepublish = Key('relay_settings_republish');
+  // Relay settings page. A [section] is `inbox`, `keyPackage`, `profile` or
+  // `lookup`. No key carries a relay URL: a key reaches every FlutterError
+  // dump's creator chain. A row is found from its address text, or through a
+  // `RelayKindStatusCell`'s fields, inside its section.
+
+  /// One section of the Relay settings page: its header, rows and controls.
+  static Key relaySettingsSection(String section) =>
+      ValueKey('relay_settings_section_$section');
+
+  /// The circled question mark beside a section's title.
+  static Key relaySettingsInfoButton(String section) =>
+      ValueKey('relay_settings_info_$section');
+
+  /// "Add relay" under an editable section.
+  static Key relaySettingsAddRelay(String section) =>
+      ValueKey('relay_settings_add_$section');
+
+  /// "Restore defaults" under an editable section.
+  static Key relaySettingsRestoreDefaults(String section) =>
+      ValueKey('relay_settings_restore_$section');
+
+  /// The trash button on a relay row.
+  static const Key relaySettingsRemoveRelay = Key('relay_settings_remove');
+
+  /// The scroll view of a section's explanation panel.
+  static const Key relaySettingsInfoSheet = Key('relay_settings_info_sheet');
+
+  /// The last, technical paragraph of a section's explanation panel.
+  static const Key relaySettingsInfoTechnical = Key(
+    'relay_settings_info_technical',
+  );
+
+  /// The symbol legend in a status-bearing section's explanation panel.
+  static const Key relaySettingsLegend = Key('relay_settings_legend');
+
+  /// The notes saying why Haven holds back a kind.
+  static const Key relaySettingsHeldNote = Key('relay_settings_held_note');
 
   /// Root [ListTile] of a [CircleMemberTile], keyed by the member's pubkey hex.
   static Key memberTile(String pubkeyHex) => ValueKey('member_tile_$pubkeyHex');

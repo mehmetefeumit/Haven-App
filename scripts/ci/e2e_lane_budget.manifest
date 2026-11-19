@@ -239,7 +239,7 @@ logscan-verdict cleanup#1/write_verdict#1/gate_own_file#1/lib:logscan_gate#1 cha
 # ---------------------------------------------------------------------------
 
 reaper e2e-integration.yml::e2e_integration eight targets, each a full run-single-avd-scenario.sh; the deadline reaps a degraded run, the per-target drive timeout names a hung target
-reaper e2e-relay-customization.yml::e2e_relay_customization four targets, each up to two run-single-avd-scenario.sh runs; the deadline reaps a degraded run, the per-target drive timeout names a hung target
+reaper e2e-relay-management.yml::e2e_relay_management five targets over two runner invocations, each target up to two run-single-avd-scenario.sh runs; the deadline reaps a degraded run, the per-target drive timeout names a hung target
 reaper e2e-background-catchup.yml::e2e_background_catchup three phase drives, a guest reboot and marker waits; sized from measurement, the per-phase drive timeout names a hung phase
 
 unit tooling/e2e/ci/run-integration-tests.sh
@@ -247,8 +247,11 @@ strfry run_one#1/bash:start-strfry.sh#1 charge @ times ARGC
 target run_one#1/bash:run-single-avd-scenario.sh#1 charge @ times ARGC
 logscan lib:logscan_gate_dir#1 charge @
 
-unit tooling/e2e/ci/run-relay-customization.sh
+unit tooling/e2e/ci/run-relay-management.sh
 relays run_one#1/reset_relays#1/*/bash:start-strfry.sh#1 charge @ times ARGC
+# A wall-clock loop (SECONDS < deadline) waiting for every fault relay's
+# `listening` line can start one more 1 s tick just before its bound.
+fault-ready run_one#1/reset_relays#1/start_fault_relays#1/sleep:1#1 charge FAULT_READY_TIMEOUT + 1 times ARGC
 # The second run is the designed retry of a target whose first ended in 124.
 target run_one#1/drive_target#*/bash:run-single-avd-scenario.sh#1 charge @ times ARGC
 # The OD-2 cue watcher beside each drive, joined after it: one more tick once

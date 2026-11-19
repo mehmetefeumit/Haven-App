@@ -54,6 +54,7 @@
 //! never depends on haven-core, whose tests depend on it.
 
 pub mod config;
+pub mod fault;
 pub mod frame;
 pub mod journal;
 pub mod loopback;

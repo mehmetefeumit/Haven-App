@@ -192,10 +192,10 @@ jobs:
   # Proves a user-customized relay set is honored, against TWO distinct
   # hermetic relays (a single relay cannot distinguish "published to custom"
   # from "published to default").
-  e2e-relay-customization:
-    name: E2E Relay Customization (Android)
+  e2e-relay-management:
+    name: E2E Relay Management (Android)
     needs: [rust]
-    uses: ./.github/workflows/e2e-relay-customization.yml
+    uses: ./.github/workflows/e2e-relay-management.yml
 
   # Runtime proof of the Android background catch-up worker: cold isolate
   # boot (Rust + keyring + SQLCipher), WorkManager job surviving a guest

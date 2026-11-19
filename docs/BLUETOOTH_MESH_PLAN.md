@@ -3862,7 +3862,7 @@ item 6, that address rotation is the build's; §7.1 carries a note now.
   were; that a real `dumpsys bluetooth_manager`'s skeleton passes the
   scanner with the new rule. **Also changed**: the guards job's cap, 20
   to 30 minutes (17 min 04 s on `1b5fa0e`);
-  `docs/E2E_TROUBLESHOOTING.md` failure mode 28.
+  `docs/E2E_TROUBLESHOOTING.md` failure mode 29.
 
 ### Proposed CLAUDE.md wording (owner to approve)
 
@@ -4030,7 +4030,7 @@ New, added:
 > answer — never green and not a finding about Haven; a failed drive
 > says why in `mesh-failure` lines of closed shapes; its raw captures
 > hold the emulator's Bluetooth address and are never uploaded:
-> `docs/E2E_TROUBLESHOOTING.md` failure mode 28),
+> `docs/E2E_TROUBLESHOOTING.md` failure mode 29),
 
 **9. "CI Pipeline", Stage 1.** `cross-check.yml`'s Android step has been
 clippy with warnings denied since the radio's JNI shim landed (the one

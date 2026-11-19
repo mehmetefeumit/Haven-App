@@ -10,10 +10,11 @@ unhealthy emulator/simulator routinely masquerades as a functional failure.**
 These are the lanes this guide has failure modes for — the core-flow pair, the
 two that share their harness, and the integration lane. They are **not** the
 full E2E fleet: the scenario lanes (`e2e-ios-background-publish`,
-`e2e-fgs-publish`, `e2e-profile`, `e2e-relay-customization`, `e2e-clock-skew`,
+`e2e-fgs-publish`, `e2e-profile`, `e2e-relay-management`, `e2e-clock-skew`,
 `e2e-kp-rotation`, `e2e-network-reconnect`, the real-GPS and auth-tier lanes)
 are inventoried in CLAUDE.md's "CI Pipeline" section and each carries its own
-header. A symptom below is worth reading against any of them; a lane-specific
+header (failure mode 28 is the relay-management lane's status target). A
+symptom below is worth reading against any of them; a lane-specific
 oracle is not. One thing is uniform across the whole fleet, these lanes and
 the scenario lanes alike: every captured log goes through `scan-logs.sh` — the
 key-material floor plus the `haven-logscan` identifier scanner — before it is
@@ -31,7 +32,7 @@ what keeps that true).
 | `launch-gate-android.yml` | the RELEASE APKs built by `scripts/build_release.sh apk` (R8, AOT, obfuscated) — or, in `release-build.yml`, the tag's exact signed artifacts — cold-launched from the launcher: fresh, after a cold relaunch, and installed over the previous non-yanked release and v0.1.13 with their data kept; `check_apk_loadable.sh` on all three APKs. Only the log-privacy-gated summaries are uploaded, never logcat or a UI dump (failure mode 26) | `run-launch-gate-android.sh` under `run-with-deadline.sh` on an api-34 x86_64 AVD in airplane mode, behind the host egress guard | none — offline by design: a release build knows only production relays |
 | `launch-gate-ios.yml` | the production `main()` in the Release native configuration (debug Dart: the simulator runs nothing else) on a simulator: fresh, cold relaunch, and installed over the previous release's simulator build; `check_ios_app_loadable.sh` on the app (failure mode 27) | `run-launch-gate-ios.sh` driving a standalone XCUITest bundle (`tooling/e2e/ios-launch-gate`) | none — egress blocked by pf (or a hosts sinkhole) |
 | `e2e-integration.yml` | seven component targets (`smoke_test`, `app_test`, `keyring_test`, …), one after another; the lane's one manifest is sealed from the host needles before the first target, and every target's captures and the aggregate go through `scan-logs.sh` (failure mode 13) | `run-integration-tests.sh` → `run-single-avd-scenario.sh` per target, on one AVD | strfry container reset per target, `ws://10.0.2.2:7777` |
-| `e2e-mesh.yml` | the Bluetooth mesh lane, push A: `mesh_lever_test.dart` on API 34 without the mesh flag (S0) and with it (the probe), and with it on API 29 (S2) — the first lane below API 34. Captures are kept raw off the artifact, published with every Bluetooth address and the adapter's name replaced, platform dumps as skeletons only, all of it through `scan-logs.sh` (failure mode 28) | `run-mesh-lever.sh <leg>…` under `reactivecircus/android-emulator-runner`; the target reports and holds, the runner reads the device (`dumpsys`, `am`, `pm`, the log buffers) and releases it | strfry container, `ws://10.0.2.2:7777` (the scenario harness pins every relay plane to it; what the app sends at start for the seeded identity goes there and nowhere else) |
+| `e2e-mesh.yml` | the Bluetooth mesh lane, push A: `mesh_lever_test.dart` on API 34 without the mesh flag (S0) and with it (the probe), and with it on API 29 (S2) — the first lane below API 34. Captures are kept raw off the artifact, published with every Bluetooth address and the adapter's name replaced, platform dumps as skeletons only, all of it through `scan-logs.sh` (failure mode 29) | `run-mesh-lever.sh <leg>…` under `reactivecircus/android-emulator-runner`; the target reports and holds, the runner reads the device (`dumpsys`, `am`, `pm`, the log buffers) and releases it | strfry container, `ws://10.0.2.2:7777` (the scenario harness pins every relay plane to it; what the app sends at start for the seeded identity goes there and nowhere else) |
 
 `e2e-android.yml` / `e2e-ios.yml` take a `live_sync` boolean input (default
 **false**) and always pass `--dart-define=HAVEN_LIVE_SYNC=<input>`, so a lane
@@ -344,7 +345,7 @@ cache (`~/.gradle/caches/modules-2` + `~/.gradle/wrapper`) on one canonical key
 before its first build — 13 restore steps today. Exactly ONE job writes that key,
 `build-check.yml`'s `android`, from a successful build only, under the restore
 step's own `cache-primary-key` output; a lane that wipes `~/.gradle` for disk
-headroom (e2e-relay-customization) must never be able to publish the hole. Every
+headroom (e2e-relay-management) must never be able to publish the hole. Every
 restore is `continue-on-error: true` under a `timeout-minutes`, because an
 optimisation must never redden a lane that would have built cold.
 
@@ -717,7 +718,7 @@ status. That last one is what `timeout … adb` returned in eight of run
 so: *"nothing was asked of `<device>` … That is this runner's tooling."*
 
 Where each lane installs: `run-single-avd-scenario.sh` Phase 2 (and through it
-e2e-android, e2e-profile, e2e-integration and e2e-relay-customization);
+e2e-android, e2e-profile, e2e-integration and e2e-relay-management);
 Phase 1 of `run-b1-fgs-publish.sh`,
 `run-b3-real-gps.sh`, `run-b5-permission-revocation.sh`,
 `run-b6-location-provider-toggle.sh`, `run-b8-clock-skew.sh`,
@@ -776,7 +777,7 @@ it — `scan_logs_or_contain` in `run-single-avd-scenario.sh`,
 `scan_log_or_contain` in `run-ios-sim-scenario.sh`, `bgp_scan_or_contain` in
 `run-ios-bg-publish.sh`, `logscan_gate_dir` over the whole log directory in the
 three directory-scanning runners (`run-integration-tests.sh`,
-`run-relay-customization.sh`, `run-m7-background-catchup.sh`) and in the scenario runners' EXIT traps — every
+`run-relay-management.sh`, `run-m7-background-catchup.sh`) and in the scenario runners' EXIT traps — every
 one of them a call into `tooling/e2e/ci/logscan-gate.sh` — and the `Scan
 captured logs for secrets before upload` step in every workflow — **deletes
 every file it scanned before exiting non-zero**. The `if: failure()` upload that
@@ -839,7 +840,7 @@ the iOS lanes, the runner's own choice elsewhere):
   (`rotate-needle-dir.sh`), so a stalled attempt's sidecar never reaches the
   next attempt's seal.
 * **`host`** — every proxy-less device lane (`e2e-profile`, `e2e-integration`,
-  `e2e-relay-customization`, `e2e-background-catchup`,
+  `e2e-relay-management`, `e2e-background-catchup`,
   the seven Android scenario lanes, the three iOS scenario lanes): nothing was
   declared over a channel, so the seal declares what the host knows —
   `tooling/e2e/ci/host-needles.sh`: the four fixed harness seeds derived to
@@ -856,7 +857,8 @@ the iOS lanes, the runner's own choice elsewhere):
   directory gate types each `*.log` by name — `*logcat*`, `*drive*`, the
   exact relay-producer names listed in `logscan-gate.sh`
   (`LOGSCAN_RELAY_LOG_NAMES`: `strfry*.log`, `relay.log`,
-  `relay-profile-*.log`, `haven-local-relay*.log`, B5's `relay-poll.b5.log`
+  `relay-profile-*.log`, `haven-local-relay*.log`, the relay-management
+  lane's `haven-fault-relay-*.log`, B5's `relay-poll.b5.log`
   and promoted relay exports, B9's `relay-backlog-event.b9.log`) as `relay` —
   and then by CONTENT: a file whose own lines are `adb logcat -v threadtime`
   entries is a `logcat` sink whatever it is called
@@ -1040,7 +1042,7 @@ a proxy log, 1 for a relay log (the hermetic host relay prints one listen line
 for a whole run) and 1 for a diag. A lane whose captures are legitimately
 smaller passes its own `--floor <class>=<n>` at its seal rather than lowering a
 default, with its basis and the runs it came from stated beside it: integration
-and relay-customization take `drive=18` (each target is gated as
+and relay-management take `drive=18` (each target is gated as
 `--sink drive=<final>,<full>` and a floor sums its class's files, so it is twice
 the 9 lines the host prints per slice), `logcat=300` (logcat is captured per
 target, not per scenario) and `relay=7`; background-catchup and FGS-publish take
@@ -1247,7 +1249,7 @@ The step's own exit code separates the two ways it can end:
 
 **Why the step exists.** Without it the action installs the packages itself,
 with bare `sdkmanager --install` calls it tries exactly once. In CI run
-35524002720 (`e2e-relay-customization`) the emulator's download failed
+35524002720 (`e2e-relay-customization`, now `e2e-relay-management`) the emulator's download failed
 (`Warning: Failed to download package!`), `sdkmanager` exited non-zero and the
 action stopped at the install — no AVD was created and nothing was booted. The
 LAST thing the job printed, though, was the action's unconditional teardown:
@@ -1303,7 +1305,7 @@ build needs the version Flutter's Gradle plugin asks for (`flutter.ndkVersion`,
 28.2.13676358 on Flutter 3.47.9), so on CI `scripts/ci/build_apk_with_retry.sh`
 installs that version first and grades every attempt on disk. Before it did,
 Flutter's plugin made that install itself with one unretried `sdkmanager` call,
-and in CI run 41546262596 (`e2e-relay-customization`) a truncated download ended
+and in CI run 41546262596 (`e2e-relay-customization`, now `e2e-relay-management`) a truncated download ended
 the build as `Error reading Zip content from a SeekableByteChannel` with nothing
 compiled. A red here is therefore a download that did not land after the
 retries the build budget allowed (they share its 180 s with the Gradle retries).
@@ -1820,7 +1822,65 @@ log-privacy gate vouched for and the workflow scanned again — never the
 | upgrade source unusable (4) | the previous release's simulator asset does not unpack to one simulator `Runner.app`, its ARB lacks a journey label, or it installs but does not onboard offline | yank the tag for `ios` in `scripts/ci/launch_gate_yanked_releases.txt` with a reason |
 | no predecessor (5, job GREEN with a `::notice::`) | no eligible release carries `app-ios-simulator.zip` and its `.sha256` yet | expected until the first release that attaches them; the fresh and relaunch legs still ran |
 
-## Failure mode 28 — the mesh lane (`E2E Mesh`): reading its verdict, and its probe
+## Failure mode 28 — `e2e-relay-management`'s status target is red
+
+The last runner invocation of `Run relay-management tests on the emulator`
+drives `integration_test/relay_management_status_test.dart` alone (its own 27m
+drive bound, evidence under `relay-mgmt-logs/status/`). It runs whatever the
+four customization targets before it ended on, and the step is red if either
+invocation was. It runs the real app against R1, R2 and the `haven-fault-relay`
+processes
+(`tooling/e2e/local-relay/src/fault.rs`), named by `HAVEN_E2E_FAULT_RELAYS` as
+`<role>=<mode>@<port>` on host loopback, which the emulator dials at
+`10.0.2.2`:
+
+| Role | Mode | What the page must end on |
+|---|---|---|
+| `green`, `lookup` | `store` — keeps and serves what it is sent | current; `lookup` is never offered a kind 30443 |
+| `refuse` | answers every event `OK false "blocked: …"`, keeps none | refused |
+| `drop` | swallows every event (no `OK`), keeps none | unconfirmed, after rendering publishing for the 6 s `OK` wait |
+| `stall` | swallows every frame, so no `REQ` ends and no event is answered | no answer, after rendering checking for the 10 s `REQ` wait; never current. It took the connection, so it is offered every kind it lacks (kinds 10050, 10002, 30443), keeps none, and only its `OK` could make it current (L1: `haven-core/tests/relay_management_e2e.rs` `a_relay_that_never_ends_its_req_is_offered_and_reads_current_only_on_its_ok`) |
+| `hole` | accepts TCP, never completes the handshake | no answer; no frame can reach it |
+| `closed` | nothing listens (the runner checks the port is free) | no answer; no frame can reach it |
+
+Haven skips only a relay proven current; every other relay it reaches is
+offered what it lacks. So the test expects no new offer only of relays proven
+current (`green` after its removal from the inbox list, the removal scrub
+aside, and `green` and `lookup` across the relaunch), and at least one of each
+kind for `refuse`, `drop` and `stall`.
+
+The test reads each fault relay over its own socket with control verbs
+(`HAVEN_FAULT_OFFERS`: events offered per kind, the app's sockets only;
+`HAVEN_FAULT_KEPT`: the store; `HAVEN_FAULT_MODE`, `HAVEN_FAULT_WIPE`), never
+from a log: each fault relay's log (`haven-fault-relay-<role>.<target>.log`) is
+a fixed startup block and nothing else.
+
+Reading a red:
+
+- `[<step>] the board did not settle within 156s (wire evidence seen: …;
+  board: …)` lists every row as `<role> <kind>=<state>`. `wire evidence seen:
+  false` means the step's list never reached the lookup relay (the pass never
+  ran or never offered); a row still `checking`/`publishing` names the relay
+  whose bound was not met; a row `unknown` is a relay the test did not add.
+- `the page never rendered <state>` — the board reached a state the page never
+  drew, or never reached it; the step lines before it say which.
+- `fault relay <role> …` — the test's control socket to that relay could not
+  be opened, closed, or did not answer a verb within 15 s (after which that
+  socket is retired, so a late reply cannot answer a later verb).
+- `the stopped app still held the session after 104s` — at the relaunch, the
+  first app's database session (Security Rule 14) was still registered after
+  the pass running and the one queued behind it could have returned; the
+  second app would have failed to open it.
+- `fault relay(s) <roles> did not report listening` in the runner — the
+  binary was not built (`Build the fault relay`) or its port was taken.
+- Steps A–E and C are the launch, the adds (healthy first, the slow relays
+  last), the removal of `green` from the inbox list, the inbox restore, and a
+  relaunch. Each waits at most one settle bound (three maintenance passes of
+  at most 52 s each). The relaunch first waits for no pass to be running,
+  then for the session registry to read the database free, each at most two
+  passes.
+
+## Failure mode 29 — the mesh lane (`E2E Mesh`): reading its verdict, and its probe
 
 `e2e_mesh_lever` (API 34: legs `s0`, then `probe`) and `e2e_mesh_refusal` (API
 29: leg `s2`) end on one of five codes, the runner's own

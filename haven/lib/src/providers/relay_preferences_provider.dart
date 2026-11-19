@@ -248,7 +248,6 @@ class InboxRelaysNotifier extends AsyncNotifier<List<String>>
 
   /// Invalidates every other provider that depends on the inbox list.
   void _invalidateDownstream() {
-    // Status page reads union(inbox, keyPackage) of relays.
     // Inbox affects the gift-wrap polling target list.
     // KeyPackage publisher also publishes kind 10050 (inbox relay list)
     // — see `_publishRelayListIfEnabled` in `key_package_provider.dart`
@@ -262,7 +261,6 @@ class InboxRelaysNotifier extends AsyncNotifier<List<String>>
     // the same reason; without the read, an added inbox relay would not be
     // advertised (no kind 10050 republish) until the next app resume.
     _bumpMarkers(ref, [
-      relayStatusInvalidatorProvider,
       invitationInvalidatorProvider,
       keyPackagePublisherInvalidatorProvider,
     ]);
@@ -344,10 +342,7 @@ class KeyPackageRelaysNotifier extends AsyncNotifier<List<String>>
     // (10002) to the updated relay set — matching every other republish
     // call site. Without the read, an added KeyPackage relay would not
     // receive the user's KeyPackage until the next app resume.
-    _bumpMarkers(ref, [
-      relayStatusInvalidatorProvider,
-      keyPackagePublisherInvalidatorProvider,
-    ]);
+    _bumpMarkers(ref, [keyPackagePublisherInvalidatorProvider]);
     ref.read(keyPackagePublisherProvider);
   }
 }
@@ -367,7 +362,7 @@ class KeyPackageRelaysNotifier extends AsyncNotifier<List<String>>
 ///   would republish kind 30443/10002/10050 for a change that has nothing
 ///   to do with any of those lists. Unlike the other two notifiers, this
 ///   class therefore has no `_invalidateDownstream` step: nothing else
-///   currently watches the profile category (`relayStatusProvider` unions
+///   currently watches the profile category (`relayStatusProvider` watches
 ///   only the inbox + KeyPackage lists), and `state = AsyncValue.data(...)`
 ///   already drives this list's own UI rebuild.
 /// * [removeRelay] does NOT run the two-plane NIP-09 removal scrub — that
@@ -575,7 +570,6 @@ final profilePoolStatusProvider = FutureProvider<ProfilePoolStatus>((
 /// service, as is the profile-pool status, which `ref.read`s the service. A
 /// provider never read is left unbuilt, and one holding data is left alone.
 void retryFailedRelayLoads(WidgetRef ref) {
-  var dropped = false;
   for (final provider in <ProviderBase<AsyncValue<Object?>>>[
     relayPreferencesServiceProvider,
     inboxRelaysProvider,
@@ -585,12 +579,8 @@ void retryFailedRelayLoads(WidgetRef ref) {
   ]) {
     if (ref.exists(provider) && ref.read(provider).hasError) {
       ref.invalidate(provider);
-      dropped = true;
     }
   }
-  // `relayStatusProvider` caches the error of a list it read; it rebuilds on
-  // this marker, which keeps it out of this file's imports.
-  if (dropped) ref.read(relayStatusInvalidatorProvider.notifier).state++;
 }
 
 /// Normalizes a relay URL for set-membership comparison (e.g. the
@@ -616,12 +606,11 @@ String normalizeRelayUrlForComparison(String url) =>
 // These exist solely so the relay-preference notifiers can invalidate
 // downstream state without taking a hard import dependency on those
 // modules (which would cause cyclic imports). The downstream providers
-// (relay_status_provider.dart, invitation_provider.dart,
-// key_package_provider.dart) watch these as plain `Object` markers and
-// rebuild when they change.
+// (invitation_provider.dart, key_package_provider.dart) watch these as plain
+// `Object` markers and rebuild when they change.
 //
 // To couple a downstream provider to one of these, simply
-// `ref.watch(relayStatusInvalidatorProvider);` somewhere in its build
+// `ref.watch(invitationInvalidatorProvider);` somewhere in its build
 // path, and bump it ([_bumpMarkers]) to force the downstream rebuild.
 // Never `ref.invalidate` one: it rebuilds to the same 0, and Riverpod
 // rebuilds a dependent only when the value it watches changes.
@@ -632,9 +621,6 @@ void _bumpMarkers(Ref ref, List<StateProvider<int>> markers) {
     ref.read(marker.notifier).state++;
   }
 }
-
-/// Invalidate marker watched by `relayStatusProvider`.
-final relayStatusInvalidatorProvider = StateProvider<int>((ref) => 0);
 
 /// Invalidate marker watched by `invitationProvider`.
 final invitationInvalidatorProvider = StateProvider<int>((ref) => 0);

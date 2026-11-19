@@ -24,7 +24,7 @@
 /// ## Host cues
 ///
 /// FFI-OD2 needs R2 down and then back. This harness prints
-/// [_kStopR2Cue] and [_kStartR2Cue]; `run-relay-customization.sh`
+/// [_kStopR2Cue] and [_kStartR2Cue]; `run-relay-management.sh`
 /// stops and restarts R2 when it reads them in logcat. Product code never
 /// prints a cue.
 ///
@@ -70,7 +70,7 @@ bool _is64LowerHex(String hex) =>
     hex.length == 64 && RegExp(r'^[0-9a-f]{64}$').hasMatch(hex);
 
 /// Asks the host to stop R2. MUST match `R2_STOP_CUE` in
-/// `tooling/e2e/ci/run-relay-customization.sh`, whose self-test reads it here.
+/// `tooling/e2e/ci/run-relay-management.sh`, whose self-test reads it here.
 const String _kStopR2Cue = '[od2-cue] stop R2';
 
 /// Asks the host to start R2 again. MUST match `R2_START_CUE`.

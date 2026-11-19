@@ -63,7 +63,7 @@
 # # The single-writer rule (C4)
 #
 # One job SAVES the key; every other job restores it read-only. That is not
-# tidiness: e2e-relay-customization.yml deliberately `rm -rf`s `~/.gradle/caches`
+# tidiness: e2e-relay-management.yml deliberately `rm -rf`s `~/.gradle/caches`
 # after its build to keep disk headroom for the emulator's system image. If that
 # lane could also save, it would publish a cache emptied by its own cleanup and
 # every other lane would restore the hole. A second writer anywhere reintroduces
@@ -145,7 +145,7 @@ fail() { printf '[%s] FAIL: %s\n' "${SCRIPT_NAME}" "$*" >&2; violations=$(( viol
 #        save-if, restore-timeout, restore-coe, restore-id
 #
 # Full-line comments are dropped first: a workflow's prose legitimately quotes
-# `flutter build apk` (e2e-relay-customization.yml's disk-headroom note does),
+# `flutter build apk` (e2e-relay-management.yml's disk-headroom note does),
 # and a guard that reads prose as code is a guard that reports the comment.
 scan_workflow() {
   awk -v build_re="${BUILD_SITE_RE}" -v bare_re="${BARE_BUILD_RE}" \
@@ -313,7 +313,7 @@ check_repo() { # $1 = workflow dir
   done
 
   if (( total_saves != 1 )); then
-    fail "C4 ${total_saves} job(s) SAVE the Gradle cache key; there must be exactly ONE writer. A lane that deletes or half-fills ~/.gradle must never be able to publish a cache the others restore (e2e-relay-customization.yml wipes ~/.gradle/caches by design)."
+    fail "C4 ${total_saves} job(s) SAVE the Gradle cache key; there must be exactly ONE writer. A lane that deletes or half-fills ~/.gradle must never be able to publish a cache the others restore (e2e-relay-management.yml wipes ~/.gradle/caches by design)."
   fi
 
   if (( violations )); then

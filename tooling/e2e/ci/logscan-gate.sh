@@ -289,9 +289,11 @@ logscan_seal() {
 
 # The files a relay itself writes, by exact producer: strfry's docker logs
 # (`strfry.<tag>.log`, `strfry2.final.log` — run-m7-background-catchup.sh,
-# run-b5-permission-revocation.sh, run-relay-customization.sh), the
+# run-b5-permission-revocation.sh, run-relay-management.sh), the
 # host-native relay's own log and the workflows' copies of it (`relay.log`,
-# `relay-profile-<port>.log` — start-local-relay.sh, e2e-profile.yml), B5's
+# `relay-profile-<port>.log` — start-local-relay.sh, e2e-profile.yml), the
+# relay-management lane's fault relays (`haven-fault-relay-<role>.<tag>.log` —
+# run-relay-management.sh, fixed text by construction), B5's
 # relay poll line and the relay exports it diffs (run-b5-permission-revocation.sh
 # `RELAY_POLL_LOG`, `relay-scan.tmp`, `relay-scan.ids`, `BASELINE_IDS`,
 # `NEW_IDS`, `APPOPS_NEW_IDS` and their `.raw`, promoted to `.log` by
@@ -300,6 +302,7 @@ logscan_seal() {
 # events, which the rules must see.
 readonly -a LOGSCAN_RELAY_LOG_NAMES=(
   'strfry*.log' 'relay.log' 'relay-profile-*.log' 'haven-local-relay*.log'
+  'haven-fault-relay-*.log'
   'relay-poll.b5.log' 'relay-backlog-event.b9.log'
   'relay-scan.tmp.log' 'relay-scan.ids.log' 'relay-baseline.ids.log'
   'relay-act2-new.ids.log' 'relay-act2-new.ids.raw.log'
@@ -528,7 +531,7 @@ logscan_gate_dir() {
 # that the gate seals from what each profile is given, hands every sink to the
 # wrapper, folds the two verdicts, and contains on a leak — never the scanner's
 # patterns, which are the crate's own tests.
-readonly LOGSCAN_GATE_SELF_TEST_FIXTURES=93
+readonly LOGSCAN_GATE_SELF_TEST_FIXTURES=94
 # bash-4-only: mapfile/readarray, coproc, declare -A, case conversion, |&, ;;&,
 # negative substring offsets.
 readonly LOGSCAN_GATE_BASH4_ONLY_RE='(^|[^[:alnum:]_])(mapfile|readarray|coproc)([^[:alnum:]_]|$)|declare[[:space:]]+-[a-zA-Z]*A|\$\{[A-Za-z_][A-Za-z0-9_]*(,,|\^\^)|\|&|;;&|\$\{[^}]*:([[:space:]]+-[0-9]|[0-9]+:[[:space:]]*-[0-9])'
@@ -1043,6 +1046,7 @@ logscan_gate_self_test() {
   local name
   for name in strfry.final.log strfry.iter-3.log strfry2.final.log strfry.log \
               relay.log relay-profile-7790.log haven-local-relay.log haven-local-relay-profile-7790.log \
+              haven-fault-relay-refuse.integration_test_relay_management_status_test_dart.log \
               relay-poll.b5.log relay-backlog-event.b9.log \
               relay-scan.tmp.log relay-scan.ids.log relay-baseline.ids.log \
               relay-act2-new.ids.log relay-act2-new.ids.raw.log \

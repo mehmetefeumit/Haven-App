@@ -6439,7 +6439,7 @@ check's own sums are 1887 s under a 32-minute deadline and 1065 s under
 18, and the job caps are 115 and 101 minutes. The harness self-tests: a
 step in `repo-guards.yml`. `check_wire_proxy_test_only.sh`: nothing but
 `.log` files in the upload. `docs/E2E_TROUBLESHOOTING.md`: the lane's
-row and failure mode 28. **One row O.2.7 did not have**:
+row and failure mode 29. **One row O.2.7 did not have**:
 `haven/test/e2e/app_lifecycle_test.dart`, which holds every target that
 mounts the app to one of three tables. The mesh target is in the one
 that is true of it — its lane compiles the live-sync engine out, so
