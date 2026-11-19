@@ -113,7 +113,9 @@ readonly CRASH_SUMMARY="${OUT_DIR}/crash-summary.log"
 readonly LOGSCAN_REPORT="${OUT_DIR%/*}/launch-gate-logscan.ndjson"
 
 # Bounds. The LAUNCH_GATE_* overrides exist for the self-test, whose stub device
-# answers instantly; the workflow sets none of them.
+# answers instantly; the workflow sets none of them. Every bound is read on the
+# clock `date +%s` answers, never SECONDS: the self-test's stub `date` counts
+# the stub device's calls, so no fixture's verdict depends on machine speed.
 readonly BOOT_SECS="${LAUNCH_GATE_BOOT_SECS:-60}"        # adb and boot_completed after the action's boot
 readonly OFFLINE_SECS="${LAUNCH_GATE_OFFLINE_SECS:-30}"  # airplane mode and no default network
 readonly LAUNCH_SECS="${LAUNCH_GATE_LAUNCH_SECS:-60}"    # `am start -W` to a drawn activity
@@ -245,14 +247,14 @@ alive() {
 clear_logs() { dev logcat -b all -c >/dev/null 2>&1 || true; }
 
 launch_app() {
-  local out rc=0 deadline
+  local out rc=0 start spent
   STATE='launch'
   out="$(timeout "${LAUNCH_SECS}" adb -s "${DEVICE}" shell am start -W -n "${ACTIVITY}" 2>&1 | tr -d '\r')" || rc=$?
   if ! grep -qx 'Status: ok' <<<"${out}"; then
     verdict '' "am start -W did not report 'Status: ok' within ${LAUNCH_SECS} s (rc ${rc})"
   fi
-  deadline=$(( SECONDS + PROCESS_SECS ))
-  while (( SECONDS < deadline )); do
+  start="$(date +%s)"
+  while spent=$(( $(date +%s) - start )); (( spent < PROCESS_SECS )); do
     if APP_PID="$(pid_now)"; then
       if [[ -z "${APP_PID}" ]]; then
         verdict 1 "am start -W reported ok but no ${PKG} process is running"
@@ -265,10 +267,10 @@ launch_app() {
 }
 
 stop_app() {
-  local deadline now
+  local start spent now
   dev shell am force-stop "${PKG}" >/dev/null 2>&1 || true
-  deadline=$(( SECONDS + PROCESS_SECS ))
-  while (( SECONDS < deadline )); do
+  start="$(date +%s)"
+  while spent=$(( $(date +%s) - start )); (( spent < PROCESS_SECS )); do
     if now="$(pid_now)" && [[ -z "${now}" ]]; then
       APP_PID=''
       return 0
@@ -362,7 +364,7 @@ declare -A TAPPED=()
 # window_open <secs> — a fresh launch's tap state, and its first window.
 window_open() {
   TAP_KEY=''; TAP_DIGEST=''; PREV_DIGEST=''; NAME_UNREAD=0; TAPPED=()
-  STALL=$(( SECONDS + $1 ))
+  STALL=$(( $(date +%s) + $1 ))
 }
 
 # act <name-file> <key>... — after an observation of our window: wait out a
@@ -386,9 +388,9 @@ act() {
         continue
       fi
       mv "${name_file}.read" "${name_file}"
-      STALL=$(( SECONDS + FINISH_SECS ))
+      STALL=$(( $(date +%s) + FINISH_SECS ))
     else
-      STALL=$(( SECONDS + SCREEN_SECS ))
+      STALL=$(( $(date +%s) + SCREEN_SECS ))
     fi
     tap "${key}"
     TAP_KEY="${key}"
@@ -414,13 +416,14 @@ stalled() {
 
 # journey <arb> <name-file> — sets TERMINAL to SETUP_HELD or MAP.
 journey() {
-  local arb="$1" name_file="$2" deadline key foreign=''
-  deadline=$(( SECONDS + JOURNEY_SECS ))
+  local arb="$1" name_file="$2" start spent now key foreign=''
+  start="$(date +%s)"
   window_open "${SCREEN_SECS}"
   STATE='first screen'
-  while (( SECONDS < deadline )); do
+  while spent=$(( $(date +%s) - start )); (( spent < JOURNEY_SECS )); do
     alive
-    if (( SECONDS >= STALL )); then
+    now="$(date +%s)"
+    if (( now >= STALL )); then
       break
     fi
     observe "${arb}" "${name_file}.read" || continue
@@ -455,13 +458,14 @@ journey() {
 # disclosure covers (a user who declined it is asked again, modally) is
 # declined the way the journey declines it.
 expect_reopened() {
-  local arb="$1" name_file="$2" deadline key name_seen=0
+  local arb="$1" name_file="$2" start spent now key name_seen=0
   STATE="reopen (${TERMINAL})"
-  deadline=$(( SECONDS + REOPEN_SECS ))
+  start="$(date +%s)"
   window_open "${SCREEN_SECS}"
-  while (( SECONDS < deadline )); do
+  while spent=$(( $(date +%s) - start )); (( spent < REOPEN_SECS )); do
     alive
-    if (( SECONDS >= STALL )); then
+    now="$(date +%s)"
+    if (( now >= STALL )); then
       break
     fi
     observe "${arb}" "${name_file}.after" || continue
@@ -509,10 +513,10 @@ expect_reopened() {
 # check_no_crash then reads the crash and events buffers, so a crash or an ANR
 # moments after MapShell's or the setup screen's first frame is still caught.
 settle_watch() {
-  local arb="$1" deadline
+  local arb="$1" start spent
   STATE="${STATE}, settling"
-  deadline=$(( SECONDS + SETTLE_SECS ))
-  while (( SECONDS < deadline )); do
+  start="$(date +%s)"
+  while spent=$(( $(date +%s) - start )); (( spent < SETTLE_SECS )); do
     alive
     observe "${arb}" || true
   done
@@ -595,12 +599,12 @@ leg_upgrade() {
 # Preconditions: a booted en-US device, offline, with error dialogs hidden.
 # ---------------------------------------------------------------------------
 preconditions() {
-  local boot_deadline offline_deadline boot locale air net
+  local start spent boot locale air net
   if ! timeout "${BOOT_SECS}" adb -s "${DEVICE}" wait-for-device; then
     verdict 3 "${DEVICE} did not come online within ${BOOT_SECS} s"
   fi
-  boot_deadline=$(( SECONDS + BOOT_SECS ))
-  while (( SECONDS < boot_deadline )); do
+  start="$(date +%s)"
+  while spent=$(( $(date +%s) - start )); (( spent < BOOT_SECS )); do
     boot="$(timeout "${ADB_SECS}" adb -s "${DEVICE}" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)"
     [[ "${boot}" == 1 ]] && break
   done
@@ -618,8 +622,8 @@ preconditions() {
   # "Active default network: none" is ConnectivityService.dump()'s line when
   # no network is the default (AOSP android-14); read from source, so a guest
   # that prints anything else is refused here, by name, rather than trusted.
-  offline_deadline=$(( SECONDS + OFFLINE_SECS ))
-  while (( SECONDS < offline_deadline )); do
+  start="$(date +%s)"
+  while spent=$(( $(date +%s) - start )); (( spent < OFFLINE_SECS )); do
     air="$(timeout "${ADB_SECS}" adb -s "${DEVICE}" shell settings get global airplane_mode_on 2>/dev/null | tr -d '\r' || true)"
     net="$(timeout "${ADB_SECS}" adb -s "${DEVICE}" shell "dumpsys connectivity | grep -m1 'Active default network:'" 2>/dev/null | tr -d '\r' || true)"
     if [[ "${air}" == 1 && "${net}" =~ Active\ default\ network:\ none$ ]]; then
@@ -700,11 +704,12 @@ finish() {
 # XML, so the real ui-dump.py reads them. Each APK is a text file naming the
 # flow it plays and its versionCode. Scenarios are environment knobs on the
 # stub. Logs go through the real logscan-gate.sh and scan-logs.sh with the
-# shared fake scanner. Deadlines are shrunk through the LAUNCH_GATE_*_SECS
-# overrides only for scenarios that must run one out; every other verdict
-# comes from what the stub shows, not from time.
+# shared fake scanner. Time is the stub's too: a stub `date` answers `+%s`
+# with a clock each adb call advances by STUB_TICK (default 1), so every
+# deadline is a count of device calls and every verdict comes from what the
+# stub shows, never from how fast this machine runs it.
 # ---------------------------------------------------------------------------
-readonly SELF_TEST_FIXTURES=44
+readonly SELF_TEST_FIXTURES=46
 readonly ST_NAME='Quiet Wanderer Fixture'
 
 _st_write_stub() { # <dir>
@@ -713,6 +718,7 @@ _st_write_stub() { # <dir>
 # The launch gate's stub device. State lives in files under ${STUB}.
 S="${STUB}"
 printf '%s\n' "$*" >> "${S}/calls"
+echo $(( $(cat "${S}/clock") + ${STUB_TICK:-1} )) > "${S}/clock"
 [[ "${1:-}" == -s ]] && shift 2
 if [[ -f "${S}/offline" ]]; then echo "error: device offline" >&2; exit 1; fi
 PKG=com.oblivioustech.haven
@@ -900,6 +906,13 @@ esac
 exit 0
 STUB
   chmod +x "$1/adb"
+  cat > "$1/date" <<'STUB'
+#!/usr/bin/env bash
+# The stub device's clock: the runner reads time only as `date +%s`.
+[[ "$*" == +%s ]] || { echo "stub date: unexpected arguments: $*" >&2; exit 9; }
+cat "${STUB}/clock"
+STUB
+  chmod +x "$1/date"
 }
 
 self_test() {
@@ -936,14 +949,15 @@ print(json.dumps({k[0]: "Get Started", k[1]: "Create My Identity", k[2]: "Not no
     rm -rf "${tmp}/stub" "${tmp}/cand" "${tmp}/prev" "${tmp}/out" "${tmp}/priv" "${tmp}/seal.argv"
     mkdir -p "${tmp}/stub/data" "${tmp}/priv"
     : > "${tmp}/stub/crash.log"; : > "${tmp}/stub/events.log"; echo 4000 > "${tmp}/stub/pidseq"
+    echo 0 > "${tmp}/stub/clock"
     _mkdir "${tmp}/cand" candidate 4022 "${cf}" "${ARB_CAND:-${arb_now}}"
     _mkdir "${tmp}/prev" v0.1.13 4020 "${pf}" "${ARB_PREV:-${arb_old}}"
     rc=0
     out="$(env PATH="${tmp}/bin:${PATH}" STUB="${tmp}/stub" STUB_NAME="${ST_NAME}" TMPDIR="${tmp}/priv" \
       LAUNCH_GATE_OUT="${tmp}/out/summary" \
       HAVEN_LOGSCAN=true HAVEN_LOGSCAN_BIN="${LOGSCAN_FAKE_BIN}" FAKE_SEAL_ARGV="${tmp}/seal.argv" \
-      GITHUB_RUN_ID="launch-gate-self-test-$$-${ran}" GITHUB_RUN_ATTEMPT=1 LAUNCH_GATE_SCREEN_SECS=3 LAUNCH_GATE_FINISH_SECS=3 \
-      LAUNCH_GATE_OFFLINE_SECS=2 LAUNCH_GATE_PROCESS_SECS=2 LAUNCH_GATE_SETTLE_SECS=1 "$@" \
+      GITHUB_RUN_ID="launch-gate-self-test-$$-${ran}" GITHUB_RUN_ATTEMPT=1 LAUNCH_GATE_SCREEN_SECS=20 LAUNCH_GATE_FINISH_SECS=30 \
+      LAUNCH_GATE_OFFLINE_SECS=4 LAUNCH_GATE_PROCESS_SECS=4 LAUNCH_GATE_SETTLE_SECS=6 "$@" \
       bash "${BASH_SOURCE[0]}" "${tmp}/cand" "${tmp}/prev" 2>&1)" || rc=$?
     if (( rc == want_rc )); then
       printf '  PASS %s\n' "${label}"
@@ -1069,10 +1083,14 @@ print(json.dumps({k[0]: "Get Started", k[1]: "Create My Identity", k[2]: "Not no
   # (39) The device not in the state the gate needs.
   _scenario "a device that is not en-US is infrastructure" 3 setup-held map STUB_LOCALE=fr-FR
   _scenario "a device that will not go offline is infrastructure" 3 setup-held map STUB_AIRPLANE_STUCK=1
-  # (41) A name field the gate cannot read is never tapped past.
+  # (41) Deadlines run on the injected clock, not this machine's: a device
+  #      whose every call outlasts a screen's window stalls at the first one.
+  _scenario "a device slower than a screen's window is a stall at the first screen" 1 setup-held map STUB_TICK=100
+  _has "…on the stub's clock" "no progress past state first screen within its deadline"
+  # (43) A name field the gate cannot read is never tapped past.
   _scenario "a create screen without a readable name field is a product failure" 1 setup-held map STUB_EDIT_CLASS=android.view.View
   _has "…named as such" "never showed exactly one non-empty name field"
-  # (43) An error state names its key; a required key missing is usage.
+  # (45) An error state names its key; a required key missing is usage.
   _scenario "a display-name error on screen is a product failure naming it" 1 name-error map
   ARB_CAND="$(python3 -I -c 'import json,sys; d=json.loads(sys.argv[1]); d.pop("commonSettings"); print(json.dumps(d))' "${arb_now}")" \
     _scenario "an ARB without a required key is a usage error" 2 setup-held map
