@@ -1917,10 +1917,18 @@ void main() {
             description: 'the accept to end in its snack',
             shouldAbort: () => _m11Superseded(generation),
           );
+          // One snack is built in every root Scaffold of the messenger (the
+          // map's under this page too), and how many are onstage is the
+          // route stack's, not the handler's: iOS showed two.
           expect(
             find.text(l10n.invitationAcceptedSnack),
-            findsOneWidget,
+            findsWidgets,
             reason: '[INV] the user must be told the invitation was accepted.',
+          );
+          expect(
+            find.text(l10n.invitationAcceptError),
+            findsNothing,
+            reason: '[INV] an accepted invitation must not report a failure.',
           );
           final members = <String>{
             _alicePubkeyHex().toLowerCase(),
