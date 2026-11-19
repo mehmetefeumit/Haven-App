@@ -12,7 +12,7 @@
 use std::fmt;
 use std::future::Future;
 
-use nostr::EventId;
+use nostr::{Event, EventId, Filter};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -130,6 +130,20 @@ pub trait RelayPlane: Send + Sync {
     /// having observed nothing.
     fn plane_ledger(&self) -> Option<&crate::relay::Ledger> {
         None
+    }
+
+    /// The events this plane's own store holds for `filter`; none for a
+    /// plane with no store to read (a test double). Never rendered.
+    ///
+    /// # Errors
+    ///
+    /// [`RigError::Core`] with [`crate::rig::Step::Publish`] if the store
+    /// cannot answer.
+    fn stored_events(
+        &self,
+        _filter: Filter,
+    ) -> impl Future<Output = Result<Vec<Event>, RigError>> + Send {
+        std::future::ready(Ok(Vec::new()))
     }
 }
 

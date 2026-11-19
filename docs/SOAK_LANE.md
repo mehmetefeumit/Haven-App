@@ -187,7 +187,18 @@ A circle an arm builds beside running engines can have a founding Welcome
 taken from its record by the admin's live plane before the create's own drive
 reaches it; the rig then takes that Welcome from the invitee's inbox — the
 one wrap that was not there before the create — and accepts it, and the
-create is reported unacknowledged only when no Welcome reached anyone. MDK's windows (15 s grace, 60 s quiet, up to 30 s jitter) are served on
+create is reported unacknowledged only when no Welcome reached anyone. A change
+made beside a running engine (`SimWorld::change`) meets the same race: the
+device's engine drives every stored record, and can take the change's commit
+before the call's own drive does. The product then answers the change by its
+record, and the rig reads the commit where that drive left it — off the record
+while one is stored, and, once applied and ended, as the one handshake of the
+circle the device's own endpoint handed a plane during the call — so "no
+commit" from a change still means nothing was staged. Three cases have no such
+reading and leave `Changed::commit` empty: a commit that drive rolled back or
+set aside, a device that handed the plane more than one handshake of the circle
+meanwhile, and a plane that keeps no ledger (the in-crate test double), where a
+test that reads the commit stops the device's engine first, as S14 does. MDK's windows (15 s grace, 60 s quiet, up to 30 s jitter) are served on
 the joiner's injectable session clock, set a day ahead for that one drive and
 given back after it; when an earlier circle's post-join on the same device
 still spaces this one, the drive runs at the instant the session names. No scenario's measured phase therefore meets a joiner's

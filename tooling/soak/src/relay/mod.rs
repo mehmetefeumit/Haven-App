@@ -379,6 +379,10 @@ impl RelayPlane for SimRelay {
     fn plane_ledger(&self) -> Option<&Ledger> {
         Some(&self.ledger)
     }
+
+    async fn stored_events(&self, filter: Filter) -> Result<Vec<Event>, RigError> {
+        self.stored_page(filter).await
+    }
 }
 
 impl SimRelay {

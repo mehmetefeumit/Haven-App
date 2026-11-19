@@ -938,15 +938,16 @@ where
 
 /// Changes `circle`'s relay list from `device`, through the product driver.
 ///
-/// Returns the commit the driver sent and where it stands when the call
-/// returns: confirmed on a relay's `OK`, rolled back only when every relay
-/// proved it refused, otherwise pending and sent again on its relays'
-/// schedule (Rule 13, the product's own).
+/// Returns the change's commit ([`Changed::commit`]: whichever of the
+/// device's drives sent it) and where it stands when the call returns:
+/// confirmed on a relay's `OK`, rolled back only when every relay proved it
+/// refused, otherwise pending and sent again on its relays' schedule (Rule
+/// 13, the product's own).
 ///
 /// # Errors
 ///
 /// [`RigError::Core`] with [`Step::StageCommit`] if the product refused the
-/// change or sent no commit for it.
+/// change or [`Changed::commit`] names no commit for it.
 pub(crate) async fn relay_update<T: TimelineSink, L: LogDrain>(
     world: &ScenarioWorld<T, L>,
     device: DeviceTag,
@@ -966,7 +967,8 @@ pub(crate) async fn relay_update<T: TimelineSink, L: LogDrain>(
     )
 }
 
-/// The commit a change sent, with its verdict; an error when it sent none.
+/// A change's commit, with its verdict; an error when [`Changed::commit`]
+/// names none.
 fn committed(changed: Changed) -> Result<(Event, PublishVerdict), RigError> {
     let verdict = changed.verdict;
     changed
@@ -990,7 +992,8 @@ fn committed(changed: Changed) -> Result<(Event, PublishVerdict), RigError> {
 /// # Errors
 ///
 /// [`RigError::Core`] with [`Step::StageCommit`] if the product refused the
-/// removal (e.g. the caller is not an admin) or sent no commit for it.
+/// removal (e.g. the caller is not an admin) or [`Changed::commit`] names no
+/// commit for it.
 pub async fn remove_member<T: TimelineSink, L: LogDrain>(
     world: &ScenarioWorld<T, L>,
     admin: DeviceTag,
@@ -1085,7 +1088,7 @@ fn addressed_to(welcome: &Event, pubkey_hex: &str) -> bool {
 ///
 /// [`RigError::Core`] with [`Step::StageCommit`] if the product refused it
 /// (the caller is not an admin, or the successor holds no leaf in the group)
-/// or sent no commit for it.
+/// or [`Changed::commit`] names no commit for it.
 pub async fn hand_off_admin<T: TimelineSink, L: LogDrain>(
     world: &ScenarioWorld<T, L>,
     admin: DeviceTag,
