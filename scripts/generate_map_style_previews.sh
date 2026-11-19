@@ -56,8 +56,10 @@
 # The key is passed to curl on stdin, never on its command line, and is never
 # printed — nor is any URL that carries it (Security Rule 15).
 #
-# Needs: curl, cwebp and webpinfo (libwebp: `brew install webp`,
-# `apt install webp`).
+# Needs: curl, cwebp and webpinfo (libwebp's tools; no Homebrew needed on Linux):
+#   Fedora:          sudo dnf install libwebp-tools
+#   Debian/Ubuntu:   sudo apt install webp
+#   macOS:           brew install webp
 #
 # Exit codes: 0 ok | 1 render/convert/verify failure | 2 no usable key |
 #             3 key is empty/placeholder/malformed | 4 missing tool |
@@ -125,7 +127,7 @@ fail() { printf '\033[1;31m[map_previews] FAIL:\033[0m %s\n' "$1" >&2; exit "${2
 # --- 1. Tools --------------------------------------------------------------
 for tool in curl cwebp webpinfo; do
   command -v "${tool}" >/dev/null 2>&1 \
-    || fail "${tool} not found (cwebp/webpinfo: brew install webp | apt install webp)" 4
+    || fail "${tool} not found (cwebp/webpinfo: Fedora: sudo dnf install libwebp-tools | Debian/Ubuntu: sudo apt install webp | macOS: brew install webp)" 4
 done
 
 # --- 2. Key, refusing empty/placeholder/malformed --------------------------

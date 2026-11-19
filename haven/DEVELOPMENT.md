@@ -150,7 +150,8 @@ WebP images bundled in `haven/assets/map_style_previews/`
 credits. They are rendered once, with your Stadia key, and committed:
 
 ```bash
-# Needs curl + libwebp (cwebp, webpinfo): brew install webp | apt install webp.
+# Needs curl + libwebp's tools (cwebp, webpinfo):
+#   Fedora: sudo dnf install libwebp-tools | Debian/Ubuntu: sudo apt install webp | macOS: brew install webp
 # Key: haven/dart_defines/secrets.json, else $STADIA_API_KEY.
 # Endpoint: required, no default — confirm it first (see below).
 STATIC_MAPS_ENDPOINT=https://tiles.stadiamaps.com/<path> scripts/generate_map_style_previews.sh
