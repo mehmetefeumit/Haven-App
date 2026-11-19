@@ -2292,9 +2292,9 @@ async fn a_heal_restores_the_pass_through_whatever_was_wrong() {
         Fault::RefuseOversize {
             max_bytes: ByteCap::new(1),
         },
-        // A class is a partition of the canonical endpoint too; the last one
-        // armed is what a heal must undo, and the page below carries one
-        // event of each class to prove it.
+        // A class is a partition of the canonical endpoint too; both stay
+        // armed until the heal, which must undo them together, and the page
+        // below carries one event of each class to prove it.
         Fault::DropClass(DropClass::Application),
         Fault::DropClass(DropClass::Handshake),
         // Each would leave its own mark below: a clamp of one cuts the page to
