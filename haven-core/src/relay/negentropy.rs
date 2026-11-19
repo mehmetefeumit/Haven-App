@@ -347,6 +347,11 @@ pub(crate) trait NegSink: Sync {
     fn stands(&self) -> bool {
         true
     }
+
+    /// Reached once the pass has dialled, before any session opens: the
+    /// stretch that reads no fence, where a test holds the pass.
+    #[cfg(any(test, feature = "test-utils"))]
+    async fn dialled(&self) {}
 }
 
 /// Holds `group_id`'s sends while what a pass fetched is not yet taken in
@@ -419,6 +424,8 @@ pub(crate) async fn run_pass(
         return;
     }
     relays.neg_prepare(&every).await;
+    #[cfg(any(test, feature = "test-utils"))]
+    sink.dialled().await;
     futures::future::join_all(
         routes
             .iter()
