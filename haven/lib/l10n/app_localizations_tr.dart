@@ -1492,7 +1492,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get storageResetRelays =>
-      'Bu güncelleme aktarıcı ayarlarınızı Haven\'ın varsayılanlarına sıfırladı. Siz devam edene ya da Aktarıcı ayarları\'ndan dönene kadar bu ayarlar yayımlanmaz; bu yüzden önce kendi aktarıcılarınızı ekleyebilirsiniz.';
+      'Bu güncelleme aktarıcı ayarlarınızı Haven\'ın varsayılanlarına sıfırladı. Siz devam edene ya da Aktarıcı ayarlarından dönene kadar bu ayarlar yayımlanmaz; bu yüzden önce kendi aktarıcılarınızı ekleyebilirsiniz.';
 
   @override
   String get storageResetContinue => 'Devam Et';
@@ -1539,9 +1539,9 @@ class AppLocalizationsTr extends AppLocalizations {
       count,
       locale: localeName,
       other:
-          '$countString gelen kutusu aktarıcısı Haven\'ın davetlerinizi okumasına izin vermedi; bu yüzden yalnızca bu aktarıcılara gönderilen bir davet size ulaşmaz. Aktarıcı ayarları\'ndan onları kaldırın ya da başka bir aktarıcı ekleyin.',
+          '$countString gelen kutusu aktarıcısı Haven\'ın davetlerinizi okumasına izin vermedi; bu yüzden yalnızca bu aktarıcılara gönderilen bir davet size ulaşmaz. Aktarıcı ayarlarından onları kaldırın ya da başka bir aktarıcı ekleyin.',
       one:
-          'Gelen kutusu aktarıcılarınızdan biri Haven\'ın davetlerinizi okumasına izin vermedi; bu yüzden yalnızca bu aktarıcıya gönderilen bir davet size ulaşmaz. Aktarıcı ayarları\'ndan onu kaldırın ya da başka bir aktarıcı ekleyin.',
+          'Gelen kutusu aktarıcılarınızdan biri Haven\'ın davetlerinizi okumasına izin vermedi; bu yüzden yalnızca bu aktarıcıya gönderilen bir davet size ulaşmaz. Aktarıcı ayarlarından onu kaldırın ya da başka bir aktarıcı ekleyin.',
     );
     return '$_temp0';
   }
