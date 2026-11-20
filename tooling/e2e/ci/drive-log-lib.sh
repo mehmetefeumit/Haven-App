@@ -970,8 +970,10 @@ drive_log_missing_markers() {
   [[ -f "${log}" ]] || { echo "no drive log at ${log}" >&2; return 2; }
   while IFS='|' read -r _ row_lane id; do
     [[ "${row_lane}" == both || "${row_lane}" == "${lane}" ]] || continue
-    if ! _drive_log_decolour "${log}" | tr -d '\r' \
-        | grep -aqE -- "(^|[[:space:]:])\\[e2e-done\\] ${id}[[:space:]]*\$"; then
+    # A process substitution, not a pipe: `grep -q` stops at the first hit, and
+    # under pipefail the producer's SIGPIPE would read as the marker missing.
+    if ! grep -aqE -- "(^|[[:space:]:])\\[e2e-done\\] ${id}[[:space:]]*\$" \
+        < <(_drive_log_decolour "${log}" | tr -d '\r'); then
       printf '%s\n' "${id}"
       missing=1
     fi
@@ -1116,7 +1118,7 @@ drive_log_check_markers() {
 # not by a floor: a floor lets a fixture be deleted and the suite stay green,
 # which is the same "reports coverage it does not have" shape this whole library
 # exists to catch. Change it only in the commit that adds or removes a fixture.
-readonly DRIVE_LOG_SELF_TEST_FIXTURES=88
+readonly DRIVE_LOG_SELF_TEST_FIXTURES=89
 
 # `ran=$(( ran + 1 ))`, never `(( ran++ ))`: the latter returns 1 when ran is
 # 0, which `set -e` on the direct-execution path would treat as a failure.
@@ -2233,6 +2235,14 @@ EOF
   _dl_expect_markers_rc m5 2 "${log}" "${target}" ""
   # (m6) A target that declares no marker is clean on any lane, even unset.
   _dl_expect_markers_rc m6 0 "${log}" integration_test/other_test.dart ""
+  # (m6b) A marker far ahead of the log's end is found: on a log larger than a
+  #       pipe holds, a reader that stops at the first hit must not leave its
+  #       producer's SIGPIPE to pipefail as "not found" — CI job 135995057668
+  #       reported exactly the markers in the first half of a 46 KB log.
+  { cat "${log}"
+    awk 'BEGIN { for (i = 0; i < 65536; i++) print "I/flutter ( 4242): filler after every marker" }'
+  } > "${log}.long"
+  _dl_expect_markers_rc m6b 0 "${log}.long" "${target}" true
 
   # The static half, over a tree shaped like the repo.
   mkdir -p "${mtree}/haven/integration_test/e2e" "${mtree}/tooling/e2e/ci" \
