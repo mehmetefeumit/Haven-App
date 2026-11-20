@@ -500,9 +500,33 @@ void main() {
 
       final l10n = l10nOf(tester, RefreshRingButton);
       expect(
-        find.bySemanticsLabel(l10n.refreshRingSemanticAllOk(2)),
+        find.bySemanticsLabel(l10n.refreshRingSemanticInboxAll(2)),
         findsOneWidget,
       );
+    });
+
+    testWidgets('the inbox vocabulary says "checked", never "responded": a '
+        'red segment is a relay that was not read in full', (tester) async {
+      await tester.pumpWidget(
+        _host(slots: const [RelayRingSlotState.ok, RelayRingSlotState.error]),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.bySemanticsLabel('Invitations checked on 1 of 2 relays'),
+        findsOneWidget,
+      );
+
+      await tester.pumpWidget(
+        _host(
+          slots: const [RelayRingSlotState.error, RelayRingSlotState.error],
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.bySemanticsLabel("Couldn't check invitations on any relay"),
+        findsOneWidget,
+      );
+      expect(find.bySemanticsLabel(RegExp('responded')), findsNothing);
     });
 
     testWidgets('no-inbox exposes the routing label', (tester) async {

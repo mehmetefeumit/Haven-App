@@ -130,3 +130,7 @@ arms = ["dead-and-silent-relays"]
 [[scenarios]]
 id = "S26"
 arms = ["identity-planes-under-faults"]
+
+[[scenarios]]
+id = "S27"
+arms = ["gated-inbox-welcome"]

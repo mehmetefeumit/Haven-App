@@ -149,9 +149,23 @@ save — see *Public Nostr Profiles* below), three additional exposures apply:
   best-effort. The pubkey ↔ name/photo binding survives "delete".
 
 **Relay planes.** Haven keeps four relay lists apart: the account plane (the
-user's Inbox and KeyPackage lists, seeded from `PRODUCTION_DEFAULT_RELAYS`:
-kinds 10050, 10002 and 30443, the inbound kind 1059 and the inbox REQ — the
-user's pubkey is visible there by design), the discovery plane
+user's KeyPackage list, seeded from `PRODUCTION_DEFAULT_RELAYS`, and Inbox
+list, seeded from `PRODUCTION_INBOX_RELAYS` — the same relays less
+`relay.damus.io`, which takes a kind 1059 and then serves it only to a client
+that answers NIP-42 AUTH (Haven's own inbox reads do, "The identity's NIP-42
+connections" below, but an inbox there depends on that succeeding and is
+unreadable to a client that does not answer, so the seed prefers relays that
+need no identity proof; probed 2026-11-16,
+`tests/fixtures/relay_read_gating_2026-11-16.json`, pinned by
+`tests/inbox_default_read_gating.rs`), then `relay.ditto.pub`, whose other relay
+software keeps one implementation's default config from gating every seeded
+inbox (owner-directed 2026-11-16; the same test holds that the seed spans two
+implementations); an install whose stored inbox list was still exactly the
+old three-relay seed becomes the current seed once, at the circle manager's
+open (`CircleStorage::retire_gated_inbox_seed`), and a list the user changed
+is left alone: kinds 10050, 10002 and 30443, the inbound kind 1059 and
+the inbox REQ — the user's pubkey is visible there by design), the discovery
+plane
 (`PRODUCTION_DISCOVERY_RELAYS`: other accounts' relay lists and KeyPackages
 are read there, and, owner-directed 2026-11-12, the relay-list heal also
 copies the account's own kinds 10002 and 10050 there — the configured lists,
@@ -174,10 +188,25 @@ proof below judges with (`planes::judge::judge`); the crate test
 and `the_exported_matrix_is_current` pins the export
 (`tooling/e2e/relay_planes.json`, read by the Dart mirror test only). A frame
 no row's shape admits — a stray tag or filter key, a filter spanning two rows,
-a REQ whose filters land on two planes, `COUNT`, `AUTH`, a `CLOSE` naming a
+a REQ whose filters land on two planes, `COUNT`, a `CLOSE` naming a
 subscription its relay was never sent, a `NEG-*` naming a session its
 connection never opened — is unknown; one a row
-admits on a relay its binding does not is a crossing. A relay holding several
+admits on a relay its binding does not is a crossing. An answer to a relay's
+NIP-42 challenge (`AUTH-22242`, "The identity's NIP-42 connections" below) is
+judged with everything its connection carried, before and after it: any frame
+there but a `CLOSE` or a `REQ-1059-P` read of the answering key's own gift
+wraps, or an answer under a second key, is a crossing
+(`plane-auth-shared-connection`), since the answer ties that key to the whole
+connection. The one other connection an answer may stand on is a write-only
+resend (owner decisions D1b, D1c, "A relay that asks for authentication to
+take a write" below): its relay answered a kind-1059 or kind-445 event
+`OK false auth-required:` at or before the answer — read off the relay's own
+answers, which the judge is handed beside the client's frames
+(`judge_answered`; the E2E journal's relay-side `OK`s) — and the connection
+carries nothing but answers under one key and that one event; anywhere else,
+an answer off the author's own inbox list is a crossing. The soak hands the
+judge no relay answers: none of its relays refuses a write for want of
+authentication, so a resend there would be a crossing. A relay holding several
 roles admits their union: an account's inbox and key-package lists may share a
 relay; an own list with a location or discovery relay, and an invitee's list
 with any relay, only when the world or lane being judged declares the pair;
@@ -204,6 +233,7 @@ when it was sent; a circle's routing counts from the commit's staging.
 | `REQ-10050-A` | REQ | 10050 | `kinds`, `authors` | `limit` | at most 64 | - | one author: the sender's own inbox list or a discovery relay when it is the sender; otherwise a discovery relay or the author's inbox list |
 | `REQ-0-A` | REQ | 0 | `kinds`, `authors` | `limit` | at most 4 | - | one author, a profile relay |
 | `NEG-445-H` | NEG-OPEN | 445 | `kinds`, `#h`, `since`, `until`, `limit` | none | at most 16384 | - | one `#h` circle whose routing stands; opening message `6100000200` |
+| `AUTH-22242` | AUTH | 22242 | `challenge`, `relay` | none | - | an account | the author's own inbox list current at the instant, on a connection that carries nothing else but `REQ-1059-P` reads of the author's own gift wraps and their `CLOSE`s; or (owner decisions D1b, D1c) a relay that answered a kind-1059 or kind-445 event `auth-required:` at or before it, on a connection that carries nothing else but that one event |
 
 Three proofs judge with it: **L1a / L1b** on every pull request — L1a,
 `every_relay_plane_receives_only_its_own_traffic_across_a_circle_lifecycle`
@@ -250,9 +280,8 @@ circle's `CLOSE` to every relay of its pool when it dropped that circle's REQ
 that joined their planes; it now goes only to the relays that hold the
 subscription.
 Its last phase pins what the product does today with an invitee's relay
-lists that name other planes (the Welcome goes to the first relay of the
-inbox list that acknowledges it, and the key-package lookup to every relay
-of the NIP-65 write set): the finding set it expects becomes empty when a
+lists that name other planes (the Welcome goes to every relay of the inbox
+list, and the key-package lookup to every relay of the NIP-65 write set): the finding set it expects becomes empty when a
 rule drops such entries. Residuals: L1a and C8 judge with no
 sender, so a request on another identity's own list (an inbox REQ by `#p` of
 an account other than the device's) passes there — the per-identity bindings
@@ -446,8 +475,8 @@ which is enough, and both of which can be changed on a client after it is
 built (`Client::set_signer`; `Client::automatic_authentication(&self, enable)`,
 `nostr-sdk-0.44.1/src/client/mod.rs:116`). So check 11 holds both in the three
 source trees: the words `set_signer` / `unset_signer` and a `.signer(` or
-`::signer(` call appear nowhere, and every `automatic_authentication(` is
-`automatic_authentication(false)`. With a signer the pool would answer a
+`::signer(` call appear nowhere outside `identity_client` (below), and every
+other `automatic_authentication(` is `automatic_authentication(false)`. With a signer the pool would answer a
 relay's NIP-42 challenge with the identity key, on a socket that carries a
 circle's routing id, and MDK's relay client would sign an unsigned non-445
 event it was handed (an unsigned 445 it refuses, `sdk_client.rs:660-666`). The
@@ -455,8 +484,221 @@ scan is of text and does not read `tests/`, where the NIP-42 control client
 holds a signer on purpose.
 `the_publish_client_holds_no_signer_and_never_authenticates` pins both, and
 `the_publish_client_never_answers_a_nip42_challenge` shows the effect against a
-relay that demands authentication to write. The fanout transport therefore
-treats `auth-required:` as a refusal that cannot change, not as an outage.
+relay that demands authentication to write. On the publish client alone,
+`auth-required:` is therefore a refusal that cannot change; it is no longer
+terminal for the product's fanout transport, which answers it with one
+authenticated resend on a connection of its own (below, "A relay that asks for
+authentication to take a write").
+
+### A relay that gates gift-wrap reads behind NIP-42
+
+strfry's default configuration now restricts reads of kinds 4 and 1059 to an
+authenticated reader named in the event (`restrictedReadKinds`,
+`restrictReadToInvolvedPubkey`): such a relay still answers a kind-1059
+publish `OK true`, and answers every unauthenticated REQ for one with `AUTH`
+and `CLOSED`, in strfry's words `ERROR: auth-required: requested filter
+requires authentication`. Haven reads such a relay by answering its
+challenge as the recipient (below, "The identity's NIP-42 connections" and
+"The live plane's inbox socket"); a relay that still refuses is reported,
+never hidden:
+
+- **The invitation poll.** A per-relay read a `CLOSED` ends with an
+  `auth-required:` or `restricted:` prefix — read past one leading `error:`,
+  the word strfry puts ahead of it — is refused
+  (`RelayFetchOutcome::refused`), and reaches Dart as
+  `InboxReadFfi::Refused`; only an `EOSE` is `Served`, and an unreached or
+  unfinished read is neither. The relay's text is read for its prefix and
+  never kept (Rule 15).
+- **The relay settings board.** Each relay-list maintenance pass asked for
+  while the app's lifecycle reads `resumed`, beside its
+  inbox-list probe, asks each relay of the inbox list, and no other, the live plane's own inbox read
+  — this account's gift wraps by `#p`, from now, `limit` 1 — and writes how
+  each answered onto the own-relay board's `inbox_reads`, apart from the
+  kind-10050 cells (`OwnRelayBoard::ask_inbox_reads`); a background burst's
+  fold, and any pass asked for while the app is not resumed, asks none and
+  keeps the last answers, so the read adds no background connection (P4); like the rest of the
+  pass it asks nothing while the storage-reset notice is unanswered, and an
+  inbox list edit forgets every answer. It discloses nothing the inbox REQ does not already
+  send that relay.
+- **The live plane.** The inbox REQ rides its own socket, which answers the
+  challenge (below, "The live plane's inbox socket"), and is asked again the
+  moment that socket authenticates. A relay that refuses it after that — or
+  whose answer to the challenge it refuses — is waited out on the gated
+  backoff — a minute, doubling to an hour (`GATED_BACKOFF_MIN_SECS`,
+  `GATED_BACKOFF_MAX_SECS`), jittered like every repair, and decaying only
+  after an hour's quiet — instead of the 30 s throttle, which would ask a
+  relay that has said no, across the whole inbox lookback, 120 times an hour.
+  A group REQ refused the same way keeps the pool's disposition and its 30 s
+  cap. The app's consumer of the event bus falling behind is answered on the
+  same gated schedule: the inbox REQ is re-issued and the inbox generation's
+  pending advance burnt, because anyone who knows the npub can flood wraps
+  past the bus at will, and the 30 s cap would sell them a lookback
+  re-download every half minute.
+
+What stays open is tracked as `T-INBOX-READ-GATE` in
+`docs/MDK_UPSTREAM_TRACKER.md`.
+
+### The identity's NIP-42 connections
+
+Owner-directed (2026-11-16, White Noise parity): the identity key answers a
+relay's NIP-42 challenge for the account's own inbox reads, and for a Welcome
+or kind-445 resend only after the relay refused the anonymous send with
+`auth-required:`. Three pieces carry it, and nothing else may sign in.
+
+- **The signer** (`relay/nip42.rs`, `Nip42Signer`) is built once, in
+  `CircleManager::new`, from the keys the session already holds (Rules 7 and
+  9): the public key and the 32 secret bytes in a `Zeroizing` buffer,
+  `ZeroizeOnDrop`, and a `Debug` that renders neither. It signs a kind-22242
+  event with empty content and exactly the `challenge` and `relay` tags
+  `EventBuilder::auth` builds, under the identity key, and refuses every other
+  event — another kind, content, a tag more, fewer or reordered, a relay URL
+  the parser would respell, another author — and every NIP-04/NIP-44 call,
+  with one fixed text that names nothing. It rebuilds the event it signs, so a
+  caller-supplied id is never what is signed. A relay client holding it can be
+  made to sign nothing but that answer, whatever reaches the client.
+- **The constructor** (`relay/verified.rs`, `identity_client`) is the only one
+  that installs a signer and switches authentication on, and it installs the
+  same `VerifiedEvents` policy and no gossip store (check 11).
+- **The per-call connections** (`relay/identity.rs`) hold one relay each,
+  registered with the publish pool's options (no reconnect, no ping) for one
+  direction only: a write connection holds no READ flag and cannot carry a
+  REQ, so no filter rides a retry socket. The call awaits the client's
+  shutdown before it returns; a call dropped mid-await is shut down by the
+  pool's own last-handle destructor (`atomic_destructor`,
+  `nostr-relay-pool-0.44.3 pool/inner.rs:41-46`), pinned by
+  `nip42_identity_e2e::a_send_dropped_mid_wait_still_closes_its_identity_socket`.
+  `send_signed_once_authenticated` sends the already-signed event
+  byte-identical at most twice — once to draw the challenge a relay issues only
+  on a gated write, once after `Authenticated` — through `Relay::send_msg`,
+  never `Relay::send_event`, whose hidden resend would make the frames sent
+  differ from the frames counted, and reads the outcome off that relay's own
+  `OK` frames for the event id by machine-readable prefix, never its prose.
+
+What a relay learns from an answer: the identity key's signature over its
+challenge ties that connection — its address and timing — to the identity.
+Check 12 of `check_engine_client_options.sh` keeps the reach narrow: the
+constructor and the per-call helpers are named only in the files listed for
+them, a kind-22242 event is made only by the signer (and tests), the signer is
+built only in `CircleManager`, the per-call relay keeps its options, and the
+profile module and the discovery plane never touch any of it. Nothing in these
+three logs (Rule 15); `nip42_identity_e2e` captures the logs of an
+authenticated read and asserts the challenge, the relay URL and the identity
+key are absent.
+
+### The live plane's inbox socket
+
+The live session holds two pools (`relay/live_sync/session.rs`): the engine
+pool, which carries every circle's `#h` REQ and never authenticates (R9,
+`live_sync_privacy_config_e2e`), and the inbox socket's, built by
+`identity_client`, which holds only the account's inbox relays and carries
+only the kind-1059 `#p` REQ. It answers a relay's challenge as soon as it
+arrives, as White Noise does; no `#h` REQ is ever issued on it, and no `AUTH`
+is ever sent on an engine socket (`live_sync_inbox_socket_e2e`).
+
+- **One re-issue per authentication.** strfry wraps every `CLOSED` reason in
+  `ERROR: `, so the pool deletes a refused REQ and never resends it; an
+  unwrapped `auth-required:` it keeps and resends itself once authenticated.
+  Each inbox relay's own notifications — the only channel a NIP-42 verdict
+  reaches — are watched from before its dial; when the connection
+  authenticates after that relay refused the inbox REQ on it, the REQ is asked
+  again at once if the pool deleted it, and Haven's gated repair is called off
+  if the pool kept it, so exactly one REQ goes out. A failure after
+  `Authenticated` on the same connection (strfry's `already authenticated` to a
+  second challenge's answer) changes nothing.
+- **Inbox floors (Rule 12).** Before each inbox REQ, every relay it goes to is
+  recorded as owing the inbox its history from the `since` it is asked
+  (`relay_floors`, under the key `inbox_1059`), and the record goes only when
+  that relay ends a REQ asked from there or earlier with an `EOSE`. A relay
+  that refuses the REQ until this device authenticates, is not connected, or
+  never answers keeps owing across a restart, and every later inbox REQ to it
+  asks from its floor; the inbox cursor another relay's `EOSE` advances erases
+  no relay's floor. An invitation stored five days ago only on a gating relay
+  is still read after a six-day absence. A floor the store will not take holds
+  the inbox cursor instead: while a relay asked owes the inbox what nothing
+  recorded, no inbox `EOSE` advances it, until a later write for that relay
+  lands, its own `EOSE` answers, or every inbox REQ is issued anew
+  (`live_sync_inbox_socket_e2e::an_inbox_floor_the_store_will_not_take_holds_the_cursor`).
+- **The radio.** Every step that closes, counts or watches the engine pool —
+  the pause's disconnect loop, the stop, the radio-off watch, the burst's
+  re-dial, the health probe, the reconnect re-issue — covers the inbox socket's
+  pool too, each pool with its own `Monitor`. Between background bursts
+  neither pool holds a subscription or a connected relay. A change of the
+  device's default network, reported while the app is in front, re-dials both
+  pools (`LiveSyncCore::reconnect_after_network_change`: the pause, then the
+  foreground open, under one lifecycle acquisition), so the inbox socket
+  answers its relays' challenges again on the new connection; the platform
+  signal carries no detail of the network, and no native code logs it. It
+  never runs in the background: nothing listens for the change while the app
+  is away (owner-directed 2026-11-20).
+- **What is disclosed.** The inbox relays learn the identity key from the
+  answer to their challenge: that the account is online, for as long as the
+  session holds the socket, and that this connection reads its gift wraps —
+  what the `#p` filter already named. The separation from the circles is
+  cryptographic, not network-level: the authenticated inbox socket and the
+  anonymous `#h` sockets leave from the same device address at the same times,
+  so a relay — or an observer — that sees both can link the identity to the
+  circles that relay carries, as it could link the `#p` REQ before. Haven
+  creates no circle on a relay of the account's own lists; a circle another
+  client created, or a relay list the user chose, can share one.
+
+### A relay that asks for authentication to take a write
+
+Owner-directed (2026-11-16, decisions D1b and D1c, White Noise parity). Every
+send is anonymous first, and nothing authenticates pre-emptively. A relay that
+answers an `EVENT` `OK false` with the `auth-required:` prefix — read off that
+relay's own `OK` frame on the publish client by machine-readable prefix, never
+its words — is sent the same signed event once more on a per-call identity
+connection (`relay::identity::send_signed_once_authenticated`): that relay
+alone, write-only, `reconnect(false)`, shut down when the call ends. The
+publish client and MDK's relay client never hold a signer, and the resent
+event is byte for byte the one the anonymous send carried — a kind-445 event
+is still signed by its one-time key (Rule 2); only the connection is
+authenticated, by a kind-22242 answer under the identity key.
+
+- **A recorded kind-445 event** (a commit, a proposal with a record): the
+  resend is made inside the same `FanoutTransport::publish` call, under that
+  relay's gate, after MDK's call met `auth-required:` — proven or not — so the
+  target is resolved once, by both phases together (`fanout::after_resend`):
+  an `OK true` or `duplicate:` on either connection is the acknowledgement;
+  a refusal only when the anonymous call was refused on every attempt AND the
+  resend sent nothing after authenticating (the answer to the challenge
+  failed, none came, or the relay did not accept it within `AUTH_WAIT`) or was
+  refused for everything it sent; a resend left unanswered, or an anonymous
+  phase that was not proven, is possibly exposed and is sent again unchanged;
+  a resend that could not be made after a proven anonymous refusal leaves the
+  relay owed as an unreachable one is (`RetryableUnavailable` with no
+  category), never refused. A transport built without `.authenticating(…)`
+  keeps the old reading — proven `auth-required:` is a refusal — and no
+  shipped entry builds one (`every_fanout_transport_shipped_code_builds_authenticates`).
+  A row's budget (`ROW_BUDGET_MS`, 53 s) includes the resend's longest run
+  (`AUTH_RETRY_MS`, 22 s: connect, two 5 s `OK` windows, the 7 s wait for
+  authentication).
+- **A Welcome** (D1b): the publish ladder stops at the first attempt every
+  relay answered `auth-required:` (`RelayError::AuthRequired`). That relay is
+  sent the gift wrap once more as the inviter, unless a relay has already
+  taken that Welcome in the same pass — read just before the dial, since a
+  resend then only discloses who sent it. The relay's turn is one answer, and
+  its next turn starts anonymous again. A proposal no record could be written
+  for goes the same way when no relay took it.
+- **A location**: one anonymous attempt per relay, and — only when no relay
+  took it — one authenticated attempt to each relay that asked, begun only if
+  it ends before the event's NIP-40 `expiration`. `LOCATION_SEND_MS` (32 s)
+  prices both.
+
+What it discloses, plainly. A relay that demands authentication to accept a
+circle's kind-445 events learns which identity sends into that routing id,
+when, and from which address — the linkage Haven's anonymous publishing
+otherwise denies it, accepted by the owner for D1c. A relay that demands it
+for a gift wrap learns which identity sent that wrap, so that the inviter
+wrote to the invitee's inbox at that time (D1b); the wrap's content stays
+sealed. Haven's own circles never put such a relay on the location pool
+(`docs/LOCATION_RELAY_VETTING.md`, criterion (c)); the linkage arises with a
+circle another client made, a relay list the user named, or an invitee's
+inbox. The identity connection and any anonymous socket to the same relay
+come from the same address at the same time, so the separation is
+cryptographic, not network-level. Nothing on these paths logs a relay, the
+challenge, the identity or an event id (Rule 15; `auth_retry_e2e` captures
+the logs of an authenticated resend and asserts each is absent).
 
 ### What a relay's refusal has to prove before the fanout may act on it
 
@@ -1036,9 +1278,13 @@ the circle is followed, received or sent meanwhile. Invitations held before a
 restart are counted durably, and until as many are held again a re-invite not
 yet polled back counts as held
 (`a_reinvite_not_yet_polled_back_after_a_restart_still_keeps_the_left_group`)
-— unless a key package was replaced while none was held: nothing held before
-can open the superseded package, so none of it is waited for any more
+— unless a key package was replaced while none was held: what was held before
+was built on the superseded package, so none of it is waited for any more
 (`a_key_package_replaced_after_a_restart_ends_the_wait_for_what_was_held_before_it`).
+The superseded package itself stays openable for its 24-hour replacement
+grace, but such an invitation re-inviting this device to a circle it left
+meets the forgotten group, which MDK refuses (T-REJOIN-LEAVE): it ends as "ask
+for a new invite", as it did when the package was deleted at the replacement.
 The first receive plane of each session also forgets every
 group the session held at its open that no circle row names and no consented
 join is still owed for — what a create, join or leave that died midway leaves
@@ -1328,8 +1574,9 @@ a location whose record cannot be WRITTEN is not handed out to be sent at
 all (`a_location_whose_record_cannot_be_written_is_never_handed_out`), and
 one whose record cannot be DELETED after its send is, to the next process,
 a record it did not seal, deleted unsent. No record is sent within one
-send's window — ten seconds, the connect and the acknowledgement wait — of
-its NIP-40 `expiration`, and the first drive at or after that instant
+send's window — thirty-two seconds, the connect and the acknowledgement wait
+and the one authenticated resend to a relay that asked for it — of its NIP-40
+`expiration`, and the first drive at or after that instant
 deletes it, in any mode, with no relay contacted
 (`an_application_fanout_ends_at_its_expiration_and_never_blocks`); a
 configuration that drives nothing leaves it in the store, unsendable, until
@@ -1340,7 +1587,10 @@ A commit's driver does not see a location's record: it is not counted in a
 relay's pacing, holds no change of the circle, is taken up only after every
 commit and proposal, and a drive never touches one whose send is under way
 (`a_concurrent_drive_never_touches_an_in_flight_location`). On these
-entries no relay is offered a location's event twice.
+entries no relay is offered a location's event twice anonymously; a relay
+that answered `auth-required:` is offered it once more as the identity, only
+when no relay took it and only if the resend ends before the expiration.
+
 
 **What the engine leaves stranded is detected, said, and handed back**
 (`docs/MDK_UPSTREAM_TRACKER.md` T-PARKED-REPLAY). While a commit of this
@@ -2573,12 +2823,39 @@ Android service's resume claims `false` and only finishes.
   not read for gift wraps, and never the inviter's own inbox. A route the
   store cannot read, or a Welcome the engine cannot answer for now (its group
   not live), is not taken for "none": the Welcomes stay in the commit's row for
-  the next drive. Records are driven by full drives only, from the foreground,
-  and add no wake of their own: due relays are tried one at a time, no sooner
-  than 30 seconds after the last attempt, the wait doubling to an hour (MDK's
-  host's rule), stopping at the first acknowledgement by an inbox relay of
-  that event — at most about thirty sends a relay a day. The engine's state is
-  read again before each relay after the first. An acknowledgement whose
+  the next drive. Records are driven by full drives only, from the
+  foreground. Each pass sends to every due relay of every record at once — a
+  relay is due at once, then no sooner than 30 seconds after its last
+  attempt, the wait doubling to an hour (MDK's host's rule), at most about
+  thirty sends a relay a day — so a relay that never answers holds back
+  neither the inbox's other relays, one of which may be the only one its
+  invitee can read (a relay may take a gift wrap and serve it only to a client
+  that authenticates, and the invitee's may not answer, or be refused), nor
+  another invitee's Welcome
+  (`fanout_change_e2e::{a_welcome_goes_to_every_due_inbox_relay_and_one_acknowledgement_completes_it,
+  a_relay_that_never_answers_holds_back_no_other_welcome_of_the_create}`,
+  `welcome_gated_inbox_e2e`). Once every record of the pass is delivered, its
+  other sends are waited for only until one send attempt — the connect and the
+  `OK` window, `WELCOME_COPY_WINDOW_MS` — after the pass began, and then
+  dropped, so a relay that takes the socket and never answers does not hold
+  the create or invite for its whole ladder: a relay that answers within that
+  attempt still holds its copy, and one that would take the Welcome only on a
+  later attempt is not sent it by this pass, whose records owe nothing more
+  (`fanout_change_e2e::{a_relay_that_never_answers_does_not_hold_a_create_another_relay_delivered,
+  a_relay_that_answers_within_the_attempt_still_takes_a_delivered_welcome}`).
+  A pass with a record still undelivered lasts until its slowest relay's send
+  ends — at most the publisher's longest run, below
+  (`a_welcome_no_relay_has_acknowledged_waits_for_its_slowest_relay`). The
+  first acknowledgement by an inbox relay of that event completes the Welcome,
+  counted once, and ends its record; every other relay of the pass was sent it
+  at the same instant. The
+  engine's state is read again immediately before each record's sends. A
+  drive that leaves a Welcome owed asks to be resumed when its next relay
+  falls due (`ResumeOutcome::retry_after_ms`, never under five seconds;
+  `a_welcome_still_owed_asks_to_be_resumed_when_its_relays_fall_due`): the
+  live plane arms its drive for then; in poll mode it is only the earliest the
+  next foreground maintenance tick may drive again, so a retry there waits for
+  that tick. An inert record asks for no wake. An acknowledgement whose
   completion the engine's store refused is completed by the next drive without
   a send; an answer that could not be stored leaves the relay due again, which
   a relay that took it answers `duplicate:`; and a record another drive ended
@@ -3873,9 +4150,12 @@ instants, so its invitations arrive on the next foreground; both are stated unde
 (`liveSyncEnabled = false`): there, Welcome events are polled on a
 foreground timer jittered uniformly over `[90, 150] s` (2 minutes nominal) — from the inbox list only (`inboxRelaysProvider`: the stored
 list kind 10050 is built from, or the compile-time seed while seeding has
-failed), over the engine's own 96 h
-window (widened from 49 h by decision 231: a wider `since` on the same REQ,
-asking each inbox relay for more stored wraps, and no new REQ) — the resume hook in `map_shell.dart` performs an immediate
+failed), over the engine's cold-start window, 7 days
+(`INBOX_GIFTWRAP_LOOKBACK_SECS`, read through the bridge: NIP-59's two days of
+backdating plus the 72 h hold on an unanswered invitation; a wider `since` on
+the same REQ, asking each inbox relay for more stored wraps, and no new REQ),
+each relay read on a connection of its own that answers its NIP-42 challenge
+("The identity's NIP-42 connections") — the resume hook in `map_shell.dart` performs an immediate
 fetch on app foregrounding, and background polling is not active on either
 platform — invitation discovery is foreground- or resume-driven only.
 
@@ -4013,12 +4293,37 @@ Security Rule 5 for this material — no init key outlives its use:
   `tc17_overlapping_ticks_publish_one_key_package_into_one_slot_via_real_ffi`),
   which the relay-list pass takes too
   (`concurrent_passes_never_interleave_on_the_board_via_real_ffi`).
-- **Superseded ⇒ deleted at the confirmed replacement.** A replacement is
-  staged, signed once, and republished unchanged until a relay acknowledges
-  it; on that acknowledgement the superseded package's private material is
-  deleted — not at its `not_after`, up to 84 days later
-  (`superseded_kp_material_deleted_on_confirmed_replacement_not_at_not_after`).
-  Haven never keeps MDK's `RetainedKeyPackagePrivateMaterial` past that point.
+- **Superseded ⇒ kept for the 24-hour replacement grace, then deleted.**
+  Owner decision D3 (2026-11-16), the spec's replacement grace
+  (`foundation/key-packages.md`; MDK master's
+  `KEY_PACKAGE_REPLACEMENT_GRACE_SECS`). A replacement is staged, signed
+  once, and republished unchanged until a relay acknowledges it; a
+  superseded package no Welcome consumed is then kept, as MDK's
+  `RetainedKeyPackagePrivateMaterial` stamped with that acknowledgement's
+  instant, so a Welcome an inviter built on it just before the replacement
+  landed still opens. It is deleted at the first tick at or after 24 hours
+  from that instant, at its `not_after` if that comes first, or at the first
+  tick whose clock reads earlier than that instant
+  (`superseded_kp_material_is_kept_for_the_grace_after_its_confirmed_replacement_and_no_longer`,
+  `a_superseded_package_goes_at_its_not_after_when_that_ends_the_grace_first`,
+  `a_clock_set_back_below_a_retained_packages_grace_start_ends_it`,
+  `a_welcome_built_on_the_superseded_package_needs_a_new_invite_after_the_grace`).
+  A staged replacement a later stage replaced keeps the grace MDK's stage
+  stamped it with, from that re-staging. No promotion extends a grace already
+  running (`a_second_promotion_never_extends_a_retained_packages_grace`). A
+  superseded package a Welcome consumed has nothing left to wait for: the
+  current one is deleted at the acknowledgement
+  (`a_welcome_that_consumed_our_package_owes_a_replacement`), a retained one
+  at the next sweep or promotion, with the consumption record when it names
+  that package
+  (`a_welcome_built_on_the_superseded_package_joins_within_the_grace_and_the_next_sweep_deletes_it`,
+  `a_grace_sweep_keeps_the_current_packages_consumption_record`), whatever
+  joins come between: MDK records only the last Welcome's consumption, so
+  every join moves a retained package's onto that package, before the join
+  and after it, and leaves the record of the current one standing
+  (`docs/MDK_UPSTREAM_TRACKER.md` `T-KP-CONSUMED-SLOT`). Accepted
+  residual: a second held invitation built on a retained package another
+  Welcome consumed cannot be opened after that sweep (MDK does the same).
 - **Expired ⇒ deleted.** Whatever is still held at `Lifetime.not_after` is
   deleted on the next tick, before anything touches the network
   (`sweep_expired_key_packages`). MDK's own delete and promote validate the
@@ -5051,10 +5356,13 @@ threat model is honest:
   relay learns **that you are online, and which circles you watch, for as long
   as that connection is held** — a continuous presence signal the previous
   short-poll model exposed only in bursts; this is irreducible while a live
-  connection is held. Because one connection serves both your circle
-  subscriptions (`#h`) and your invitation inbox (`#p`, keyed to your stable
-  public key), a relay that is in **both** a circle's relay set and your inbox
-  relay set can link your public key to that circle for the session. We
+  connection is held. Your circle subscriptions (`#h`) and your invitation
+  inbox (`#p`, keyed to your stable public key) ride separate connections,
+  and the inbox one answers a relay's NIP-42 challenge with your identity key
+  ("The live plane's inbox socket"), but both leave from the same device
+  address at the same times, so a relay that is in **both** a circle's relay
+  set and your inbox relay set can still link your public key to that circle
+  for the session. We
   minimize exposure by: (a) connecting **only** to relays you configured (never
   a discovery/default relay — the engine client sets no `.gossip(...)`, so
   NIP-65 gossip is off, PSI-8); (b) scoping subscriptions to exactly your
@@ -5063,9 +5371,10 @@ threat model is honest:
   IDs from a **per-session random salt never written to disk**
   (`generate_session_salt`, an ephemeral `Zeroizing<[u8; 16]>`), so a relay
   cannot link your subscriptions across app sessions (PSI-2); and (e)
-  **disabling NIP-42 authentication** on the receive connection
-  (`automatic_authentication(false)`), so your signing identity is never sent
-  to a relay over this socket. The live engine's **receive client publishes
+  **disabling NIP-42 authentication** on the connections that carry your
+  circle subscriptions (`automatic_authentication(false)`), so your signing
+  identity is never sent to a relay over them; only the inbox socket answers
+  a challenge, and it carries the `#p` REQ alone. The live engine's **receive client publishes
   nothing**: what the live session sends — the engine's convergence auto-commits
   (per MIP-03), the post-join self-update, a leave's proposal, and a recorded
   commit or Welcome sent again byte for byte — leaves through the fanout driver
@@ -5075,8 +5384,10 @@ threat model is honest:
   commit sent again, or confirmed on a stored acknowledgement), and every
   background plane, the OS wake included, carries a leave on (see "Scheduled
   background wakes (M7)"); a resubscribe re-issues REQs and publishes nothing.
-  The receive client never holds your private
-  Nostr signing key, and never sends key material or your real MLS group
+  The engine pool's client never holds your private
+  Nostr signing key — the inbox socket's holds it only inside `Nip42Signer`,
+  which signs the answer to a challenge and nothing else — and neither sends
+  key material or your real MLS group
   identifier over the wire (only the pseudonymous `nostr_group_id`). To also
   hide your IP / online-presence from the relay operator, run Haven behind a
   VPN or Tor (e.g. Mullvad).
@@ -5293,8 +5604,9 @@ Eleven residuals, none of them optional:
    periodic one is not gone either.** Two cases, both CPU-only and neither
    contacting a relay. (a) A subscription repair armed *before* the pause keeps
    the deadline it already had and fires once, up to `BACKOFF_MAX_SECS` (30 s)
-   into the pause; it finds the engine paused, re-parks, and arms no new
-   deadline while paused — at most once per pause. (b) The public-profile
+   into the pause — up to the jittered `GATED_BACKOFF_MAX_SECS` (an hour) for
+   an inbox REQ on the gated backoff; it finds the engine paused, re-parks,
+   and arms no new deadline while paused — at most once per pause. (b) The public-profile
    anti-entropy sweep is the fourth `MaintenanceSchedulerNotifier` timer and the
    one `suspendForBackground` does **not** cancel: `_armProfileAntiEntropy` has
    no arming gate, the gate is inside `_runProfileAntiEntropyTick`, and the

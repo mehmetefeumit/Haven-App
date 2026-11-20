@@ -19,7 +19,9 @@ use haven_local_relay::planes::cli::{
     self, RC_CLEAN, RC_META_FLOOR, RC_UNUSABLE, RC_USAGE, RC_VIOLATION,
 };
 use haven_local_relay::planes::frame::Frame;
-use haven_local_relay::planes::judge::{judge, Class, Judgement, Observed};
+use haven_local_relay::planes::judge::{
+    judge, judge_answered, AuthDemand, Class, Judgement, Observed,
+};
 use haven_local_relay::planes::policy::{render_markdown, Plane, Role, Row, Verb, ROWS};
 use haven_local_relay::planes::table::{
     List, PlaneTable, RelayIx, RelayMatch, RoutingEnd, Unusable,
@@ -387,7 +389,351 @@ fn fixture(w: &World, row: Row) -> (Value, Option<String>, Vec<RelayIx>, Plane) 
             vec![w.loc_x],
             Plane::Location,
         ),
+        Row::Auth22242 => (
+            json!(["AUTH", auth_event(18, &a)]),
+            a_str,
+            vec![w.a_inbox],
+            Plane::OwnInbox,
+        ),
     }
+}
+
+/// `pubkey`'s answer to a NIP-42 challenge from alice's inbox relay.
+fn auth_event(n: u32, pubkey: &str) -> Value {
+    event(
+        &id(n),
+        pubkey,
+        22242,
+        1_000,
+        &[&["challenge", "challenge-c0"], &["relay", A_INBOX]],
+    )
+}
+
+/// Judges `frames`, each `(connection, relay, frame)`, sent at 10 with the
+/// sender unknown, as the E2E journal is.
+fn judge_conns(table: &PlaneTable, frames: &[(u64, RelayIx, Value)]) -> Judgement {
+    let parsed: Vec<(u64, RelayIx, Frame)> = frames
+        .iter()
+        .map(|(conn, relay, value)| (*conn, *relay, frame(value)))
+        .collect();
+    judge(
+        table,
+        parsed.iter().map(|(conn, relay, frame)| Observed {
+            relay: *relay,
+            conn: *conn,
+            sender: None,
+            at: 10,
+            frame,
+        }),
+    )
+    .expect("the world is usable")
+}
+
+fn shared_at(judgement: &Judgement) -> Vec<usize> {
+    assert_holds_no_value(&format!("{:?}", judgement.findings), "a judgement's Debug");
+    judgement
+        .findings
+        .iter()
+        .filter(|f| f.class == Class::AuthOnSharedConnection)
+        .map(|f| {
+            assert_eq!(f.row, Some(Row::Auth22242));
+            f.index
+        })
+        .collect()
+}
+
+/// A5 (owner-directed 2026-11-16): the identity key answers a challenge only
+/// on a connection of its own that reads its own gift wraps, so the answer
+/// ties the key to nothing else.
+#[test]
+fn an_answer_on_a_connection_carrying_only_its_own_gift_wrap_reads_is_admitted() {
+    let w = world();
+    let a = alice();
+    let own_read = json!(["REQ", "r1", {"kinds": [1059], "#p": [a], "since": 1, "limit": 1000}]);
+    let judgement = judge_conns(
+        &w.table,
+        &[
+            (0, w.a_inbox, own_read),
+            (0, w.a_inbox, json!(["AUTH", auth_event(30, &a)])),
+            (
+                0,
+                w.a_inbox,
+                json!(["REQ", "r2", {"kinds": [1059], "#p": [a], "limit": 1000}]),
+            ),
+            (0, w.a_inbox, json!(["CLOSE", "r2"])),
+            // Another connection's reads are its own business.
+            (
+                1,
+                w.disc,
+                json!(["REQ", "l", {"kinds": [10050], "authors": [bob()], "limit": 1}]),
+            ),
+        ],
+    );
+    assert!(judgement.findings.is_empty(), "{:?}", judgement.findings);
+    assert!(judgement
+        .hits
+        .contains_key(&(w.a_inbox, Row::Auth22242, Plane::OwnInbox)));
+}
+
+#[test]
+fn an_answer_ties_its_key_to_everything_else_its_connection_carried_before_or_after_it() {
+    let w = world();
+    let a = alice();
+    let answer = json!(["AUTH", auth_event(31, &a)]);
+    for (why, other) in [
+        (
+            "a lookup the relay would admit on its own",
+            json!(["REQ", "l", {"kinds": [10050], "authors": [a], "limit": 1}]),
+        ),
+        (
+            "a read of another key's gift wraps",
+            json!(["REQ", "p", {"kinds": [1059], "#p": [bob()], "limit": 1000}]),
+        ),
+        (
+            "an own read beside another filter",
+            json!(["REQ", "m", {"kinds": [1059], "#p": [a]}, {"kinds": [1059], "#p": [bob()]}]),
+        ),
+        (
+            "a publish",
+            json!([
+                "EVENT",
+                event(&id(32), &a, 10050, 1_000, &[&["relay", A_INBOX]])
+            ]),
+        ),
+    ] {
+        for before in [true, false] {
+            let frames = if before {
+                vec![
+                    (0, w.a_inbox, other.clone()),
+                    (0, w.a_inbox, answer.clone()),
+                ]
+            } else {
+                vec![
+                    (0, w.a_inbox, answer.clone()),
+                    (0, w.a_inbox, other.clone()),
+                ]
+            };
+            let at = usize::from(!before);
+            assert_eq!(shared_at(&judge_conns(&w.table, &frames)), [at], "{why}");
+        }
+    }
+}
+
+/// A connection-tagged frame list, each `(connection, relay, frame)`.
+type Frames = Vec<(u64, RelayIx, Value)>;
+/// The relays' `auth-required:` demands, each `(relay, at, id)`.
+type Demands = Vec<(RelayIx, u64, String)>;
+
+/// Judges `frames`, each `(connection, relay, frame)`, the i-th sent at `i`,
+/// with the relays' `auth-required:` demands, each `(relay, at, id)`.
+fn judge_demanded(
+    table: &PlaneTable,
+    frames: &[(u64, RelayIx, Value)],
+    demands: &[(RelayIx, u64, String)],
+) -> Judgement {
+    let parsed: Vec<(u64, RelayIx, Frame)> = frames
+        .iter()
+        .map(|(conn, relay, value)| (*conn, *relay, frame(value)))
+        .collect();
+    let demands: Vec<AuthDemand<'_>> = demands
+        .iter()
+        .map(|(relay, at, id)| AuthDemand {
+            relay: *relay,
+            at: *at,
+            id,
+        })
+        .collect();
+    judge_answered(
+        table,
+        parsed
+            .iter()
+            .enumerate()
+            .map(|(at, (conn, relay, frame))| Observed {
+                relay: *relay,
+                conn: *conn,
+                sender: None,
+                at: at as u64,
+                frame,
+            }),
+        &demands,
+    )
+    .expect("the world is usable")
+}
+
+/// D1b and D1c (owner-directed 2026-11-16): a relay that answers a Welcome
+/// or a kind-445 event `auth-required:` is sent the same event once more on a
+/// write-only connection that answers the challenge. That connection is
+/// admitted whether the journal kept the event's copy on it (the soak's
+/// per-connection record) or only on the connection that first sent it (the
+/// E2E journal's one copy per relay).
+#[test]
+fn a_write_only_resend_of_an_event_its_relay_demanded_authentication_for_is_admitted() {
+    let w = world();
+    let a = alice();
+    let welcome = json!([
+        "EVENT",
+        event(&id(40), &eph(40), 1059, 1_000, &[&["p", &bob()]])
+    ]);
+    let commit = json!([
+        "EVENT",
+        event(&id(41), &eph(41), 445, 1_000, &[&["h", &hx()]])
+    ]);
+    for (relay, sent, sent_id, plane) in [
+        (w.b_inbox, &welcome, id(40), Plane::InviteeInbox),
+        (w.loc_x, &commit, id(41), Plane::Location),
+    ] {
+        for kept_on_the_resend in [false, true] {
+            let mut frames = vec![
+                (0, relay, sent.clone()),
+                (1, relay, json!(["AUTH", auth_event(42, &a)])),
+            ];
+            if kept_on_the_resend {
+                frames.insert(1, (1, relay, sent.clone()));
+            }
+            let judgement = judge_demanded(&w.table, &frames, &[(relay, 0, sent_id.clone())]);
+            assert!(
+                judgement.findings.is_empty(),
+                "kept={kept_on_the_resend}: {:?}",
+                judgement.findings
+            );
+            assert!(judgement.hits.contains_key(&(relay, Row::Auth22242, plane)));
+        }
+    }
+}
+
+/// Every way a connection that answers a challenge off the author's own
+/// inbox list falls short of that one resend is a crossing: no demand, a
+/// demand after the answer, a demand for another event, a demand for an event
+/// of another kind, another frame on the connection, or a second key.
+#[test]
+fn an_answer_off_the_own_inbox_list_without_its_demanded_resend_is_a_crossing() {
+    let w = world();
+    let a = alice();
+    let commit = json!([
+        "EVENT",
+        event(&id(50), &eph(50), 445, 1_000, &[&["h", &hx()]])
+    ]);
+    let other = json!([
+        "EVENT",
+        event(&id(51), &eph(51), 445, 1_000, &[&["h", &hx()]])
+    ]);
+    let answer = json!(["AUTH", auth_event(52, &a)]);
+    let demand = |at: u64, id: String| vec![(w.loc_x, at, id)];
+    let crossed = |judgement: &Judgement| {
+        judgement
+            .findings
+            .iter()
+            .any(|f| f.row == Some(Row::Auth22242) && f.verb == Verb::Auth)
+    };
+    let cases: Vec<(&str, Frames, Demands)> = vec![
+        (
+            "no relay demanded it",
+            vec![(0, w.loc_x, commit.clone()), (1, w.loc_x, answer.clone())],
+            Vec::new(),
+        ),
+        (
+            "the demand came after the answer",
+            vec![(0, w.loc_x, commit.clone()), (1, w.loc_x, answer.clone())],
+            demand(5, id(50)),
+        ),
+        (
+            "the connection resends an event the relay never demanded",
+            vec![
+                (0, w.loc_x, other.clone()),
+                (1, w.loc_x, other.clone()),
+                (1, w.loc_x, answer.clone()),
+            ],
+            demand(0, id(50)),
+        ),
+        (
+            "the connection carries a read beside the resend",
+            vec![
+                (0, w.loc_x, commit.clone()),
+                (1, w.loc_x, commit.clone()),
+                (1, w.loc_x, answer.clone()),
+                (
+                    1,
+                    w.loc_x,
+                    json!(["REQ", "h", {"kinds": [445], "#h": [hx()], "since": 1, "limit": 1000}]),
+                ),
+            ],
+            demand(0, id(50)),
+        ),
+        (
+            "the connection resends two events",
+            vec![
+                (0, w.loc_x, commit.clone()),
+                (0, w.loc_x, other.clone()),
+                (1, w.loc_x, commit.clone()),
+                (1, w.loc_x, other),
+                (1, w.loc_x, answer.clone()),
+            ],
+            vec![(w.loc_x, 0, id(50)), (w.loc_x, 1, id(51))],
+        ),
+        (
+            "answers under two keys",
+            vec![
+                (0, w.loc_x, commit),
+                (1, w.loc_x, answer.clone()),
+                (1, w.loc_x, json!(["AUTH", auth_event(53, &bob())])),
+            ],
+            demand(0, id(50)),
+        ),
+    ];
+    for (why, frames, demands) in cases {
+        assert!(
+            crossed(&judge_demanded(&w.table, &frames, &demands)),
+            "{why}: the answer was admitted",
+        );
+    }
+    // A demand for a relay list is no licence: only a Welcome or a kind 445
+    // is ever resent.
+    let list = json!([
+        "EVENT",
+        event(&id(54), &a, 10050, 1_000, &[&["relay", A_INBOX]])
+    ]);
+    let judgement = judge_demanded(
+        &w.table,
+        &[(0, w.disc, list), (1, w.disc, answer)],
+        &[(w.disc, 0, id(54))],
+    );
+    assert!(crossed(&judgement), "a resend of a relay list was admitted");
+}
+
+#[test]
+fn answers_under_two_keys_on_one_connection_are_each_a_crossing() {
+    let mut w = world();
+    let b = bob();
+    w.table.add(List::OwnInbox(&b), w.a_inbox, 0);
+    let judgement = judge_conns(
+        &w.table,
+        &[
+            (0, w.a_inbox, json!(["AUTH", auth_event(33, &alice())])),
+            (0, w.a_inbox, json!(["AUTH", auth_event(34, &b)])),
+        ],
+    );
+    assert_eq!(shared_at(&judgement), [0, 1]);
+}
+
+#[test]
+fn an_answer_off_its_authors_own_inbox_list_is_a_crossing() {
+    let w = world();
+    let answer = json!(["AUTH", auth_event(35, &alice())]);
+    assert!(admitted(&w.table, w.a_inbox, None, &answer));
+    for relay in [w.b_inbox, w.disc, w.a_kp] {
+        assert_eq!(
+            class_of(&w.table, relay, None, &answer),
+            Some(Class::CrossedEvent)
+        );
+    }
+    let no_relay = json!([
+        "AUTH",
+        event(&id(36), &alice(), 22242, 1_000, &[&["challenge", "c"]])
+    ]);
+    assert_eq!(
+        class_of(&w.table, w.a_inbox, None, &no_relay),
+        Some(Class::UnknownFrame)
+    );
 }
 
 #[test]
@@ -417,7 +763,7 @@ fn every_row_admits_its_own_shape_on_its_own_list_and_nothing_else() {
     let w = world();
     for spec in &ROWS {
         let (value, sender, homes, plane) = fixture(&w, spec.row);
-        let crossed = if spec.verb == Verb::Event {
+        let crossed = if matches!(spec.verb, Verb::Event | Verb::Auth) {
             Class::CrossedEvent
         } else {
             Class::CrossedRequest
@@ -919,7 +1265,7 @@ fn after_removal_a_former_list_admits_only_the_kind_5_scrub_and_close() {
 }
 
 #[test]
-fn auth_count_and_unparsable_frames_are_unknown() {
+fn a_malformed_answer_count_and_unparsable_frames_are_unknown() {
     let w = world();
     for value in [
         json!(["AUTH", {"kind": 22242}]),
@@ -1915,6 +2261,152 @@ fn cases() -> Vec<Case> {
             &["C8.1-C8.8 hold"],
         ),
     ];
+    // A gated route (`gate-read=`): the REQ the proxy refused is still what
+    // the client sent, so it is judged like any other; the gate's own answers
+    // and the event it withheld are not client frames.
+    cases.push(case(
+        "P6 a gated route's refusal and withheld event",
+        &healthy(|j| {
+            let gated = "127.0.0.1:7788";
+            j.frame(
+                APP_INBOX,
+                "c2p",
+                gated,
+                json!(["REQ", "sub-gated", {"kinds": [1059], "#p": [alice()], "since": 1}]),
+            );
+            j.frame(APP_INBOX, "p2c", gated, json!(["AUTH", "challenge-c1"]));
+            j.frame(
+                APP_INBOX,
+                "p2c",
+                gated,
+                json!([
+                    "CLOSED",
+                    "sub-gated",
+                    "ERROR: auth-required: requested filter requires authentication"
+                ]),
+            );
+            j.frame(
+                APP_INBOX,
+                "r2p",
+                gated,
+                json!([
+                    "EVENT",
+                    "sub-mixed",
+                    event(&id(24), &eph(6), 1059, 1_000, &[&["p", &alice()]])
+                ]),
+            );
+        }),
+        &[],
+        RC_CLEAN,
+        &["C8.1-C8.8 hold"],
+    ));
+    cases.push(case(
+        "C8.2 a REQ a gated route refused, on a listen whose roles forbid it",
+        &healthy(|j| {
+            j.frame(
+                APP_LOC,
+                "c2p",
+                "127.0.0.1:7789",
+                json!(["REQ", "sub-gated", {"kinds": [1059], "#p": [alice()], "since": 1}]),
+            );
+        }),
+        &[],
+        RC_VIOLATION,
+        C82,
+    ));
+    // A5 (owner-directed 2026-11-16): an own inbox read answers the gate's
+    // challenge on a connection of its own, and is then served.
+    let answered = |j: &mut J, conn: &str, before: Option<Value>| {
+        let gated = "127.0.0.1:7788";
+        j.open(conn, 7788);
+        if let Some(before) = before {
+            j.c2r(conn, 7788, before);
+        }
+        j.frame(conn, "p2c", gated, json!(["AUTH", "challenge-c9"]));
+        j.frame(
+            conn,
+            "c2p",
+            gated,
+            json!(["AUTH", auth_event(25, &alice())]),
+        );
+        j.frame(conn, "p2c", gated, json!(["OK", id(25), true, ""]));
+        j.c2r(
+            conn,
+            7788,
+            json!(["REQ", "sub-authed", {"kinds": [1059], "#p": [alice()], "since": 1}]),
+        );
+    };
+    cases.push(case(
+        "P7 an own inbox read that answered a gated route's challenge",
+        &healthy(|j| answered(j, "app-inbox-authed", None)),
+        &[],
+        RC_CLEAN,
+        &["C8.1-C8.8 hold"],
+    ));
+    cases.push(case(
+        "C8.2 an answer to a challenge on a connection that also looked an account up",
+        &healthy(|j| {
+            answered(
+                j,
+                "app-inbox-shared",
+                Some(json!(["REQ", "sub-l", {"kinds": [10050], "authors": [alice()], "limit": 1}])),
+            );
+        }),
+        &[],
+        RC_VIOLATION,
+        &["C8.2 VIOLATION: plane-auth-shared-connection"],
+    ));
+    // D1c (owner-directed 2026-11-16): a circle relay answers a commit
+    // `auth-required:`, and the same bytes go once more on a write-only
+    // connection that answers its challenge. The relay's answer is what
+    // licenses it; the journal keeps one copy of the event per relay.
+    let resent = |j: &mut J, demanded: bool| {
+        let loc = "127.0.0.1:7789";
+        j.c2r(APP_LOC, 7789, commit(60, 20, &hx()));
+        if demanded {
+            j.frame(
+                APP_LOC,
+                "r2c",
+                loc,
+                json!(["OK", id(60), false, "auth-required: sign in to publish"]),
+            );
+        }
+        j.open("app-loc-resend", 7789);
+        j.c2r("app-loc-resend", 7789, commit(60, 20, &hx()));
+        j.frame(
+            "app-loc-resend",
+            "r2c",
+            loc,
+            json!(["AUTH", "challenge-c7"]),
+        );
+        j.c2r(
+            "app-loc-resend",
+            7789,
+            json!(["AUTH", auth_event(61, &alice())]),
+        );
+        j.frame(
+            "app-loc-resend",
+            "r2c",
+            loc,
+            json!(["OK", id(61), true, ""]),
+        );
+        j.c2r("app-loc-resend", 7789, commit(60, 20, &hx()));
+    };
+    cases.push(case(
+        "P8 a write-only resend of a commit its relay demanded authentication for",
+        &healthy(|j| resent(j, true)),
+        &[],
+        RC_CLEAN,
+        &["C8.1-C8.8 hold"],
+    ));
+    cases.push(case(
+        "C8.2 an answer on a circle relay that demanded no authentication",
+        &healthy(|j| resent(j, false)),
+        &[],
+        RC_VIOLATION,
+        &["C8.2 VIOLATION: plane-crossed-event"],
+    ));
+
     // C8.1 — EVENT placement.
     let c81: [Plant; 15] = [
         (
@@ -2590,7 +3082,7 @@ fn lane_args(journal: &Path, extra: &[String]) -> Vec<String> {
 }
 
 /// The number of C8 fixtures. Moving it is the only way to add or remove one.
-const CLI_CASES: usize = 80;
+const CLI_CASES: usize = 86;
 
 #[test]
 fn the_c8_fixture_suite() {

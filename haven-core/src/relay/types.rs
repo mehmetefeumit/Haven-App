@@ -82,6 +82,14 @@ pub struct RelayFetchOutcome {
     /// advance on this flag; a page without it may be a prefix of an unknown
     /// whole, and treating it as the whole silently drops the remainder.
     pub drained: bool,
+    /// Whether the relay ended this REQ with a `CLOSED` refusing the read
+    /// itself (`auth-required:` or `restricted:`): it serves the filter only
+    /// to a NIP-42-authenticated reader. The publish client never
+    /// authenticates (Security Rule 16); an own-inbox read
+    /// (`RelayManager::read_own_inbox_per_relay`) does, and is `refused` only
+    /// when the relay still refused it. Never `true` with `drained`; the
+    /// relay's text is not kept.
+    pub refused: bool,
     /// Events fetched from this relay (empty unless `responded`), each at most
     /// once and ordered NEWEST FIRST by `created_at`, ties broken by id.
     ///
@@ -89,6 +97,37 @@ pub struct RelayFetchOutcome {
     /// ambiguity positionally would otherwise be resolving it by whatever order
     /// the relay chose to deliver in.
     pub events: Vec<Event>,
+}
+
+/// How one relay answered a read of the user's own inbox (`kind:1059`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InboxRead {
+    /// It ended the read with `EOSE`: what it holds for this account, it sent.
+    Served,
+    /// It refused the read: after this device answered its NIP-42 challenge,
+    /// or refused that answer, or asked for one and sent no challenge. An
+    /// invitation stored there is not read from it.
+    Refused,
+    /// It was reached but did not finish its answer.
+    Incomplete,
+    /// It could not be reached.
+    Unreached,
+}
+
+impl RelayFetchOutcome {
+    /// This answer as a read of the user's own inbox.
+    #[must_use]
+    pub const fn inbox_read(&self) -> InboxRead {
+        if self.drained {
+            InboxRead::Served
+        } else if self.refused {
+            InboxRead::Refused
+        } else if self.responded {
+            InboxRead::Incomplete
+        } else {
+            InboxRead::Unreached
+        }
+    }
 }
 
 impl PublishResult {
@@ -114,6 +153,27 @@ impl PublishResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_eose_serves_an_inbox_read_and_only_a_gating_close_refuses_one() {
+        let answer = |responded, drained, refused| RelayFetchOutcome {
+            relay_url: String::new(),
+            responded,
+            drained,
+            refused,
+            events: Vec::new(),
+        };
+        assert_eq!(answer(true, true, false).inbox_read(), InboxRead::Served);
+        assert_eq!(answer(true, false, true).inbox_read(), InboxRead::Refused);
+        assert_eq!(
+            answer(true, false, false).inbox_read(),
+            InboxRead::Incomplete
+        );
+        assert_eq!(
+            answer(false, false, false).inbox_read(),
+            InboxRead::Unreached
+        );
+    }
 
     #[test]
     fn relay_status_variants() {

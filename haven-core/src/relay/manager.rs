@@ -15,10 +15,12 @@ use std::time::Duration;
 
 use cgka_traits::app_components::{is_loopback_host, is_public_ip};
 use cgka_traits::TransportEndpoint;
+use nostr::message::MachineReadablePrefix;
 #[cfg(debug_assertions)]
 use nostr::Url;
 use nostr::{
     ClientMessage, Event, EventId, Filter, Kind, PublicKey, RelayMessage, RelayUrl, SubscriptionId,
+    Timestamp,
 };
 use nostr_sdk::pool::relay::{RelayNotification, RelayServiceFlags, ReqExitPolicy};
 // The pool's own per-socket status, aliased because `super::types` exports a
@@ -33,10 +35,14 @@ use url::Host;
 use super::clock_skew;
 use super::discovery::discovery_relays;
 use super::error::{InvalidUrlReason, RelayError, RelayResult};
-use super::fanout::{self, FanoutTargetOutcome};
+use super::fanout::{self, FanoutTargetOutcome, UnrecordedAnswer};
+use super::identity::{
+    self, with_identity_relay, AuthSendOutcome, AuthTracker, AuthVerdict, IdentityUse, AUTH_WAIT,
+};
 use super::maintenance::key_package::{
     is_pre_migration_key_package_of, kp_event_d_tag, KeyPackageCandidate,
 };
+use super::nip42::Nip42Signer;
 use super::types::{PublishResult, RelayConnectionStatus, RelayFetchOutcome, RelayStatus};
 use super::url_norm;
 use super::verified::verified_client;
@@ -120,6 +126,18 @@ const MAX_FOREIGN_LIST_RELAYS: usize = 16;
 /// Timeout for waiting for relay WebSocket connections to establish.
 pub const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The `limit` of an invitation read's one REQ to a relay
+/// ([`RelayManager::read_own_inbox_per_relay`]), the background poll's and
+/// the invitations page's alike.
+///
+/// Anyone who knows the npub can store gift
+/// wraps addressed to it at whatever `created_at` they like, and NIP-59
+/// backdates a genuine one at random, so what pushes a Welcome out of the read
+/// is more wraps in the lookback window than one REQ is served: this many, or
+/// fewer where the relay caps a REQ lower. The relay-plane matrix's
+/// `REQ-1059-P` bound.
+pub const OWN_INBOX_READ_CAP: usize = 1_000;
+
 /// Maximum number of attempts (initial try + retries) for [`RelayManager::publish_event`].
 ///
 /// The first publish after a cold start — e.g. the app foregrounds and the
@@ -146,10 +164,13 @@ const MAX_PUBLISH_ATTEMPTS: u32 = 3;
 /// The longest [`RelayManager::publish_event`] takes with relays that never
 /// answer, in milliseconds: every attempt's connect and wait, and the pauses
 /// between them. The wait for a relay another send holds is not in it.
-pub const PUBLISH_LADDER_MS: u64 = (MAX_PUBLISH_ATTEMPTS as u64
-    * (CONNECTION_TIMEOUT.as_secs() + DEFAULT_TIMEOUT.as_secs())
-    + (MAX_PUBLISH_ATTEMPTS as u64 - 1) * PUBLISH_RETRY_BACKOFF.as_secs())
-    * 1_000;
+pub const PUBLISH_LADDER_MS: u64 = MAX_PUBLISH_ATTEMPTS as u64 * PUBLISH_ATTEMPT_MS
+    + (MAX_PUBLISH_ATTEMPTS as u64 - 1) * PUBLISH_RETRY_BACKOFF.as_secs() * 1_000;
+
+/// The longest one attempt of [`RelayManager::publish_event`]'s ladder takes,
+/// in milliseconds: the connect and the wait for the relay's `OK`.
+pub const PUBLISH_ATTEMPT_MS: u64 =
+    (CONNECTION_TIMEOUT.as_secs() + DEFAULT_TIMEOUT.as_secs()) * 1_000;
 
 /// Backoff between [`RelayManager::publish_event`] attempts.
 ///
@@ -211,11 +232,23 @@ pub const OFFER_ACK_TIMEOUT: Duration = PROFILE_PUBLISH_ACK_TIMEOUT;
 /// did, the late relay's copy is an extra archive.
 const LOCATION_ACK_WINDOW: Duration = Duration::from_secs(5);
 
+/// The `OK` window of an authenticated resend: one to a relay that answered
+/// an anonymous send `auth-required:` (owner decisions D1b, D1c). The
+/// location's own, so a location's resend fits the window its send is
+/// priced in.
+pub const AUTH_RETRY_ACK: Duration = LOCATION_ACK_WINDOW;
+
+/// The longest one authenticated resend takes, in milliseconds
+/// ([`identity::auth_send_ceiling`]): what every budget a resend can run
+/// inside adds.
+pub const AUTH_RETRY_MS: u64 = identity::auth_send_ceiling(AUTH_RETRY_ACK).as_secs() * 1_000;
+
 /// The longest one location send holds the radio: the connect and the
-/// acknowledgement window, once. What a location's record must have left
+/// acknowledgement window, once, and then at most one authenticated resend
+/// to the relays that asked for one. What a location's record must have left
 /// before its expiration for a send to be begun.
 pub const LOCATION_SEND_MS: u64 =
-    (CONNECTION_TIMEOUT.as_secs() + LOCATION_ACK_WINDOW.as_secs()) * 1_000;
+    (CONNECTION_TIMEOUT.as_secs() + LOCATION_ACK_WINDOW.as_secs()) * 1_000 + AUTH_RETRY_MS;
 /// `DEFAULT_TIMEOUT` stands in for the pool's own `WAIT_FOR_OK_TIMEOUT`
 /// (`nostr-relay-pool-0.44.3 relay/constants.rs:10`), which is `pub(super)` and
 /// so unreachable from here; the two are both 10 s, and a crate bump that
@@ -294,7 +327,7 @@ const PUBLISH_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 /// NOT get these options: it holds standing REQs, so its socket carries no other
 /// traffic and a ping-less NAT drop there would be silent until the 15-minute
 /// health tick.
-fn publish_relay_options() -> RelayOptions {
+pub(super) fn publish_relay_options() -> RelayOptions {
     RelayOptions::default()
         .ping(false)
         .reconnect(false)
@@ -479,6 +512,9 @@ where
                     return Err(last_err);
                 }
             }
+            // Hopeless as a clock refusal is: the relays asked for what an
+            // anonymous resend cannot give.
+            Err(RelayError::AuthRequired) => return Err(RelayError::AuthRequired),
             Err(e) => last_err = e,
         }
         if i + 1 < attempts {
@@ -502,6 +538,9 @@ enum AckOutcome {
     /// relay-controlled reason is carried for
     /// [`clock_skew::classify_publish_outcome`] and never rendered.
     Refused(String),
+    /// [`Self::Refused`], where the relay's own `OK` frame for the event said
+    /// `auth-required:` by its machine-readable prefix.
+    AuthRequired(String),
     /// No answer inside the ack bound (or the relay was not in the pool).
     Unanswered,
 }
@@ -546,9 +585,18 @@ async fn send_to_one(
     let Ok(relay) = client.relay(url.as_str()).await else {
         return (url.to_string(), AckOutcome::Unanswered);
     };
+    // Taken before the send: the prefix is read off the relay's own frame.
+    let mut heard = relay.notifications();
     match tokio::time::timeout(bound, relay.send_event(event)).await {
         Ok(Ok(_)) => (url.to_string(), AckOutcome::Accepted),
-        Ok(Err(e)) => (url.to_string(), AckOutcome::Refused(e.to_string())),
+        Ok(Err(e)) => {
+            let reason = e.to_string();
+            if UnrecordedAnswer::heard(&mut heard, &event.id) == UnrecordedAnswer::AuthRequired {
+                (url.to_string(), AckOutcome::AuthRequired(reason))
+            } else {
+                (url.to_string(), AckOutcome::Refused(reason))
+            }
+        }
         Err(_) => (url.to_string(), AckOutcome::Unanswered),
     }
 }
@@ -650,7 +698,7 @@ impl RelayManager {
     /// challenge: an answer would be the identity key's signature over a
     /// relay's challenge, on a socket that carries a circle's routing id. The
     /// two facts are pinned apart (`the_publish_client_holds_no_signer_and_never_authenticates`,
-    /// and no source may install a signer:
+    /// and no source but `verified::identity_client` may install a signer:
     /// `scripts/ci/check_engine_client_options.sh` check 11).
     #[must_use]
     pub fn new() -> Self {
@@ -693,6 +741,7 @@ impl RelayManager {
             relay_client: Arc::clone(relay_client),
             gates: Arc::clone(&self.fanout_gates),
             clock: Arc::clone(&self.clock),
+            signer: None,
         }
     }
 
@@ -710,6 +759,7 @@ impl RelayManager {
             relay_client,
             gates: Arc::clone(&self.fanout_gates),
             clock: Arc::clone(&self.clock),
+            signer: None,
         }
     }
 
@@ -796,13 +846,13 @@ impl RelayManager {
 
     /// Publishes an event to the specified relays, with a retry ladder.
     ///
-    /// The path for a signed event no fanout record holds: a founding
-    /// circle's Welcome gift wraps, the relay-removal scrub, the `KeyPackage`
-    /// slot retraction, and the one send of a proposal no record could be
-    /// written for. Each is lost for good if this call gives up, so they pay
-    /// [`MAX_PUBLISH_ATTEMPTS`]. The account's own `KeyPackage` and relay
-    /// lists are not among them: every maintenance pass re-checks each relay
-    /// and offers them once where they are missing
+    /// The path for a signed event no fanout record holds: the relay-removal
+    /// scrub, the `KeyPackage` slot retraction — and, read relay by relay
+    /// ([`Self::publish_unrecorded_answers`]), a Welcome and the one send of a
+    /// proposal no record could be written for. Each is lost for good if this
+    /// call gives up, so they pay [`MAX_PUBLISH_ATTEMPTS`]. The account's own
+    /// `KeyPackage` and relay lists are not among them: every maintenance pass
+    /// re-checks each relay and offers them once where they are missing
     /// ([`offer_event_to`](Self::offer_event_to)). A commit never comes here: it leaves only
     /// through the fanout driver, and an event a record holds is refused
     /// (Security Rule 13). Locations take
@@ -869,6 +919,107 @@ impl RelayManager {
         .await
     }
 
+    /// [`Self::publish_event`], answered relay by relay: what each of
+    /// `relays` did with `event`, in their order, read off that relay's own
+    /// `OK` frames on this pool ([`UnrecordedAnswer::heard`]).
+    ///
+    /// The publisher of what has no record (a Welcome, a proposal no record
+    /// could be written for). Its ladder ends at once when no relay took the
+    /// event and every relay answered `auth-required:`
+    /// ([`RelayError::AuthRequired`]). Nothing here authenticates: a relay
+    /// that asked is answered, if at all, by [`Self::publish_authenticated`].
+    /// An event a fanout record holds, or a relay this device may not dial, is
+    /// sent nothing, and every relay is unanswered.
+    pub async fn publish_unrecorded_answers(
+        &self,
+        event: &Event,
+        relays: &[String],
+    ) -> Vec<UnrecordedAnswer> {
+        if Self::refuse_fanout_owned(event).is_err() {
+            return vec![UnrecordedAnswer::Unanswered; relays.len()];
+        }
+        let Ok(relay_urls) = Self::validate_relay_urls(relays) else {
+            return vec![UnrecordedAnswer::Unanswered; relays.len()];
+        };
+        let heard = Arc::new(std::sync::Mutex::new(vec![
+            UnrecordedAnswer::Unanswered;
+            relays.len()
+        ]));
+
+        let client = self.client.clone();
+        let gates = Arc::clone(&self.fanout_gates);
+        let _ = publish_with_retry(
+            MAX_PUBLISH_ATTEMPTS,
+            PUBLISH_RETRY_BACKOFF,
+            age_on(&self.clock, event),
+            |_| {
+                let (client, gates, heard) =
+                    (client.clone(), Arc::clone(&gates), Arc::clone(&heard));
+                let relay_urls = relay_urls.clone();
+                let event = event.clone();
+                async move {
+                    // As `publish_event`: never beside a fanout call to these relays.
+                    let _no_fanout_call = hold_fanout_gates(&gates, &relay_urls).await;
+                    let (result, this_attempt) =
+                        Self::try_publish_once_heard(&client, &relay_urls, &event).await;
+                    let accepted_by: &[String] = result
+                        .as_ref()
+                        .map_or(&[], |result| result.accepted_by.as_slice());
+                    let mut all = heard
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    for ((seen, answer), url) in
+                        all.iter_mut().zip(this_attempt.iter()).zip(&relay_urls)
+                    {
+                        *seen = seen.merge(*answer);
+                        if accepted_by.iter().any(|by| *by == url.to_string()) {
+                            *seen = UnrecordedAnswer::Accepted;
+                        }
+                    }
+                    drop(all);
+                    if !this_attempt.is_empty()
+                        && this_attempt
+                            .iter()
+                            .all(|answer| *answer == UnrecordedAnswer::AuthRequired)
+                    {
+                        return Err(RelayError::AuthRequired);
+                    }
+                    result
+                }
+            },
+        )
+        .await;
+        let answers = heard
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        answers
+    }
+
+    /// One authenticated resend of `event` to `relay` as `signer`'s
+    /// identity, on a connection of its own that holds that relay alone,
+    /// write-only, and is closed when the call ends
+    /// ([`identity::send_signed_once_authenticated`]).
+    ///
+    /// For a relay that answered this event's anonymous publish
+    /// `auth-required:` (owner decision D1b). The publish client is not
+    /// touched and never holds a signer. An event a fanout record holds, or a
+    /// relay this device may not dial, is sent nothing.
+    pub async fn publish_authenticated(
+        &self,
+        signer: Arc<Nip42Signer>,
+        event: &Event,
+        relay: &str,
+    ) -> AuthSendOutcome {
+        if Self::refuse_fanout_owned(event).is_err() {
+            return AuthSendOutcome::NotSent;
+        }
+        let Ok(url) = Self::validate_single_relay_url(relay) else {
+            return AuthSendOutcome::NotSent;
+        };
+        identity::send_signed_once_authenticated(signer, &url, event, AUTH_RETRY_ACK).await
+    }
+
     /// Performs a single connect-and-publish attempt.
     ///
     /// Returns `Ok` with a [`PublishResult`] that may be unsuccessful
@@ -881,8 +1032,32 @@ impl RelayManager {
         relay_urls: &[RelayUrl],
         event: &Event,
     ) -> RelayResult<PublishResult> {
+        Self::try_publish_once_heard(client, relay_urls, event)
+            .await
+            .0
+    }
+
+    /// [`Self::try_publish_once`], with what each relay's own `OK` frames
+    /// said, in `relay_urls`' order.
+    async fn try_publish_once_heard(
+        client: &Client,
+        relay_urls: &[RelayUrl],
+        event: &Event,
+    ) -> (RelayResult<PublishResult>, Vec<UnrecordedAnswer>) {
         // Add relays, connect, and wait for WebSocket handshakes.
         Self::add_relays_and_connect(client, relay_urls).await;
+
+        // Taken before the send, so no answer to it precedes them.
+        let mut heard = Vec::with_capacity(relay_urls.len());
+        for url in relay_urls {
+            heard.push(
+                client
+                    .relay(url.as_str())
+                    .await
+                    .ok()
+                    .map(|relay| relay.notifications()),
+            );
+        }
 
         let sent = tokio::time::timeout(
             DEFAULT_TIMEOUT,
@@ -895,6 +1070,27 @@ impl RelayManager {
         // attempt is worth nothing unless it dials a live one.
         recover_wedged_publish_sockets(client, relay_urls).await;
 
+        let answers = heard
+            .iter_mut()
+            .map(|heard| {
+                heard
+                    .as_mut()
+                    .map_or(UnrecordedAnswer::Unanswered, |heard| {
+                        UnrecordedAnswer::heard(heard, &event.id)
+                    })
+            })
+            .collect();
+        (Self::publish_result(event, sent), answers)
+    }
+
+    /// What one pooled send came to, as [`Self::try_publish_once`] returns it.
+    fn publish_result(
+        event: &Event,
+        sent: Result<
+            Result<nostr_sdk::pool::Output<EventId>, nostr_sdk::client::Error>,
+            tokio::time::error::Elapsed,
+        >,
+    ) -> RelayResult<PublishResult> {
         let send_result = sent
             .map_err(|_| {
                 log::warn!(
@@ -1166,18 +1362,23 @@ impl RelayManager {
         relays: &[String],
     ) -> RelayResult<PublishResult> {
         Self::refuse_fanout_owned(event)?;
-        Self::send_location(&self.client, &self.clock, event, relays).await
+        Self::send_location(&self.client, &self.clock, event, relays, None).await
     }
 
     /// [`Self::publish_location_event`] without the refusal of an event that
     /// has a fanout record: the one send the record's own driver makes
     /// ([`FanoutTransport`]), on the same pool, in the same window, read by
     /// the same classifier.
+    ///
+    /// With `signer`, a relay that answered `auth-required:` is sent the same
+    /// event once more as that identity when no relay took it
+    /// ([`Self::authenticate_location`]).
     async fn send_location(
         client: &Client,
         clock: &SecondsClock,
         event: &Event,
         relays: &[String],
+        signer: Option<&Arc<Nip42Signer>>,
     ) -> RelayResult<PublishResult> {
         let relay_urls = Self::validate_relay_urls(relays)?;
 
@@ -1201,17 +1402,68 @@ impl RelayManager {
                 // partition — one ack is a success, no ack is classified for a
                 // clock verdict before it collapses to `AllRelaysFailed`.
                 async move {
-                    Ok(Self::try_publish_once_harvesting(
-                        &client,
-                        &relay_urls,
-                        &event,
-                        LOCATION_ACK_WINDOW,
-                    )
-                    .await)
+                    let (mut result, asked) =
+                        Self::harvest_heard(&client, &relay_urls, &event, LOCATION_ACK_WINDOW)
+                            .await;
+                    if let Some(signer) = signer.filter(|_| !result.is_success()) {
+                        Self::authenticate_location(
+                            signer,
+                            clock,
+                            &relay_urls,
+                            &asked,
+                            &event,
+                            &mut result,
+                        )
+                        .await;
+                    }
+                    Ok(result)
                 }
             },
         )
         .await
+    }
+
+    /// The one authenticated resend of a location no relay took: to each
+    /// relay that `asked` for it (`auth-required:`), at once, and only while
+    /// the whole resend ends before the event's expiration, read on `clock`
+    /// just before it is begun. An event with no expiration is not resent.
+    ///
+    /// A relay that took it moves from `rejected_by` to `accepted_by`.
+    async fn authenticate_location(
+        signer: &Arc<Nip42Signer>,
+        clock: &SecondsClock,
+        relay_urls: &[RelayUrl],
+        asked: &[bool],
+        event: &Event,
+        result: &mut PublishResult,
+    ) {
+        let Some(expires) = event.tags.expiration() else {
+            return;
+        };
+        if clock().saturating_add(AUTH_RETRY_MS / 1_000) >= expires.as_secs() {
+            return;
+        }
+        let resends = relay_urls
+            .iter()
+            .zip(asked)
+            .filter(|(_, asked)| **asked)
+            .map(|(url, _)| async move {
+                let outcome = identity::send_signed_once_authenticated(
+                    Arc::clone(signer),
+                    url,
+                    event,
+                    AUTH_RETRY_ACK,
+                )
+                .await;
+                (url, outcome)
+            });
+        for (url, outcome) in futures::future::join_all(resends).await {
+            if outcome == AuthSendOutcome::Accepted {
+                let url = url.to_string();
+                result.rejected_by.retain(|(by, _)| *by != url);
+                result.accepted_by.push(url);
+            }
+        }
     }
 
     /// Performs a single connect-and-publish attempt that waits for EVERY
@@ -1244,6 +1496,19 @@ impl RelayManager {
         event: &Event,
         ack_timeout: Duration,
     ) -> PublishResult {
+        Self::harvest_heard(client, relay_urls, event, ack_timeout)
+            .await
+            .0
+    }
+
+    /// [`Self::try_publish_once_harvesting`], with whether each relay, in
+    /// `relay_urls`' order, answered `auth-required:`.
+    async fn harvest_heard(
+        client: &Client,
+        relay_urls: &[RelayUrl],
+        event: &Event,
+        ack_timeout: Duration,
+    ) -> (PublishResult, Vec<bool>) {
         // Add relays, connect, and wait for WebSocket handshakes.
         Self::add_relays_and_connect(client, relay_urls).await;
 
@@ -1254,7 +1519,11 @@ impl RelayManager {
         // A silent relay is EITHER slow or holding this event unsent forever;
         // only the second is freed here, and only after the ack window closed.
         recover_wedged_publish_sockets(client, relay_urls).await;
-        Self::fold_harvest(event, outcomes)
+        let asked = outcomes
+            .iter()
+            .map(|(_, outcome)| matches!(outcome, AckOutcome::AuthRequired(_)))
+            .collect();
+        (Self::fold_harvest(event, outcomes), asked)
     }
 
     /// Folds each relay's [`AckOutcome`] into a [`PublishResult`].
@@ -1265,7 +1534,9 @@ impl RelayManager {
         for (url, outcome) in outcomes {
             match outcome {
                 AckOutcome::Accepted => accepted_by.push(url),
-                AckOutcome::Refused(reason) => rejected_by.push((url, reason)),
+                AckOutcome::Refused(reason) | AckOutcome::AuthRequired(reason) => {
+                    rejected_by.push((url, reason));
+                }
                 AckOutcome::Unanswered => failed.push(url),
             }
         }
@@ -1981,6 +2252,7 @@ impl RelayManager {
                         relay_url: relay.clone(),
                         responded: false,
                         drained: false,
+                        refused: false,
                         events: Vec::new(),
                     };
                 };
@@ -2004,6 +2276,7 @@ impl RelayManager {
                         relay_url,
                         responded: false,
                         drained: false,
+                        refused: false,
                         events: Vec::new(),
                     };
                 }
@@ -2016,22 +2289,107 @@ impl RelayManager {
                         relay_url,
                         responded: true,
                         drained: false,
+                        refused: false,
                         events: Vec::new(),
                     };
                 };
 
-                let (drained, events) =
-                    Self::read_one_relays_answer(&handle, filter, req_timeout).await;
+                let notifications = handle.notifications();
+                let (drained, refused, events) =
+                    Self::read_one_relays_answer(&handle, notifications, None, filter, req_timeout)
+                        .await;
                 RelayFetchOutcome {
                     relay_url,
                     responded: true,
                     drained,
+                    refused,
                     events,
                 }
             }
         });
 
         Ok(futures::future::join_all(fetch_futures).await)
+    }
+
+    /// Reads the user's own inbox — kind 1059 addressed to `signer`'s key,
+    /// from `since`, at most `limit` events a relay — from each relay of
+    /// `relays`, as [`Self::fetch_events_per_relay`] reads a page, on an
+    /// identity connection of its own that answers the relay's NIP-42
+    /// challenge (`with_identity_relay`, read-only, shut down when its read
+    /// ends). Owner-directed (2026-11-16): White Noise reads an inbox so, and
+    /// a relay that serves gift wraps only to their authenticated recipient
+    /// (damus, strfry's `restrictedReadKinds`) holds invitations no anonymous
+    /// read can reach.
+    ///
+    /// The `#p` is the signer's own key, never one a caller names: such a
+    /// relay serves only the key that authenticated. A connection of its own
+    /// for every relay and every call, so no other read's challenge can be
+    /// answered twice on it (strfry refuses a second answer). `refused` is a
+    /// relay that refused an authenticated read, or the answer to its
+    /// challenge, or asked for one and sent none.
+    pub async fn read_own_inbox_per_relay(
+        signer: &Arc<Nip42Signer>,
+        since: Option<Timestamp>,
+        limit: usize,
+        relays: &[String],
+    ) -> Vec<RelayFetchOutcome> {
+        let mut filter = Filter::new()
+            .kind(Kind::GiftWrap)
+            .pubkey(signer.public_key())
+            .limit(limit);
+        if let Some(since) = since {
+            filter = filter.since(since);
+        }
+        let reads = relays.iter().map(|relay| {
+            let filter = filter.clone();
+            async move {
+                let unreached = |relay_url: String| RelayFetchOutcome {
+                    relay_url,
+                    responded: false,
+                    drained: false,
+                    refused: false,
+                    events: Vec::new(),
+                };
+                let Ok(url) = Self::validate_single_relay_url(relay) else {
+                    log::debug!("[RelayManager] own inbox: skipping one invalid relay url");
+                    return unreached(relay.clone());
+                };
+                let read = with_identity_relay(
+                    Arc::clone(signer),
+                    &url,
+                    IdentityUse::Read,
+                    |mut conn| async move {
+                        // A challenge answered before the REQ decides how its
+                        // refusal reads.
+                        let mut auth = AuthTracker::default();
+                        while let Ok(notification) = conn.notifications.try_recv() {
+                            auth.observe(&notification);
+                        }
+                        Self::read_one_relays_answer(
+                            &conn.relay,
+                            conn.notifications,
+                            Some(auth),
+                            filter,
+                            DEFAULT_TIMEOUT,
+                        )
+                        .await
+                    },
+                )
+                .await;
+                let Ok((drained, refused, events)) = read else {
+                    log::debug!("[RelayManager] own inbox: one relay did not respond");
+                    return unreached(url.as_str().to_string());
+                };
+                RelayFetchOutcome {
+                    relay_url: url.as_str().to_string(),
+                    responded: true,
+                    drained,
+                    refused,
+                    events,
+                }
+            }
+        });
+        futures::future::join_all(reads).await
     }
 
     /// Registers and dials every relay of `relays` that may be dialled, for a
@@ -2133,7 +2491,9 @@ impl RelayManager {
     }
 
     /// Issues ONE REQ to ONE relay and reads that relay's own answer, reporting
-    /// whether the relay finished giving it (`EOSE`) alongside what arrived.
+    /// whether the relay finished giving it (`EOSE`), whether a `CLOSED`
+    /// refused the read itself ([`RelayFetchOutcome::refused`]), and what
+    /// arrived.
     ///
     /// # Why the notification stream and not the subscription's event stream
     ///
@@ -2145,7 +2505,7 @@ impl RelayManager {
     ///
     /// # Ordering, and the two races that are closed by construction
     ///
-    /// The notification receiver is taken BEFORE the REQ goes out, because
+    /// The caller takes `notifications` BEFORE the REQ goes out, because
     /// `notifications()` yields nothing that arrived before the call and a relay
     /// can answer inside the subscribe. And the relay's socket reader handles
     /// messages strictly sequentially, so the `EOSE` notification cannot
@@ -2156,6 +2516,19 @@ impl RelayManager {
     /// BEFORE sending the REQ, so it is not exposed to the registration race
     /// that bars `verify_subscriptions`), and its handler sends the NIP-01
     /// `CLOSE` when it sees that `EOSE`.
+    ///
+    /// # On a connection that answers NIP-42 (`auth` is `Some`)
+    ///
+    /// A `CLOSED` asking for authentication is not the end while the relay's
+    /// verdict on the answer to its challenge is awaited (at most
+    /// [`AUTH_WAIT`]); the read then goes on as the pool's own does. A refusal
+    /// spelled exactly `auth-required:` is resent by the pool under the same id
+    /// once it authenticates, so the read keeps that id. strfry's
+    /// `ERROR: auth-required:` the pool drops, and a refusal arriving after
+    /// the connection authenticated it never resends, so the read sends its
+    /// REQ once more under a new id. One second chance in all: a second such
+    /// `CLOSED`, or a failed answer, is the relay's refusal, and a relay that
+    /// never challenges is one too. All of it within `req_timeout`.
     ///
     /// # Why an early exit sends its own `CLOSE`
     ///
@@ -2199,81 +2572,110 @@ impl RelayManager {
     /// `Events` collection this replaced.
     async fn read_one_relays_answer(
         relay: &Relay,
+        mut notifications: tokio::sync::broadcast::Receiver<RelayNotification>,
+        mut auth: Option<AuthTracker>,
         filter: Filter,
         req_timeout: Duration,
-    ) -> (bool, Vec<Event>) {
+    ) -> (bool, bool, Vec<Event>) {
         let intake_cap = filter.limit.unwrap_or(MAX_EVENTS_PER_UNLIMITED_REQ);
-        let id = SubscriptionId::generate();
-        let mut notifications = relay.notifications();
-
-        let opts = SubscribeOptions::default().close_on(Some(
-            SubscribeAutoCloseOptions::default()
-                .exit_policy(ReqExitPolicy::ExitOnEOSE)
-                .timeout(Some(req_timeout)),
-        ));
-        // auto-closing REQ: `opts` exits on EOSE, so this registers nothing in
-        // the pool's long-lived subscription map and the socket can still sleep.
-        // The marker is what `check_engine_client_options.sh` check 7 allows it
-        // by; an unmarked subscribe anywhere in this file is a standing REQ.
-        // auto-closing REQ
-        let issued = relay.subscribe_with_id(id.clone(), filter, opts).await;
-        if issued.is_err() {
+        let deadline = tokio::time::Instant::now() + req_timeout;
+        let mut id = SubscriptionId::generate();
+        if !Self::issue_page_req(relay, &id, filter.clone(), deadline).await {
             // Presence-only: neither the own-relay URL nor the relay's own
             // words (Security Rule 15), matching the branches above.
             log::debug!("[RelayManager] per-relay REQ failed (one own relay)");
-            return (false, Vec::new());
+            return (false, false, Vec::new());
         }
 
+        let mut refused = false;
         let mut events: Vec<Event> = Vec::new();
         let mut seen: HashSet<EventId> = HashSet::new();
         let mut arrivals: usize = 0;
-        let drained = tokio::time::timeout(req_timeout, async {
-            loop {
-                match notifications.recv().await {
-                    Ok(RelayNotification::Message { message }) => match message {
-                        RelayMessage::Event {
-                            subscription_id,
-                            event,
-                        } if subscription_id.as_ref() == &id => {
-                            if arrivals >= intake_cap {
-                                return false;
-                            }
-                            arrivals += 1;
-                            if seen.insert(event.id) {
-                                events.push(event.into_owned());
-                            }
+        let mut chance = SecondChance::default();
+        let mut wait_until = deadline;
+        let drained = loop {
+            let Ok(received) = tokio::time::timeout_at(wait_until, notifications.recv()).await
+            else {
+                break false;
+            };
+            let verdict = auth
+                .as_mut()
+                .zip(received.as_ref().ok())
+                .and_then(|(auth, notification)| auth.observe(notification));
+            let mut reissue = false;
+            match received {
+                Ok(RelayNotification::Message { message }) => match message {
+                    RelayMessage::Event {
+                        subscription_id,
+                        event,
+                    } if subscription_id.as_ref() == &id => {
+                        if arrivals >= intake_cap {
+                            break false;
                         }
-                        RelayMessage::EndOfStoredEvents(sub) if sub.as_ref() == &id => return true,
-                        // The relay ended this subscription itself (rate limit,
-                        // auth required, refusal). Whatever it had not sent, it
-                        // is not going to.
-                        RelayMessage::Closed {
-                            subscription_id, ..
-                        } if subscription_id.as_ref() == &id => return false,
-                        _ => {}
-                    },
-                    // The socket went away mid-delivery, the pool shut down, or a
-                    // lagged broadcast dropped deliveries we will never see —
-                    // after which an `EOSE` would vouch for a page we did not
-                    // receive whole. None of them is the relay saying it is
-                    // done, which is the only thing that ends this read as
-                    // drained.
-                    Ok(
-                        RelayNotification::RelayStatus {
-                            status:
-                                nostr_sdk::RelayStatus::Disconnected
-                                | nostr_sdk::RelayStatus::Terminated
-                                | nostr_sdk::RelayStatus::Banned,
+                        arrivals += 1;
+                        if seen.insert(event.id) {
+                            events.push(event.into_owned());
                         }
-                        | RelayNotification::Shutdown,
-                    )
-                    | Err(_) => return false,
-                    Ok(_) => {}
-                }
+                    }
+                    RelayMessage::EndOfStoredEvents(sub) if sub.as_ref() == &id => break true,
+                    // The relay ended this subscription itself (rate limit,
+                    // auth required, refusal). Whatever it had not sent, it
+                    // is not going to — unless the connection can answer an
+                    // `auth-required:` it has not already been refused after.
+                    RelayMessage::Closed {
+                        subscription_id,
+                        message,
+                    } if subscription_id.as_ref() == &id => {
+                        refused = super::live_sync::repair::refuses_read(&message);
+                        match auth
+                            .as_ref()
+                            .map(|a| chance.on_closed(a.is_authenticated(), &message))
+                        {
+                            Some(AfterClosed::Reissue) => reissue = true,
+                            Some(AfterClosed::AwaitVerdict) => {
+                                wait_until = deadline.min(tokio::time::Instant::now() + AUTH_WAIT);
+                            }
+                            Some(AfterClosed::End) | None => break false,
+                        }
+                    }
+                    _ => {}
+                },
+                // The socket went away mid-delivery, the pool shut down, or a
+                // lagged broadcast dropped deliveries we will never see —
+                // after which an `EOSE` would vouch for a page we did not
+                // receive whole. None of them is the relay saying it is
+                // done, which is the only thing that ends this read as
+                // drained.
+                Ok(
+                    RelayNotification::RelayStatus {
+                        status:
+                            nostr_sdk::RelayStatus::Disconnected
+                            | nostr_sdk::RelayStatus::Terminated
+                            | nostr_sdk::RelayStatus::Banned,
+                    }
+                    | RelayNotification::Shutdown,
+                )
+                | Err(_) => break false,
+                Ok(_) => {}
             }
-        })
-        .await
-        .unwrap_or(false);
+            match verdict.and_then(|verdict| chance.on_verdict(verdict)) {
+                Some(AfterVerdict::End) => break false,
+                Some(after) => {
+                    refused = false;
+                    wait_until = deadline;
+                    reissue = matches!(after, AfterVerdict::Reissue);
+                }
+                None => {}
+            }
+            if reissue {
+                refused = false;
+                id = SubscriptionId::generate();
+                if !Self::issue_page_req(relay, &id, filter.clone(), deadline).await {
+                    break false;
+                }
+                log::debug!("[RelayManager] per-relay REQ asked again after authentication");
+            }
+        };
 
         if !drained {
             // Nothing else closes this REQ until the auto-close handler spends
@@ -2286,7 +2688,32 @@ impl RelayManager {
                 .cmp(&a.created_at)
                 .then_with(|| a.id.cmp(&b.id))
         });
-        (drained, events)
+        (drained, refused, events)
+    }
+
+    /// Sends [`Self::read_one_relays_answer`]'s REQ under `id`, closing itself
+    /// on `EOSE` or at `deadline`; `false` when it could not be handed to the
+    /// socket.
+    async fn issue_page_req(
+        relay: &Relay,
+        id: &SubscriptionId,
+        filter: Filter,
+        deadline: tokio::time::Instant,
+    ) -> bool {
+        let opts = SubscribeOptions::default().close_on(Some(
+            SubscribeAutoCloseOptions::default()
+                .exit_policy(ReqExitPolicy::ExitOnEOSE)
+                .timeout(Some(
+                    deadline.saturating_duration_since(tokio::time::Instant::now()),
+                )),
+        ));
+        // auto-closing REQ: `opts` exits on EOSE, so this registers nothing in
+        // the pool's long-lived subscription map and the socket can still sleep.
+        // The marker is what `check_engine_client_options.sh` check 7 allows it
+        // by; an unmarked subscribe anywhere in this file is a standing REQ.
+        // auto-closing REQ
+        let issued = relay.subscribe_with_id(id.clone(), filter, opts).await;
+        issued.is_ok()
     }
 
     /// Validates relay URLs and ensures they use wss://.
@@ -2458,12 +2885,39 @@ async fn hold_fanout_gates(
 /// Publishes one fanout event to one relay through MDK's relay client, on
 /// Haven's publish pool ([`RelayManager::fanout_transport`]).
 ///
+/// A relay that answers a send `auth-required:` is sent the same signed event
+/// once more on a connection of its own, as the identity [`Self::authenticating`]
+/// names (owner decision D1c); the publish client and MDK's client never hold a
+/// signer.
+///
 /// No `Debug`: it holds the publish client, whose own names every relay.
 pub struct FanoutTransport {
     client: Client,
     relay_client: Arc<dyn NostrRelayClient>,
     gates: FanoutGates,
     clock: SecondsClock,
+    signer: Option<Arc<Nip42Signer>>,
+}
+
+/// The authenticated resend of one fanout call: to the call's own relay, as
+/// the transport's identity ([`identity::send_signed_once_authenticated`]).
+struct IdentityResend<'a> {
+    signer: &'a Arc<Nip42Signer>,
+    url: &'a RelayUrl,
+}
+
+impl fanout::AuthRetry for IdentityResend<'_> {
+    fn resend<'a>(
+        &'a self,
+        event: &'a Event,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = AuthSendOutcome> + Send + 'a>> {
+        Box::pin(identity::send_signed_once_authenticated(
+            Arc::clone(self.signer),
+            self.url,
+            event,
+            AUTH_RETRY_ACK,
+        ))
+    }
 }
 
 #[async_trait::async_trait]
@@ -2486,11 +2940,37 @@ impl fanout::FanoutSend for FanoutTransport {
         event: &Event,
         targets: &[String],
     ) -> RelayResult<PublishResult> {
-        RelayManager::send_location(&self.client, &self.clock, event, targets).await
+        RelayManager::send_location(
+            &self.client,
+            &self.clock,
+            event,
+            targets,
+            self.signer.as_ref(),
+        )
+        .await
     }
 }
 
 impl FanoutTransport {
+    /// This transport, answering a relay's `auth-required:` with one
+    /// authenticated resend as `signer`'s identity: of a recorded event inside
+    /// the call ([`fanout::publish_to_target`]), and of a location no relay
+    /// took. Every product entry builds its transport through this.
+    #[must_use]
+    pub fn authenticating(self, signer: Arc<Nip42Signer>) -> Self {
+        Self {
+            signer: Some(signer),
+            ..self
+        }
+    }
+
+    /// Whether this transport answers `auth-required:` with an authenticated
+    /// resend ([`Self::authenticating`]).
+    #[must_use]
+    pub const fn authenticates(&self) -> bool {
+        self.signer.is_some()
+    }
+
     /// Takes `target`'s relay for one fanout call, or `None` when another
     /// send held it for the whole of [`fanout::GATE_WAIT_SECS`].
     ///
@@ -2556,12 +3036,21 @@ impl FanoutTransport {
             .await
             .ok()
             .map(|relay| relay.notifications());
+        // Inside this call, under this relay's gate: one attempt, stored once,
+        // resolved by what both connections heard.
+        let resend = self.signer.as_ref().map(|signer| IdentityResend {
+            signer,
+            url: &relay_urls[0],
+        });
         let outcome = fanout::publish_to_target(
             self.relay_client.as_ref(),
             &target,
             message,
             heard,
             (self.clock)(),
+            resend
+                .as_ref()
+                .map(|resend| resend as &dyn fanout::AuthRetry),
         )
         .await;
         // MDK's client adds a target it does not find in the pool through the
@@ -2679,6 +3168,81 @@ fn answered_whole(answers: &[RelayFetchOutcome]) -> bool {
         && answers
             .iter()
             .all(|answer| answer.drained || !answer.responded)
+}
+
+/// An authenticating page read's one second chance after `auth-required:`.
+#[derive(Default)]
+struct SecondChance {
+    /// Spent.
+    taken: bool,
+    /// While the relay's verdict on the answer to its challenge is awaited:
+    /// whether the pool resends the REQ itself once it authenticates.
+    pool_resends: Option<bool>,
+}
+
+/// What a read does once the relay's verdict on its answer is in.
+enum AfterVerdict {
+    /// Reads on under the same id: the pool resent the REQ.
+    Read,
+    /// Sends the REQ once more, under a new id.
+    Reissue,
+    /// Nothing more: the relay refused the answer, so the refusal stands.
+    End,
+}
+
+/// What a read does after its REQ's `CLOSED`.
+enum AfterClosed {
+    /// Nothing more: the refusal stands.
+    End,
+    /// Sends the REQ once more, under a new id.
+    Reissue,
+    /// Waits for the relay's verdict on the answer to its challenge.
+    AwaitVerdict,
+}
+
+impl SecondChance {
+    /// The step after a `CLOSED` saying `message`, on a connection that has
+    /// (`authenticated`) or has not authenticated.
+    fn on_closed(&mut self, authenticated: bool, message: &str) -> AfterClosed {
+        if self.taken || !asks_to_authenticate(message) {
+            return AfterClosed::End;
+        }
+        self.taken = true;
+        if authenticated {
+            // Authenticated before this answer: the pool resends nothing.
+            return AfterClosed::Reissue;
+        }
+        // The pool resends under the same id only a refusal spelled exactly
+        // `auth-required:` (strfry puts `ERROR: ` before its own).
+        self.pool_resends = Some(
+            MachineReadablePrefix::parse(message) == Some(MachineReadablePrefix::AuthRequired),
+        );
+        AfterClosed::AwaitVerdict
+    }
+
+    /// The step after `verdict`, when one is awaited.
+    fn on_verdict(&mut self, verdict: AuthVerdict) -> Option<AfterVerdict> {
+        match verdict {
+            AuthVerdict::Authenticated => self.pool_resends.take().map(|resent| {
+                if resent {
+                    AfterVerdict::Read
+                } else {
+                    AfterVerdict::Reissue
+                }
+            }),
+            AuthVerdict::Failed => self.pool_resends.is_some().then_some(AfterVerdict::End),
+        }
+    }
+}
+
+/// Whether a `CLOSED` asks for authentication, spelled `auth-required:` or
+/// with strfry's `ERROR: ` before it.
+fn asks_to_authenticate(message: &str) -> bool {
+    let message = message
+        .strip_prefix("ERROR:")
+        .or_else(|| message.strip_prefix("error:"))
+        .map_or(message, str::trim_start);
+    MachineReadablePrefix::parse(message) == Some(MachineReadablePrefix::AuthRequired)
 }
 
 /// Every event of every relay's answer.
@@ -4035,6 +4599,7 @@ mod tests {
             relay_url: String::new(),
             responded,
             drained,
+            refused: false,
             events: Vec::new(),
         };
         let finished = answer(true, true);
@@ -4090,6 +4655,7 @@ mod tests {
             relay_url: String::new(),
             responded,
             drained,
+            refused: false,
             events: Vec::new(),
         };
         let (finished, cut_short, unreachable) = (
@@ -4854,6 +5420,7 @@ mod tests {
             relay_client: Arc::new(LeavesAnEventUnread(relay.clone())),
             gates: FanoutGates::default(),
             clock: device_clock(),
+            signer: None,
         };
         let _ = fanned_out(&wedging, target).await;
         assert_eq!(
@@ -5140,6 +5707,7 @@ mod tests {
             relay_client: Arc::new(AddsItsTargetAgain(manager.client.clone())),
             gates: FanoutGates::default(),
             clock: device_clock(),
+            signer: None,
         };
         let _ = fanned_out(&racing, relay.url()).await;
         let held = manager
@@ -6475,8 +7043,8 @@ mod tests {
              an event: {faults:?}",
         );
         for expected in [
-            "try_publish_once",
-            "try_publish_once_harvesting",
+            "try_publish_once_heard",
+            "harvest_heard",
             "offer_harvest",
             "offer_event_to",
             "publish_event_background",
@@ -6502,6 +7070,9 @@ mod tests {
         let takes_an_event = |function: &ScannedFn| {
             function.code.contains("(&self,event:&Event,")
                 || function.code.contains("(&self,event:Event,")
+                || function
+                    .code
+                    .contains("(&self,signer:Arc<Nip42Signer>,event:&Event,")
         };
         let publishers: Vec<ScannedFn> = scan_production_functions(include_str!("manager.rs"))
             .into_iter()
@@ -6512,6 +7083,8 @@ mod tests {
             names,
             [
                 "publish_event",
+                "publish_unrecorded_answers",
+                "publish_authenticated",
                 "publish_profile_event",
                 "offer_profile_event",
                 "offer_event_to",
@@ -6540,7 +7113,8 @@ mod tests {
             let body = function.code.split_once('{').map_or("", |(_, body)| body);
             assert!(
                 body.starts_with("Self::refuse_fanout_owned(event)?;")
-                    || body.starts_with("Self::refuse_fanout_owned(&event)?;"),
+                    || body.starts_with("Self::refuse_fanout_owned(&event)?;")
+                    || body.starts_with("ifSelf::refuse_fanout_owned(event).is_err(){"),
                 "`{}` can send an event that has a fanout row: a second sender's \
                  relay answers would be counted as the fanout's own",
                 function.name,
@@ -7709,6 +8283,60 @@ mod tests {
             .expect("a read never fails as a whole");
         assert_eq!(outcomes.len(), urls.len());
         assert!(outcomes.iter().all(|o| o.responded && o.drained));
+    }
+
+    /// A relay that gates gift-wrap reads behind NIP-42 (strfry's default
+    /// `restrictedReadKinds`) ends the REQ refused, never served: the
+    /// Invitations page must not paint it "up to date". Every other `CLOSED`
+    /// is a read that did not finish, and only `EOSE` serves one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_closed_refusing_the_read_ends_a_page_refused_and_never_served() {
+        use crate::relay::scripted_relay::Frame;
+        use crate::relay::InboxRead;
+
+        let wrap = |closed: Option<&str>| {
+            closed.map_or_else(
+                || vec![Frame::Eose],
+                |text| vec![Frame::Closed(text.to_owned())],
+            )
+        };
+        let cases = [
+            (
+                Some("auth-required: requested filter requires authentication"),
+                InboxRead::Refused,
+            ),
+            (Some("restricted: not your inbox"), InboxRead::Refused),
+            // relay.damus.io's own words, strfry's `ERROR: ` and all.
+            (
+                Some("ERROR: auth-required: requested filter requires authentication"),
+                InboxRead::Refused,
+            ),
+            (Some("rate-limited: slow down"), InboxRead::Incomplete),
+            (Some("error: shutting down"), InboxRead::Incomplete),
+            (Some(""), InboxRead::Incomplete),
+            (None, InboxRead::Served),
+        ];
+        let manager = RelayManager::new();
+        for (closed, expected) in cases {
+            let relay = ScriptedRelay::start();
+            relay.answer(|_| true, wrap(closed));
+            let outcomes = manager
+                .fetch_events_per_relay(
+                    Filter::new()
+                        .kind(Kind::GiftWrap)
+                        .pubkey(nostr::Keys::generate().public_key()),
+                    &[relay.url().to_string()],
+                )
+                .await
+                .expect("a read never fails as a whole");
+            let outcome = &outcomes[0];
+            assert_eq!(outcome.inbox_read(), expected, "{closed:?}");
+            assert!(outcome.responded, "{closed:?}");
+            assert!(
+                !(outcome.refused && outcome.drained),
+                "a refused read is never a whole page: {closed:?}"
+            );
+        }
     }
 
     #[test]

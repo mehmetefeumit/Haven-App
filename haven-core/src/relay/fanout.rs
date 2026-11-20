@@ -130,7 +130,7 @@ use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use cgka_traits::{
@@ -161,6 +161,8 @@ use crate::nostr::mls::ChangeNote;
 use crate::nostr::mls::RemovalRequeue;
 use crate::nostr::mls::SessionManager;
 use crate::relay::catchup::ReceiveOnlyOutcome;
+use crate::relay::identity::AuthSendOutcome;
+use crate::relay::nip42::Nip42Signer;
 use crate::relay::{PublishResult, RelayResult};
 
 /// How many times MDK's relay client sends an event to a relay that keeps
@@ -210,24 +212,33 @@ pub enum FanoutTargetOutcome {
 /// and misses its quorum comes back as an error with the receipts it did
 /// collect thrown away (v0.10.4 `transport-nostr-adapter/src/sdk_client.rs`
 /// 1276-1316), which would read an accepted commit as failed everywhere.
+///
+/// `resend`, when the transport authenticates, answers an `auth-required:`
+/// failure — proven or not — inside this call: the same verified event, byte
+/// for byte, sent once more as the identity on a connection of its own
+/// (owner decision D1c), and the two phases classified together
+/// ([`after_resend`]). Without it, a proven `auth-required:` is a refusal
+/// that cannot change ([`proven`]).
 pub(crate) async fn publish_to_target(
     relay_client: &dyn NostrRelayClient,
     target: &TransportEndpoint,
     message: &TransportMessage,
     mut heard: Option<Receiver<RelayNotification>>,
     now_secs: u64,
+    resend: Option<&dyn AuthRetry>,
 ) -> FanoutTargetOutcome {
     // The frozen bytes are sent as the signed event they are, or not at all:
     // MDK's client signs an unsigned event with whatever signer its client has.
-    let Some((event, id, signed_at)) = NostrTransportEvent::from_transport_message(message)
+    let Some((event, verified)) = NostrTransportEvent::from_transport_message(message)
         .ok()
         .and_then(|event| {
             let verified = event.to_verified_nostr_event().ok()?;
-            Some((event, verified.id, verified.created_at.as_secs()))
+            Some((event, verified))
         })
     else {
         return not_exposed(target);
     };
+    let (id, signed_at) = (verified.id, verified.created_at.as_secs());
     let age_secs = now_secs.saturating_sub(signed_at);
     let result = relay_client
         .publish_event(std::slice::from_ref(target), &event, 1)
@@ -257,13 +268,75 @@ pub(crate) async fn publish_to_target(
         log::warn!("[Fanout] a relay client's answer classified nothing for its relay");
         return failed_as(target, possibly_exposed(target));
     };
-    match failed_as(target, proven(failure.clone(), answers)) {
+    let mut failure = proven(failure.clone(), answers);
+    if let Some(resend) = resend.filter(|_| {
+        failure.rejection_category == Some(TransportEndpointRejectionCategory::AuthRequired)
+    }) {
+        match after_resend(failure, resend.resend(&verified).await) {
+            Some(after) => failure = after,
+            None => return FanoutTargetOutcome::Accepted,
+        }
+    }
+    match failed_as(target, failure) {
         FanoutTargetOutcome::Failed(failed) => {
             FanoutTargetOutcome::Failed(failed.blaming_the_clock(answers.clock.and_then(
                 |complaint| crate::relay::clock_skew::on_this_clock(complaint, age_secs),
             )))
         }
         accepted @ FanoutTargetOutcome::Accepted => accepted,
+    }
+}
+
+/// One authenticated resend of a frozen, verified event to the relay a fanout
+/// call is for (owner decision D1c): what `relay::identity` reads off that
+/// relay's own `OK` frames on its own connection.
+pub(crate) trait AuthRetry: Send + Sync {
+    /// Sends `event`, unchanged, at most once after authenticating.
+    fn resend<'a>(
+        &'a self,
+        event: &'a nostr::Event,
+    ) -> Pin<Box<dyn Future<Output = AuthSendOutcome> + Send + 'a>>;
+}
+
+/// The reason stored for a target whose authenticated resend could not be
+/// made: Haven's own words, fixed.
+pub const NOT_RESENT: &str = "the authenticated resend was not made";
+
+/// What a call whose anonymous phase ended in `anonymous` — an
+/// `auth-required:` failure, `TerminalRejected` when every attempt was proven
+/// refused and `PossiblyExposed` when not — comes to once its authenticated
+/// resend answered `resent`. `None` is an acceptance.
+///
+/// Rolled back only on proof (Security Rule 13): a refusal stands only when
+/// BOTH phases are proven — the anonymous call answered `OK false` on every
+/// attempt, and the authenticated one either sent nothing after
+/// authenticating or was answered `OK false` for everything it sent. A frame
+/// left unanswered on either connection may be stored. A resend that could
+/// not be made after a proven anonymous refusal leaves the relay owed, as
+/// one that could not be reached is: never a refusal the record would end
+/// the target on.
+fn after_resend(
+    anonymous: TransportEndpointFailure,
+    resent: AuthSendOutcome,
+) -> Option<TransportEndpointFailure> {
+    use TransportEndpointFailureKind::{PossiblyExposed, RetryableUnavailable, TerminalRejected};
+    let proven = anonymous.kind == TerminalRejected;
+    match resent {
+        AuthSendOutcome::Accepted => None,
+        AuthSendOutcome::Refused | AuthSendOutcome::NotAuthenticated if proven => Some(anonymous),
+        AuthSendOutcome::NotSent if proven => Some(TransportEndpointFailure {
+            reason: NOT_RESENT.to_owned(),
+            kind: RetryableUnavailable,
+            rejection_category: None,
+            ..anonymous
+        }),
+        AuthSendOutcome::Refused
+        | AuthSendOutcome::NotAuthenticated
+        | AuthSendOutcome::NotSent
+        | AuthSendOutcome::Unanswered => Some(TransportEndpointFailure {
+            kind: PossiblyExposed,
+            ..anonymous
+        }),
     }
 }
 
@@ -373,8 +446,9 @@ fn proven(failure: TransportEndpointFailure, answers: Answers) -> TransportEndpo
             ..failure
         };
     }
-    // The publish client holds no signer and never authenticates, so this
-    // answer cannot change: it is a refusal, not an outage to wait out.
+    // The publish client holds no signer and never authenticates, so on its
+    // own this answer cannot change: a refusal, not an outage to wait out. An
+    // authenticating transport's resend is what decides it (`after_resend`).
     if failure.rejection_category == Some(TransportEndpointRejectionCategory::AuthRequired) {
         return TransportEndpointFailure {
             kind: TerminalRejected,
@@ -869,16 +943,18 @@ pub trait FanoutSend: Send + Sync {
     ) -> FanoutTargetOutcome;
 
     /// Offers a location's `event` to every one of `targets` — relay URLs
-    /// exactly as its record froze them — once, inside the location window,
-    /// and answers what the transport did, unchanged: one relay's `OK` is a
+    /// exactly as its record froze them — once (an authenticating transport
+    /// once more, as the identity, to a relay that answered `auth-required:`
+    /// when no relay took it), inside the location window, and answers what
+    /// the transport did, unchanged: one relay's `OK` is a
     /// success, and when no relay took it and a relay's `invalid:`,
     /// `blocked:` or unprefixed refusal blamed the timestamp it is
     /// [`RelayError::DeviceClockRejected`](crate::relay::RelayError::DeviceClockRejected)
     /// (`clock_skew::classify_publish_outcome`).
     ///
-    /// Haven's own transport, not MDK's relay client: one attempt a relay
-    /// where that client makes up to three, and the relay's words kept for
-    /// the clock verdict where it discards them
+    /// Haven's own transport, not MDK's relay client: one anonymous attempt
+    /// a relay where that client makes up to three, and the relay's words kept
+    /// for the clock verdict where it discards them
     /// (`docs/MDK_UPSTREAM_TRACKER.md` T-APP-TRANSPORT). No relay is taken
     /// for it ([`Self::take`]): a location never waits behind a commit's
     /// call, and never makes one wait.
@@ -1005,9 +1081,13 @@ pub const GATE_WAIT_SECS: u64 = 5;
 /// The longest one row can take in a drive, and so what a wake must still
 /// have left for a row to be begun in it.
 ///
-/// The wait for its relays, MDK's client's own ceiling for a call, and every
-/// deadline the fold of its resolution may wait out.
-pub const ROW_BUDGET_MS: u64 = (GATE_WAIT_SECS + MDK_CALL_CEILING_SECS) * 1_000 + FOLD_BUDGET_MS;
+/// The wait for its relays, MDK's client's own ceiling for a call, the one
+/// authenticated resend a relay that answered `auth-required:` is made inside
+/// that call ([`AUTH_RETRY_MS`](crate::relay::manager::AUTH_RETRY_MS)), and
+/// every deadline the fold of its resolution may wait out.
+pub const ROW_BUDGET_MS: u64 = (GATE_WAIT_SECS + MDK_CALL_CEILING_SECS) * 1_000
+    + crate::relay::manager::AUTH_RETRY_MS
+    + FOLD_BUDGET_MS;
 
 /// The longest the fold of one resolution waits for the engine's own
 /// deadlines.
@@ -1019,8 +1099,20 @@ pub const FOLD_BUDGET_MS: u64 = crate::relay::retick::MAX_CONVERGENCE_RETICKS as
 ///
 /// A Welcome sent from its record, or a proposal no record could be
 /// written for: the figure is that publisher's own longest run against
-/// relays that never answer.
-pub const PUBLISHER_BUDGET_MS: u64 = crate::relay::manager::PUBLISH_LADDER_MS;
+/// relays that never answer, and then the one authenticated resend to the
+/// relays that asked for it.
+pub const PUBLISHER_BUDGET_MS: u64 =
+    crate::relay::manager::PUBLISH_LADDER_MS + crate::relay::manager::AUTH_RETRY_MS;
+
+/// How long after a pass of Welcome sends began its other sends are still
+/// waited for once every record of the pass has been acknowledged.
+///
+/// One attempt of the publisher's ladder: the connect and the `OK` window.
+/// What a relay that answers within it acknowledges is still a copy of the
+/// Welcome on that relay; what it cuts off is a copy nothing owes, never a
+/// record's delivery. A relay that would take the Welcome only on a later
+/// attempt of its ladder is not sent it by this pass.
+pub const WELCOME_COPY_WINDOW_MS: u64 = crate::relay::manager::PUBLISH_ATTEMPT_MS;
 
 /// What a drive asks to be woken after when a relay it wants was not free.
 ///
@@ -3493,39 +3585,130 @@ pub fn wake_deadline(circle: &CircleManager, clock: &dyn FanoutClock, budget_ms:
         .map_or(deadline, |ends| deadline.min(ends.on(clock)))
 }
 
+/// What one relay did with an event no fanout record holds, read off that
+/// relay's own `OK` frames for the event: the category from the
+/// machine-readable prefix, never the relay's words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnrecordedAnswer {
+    /// `OK true`, or `OK false` with `duplicate:`: the relay holds the event.
+    Accepted,
+    /// `OK false` with `auth-required:`, and nothing it said took the event.
+    AuthRequired,
+    /// `OK false` otherwise.
+    Refused,
+    /// No `OK` for the event was heard.
+    Unanswered,
+}
+
+impl UnrecordedAnswer {
+    /// Everything `heard` holds for `id`, without waiting.
+    pub(crate) fn heard(heard: &mut Receiver<RelayNotification>, id: &EventId) -> Self {
+        let mut answer = Self::Unanswered;
+        loop {
+            match heard.try_recv() {
+                Ok(RelayNotification::Message {
+                    message:
+                        RelayMessage::Ok {
+                            event_id,
+                            status,
+                            message,
+                        },
+                }) if event_id == *id => {
+                    let prefix = MachineReadablePrefix::parse(&message);
+                    answer = answer.merge(
+                        if status || prefix == Some(MachineReadablePrefix::Duplicate) {
+                            Self::Accepted
+                        } else if prefix == Some(MachineReadablePrefix::AuthRequired) {
+                            Self::AuthRequired
+                        } else {
+                            Self::Refused
+                        },
+                    );
+                }
+                Ok(_) | Err(TryRecvError::Lagged(_)) => {}
+                Err(TryRecvError::Empty | TryRecvError::Closed) => return answer,
+            }
+        }
+    }
+
+    /// What two answers of one relay to the same event say together: an
+    /// acceptance stands, and a demand for authentication outranks any other
+    /// refusal, which outranks silence.
+    #[must_use]
+    pub const fn merge(self, other: Self) -> Self {
+        const fn rank(answer: UnrecordedAnswer) -> u8 {
+            match answer {
+                UnrecordedAnswer::Accepted => 3,
+                UnrecordedAnswer::AuthRequired => 2,
+                UnrecordedAnswer::Refused => 1,
+                UnrecordedAnswer::Unanswered => 0,
+            }
+        }
+        if rank(other) > rank(self) {
+            other
+        } else {
+            self
+        }
+    }
+
+    /// One answer per relay of `relays`: all accepted when `acked`, all
+    /// refused when not — for a publisher that knows no more than that.
+    #[must_use]
+    pub fn all(relays: &[String], acked: bool) -> Vec<Self> {
+        vec![if acked { Self::Accepted } else { Self::Refused }; relays.len()]
+    }
+}
+
 /// A relay plane that publishes an event no fanout record holds.
 ///
 /// It sends a Welcome, or a proposal no record could be written for, and
-/// reports whether at least one relay OK-acked it; never a commit (Security
-/// Rule 13).
+/// reports what each relay did with it; never a commit (Security Rule 13).
+/// A relay that answered `auth-required:` may be sent the same event once
+/// more as the user's identity ([`Self::publish_authenticated`], owner
+/// decision D1b) — never pre-emptively, and never on the anonymous publish
+/// client.
 ///
 /// "Acked" means a relay returned OK, never merely "sent": a transport error
-/// or a zero-ack outcome is `false`. A boxed future keeps the trait
+/// or a zero-ack outcome is no acceptance. A boxed future keeps the trait
 /// object-safe without `async-trait`.
 pub trait UnrecordedPublisher: Send + Sync {
-    /// Publishes `event` to `relays`; resolves to `true` iff ≥1 relay OK-acked.
+    /// Publishes `event` to `relays`, anonymously: one answer per relay, in
+    /// `relays`' order.
     fn publish_unrecorded<'a>(
         &'a self,
         event: &'a nostr::Event,
         relays: &'a [String],
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Vec<UnrecordedAnswer>> + Send + 'a>>;
+
+    /// Sends `event` to `relay` once more, as `signer`'s identity, on a
+    /// connection that authenticates and is closed when the call ends.
+    fn publish_authenticated<'a>(
+        &'a self,
+        signer: Arc<Nip42Signer>,
+        event: &'a nostr::Event,
+        relay: &'a str,
+    ) -> Pin<Box<dyn Future<Output = AuthSendOutcome> + Send + 'a>>;
 }
 
-/// The product's publisher of what has no record: `publish_event` already
-/// holds the ≥1-relay OK-ack contract
-/// ([`crate::relay::PublishResult::is_success`]) and refuses an event a
-/// fanout record owns ([`is_owned`]).
+/// The product's publisher of what has no record: `publish_event`'s ladder,
+/// read relay by relay, which refuses an event a fanout record owns
+/// ([`is_owned`]); and the identity's per-call connection for the resend.
 impl UnrecordedPublisher for super::RelayManager {
     fn publish_unrecorded<'a>(
         &'a self,
         event: &'a nostr::Event,
         relays: &'a [String],
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move {
-            self.publish_event(event, relays)
-                .await
-                .is_ok_and(|result| result.is_success())
-        })
+    ) -> Pin<Box<dyn Future<Output = Vec<UnrecordedAnswer>> + Send + 'a>> {
+        Box::pin(self.publish_unrecorded_answers(event, relays))
+    }
+
+    fn publish_authenticated<'a>(
+        &'a self,
+        signer: Arc<Nip42Signer>,
+        event: &'a nostr::Event,
+        relay: &'a str,
+    ) -> Pin<Box<dyn Future<Output = AuthSendOutcome> + Send + 'a>> {
+        Box::pin(Self::publish_authenticated(self, signer, event, relay))
     }
 }
 
@@ -3641,20 +3824,55 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
         Ok(())
     }
 
-    /// Hands `event` to the publisher of what has no record — in
-    /// [`DriveMode::Full`] alone — when the wake
-    /// has that publisher's longest run left, and for no longer than the
-    /// wake lasts. `None` when it was not begun or the wake ended first:
-    /// either way nothing says a relay took it.
-    async fn send_unrecorded(&self, event: &nostr::Event, relays: &[String]) -> Option<bool> {
-        if self.mode.mode() != DriveMode::Full || !self.allows(PUBLISHER_BUDGET_MS) {
-            return None;
-        }
-        within(
-            self.clock,
-            self.deadline_ms,
-            self.publisher.publish_unrecorded(event, relays),
-        )
+    /// Whether a publish of what has no record may be begun now: in
+    /// [`DriveMode::Full`] alone, and only while the wake has that
+    /// publisher's longest run left ([`PUBLISHER_BUDGET_MS`]). Asked by each
+    /// caller of [`Self::send_unrecorded`] before it — once for a whole pass
+    /// of Welcomes, whose sends begin at one instant.
+    fn may_send_unrecorded(&self) -> bool {
+        self.mode.mode() == DriveMode::Full && self.allows(PUBLISHER_BUDGET_MS)
+    }
+
+    /// Hands `event` to the publisher of what has no record, for no longer
+    /// than the wake lasts: the driver's one way to a relay for an event no
+    /// record holds — a Welcome, or a proposal no record could be written
+    /// for. Its caller has asked [`Self::may_send_unrecorded`]. `None` when
+    /// the wake ended first: nothing says a relay took it.
+    ///
+    /// When no relay took it, each relay that answered `auth-required:` is
+    /// sent it once more as `circle`'s identity, all at once (owner decision
+    /// D1b) — unless `taken` says another send of the same event has been
+    /// acknowledged by then, read just before each dial: a resend after that
+    /// only discloses who sent it. An acknowledgement here sets `taken`.
+    async fn send_unrecorded(
+        &self,
+        circle: &CircleManager,
+        event: &nostr::Event,
+        relays: &[String],
+        taken: &std::sync::atomic::AtomicBool,
+    ) -> Option<bool> {
+        within(self.clock, self.deadline_ms, async {
+            let answers = self.publisher.publish_unrecorded(event, relays).await;
+            let accepted = answers.contains(&UnrecordedAnswer::Accepted) || {
+                let resends = relays
+                    .iter()
+                    .zip(&answers)
+                    .filter(|(_, answer)| **answer == UnrecordedAnswer::AuthRequired)
+                    .map(|(relay, _)| async move {
+                        !taken.load(Ordering::SeqCst)
+                            && self
+                                .publisher
+                                .publish_authenticated(circle.nip42_signer(), event, relay)
+                                .await
+                                == AuthSendOutcome::Accepted
+                    });
+                futures::future::join_all(resends).await.contains(&true)
+            };
+            if accepted {
+                taken.store(true, Ordering::SeqCst);
+            }
+            accepted
+        })
         .await
     }
 
@@ -5067,7 +5285,11 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
                 found = Some(Own { status, notes });
             }
         }
-        pass.welcomes_sent += self.deliver_welcomes(circle).await.len();
+        let (delivered, due_after_ms) = self.deliver_welcomes(circle).await;
+        pass.welcomes_sent += delivered.len();
+        if let Some(wait) = due_after_ms.map(|wait| wait.max(BUSY_RETRY_MS)) {
+            pass.retry_after_ms = Some(pass.retry_after_ms.map_or(wait, |least| least.min(wait)));
+        }
         if errored {
             pass.errored = true;
             log::warn!(
@@ -5104,35 +5326,48 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
             if !relays.is_empty() {
                 // Nothing to confirm and nothing to roll back: an unacked
                 // proposal is minted again by the next commit applied.
-                let _ = self.send_unrecorded(&proposal, &relays).await;
+                if self.may_send_unrecorded() {
+                    let taken = std::sync::atomic::AtomicBool::new(false);
+                    let _ = self
+                        .send_unrecorded(circle, &proposal, &relays, &taken)
+                        .await;
+                }
             }
         }
     }
 
     /// Sends every Welcome still owed from its delivery record
     /// (`SessionManager::welcome_records`): the exact stored event, byte for
-    /// byte, to each relay of its invitee's inbox that is due by MDK's own
+    /// byte, to every relay of its invitee's inbox that is due by MDK's own
     /// schedule for such a record — at once, then 30 seconds after an
     /// unanswered attempt, the wait doubling to an hour — until one of those
     /// relays acknowledges that event, which completes the Welcome in the
-    /// engine and ends the record. Returns the circle of each Welcome
-    /// delivered.
+    /// engine and ends the record. Every due relay of every record is sent to
+    /// in one concurrent pass: a relay that never answers delays neither
+    /// another relay of the same inbox, which may be the only one its invitee
+    /// can read, nor another invitee's Welcome. Returns the circle of each
+    /// Welcome delivered, and how long until a record still owed has a relay
+    /// due — the drive's own ask to be resumed.
     ///
-    /// Asked again immediately before each send whether the invite's commit
-    /// is still this device's canonical one and the engine still owes the
-    /// Welcome: a Welcome into an epoch the circle never reached must not go
-    /// out (Security Rule 3). One whose commit lost for good ends as failed;
-    /// one past its bound (a day) is no longer sent, and its circle's note
-    /// that a Welcome is still owed stands. A send that was not begun — the
-    /// mode narrowed, or the wake has no room — is no send, and its relay
-    /// stays due.
-    async fn deliver_welcomes(&self, circle: &CircleManager) -> Vec<GroupId> {
+    /// Asked again immediately before each record's sends whether the
+    /// invite's commit is still this device's canonical one and the engine
+    /// still owes the Welcome: a Welcome into an epoch the circle never
+    /// reached must not go out (Security Rule 3). One whose commit lost for
+    /// good ends as failed; one past its bound (a day) is no longer sent, and
+    /// its circle's note that a Welcome is still owed stands. A send that was
+    /// not begun — the mode narrowed, or the wake has no room — or that the
+    /// wake cut short is no send, and its relay stays due.
+    async fn deliver_welcomes(&self, circle: &CircleManager) -> (Vec<GroupId>, Option<u64>) {
         let mut delivered = Vec::new();
         if self.mode.mode() != DriveMode::Full {
-            return delivered;
+            return (delivered, None);
         }
-        for mut record in circle.session().welcome_records().await {
+        let mut records = Vec::new();
+        let mut sends = Vec::new();
+        let mut cut_short = None;
+        for record in circle.session().welcome_records().await {
             if !self.allows(PUBLISHER_BUDGET_MS) {
+                cut_short = Some(0);
                 break;
             }
             if !still_owed(circle, &record).await {
@@ -5182,39 +5417,108 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
             let Ok(event) = SessionManager::transport_message_to_event(record.welcome()) else {
                 continue;
             };
-            for (index, (relay, url)) in record.due(now_ms).into_iter().enumerate() {
-                // Read again before each send after the first: a relay's
-                // answer takes seconds, and the commit or the engine's
-                // obligation can change under it.
-                if index > 0 && !still_owed(circle, &record).await {
-                    if circle.session().welcome_delivered(&record).await {
-                        delivered.extend(record.group().cloned());
-                    }
-                    break;
-                }
-                let relays = [url];
-                if !circle.record_welcome_relays(&relays) {
-                    continue;
-                }
-                let Some(accepted) = self.send_unrecorded(&event, &relays).await else {
-                    break;
-                };
-                // An answer that is not stored leaves the relay due again:
-                // the same bytes go to it at its next turn, which a relay that
-                // took them answers `duplicate:`.
-                let answered = circle
-                    .session()
-                    .note_welcome_answer(&mut record, relay, accepted, self.clock.now_ms())
-                    .await;
-                if answered.unwrap_or(false) {
-                    if let Some(group_id) = record.group() {
-                        delivered.push(group_id.clone());
-                    }
-                    break;
+            let mut due = record.due(now_ms);
+            let urls: Vec<String> = due.iter().map(|(_, url)| url.clone()).collect();
+            if !urls.is_empty() && !circle.record_welcome_relays(&urls) {
+                due.clear();
+            }
+            records.push(record);
+            sends.push((event, due));
+        }
+        let ended = self.send_welcomes(circle, &mut records, &sends).await;
+        delivered.extend(
+            records
+                .iter()
+                .zip(&ended)
+                .filter(|(_, ended)| **ended)
+                .filter_map(|(record, _)| record.group().cloned()),
+        );
+        let now_ms = self.clock.now_ms();
+        let soonest = records
+            .iter()
+            .zip(&ended)
+            .filter(|(_, ended)| !**ended)
+            .filter_map(|(record, _)| record.due_after_ms(now_ms))
+            .chain(cut_short)
+            .min();
+        (delivered, soonest)
+    }
+
+    /// Sends each record's Welcome (`sends[i]`, the event and its due relays,
+    /// for `records[i]`) in one concurrent pass and stores every answer, and
+    /// returns which records an acknowledgement delivered. Once every record
+    /// is delivered, the sends still under way are waited for only until
+    /// [`WELCOME_COPY_WINDOW_MS`] after the pass began, and then dropped.
+    ///
+    /// Each send is anonymous. A relay that answers it `auth-required:` is
+    /// sent the same bytes once more, as the inviter's identity (owner
+    /// decision D1b), unless a relay has already taken that Welcome in this
+    /// pass — read just before the dial, since an authenticated send after
+    /// that only discloses who sent it. The relay's turn is one answer: either
+    /// send's acceptance. Its next turn starts anonymous again.
+    async fn send_welcomes(
+        &self,
+        circle: &CircleManager,
+        records: &mut [WelcomeRecord],
+        sends: &[(nostr::Event, Vec<(usize, String)>)],
+    ) -> Vec<bool> {
+        use futures::stream::{FuturesUnordered, StreamExt};
+        use std::sync::atomic::AtomicBool;
+
+        let taken: Vec<AtomicBool> = records.iter().map(|_| AtomicBool::new(false)).collect();
+        let taken = taken.as_slice();
+        // Every send of the pass is begun at one instant, so the wake's room
+        // is read once for all of them.
+        let copies_until_ms = self.clock.now_ms().saturating_add(WELCOME_COPY_WINDOW_MS);
+        let mut answers = FuturesUnordered::new();
+        if self.may_send_unrecorded() {
+            for (index, (event, due)) in sends.iter().enumerate() {
+                for (relay, url) in due {
+                    answers.push(async move {
+                        let relays = std::slice::from_ref(url);
+                        let answer = self
+                            .send_unrecorded(circle, event, relays, &taken[index])
+                            .await;
+                        (index, *relay, answer)
+                    });
                 }
             }
         }
-        delivered
+
+        let mut ended = vec![false; records.len()];
+        loop {
+            // A user's create or invite waits on this pass: once every record
+            // is delivered, a relay that takes the socket and never answers
+            // must not hold it for a whole ladder. Polled first, so an answer
+            // already there is never cut.
+            let next = if ended.iter().all(|ended| *ended) {
+                match futures::future::select(answers.next(), self.clock.until(copies_until_ms))
+                    .await
+                {
+                    futures::future::Either::Left((next, _)) => next,
+                    futures::future::Either::Right(((), _)) => None,
+                }
+            } else {
+                answers.next().await
+            };
+            let Some((index, relay, answer)) = next else {
+                break;
+            };
+            // Once one relay's acknowledgement ended the record, every later
+            // answer of the pass reads as that same delivery.
+            let (Some(accepted), false) = (answer, ended[index]) else {
+                continue;
+            };
+            // An answer that is not stored leaves the relay due again: the
+            // same bytes go to it at its next turn, which a relay that took
+            // them answers `duplicate:`.
+            ended[index] = circle
+                .session()
+                .note_welcome_answer(&mut records[index], relay, accepted, self.clock.now_ms())
+                .await
+                .unwrap_or(false);
+        }
+        ended
     }
 }
 
@@ -5237,7 +5541,9 @@ async fn still_owed(circle: &CircleManager, record: &WelcomeRecord) -> bool {
 #[cfg(any(test, feature = "test-utils"))]
 pub mod scripted {
     use std::collections::{HashMap, VecDeque};
-    use std::sync::{Mutex, PoisonError};
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex, PoisonError};
 
     use cgka_traits::{
         TransportEndpoint, TransportEndpointFailure, TransportEndpointFailureKind,
@@ -5248,8 +5554,10 @@ pub mod scripted {
 
     use crate::relay::{PublishResult, RelayResult};
 
-    use super::{FanoutSend, FanoutTargetOutcome, Taken};
+    use super::{FanoutSend, FanoutTargetOutcome, Taken, UnrecordedAnswer};
     use crate::nostr::mls::types::{FanoutEndpointFailure, TransportMessage};
+    use crate::relay::identity::AuthSendOutcome;
+    use crate::relay::nip42::Nip42Signer;
 
     /// What a scripted relay does with one fanout publish, as the transport
     /// reports it.
@@ -5519,14 +5827,29 @@ pub mod scripted {
         fn publish_unrecorded<'a>(
             &'a self,
             event: &'a nostr::Event,
-            _relays: &'a [String],
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+            relays: &'a [String],
+        ) -> Pin<Box<dyn Future<Output = Vec<UnrecordedAnswer>> + Send + 'a>> {
             self.handed
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push(event.clone());
-            Box::pin(async { true })
+            Box::pin(async { UnrecordedAnswer::all(relays, true) })
         }
+
+        fn publish_authenticated<'a>(
+            &'a self,
+            _signer: Arc<Nip42Signer>,
+            _event: &'a nostr::Event,
+            _relay: &'a str,
+        ) -> Pin<Box<dyn Future<Output = AuthSendOutcome> + Send + 'a>> {
+            not_resent()
+        }
+    }
+
+    /// The answer of a publisher that makes no authenticated resend.
+    #[must_use = "a resend answer that is never awaited decides nothing"]
+    pub fn not_resent<'a>() -> Pin<Box<dyn Future<Output = AuthSendOutcome> + Send + 'a>> {
+        Box::pin(async { AuthSendOutcome::NotSent })
     }
 
     /// A transport, and a publisher of what has no record, on which every
@@ -5566,9 +5889,18 @@ pub mod scripted {
         fn publish_unrecorded<'a>(
             &'a self,
             _event: &'a nostr::Event,
-            _relays: &'a [String],
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
-            Box::pin(async { false })
+            relays: &'a [String],
+        ) -> Pin<Box<dyn Future<Output = Vec<UnrecordedAnswer>> + Send + 'a>> {
+            Box::pin(async { UnrecordedAnswer::all(relays, false) })
+        }
+
+        fn publish_authenticated<'a>(
+            &'a self,
+            _signer: Arc<Nip42Signer>,
+            _event: &'a nostr::Event,
+            _relay: &'a str,
+        ) -> Pin<Box<dyn Future<Output = AuthSendOutcome> + Send + 'a>> {
+            not_resent()
         }
     }
 
@@ -5607,9 +5939,18 @@ pub mod scripted {
         fn publish_unrecorded<'a>(
             &'a self,
             _event: &'a nostr::Event,
-            _relays: &'a [String],
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
-            Box::pin(async { false })
+            relays: &'a [String],
+        ) -> Pin<Box<dyn Future<Output = Vec<UnrecordedAnswer>> + Send + 'a>> {
+            Box::pin(async { vec![UnrecordedAnswer::Unanswered; relays.len()] })
+        }
+
+        fn publish_authenticated<'a>(
+            &'a self,
+            _signer: Arc<Nip42Signer>,
+            _event: &'a nostr::Event,
+            _relay: &'a str,
+        ) -> Pin<Box<dyn Future<Output = AuthSendOutcome> + Send + 'a>> {
+            not_resent()
         }
     }
 
@@ -6055,6 +6396,7 @@ mod tests {
             &fanout_message(),
             None,
             BEFORE_EVERY_SIGNING,
+            None,
         )
         .await;
 
@@ -6083,7 +6425,15 @@ mod tests {
         });
         assert!(
             matches!(
-                publish_to_target(&accepting, &target, &message, None, BEFORE_EVERY_SIGNING).await,
+                publish_to_target(
+                    &accepting,
+                    &target,
+                    &message,
+                    None,
+                    BEFORE_EVERY_SIGNING,
+                    None
+                )
+                .await,
                 FanoutTargetOutcome::Accepted
             ),
             "an acceptance for the same relay under MDK's spelling was not \
@@ -6109,6 +6459,7 @@ mod tests {
             &message,
             Some(refusals),
             BEFORE_EVERY_SIGNING,
+            None,
         )
         .await;
         assert!(
@@ -6174,6 +6525,7 @@ mod tests {
                 &fanout_message(),
                 None,
                 BEFORE_EVERY_SIGNING,
+                None,
             )
             .await;
             assert!(
@@ -6205,6 +6557,7 @@ mod tests {
                 &fanout_message(),
                 None,
                 BEFORE_EVERY_SIGNING,
+                None,
             )
             .await;
             assert!(
@@ -6262,6 +6615,7 @@ mod tests {
                 &payload,
                 None,
                 BEFORE_EVERY_SIGNING,
+                None,
             )
             .await;
             assert!(
@@ -6281,6 +6635,7 @@ mod tests {
             &message,
             None,
             BEFORE_EVERY_SIGNING,
+            None,
         )
         .await;
         assert!(
@@ -6319,6 +6674,7 @@ mod tests {
                             message,
                             Some(stream),
                             BEFORE_EVERY_SIGNING,
+                            None,
                         )
                         .await,
                     )
@@ -6352,6 +6708,7 @@ mod tests {
                 &message,
                 None,
                 BEFORE_EVERY_SIGNING,
+                None,
             )
             .await;
             assert!(
@@ -6375,6 +6732,7 @@ mod tests {
                 &message,
                 Some(lagged),
                 BEFORE_EVERY_SIGNING,
+                None,
             )
             .await;
             assert!(
@@ -6391,6 +6749,7 @@ mod tests {
                 &message,
                 Some(closed),
                 BEFORE_EVERY_SIGNING,
+                None,
             )
             .await;
             assert!(
@@ -7424,6 +7783,7 @@ mod tests {
                 &message,
                 Some(stream),
                 BEFORE_EVERY_SIGNING,
+                None,
             )
             .await;
             assert!(
@@ -7455,6 +7815,7 @@ mod tests {
             &message,
             Some(stream),
             BEFORE_EVERY_SIGNING,
+            None,
         )
         .await;
         assert!(
@@ -7488,6 +7849,7 @@ mod tests {
                 &fanout_message(),
                 None,
                 BEFORE_EVERY_SIGNING,
+                None,
             )
             .await;
             assert!(
@@ -7517,7 +7879,8 @@ mod tests {
                         &endpoint(RELAY),
                         &message,
                         Some(stream),
-                        BEFORE_EVERY_SIGNING
+                        BEFORE_EVERY_SIGNING,
+                        None
                     )
                     .await,
                     FanoutTargetOutcome::Accepted
@@ -7533,7 +7896,8 @@ mod tests {
                         &endpoint(RELAY),
                         &message,
                         Some(stream),
-                        BEFORE_EVERY_SIGNING
+                        BEFORE_EVERY_SIGNING,
+                        None
                     )
                     .await,
                     FanoutTargetOutcome::Accepted
@@ -7558,7 +7922,8 @@ mod tests {
                     &endpoint(RELAY),
                     &message,
                     Some(lagged),
-                    BEFORE_EVERY_SIGNING
+                    BEFORE_EVERY_SIGNING,
+                    None
                 )
                 .await,
                 FanoutTargetOutcome::Accepted
@@ -7567,11 +7932,55 @@ mod tests {
         );
     }
 
-    /// The publish client can never authenticate, so `auth-required:` cannot
-    /// change: once the relay has said it to every attempt it is a refusal, not
-    /// an outage to wait out. Unproven, it is what every unproven refusal is.
+    /// An authenticated resend that answers as a test scripted it, keeping
+    /// every event it was handed.
+    struct Resend {
+        answer: AuthSendOutcome,
+        handed: Mutex<Vec<nostr::Event>>,
+    }
+
+    impl Resend {
+        fn answering(answer: AuthSendOutcome) -> Self {
+            Self {
+                answer,
+                handed: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn handed(&self) -> Vec<nostr::Event> {
+            self.handed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    impl AuthRetry for Resend {
+        fn resend<'a>(
+            &'a self,
+            event: &'a nostr::Event,
+        ) -> Pin<Box<dyn Future<Output = AuthSendOutcome> + Send + 'a>> {
+            self.handed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(event.clone());
+            let answer = self.answer;
+            Box::pin(async move { answer })
+        }
+    }
+
+    /// `auth-required:` is answered by ONE resend of the same signed event,
+    /// and the call is what both phases prove together (owner decision D1c,
+    /// Security Rule 13): acked on either connection is acked; a refusal only
+    /// when the anonymous call was refused on every attempt AND the resend
+    /// was refused or never got past authentication; anything unanswered, or
+    /// an unproven anonymous phase, is possibly exposed; and a resend that
+    /// could not be made leaves the relay owed, never refused. A transport
+    /// that makes no resend keeps the anonymous verdict: proven, a refusal
+    /// that cannot change.
     #[tokio::test]
-    async fn auth_required_is_terminal_once_every_attempt_was_answered_with_it() {
+    async fn auth_required_is_decided_by_one_resend_and_what_both_phases_prove() {
+        use AuthSendOutcome::{Accepted, NotAuthenticated, NotSent, Refused, Unanswered};
         use TransportEndpointFailureKind::{
             PossiblyExposed, RetryableUnavailable, TerminalRejected,
         };
@@ -7579,33 +7988,121 @@ mod tests {
         let client = failing(RetryableUnavailable, auth);
         let message = fanout_message();
         let id = id_of(&message);
+        let frozen = SessionManager::transport_message_to_event(&message)
+            .unwrap_or_else(|_| panic!("the frozen event"));
 
-        let (_said, proven) = heard(&[(id, false); 3]);
+        // (anonymous phase proven, what the resend answered) → the call.
+        let cases = [
+            (true, Accepted, None),
+            (false, Accepted, None),
+            (true, Refused, Some((TerminalRejected, auth))),
+            (true, NotAuthenticated, Some((TerminalRejected, auth))),
+            (false, Refused, Some((PossiblyExposed, auth))),
+            (false, NotAuthenticated, Some((PossiblyExposed, auth))),
+            (true, Unanswered, Some((PossiblyExposed, auth))),
+            (false, Unanswered, Some((PossiblyExposed, auth))),
+            (true, NotSent, Some((RetryableUnavailable, None))),
+            (false, NotSent, Some((PossiblyExposed, auth))),
+        ];
+        for (anonymous_proven, answer, expected) in cases {
+            let refusals = if anonymous_proven { 3 } else { 2 };
+            let (_said, stream) = heard(&vec![(id, false); refusals]);
+            let resend = Resend::answering(answer);
+            let outcome = publish_to_target(
+                &client,
+                &endpoint(RELAY),
+                &message,
+                Some(stream),
+                BEFORE_EVERY_SIGNING,
+                Some(&resend),
+            )
+            .await;
+            assert!(
+                classified(&outcome) == expected,
+                "anonymous phase proven={anonymous_proven}, resend {answer:?}: the call \
+                 was classified as something its two phases do not prove",
+            );
+            let handed = resend.handed();
+            assert!(
+                handed.len() == 1
+                    && handed[0].id == frozen.id
+                    && handed[0].sig == frozen.sig
+                    && nostr::JsonUtil::as_json(&handed[0]) == nostr::JsonUtil::as_json(&frozen),
+                "the resend was not exactly one copy of the frozen event",
+            );
+        }
+
+        // A transport that resends nothing: proven, a refusal it can never
+        // change; unproven, what every unproven refusal is.
+        for (refusals, expected) in [(3, (TerminalRejected, auth)), (2, (PossiblyExposed, auth))] {
+            let (_said, stream) = heard(&vec![(id, false); refusals]);
+            let outcome = publish_to_target(
+                &client,
+                &endpoint(RELAY),
+                &message,
+                Some(stream),
+                BEFORE_EVERY_SIGNING,
+                None,
+            )
+            .await;
+            assert!(
+                classified(&outcome) == Some(expected),
+                "with no resend, a demand for authentication was classified otherwise",
+            );
+        }
+    }
+
+    /// Only `auth-required:` is resent: an acceptance, another refusal, a
+    /// relay that could not be reached and an unclassified answer are each
+    /// what they were, and no identity connection is made for them.
+    #[tokio::test]
+    async fn nothing_but_auth_required_is_resent() {
+        use TransportEndpointFailureKind::{
+            PossiblyExposed, RetryableUnavailable, TerminalRejected,
+        };
+        let message = fanout_message();
+        let id = id_of(&message);
+        let blocked = Some(TransportEndpointRejectionCategory::Blocked);
+        let limited = Some(TransportEndpointRejectionCategory::RateLimited);
+        for (kind, category) in [
+            (TerminalRejected, blocked),
+            (RetryableUnavailable, limited),
+            (RetryableUnavailable, None),
+            (PossiblyExposed, None),
+        ] {
+            let resend = Resend::answering(AuthSendOutcome::Accepted);
+            let (_said, stream) = heard(&[(id, false); 3]);
+            let outcome = publish_to_target(
+                &failing(kind, category),
+                &endpoint(RELAY),
+                &message,
+                Some(stream),
+                BEFORE_EVERY_SIGNING,
+                Some(&resend),
+            )
+            .await;
+            assert!(
+                resend.handed().is_empty() && classified(&outcome) == Some((kind, category)),
+                "a failure that was not a demand for authentication was resent as the identity",
+            );
+        }
+        let resend = Resend::answering(AuthSendOutcome::Refused);
+        let (_said, stream) = heard(&[(id, true)]);
         let outcome = publish_to_target(
-            &client,
+            &failing(
+                RetryableUnavailable,
+                Some(TransportEndpointRejectionCategory::AuthRequired),
+            ),
             &endpoint(RELAY),
             &message,
-            Some(proven),
+            Some(stream),
             BEFORE_EVERY_SIGNING,
+            Some(&resend),
         )
         .await;
         assert!(
-            classified(&outcome) == Some((TerminalRejected, auth)),
-            "a demand this client can never meet was left retryable",
-        );
-
-        let (_said, unproven) = heard(&[(id, false); 2]);
-        let outcome = publish_to_target(
-            &client,
-            &endpoint(RELAY),
-            &message,
-            Some(unproven),
-            BEFORE_EVERY_SIGNING,
-        )
-        .await;
-        assert!(
-            classified(&outcome) == Some((PossiblyExposed, auth)),
-            "an unproven demand for authentication was returned as a refusal",
+            matches!(outcome, FanoutTargetOutcome::Accepted) && resend.handed().is_empty(),
+            "a relay that acknowledged the anonymous send was signed in to all the same",
         );
     }
 
@@ -7721,6 +8218,7 @@ mod tests {
                 &message,
                 Some(refusals),
                 BEFORE_EVERY_SIGNING,
+                None,
             )
             .await;
             record(index, outcome, recorded);
@@ -7753,6 +8251,7 @@ mod tests {
     /// MDK's. Each wrapper's own rendering over MDK values that carry a canary
     /// is proved beside its `Debug`, in `nostr::mls::types`.
     #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::too_many_lines)]
     async fn an_ok_false_reason_never_reaches_a_log() {
         let relay = ScriptedRelay::start();
         let text = std::sync::Arc::new(Mutex::new(format!("blocked: {CANARY}")));
@@ -7809,6 +8308,7 @@ mod tests {
                 &fanout_message(),
                 None,
                 BEFORE_EVERY_SIGNING,
+                None,
             )
             .await;
             rendered.push(format!("{quoted:?}"));
@@ -7823,6 +8323,7 @@ mod tests {
                 &fanout_message(),
                 None,
                 BEFORE_EVERY_SIGNING,
+                None,
             )
             .await;
             rendered.push(format!("{errored:?}"));

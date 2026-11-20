@@ -126,6 +126,10 @@ class TestUser {
   /// `allowPublicRelay: true`, only with explicit user authorization and
   /// non-sentinel seeds.
   ///
+  /// [harnessOnlyRelays] are relays the harness alone dials (a probe of a
+  /// relay store behind the app's route) and nothing installs; they are held
+  /// to the same loopback floor.
+  ///
   /// [discoveryRelays] — the lookup (discovery) plane, for a target that
   /// asserts on it. Omitted, the plane falls back to [relays]
   /// (`discovery.rs`), which silently makes the default relay a lookup relay
@@ -135,6 +139,7 @@ class TestUser {
     required List<String> relays,
     bool allowPublicRelay = false,
     List<String>? profileRelays,
+    List<String> harnessOnlyRelays = const <String>[],
     List<String>? discoveryRelays,
     List<String>? blossomServers,
   }) async {
@@ -159,6 +164,7 @@ class TestUser {
         ...?discoveryRelays,
         ...?blossomServers,
         locationRelayUrl,
+        ...harnessOnlyRelays,
       ];
       for (var i = 0; i < allUrls.length; i++) {
         if (!_isLoopback(allUrls[i])) {

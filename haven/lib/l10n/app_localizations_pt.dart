@@ -524,6 +524,27 @@ class AppLocalizationsPt extends AppLocalizations {
   }
 
   @override
+  String get relaySettingsInboxRefused =>
+      'Este relay não permitiu que o Haven lesse seus convites. Remova-o ou adicione outro relay.';
+
+  @override
+  String get relaySettingsInboxRefusedTooltip =>
+      'Não permitiu que o Haven lesse os convites';
+
+  @override
+  String relaySettingsInboxRefusedSemantics(String url) {
+    return 'Aviso: $url não permitiu que o Haven lesse seus convites';
+  }
+
+  @override
+  String get relaySettingsInboxAllRefusedTitle =>
+      'Nenhum dos seus relays de caixa de entrada permitiu que o Haven lesse seus convites';
+
+  @override
+  String get relaySettingsInboxAllRefusedMessage =>
+      'Os convites enviados a você não vão chegar até que um dos seus relays de caixa de entrada permita que o Haven os leia. Restaure os padrões ou adicione outro relay.';
+
+  @override
   String get locationSettingsTitle => 'Localização';
 
   @override
@@ -1537,6 +1558,54 @@ class AppLocalizationsPt extends AppLocalizations {
   String get invitationsLoadError => 'Não foi possível carregar os convites';
 
   @override
+  String invitationsNoticeRefused(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other:
+          '$countString relays de caixa de entrada não permitiram que o Haven lesse seus convites, então um convite enviado só para eles não vai chegar até você. Em Configurações de relays, remova-os ou adicione outro relay.',
+      many:
+          '$countString de relays de caixa de entrada não permitiram que o Haven lesse seus convites, então um convite enviado só para eles não vai chegar até você. Em Configurações de relays, remova-os ou adicione outro relay.',
+      one:
+          '1 relay de caixa de entrada não permitiu que o Haven lesse seus convites, então um convite enviado só para ele não vai chegar até você. Em Configurações de relays, remova-o ou adicione outro relay.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String invitationsNoticeNotSaved(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other:
+          '$countString convites chegaram, mas não puderam ser salvos neste dispositivo.',
+      many:
+          '$countString de convites chegaram, mas não puderam ser salvos neste dispositivo.',
+      one: 'Um convite chegou, mas não pôde ser salvo neste dispositivo.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get invitationsNoticeOffline =>
+      'O Haven não conseguiu se conectar aos seus relays de caixa de entrada, então os novos convites ainda não podem aparecer.';
+
+  @override
+  String get invitationsNoticeIncomplete =>
+      'O Haven não conseguiu terminar de verificar todos os seus relays de caixa de entrada, então alguns convites talvez ainda não apareçam.';
+
+  @override
+  String get invitationsNoticeOpenRelaySettings => 'Configurações de relays';
+
+  @override
   String get invitationsEmptyTitle => 'Nenhum convite';
 
   @override
@@ -1567,7 +1636,7 @@ class AppLocalizationsPt extends AppLocalizations {
   }
 
   @override
-  String refreshRingSemanticAllOk(int total) {
+  String refreshRingSemanticInboxAll(int total) {
     final intl.NumberFormat totalNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
@@ -1575,18 +1644,19 @@ class AppLocalizationsPt extends AppLocalizations {
     String _temp0 = intl.Intl.pluralLogic(
       total,
       locale: localeName,
-      other: 'Todos os $totalString relays responderam',
-      many: 'Todos os $totalString relays responderam',
-      one: 'O relay respondeu',
+      other: 'Convites verificados em todos os $totalString relays',
+      many: 'Convites verificados em todos os $totalString de relays',
+      one: 'Convites verificados no relay',
     );
     return '$_temp0';
   }
 
   @override
-  String get refreshRingSemanticAllError => 'Nenhum relay respondeu';
+  String get refreshRingSemanticInboxNone =>
+      'Não foi possível verificar os convites em nenhum relay';
 
   @override
-  String refreshRingSemanticPartial(int ok, int total) {
+  String refreshRingSemanticInboxPartial(int ok, int total) {
     final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -1595,17 +1665,18 @@ class AppLocalizationsPt extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return '$okString de $totalString relays responderam';
+    return 'Convites verificados em $okString de $totalString relays';
   }
 
   @override
   String get refreshRingAnnouncementChecking => 'Verificando relays';
 
   @override
-  String get refreshRingAnnouncementAllOk => 'Todos os relays responderam';
+  String get refreshRingAnnouncementInboxAll =>
+      'Convites verificados em todos os relays';
 
   @override
-  String refreshRingAnnouncementPartial(int ok, int total) {
+  String refreshRingAnnouncementInboxPartial(int ok, int total) {
     final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -1614,12 +1685,12 @@ class AppLocalizationsPt extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return '$okString de $totalString relays responderam';
+    return 'Convites verificados em $okString de $totalString relays';
   }
 
   @override
-  String get refreshRingAnnouncementAllError =>
-      'Não foi possível alcançar nenhum relay';
+  String get refreshRingAnnouncementInboxNone =>
+      'Não foi possível verificar os convites em nenhum relay';
 
   @override
   String get refreshRingAnnouncementNoInbox =>

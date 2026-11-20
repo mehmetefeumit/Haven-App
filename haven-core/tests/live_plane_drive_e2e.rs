@@ -101,12 +101,33 @@ impl UnrecordedPublisher for Recording {
     fn publish_unrecorded<'a>(
         &'a self,
         event: &'a Event,
-        _relays: &'a [String],
-    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move {
-            self.handed.lock().expect("recording").push(event.clone());
-            self.acks
-        })
+        relays: &'a [String],
+    ) -> Pin<Box<dyn Future<Output = Vec<haven_core::relay::fanout::UnrecordedAnswer>> + Send + 'a>>
+    {
+        let acked: std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> = {
+            Box::pin(async move {
+                self.handed.lock().expect("recording").push(event.clone());
+                self.acks
+            })
+        };
+        Box::pin(
+            async move { haven_core::relay::fanout::UnrecordedAnswer::all(relays, acked.await) },
+        )
+    }
+
+    fn publish_authenticated<'a>(
+        &'a self,
+        _signer: std::sync::Arc<haven_core::relay::nip42::Nip42Signer>,
+        _event: &'a nostr::Event,
+        _relay: &'a str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = haven_core::relay::identity::AuthSendOutcome>
+                + Send
+                + 'a,
+        >,
+    > {
+        haven_core::relay::fanout::scripted::not_resent()
     }
 }
 
@@ -3230,7 +3251,6 @@ async fn a_settle_waits_for_the_fold_after_the_last_answer() {
     transport.park();
     let core = LiveSyncCore::new_local_with_driver_for_test(
         Arc::clone(&admin.circle),
-        admin.keys.public_key(),
         LiveDriver {
             fanout: Arc::clone(&transport) as Arc<dyn FanoutSend>,
             publisher: Recording::acking(true) as Arc<dyn UnrecordedPublisher>,
@@ -3909,11 +3929,8 @@ impl Scripted {
         relay: &str,
         claim: Claim,
     ) -> LiveSyncCore {
-        let core = LiveSyncCore::new_local_with_driver_for_test(
-            Arc::clone(&member.circle),
-            member.keys.public_key(),
-            self.driver(),
-        );
+        let core =
+            LiveSyncCore::new_local_with_driver_for_test(Arc::clone(&member.circle), self.driver());
         let spec = CircleSpec {
             group_id_hex: hex::encode(ngid(member, group).await),
             relays: vec![relay.to_owned()],
@@ -4106,6 +4123,54 @@ async fn a_session_nobody_claimed_makes_no_first_send_however_many_ticks_arrive(
         "control: the record was the claimed session's to send all along",
     );
     assert_eq!(scripted.transport.calls().len(), 1);
+    let _ = core.stop().await;
+}
+
+/// A network change says the network is back once the session has opened
+/// again: a relay a stored record could not reach is called at once, on a
+/// driver clock that has not moved, instead of waiting out its backoff — as
+/// the pool's own loss and return of every relay would. A foreground
+/// re-anchor alone leaves it waiting.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_network_change_calls_a_relay_left_unreachable_at_once() {
+    let (fx, _relay, url) = a_circle_on_a_local_relay().await;
+    let admin = fx.admin();
+    let earlier = Plane::over(&admin.circle);
+    earlier.processor.for_test().set_background_burst(false);
+    feed_leave(&earlier, &fx, 1, 2).await;
+    drop(earlier);
+
+    let scripted = Scripted::new();
+    scripted.transport.answer(&url, [Answer::Unreachable; 3]);
+    let core = scripted
+        .session(admin, &fx.group, &url, Claim::Foreground)
+        .await;
+    assert!(
+        held(|| async {
+            scripted.transport.call_count() == 1 && core.processor().passes_under_way() == 0
+        })
+        .await,
+        "premise: the claim's drive called the relay, which could not be reached",
+    );
+
+    let reads = scripted.read.reads();
+    core.resume_after_background(Claim::Foreground)
+        .await
+        .expect("the re-anchor answers");
+    assert!(scripted.a_drive_ran(&core, reads).await);
+    assert_eq!(
+        scripted.transport.call_count(),
+        1,
+        "control: the relay is not due on the clock as it stands",
+    );
+
+    core.reconnect_after_network_change(Claim::Foreground)
+        .await
+        .expect("the change re-opens the session");
+    assert!(
+        held(|| async { scripted.transport.call_count() == 2 }).await,
+        "a relay left unreachable across the change waited out its backoff",
+    );
     let _ = core.stop().await;
 }
 
@@ -4651,7 +4716,6 @@ async fn a_session_started_into_a_burst_within_a_measured_budget_hands_it_to_its
         scripted.transport.answer(&url, [Answer::Accepted]);
         let core = LiveSyncCore::new_local_with_driver_for_test(
             Arc::clone(&admin.circle),
-            admin.keys.public_key(),
             scripted.driver(),
         );
         core.start_into_burst(std::slice::from_ref(&spec), &[], Some(budget_ms))

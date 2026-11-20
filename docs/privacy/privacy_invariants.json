@@ -61,7 +61,7 @@
     {
       "id": "RC1",
       "source": "haven-core/SECURITY.md#relay-observable-metadata-and-correlation-accepted",
-      "summary": "NOT one connection per relay: Haven opens at least TWO long-lived nostr-sdk Clients per process — the live-sync engine's receive client (build_engine_client, haven-core/src/relay/live_sync/session.rs:111) and the publish client (RelayManager::new, haven-core/src/relay/manager.rs:613) — plus the live session's own fanout drive pool while one runs (LiveSyncCore::new_local) and one more for every isolate that builds its own RelayManager, which the Android background-sharing foreground service does. A shared relay therefore sees up to three connections from the foreground isolate alone, not one, and can join them by source address without any protocol help. A relay serving BOTH the gift-wrap inbox (kind 1059 by #p = user pubkey) and group messages (kind 445 by #h = nostr_group_id) over the same connection can correlate the real identity pubkey with circle membership by connection continuity. Since M11 the receive connection is STANDING while the app is FOREGROUNDED, on both platforms, so the correlation is continuous rather than bursty for as long as that socket is held. Since P4 it is no longer standing while backgrounded on iOS either: with background sharing on the engine is PAUSED between publishes and both filters ride one bounded burst per publish tick, so for a CIRCLE relay the join is per-burst rather than continuous. Per-burst is NOT per-publish, though since PUB-COALESCE it is close to it: a burst re-anchors every circle's #h REQ, connects the whole relay union AND publishes every publish-eligible circle, so a circle relay sees a REQ/CLOSE pair on every burst and this device's kind-445 for its own circle on essentially every burst too. The join stays wider than the send in three cases only — a burst whose publish window refuses publishes nothing at all; a subscribed circle that is not publish-eligible (quarantined because its encrypted state failed to load, or engine-flagged Unrecoverable) is re-anchored on every burst and never published to; a send that fails, is deferred by the engine, or is the tail of a roster past kMaxCirclesPerBurst. What coalescing ADDS to this deviation is a duration: the union connection is held across the whole staggered publish pass, so its connect-to-disconnect span grows with the number of eligible circles and hands EVERY relay in the union — one carrying a single circle, or an inbox relay carrying none — an estimator of that count, which the per-circle schedules leaked only as a rate and only to relays that already read the circle set off the multiplexed #h filter (PUB-COALESCE). That NARROWS the deviation for circle relays without strictly narrowing it: an inbox-ONLY relay (kind-10050 inbox, none of this account's circles — an independent set) carries no kind-445 to correlate with, and where it used to see one continuous socket it now sees a REQ/CLOSE pair every 72-168 s (the 120 s nominal cadence, jittered ±40 %), which is itself the inference \"this pubkey is background-sharing right now\". The lever is INBOX_BURSTS_PER_REQ (OD4-b, accepted, blocked on a separate defect and not yet raised); at the shipped value that inference is a named, disclosed residual, not a mitigated one. The residuals P4 carries are enumerated in SECURITY.md under \"iOS background sharing: presence only at publish instants (P4)\". On Android it no longer outlives the foreground: since P1 the pause path stops the engine in BOTH toggle states (with sharing ON it stops first to hand the MLS session to the foreground service; with sharing OFF `_stopLiveSyncBounded()` stops it and deliberately does not release the guard, since no isolate reclaims it), and the resume heal restarts it. Not protocol-forced: the kind-10050 inbox list and the group's 0x8004 relay set are independent. Seeding them disjointly was declined at first, for the connection count and because P6 (no Tor/proxy) leaves IP-level joining intact, and re-decided on 2026-10-31 (the relay-plane segregation, whose owner decision OD-3 accepted the extra sockets, ESTIMATED in POWER_EFFICIENCY_PLAN.md §6.5a): a circle Haven creates without named relays now takes its relays from the location pool, never one on its creator's own lists, so for such a circle the single-socket join is gone unless a member's own lists name one of its relays. It remains for every circle created before that change and for circles other clients create; P6 still leaves IP-level joining intact.",
+      "summary": "NOT one connection per relay: Haven opens at least THREE long-lived nostr-sdk Clients per process — the live-sync engine's receive client (build_engine_client, haven-core/src/relay/live_sync/session.rs), its inbox socket's (build_inbox_client, which answers a relay's NIP-42 challenge with the identity key, owner-directed 2026-11-16) and the publish client (RelayManager::new, haven-core/src/relay/manager.rs) — plus the live session's own fanout drive pool while one runs (LiveSyncCore::new_local), a short-lived identity connection per own-inbox read and per auth-required: resend, and one more for every isolate that builds its own RelayManager, which the Android background-sharing foreground service does. A shared relay therefore sees up to four connections from the foreground isolate alone, not one, and can join them by source address without any protocol help. A relay serving BOTH the gift-wrap inbox (kind 1059 by #p = user pubkey) and group messages (kind 445 by #h = nostr_group_id) can correlate the real identity pubkey with circle membership: by connection continuity while one connection carried both, and since the inbox moved to a socket of its own (2026-11-16) by source address and timing, with the identity now proven to it by the inbox socket's NIP-42 answer. Since M11 the receive connection is STANDING while the app is FOREGROUNDED, on both platforms, so the correlation is continuous rather than bursty for as long as that socket is held. Since P4 it is no longer standing while backgrounded on iOS either: with background sharing on the engine is PAUSED between publishes and both filters ride one bounded burst per publish tick, so for a CIRCLE relay the join is per-burst rather than continuous. Per-burst is NOT per-publish, though since PUB-COALESCE it is close to it: a burst re-anchors every circle's #h REQ, connects the whole relay union AND publishes every publish-eligible circle, so a circle relay sees a REQ/CLOSE pair on every burst and this device's kind-445 for its own circle on essentially every burst too. The join stays wider than the send in three cases only — a burst whose publish window refuses publishes nothing at all; a subscribed circle that is not publish-eligible (quarantined because its encrypted state failed to load, or engine-flagged Unrecoverable) is re-anchored on every burst and never published to; a send that fails, is deferred by the engine, or is the tail of a roster past kMaxCirclesPerBurst. What coalescing ADDS to this deviation is a duration: the union connection is held across the whole staggered publish pass, so its connect-to-disconnect span grows with the number of eligible circles and hands EVERY relay in the union — one carrying a single circle, or an inbox relay carrying none — an estimator of that count, which the per-circle schedules leaked only as a rate and only to relays that already read the circle set off the multiplexed #h filter (PUB-COALESCE). That NARROWS the deviation for circle relays without strictly narrowing it: an inbox-ONLY relay (kind-10050 inbox, none of this account's circles — an independent set) carries no kind-445 to correlate with, and where it used to see one continuous socket it now sees a REQ/CLOSE pair every 72-168 s (the 120 s nominal cadence, jittered ±40 %), which is itself the inference \"this pubkey is background-sharing right now\". The lever is INBOX_BURSTS_PER_REQ (OD4-b, accepted, blocked on a separate defect and not yet raised); at the shipped value that inference is a named, disclosed residual, not a mitigated one. The residuals P4 carries are enumerated in SECURITY.md under \"iOS background sharing: presence only at publish instants (P4)\". On Android it no longer outlives the foreground: since P1 the pause path stops the engine in BOTH toggle states (with sharing ON it stops first to hand the MLS session to the foreground service; with sharing OFF `_stopLiveSyncBounded()` stops it and deliberately does not release the guard, since no isolate reclaims it), and the resume heal restarts it. Not protocol-forced: the kind-10050 inbox list and the group's 0x8004 relay set are independent. Seeding them disjointly was declined at first, for the connection count and because P6 (no Tor/proxy) leaves IP-level joining intact, and re-decided on 2026-10-31 (the relay-plane segregation, whose owner decision OD-3 accepted the extra sockets, ESTIMATED in POWER_EFFICIENCY_PLAN.md §6.5a): a circle Haven creates without named relays now takes its relays from the location pool, never one on its creator's own lists, so for such a circle the single-socket join is gone unless a member's own lists name one of its relays. It remains for every circle created before that change and for circles other clients create; P6 still leaves IP-level joining intact.",
       "forbidden_claim": "Copy must not claim relays cannot link your identity to your circle membership, and must not present the ephemeral per-message kind-445 author keys as making you unlinkable at the relay."
     },
     {
@@ -3086,7 +3086,7 @@
     {
       "id": "INV-W-RELAY-LISTS-PUBLISHED-KINDS",
       "title": "The inbox and KeyPackage relay lists are published under the identity key",
-      "statement": "Haven publishes a kind-10050 inbox relay list and a kind-10002 NIP-65 list, both signed by the identity key and both fanned out to the relays already on them and, unchanged, to the discovery relays (owner-directed 2026-11-12; an opt-out retracts them there too), and it publishes kind-30443 KeyPackages to those relays; consequently every URL a user adds to those lists becomes public and permanently linked to their pubkey, and the retired kind-10051 is not emitted at all. Gift wraps (kind 1059) are read only from the inbox list `inboxRelaysProvider` gives — the stored list kind 10050 is built from, or the compile-time seed while seeding has failed — by the invitation poller, the manual inbox refresh and the live-sync engine's inbox REQ, whose start is handed that list, over 96 h (the poller and the refresh from the wall clock; the engine from its inbox cursor, and 7 days on the one REQ made before any cursor exists); an empty list polls nothing rather than ask other relays for this pubkey's gift wraps. An inviter's lookup (RelayManager::lookup_member_for_invite) reads the invitee's kind 10050 from the discovery relays, which is why the list is kept there as well as on the user's own relays; and each inbox row on the Relays page carries that list's presence on that relay. An inviter routes the Welcome's gift wrap to the invitee's kind-10050 inbox relays and never to its NIP-65 relays; a kind-30443 KeyPackage goes only to the relays on the KeyPackage list, never to a lookup relay that is not on it; an invite lookup that finds no package where the invitee's lists say it should be reports the person not found, so a relay missing the user's KeyPackage or lists can cost them an invitation; and a list with no relays is published nowhere, the lookup relays included.",
+      "statement": "Haven publishes a kind-10050 inbox relay list and a kind-10002 NIP-65 list, both signed by the identity key and both fanned out to the relays already on them and, unchanged, to the discovery relays (owner-directed 2026-11-12; an opt-out retracts them there too), and it publishes kind-30443 KeyPackages to those relays; consequently every URL a user adds to those lists becomes public and permanently linked to their pubkey, and the retired kind-10051 is not emitted at all. Gift wraps (kind 1059) are read only from the inbox list `inboxRelaysProvider` gives — the stored list kind 10050 is built from, or the compile-time seed while seeding has failed — by the invitation poller, the manual inbox refresh, the live-sync engine's inbox REQ, whose start is handed that list, and the relay-list maintenance pass's inbox probe, from now and at most one, asked only by a pass made while the app is resumed and never by a background burst's, whose answer the Relays page warns from: the poller and the refresh over 7 days from the wall clock (INBOX_GIFTWRAP_LOOKBACK_SECS, read through the bridge); the engine over 96 h from its inbox cursor, 7 days on the one REQ made before any cursor exists, and from a relay's own floor while that relay still owes the inbox (relay_floors, key inbox_1059); an empty list polls nothing rather than ask other relays for this pubkey's gift wraps. An inviter's lookup (RelayManager::lookup_member_for_invite) reads the invitee's kind 10050 from the discovery relays, which is why the list is kept there as well as on the user's own relays; and each inbox row on the Relays page carries that list's presence on that relay. An inviter routes the Welcome's gift wrap to the invitee's kind-10050 inbox relays and never to its NIP-65 relays; a kind-30443 KeyPackage goes only to the relays on the KeyPackage list, never to a lookup relay that is not on it; an invite lookup that finds no package where the invitee's lists say it should be reports the person not found, so a relay missing the user's KeyPackage or lists can cost them an invitation; and a list with no relays is published nowhere, the lookup relays included.",
       "status": "enforced",
       "assertion_arb_keys": [
         "relaySettingsKeyPackageInfoKeeps",
@@ -3188,7 +3188,7 @@
         },
         {
           "file": "haven/test/providers/invitation_provider_test.dart",
-          "name": "looks back 96 h: a wrap re-sent a day after its hand-over and backdated two days is still asked for"
+          "name": "looks back the engine's inbox lookback: a Welcome held 72 h and backdated two days is still asked for"
         },
         {
           "file": "haven/rust_builder/src/api.rs",
@@ -3743,8 +3743,8 @@
     },
     {
       "id": "INV-R-ENGINE-NO-GOSSIP-NO-AUTH",
-      "title": "The live-sync engine never authenticates and never fans out beyond the configured relays",
-      "statement": "The engine Client is built with automatic_authentication(false) and no gossip, so it refuses every NIP-42 AUTH challenge (never signing a kind-22242 that would join the identity key to the circle traffic on that socket) and its relay pool equals exactly the configured circle-union-inbox set even after a kind-10002 advertises a phantom relay. verify_subscriptions must also stay off, or fresh REQs silently drop their first stored events.",
+      "title": "The live-sync engine's circle connections never authenticate, and the session never fans out beyond the configured relays",
+      "statement": "The engine Client, which carries every circle's #h REQ, is built with automatic_authentication(false) and no gossip, so it refuses every NIP-42 AUTH challenge (never signing a kind-22242 that would join the identity key to the circle traffic on that socket), and the session's relays equal exactly the configured circle-union-inbox set even after a kind-10002 advertises a phantom relay. The one live connection that answers a challenge is the inbox socket (build_inbox_client, owner-directed 2026-11-16), which carries the account's own kind-1059 #p REQ and nothing else (INV-R-NIP42-ANSWERED-ONLY-FOR-OWN-INBOX-AND-REFUSED-WRITES). verify_subscriptions must also stay off, or fresh REQs silently drop their first stored events.",
       "status": "enforced",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
@@ -3758,7 +3758,7 @@
         {
           "kind": 22242,
           "token": "never-constructed:nip42-auth",
-          "note": "NIP-42 AUTH. Haven never signs one — build_engine_client sets automatic_authentication(false). Declared so the kind-based closed world can see the one kind whose appearance would falsify this invariant."
+          "note": "NIP-42 AUTH. The engine client never signs one — build_engine_client sets automatic_authentication(false); only the identity connections do (INV-R-NIP42-ANSWERED-ONLY-FOR-OWN-INBOX-AND-REFUSED-WRITES). Declared so the kind-based closed world can see the one kind whose appearance on an engine socket would falsify this invariant."
         }
       ],
       "symbols": [
@@ -3775,6 +3775,89 @@
         {
           "file": "haven-core/tests/live_sync_privacy_config_e2e.rs",
           "name": "engine_connects_only_to_configured_relays_never_gossip_discovered"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_engine_client_options.sh"
+      ]
+    },
+    {
+      "id": "INV-R-NIP42-ANSWERED-ONLY-FOR-OWN-INBOX-AND-REFUSED-WRITES",
+      "title": "The identity key answers a relay's NIP-42 challenge only for the account's own inbox reads and for a write the relay refused for want of it",
+      "statement": "Owner-directed 2026-11-16 (Security Rule 16, White Noise parity): one constructor, identity_client, installs a signer and switches authentication on, and the only signer it takes is Nip42Signer, which signs a kind-22242 event with empty content and exactly the challenge and relay tags under the identity key and refuses every other event and every NIP-04/NIP-44 call. It is used by the live session's inbox socket (build_inbox_client), which holds only the inbox relays and carries only the own kind-1059 #p REQ, so no circle #h REQ rides an authenticated socket; by the per-call own-inbox reads (RelayManager::read_own_inbox_per_relay: the invitation poll, the manual refresh and the relay settings check), one read-only relay per connection, shut down when the read ends; and by the one authenticated resend (send_signed_once_authenticated) of a Welcome, kind 445 or location that a relay answered OK false auth-required:, on a write-only connection to that relay alone, of the byte-identical event — a kind 445 still signed by its one-time key. The publish client, MDK's relay client and the engine client hold no signer, and the profile module and the discovery plane never reach any of this. What an answer discloses: the relay learns the identity key behind that connection, its address and timing; for a write it refused, which identity sent that event. This becomes false if another client is given a signer or authentication, if Nip42Signer signs anything but that answer, if an #h REQ or a filter rides an identity connection, or if a send authenticates before a relay asked.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#the-identitys-nip-42-connections"
+      ],
+      "event_kinds": [
+        {
+          "kind": 22242,
+          "token": "Kind::Authentication",
+          "note": "Nip42Signer refuses every unsigned event whose kind is not this one (haven-core/src/relay/nip42.rs)."
+        },
+        {
+          "kind": 22242,
+          "token": "EventBuilder::auth",
+          "note": "Nip42Signer rebuilds the answer it signs with this builder from the challenge and relay tags it was handed, so a caller-supplied id is never what is signed."
+        }
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/relay/nip42.rs",
+          "symbol": "Nip42Signer"
+        },
+        {
+          "file": "haven-core/src/relay/verified.rs",
+          "symbol": "identity_client"
+        },
+        {
+          "file": "haven-core/src/relay/identity.rs",
+          "symbol": "with_identity_relay"
+        },
+        {
+          "file": "haven-core/src/relay/identity.rs",
+          "symbol": "send_signed_once_authenticated"
+        },
+        {
+          "file": "haven-core/src/relay/live_sync/session.rs",
+          "symbol": "build_inbox_client"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/src/relay/nip42.rs",
+          "name": "it_signs_the_answer_the_pool_builds_under_the_identity_key"
+        },
+        {
+          "file": "haven-core/src/relay/nip42.rs",
+          "name": "it_signs_the_rebuilt_answer_never_a_caller_supplied_id"
+        },
+        {
+          "file": "haven-core/src/relay/nip42.rs",
+          "name": "it_neither_encrypts_nor_decrypts"
+        },
+        {
+          "file": "haven-core/tests/live_sync_inbox_socket_e2e.rs",
+          "name": "the_engine_socket_never_authenticates_and_the_inbox_socket_carries_no_circle"
+        },
+        {
+          "file": "haven-core/tests/nip42_identity_e2e.rs",
+          "name": "each_direction_is_registered_alone"
+        },
+        {
+          "file": "haven-core/tests/nip42_identity_e2e.rs",
+          "name": "a_refusal_authentication_would_not_change_draws_no_answer"
+        },
+        {
+          "file": "haven-core/tests/auth_retry_e2e.rs",
+          "name": "a_welcome_an_inbox_relay_takes_anonymously_draws_no_authentication"
+        },
+        {
+          "file": "haven-core/tests/own_inbox_read_e2e.rs",
+          "name": "a_strfry_gated_inbox_is_read_after_its_wrapped_refusal"
         }
       ],
       "guards": [

@@ -311,7 +311,7 @@ jobs:
       #        CONNECT_WATCHDOG_SECS) at this lane's 10m drive and 120 s
       #        watchdog, each retry restoring the app its failed attempt's
       #        teardown uninstalled: 2 x (120 + 5 + 120 + 5) + 600 + 30 + 120
-      #        barrier + 20 Wi-Fi + 120 route = 1390 s = 23m10s, so eight are
+      #        barrier + 20 Wi-Fi + 16 settle + 120 route = 1406 s = 23m26s, so eight are
       #        ~185 minutes of bounded waits before any relay reset or adb
       #        work. Without an aggregate bound a degraded run could not finish
       #        before the step cap killed it anonymously; that was the real

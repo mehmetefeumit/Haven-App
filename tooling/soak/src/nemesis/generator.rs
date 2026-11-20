@@ -333,7 +333,8 @@ mod tests {
             | Fault::ColdFirstConnect
             | Fault::Unanswering
             | Fault::WithholdEose
-            | Fault::RefusesNegentropy => false,
+            | Fault::RefusesNegentropy
+            | Fault::AuthGatedReads => false,
         };
         assert!(FAULT_PALETTE.into_iter().all(schedulable));
         for seed in 0..16 {

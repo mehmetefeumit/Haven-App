@@ -40,7 +40,7 @@
 use std::collections::BTreeSet;
 
 use haven_local_relay::planes::frame::Frame;
-use haven_local_relay::planes::judge::{judge, Class, Observed};
+use haven_local_relay::planes::judge::{judge_answered, AuthDemand, Class, Observed};
 use haven_local_relay::planes::policy::Row;
 use haven_local_relay::planes::table::{List, PlaneTable, RelayIx, RelayMatch, RoutingEnd};
 
@@ -79,10 +79,14 @@ struct Seen {
     frame: PlaneFrame,
 }
 
+/// Each relay's `OK false auth-required:`: the relay, when, the event id.
+type Demands = Vec<(RelayIx, u64, String)>;
+
 /// The ground truth and the frames, built once per grading.
 struct Evidence {
     table: PlaneTable,
     seen: Vec<Seen>,
+    demands: Demands,
     senders: Vec<(DeviceTag, String)>,
     full: Option<RelayTag>,
     roles: Vec<(RelayIx, PlaneRole)>,
@@ -113,7 +117,16 @@ pub fn plane_containment<R: RelayPlane, T: TimelineSink, L: LogDrain>(
         .iter()
         .map(|seen| Frame::parse(&seen.frame.text))
         .collect();
-    let judgement = judge(
+    let demands: Vec<AuthDemand<'_>> = evidence
+        .demands
+        .iter()
+        .map(|(relay, at, id)| AuthDemand {
+            relay: *relay,
+            at: *at,
+            id,
+        })
+        .collect();
+    let judgement = judge_answered(
         &evidence.table,
         evidence
             .seen
@@ -126,6 +139,7 @@ pub fn plane_containment<R: RelayPlane, T: TimelineSink, L: LogDrain>(
                 at: seen.frame.at,
                 frame,
             }),
+        &demands,
     )
     .map_err(|_| RigError::ShapeMismatch)?;
 
@@ -185,14 +199,15 @@ fn crossing(relay: RelayTag, device: Option<DeviceTag>, row: Option<Row>, class:
     let rule = class.name();
     match class {
         Class::CrossedRequest => Finding::PlaneCrossedRequest { relay, device, row },
-        Class::CrossedEvent | Class::WrongAuthor | Class::ListNamesForeignPlane => {
-            Finding::PlaneCrossedEvent {
-                relay,
-                device,
-                row,
-                rule,
-            }
-        }
+        Class::CrossedEvent
+        | Class::WrongAuthor
+        | Class::ListNamesForeignPlane
+        | Class::AuthOnSharedConnection => Finding::PlaneCrossedEvent {
+            relay,
+            device,
+            row,
+            rule,
+        },
         Class::UnknownFrame
         | Class::UnresolvedId
         | Class::NoGroundTruth
@@ -227,10 +242,11 @@ fn evidence<R: RelayPlane, T: TimelineSink, L: LogDrain>(world: &SimWorld<R, T, 
         .collect();
     lists(world, &mut table, &senders);
     routings(world, &mut table, &mut roles, &senders);
-    let (seen, full) = frames(world, &mut table, planes);
+    let (seen, demands, full) = frames(world, &mut table, planes);
     Evidence {
         table,
         seen,
+        demands,
         senders,
         full,
         roles,
@@ -254,10 +270,23 @@ fn lists<R: RelayPlane, T: TimelineSink, L: LogDrain>(
         .get(1)
         .or_else(|| account.first())
         .and_then(|plane| table.resolve(plane.url()));
-    for (_, pubkey) in senders {
+    for (tag, pubkey) in senders {
         table.add_account(pubkey);
-        if let Some(inbox) = inbox {
-            table.add(List::OwnInbox(pubkey), inbox, 0);
+        // The device's inbox list as it stands: the first account plane, or
+        // the list an arm gave it (S27), held from the start — a device opens
+        // no inbox read on a plane before it lists it.
+        let own_inbox: Vec<RelayIx> = world.device(*tag).map_or_else(
+            |_| inbox.into_iter().collect(),
+            |device| {
+                device
+                    .stored_inbox()
+                    .iter()
+                    .filter_map(|url| table.resolve(url))
+                    .collect()
+            },
+        );
+        for ix in own_inbox {
+            table.add(List::OwnInbox(pubkey), ix, 0);
         }
         if let Some(key_package) = key_package {
             table.add(List::OwnKeyPackage(pubkey), key_package, 0);
@@ -313,13 +342,15 @@ fn routings<R: RelayPlane, T: TimelineSink, L: LogDrain>(
 
 /// Every plane's recorded frames, each on the relay it was sent to — an alias
 /// endpoint's on the address its slot stands for — in arrival order, with the
-/// plane's indexed events, and the first plane whose record is full.
+/// plane's indexed events; each `auth-required:` demand a plane wrote, on the
+/// same relay; and the first plane whose record is full.
 fn frames<R: RelayPlane, T: TimelineSink, L: LogDrain>(
     world: &SimWorld<R, T, L>,
     table: &mut PlaneTable,
     planes: Vec<(&R, RelayIx)>,
-) -> (Vec<Seen>, Option<RelayTag>) {
+) -> (Vec<Seen>, Demands, Option<RelayTag>) {
     let mut seen = Vec::new();
+    let mut demands = Vec::new();
     let mut full = None;
     for (plane, ix) in planes {
         let Some(ledger) = plane.plane_ledger() else {
@@ -332,17 +363,22 @@ fn frames<R: RelayPlane, T: TimelineSink, L: LogDrain>(
         for (id, kind, h) in &record.events {
             table.index_event(id, *kind, h.as_deref());
         }
+        let relay_of = |table: &mut PlaneTable, endpoint: EndpointId| match endpoint {
+            EndpointId::Canonical | EndpointId::Own(_) => Some(ix),
+            EndpointId::Alias(device, slot) => world
+                .device(device)
+                .ok()
+                .and_then(|owner| owner.alias_address(slot))
+                .or_else(|| plane.alias_urls_for(device).get(usize::from(slot)).cloned())
+                .and_then(|address| ix_of(table, &address)),
+        };
+        for (endpoint, id, at) in record.demands {
+            if let Some(relay) = relay_of(table, endpoint) {
+                demands.push((relay, at, id));
+            }
+        }
         for frame in record.frames {
-            let relay = match frame.endpoint {
-                EndpointId::Canonical | EndpointId::Own(_) => Some(ix),
-                EndpointId::Alias(device, slot) => world
-                    .device(device)
-                    .ok()
-                    .and_then(|owner| owner.alias_address(slot))
-                    .or_else(|| plane.alias_urls_for(device).get(usize::from(slot)).cloned())
-                    .and_then(|address| ix_of(table, &address)),
-            };
-            if let Some(relay) = relay {
+            if let Some(relay) = relay_of(table, frame.endpoint) {
                 seen.push(Seen {
                     relay,
                     plane: plane.tag(),
@@ -353,7 +389,7 @@ fn frames<R: RelayPlane, T: TimelineSink, L: LogDrain>(
         }
     }
     seen.sort_by_key(|seen| seen.frame.at);
-    (seen, full)
+    (seen, demands, full)
 }
 
 #[cfg(test)]
@@ -374,6 +410,7 @@ mod tests {
             (Class::UnresolvedId, "plane-unknown-frame"),
             (Class::NoGroundTruth, "plane-unknown-frame"),
             (Class::UndeclaredCircle, "plane-unknown-frame"),
+            (Class::AuthOnSharedConnection, "plane-crossed-event"),
         ];
         for (class, o7) in expected {
             let finding = crossing(relay, device, Some(Row::Ev0), class);

@@ -6,6 +6,11 @@
 //! them, so the relay settings page shows what maintenance did and can never
 //! disagree with it. A cell is judged by maintenance's own rules and settled
 //! by the relay's own `OK`; the page reads a network-free snapshot.
+//!
+//! Beside them, per own inbox relay, how it answered the relay-list pass's
+//! read of this account's gift wraps ([`OwnRelayBoard::ask_inbox_reads`]): a
+//! relay that refuses it stores every invitation sent there out of this
+//! device's reach, and no republish changes that.
 
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -13,7 +18,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use futures::stream::{FuturesUnordered, StreamExt};
-use nostr::{Event, Kind, PublicKey};
+use nostr::{Event, Kind, PublicKey, Timestamp};
 
 use super::key_package::{kp_event_d_tag, kp_event_is_pre_migration, RelayKpEntry};
 use super::key_package::{RelayKpPerRelay, RelayKpSnapshot};
@@ -22,8 +27,9 @@ use super::relay_list::list_relay_healthy;
 use crate::log_alias;
 use crate::nostr::mls::TrackedKeyPackage;
 use crate::relay::clock_skew::DeviceClockComplaint;
+use crate::relay::nip42::Nip42Signer;
 use crate::relay::publishers::dedup_key;
-use crate::relay::{RelayFetchOutcome, RelayManager, SendAck};
+use crate::relay::{InboxRead, RelayFetchOutcome, RelayManager, SendAck};
 
 /// One of the user's own events a relay is expected to serve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,6 +152,29 @@ impl std::fmt::Debug for OwnRelayCell {
     }
 }
 
+/// How one own inbox relay answered a read of this account's gift wraps, the
+/// relay as the user's list names it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OwnInboxReadCell {
+    /// The list entry, verbatim.
+    pub relay_url: String,
+    /// How it answered.
+    pub read: InboxRead,
+}
+
+/// Redacting `Debug`: the relay is named by a salted handle (Rule 15).
+impl std::fmt::Debug for OwnInboxReadCell {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OwnInboxReadCell")
+            .field(
+                "relay",
+                &log_alias::relay(log_alias::RelayUrl(&self.relay_url)),
+            )
+            .field("read", &self.read)
+            .finish()
+    }
+}
+
 /// One kind of the board.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnKindSnapshot {
@@ -168,6 +197,9 @@ pub struct OwnBoardSnapshot {
     pub relay_list: OwnKindSnapshot,
     /// Kind 10050.
     pub inbox_relay_list: OwnKindSnapshot,
+    /// Each own inbox relay's answer to the last gift-wrap read, in the
+    /// list's order; empty before one, and after an edit of the inbox list.
+    pub inbox_reads: Vec<OwnInboxReadCell>,
 }
 
 struct Entry {
@@ -202,12 +234,21 @@ impl KindBoard {
     }
 }
 
+/// The last gift-wrap read's answers. Moved by every inbox list edit, as a
+/// kind is, so a read the edit superseded writes nothing.
+#[derive(Default)]
+struct InboxReads {
+    generation: u64,
+    cells: Vec<OwnInboxReadCell>,
+}
+
 /// A monotonic clock: production reads [`Instant::now`], a test moves its own.
 pub type BoardClock = Arc<dyn Fn() -> Instant + Send + Sync>;
 
 /// The user's own relays and what each serves, per kind. One per account.
 pub struct OwnRelayBoard {
     kinds: Mutex<[KindBoard; 3]>,
+    inbox_reads: Mutex<InboxReads>,
     running: AtomicUsize,
     clock: BoardClock,
 }
@@ -224,6 +265,7 @@ impl OwnRelayBoard {
     pub fn with_clock(clock: BoardClock) -> Self {
         Self {
             kinds: Mutex::new(Default::default()),
+            inbox_reads: Mutex::new(InboxReads::default()),
             running: AtomicUsize::new(0),
             clock,
         }
@@ -231,6 +273,12 @@ impl OwnRelayBoard {
 
     fn kinds(&self) -> std::sync::MutexGuard<'_, [KindBoard; 3]> {
         self.kinds.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn inbox_reads(&self) -> std::sync::MutexGuard<'_, InboxReads> {
+        self.inbox_reads
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     fn with_kind<R>(&self, kind: OwnKind, write: impl FnOnce(&mut KindBoard) -> R) -> R {
@@ -264,6 +312,7 @@ impl OwnRelayBoard {
             key_package: kind(OwnKind::KeyPackage),
             relay_list: kind(OwnKind::RelayList),
             inbox_relay_list: kind(OwnKind::InboxRelayList),
+            inbox_reads: self.inbox_reads().cells.clone(),
         }
     }
 
@@ -299,6 +348,57 @@ impl OwnRelayBoard {
     /// that has changed, or by a pass that failed before it could judge.
     pub fn clear(&self, kind: OwnKind) {
         self.with_kind(kind, |board| board.replace(None));
+    }
+
+    /// Where the gift-wrap reads stand: taken before the inbox list is read
+    /// and handed to [`Self::ask_inbox_reads`], as [`Self::generation`] is.
+    #[must_use]
+    pub fn inbox_reads_generation(&self) -> u64 {
+        self.inbox_reads().generation
+    }
+
+    /// Forgets every inbox relay's answer: the list they were asked from has
+    /// changed.
+    pub fn clear_inbox_reads(&self) {
+        let mut reads = self.inbox_reads();
+        reads.generation += 1;
+        reads.cells.clear();
+    }
+
+    /// Asks each of `inbox`, on an identity connection of its own that
+    /// answers the relay's NIP-42 challenge as `signer`
+    /// ([`RelayManager::read_own_inbox_per_relay`]), for this account's gift
+    /// wraps from now — so it normally brings nothing back — and records how
+    /// each answered, unless an edit since `seen` superseded the read. A
+    /// relay that refuses this read refuses the invitee's own reads too.
+    ///
+    /// The last answers are forgotten as the read begins, as a pass's cells
+    /// read checking: no warning stands on an answer being asked again.
+    pub async fn ask_inbox_reads(&self, signer: &Arc<Nip42Signer>, seen: u64, inbox: &[String]) {
+        {
+            let mut reads = self.inbox_reads();
+            if reads.generation == seen {
+                reads.cells.clear();
+            }
+        }
+        let answers = Box::pin(RelayManager::read_own_inbox_per_relay(
+            signer,
+            Some(Timestamp::now()),
+            1,
+            inbox,
+        ))
+        .await;
+        let mut reads = self.inbox_reads();
+        if reads.generation == seen {
+            reads.cells = inbox
+                .iter()
+                .zip(&answers)
+                .map(|(relay_url, answer)| OwnInboxReadCell {
+                    relay_url: relay_url.clone(),
+                    read: answer.inbox_read(),
+                })
+                .collect();
+        }
     }
 
     /// Forgets `relay`'s cell of `kind` only.
@@ -625,6 +725,7 @@ impl<T: Clone> Coalesced<T> {
 mod tests {
     use super::*;
     use crate::relay::maintenance::{KeyPackageLifetime, KIND_MARMOT_KEY_PACKAGE};
+    use crate::relay::recording_front::RecordingFront;
     use crate::relay::scripted_relay::{Frame, ScriptedRelay};
     use nostr::{EventBuilder, Filter, Keys, Tag, Timestamp};
     use OwnCell::{Checking, Current, Missing, NoAnswer, Publishing, Refused};
@@ -640,6 +741,7 @@ mod tests {
             relay_url: relay_url.to_owned(),
             responded: true,
             drained,
+            refused: false,
             events: Vec::new(),
         }
     }
@@ -936,6 +1038,221 @@ mod tests {
             "OwnBoardSnapshot",
             marker = "OwnRelayCell",
             &[RELAY, "private.relay.example.com"]
+        );
+    }
+
+    #[test]
+    fn own_inbox_read_cell_debug_redacts_the_relay() {
+        const RELAY: &str = "wss://private.relay.example.com";
+        let cell = OwnInboxReadCell {
+            relay_url: RELAY.to_owned(),
+            read: InboxRead::Refused,
+        };
+        crate::assert_debug_redacted!(
+            &cell,
+            "OwnInboxReadCell",
+            &[RELAY, "private.relay.example.com"]
+        );
+        let board = OwnRelayBoard::default();
+        board.inbox_reads().cells.push(cell);
+        crate::assert_debug_redacted!(
+            &board.snapshot(),
+            "OwnBoardSnapshot",
+            marker = "OwnInboxReadCell",
+            &[RELAY, "private.relay.example.com"]
+        );
+    }
+
+    /// Asks `inbox` for `own`'s gift wraps on a fresh board, as the
+    /// relay-list pass does, and returns what the board then holds.
+    async fn inbox_reads_of(own: &Keys, inbox: &[String]) -> Vec<OwnInboxReadCell> {
+        let board = OwnRelayBoard::default();
+        let signer = Arc::new(Nip42Signer::new(own));
+        board
+            .ask_inbox_reads(&signer, board.inbox_reads_generation(), inbox)
+            .await;
+        board.snapshot().inbox_reads
+    }
+
+    /// The relay settings page warns on exactly the relays that keep an
+    /// invitation out of this device's reach: one refusing the read, here a
+    /// relay that asks for authentication and never issues the challenge the
+    /// device would answer. A throttle or a plain error is a read that did not
+    /// finish, never a refusal.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_inbox_relay_is_judged_by_how_it_answers_a_gift_wrap_read() {
+        let own = Keys::generate();
+        let cases = [
+            (
+                vec![Frame::Closed(
+                    "auth-required: requested filter requires authentication".to_owned(),
+                )],
+                InboxRead::Refused,
+            ),
+            (
+                vec![Frame::Closed("restricted: not your inbox".to_owned())],
+                InboxRead::Refused,
+            ),
+            (
+                vec![Frame::Closed(
+                    "ERROR: auth-required: requested filter requires authentication".to_owned(),
+                )],
+                InboxRead::Refused,
+            ),
+            (
+                vec![Frame::Closed("rate-limited: slow down".to_owned())],
+                InboxRead::Incomplete,
+            ),
+            (
+                vec![Frame::Closed("error: shutting down".to_owned())],
+                InboxRead::Incomplete,
+            ),
+            (served(vec![]), InboxRead::Served),
+        ];
+        for (frames, expected) in cases {
+            let relay = ScriptedRelay::start();
+            answer(&relay, Kind::GiftWrap, frames);
+            let inbox = vec![relay.url().to_owned()];
+            let reads = inbox_reads_of(&own, &inbox).await;
+            assert_eq!(
+                reads,
+                [OwnInboxReadCell {
+                    relay_url: inbox[0].clone(),
+                    read: expected,
+                }],
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_inbox_relay_that_cannot_be_reached_is_unreached() {
+        let _ = crate::relay::allow_ws_loopback_for_test();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("local addr").port();
+        drop(listener);
+        let unreachable = vec![
+            format!("ws://127.0.0.1:{port}"),
+            "ws://insecure.relay.example.com".to_owned(),
+            "not-a-url".to_owned(),
+        ];
+        let reads = inbox_reads_of(&Keys::generate(), &unreachable).await;
+        assert_eq!(
+            reads
+                .iter()
+                .map(|cell| (cell.relay_url.as_str(), cell.read))
+                .collect::<Vec<_>>(),
+            unreachable
+                .iter()
+                .map(|url| (url.as_str(), InboxRead::Unreached))
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    /// The probe asks only what the live plane's own inbox REQ asks — this
+    /// account's gift wraps by `#p`, never by author and never a circle's
+    /// `#h` — and only from now, so a relay that serves it hands back nothing
+    /// a later read would not.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_inbox_read_probe_asks_only_for_own_gift_wraps_from_now() {
+        let own = Keys::generate();
+        let relay = ScriptedRelay::start();
+        let front = RecordingFront::start(relay.url());
+        let before = Timestamp::now().as_secs();
+        let _ = inbox_reads_of(&own, &[front.url().to_owned()]).await;
+
+        let gift_wrap_reqs: Vec<serde_json::Value> = front
+            .frames()
+            .iter()
+            .filter_map(|frame| serde_json::from_str::<serde_json::Value>(&frame.text).ok())
+            .filter(|message| {
+                message[0] == "REQ" && message[2]["kinds"] == serde_json::json!([1059])
+            })
+            .collect();
+        assert_eq!(
+            gift_wrap_reqs.len(),
+            1,
+            "one gift-wrap read per inbox relay"
+        );
+        let filter = gift_wrap_reqs[0][2]
+            .as_object()
+            .expect("a REQ filter")
+            .clone();
+        let mut keys: Vec<&str> = filter.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["#p", "kinds", "limit", "since"]);
+        let own_hex = own.public_key().to_hex();
+        assert!(
+            filter["#p"]
+                .as_array()
+                .is_some_and(|p| p.len() == 1 && p[0] == own_hex.as_str()),
+            "the read names this account's own key, and only it"
+        );
+        assert_eq!(filter["limit"], 1);
+        assert!(
+            filter["since"].as_u64().expect("a since") >= before,
+            "the read asks from now"
+        );
+    }
+
+    /// An inbox list edit forgets every answer, and a read that began before
+    /// it records nothing: its answers came from relays of the old list.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_inbox_list_edit_forgets_the_reads_and_supersedes_one_in_flight() {
+        let own = Keys::generate();
+        let signer = Arc::new(Nip42Signer::new(&own));
+        let relay = ScriptedRelay::start();
+        answer(&relay, Kind::GiftWrap, served(vec![]));
+        let inbox = vec![relay.url().to_owned()];
+        let board = OwnRelayBoard::default();
+
+        board
+            .ask_inbox_reads(&signer, board.inbox_reads_generation(), &inbox)
+            .await;
+        assert_eq!(board.snapshot().inbox_reads.len(), 1);
+        board.clear_inbox_reads();
+        assert!(board.snapshot().inbox_reads.is_empty());
+
+        // A read asked again forgets the last answers while it is asked.
+        board
+            .ask_inbox_reads(&signer, board.inbox_reads_generation(), &inbox)
+            .await;
+        let held = ScriptedRelay::start();
+        let (open, opened) = tokio::sync::watch::channel(false);
+        answer(
+            &held,
+            Kind::GiftWrap,
+            vec![Frame::Hold(opened), Frame::Eose],
+        );
+        let held_inbox = vec![held.url().to_owned()];
+        let asked = board.ask_inbox_reads(&signer, board.inbox_reads_generation(), &held_inbox);
+        let watched = async {
+            while held.connections() == 0 {
+                tokio::task::yield_now().await;
+            }
+            let mid = board.snapshot().inbox_reads;
+            open.send(true).expect("the relay listens");
+            mid
+        };
+        let ((), mid) = tokio::join!(asked, watched);
+        assert!(mid.is_empty(), "an answer stood while it was asked again");
+        assert_eq!(
+            board.snapshot().inbox_reads,
+            [OwnInboxReadCell {
+                relay_url: held_inbox[0].clone(),
+                read: InboxRead::Served,
+            }],
+        );
+
+        let seen = board.inbox_reads_generation();
+        board.clear_inbox_reads();
+        board.ask_inbox_reads(&signer, seen, &inbox).await;
+        assert!(
+            board.snapshot().inbox_reads.is_empty(),
+            "a read the edit superseded wrote its answers"
+        );
+        assert!(
+            board.snapshot().inbox_relay_list.cells.is_empty(),
+            "the reads are no kind's cells"
         );
     }
 

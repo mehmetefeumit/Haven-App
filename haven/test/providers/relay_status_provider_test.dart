@@ -11,7 +11,9 @@
 ///   front and something watches, and never after a pause or a dispose;
 /// - an unchanged board notifies nobody;
 /// - a publishing cell turns current at the next read with no input;
-/// - opening the page runs a pass only when the board is stale.
+/// - opening the page runs a pass only when the board is stale;
+/// - an inbox relay's gift-wrap read reaches its inbox row only, beside its
+///   kinds and never one of them.
 library;
 
 import 'package:fake_async/fake_async.dart';
@@ -24,6 +26,7 @@ import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/relay_status_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/relay_preferences_service.dart';
+import 'package:haven/src/services/relay_service.dart' show InboxRead;
 
 import '../helpers/fake_board_source.dart';
 import '../mocks/mock_relay_preferences_service.dart';
@@ -118,6 +121,57 @@ void main() {
         expect(fallbackDiscoveryRelays, contains(r.relayUrl));
         expect(r.lookup, isTrue);
       }
+    });
+
+    test("an inbox relay's gift-wrap read reaches its inbox row only, "
+        'whatever spelling the pass used, and is never one of its kinds', () {
+      const both = 'wss://both.example.com';
+      for (final read in InboxRead.values) {
+        final state = relayStatusOf(
+          const [_inbox, both],
+          const [_kp, both],
+          OwnRelayBoard(
+            inboxRelayList: const OwnKindBoard(
+              cells: [
+                OwnRelayCell(relayUrl: _inbox, status: OwnRelayStatus.current),
+              ],
+            ),
+            inboxReads: [
+              OwnInboxRead(relayUrl: 'WSS://Inbox.Example.com/', read: read),
+              OwnInboxRead(relayUrl: both, read: read),
+              // A relay no list names any more: its answer reaches no row.
+              OwnInboxRead(relayUrl: _kp, read: read),
+            ],
+          ),
+        );
+        final byUrl = _byUrl(state);
+        expect(byUrl[_inbox]!.inboxRead, read, reason: read.name);
+        expect(byUrl[both]!.inboxRead, read, reason: read.name);
+        expect(byUrl[_kp]!.inboxRead, isNull, reason: 'not an inbox relay');
+        expect(
+          byUrl[_inbox]!.expected,
+          [KindPresence.current],
+          reason: 'the read is never one of the kinds a pass publishes',
+        );
+        for (final r in state.relays.where((r) => !r.own)) {
+          expect(r.inboxRead, isNull, reason: 'a lookup row is never asked');
+        }
+      }
+
+      final unasked = relayStatusOf(const [_inbox], const [_kp], null);
+      expect(_byUrl(unasked)[_inbox]!.inboxRead, isNull);
+    });
+
+    test('a changed gift-wrap read alone is a changed state', () {
+      RelayStatusState of(InboxRead read) => relayStatusOf(
+        const [_inbox],
+        const [_kp],
+        OwnRelayBoard(
+          inboxReads: [OwnInboxRead(relayUrl: _inbox, read: read)],
+        ),
+      );
+      expect(of(InboxRead.refused), of(InboxRead.refused));
+      expect(of(InboxRead.refused), isNot(of(InboxRead.served)));
     });
 
     test('the lookup rows are the relays the board says the pass asks', () {
@@ -300,8 +354,7 @@ void main() {
               ],
             ),
           );
-        final c = _container(source)
-          ..listen(relayStatusProvider, (_, _) {});
+        final c = _container(source)..listen(relayStatusProvider, (_, _) {});
         async.elapse(Duration.zero);
         expect(
           _byUrl(c.read(relayStatusProvider))[_kp]!.keyPackage,

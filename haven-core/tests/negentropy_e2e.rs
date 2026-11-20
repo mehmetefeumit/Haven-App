@@ -813,11 +813,7 @@ async fn no_plane_follows_an_unrecoverable_circle_and_its_absence_moves_nothing(
 
     let from = wire.frames().len();
     step_pass_clock(&alice, &mut at);
-    let core = LiveSyncCore::new_local(
-        Arc::clone(&alice),
-        keys.public_key(),
-        Arc::new(RelayManager::new()),
-    );
+    let core = LiveSyncCore::new_local(Arc::clone(&alice), Arc::new(RelayManager::new()));
     core.start(
         &[dead_hex.clone(), live_hex.clone()].map(|group_id_hex| CircleSpec {
             group_id_hex,
@@ -938,11 +934,7 @@ async fn a_circle_a_welcome_repairs_in_place_is_followed_again_at_once() {
     };
 
     let from = wire.frames().len();
-    let core = LiveSyncCore::new_local(
-        Arc::clone(&bob),
-        bob_keys.public_key(),
-        Arc::new(RelayManager::new()),
-    );
+    let core = LiveSyncCore::new_local(Arc::clone(&bob), Arc::new(RelayManager::new()));
     core.start(
         &[CircleSpec {
             group_id_hex: routing.clone(),
@@ -1007,11 +999,7 @@ async fn a_circle_a_welcome_repairs_in_place_is_followed_again_at_once() {
 /// Bob's engine over `urls`, started and settled, then paused: the state a
 /// background wake finds.
 async fn paused_engine(pair: &Pair, circle: &Joined, urls: &[String]) -> LiveSyncCore {
-    let core = LiveSyncCore::new_local(
-        Arc::clone(&pair.bob),
-        pair.bob_keys.public_key(),
-        Arc::new(RelayManager::new()),
-    );
+    let core = LiveSyncCore::new_local(Arc::clone(&pair.bob), Arc::new(RelayManager::new()));
     core.start(
         &[CircleSpec {
             group_id_hex: circle.hex(),

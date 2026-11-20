@@ -1,9 +1,11 @@
-/// What the own-relay maintenance passes found and did, per relay and kind:
-/// the Dart side of the Rust-owned board (`CircleManagerFfi.ownRelayBoard`),
-/// read as a network-free snapshot.
+/// What the own-relay maintenance passes found and did, per relay and kind,
+/// and how each own inbox relay answered their read of this account's gift
+/// wraps: the Dart side of the Rust-owned board
+/// (`CircleManagerFfi.ownRelayBoard`), read as a network-free snapshot.
 library;
 
 import 'package:flutter/foundation.dart';
+import 'package:haven/src/services/relay_service.dart' show InboxRead;
 
 /// One relay's state for one kind, as the last or running pass left it.
 enum OwnRelayStatus {
@@ -58,6 +60,20 @@ class OwnRelayCell {
   final OwnRelayStatus status;
 }
 
+/// How one own inbox relay answered the last read of this account's gift
+/// wraps.
+@immutable
+class OwnInboxRead {
+  /// Creates an answer.
+  const OwnInboxRead({required this.relayUrl, required this.read});
+
+  /// The relay, as the inbox list spells it.
+  final String relayUrl;
+
+  /// How it answered.
+  final InboxRead read;
+}
+
 /// One kind's half of the board.
 @immutable
 class OwnKindBoard {
@@ -85,6 +101,7 @@ class OwnRelayBoard {
     this.keyPackage = const OwnKindBoard(),
     this.relayList = const OwnKindBoard(),
     this.inboxRelayList = const OwnKindBoard(),
+    this.inboxReads = const [],
   });
 
   /// Whether a pass is running or waiting for the one that is.
@@ -101,4 +118,8 @@ class OwnRelayBoard {
 
   /// Kind 10050.
   final OwnKindBoard inboxRelayList;
+
+  /// Each own inbox relay's answer to the last gift-wrap read; empty before
+  /// one in this session, and after an edit of the inbox list.
+  final List<OwnInboxRead> inboxReads;
 }

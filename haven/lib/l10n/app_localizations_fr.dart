@@ -525,6 +525,27 @@ class AppLocalizationsFr extends AppLocalizations {
   }
 
   @override
+  String get relaySettingsInboxRefused =>
+      'Ce relais n\'a pas laissé Haven lire vos invitations. Supprimez-le ou ajoutez un autre relais.';
+
+  @override
+  String get relaySettingsInboxRefusedTooltip =>
+      'N\'a pas laissé Haven lire les invitations';
+
+  @override
+  String relaySettingsInboxRefusedSemantics(String url) {
+    return 'Avertissement : $url n\'a pas laissé Haven lire vos invitations';
+  }
+
+  @override
+  String get relaySettingsInboxAllRefusedTitle =>
+      'Aucun de vos relais de réception n\'a laissé Haven lire vos invitations';
+
+  @override
+  String get relaySettingsInboxAllRefusedMessage =>
+      'Les invitations qui vous sont envoyées ne vous parviendront pas tant qu\'aucun de vos relais de réception ne laissera Haven les lire. Rétablissez les valeurs par défaut ou ajoutez un autre relais.';
+
+  @override
   String get locationSettingsTitle => 'Position';
 
   @override
@@ -1536,6 +1557,55 @@ class AppLocalizationsFr extends AppLocalizations {
   String get invitationsLoadError => 'Impossible de charger les invitations';
 
   @override
+  String invitationsNoticeRefused(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other:
+          '$countString relais de réception n\'ont pas laissé Haven lire vos invitations : une invitation envoyée uniquement à ces relais ne vous parviendra donc pas. Dans les Paramètres de relais, supprimez-les ou ajoutez un autre relais.',
+      many:
+          '$countString relais de réception n\'ont pas laissé Haven lire vos invitations : une invitation envoyée uniquement à ces relais ne vous parviendra donc pas. Dans les Paramètres de relais, supprimez-les ou ajoutez un autre relais.',
+      one:
+          'Un relais de réception n\'a pas laissé Haven lire vos invitations : une invitation envoyée uniquement à ce relais ne vous parviendra donc pas. Dans les Paramètres de relais, supprimez-le ou ajoutez un autre relais.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String invitationsNoticeNotSaved(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other:
+          '$countString invitations sont arrivées, mais n\'ont pas pu être enregistrées sur cet appareil.',
+      many:
+          '$countString invitations sont arrivées, mais n\'ont pas pu être enregistrées sur cet appareil.',
+      one:
+          'Une invitation est arrivée, mais n\'a pas pu être enregistrée sur cet appareil.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get invitationsNoticeOffline =>
+      'Haven n\'a pu joindre aucun de vos relais de réception : les nouvelles invitations ne peuvent donc pas encore s\'afficher.';
+
+  @override
+  String get invitationsNoticeIncomplete =>
+      'Haven n\'a pas pu finir de vérifier tous vos relais de réception : certaines invitations pourraient donc ne pas encore s\'afficher.';
+
+  @override
+  String get invitationsNoticeOpenRelaySettings => 'Paramètres de relais';
+
+  @override
   String get invitationsEmptyTitle => 'Aucune invitation';
 
   @override
@@ -1566,7 +1636,7 @@ class AppLocalizationsFr extends AppLocalizations {
   }
 
   @override
-  String refreshRingSemanticAllOk(int total) {
+  String refreshRingSemanticInboxAll(int total) {
     final intl.NumberFormat totalNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
@@ -1574,18 +1644,19 @@ class AppLocalizationsFr extends AppLocalizations {
     String _temp0 = intl.Intl.pluralLogic(
       total,
       locale: localeName,
-      other: 'Les $totalString relais ont répondu',
-      many: 'Les $totalString relais ont répondu',
-      one: 'Le relais a répondu',
+      other: 'Invitations vérifiées sur les $totalString relais',
+      many: 'Invitations vérifiées sur les $totalString relais',
+      one: 'Invitations vérifiées sur le relais',
     );
     return '$_temp0';
   }
 
   @override
-  String get refreshRingSemanticAllError => 'Aucun relais n\'a répondu';
+  String get refreshRingSemanticInboxNone =>
+      'Les invitations n\'ont pu être vérifiées sur aucun relais';
 
   @override
-  String refreshRingSemanticPartial(int ok, int total) {
+  String refreshRingSemanticInboxPartial(int ok, int total) {
     final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -1594,17 +1665,18 @@ class AppLocalizationsFr extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return '$okString relais sur $totalString ont répondu';
+    return 'Invitations vérifiées : $okString relais sur $totalString';
   }
 
   @override
   String get refreshRingAnnouncementChecking => 'Vérification des relais';
 
   @override
-  String get refreshRingAnnouncementAllOk => 'Tous les relais ont répondu';
+  String get refreshRingAnnouncementInboxAll =>
+      'Invitations vérifiées sur tous les relais';
 
   @override
-  String refreshRingAnnouncementPartial(int ok, int total) {
+  String refreshRingAnnouncementInboxPartial(int ok, int total) {
     final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -1613,12 +1685,12 @@ class AppLocalizationsFr extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return '$okString relais sur $totalString ont répondu';
+    return 'Invitations vérifiées : $okString relais sur $totalString';
   }
 
   @override
-  String get refreshRingAnnouncementAllError =>
-      'Aucun relais n\'a pu être contacté';
+  String get refreshRingAnnouncementInboxNone =>
+      'Les invitations n\'ont pu être vérifiées sur aucun relais';
 
   @override
   String get refreshRingAnnouncementNoInbox =>

@@ -8,6 +8,7 @@ library;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/src/constants/relays.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/relay_status_provider.dart';
@@ -51,6 +52,28 @@ void main() {
       final list = await container.read(inboxRelaysProvider.future);
       expect(mock.didSeed, isTrue);
       expect(list, isNotEmpty);
+    });
+
+    test('a failed seed falls back to the inbox defaults, never a relay '
+        'that gates gift-wrap reads', () async {
+      final failing = MockRelayPreferencesService(seedThrows: true);
+      final c = ProviderContainer(
+        overrides: [
+          relayPreferencesServiceProvider.overrideWith((ref) async => failing),
+          relayServiceProvider.overrideWithValue(MockRelayService()),
+        ],
+      );
+      addTearDown(c.dispose);
+      final inbox = await c.read(inboxRelaysProvider.future);
+      expect(failing.didSeed, isTrue);
+      expect(inbox, fallbackDefaultInboxRelays);
+      expect(inbox, isNot(contains('wss://relay.damus.io')));
+      // The KeyPackage list keeps the account seed, which that relay serves.
+      expect(
+        await c.read(keyPackageRelaysProvider.future),
+        fallbackDefaultRelays,
+      );
+      expect(fallbackDefaultRelays, contains('wss://relay.damus.io'));
     });
 
     test('returns existing list without seeding when not empty', () async {

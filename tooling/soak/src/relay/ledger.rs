@@ -40,7 +40,7 @@
 //! silent drop.
 
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -129,6 +129,11 @@ pub struct PlaneRecord {
     /// Every event this plane carried, was seeded with or forged: its id,
     /// kind and `#h`, for the judge's event index.
     pub events: Vec<(String, u16, Option<String>)>,
+    /// Each `OK false auth-required:` the plane wrote towards a client: the
+    /// endpoint, the event id and when, in [`plane_instant`]'s order — what
+    /// licenses one authenticated resend of that event (owner decisions D1b,
+    /// D1c).
+    pub demands: Vec<(EndpointId, String, u64)>,
     /// Whether a cap was hit, so the record is incomplete.
     pub full: bool,
 }
@@ -155,6 +160,9 @@ impl fmt::Debug for PlaneHighWater {
 struct PlaneLog {
     first_seen: HashMap<(EndpointId, u64, String), u64>,
     events: BTreeMap<String, (u16, Option<String>)>,
+    /// Each `OK false auth-required:` written towards the client: the
+    /// endpoint, the event id and when.
+    demands: Vec<(EndpointId, String, u64)>,
     shapes: usize,
     shapes_cap: usize,
     ids_cap: usize,
@@ -166,6 +174,7 @@ impl Default for PlaneLog {
         Self {
             first_seen: HashMap::new(),
             events: BTreeMap::new(),
+            demands: Vec::new(),
             shapes: 0,
             shapes_cap: PLANE_SHAPES_CAP,
             ids_cap: PLANE_IDS_CAP,
@@ -326,6 +335,11 @@ struct Inner {
     /// socket never carried it" is a different fact from "the plane never
     /// wrote it".
     delivered: HashMap<EventId, HashMap<Option<DeviceTag>, usize>>,
+    /// The endpoints that withheld an `EVENT` frame of a dropped class, per
+    /// event: the partition's own evidence, which an absence from
+    /// [`Self::delivered`] is not — that is also what a frame still in flight
+    /// looks like.
+    dropped: HashMap<EventId, HashSet<Option<DeviceTag>>>,
     /// `EVENT` frames the client sent towards the relay, per event.
     published: HashMap<EventId, usize>,
     /// Events this plane forged onto a subscription, in injection order.
@@ -366,6 +380,9 @@ struct Inner {
     withheld_eose: usize,
     /// NIP-77 frames, per endpoint and kind.
     neg: HashMap<(Option<DeviceTag>, NegFrame), usize>,
+    /// Reads a plane under `AuthGatedReads` refused, per endpoint: the gate's
+    /// firing, which arming it is not.
+    gated_refusals: HashMap<Option<DeviceTag>, usize>,
     /// Every client→relay data frame, for O7.
     planes: PlaneLog,
 }
@@ -456,6 +473,19 @@ impl Ledger {
                 .delivered
                 .get(event_id)
                 .is_some_and(|endpoints| endpoints.contains_key(&Some(device)))
+        })
+    }
+
+    /// Whether `device`'s OWN endpoint withheld an `EVENT` frame naming
+    /// `event_id` under a dropped class: the relay sent it towards that
+    /// device, and the partition kept it from the socket.
+    #[must_use]
+    pub fn dropped_at(&self, device: DeviceTag, event_id: &EventId) -> bool {
+        self.with(|inner| {
+            inner
+                .dropped
+                .get(event_id)
+                .is_some_and(|endpoints| endpoints.contains(&Some(device)))
         })
     }
 
@@ -594,6 +624,17 @@ impl Ledger {
         })
     }
 
+    /// How many reads `device`'s endpoint (`None`: the canonical one) refused
+    /// under `AuthGatedReads`.
+    #[must_use]
+    pub fn gated_refusals(&self, device: Option<DeviceTag>) -> usize {
+        self.with(|inner| inner.gated_refusals.get(&device).copied().unwrap_or(0))
+    }
+
+    pub(crate) fn note_gated_refusal(&self, device: Option<DeviceTag>) {
+        self.with(|inner| *inner.gated_refusals.entry(device).or_default() += 1);
+    }
+
     pub(crate) fn note_neg(&self, device: Option<DeviceTag>, frame: NegFrame) {
         self.with(|inner| *inner.neg.entry((device, frame)).or_default() += 1);
     }
@@ -609,6 +650,17 @@ impl Ledger {
         });
     }
 
+    /// Records a relay's `OK false auth-required:` for `event_id`, written
+    /// towards the client on `endpoint`.
+    pub(crate) fn note_auth_demand(&self, endpoint: EndpointId, event_id: EventId) {
+        self.with(|inner| {
+            inner
+                .planes
+                .demands
+                .push((endpoint, event_id.to_hex(), plane_instant()));
+        });
+    }
+
     pub(crate) fn note_delivered(&self, device: Option<DeviceTag>, event_id: EventId) {
         self.with(|inner| {
             inner.tag(event_id);
@@ -618,6 +670,12 @@ impl Ledger {
                 .or_default()
                 .entry(device)
                 .or_default() += 1;
+        });
+    }
+
+    pub(crate) fn note_dropped(&self, device: Option<DeviceTag>, event_id: EventId) {
+        self.with(|inner| {
+            inner.dropped.entry(event_id).or_default().insert(device);
         });
     }
 
@@ -671,6 +729,7 @@ impl Ledger {
                     .iter()
                     .map(|(id, (kind, h))| (id.clone(), *kind, h.clone()))
                     .collect(),
+                demands: inner.planes.demands.clone(),
                 full: inner.planes.full,
             }
         })
@@ -768,6 +827,7 @@ impl fmt::Debug for Ledger {
                 .field("acked", &sim_magnitude(inner.acked.len()))
                 .field("refused", &sim_magnitude(inner.refusals.len()))
                 .field("delivered", &sim_magnitude(inner.delivered.len()))
+                .field("dropped", &sim_magnitude(inner.dropped.len()))
                 .field("published", &sim_magnitude(inner.published.len()))
                 .field("injected", &sim_magnitude(inner.injected.len()))
                 .field("reqs", &sim_magnitude(inner.reqs.len()))
@@ -909,6 +969,27 @@ mod tests {
             "the plane-wide count is the sum over every endpoint"
         );
         assert_eq!(ledger.delivered(&an_event_id(2)), 1);
+    }
+
+    #[test]
+    fn a_drop_is_answered_per_endpoint_and_is_never_a_delivery() {
+        let ledger = Ledger::new();
+        let (alice, bob) = (DeviceTag::new(0), DeviceTag::new(1));
+        ledger.note_dropped(Some(alice), an_event_id(1));
+        ledger.note_dropped(None, an_event_id(2));
+        assert!(ledger.dropped_at(alice, &an_event_id(1)));
+        assert!(
+            !ledger.dropped_at(bob, &an_event_id(1)),
+            "another endpoint's drop says nothing about this one"
+        );
+        assert!(
+            !ledger.dropped_at(alice, &an_event_id(2)),
+            "a drop at the canonical endpoint is no device's"
+        );
+        assert!(
+            !ledger.delivered_to(alice, &an_event_id(1)) && ledger.delivered(&an_event_id(1)) == 0,
+            "a withheld frame never went out"
+        );
     }
 
     #[test]
@@ -1176,6 +1257,28 @@ mod tests {
         assert_eq!(
             format!("{:?}", EndpointId::Alias(dev, 4)),
             "Alias(simdev#2, 4)"
+        );
+    }
+
+    /// The plane record hands O7 every `auth-required:` demand a plane wrote
+    /// towards a client, on the endpoint it went out on, in order: the
+    /// licence for one authenticated resend (owner decisions D1b, D1c).
+    #[test]
+    fn the_plane_record_keeps_each_auth_required_demand_on_its_endpoint() {
+        let ledger = Ledger::new();
+        let own = EndpointId::Own(DeviceTag::new(1));
+        ledger.note_auth_demand(own, an_event_id(7));
+        ledger.note_auth_demand(EndpointId::Canonical, an_event_id(8));
+        let demands = ledger.plane_record().demands;
+        assert_eq!(demands.len(), 2);
+        assert_eq!(
+            (demands[0].0, demands[0].1.as_str()),
+            (own, hex::encode([7u8; 32]).as_str())
+        );
+        assert_eq!(demands[1].0, EndpointId::Canonical);
+        assert!(
+            demands[0].2 <= demands[1].2,
+            "the demands are not in their order"
         );
     }
 }

@@ -216,7 +216,6 @@ async fn delivered_445_never_sets_the_cursor_but_eose_does() {
     let opened_at = now_secs();
     let engine1 = LiveSyncCore::new_local(
         Arc::clone(&circle),
-        Keys::generate().public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     engine1
@@ -294,7 +293,6 @@ async fn delivered_445_never_sets_the_cursor_but_eose_does() {
 
     let engine2 = LiveSyncCore::new_local(
         Arc::clone(&circle),
-        Keys::generate().public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     engine2
@@ -466,7 +464,6 @@ async fn busy_circle_high_cursor_does_not_bury_a_quiet_co_multiplexed_circle() {
 
     let engine = LiveSyncCore::new_local(
         Arc::clone(&alice),
-        alice_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     let mut bus = engine.bus().subscribe();

@@ -101,6 +101,18 @@ class InvitationRejoinConfirmationRequiredException
     : super('Invitation would replace a held circle');
 }
 
+/// Thrown when a gift wrap opened as an invitation but holding it could not
+/// be recorded on this device, so it is not held.
+///
+/// Its own type because it is the one intake failure the Invitations page
+/// tells the user about: it is this device's, and a refresh asks again. A
+/// wrap that is no invitation this device can open stays silent, since anyone
+/// who knows the npub can send one.
+class InvitationNotSavedException extends CircleServiceException {
+  /// Creates an [InvitationNotSavedException].
+  const InvitationNotSavedException() : super('Invitation could not be saved');
+}
+
 /// A replacement Welcome awaiting the user's consent: joining it discards
 /// this device's copy of the circle [mlsGroupId].
 @immutable
@@ -981,12 +993,14 @@ abstract class CircleService {
   /// - [Invitation] for a newly-processed gift wrap (caller should surface
   ///   it in the UI and refresh the pending-invitations list).
   /// - `null` when the gift wrap has already been processed on a prior
-  ///   poll cycle. This is the expected outcome when NIP-59's 2-day
-  ///   lookback causes the poller to re-fetch the same wrapper events.
-  ///   Callers should treat `null` as a silent no-op (no count, no log).
+  ///   poll cycle (the inbox lookback re-fetches the same wrapper events),
+  ///   or when it is no invitation this device can open — a shared inbox
+  ///   carries other clients' wraps, and anyone who knows the npub can send
+  ///   one. Callers should treat `null` as a silent no-op (no count, no log).
   ///
-  /// Throws [CircleServiceException] for real failures (malformed event,
-  /// MDK error, storage failure).
+  /// Throws [InvitationNotSavedException] when the invitation opened but
+  /// could not be recorded on this device, and [CircleServiceException] for
+  /// any other failure.
   Future<Invitation?> processGiftWrappedInvitation({
     required List<int> identitySecretBytes,
     required String giftWrapEventJson,

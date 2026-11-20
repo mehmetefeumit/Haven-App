@@ -851,7 +851,8 @@ async fn a_per_relay_page_puts_the_event_nip01_keeps_first_whatever_the_relay_se
 async fn a_forged_event_never_reads_as_published_on_a_relay() {
     hermetic();
     let relay = ScriptedRelay::start();
-    let own = Keys::generate().public_key();
+    let keys = Keys::generate();
+    let own = keys.public_key();
     let inbox = urls(&[&relay]);
     // The very list configured: it would read current were it believed.
     let (prime, forged) = forged_as(

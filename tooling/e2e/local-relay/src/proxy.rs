@@ -39,6 +39,16 @@
 //! control verb this build cannot intercept — which is how a needle declaration
 //! ends up stored by `strfry` and uploaded in a lane's relay log.
 //!
+//! # A gated route
+//!
+//! A route with a [`ReadGate`] (`;gate-read=<kinds>` in the routing table)
+//! answers as a relay that will not serve those kinds' reads to a client that
+//! has not authenticated — see [`crate::gate`]. The frames it refuses or
+//! answers itself (a client's `AUTH` among them), the answers it writes and
+//! the relay events it withholds are journalled under their own directions
+//! (`c2p`, `p2c`, `r2p`), never as `c2r`/`r2c`: those claim a hop to or from
+//! `relay_url` that these frames never made.
+//!
 //! # Errors are logged by KIND, never interpolated
 //!
 //! Security Rules 6 and 8: a transport error's message can carry
@@ -84,6 +94,7 @@ use crate::frame::{
     sentinel_ack, validate_mls_group_id, ControlFrame, ControlVerb, MlsGroupIdRejection,
     Observation, CONTROL_VERB_NAMESPACE,
 };
+use crate::gate::{answer_auth, ReadGate};
 use crate::journal::{now_ms, Dir, Endpoint, WireJournal};
 use crate::needles::{CanarySink, NeedleSink};
 
@@ -99,6 +110,9 @@ const TEARDOWN_DRAIN: Duration = Duration::from_secs(5);
 const REASON_C2R_DISCARDED: &str = "c2r frames discarded";
 /// `reason` recorded when journalled relay→client frames never left the proxy.
 const REASON_R2C_DISCARDED: &str = "r2c frames discarded";
+/// `reason` recorded when the answers a gated route journalled as written to
+/// the client never left the proxy.
+const REASON_P2C_DISCARDED: &str = "p2c frames discarded";
 /// `reason` recorded when a client named a control verb outside the table.
 const REASON_UNKNOWN_CONTROL_VERB: &str = "unknown control verb";
 /// `reason` recorded when the client→relay stream failed mid-connection.
@@ -113,6 +127,9 @@ pub struct Route {
     pub listen: SocketAddr,
     /// Upstream relay URL, e.g. `ws://127.0.0.1:7777`.
     pub upstream: String,
+    /// When set, the route answers as a relay gating these kinds' reads
+    /// (`crate::gate`).
+    pub read_gate: Option<ReadGate>,
 }
 
 /// The proxy's full routing table.
@@ -238,6 +255,7 @@ impl Proxy {
             bound.push(Route {
                 listen: local_addr,
                 upstream: route.upstream.clone(),
+                read_gate: route.read_gate.clone(),
             });
 
             let endpoint = Endpoint {
@@ -250,6 +268,7 @@ impl Proxy {
             accept_tasks.push(tokio::spawn(accept_loop(
                 listener,
                 endpoint,
+                route.read_gate.clone().map(Arc::new),
                 connections,
                 journal,
                 sinks,
@@ -724,6 +743,7 @@ fn declaration_notice(
 async fn accept_loop(
     listener: TcpListener,
     endpoint: Endpoint,
+    gate: Option<Arc<ReadGate>>,
     connections: Arc<AtomicU64>,
     journal: Arc<WireJournal>,
     sinks: ControlSinks,
@@ -736,8 +756,10 @@ async fn accept_loop(
                 let journal = Arc::clone(&journal);
                 let sinks = sinks.clone();
                 let endpoint = endpoint.clone();
+                let gate = gate.clone();
                 tokio::spawn(async move {
-                    handle_connection(stream, conn_id, endpoint, journal, sinks).await;
+                    handle_connection(stream, conn_id, endpoint, gate.as_deref(), journal, sinks)
+                        .await;
                 });
             }
             Err(err) => {
@@ -755,10 +777,12 @@ async fn accept_loop(
 }
 
 /// Pumps one client connection to the relay and back, recording as it goes.
+#[allow(clippy::too_many_lines)]
 async fn handle_connection(
     stream: TcpStream,
     conn_id: String,
     endpoint: Endpoint,
+    gate: Option<&ReadGate>,
     journal: Arc<WireJournal>,
     sinks: ControlSinks,
 ) {
@@ -810,11 +834,37 @@ async fn handle_connection(
     // which is why it is a pair of counters rather than a return value.
     let c2r_ledger = Ledger::default();
     let r2c_ledger = Ledger::default();
+    // The gate's own answers go to the client through the same writer as the
+    // relay's, journalled `p2c`, so their shortfall is counted apart: a
+    // retraction names the direction whose last lines it retracts.
+    let p2c_ledger = Ledger::default();
+    // The key this connection answered the gate's challenge under: read by
+    // both pumps, which run in this one task.
+    let reader = std::sync::Mutex::new(None::<String>);
+    let gate = gate.map(|gate| Gated {
+        gate,
+        reader: &reader,
+        listen_port: endpoint
+            .listen
+            .rsplit_once(':')
+            .and_then(|(_, port)| port.parse().ok())
+            .unwrap_or_default(),
+    });
 
     // `mut` because the teardown below awaits each handle THROUGH a borrow, so
     // a writer that finished within the bound is never polled again.
-    let mut client_writer = tokio::spawn(writer(to_client, client_rx, r2c_ledger.delivered()));
-    let mut relay_writer = tokio::spawn(writer(to_relay, relay_rx, c2r_ledger.delivered()));
+    let mut client_writer = tokio::spawn(writer(
+        to_client,
+        client_rx,
+        r2c_ledger.delivered(),
+        p2c_ledger.delivered(),
+    ));
+    let mut relay_writer = tokio::spawn(writer(
+        to_relay,
+        relay_rx,
+        c2r_ledger.delivered(),
+        Arc::default(),
+    ));
 
     let c2r = pump(
         from_client,
@@ -822,8 +872,10 @@ async fn handle_connection(
         Some(Control {
             reply: client_tx.clone(),
             sinks: &sinks,
+            synthesized: p2c_ledger.claimed(),
         }),
         Dir::ClientToRelay,
+        gate,
         &conn_id,
         &endpoint,
         &journal,
@@ -834,6 +886,7 @@ async fn handle_connection(
         client_tx,
         None,
         Dir::RelayToClient,
+        gate,
         &conn_id,
         &endpoint,
         &journal,
@@ -885,6 +938,13 @@ async fn handle_connection(
         REASON_R2C_DISCARDED,
         &r2c_ledger,
     );
+    record_shortfall(
+        &journal,
+        &conn_id,
+        &endpoint,
+        REASON_P2C_DISCARDED,
+        &p2c_ledger,
+    );
 }
 
 /// One direction's delivery ledger.
@@ -919,12 +979,23 @@ impl Ledger {
 /// A message queued for one of the two writer tasks.
 struct Outbound {
     message: Message,
-    /// `true` when a journal line has already CLAIMED this message was sent.
+    /// Which journal line, if any, has already CLAIMED this message was sent.
     ///
     /// Control frames and the synthesized sentinel ack are never journalled,
     /// so losing one is untidy but not a fidelity failure — counting them
     /// would inflate every discard record and make the honest ones ignorable.
-    journalled: bool,
+    claim: Claim,
+}
+
+/// The journal line an [`Outbound`] message makes true by being delivered.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Claim {
+    /// None: the message is not journalled.
+    Unrecorded,
+    /// A `c2r` or `r2c` line.
+    Relayed,
+    /// A `p2c` line: a gated route's own answer.
+    Synthesized,
 }
 
 /// Owns one socket's write half and reports what it managed to deliver.
@@ -937,6 +1008,7 @@ async fn writer<S>(
     mut sink: S,
     mut rx: mpsc::UnboundedReceiver<Outbound>,
     delivered: Arc<AtomicU64>,
+    synthesized_delivered: Arc<AtomicU64>,
 ) where
     S: SinkExt<Message> + Unpin,
 {
@@ -945,11 +1017,20 @@ async fn writer<S>(
         if broken {
             continue;
         }
+        let claim = out.claim;
         if sink.send(out.message).await.is_err() {
             broken = true;
             rx.close();
-        } else if out.journalled {
-            delivered.fetch_add(1, Ordering::SeqCst);
+        } else {
+            match claim {
+                Claim::Unrecorded => {}
+                Claim::Relayed => {
+                    delivered.fetch_add(1, Ordering::SeqCst);
+                }
+                Claim::Synthesized => {
+                    synthesized_delivered.fetch_add(1, Ordering::SeqCst);
+                }
+            }
         }
     }
     if !broken {
@@ -1007,6 +1088,8 @@ struct Control<'a> {
     reply: mpsc::UnboundedSender<Outbound>,
     /// Where each declared value goes. NEVER the journal.
     sinks: &'a ControlSinks,
+    /// The `p2c` lines a gated route has journalled and handed to `reply`.
+    synthesized: Arc<AtomicU64>,
 }
 
 /// What the byte-level gate decided about one client message.
@@ -1118,8 +1201,101 @@ fn intercept(control: &Control<'_>, frame: ControlFrame<'_>, conn_id: &str) -> b
 fn reply(control: &Control<'_>, ack: String) {
     let _ = control.reply.send(Outbound {
         message: Message::Text(ack.into()),
-        journalled: false,
+        claim: Claim::Unrecorded,
     });
+}
+
+/// One connection's view of its route's read gate.
+#[derive(Clone, Copy)]
+struct Gated<'a> {
+    gate: &'a ReadGate,
+    /// The key the connection authenticated as, hex.
+    reader: &'a std::sync::Mutex<Option<String>>,
+    listen_port: u16,
+}
+
+impl Gated<'_> {
+    fn reader(&self) -> Option<String> {
+        self.reader
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Answers, in place of the relay, a client's `AUTH` or a read the gate
+    /// refuses a connection that has not authenticated: `true` when `message`
+    /// was such a frame and must not be forwarded.
+    fn answered(
+        &self,
+        control: &Control<'_>,
+        message: &Message,
+        conn_id: &str,
+        endpoint: &Endpoint,
+        journal: &WireJournal,
+    ) -> bool {
+        let Message::Text(text) = message else {
+            return false;
+        };
+        let challenge = format!("challenge-{conn_id}");
+        let reader = self.reader();
+        let answers: Vec<String> = if let Some((ok, now)) = answer_auth(
+            text.as_str(),
+            &challenge,
+            self.listen_port,
+            reader.as_deref(),
+        ) {
+            if now.is_some() {
+                *self
+                    .reader
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = now;
+            }
+            vec![ok]
+        } else if reader.is_none() {
+            match self.gate.refusal(text.as_str(), &challenge) {
+                Some(answers) => answers.into(),
+                None => return false,
+            }
+        } else {
+            return false;
+        };
+        answer_in_place(control, text.as_str(), answers, conn_id, endpoint, journal);
+        true
+    }
+}
+
+/// Journals `text` as `c2p` — the client sent it, no relay got it — and each
+/// of `answers` as `p2c` before it is queued, so the journal holds what the
+/// client saw without ever claiming the relay sent or received it.
+fn answer_in_place(
+    control: &Control<'_>,
+    text: &str,
+    answers: Vec<String>,
+    conn_id: &str,
+    endpoint: &Endpoint,
+    journal: &WireJournal,
+) {
+    journal.record(
+        conn_id,
+        endpoint,
+        Dir::ClientToProxy,
+        now_ms(),
+        &classify_text(text),
+    );
+    for answer in answers {
+        journal.record(
+            conn_id,
+            endpoint,
+            Dir::ProxyToClient,
+            now_ms(),
+            &classify_text(&answer),
+        );
+        control.synthesized.fetch_add(1, Ordering::SeqCst);
+        let _ = control.reply.send(Outbound {
+            message: Message::Text(answer.into()),
+            claim: Claim::Synthesized,
+        });
+    }
 }
 
 /// One direction of one connection.
@@ -1135,6 +1311,7 @@ async fn pump<S>(
     forward: mpsc::UnboundedSender<Outbound>,
     control: Option<Control<'_>>,
     dir: Dir,
+    gate: Option<Gated<'_>>,
     conn_id: &str,
     endpoint: &Endpoint,
     journal: &WireJournal,
@@ -1169,7 +1346,7 @@ async fn pump<S>(
         if matches!(message, Message::Close(_)) {
             let _ = forward.send(Outbound {
                 message,
-                journalled: false,
+                claim: Claim::Unrecorded,
             });
             break;
         }
@@ -1259,6 +1436,22 @@ async fn pump<S>(
                 }
             }
 
+            // A GATED ROUTE plays the relay's read gate (`crate::gate`). Like a
+            // control frame, what the gate answers is decided before the
+            // recorder, so no line ever claims a hop the frame did not make.
+            if let Some(gated) = gate {
+                if let Some(control) = control.as_ref() {
+                    if gated.answered(control, &message, conn_id, endpoint, journal) {
+                        continue;
+                    }
+                } else if matches!(&message, Message::Text(text)
+                    if gated.gate.withholds(text.as_str(), gated.reader().as_deref()))
+                {
+                    journal.record(conn_id, endpoint, Dir::RelayToProxy, now_ms(), &observation);
+                    continue;
+                }
+            }
+
             let seq = journal.record(conn_id, endpoint, dir, now_ms(), &observation);
 
             if let (Some(token), Some(control)) = (&observation.sentinel, control.as_ref()) {
@@ -1280,7 +1473,11 @@ async fn pump<S>(
         if forward
             .send(Outbound {
                 message,
-                journalled,
+                claim: if journalled {
+                    Claim::Relayed
+                } else {
+                    Claim::Unrecorded
+                },
             })
             .is_err()
         {
@@ -1296,9 +1493,12 @@ async fn pump<S>(
 /// is the part that changes a verdict. The class is on stderr, which
 /// `stop-wire-proxy.sh` tails into the lane log.
 const fn read_failed_reason(dir: Dir) -> &'static str {
-    match dir {
-        Dir::ClientToRelay => REASON_C2R_READ_FAILED,
-        Dir::RelayToClient => REASON_R2C_READ_FAILED,
+    // A pump reads one of the two sockets; the proxy-hop directions name what
+    // the gate did with a frame, never a stream that can fail.
+    if matches!(dir, Dir::ClientToRelay) {
+        REASON_C2R_READ_FAILED
+    } else {
+        REASON_R2C_READ_FAILED
     }
 }
 
@@ -1813,6 +2013,7 @@ mod tests {
                     routes: vec![Route {
                         listen,
                         upstream: "ws://127.0.0.1:7777".to_owned(),
+                        read_gate: None,
                     }],
                 },
                 Arc::clone(&journal),
@@ -1839,6 +2040,7 @@ mod tests {
                 routes: vec![Route {
                     listen: SocketAddr::from(([127, 0, 0, 1], 0)),
                     upstream: "ws://127.0.0.1:7777".to_owned(),
+                    read_gate: None,
                 }],
             },
             journal,

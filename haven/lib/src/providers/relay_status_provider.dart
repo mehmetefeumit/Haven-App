@@ -1,7 +1,8 @@
 /// What the own-relay maintenance passes found, per relay of the user's own
 /// inbox and `KeyPackage` lists and per lookup relay, for each kind expected
 /// there: kind 30443 on an own `KeyPackage` relay, kind 10002 there and on a
-/// lookup relay, kind 10050 on an own inbox relay and on a lookup relay.
+/// lookup relay, kind 10050 on an own inbox relay and on a lookup relay — and,
+/// per own inbox relay, whether it lets Haven read this account's gift wraps.
 ///
 /// The passes write a Rust-owned board; this reads it — a network-free
 /// snapshot — at once and then every [relayBoardPollIntervalProvider], only
@@ -19,6 +20,7 @@ import 'package:haven/src/models/own_relay_board.dart';
 import 'package:haven/src/providers/location_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/services/relay_service.dart' show InboxRead;
 
 /// A kind a relay row reports on.
 enum RelayKind {
@@ -78,6 +80,7 @@ class RelayPresence {
     this.keyPackage,
     this.relayList,
     this.inboxRelayList,
+    this.inboxRead,
   });
 
   /// The configured or lookup entry, verbatim.
@@ -98,6 +101,13 @@ class RelayPresence {
   /// Kind 10050, if expected here.
   final KindPresence? inboxRelayList;
 
+  /// How it answered the last read of this account's gift wraps; `null` for
+  /// a relay off the inbox list, and while not yet asked.
+  ///
+  /// Never one of [expected]: no republish changes whether a relay lets Haven
+  /// read the inbox, so it is shown as a warning of its own.
+  final InboxRead? inboxRead;
+
   /// This row's [kind], if expected here.
   KindPresence? of(RelayKind kind) => switch (kind) {
     RelayKind.keyPackage => keyPackage,
@@ -116,11 +126,19 @@ class RelayPresence {
       other.lookup == lookup &&
       other.keyPackage == keyPackage &&
       other.relayList == relayList &&
-      other.inboxRelayList == inboxRelayList;
+      other.inboxRelayList == inboxRelayList &&
+      other.inboxRead == inboxRead;
 
   @override
-  int get hashCode =>
-      Object.hash(relayUrl, own, lookup, keyPackage, relayList, inboxRelayList);
+  int get hashCode => Object.hash(
+    relayUrl,
+    own,
+    lookup,
+    keyPackage,
+    relayList,
+    inboxRelayList,
+    inboxRead,
+  );
 }
 
 /// Every row, the kinds Haven holds back, and whether a pass is running.
@@ -209,7 +227,8 @@ class RelayStatusNotifier extends AutoDisposeNotifier<RelayStatusState> {
 }
 
 /// The rows for [inbox] and [keyPackage] and the lookup relays, each kind
-/// joined to its [board] cell by normalized URL.
+/// joined to its [board] cell by normalized URL, and each inbox row to its
+/// relay's gift-wrap read.
 ///
 /// Without a board every expected kind reads not checked: a failed read
 /// proves nothing about a relay.
@@ -241,6 +260,10 @@ RelayStatusState relayStatusOf(
         normalizeRelayUrlForComparison(cell.relayUrl): cell.status,
     };
   }
+  final inboxReads = {
+    for (final r in board?.inboxReads ?? const <OwnInboxRead>[])
+      normalizeRelayUrlForComparison(r.relayUrl): r.read,
+  };
   KindPresence presence(RelayKind kind, String key) {
     if (holds.containsKey(kind)) return KindPresence.held;
     final status = cells[kind]![key];
@@ -263,6 +286,7 @@ RelayStatusState relayStatusOf(
       inboxRelayList: inInbox || lookup
           ? presence(RelayKind.inboxRelayList, key)
           : null,
+      inboxRead: inInbox ? inboxReads[key] : null,
     );
   }
   return RelayStatusState(

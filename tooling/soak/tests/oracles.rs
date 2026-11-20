@@ -60,6 +60,7 @@ use haven_soak::scenarios::s23_chained_backlog::one_commit_control;
 use haven_soak::scenarios::s24_routing_collision::uncollided_control;
 use haven_soak::scenarios::s25_silent_relays::answering_control;
 use haven_soak::scenarios::s26_identity_planes::no_pool_control;
+use haven_soak::scenarios::s27_gated_inbox_welcome::ungated_control;
 use haven_soak::scenarios::Scenario;
 use haven_soak::timeline::Timeline;
 
@@ -1389,7 +1390,7 @@ const EXPECTED_RED: [(Scenario, &str); 0] = [];
 
 /// Every (scenario, arm) the sweep below runs, written out so that an arm added
 /// to a scenario without a test here fails rather than widening a loop.
-const SWEPT: [(Scenario, &str); 65] = [
+const SWEPT: [(Scenario, &str); 66] = [
     (Scenario::RelayOutage, "single-relay-outage"),
     (Scenario::RelayOutage, "all-relay-outage"),
     (Scenario::RelayOutage, "rolling-outage"),
@@ -1473,6 +1474,7 @@ const SWEPT: [(Scenario, &str); 65] = [
     (Scenario::RoutingCollision, "collided-circles-leave-apart"),
     (Scenario::SilentRelays, "dead-and-silent-relays"),
     (Scenario::IdentityPlanes, "identity-planes-under-faults"),
+    (Scenario::GatedInboxWelcome, "gated-inbox-welcome"),
 ];
 
 /// The world one arm is run in: the PR profile's own shape, widened only where
@@ -1513,6 +1515,10 @@ fn shape_for(label: &str) -> WorldShape {
     if label == "identity-planes-under-faults" {
         shape.account_relays = 2;
         shape.profile_relays = haven_core::profile::PROFILE_POOL_MIN;
+    }
+    // The nightly's two account relays: an inbox list of two, the first gated.
+    if label == "gated-inbox-welcome" {
+        shape.account_relays = 2;
     }
     if matches!(
         label,
@@ -1973,6 +1979,25 @@ async fn s25_dead_and_silent_relays_holds() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn s26_identity_planes_under_faults_holds() {
     happy_path(Scenario::IdentityPlanes, "identity-planes-under-faults").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s27_gated_inbox_welcome_holds() {
+    happy_path(Scenario::GatedInboxWelcome, "gated-inbox-welcome").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s27_an_inbox_nothing_gates_proves_nothing() {
+    // The mis-configuration: no relay is gated, so the gate never fires and
+    // the second Welcome is delivered like the first.
+    let mut world = build_shaped_world(&shape_for("gated-inbox-welcome")).await;
+
+    let report = ungated_control(&mut world, pr_tick())
+        .await
+        .expect("the scenario runs");
+    floor_is_unusable(&report);
+
+    world.teardown().await.expect("teardown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2800,7 +2825,7 @@ fn every_registered_scenario_has_a_mis_configuration_control() {
     // The controls above, by the scenario each one controls. Written out
     // so that a scenario added to the registry without a control fails here
     // rather than inheriting somebody else's.
-    const CONTROLLED: [Scenario; 24] = [
+    const CONTROLLED: [Scenario; 25] = [
         Scenario::RelayOutage,
         Scenario::ReceiverPartition,
         Scenario::LostCommit,
@@ -2825,6 +2850,7 @@ fn every_registered_scenario_has_a_mis_configuration_control() {
         Scenario::RoutingCollision,
         Scenario::SilentRelays,
         Scenario::IdentityPlanes,
+        Scenario::GatedInboxWelcome,
     ];
     assert!(
         CONTROLLED.len() == Scenario::REGISTRY.len(),

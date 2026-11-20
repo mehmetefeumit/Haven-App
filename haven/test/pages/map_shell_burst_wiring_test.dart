@@ -161,6 +161,10 @@ class _RecordingEngine implements SubscriptionService {
   Future<void> resumeAfterBackground() async => throw UnimplementedError();
 
   @override
+  Future<bool> reconnectAfterNetworkChange() async =>
+      throw UnimplementedError();
+
+  @override
   Future<void> settleForegroundClaim() async => throw UnimplementedError();
 
   @override
@@ -207,6 +211,10 @@ class _ResumeEngine implements SubscriptionService {
     paused = false;
     if (throwOnReanchor) throw const SubscriptionServiceException('no session');
   }
+
+  @override
+  Future<bool> reconnectAfterNetworkChange() async =>
+      throw UnimplementedError();
 
   @override
   Future<void> settleForegroundClaim() async => throw UnimplementedError();
@@ -305,6 +313,10 @@ class _BurstEngine implements SubscriptionService {
 
   @override
   Future<void> resumeAfterBackground() async => throw UnimplementedError();
+
+  @override
+  Future<bool> reconnectAfterNetworkChange() async =>
+      throw UnimplementedError();
 
   @override
   Future<void> settleForegroundClaim() async => throw UnimplementedError();
@@ -799,14 +811,25 @@ void main() {
         reason: 'the wait must price what a cancelled burst still owes: its '
             'publish, its settle, and the BOUNDED prefix of its pause',
       );
-      expect(kOptOutBurstWait, const Duration(seconds: 68));
+      expect(kOptOutBurstWait, const Duration(seconds: 90));
     });
 
     test('the burst publish budget is the whole ladder, and it is one attempt',
         () {
       // If `LOCATION_PUBLISH_ATTEMPTS` ever stops being 1, the first term is
       // no longer one connect + one ack window and this derivation is wrong.
+      // The rest is the one authenticated resend (`AUTH_RETRY_MS`): the
+      // connect, two `OK` windows of `AUTH_RETRY_ACK` — the location's own —
+      // and the wait for authentication.
       final manager = _rustSource('src/relay/manager.rs');
+      final identity = _rustSource('src/relay/identity.rs');
+      expect(
+        manager.contains(
+          'pub const AUTH_RETRY_ACK: Duration = LOCATION_ACK_WINDOW;',
+        ),
+        isTrue,
+        reason: 'the resend no longer waits the location window for its OKs',
+      );
       expect(
         _rustConst(manager, 'LOCATION_PUBLISH_ATTEMPTS'),
         1,
@@ -818,10 +841,14 @@ void main() {
         Duration(
           seconds:
               _rustSecs(manager, 'CONNECTION_TIMEOUT') +
-              _rustSecs(manager, 'LOCATION_ACK_WINDOW'),
+              _rustSecs(manager, 'LOCATION_ACK_WINDOW') +
+              _rustSecs(manager, 'CONNECTION_TIMEOUT') +
+              2 * _rustSecs(manager, 'LOCATION_ACK_WINDOW') +
+              _rustSecs(identity, 'AUTH_WAIT'),
         ),
       );
     });
+
 
     test("the settle cap term is the engine's BURST_SETTLE_CAP_SECS", () {
       expect(

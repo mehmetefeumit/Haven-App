@@ -2160,6 +2160,69 @@ impl std::fmt::Debug for AcceptInvitationOutcomeFfi {
     }
 }
 
+/// What [`CircleManagerFfi::process_gift_wrapped_invitation`] did with one
+/// gift wrap. At most one of the two is `Some`; neither means the wrap was
+/// already processed.
+#[derive(Clone)]
+pub struct GiftWrapIntakeFfi {
+    /// The new pending invitation.
+    pub invitation: Option<InvitationFfi>,
+    /// Why no invitation came of it, when one should be told apart.
+    pub failure: Option<GiftWrapIntakeFailureFfi>,
+}
+
+impl GiftWrapIntakeFfi {
+    const fn failed(failure: GiftWrapIntakeFailureFfi) -> Self {
+        Self {
+            invitation: None,
+            failure: Some(failure),
+        }
+    }
+
+    /// Classifies the core intake by error variant, never by its text.
+    fn of(intake: Result<CoreInvitation, CoreCircleError>) -> Result<Self, String> {
+        match intake {
+            Ok(invitation) => Ok(Self {
+                invitation: Some(InvitationFfi::from(invitation)),
+                failure: None,
+            }),
+            // Idempotent skip: the poller has already processed this wrapper.
+            Err(CoreCircleError::AlreadyProcessed) => Ok(Self {
+                invitation: None,
+                failure: None,
+            }),
+            Err(CoreCircleError::Mls(_)) => Ok(Self::failed(GiftWrapIntakeFailureFfi::Unusable)),
+            Err(CoreCircleError::Storage(_) | CoreCircleError::Database(_)) => {
+                Ok(Self::failed(GiftWrapIntakeFailureFfi::StoreFailed))
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    }
+}
+
+/// Presence-only: the invitation's own `Debug` already aliases it.
+impl std::fmt::Debug for GiftWrapIntakeFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GiftWrapIntakeFfi")
+            .field("invitation", &self.invitation)
+            .field("failure", &self.failure)
+            .finish()
+    }
+}
+
+/// Why a gift wrap gave no invitation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GiftWrapIntakeFailureFfi {
+    /// It is not an invitation this device can open. Never shown: a shared
+    /// NIP-17 inbox also carries other clients' messages, and anyone who
+    /// knows the npub can send a wrap that names this account's public
+    /// KeyPackage and carries nothing.
+    Unusable,
+    /// It opened, but holding the invitation could not be recorded on this
+    /// device, so it was not held.
+    StoreFailed,
+}
+
 /// A typed reason an invitation cannot be accepted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AcceptFailureFfi {
@@ -3148,6 +3211,10 @@ pub struct CircleManagerFfi {
     /// One relay-list maintenance pass for every request made while one
     /// waits for its turn ([`RelayManagerFfi::maintain_relay_list`]).
     relay_list_passes: Coalesced<Result<RelayListMaintenanceOutcomeFfi, String>>,
+    /// A foreground relay-list request asked for the gift-wrap read and no
+    /// pass has begun since: the next pass to begin takes it, whichever
+    /// request started it.
+    inbox_read_asked: std::sync::atomic::AtomicBool,
 }
 
 // Compile-time assertion: the refactor above is only sound if the core
@@ -3315,6 +3382,7 @@ impl CircleManagerFfi {
                 own_pubkey_hex,
                 kp_passes: Coalesced::default(),
                 relay_list_passes: Coalesced::default(),
+                inbox_read_asked: std::sync::atomic::AtomicBool::new(false),
             })
             .map_err(|e| e.to_string())
     }
@@ -3543,24 +3611,30 @@ impl CircleManagerFfi {
     ///
     /// # Returns
     ///
-    /// * `Ok(Some(invitation))` — a new pending invitation the caller must
-    ///   accept or decline.
-    /// * `Ok(None)` — the gift wrap has already been processed on a prior
-    ///   poll cycle and should be silently skipped. This is the expected
-    ///   outcome for the inbox lookback (96 h, wider than NIP-59's 2-day
-    ///   backdating) repeatedly surfacing the same wrapper events.
-    /// * `Err(msg)` — a real failure (malformed event, MDK error, etc.).
-    ///   The message is already sanitized via `redact_hex_sequences`.
+    /// A [`GiftWrapIntakeFfi`]: the new pending invitation the caller must
+    /// accept or decline, or a typed failure, or — both `None` — a wrap
+    /// already processed on a prior poll, to be skipped silently (the inbox
+    /// lookback, wider than NIP-59's 2-day backdating, surfaces the same
+    /// wrappers again and again).
+    ///
+    /// # Errors
+    ///
+    /// Only for bad secret bytes, or a failure no typed outcome names.
     pub async fn process_gift_wrapped_invitation(
         &self,
         identity_secret_bytes: Vec<u8>,
         gift_wrap_event_json: String,
-    ) -> Result<Option<InvitationFfi>, String> {
+    ) -> Result<GiftWrapIntakeFfi, String> {
         let keys = keys_from_secret_bytes(identity_secret_bytes)?;
 
-        // Parse the gift-wrapped event
-        let gift_wrap_event: nostr::Event = serde_json::from_str(&gift_wrap_event_json)
-            .map_err(|e| format!("Invalid gift wrap event JSON: {e}"))?;
+        // serde's message can quote the relay-authored JSON (Rule 15), and a
+        // wrap that does not parse is as unusable as one that does not open.
+        let Ok(gift_wrap_event) = serde_json::from_str::<nostr::Event>(&gift_wrap_event_json)
+        else {
+            return Ok(GiftWrapIntakeFfi::failed(
+                GiftWrapIntakeFailureFfi::Unusable,
+            ));
+        };
 
         // Genuinely async — the Dark Matter peeler previews the welcome (peel
         // WITHOUT ingest, F3 hold-before-ingest) internally. The returned
@@ -3568,18 +3642,11 @@ impl CircleManagerFfi {
         // until Accept ingests and the engine yields the real MLS group id;
         // Dart passes that stand-in id back to `accept_invitation` /
         // `decline_invitation` (they key on the gift-wrap id).
-        match self
-            .inner
-            .process_gift_wrapped_invitation(&keys, &gift_wrap_event)
-            .await
-        {
-            Ok(invitation) => Ok(Some(InvitationFfi::from(invitation))),
-            // Idempotent skip: the poller has already processed this wrapper.
-            // Flatten to `Ok(None)` so the Dart side never surfaces it as
-            // a failure.
-            Err(haven_core::circle::CircleError::AlreadyProcessed) => Ok(None),
-            Err(e) => Err(e.to_string()),
-        }
+        GiftWrapIntakeFfi::of(
+            self.inner
+                .process_gift_wrapped_invitation(&keys, &gift_wrap_event)
+                .await,
+        )
     }
 
     /// Gets all pending invitations from the in-memory held-welcome store.
@@ -4426,6 +4493,14 @@ impl CircleManagerFfi {
             key_package: board.key_package.into(),
             relay_list: board.relay_list.into(),
             inbox_relay_list: board.inbox_relay_list.into(),
+            inbox_reads: board
+                .inbox_reads
+                .into_iter()
+                .map(|cell| OwnInboxReadFfi {
+                    relay_url: cell.relay_url,
+                    read: cell.read.into(),
+                })
+                .collect(),
         }
     }
 
@@ -6526,6 +6601,16 @@ pub fn fold_for_search(query: String) -> String {
     haven_core::directory::fold_for_search(&query)
 }
 
+/// How far back, in seconds, a read of the user's inbox asks for gift wraps
+/// (`haven_core::relay::cursor::INBOX_GIFTWRAP_LOOKBACK_SECS`): at least
+/// NIP-59's two days of backdating plus the 72-hour hold on an unanswered
+/// invitation, so one held before a restart is read back after it.
+#[frb(sync)]
+#[must_use]
+pub const fn inbox_gift_wrap_lookback_secs() -> i64 {
+    haven_core::relay::cursor::INBOX_GIFTWRAP_LOOKBACK_SECS
+}
+
 /// Returns the canonical default relay list shared by Rust and Dart.
 ///
 /// Single source of truth for [`haven_core::circle::default_relays`].
@@ -7090,6 +7175,73 @@ impl From<haven_core::relay::maintenance::OwnKindSnapshot> for OwnKindBoardFfi {
     }
 }
 
+/// How one relay answered a read of the user's own inbox (kind 1059)
+/// (`haven_core::relay::InboxRead`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InboxReadFfi {
+    /// It ended the read with `EOSE`: what it holds for this account, it sent.
+    Served,
+    /// It refused the read: after this device answered its NIP-42 challenge,
+    /// or refused that answer, or asked for one and sent no challenge. An
+    /// invitation stored there is not read from it.
+    Refused,
+    /// It was reached but did not finish its answer.
+    Incomplete,
+    /// It could not be reached.
+    Unreached,
+}
+
+impl From<haven_core::relay::InboxRead> for InboxReadFfi {
+    fn from(read: haven_core::relay::InboxRead) -> Self {
+        use haven_core::relay::InboxRead as R;
+        match read {
+            R::Served => Self::Served,
+            R::Refused => Self::Refused,
+            R::Incomplete => Self::Incomplete,
+            R::Unreached => Self::Unreached,
+        }
+    }
+}
+
+/// How one own inbox relay answered the relay-list pass's read of this
+/// account's gift wraps (`haven_core::relay::maintenance::OwnInboxReadCell`).
+#[derive(Clone, PartialEq, Eq)]
+pub struct OwnInboxReadFfi {
+    /// The inbox list entry, verbatim.
+    pub relay_url: String,
+    /// How it answered.
+    pub read: InboxReadFfi,
+}
+
+/// Redacting `Debug`: the relay is named by a salted handle (Rule 15).
+impl std::fmt::Debug for OwnInboxReadFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OwnInboxReadFfi")
+            .field(
+                "relay",
+                &haven_core::log_alias::relay(RelayUrl(&self.relay_url)),
+            )
+            .field("read", &self.read)
+            .finish()
+    }
+}
+
+/// A gift-wrap fetch's `since`, in seconds.
+fn since_timestamp(since: Option<i64>) -> Result<Option<nostr::Timestamp>, String> {
+    since
+        .map(|ts| {
+            u64::try_from(ts)
+                .map(nostr::Timestamp::from)
+                .map_err(|_| "since timestamp must be non-negative".to_string())
+        })
+        .transpose()
+}
+
+/// A fetched event's JSON, for the bridge.
+fn serialized_event(event: &nostr::Event) -> Result<String, String> {
+    serde_json::to_string(event).map_err(|_| "Failed to serialize event".to_string())
+}
+
 /// What each own relay and lookup relay serves of the user's own events, as
 /// the maintenance passes last found and left it
 /// ([`CircleManagerFfi::own_relay_board`]).
@@ -7105,6 +7257,11 @@ pub struct OwnRelayBoardFfi {
     pub relay_list: OwnKindBoardFfi,
     /// Kind 10050, on the inbox list and the lookup relays.
     pub inbox_relay_list: OwnKindBoardFfi,
+    /// How each own inbox relay answered the last read of this account's gift
+    /// wraps, in the list's order: a relay that refuses it keeps every
+    /// invitation sent there out of this device's reach. Empty before a
+    /// relay-list pass has read, and after an inbox list edit.
+    pub inbox_reads: Vec<OwnInboxReadFfi>,
 }
 
 /// Redacting `Debug`: each lookup relay is named by a salted handle, as each
@@ -7124,28 +7281,27 @@ impl std::fmt::Debug for OwnRelayBoardFfi {
             .field("key_package", &self.key_package)
             .field("relay_list", &self.relay_list)
             .field("inbox_relay_list", &self.inbox_relay_list)
+            .field("inbox_reads", &self.inbox_reads)
             .finish()
     }
 }
 
 /// Per-relay outcome of a gift-wrap fetch (FFI-friendly).
 ///
-/// `responded` is true when the relay completed the WebSocket handshake (it
-/// answered), even if it returned no events. A relay that answered with zero
-/// events is `responded == true` with an empty `events` list — distinct from
-/// an unreachable relay (`responded == false`). `events` holds the gift-wrap
-/// event JSON strings fetched from this relay.
+/// Only [`InboxReadFfi::Served`] means the relay sent everything it holds for
+/// this account; `events` holds the gift-wrap event JSON strings that arrived,
+/// whatever `read` says.
 #[derive(Clone)]
 pub struct RelayGiftWrapFetchFfi {
     /// The relay URL that was queried.
     pub relay_url: String,
-    /// Whether the relay answered (completed the WebSocket handshake).
-    pub responded: bool,
+    /// How the relay answered the read.
+    pub read: InboxReadFfi,
     /// Gift-wrap event JSON strings fetched from this relay.
     pub events: Vec<String>,
 }
 
-/// Redacting `Debug`: a salted relay handle, whether the relay answered, and
+/// Redacting `Debug`: a salted relay handle, how the relay answered, and
 /// whether it returned anything. The gift-wrap JSONs are whole events and their
 /// COUNT is how many invitations this account is holding (Rule 15).
 impl std::fmt::Debug for RelayGiftWrapFetchFfi {
@@ -7155,7 +7311,7 @@ impl std::fmt::Debug for RelayGiftWrapFetchFfi {
                 "relay",
                 &haven_core::log_alias::relay(RelayUrl(&self.relay_url)),
             )
-            .field("responded", &self.responded)
+            .field("read", &self.read)
             .field("has_events", &!self.events.is_empty())
             .finish()
     }
@@ -8414,7 +8570,9 @@ struct Driving<'a> {
 impl<'a> Driving<'a> {
     fn new(relays: &'a CoreRelayManager, circle: &'a CircleManagerFfi, foreground: bool) -> Self {
         Self {
-            transport: relays.fanout_transport(),
+            transport: relays
+                .fanout_transport()
+                .authenticating(circle.inner.nip42_signer()),
             clock: haven_core::relay::fanout::WallClock,
             mode: haven_core::relay::fanout::Claimed::new(&circle.inner, foreground),
             relays,
@@ -9409,117 +9567,105 @@ impl RelayManagerFfi {
             .map_err(|e| e.to_string())
     }
 
-    /// Fetches gift-wrapped events (kind 1059) addressed to a recipient.
+    /// Fetches the gift wraps (kind 1059) addressed to `circle`'s own
+    /// identity, merged across `relays`.
     ///
-    /// Queries the given relays for NIP-59 gift wrap events tagged with the
-    /// recipient's public key. An optional `since` timestamp restricts results
-    /// to events created after that point.
+    /// Each relay is read on a connection of its own that answers the relay's
+    /// NIP-42 challenge as that identity
+    /// (`RelayManager::read_own_inbox_per_relay`), so a relay serving gift
+    /// wraps only to their authenticated recipient is read too. An optional
+    /// `since` timestamp restricts results to events created after that point.
     ///
     /// # Arguments
     ///
-    /// * `recipient_pubkey` - The recipient's public key (hex or npub format)
+    /// * `circle` - The circle manager whose identity is the recipient
     /// * `relays` - Relay URLs to query
     /// * `since` - Optional Unix timestamp (seconds); only events after this time are returned
     ///
     /// # Returns
     ///
-    /// A list of gift-wrap events serialized as JSON strings.
+    /// The gift-wrap events every relay sent, each once, serialized as JSON
+    /// strings. A relay that is not reached or refuses the read adds nothing.
+    ///
+    /// # Errors
+    ///
+    /// A negative `since`, or an event that does not serialize.
     pub async fn fetch_gift_wraps(
         &self,
-        recipient_pubkey: String,
+        circle: &CircleManagerFfi,
         relays: Vec<String>,
         since: Option<i64>,
     ) -> Result<Vec<String>, String> {
-        let pk = nostr::PublicKey::parse(&recipient_pubkey)
-            .map_err(|e| format!("Invalid recipient pubkey: {e}"))?;
-
-        let mut filter = nostr::Filter::new()
-            .kind(nostr::Kind::GiftWrap)
-            .pubkey(pk)
-            .limit(100);
-
-        if let Some(ts) = since {
-            let secs = u64::try_from(ts).map_err(|_| "since timestamp must be non-negative")?;
-            filter = filter.since(nostr::Timestamp::from(secs));
-        }
-
-        let events = self
-            .inner
-            .fetch_events(filter, &relays, None)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        events
+        let outcomes = CoreRelayManager::read_own_inbox_per_relay(
+            &circle.inner.nip42_signer(),
+            since_timestamp(since)?,
+            haven_core::relay::OWN_INBOX_READ_CAP,
+            &relays,
+        )
+        .await;
+        let mut seen = std::collections::HashSet::new();
+        outcomes
             .into_iter()
-            .map(|e| {
-                serde_json::to_string(&e).map_err(|err| format!("Failed to serialize event: {err}"))
-            })
-            .collect::<Result<Vec<_>, _>>()
+            .flat_map(|outcome| outcome.events)
+            .filter(|event| seen.insert(event.id))
+            .map(|event| serialized_event(&event))
+            .collect()
     }
 
-    /// Fetches gift-wrapped events (kind 1059) per relay, reporting which
-    /// relays answered.
+    /// Fetches the gift wraps (kind 1059) addressed to `circle`'s own
+    /// identity from each relay, reporting how each relay answered.
     ///
     /// Like [`fetch_gift_wraps`](Self::fetch_gift_wraps), but instead of one
-    /// merged list it queries each relay independently and returns a per-relay
-    /// outcome: whether the relay answered (`responded`) and the events it
-    /// returned. This lets the caller show an accurate "N of M inboxes
-    /// answered" tally. A relay that answers with zero events is
-    /// `responded == true` with an empty `events` list — distinct from an
-    /// unreachable relay (`responded == false`).
+    /// merged list it returns a per-relay outcome: how the relay answered the
+    /// read ([`InboxReadFfi`]) and the events it returned. Only `Served` says
+    /// the relay sent everything it holds. A relay that refuses the read until
+    /// the reader authenticates is answered and asked again; it is `Refused`
+    /// only when it refuses that read too, or the answer to its challenge,
+    /// never mistaken for an empty inbox.
     ///
     /// # Arguments
     ///
-    /// * `recipient_pubkey` - The recipient's public key (hex or npub format)
+    /// * `circle` - The circle manager whose identity is the recipient
     /// * `relays` - Relay URLs to query, each independently
     /// * `since` - Optional Unix timestamp (seconds); only events after this time
     ///
     /// # Returns
     ///
     /// One [`RelayGiftWrapFetchFfi`] per relay, in input order.
+    ///
+    /// # Errors
+    ///
+    /// A negative `since`, or an event that does not serialize.
     pub async fn fetch_gift_wraps_per_relay(
         &self,
-        recipient_pubkey: String,
+        circle: &CircleManagerFfi,
         relays: Vec<String>,
         since: Option<i64>,
     ) -> Result<Vec<RelayGiftWrapFetchFfi>, String> {
-        let pk = nostr::PublicKey::parse(&recipient_pubkey)
-            .map_err(|e| format!("Invalid recipient pubkey: {e}"))?;
-
-        // The per-relay count is shown to the user as exact, so the cap is a
-        // generous flood-guard rather than a paging limit: a real inbox holds
-        // far fewer than this many gift wraps in its 96-hour lookback window, so
-        // the headline "N new invitations" is not silently truncated.
-        let mut filter = nostr::Filter::new()
-            .kind(nostr::Kind::GiftWrap)
-            .pubkey(pk)
-            .limit(1000);
-
-        if let Some(ts) = since {
-            let secs = u64::try_from(ts).map_err(|_| "since timestamp must be non-negative")?;
-            filter = filter.since(nostr::Timestamp::from(secs));
-        }
-
-        let outcomes = self
-            .inner
-            .fetch_events_per_relay(filter, &relays)
-            .await
-            .map_err(|e| e.to_string())?;
+        // The per-relay count is shown to the user as exact: a real inbox
+        // holds far fewer than the cap's gift wraps in its lookback window
+        // ([`inbox_gift_wrap_lookback_secs`]), so the headline "N new
+        // invitations" is not silently truncated.
+        let outcomes = CoreRelayManager::read_own_inbox_per_relay(
+            &circle.inner.nip42_signer(),
+            since_timestamp(since)?,
+            haven_core::relay::OWN_INBOX_READ_CAP,
+            &relays,
+        )
+        .await;
 
         outcomes
             .into_iter()
             .map(|o| {
+                let read = o.inbox_read().into();
                 let events = o
                     .events
-                    .into_iter()
-                    .map(|e| {
-                        serde_json::to_string(&e)
-                            .map_err(|err| format!("Failed to serialize event: {err}"))
-                    })
+                    .iter()
+                    .map(serialized_event)
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(RelayGiftWrapFetchFfi {
                     relay_url: o.relay_url,
-                    responded: o.responded,
+                    read,
                     events,
                 })
             })
@@ -10122,9 +10268,9 @@ impl RelayManagerFfi {
     }
 
     /// Publishes a staged replacement's frozen event to `targets` and, once a
-    /// relay acknowledged it, promotes it — which deletes the private material
-    /// of every package it supersedes (`foundation/key-packages.md`'s FIRST
-    /// deletion bound).
+    /// relay acknowledged it, promotes it — which starts the superseded
+    /// package's replacement grace, or deletes it when a Welcome consumed it
+    /// (`foundation/key-packages.md`'s FIRST deletion bound).
     ///
     /// Promotion follows a relay's `OK true` and nothing less, so promotion
     /// means acked, never merely sent: the account is never left with a
@@ -10158,7 +10304,13 @@ impl RelayManagerFfi {
             };
         }
         let session = circle_mgr.session();
-        let promoted = matches!(session.promote_key_package(&event.id).await, Ok(true));
+        // Read at the acknowledgement, on the tick's clock: the grace runs from
+        // the instant a relay took the replacement.
+        let acked_at = maintenance_now_secs();
+        let promoted = matches!(
+            session.promote_key_package(&event.id, acked_at).await,
+            Ok(true)
+        );
         pass.settle_rest(promoted);
         if promoted {
             let replacement_consumed = matches!(
@@ -10518,6 +10670,14 @@ impl RelayManagerFfi {
     /// and sends each relay at most one offer of each event, settled by that
     /// relay's own `OK`. It runs under the account's one maintenance lock, and
     /// a request made while a pass of its kind waits for that lock joins it.
+    /// Beside the inbox list's pass, a pass asked for in the `foreground` asks
+    /// each own inbox relay for this account's gift wraps and writes how each
+    /// answered onto the board, which the relay settings page warns from when
+    /// one refuses. `foreground` is the caller's claim: `true` ONLY when the
+    /// app's lifecycle reads `resumed` at the call, so no background burst
+    /// opens those identity connections (P4); without it the board keeps the
+    /// last answers. A foreground request joining a pass that has not begun
+    /// still gets its read.
     ///
     /// Returns a presence-only [`RelayListMaintenanceOutcomeFfi`].
     ///
@@ -10527,14 +10687,21 @@ impl RelayManagerFfi {
         &self,
         circle: &CircleManagerFfi,
         identity_secret_bytes: Vec<u8>,
+        foreground: bool,
     ) -> Result<RelayListMaintenanceOutcomeFfi, String> {
         let _running = circle.inner.own_relay_board().running();
         let keys = keys_from_secret_bytes(identity_secret_bytes)?;
+        if foreground {
+            // Before the request's ticket, so the pass that serves it sees it.
+            circle
+                .inbox_read_asked
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         circle
             .relay_list_passes
             .run(
                 circle.inner.session().own_relays_tick(),
-                self.relay_list_pass(&circle.inner, &keys),
+                self.relay_list_pass(&circle.inner, &keys, &circle.inbox_read_asked),
             )
             .await
     }
@@ -10544,9 +10711,12 @@ impl RelayManagerFfi {
         &self,
         circle_mgr: &Arc<CoreCircleManager>,
         keys: &nostr::Keys,
+        inbox_read_asked: &std::sync::atomic::AtomicBool,
     ) -> Result<RelayListMaintenanceOutcomeFfi, String> {
         use haven_core::circle::RelayType;
         use haven_core::relay::maintenance::{OwnKind, RelayListMaintenanceOutcome};
+
+        let read_inbox = inbox_read_asked.swap(false, std::sync::atomic::Ordering::SeqCst);
 
         let key_package = self
             .maintain_relay_list_category(
@@ -10556,18 +10726,61 @@ impl RelayManagerFfi {
                 OwnKind::RelayList,
             )
             .await;
-        let inbox = self
-            .maintain_relay_list_category(
+        // The gift-wrap read rides identity connections of its own, beside the
+        // inbox list's probe, so it adds nothing to the pass's longest wait.
+        let (inbox, ()) = tokio::join!(
+            self.maintain_relay_list_category(
                 circle_mgr,
                 keys,
                 RelayType::Inbox,
                 OwnKind::InboxRelayList,
-            )
-            .await;
+            ),
+            Self::ask_own_inbox_reads(circle_mgr, read_inbox),
+        );
 
         Ok(RelayListMaintenanceOutcomeFfi::from(
             RelayListMaintenanceOutcome { inbox, key_package },
         ))
+    }
+
+    /// Asks each own inbox relay for this account's gift wraps from now, on
+    /// an identity connection of its own, and writes how each answered onto
+    /// the board ([`OwnRelayBoard::ask_inbox_reads`]): a relay that refuses
+    /// this read refuses the invitee's own reads too.
+    ///
+    /// Like every kind of the pass, it asks nothing while the storage-reset
+    /// notice is unanswered; then, and when the list cannot be read, it
+    /// forgets the answers. Unless `read`, it asks nothing and keeps them.
+    ///
+    /// [`OwnRelayBoard::ask_inbox_reads`]: haven_core::relay::maintenance::OwnRelayBoard::ask_inbox_reads
+    async fn ask_own_inbox_reads(circle_mgr: &Arc<CoreCircleManager>, read: bool) {
+        let board = circle_mgr.own_relay_board();
+        // Before the list is read, as each kind's pass takes its generation.
+        let seen = board.inbox_reads_generation();
+        if !circle_mgr.storage_reset_acknowledged() {
+            board.clear_inbox_reads();
+            return;
+        }
+        if !read {
+            return;
+        }
+        let inbox = run_blocking({
+            let mgr = circle_mgr.clone();
+            move || {
+                mgr.list_user_relays(haven_core::circle::RelayType::Inbox)
+                    .map(|user| haven_core::relay::dedup_relay_targets(&user))
+                    .map_err(|_| "Could not read the inbox list".to_string())
+            }
+        })
+        .await;
+        match inbox {
+            Ok(inbox) => {
+                board
+                    .ask_inbox_reads(&circle_mgr.nip42_signer(), seen, &inbox)
+                    .await;
+            }
+            Err(_) => board.clear_inbox_reads(),
+        }
     }
 
     /// Runs [`Self::maintain_relay_list`] for one category, whose list is
@@ -13126,22 +13339,26 @@ pub struct FfiGroupSpec {
 #[frb(opaque)]
 pub struct LiveSyncFfi {
     circle: Arc<CoreCircleManager>,
-    own_pubkey: nostr::PublicKey,
 }
 
 impl LiveSyncFfi {
-    /// Builds a handle over `circle`'s MLS state for `own_pubkey_hex`.
+    /// Builds a handle over `circle`'s MLS state for `own_pubkey_hex`, which
+    /// must be the identity `circle` was opened with: the session's inbox
+    /// socket reads that key's gift wraps, authenticated as it.
     ///
     /// # Errors
     ///
-    /// Returns an error if `own_pubkey_hex` is not a valid Nostr public key.
+    /// Returns an error if `own_pubkey_hex` is not a valid Nostr public key,
+    /// or not `circle`'s identity.
     pub fn new_instance(circle: &CircleManagerFfi, own_pubkey_hex: String) -> Result<Self, String> {
         validate_pubkey_hex(&own_pubkey_hex, "own_pubkey")?;
         let pk = nostr::PublicKey::from_hex(&normalize_pubkey_hex(&own_pubkey_hex))
             .map_err(|e| e.to_string())?;
+        if pk != circle.inner.nip42_signer().public_key() {
+            return Err("own_pubkey is not this account's identity".to_string());
+        }
         Ok(Self {
             circle: Arc::clone(&circle.inner),
-            own_pubkey: pk,
         })
     }
 
@@ -13214,7 +13431,6 @@ impl LiveSyncFfi {
         // its relay's answer (Security Rule 13).
         let core = Arc::new(LiveSyncCore::new_local(
             Arc::clone(&self.circle),
-            self.own_pubkey,
             Arc::new(CoreRelayManager::new()),
         ));
 
@@ -13349,6 +13565,34 @@ impl LiveSyncFfi {
         match core {
             Some(core) => core
                 .resume_after_background(foreground_claim(foreground))
+                .await
+                .map_err(|e| e.to_string()),
+            None => Err("no active live-sync session".to_string()),
+        }
+    }
+
+    /// Re-dials every live socket after the default network changed.
+    ///
+    /// The re-anchor above keeps a socket the pool still reads as
+    /// `Connected`, and one the old network carried reads so until a ping
+    /// goes unanswered; this pauses the session, then opens it again.
+    ///
+    /// `foreground` is the claim [`Self::resume_after_background`] takes,
+    /// and on `false` the call is refused in the same way.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if there is no active session, the lock is poisoned,
+    /// the caller did not claim the foreground, or the open fails.
+    pub async fn reconnect_after_network_change(&self, foreground: bool) -> Result<(), String> {
+        let core = SESSION
+            .read()
+            .map_err(|_| "session lock poisoned".to_string())?
+            .as_ref()
+            .map(Arc::clone);
+        match core {
+            Some(core) => core
+                .reconnect_after_network_change(foreground_claim(foreground))
                 .await
                 .map_err(|e| e.to_string()),
             None => Err("no active live-sync session".to_string()),
@@ -13655,10 +13899,12 @@ impl LiveSyncFfi {
     /// Streams decrypted live events to Dart for the lifetime of the session.
     ///
     /// Returns `Err` immediately if no session is active (a cold-start race, not
-    /// a hung stream). The loop ends when the Dart side closes the sink
-    /// (`sink.add` returns `Err`) OR the bus closes on `stop_session` (the last
-    /// `Arc<LiveSyncCore>` drops → `RecvError::Closed`); a lag is skipped, never
-    /// fatal (the cursor + catch-up replay anything dropped).
+    /// a hung stream). The first stream of a session starts at its construction,
+    /// so nothing the session's first REQs replayed before Dart attached is
+    /// lost. The loop ends when the Dart side closes the sink (`sink.add`
+    /// returns `Err`) OR the bus closes on `stop_session` (the last
+    /// `Arc<LiveSyncCore>` drops); a lag is never fatal
+    /// ([`haven_core::relay::live_sync::LiveEvents::recv`]).
     ///
     /// # Errors
     ///
@@ -13673,20 +13919,14 @@ impl LiveSyncFfi {
             .as_ref()
             .map(Arc::clone)
             .ok_or_else(|| "no active live-sync session".to_string())?;
-        let mut rx = core.bus().subscribe();
+        let mut events = core.events();
         // Drop our Arc so the bus closes promptly when stop_session takes the
         // session (otherwise this clone would keep the core — and its bus —
-        // alive, and the Closed branch could never fire).
+        // alive, and the stream could never end).
         drop(core);
-        loop {
-            match rx.recv().await {
-                Ok(event) => {
-                    if sink.add(live_event_to_ffi(event)).is_err() {
-                        break; // Dart closed the stream
-                    }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        while let Some(event) = events.recv().await {
+            if sink.add(live_event_to_ffi(event)).is_err() {
+                break; // Dart closed the stream
             }
         }
         Ok(())
@@ -14355,6 +14595,7 @@ mod maintenance_real_ffi_tests {
         ProfileMetadata, ProfileState, ProfileSyncOutcomeFfi, RelayManagerFfi, RelayTypeFfi,
     };
     use haven_core::circle::RelayType;
+    use haven_core::relay::recording_front::RecordingFront;
     use nostr::{Keys, Kind};
     use nostr_relay_builder::MockRelay;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -14815,7 +15056,6 @@ mod maintenance_real_ffi_tests {
         // Install a live core so the reclaim runs its real body.
         let core = std::sync::Arc::new(super::LiveSyncCore::new_local(
             std::sync::Arc::clone(&manager.inner),
-            keys.public_key(),
             std::sync::Arc::new(super::CoreRelayManager::new()),
         ));
         *super::SESSION.write().expect("session lock") = Some(std::sync::Arc::clone(&core));
@@ -14943,7 +15183,6 @@ mod maintenance_real_ffi_tests {
             .expect("CircleManagerFfi::new");
         let core = std::sync::Arc::new(super::LiveSyncCore::new_local(
             std::sync::Arc::clone(&manager.inner),
-            keys.public_key(),
             std::sync::Arc::new(super::CoreRelayManager::new()),
         ));
         *super::SESSION.write().expect("session lock") = Some(std::sync::Arc::clone(&core));
@@ -14985,7 +15224,6 @@ mod maintenance_real_ffi_tests {
 
         let core = std::sync::Arc::new(super::LiveSyncCore::new_local(
             std::sync::Arc::clone(&manager.inner),
-            keys.public_key(),
             std::sync::Arc::new(super::CoreRelayManager::new()),
         ));
         let _ = core.stop().await;
@@ -15419,7 +15657,7 @@ mod maintenance_real_ffi_tests {
     /// the `KeyPackage`.
     async fn both_passes(relay_mgr: &RelayManagerFfi, circle: &CircleManagerFfi, secret: &[u8]) {
         relay_mgr
-            .maintain_relay_list(circle, secret.to_vec())
+            .maintain_relay_list(circle, secret.to_vec(), true)
             .await
             .expect("maintain_relay_list must not error");
         circle_maintain(relay_mgr, circle, secret.to_vec()).await;
@@ -15496,6 +15734,7 @@ mod maintenance_real_ffi_tests {
                 "nothing is known before a pass"
             );
         }
+        assert!(before.inbox_reads.is_empty(), "no inbox read before a pass");
 
         both_passes(&relay_mgr, &circle, &secret).await;
 
@@ -15525,6 +15764,217 @@ mod maintenance_real_ffi_tests {
             assert!(kind.checked_secs_ago.is_some() && kind.hold.is_none());
         }
         assert_eq!(kept(&inbox_relay, Kind::Custom(30443)).len(), 0);
+        assert_eq!(
+            inbox_reads(&after),
+            [
+                (inbox.as_str(), super::InboxReadFfi::Served),
+                (dead.as_str(), super::InboxReadFfi::Unreached),
+            ],
+            "each own inbox relay, and no other, is asked for gift wraps"
+        );
+
+        // Removing a relay forgets every answer, so a warning it raised does
+        // not stand; the next pass asks the list that is left.
+        circle
+            .remove_user_relay(dead.clone(), RelayTypeFfi::Inbox)
+            .await
+            .expect("the user removes the dead relay");
+        assert!(circle.own_relay_board().inbox_reads.is_empty());
+        relay_mgr
+            .maintain_relay_list(&circle, secret.clone(), true)
+            .await
+            .expect("maintain_relay_list must not error");
+        assert_eq!(
+            inbox_reads(&circle.own_relay_board()),
+            [(inbox.as_str(), super::InboxReadFfi::Served)]
+        );
+        // So does a restore of the defaults.
+        circle
+            .wipe_and_reset_defaults_for(RelayTypeFfi::Inbox)
+            .await
+            .expect("the user restores the inbox defaults");
+        assert!(circle.own_relay_board().inbox_reads.is_empty());
+    }
+
+    /// Each own inbox relay's answer to the last gift-wrap read, in order.
+    fn inbox_reads(board: &OwnRelayBoardFfi) -> Vec<(&str, super::InboxReadFfi)> {
+        board
+            .inbox_reads
+            .iter()
+            .map(|cell| (cell.relay_url.as_str(), cell.read))
+            .collect()
+    }
+
+    /// The `REQ`s for gift wraps (kind 1059) a recording front passed on.
+    fn gift_wrap_reqs(front: &haven_core::relay::recording_front::RecordingFront) -> usize {
+        front
+            .frames()
+            .iter()
+            .filter_map(|frame| serde_json::from_str::<serde_json::Value>(&frame.text).ok())
+            .filter(|message| {
+                message[0] == "REQ"
+                    && message.as_array().is_some_and(|parts| {
+                        parts.iter().skip(2).any(|filter| {
+                            filter["kinds"]
+                                .as_array()
+                                .is_some_and(|kinds| kinds.contains(&1059.into()))
+                        })
+                    })
+            })
+            .count()
+    }
+
+    /// An account with one inbox relay, behind a recording front, and one
+    /// `KeyPackage` relay.
+    /// Fields drop in order: the store before its directory, the keyring
+    /// lock last.
+    struct InboxReadWorld {
+        relay_mgr: RelayManagerFfi,
+        circle: CircleManagerFfi,
+        secret: zeroize::Zeroizing<Vec<u8>>,
+        front: haven_core::relay::recording_front::RecordingFront,
+        kp_relay: haven_core::relay::scripted_relay::ScriptedRelay,
+        _inbox_relay: haven_core::relay::scripted_relay::ScriptedRelay,
+        _dir: DataDir,
+        _keyring_guard: tokio::sync::MutexGuard<'static, ()>,
+    }
+
+    impl InboxReadWorld {
+        async fn new(name: &str) -> Self {
+            use haven_core::relay::recording_front::RecordingFront;
+            use haven_core::relay::scripted_relay::ScriptedRelay;
+
+            let keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+            install_test_seams();
+            let (inbox_relay, kp_relay) = (ScriptedRelay::start(), ScriptedRelay::start());
+            inbox_relay.serve_kept();
+            kp_relay.serve_kept();
+            let front = RecordingFront::start(inbox_relay.url());
+            let secret = zeroize::Zeroizing::new(secret_bytes(&Keys::generate()));
+            let dir = DataDir::new(name);
+            let circle = CircleManagerFfi::new(dir.as_str(), secret.to_vec())
+                .expect("CircleManagerFfi::new");
+            let relay_mgr = RelayManagerFfi::new_instance()
+                .await
+                .expect("RelayManagerFfi::new_instance");
+            circle
+                .add_user_relay(front.url().to_owned(), RelayTypeFfi::Inbox)
+                .await
+                .expect("an inbox relay");
+            circle
+                .add_user_relay(kp_relay.url().to_owned(), RelayTypeFfi::Nip65)
+                .await
+                .expect("a KeyPackage relay");
+            Self {
+                _keyring_guard: keyring_guard,
+                _dir: dir,
+                _inbox_relay: inbox_relay,
+                kp_relay,
+                front,
+                secret,
+                circle,
+                relay_mgr,
+            }
+        }
+
+        async fn pass(&self, foreground: bool) {
+            self.relay_mgr
+                .maintain_relay_list(&self.circle, self.secret.to_vec(), foreground)
+                .await
+                .expect("maintain_relay_list must not error");
+        }
+
+        fn inbox(&self) -> String {
+            let [inbox] = <[String; 1]>::try_from(
+                self.circle
+                    .inner
+                    .list_user_relays(RelayType::Inbox)
+                    .expect("the stored list"),
+            )
+            .expect("one inbox relay");
+            inbox
+        }
+    }
+
+    /// The gift-wrap read is the foreground's (P4): a pass asked for in the
+    /// background checks the inbox list but sends no own inbox relay a
+    /// gift-wrap `REQ` and leaves the board's answers as they were — none
+    /// before a foreground pass, that pass's after it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn only_a_foreground_pass_asks_the_inbox_relays_for_gift_wraps_via_real_ffi() {
+        let world = InboxReadWorld::new("inbox_read_foreground").await;
+        let inbox = world.inbox();
+
+        world.pass(false).await;
+        let board = world.circle.own_relay_board();
+        assert_eq!(
+            cell(&board.inbox_relay_list, &inbox),
+            Some(OwnRelayStatusFfi::Current),
+            "the background pass checked the inbox list"
+        );
+        assert!(board.inbox_reads.is_empty(), "and wrote no read");
+        assert_eq!(gift_wrap_reqs(&world.front), 0, "nor asked for one");
+
+        world.pass(true).await;
+        let served = [(inbox.as_str(), super::InboxReadFfi::Served)];
+        assert_eq!(inbox_reads(&world.circle.own_relay_board()), served);
+        assert_eq!(gift_wrap_reqs(&world.front), 1);
+
+        world.pass(false).await;
+        assert_eq!(
+            inbox_reads(&world.circle.own_relay_board()),
+            served,
+            "a background pass keeps the last answers"
+        );
+        assert_eq!(gift_wrap_reqs(&world.front), 1, "and asks nothing");
+    }
+
+    /// A foreground request that joins a pass a background request is
+    /// waiting for gets its read from that pass; the pass already running
+    /// when it was made, a background one, asks none.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_foreground_request_joining_a_background_pass_gets_its_read_via_real_ffi() {
+        use haven_core::relay::scripted_relay::Verdict;
+
+        let world = InboxReadWorld::new("inbox_read_joined").await;
+        let inbox = world.inbox();
+        let (release, released) = tokio::sync::watch::channel(false);
+        world
+            .kp_relay
+            .on_publish(move |_| Verdict::HoldThen(released.clone(), Box::new(Verdict::Keep)));
+
+        let running = world.pass(false);
+        tokio::pin!(running);
+        // The background request first, so the pass it waits for is the one
+        // the foreground request joins.
+        let mut joined = [Box::pin(world.pass(false)), Box::pin(world.pass(true))];
+        tokio::join!(&mut running, async {
+            board_until(&world.circle, |board| {
+                cell(&board.relay_list, world.kp_relay.url()) == Some(OwnRelayStatusFfi::Publishing)
+            })
+            .await;
+            for request in &mut joined {
+                tokio::select! {
+                    biased;
+                    () = request.as_mut() => panic!("a request ran before its turn"),
+                    () = std::future::ready(()) => {}
+                }
+            }
+            release.send(true).expect("the relay listens");
+        });
+        for request in joined {
+            request.await;
+        }
+
+        assert_eq!(
+            gift_wrap_reqs(&world.front),
+            1,
+            "one read, by the pass the foreground request joined"
+        );
+        assert_eq!(
+            inbox_reads(&world.circle.own_relay_board()),
+            [(inbox.as_str(), super::InboxReadFfi::Served)]
+        );
     }
 
     /// An older package of this account in the tracked slot is not this
@@ -15805,6 +16255,7 @@ mod maintenance_real_ffi_tests {
             assert!(kind.cells.is_empty() && kind.checked_secs_ago.is_some());
         }
         assert_eq!(relay.connections(), 0, "a held pass asks no relay anything");
+        assert!(held.inbox_reads.is_empty(), "nor reads the inbox");
 
         super::acknowledge_storage_reset(dir.as_str()).expect("acknowledge");
         both_passes(&relay_mgr, &circle, &secret).await;
@@ -15849,7 +16300,7 @@ mod maintenance_real_ffi_tests {
             .expect("store the setting");
 
         relay_mgr
-            .maintain_relay_list(&circle, secret)
+            .maintain_relay_list(&circle, secret, true)
             .await
             .expect("maintain_relay_list must not error");
         let board = circle.own_relay_board();
@@ -15904,7 +16355,7 @@ mod maintenance_real_ffi_tests {
         let lookup = haven_core::relay::discovery_relays();
 
         let lists = relay_mgr
-            .maintain_relay_list(&circle, secret)
+            .maintain_relay_list(&circle, secret, true)
             .await
             .expect("maintain_relay_list must not error");
         let board = circle.own_relay_board();
@@ -15952,7 +16403,7 @@ mod maintenance_real_ffi_tests {
             .await
             .expect("a KeyPackage relay");
 
-        let lists = relay_mgr.maintain_relay_list(&circle, secret.clone());
+        let lists = relay_mgr.maintain_relay_list(&circle, secret.clone(), true);
         let package = circle_maintain(&relay_mgr, &circle, secret.clone());
         tokio::pin!(lists, package);
         let (lists, ()) = tokio::join!(&mut lists, async {
@@ -16026,10 +16477,10 @@ mod maintenance_real_ffi_tests {
                 .count()
         };
 
-        let running = relay_mgr.maintain_relay_list(&circle, secret.clone());
+        let running = relay_mgr.maintain_relay_list(&circle, secret.clone(), true);
         tokio::pin!(running);
         let mut joined: Vec<_> = (0..3)
-            .map(|_| Box::pin(relay_mgr.maintain_relay_list(&circle, secret.clone())))
+            .map(|_| Box::pin(relay_mgr.maintain_relay_list(&circle, secret.clone(), true)))
             .collect();
         let (first, ()) = tokio::join!(&mut running, async {
             board_until(&circle, |board| {
@@ -16156,7 +16607,7 @@ mod maintenance_real_ffi_tests {
         // WorkManager all drive these two entry points) and the user-edit
         // publish path.
         let lists = relay_mgr
-            .maintain_relay_list(&circle, secret.clone())
+            .maintain_relay_list(&circle, secret.clone(), true)
             .await
             .expect("relay-list tick");
         for category in [lists.inbox, lists.key_package] {
@@ -16187,7 +16638,7 @@ mod maintenance_real_ffi_tests {
 
         super::acknowledge_storage_reset(dir.as_str()).expect("acknowledge");
         let lists = relay_mgr
-            .maintain_relay_list(&circle, secret.clone())
+            .maintain_relay_list(&circle, secret.clone(), true)
             .await
             .expect("relay-list tick");
         assert_eq!(lists.inbox.action, super::RelayListActionFfi::Republished);
@@ -16241,7 +16692,7 @@ mod maintenance_real_ffi_tests {
         super::acknowledge_storage_reset(dir.as_str()).expect("acknowledge");
 
         let lists = relay_mgr
-            .maintain_relay_list(&circle, secret)
+            .maintain_relay_list(&circle, secret, true)
             .await
             .expect("relay-list tick");
         assert_eq!(lists.inbox.action, super::RelayListActionFfi::Republished);
@@ -16768,7 +17219,10 @@ mod maintenance_real_ffi_tests {
         );
 
         // And only NOW is the superseded init key gone — the first deletion
-        // bound fires exactly on confirmed publication, not before.
+        // bound fires exactly on confirmed publication, not before. The
+        // Welcome accepted above consumed KeyPackage #1, so it gets no
+        // replacement grace: a superseded package no Welcome consumed would be
+        // kept for 24 hours (`kp_lifecycle_e2e`).
         assert!(
             matches!(
                 bob.inner
@@ -16777,9 +17231,10 @@ mod maintenance_real_ffi_tests {
                     .await,
                 Ok(haven_core::nostr::mls::types::WelcomeAcceptance::NeedsNewInvite)
             ),
-            "once the replacement is confirmed published, the superseded \
-             init key MUST be deleted — retaining it means a compromise of \
-             that one key decrypts every Welcome ever recorded to it"
+            "once the replacement is confirmed published, the consumed \
+             superseded init key MUST be deleted — retaining it means a \
+             compromise of that one key decrypts every Welcome ever recorded \
+             to it"
         );
 
         super::MAINTENANCE_CLOCK_OVERRIDE_SECS.store(0, Ordering::Relaxed);
@@ -17055,6 +17510,7 @@ mod maintenance_real_ffi_tests {
                     )
                     .await
                     .expect("hold the invitation")
+                    .invitation
                     .is_some(),
                 "the invitation is held for the user's answer"
             );
@@ -17629,6 +18085,7 @@ mod maintenance_real_ffi_tests {
                 .process_gift_wrapped_invitation(secret.clone(), invitation.as_json())
                 .await
                 .expect("hold the invitation")
+                .invitation
                 .is_some());
         }
         assert!(accepted(&circle, &invitations[0]).await);
@@ -17666,6 +18123,7 @@ mod maintenance_real_ffi_tests {
             .process_gift_wrapped_invitation(secret.clone(), invitations[1].as_json())
             .await
             .expect("the poll finds it again")
+            .invitation
             .is_some());
         assert!(
             accepted(&circle, &invitations[1]).await,
@@ -17828,7 +18286,13 @@ mod maintenance_real_ffi_tests {
             .expect("tracked");
         assert!(tracked.pending.is_none());
         assert_eq!(tracked.published.map(|event| event.id), Some(served.id));
-        assert_eq!(bundles().await, 1, "the refused package's key went with it");
+        // D3: the refused package is a superseded one no Welcome consumed, so
+        // its key is kept for the replacement grace MDK's re-stage started.
+        assert_eq!(
+            bundles().await,
+            2,
+            "the refused package's key is in its grace"
+        );
         // The relay serves what it kept, so the next tick finds it there.
         let kept = served.clone();
         relay.answer(
@@ -17844,8 +18308,26 @@ mod maintenance_real_ffi_tests {
             ],
         );
         assert_eq!(
+            circle_maintain(&relay_mgr, &circle, secret.clone())
+                .await
+                .action,
+            KpMaintenanceActionFfi::AlreadyHealthy
+        );
+        assert_eq!(bundles().await, 2);
+        super::MAINTENANCE_CLOCK_OVERRIDE_SECS.store(
+            served.created_at.as_secs()
+                + haven_core::nostr::mls::KEY_PACKAGE_REPLACEMENT_GRACE_SECS,
+            Ordering::Relaxed,
+        );
+        assert_eq!(
             circle_maintain(&relay_mgr, &circle, secret).await.action,
             KpMaintenanceActionFfi::AlreadyHealthy
+        );
+        super::MAINTENANCE_CLOCK_OVERRIDE_SECS.store(0, Ordering::Relaxed);
+        assert_eq!(
+            bundles().await,
+            1,
+            "the refused package's key went at its end"
         );
     }
 
@@ -19251,6 +19733,136 @@ mod maintenance_real_ffi_tests {
         honest.shutdown();
     }
 
+    /// A circle manager for `keys`, in a store of its own.
+    fn circle_of(keys: &Keys, tag: &str) -> (CircleManagerFfi, DataDir) {
+        let dir = DataDir::new(tag);
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret_bytes(keys)).expect("CircleManagerFfi::new");
+        (circle, dir)
+    }
+
+    /// A relay gating gift-wrap reads behind NIP-42 as strfry does (damus's
+    /// `ERROR: auth-required:`) is read by both invitation reads — the page's
+    /// and the poller's — as the circle's own identity, once it answered the
+    /// challenge: the page calls it `Served` and both hand over the Welcome
+    /// stored there. The `#p` is the circle's own key; Dart names none.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_invitation_reads_are_served_by_a_relay_gating_gift_wrap_reads_via_real_ffi() {
+        use haven_core::relay::scripted_relay::ScriptedRelay;
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let keys = Keys::generate();
+        let (circle, _dir) = circle_of(&keys, "gated-inbox");
+        let store = MockRelay::run().await.expect("start MockRelay");
+        let wrap = nostr::EventBuilder::new(Kind::GiftWrap, "c2VhbGVk")
+            .tag(nostr::Tag::public_key(keys.public_key()))
+            .sign_with_keys(&Keys::generate())
+            .expect("sign the wrap");
+        let seeder = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        seeder
+            .inner
+            .publish_event(&wrap, &[store.url().await.to_string()])
+            .await
+            .expect("the relay takes the wrap");
+        let gated = RecordingFront::start_gating(store.url().await.as_str());
+        let open = ScriptedRelay::start();
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        let is_the_wrap = |json: &String| {
+            serde_json::from_str::<nostr::Event>(json).is_ok_and(|event| event == wrap)
+        };
+
+        let per_relay = relay_mgr
+            .fetch_gift_wraps_per_relay(
+                &circle,
+                vec![gated.url().to_owned(), open.url().to_owned()],
+                None,
+            )
+            .await
+            .expect("the page read runs");
+        assert_eq!(
+            per_relay.iter().map(|inbox| inbox.read).collect::<Vec<_>>(),
+            [super::InboxReadFfi::Served, super::InboxReadFfi::Served],
+        );
+        assert!(
+            per_relay[0].events.len() == 1 && is_the_wrap(&per_relay[0].events[0]),
+            "the page read was not handed the Welcome the gated relay holds"
+        );
+        let polled = relay_mgr
+            .fetch_gift_wraps(&circle, vec![gated.url().to_owned()], None)
+            .await
+            .expect("the poll runs");
+        assert!(
+            polled.len() == 1 && is_the_wrap(&polled[0]),
+            "the poller was not handed the Welcome the gated relay holds"
+        );
+
+        let answers: Vec<nostr::Event> = gated
+            .frames()
+            .iter()
+            .filter_map(|frame| serde_json::from_str::<serde_json::Value>(&frame.text).ok())
+            .filter(|frame| frame[0] == "AUTH")
+            .map(|frame| nostr::JsonUtil::from_json(frame[1].to_string()).expect("an AUTH event"))
+            .collect();
+        assert!(
+            answers.len() == 2
+                && answers
+                    .iter()
+                    .all(|answer| answer.pubkey == keys.public_key() && answer.verify().is_ok()),
+            "each read answered its challenge once, as the circle's own identity"
+        );
+    }
+
+    /// A relay that refuses the read again after accepting the answer to its
+    /// challenge is still `Refused` on the page, and the poller is handed
+    /// nothing from it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_invitation_reads_report_a_relay_refusing_after_authentication_as_refused() {
+        use haven_core::relay::scripted_relay::{Frame, ScriptedRelay};
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let keys = Keys::generate();
+        let (circle, _dir) = circle_of(&keys, "refusing-inbox");
+        let (refusing, open) = (ScriptedRelay::start(), ScriptedRelay::start());
+        refusing.accept_auth();
+        refusing.answer(
+            |_| true,
+            vec![
+                Frame::Text(serde_json::json!(["AUTH", "scripted-challenge-0b7e"]).to_string()),
+                Frame::Closed("auth-required: not this inbox".to_owned()),
+            ],
+        );
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+
+        let per_relay = relay_mgr
+            .fetch_gift_wraps_per_relay(
+                &circle,
+                vec![refusing.url().to_owned(), open.url().to_owned()],
+                None,
+            )
+            .await
+            .expect("the page read runs");
+        assert_eq!(
+            per_relay.iter().map(|inbox| inbox.read).collect::<Vec<_>>(),
+            [super::InboxReadFfi::Refused, super::InboxReadFfi::Served],
+        );
+        assert!(
+            relay_mgr
+                .fetch_gift_wraps(&circle, vec![refusing.url().to_owned()], None)
+                .await
+                .expect("the poll runs")
+                .is_empty(),
+            "the poller was handed something by a relay that refused it"
+        );
+    }
+
     /// The invitation poll keeps the first gift wrap it sees under an id, so a
     /// forged wrap under a genuine id, from the relay that answers first, would
     /// hide the invitation on every poll.
@@ -19258,10 +19870,13 @@ mod maintenance_real_ffi_tests {
     async fn a_forged_gift_wrap_never_takes_the_genuine_ones_place_via_real_ffi() {
         use haven_core::relay::scripted_relay::{Frame, ScriptedRelay};
 
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
         install_test_seams();
         let (hostile, honest) = (ScriptedRelay::start(), ScriptedRelay::start());
         let both = vec![hostile.url().to_owned(), honest.url().to_owned()];
-        let recipient = Keys::generate().public_key();
+        let recipient_keys = Keys::generate();
+        let recipient = recipient_keys.public_key();
+        let (circle, _dir) = circle_of(&recipient_keys, "forged-wrap");
         let genuine = nostr::EventBuilder::new(Kind::GiftWrap, "b3BhcXVl")
             .tag(nostr::Tag::public_key(recipient))
             .sign_with_keys(&Keys::generate())
@@ -19296,13 +19911,14 @@ mod maintenance_real_ffi_tests {
             .await
             .expect("RelayManagerFfi::new_instance");
         let per_relay = relay_mgr
-            .fetch_gift_wraps_per_relay(recipient.to_hex(), both.clone(), None)
+            .fetch_gift_wraps_per_relay(&circle, both.clone(), None)
             .await
             .expect("the poll runs");
         assert_eq!(per_relay.len(), 2);
         for inbox in &per_relay {
             assert!(
-                inbox.responded && is_the_genuine_wrap_alone(&inbox.events),
+                inbox.read == super::InboxReadFfi::Served
+                    && is_the_genuine_wrap_alone(&inbox.events),
                 "an inbox's answer is not exactly the genuine gift wrap"
             );
         }
@@ -19313,7 +19929,7 @@ mod maintenance_real_ffi_tests {
             let pooled = RelayManagerFfi::new_instance()
                 .await
                 .expect("RelayManagerFfi::new_instance")
-                .fetch_gift_wraps(recipient.to_hex(), inboxes, None)
+                .fetch_gift_wraps(&circle, inboxes, None)
                 .await
                 .expect("the fetch runs");
             assert!(
@@ -19321,6 +19937,57 @@ mod maintenance_real_ffi_tests {
                 "the pooled fetch did not return exactly the genuine gift wrap"
             );
         }
+    }
+
+    /// Anyone who knows the npub can store gift wraps addressed to it, dated
+    /// as they like, so a flood past the background poll's old hundred pushed
+    /// a Welcome older than all of it out of every poll. The poll now reads as
+    /// many as the invitations page does.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_flood_of_gift_wraps_does_not_push_a_welcome_out_of_the_poll_via_real_ffi() {
+        use haven_core::relay::scripted_relay::{Frame, ScriptedRelay};
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let inbox = ScriptedRelay::start();
+        let keys = Keys::generate();
+        let (circle, _dir) = circle_of(&keys, "flooded-inbox");
+        let wrap_aged = |age_secs: u64| {
+            nostr::EventBuilder::new(Kind::GiftWrap, "c2VhbGVk")
+                .tag(nostr::Tag::public_key(keys.public_key()))
+                .custom_created_at(nostr::Timestamp::now() - age_secs)
+                .sign_with_keys(&Keys::generate())
+                .expect("sign the wrap")
+        };
+        // Newest first, as a relay serves them: the flood, then the Welcome
+        // NIP-59 backdated two days.
+        let mut frames: Vec<Frame> = (0..150).map(|age| Frame::Event(wrap_aged(age))).collect();
+        let welcome = wrap_aged(2 * 86_400);
+        frames.push(Frame::Event(welcome.clone()));
+        frames.push(Frame::Eose);
+        inbox.answer(
+            |filter| {
+                filter
+                    .kinds
+                    .as_ref()
+                    .is_some_and(|kinds| kinds.contains(&Kind::GiftWrap))
+            },
+            frames,
+        );
+
+        let polled = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance")
+            .fetch_gift_wraps(&circle, vec![inbox.url().to_owned()], None)
+            .await
+            .expect("the poll runs");
+        assert!(
+            polled
+                .iter()
+                .any(|json| serde_json::from_str::<nostr::Event>(json).is_ok_and(|w| w == welcome)),
+            "a flood of gift wraps pushed the Welcome out of the poll"
+        );
+        assert_eq!(polled.len(), 151, "the poll did not read the whole inbox");
     }
 
     // ========================================================================
@@ -19687,7 +20354,7 @@ mod maintenance_real_ffi_tests {
             .expect("seed the foreign list");
 
         let outcome = relay_mgr
-            .maintain_relay_list(&circle, secret)
+            .maintain_relay_list(&circle, secret, true)
             .await
             .expect("maintain_relay_list must not error");
         assert_eq!(
@@ -19768,7 +20435,7 @@ mod maintenance_real_ffi_tests {
                 let outcome = RelayManagerFfi::new_instance()
                     .await
                     .expect("RelayManagerFfi::new_instance")
-                    .maintain_relay_list(&circle, secret)
+                    .maintain_relay_list(&circle, secret, true)
                     .await
                     .expect("maintain_relay_list must not error");
                 let healed_here = relay
@@ -19851,7 +20518,7 @@ mod maintenance_real_ffi_tests {
         }
 
         let lists = relay_mgr
-            .maintain_relay_list(&circle, secret.clone())
+            .maintain_relay_list(&circle, secret.clone(), true)
             .await
             .expect("the relay-list tick");
         let kp = circle_maintain(&relay_mgr, &circle, secret.clone()).await;
@@ -19896,7 +20563,7 @@ mod maintenance_real_ffi_tests {
         // Every relay now serves what it should: nothing is republished, and
         // the healthy own relay alone confirms each.
         let again = relay_mgr
-            .maintain_relay_list(&circle, secret.clone())
+            .maintain_relay_list(&circle, secret.clone(), true)
             .await
             .expect("the second relay-list tick");
         for list in [again.key_package, again.inbox] {
@@ -19925,7 +20592,7 @@ mod maintenance_real_ffi_tests {
 
         // The onboarding race: a publish before anything seeded the defaults.
         let lists = relay_mgr
-            .maintain_relay_list(&circle, secret.clone())
+            .maintain_relay_list(&circle, secret.clone(), true)
             .await
             .expect("the relay-list tick");
         for relay_type in [RelayType::KeyPackage, RelayType::Inbox] {
@@ -19986,7 +20653,7 @@ mod maintenance_real_ffi_tests {
             "the last relay of a category cannot be removed"
         );
         let edited = relay_mgr
-            .maintain_relay_list(&circle, secret)
+            .maintain_relay_list(&circle, secret, true)
             .await
             .expect("the relay-list tick after the edit");
         assert_eq!(
@@ -20047,7 +20714,7 @@ mod maintenance_real_ffi_tests {
             .expect("the lookup relay takes it");
 
         let lists = relay_mgr
-            .maintain_relay_list(&circle, secret)
+            .maintain_relay_list(&circle, secret, true)
             .await
             .expect("the relay-list tick");
         assert_eq!(
@@ -23329,14 +23996,30 @@ mod maintenance_real_ffi_tests {
 
     /// An in-process relay behind a recording front: the product is told the
     /// front's address and nothing else.
-    struct FrontedRelay {
+    pub(super) struct FrontedRelay {
         _server: nostr_relay_builder::LocalRelay,
         db: nostr_relay_builder::prelude::MemoryDatabase,
-        front: haven_core::relay::recording_front::RecordingFront,
+        pub(super) front: RecordingFront,
     }
 
     impl FrontedRelay {
-        async fn run() -> Self {
+        pub(super) async fn run() -> Self {
+            Self::start(RecordingFront::start).await
+        }
+
+        /// Behind a gating front: gift-wrap reads are refused as strfry
+        /// refuses them a client that has not authenticated.
+        pub(super) async fn run_gating() -> Self {
+            Self::start(RecordingFront::start_gating).await
+        }
+
+        /// Behind a front that refuses gift-wrap reads even to a client that
+        /// authenticated.
+        pub(super) async fn run_refusing() -> Self {
+            Self::start(RecordingFront::start_refusing).await
+        }
+
+        async fn start(fronted: fn(&str) -> RecordingFront) -> Self {
             let db = nostr_relay_builder::prelude::MemoryDatabase::with_opts(
                 nostr_relay_builder::prelude::MemoryDatabaseOptions {
                     events: true,
@@ -23360,9 +24043,8 @@ mod maintenance_real_ffi_tests {
                 assert!(started.is_ok(), "an in-process relay did not start");
                 break server;
             };
-            let front = haven_core::relay::recording_front::RecordingFront::start(
-                &server.url().await.to_string(),
-            );
+            let upstream = server.url().await.to_string();
+            let front = fronted(&upstream);
             Self {
                 _server: server,
                 db,
@@ -23472,7 +24154,7 @@ mod maintenance_real_ffi_tests {
                 .expect("the publish toggle");
         }
         let healed = relay_mgr
-            .maintain_relay_list(&circle, secret.clone())
+            .maintain_relay_list(&circle, secret.clone(), true)
             .await
             .expect("the relay-list tick");
         assert!(
@@ -23604,6 +24286,86 @@ mod maintenance_real_ffi_tests {
             "a kind 0 on the key-package relay was not the one finding: {:?}",
             planted.findings,
         );
+    }
+
+    /// The invitation poll's window is the inbox REQ's cold lookback, and it
+    /// covers a wrap backdated NIP-59's two days that was then held the full
+    /// 72 hours before a restart dropped the in-memory copy.
+    #[test]
+    fn the_poll_lookback_reaches_a_held_wrap_backdated_two_days() {
+        const NIP59_BACKDATING_SECS: i64 = 2 * 24 * 60 * 60;
+        let lookback = super::inbox_gift_wrap_lookback_secs();
+        assert_eq!(
+            lookback,
+            haven_core::relay::cursor::INBOX_GIFTWRAP_LOOKBACK_SECS
+        );
+        assert!(
+            lookback
+                >= NIP59_BACKDATING_SECS
+                    + i64::try_from(haven_core::circle::CONSUMED_KEY_PACKAGE_HOLD_SECS)
+                        .expect("the hold fits")
+        );
+    }
+
+    /// A gift wrap is classified by the core error's variant, never by its
+    /// text: an MLS failure is a silent `Unusable`, a store failure the
+    /// `StoreFailed` the user is told about, and a wrap already processed is
+    /// neither.
+    #[test]
+    fn a_gift_wrap_intake_is_classified_by_error_variant() {
+        use super::{GiftWrapIntakeFailureFfi as F, GiftWrapIntakeFfi};
+        use haven_core::circle::CircleError;
+
+        for (case, intake, failure) in [
+            (
+                "mls",
+                CircleError::Mls("canary".to_owned()),
+                Some(F::Unusable),
+            ),
+            (
+                "storage",
+                CircleError::Storage("canary".to_owned()),
+                Some(F::StoreFailed),
+            ),
+            ("already processed", CircleError::AlreadyProcessed, None),
+        ] {
+            let outcome = GiftWrapIntakeFfi::of(Err(intake)).expect(case);
+            assert!(outcome.invitation.is_none(), "{case}");
+            assert_eq!(outcome.failure, failure, "{case}");
+        }
+    }
+
+    /// A wrap that opens no invitation — another client's message, a stranger's
+    /// empty wrap, JSON that does not even parse — is a typed `Unusable`, so no
+    /// relay-authored text reaches an FFI error string (Rule 15).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_gift_wrap_that_opens_no_invitation_is_a_typed_unusable() {
+        use nostr::JsonUtil as _;
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let keys = Keys::generate();
+        let dir = DataDir::new("intake_unusable");
+        let manager = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
+            .expect("CircleManagerFfi::new");
+        let stranger = nostr::EventBuilder::new(Kind::GiftWrap, "bm90IGEgd2VsY29tZQ==")
+            .tag(nostr::Tag::public_key(keys.public_key()))
+            .sign_with_keys(&Keys::generate())
+            .expect("a wrap signs");
+        for json in [
+            stranger.as_json(),
+            r#"{"kind":"canary-7f3a","content":"canary-7f3a"}"#.to_owned(),
+        ] {
+            let intake = manager
+                .process_gift_wrapped_invitation(secret_bytes(&keys), json)
+                .await
+                .expect("a wrap that opens nothing is a typed outcome, not an error string");
+            assert!(intake.invitation.is_none());
+            assert_eq!(
+                intake.failure,
+                Some(super::GiftWrapIntakeFailureFfi::Unusable)
+            );
+        }
     }
 }
 
@@ -24120,9 +24882,10 @@ mod log_anonymity_tests {
         AcceptFailureFfi, AcceptInvitationOutcomeFfi, BuiltRelayListEventFfi, BuiltUnpublishFfi,
         CircleCreationOutcomeFfi, CircleEngineStateFfi, CircleFfi, CircleMemberFfi,
         CircleWithMembersFfi, ContactFfi, DecryptedLocationFfi, DirectoryEntryFfi,
-        DirectoryTierFfi, FfiRelayEvent, FfiRelayEventKind, FfiSyncStatusReason, HavenTargetFilter,
-        InMemoryStorage, InvitationFfi, LastKnownLocationFfi, LeavePlanFfi, LeavePlanKindFfi,
-        LocationMessage, LocationMessageResultFfi, LocationMessageResultKindFfi, LogAliasClassFfi,
+        DirectoryTierFfi, FfiRelayEvent, FfiRelayEventKind, FfiSyncStatusReason,
+        GiftWrapIntakeFailureFfi, GiftWrapIntakeFfi, HavenTargetFilter, InMemoryStorage,
+        InvitationFfi, LastKnownLocationFfi, LeavePlanFfi, LeavePlanKindFfi, LocationMessage,
+        LocationMessageResultFfi, LocationMessageResultKindFfi, LogAliasClassFfi,
         MemberKeyPackageFfi, MemberLookupFfi, MemberLookupVerdictFfi, NostrIdentityManager,
         OwnProfileRelayAnswerFfi, OwnRelayCellFfi, ProfileMetadataFfi, ProfilePictureRefFfi,
         PublicIdentity, RejoinOfferFfi, RejoinOffersOutcomeFfi, RelayConnectionStatusFfi,
@@ -24309,7 +25072,7 @@ mod log_anonymity_tests {
     fn gift_wrap_fetch(events: usize) -> RelayGiftWrapFetchFfi {
         RelayGiftWrapFetchFfi {
             relay_url: RELAY.to_string(),
-            responded: true,
+            read: super::InboxReadFfi::Refused,
             events: vec![TEXT.to_string(); events],
         }
     }
@@ -24838,6 +25601,31 @@ mod log_anonymity_tests {
     }
 
     #[test]
+    fn gift_wrap_intake_ffi_debug_redacts_the_invitation() {
+        let held = GiftWrapIntakeFfi {
+            invitation: Some(InvitationFfi {
+                mls_group_id: vec![7u8; 32],
+                circle_name: NAME.to_string(),
+                inviter_pubkey: HEX_ID.to_string(),
+                inviter_npub: NPUB.to_string(),
+                invited_at: INSTANT,
+            }),
+            failure: None,
+        };
+        assert_debug_redacted!(held, "GiftWrapIntakeFfi", NEEDLES);
+        for (failure, marker) in [
+            (GiftWrapIntakeFailureFfi::Unusable, "Unusable"),
+            (GiftWrapIntakeFailureFfi::StoreFailed, "StoreFailed"),
+        ] {
+            let failed = GiftWrapIntakeFfi {
+                invitation: None,
+                failure: Some(failure),
+            };
+            assert_debug_redacted!(failed, "GiftWrapIntakeFfi", marker = marker, NEEDLES);
+        }
+    }
+
+    #[test]
     fn circle_with_members_ffi_debug_redacts_the_roster() {
         let subject: CircleWithMembersFfi = with_members(4);
         assert_debug_redacted!(subject, "CircleWithMembersFfi", NEEDLES);
@@ -24910,6 +25698,10 @@ mod log_anonymity_tests {
             key_package: kind.clone(),
             relay_list: kind.clone(),
             inbox_relay_list: kind,
+            inbox_reads: vec![super::OwnInboxReadFfi {
+                relay_url: RELAY.to_string(),
+                read: super::InboxReadFfi::Refused,
+            }],
         };
         assert_debug_redacted!(
             board,
@@ -24917,6 +25709,11 @@ mod log_anonymity_tests {
             marker = "OwnRelayCellFfi",
             NEEDLES
         );
+        let read = super::OwnInboxReadFfi {
+            relay_url: RELAY.to_string(),
+            read: super::InboxReadFfi::Refused,
+        };
+        assert_debug_redacted!(read, "OwnInboxReadFfi", NEEDLES);
     }
 
     #[test]
@@ -25303,6 +26100,11 @@ mod driver_real_ffi_tests {
         nostr::JsonUtil::as_json(&event)
     }
 }
+
+#[cfg(test)]
+#[cfg(debug_assertions)] // the ws:// loopback + in-memory-keyring seams are debug-only
+#[path = "split_plane_invite_tests.rs"]
+mod split_plane_invite_tests;
 
 #[cfg(test)]
 mod publish_event_ffi_tests {

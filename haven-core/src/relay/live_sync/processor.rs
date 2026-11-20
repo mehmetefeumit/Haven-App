@@ -629,6 +629,10 @@ pub struct EngineProcessor {
     /// local clock reading. A gift wrap's own `created_at` reaches it in no
     /// direction; see [`InboxAnchor`].
     inbox_anchor: InboxAnchor,
+    /// Inbox relays whose REQ went out with the floor it owes unrecorded:
+    /// while any does, no inbox generation advances the cursor (Security
+    /// Rule 12).
+    inbox_floors_unrecorded: Mutex<HashSet<RelayUrl>>,
     /// Per-REQ delivery liveness — the signal `RelayStatus` cannot give.
     delivery: DeliveryLog,
     /// `(relay, subscription)` endpoints whose stored replay is finished for the
@@ -786,6 +790,7 @@ impl EngineProcessor {
             bus,
             anchors: CursorAnchors::default(),
             inbox_anchor: InboxAnchor::default(),
+            inbox_floors_unrecorded: Mutex::new(HashSet::new()),
             delivery: DeliveryLog::default(),
             settled_endpoints: Mutex::new(HashSet::new()),
             released_endpoints: Mutex::new(HashSet::new()),
@@ -1001,6 +1006,18 @@ impl EngineProcessor {
         }
     }
 
+    /// Ends what `key`'s relay owed the inbox back to the `since` it was
+    /// asked: its `EOSE` vouches for the inbox's history from there.
+    pub fn settle_inbox_floor(&self, key: &RepairKey) {
+        if let Some(since) = self.asked_from(key) {
+            self.circle.clear_inbox_floor(key.relay_url.as_str(), since);
+            self.inbox_floors_unrecorded
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&key.relay_url);
+        }
+    }
+
     /// The `since` `key`'s relay was last asked from, if this REQ recorded one.
     #[must_use]
     pub fn asked_from(&self, key: &RepairKey) -> Option<i64> {
@@ -1113,6 +1130,13 @@ impl EngineProcessor {
         self.inbox_anchor.suppress_open_generation();
     }
 
+    /// Burns the INBOX generation's pending advance alone: a consumer of the
+    /// bus lost an unknown set of decrypted events, and only a gift wrap
+    /// among them is not already applied.
+    pub fn note_inbox_delivery_gap(&self) {
+        self.inbox_anchor.suppress_open_generation();
+    }
+
     /// Opens a fresh INBOX cursor-anchor generation at `opened_at_secs` — a
     /// LOCAL wall-clock reading taken when the `kind:1059` REQ was (re-)issued.
     ///
@@ -1121,6 +1145,47 @@ impl EngineProcessor {
     /// With no open generation the inbox cursor never advances.
     pub fn note_inbox_subscription_opened(&self, opened_at_secs: i64) {
         self.inbox_anchor.open(opened_at_secs);
+        self.hold_inbox_if_unrecorded();
+    }
+
+    /// Records whether the floor `relay` owes the inbox was written before its
+    /// REQ went out. One that was not holds every inbox advance until a later
+    /// write for it lands or its own `EOSE` answers: another relay's `EOSE`
+    /// would otherwise move the cursor past what it owes, with nothing left to
+    /// say so.
+    pub fn note_inbox_floor_recorded(&self, relay: &RelayUrl, recorded: bool) {
+        let mut unrecorded = self
+            .inbox_floors_unrecorded
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if recorded {
+            unrecorded.remove(relay);
+        } else {
+            unrecorded.insert(relay.clone());
+        }
+        drop(unrecorded);
+        self.hold_inbox_if_unrecorded();
+    }
+
+    /// Forgets every unrecorded inbox floor: every inbox REQ is closed or
+    /// about to be issued anew, and the cursor never moved past what they
+    /// owed.
+    pub fn forget_unrecorded_inbox_floors(&self) {
+        self.inbox_floors_unrecorded
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+    }
+
+    fn hold_inbox_if_unrecorded(&self) {
+        let held = !self
+            .inbox_floors_unrecorded
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_empty();
+        if held {
+            self.inbox_anchor.suppress_open_generation();
+        }
     }
 
     /// Records the relay's end-of-stored-events for the INBOX subscription and
@@ -1154,6 +1219,7 @@ impl EngineProcessor {
     /// EOSE cannot advance a cursor for a REQ we no longer own.
     pub fn forget_inbox_subscription(&self) {
         self.inbox_anchor.forget();
+        self.forget_unrecorded_inbox_floors();
     }
 
     /// Processes one incoming `kind:445` for `nostr_group_id` (its routed `#h`).
@@ -2496,6 +2562,22 @@ impl EngineProcessor {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// Resolves once `done` holds, read now and again each time an endpoint
+    /// settles — after its `EOSE` or `CLOSED` was taken in and anchored.
+    /// Unbounded: the caller bounds it.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn settles_until_for_test(&self, done: impl Fn() -> bool) {
+        loop {
+            let settled = self.eose_notify.notified();
+            tokio::pin!(settled);
+            settled.as_mut().enable();
+            if done() {
+                return;
+            }
+            settled.await;
+        }
     }
 
     /// Whether some endpoint of `relay` has settled in its current generation.

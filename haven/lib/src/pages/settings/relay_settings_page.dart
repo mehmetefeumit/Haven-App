@@ -11,7 +11,9 @@
 /// publish (`relayStatusProvider`). The page offers no refresh and no
 /// republish: opening it runs a pass only when the last one is stale
 /// ([ownRelayBoardIsStale]), and one screen-reader announcement follows each
-/// pass when it settles.
+/// pass when it settles. An Inbox row whose relay refused the pass's read of
+/// this account's invitations says so, in words and with an icon; when every
+/// inbox relay refused it, a banner offers the defaults back.
 ///
 /// The Profile section's remove control is deliberately absent on the curated
 /// pool entries — `usable_profile_relays()` unions
@@ -46,6 +48,7 @@ import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/relay_status_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/relay_preferences_service.dart';
+import 'package:haven/src/services/relay_service.dart' show InboxRead;
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/widgets.dart';
@@ -299,6 +302,14 @@ class _RelaySection extends ConsumerWidget {
     final unremovable = category == RelayCategory.profile
         ? _unremovableProfileRelays
         : const <String>{};
+    // Only inbox rows carry a read verdict: what the last pass's read saw.
+    bool refused(String url) =>
+        category == RelayCategory.inbox &&
+        _rowFor(status, url)?.inboxRead == InboxRead.refused;
+    final allRefused = switch (relays.valueOrNull) {
+      final urls? when urls.isNotEmpty => urls.every(refused),
+      _ => false,
+    };
 
     return Column(
       key: WidgetKeys.relaySettingsSection(section.name),
@@ -307,6 +318,10 @@ class _RelaySection extends ConsumerWidget {
         _SectionHeader(section: section),
         if (category == RelayCategory.profile)
           const _ProfilePoolUnderflowBanner(),
+        if (allRefused)
+          _InboxAllRefusedBanner(
+            onRestore: () => _onRestoreDefaultsTapped(context, ref),
+          ),
         relays.when(
           data: (urls) {
             if (urls.isEmpty) {
@@ -328,6 +343,7 @@ class _RelaySection extends ConsumerWidget {
                       isContaminated: contaminated.contains(
                         normalizeRelayUrlForComparison(urls[i]),
                       ),
+                      isInboxRefused: refused(urls[i]),
                     ),
                     if (i < urls.length - 1)
                       const Divider(height: 1, indent: HavenSpacing.base),
@@ -495,6 +511,7 @@ class _RelayRow extends StatelessWidget {
     required this.cells,
     required this.onRemove,
     this.isContaminated = false,
+    this.isInboxRefused = false,
   });
 
   final String url;
@@ -513,6 +530,10 @@ class _RelayRow extends StatelessWidget {
   /// Only ever set for Profile-section rows. Never gates [onRemove] or the
   /// Add-relay flow — it is purely informational.
   final bool isContaminated;
+
+  /// `true` when this inbox relay refused the last pass's read of this
+  /// account's gift wraps. Only ever set for Inbox-section rows.
+  final bool isInboxRefused;
 
   @override
   Widget build(BuildContext context) {
@@ -540,13 +561,24 @@ class _RelayRow extends StatelessWidget {
                       // often at the end. Left to right in every locale, so
                       // its punctuation is not reordered.
                       Expanded(
-                        child: Align(
-                          alignment: AlignmentDirectional.centerStart,
-                          child: Text(
-                            displayUrl,
-                            textDirection: TextDirection.ltr,
-                            style: theme.textTheme.bodyMedium,
-                          ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              displayUrl,
+                              textDirection: TextDirection.ltr,
+                              style: theme.textTheme.bodyMedium,
+                            ),
+                            // In words, so it is never carried by colour alone.
+                            if (isInboxRefused)
+                              Text(
+                                l10n.relaySettingsInboxRefused,
+                                style: theme.textTheme.bodySmall?.copyWith(
+                                  color: theme.colorScheme.onSurfaceVariant,
+                                ),
+                              ),
+                          ],
                         ),
                       ),
                       if (cells.isNotEmpty) ...[
@@ -575,6 +607,7 @@ class _RelayRow extends StatelessWidget {
               ),
             ),
             if (isContaminated) _ContaminationWarningIcon(url: displayUrl),
+            if (isInboxRefused) _InboxRefusedWarningIcon(url: displayUrl),
             if (remove != null)
               IconButton(
                 key: WidgetKeys.relaySettingsRemoveRelay,
@@ -615,6 +648,72 @@ class _ContaminationWarningIcon extends StatelessWidget {
             size: 18,
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// Warning icon next to an inbox relay that refused the last pass's read of
+/// this account's gift wraps. Same shape as [_ContaminationWarningIcon]: a
+/// short tooltip, and a screen-reader label that names the relay.
+class _InboxRefusedWarningIcon extends StatelessWidget {
+  const _InboxRefusedWarningIcon({required this.url});
+
+  /// Display URL (`wss://` stripped), named in the accessibility label.
+  final String url;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
+    return Tooltip(
+      message: l10n.relaySettingsInboxRefusedTooltip,
+      child: Semantics(
+        label: l10n.relaySettingsInboxRefusedSemantics(url),
+        child: const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 4),
+          child: Icon(
+            LucideIcons.triangleAlert,
+            color: HavenSecurityColors.warning,
+            size: 18,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Banner at the top of the Inbox section when every inbox relay refused the
+/// last pass's read of this account's gift wraps: no invitation reaches the
+/// user until one does. Haven's defaults hold no such relay.
+class _InboxAllRefusedBanner extends StatelessWidget {
+  const _InboxAllRefusedBanner({required this.onRestore});
+
+  final VoidCallback onRestore;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: HavenSpacing.sm),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          HavenInfoNote(
+            icon: LucideIcons.triangleAlert,
+            tone: HavenInfoNoteTone.warning,
+            title: l10n.relaySettingsInboxAllRefusedTitle,
+            paragraphs: [l10n.relaySettingsInboxAllRefusedMessage],
+          ),
+          const SizedBox(height: HavenSpacing.sm),
+          Align(
+            alignment: AlignmentDirectional.centerStart,
+            child: TextButton.icon(
+              icon: const Icon(LucideIcons.rotateCcw, size: 16),
+              label: Text(l10n.relaySettingsRestoreDefaults),
+              onPressed: onRestore,
+            ),
+          ),
+        ],
       ),
     );
   }

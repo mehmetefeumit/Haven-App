@@ -142,7 +142,7 @@ locally: the producer is the only place it can be resolved.
 | `type` | string | `frame` \| `conn_open` \| `conn_error`. |
 | `conn_id` | string | `c0`, `c1`, … Stable per WebSocket connection, unique across every route. |
 | `ts_ms` | int | Proxy-side wall clock at observation. Never load-bearing for ordering. |
-| `dir` | string | `c2r` (client→relay) or `r2c` (relay→client). `frame` lines only. |
+| `dir` | string | `c2r` (client→relay) or `r2c` (relay→client); on a gated route also `c2p`, `p2c` or `r2p` (see "A gated route" below). `frame` lines only. |
 | `relay_url` | string | The upstream this connection is proxied to — where the bytes actually went. |
 | `listen` | string | `host:port` of the proxy listener that accepted the connection — how a lane correlates a connection back to the relay entry it configured in the app. |
 | `frame` | array \| null | The parsed frame verbatim. `null` when the message was not structurally a Nostr frame. |
@@ -161,13 +161,54 @@ can be matched, not parsed.
 | `client handshake failed` | The client's WebSocket handshake did not complete. |
 | `upstream connect failed` | The proxy could not reach `relay_url`. |
 | `c2r read failed` / `r2c read failed` | The named direction's stream failed MID-CONNECTION: invalid UTF-8 in a text frame, a protocol violation, a capacity overrun, a reset without a closing handshake. The error CLASS is on the proxy's stderr (which `stop-wire-proxy.sh` tails into the lane log), not in the journal — the direction is the part that changes a verdict, and enlarging this vocabulary by twelve error kinds would make it unmatchable. |
-| `c2r frames discarded` / `r2c frames discarded` | A delivery retraction; carries `discarded`. See below. |
+| `c2r frames discarded` / `r2c frames discarded` / `p2c frames discarded` | A delivery retraction; carries `discarded`. See below. |
 
 A read failure is a FINDING, not noise: a journal that simply stopped was
 previously indistinguishable from a clean close, and an oracle cannot fail
 closed on a truncation it cannot see. Note the corollary — a peer that drops
 its socket without a closing handshake now leaves a `conn_error` line, so these
 are not rare.
+
+## A gated route
+
+A route whose routing-table entry ends in `;gate-read=<kind>[+<kind>…]`
+(`tooling/e2e/local-relay/src/gate.rs`) answers as a relay that will not serve
+those kinds to a client that has not authenticated (NIP-42) — strfry's
+`relay.auth.restrictedReadKinds`, whose default `"4, 1059"` `relay.damus.io`
+runs — frame for frame as haven-core's `RecordingFront::start_gating`: a `REQ`
+whose every filter names only gated kinds, a `COUNT` with a filter naming one
+and a `NEG-OPEN` naming only them get `["AUTH","challenge-<conn_id>"]` and then
+`CLOSED` (`NEG-ERR` for the `NEG-OPEN`) and never reach the relay; a gated-kind
+event the relay sends for another subscription is withheld; every `EVENT` is
+handed on.
+
+A client that answers the challenge is checked as strfry's `handleAuth` checks
+it — a kind-22242 event with a valid id and signature, carrying its
+connection's challenge and a `relay` tag naming the route (by scheme and port:
+the emulator dials the route through `10.0.2.2`) — and answered `OK true`;
+from then on its connection's reads go to the relay, and of the gated kinds it
+is served only events naming its key in a `p` tag or signed by it. Any other
+answer, or a second one, is `OK false`. So the route is `relay.damus.io` as
+Haven meets it since A5 (owner-directed 2026-11-16): an inbox read that
+answers is served; the live plane, which never answers (Security Rule 16), is
+refused. The E2E lanes put one first in every account's inbox list, in front
+of a relay store of its own.
+
+Nothing the gate handles is journalled as `c2r` or `r2c`, which would claim a
+hop to or from `relay_url` it never made:
+
+| `dir` | the line |
+|---|---|
+| `c2p` | a client frame the gate refused or answered itself (a client's `AUTH`); the relay never got it |
+| `p2c` | a frame the gate wrote to the client itself; no relay sent it |
+| `r2p` | a relay frame the gate withheld from the client |
+
+The oracles read `c2p` as what Haven sent (a refused REQ is still a filter
+Haven asked for: `check-wire-journal.sh` C4-REQ, `check-wire-correlation.sh`
+C5.2 and `haven-wire-planes` C8.2 judge it; an answer to the challenge is
+`haven-wire-planes` C8.2's row `AUTH-22242`, admitted only on its author's own
+inbox list and only on a connection carrying nothing but that key's own
+gift-wrap reads) and leave `p2c` and `r2p` out of every assertion.
 
 ## A recorded frame is a SENT frame — or the journal retracts it
 

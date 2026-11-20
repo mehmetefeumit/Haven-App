@@ -233,6 +233,7 @@ class _MockRelayService implements RelayService {
   Future<RelayListMaintenanceResult> maintainRelayList({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,
+    required bool foreground,
   }) async => const RelayListMaintenanceResult.failed();
 
   @override
@@ -246,7 +247,6 @@ class _MockRelayService implements RelayService {
 
   @override
   Future<List<String>> fetchGiftWraps({
-    required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
   }) async {
@@ -255,7 +255,6 @@ class _MockRelayService implements RelayService {
 
   @override
   Future<List<RelayGiftWrapFetch>> fetchGiftWrapsPerRelay({
-    required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
   }) async => [];

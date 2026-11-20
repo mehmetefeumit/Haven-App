@@ -125,7 +125,6 @@ void main() {
           relayManager: relayManager,
           invitee: bob.user.circleManager,
           inviteeSecretBytes: await bob.user.getSecretBytes(),
-          inviteePubkeyHex: bob.pubkeyHex,
           relays: <String>[ctx.relay.url],
           scenario: 'redelivery',
         );
@@ -222,7 +221,6 @@ void main() {
           relayManager: relayManager,
           invitee: carol.user.circleManager,
           inviteeSecretBytes: await carol.user.getSecretBytes(),
-          inviteePubkeyHex: carol.pubkeyHex,
           relays: <String>[ctx.relay.url],
           scenario: 'redelivery',
         );

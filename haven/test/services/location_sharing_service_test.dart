@@ -3445,6 +3445,7 @@ class _MutableMockRelayService implements RelayService {
   Future<RelayListMaintenanceResult> maintainRelayList({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,
+    required bool foreground,
   }) async => relayListsCurrent;
 
   @override
@@ -3501,14 +3502,12 @@ class _MutableMockRelayService implements RelayService {
 
   @override
   Future<List<String>> fetchGiftWraps({
-    required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
   }) async => [];
 
   @override
   Future<List<RelayGiftWrapFetch>> fetchGiftWrapsPerRelay({
-    required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
   }) async => [];
@@ -3553,6 +3552,7 @@ class _PauseRacingRelayService implements RelayService {
   Future<RelayListMaintenanceResult> maintainRelayList({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,
+    required bool foreground,
   }) async => relayListsCurrent;
 
   @override
@@ -3605,14 +3605,12 @@ class _PauseRacingRelayService implements RelayService {
 
   @override
   Future<List<String>> fetchGiftWraps({
-    required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
   }) async => [];
 
   @override
   Future<List<RelayGiftWrapFetch>> fetchGiftWrapsPerRelay({
-    required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
   }) async => [];
@@ -3652,6 +3650,7 @@ class _SinceCapturingRelayService implements RelayService {
   Future<RelayListMaintenanceResult> maintainRelayList({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,
+    required bool foreground,
   }) async => relayListsCurrent;
 
   @override
@@ -3699,14 +3698,12 @@ class _SinceCapturingRelayService implements RelayService {
 
   @override
   Future<List<String>> fetchGiftWraps({
-    required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
   }) async => [];
 
   @override
   Future<List<RelayGiftWrapFetch>> fetchGiftWrapsPerRelay({
-    required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
   }) async => [];

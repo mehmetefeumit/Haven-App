@@ -76,7 +76,10 @@
 #        start-wire-proxy.sh --self-test
 #
 # Optional env:
-#   HAVEN_WIRE_PROXY_ROUTES        '<listen>=<upstream>,...' — wins over argv.
+#   HAVEN_WIRE_PROXY_ROUTES        '<listen>=<upstream>[;gate-read=<kinds>],...'
+#                                  — wins over argv. `gate-read` makes the
+#                                  route answer as a relay gating those kinds'
+#                                  reads (local-relay/src/gate.rs).
 #                                  <listen> is a bare port or an IP literal and
 #                                  port; a non-loopback one is a hard startup
 #                                  failure in the binary, with no override.
@@ -154,6 +157,34 @@ conflicting_instance() {
     fi
   done
   return 0
+}
+
+# The hermeticity gate's two readers, defined before the self-test so it can
+# drive them. See "Hermeticity gate" below for what they gate.
+check_loopback() { # check_loopback <ws-url>
+  local url="${1%%;*}" host
+  host="${url#ws://}"
+  host="${host#wss://}"
+  host="${host%%/*}"
+  host="${host%%:*}"
+  case "${host}" in
+    127.0.0.1 | localhost | ::1 | '[::1]') return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+route_upstreams() { # route_upstreams <routing-table> — one upstream per line
+  local route
+  local -a routes
+  IFS=',' read -r -a routes <<<"$1"
+  for route in "${routes[@]}"; do
+    route="${route// /}"
+    [[ -z "${route}" ]] && continue
+    # A route's options (`;gate-read=<kinds>`, a gated route) follow its
+    # upstream and are not part of it.
+    route="${route#*=}"
+    printf '%s\n' "${route%%;*}"
+  done
 }
 
 # ---------------------------------------------------------------------------
@@ -294,6 +325,22 @@ self_test() {
     fails=1
   fi
 
+  # A gated route's option is not part of its upstream: the gate reads the
+  # upstream alone, so a non-loopback relay behind a gated route is still
+  # refused and a loopback one is not mistaken for something else.
+  echo "self-test: a gated route's upstream"
+  local ups
+  ups="$(route_upstreams '7788=ws://127.0.0.1:7777, 7790=ws://127.0.0.1:7778;gate-read=1059')"
+  _path_case "the gate-read option is stripped from the upstream" \
+    "$(tr '\n' ' ' <<<"${ups}")" "ws://127.0.0.1:7777 ws://127.0.0.1:7778 "
+  if check_loopback "ws://127.0.0.1:7778;gate-read=1059" \
+    && ! check_loopback "ws://relay.example.org:7778;gate-read=127.0.0.1"; then
+    printf '  \033[1;32mPASS\033[0m the loopback gate reads a gated route by its upstream alone\n'
+  else
+    printf '  \033[1;31mFAIL\033[0m the loopback gate misread a gated route\n' >&2
+    fails=1
+  fi
+
   kill "${live}" 2>/dev/null || true
   wait "${live}" 2>/dev/null || true
 
@@ -345,26 +392,12 @@ readonly MLS_GROUP_ID_FILE="${HAVEN_WIRE_MLS_GROUP_ID_FILE:-${DEFAULT_MLS_GROUP_
 # stronger of the two guarantees behind the weaker path (this script is not the
 # only way to start the recorder) and leave both looking optional.
 # ---------------------------------------------------------------------------
-check_loopback() { # check_loopback <ws-url>
-  local url="$1" host
-  host="${url#ws://}"
-  host="${host#wss://}"
-  host="${host%%/*}"
-  host="${host%%:*}"
-  case "${host}" in
-    127.0.0.1 | localhost | ::1 | '[::1]') return 0 ;;
-    *) return 1 ;;
-  esac
-}
 
 declare -a UPSTREAMS=()
 if [[ -n "${HAVEN_WIRE_PROXY_ROUTES:-}" ]]; then
-  IFS=',' read -r -a _routes <<<"${HAVEN_WIRE_PROXY_ROUTES}"
-  for _route in "${_routes[@]}"; do
-    _route="${_route// /}"
-    [[ -z "${_route}" ]] && continue
-    UPSTREAMS+=("${_route#*=}")
-  done
+  while IFS= read -r _upstream; do
+    UPSTREAMS+=("${_upstream}")
+  done < <(route_upstreams "${HAVEN_WIRE_PROXY_ROUTES}")
 else
   UPSTREAMS+=("${UPSTREAM}")
 fi

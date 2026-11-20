@@ -190,7 +190,6 @@ async fn the_claimed_foregrounds_eviction_goes_to_the_address_the_map_returns() 
     let dialled = url.clone();
     let core = LiveSyncCore::new_local_with_relay_map_for_test(
         Arc::clone(&c.alice.manager),
-        c.alice.keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
         move |relay| {
             record.lock().unwrap().push(relay.to_owned());

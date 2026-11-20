@@ -204,6 +204,15 @@ dialog (an upgraded user who declined it) is declined the same way before
 page — its `identityTitle` app bar ("Identity", the Settings entry's own words,
 so it is never tapped) over one name field, whose "Display Name" label is a
 hint no dump shows — the field is read until it shows the name.
+A window that closes with another package at the root of the last dump is
+judged by what holds input focus then (`ui-dump.py focused`), because the
+system's error dialogs are rooted in package `android` whoever stopped
+responding: Haven's own "isn't responding" or "keeps stopping" dialog is a
+product failure, another process's is infrastructure, Haven's own activity
+holding focus is Haven's own screen not progressing, and anything else is a
+product failure naming the package and the focus (CI run 44698826899 read a
+bare `android` root on API 35 as "android held the foreground", with nothing
+to say whose window it was).
 
 **Crash evidence comes first.** Before anything else is blamed, the runner
 reads the crash buffer (`Process: com.oblivioustech.haven` or
@@ -217,9 +226,9 @@ running). That is why a v0.1.14-shaped candidate's red names
 | rc | Class | Meaning | What to do |
 |---|---|---|---|
 | 0 | pass | every leg passed | — |
-| 1 | product | the candidate crashed, stalled, lost data, showed the intro after onboarding, kept a debug log plant, or did not replace the previous release; a photo tap opened no picker, or (API 33+) a known wrong picker — DocumentsUI, the GET_CONTENT alias, the Play services picker; Haven showed `avatarPickerUpdateError` or stayed in front instead of opening uCrop; Haven's own "isn't responding" or "keeps stopping" dialog held the picker's focus; uCrop did not return or its window never took input focus; the photo save was refused after the crop (`avatarPickerUpdateError`: root cause A's class), did not show within `APPLY_SECS`, or was gone after a cold restart; background sharing did not turn on with everything granted | fix the app; never re-run to green |
+| 1 | product | the candidate crashed, stalled, lost data, showed the intro after onboarding, kept a debug log plant, or did not replace the previous release; a photo tap opened no picker, or (API 33+) a known wrong picker — DocumentsUI, the GET_CONTENT alias, the Play services picker; Haven showed `avatarPickerUpdateError` or stayed in front instead of opening uCrop; Haven's own "isn't responding" or "keeps stopping" dialog held the picker's focus or held focus when a screen's window closed; uCrop did not return or its window never took input focus; the photo save was refused after the crop (`avatarPickerUpdateError`: root cause A's class), did not show within `APPLY_SECS`, or was gone after a cold restart; background sharing did not turn on with everything granted | fix the app; never re-run to green |
 | 2 | usage or harness | a missing input (directory, ARB key); a picker or uCrop screen no selector knows (the summary lists the resource ids it does have: update the selectors for that system image), a system picker whose window never took input focus, or an activity the picker rules do not know (its component is listed: a newer Photopicker module, say); background sharing held off while Android showed the battery or notification snack the grants were meant to prevent; no leg reached MapShell; the gallery fixtures could not be seeded though the device answered (a push or a media-store query it refused, or a media store that never listed them) | fix the workflow or the selectors; never re-run to green |
-| 3 | infrastructure | the device went away, never booted, is not en-US, would not go offline, gave no answer while the gallery was seeded or never attached its shared storage, would not take a permission grant or the battery exemption, or showed another process's "isn't responding" or "keeps stopping" dialog over the picker or uCrop | re-run the job ("Re-run failed jobs" works: the launch jobs read the candidate hand-off, which is named by the run, not the attempt) |
+| 3 | infrastructure | the device went away, never booted, is not en-US, would not go offline, gave no answer while the gallery was seeded or never attached its shared storage, would not take a permission grant or the battery exemption, or showed another process's "isn't responding" or "keeps stopping" dialog over the picker or uCrop, or holding focus when one of Haven's screens' windows closed | re-run the job ("Re-run failed jobs" works: the launch jobs read the candidate hand-off, which is named by the run, not the attempt) |
 | 4 | upgrade source unusable | the previous release itself failed before the candidate was installed | add it to `scripts/ci/launch_gate_yanked_releases.txt` with the reason |
 
 The step prints one `::error::` line naming the leg, the state reached, the

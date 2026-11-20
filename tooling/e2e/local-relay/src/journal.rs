@@ -62,12 +62,23 @@ pub const TYPE_CONN_OPEN: &str = "conn_open";
 pub const TYPE_CONN_ERROR: &str = "conn_error";
 
 /// Direction of an observed message.
+///
+/// The three `p` directions exist only on a gated route (`crate::gate`), where
+/// the proxy plays the relay's read gate: a line there must never claim a hop
+/// the message did not make, so a frame the proxy answered, wrote or withheld
+/// itself is told apart from one that crossed it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dir {
     /// Client → relay.
     ClientToRelay,
     /// Relay → client.
     RelayToClient,
+    /// Client → proxy: a client frame the proxy refused and never forwarded.
+    ClientToProxy,
+    /// Proxy → client: a frame the proxy wrote itself; no relay sent it.
+    ProxyToClient,
+    /// Relay → proxy: a relay frame the proxy withheld from the client.
+    RelayToProxy,
 }
 
 impl Dir {
@@ -77,6 +88,9 @@ impl Dir {
         match self {
             Self::ClientToRelay => "c2r",
             Self::RelayToClient => "r2c",
+            Self::ClientToProxy => "c2p",
+            Self::ProxyToClient => "p2c",
+            Self::RelayToProxy => "r2p",
         }
     }
 }

@@ -25,13 +25,14 @@ use crate::frame::{
     ControlVerb, CANARY_MANIFEST_ACK_VERB, CANARY_MANIFEST_VERB, MLS_GROUP_ID_ACK_VERB,
     MLS_GROUP_ID_VERB, NEEDLE_DECL_ACK_VERB, NEEDLE_DECL_VERB, SENTINEL_ACK_VERB, SENTINEL_VERB,
 };
+use crate::gate::{ReadGate, AUTH_REQUIRED};
 use crate::journal::{Degraded, WireJournal, TYPE_CONN_OPEN, TYPE_FRAME};
 use crate::needles::{CanarySink, NeedleSink};
 use crate::proxy::{ControlSinks, MlsGroupIdSink, Proxy, ProxyConfig, Route};
 
 /// Number of cases [`run`] must execute. A case that stops running is a case
 /// that stops proving anything, and silence is how that goes unnoticed.
-const DECLARED_CASES: usize = 10;
+const DECLARED_CASES: usize = 11;
 
 /// Everything the self-test can conclude.
 type Case = Result<(), String>;
@@ -56,6 +57,7 @@ pub async fn run() -> Result<(), String> {
         ("H needle + canary channel", case_needles().await),
         ("I unknown control verb", case_unknown_control_verb().await),
         ("J routing declaration", case_routing_declaration().await),
+        ("K gated read", case_gated_read().await),
     ] {
         executed += 1;
         match result {
@@ -198,18 +200,24 @@ async fn start_echo_upstream() -> Result<(String, tokio::task::JoinHandle<()>), 
     Ok((format!("ws://{addr}"), handle))
 }
 
+/// One loopback route to `upstream`, gated when `read_gate` is set.
+fn one_route(upstream: String, read_gate: Option<ReadGate>) -> ProxyConfig {
+    ProxyConfig {
+        routes: vec![Route {
+            listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            upstream,
+            read_gate,
+        }],
+    }
+}
+
 async fn rig(tag: &str) -> Result<Rig, String> {
     let dir = TempDir::new(tag)?;
     let journal_path = dir.0.join("journal.ndjson");
     let (relay, relay_url) = start_relay().await?;
     let journal = Arc::new(WireJournal::open(&journal_path));
     let proxy = Proxy::start(
-        &ProxyConfig {
-            routes: vec![Route {
-                listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
-                upstream: relay_url,
-            }],
-        },
+        &one_route(relay_url, None),
         journal,
         Arc::new(MlsGroupIdSink::disabled()),
     )
@@ -437,12 +445,7 @@ async fn case_unparseable() -> Case {
     let (upstream, echo) = start_echo_upstream().await?;
     let journal = Arc::new(WireJournal::open(&journal_path));
     let proxy = Proxy::start(
-        &ProxyConfig {
-            routes: vec![Route {
-                listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
-                upstream,
-            }],
-        },
+        &one_route(upstream, None),
         journal,
         Arc::new(MlsGroupIdSink::disabled()),
     )
@@ -499,12 +502,7 @@ async fn case_sentinel() -> Case {
     let (upstream, echo) = start_echo_upstream().await?;
     let journal = Arc::new(WireJournal::open(&journal_path));
     let proxy = Proxy::start(
-        &ProxyConfig {
-            routes: vec![Route {
-                listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
-                upstream,
-            }],
-        },
+        &one_route(upstream, None),
         journal,
         Arc::new(MlsGroupIdSink::disabled()),
     )
@@ -622,12 +620,7 @@ async fn case_routing_declaration() -> Case {
     let (upstream, echo) = start_echo_upstream().await?;
     let journal = Arc::new(WireJournal::open(&journal_path));
     let proxy = Proxy::start(
-        &ProxyConfig {
-            routes: vec![Route {
-                listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
-                upstream,
-            }],
-        },
+        &one_route(upstream, None),
         journal,
         Arc::new(MlsGroupIdSink::disabled()),
     )
@@ -743,12 +736,7 @@ async fn case_fail_open() -> Case {
     }
 
     let proxy = Proxy::start(
-        &ProxyConfig {
-            routes: vec![Route {
-                listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
-                upstream: relay_url,
-            }],
-        },
+        &one_route(relay_url, None),
         Arc::clone(&journal),
         Arc::new(MlsGroupIdSink::disabled()),
     )
@@ -813,10 +801,12 @@ async fn case_endpoints() -> Case {
                 Route {
                     listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
                     upstream: url_a.clone(),
+                    read_gate: None,
                 },
                 Route {
                     listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
                     upstream: url_b.clone(),
+                    read_gate: None,
                 },
             ],
         },
@@ -902,18 +892,9 @@ async fn case_mls_group_id() -> Case {
     let (upstream, echo) = start_echo_upstream().await?;
     let journal = Arc::new(WireJournal::open(&journal_path));
     let sink = Arc::new(MlsGroupIdSink::new(sidecar_path.clone()));
-    let proxy = Proxy::start(
-        &ProxyConfig {
-            routes: vec![Route {
-                listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
-                upstream,
-            }],
-        },
-        journal,
-        Arc::clone(&sink),
-    )
-    .await
-    .map_err(|e| format!("proxy start: {:?}", e.kind()))?;
+    let proxy = Proxy::start(&one_route(upstream, None), journal, Arc::clone(&sink))
+        .await
+        .map_err(|e| format!("proxy start: {:?}", e.kind()))?;
     let mut client = connect(proxy.local_addr()).await?;
 
     // Confirm the upstream really is receiving, or "the declaration did not
@@ -1174,12 +1155,7 @@ async fn needle_proxy(
     canaries: &Arc<CanarySink>,
 ) -> Result<Proxy, String> {
     Proxy::start_with_sinks(
-        &ProxyConfig {
-            routes: vec![Route {
-                listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
-                upstream: upstream.to_owned(),
-            }],
-        },
+        &one_route(upstream.to_owned(), None),
         journal,
         ControlSinks {
             mls_group_ids: Arc::new(MlsGroupIdSink::disabled()),
@@ -1273,12 +1249,7 @@ async fn case_unknown_control_verb() -> Case {
     let (upstream, echo) = start_echo_upstream().await?;
     let journal = Arc::new(WireJournal::open(&journal_path));
     let proxy = Proxy::start(
-        &ProxyConfig {
-            routes: vec![Route {
-                listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
-                upstream,
-            }],
-        },
+        &one_route(upstream, None),
         journal,
         Arc::new(MlsGroupIdSink::disabled()),
     )
@@ -1352,5 +1323,220 @@ async fn case_unknown_control_verb() -> Case {
     }
 
     echo.abort();
+    Ok(())
+}
+
+/// A signed event of `kind`, tagged `p` to `to` when given: what the
+/// gated-read case publishes.
+fn signed_kind_json(kind: u16, to: Option<&str>) -> Result<String, String> {
+    use nostr_relay_builder::prelude::*;
+
+    let tags = to
+        .map(|to| Tag::parse(["p", to]).map_err(|_| "p tag".to_owned()))
+        .transpose()?;
+    EventBuilder::new(Kind::Custom(kind), "Y2lwaGVydGV4dA==")
+        .tags(tags)
+        .sign_with_keys(&Keys::generate())
+        .map_err(|_| "event signing failed".to_owned())?
+        .try_as_json()
+        .map_err(|_| "event encoding failed".to_owned())
+}
+
+/// `keys`' answer to `challenge` from the relay at `relay`, as a client frame.
+fn auth_answer(
+    keys: &nostr_relay_builder::prelude::Keys,
+    challenge: &str,
+    relay: &str,
+) -> Result<String, String> {
+    use nostr_relay_builder::prelude::*;
+
+    let tags = [
+        Tag::parse(["challenge", challenge]).map_err(|_| "challenge tag".to_owned())?,
+        Tag::parse(["relay", relay]).map_err(|_| "relay tag".to_owned())?,
+    ];
+    let event = EventBuilder::new(Kind::Authentication, "")
+        .tags(tags)
+        .sign_with_keys(keys)
+        .map_err(|_| "answer signing failed".to_owned())?
+        .try_as_json()
+        .map_err(|_| "answer encoding failed".to_owned())?;
+    Ok(format!(r#"["AUTH",{event}]"#))
+}
+
+/// K: a `gate-read=1059` route answers as a relay that serves gift wraps only
+/// to a client that has authenticated, and only those naming it, and its
+/// journal never claims a hop a frame did not make.
+///
+/// Publishes go through (`OK true`). Before the client authenticates, a REQ
+/// for kind 1059 alone is answered AUTH then strfry's `CLOSED` and never
+/// reaches the relay, a NEG-OPEN for it gets `NEG-ERR`, and a REQ that also
+/// names an open kind is served with every gift wrap withheld. Once it answers
+/// the challenge (`OK true`), the same read reaches the relay and is served
+/// the wrap naming the client, not the other. The refused frames and the
+/// answer are journalled `c2p`, the gate's frames `p2c` and each withheld
+/// event `r2p` — none as `c2r`/`r2c`.
+async fn case_gated_read() -> Case {
+    use nostr_relay_builder::prelude::Keys;
+
+    let dir = TempDir::new("gated")?;
+    let journal_path = dir.0.join("journal.ndjson");
+    let (_relay, relay_url) = start_relay().await?;
+    let journal = Arc::new(WireJournal::open(&journal_path));
+    let proxy = Proxy::start(
+        &one_route(relay_url, Some(ReadGate::parse("1059")?)),
+        journal,
+        Arc::new(MlsGroupIdSink::disabled()),
+    )
+    .await
+    .map_err(|e| format!("proxy start: {:?}", e.kind()))?;
+    let mut client = connect(proxy.local_addr()).await?;
+    let reader = Keys::generate();
+    let me = reader.public_key().to_hex();
+    let other = Keys::generate().public_key().to_hex();
+
+    for (kind, to) in [(1059, Some(&me)), (1059, Some(&other)), (445, None)] {
+        send(
+            &mut client,
+            &format!(
+                r#"["EVENT",{}]"#,
+                signed_kind_json(kind, to.map(String::as_str))?
+            ),
+        )
+        .await?;
+        let ok = recv_until(&mut client, "OK", |v| verb_is(v, "OK")).await?;
+        if ok[2] != Value::Bool(true) {
+            return Err(format!("the gated route did not take a kind-{kind} write"));
+        }
+    }
+
+    send(&mut client, r#"["REQ","gated",{"kinds":[1059]}]"#).await?;
+    send(
+        &mut client,
+        r#"["NEG-OPEN","neg",{"kinds":[1059]},"6100000200"]"#,
+    )
+    .await?;
+    send(&mut client, r#"["REQ","mixed",{"kinds":[1059,445]}]"#).await?;
+    // Ordered after both refusals on one connection: had the relay been handed
+    // the gated REQ, its EOSE for it would arrive before this one.
+    let seen = recv_collecting(&mut client, "the mixed REQ's EOSE", |v| {
+        verb_is(v, "EOSE") && v[1] == "mixed"
+    })
+    .await?;
+    let seen: Vec<Value> = seen
+        .iter()
+        .filter_map(|m| serde_json::from_str(m).ok())
+        .collect();
+    let want = [
+        serde_json::json!(["AUTH", "challenge-c0"]),
+        serde_json::json!(["CLOSED", "gated", format!("ERROR: {AUTH_REQUIRED}")]),
+        serde_json::json!(["NEG-ERR", "neg", AUTH_REQUIRED]),
+    ];
+    for frame in &want {
+        if !seen.contains(frame) {
+            return Err(format!("the client never got the gate's {}", frame[0]));
+        }
+    }
+    if seen.iter().any(|v| verb_is(v, "EOSE") && v[1] == "gated") {
+        return Err("the gated REQ reached the relay".to_owned());
+    }
+    let kinds_served: Vec<u64> = seen
+        .iter()
+        .filter(|v| verb_is(v, "EVENT"))
+        .filter_map(|v| v[2]["kind"].as_u64())
+        .collect();
+    if kinds_served != [445] {
+        return Err(format!(
+            "the mixed REQ must be served its kind 445 and no kind 1059, got {kinds_served:?}"
+        ));
+    }
+
+    let route = format!("ws://{}", proxy.local_addr());
+    send(&mut client, &auth_answer(&reader, "challenge-c0", &route)?).await?;
+    let ok = recv_until(&mut client, "the answer's OK", |v| verb_is(v, "OK")).await?;
+    if ok[2] != Value::Bool(true) {
+        return Err("the gate refused a valid answer to its challenge".to_owned());
+    }
+    send(&mut client, r#"["REQ","authed",{"kinds":[1059]}]"#).await?;
+    let served = recv_collecting(&mut client, "the authenticated REQ's EOSE", |v| {
+        verb_is(v, "EOSE") && v[1] == "authed"
+    })
+    .await?;
+    let served: Vec<Value> = served
+        .iter()
+        .filter_map(|m| serde_json::from_str::<Value>(m).ok())
+        .filter(|v| verb_is(v, "EVENT"))
+        .collect();
+    if served.len() != 1 || served[0][2]["tags"][0][1] != me.as_str() {
+        return Err(format!(
+            "an authenticated reader must be served its own gift wrap alone, got {}",
+            served.len()
+        ));
+    }
+
+    // conn_open; 3 EVENT + 3 OK; the gated REQ + AUTH + CLOSED; the NEG-OPEN +
+    // AUTH + NEG-ERR; the mixed REQ, 2 withheld 1059s, the served 445, EOSE;
+    // the answer + OK; the authenticated REQ, the served and the withheld
+    // 1059, EOSE.
+    check_gated_journal(&read_journal(&journal_path, 24).await?)?;
+    close(client).await;
+    Ok(())
+}
+
+/// Case K's journal: each frame the gate handled is under its proxy-hop
+/// direction, and none under `c2r`/`r2c`.
+fn check_gated_journal(lines: &[Value]) -> Case {
+    let journalled = frames(lines);
+    for (dir, verb, sub) in [
+        ("c2p", "REQ", "gated"),
+        ("c2p", "NEG-OPEN", "neg"),
+        ("p2c", "CLOSED", "gated"),
+        ("p2c", "NEG-ERR", "neg"),
+        ("c2r", "REQ", "mixed"),
+        ("r2p", "EVENT", "mixed"),
+        ("r2c", "EVENT", "mixed"),
+        ("c2r", "REQ", "authed"),
+        ("r2p", "EVENT", "authed"),
+        ("r2c", "EVENT", "authed"),
+    ] {
+        if !journalled
+            .iter()
+            .any(|l| l["dir"] == dir && l["frame"][0] == verb && l["frame"][1] == sub)
+        {
+            return Err(format!("the journal has no {dir} {verb} line for {sub}"));
+        }
+    }
+    let auth_lines = journalled
+        .iter()
+        .filter(|l| l["dir"] == "p2c" && l["frame"][0] == "AUTH")
+        .count();
+    if auth_lines != 2 {
+        return Err("each refusal's AUTH challenge must be journalled p2c".to_owned());
+    }
+    for (dir, verb) in [("c2p", "AUTH"), ("p2c", "OK")] {
+        let answered = journalled
+            .iter()
+            .filter(|l| l["dir"] == dir && l["frame"][0] == verb)
+            .count();
+        // The OK lines of the publishes are the relay's, journalled r2c.
+        if answered != 1 {
+            return Err(format!("the answer's {verb} must be journalled {dir} once"));
+        }
+    }
+    for line in &journalled {
+        let verb = line["frame"][0].as_str().unwrap_or_default();
+        let sub = line["frame"][1].as_str().unwrap_or_default();
+        let gated = matches!(sub, "gated" | "neg") || verb == "AUTH" || line["dir"] == "p2c";
+        if gated && (line["dir"] == "c2r" || line["dir"] == "r2c") {
+            return Err(format!(
+                "a frame the gate handled was journalled {}, a relay hop it never made",
+                line["dir"]
+            ));
+        }
+        if line["dir"] == "r2c" && line["frame"][2]["kind"] == 1059 && line["frame"][1] != "authed"
+        {
+            return Err("a withheld gift wrap was journalled as delivered".to_owned());
+        }
+    }
+
     Ok(())
 }

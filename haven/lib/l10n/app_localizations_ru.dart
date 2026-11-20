@@ -527,6 +527,27 @@ class AppLocalizationsRu extends AppLocalizations {
   }
 
   @override
+  String get relaySettingsInboxRefused =>
+      'Это реле не дало Haven прочитать ваши приглашения. Удалите его или добавьте другое реле.';
+
+  @override
+  String get relaySettingsInboxRefusedTooltip =>
+      'Не дало Haven прочитать приглашения';
+
+  @override
+  String relaySettingsInboxRefusedSemantics(String url) {
+    return 'Предупреждение: реле $url не дало Haven прочитать ваши приглашения';
+  }
+
+  @override
+  String get relaySettingsInboxAllRefusedTitle =>
+      'Ни одно из ваших входящих реле не дало Haven прочитать приглашения';
+
+  @override
+  String get relaySettingsInboxAllRefusedMessage =>
+      'Приглашения не будут до вас доходить, пока хотя бы одно из ваших входящих реле не даст Haven их прочитать. Восстановите реле по умолчанию или добавьте другое реле.';
+
+  @override
   String get locationSettingsTitle => 'Местоположение';
 
   @override
@@ -1546,6 +1567,59 @@ class AppLocalizationsRu extends AppLocalizations {
   String get invitationsLoadError => 'Не удалось загрузить приглашения';
 
   @override
+  String invitationsNoticeRefused(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other:
+          '$countString входящего реле не дало Haven прочитать ваши приглашения, поэтому приглашение, отправленное только на эти реле, до вас не дойдёт. В настройках реле удалите их или добавьте другое реле.',
+      many:
+          '$countString входящих реле не дали Haven прочитать ваши приглашения, поэтому приглашение, отправленное только на эти реле, до вас не дойдёт. В настройках реле удалите их или добавьте другое реле.',
+      few:
+          '$countString входящих реле не дали Haven прочитать ваши приглашения, поэтому приглашение, отправленное только на эти реле, до вас не дойдёт. В настройках реле удалите их или добавьте другое реле.',
+      one:
+          '$countString входящее реле не дало Haven прочитать ваши приглашения, поэтому приглашение, отправленное только туда, до вас не дойдёт. В настройках реле удалите его или добавьте другое реле.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String invitationsNoticeNotSaved(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other:
+          'Пришло $countString приглашения, но сохранить их на этом устройстве не удалось.',
+      many:
+          'Пришло $countString приглашений, но сохранить их на этом устройстве не удалось.',
+      few:
+          'Пришло $countString приглашения, но сохранить их на этом устройстве не удалось.',
+      one:
+          'Пришло $countString приглашение, но сохранить на этом устройстве не удалось.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get invitationsNoticeOffline =>
+      'Haven не удалось связаться с вашими входящими реле, поэтому новые приглашения пока не появятся.';
+
+  @override
+  String get invitationsNoticeIncomplete =>
+      'Haven не удалось до конца проверить все ваши входящие реле, поэтому некоторые приглашения могут пока не отображаться.';
+
+  @override
+  String get invitationsNoticeOpenRelaySettings => 'Настройки реле';
+
+  @override
   String get invitationsEmptyTitle => 'Нет приглашений';
 
   @override
@@ -1569,7 +1643,7 @@ class AppLocalizationsRu extends AppLocalizations {
   }
 
   @override
-  String refreshRingSemanticAllOk(int total) {
+  String refreshRingSemanticInboxAll(int total) {
     final intl.NumberFormat totalNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
@@ -1577,19 +1651,20 @@ class AppLocalizationsRu extends AppLocalizations {
     String _temp0 = intl.Intl.pluralLogic(
       total,
       locale: localeName,
-      other: 'Ответили все $totalString реле',
-      many: 'Ответили все $totalString реле',
-      few: 'Ответили все $totalString реле',
-      one: 'Ответили все реле: $totalString',
+      other: 'Приглашения проверены на всех реле: $totalString',
+      many: 'Приглашения проверены на всех реле: $totalString',
+      few: 'Приглашения проверены на всех реле: $totalString',
+      one: 'Приглашения проверены на всех реле: $totalString',
     );
     return '$_temp0';
   }
 
   @override
-  String get refreshRingSemanticAllError => 'Ни одно реле не ответило';
+  String get refreshRingSemanticInboxNone =>
+      'Не удалось проверить приглашения ни на одном реле';
 
   @override
-  String refreshRingSemanticPartial(int ok, int total) {
+  String refreshRingSemanticInboxPartial(int ok, int total) {
     final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -1598,17 +1673,18 @@ class AppLocalizationsRu extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'Получен ответ от $okString из $totalString реле';
+    return 'Приглашения проверены на $okString из $totalString реле';
   }
 
   @override
   String get refreshRingAnnouncementChecking => 'Проверка реле';
 
   @override
-  String get refreshRingAnnouncementAllOk => 'Все реле ответили';
+  String get refreshRingAnnouncementInboxAll =>
+      'Приглашения проверены на всех реле';
 
   @override
-  String refreshRingAnnouncementPartial(int ok, int total) {
+  String refreshRingAnnouncementInboxPartial(int ok, int total) {
     final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -1617,12 +1693,12 @@ class AppLocalizationsRu extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'Получен ответ от $okString из $totalString реле';
+    return 'Приглашения проверены на $okString из $totalString реле';
   }
 
   @override
-  String get refreshRingAnnouncementAllError =>
-      'Не удалось связаться ни с одним реле';
+  String get refreshRingAnnouncementInboxNone =>
+      'Не удалось проверить приглашения ни на одном реле';
 
   @override
   String get refreshRingAnnouncementNoInbox => 'Входящие реле не настроены';

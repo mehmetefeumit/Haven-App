@@ -2,10 +2,11 @@
 ///
 /// Tapping the control morphs the refresh icon into a ring of independent arc
 /// segments, one per relay being contacted. Each arc animates gray (not yet
-/// contacted) → amber (in flight) → green (responded) / red (unreachable), so
-/// the user watches the refresh fill in, relay by relay. A successful
-/// all-green result holds briefly, then fades back to the calm icon; a result
-/// with any problem stays put until the next refresh so it is never missed.
+/// contacted) → amber (in flight) → green (it served the inbox read in full) /
+/// red (anything else), so the user watches the refresh fill in, relay by
+/// relay. A successful all-green result holds briefly, then fades back to the
+/// calm icon; a result with any problem stays put until the next refresh so it
+/// is never missed.
 ///
 /// The widget speaks only the [RelayRingSlotState] vocabulary and never sees a
 /// relay URL, so it can never leak relay identities into the semantics tree.
@@ -322,12 +323,12 @@ class _RefreshRingButtonState extends State<RefreshRingButton>
     if (_settled(oldSlots) || !_settled(newSlots)) return;
     final l10n = AppLocalizations.of(context);
     if (_allOk(newSlots)) {
-      _announce(l10n.refreshRingAnnouncementAllOk);
+      _announce(l10n.refreshRingAnnouncementInboxAll);
     } else if (newSlots.every((s) => s == RelayRingSlotState.error)) {
-      _announce(l10n.refreshRingAnnouncementAllError);
+      _announce(l10n.refreshRingAnnouncementInboxNone);
     } else {
       final ok = newSlots.where((s) => s == RelayRingSlotState.ok).length;
-      _announce(l10n.refreshRingAnnouncementPartial(ok, newSlots.length));
+      _announce(l10n.refreshRingAnnouncementInboxPartial(ok, newSlots.length));
     }
   }
 
@@ -356,12 +357,12 @@ class _RefreshRingButtonState extends State<RefreshRingButton>
           .length;
       return l10n.refreshRingSemanticChecking(resolved, slots.length);
     }
-    if (_allOk(slots)) return l10n.refreshRingSemanticAllOk(slots.length);
+    if (_allOk(slots)) return l10n.refreshRingSemanticInboxAll(slots.length);
     if (slots.every((s) => s == RelayRingSlotState.error)) {
-      return l10n.refreshRingSemanticAllError;
+      return l10n.refreshRingSemanticInboxNone;
     }
     final ok = slots.where((s) => s == RelayRingSlotState.ok).length;
-    return l10n.refreshRingSemanticPartial(ok, slots.length);
+    return l10n.refreshRingSemanticInboxPartial(ok, slots.length);
   }
 
   _RingGlyph _settledGlyph() {

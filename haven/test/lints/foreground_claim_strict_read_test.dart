@@ -56,7 +56,16 @@ import 'package:flutter_test/flutter_test.dart';
 /// A new site is added here in the change that adds it — which is the point:
 /// someone has to say where its claim comes from.
 const _claimSites = <String, List<String>>{
+  // The publisher's relay-list pass asks the own-inbox gift-wrap read only in
+  // front of the user (P4).
+  'lib/src/providers/key_package_provider.dart': [
+    'maintainRelayList(foreground: appIsResumed())',
+  ],
   'lib/src/providers/maintenance_scheduler_provider.dart': [
+    // A burst's fold of the relay-list task claims nothing; the timer's tick
+    // claims the strict read.
+    'maintainRelayList(foreground: false)',
+    'maintainRelayList(foreground: appIsResumed())',
     'maintainSubscriptionHealth(foreground: appIsResumed())',
     'reinviteOwed(foreground: appIsResumed())',
     'resumeDrive(foreground: appIsResumed())',
@@ -74,6 +83,7 @@ const _claimSites = <String, List<String>>{
   'lib/src/services/maintenance_service.dart': [
     'reinvite(foreground: foreground)',
     'resume(foreground: foreground)',
+    'maintainRelayList(foreground: foreground)',
     'maintainSubscriptionHealth(foreground: foreground)',
   ],
   // The circle changes the user makes, handed to the fanout driver once the
@@ -92,6 +102,7 @@ const _claimSites = <String, List<String>>{
     'circleRecovery(foreground: _appInFront())',
   ],
   'lib/src/services/nostr_relay_service.dart': [
+    'maintainRelayList(foreground: foreground)',
     'maintainSubscriptionHealth(foreground: foreground)',
     'createCircleDriven(foreground: foreground)',
     'addMembersDriven(foreground: foreground)',
@@ -110,6 +121,8 @@ const _claimSites = <String, List<String>>{
   ],
   'lib/src/services/nostr_subscription_service.dart': [
     'resumeAfterBackground(foreground: appIsResumed())',
+    // The network-change re-dial (`NetworkChangeReconnector`).
+    'reconnectAfterNetworkChange(foreground: appIsResumed())',
     'claimForeground(foreground: appIsResumed())',
   ],
 };

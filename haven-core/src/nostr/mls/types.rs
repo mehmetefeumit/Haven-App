@@ -1214,25 +1214,45 @@ impl WelcomeRecord {
             .targets
             .iter()
             .enumerate()
-            .filter(|(_, target)| {
-                use cgka_traits::maintenance::TransportFanoutAttemptState as State;
-                if matches!(target.state, State::Accepted | State::PolicyProhibited) {
-                    return false;
-                }
-                let shift = target.attempt_count.saturating_sub(1).min(7);
-                let wait = 30_u64.saturating_mul(1_u64 << shift).min(60 * 60);
-                target
-                    .last_attempt_at
-                    .is_none_or(|last| now >= last.0.saturating_add(wait))
-            })
+            .filter(|(_, target)| next_due(target).is_some_and(|at| now >= at))
             .map(|(index, target)| (index, target.endpoint.0.clone()))
             .collect()
+    }
+
+    /// How long after `now_ms` a relay of it is next due a send by
+    /// [`Self::due`]'s rule: zero when one already is, `None` when none ever
+    /// will be.
+    pub(crate) fn due_after_ms(&self, now_ms: u64) -> Option<u64> {
+        let now = now_ms / 1_000;
+        self.0
+            .targets
+            .iter()
+            .filter_map(next_due)
+            .min()
+            .map(|at| at.saturating_sub(now).saturating_mul(1_000))
     }
 
     /// The exact Welcome, as it is sent every time.
     pub(crate) const fn welcome(&self) -> &TransportMessage {
         &self.0.exact_message
     }
+}
+
+/// The second at which `target` is next due a send: at once before its first
+/// attempt, then 30 seconds after an unanswered one, the wait doubling to an
+/// hour; `None` once it acknowledged or was stopped.
+fn next_due(target: &cgka_traits::maintenance::TransportFanoutTarget) -> Option<u64> {
+    use cgka_traits::maintenance::TransportFanoutAttemptState as State;
+    if matches!(target.state, State::Accepted | State::PolicyProhibited) {
+        return None;
+    }
+    let shift = target.attempt_count.saturating_sub(1).min(7);
+    let wait = 30_u64.saturating_mul(1_u64 << shift).min(60 * 60);
+    Some(
+        target
+            .last_attempt_at
+            .map_or(0, |last| last.0.saturating_add(wait)),
+    )
 }
 
 /// Where a Welcome's record stands, read immediately before a send.

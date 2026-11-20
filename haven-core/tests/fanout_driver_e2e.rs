@@ -775,8 +775,9 @@ async fn nothing_but_the_driver_sends_an_event_that_has_a_fanout_row() {
     let targets = [ONE.to_string(), TWO.to_string()];
     // Every publish path of a fresh relay manager refuses the event and
     // registers no relay for it.
+    let signer = fx.admin().circle.nip42_signer();
     let refused = || {
-        let (event, targets) = (event.clone(), targets.clone());
+        let (event, targets, signer) = (event.clone(), targets.clone(), signer.clone());
         async move {
             let relays = RelayManager::new();
             let ladder = relays.publish_event(&event, &targets).await;
@@ -784,6 +785,7 @@ async fn nothing_but_the_driver_sends_an_event_that_has_a_fanout_row() {
             let location = relays.publish_location_event(&event, &targets).await;
             let background = relays.publish_event_background(event.clone(), &targets);
             let legacy_ladder = relays.publish_unrecorded(&event, &targets).await;
+            let resend = relays.publish_authenticated(signer, &event, ONE).await;
             let offer = relays
                 .offer_event_to(&event, &targets[0], OFFER_ACK_TIMEOUT)
                 .await;
@@ -792,7 +794,8 @@ async fn nothing_but_the_driver_sends_an_event_that_has_a_fanout_row() {
                 && matches!(profile, Err(RelayError::FanoutOwned))
                 && matches!(location, Err(RelayError::FanoutOwned))
                 && matches!(background, Err(RelayError::FanoutOwned))
-                && !legacy_ladder
+                && !legacy_ladder.contains(&haven_core::relay::fanout::UnrecordedAnswer::Accepted)
+                && resend == haven_core::relay::identity::AuthSendOutcome::NotSent
                 && relays.get_relay_status().await.is_empty()
         }
     };

@@ -3789,7 +3789,11 @@ before and E-A2 is unchanged (pinned by `maintenance_scheduler_provider_test.dar
 keeps the nominal deadline"). Foreground retries, like the onboarding "Finishing setup…" wait, are outside this
 model's subject. What each relay-list tick adds is the lookup relays (OD-B): it also probes the six discovery relays
 and republishes the same list to any that misses it — three more dials on a default install, whose three seed
-relays are also lookup relays, six on custom lists.
+relays are also lookup relays, six on custom lists. The gift-wrap read the Relays page warns from — one
+identity-authenticated connection per inbox relay — is asked only by a pass made while the lifecycle reads `resumed`,
+never by a burst's fold, so it adds nothing to the row below (pinned by `maintenance_scheduler_provider_test.dart`, "a
+relay-list fold claims no foreground, even with the app resumed", and `haven/rust_builder/src/api.rs`
+`only_a_foreground_pass_asks_the_inbox_relays_for_gift_wraps_via_real_ffi`).
 
 | Case | What it adds | **ESTIMATED** |
 |---|---|---|
@@ -3797,6 +3801,23 @@ relays are also lookup relays, six on custom lists.
 | A reinstall's adopt-only `KeyPackage` tick | none when the same tick mints into the adopted slot, as it does after a successful adoption; one prompt retry, on the ladder, only when the adoption itself fails | below the table's rounding |
 
 None of these is measured.
+
+**The network-change re-dial (owner decisions N1–N3, added 2026-11-20, L-138) adds no background wake, and what it
+adds inside a foreground one is ESTIMATED here.** A socket the old network carried reads `Connected` to the pool until
+a ping goes unanswered, 55–110 s (E-I8), and the foreground re-anchor connects only what is not, so on a change of the
+default network the app now pauses and re-opens the live session (`LiveSyncCore::reconnect_after_network_change`).
+Nothing listens for the change while the app is away (MapShell stops the listener at a pause, and the settle timer is
+the only new timer, `engine_work_no_background_timer_test.dart`), so E-A2's background wake count is unchanged and
+the row lands outside this model's subject, like every foreground row above.
+
+| Case | What one change costs | **ESTIMATED** |
+|---|---|---|
+| One circle on three relays + the three inbox relays, app in front | one live-plane cycle: ≈ 9 TLS dials (the engine pool's relays, the inbox socket's, and the drive pool's NIP-77 pass), the REQs re-issued from their cursors and floors — the inbox one with its 96 h replay, deduplicated — one NIP-77 pass and one drive | ≈ 9 × 0.5 J ≈ **4.5 J per change** (E-I6), inside a wake the radio is already in; mostly cost moved EARLIER, since the ping-driven reconnect it replaces dials the same relays 55–110 s later |
+| Leaving airplane mode or Wi-Fi range: cellular up, then Wi-Fi takes the default | two changes; one re-dial when they land within the 3 s settle (`kNetworkChangeSettle`), two when they do not | up to ≈ **9 J** for the pair |
+| A run of changes | at most one re-dial in flight and one trailing; on iOS at most one per 30 s (`kIosNetworkReconnectFloor`), since how often an `NWPathMonitor` update changes the key with no new network is unobserved; Android has no floor beyond the settle | bounded by the change rate, ≈ 9 J each; the iOS floor caps it at ≈ 120 re-dials/h ≈ 1 kJ/h only under continuous churn that no device has shown |
+
+None of these is measured. The CI proxy is the b9 lane's `NETWORK_REDIALED` (the re-dial's own line, then the peer's
+location within 30 s, Android only); no lane changes the iOS simulator's network, so the iOS half waits for a device.
 
 **Three findings the model itself produces**, each worth acting on and none of which needed a phone:
 1. **Most of the Android GNSS win is P1's, not P2a's.** Releasing the never-cancelled 1 Hz UI stream at pause takes
@@ -4475,8 +4496,8 @@ so it is a refinement of `DECIDED`, never a third thing. §9.8 lists the chains 
 | **Cost** | The honest downside the decision buys. `—` means the record states none, which is itself worth noticing. |
 | **Invalidated by** | The observation that would mean this decision is wrong. This is the column the ledger exists for: it is written so that someone who sees that observation knows to come back here, and so that "we never thought about it" is never the answer. |
 
-**Size.** 137 rows, `L-01`–`L-137`, contiguous and each id used once, across §9.1–§9.10 (§9.7a, §9.7b, §9.7c, §9.7d,
-§9.7e, §9.7f, §9.7g, §9.7h and §9.7i included); it read "134" until 2026-11-12, though §9.7g and §9.7h had each added a row. **It read "119 rows, `L-01`–`L-119`" until 2026-09-09 — already stale by one before that day's five rows
+**Size.** 138 rows, `L-01`–`L-138`, contiguous and each id used once, across §9.1–§9.10 (§9.7a, §9.7b, §9.7c, §9.7d,
+§9.7e, §9.7f, §9.7g, §9.7h, §9.7i and §9.7j included); it read "137" until 2026-11-20, and "134" until 2026-11-12, though §9.7g and §9.7h had each added a row. **It read "119 rows, `L-01`–`L-119`" until 2026-09-09 — already stale by one before that day's five rows
 were added, because L-120 was appended to §9.10 without this sentence being touched, and it then read "125" for as
 long as it took OD4-d's implementation to add §9.7b's five, and "131" for as long as it took the roster bound's own
 landing to add §9.7d's one, and "132" for as long as it took OD4-c's own implementation to add §9.7e's one, and "133" for as
@@ -4773,6 +4794,15 @@ every cycle that publishes, because the store the throttle let age is what the m
 | # | Date | Status | Decision | Rejected — and why | Cost | Invalidated by |
 |---|---|---|---|---|---|---|
 | **L-137** | 2026-11-12 | **DECIDED** (owner) | **The Android foreground service fetches its circles' peer locations on every cycle that got a publish to a relay, not once per `kLocationUpdateInterval`.** What the encrypted last-known store holds when the app opens is what the map shows until the live plane catches up, so a skipped fetch reads as a stale marker on open. At the nominal jittered cadence the throttle skipped one cycle in three and left up to 288 s between fetches on the scheduled cadence; fetching every publish cycle leaves at most one publish interval, more by a multi-circle burst's spread. Such a cycle already holds the fix, the publish hold and a pool a relay answered on. **A cycle that got no publish to a relay keeps the old floor**: while a circle stays overdue — every due circle held by the core (a departure owed until a foreground, a change awaiting its relays) or no relay reached — `_runWatchdog` runs a cycle every 72 s for as long as that lasts, and fetching in each would dial relays twice as often as the throttle did, for no publish. A cycle that handed publishing back to the foreground fetches nothing. → `_publishCycle` step 9 (`background_location_task.dart`) | **Keeping the throttle** — the stale marker on open is the defect the owner raised. **A shorter throttle** — any floor at or above the spacing a burst can realize still skips cycles, so it shortens the gap on average and not in the worst case. **Fetching on every cycle, held or not** — taken first and reverted the same day, when review found the held state's 72 s cycles. | Fetches per hour at the nominal 120 s cadence rise from 20 to 30, each one relay round trip per circle, inside cycles whose publish already reached a relay; a burst whose tail the stagger budget defers is followed by an earlier cycle that fetches too. A cycle that reached no relay fetches no more often than before. Nothing has estimated or measured what the extra fetches cost. | The device protocol (`docs/POWER_MEASUREMENT.md`) attributing a material share of Android background drain to the fetch step; or an Android receiver with background sharing on still opening to markers older than two publish intervals plus a burst's spread, which would mean the store's age is set by something other than the fetch cadence |
+
+### 9.7j 2026-11-20 — the network-change re-dial, a foreground-only new wake
+
+One row, taken by the owner (N1–N3). It adds a timer that reaches engine work — a new wake — and keeps it in the
+foreground.
+
+| # | Date | Status | Decision | Rejected — and why | Cost | Invalidated by |
+|---|---|---|---|---|---|---|
+| **L-138** | 2026-11-20 | **DECIDED** (owner) | **A change of the device's default network, reported while the app is in front, re-dials the live session: pause, then foreground open, under one lifecycle acquisition (`LiveSyncCore::reconnect_after_network_change`).** Sockets the old network carried read `Connected` until a ping goes unanswered (55–110 s), and the re-anchor connects only what is not. The signal is a fieldless native channel (`haven.app/network_change`: Android's default-network callback, compared by `Network`; iOS's `NWPathMonitor`, keyed on the preferred interface and its sorted gateways); `NetworkChangeReconnector` settles 3 s, runs one at a time plus one trailing, keeps a change seen while `inactive` owed to the next resume, and on iOS floors re-dials 30 s apart (N3). Its settle timer is a **new wake** (`engine_work_no_background_timer_test.dart` `_engineWakes`), listened for only while the app is resumed. → §6.5a ("The network-change re-dial"), CLAUDE.md Architecture "Network changes" | **`connectivity_plus`** (N1) — Android reports capability-derived type lists on frequent capability updates and never the `Network`, so a re-registration on the same transport cannot be told from a signal tick; an extra dependency. **A periodic liveness probe** (N2) — a wake of its own, every interval, for the residual below. **No iOS floor** (N3) — iOS path updates the key cannot all tell from a new network are unobserved. | ≈ 9 TLS dials per change in the foreground (§6.5a, **ESTIMATED**); two for a cellular-then-Wi-Fi pair outside the settle. Accepted residuals (N2): a path that dies with no OS-visible change (a NAT timeout, an iOS re-registration that keeps the interface and gateway) still waits for the ping, and a change that lands while the engine is starting is not re-dialled. | the b9 lane's `NETWORK_REDIALED` absent on a run whose engine survived the outage; an iOS device showing re-dials with no network change, or none across a Wi-Fi → cellular hand-over; a battery trace attributing foreground radio time to repeated re-dials. |
 
 ### 9.8 The correction chains
 
@@ -5127,7 +5157,8 @@ a full-text search for a backticked name is still the fallback.
 `LiveEventRouter._handleStatus` L-134 · `_handleUnrecoverable` L-134 · `markCircleBlocked` L-134 ·
 `_BlockedCircleBanner` L-134 · `legacyCircleRecreateCta` L-134.
 
-**Dart — lifecycle, stream and health.** `_onPaused` L-10, L-43 · `_onResumed` L-10, L-131 · `_onDetached` L-25 ·
+**Dart — lifecycle, stream and health.** `_onPaused` L-10, L-43, L-138 · `_onResumed` L-10, L-131, L-138 · `_onDetached` L-25 ·
+`NetworkChangeReconnector` L-138 · `reconnectAfterNetworkChange()` L-138 ·
 `_stopLiveSyncBounded()` L-25 · `_healLiveSyncIfStopped()` L-20, L-90, L-131, §9.9 ·
 `_restartReceiveAfterPausedStop` L-131 · `ensureRunning()` L-131 · `_fullRestart` L-83 ·
 `shouldStopLiveSyncOnPause` L-90 · `suspendForBackground()` L-43 · `suspendStream()` L-10, L-29 ·

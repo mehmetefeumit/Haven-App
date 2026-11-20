@@ -37,6 +37,7 @@ use super::rotation::{rotation_decision, RotationDecision, RotationInputs, SkipR
 use super::storage::{CircleStorage, PriorRouting};
 use super::storage_key_packages::CONSUMED_HOLD_OVER;
 use super::storage_member_directory::DirectoryTier;
+use super::storage_relay_floor::INBOX_FLOOR_KEY;
 use super::types::{
     Circle, CircleConfig, CircleEngineState, CircleMember, CircleMembership, CircleType,
     CircleWithMembers, Contact, GiftWrappedWelcome, Invitation, MemberKeyPackage, MembershipStatus,
@@ -225,6 +226,10 @@ pub struct CircleManager {
     /// than a `cfg`-split field, and a field that exists only under test is a
     /// field the shipped code path is not the one being measured.
     convergence_reticks: std::sync::atomic::AtomicUsize,
+    /// The identity key's answer to a relay's NIP-42 challenge, and nothing
+    /// else: built from the same keys as the session, here, so no key is
+    /// handed anywhere new (Security Rules 7 and 9).
+    nip42_signer: Arc<crate::relay::nip42::Nip42Signer>,
     /// What each own relay serves of the user's own events, as the
     /// maintenance passes last found it — see [`Self::own_relay_board`].
     own_relay_board: crate::relay::maintenance::OwnRelayBoard,
@@ -310,6 +315,7 @@ impl CircleManager {
         session.install_stall_evidence(storage.clone());
         Self::backfill_contamination_ledger(&storage);
         Self::prune_retired_profile_pool(&storage);
+        Self::retire_gated_inbox_seed(&storage);
         Self::sweep_expired_directory_members(&storage);
 
         Ok(Self {
@@ -328,6 +334,7 @@ impl CircleManager {
             held_at_open,
             held_polled_back: std::sync::atomic::AtomicBool::new(held_at_open == 0),
             convergence_reticks: std::sync::atomic::AtomicUsize::new(0),
+            nip42_signer: Arc::new(crate::relay::nip42::Nip42Signer::new(keys)),
             own_relay_board: crate::relay::maintenance::OwnRelayBoard::default(),
             storage,
         })
@@ -390,6 +397,23 @@ impl CircleManager {
         }
     }
 
+    /// Runs the one-time retirement of the read-gated relay from an inbox list
+    /// still exactly the old seed, best-effort; see
+    /// [`CircleStorage::retire_gated_inbox_seed`].
+    ///
+    /// Failure is logged rather than propagated, as the profile prune's is: its
+    /// sentinel is written only with its change, so the next launch retries.
+    fn retire_gated_inbox_seed(storage: &CircleStorage) {
+        match storage.retire_gated_inbox_seed() {
+            Ok(0) => {}
+            Ok(_) => log::info!("inbox relays: retired a read-gated seed relay at startup"),
+            Err(e) => log::warn!(
+                "inbox seed retirement failed (retries next launch): {}",
+                e.code()
+            ),
+        }
+    }
+
     /// Enforces the member directory's retention deadline at process start,
     /// best-effort.
     ///
@@ -405,7 +429,7 @@ impl CircleManager {
     /// manager — and because a bare purge is a single indexed DELETE on
     /// `circles.db`: no roster read, no MLS session, nothing that could make it
     /// a new wake or a new battery cost. It rides an open this constructor was
-    /// already performing, beside the two maintenance passes above it.
+    /// already performing, beside the maintenance passes above it.
     ///
     /// Failure is logged rather than propagated, as they are: the next launch
     /// retries, the ranked read sweeps the same rows before it can show one, and
@@ -450,6 +474,7 @@ impl CircleManager {
         session.install_stall_evidence(storage.clone());
         Self::backfill_contamination_ledger(&storage);
         Self::prune_retired_profile_pool(&storage);
+        Self::retire_gated_inbox_seed(&storage);
         Self::sweep_expired_directory_members(&storage);
 
         Ok(Self {
@@ -468,6 +493,7 @@ impl CircleManager {
             held_at_open,
             held_polled_back: std::sync::atomic::AtomicBool::new(held_at_open == 0),
             convergence_reticks: std::sync::atomic::AtomicUsize::new(0),
+            nip42_signer: Arc::new(crate::relay::nip42::Nip42Signer::new(keys)),
             own_relay_board: crate::relay::maintenance::OwnRelayBoard::default(),
             storage,
         })
@@ -499,6 +525,13 @@ impl CircleManager {
     #[must_use]
     pub const fn session(&self) -> &Arc<SessionManager> {
         &self.session
+    }
+
+    /// The signer that answers a relay's NIP-42 challenge with the identity
+    /// key and signs nothing else, for `relay::identity`'s connections.
+    #[must_use]
+    pub fn nip42_signer(&self) -> Arc<crate::relay::nip42::Nip42Signer> {
+        Arc::clone(&self.nip42_signer)
     }
 
     /// Returns the current MLS epoch for a group.
@@ -5088,6 +5121,45 @@ impl CircleManager {
         }
     }
 
+    /// Records that `relay` owes the inbox stream its history from
+    /// `since_secs` (Security Rule 12), keeping an earlier floor. Whether it
+    /// was recorded.
+    pub(crate) fn owe_inbox_floor(&self, relay: &str, since_secs: i64) -> bool {
+        self.storage
+            .owe_relay_floor(INBOX_FLOOR_KEY, relay, since_secs)
+            .inspect_err(|_| log::warn!("a relay's owed inbox floor was not recorded"))
+            .is_ok()
+    }
+
+    /// The floor `relay` owes the inbox stream, if any. A store that cannot
+    /// say answers none, said in the log.
+    pub(crate) fn inbox_floor(&self, relay: &str) -> Option<i64> {
+        self.storage
+            .relay_floor(INBOX_FLOOR_KEY, relay)
+            .inspect_err(|_| log::warn!("a relay's owed inbox floor was not read"))
+            .ok()
+            .flatten()
+    }
+
+    /// [`Self::inbox_floor`], for a test.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[must_use]
+    pub fn inbox_floor_for_test(&self, relay: &str) -> Option<i64> {
+        self.inbox_floor(relay)
+    }
+
+    /// Ends the floor `relay` owes the inbox stream once a REQ it answered to
+    /// its end asked from `covered_since` or earlier.
+    pub(crate) fn clear_inbox_floor(&self, relay: &str, covered_since: i64) {
+        if self
+            .storage
+            .clear_relay_floor(INBOX_FLOOR_KEY, relay, covered_since)
+            .is_err()
+        {
+            log::warn!("a relay's owed inbox floor was not cleared");
+        }
+    }
+
     /// The circle a `kind:445` event is addressed to, by its `#h` tag: what
     /// the event claims, before anything about it is authenticated.
     pub(crate) fn group_of_event(&self, event: &Event) -> Option<GroupId> {
@@ -5796,7 +5868,9 @@ impl CircleManager {
     /// call as the write: a relay list is current only when it names exactly
     /// the configured list, so every cell of its kind was judged against the
     /// old one. A `KeyPackage` stays what it was on every relay but the one
-    /// added or removed (`edited`; every relay for a restore or a wipe).
+    /// added or removed (`edited`; every relay for a restore or a wipe). An
+    /// inbox edit also forgets every gift-wrap answer, so a warning a removed
+    /// relay raised never stands for the list that replaced it.
     fn relay_list_edited(&self, relay_type: super::relay_prefs::RelayType, edited: Option<&str>) {
         use super::relay_prefs::RelayType;
         use crate::relay::maintenance::OwnKind;
@@ -5809,7 +5883,10 @@ impl CircleManager {
                     None => board.clear(OwnKind::KeyPackage),
                 }
             }
-            RelayType::Inbox => board.clear(OwnKind::InboxRelayList),
+            RelayType::Inbox => {
+                board.clear(OwnKind::InboxRelayList);
+                board.clear_inbox_reads();
+            }
             RelayType::Profile => {}
         }
     }
@@ -8685,6 +8762,7 @@ mod tests {
                 relay_url: relay_url.clone(),
                 responded: true,
                 drained: true,
+                refused: false,
                 events: Vec::new(),
             })
             .collect();

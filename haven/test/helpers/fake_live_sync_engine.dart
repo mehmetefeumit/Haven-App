@@ -21,7 +21,12 @@ class FakeLiveSyncEngine implements LiveSyncFfi {
     this.failPause = false,
     this.failPoolCount = false,
     this.failClaim = false,
+    this.failNetworkChange = false,
   });
+
+  /// When true, [reconnectAfterNetworkChange] throws (with a relay url in the
+  /// detail, to prove the service never leaks it — Security Rule 8).
+  final bool failNetworkChange;
 
   /// When true, [claimForeground] throws (with a hex-like detail, to prove
   /// the service never leaks it — Security Rule 8).
@@ -61,6 +66,10 @@ class FakeLiveSyncEngine implements LiveSyncFfi {
 
   /// The foreground claim each [claimForeground] carried, in call order.
   final List<bool> foregroundClaims = [];
+
+  /// The foreground claim each [reconnectAfterNetworkChange] carried, in call
+  /// order.
+  final List<bool> networkChangeClaims = [];
 
   /// When true, [liveEvents] throws — the one failure that lands AFTER the
   /// service has taken ownership of the handle, so it distinguishes "the
@@ -249,6 +258,17 @@ class FakeLiveSyncEngine implements LiveSyncFfi {
   Future<void> resumeAfterBackground({required bool foreground}) async {
     resumeCalls++;
     resumeClaims.add(foreground);
+    _paused = false;
+  }
+
+  // The core pauses a live session and opens it again, so it leaves the
+  // session un-paused, as the re-anchor does.
+  @override
+  Future<void> reconnectAfterNetworkChange({required bool foreground}) async {
+    networkChangeClaims.add(foreground);
+    if (failNetworkChange) {
+      throw Exception('re-dial failed for wss://relay.example.invalid');
+    }
     _paused = false;
   }
 

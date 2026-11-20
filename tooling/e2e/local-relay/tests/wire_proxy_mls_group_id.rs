@@ -120,6 +120,7 @@ async fn start_proxy(
             routes: vec![Route {
                 listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
                 upstream,
+                read_gate: None,
             }],
         },
         journal,

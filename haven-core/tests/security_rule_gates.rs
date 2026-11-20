@@ -67,7 +67,7 @@ use haven_core::nostr::mls::{
 };
 use haven_core::relay::live_sync::config::WORKER_QUEUE_CAP;
 use haven_core::relay::live_sync::supervisor::{intake_queue, run_receiver, RawSignal};
-use haven_core::relay::live_sync::{group_cursor_stream, EngineProcessor, EventBus};
+use haven_core::relay::live_sync::{group_cursor_stream, EngineProcessor, EventBus, PlaneKind};
 use nostr::nips::nip44;
 use nostr::{
     Alphabet, Event, EventBuilder, JsonUtil as _, Keys, Kind, PublicKey, RelayUrl, SingleLetterTag,
@@ -504,6 +504,7 @@ async fn deliver_through_receiver(
     }
     let handle = tokio::spawn(run_receiver(
         brx,
+        PlaneKind::Group,
         tx,
         processor,
         Arc::new(AtomicBool::new(false)),
@@ -547,6 +548,7 @@ fn rule12_live_intake_cap_is_pinned_and_really_bounds_the_queue() {
     let eose = || RawSignal::EndOfStoredEvents {
         relay_url: RelayUrl::parse("wss://relay.example").expect("relay url"),
         subscription_id: SubscriptionId::new("s_group_0"),
+        pool: PlaneKind::Group,
     };
     let (tx, _rx) = intake_queue();
     for slot in 0..WORKER_QUEUE_CAP {
@@ -908,6 +910,7 @@ impl LiveCalls {
 /// Rule 13's cover, call by call: each way the live plane reaches a relay is
 /// the only one of its kind, and is counted on the gauge the pause waits on
 /// before it can begin, reading the lifecycle after its count.
+#[allow(clippy::too_many_lines)]
 fn assert_every_live_relay_call_is_counted_before_it_can_begin(calls: &LiveCalls) {
     let squash = |text: &str| -> String { text.chars().filter(|c| !c.is_whitespace()).collect() };
     let flat = squash(&calls.fanout);
@@ -958,6 +961,15 @@ fn assert_every_live_relay_call_is_counted_before_it_can_begin(calls: &LiveCalls
             .contains("publisher.publish_unrecorded("),
         "the one recordless publish is no longer the driver's",
     );
+    // Its authenticated resend (owner decision D1b) is that function's too,
+    // and nowhere else: a resend made beside it would reach a relay uncounted.
+    assert!(
+        flat.matches(".publish_authenticated(").count() == 1
+            && squash(fn_body(&calls.fanout, "async fn send_unrecorded").expect("send_unrecorded"))
+                .contains("self.publisher.publish_authenticated("),
+        "an authenticated resend of what has no record is made outside the driver's one \
+         recordless function",
+    );
 
     // The live plane hands its driver nothing but its leashed wrappers, on a
     // leash that counts.
@@ -975,6 +987,17 @@ fn assert_every_live_relay_call_is_counted_before_it_can_begin(calls: &LiveCalls
             .zip(unrecorded.find("self.leash.mode()"))
             .is_some_and(|(counted, read)| counted < read),
         "a recordless publish of the live plane reads its mode before it is counted",
+    );
+    let resend = squash(
+        fn_body(&calls.drive, "fn publish_authenticated<'a>(")
+            .expect("LeashedPublisher's authenticated resend"),
+    );
+    assert!(
+        resend
+            .find("let_counted=self.leash.in_flight.map(InFlight::count);")
+            .zip(resend.find("self.leash.mode()"))
+            .is_some_and(|(counted, read)| counted < read),
+        "an authenticated resend of the live plane reads its mode before it is counted",
     );
     let live = [
         &calls.processor,
@@ -1118,6 +1141,21 @@ fn the_relay_call_cover_refuses_a_recordless_publish_counted_nowhere() {
         |calls| &mut calls.drive,
         "let _counted = self.leash.in_flight.map(InFlight::count);",
         "",
+    ));
+}
+
+#[test]
+#[should_panic(
+    expected = "an authenticated resend of the live plane reads its mode before it is counted"
+)]
+fn the_relay_call_cover_refuses_an_authenticated_resend_counted_nowhere() {
+    assert_every_live_relay_call_is_counted_before_it_can_begin(&LiveCalls::mutated(
+        |calls| &mut calls.drive,
+        "let _counted = self.leash.in_flight.map(InFlight::count);\n            \
+         if self.leash.mode() != DriveMode::Full {\n                \
+         return AuthSendOutcome::NotSent;",
+        "if self.leash.mode() != DriveMode::Full {\n                \
+         return AuthSendOutcome::NotSent;",
     ));
 }
 
@@ -1902,6 +1940,8 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
                 "InFlight",
                 "ModeSource",
                 "Taken",
+                // A relay's typed answer to what has no record (D1b).
+                "UnrecordedAnswer",
                 "UnrecordedPublisher",
                 "WallClock",
                 "interrupted",
@@ -1936,6 +1976,7 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
                 "RESUME_BUDGET_MS",
                 "ROW_BUDGET_MS",
                 "RelayMappedFanout",
+                "UnrecordedAnswer",
                 "UnrecordedPublisher",
                 "WallClock",
             ],
@@ -1943,10 +1984,14 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
         (
             "haven-core/src/relay/manager.rs",
             &[
+                // The authenticated resend of a fanout call (D1c), and a
+                // relay's typed answer to what has no record (D1b).
+                "AuthRetry",
                 "FanoutSend",
                 "FanoutTargetOutcome",
                 "GATE_WAIT_SECS",
                 "Taken",
+                "UnrecordedAnswer",
                 "is_owned",
                 "not_exposed",
                 "publish_to_target",
@@ -2005,6 +2050,7 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
                 "RESUME_BUDGET_MS",
                 "RelayMappedFanout",
                 "Taken",
+                "UnrecordedAnswer",
                 "UnrecordedPublisher",
                 "WallClock",
             ],
@@ -2275,9 +2321,25 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
              change to this gate, the manifest and the reviews, not to one line",
         );
     }
+    // The publisher of what has no record asks its leash for the full mode
+    // twice: before a publish and before an authenticated resend (D1b).
+    for (signature, refused) in [
+        ("fn publish_unrecorded<'a>(", "returnunanswered;"),
+        (
+            "fn publish_authenticated<'a>(",
+            "returnAuthSendOutcome::NotSent;",
+        ),
+    ] {
+        assert!(
+            squash(fn_body(&lifecycle, signature).expect(signature)).contains(&format!(
+                "ifself.leash.mode()!=DriveMode::Full{{{refused}}}"
+            )),
+            "{signature} hands something on outside the full mode",
+        );
+    }
     assert_eq!(
         squash(&lifecycle).matches("DriveMode::Full").count(),
-        5,
+        6,
         "the full mode is named in the live plane's lifecycle and leash somewhere this \
          gate does not pin",
     );
@@ -2499,7 +2561,11 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
             )
             && leash.contains("taken.filter(|_|self.leash.stands())")
             && leash
-                .matches("ifself.leash.mode()!=DriveMode::Full{returnfalse;}")
+                .matches("ifself.leash.mode()!=DriveMode::Full{returnunanswered;}")
+                .count()
+                == 1
+            && leash
+                .matches("ifself.leash.mode()!=DriveMode::Full{returnAuthSendOutcome::NotSent;}")
                 .count()
                 == 1
             && leash.matches("began").count() == 6
@@ -2753,12 +2819,15 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
         (
             "{matchclaim{Claim::Foreground=>Some(Self::Foreground),Claim::Nothing=>None,}}"
                 .to_owned(),
-            3,
+            // The re-anchor, the network change, and the health tick's two.
+            4,
             1,
             // The two background opens, a start into a burst entering it, and
             // that start's read of the inbox fold.
             4,
-            5,
+            // The re-anchor, the network change, the two background opens and
+            // the health tick's two.
+            6,
         ),
         "the foreground kind of an open is made without a claim, or an open has a \
          caller this gate does not name",
@@ -2818,6 +2887,26 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
         "the foreground re-anchor is made for a caller that claimed nothing, or touches \
          the session before it has refused one",
     );
+    // The network change: refused before the lock for a caller that claims
+    // nothing; then ONE acquisition covers the read of the pause, the pause
+    // a live session needs before its sockets may be rebuilt, and the
+    // foreground open — so nothing slips between them — and the network is
+    // said to be back only once that open has succeeded.
+    assert_eq!(
+        squash(
+            fn_body(&core, "pub async fn reconnect_after_network_change(")
+                .expect("session.rs defines reconnect_after_network_change")
+        ),
+        "{letSome(kind)=BurstKind::claimed(claim)else{returnErr(LiveSyncError::NotForeground);};\
+         letlifecycle=self.lifecycle.lock().await;\
+         log::info!(\"[live_sync]thenetworkchanged:re-diallingeverylivesocket\");\
+         if!self.paused.load(Ordering::Acquire){self.pause_locked(&lifecycle).await?;}\
+         self.resume_burst(&lifecycle,kind,INBOX_BURSTS_PER_REQ,None).await?;\
+         self.repair.note_network_back();Ok(())}",
+        "the network change is made for a caller that claimed nothing, touches the session \
+         before it has refused one, re-dials without a pause, lets go of the lock between \
+         its pause and its open, or says the network is back before the open succeeded",
+    );
     assert!(
         health.contains(
             "matchBurstKind::claimed(claim){Some(kind)=>{self.resume_burst(&lifecycle,kind,\
@@ -2870,7 +2959,7 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
             // A start into a burst is in the burst from before its first socket.
             && start
                 .find("ifburst{self.enter_burst(BurstKind::Background,ends)?;}")
-                .zip(start.find("self.client.connect().await;"))
+                .zip(start.find("self.connect_both().await;"))
                 .is_some_and(|(burst, connect)| burst < connect)
             && squash(fn_body(&core, "pub async fn start(").expect("start"))
                 == "{self.start_in(circles,inbox_relays,false,None).await}"
@@ -3151,6 +3240,7 @@ fn the_foreground_is_claimed_through_the_bridge_alone() {
         }
         for entry in [
             ".resume_after_background(",
+            ".reconnect_after_network_change(",
             ".maintain_subscription_health(",
             ".claim_foreground(",
         ] {
@@ -3183,6 +3273,10 @@ fn the_foreground_is_claimed_through_the_bridge_alone() {
             (
                 "haven/rust_builder/src/api.rs",
                 ".resume_after_background(foreground_claim(foreground)",
+            ),
+            (
+                "haven/rust_builder/src/api.rs",
+                ".reconnect_after_network_change(foreground_claim(foreground)",
             ),
             (
                 "haven/rust_builder/src/api.rs",
@@ -3239,8 +3333,8 @@ fn the_foreground_is_claimed_through_the_bridge_alone() {
         ),
         (
             "{ifforeground{Claim::Foreground}else{Claim::Nothing}}".to_owned(),
+            5,
             4,
-            3,
             1,
             1,
         ),
@@ -3259,9 +3353,18 @@ fn the_foreground_is_claimed_through_the_bridge_alone() {
         "a session start carries a claim again: it is read seconds before the start acts \
          on it, and a pause in between never reaches the core",
     );
-    // Each of the three, WHOLE: the flag is the entry's own parameter, handed
+    // Each of the four, WHOLE: the flag is the entry's own parameter, handed
     // on once and never assigned on the way.
     for (signature, whole) in [
+        (
+            "pub async fn reconnect_after_network_change(&self, foreground: bool)",
+            "pubasyncfnreconnect_after_network_change(&self,foreground:bool)->Result<(),String>{\
+             letcore=SESSION.read().map_err(|_|\"sessionlockpoisoned\".to_string())?\
+             .as_ref().map(Arc::clone);matchcore{Some(core)=>core\
+             .reconnect_after_network_change(foreground_claim(foreground)).await\
+             .map_err(|e|e.to_string()),None=>Err(\"noactivelive-syncsession\"\
+             .to_string()),}}",
+        ),
         (
             "pub async fn resume_after_background(&self, foreground: bool)",
             "pubasyncfnresume_after_background(&self,foreground:bool)->Result<(),String>{\
@@ -3360,6 +3463,7 @@ fn the_drivers_public_surface_is_pinned() {
         "const MDK_CALL_CEILING_SECS",
         "enum FanoutTargetOutcome",
         "pub(crate) async fn publish_to_target",
+        "const NOT_RESENT",
         "impl Answers",
         "pub(crate) fn possibly_exposed",
         "const INTERRUPTED",
@@ -3419,6 +3523,8 @@ fn the_drivers_public_surface_is_pinned() {
         "const ROW_BUDGET_MS",
         "const FOLD_BUDGET_MS",
         "const PUBLISHER_BUDGET_MS",
+        // How long a delivered pass still waits for its other Welcome sends.
+        "const WELCOME_COPY_WINDOW_MS",
         "const BUSY_RETRY_MS",
         "enum FanoutStatus",
         "struct DriveOutcome",
@@ -3465,6 +3571,12 @@ fn the_drivers_public_surface_is_pinned() {
         "pub(crate) fn after",
         "pub(crate) fn on",
         "fn wake_deadline",
+        // A relay's typed answer to what has no record (D1b).
+        "enum UnrecordedAnswer",
+        "impl UnrecordedAnswer",
+        "pub(crate) fn heard",
+        "const fn merge",
+        "fn all",
         "trait UnrecordedPublisher",
         "impl UnrecordedPublisher for super::RelayManager",
         "struct Publishing",
@@ -3515,6 +3627,7 @@ fn the_drivers_public_surface_is_pinned() {
         "fn handed",
         "impl FanoutSend for Accepting",
         "impl crate::relay::fanout::UnrecordedPublisher for Accepting",
+        "fn not_resent",
         "struct Refusing",
         "impl FanoutSend for Refusing",
         "impl crate::relay::fanout::UnrecordedPublisher for Refusing",
@@ -4013,10 +4126,24 @@ fn the_driver_and_its_entries_hand_no_commit_to_a_publisher() {
     );
     let unrecorded =
         squash(fn_body(&driver, "async fn send_unrecorded(").expect("fanout.rs: send_unrecorded"));
+    // The admission is asked by each caller before the send — once for a pass
+    // of Welcomes, whose sends begin at one instant — and by nothing else.
+    let admitted = "ifself.may_send_unrecorded(){";
+    let callers = ["async fn dispose(", "async fn send_welcomes("].map(|caller| {
+        squash(fn_body(&driver, caller).unwrap_or_else(|| panic!("fanout.rs: {caller}")))
+    });
     assert!(
-        unrecorded.starts_with(
-            "{ifself.mode.mode()!=DriveMode::Full||!self.allows(PUBLISHER_BUDGET_MS){returnNone;}"
-        ) && unrecorded.contains(".publish_unrecorded("),
+        squash(
+            fn_body(&driver, "fn may_send_unrecorded(").expect("fanout.rs: may_send_unrecorded")
+        ) == "{self.mode.mode()==DriveMode::Full&&self.allows(PUBLISHER_BUDGET_MS)}"
+            && unrecorded.contains(".publish_unrecorded(")
+            && flat.matches(".send_unrecorded(").count() == 2
+            && callers.iter().all(|body| {
+                body.find(admitted)
+                    .zip(body.find(".send_unrecorded("))
+                    .is_some_and(|(asked, sent)| asked < sent)
+                    && body.matches(".send_unrecorded(").count() == 1
+            }),
         "something with no record is published outside the full mode, or outside \
          `send_unrecorded`",
     );
@@ -4316,8 +4443,8 @@ fn the_live_plane_sends_what_it_records_from_its_drive_alone() {
     ));
     assert!(
         core.contains(
-            "letdriver=LiveDriver::over(&drive_pool);\
-             Self::assemble(circle,own_pubkey,driver,Some(drive_pool))"
+            "letdriver=LiveDriver::over(&drive_pool,circle.nip42_signer());\
+             Self::assemble(circle,driver,Some(drive_pool))"
         ),
         "the session's driver must be built over the drive pool it was handed",
     );
@@ -4326,8 +4453,9 @@ fn the_live_plane_sends_what_it_records_from_its_drive_alone() {
     ));
     assert!(
         pool.contains(
-            "pubfnover(pool:&Arc<RelayManager>)->Self{Self{fanout:Arc::new(\
-             pool.fanout_transport()),publisher:Arc::clone(pool)asArc<dynUnrecordedPublisher>,"
+            "pubfnover(pool:&Arc<RelayManager>,signer:Arc<Nip42Signer>)->Self{Self{fanout:\
+             Arc::new(pool.fanout_transport().authenticating(signer)),\
+             publisher:Arc::clone(pool)asArc<dynUnrecordedPublisher>,"
         ),
         "the product's driver must be the pool's own fanout transport and publish ladder",
     );
@@ -4957,15 +5085,36 @@ fn assert_commit_publishers_keep_the_ladder(root: &std::path::Path) {
         "impl UnrecordedPublisher for super::RelayManager {",
     );
     assert!(
-        via_manager.contains(concat!("publish", "_event(")),
-        "what has no record is published through the publish client's ladder; \
-         found: {via_manager}",
+        via_manager.contains("self.publish_unrecorded_answers(event, relays)"),
+        "what has no record is published through the publish client's ladder, \
+         read relay by relay; found: {via_manager}",
     );
-    assert!(
-        via_manager.contains(".is_ok_and(|result| result.is_success())"),
-        "\"acked\" means at least one relay returned OK, never merely that the \
-         event was sent (Rule 13): {via_manager}",
+    // "Acked" means a relay returned OK, never merely that the event was sent
+    // (Rule 13): an acceptance is read off the relay's own `OK` frame, or is
+    // a relay the pool's own send heard say `OK true`; and the ladder is the
+    // commit ladder's length.
+    let manager = production_source(&root.join("haven-core/src/relay/manager.rs"));
+    let answered = block_after(&manager, "pub async fn publish_unrecorded_answers(");
+    for needle in [
+        "MAX_PUBLISH_ATTEMPTS,",
+        "UnrecordedAnswer::heard(heard, &event.id)",
+        "*seen = UnrecordedAnswer::Accepted;",
+        "result.accepted_by",
+    ] {
+        assert!(
+            answered.contains(needle)
+                || block_after(&manager, "async fn try_publish_once_heard(").contains(needle),
+            "the typed publish of what has no record no longer reads acceptance as \
+             a relay's own OK ({needle})",
+        );
+    }
+    assert_eq!(
+        answered.matches("UnrecordedAnswer::Accepted").count(),
+        1,
+        "the typed publish of what has no record calls something an acceptance \
+         that no relay said",
     );
+
     assert!(
         !via_manager.contains(concat!("publish_location", "_event")),
         "something published on the location path would be re-sent never: {via_manager}",
@@ -5480,10 +5629,19 @@ fn rule13_fanout_constants_are_pinned() {
     // again five seconds after it gave up.
     assert_eq!(GATE_WAIT_SECS, 5);
     assert_eq!(BUSY_RETRY_MS, 5_000);
+    // An authenticated resend to a relay that asked for one (D1b/D1c): the
+    // connect, two five-second `OK` windows and the seven-second wait for
+    // authentication.
+    assert_eq!(haven_core::relay::AUTH_RETRY_MS, 22_000);
     // A row is begun only while a wake has its longest possible run left:
-    // the wait for the relay, MDK's ceiling, and six one-second deadlines.
-    assert_eq!(ROW_BUDGET_MS, 31_000);
-    assert_eq!(RESUME_BUDGET_MS, 62_000);
+    // the wait for the relay, MDK's ceiling, the resend made inside the same
+    // call, and six one-second deadlines.
+    assert_eq!(ROW_BUDGET_MS, 53_000);
+    assert_eq!(RESUME_BUDGET_MS, 106_000);
+    // A location's one send: the connect and window, and the one resend.
+    assert_eq!(haven_core::relay::fanout::LOCATION_SEND_MS, 32_000);
+    // A Welcome's or unrecorded proposal's ladder, and the one resend.
+    assert_eq!(haven_core::relay::fanout::PUBLISHER_BUDGET_MS, 71_000);
     // A refused eviction is staged again after a minute, doubling.
     assert_eq!(RESTAGE_BASE_MS, 60_000);
 
@@ -5495,6 +5653,42 @@ fn rule13_fanout_constants_are_pinned() {
         required.contains(".min(2)"),
         "a commit's record no longer freezes min(2, distinct relays) as the \
          acknowledgements its fanout is retried for (owner decision OD-2)",
+    );
+}
+
+/// Every fanout transport shipped code builds answers a relay's
+/// `auth-required:` as the user (owner decision D1c): a product entry that
+/// built one without `.authenticating(` would quietly send a recorded commit,
+/// proposal or location to such a relay anonymously, be refused, and — for a
+/// commit — roll it back. Read over the production source of the core and the
+/// bridge; the compiler holds the live plane's driver, whose constructor takes
+/// the signer.
+#[test]
+fn every_fanout_transport_shipped_code_builds_authenticates() {
+    let root = repo_root();
+    let mut files = Vec::new();
+    sources_under(&root.join("haven-core/src"), "rs", &mut files);
+    sources_under(&root.join("haven/rust_builder/src"), "rs", &mut files);
+    let mut entries = 0;
+    for file in files {
+        let source: String = production_source(&file)
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        for (at, _) in source.match_indices(".fanout_transport()") {
+            entries += 1;
+            assert!(
+                source[at + ".fanout_transport()".len()..].starts_with(".authenticating("),
+                "{} builds a fanout transport that never authenticates",
+                file.display(),
+            );
+        }
+    }
+    // api.rs `Driving::new`, the two catch-up sweeps, `LiveDriver::over`, and
+    // the live session's test-utils relay map.
+    assert_eq!(
+        entries, 5,
+        "a fanout transport entry was added or removed: decide whether it authenticates",
     );
 }
 

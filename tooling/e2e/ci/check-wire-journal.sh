@@ -423,7 +423,7 @@ journal_wellformed() {
         elif ($o.conn_id | type) != "string" then "missing/invalid conn_id"
         elif (["frame","conn_open","conn_error"] | index($o.type)) == null then
           "unknown record type \($o.type | tojson)"
-        elif ($o.type == "frame") and ($o.dir != "c2r" and $o.dir != "r2c") then "frame line with missing/invalid dir"
+        elif ($o.type == "frame") and ((["c2r","r2c","c2p","p2c","r2p"] | index($o.dir)) == null) then "frame line with missing/invalid dir"
         elif ($o.type == "frame") and ($o | has("frame") | not) then "frame line with no frame key"
         # The two halves of the documented `type == "frame"` <=> `"frame" in
         # line` equivalence. Without these a lifecycle label is a way to put an
@@ -589,6 +589,13 @@ normalize() {
     # asserted that a lifecycle record carries neither field, so this filter
     # cannot be used to hide traffic behind a lifecycle label.
     | select(.type == "frame")
+    # A GATED route (haven-wire-proxy `gate-read=`) plays a relay that will not
+    # serve some kinds to a client that never authenticates. What it writes the
+    # client itself (`p2c`: the AUTH challenge and the refusal) and what it
+    # withholds from the client (`r2p`) is neither traffic Haven sent nor
+    # anything Haven received, so no assertion here is about it; a frame Haven
+    # sent that the gate refused (`c2p`) stays in, judged like any other.
+    | select(.dir != "p2c" and .dir != "r2p")
     | . as $line
     | try (
         if (.frame == null) then
@@ -1648,6 +1655,35 @@ self_test() {
   local healthy="${tmp}/healthy.ndjson"
   write_healthy "${healthy}"
   expect_rc 0 "healthy journal passes" --journal "${healthy}" "${base[@]}" || fail=1
+
+  # A GATED ROUTE's journal. The gift wrap the gate withheld is not something
+  # Haven received, so this stays clean only while `p2c`/`r2p` are read as the
+  # proxy's, not the relay's; the refused REQ (`c2p`) and the client's answer to
+  # the challenge are still Haven's, so a filter key nobody reasoned about on
+  # the REQ is still a finding.
+  local gated="${tmp}/gated.ndjson"
+  fx_begin "${tmp}/gated.raw"
+  jline c2p c1 "[\"REQ\",\"sub-in\",{\"kinds\":[1059],\"#p\":[\"${PK_A}\"]}]"
+  jline p2c c1 '["AUTH","challenge-c1"]'
+  jline p2c c1 '["CLOSED","sub-in","ERROR: auth-required: requested filter requires authentication"]'
+  jline r2p c1 "[\"EVENT\",\"sub-mix\",$(ev 1059 "eW" "${PK_EPH1}" "[[\"p\",\"${PK_A}\"]]")]"
+  jline c2p c1 "[\"AUTH\",$(ev 22242 "eAUTH" "${PK_A}" '[["challenge","challenge-c1"],["relay","ws://10.0.2.2:7790"]]')]"
+  jline p2c c1 '["OK","eAUTH",true,""]'
+  cat "${healthy}" >> "${tmp}/gated.raw"
+  renumber "${tmp}/gated.raw" "${gated}"
+  expect_rc 0 "a gated route's refusal and withheld event leave a clean journal clean" \
+    --journal "${gated}" "${base[@]}" || fail=1
+  local counted="${tmp}/counted.ndjson"
+  sed 's/"dir":"c2p"\(.*"frame":\["\)AUTH"/"dir":"c2p"\1COUNT"/' \
+    "${gated}" > "${counted}"
+  expect_msg 'frame verb "COUNT" is not in the allow-list' \
+    "a frame Haven sent a gated route is still held to the closed verb set" \
+    --journal "${counted}" "${base[@]}" || fail=1
+  local gated_search="${tmp}/gated-search.ndjson"
+  sed 's/{"kinds":\[1059\],"#p"/{"kinds":[1059],"search":"x","#p"/' "${gated}" > "${gated_search}"
+  expect_msg 'carried the filter key "search"' \
+    "a REQ the gate refused is still Haven's, and its filter keys are judged" \
+    --journal "${gated_search}" "${base[@]}" || fail=1
 
   # The multiset trap. `write_healthy` already publishes e09 three times, but a
   # case asserting that with the SAME journal and the SAME arguments as the
@@ -2832,7 +2868,7 @@ self_test() {
   # it exactly, and deleting any case still trips it. If a case is genuinely
   # retired, lower this number in the same commit and say why.
   # -------------------------------------------------------------------------
-  readonly MIN_CASES=156
+  readonly MIN_CASES=159
   if (( CASES_RUN + CASES_SKIPPED < MIN_CASES )); then
     echo "SELF-TEST FAIL: only $(( CASES_RUN + CASES_SKIPPED )) fixture(s) accounted for" >&2
     echo "  (${CASES_RUN} run + ${CASES_SKIPPED} skipped); at least ${MIN_CASES} expected." >&2

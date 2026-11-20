@@ -294,7 +294,6 @@ async fn live_sync_start_drains_a_backlog_an_earlier_process_retained() {
 
     let engine = LiveSyncCore::new_local(
         Arc::clone(&fx.bob),
-        fx.bob_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     engine

@@ -1259,7 +1259,9 @@ class _FakeMaintenance extends MaintenanceService {
   bool Function() held = () => false;
 
   @override
-  Future<RelayListMaintenanceResult> maintainRelayList() async {
+  Future<RelayListMaintenanceResult> maintainRelayList({
+    required bool foreground,
+  }) async {
     calls.add('relayList');
     seededAtFirstPublish ??= _prefs.didSeed;
     final boom = relayListThrows;

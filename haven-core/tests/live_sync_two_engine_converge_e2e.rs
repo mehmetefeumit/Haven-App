@@ -37,9 +37,7 @@ use tempfile::TempDir;
 /// real MLS store, ready to wrap in a [`LiveSyncCore`].
 struct TwoMemberCircle {
     alice: Arc<CircleManager>,
-    alice_keys: Keys,
     bob: Arc<CircleManager>,
-    bob_keys: Keys,
     mls_group_id: GroupId,
     nostr_group_id: [u8; 32],
     _alice_dir: TempDir,
@@ -101,9 +99,7 @@ async fn build_two_member_circle(group_relay: &str) -> TwoMemberCircle {
 
     TwoMemberCircle {
         alice: Arc::new(alice),
-        alice_keys,
         bob: Arc::new(bob),
-        bob_keys,
         mls_group_id,
         nostr_group_id,
         _alice_dir: alice_dir,
@@ -153,12 +149,10 @@ async fn two_engines_converge_over_one_relay_via_the_engine_loop() {
     // One engine per member, both over the SAME relay, both subscribed to #h.
     let alice_engine = LiveSyncCore::new_local(
         Arc::clone(&fx.alice),
-        fx.alice_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     let bob_engine = LiveSyncCore::new_local(
         Arc::clone(&fx.bob),
-        fx.bob_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     let spec = CircleSpec {

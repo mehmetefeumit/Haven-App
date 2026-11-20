@@ -171,7 +171,7 @@
 #      sleeping AND re-create the C3 silent-drop class on the one pool that has
 #      no keepalive to detect it.
 #   9. `api.rs` is a PURE FORWARDER for the whole burst lifecycle: each of the
-#      eight `LiveSyncFfi` methods named in `FFI_DELEGATIONS` calls
+#      nine `LiveSyncFfi` methods named in `FFI_DELEGATIONS` calls
 #      `core.<same-name>()`, makes exactly ONE call on the core handle, and
 #      contains no `return` but the session gate's `return Err(`. The last rule
 #      is what makes it a reachability check rather than a substring one — a
@@ -181,18 +181,26 @@
 #      answer from `SESSION`, ask the core for the flag they name, and contain
 #      no panic token — a sync FFI read unwinds into Dart, and `unwrap_used` /
 #      `expect_used` are restriction lints this repo does not enable.
-#  11. Every relay client is built by `relay/verified.rs`'s `verified_client`,
-#      which installs the policy that verifies each relay event's id AND
-#      signature before the pool acts on it. No other source file under
-#      haven-core/src, haven/rust_builder/src or tooling/soak/src names a
-#      `Client` or `RelayPool` construction, other than the test witnesses
-#      marked `// test witness` in the files and test modules listed for them;
-#      nothing reads a client's database; no source gives a relay client a
-#      signer; and MDK's relay client, which builds no client and is handed
-#      one, is handed the publish client and nothing else, at one site. It is a
-#      text scan: integration tests under `tests/` are not read, and a
-#      construction it cannot spell is not seen. See check 11's own block for
-#      what that leaves open.
+#  11. Every relay client is built by `relay/verified.rs` — `verified_client`,
+#      or `identity_client`, the one client that answers a NIP-42 challenge
+#      (owner-directed 2026-11-16) — each installing the policy that verifies
+#      each relay event's id AND signature before the pool acts on it. No other
+#      source file under haven-core/src, haven/rust_builder/src or
+#      tooling/soak/src names a `Client` or `RelayPool` construction, other
+#      than the test witnesses marked `// test witness` in the files and test
+#      modules listed for them; nothing reads a client's database; no source
+#      but `identity_client` gives a relay client a signer, and that one is
+#      its `Arc<Nip42Signer>` parameter; and MDK's relay client, which builds
+#      no client and is handed one, is handed the publish client and nothing
+#      else, at one site. It is a text scan: integration tests under `tests/`
+#      are not read, and a construction it cannot spell is not seen. See check
+#      11's own block for what that leaves open.
+#  12. The identity's NIP-42 reach: `identity_client` and the per-call identity
+#      helpers are named only in the files listed for them, a kind-22242 event
+#      is made only by the signer (and tests), the signer is built only in
+#      `CircleManager`, the per-call relay keeps the publish options for one
+#      direction, and the profile module and the discovery plane never touch
+#      any of it. See check 12's own block.
 #
 # # Why check 7 reads every spelling, and how the one legitimate call is told apart
 #
@@ -595,7 +603,7 @@ check_ffi_add_relay() { # <api.rs>
 # ---------------------------------------------------------------------------
 # 9. The bridge is a PURE FORWARDER for the whole background-burst lifecycle.
 #
-#    Seven `LiveSyncFfi` methods exist only to hand a call to the core method of
+#    Nine `LiveSyncFfi` methods exist only to hand a call to the core method of
 #    the SAME NAME. The core owns the burst state machine; the bridge owns
 #    nothing, and every decision it takes instead of forwarding is invisible —
 #    `rust_builder` has no test that ever constructs a `LiveSyncFfi`, and the
@@ -625,14 +633,14 @@ check_ffi_add_relay() { # <api.rs>
 #    skip past the forwarding with a success.
 #
 #    Rules (a) and (b) read the handle by NAME, so the engine `Arc` must stay
-#    bound as `core` in these eight methods. That is a convention this guard
+#    bound as `core` in these nine methods. That is a convention this guard
 #    imposes and cannot infer — a rename fails rule (a) with "does not forward",
 #    which is the right place to learn about it.
 #
 #    Whitespace is squeezed out before matching, so rustfmt may split or join
 #    the builder chain freely without moving this check either way.
 #
-#    Two of the eight are also each other's most plausible wrong destination, and
+#    Two of the nine are also each other's most plausible wrong destination, and
 #    each direction is silent in its own way. `LiveSyncCore` deliberately splits
 #    `resume_after_background` (the foreground re-anchor — app resume and the
 #    health tick's whole-session repair, which must always carry the inbox REQ)
@@ -652,6 +660,7 @@ check_ffi_add_relay() { # <api.rs>
 # the core method it must reach.
 FFI_DELEGATIONS=(
   'resume_after_background'
+  'reconnect_after_network_change'
   'open_background_burst'
   'wait_backlog_settled'
   'settle_before_pause'
@@ -715,6 +724,8 @@ _delegation_why() { # <name>
   case "$1" in
     resume_after_background)
       printf '%s' "App resume and the subscription-health tick have no whole-session re-anchor left, so an open app stops repairing its own subscriptions." ;;
+    reconnect_after_network_change)
+      printf '%s' "Any other core call keeps every socket the old network carried, which the pool reads as Connected until a ping goes unanswered, so for up to two ping intervals after a network change nothing reaches the open app and nothing it sends leaves." ;;
     open_background_burst)
       printf '%s' "Any other core call skips the burst counter, so the INBOX_BURSTS_PER_REQ fold silently never applies and every burst re-requests the whole bounded inbox lookback." ;;
     wait_backlog_settled)
@@ -806,9 +817,9 @@ check_ffi_sync_reads_cannot_panic() { # <api.rs>
 #
 #     What is pinned:
 #       * the constructor still installs THAT policy (`.admit_policy(VerifiedEvents)`),
-#         names `admit_policy` exactly once, and holds the file's only
-#         construction outside its test module — above the module or below
-#         it. Once, because the builder keeps the LAST policy it is given, so a
+#         names `admit_policy` exactly once, and with `identity_client` holds
+#         the file's only two constructions outside its test module — above the
+#         module or below it. Once, because the builder keeps the LAST policy it is given, so a
 #         second `.admit_policy(...)` after the first silently replaces it; and
 #         never as an assignment, because the builder's field is public and
 #         `builder.admit_policy = None` unsets it;
@@ -831,9 +842,10 @@ check_ffi_sync_reads_cannot_panic() { # <api.rs>
 #         form are refused because the scan could not follow them;
 #       * no `.database()` read: the pool's database is a second source of
 #         events this guard does not reason about;
-#       * no signer on any relay client: the words `set_signer` and
-#         `unset_signer`, and `.signer(` / `::signer(` with or without a
-#         turbofish (`.signer::<Keys>(`), appear nowhere in the three trees —
+#       * no signer on any relay client but the identity's: the words
+#         `set_signer` and `unset_signer`, and `.signer(` / `::signer(` with or
+#         without a turbofish (`.signer::<Keys>(`), appear nowhere in the three
+#         trees outside `identity_client` —
 #         so `set_signer::<Keys>(`, the path-qualified call
 #         (`ClientBuilder::signer(b, k)`) and a method reference to
 #         `set_signer` or to a builder's `signer` (`ClientBuilder::signer`,
@@ -846,8 +858,9 @@ check_ffi_sync_reads_cannot_panic() { # <api.rs>
 #         that carries a circle's routing id, and MDK's relay client signs an
 #         unsigned non-445 event it is handed
 #         (`transport-nostr-adapter/src/sdk_client.rs:668-682`);
-#       * no relay client is told to authenticate: every
-#         `automatic_authentication(` is `automatic_authentication(false)`.
+#       * no relay client is told to authenticate but the identity's: every
+#         `automatic_authentication(` is `automatic_authentication(false)`
+#         outside `identity_client`, and `verified_client` says so itself.
 #         Two things can be changed on a client AFTER it is built — its signer
 #         (`Client::set_signer`) and this switch
 #         (`Client::automatic_authentication(&self, enable)`,
@@ -855,6 +868,16 @@ check_ffi_sync_reads_cannot_panic() { # <api.rs>
 #         and the publish client's values are read back by the test
 #         `the_publish_client_holds_no_signer_and_never_authenticates`. Either
 #         alone keeps the pool from answering a challenge;
+#       * the identity's client (owner-directed 2026-11-16: its own inbox
+#         reads, and a Welcome or kind-445 resend a relay refused with
+#         `auth-required:`) is `identity_client`, in this file: its first
+#         parameter is `signer: Arc<Nip42Signer>` — relay/nip42.rs's type,
+#         imported, never one declared here — and its body installs that
+#         parameter as its one signer, the policy once, and
+#         `automatic_authentication(true)` once. Nip42Signer signs a kind-22242
+#         answer under the identity key and refuses everything else, so the
+#         TYPE is what keeps a signer on a relay client from signing anything
+#         a relay or MDK hands it; who may call it is check 12;
 #       * NOT read: `tests/`. The NIP-42 control client there holds a signer
 #         and authenticates on purpose; a macro that spells either call is
 #         not followed either;
@@ -934,6 +957,9 @@ readonly -a TEST_WITNESS_FILES=(
 # renamed out of the view before the scan rather than excused after it.
 readonly _CLIENT_CONSTRUCTION='(^|[^A-Za-z0-9_])(Client::(builder|new|default)|ClientBuilder|RelayPoolBuilder|RelayPool::(builder|new|default)|Relay::new|(Client|RelayPool|Relay)>::)'
 readonly _SDK_RELAY_CLIENT='(^|[^A-Za-z0-9_])NostrSdkRelayClient([^A-Za-z0-9_]|$)'
+# A signer given to, set on or taken off a relay client, in every spelling
+# check 11's block lists.
+readonly _SIGNER='(^|[^A-Za-z0-9_])(un)?set_signer([^A-Za-z0-9_]|$)|\.signer(::<|\(|=[^=])|::signer(::<|[^A-Za-z0-9_:]|$)'
 readonly _CLIENT_ALIAS='(^|[^A-Za-z0-9_])(Client|ClientBuilder|RelayPool|RelayPoolBuilder|Relay) as |=([A-Za-z0-9_]+::)*(Client|RelayPool|Relay);'
 
 # stdin, flattened onto one line with no space beside punctuation.
@@ -998,8 +1024,48 @@ check_relay_events_verified() { # <core-src-dir> <ffi-src-dir> <soak-src-dir>
       lfail "(11) relay/verified.rs disarms the policy (\`${disarm}\`). The SDK hands every event to a gossip store BEFORE it asks the admission policy, so a client given one — by the builder's call or by assigning its public field — takes in a forged relay list and refuses it only afterwards; and assigning the builder's admit_policy field replaces or unsets what verified_client() installs."
     fi
   done
-  if (( $(grep -oE "${_CLIENT_CONSTRUCTION}" <<<"${product}" | wc -l) != 1 )); then
-    lfail "(11) relay/verified.rs must hold exactly one client construction outside its test module — verified_client()'s. A second one, above the tests or below them, is a client built without the policy, in the one file this check does not scan for them."
+  if (( $(grep -oE "${_CLIENT_CONSTRUCTION}" <<<"${product}" | wc -l) != 2 )); then
+    lfail "(11) relay/verified.rs must hold exactly two client constructions outside its test module — verified_client()'s and identity_client()'s. A third one, above the tests or below them, is a client built without the policy, in the one file this check does not scan for them."
+  fi
+
+  # The anonymous constructor: no signer, never told to authenticate.
+  if [[ -n "${constructor}" ]]; then
+    if grep -qE "${_SIGNER}" <<<"${constructor}" \
+      || [[ "${constructor}" != *"automatic_authentication(false)"* || "${constructor}" == *"automatic_authentication(true)"* ]]; then
+      lfail "(11) verified_client() holds a signer or does not switch authentication off (\`automatic_authentication(false)\`). It builds the engine, publish and every other anonymous client: answering a challenge there signs a relay's challenge with the identity key on a socket that carries a circle's routing id."
+    fi
+  fi
+
+  # The one authenticating constructor (owner-directed, 2026-11-16): the same
+  # policy, and the NIP-42 signer it is handed — a signer that signs the answer
+  # to a challenge and nothing else — as its only signer.
+  local identity
+  identity="$(fn_body_flat 'identity_client' "${verified}" | _tight)"
+  if [[ -z "${identity}" ]]; then
+    lfail "(11) relay/verified.rs defines no identity_client(). It is the one place a client that answers a NIP-42 challenge is built; without it the inbox reads and auth-required retries have no constructor this check can hold."
+  else
+    if ! grep -qE 'fn identity_client\(signer:Arc<Nip42Signer>,' <<<"${identity}"; then
+      lfail "(11) identity_client()'s first parameter is no longer \`signer: Arc<Nip42Signer>\`. The signer type is the scope: Nip42Signer signs a kind-22242 answer under the identity key and refuses everything else, while \`Keys\` or any other NostrSigner would let the pool — and whatever reaches the client — sign anything."
+    fi
+    if [[ "${identity}" != *".admit_policy(VerifiedEvents)"* ]] \
+      || (( $(grep -o 'admit_policy' <<<"${identity}" | wc -l) != 1 )); then
+      lfail "(11) identity_client() does not install the policy exactly once (\`.admit_policy(VerifiedEvents)\`). An authenticated client reads the account's own inbox; without the policy it acts on a relay's forgery under an id it has seen."
+    fi
+    if (( $(grep -oE "${_SIGNER}" <<<"${identity}" | wc -l) != 1 )) \
+      || ! grep -qE '\.signer\(signer( as Arc<dyn NostrSigner>)?\)' <<<"${identity}"; then
+      lfail "(11) identity_client() must install exactly one signer, its own \`signer\` parameter (\`.signer(signer as Arc<dyn NostrSigner>)\`). Any other signer would answer challenges — and sign whatever the pool or MDK hands it — with a key whose scope this check cannot see."
+    fi
+    if (( $(grep -o 'automatic_authentication(true)' <<<"${identity}" | wc -l) != 1 )); then
+      lfail "(11) identity_client() must switch authentication on exactly once (\`automatic_authentication(true)\`). It is the client the inbox reads and auth-required retries are made on; one that does not answer a challenge is refused by every relay that gates them."
+    fi
+  fi
+  if (( $(grep -oE "${_SIGNER}" <<<"${product}" | wc -l) != 1 )) \
+    || (( $(grep -o 'automatic_authentication(true)' <<<"${product}" | wc -l) != 1 )) \
+    || (( $(grep -o 'automatic_authentication(' <<<"${product}" | wc -l) != $(grep -o 'automatic_authentication(false)' <<<"${product}" | wc -l) + 1 )); then
+    lfail "(11) relay/verified.rs gives a relay client a signer, or switches authentication, outside identity_client(). The file holds exactly one signer and one \`automatic_authentication(true)\`, both in identity_client(); every other switch is the literal \`false\`."
+  fi
+  if [[ "${product}" != *"use super::nip42::Nip42Signer;"* || "${product}" == *"struct Nip42Signer"* ]]; then
+    lfail "(11) relay/verified.rs's Nip42Signer is not relay/nip42.rs's. identity_client() is held by the TYPE it takes; a type of the same name declared or imported from elsewhere carries none of that signer's refusals."
   fi
 
   local policy
@@ -1071,8 +1137,8 @@ check_relay_events_verified() { # <core-src-dir> <ffi-src-dir> <soak-src-dir>
     if [[ "${view}" == *".database()"* ]]; then
       lfail "(11) ${rel} reads a client's database (\`.database()\`). The pool's database is a second source of relay events; Haven reads a relay only through a fetch or a notification of a client verified_client() built."
     fi
-    if grep -qE '(^|[^A-Za-z0-9_])(un)?set_signer([^A-Za-z0-9_]|$)|\.signer(::<|\(|=[^=])|::signer(::<|[^A-Za-z0-9_:]|$)' <<<"${view}"; then
-      lfail "(11) ${rel} gives a relay client a signer (\`set_signer\` / \`.signer(\` / \`::signer(\` / \`.signer =\`). No relay client of Haven's holds a key: with one the pool answers a relay's NIP-42 challenge with it — on the publish client that is the identity key, bound by its signature to a circle's routing id, the device's address and the time — and MDK's relay client signs an unsigned non-445 event it is handed. Events are signed where they are built, never by a client."
+    if grep -qE "${_SIGNER}" <<<"${view}"; then
+      lfail "(11) ${rel} gives a relay client a signer (\`set_signer\` / \`.signer(\` / \`::signer(\` / \`.signer =\`). No relay client of Haven's holds a key but the one relay/verified.rs's identity_client() builds around the NIP-42 signer: with one the pool answers a relay's NIP-42 challenge with it — on the publish client that is the identity key, bound by its signature to a circle's routing id, the device's address and the time — and MDK's relay client signs an unsigned non-445 event it is handed. Events are signed where they are built, never by a client."
     fi
     if (( $(grep -o 'automatic_authentication(' <<<"${view}" | wc -l) != $(grep -o 'automatic_authentication(false)' <<<"${view}" | wc -l) )); then
       lfail "(11) ${rel} sets a relay client's \`automatic_authentication\` to something other than the literal \`false\`. It can be switched on a built client (\`Client::automatic_authentication(&self, enable)\`), and a client that authenticates answers a relay's NIP-42 challenge the day it holds a signer. Every relay client of Haven's is built with \`automatic_authentication(false)\` and none is ever told otherwise."
@@ -1119,6 +1185,118 @@ check_relay_events_verified() { # <core-src-dir> <ffi-src-dir> <soak-src-dir>
 }
 
 # ---------------------------------------------------------------------------
+# 12. The identity's NIP-42 reach stays where the owner put it.
+#
+#     Owner-directed (2026-11-16, matching White Noise): Haven answers a
+#     relay's NIP-42 challenge with the identity key for its own inbox reads,
+#     and for a Welcome or kind-445 resend a relay refused with
+#     `auth-required:` — nowhere else. Check 11 holds the one constructor; this
+#     holds who may reach it. Each piece is one plausible line that every test
+#     of an honest relay passes: a profile lookup on an identity client signs
+#     the user in to a relay the user never chose (and makes
+#     `memberPickerStrangerLookupNote`'s "the request carries no signature"
+#     false), a circle REQ on one binds the identity to the circle's routing
+#     id, and a second construction of the signer is a second copy of the key.
+#
+#     What is pinned, over each file's comment-stripped view:
+#       * `identity_client` is named outside relay/verified.rs only in
+#         IDENTITY_CLIENT_FILES — the per-call connections and the live
+#         session's inbox socket;
+#       * the per-call helpers (`with_identity_relay`,
+#         `send_signed_once_authenticated`) only in IDENTITY_CALL_FILES — their
+#         own module, and the inbox reads and auth-required retries;
+#       * a kind-22242 event (`Kind::Authentication`, `EventBuilder::auth(`, the
+#         number) only in AUTH_EVENT_FILES or inside a top-level
+#         `#[cfg(test)] mod`: the pool builds the answer and the signer checks
+#         it, and nothing else in the product has a reason to make one;
+#       * `Nip42Signer::new(` outside test modules only in circle/manager.rs,
+#         from the session's own keys;
+#       * the profile module and the discovery plane never name the signer,
+#         the constructor, the helpers or the module that holds them.
+#     A name, not a call: a function passed by name reaches the same code. Not
+#     read: `tests/`, and a re-export under another name.
+# ---------------------------------------------------------------------------
+readonly -a IDENTITY_CLIENT_FILES=('relay/identity.rs' 'relay/live_sync/session.rs')
+readonly -a IDENTITY_CALL_FILES=('relay/identity.rs' 'relay/manager.rs' 'relay/fanout.rs')
+# recording_front.rs is compiled only with `test-utils`: the gating front that
+# checks the AUTH frames it is sent.
+readonly -a AUTH_EVENT_FILES=('relay/nip42.rs' 'relay/recording_front.rs')
+readonly _IDENTITY_CLIENT_NAME='(^|[^A-Za-z0-9_])identity_client([^A-Za-z0-9_]|$)'
+readonly _IDENTITY_CALL_NAME='(^|[^A-Za-z0-9_])(with_identity_relay|send_signed_once_authenticated)([^A-Za-z0-9_]|$)'
+readonly _AUTH_EVENT='Kind::Authentication|EventBuilder::auth\(|(^|[^0-9A-Za-z_])22242([^0-9A-Za-z_]|$)'
+readonly _IDENTITY_ANY='(^|[^A-Za-z0-9_])(Nip42Signer|nip42_signer|identity_client|with_identity_relay|send_signed_once_authenticated|IdentityRelay)([^A-Za-z0-9_]|$)|relay::(identity|nip42)([^A-Za-z0-9_]|$)'
+
+# Whether <file> is <core-dir>/<one of the remaining args>.
+_core_file_in() { # <file> <core-dir> <rel>...
+  local file="$1" dir="$2" rel
+  shift 2
+  for rel in "$@"; do
+    [[ "${file}" == "${dir}/${rel}" ]] && return 0
+  done
+  return 1
+}
+
+check_identity_scope() { # <core-src-dir> <ffi-src-dir> <soak-src-dir>
+  local core_dir="$1" ffi_dir="$2" soak_dir="$3"
+  _lf=0
+  local file rel view product
+  while IFS= read -r file; do
+    rel="${file#"${REPO_ROOT}/"}"
+    view="$(code_view "${file}")"
+    if [[ "${file}" == "${soak_dir}/"* ]]; then
+      product="${view}"
+    else
+      product="$(_outside_test_modules "${file}")"
+    fi
+
+    if [[ "${file}" != "${core_dir}/relay/verified.rs" ]] \
+      && grep -qE "${_IDENTITY_CLIENT_NAME}" <<<"${view}" \
+      && ! _core_file_in "${file}" "${core_dir}" "${IDENTITY_CLIENT_FILES[@]}"; then
+      lfail "(12) ${rel} names identity_client. The client that answers a NIP-42 challenge with the identity key is built for the per-call connections (relay/identity.rs) and the live session's inbox socket, and nowhere else: anything else on it is signed in to its relay as the user. Change IDENTITY_CLIENT_FILES only with the owner's decision that needs it."
+    fi
+    if grep -qE "${_IDENTITY_CALL_NAME}" <<<"${view}" \
+      && ! _core_file_in "${file}" "${core_dir}" "${IDENTITY_CALL_FILES[@]}"; then
+      lfail "(12) ${rel} names an identity connection helper (with_identity_relay / send_signed_once_authenticated). They authenticate as the user, and are for the inbox reads and the auth-required retries alone. Change IDENTITY_CALL_FILES only with the owner's decision that needs it."
+    fi
+    if grep -qE "${_AUTH_EVENT}" <<<"${product}" \
+      && ! _core_file_in "${file}" "${core_dir}" "${AUTH_EVENT_FILES[@]}"; then
+      lfail "(12) ${rel} makes a NIP-42 authentication event (Kind::Authentication / EventBuilder::auth( / 22242) outside the signer. The pool builds the answer to a challenge and relay/nip42.rs checks it; product code has no other reason to make one."
+    fi
+    if grep -q 'Nip42Signer::new(' <<<"${product}" \
+      && [[ "${file}" != "${core_dir}/circle/manager.rs" ]]; then
+      lfail "(12) ${rel} builds a Nip42Signer. It is built once, in CircleManager::new from the session's own keys, and handed out as nip42_signer(): a second construction is a second copy of the identity's secret."
+    fi
+    if [[ "${file}" == "${core_dir}/profile/"* || "${file}" == "${core_dir}/relay/discovery.rs" ]] \
+      && grep -qE "${_IDENTITY_ANY}" <<<"${view}"; then
+      lfail "(12) ${rel} reaches the identity's NIP-42 signer or connections. A profile lookup or a discovery read is never signed in: the user-visible promise is that it carries no signature and cannot answer a relay's challenge (memberPickerStrangerLookupNote)."
+    fi
+  done < <(grep -rlE --include='*.rs' 'identity_client|with_identity_relay|send_signed_once_authenticated|Authentication|EventBuilder::auth|22242|Nip42Signer|nip42_signer|IdentityRelay|relay::identity|relay::nip42' "${core_dir}" "${ffi_dir}" "${soak_dir}" 2>/dev/null | sort)
+
+  # The per-call connection's one relay: the publish pool's options (no
+  # reconnect, no ping), one direction dropped. A reconnecting identity socket
+  # re-authenticates for as long as its task lives; a write connection that
+  # keeps READ can carry a REQ.
+  local identity_rs="${core_dir}/relay/identity.rs" options statement override
+  if [[ -f "${identity_rs}" ]]; then
+    options="$(fn_body_flat 'identity_relay_options' "${identity_rs}" | _tight)"
+    if [[ "${options}" != *"publish_relay_options()"* || "${options}" != *"IdentityUse::Write=>options.read(false)"* ]]; then
+      lfail "(12) relay/identity.rs registers its relay with options other than the publish pool's for one direction (fn identity_relay_options: \`publish_relay_options()\`, and \`.read(false)\` for a write). A reconnecting identity socket keeps re-authenticating as the user; a write connection that keeps READ can carry a REQ."
+    fi
+    for override in '.reconnect(' '.ping(' '.flags(' '.sleep_when_idle('; do
+      if [[ "${options}" == *"${override}"* ]]; then
+        lfail "(12) relay/identity.rs registers its relay with options other than the publish pool's for one direction: identity_relay_options() overrides \`${override}\`."
+      fi
+    done
+    while IFS= read -r statement; do
+      if [[ "${statement}" != *"identity_relay_options("* ]] || grep -qE '\.(reconnect|ping|flags|read|write|sleep_when_idle)\(' <<<"${statement}"; then
+        lfail "(12) relay/identity.rs registers its relay with options other than the publish pool's for one direction: an \`.add_relay(\` does not pass identity_relay_options() as it is."
+      fi
+    done < <(code_view "${identity_rs}" | _tight | grep -oE '\.add_relay\([^;]*;')
+  fi
+  return "$_lf"
+}
+
+# ---------------------------------------------------------------------------
 # THE REGISTRY. One list, driven by BOTH the production run and `--self-test`.
 #
 # It used to be two: the production block enumerated the checks, and the
@@ -1141,6 +1319,7 @@ run_all_checks() { # <core-src-dir> <ffi-src-dir> <manager.rs> <session.rs> <api
   check_ffi_core_delegations "${api}" || rc=1
   check_ffi_sync_reads_cannot_panic "${api}" || rc=1
   check_relay_events_verified "${core_dir}" "${ffi_dir}" "${soak_dir}" || rc=1
+  check_identity_scope "${core_dir}" "${ffi_dir}" "${soak_dir}" || rc=1
   return "${rc}"
 }
 
@@ -1171,7 +1350,7 @@ fi
 # hide under the slack.
 # ---------------------------------------------------------------------------
 self_test() {
-  local -r SELF_TEST_FIXTURES=103
+  local -r SELF_TEST_FIXTURES=132
   local tmp fails=0 checked=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -1183,14 +1362,18 @@ self_test() {
   local verified="${core}/relay/verified.rs"
   local api="${ffi}/api.rs"
   local doubles="${soak}/rig/doubles.rs"
+  local identity_rs="${core}/relay/identity.rs"
+  local blossom="${core}/profile/blossom.rs"
 
   _clean_tree() {
     rm -rf "${core}" "${ffi}" "${soak}"
-    mkdir -p "${core}/relay/live_sync" "${core}/profile" "${ffi}" "${soak}/rig" "${soak}/scenarios"
+    mkdir -p "${core}/relay/live_sync" "${core}/profile" "${core}/circle" "${ffi}" "${soak}/rig" "${soak}/scenarios"
 
     cat >"${verified}" <<'RS'
 //! A comment naming Client::builder() and verify_signature() constructs and
 //! checks nothing.
+use super::nip42::Nip42Signer;
+
 #[derive(Debug)]
 struct VerifiedEvents;
 
@@ -1212,7 +1395,23 @@ impl AdmitPolicy for VerifiedEvents {
 }
 
 pub fn verified_client(opts: ClientOptions, monitor: Option<Monitor>) -> Client {
-    let builder = Client::builder().opts(opts).admit_policy(VerifiedEvents);
+    let builder = Client::builder().opts(opts.automatic_authentication(false)).admit_policy(VerifiedEvents);
+    match monitor {
+        Some(monitor) => builder.monitor(monitor),
+        None => builder,
+    }
+    .build()
+}
+
+pub fn identity_client(
+    signer: Arc<Nip42Signer>,
+    opts: ClientOptions,
+    monitor: Option<Monitor>,
+) -> Client {
+    let builder = Client::builder()
+        .signer(signer as Arc<dyn NostrSigner>)
+        .opts(opts.automatic_authentication(true))
+        .admit_policy(VerifiedEvents);
     match monitor {
         Some(monitor) => builder.monitor(monitor),
         None => builder,
@@ -1229,12 +1428,57 @@ mod tests {
 }
 RS
 
+    cat >"${identity_rs}" <<'RS'
+fn identity_relay_options(direction: IdentityUse) -> RelayOptions {
+    let options = publish_relay_options();
+    match direction {
+        IdentityUse::Write => options.read(false),
+        IdentityUse::Read => options.write(false),
+    }
+}
+
+pub async fn with_identity_relay(signer: Arc<Nip42Signer>, url: &RelayUrl, direction: IdentityUse) {
+    let client = identity_client(signer, ClientOptions::default(), None);
+    let _ = client
+        .pool()
+        .add_relay(url.as_str(), identity_relay_options(direction))
+        .await;
+    client.shutdown().await;
+}
+RS
+
+    cat >"${core}/relay/nip42.rs" <<'RS'
+pub struct Nip42Signer {
+    public_key: PublicKey,
+}
+
+impl Nip42Signer {
+    fn answers(&self, unsigned: &UnsignedEvent) -> bool {
+        unsigned.kind == Kind::Authentication
+    }
+}
+RS
+
+    cat >"${core}/circle/manager.rs" <<'RS'
+impl CircleManager {
+    pub fn new(keys: &Keys) -> Self {
+        Self { nip42_signer: Arc::new(Nip42Signer::new(keys)) }
+    }
+
+    pub fn nip42_signer(&self) -> Arc<Nip42Signer> {
+        Arc::clone(&self.nip42_signer)
+    }
+}
+RS
+
     # The Blossom HTTP client and an in-process test relay: neither is a relay
     # client, and both spell a token the scan looks for.
     cat >"${core}/profile/blossom.rs" <<'RS'
 fn http() -> reqwest::Client {
     reqwest::Client::builder().build().unwrap_or_default()
 }
+
+// A profile lookup is never signed in: no identity_client, no Nip42Signer.
 
 #[cfg(test)]
 mod tests {
@@ -1307,6 +1551,10 @@ impl RelayManager {
         }
     }
 
+    async fn retry(&self, signer: Arc<Nip42Signer>, url: &RelayUrl, event: &Event) -> AuthSendOutcome {
+        send_signed_once_authenticated(signer, url, event, LOCATION_ACK_WINDOW).await
+    }
+
     async fn read_one_relays_answer(relay: &Relay, filter: Filter) {
         let opts = SubscribeOptions::default().close_on(Some(
             SubscribeAutoCloseOptions::default().exit_policy(ReqExitPolicy::ExitOnEOSE),
@@ -1337,6 +1585,10 @@ mod tests {
 RS
 
     cat >"${session}" <<'RS'
+fn build_inbox_client(signer: Arc<Nip42Signer>) -> Client {
+    identity_client(signer, ClientOptions::default(), Some(Monitor::new(64)))
+}
+
 fn build_engine_client() -> Client {
     let client_opts = ClientOptions::default()
         .verify_subscriptions(false)
@@ -1450,6 +1702,22 @@ impl LiveSyncFfi {
         match core {
             Some(core) => core
                 .resume_after_background()
+                .await
+                .map_err(|e| e.to_string()),
+            None => Err("no active live-sync session".to_string()),
+        }
+    }
+
+    /// Re-dials every live socket after the default network changed.
+    pub async fn reconnect_after_network_change(&self) -> Result<(), String> {
+        let core = SESSION
+            .read()
+            .map_err(|_| "session lock poisoned".to_string())?
+            .as_ref()
+            .map(Arc::clone);
+        match core {
+            Some(core) => core
+                .reconnect_after_network_change()
                 .await
                 .map_err(|e| e.to_string()),
             None => Err("no active live-sync session".to_string()),
@@ -1780,6 +2048,13 @@ RS
     '(9) api.rs: resume_after_background() forwards to the BURST' \
     _sed 's|            .resume_after_background()|            .open_background_burst()|' "${api}"
 
+  # 23b. The network change collapsed onto the re-anchor: it compiles, the app
+  #      keeps receiving once the pool's ping notices the dead sockets, and up
+  #      to two ping intervals after every change go silent.
+  _fixture 'the network change forwarding to the re-anchor fails' 1 \
+    '(9) api.rs: reconnect_after_network_change() does not forward' \
+    _sed 's|            .reconnect_after_network_change()|            .resume_after_background()|' "${api}"
+
   # 24. The guarded bypass — the mutation that beat check 9 while it was a
   #     substring test. The required call is still THERE and is now dead code:
   #     every burst opens from `Paused`, so `is_paused()` holds at 100% of burst
@@ -1906,12 +2181,12 @@ RS
   _fixture 'a missing verified.rs fails' 1 '(11) relay/verified.rs is gone' \
     rm "${verified}"
 
-  _fixture 'a second construction beside the constructor fails' 1 '(11) relay/verified.rs must hold exactly one client construction' \
+  _fixture 'a second construction beside the constructor fails' 1 '(11) relay/verified.rs must hold exactly two client constructions' \
     _sed 's/^#\[cfg(test)\]/pub fn plain_client() -> Client { Client::builder().build() }\n\n#[cfg(test)]/' "${verified}"
 
   # 53b. ...and below the test module, where a view that stops at the first
   #      `#[cfg(test)]` never looks.
-  _fixture 'a second construction below the test module fails' 1 '(11) relay/verified.rs must hold exactly one client construction' \
+  _fixture 'a second construction below the test module fails' 1 '(11) relay/verified.rs must hold exactly two client constructions' \
     _append "${verified}" 'pub fn plain_client() -> Client { Client::builder().build() }'
 
   # 54-59. A client built somewhere else, in each crate and each spelling.
@@ -2103,6 +2378,96 @@ fn styled(d: &Design) -> Look { d.designer().look() }'
 
   _fixture 'a comment naming NostrSdkRelayClient in another file still passes' 0 '' \
     _append "${session}" '// MDK'"'"'s NostrSdkRelayClient::new(client) is handed a client in manager.rs.'
+
+  # The one authenticating constructor (owner-directed, 2026-11-16) and the
+  # anonymous one beside it: each held to its own shape.
+  _fixture 'a signer in verified_client fails' 1 '(11) verified_client() holds a signer' \
+    _sed 's/Client::builder().opts(opts.automatic_authentication(false))/Client::builder().signer(keys).opts(opts.automatic_authentication(false))/' "${verified}"
+
+  _fixture 'verified_client switched to authenticate fails' 1 '(11) verified_client() holds a signer or does not switch authentication off' \
+    _sed 's/opts.automatic_authentication(false)/opts.automatic_authentication(true)/' "${verified}"
+
+  _fixture 'Keys as identity_client'"'"'s parameter fails' 1 '(11) identity_client()'"'"'s first parameter is no longer' \
+    _sed 's/^    signer: Arc<Nip42Signer>,$/    signer: Keys,/' "${verified}"
+
+  _fixture 'identity_client without the policy fails' 1 '(11) identity_client() does not install the policy exactly once' \
+    _sed 's/^        \.admit_policy(VerifiedEvents);$/        ;/' "${verified}"
+
+  _fixture 'a gossip store on the identity client fails' 1 '(11) relay/verified.rs disarms the policy (`gossip`)' \
+    _sed 's/^        \.admit_policy(VerifiedEvents);$/        .admit_policy(VerifiedEvents)\n        .gossip(NostrGossipMemory::unbounded());/' "${verified}"
+
+  _fixture 'an identity_client that never authenticates fails' 1 '(11) identity_client() must switch authentication on exactly once' \
+    _sed 's/opts.automatic_authentication(true)/opts.automatic_authentication(false)/' "${verified}"
+
+  _fixture 'identity_client installing some other signer fails' 1 '(11) identity_client() must install exactly one signer' \
+    _sed 's/\.signer(signer as Arc<dyn NostrSigner>)/.signer(Keys::generate())/' "${verified}"
+
+  _fixture 'a second signer on the identity client fails' 1 '(11) identity_client() must install exactly one signer' \
+    _sed 's/\.signer(signer as Arc<dyn NostrSigner>)/.signer(signer as Arc<dyn NostrSigner>).signer(keys)/' "${verified}"
+
+  _fixture 'a Nip42Signer declared in verified.rs fails' 1 '(11) relay/verified.rs'"'"'s Nip42Signer is not relay/nip42.rs'"'"'s' \
+    _append "${verified}" 'pub struct Nip42Signer(Keys);'
+
+  _fixture 'a missing identity_client fails' 1 '(11) relay/verified.rs defines no identity_client()' \
+    _sed 's/^pub fn identity_client(/pub fn other_client(/' "${verified}"
+
+  _fixture 'a signer set outside identity_client in verified.rs fails' 1 '(11) relay/verified.rs gives a relay client a signer, or switches authentication, outside identity_client()' \
+    _append "${verified}" 'pub async fn arm(c: &Client, keys: Keys) { c.set_signer(keys).await }'
+
+  # 12. Who may reach the identity's NIP-42 answer.
+  _fixture 'identity_client named in the FFI crate fails' 1 'api.rs names identity_client' \
+    _append "${api}" 'fn inbox(s: Arc<Nip42Signer>) -> Client { identity_client(s, ClientOptions::default(), None) }'
+
+  _fixture 'identity_client named in the profile module fails' 1 'blossom.rs names identity_client' \
+    _append "${blossom}" 'fn lookup(s: Arc<Nip42Signer>) -> Client { identity_client(s, ClientOptions::default(), None) }'
+
+  _fixture 'with_identity_relay named in session.rs fails' 1 'session.rs names an identity connection helper' \
+    _append "${session}" 'async fn read(s: Arc<Nip42Signer>, u: &RelayUrl) { with_identity_relay(s, u, IdentityUse::Read).await }'
+
+  _fixture 'a helper passed by name from the FFI crate fails' 1 'api.rs names an identity connection helper' \
+    _append "${api}" 'fn sender() -> impl Fn() { send_signed_once_authenticated }'
+
+  _fixture 'an AUTH event built in manager.rs product code fails' 1 'manager.rs makes a NIP-42 authentication event' \
+    _append "${manager}" 'fn answer(c: &str, r: RelayUrl) -> EventBuilder { EventBuilder::auth(c, r) }'
+
+  _fixture 'the number 22242 in session.rs fails' 1 'session.rs makes a NIP-42 authentication event' \
+    _append "${session}" 'const AUTH: u16 = 22242;'
+
+  _fixture 'Kind::Authentication in the soak rig fails' 1 'doubles.rs makes a NIP-42 authentication event' \
+    _append "${doubles}" 'fn auth() -> Kind { Kind::Authentication }'
+
+  _fixture 'Kind::Authentication in a test module still passes' 0 '' \
+    _append "${manager}" '#[cfg(test)]
+mod auth_tests {
+    fn kind() -> Kind { Kind::Authentication }
+}'
+
+  _fixture 'a longer number containing 22242 still passes' 0 '' \
+    _append "${session}" 'const BIG: u32 = 222420;'
+
+  _fixture 'a second Nip42Signer::new fails' 1 'api.rs builds a Nip42Signer' \
+    _append "${api}" 'fn signer(keys: &Keys) -> Nip42Signer { Nip42Signer::new(keys) }'
+
+  _fixture 'the NIP-42 signer named in discovery fails' 1 'discovery.rs reaches the identity' \
+    _append "${core}/relay/discovery.rs" 'fn lookup(signer: Arc<Nip42Signer>) {}'
+
+  _fixture 'nip42_signer named in the profile module fails' 1 'blossom.rs reaches the identity' \
+    _append "${blossom}" 'fn sign(c: &CircleManager) { let _ = c.nip42_signer(); }'
+
+  _fixture 'a comment naming identity_client elsewhere still passes' 0 '' \
+    _append "${api}" '// Never identity_client(…) or with_identity_relay(…) here.'
+
+  _fixture 'an identity relay that reconnects fails' 1 'relay/identity.rs registers its relay with options other than' \
+    _sed 's/let options = publish_relay_options();/let options = publish_relay_options().reconnect(true);/' "${identity_rs}"
+
+  _fixture 'a write identity relay that keeps READ fails' 1 'relay/identity.rs registers its relay with options other than' \
+    _sed 's/IdentityUse::Write => options.read(false),/IdentityUse::Write => options,/' "${identity_rs}"
+
+  _fixture 'an identity relay registered without the identity options fails' 1 'relay/identity.rs registers its relay with options other than' \
+    _sed 's/identity_relay_options(direction))/RelayOptions::default())/' "${identity_rs}"
+
+  _fixture 'an identity registration that adds a flag back fails' 1 'relay/identity.rs registers its relay with options other than' \
+    _sed 's/identity_relay_options(direction))/identity_relay_options(direction).read(true))/' "${identity_rs}"
 
   # 72-73. Anti-vacuity: what must NOT fail. The clean tree already carries the
   #        Blossom `reqwest::Client::builder()`, an in-process `LocalRelay::new`,

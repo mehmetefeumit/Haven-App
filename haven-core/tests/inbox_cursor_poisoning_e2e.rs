@@ -249,7 +249,7 @@ async fn a_future_dated_gift_wrap_never_pushes_the_inbox_cursor_past_the_local_c
     let dir = TempDir::new().unwrap();
     let keys = Keys::generate();
     let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &keys).unwrap());
-    let own = Keys::generate().public_key();
+    let own = keys.public_key();
 
     // A year ahead: far enough that no clock-skew tolerance anywhere could
     // excuse it, and far enough that `cursor - 7d` is still in the future.
@@ -259,7 +259,6 @@ async fn a_future_dated_gift_wrap_never_pushes_the_inbox_cursor_past_the_local_c
     let opened_at = now_secs();
     let engine = LiveSyncCore::new_local(
         Arc::clone(&circle),
-        own,
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     // Subscribe BEFORE start so the stored replay cannot be missed.
@@ -360,11 +359,10 @@ async fn a_live_gift_wrap_after_eose_moves_the_inbox_cursor_nowhere() {
     let dir = TempDir::new().unwrap();
     let keys = Keys::generate();
     let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &keys).unwrap());
-    let own = Keys::generate().public_key();
+    let own = keys.public_key();
 
     let engine = LiveSyncCore::new_local(
         Arc::clone(&circle),
-        own,
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     engine
@@ -421,13 +419,12 @@ async fn the_anchored_inbox_cursor_survives_a_restart() {
     let dir = TempDir::new().unwrap();
     let keys = Keys::generate();
     let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &keys).unwrap());
-    let own = Keys::generate().public_key();
+    let own = keys.public_key();
 
     publish(&url, &routed_giftwrap_at(own, now_secs() + 365 * 86_400)).await;
 
     let engine1 = LiveSyncCore::new_local(
         Arc::clone(&circle),
-        own,
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     engine1
@@ -473,7 +470,6 @@ async fn the_anchored_inbox_cursor_survives_a_restart() {
 
     let engine2 = LiveSyncCore::new_local(
         Arc::clone(&reopened),
-        own,
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     engine2
@@ -516,7 +512,6 @@ async fn a_cursor_poisoned_by_a_pre_fix_build_is_repaired_on_the_next_start() {
     let dir = TempDir::new().unwrap();
     let keys = Keys::generate();
     let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &keys).unwrap());
-    let own = Keys::generate().public_key();
 
     // Exactly what the pre-fix path wrote: the wrap's outer `created_at`, in ms,
     // unclamped. A year ahead.
@@ -543,7 +538,6 @@ async fn a_cursor_poisoned_by_a_pre_fix_build_is_repaired_on_the_next_start() {
 
     let engine = LiveSyncCore::new_local(
         Arc::clone(&circle),
-        own,
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     engine
@@ -602,7 +596,6 @@ async fn a_session_start_never_lowers_a_healthy_inbox_cursor() {
     let dir = TempDir::new().unwrap();
     let keys = Keys::generate();
     let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &keys).unwrap());
-    let own = Keys::generate().public_key();
 
     // A perfectly ordinary cursor: an hour old, comfortably below the clock.
     let healthy_ms = (now_secs() - 3600) * 1000;
@@ -612,7 +605,6 @@ async fn a_session_start_never_lowers_a_healthy_inbox_cursor() {
 
     let engine = LiveSyncCore::new_local(
         Arc::clone(&circle),
-        own,
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     engine
@@ -759,7 +751,6 @@ impl InboxRelay {
 /// read.
 async fn engine_anchored_on(
     circle: &Arc<CircleManager>,
-    own: PublicKey,
     relays: &[String],
     planted_cursor_secs: i64,
 ) -> (LiveSyncCore, i64) {
@@ -770,7 +761,6 @@ async fn engine_anchored_on(
 
     let engine = LiveSyncCore::new_local(
         Arc::clone(circle),
-        own,
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     engine.start(&[], relays).await.expect("start session");
@@ -805,11 +795,10 @@ async fn a_resubscribe_asks_for_two_days_plus_an_hour_never_seven() {
     let dir = TempDir::new().unwrap();
     let keys = Keys::generate();
     let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &keys).unwrap());
-    let own = Keys::generate().public_key();
 
     let planted_secs = now_secs() - 600;
     let (engine, anchored_ms) =
-        engine_anchored_on(&circle, own, std::slice::from_ref(&relay.url), planted_secs).await;
+        engine_anchored_on(&circle, std::slice::from_ref(&relay.url), planted_secs).await;
 
     engine
         .resume_after_background(Claim::Foreground)
@@ -869,7 +858,6 @@ async fn a_first_ever_start_with_no_cursor_asks_for_seven_days() {
     let dir = TempDir::new().unwrap();
     let keys = Keys::generate();
     let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &keys).unwrap());
-    let own = Keys::generate().public_key();
     assert_eq!(
         circle.read_sync_cursor(STREAM_INBOX_1059).unwrap(),
         None,
@@ -880,7 +868,6 @@ async fn a_first_ever_start_with_no_cursor_asks_for_seven_days() {
     let before = now_secs();
     let engine = LiveSyncCore::new_local(
         Arc::clone(&circle),
-        own,
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     engine
@@ -937,7 +924,6 @@ async fn a_start_cut_before_its_inbox_end_leaves_the_next_start_seven_days() {
     let dir = TempDir::new().unwrap();
     let keys = Keys::generate();
     let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &keys).unwrap());
-    let own = Keys::generate().public_key();
     let asked = |count: usize| {
         let floors = Arc::clone(&floors);
         let heard = Arc::clone(&heard);
@@ -956,15 +942,16 @@ async fn a_start_cut_before_its_inbox_end_leaves_the_next_start_seven_days() {
         }
     };
 
+    let first_before = now_secs();
     let first = LiveSyncCore::new_local(
         Arc::clone(&circle),
-        own,
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     first
         .start(&[], std::slice::from_ref(&url))
         .await
         .expect("start session 1");
+    let first_after = now_secs();
     assert_eq!(asked(1).await.len(), 1, "premise: the inbox was asked for");
     assert_ne!(
         first.stop().await,
@@ -972,10 +959,8 @@ async fn a_start_cut_before_its_inbox_end_leaves_the_next_start_seven_days() {
         "session 1 drains"
     );
 
-    let before = now_secs();
     let second = LiveSyncCore::new_local(
         Arc::clone(&circle),
-        own,
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     second
@@ -983,17 +968,27 @@ async fn a_start_cut_before_its_inbox_end_leaves_the_next_start_seven_days() {
         .await
         .expect("start session 2");
     let after = now_secs();
-    let floor = asked(2)
-        .await
-        .get(1)
-        .copied()
-        .flatten()
-        .and_then(|since| i64::try_from(since).ok())
-        .expect("the second start put a since on the wire");
+    let sinces = asked(2).await;
+    let since_of = |at: usize| {
+        sinces
+            .get(at)
+            .copied()
+            .flatten()
+            .and_then(|since| i64::try_from(since).ok())
+            .expect("each start put a since on the wire")
+    };
+    let (first_since, floor) = (since_of(0), since_of(1));
     assert!(
-        (before - 604_800..=after - 604_800).contains(&floor),
+        (first_before - 604_800..=first_after - 604_800).contains(&first_since),
+        "premise: the first start asked the cold-start seven days: {first_since}",
+    );
+    // The relay never ended the first REQ, so it still owes the inbox from
+    // where that REQ asked (Security Rule 12): never less than seven days
+    // back, and exactly where the first start asked.
+    assert!(
+        floor <= after - 604_800 && floor == first_since,
         "a start after one cut before its inbox end of stored events asked for less than \
-         the cold-start seven days: {floor}",
+         the cold-start seven days, or not from where the relay still owes: {floor}",
     );
     let _ = second.stop().await;
 }
@@ -1015,15 +1010,9 @@ async fn a_restart_on_a_known_cursor_asks_for_forty_nine_hours_not_seven_days() 
     let dir = TempDir::new().unwrap();
     let keys = Keys::generate();
     let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &keys).unwrap());
-    let own = Keys::generate().public_key();
 
-    let (engine1, _) = engine_anchored_on(
-        &circle,
-        own,
-        std::slice::from_ref(&relay.url),
-        now_secs() - 600,
-    )
-    .await;
+    let (engine1, _) =
+        engine_anchored_on(&circle, std::slice::from_ref(&relay.url), now_secs() - 600).await;
 
     // Rule 14 (single live session per MLS DB): session 1's supervisor tasks
     // must be joined before a second core runs against the same store.
@@ -1040,7 +1029,6 @@ async fn a_restart_on_a_known_cursor_asks_for_forty_nine_hours_not_seven_days() 
 
     let engine2 = LiveSyncCore::new_local(
         Arc::clone(&circle),
-        own,
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     engine2
@@ -1093,15 +1081,10 @@ async fn a_wrap_backdated_forty_eight_hours_published_after_the_last_open_is_sti
     let dir = TempDir::new().unwrap();
     let keys = Keys::generate();
     let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &keys).unwrap());
-    let own = Keys::generate().public_key();
+    let own = keys.public_key();
 
-    let (engine, anchored_ms) = engine_anchored_on(
-        &circle,
-        own,
-        std::slice::from_ref(&relay.url),
-        now_secs() - 600,
-    )
-    .await;
+    let (engine, anchored_ms) =
+        engine_anchored_on(&circle, std::slice::from_ref(&relay.url), now_secs() - 600).await;
     let anchored_secs = anchored_ms.div_euclid(1000);
 
     let accurate_clock = routed_giftwrap_at(own, anchored_secs - max_nip59_backdate_secs());
@@ -1169,10 +1152,10 @@ async fn a_wrap_only_the_slow_inbox_relay_holds_is_fetched_within_the_lookback()
     let dir = TempDir::new().unwrap();
     let keys = Keys::generate();
     let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &keys).unwrap());
-    let own = Keys::generate().public_key();
+    let own = keys.public_key();
 
     let relays = vec![answering.url.clone(), lagging.url.clone()];
-    let (engine, anchored_ms) = engine_anchored_on(&circle, own, &relays, now_secs() - 600).await;
+    let (engine, anchored_ms) = engine_anchored_on(&circle, &relays, now_secs() - 600).await;
     let anchored_secs = anchored_ms.div_euclid(1000);
 
     let wrap = routed_giftwrap_at(own, anchored_secs - max_nip59_backdate_secs());

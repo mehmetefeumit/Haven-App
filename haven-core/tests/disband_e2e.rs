@@ -83,11 +83,7 @@ async fn a_crash_after_disband_before_projection_still_stops_routing_on_next_ope
         Some(admin.pubkey_hex()),
         "the notice cannot name who disbanded the circle",
     );
-    let core = LiveSyncCore::new_local(
-        Arc::clone(&member.circle),
-        member.keys.public_key(),
-        Arc::new(RelayManager::new()),
-    );
+    let core = LiveSyncCore::new_local(Arc::clone(&member.circle), Arc::new(RelayManager::new()));
     core.start(
         &[CircleSpec {
             group_id_hex: hex::encode(ngid(&member, &group).await),
@@ -180,11 +176,7 @@ async fn inbound_disband_stops_send_and_receive_for_that_circle_only() {
         "the other circle's sends stopped"
     );
     assert_eq!(state_of(&member, &other).await, CircleEngineState::Live);
-    let core = LiveSyncCore::new_local(
-        Arc::clone(&member.circle),
-        member.keys.public_key(),
-        Arc::new(RelayManager::new()),
-    );
+    let core = LiveSyncCore::new_local(Arc::clone(&member.circle), Arc::new(RelayManager::new()));
     core.start(
         &[
             CircleSpec {

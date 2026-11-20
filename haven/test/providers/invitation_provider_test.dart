@@ -2,11 +2,13 @@
 ///
 /// Verifies that:
 /// - pendingInvitationsProvider loads invitations correctly
-/// - pendingInvitationsProvider handles errors gracefully
+/// - pendingInvitationsProvider reports a failed read as an error, never as
+///   an empty list
 /// - invitationPollerProvider processes gift wraps correctly
 /// - invitationPollerProvider handles errors and invalidates providers
 library;
 
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:haven/src/rust/api.dart';
@@ -76,46 +78,46 @@ void main() {
       expect(invitations, isEmpty);
     });
 
-    test(
-      'returns empty list when service throws CircleServiceException',
-      () async {
-        final mockService = _ThrowingCircleServiceInvitations(
-          exception: const CircleServiceException('Storage error'),
-        );
-        final container = ProviderContainer(
-          overrides: [circleServiceProvider.overrideWithValue(mockService)],
-        );
-        addTearDown(container.dispose);
+    test('a CircleServiceException is an error, not an empty list', () async {
+      final mockService = _ThrowingCircleServiceInvitations(
+        exception: const CircleServiceException('Storage error'),
+      );
+      final container = ProviderContainer(
+        overrides: [circleServiceProvider.overrideWithValue(mockService)],
+      );
+      addTearDown(container.dispose);
 
-        // Should not throw - returns empty list instead
-        final invitations = await container.read(
-          pendingInvitationsProvider.future,
-        );
+      // "No invitations" would be a claim the failed read never made.
+      await expectLater(
+        container.read(pendingInvitationsProvider.future),
+        throwsA(isA<CircleServiceException>()),
+      );
+      expect(container.read(pendingInvitationsProvider).hasError, isTrue);
+    });
 
-        expect(invitations, isEmpty);
-      },
-    );
+    test('an FFI Error is a typed error with fixed text, and nothing it '
+        'carried reaches the log', () async {
+      final capture = LogCapture.install();
+      final mockService = _ThrowingCircleServiceInvitations(
+        error: StateError('FFI error at wss://planted.example ${'ab' * 32}'),
+      );
+      final container = ProviderContainer(
+        overrides: [circleServiceProvider.overrideWithValue(mockService)],
+      );
+      addTearDown(container.dispose);
 
-    test(
-      'returns empty list when service throws generic Error (FFI)',
-      () async {
-        final mockService = _ThrowingCircleServiceInvitations(
-          error: StateError('FFI error: Storage Error'),
-        );
-        final container = ProviderContainer(
-          overrides: [circleServiceProvider.overrideWithValue(mockService)],
-        );
-        addTearDown(container.dispose);
-
-        // Should not throw - returns empty list instead
-        // This tests that catch handles non-Exception throwables
-        final invitations = await container.read(
-          pendingInvitationsProvider.future,
-        );
-
-        expect(invitations, isEmpty);
-      },
-    );
+      await expectLater(
+        container.read(pendingInvitationsProvider.future),
+        throwsA(
+          isA<CircleServiceException>().having(
+            (e) => e.message,
+            'message',
+            'Failed to load invitations',
+          ),
+        ),
+      );
+      capture.assertNoNeedles(['wss://planted.example', 'ab' * 32]);
+    });
   });
 
   group('invitationPollerProvider', () {
@@ -139,11 +141,12 @@ void main() {
       expect(newCount, 0);
     });
 
-    test('looks back 96 h: a wrap re-sent a day after its hand-over and '
+    test("looks back the engine's inbox lookback: a Welcome held 72 h and "
         'backdated two days is still asked for', () async {
-      // NIP-59 backdates a wrap's `created_at` up to two days, and a Welcome
-      // is re-sent, byte for byte, for up to a day after its hand-over. 96 h
-      // is Rust's `INBOX_RESUBSCRIBE_LOOKBACK_SECS`.
+      // NIP-59 backdates a wrap's `created_at` up to two days, and an
+      // unanswered invitation is held for 72 h; the window is Rust's
+      // `INBOX_GIFTWRAP_LOOKBACK_SECS` (the bridge is not loaded here, so the
+      // getter answers its mirror, held equal below).
       final relay = _MockRelayService();
       final container = ProviderContainer(
         overrides: [
@@ -162,9 +165,24 @@ void main() {
 
       expect(
         relay.lastFetchSince,
-        _now.subtract(const Duration(hours: 96)),
+        _now.subtract(const Duration(days: 7)),
         reason: 'a narrower window never fetches a wrap backdated past it, and '
             "a wider one asks for more than the engine's own inbox lookback",
+      );
+      expect(inboxGiftWrapLookback, fallbackInboxGiftWrapLookback);
+    });
+
+    test("the lookback's fallback mirrors INBOX_GIFTWRAP_LOOKBACK_SECS", () {
+      final match = RegExp(
+        r'pub const INBOX_GIFTWRAP_LOOKBACK_SECS: i64 = ([\d_]+);',
+      ).firstMatch(
+        File('../haven-core/src/relay/cursor.rs').readAsStringSync(),
+      );
+      expect(match, isNotNull, reason: 'the Rust constant moved or changed');
+      expect(
+        Duration(seconds: int.parse(match!.group(1)!.replaceAll('_', ''))),
+        fallbackInboxGiftWrapLookback,
+        reason: 'a unit test would assert a window the app never asks for',
       );
     });
 
@@ -904,6 +922,7 @@ class _MockRelayService implements RelayService {
   Future<RelayListMaintenanceResult> maintainRelayList({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,
+    required bool foreground,
   }) async => const RelayListMaintenanceResult.failed();
 
   @override
@@ -928,7 +947,6 @@ class _MockRelayService implements RelayService {
 
   @override
   Future<List<String>> fetchGiftWraps({
-    required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
   }) async {
@@ -942,7 +960,6 @@ class _MockRelayService implements RelayService {
 
   @override
   Future<List<RelayGiftWrapFetch>> fetchGiftWrapsPerRelay({
-    required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
   }) async => [];

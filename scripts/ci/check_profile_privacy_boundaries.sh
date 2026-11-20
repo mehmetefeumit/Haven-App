@@ -1757,7 +1757,7 @@ fi
 # ---------------------------------------------------------------------------
 # Check 13: the Dart fallback relay lists MUST mirror their Rust constants.
 #
-# `haven/lib/src/constants/relays.dart` carries three compile-time lists whose
+# `haven/lib/src/constants/relays.dart` carries four compile-time lists whose
 # doc comments claim they "MUST agree" with a Rust constant. Nothing enforced
 # that, so the claim read like a checked invariant while drift was free. It
 # matters most for `fallbackDefaultProfileRelays`: the profile plane
@@ -1820,6 +1820,13 @@ check_relay_mirror \
   'const fallbackDefaultRelays' \
   "${REPO_ROOT}/haven-core/src/circle/types.rs" \
   'pub const PRODUCTION_DEFAULT_RELAYS'
+# `InboxRelaysNotifier` falls back to this list on a failed seed; a drifted
+# entry could point the invitation poll at a relay that gates gift-wrap reads.
+check_relay_mirror \
+  "fallbackDefaultInboxRelays" \
+  'const fallbackDefaultInboxRelays' \
+  "${REPO_ROOT}/haven-core/src/circle/types.rs" \
+  'pub const PRODUCTION_INBOX_RELAYS'
 
 # ---------------------------------------------------------------------------
 # Check 14: the pool may only ship VETTED, and retired relays stay retired.

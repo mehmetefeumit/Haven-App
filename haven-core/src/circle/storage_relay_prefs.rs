@@ -45,7 +45,7 @@ use super::location_pool::relay_authority;
 use super::relay_prefs::RelayType;
 use super::storage::CircleStorage;
 use super::storage_contamination::record_relay_category_on;
-use super::types::default_relays;
+use super::types::{default_inbox_relays, default_relays};
 
 /// Sentinel key in `user_settings` that records whether seeding of the
 /// **account-seed categories** ([`RelayType::Inbox`], [`RelayType::KeyPackage`])
@@ -79,6 +79,23 @@ pub const SEEDED_KEY: &str = "relay_prefs_seeded_v1";
 /// upgrade cannot touch rows belonging to a group whose sentinel is already
 /// set. That property holds structurally rather than by careful coding.
 pub const PROFILE_SEEDED_KEY: &str = "relay_prefs_profile_seeded_v1";
+
+/// Sentinel key in `user_settings` recording that
+/// [`CircleStorage::retire_gated_inbox_seed`] has run: once, whatever it found,
+/// so a user who adds the retired relay back keeps it.
+pub const INBOX_SEED_GATE_RETIRED_KEY: &str = "inbox_seed_gate_retired_v1";
+
+/// The inbox list every install was seeded with before the inbox seed left out
+/// relays that gate kind-1059 reads ([`crate::circle::PRODUCTION_INBOX_RELAYS`]).
+const RETIRED_INBOX_SEED: [&str; 3] = [
+    "wss://relay.damus.io",
+    "wss://relay.primal.net",
+    "wss://nos.lol",
+];
+
+/// The relay of [`RETIRED_INBOX_SEED`] that withholds kind-1059 reads from a
+/// client that does not authenticate.
+const READ_GATED_INBOX_SEED_RELAY: &str = "wss://relay.damus.io";
 
 /// `user_settings` key that toggles publishing of the NIP-65 relay list
 /// (kind 10002), built from the `KeyPackage` relay slot. The key's name
@@ -180,10 +197,10 @@ pub fn normalize_url(input: &str) -> Result<String> {
 /// it is a single named function rather than an inline `default_relays()` call
 /// repeated at each seed/restore/reset site:
 ///
-/// * [`RelayType::Inbox`] and [`RelayType::KeyPackage`] — the account seed
-///   ([`default_relays`]). These relays carry the user's gift-wrapped welcomes
-///   and, through the circles built on them, their encrypted kind-445 location
-///   traffic.
+/// * [`RelayType::KeyPackage`] — the account seed ([`default_relays`]).
+/// * [`RelayType::Inbox`] — the inbox seed ([`default_inbox_relays`]): the
+///   account seed less every relay that will not serve the user's gift-wrapped
+///   welcomes back to a client that does not authenticate.
 /// * [`RelayType::Profile`] — the curated profile pool
 ///   ([`crate::profile::profile_relay_pool_default`] — the EFFECTIVE set, so a
 ///   hermetic test override is honoured), which is
@@ -199,7 +216,8 @@ pub fn normalize_url(input: &str) -> Result<String> {
 #[must_use]
 pub fn default_relays_for(relay_type: RelayType) -> Vec<String> {
     match relay_type {
-        RelayType::Inbox | RelayType::KeyPackage => default_relays(),
+        RelayType::Inbox => default_inbox_relays(),
+        RelayType::KeyPackage => default_relays(),
         RelayType::Profile => crate::profile::profile_relay_pool_default(),
     }
 }
@@ -210,7 +228,7 @@ impl CircleStorage {
     /// Two independent sentinel keys gate two independent groups:
     ///
     /// * [`SEEDED_KEY`] gates [`RelayType::Inbox`] + [`RelayType::KeyPackage`],
-    ///   seeded from the account seed.
+    ///   seeded from the inbox seed and the account seed.
     /// * [`PROFILE_SEEDED_KEY`] gates [`RelayType::Profile`], seeded from the
     ///   curated profile pool.
     ///
@@ -368,6 +386,92 @@ impl CircleStorage {
                 params![crate::profile::ProfileState::Unknown.as_db_value()],
             )?;
         }
+        tx.commit()?;
+        Ok(removed)
+    }
+
+    /// Turns an inbox list that is still exactly the seed every install got
+    /// before the inbox seed left the read-gated relay out into the current
+    /// inbox seed: that relay's row goes and any seed relay missing is added
+    /// (startup migration, once per install).
+    ///
+    /// That relay serves a Welcome back only to a reader that answers its
+    /// NIP-42 challenge, and the inbox seed prefers relays that need no such
+    /// proof ([`crate::circle::PRODUCTION_INBOX_RELAYS`]). The stored rows are
+    /// compared, canonicalised, as a SET with
+    /// [`RETIRED_INBOX_SEED`]: an inbox list the user changed in any way — a
+    /// relay added or removed — is theirs and is left alone. The sentinel is
+    /// written either way, in the same transaction, so the check never runs
+    /// again and a user who adds the relay back keeps it. The next relay-list
+    /// heal republishes the new kind 10050.
+    ///
+    /// # Returns
+    ///
+    /// The number of inbox rows removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CircleError::Storage`] if the lock cannot be acquired and
+    /// [`CircleError::Database`] for `SQLite` errors.
+    pub fn retire_gated_inbox_seed(&self) -> Result<usize> {
+        let mut conn = self
+            .conn()
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        let tx = conn.transaction()?;
+        let retired = tx
+            .query_row(
+                "SELECT value FROM user_settings WHERE key = ?1",
+                params![INBOX_SEED_GATE_RETIRED_KEY],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?
+            .is_some();
+        if retired {
+            return Ok(0);
+        }
+        let rows = tx
+            .prepare("SELECT url FROM user_relays WHERE relay_type = ?1")?
+            .query_map(params![RelayType::Inbox.as_str()], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let stored: BTreeSet<String> = rows
+            .iter()
+            .map(|url| crate::relay::url_norm::canonicalize(url))
+            .collect();
+        let old_seed: BTreeSet<String> = RETIRED_INBOX_SEED
+            .iter()
+            .map(|url| crate::relay::url_norm::canonicalize(url))
+            .collect();
+        let gated = crate::relay::url_norm::canonicalize(READ_GATED_INBOX_SEED_RELAY);
+        let mut removed = 0usize;
+        if stored == old_seed {
+            for url in rows
+                .iter()
+                .filter(|url| crate::relay::url_norm::canonicalize(url) == gated)
+            {
+                removed += tx.execute(
+                    "DELETE FROM user_relays WHERE url = ?1 AND relay_type = ?2",
+                    params![url, RelayType::Inbox.as_str()],
+                )?;
+            }
+            // An untouched seed becomes the current one: a relay it lacks is
+            // added, compared canonically so a stored spelling is never doubled.
+            let now = Utc::now().timestamp();
+            for relay in default_relays_for(RelayType::Inbox) {
+                if !stored.contains(&crate::relay::url_norm::canonicalize(&relay)) {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO user_relays (url, relay_type, created_at) VALUES (?1, ?2, ?3)",
+                        params![relay, RelayType::Inbox.as_str(), now],
+                    )?;
+                }
+            }
+        }
+        tx.execute(
+            "INSERT OR IGNORE INTO user_settings (key, value) VALUES (?1, '1')",
+            params![INBOX_SEED_GATE_RETIRED_KEY],
+        )?;
         tx.commit()?;
         Ok(removed)
     }
@@ -945,8 +1049,8 @@ mod tests {
         // Both account categories populated with the production defaults.
         let inbox = storage.list_user_relays(RelayType::Inbox).unwrap();
         let kp = storage.list_user_relays(RelayType::KeyPackage).unwrap();
-        assert_eq!(inbox.len(), crate::circle::PRODUCTION_DEFAULT_RELAYS.len());
-        assert_eq!(kp.len(), crate::circle::PRODUCTION_DEFAULT_RELAYS.len());
+        assert_eq!(inbox, crate::circle::PRODUCTION_INBOX_RELAYS);
+        assert_eq!(kp, crate::circle::PRODUCTION_DEFAULT_RELAYS);
         // ...and the profile category from its own, separate pool.
         let profile = storage.list_user_relays(RelayType::Profile).unwrap();
         assert_eq!(profile, profile_pool());
@@ -1101,13 +1205,25 @@ mod tests {
 
     #[test]
     fn default_relays_for_dispatches_per_category() {
-        // The dispatch itself, independent of storage: the account categories
-        // share the account seed, the profile category does not draw from it
-        // at all. `default_relays_for(Profile)` resolves through the EFFECTIVE
-        // accessor, so comparing it to the shipped constant is sound only
-        // because no lib test installs the pool override — see `profile_pool`.
-        assert_eq!(default_relays_for(RelayType::Inbox), default_relays());
-        assert_eq!(default_relays_for(RelayType::KeyPackage), default_relays());
+        // The dispatch itself, independent of storage: the KeyPackage
+        // category takes the account seed, the inbox its own seed (no relay
+        // that gates gift-wrap reads), and the profile category does not draw
+        // from the account seed at all. `default_relays_for(Profile)` resolves
+        // through the EFFECTIVE accessor, so comparing it to the shipped
+        // constant is sound only because no lib test installs the pool
+        // override — see `profile_pool`.
+        assert_eq!(
+            default_relays_for(RelayType::Inbox),
+            crate::circle::PRODUCTION_INBOX_RELAYS
+        );
+        assert_eq!(
+            default_relays_for(RelayType::KeyPackage),
+            crate::circle::PRODUCTION_DEFAULT_RELAYS
+        );
+        assert!(
+            !default_relays_for(RelayType::Inbox).contains(&READ_GATED_INBOX_SEED_RELAY.to_owned()),
+            "the inbox seed must not list a relay that gates gift-wrap reads"
+        );
 
         let profile = default_relays_for(RelayType::Profile);
         assert_eq!(profile, profile_pool());
@@ -1320,30 +1436,197 @@ mod tests {
 
     #[test]
     fn seed_does_not_reapply_after_user_remove_and_restart() {
-        // Regression: the sentinel is the signal, not row presence.
+        // Regression: the sentinel is the signal, not row presence — in both
+        // account categories, each seeded from its own list.
         let storage = make_storage();
         storage.seed_defaults_if_unseeded().unwrap();
-        // User removes ONE default but keeps two — remove_user_relay refuses
-        // to leave the category empty. Removing one is fine because two
-        // others remain.
-        storage
-            .remove_user_relay(
-                crate::circle::PRODUCTION_DEFAULT_RELAYS[0],
-                RelayType::Inbox,
-            )
-            .unwrap();
-        let after_remove = storage.list_user_relays(RelayType::Inbox).unwrap();
-        assert_eq!(
-            after_remove.len(),
-            crate::circle::PRODUCTION_DEFAULT_RELAYS.len() - 1
+        // remove_user_relay refuses to leave a category empty; each keeps at
+        // least one seeded relay here.
+        let inbox_removed = crate::circle::PRODUCTION_INBOX_RELAYS[0];
+        let kp_removed = crate::circle::PRODUCTION_DEFAULT_RELAYS[0];
+        assert!(
+            storage
+                .remove_user_relay(inbox_removed, RelayType::Inbox)
+                .unwrap(),
+            "non-vacuity: the removed relay was a seeded inbox row"
         );
-        // Defensive seed call must NOT re-add the removed default.
+        assert!(
+            storage
+                .remove_user_relay(kp_removed, RelayType::KeyPackage)
+                .unwrap(),
+            "non-vacuity: the removed relay was a seeded KeyPackage row"
+        );
+        let inbox_after_remove = storage.list_user_relays(RelayType::Inbox).unwrap();
+        let kp_after_remove = storage.list_user_relays(RelayType::KeyPackage).unwrap();
+        assert_eq!(
+            inbox_after_remove,
+            crate::circle::PRODUCTION_INBOX_RELAYS[1..]
+        );
+        assert_eq!(
+            kp_after_remove,
+            crate::circle::PRODUCTION_DEFAULT_RELAYS[1..]
+        );
+        // Defensive seed call must NOT re-add either removed default.
         assert!(!storage.seed_defaults_if_unseeded().unwrap());
-        let after_seed = storage.list_user_relays(RelayType::Inbox).unwrap();
         assert_eq!(
-            after_seed.len(),
-            crate::circle::PRODUCTION_DEFAULT_RELAYS.len() - 1
+            storage.list_user_relays(RelayType::Inbox).unwrap(),
+            inbox_after_remove
         );
+        assert_eq!(
+            storage.list_user_relays(RelayType::KeyPackage).unwrap(),
+            kp_after_remove
+        );
+    }
+
+    /// Inserts an Inbox-category row as an old seeder did: the URL verbatim.
+    fn insert_inbox_row(storage: &CircleStorage, url: &str) {
+        let conn = storage.conn().lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO user_relays (url, relay_type, created_at) VALUES (?1, ?2, 1)",
+            params![url, RelayType::Inbox.as_str()],
+        )
+        .unwrap();
+    }
+
+    /// Whether the inbox-seed retirement's sentinel is written, by presence.
+    fn inbox_retirement_recorded(storage: &CircleStorage) -> bool {
+        let conn = storage.conn().lock().unwrap();
+        conn.query_row(
+            "SELECT value FROM user_settings WHERE key = ?1",
+            params![INBOX_SEED_GATE_RETIRED_KEY],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .unwrap()
+        .is_some()
+    }
+
+    /// An install seeded before the inbox seed left the read-gated relay out:
+    /// its sentinel set and every account row the old seed.
+    fn old_seed_install() -> CircleStorage {
+        let storage = make_storage();
+        storage.set_bool_setting(SEEDED_KEY, true).unwrap();
+        for relay in RETIRED_INBOX_SEED {
+            insert_inbox_row(&storage, relay);
+            storage
+                .add_user_relay(relay, RelayType::KeyPackage)
+                .unwrap();
+        }
+        storage
+    }
+
+    #[test]
+    fn a_new_install_seeds_its_inbox_without_a_relay_that_gates_gift_wrap_reads() {
+        let storage = make_storage();
+        assert_eq!(storage.retire_gated_inbox_seed().unwrap(), 0);
+        assert!(storage.seed_defaults_if_unseeded().unwrap());
+        let inbox = storage.list_user_relays(RelayType::Inbox).unwrap();
+        assert!(!inbox.iter().any(|u| u == READ_GATED_INBOX_SEED_RELAY));
+        assert_eq!(inbox, crate::circle::PRODUCTION_INBOX_RELAYS);
+        assert!(
+            storage
+                .list_user_relays(RelayType::KeyPackage)
+                .unwrap()
+                .iter()
+                .any(|u| u == READ_GATED_INBOX_SEED_RELAY),
+            "the relay serves KeyPackages and keeps the KeyPackage list"
+        );
+    }
+
+    #[test]
+    fn an_inbox_list_still_the_old_seed_drops_the_gated_relay_once() {
+        let storage = old_seed_install();
+        assert_eq!(storage.retire_gated_inbox_seed().unwrap(), 1);
+        assert_eq!(
+            storage.list_user_relays(RelayType::Inbox).unwrap(),
+            crate::circle::PRODUCTION_INBOX_RELAYS
+        );
+        assert_eq!(
+            storage.list_user_relays(RelayType::KeyPackage).unwrap(),
+            RETIRED_INBOX_SEED,
+            "the KeyPackage list is untouched"
+        );
+
+        // Once: a user who adds the relay back keeps it.
+        storage
+            .add_user_relay(READ_GATED_INBOX_SEED_RELAY, RelayType::Inbox)
+            .unwrap();
+        assert_eq!(storage.retire_gated_inbox_seed().unwrap(), 0);
+        let inbox = storage.list_user_relays(RelayType::Inbox).unwrap();
+        assert!(inbox.iter().any(|u| u == READ_GATED_INBOX_SEED_RELAY));
+        assert_eq!(
+            inbox.len(),
+            crate::circle::PRODUCTION_INBOX_RELAYS.len() + 1
+        );
+    }
+
+    #[test]
+    fn the_old_seed_is_matched_as_a_canonical_set_in_any_order() {
+        let storage = make_storage();
+        for relay in [
+            "wss://nos.lol/",
+            "WSS://Relay.Damus.io",
+            "wss://relay.primal.net",
+        ] {
+            insert_inbox_row(&storage, relay);
+        }
+        assert_eq!(storage.retire_gated_inbox_seed().unwrap(), 1);
+        assert_eq!(
+            storage.list_user_relays(RelayType::Inbox).unwrap(),
+            vec![
+                "wss://nos.lol/".to_owned(),
+                "wss://relay.primal.net".to_owned(),
+                "wss://relay.ditto.pub".to_owned(),
+            ],
+            "the gated relay's row went whatever its spelling, no seed relay is \
+             doubled under another spelling, and the missing one was added"
+        );
+    }
+
+    #[test]
+    fn a_customised_inbox_list_is_left_untouched() {
+        let extra = old_seed_install();
+        extra
+            .add_user_relay("wss://custom.example.com", RelayType::Inbox)
+            .unwrap();
+        let minus_one = old_seed_install();
+        assert!(minus_one
+            .remove_user_relay(RETIRED_INBOX_SEED[2], RelayType::Inbox)
+            .unwrap());
+        let only_gated = make_storage();
+        insert_inbox_row(&only_gated, READ_GATED_INBOX_SEED_RELAY);
+
+        for (storage, case) in [
+            (extra, "the old seed plus a relay"),
+            (minus_one, "the old seed less a relay"),
+            (only_gated, "the gated relay alone"),
+        ] {
+            let before = storage.list_user_relays(RelayType::Inbox).unwrap();
+            assert!(
+                before.iter().any(|u| u == READ_GATED_INBOX_SEED_RELAY),
+                "non-vacuity ({case}): the gated relay is listed"
+            );
+            assert_eq!(storage.retire_gated_inbox_seed().unwrap(), 0, "{case}");
+            assert_eq!(
+                storage.list_user_relays(RelayType::Inbox).unwrap(),
+                before,
+                "{case} is the user's list"
+            );
+            // The sentinel is written either way: the list becoming the old
+            // seed later is the user's choice too.
+            assert!(inbox_retirement_recorded(&storage), "{case}");
+        }
+    }
+
+    #[test]
+    fn the_inbox_seed_retirement_is_idempotent() {
+        let storage = old_seed_install();
+        assert_eq!(storage.retire_gated_inbox_seed().unwrap(), 1);
+        let after = storage.list_user_relays(RelayType::Inbox).unwrap();
+        for _ in 0..3 {
+            assert_eq!(storage.retire_gated_inbox_seed().unwrap(), 0);
+        }
+        assert_eq!(storage.list_user_relays(RelayType::Inbox).unwrap(), after);
     }
 
     #[test]
@@ -1511,23 +1794,32 @@ mod tests {
             .add_user_relay("wss://custom.example.com", RelayType::Inbox)
             .unwrap();
         // Remove one default to verify restore re-adds it.
-        storage
-            .remove_user_relay(
-                crate::circle::PRODUCTION_DEFAULT_RELAYS[0],
-                RelayType::Inbox,
-            )
-            .unwrap();
+        let removed = crate::circle::PRODUCTION_INBOX_RELAYS[0];
+        assert!(
+            storage
+                .remove_user_relay(removed, RelayType::Inbox)
+                .unwrap(),
+            "non-vacuity: the removed relay was a seeded inbox row"
+        );
+        assert!(!storage
+            .list_user_relays(RelayType::Inbox)
+            .unwrap()
+            .iter()
+            .any(|u| u == removed));
         // Restore.
         storage.restore_defaults_for(RelayType::Inbox).unwrap();
         let list = storage.list_user_relays(RelayType::Inbox).unwrap();
-        // Both defaults AND the custom must be present.
+        // Every inbox default AND the custom must be present, and nothing the
+        // inbox seed leaves out.
         assert!(list.iter().any(|u| u.contains("custom.example.com")));
-        for default in crate::circle::PRODUCTION_DEFAULT_RELAYS {
+        for default in crate::circle::PRODUCTION_INBOX_RELAYS {
             assert!(
-                list.iter().any(|u| u.starts_with(default)),
+                list.iter().any(|u| u == default),
                 "restore must re-add missing default {default}"
             );
         }
+        assert_eq!(list.len(), crate::circle::PRODUCTION_INBOX_RELAYS.len() + 1);
+        assert!(!list.iter().any(|u| u == READ_GATED_INBOX_SEED_RELAY));
     }
 
     #[test]
@@ -1557,11 +1849,20 @@ mod tests {
             .wipe_and_reset_defaults_for(RelayType::Inbox)
             .unwrap();
         let list = storage.list_user_relays(RelayType::Inbox).unwrap();
-        // Custom must be gone; defaults present.
+        // Custom must be gone; exactly the inbox defaults present.
         assert!(!list.iter().any(|u| u.contains("custom.example.com")));
-        for default in crate::circle::PRODUCTION_DEFAULT_RELAYS {
-            assert!(list.iter().any(|u| u.starts_with(default)));
-        }
+        assert_eq!(list, crate::circle::PRODUCTION_INBOX_RELAYS);
+
+        storage
+            .add_user_relay("wss://custom.example.com", RelayType::KeyPackage)
+            .unwrap();
+        storage
+            .wipe_and_reset_defaults_for(RelayType::KeyPackage)
+            .unwrap();
+        assert_eq!(
+            storage.list_user_relays(RelayType::KeyPackage).unwrap(),
+            crate::circle::PRODUCTION_DEFAULT_RELAYS
+        );
     }
 
     #[test]

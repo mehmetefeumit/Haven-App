@@ -170,6 +170,8 @@ class MockCircleService implements CircleService {
   @override
   Future<List<Invitation>> getPendingInvitations() async {
     methodCalls.add('getPendingInvitations');
+    final boom = getPendingInvitationsThrows;
+    if (boom != null) throw boom;
     return List<Invitation>.of(_invitations);
   }
 
@@ -238,6 +240,14 @@ class MockCircleService implements CircleService {
   /// zeroize still runs on the error path).
   bool shouldThrowOnProcessGiftWrappedInvitation = false;
 
+  /// When set, answers [processGiftWrappedInvitation] for each wrap JSON in
+  /// place of the default new invitation (a throw included).
+  Future<Invitation?> Function(String giftWrapEventJson)?
+  processGiftWrappedInvitationHandler;
+
+  /// When set, [getPendingInvitations] throws it.
+  Error? getPendingInvitationsThrows;
+
   @override
   Future<Invitation?> processGiftWrappedInvitation({
     required List<int> identitySecretBytes,
@@ -248,6 +258,8 @@ class MockCircleService implements CircleService {
     if (shouldThrowOnProcessGiftWrappedInvitation) {
       throw Exception('mock process failure');
     }
+    final handler = processGiftWrappedInvitationHandler;
+    if (handler != null) return handler(giftWrapEventJson);
     return Invitation(
       mlsGroupId: const [1, 2, 3, 4],
       circleName: 'Mock Circle',

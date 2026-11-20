@@ -110,6 +110,7 @@ class _RecordingRelayService implements RelayService {
   Future<RelayListMaintenanceResult> maintainRelayList({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,
+    required bool foreground,
   }) async => const RelayListMaintenanceResult.failed();
 
   @override
@@ -154,14 +155,12 @@ class _RecordingRelayService implements RelayService {
 
   @override
   Future<List<String>> fetchGiftWraps({
-    required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
   }) => throw UnimplementedError();
 
   @override
   Future<List<RelayGiftWrapFetch>> fetchGiftWrapsPerRelay({
-    required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
   }) => throw UnimplementedError();
@@ -430,7 +429,6 @@ void main() {
           relayManager: bobRelayManager,
           invitee: bobManager,
           inviteeSecretBytes: bobSecretBytes,
-          inviteePubkeyHex: bobPubkeyHex,
           relays: const [_testRelayUrl],
           scenario: 'remove',
         );

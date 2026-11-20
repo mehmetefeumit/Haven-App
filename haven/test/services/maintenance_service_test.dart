@@ -26,6 +26,9 @@ class _RecordingRelay extends MockRelayService {
   List<int>? capturedKpSecret;
   List<int>? capturedRelayListSecret;
 
+  /// The foreground claim each relay-list tick carried, in call order.
+  final List<bool> relayListClaims = [];
+
   KeyPackageMaintenanceOutcome kpResult =
       const KeyPackageMaintenancePublished(
         relaysAcked: 2,
@@ -53,9 +56,11 @@ class _RecordingRelay extends MockRelayService {
   Future<RelayListMaintenanceResult> maintainRelayList({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,
+    required bool foreground,
   }) async {
     relayListCalls++;
     capturedRelayListSecret = identitySecretBytes;
+    relayListClaims.add(foreground);
     return const RelayListMaintenanceResult(
       inbox: RelayListCategoryResult(
         action: RelayListMaintenanceAction.republished,
@@ -171,6 +176,10 @@ void main() {
           ),
           relayList: kind(hold: OwnPublishHoldFfi.awaitingResetAcknowledgement),
           inboxRelayList: kind(hold: OwnPublishHoldFfi.noRelaysConfigured),
+          inboxReads: [
+            for (final r in InboxReadFfi.values)
+              OwnInboxReadFfi(relayUrl: 'wss://${r.name}.example', read: r),
+          ],
         );
       final service = MaintenanceService(
         relayService: _RecordingRelay(),
@@ -197,6 +206,14 @@ void main() {
       expect(board.inboxRelayList.hold, OwnPublishHold.noRelaysConfigured);
       expect(board.inboxRelayList.checkedSecsAgo, isNull);
       expect(
+        board.inboxReads.map((r) => (r.relayUrl, r.read.name)),
+        [
+          for (final r in InboxReadFfi.values)
+            ('wss://${r.name}.example', r.name),
+        ],
+        reason: 'each inbox read keeps its verdict and its relay',
+      );
+      expect(
         ownRelayBoardOf(
           OwnRelayBoardFfi(
             running: false,
@@ -204,6 +221,7 @@ void main() {
             keyPackage: kind(hold: OwnPublishHoldFfi.publishingSuppressed),
             relayList: kind(),
             inboxRelayList: kind(),
+            inboxReads: const [],
           ),
         ).keyPackage.hold,
         OwnPublishHold.publishingSuppressed,
@@ -387,10 +405,24 @@ void main() {
         identitySecretBytes: () async => [1, 2, 3],
       );
 
-      final result = await service.maintainRelayList();
+      final result = await service.maintainRelayList(foreground: true);
 
       expect(relay.relayListCalls, 1);
       expect(result.inbox.action, RelayListMaintenanceAction.republished);
+    });
+
+    test('hands the foreground claim on untouched', () async {
+      final relay = _RecordingRelay();
+      final service = MaintenanceService(
+        relayService: relay,
+        circleManagerFactory: () async => _FakeCircleManager(),
+        identitySecretBytes: () async => [1, 2, 3],
+      );
+
+      await service.maintainRelayList(foreground: true);
+      await service.maintainRelayList(foreground: false);
+
+      expect(relay.relayListClaims, [true, false]);
     });
 
     test('scrubs the secret buffer after the call', () async {
@@ -401,7 +433,7 @@ void main() {
         identitySecretBytes: () async => [4, 5, 6],
       );
 
-      await service.maintainRelayList();
+      await service.maintainRelayList(foreground: false);
 
       final captured = relay.capturedRelayListSecret;
       expect(captured, isNotNull);
@@ -420,7 +452,7 @@ void main() {
         identitySecretBytes: () async => [1],
       );
 
-      final result = await service.maintainRelayList();
+      final result = await service.maintainRelayList(foreground: false);
 
       expect(relay.relayListCalls, 0);
       for (final category in [result.inbox, result.keyPackage]) {

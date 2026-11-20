@@ -527,6 +527,27 @@ class AppLocalizationsEs extends AppLocalizations {
   }
 
   @override
+  String get relaySettingsInboxRefused =>
+      'Este relé no permitió que Haven leyera tus invitaciones. Quítalo o añade otro relé.';
+
+  @override
+  String get relaySettingsInboxRefusedTooltip =>
+      'No permitió que Haven leyera las invitaciones';
+
+  @override
+  String relaySettingsInboxRefusedSemantics(String url) {
+    return 'Advertencia: $url no permitió que Haven leyera tus invitaciones';
+  }
+
+  @override
+  String get relaySettingsInboxAllRefusedTitle =>
+      'Ninguno de tus relés de bandeja de entrada permitió que Haven leyera tus invitaciones';
+
+  @override
+  String get relaySettingsInboxAllRefusedMessage =>
+      'Las invitaciones que te envíen no te llegarán hasta que uno de tus relés de bandeja de entrada permita que Haven las lea. Restaura los predeterminados o añade otro relé.';
+
+  @override
   String get locationSettingsTitle => 'Ubicación';
 
   @override
@@ -1545,6 +1566,54 @@ class AppLocalizationsEs extends AppLocalizations {
   String get invitationsLoadError => 'No se pudieron cargar las invitaciones';
 
   @override
+  String invitationsNoticeRefused(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other:
+          '$countString relés de bandeja de entrada no permitieron que Haven leyera tus invitaciones, así que una invitación enviada solo a esos relés no te llegará. En Ajustes de relés, quítalos o añade otro relé.',
+      many:
+          '$countString relés de bandeja de entrada no permitieron que Haven leyera tus invitaciones, así que una invitación enviada solo a esos relés no te llegará. En Ajustes de relés, quítalos o añade otro relé.',
+      one:
+          'Un relé de bandeja de entrada no permitió que Haven leyera tus invitaciones, así que una invitación enviada solo a ese relé no te llegará. En Ajustes de relés, quítalo o añade otro relé.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String invitationsNoticeNotSaved(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other:
+          'Llegaron $countString invitaciones, pero no se pudieron guardar en este dispositivo.',
+      many:
+          'Llegaron $countString invitaciones, pero no se pudieron guardar en este dispositivo.',
+      one: 'Llegó una invitación, pero no se pudo guardar en este dispositivo.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get invitationsNoticeOffline =>
+      'Haven no pudo conectar con tus relés de bandeja de entrada, así que las invitaciones nuevas todavía no pueden aparecer.';
+
+  @override
+  String get invitationsNoticeIncomplete =>
+      'Haven no pudo terminar de comprobar todos tus relés de bandeja de entrada, así que puede que algunas invitaciones todavía no aparezcan.';
+
+  @override
+  String get invitationsNoticeOpenRelaySettings => 'Ajustes de relés';
+
+  @override
   String get invitationsEmptyTitle => 'Sin invitaciones';
 
   @override
@@ -1575,7 +1644,7 @@ class AppLocalizationsEs extends AppLocalizations {
   }
 
   @override
-  String refreshRingSemanticAllOk(int total) {
+  String refreshRingSemanticInboxAll(int total) {
     final intl.NumberFormat totalNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
@@ -1583,18 +1652,19 @@ class AppLocalizationsEs extends AppLocalizations {
     String _temp0 = intl.Intl.pluralLogic(
       total,
       locale: localeName,
-      other: 'Todos los $totalString relés respondieron',
-      many: 'Todos los $totalString relés respondieron',
-      one: 'El relé respondió',
+      other: 'Invitaciones comprobadas en todos los $totalString relés',
+      many: 'Invitaciones comprobadas en todos los $totalString relés',
+      one: 'Invitaciones comprobadas en el relé',
     );
     return '$_temp0';
   }
 
   @override
-  String get refreshRingSemanticAllError => 'Ningún relé respondió';
+  String get refreshRingSemanticInboxNone =>
+      'No se pudieron comprobar las invitaciones en ningún relé';
 
   @override
-  String refreshRingSemanticPartial(int ok, int total) {
+  String refreshRingSemanticInboxPartial(int ok, int total) {
     final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -1603,17 +1673,18 @@ class AppLocalizationsEs extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return '$okString de $totalString relés respondieron';
+    return 'Invitaciones comprobadas en $okString de $totalString relés';
   }
 
   @override
   String get refreshRingAnnouncementChecking => 'Comprobando relés';
 
   @override
-  String get refreshRingAnnouncementAllOk => 'Todos los relés respondieron';
+  String get refreshRingAnnouncementInboxAll =>
+      'Invitaciones comprobadas en todos los relés';
 
   @override
-  String refreshRingAnnouncementPartial(int ok, int total) {
+  String refreshRingAnnouncementInboxPartial(int ok, int total) {
     final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -1622,12 +1693,12 @@ class AppLocalizationsEs extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return '$okString de $totalString relés respondieron';
+    return 'Invitaciones comprobadas en $okString de $totalString relés';
   }
 
   @override
-  String get refreshRingAnnouncementAllError =>
-      'No se pudo contactar con ningún relé';
+  String get refreshRingAnnouncementInboxNone =>
+      'No se pudieron comprobar las invitaciones en ningún relé';
 
   @override
   String get refreshRingAnnouncementNoInbox =>

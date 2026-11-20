@@ -531,6 +531,27 @@ class AppLocalizationsAr extends AppLocalizations {
   }
 
   @override
+  String get relaySettingsInboxRefused =>
+      'لم يسمح هذا المُرحِّل لتطبيق Haven بقراءة دعواتك. أزِله أو أضف مُرحِّلًا آخر.';
+
+  @override
+  String get relaySettingsInboxRefusedTooltip =>
+      'لم يسمح لتطبيق Haven بقراءة الدعوات';
+
+  @override
+  String relaySettingsInboxRefusedSemantics(String url) {
+    return 'تحذير: $url لم يسمح لتطبيق Haven بقراءة دعواتك';
+  }
+
+  @override
+  String get relaySettingsInboxAllRefusedTitle =>
+      'لم يسمح أي من مُرحِّلات صندوق الوارد لتطبيق Haven بقراءة دعواتك';
+
+  @override
+  String get relaySettingsInboxAllRefusedMessage =>
+      'لن تصلك الدعوات المُرسَلة إليك حتى يسمح أحد مُرحِّلات صندوق الوارد لتطبيق Haven بقراءتها. استعِد الإعدادات الافتراضية أو أضف مُرحِّلًا آخر.';
+
+  @override
   String get locationSettingsTitle => 'الموقع';
 
   @override
@@ -1574,6 +1595,61 @@ class AppLocalizationsAr extends AppLocalizations {
   String get invitationsLoadError => 'تعذّر تحميل الدعوات';
 
   @override
+  String invitationsNoticeRefused(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other:
+          'لم يسمح $countString من مُرحِّلات صندوق الوارد لتطبيق Haven بقراءة دعواتك، لذا لن تصلك أي دعوة أُرسِلت إليها فقط. في إعدادات المُرحِّلات، أزِلها أو أضف مُرحِّلًا آخر.',
+      many:
+          'لم يسمح $countString من مُرحِّلات صندوق الوارد لتطبيق Haven بقراءة دعواتك، لذا لن تصلك أي دعوة أُرسِلت إليها فقط. في إعدادات المُرحِّلات، أزِلها أو أضف مُرحِّلًا آخر.',
+      few:
+          'لم يسمح $countString من مُرحِّلات صندوق الوارد لتطبيق Haven بقراءة دعواتك، لذا لن تصلك أي دعوة أُرسِلت إليها فقط. في إعدادات المُرحِّلات، أزِلها أو أضف مُرحِّلًا آخر.',
+      two:
+          'لم يسمح اثنان من مُرحِّلات صندوق الوارد لتطبيق Haven بقراءة دعواتك، لذا لن تصلك أي دعوة أُرسِلت إليهما فقط. في إعدادات المُرحِّلات، أزِلهما أو أضف مُرحِّلًا آخر.',
+      one:
+          'أحد مُرحِّلات صندوق الوارد لم يسمح لتطبيق Haven بقراءة دعواتك، لذا لن تصلك أي دعوة أُرسِلت إليه فقط. في إعدادات المُرحِّلات، أزِله أو أضف مُرحِّلًا آخر.',
+      zero:
+          'لم يسمح $countString من مُرحِّلات صندوق الوارد لتطبيق Haven بقراءة دعواتك، لذا لن تصلك أي دعوة أُرسِلت إليها فقط. في إعدادات المُرحِّلات، أزِلها أو أضف مُرحِّلًا آخر.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String invitationsNoticeNotSaved(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'وصلت $countString دعوة لكن تعذّر حفظها على هذا الجهاز.',
+      many: 'وصلت $countString دعوةً لكن تعذّر حفظها على هذا الجهاز.',
+      few: 'وصلت $countString دعوات لكن تعذّر حفظها على هذا الجهاز.',
+      two: 'وصلت دعوتان لكن تعذّر حفظهما على هذا الجهاز.',
+      one: 'وصلت دعوة لكن تعذّر حفظها على هذا الجهاز.',
+      zero: 'وصلت دعوات لكن تعذّر حفظها على هذا الجهاز.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get invitationsNoticeOffline =>
+      'تعذّر على Haven الوصول إلى مُرحِّلات صندوق الوارد الخاصة بك، لذا لا يمكن أن تظهر الدعوات الجديدة حاليًا.';
+
+  @override
+  String get invitationsNoticeIncomplete =>
+      'تعذّر على Haven إكمال فحص جميع مُرحِّلات صندوق الوارد الخاصة بك، لذا قد لا تظهر بعض الدعوات حاليًا.';
+
+  @override
+  String get invitationsNoticeOpenRelaySettings => 'إعدادات المُرحِّلات';
+
+  @override
   String get invitationsEmptyTitle => 'لا توجد دعوات';
 
   @override
@@ -1607,7 +1683,7 @@ class AppLocalizationsAr extends AppLocalizations {
   }
 
   @override
-  String refreshRingSemanticAllOk(int total) {
+  String refreshRingSemanticInboxAll(int total) {
     final intl.NumberFormat totalNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
@@ -1615,21 +1691,21 @@ class AppLocalizationsAr extends AppLocalizations {
     String _temp0 = intl.Intl.pluralLogic(
       total,
       locale: localeName,
-      other: 'استجابت $totalString مُرحِّل',
-      many: 'استجاب $totalString مُرحِّلًا',
-      few: 'استجابت $totalString مُرحِّلات',
-      two: 'استجاب المُرحِّلان',
-      one: 'استجاب المُرحِّل',
-      zero: 'استجابت جميع المُرحِّلات',
+      other: 'تم فحص الدعوات على جميع المُرحِّلات، وعددها $totalString',
+      many: 'تم فحص الدعوات على جميع المُرحِّلات، وعددها $totalString',
+      few: 'تم فحص الدعوات على جميع المُرحِّلات، وعددها $totalString',
+      two: 'تم فحص الدعوات على المُرحِّلَين كليهما',
+      one: 'تم فحص الدعوات على المُرحِّل',
+      zero: 'تم فحص الدعوات على جميع المُرحِّلات',
     );
     return '$_temp0';
   }
 
   @override
-  String get refreshRingSemanticAllError => 'لم يستجب أي مُرحِّل';
+  String get refreshRingSemanticInboxNone => 'تعذّر فحص الدعوات على أي مُرحِّل';
 
   @override
-  String refreshRingSemanticPartial(int ok, int total) {
+  String refreshRingSemanticInboxPartial(int ok, int total) {
     final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -1638,17 +1714,18 @@ class AppLocalizationsAr extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'استجاب $okString من أصل $totalString مُرحِّل';
+    return 'تم فحص الدعوات على $okString من المُرحِّلات من أصل $totalString';
   }
 
   @override
   String get refreshRingAnnouncementChecking => 'جارٍ فحص المُرحِّلات';
 
   @override
-  String get refreshRingAnnouncementAllOk => 'استجابت جميع المُرحِّلات';
+  String get refreshRingAnnouncementInboxAll =>
+      'تم فحص الدعوات على كل المُرحِّلات';
 
   @override
-  String refreshRingAnnouncementPartial(int ok, int total) {
+  String refreshRingAnnouncementInboxPartial(int ok, int total) {
     final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -1657,11 +1734,12 @@ class AppLocalizationsAr extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'استجاب $okString من أصل $totalString مُرحِّل';
+    return 'تم فحص الدعوات على $okString من المُرحِّلات من أصل $totalString';
   }
 
   @override
-  String get refreshRingAnnouncementAllError => 'تعذّر الوصول إلى أي مُرحِّل';
+  String get refreshRingAnnouncementInboxNone =>
+      'تعذّر فحص الدعوات على أي مُرحِّل';
 
   @override
   String get refreshRingAnnouncementNoInbox => 'لا يوجد صندوق وارد مُهيَّأ';

@@ -44,6 +44,46 @@ pub const PRODUCTION_DEFAULT_RELAYS: &[&str] = &[
     "wss://nos.lol",
 ];
 
+/// Production **inbox-seed** relay URLs: the account seed less every relay
+/// that withholds kind-1059 reads from a client that does not authenticate
+/// (NIP-42).
+///
+/// A new account's kind-10050 list is seeded from this set, never from
+/// [`PRODUCTION_DEFAULT_RELAYS`]: an inviter delivers a Welcome to the
+/// invitee's inbox relays, and the seed prefers relays that serve it back with
+/// no proof of identity: Haven's own inbox reads answer the challenge
+/// (Security Rule 16), but an inbox that needs it depends on authentication
+/// succeeding, and a client that does not answer — another app, an older
+/// Haven build — reads nothing there. `relay.damus.io` gates kinds 4 and 1059
+/// that way (probed 2026-11-16,
+/// `tests/fixtures/relay_read_gating_2026-11-16.json`) and serves every other
+/// kind, so it stays in the account seed and on the discovery plane.
+/// `relay.ditto.pub` runs other software than the strfry relays beside it
+/// (owner-directed 2026-11-16), so one relay implementation's default config
+/// cannot gate every seeded inbox at once.
+///
+/// Runtime callers should use [`default_inbox_relays`], which honors the same
+/// debug-only test override as [`default_relays`].
+pub const PRODUCTION_INBOX_RELAYS: &[&str] = &[
+    "wss://relay.primal.net",
+    "wss://nos.lol",
+    "wss://relay.ditto.pub",
+];
+
+/// Returns the inbox-seed relay list for the current process: the
+/// [`default_relays`] test override when one is installed, else
+/// [`PRODUCTION_INBOX_RELAYS`].
+#[must_use]
+pub fn default_inbox_relays() -> Vec<String> {
+    if let Some(over) = DEFAULT_RELAYS_OVERRIDE.get() {
+        return over.clone();
+    }
+    PRODUCTION_INBOX_RELAYS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
+}
+
 /// Process-static override of the default relay list. Set once via
 /// [`set_default_relays_for_test`] in debug builds, never observable in
 /// release.
@@ -1123,6 +1163,25 @@ mod tests {
         for relay in PRODUCTION_DEFAULT_RELAYS {
             assert!(relay.starts_with("wss://"));
         }
+    }
+
+    /// The inbox seed is the account seed, in its order, less the one relay
+    /// that gates gift-wrap reads, then a relay of another implementation (the
+    /// fixture's record is pinned by `tests/inbox_default_read_gating.rs`).
+    #[test]
+    fn the_inbox_seed_is_the_account_seed_less_read_gated_relays_then_ditto() {
+        let less_gated: Vec<&str> = PRODUCTION_DEFAULT_RELAYS
+            .iter()
+            .copied()
+            .filter(|relay| *relay != "wss://relay.damus.io")
+            .chain(["wss://relay.ditto.pub"])
+            .collect();
+        assert_eq!(PRODUCTION_INBOX_RELAYS, less_gated.as_slice());
+        assert!(
+            PRODUCTION_DEFAULT_RELAYS.contains(&"wss://relay.damus.io"),
+            "non-vacuity: the gated relay stays in the account seed"
+        );
+        assert_eq!(default_inbox_relays(), less_gated);
     }
 
     #[test]

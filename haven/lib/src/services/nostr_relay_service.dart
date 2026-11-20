@@ -522,9 +522,19 @@ class NostrRelayService implements RelayService, CircleChangeDriver {
     }
   }
 
+  /// The circle manager whose identity an own inbox read is made as: Rust
+  /// reads that identity's gift wraps and answers a relay's challenge with
+  /// it, so no pubkey and no secret crosses the bridge for it.
+  Future<CircleManagerFfi> _inboxCircleManager() async {
+    final circleManagerFactory = _circleManagerFactory;
+    if (circleManagerFactory == null) {
+      throw StateError('no circle manager to read the inbox as');
+    }
+    return circleManagerFactory();
+  }
+
   @override
   Future<List<String>> fetchGiftWraps({
-    required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
   }) async {
@@ -536,7 +546,7 @@ class NostrRelayService implements RelayService, CircleChangeDriver {
           : null;
 
       return await manager.fetchGiftWraps(
-        recipientPubkey: recipientPubkey,
+        circle: await _inboxCircleManager(),
         relays: relays,
         since: sinceTimestamp,
       );
@@ -548,7 +558,6 @@ class NostrRelayService implements RelayService, CircleChangeDriver {
 
   @override
   Future<List<RelayGiftWrapFetch>> fetchGiftWrapsPerRelay({
-    required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
   }) async {
@@ -560,7 +569,7 @@ class NostrRelayService implements RelayService, CircleChangeDriver {
           : null;
 
       final ffiResults = await manager.fetchGiftWrapsPerRelay(
-        recipientPubkey: recipientPubkey,
+        circle: await _inboxCircleManager(),
         relays: relays,
         since: sinceTimestamp,
       );
@@ -569,7 +578,7 @@ class NostrRelayService implements RelayService, CircleChangeDriver {
           .map(
             (r) => RelayGiftWrapFetch(
               relayUrl: r.relayUrl,
-              responded: r.responded,
+              read: inboxReadOf(r.read),
               events: r.events,
             ),
           )
@@ -659,6 +668,7 @@ class NostrRelayService implements RelayService, CircleChangeDriver {
   Future<RelayListMaintenanceResult> maintainRelayList({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,
+    required bool foreground,
   }) async {
     // Best-effort: never throws. Secret bytes consumed + zeroized Rust-side.
     try {
@@ -666,6 +676,7 @@ class NostrRelayService implements RelayService, CircleChangeDriver {
       final r = await manager.maintainRelayList(
         circle: circle,
         identitySecretBytes: identitySecretBytes,
+        foreground: foreground,
       );
       return RelayListMaintenanceResult(
         inbox: mapRelayListCategory(r.inbox),

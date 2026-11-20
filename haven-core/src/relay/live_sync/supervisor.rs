@@ -55,21 +55,26 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use nostr::{Event, Kind, PublicKey, RelayMessage, RelayUrl, SubscriptionId};
-use nostr_sdk::RelayPoolNotification;
+use nostr_sdk::pool::relay::RelayNotification;
+use nostr_sdk::{RelayPoolNotification, RelayStatus};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc, oneshot, watch, RwLock};
 
 use crate::relay::circle_handle;
+use crate::relay::identity::{AuthTracker, AuthVerdict};
 
 use super::config::{STORED_REPLAY_BYTE_CAP, WORKER_QUEUE_CAP};
 use super::event::SyncStatusReason;
 use super::planes::{group::GROUP_EVENT_KIND, PlaneKind};
 use super::processor::EngineProcessor;
-use super::repair::{ClosedKind, RepairKey, RepairQueue};
+use super::repair::{refuses_read, ClosedKind, RepairKey, RepairQueue};
 use super::router::{Router, SubCtx};
 
 /// One routed relay event handed from the receiver to the worker.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is hand-written: the relay, the subscription id and the event are
+/// identifiers (Security Rule 15).
+#[derive(Clone)]
 pub struct RawEvent {
     /// Relay the event arrived on.
     pub relay_url: RelayUrl,
@@ -77,6 +82,19 @@ pub struct RawEvent {
     pub subscription_id: SubscriptionId,
     /// The event itself (relay-public; first-seen, never our own — pool dedup).
     pub event: Event,
+    /// The pool whose socket carried it, named by the plane that pool serves.
+    pub pool: PlaneKind,
+}
+
+impl std::fmt::Debug for RawEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RawEvent")
+            .field("relay_url", &"<redacted>")
+            .field("subscription_id", &"<redacted>")
+            .field("event", &"<redacted>")
+            .field("pool", &self.pool)
+            .finish()
+    }
 }
 
 /// What the receiver hands the worker: a delivered event, a relay's
@@ -115,7 +133,8 @@ pub struct RawEvent {
 /// require an ack that can be dropped silently — and a pause whose ack is lost
 /// blocks the lifecycle lock until its bound elapses. Nothing in the receive
 /// path clones a signal, so the capability is simply not offered.
-#[derive(Debug)]
+///
+/// `Debug` is hand-written, as [`RawEvent`]'s is.
 pub enum RawSignal {
     /// A first-seen event on a live subscription.
     Event(Box<RawEvent>),
@@ -125,6 +144,8 @@ pub enum RawSignal {
         relay_url: RelayUrl,
         /// Subscription it terminates the stored phase of.
         subscription_id: SubscriptionId,
+        /// The pool whose socket carried it ([`RawEvent::pool`]).
+        pool: PlaneKind,
     },
     /// A relay ended one subscription (`CLOSED`).
     ///
@@ -140,6 +161,20 @@ pub enum RawSignal {
         subscription_id: SubscriptionId,
         /// Whether the pool deleted the subscription or merely marked it closed.
         kind: ClosedKind,
+        /// Whether it refused the read until this device authenticates
+        /// ([`super::repair::refuses_read`]); the worker, which knows the
+        /// plane, decides what that means.
+        refuses_read: bool,
+        /// The pool whose socket carried it ([`RawEvent::pool`]).
+        pool: PlaneKind,
+    },
+    /// The inbox socket to a relay authenticated after that relay refused one
+    /// of its REQs until it did ([`run_auth_watch`]), on the same connection.
+    Authenticated {
+        /// Relay that accepted the answer to its challenge.
+        relay_url: RelayUrl,
+        /// The REQ it had refused. Not yet known to be ours.
+        subscription_id: SubscriptionId,
     },
     /// The session is pausing: drain everything already queued, THEN clear the
     /// router and burn the open generations' advances, and ack.
@@ -172,6 +207,39 @@ pub enum RawSignal {
         /// stale) and any suppression applied.
         ack: oneshot::Sender<()>,
     },
+}
+
+impl std::fmt::Debug for RawSignal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Event(event) => f.debug_tuple("Event").field(event).finish(),
+            Self::EndOfStoredEvents { pool, .. } => f
+                .debug_struct("EndOfStoredEvents")
+                .field("relay_url", &"<redacted>")
+                .field("subscription_id", &"<redacted>")
+                .field("pool", pool)
+                .finish(),
+            Self::SubscriptionClosed {
+                kind,
+                refuses_read,
+                pool,
+                ..
+            } => f
+                .debug_struct("SubscriptionClosed")
+                .field("relay_url", &"<redacted>")
+                .field("subscription_id", &"<redacted>")
+                .field("kind", kind)
+                .field("refuses_read", refuses_read)
+                .field("pool", pool)
+                .finish(),
+            Self::Authenticated { .. } => f
+                .debug_struct("Authenticated")
+                .field("relay_url", &"<redacted>")
+                .field("subscription_id", &"<redacted>")
+                .finish(),
+            Self::Pause { .. } => f.debug_struct("Pause").finish_non_exhaustive(),
+        }
+    }
 }
 
 /// What the receiver loop should do with one pool notification.
@@ -400,6 +468,7 @@ fn report_worker_gone(processor: &EngineProcessor, wedged: &AtomicBool) {
 /// session. See [`super::session::LiveSyncCore::is_running`].
 pub async fn run_receiver(
     mut notifications: broadcast::Receiver<RelayPoolNotification>,
+    pool: PlaneKind,
     tx: mpsc::Sender<RawSignal>,
     processor: Arc<EngineProcessor>,
     shutdown: Arc<AtomicBool>,
@@ -442,6 +511,7 @@ pub async fn run_receiver(
                             relay_url,
                             subscription_id: subscription_id.into_owned(),
                             event: event.into_owned(),
+                            pool,
                         }))) {
                             Err(mpsc::error::TrySendError::Full(RawSignal::Event(dropped))) => {
                                 note_intake_drop(&processor, &dropped.event);
@@ -468,6 +538,7 @@ pub async fn run_receiver(
                             tx.try_send(RawSignal::EndOfStoredEvents {
                                 relay_url,
                                 subscription_id: subscription_id.into_owned(),
+                                pool,
                             })
                         {
                             report_worker_gone(&processor, &wedged);
@@ -492,6 +563,8 @@ pub async fn run_receiver(
                             relay_url,
                             subscription_id: subscription_id.into_owned(),
                             kind: ClosedKind::classify(&message),
+                            refuses_read: refuses_read(&message),
+                            pool,
                         }) {
                             Ok(()) => {}
                             Err(mpsc::error::TrySendError::Closed(_)) => {
@@ -559,6 +632,126 @@ pub async fn run_receiver(
     }
 }
 
+/// One inbox relay's connection, read for the moment a REQ it refused until
+/// this device authenticated can be asked again.
+///
+/// Pure over the relay's own notifications, which carry its messages and its
+/// NIP-42 verdicts in the one order the pool saw them; the pool's notification
+/// stream carries no verdict at all.
+#[derive(Default)]
+pub(crate) struct InboxAuthWatch {
+    auth: AuthTracker,
+    /// The REQ the relay refused, on this connection, before it authenticated.
+    refused: Option<SubscriptionId>,
+}
+
+impl InboxAuthWatch {
+    /// The REQ to ask again now `notification` arrived, if any: one refused
+    /// until this device authenticated, on a connection that has just done so.
+    ///
+    /// A refusal after the connection authenticated is the relay's answer, not
+    /// a wait for one, and stays on the gated schedule; so does one whose
+    /// answer failed. A failure after `Authenticated` on the same connection —
+    /// strfry's `already authenticated` to a second challenge's answer — is no
+    /// verdict ([`AuthTracker`]).
+    pub(crate) fn observe(&mut self, notification: &RelayNotification) -> Option<SubscriptionId> {
+        if let RelayNotification::Message {
+            message:
+                RelayMessage::Closed {
+                    subscription_id,
+                    message,
+                },
+        } = notification
+        {
+            if !self.auth.is_authenticated() && refuses_read(message) {
+                self.refused = Some(subscription_id.clone().into_owned());
+            }
+            return None;
+        }
+        match self.auth.observe(notification) {
+            Some(AuthVerdict::Authenticated) => self.refused.take(),
+            Some(AuthVerdict::Failed) => {
+                self.refused = None;
+                None
+            }
+            None => {
+                if matches!(
+                    notification,
+                    RelayNotification::RelayStatus { status } if *status != RelayStatus::Connected
+                ) {
+                    // A connection that ends takes its refusal with it: the
+                    // next one is asked by the reconnect's own re-issue.
+                    self.refused = None;
+                }
+                None
+            }
+        }
+    }
+}
+
+/// Watches one inbox relay's own notifications ([`InboxAuthWatch`]) and hands
+/// the worker [`RawSignal::Authenticated`] when a REQ it refused until this
+/// device authenticated may be asked again.
+///
+/// Its receiver is taken before the relay is dialled, so a relay that
+/// challenges on connect is read from the first frame. It ends at `cancel`,
+/// when `generation` moves past `mine` (the relay object it reads was
+/// replaced), when the relay's channel closes, or at a `Shutdown` once the
+/// session is shutting down — never at the `Shutdown` a pause's disconnect
+/// sends, since the next burst dials the same relay object again.
+pub(crate) async fn run_auth_watch(
+    relay_url: RelayUrl,
+    mut notifications: broadcast::Receiver<RelayNotification>,
+    tx: mpsc::Sender<RawSignal>,
+    shutdown: Arc<AtomicBool>,
+    mut generation: watch::Receiver<u64>,
+    mine: u64,
+    mut cancel: watch::Receiver<bool>,
+) {
+    let mut watch = InboxAuthWatch::default();
+    loop {
+        let notification = tokio::select! {
+            biased;
+            _ = cancel.wait_for(|cancelled| *cancelled) => break,
+            _ = generation.wait_for(|current| *current != mine) => break,
+            received = notifications.recv() => received,
+        };
+        let notification = match notification {
+            Ok(notification) => notification,
+            // A skipped verdict leaves the refusal on the gated schedule.
+            Err(RecvError::Lagged(_)) => continue,
+            Err(RecvError::Closed) => break,
+        };
+        if matches!(notification, RelayNotification::Shutdown) && shutdown.load(Ordering::Acquire) {
+            break;
+        }
+        if let Some(subscription_id) = watch.observe(&notification) {
+            // Never awaited, as the receiver never awaits: a full queue leaves
+            // the refusal on the gated schedule.
+            if let Err(mpsc::error::TrySendError::Closed(_)) =
+                tx.try_send(RawSignal::Authenticated {
+                    relay_url: relay_url.clone(),
+                    subscription_id,
+                })
+            {
+                break;
+            }
+        }
+    }
+}
+
+/// What a `CLOSED` on a REQ of `plane` schedules. Only an inbox REQ is ever
+/// [`ClosedKind::ReadGated`]: a group REQ keeps the pool's disposition, and
+/// with it a re-issue within the 30 s cap, so no circle's receive plane waits
+/// an hour on one relay.
+fn closed_kind(kind: ClosedKind, refuses_read: bool, plane: PlaneKind) -> ClosedKind {
+    if refuses_read && plane == PlaneKind::Inbox {
+        ClosedKind::ReadGated
+    } else {
+        kind
+    }
+}
+
 /// Records a relay ending one of OUR subscriptions: a visible status plus a
 /// scheduled re-issue.
 ///
@@ -580,13 +773,23 @@ pub async fn run_receiver(
 /// repair already being queued. Emitting first published a state that had not
 /// happened yet — which made an observer that used the status as its
 /// happens-before edge race the scheduling under load.
+///
+/// `pool` is what the pool itself did with the subscription
+/// ([`ClosedKind::classify`]): for a [`ClosedKind::ReadGated`] close it is what
+/// decides, once the inbox socket has authenticated, whether the pool's own
+/// resend is the re-issue or Haven's is ([`RepairQueue::note_authenticated`]).
 pub(crate) fn note_subscription_closed(
     processor: &EngineProcessor,
     repair: &RepairQueue,
     key: &RepairKey,
     kind: ClosedKind,
+    pool: ClosedKind,
 ) {
-    repair.note_closed(key, kind);
+    if kind == ClosedKind::ReadGated {
+        repair.note_read_gated(key, pool == ClosedKind::Throttled);
+    } else {
+        repair.note_closed(key, kind);
+    }
     processor.emit_status(SyncStatusReason::RelayError);
     // Presence-only (Security Rules 4/6): never the relay, the sub-id, the `#h`,
     // or the relay's free-text reason.
@@ -655,6 +858,7 @@ fn anchor_end_of_stored_events(processor: &EngineProcessor, ctx: &SubCtx, key: &
         // backdating makes every genuine wrap invisible. It anchors here now, on
         // the inbox REQ's local open time, exactly like a group bucket.
         PlaneKind::Inbox => {
+            processor.settle_inbox_floor(key);
             if processor.note_inbox_end_of_stored_events() {
                 log::debug!("[live_sync::worker] EOSE anchored inbox cursor");
             }
@@ -731,6 +935,37 @@ pub async fn run_worker(
     .await;
 }
 
+/// The `(relay, subscription)` a signal names, and the pool whose socket
+/// carried it; `None` for the pause marker, which names neither.
+fn endpoint_of(signal: &RawSignal) -> Option<(RepairKey, PlaneKind)> {
+    let (relay_url, sub_id, pool) = match signal {
+        RawSignal::Event(raw) => (&raw.relay_url, &raw.subscription_id, raw.pool),
+        RawSignal::EndOfStoredEvents {
+            relay_url,
+            subscription_id,
+            pool,
+        }
+        | RawSignal::SubscriptionClosed {
+            relay_url,
+            subscription_id,
+            pool,
+            ..
+        } => (relay_url, subscription_id, *pool),
+        RawSignal::Authenticated {
+            relay_url,
+            subscription_id,
+        } => (relay_url, subscription_id, PlaneKind::Inbox),
+        RawSignal::Pause { .. } => return None,
+    };
+    Some((
+        RepairKey {
+            relay_url: relay_url.clone(),
+            sub_id: sub_id.clone(),
+        },
+        pool,
+    ))
+}
+
 /// [`run_worker`], taking in what it holds of the stored replay once
 /// `hold_cap` events, or `hold_bytes` bytes of their content, are held.
 async fn work(
@@ -754,25 +989,9 @@ async fn work(
             continue;
         }
 
-        let key = match &signal {
-            RawSignal::Event(raw) => RepairKey {
-                relay_url: raw.relay_url.clone(),
-                sub_id: raw.subscription_id.clone(),
-            },
-            RawSignal::EndOfStoredEvents {
-                relay_url,
-                subscription_id,
-            }
-            | RawSignal::SubscriptionClosed {
-                relay_url,
-                subscription_id,
-                ..
-            } => RepairKey {
-                relay_url: relay_url.clone(),
-                sub_id: subscription_id.clone(),
-            },
-            // Handled above; the marker never reaches the router.
-            RawSignal::Pause { .. } => continue,
+        // Handled above; the marker never reaches the router.
+        let Some((key, carried)) = endpoint_of(&signal) else {
+            continue;
         };
 
         // Resolve the subscription context (cloned so the router lock is not held
@@ -785,23 +1004,44 @@ async fn work(
                 .cloned()
         };
         let Some(ctx) = ctx else { continue };
+        // Each plane's REQs ride one pool: what names one of them on the other
+        // pool's socket — a relay both pools hold, echoing the id — was never
+        // asked of that socket.
+        if carried != ctx.plane {
+            continue;
+        }
 
         // This REQ endpoint is carrying traffic. Recorded for anything the
         // router resolved — a CLOSED excepted, which is the relay ENDING the
-        // REQ, not serving it.
-        if !matches!(signal, RawSignal::SubscriptionClosed { .. }) {
+        // REQ, not serving it, and an authentication, which serves nothing.
+        if !matches!(
+            signal,
+            RawSignal::SubscriptionClosed { .. } | RawSignal::Authenticated { .. }
+        ) {
             processor.note_delivery(&key);
         }
 
         let raw = match signal {
             RawSignal::Event(raw) => *raw,
-            RawSignal::SubscriptionClosed { kind, .. } => {
+            RawSignal::SubscriptionClosed {
+                kind, refuses_read, ..
+            } => {
                 // This endpoint will send nothing more on this REQ, so a burst
                 // waiting on it has its answer — waiting for an `EOSE` that can
                 // no longer come would spend the whole backlog budget.
                 flush_stored(&processor, Some(&key.sub_id)).await;
                 processor.note_endpoint_settled(&key);
-                note_subscription_closed(&processor, &repair, &key, kind);
+                note_subscription_closed(
+                    &processor,
+                    &repair,
+                    &key,
+                    closed_kind(kind, refuses_read, ctx.plane),
+                    kind,
+                );
+                continue;
+            }
+            RawSignal::Authenticated { .. } => {
+                repair.note_authenticated(&key);
                 continue;
             }
             RawSignal::EndOfStoredEvents { .. } => {
@@ -1017,6 +1257,147 @@ mod tests {
             )])
             .sign_with_keys(&Keys::generate())
             .unwrap()
+    }
+
+    fn closed(sub: &str, message: &str) -> RelayNotification {
+        RelayNotification::Message {
+            message: RelayMessage::Closed {
+                subscription_id: std::borrow::Cow::Owned(SubscriptionId::new(sub)),
+                message: std::borrow::Cow::Owned(message.to_owned()),
+            },
+        }
+    }
+
+    const WRAPPED: &str = "ERROR: auth-required: requested filter requires authentication";
+
+    /// Security Rule 15: no signal names its relay, its subscription or its
+    /// event.
+    #[test]
+    fn raw_event_and_raw_signal_debug_redacts_relay_sub_id_and_event() {
+        let relay = "wss://planted-relay-host.example.com";
+        let sub = "planted_subscription_9f3a";
+        let h = "ab".repeat(32);
+        let event = commit_event_with_h(&h);
+        let (id, author) = (event.id.to_hex(), event.pubkey.to_hex());
+        let raw = || RawEvent {
+            relay_url: RelayUrl::parse(relay).unwrap(),
+            subscription_id: SubscriptionId::new(sub),
+            event: event.clone(),
+            pool: PlaneKind::Group,
+        };
+        let needles = &[relay, sub, &id, &author, &h, "planted-relay-host"];
+        crate::assert_debug_redacted!(raw(), "RawEvent", needles);
+        let (ack, _) = oneshot::channel();
+        for (signal, marker) in [
+            (RawSignal::Event(Box::new(raw())), "RawEvent"),
+            (
+                RawSignal::EndOfStoredEvents {
+                    relay_url: RelayUrl::parse(relay).unwrap(),
+                    subscription_id: SubscriptionId::new(sub),
+                    pool: PlaneKind::Inbox,
+                },
+                "EndOfStoredEvents",
+            ),
+            (
+                RawSignal::SubscriptionClosed {
+                    relay_url: RelayUrl::parse(relay).unwrap(),
+                    subscription_id: SubscriptionId::new(sub),
+                    kind: ClosedKind::ReadGated,
+                    refuses_read: true,
+                    pool: PlaneKind::Inbox,
+                },
+                "SubscriptionClosed",
+            ),
+            (
+                RawSignal::Authenticated {
+                    relay_url: RelayUrl::parse(relay).unwrap(),
+                    subscription_id: SubscriptionId::new(sub),
+                },
+                "Authenticated",
+            ),
+            (
+                RawSignal::Pause {
+                    registrations: 7_654_321,
+                    ack,
+                },
+                "Pause",
+            ),
+        ] {
+            crate::assert_debug_redacted!(
+                signal,
+                "RawSignal",
+                marker = marker,
+                &[needles.as_slice(), &["7654321"]].concat()
+            );
+        }
+    }
+
+    /// A REQ the relay refused before the connection authenticated is asked
+    /// again once, at the authentication — and a refusal after it is the
+    /// relay's answer, left to the gated schedule.
+    #[test]
+    fn only_a_refusal_made_before_the_connection_authenticated_is_asked_again() {
+        let mut watch = InboxAuthWatch::default();
+        assert_eq!(watch.observe(&closed("s_inbox_0", WRAPPED)), None);
+        assert_eq!(
+            watch.observe(&RelayNotification::Authenticated),
+            Some(SubscriptionId::new("s_inbox_0"))
+        );
+        assert_eq!(
+            watch.observe(&RelayNotification::Authenticated),
+            None,
+            "once"
+        );
+        assert_eq!(watch.observe(&closed("s_inbox_0", WRAPPED)), None);
+        assert_eq!(
+            watch.observe(&RelayNotification::Authenticated),
+            None,
+            "a refusal on an authenticated connection waited for nothing"
+        );
+    }
+
+    /// M1: strfry challenges each gated REQ, so an answer can follow the one
+    /// that authenticated and be refused as a repeat. That failure is no
+    /// verdict: the re-issue it follows stands, and a refusal after it is
+    /// still a refusal on an authenticated connection.
+    #[test]
+    fn a_failure_after_authenticated_on_the_same_connection_is_not_fatal() {
+        let mut watch = InboxAuthWatch::default();
+        watch.observe(&closed("s_inbox_0", "auth-required: unwrapped"));
+        assert_eq!(
+            watch.observe(&RelayNotification::Authenticated),
+            Some(SubscriptionId::new("s_inbox_0"))
+        );
+        assert_eq!(
+            watch.observe(&RelayNotification::AuthenticationFailed),
+            None
+        );
+        watch.observe(&closed("s_inbox_0", WRAPPED));
+        assert_eq!(watch.observe(&RelayNotification::Authenticated), None);
+    }
+
+    /// A failed answer, or a connection that ends, takes the refusal with it;
+    /// a closing that refuses nothing is no refusal.
+    #[test]
+    fn a_failed_answer_or_a_lost_connection_forgets_the_refusal() {
+        let mut watch = InboxAuthWatch::default();
+        watch.observe(&closed("s_inbox_0", WRAPPED));
+        watch.observe(&RelayNotification::AuthenticationFailed);
+        assert_eq!(watch.observe(&RelayNotification::Authenticated), None);
+
+        let mut watch = InboxAuthWatch::default();
+        watch.observe(&closed("s_inbox_0", WRAPPED));
+        watch.observe(&RelayNotification::RelayStatus {
+            status: RelayStatus::Connected,
+        });
+        watch.observe(&RelayNotification::RelayStatus {
+            status: RelayStatus::Disconnected,
+        });
+        assert_eq!(watch.observe(&RelayNotification::Authenticated), None);
+
+        let mut watch = InboxAuthWatch::default();
+        watch.observe(&closed("s_inbox_0", "error: shutting down"));
+        assert_eq!(watch.observe(&RelayNotification::Authenticated), None);
     }
 
     #[test]
@@ -1389,6 +1770,7 @@ mod supervisor_isolation_tests {
                 relay_url: RelayUrl::parse(&relay).unwrap(),
                 subscription_id: sub.clone(),
                 event,
+                pool: PlaneKind::Inbox,
             }))
         };
 
@@ -1398,6 +1780,16 @@ mod supervisor_isolation_tests {
         tx.send(deliver(event_445("aa00", "not a wrap")))
             .await
             .unwrap();
+        // Ours, but on the engine pool's socket, which was never sent the
+        // inbox REQ: a relay both pools hold echoing the inbox id there.
+        tx.send(RawSignal::Event(Box::new(RawEvent {
+            relay_url: RelayUrl::parse(&relay).unwrap(),
+            subscription_id: sub.clone(),
+            event: wrap_for(own),
+            pool: PlaneKind::Group,
+        })))
+        .await
+        .unwrap();
         let genuine = wrap_for(own);
         tx.send(deliver(genuine.clone())).await.unwrap();
 
@@ -1480,6 +1872,7 @@ mod supervisor_isolation_tests {
                 relay_url: RelayUrl::parse(&relay).unwrap(),
                 subscription_id: sub.clone(),
                 event: event_445(&group_hex, "__panic_for_test__"),
+                pool: PlaneKind::Group,
             })))
             .await
             .expect("the queue is sized for the whole backlog plus the marker");
@@ -1631,6 +2024,7 @@ mod supervisor_isolation_tests {
                 relay_url: RelayUrl::parse(&relay).unwrap(),
                 subscription_id: sub.clone(),
                 event: event_445(&group_hex, content),
+                pool: PlaneKind::Group,
             }))
         };
         // TWO panic events (each trips the `#[cfg(test)]` seam inside
@@ -1711,6 +2105,8 @@ mod supervisor_isolation_tests {
             relay_url: RelayUrl::parse(&relay).unwrap(),
             subscription_id: sub.clone(),
             kind: ClosedKind::Dropped,
+            refuses_read: false,
+            pool: PlaneKind::Group,
         };
         tx.send(closed(&SubscriptionId::new("an_id_we_never_issued")))
             .await
@@ -1795,6 +2191,8 @@ mod supervisor_isolation_tests {
             relay_url: key.relay_url.clone(),
             subscription_id: sub,
             kind: ClosedKind::Dropped,
+            refuses_read: false,
+            pool: PlaneKind::Group,
         })
         .await
         .unwrap();
@@ -1823,6 +2221,126 @@ mod supervisor_isolation_tests {
         );
     }
 
+    /// Hands the worker a relay's `CLOSED` of `sub` with `message`, on the pool
+    /// the relay's name says, and waits for the status it reports.
+    async fn refuse(
+        tx: &mpsc::Sender<RawSignal>,
+        bus: &mut broadcast::Receiver<LiveSyncEvent>,
+        relay: &str,
+        sub: &SubscriptionId,
+        message: &str,
+    ) {
+        tx.send(RawSignal::SubscriptionClosed {
+            relay_url: RelayUrl::parse(relay).unwrap(),
+            subscription_id: sub.clone(),
+            kind: ClosedKind::classify(message),
+            refuses_read: super::super::repair::refuses_read(message),
+            pool: if relay.contains("inbox") {
+                PlaneKind::Inbox
+            } else {
+                PlaneKind::Group
+            },
+        })
+        .await
+        .unwrap();
+        while !matches!(
+            bus.recv().await,
+            Ok(LiveSyncEvent::Status {
+                reason: SyncStatusReason::RelayError
+            })
+        ) {}
+    }
+
+    /// A relay gating gift-wrap reads ends the INBOX REQ refused. Until the
+    /// inbox socket authenticates, that key waits the gated backoff (a
+    /// minute, doubling to an hour) instead of re-asking every 30 s; a group REQ refused the same way
+    /// keeps the pool's disposition and its 30 s cap. Neither log line names
+    /// the relay or the subscription (Rule 15).
+    #[tokio::test]
+    async fn a_read_refused_inbox_req_waits_the_gated_backoff_and_a_group_req_does_not() {
+        use super::super::config::{
+            BACKOFF_JITTER_FRACTION_BP, BACKOFF_MAX_SECS, GATED_BACKOFF_MIN_SECS,
+        };
+        use std::time::Instant;
+
+        const INBOX_HOST: &str = "gated-inbox.relay.example";
+        const GROUP_HOST: &str = "group.relay.example";
+        // relay.damus.io's own words: strfry's `ERROR: ` ahead of the prefix.
+        const GATED: &str = "ERROR: auth-required: requested filter requires authentication";
+        const REFUSAL: &str = "auth-required: requested filter requires authentication";
+
+        // `secs` at the low and the high end of its jitter.
+        let spread = u64::from(BACKOFF_JITTER_FRACTION_BP);
+        let low = |secs: u64| Duration::from_millis(secs * (10_000 - spread) / 10);
+        let high = |secs: u64| Duration::from_millis(secs * (10_000 + spread) / 10);
+        let dir = TempDir::new().unwrap();
+        let circle =
+            Arc::new(CircleManager::new_unencrypted(dir.path(), &Keys::generate()).unwrap());
+        let bus = EventBus::new();
+        let mut rx_bus = bus.subscribe();
+        let processor = Arc::new(EngineProcessor::new(circle, bus.clone()));
+        let repair = Arc::new(RepairQueue::default());
+
+        let inbox_relay = format!("wss://{INBOX_HOST}");
+        let group_relay = format!("wss://{GROUP_HOST}");
+        let inbox_sub = SubscriptionId::new("s_inbox_SECRETSUB");
+        let group_sub = SubscriptionId::new("s_group_SECRETSUB");
+        let mut router = Router::new();
+        router.register(
+            &inbox_relay,
+            &inbox_sub,
+            SubCtx {
+                plane: PlaneKind::Inbox,
+                group_ids_hex: HashSet::new(),
+            },
+        );
+        router.register_group(
+            std::slice::from_ref(&group_relay),
+            &group_sub,
+            &HashSet::from([hex::encode([0x66u8; 32])]),
+        );
+        let (tx, worker_rx) = mpsc::channel::<RawSignal>(16);
+        tokio::spawn(run_worker(
+            worker_rx,
+            Arc::new(RwLock::new(router)),
+            processor,
+            Arc::clone(&repair),
+            Keys::generate().public_key(),
+        ));
+
+        let lines = crate::test_log::capture_log_lines(async {
+            let before = Instant::now();
+            refuse(&tx, &mut rx_bus, &inbox_relay, &inbox_sub, GATED).await;
+            let gated = repair
+                .next_deadline()
+                .expect("the inbox re-issue is scheduled");
+            assert!(
+                gated >= before + low(GATED_BACKOFF_MIN_SECS),
+                "a refused inbox read must wait the gated backoff, not the 30 s throttle"
+            );
+
+            let before = Instant::now();
+            refuse(&tx, &mut rx_bus, &group_relay, &group_sub, REFUSAL).await;
+            let throttled = repair.next_deadline().expect("both are scheduled");
+            assert!(
+                throttled >= before + low(BACKOFF_MAX_SECS)
+                    && throttled <= Instant::now() + high(BACKOFF_MAX_SECS),
+                "a group REQ keeps the pool's throttle, never the gated wait"
+            );
+        })
+        .await;
+        assert!(
+            lines.iter().any(|l| l.contains("kind=ReadGated"))
+                && lines.iter().any(|l| l.contains("kind=Throttled")),
+            "anti-vacuity: both closes were logged: {lines:?}"
+        );
+        for line in &lines {
+            for needle in [INBOX_HOST, GROUP_HOST, "SECRETSUB", "wss://"] {
+                assert!(!line.contains(needle), "leaked {needle:?}: {line}");
+            }
+        }
+    }
+
     /// A `CLOSED` reaches the worker classified, and the classification is the
     /// one that decides whether the pool kept the subscription.
     #[tokio::test]
@@ -1833,6 +2351,7 @@ mod supervisor_isolation_tests {
         let (processor, _dir) = bare_processor();
         let handle = tokio::spawn(run_receiver(
             brx,
+            PlaneKind::Group,
             mtx,
             processor,
             Arc::new(AtomicBool::new(false)),
@@ -1905,6 +2424,7 @@ mod supervisor_isolation_tests {
             .try_send(RawSignal::EndOfStoredEvents {
                 relay_url: RelayUrl::parse("wss://relay.example").unwrap(),
                 subscription_id: SubscriptionId::new("filler"),
+                pool: PlaneKind::Group,
             })
             .expect("the queue takes its one slot");
 
@@ -1913,6 +2433,7 @@ mod supervisor_isolation_tests {
         let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
         let handle = tokio::spawn(run_receiver(
             brx,
+            PlaneKind::Group,
             mtx,
             processor,
             Arc::new(AtomicBool::new(false)),
@@ -1983,6 +2504,7 @@ mod supervisor_isolation_tests {
 
         let handle = tokio::spawn(run_receiver(
             brx,
+            PlaneKind::Group,
             mtx,
             processor,
             Arc::new(AtomicBool::new(false)),
@@ -2045,6 +2567,7 @@ mod supervisor_isolation_tests {
         let (processor, _dir) = bare_processor();
         let handle = tokio::spawn(run_receiver(
             brx,
+            PlaneKind::Group,
             mtx,
             processor,
             Arc::clone(&shutdown),
@@ -2108,6 +2631,7 @@ mod supervisor_isolation_tests {
 
         let handle = tokio::spawn(run_receiver(
             brx,
+            PlaneKind::Group,
             mtx,
             processor,
             Arc::clone(&shutdown),
@@ -2162,6 +2686,7 @@ mod supervisor_isolation_tests {
         let (processor, _dir) = bare_processor();
         let handle = tokio::spawn(run_receiver(
             brx,
+            PlaneKind::Group,
             mtx,
             processor,
             Arc::clone(&shutdown),
@@ -2290,6 +2815,7 @@ mod stored_replay_tests {
                         relay_url: self.group.relay_url.clone(),
                         subscription_id: self.group.sub_id.clone(),
                         event,
+                        pool: PlaneKind::Group,
                     })))
                     .await
                     .unwrap();
@@ -2308,6 +2834,7 @@ mod stored_replay_tests {
                     relay_url: self.group.relay_url.clone(),
                     subscription_id: self.inbox.clone(),
                     event: probe,
+                    pool: PlaneKind::Inbox,
                 })))
                 .await
                 .unwrap();
@@ -2383,6 +2910,8 @@ mod stored_replay_tests {
                 relay_url: worker.group.relay_url.clone(),
                 subscription_id: worker.group.sub_id.clone(),
                 kind: ClosedKind::classify("error: shutting down"),
+                refuses_read: false,
+                pool: PlaneKind::Group,
             })
             .await
             .unwrap();

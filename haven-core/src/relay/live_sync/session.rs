@@ -1,8 +1,10 @@
 //! [`LiveSyncCore`] — the persistent receive engine's lifecycle and assembly.
 //!
-//! Owns the single engine `Client`, the shared settle buffer + event bus + write
-//! gate, and the router; spawns the [`super::supervisor`] receiver/worker tasks
-//! and issues the multiplexed `#h` (group) and `#p` (inbox) subscriptions.
+//! Owns the engine `Client` and the inbox socket's own, the shared settle
+//! buffer + event bus + write gate, and the router; spawns the
+//! [`super::supervisor`] receiver/worker tasks and issues the multiplexed `#h`
+//! (group) subscriptions on the engine pool and the `#p` (inbox) subscription
+//! on the inbox socket's.
 //!
 //! The engine `Client` is built WITHOUT `verify_subscriptions` (it would drop
 //! the first stored events of every fresh REQ — see [`build_engine_client`];
@@ -11,6 +13,9 @@
 //! NIP-42 AUTH on this socket — no nsec↔circle linkage), a generously-sized
 //! notification channel (so a slow decrypt cannot lag the pool), a `Monitor`
 //! (for reconnect re-anchoring), and **no** gossip (own-relays-only, PSI-8).
+//! The inbox socket's ([`build_inbox_client`]) has the same options but one: it
+//! answers a relay's NIP-42 challenge as the identity, and carries nothing but
+//! the inbox REQ.
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -20,6 +25,7 @@ use std::time::{Duration, Instant};
 
 use nostr::{Filter, PublicKey, RelayUrl, SubscriptionId};
 use nostr_sdk::pool::monitor::{Monitor, MonitorNotification};
+use nostr_sdk::pool::relay::RelayNotification;
 use nostr_sdk::{Client, ClientOptions, RelayPoolNotification, RelayPoolOptions, RelayStatus};
 use tokio::sync::{broadcast, watch, Mutex as TokioMutex, MutexGuard as TokioMutexGuard, RwLock};
 use tokio::task::JoinHandle;
@@ -30,7 +36,8 @@ use crate::relay::circle_handle;
 use crate::relay::cursor::{since_for_stream, SubscribePhase, STREAM_INBOX_1059};
 use crate::relay::fanout::{RESUME_BUDGET_MS, ROW_BUDGET_MS};
 use crate::relay::negentropy;
-use crate::relay::verified::verified_client;
+use crate::relay::nip42::Nip42Signer;
+use crate::relay::verified::{identity_client, verified_client};
 use crate::relay::RelayManager;
 
 use super::config::{
@@ -56,7 +63,9 @@ use super::planes::{
 use super::processor::{group_cursor_stream, BacklogOutcome, BurstEnd, EngineProcessor};
 use super::repair::{ClosedKind, RepairKey, RepairQueue};
 use super::router::{Router, SubCtx};
-use super::supervisor::{flush_stored, intake_queue, run_receiver, run_worker, RawSignal};
+use super::supervisor::{
+    flush_stored, intake_queue, run_auth_watch, run_receiver, run_worker, RawSignal,
+};
 
 /// Cold-start cursor seed: on first subscription a circle's cursor is seeded to
 /// `now − SEED_LOOKBACK_SECS` so the engine backfills the recent past without
@@ -122,6 +131,24 @@ fn build_engine_client() -> Client {
     verified_client(client_opts, Some(Monitor::new(64)))
 }
 
+/// Builds the inbox socket's `Client`: the engine pool's options, on the one
+/// constructor that answers a relay's NIP-42 challenge, as soon as it comes,
+/// under the identity key (owner-directed 2026-11-16, as White Noise does).
+///
+/// A pool of its own, holding only the inbox relays and carrying only the
+/// `kind:1059` `#p` REQ, so no circle's `#h` REQ ever rides an authenticated
+/// socket: authentication is a property of a whole pool, never of one relay
+/// or one REQ. It keeps the engine's ping and its own `Monitor`, so the
+/// radio-off watch and the reconnect re-anchor see its relays apart from the
+/// engine's even where both pools hold the same relay.
+fn build_inbox_client(signer: Arc<Nip42Signer>) -> Client {
+    let pool_opts = RelayPoolOptions::default().notification_channel_size(POOL_NOTIF_CAP);
+    let client_opts = ClientOptions::default()
+        .verify_subscriptions(false)
+        .pool(pool_opts);
+    identity_client(signer, client_opts, Some(Monitor::new(64)))
+}
+
 /// One live group REQ in the running session: either a base bucket (a
 /// multiplexed `#h` over a shared relay set, assigned once at
 /// [`LiveSyncCore::start`]) or a dynamic singleton (one circle added mid-session
@@ -170,6 +197,34 @@ fn to_group_subscription(sub: &LiveGroupSub) -> GroupSubscription {
     }
 }
 
+/// One consumer of a session's [`EventBus`] ([`LiveSyncCore::events`]).
+pub struct LiveEvents {
+    rx: broadcast::Receiver<LiveSyncEvent>,
+    core: std::sync::Weak<LiveSyncCore>,
+}
+
+impl LiveEvents {
+    /// The next event, or `None` once the bus has closed.
+    ///
+    /// A lag is never fatal: the inbox is asked again
+    /// ([`LiveSyncCore::note_consumer_lag`]), and the cursors and catch-up
+    /// replay the rest. Holds no `Arc` between calls, so the bus still closes
+    /// when the session's last owner drops it.
+    pub async fn recv(&mut self) -> Option<LiveSyncEvent> {
+        loop {
+            match self.rx.recv().await {
+                Ok(event) => return Some(event),
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    if let Some(core) = self.core.upgrade() {
+                        core.note_consumer_lag().await;
+                    }
+                }
+                Err(broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    }
+}
+
 /// Whether [`LiveSyncCore::stop`] observed every supervisor task exit.
 ///
 /// The distinction matters to exactly one caller: something reclaiming an
@@ -203,7 +258,14 @@ pub enum StopOutcome {
 type DialMap = Arc<dyn Fn(&str) -> String + Send + Sync>;
 
 pub struct LiveSyncCore {
+    /// The engine pool: every circle's `#h` REQ, on sockets that never
+    /// authenticate.
     client: Client,
+    /// The inbox socket's pool: the `kind:1059` `#p` REQ alone, on sockets
+    /// that answer a relay's NIP-42 challenge as the identity
+    /// ([`build_inbox_client`]). Every lifecycle step the engine pool takes,
+    /// this one takes too.
+    inbox: Client,
     /// The publish pool this session's fanout drives ride, and nothing else
     /// does: handed in at construction, used only while the session is in the
     /// foreground, and closed wherever the session cuts its own radio
@@ -213,6 +275,11 @@ pub struct LiveSyncCore {
     processor: Arc<EngineProcessor>,
     router: Arc<RwLock<Router>>,
     bus: EventBus,
+    /// Subscribed at construction and handed to the first [`Self::events`],
+    /// so an event the session put on the bus before its consumer attached —
+    /// a gift wrap the first inbox REQ replayed, whose `EOSE` then advanced
+    /// the inbox cursor past it — still reaches that consumer.
+    startup_rx: StdMutex<Option<broadcast::Receiver<LiveSyncEvent>>>,
     own_pubkey: PublicKey,
     salt: Zeroizing<[u8; 16]>,
     /// The circle whose next own REQ a test makes fail
@@ -252,6 +319,10 @@ pub struct LiveSyncCore {
     /// was the relay pool's `Shutdown` notification, and that is not
     /// guaranteed to arrive (see [`Self::stop_inner`]).
     cancel_tx: watch::Sender<bool>,
+    /// The generation of the inbox socket's auth watches
+    /// ([`Self::watch_inbox_auth`]): moved on whenever they are spawned again,
+    /// which ends the previous set.
+    auth_watch: watch::Sender<u64>,
     /// The live subscription model of the active session, retained so
     /// [`Self::resume_after_background`] and the delta ops
     /// ([`Self::subscribe_circle`] / [`Self::unsubscribe_circle`]) re-anchor /
@@ -518,6 +589,7 @@ where
 /// permanent.
 struct SubscribeCtx<'a> {
     client: &'a Client,
+    inbox: &'a Client,
     circle: &'a CircleManager,
     processor: &'a Arc<EngineProcessor>,
     router: &'a RwLock<Router>,
@@ -572,6 +644,7 @@ impl SubscribeCtx<'_> {
     /// never the subscribe call itself — a bound on the `verify_subscriptions`
     /// cold subscribe previously regressed engine start (run b7dba45) — so it does
     /// not reintroduce that regression.
+    #[cfg(test)]
     async fn subscribe_bucket(
         &self,
         relays: Vec<String>,
@@ -583,12 +656,14 @@ impl SubscribeCtx<'_> {
             .filter_map(|relay| RelayUrl::parse(relay).ok())
             .map(|relay_url| (relay_url, filter.clone()))
             .collect();
-        self.subscribe_targets(&sub_id, targets).await
+        self.subscribe_targets(self.client, &sub_id, targets).await
     }
 
-    /// [`Self::subscribe_bucket`] with a filter of its own for each relay.
+    /// [`Self::subscribe_bucket`] on `client`, with a filter of its own for
+    /// each relay.
     async fn subscribe_targets(
         &self,
+        client: &Client,
         sub_id: &SubscriptionId,
         targets: Vec<(RelayUrl, Filter)>,
     ) -> LiveSyncResult<Vec<RelayUrl>> {
@@ -605,8 +680,7 @@ impl SubscribeCtx<'_> {
                 if self.shutdown.load(Ordering::Acquire) {
                     return Err(LiveSyncError::NoSession);
                 }
-                let output = self
-                    .client
+                let output = client
                     .subscribe_targeted(
                         sub_id.clone(),
                         targets.clone(),
@@ -620,7 +694,7 @@ impl SubscribeCtx<'_> {
                 // expect an answer from.
                 Ok(output.success.into_iter().collect())
             },
-            || self.client.wait_for_connection(SUBSCRIBE_RETRY_WAIT),
+            || client.wait_for_connection(SUBSCRIBE_RETRY_WAIT),
         )
         .await
     }
@@ -721,7 +795,7 @@ impl SubscribeCtx<'_> {
             );
             targets.push((relay_url, group_filter(group_ids_hex, asked)));
         }
-        self.subscribe_targets(sub_id, targets).await
+        self.subscribe_targets(self.client, sub_id, targets).await
     }
 
     /// Narrows `sub_id`'s coverage to the relays that accepted it while
@@ -739,7 +813,7 @@ impl SubscribeCtx<'_> {
     ) -> Vec<RelayUrl> {
         let mut covering = Vec::with_capacity(issued.len());
         for relay_url in issued {
-            let connected = accepted.contains(relay_url) && self.connected(relay_url).await;
+            let connected = accepted.contains(relay_url) && connected(self.client, relay_url).await;
             if connected || !self.owe(sub_id, group_ids_hex, relay_url) {
                 covering.push(relay_url.clone());
             } else {
@@ -763,15 +837,6 @@ impl SubscribeCtx<'_> {
             self.processor.request_drive();
         }
         covering
-    }
-
-    /// Whether the pool holds `relay_url` connected: a REQ it took for a relay
-    /// that is not was only queued (T-POOL-QUEUED-ACCEPT).
-    async fn connected(&self, relay_url: &RelayUrl) -> bool {
-        self.client
-            .relay(relay_url)
-            .await
-            .is_ok_and(|relay| relay.status() == RelayStatus::Connected)
     }
 
     /// Records that `relay_url` owes each of `group_ids_hex` its history from
@@ -819,7 +884,7 @@ impl SubscribeCtx<'_> {
             }
         }
         self.processor.note_inbox_subscription_opened(now);
-        self.open_delivery_windows(relays, sub_id, now);
+        let issued = self.open_delivery_windows(relays, sub_id, now);
         // No end of stored events heard yet: the cold-start width, from now,
         // whichever open asks.
         let since = self
@@ -838,19 +903,67 @@ impl SubscribeCtx<'_> {
                 },
                 |cursor| since_for_stream(STREAM_INBOX_1059, cursor, phase, now),
             );
-        let filter = inbox_filter(self.own_pubkey, since);
-        let accepted = self
-            .subscribe_bucket(relays.to_vec(), sub_id.clone(), filter)
-            .await?;
+        // Each relay is asked from `since` or from the floor it still owes
+        // the inbox, whichever is earlier, and owes from what it was asked
+        // until its `EOSE` for this REQ says otherwise: written BEFORE the
+        // REQ, so a relay that refuses it until this device authenticates,
+        // is not connected, or never answers keeps owing across a restart,
+        // and the cursor another relay's `EOSE` advances erases nothing it
+        // owes (Security Rule 12). A floor the store would not take holds
+        // the cursor instead.
+        let mut targets: Vec<(RelayUrl, Filter)> = Vec::with_capacity(issued.len());
+        for relay_url in issued {
+            let asked = self
+                .circle
+                .inbox_floor(relay_url.as_str())
+                .map_or(since, |floor| floor.min(since));
+            let key = RepairKey {
+                relay_url,
+                sub_id: sub_id.clone(),
+            };
+            self.processor.note_asked_from(&key, asked);
+            let recorded = self.circle.owe_inbox_floor(key.relay_url.as_str(), asked);
+            self.processor
+                .note_inbox_floor_recorded(&key.relay_url, recorded);
+            targets.push((key.relay_url, inbox_filter(self.own_pubkey, asked)));
+        }
+        let accepted = self.subscribe_targets(self.inbox, sub_id, targets).await?;
         // A burst waits on the relays that can answer it.
         let mut waited = Vec::with_capacity(accepted.len());
         for relay_url in accepted {
-            if self.connected(&relay_url).await {
+            if connected(self.inbox, &relay_url).await {
                 waited.push(relay_url);
             }
         }
         Ok(endpoints(&waited, sub_id))
     }
+}
+
+/// Whether `client`'s pool holds `relay_url` connected: a REQ it took for a
+/// relay that is not was only queued (T-POOL-QUEUED-ACCEPT).
+async fn connected(client: &Client, relay_url: &RelayUrl) -> bool {
+    client
+        .relay(relay_url)
+        .await
+        .is_ok_and(|relay| relay.status() == RelayStatus::Connected)
+}
+
+/// What `client`'s pool holds: its subscriptions, and its relays connected.
+async fn pool_view(
+    client: &Client,
+) -> (
+    HashMap<SubscriptionId, HashMap<RelayUrl, Vec<Filter>>>,
+    HashSet<RelayUrl>,
+) {
+    let live = client.subscriptions().await;
+    let connected = client
+        .relays()
+        .await
+        .into_iter()
+        .filter(|(_, relay)| relay.status() == RelayStatus::Connected)
+        .map(|(url, _)| url)
+        .collect();
+    (live, connected)
 }
 
 /// Which caller opened a set of REQs.
@@ -900,7 +1013,8 @@ enum BurstWindow {
     Open(Vec<RepairKey>),
 }
 
-/// Every relay the active session's REQs target, group and inbox alike.
+/// Every relay the active session's group REQs target: the engine pool's
+/// relays. The inbox relays are the inbox socket's pool's alone.
 ///
 /// A burst open registers this union in the pool BEFORE `connect()`. A circle
 /// subscribed while paused pushed a `LiveGroupSub` into `active` but could not
@@ -908,12 +1022,11 @@ enum BurstWindow {
 /// would be issued to a relay the pool does not hold — and the whole burst open
 /// would fail on that one bucket's `?`, leaving the circle silent in the
 /// background.
-fn relay_union(active: &ActiveSession) -> HashSet<String> {
+fn group_relays(active: &ActiveSession) -> HashSet<String> {
     let mut all: HashSet<String> = HashSet::new();
     for g in &active.group_subs {
         all.extend(g.relays.iter().cloned());
     }
-    all.extend(active.inbox_relays.iter().cloned());
     all
 }
 
@@ -945,43 +1058,53 @@ impl<M: Fn(&str) -> String + Send + Sync> crate::relay::fanout::UnrecordedPublis
         &'a self,
         event: &'a nostr::Event,
         relays: &'a [String],
-    ) -> std::pin::Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+    ) -> std::pin::Pin<
+        Box<dyn Future<Output = Vec<crate::relay::fanout::UnrecordedAnswer>> + Send + 'a>,
+    > {
         Box::pin(async move {
             let mapped: Vec<String> = relays.iter().map(|relay| (self.map)(relay)).collect();
-            self.pool.publish_unrecorded(event, &mapped).await
+            self.pool.publish_unrecorded_answers(event, &mapped).await
+        })
+    }
+
+    fn publish_authenticated<'a>(
+        &'a self,
+        signer: Arc<crate::relay::nip42::Nip42Signer>,
+        event: &'a nostr::Event,
+        relay: &'a str,
+    ) -> std::pin::Pin<Box<dyn Future<Output = crate::relay::identity::AuthSendOutcome> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let mapped = (self.map)(relay);
+            self.pool
+                .publish_authenticated(signer, event, &mapped)
+                .await
         })
     }
 }
 
 impl LiveSyncCore {
-    /// Builds an engine over `circle` for `own_pubkey`, with a fresh ephemeral
-    /// sub-id salt and a dedicated engine `Client`. Does not connect or
-    /// subscribe — call [`Self::start`].
+    /// Builds an engine over `circle` for the identity `circle` was opened
+    /// with, with a fresh ephemeral sub-id salt, a dedicated engine `Client`
+    /// and the inbox socket's own. Does not connect or subscribe — call
+    /// [`Self::start`].
     ///
     /// `drive_pool` is the publish pool the session's fanout drives are sent
     /// through while it is in the foreground. It is this session's ALONE:
     /// the session closes it whenever it cuts its own radio, which would cut
     /// any other publish riding it between its send and its relay's answer.
     #[must_use]
-    pub fn new_local(
-        circle: Arc<CircleManager>,
-        own_pubkey: PublicKey,
-        drive_pool: Arc<RelayManager>,
-    ) -> Self {
-        let driver = LiveDriver::over(&drive_pool);
-        Self::assemble(circle, own_pubkey, driver, Some(drive_pool))
+    pub fn new_local(circle: Arc<CircleManager>, drive_pool: Arc<RelayManager>) -> Self {
+        let driver = LiveDriver::over(&drive_pool, circle.nip42_signer());
+        Self::assemble(circle, driver, Some(drive_pool))
     }
 
     /// [`Self::new_local`] with the driver a test scripts in the drive
     /// pool's place: no pool is held, and none is dialled or closed.
     #[cfg(any(test, feature = "test-utils"))]
     #[must_use]
-    pub fn new_local_with_driver_for_test(
-        circle: Arc<CircleManager>,
-        own_pubkey: PublicKey,
-        driver: LiveDriver,
-    ) -> Self {
-        Self::assemble(circle, own_pubkey, driver, None)
+    pub fn new_local_with_driver_for_test(circle: Arc<CircleManager>, driver: LiveDriver) -> Self {
+        Self::assemble(circle, driver, None)
     }
 
     /// [`Self::new_local`], with every address the fanout drive and the
@@ -997,7 +1120,6 @@ impl LiveSyncCore {
     #[must_use]
     pub fn new_local_with_relay_map_for_test(
         circle: Arc<CircleManager>,
-        own_pubkey: PublicKey,
         drive_pool: Arc<RelayManager>,
         map: impl Fn(&str) -> String + Send + Sync + 'static,
     ) -> Self {
@@ -1005,7 +1127,9 @@ impl LiveSyncCore {
         let (to_fanout, to_pool, to_dial) = (Arc::clone(&map), Arc::clone(&map), map);
         let driver = LiveDriver {
             fanout: Arc::new(crate::relay::fanout::RelayMappedFanout::new(
-                drive_pool.fanout_transport(),
+                drive_pool
+                    .fanout_transport()
+                    .authenticating(circle.nip42_signer()),
                 move |relay| to_fanout(relay),
             )),
             publisher: Arc::new(RelayMappedPool {
@@ -1014,19 +1138,24 @@ impl LiveSyncCore {
             }),
             clock: Arc::new(crate::relay::fanout::WallClock),
         };
-        let mut core = Self::assemble(circle, own_pubkey, driver, Some(drive_pool));
+        let mut core = Self::assemble(circle, driver, Some(drive_pool));
         core.dial = Some(Arc::new(move |relay: &str| to_dial(relay)));
         core
     }
 
     fn assemble(
         circle: Arc<CircleManager>,
-        own_pubkey: PublicKey,
         driver: LiveDriver,
         drive_pool: Option<Arc<RelayManager>>,
     ) -> Self {
         let bus = EventBus::with_capacity(BUS_CAP);
         let client = build_engine_client();
+        // The inbox `#p` is the key the inbox socket answers a challenge
+        // under: a relay that serves gift wraps only to their recipient
+        // refuses any other.
+        let signer = circle.nip42_signer();
+        let own_pubkey = signer.public_key();
+        let inbox = build_inbox_client(signer);
         let shutdown = Arc::new(AtomicBool::new(false));
         let cancel_tx = watch::channel(false).0;
         let mut processor = EngineProcessor::with_driver(Arc::clone(&circle), bus.clone(), driver);
@@ -1034,10 +1163,12 @@ impl LiveSyncCore {
         let processor = Arc::new(processor);
         Self {
             client,
+            inbox,
             drive_pool,
             circle,
             processor,
             router: Arc::new(RwLock::new(Router::new())),
+            startup_rx: StdMutex::new(Some(bus.subscribe())),
             bus,
             own_pubkey,
             salt: generate_session_salt(),
@@ -1050,6 +1181,7 @@ impl LiveSyncCore {
             shutdown,
             tasks: StdMutex::new(Vec::new()),
             cancel_tx,
+            auth_watch: watch::channel(0).0,
             active: Arc::new(RwLock::new(None)),
             lifecycle: Arc::new(TokioMutex::new(())),
             wedged: Arc::new(AtomicBool::new(false)),
@@ -1069,6 +1201,56 @@ impl LiveSyncCore {
     #[must_use]
     pub const fn bus(&self) -> &EventBus {
         &self.bus
+    }
+
+    /// A consumer of [`Self::bus`]: the first one reads from this core's
+    /// construction on, every later one from its own call on.
+    #[must_use]
+    pub fn events(self: &Arc<Self>) -> LiveEvents {
+        let rx = self
+            .startup_rx
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+            .unwrap_or_else(|| self.bus.subscribe());
+        LiveEvents {
+            rx,
+            core: Arc::downgrade(self),
+        }
+    }
+
+    /// A consumer fell behind the bus and lost events it will never see,
+    /// gift wraps among them. Burns the inbox generation's pending advance and
+    /// re-issues the inbox REQ, which asks the lookback again, on the gated
+    /// schedule: anyone who knows the npub can flood wraps past the bus at
+    /// will, and the 30 s cap would buy them a whole lookback re-download
+    /// every half minute.
+    async fn note_consumer_lag(&self) {
+        self.processor.note_inbox_delivery_gap();
+        let inbox: Vec<RepairKey> = self
+            .active
+            .read()
+            .await
+            .as_ref()
+            .map(|active| {
+                active
+                    .inbox_relays
+                    .iter()
+                    .filter_map(|relay| RelayUrl::parse(relay).ok())
+                    .map(|relay_url| RepairKey {
+                        relay_url,
+                        sub_id: active.inbox_sub_id.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for key in &inbox {
+            self.repair.note_closed(key, ClosedKind::ReadGated);
+        }
+        log::warn!(
+            "[live_sync] the event consumer fell behind the bus; the inbox REQ is re-issued \
+             on the gated schedule"
+        );
     }
 
     /// The shared MLS state owner — the SAME `Arc<CircleManager>` (one
@@ -1175,6 +1357,7 @@ impl LiveSyncCore {
     fn ctx(&self) -> SubscribeCtx<'_> {
         SubscribeCtx {
             client: &self.client,
+            inbox: &self.inbox,
             circle: &self.circle,
             processor: &self.processor,
             router: &self.router,
@@ -1293,17 +1476,18 @@ impl LiveSyncCore {
                 ));
             }
         }
-        for relay in &all_relays {
-            let _ = self.client.add_relay(relay.as_str()).await;
+        for g in &group_subs {
+            for relay in &g.relays {
+                let _ = self.client.add_relay(relay.as_str()).await;
+            }
         }
-        self.client.connect().await;
-        // `connect()` only SPAWNS the per-relay connect tasks and returns; give
-        // the WebSocket handshakes a bounded, early-returning grace to finish so
-        // the first REQ (issued below) lands on a live socket instead of dropping
-        // into `Output.failed`. Bounds a WAIT, not the subscribe call itself.
-        self.client
-            .wait_for_connection(SUBSCRIBE_CONNECT_WAIT)
-            .await;
+        for relay in &inbox_sub.relays {
+            let _ = self.inbox.add_relay(relay.as_str()).await;
+        }
+        // Before the dial, so a relay that challenges on connect is read from
+        // its first frame.
+        let watched = self.inbox_relay_notifications().await;
+        self.connect_both().await;
 
         // Interruptible: a concurrent `stop` may have raised `shutdown` during the
         // connect wait above. Bail BEFORE spawning the supervisor / issuing any REQ
@@ -1329,6 +1513,7 @@ impl LiveSyncCore {
         // everything already queued (drain-then-clear, Rule 12). `stop_inner`
         // drops it — see the `intake` field doc for why that is not optional.
         *self.intake.lock().unwrap_or_else(PoisonError::into_inner) = Some(tx.clone());
+        self.watch_inbox_auth(watched, &tx);
         // The worker just drains events and feeds them to the engine (which owns
         // convergence + publish-before-apply internally); no per-circle gate /
         // settle buffer / converge task is needed anymore (plan §5.4).
@@ -1525,8 +1710,20 @@ impl LiveSyncCore {
         tx: tokio::sync::mpsc::Sender<super::supervisor::RawSignal>,
         rx: tokio::sync::mpsc::Receiver<super::supervisor::RawSignal>,
     ) {
+        // The inbox socket's pool feeds the same intake: one worker, one
+        // order, and the router tells the planes apart by relay and id.
+        let inbox_receiver_task = tokio::spawn(run_receiver(
+            self.inbox.notifications(),
+            PlaneKind::Inbox,
+            tx.clone(),
+            Arc::clone(&self.processor),
+            Arc::clone(&self.shutdown),
+            Arc::clone(&self.wedged),
+            self.cancel_tx.subscribe(),
+        ));
         let receiver_task = tokio::spawn(run_receiver(
             notifications,
+            PlaneKind::Group,
             tx,
             Arc::clone(&self.processor),
             Arc::clone(&self.shutdown),
@@ -1558,6 +1755,7 @@ impl LiveSyncCore {
         let follow_task = tokio::spawn(run_follow(self.repair_plane(), self.cancel_tx.subscribe()));
         let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
         tasks.push(receiver_task);
+        tasks.push(inbox_receiver_task);
         tasks.push(worker_task);
         tasks.push(repair_task);
         tasks.push(drive_task);
@@ -1568,17 +1766,92 @@ impl LiveSyncCore {
         // `Arc<CircleManager>`, so it adds no Rule-14 lifetime edge; the `Client`
         // clone is an `Arc` over the relay pool only, and this task is joined
         // here anyway so nothing outlives `stop`.
-        if let Some(monitor) = self.client.monitor() {
-            tasks.push(tokio::spawn(run_monitor(
-                monitor.subscribe(),
-                self.bus.clone(),
-                Arc::clone(&self.paused),
-                RadioOffWatch {
-                    radio_off: Arc::clone(&self.radio_off),
-                    repair: Arc::clone(&self.repair),
-                    client: self.client.clone(),
-                    cut: Arc::clone(&self.unrequested_connections),
-                },
+        // One per pool, each over its own `Monitor`: a relay both pools hold
+        // is two sockets, and the watch must cut the one that came up.
+        for client in self.pools() {
+            if let Some(monitor) = client.monitor() {
+                tasks.push(tokio::spawn(run_monitor(
+                    monitor.subscribe(),
+                    self.bus.clone(),
+                    Arc::clone(&self.paused),
+                    RadioOffWatch {
+                        radio_off: Arc::clone(&self.radio_off),
+                        repair: Arc::clone(&self.repair),
+                        client: client.clone(),
+                        cut: Arc::clone(&self.unrequested_connections),
+                    },
+                    self.cancel_tx.subscribe(),
+                )));
+            }
+        }
+    }
+
+    /// The session's two pools: the engine's, and the inbox socket's.
+    const fn pools(&self) -> [&Client; 2] {
+        [&self.client, &self.inbox]
+    }
+
+    /// Dials both pools, then gives their handshakes one bounded,
+    /// early-returning grace together: `connect()` only SPAWNS the per-relay
+    /// connect tasks, and a REQ issued before a socket is up drops into
+    /// `Output.failed`. Bounds a WAIT, not the subscribe call itself.
+    async fn connect_both(&self) {
+        self.client.connect().await;
+        self.inbox.connect().await;
+        tokio::join!(
+            self.client.wait_for_connection(SUBSCRIBE_CONNECT_WAIT),
+            self.inbox.wait_for_connection(SUBSCRIBE_CONNECT_WAIT),
+        );
+    }
+
+    /// Each inbox relay's own notifications, taken now: the only channel its
+    /// NIP-42 verdicts reach.
+    async fn inbox_relay_notifications(
+        &self,
+    ) -> Vec<(RelayUrl, broadcast::Receiver<RelayNotification>)> {
+        self.inbox
+            .relays()
+            .await
+            .into_iter()
+            .map(|(url, relay)| (url, relay.notifications()))
+            .collect()
+    }
+
+    /// Watches the inbox relays again after a rebuild: a rebuilt relay is a
+    /// new relay object, whose notifications only a fresh receiver reads.
+    async fn rewatch_inbox_auth(&self) {
+        let tx = self
+            .intake
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(tx) = tx {
+            let watched = self.inbox_relay_notifications().await;
+            self.watch_inbox_auth(watched, &tx);
+        }
+    }
+
+    /// Spawns one [`run_auth_watch`] per inbox relay in `watched`, and ends
+    /// every one an earlier call spawned: their relay objects are gone or
+    /// read again here. Finished handles are let go, so a session that
+    /// re-dials every burst holds no more of them than it has relays.
+    fn watch_inbox_auth(
+        &self,
+        watched: Vec<(RelayUrl, broadcast::Receiver<RelayNotification>)>,
+        tx: &tokio::sync::mpsc::Sender<RawSignal>,
+    ) {
+        self.auth_watch.send_modify(|generation| *generation += 1);
+        let mine = *self.auth_watch.borrow();
+        let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
+        tasks.retain(|task| !task.is_finished());
+        for (relay_url, notifications) in watched {
+            tasks.push(tokio::spawn(run_auth_watch(
+                relay_url,
+                notifications,
+                tx.clone(),
+                Arc::clone(&self.shutdown),
+                self.auth_watch.subscribe(),
+                mine,
                 self.cancel_tx.subscribe(),
             )));
         }
@@ -1639,6 +1912,7 @@ impl LiveSyncCore {
         if inbox_sub.relays.is_empty() {
             return Ok(opened);
         }
+        self.processor.forget_unrecorded_inbox_floors();
         opened.extend(
             ctx.issue_inbox(&inbox_sub.relays, &inbox_sub.sub_id, inbox_phase, now)
                 .await?,
@@ -1736,10 +2010,25 @@ impl LiveSyncCore {
         self.processor.endpoint_settled_for_test(relay)
     }
 
+    /// Resolves once `done` holds, read now and again each time an endpoint
+    /// settles — after its `EOSE` or `CLOSED` was taken in and anchored.
+    /// Unbounded: the caller bounds it.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn settles_until_for_test(&self, done: impl Fn() -> bool) {
+        self.processor.settles_until_for_test(done).await;
+    }
+
     /// The relays the engine pool holds now.
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn relays_in_pool_for_test(&self) -> Vec<RelayUrl> {
         self.client.relays().await.into_keys().collect()
+    }
+
+    /// How many REQ re-issues the repair task holds pending.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[must_use]
+    pub fn repairs_pending_for_test(&self) -> usize {
+        self.repair.pending_len()
     }
 
     /// How many follows have ended so far ([`Self::follows_ended_for_test`]).
@@ -1930,7 +2219,7 @@ impl LiveSyncCore {
         // Best-effort, bounded teardown: the shutdown flag is already set, so the
         // supervisor/receiver tasks die regardless; a wedged pool op must not
         // block logout/teardown. `stop` returns (), so a timeout cannot propagate.
-        if bounded(RELAY_LIFECYCLE_OP_TIMEOUT, self.client.unsubscribe_all())
+        if bounded(RELAY_LIFECYCLE_OP_TIMEOUT, self.unsubscribe_both())
             .await
             .is_err()
         {
@@ -1950,9 +2239,12 @@ impl LiveSyncCore {
         {
             log::warn!("[live_sync] stop: relay termination timed out; proceeding");
         }
-        if bounded(RELAY_LIFECYCLE_OP_TIMEOUT, self.client.shutdown())
-            .await
-            .is_err()
+        if bounded(RELAY_LIFECYCLE_OP_TIMEOUT, async {
+            self.client.shutdown().await;
+            self.inbox.shutdown().await;
+        })
+        .await
+        .is_err()
         {
             log::warn!("[live_sync] stop: client shutdown timed out; proceeding");
         }
@@ -2027,6 +2319,40 @@ impl LiveSyncCore {
         let lifecycle = self.lifecycle.lock().await;
         self.resume_burst(&lifecycle, kind, INBOX_BURSTS_PER_REQ, None)
             .await
+    }
+
+    /// Re-dials both pools after the device's default network changed: the
+    /// pause, then the foreground open, under one lifecycle acquisition.
+    ///
+    /// Not [`Self::resume_after_background`]: a socket the old network
+    /// carried still reads `Connected` to the pool until a ping goes
+    /// unanswered, up to two ping intervals later, and an open connects only
+    /// what is not. Only after a pause may the open rebuild every relay (see
+    /// [`Self::rebuild_stalled_relays`]); a session already paused needs only
+    /// the open. The pause forgets a network return the repair task had not
+    /// acted on, so it is said again once the open has succeeded: a relay a
+    /// stored record could not reach on the old network is called on this
+    /// one at once, at most once a minute (`NETWORK_BACK_FLOOR_MS`).
+    ///
+    /// On [`Claim::Nothing`] it is refused before it touches the session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LiveSyncError::NotForeground`] if the caller claims nothing,
+    /// or another [`LiveSyncError`] if the pause or a re-subscription fails.
+    pub async fn reconnect_after_network_change(&self, claim: Claim) -> LiveSyncResult<()> {
+        let Some(kind) = BurstKind::claimed(claim) else {
+            return Err(LiveSyncError::NotForeground);
+        };
+        let lifecycle = self.lifecycle.lock().await;
+        log::info!("[live_sync] the network changed: re-dialling every live socket");
+        if !self.paused.load(Ordering::Acquire) {
+            self.pause_locked(&lifecycle).await?;
+        }
+        self.resume_burst(&lifecycle, kind, INBOX_BURSTS_PER_REQ, None)
+            .await?;
+        self.repair.note_network_back();
+        Ok(())
     }
 
     /// Opens ONE background burst: the same re-anchor, plus the two things that
@@ -2184,16 +2510,19 @@ impl LiveSyncCore {
 
         let active = self.active.read().await.clone();
         if let Some(active) = &active {
-            for relay in relay_union(active) {
+            for relay in group_relays(active) {
                 let _ = self.client.add_relay(relay.as_str()).await;
+            }
+            for relay in &active.inbox_relays {
+                let _ = self.inbox.add_relay(relay.as_str()).await;
             }
         }
 
         // A leftover registration on a `Terminated` relay is re-sent by the
         // pool's own `resubscribe()` the moment `connect()` re-opens the socket
         // — ahead of this burst's REQs. Flush the CLOSEs first.
-        if !self.client.subscriptions().await.is_empty()
-            && bounded(RELAY_LIFECYCLE_OP_TIMEOUT, self.client.unsubscribe_all())
+        if self.pool_subscription_count().await > 0
+            && bounded(RELAY_LIFECYCLE_OP_TIMEOUT, self.unsubscribe_both())
                 .await
                 .is_err()
         {
@@ -2207,15 +2536,13 @@ impl LiveSyncCore {
         // commit back (see [`Self::rebuild_stalled_relays`]).
         if was_paused {
             self.rebuild_stalled_relays().await;
+            self.rewatch_inbox_auth().await;
         }
 
-        self.client.connect().await;
         // Same fresh-reconnect race as `start`: let the re-opened sockets finish
         // their handshake (early-returning wait) before re-issuing the REQs, so a
         // re-subscribe does not drop into `Output.failed` and orphan the circle.
-        self.client
-            .wait_for_connection(SUBSCRIBE_CONNECT_WAIT)
-            .await;
+        self.connect_both().await;
 
         // Interruptible: a concurrent `stop` may have raised `shutdown` during the
         // connect wait. Bail (fail closed) before re-issuing any REQ so the
@@ -2437,8 +2764,14 @@ impl LiveSyncCore {
     /// lock, which is the invariant that lets anything touch the pool's relay set
     /// (see [`Self::lifecycle`]).
     async fn rebuild_stalled_relays(&self) {
-        let stalled: Vec<String> = self
-            .client
+        for client in self.pools() {
+            Self::rebuild_stalled_relays_of(client).await;
+        }
+    }
+
+    /// [`Self::rebuild_stalled_relays`] for one pool.
+    async fn rebuild_stalled_relays_of(client: &Client) {
+        let stalled: Vec<String> = client
             .relays()
             .await
             .iter()
@@ -2457,8 +2790,8 @@ impl LiveSyncCore {
             .map(|(url, _)| url.to_string())
             .collect();
         for url in &stalled {
-            let _ = self.client.force_remove_relay(url.as_str()).await;
-            let _ = self.client.add_relay(url.as_str()).await;
+            let _ = client.force_remove_relay(url.as_str()).await;
+            let _ = client.add_relay(url.as_str()).await;
         }
     }
 
@@ -2468,17 +2801,21 @@ impl LiveSyncCore {
     /// crate documents it as a sticky, permanent refusal, and its connection
     /// task has exited exactly as a `Terminated` one has.
     async fn unterminated_relay_count(&self) -> usize {
-        self.client
-            .relays()
-            .await
-            .values()
-            .filter(|relay| {
-                !matches!(
-                    relay.status(),
-                    RelayStatus::Terminated | RelayStatus::Banned
-                )
-            })
-            .count()
+        let mut count = 0;
+        for client in self.pools() {
+            count += client
+                .relays()
+                .await
+                .values()
+                .filter(|relay| {
+                    !matches!(
+                        relay.status(),
+                        RelayStatus::Terminated | RelayStatus::Banned
+                    )
+                })
+                .count();
+        }
+        count
     }
 
     /// Terminates every pool relay and PROVES it, re-asserting up to
@@ -2537,7 +2874,9 @@ impl LiveSyncCore {
     /// re-connects a retry interval later.
     async fn terminate_all_relays(&self) {
         for _ in 0..RELAY_TERMINATE_ROUNDS {
-            self.client.disconnect().await;
+            for client in self.pools() {
+                client.disconnect().await;
+            }
             // Let a woken connection task write whatever status it is going to
             // write before this round judges convergence. A yield, never a
             // sleep: convergence is decided by the status read, not by time.
@@ -2598,12 +2937,22 @@ impl LiveSyncCore {
     /// registration a partial `unsubscribe_all` left behind under an id the
     /// session no longer models. Presence-only: a count, never a sub-id or relay.
     pub async fn pool_subscription_count(&self) -> usize {
-        self.client
-            .subscriptions()
-            .await
-            .values()
-            .map(HashMap::len)
-            .sum()
+        let mut count = 0;
+        for client in self.pools() {
+            count += client
+                .subscriptions()
+                .await
+                .values()
+                .map(HashMap::len)
+                .sum::<usize>();
+        }
+        count
+    }
+
+    /// `unsubscribe_all` on both pools.
+    async fn unsubscribe_both(&self) {
+        self.client.unsubscribe_all().await;
+        self.inbox.unsubscribe_all().await;
     }
 
     /// How many of the drive pool's relays are connected right now, or `None`
@@ -2874,34 +3223,35 @@ impl LiveSyncCore {
         *self.burst_window.write().await = BurstWindow::Closed;
 
         // (a) CLOSE every REQ, then prove it.
-        if bounded(RELAY_LIFECYCLE_OP_TIMEOUT, self.client.unsubscribe_all())
+        if bounded(RELAY_LIFECYCLE_OP_TIMEOUT, self.unsubscribe_both())
             .await
             .is_err()
         {
             log::warn!("[live_sync] pause: unsubscribe_all timed out; sweeping leftovers");
         }
-        let leftover: Vec<SubscriptionId> =
-            bounded(RELAY_LIFECYCLE_OP_TIMEOUT, self.client.subscriptions())
-                .await
-                .map_or_else(
-                    |_| {
-                        log::warn!("[live_sync] pause: subscription probe timed out");
-                        Vec::new()
-                    },
-                    |live| live.into_keys().collect(),
-                );
-        for sub_id in &leftover {
-            if bounded(
-                RELAY_LIFECYCLE_OP_TIMEOUT,
-                close_where_held(&self.client, sub_id),
-            )
-            .await
-            .is_err()
-            {
-                log::warn!("[live_sync] pause: a leftover unsubscribe timed out; proceeding");
+        let mut swept = false;
+        for client in self.pools() {
+            let leftover: Vec<SubscriptionId> =
+                bounded(RELAY_LIFECYCLE_OP_TIMEOUT, client.subscriptions())
+                    .await
+                    .map_or_else(
+                        |_| {
+                            log::warn!("[live_sync] pause: subscription probe timed out");
+                            Vec::new()
+                        },
+                        |live| live.into_keys().collect(),
+                    );
+            for sub_id in &leftover {
+                if bounded(RELAY_LIFECYCLE_OP_TIMEOUT, close_where_held(client, sub_id))
+                    .await
+                    .is_err()
+                {
+                    log::warn!("[live_sync] pause: a leftover unsubscribe timed out; proceeding");
+                }
             }
+            swept |= !leftover.is_empty();
         }
-        if !leftover.is_empty() {
+        if swept {
             log::warn!(
                 "[live_sync] pause: swept the subscription(s) a partial unsubscribe_all \
                  left registered"
@@ -3109,6 +3459,7 @@ impl LiveSyncCore {
     fn repair_plane(&self) -> RepairPlane {
         RepairPlane {
             client: self.client.clone(),
+            inbox: self.inbox.clone(),
             circle: Arc::clone(&self.circle),
             processor: Arc::clone(&self.processor),
             router: Arc::clone(&self.router),
@@ -3163,15 +3514,8 @@ impl LiveSyncCore {
         let Some(active) = self.active.read().await.clone() else {
             return (0, 0, Vec::new());
         };
-        let live = self.client.subscriptions().await;
-        let connected: HashSet<RelayUrl> = self
-            .client
-            .relays()
-            .await
-            .into_iter()
-            .filter(|(_, relay)| relay.status() == RelayStatus::Connected)
-            .map(|(url, _)| url)
-            .collect();
+        let (live, connected) = pool_view(&self.client).await;
+        let (inbox_live, inbox_connected) = pool_view(&self.inbox).await;
         let now = chrono::Utc::now().timestamp();
         let window = delivery_silence_window_secs();
         let is_live = |sub_id: &SubscriptionId, url: &RelayUrl| {
@@ -3182,6 +3526,11 @@ impl LiveSyncCore {
         // it, and the relay is re-issued alone when it reconnects.
         let owed = |sub_id: &SubscriptionId, url: &RelayUrl| {
             is_live(sub_id, url) || connected.contains(url)
+        };
+        let inbox_is_live = |url: &RelayUrl| {
+            inbox_live
+                .get(&active.inbox_sub_id)
+                .is_some_and(|m| m.contains_key(url))
         };
 
         let mut expected = 0usize;
@@ -3224,11 +3573,11 @@ impl LiveSyncCore {
                 let Ok(url) = RelayUrl::parse(relay) else {
                     continue;
                 };
-                if !owed(&active.inbox_sub_id, &url) {
+                if !inbox_is_live(&url) && !inbox_connected.contains(&url) {
                     continue;
                 }
                 expected += 1;
-                if is_live(&active.inbox_sub_id, &url) {
+                if inbox_is_live(&url) {
                     present += 1;
                 }
             }
@@ -3257,12 +3606,14 @@ impl LiveSyncCore {
     /// idle state — not a drop to heal. If that option is ever enabled and
     /// sleeping relays must be re-woken, that logic would be added here.
     async fn health_probe(&self) -> (RelayHealthSnapshot, Vec<RepairKey>) {
-        let relays = self.client.relays().await;
+        // Both pools' sockets: a relay both hold is two of them.
+        let mut relays = self.client.relays().await.into_values().collect::<Vec<_>>();
+        relays.extend(self.inbox.relays().await.into_values());
         let total = relays.len();
         let mut connected = 0usize;
         let mut still_connecting = 0usize;
         let mut disconnected = 0usize;
-        for relay in relays.values() {
+        for relay in &relays {
             match relay.status() {
                 RelayStatus::Connected => connected += 1,
                 RelayStatus::Initialized | RelayStatus::Pending | RelayStatus::Connecting => {
@@ -3486,6 +3837,7 @@ impl LiveSyncCore {
 /// hazard the `tasks` field exists to close.
 struct RepairPlane {
     client: Client,
+    inbox: Client,
     circle: Arc<CircleManager>,
     processor: Arc<EngineProcessor>,
     router: Arc<RwLock<Router>>,
@@ -3568,8 +3920,14 @@ impl RepairPlane {
             return Vec::new();
         };
         let live = self.client.subscriptions().await;
+        let inbox_live = self.inbox.subscriptions().await;
         let held = |sub_id: &SubscriptionId, url: &RelayUrl| {
             live.get(sub_id).is_some_and(|m| m.contains_key(url))
+        };
+        let inbox_held = |url: &RelayUrl| {
+            inbox_live
+                .get(&active.inbox_sub_id)
+                .is_some_and(|m| m.contains_key(url))
         };
         let mut unheld = Vec::new();
         for url in relays {
@@ -3583,7 +3941,7 @@ impl RepairPlane {
             }
             if self.inbox_req_open.load(Ordering::Acquire)
                 && matching_relay(&active.inbox_relays, &url).is_some()
-                && !held(&active.inbox_sub_id, &url)
+                && !inbox_held(&url)
             {
                 unheld.push(RepairKey {
                     relay_url: url,
@@ -3862,16 +4220,16 @@ impl RepairPlane {
         }
     }
 
-    /// Lets go of every relay in the pool that no listed REQ — a circle's or
-    /// the inbox's — uses: its socket closes, and the pool does not dial it
-    /// again.
+    /// Lets go of every relay in the engine pool that no listed circle REQ
+    /// uses: its socket closes, and the pool does not dial it again. The
+    /// inbox socket's relays are the session's for its whole life.
     async fn let_go_of_unused_relays(&self) {
         let used: HashSet<RelayUrl> = {
             let guard = self.active.read().await;
             let Some(active) = guard.as_ref() else {
                 return;
             };
-            let used = relay_union(active)
+            let used = group_relays(active)
                 .iter()
                 .filter_map(|relay| RelayUrl::parse(relay).ok())
                 .collect();
@@ -4174,6 +4532,7 @@ impl RepairPlane {
     fn ctx(&self) -> SubscribeCtx<'_> {
         SubscribeCtx {
             client: &self.client,
+            inbox: &self.inbox,
             circle: &self.circle,
             processor: &self.processor,
             router: &self.router,
@@ -4232,12 +4591,12 @@ impl RepairPlane {
         // A relay the pool does not hold connected would only be queued or
         // refused, and the issue would clear the bucket's caught-up mark for
         // nothing: it is re-issued alone when it reconnects.
-        if !self
-            .client
-            .relay(&key.relay_url)
-            .await
-            .is_ok_and(|relay| relay.status() == RelayStatus::Connected)
-        {
+        let pool = if key.sub_id == active.inbox_sub_id {
+            &self.inbox
+        } else {
+            &self.client
+        };
+        if !connected(pool, &key.relay_url).await {
             return;
         }
         let now = i64::try_from(nostr::Timestamp::now().as_secs()).unwrap_or(i64::MAX);
@@ -5012,9 +5371,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let keys = Keys::generate();
         let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &keys).unwrap());
-        let pk = keys.public_key();
         (
-            LiveSyncCore::new_local(circle, pk, Arc::new(RelayManager::new())),
+            LiveSyncCore::new_local(circle, Arc::new(RelayManager::new())),
             dir,
         )
     }
@@ -5029,10 +5387,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let keys = Keys::generate();
         let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &keys).unwrap());
+        let signer = circle.nip42_signer();
         let driven = LiveSyncCore::new_local_with_driver_for_test(
             circle,
-            keys.public_key(),
-            LiveDriver::over(&Arc::new(RelayManager::new())),
+            LiveDriver::over(&Arc::new(RelayManager::new()), signer),
         );
         assert_eq!(driven.drive_pool_connected_relays().await, None);
     }
@@ -5340,6 +5698,9 @@ mod tests {
             .await
             .expect("the initial REQ must be accepted by a connected relay");
         if with_inbox {
+            let _ = core.inbox.add_relay(url).await;
+            core.inbox.connect().await;
+            core.inbox.wait_for_connection(Duration::from_secs(5)).await;
             core.ctx()
                 .issue_inbox(&relays, &inbox_sub_id, SubscribePhase::Initial, now)
                 .await
@@ -5467,6 +5828,7 @@ mod tests {
             &core.processor,
             &core.repair,
             &endpoint(&url, &sub_id),
+            ClosedKind::Dropped,
             ClosedKind::Dropped,
         );
 
@@ -5635,6 +5997,7 @@ mod tests {
             &core.processor,
             &core.repair,
             &endpoint(&url, &sub_id),
+            ClosedKind::Dropped,
             ClosedKind::Dropped,
         );
         {
@@ -7118,11 +7481,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let keys = Keys::generate();
         let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &keys).unwrap());
-        let core = LiveSyncCore::new_local(
-            Arc::clone(&circle),
-            keys.public_key(),
-            Arc::new(RelayManager::new()),
-        );
+        let core = LiveSyncCore::new_local(Arc::clone(&circle), Arc::new(RelayManager::new()));
 
         assert!(
             Arc::ptr_eq(core.circle(), &circle),
@@ -7496,6 +7855,142 @@ mod tests {
              background-sharing right now\" — that an inbox-only relay, which carries \
              none of this device's circles, would otherwise read off the wire"
         );
+
+        let _ = core.stop().await;
+    }
+
+    /// A gift wrap an inbox relay already holds when the session starts is
+    /// replayed by the first inbox REQ — before the app's consumer attaches —
+    /// and that REQ's `EOSE` then moves the inbox cursor past it. The consumer
+    /// attaching after the start must still be handed it, or the invitation
+    /// waits for some later REQ to ask the lookback again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_gift_wrap_replayed_before_the_consumer_attaches_reaches_it() {
+        use nostr::JsonUtil;
+        use nostr_relay_builder::prelude::{MemoryDatabase, MemoryDatabaseOptions, NostrDatabase};
+
+        let _ = crate::relay::allow_ws_loopback_for_test();
+        let db = MemoryDatabase::with_opts(MemoryDatabaseOptions {
+            events: true,
+            max_events: None,
+        });
+        let relay = nostr_relay_builder::LocalRelay::new(
+            nostr_relay_builder::RelayBuilder::default().database(db.clone()),
+        );
+        relay.run().await.expect("local relay runs");
+        let url = relay.url().await.to_string();
+        let (core, _dir) = build_core();
+        let core = Arc::new(core);
+        let wrap = nostr::EventBuilder::new(nostr::Kind::GiftWrap, "sealed")
+            .tags([nostr::Tag::public_key(core.own_pubkey)])
+            .sign_with_keys(&Keys::generate())
+            .expect("a wrap signs");
+        assert!(db.save_event(&wrap).await.expect("save").is_success());
+
+        core.start(&[], std::slice::from_ref(&url))
+            .await
+            .expect("the engine starts against the inbox relay");
+        assert_eq!(core.wait_backlog_settled().await, BacklogOutcome::Settled);
+
+        let mut events = core.events();
+        let delivered = tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(event) = events.recv().await {
+                if let LiveSyncEvent::Welcome { gift_wrap_json } = event {
+                    return gift_wrap_json == wrap.as_json();
+                }
+            }
+            false
+        })
+        .await;
+        assert!(
+            matches!(delivered, Ok(true)),
+            "the wrap the first inbox REQ replayed never reached the consumer"
+        );
+
+        let _ = core.stop().await;
+    }
+
+    /// The consumer holds no `Arc` of the session it reads, so dropping the
+    /// session's last owner closes the bus and ends the stream instead of
+    /// keeping a stopped engine alive behind it.
+    #[tokio::test]
+    async fn a_consumer_ends_when_the_sessions_last_owner_drops_it() {
+        let (core, _dir) = build_core();
+        let core = Arc::new(core);
+        let mut events = core.events();
+        drop(core);
+        let ended = tokio::time::timeout(Duration::from_secs(5), events.recv()).await;
+        assert!(matches!(ended, Ok(None)), "the stream outlived the session");
+    }
+
+    /// A consumer that falls behind the bus loses events it never sees, gift
+    /// wraps among them. The inbox REQ is asked again, on the gated schedule —
+    /// a minute at the least, since anyone who knows the npub can lag the bus
+    /// at will — and the inbox generation's pending advance is burnt, so a
+    /// late `EOSE` cannot move the cursor over what was lost. The log line
+    /// names neither the relay, the subscription nor the account.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_lagged_consumer_reissues_the_inbox_req_on_the_gated_schedule() {
+        let _ = crate::relay::allow_ws_loopback_for_test();
+        let (_relay, url, _recorded) = recording_relay().await;
+        let (core, _dir) = build_core();
+        let core = Arc::new(core);
+        core.start(&[], std::slice::from_ref(&url))
+            .await
+            .expect("the engine starts against the inbox relay");
+        assert_eq!(core.wait_backlog_settled().await, BacklogOutcome::Settled);
+        assert!(
+            core.repair.next_deadline().is_none(),
+            "premise: nothing due"
+        );
+        let inbox_sub = core
+            .active
+            .read()
+            .await
+            .as_ref()
+            .expect("a started session")
+            .inbox_sub_id
+            .to_string();
+        let now = chrono::Utc::now().timestamp();
+        core.processor.note_inbox_subscription_opened(now);
+
+        let mut events = core.events();
+        for _ in 0..=BUS_CAP {
+            core.bus().send(LiveSyncEvent::Status {
+                reason: SyncStatusReason::Connected,
+            });
+        }
+        let before = Instant::now();
+        let lines = crate::test_log::capture_log_lines(async {
+            assert!(events.recv().await.is_some(), "the consumer goes on");
+        })
+        .await;
+
+        let due = core
+            .repair
+            .next_deadline()
+            .expect("the lag scheduled an inbox re-issue");
+        assert!(
+            due >= before
+                + Duration::from_secs(super::super::config::GATED_BACKOFF_MIN_SECS) * 3 / 4,
+            "a lag re-issues on the gated schedule, never at once"
+        );
+        assert!(
+            !core.processor.note_inbox_end_of_stored_events(),
+            "the lag must burn the inbox generation's pending advance"
+        );
+
+        assert!(
+            lines.iter().any(|line| line.contains("fell behind")),
+            "anti-vacuity: the lag was logged"
+        );
+        let host_port = url.trim_start_matches("ws://").trim_end_matches('/');
+        let own = core.own_pubkey.to_hex();
+        for line in &lines {
+            for needle in [host_port, inbox_sub.as_str(), own.as_str()] {
+                assert!(!line.contains(needle), "a lag line names an identifier");
+            }
+        }
 
         let _ = core.stop().await;
     }
@@ -8357,6 +8852,7 @@ mod tests {
             .send(RawSignal::EndOfStoredEvents {
                 relay_url: RelayUrl::parse(&url).expect("the relay's url parses"),
                 subscription_id: sub_id,
+                pool: PlaneKind::Group,
             })
             .await
             .expect("the EOSE is queued");
@@ -8454,6 +8950,7 @@ mod tests {
             .send(RawSignal::EndOfStoredEvents {
                 relay_url: RelayUrl::parse(&url).expect("the relay's url parses"),
                 subscription_id: sub_id,
+                pool: PlaneKind::Group,
             })
             .await
             .expect("the answer is queued");
@@ -9741,6 +10238,7 @@ mod tests {
         for _ in 0..QUEUED {
             tx.send(crate::relay::live_sync::supervisor::RawSignal::Event(
                 Box::new(crate::relay::live_sync::supervisor::RawEvent {
+                    pool: PlaneKind::Group,
                     relay_url: RelayUrl::parse(&url).expect("relay url"),
                     subscription_id: sub_id.clone(),
                     event: nostr::EventBuilder::new(nostr::Kind::Custom(445), "__panic_for_test__")
@@ -9849,6 +10347,68 @@ mod tests {
             .expect("the pause task must not panic")
             .expect("the pause must succeed once the publish resolves");
         assert_eq!(core.pool_subscription_count().await, 0);
+
+        let _ = core.stop().await;
+    }
+
+    /// A network change's pause BLOCKS on the in-flight publish gauge before
+    /// it cuts a socket, as every pause does (Security Rule 13): the change
+    /// re-dials, but never between a commit's SEND and its OK.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_network_change_blocks_on_the_in_flight_publish_gauge() {
+        let _ = crate::relay::allow_ws_loopback_for_test();
+        let relay = nostr_relay_builder::MockRelay::run()
+            .await
+            .expect("mock relay starts");
+        let url = relay.url().await.to_string();
+        let (core, _dir) = build_core();
+        keep_rows(&core, &[0x3d]);
+        let core = Arc::new(core);
+        core.start(
+            &[CircleSpec {
+                group_id_hex: "3d".repeat(32),
+                relays: vec![url.clone()],
+            }],
+            &[],
+        )
+        .await
+        .expect("session starts");
+
+        let gauge = core.processor.hold_publish_for_test();
+        assert_eq!(core.in_flight_publishes(), 1);
+
+        let changing = Arc::clone(&core);
+        let change = tokio::spawn(async move {
+            changing
+                .reconnect_after_network_change(Claim::Foreground)
+                .await
+        });
+
+        // Deterministic: nothing releases the gauge during this window.
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !change.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .is_err(),
+            "a network change must not re-dial while a publish is between SEND and OK: \
+             the relay may already hold that commit while the drive records the attempt \
+             as unanswered (Security Rule 13)"
+        );
+        assert!(
+            core.relay_health().await.connected > 0,
+            "...and it must not have cut a socket either"
+        );
+
+        drop(gauge);
+        change
+            .await
+            .expect("the change task must not panic")
+            .expect("the change must re-open the session once the publish resolves");
+        assert!(!core.is_paused());
+        assert!(core.pool_subscription_count().await > 0);
 
         let _ = core.stop().await;
     }
@@ -10585,7 +11145,7 @@ mod tests {
         let keys = Keys::generate();
         let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &keys).unwrap());
         let pool = Arc::new(RelayManager::new());
-        let core = LiveSyncCore::new_local(circle, keys.public_key(), Arc::clone(&pool));
+        let core = LiveSyncCore::new_local(circle, Arc::clone(&pool));
         let probe = || pool.neg_probe_ids(&url, &[0xab; 32], 0, nostr::Timestamp::now().as_secs());
 
         assert!(

@@ -221,7 +221,13 @@ jobs:
         # through a step nobody had budgeted, which is the blind-SIGKILL
         # outcome that arithmetic exists to prevent.
         timeout-minutes: 15
-        run: bash tooling/e2e/ci/start-local-relay.sh 7777
+        # The second instance is the GATED inbox relay's own store (7778): the
+        # proxy's `gate-read=1059` route (7790) stands in front of it — see the
+        # e2e_combined step's HAVEN_E2E_GATED_INBOX_RELAY. Same binary, so its
+        # build is the first start's cache hit.
+        run: |
+          bash tooling/e2e/ci/start-local-relay.sh 7777
+          bash tooling/e2e/ci/start-local-relay.sh 7778 gated
 
       # Same build-before-boot discipline as the relay above: the proxy is
       # another release cargo build out of tooling/e2e/local-relay (already in
@@ -264,8 +270,9 @@ jobs:
           set -euo pipefail
           mkdir -m 0700 -p /tmp/haven-soak/needles
           rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
-          upstream=ws://127.0.0.1:7777; HAVEN_WIRE_PROXY_ROUTES='7788=ws://127.0.0.1:7777,7789=ws://127.0.0.1:7777' bash tooling/e2e/ci/start-wire-proxy.sh
+          upstream=ws://127.0.0.1:7777; gated=ws://127.0.0.1:7778; HAVEN_WIRE_PROXY_ROUTES='7788=ws://127.0.0.1:7777,7789=ws://127.0.0.1:7777,7790=ws://127.0.0.1:7778;gate-read=1059,7791=ws://127.0.0.1:7778' bash tooling/e2e/ci/start-wire-proxy.sh
           echo "WIRE_UPSTREAM=${upstream}" >> "${GITHUB_ENV}"
+          echo "WIRE_GATED_UPSTREAM=${gated}" >> "${GITHUB_ENV}"
 
       # ONE token, minted ONCE, read by BOTH halves — the drive (as a
       # --dart-define, forwarded by run-ios-sim-scenario.sh) and the host oracle
@@ -385,14 +392,33 @@ jobs:
           # as --dart-define=HAVEN_WIRE_SENTINEL=… only when it is non-empty;
           # that is the chain check_wire_oracle_lane_reachable.sh follows.
           HAVEN_WIRE_SENTINEL: ${{ env.HAVEN_WIRE_SENTINEL }}
+          # The GATED inbox relay: the proxy's `gate-read=1059` route (7790), in
+          # front of a relay store of its own (7778). It answers as
+          # relay.damus.io does — takes a gift wrap, refuses every
+          # unauthenticated read of kind 1059 with `auth-required:`, and serves
+          # an inbox read that answers its NIP-42 challenge (A5) the gift wraps
+          # naming it — and the harness puts it FIRST in every account's inbox
+          # list, so an invite proves both that the Welcome reached every inbox
+          # relay and that the app's own inbox read authenticates there. Its
+          # own store, never 7777's: a gate in front of the store the plain
+          # route reads would let that route serve a Welcome only the gate
+          # took. Scoped to this step: the
+          # background-mirror scenario below runs on the account topology it
+          # always had. run-ios-sim-scenario.sh forwards both as dart-defines.
+          HAVEN_E2E_GATED_INBOX_RELAY: ws://localhost:7790
+          # The same store through an ungated route (7791), for the harness's
+          # own probe only: it proves the gated store holds the Welcome the
+          # invitee joined through, so the gate was exercised.
+          HAVEN_E2E_GATED_STORE_PROBE: ws://localhost:7791
         uses: nick-fields/retry@v3
         with:
           timeout_minutes: ${{ inputs.live_sync && 45 || 30 }}
           max_attempts: 2
           command: >-
             bash tooling/e2e/ci/start-local-relay.sh 7777 &&
+            bash tooling/e2e/ci/start-local-relay.sh 7778 gated &&
             bash tooling/e2e/ci/rotate-needle-dir.sh &&
-            HAVEN_WIRE_PROXY_ROUTES='7788=ws://127.0.0.1:7777,7789=ws://127.0.0.1:7777' bash tooling/e2e/ci/start-wire-proxy.sh &&
+            HAVEN_WIRE_PROXY_ROUTES='7788=ws://127.0.0.1:7777,7789=ws://127.0.0.1:7777,7790=ws://127.0.0.1:7778;gate-read=1059,7791=ws://127.0.0.1:7778' bash tooling/e2e/ci/start-wire-proxy.sh &&
             bash tooling/e2e/ci/run-ios-sim-scenario.sh
             integration_test/e2e/e2e_combined.dart
             ${{ steps.sim.outputs.udid }}
@@ -667,6 +693,12 @@ jobs:
             --plane inbox=127.0.0.1:7788 \
             --plane keypackage=127.0.0.1:7788 \
             --plane discovery=127.0.0.1:7788 \
+            --plane inbox=127.0.0.1:7790 \
+            --plane keypackage=127.0.0.1:7790 \
+            --plane discovery=127.0.0.1:7790 \
+            --plane inbox=127.0.0.1:7791 \
+            --plane keypackage=127.0.0.1:7791 \
+            --plane discovery=127.0.0.1:7791 \
             --plane location=127.0.0.1:7789 \
             --declare-overlap inbox:discovery \
             --declare-overlap keypackage:discovery \
@@ -756,13 +788,13 @@ jobs:
           bash tooling/e2e/ci/check-wire-correlation.sh \
             --journal /tmp/haven-wire-journal.ndjson \
             --sentinel "${HAVEN_WIRE_SENTINEL}" \
-            --pool "0=${WIRE_UPSTREAM}" \
-            --pool "5=${WIRE_UPSTREAM}" \
+            --pool "0=${WIRE_UPSTREAM},${WIRE_GATED_UPSTREAM}" \
+            --pool "5=${WIRE_UPSTREAM},${WIRE_GATED_UPSTREAM}" \
             --pool "445=${WIRE_UPSTREAM}" \
-            --pool "1059=${WIRE_UPSTREAM}" \
-            --pool "10002=${WIRE_UPSTREAM}" \
-            --pool "10050=${WIRE_UPSTREAM}" \
-            --pool "30443=${WIRE_UPSTREAM}" \
+            --pool "1059=${WIRE_UPSTREAM},${WIRE_GATED_UPSTREAM}" \
+            --pool "10002=${WIRE_UPSTREAM},${WIRE_GATED_UPSTREAM}" \
+            --pool "10050=${WIRE_UPSTREAM},${WIRE_GATED_UPSTREAM}" \
+            --pool "30443=${WIRE_UPSTREAM},${WIRE_GATED_UPSTREAM}" \
             ${excl[@]+"${excl[@]}"} \
             ${mls_args[@]+"${mls_args[@]}"} \
             ${expect[@]+"${expect[@]}"} || rc=$?
@@ -802,6 +834,7 @@ jobs:
             | tail -c "${SIM_LOG_FULL_CAP_BYTES}" > /tmp/sim-unified-full.log || true
           rm -rf /tmp/sim.logarchive
           cp /tmp/haven-local-relay.log /tmp/relay.log 2>/dev/null || true
+          cp /tmp/haven-local-relay-gated.log /tmp/relay-gated.log 2>/dev/null || true
           cp /tmp/haven-wire-proxy.log /tmp/wire-proxy.log 2>/dev/null || true
           # A REDACTED transcript, never the raw journal: the .ndjson is a
           # complete record of every event body, REQ filter and endpoint the run
@@ -852,7 +885,7 @@ jobs:
             --manifest-dir /tmp/haven-soak/needles \
             --sink ios=/tmp/sim-unified.log,/tmp/sim-unified-full.log \
             "${drives[@]}" \
-            --sink relay=/tmp/relay.log \
+            --sink relay=/tmp/relay.log,/tmp/relay-gated.log \
             --sink proxy=/tmp/wire-proxy.log \
             ${summary[@]+"${summary[@]}"} \
             --report /tmp/logscan-report-upload.ndjson || rc=$?
@@ -878,6 +911,7 @@ jobs:
             /tmp/flutter-ios-test.e2e_combined.log
             /tmp/flutter-ios-test.ios_bg_mirror_test.log
             /tmp/relay.log
+            /tmp/relay-gated.log
             /tmp/sim-unified.log
             /tmp/sim-unified-full.log
             /tmp/wire-proxy.log
@@ -899,4 +933,6 @@ jobs:
       # never turn a green run red.
       - name: Tear down host-native relay
         if: always()
-        run: bash tooling/e2e/ci/stop-local-relay.sh
+        run: |
+          bash tooling/e2e/ci/stop-local-relay.sh
+          bash tooling/e2e/ci/stop-local-relay.sh gated

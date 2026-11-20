@@ -44,6 +44,11 @@ class _ClaimRecordingEngine implements LiveSyncFfi {
   }
 
   @override
+  Future<void> reconnectAfterNetworkChange({required bool foreground}) async {
+    claims.add(foreground);
+  }
+
+  @override
   Stream<FfiRelayEvent> liveEvents() => _events.stream;
 
   @override
@@ -95,12 +100,13 @@ void main() {
     await service.start(groups: const [], inboxRelays: const []);
     await service.resumeAfterBackground();
     await service.claimForeground();
+    await service.reconnectAfterNetworkChange();
 
     expect(
       engine.claims,
-      [false],
-      reason: 'the re-anchor is refused its claim, and neither the start nor '
-          'the heal asks the engine for one',
+      [false, false],
+      reason: 'the re-anchor and the network re-dial are refused their claim, '
+          'and neither the start nor the heal asks the engine for one',
     );
   });
 }

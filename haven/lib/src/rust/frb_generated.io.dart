@@ -314,6 +314,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  GiftWrapIntakeFailureFfi dco_decode_box_autoadd_gift_wrap_intake_failure_ffi(
+    dynamic raw,
+  );
+
+  @protected
   PlatformInt64 dco_decode_box_autoadd_i_64(dynamic raw);
 
   @protected
@@ -443,10 +448,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ForceReleaseOutcomeFfi dco_decode_force_release_outcome_ffi(dynamic raw);
 
   @protected
+  GiftWrapIntakeFailureFfi dco_decode_gift_wrap_intake_failure_ffi(dynamic raw);
+
+  @protected
+  GiftWrapIntakeFfi dco_decode_gift_wrap_intake_ffi(dynamic raw);
+
+  @protected
   int dco_decode_i_32(dynamic raw);
 
   @protected
   PlatformInt64 dco_decode_i_64(dynamic raw);
+
+  @protected
+  InboxReadFfi dco_decode_inbox_read_ffi(dynamic raw);
 
   @protected
   IngestOutcomeFfi dco_decode_ingest_outcome_ffi(dynamic raw);
@@ -519,6 +533,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<MemberKeyPackageFfi> dco_decode_list_member_key_package_ffi(dynamic raw);
+
+  @protected
+  List<OwnInboxReadFfi> dco_decode_list_own_inbox_read_ffi(dynamic raw);
 
   @protected
   List<OwnRelayCellFfi> dco_decode_list_own_relay_cell_ffi(dynamic raw);
@@ -629,6 +646,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  GiftWrapIntakeFailureFfi?
+  dco_decode_opt_box_autoadd_gift_wrap_intake_failure_ffi(dynamic raw);
+
+  @protected
   PlatformInt64? dco_decode_opt_box_autoadd_i_64(dynamic raw);
 
   @protected
@@ -685,6 +706,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Uint8List? dco_decode_opt_list_prim_u_8_strict(dynamic raw);
+
+  @protected
+  OwnInboxReadFfi dco_decode_own_inbox_read_ffi(dynamic raw);
 
   @protected
   OwnKindBoardFfi dco_decode_own_kind_board_ffi(dynamic raw);
@@ -1117,6 +1141,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  GiftWrapIntakeFailureFfi sse_decode_box_autoadd_gift_wrap_intake_failure_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   PlatformInt64 sse_decode_box_autoadd_i_64(SseDeserializer deserializer);
 
   @protected
@@ -1290,10 +1319,23 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  GiftWrapIntakeFailureFfi sse_decode_gift_wrap_intake_failure_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  GiftWrapIntakeFfi sse_decode_gift_wrap_intake_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   int sse_decode_i_32(SseDeserializer deserializer);
 
   @protected
   PlatformInt64 sse_decode_i_64(SseDeserializer deserializer);
+
+  @protected
+  InboxReadFfi sse_decode_inbox_read_ffi(SseDeserializer deserializer);
 
   @protected
   IngestOutcomeFfi sse_decode_ingest_outcome_ffi(SseDeserializer deserializer);
@@ -1384,6 +1426,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<MemberKeyPackageFfi> sse_decode_list_member_key_package_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<OwnInboxReadFfi> sse_decode_list_own_inbox_read_ffi(
     SseDeserializer deserializer,
   );
 
@@ -1524,6 +1571,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  GiftWrapIntakeFailureFfi?
+  sse_decode_opt_box_autoadd_gift_wrap_intake_failure_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   PlatformInt64? sse_decode_opt_box_autoadd_i_64(SseDeserializer deserializer);
 
   @protected
@@ -1592,6 +1645,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Uint8List? sse_decode_opt_list_prim_u_8_strict(SseDeserializer deserializer);
+
+  @protected
+  OwnInboxReadFfi sse_decode_own_inbox_read_ffi(SseDeserializer deserializer);
 
   @protected
   OwnKindBoardFfi sse_decode_own_kind_board_ffi(SseDeserializer deserializer);
@@ -2128,6 +2184,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_gift_wrap_intake_failure_ffi(
+    GiftWrapIntakeFailureFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_i_64(
     PlatformInt64 self,
     SseSerializer serializer,
@@ -2344,10 +2406,25 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_gift_wrap_intake_failure_ffi(
+    GiftWrapIntakeFailureFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_gift_wrap_intake_ffi(
+    GiftWrapIntakeFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_i_32(int self, SseSerializer serializer);
 
   @protected
   void sse_encode_i_64(PlatformInt64 self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_inbox_read_ffi(InboxReadFfi self, SseSerializer serializer);
 
   @protected
   void sse_encode_ingest_outcome_ffi(
@@ -2469,6 +2546,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_member_key_package_ffi(
     List<MemberKeyPackageFfi> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_own_inbox_read_ffi(
+    List<OwnInboxReadFfi> self,
     SseSerializer serializer,
   );
 
@@ -2645,6 +2728,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_gift_wrap_intake_failure_ffi(
+    GiftWrapIntakeFailureFfi? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_i_64(
     PlatformInt64? self,
     SseSerializer serializer,
@@ -2728,6 +2817,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_list_prim_u_8_strict(
     Uint8List? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_own_inbox_read_ffi(
+    OwnInboxReadFfi self,
     SseSerializer serializer,
   );
 

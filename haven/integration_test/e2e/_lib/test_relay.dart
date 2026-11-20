@@ -58,6 +58,41 @@ const String locationRelayUrl = String.fromEnvironment(
   defaultValue: 'ws://127.0.0.1:7777',
 );
 
+/// URL of the GATED inbox relay: a recording-proxy route (`gate-read=1059`)
+/// that answers as `relay.damus.io` does — it takes a gift wrap and refuses
+/// every read of kind 1059 from a client that has not authenticated (NIP-42),
+/// and serves an inbox read that answered its challenge (A5) — the app's own
+/// inbox reads do — the gift wraps naming it, in front of a relay store of
+/// its own.
+///
+/// When set, it is the FIRST entry of the default-relay override, so it heads
+/// every account's inbox list (and its key-package list, whose reads it
+/// serves), and a Welcome delivered to it alone is read only by an inbox read
+/// that answers its challenge. Empty means the lane has no gated relay.
+const String gatedInboxRelayUrl = String.fromEnvironment(
+  'HAVEN_E2E_GATED_INBOX_RELAY',
+);
+
+/// The gated relay's STORE through an ungated proxy route: the harness's own
+/// view of what [gatedInboxRelayUrl] holds, which no product read can have.
+/// Set exactly when [gatedInboxRelayUrl] is.
+const String gatedStoreProbeUrl = String.fromEnvironment(
+  'HAVEN_E2E_GATED_STORE_PROBE',
+);
+
+/// Whether this build runs with the gated inbox relay. Throws when only one of
+/// the two defines is set: a lane that gates its inbox without the probe (or
+/// the reverse) would prove nothing about either.
+bool get gatedInboxConfigured {
+  if (gatedInboxRelayUrl.isEmpty != gatedStoreProbeUrl.isEmpty) {
+    throw StateError(
+      'HAVEN_E2E_GATED_INBOX_RELAY and HAVEN_E2E_GATED_STORE_PROBE are set '
+      'together or not at all.',
+    );
+  }
+  return gatedInboxRelayUrl.isNotEmpty;
+}
+
 /// The compiled-in value when a lane passes no `--dart-define`. Named so the
 /// "is this an instrumented run?" test below is a comparison against one
 /// constant rather than a magic string repeated at each call site.

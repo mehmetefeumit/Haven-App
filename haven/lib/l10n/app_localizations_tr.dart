@@ -518,6 +518,27 @@ class AppLocalizationsTr extends AppLocalizations {
   }
 
   @override
+  String get relaySettingsInboxRefused =>
+      'Bu aktarıcı Haven\'ın davetlerinizi okumasına izin vermedi. Onu kaldırın ya da başka bir aktarıcı ekleyin.';
+
+  @override
+  String get relaySettingsInboxRefusedTooltip =>
+      'Haven\'ın davetleri okumasına izin vermedi';
+
+  @override
+  String relaySettingsInboxRefusedSemantics(String url) {
+    return 'Uyarı: $url Haven\'ın davetlerinizi okumasına izin vermedi';
+  }
+
+  @override
+  String get relaySettingsInboxAllRefusedTitle =>
+      'Gelen kutusu aktarıcılarınızın hiçbiri Haven\'ın davetlerinizi okumasına izin vermedi';
+
+  @override
+  String get relaySettingsInboxAllRefusedMessage =>
+      'Size gönderilen davetler, gelen kutusu aktarıcılarınızdan biri Haven\'ın bunları okumasına izin verene kadar size ulaşmayacak. Varsayılanları geri yükleyin ya da başka bir aktarıcı ekleyin.';
+
+  @override
   String get locationSettingsTitle => 'Konum';
 
   @override
@@ -1471,7 +1492,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get storageResetRelays =>
-      'Bu güncelleme aktarıcı ayarlarınızı Haven\'ın varsayılanlarına sıfırladı. Siz devam edene ya da Aktarıcı ayarları\'ndan dönene kadar bu ayarlar yayımlanmaz; bu yüzden önce kendi aktarıcılarınızı ekleyebilirsiniz.';
+      'Bu güncelleme aktarıcı ayarlarınızı Haven\'ın varsayılanlarına sıfırladı. Siz devam edene ya da Aktarıcı ayarlarından dönene kadar bu ayarlar yayımlanmaz; bu yüzden önce kendi aktarıcılarınızı ekleyebilirsiniz.';
 
   @override
   String get storageResetContinue => 'Devam Et';
@@ -1509,6 +1530,49 @@ class AppLocalizationsTr extends AppLocalizations {
   String get invitationsLoadError => 'Davetler yüklenemedi';
 
   @override
+  String invitationsNoticeRefused(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other:
+          '$countString gelen kutusu aktarıcısı Haven\'ın davetlerinizi okumasına izin vermedi; bu yüzden yalnızca bu aktarıcılara gönderilen bir davet size ulaşmaz. Aktarıcı ayarlarından onları kaldırın ya da başka bir aktarıcı ekleyin.',
+      one:
+          'Gelen kutusu aktarıcılarınızdan biri Haven\'ın davetlerinizi okumasına izin vermedi; bu yüzden yalnızca bu aktarıcıya gönderilen bir davet size ulaşmaz. Aktarıcı ayarlarından onu kaldırın ya da başka bir aktarıcı ekleyin.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String invitationsNoticeNotSaved(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$countString davet geldi ancak bu cihaza kaydedilemedi.',
+      one: 'Bir davet geldi ancak bu cihaza kaydedilemedi.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get invitationsNoticeOffline =>
+      'Haven gelen kutusu aktarıcılarınıza ulaşamadı; bu yüzden yeni davetler henüz görünemiyor.';
+
+  @override
+  String get invitationsNoticeIncomplete =>
+      'Haven gelen kutusu aktarıcılarınızın hepsini denetlemeyi bitiremedi; bu yüzden bazı davetler henüz görünmüyor olabilir.';
+
+  @override
+  String get invitationsNoticeOpenRelaySettings => 'Aktarıcı ayarları';
+
+  @override
   String get invitationsEmptyTitle => 'Davet Yok';
 
   @override
@@ -1538,7 +1602,7 @@ class AppLocalizationsTr extends AppLocalizations {
   }
 
   @override
-  String refreshRingSemanticAllOk(int total) {
+  String refreshRingSemanticInboxAll(int total) {
     final intl.NumberFormat totalNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
@@ -1546,17 +1610,18 @@ class AppLocalizationsTr extends AppLocalizations {
     String _temp0 = intl.Intl.pluralLogic(
       total,
       locale: localeName,
-      other: '$totalString aktarıcının tümü yanıt verdi',
-      one: 'Aktarıcı yanıt verdi',
+      other: 'Davetler $totalString aktarıcının tümünde denetlendi',
+      one: 'Davetler aktarıcıda denetlendi',
     );
     return '$_temp0';
   }
 
   @override
-  String get refreshRingSemanticAllError => 'Hiçbir aktarıcı yanıt vermedi';
+  String get refreshRingSemanticInboxNone =>
+      'Davetler hiçbir aktarıcıda denetlenemedi';
 
   @override
-  String refreshRingSemanticPartial(int ok, int total) {
+  String refreshRingSemanticInboxPartial(int ok, int total) {
     final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -1565,17 +1630,18 @@ class AppLocalizationsTr extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return '$totalString aktarıcıdan $okString tanesi yanıt verdi';
+    return 'Davetler $totalString aktarıcıdan $okString tanesinde denetlendi';
   }
 
   @override
   String get refreshRingAnnouncementChecking => 'Aktarıcılar denetleniyor';
 
   @override
-  String get refreshRingAnnouncementAllOk => 'Tüm aktarıcılar yanıt verdi';
+  String get refreshRingAnnouncementInboxAll =>
+      'Davetler tüm aktarıcılarda denetlendi';
 
   @override
-  String refreshRingAnnouncementPartial(int ok, int total) {
+  String refreshRingAnnouncementInboxPartial(int ok, int total) {
     final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -1584,11 +1650,12 @@ class AppLocalizationsTr extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return '$totalString aktarıcıdan $okString tanesi yanıt verdi';
+    return 'Davetler $totalString aktarıcıdan $okString tanesinde denetlendi';
   }
 
   @override
-  String get refreshRingAnnouncementAllError => 'Hiçbir aktarıcıya ulaşılamadı';
+  String get refreshRingAnnouncementInboxNone =>
+      'Davetler hiçbir aktarıcıda denetlenemedi';
 
   @override
   String get refreshRingAnnouncementNoInbox => 'Gelen kutusu yapılandırılmadı';

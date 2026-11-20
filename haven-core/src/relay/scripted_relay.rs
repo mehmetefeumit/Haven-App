@@ -8,7 +8,7 @@
 //! transport's tests need what a real relay also will not do on request: keep
 //! an event and withhold its `OK`, or hang up on one. Loopback only.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use futures::{SinkExt, StreamExt};
@@ -28,6 +28,8 @@ pub enum Frame {
     /// as this JSON text, byte for byte: a relay may spell a genuine event
     /// with its keys in another order, extra fields or other escapes.
     Raw(String),
+    /// This whole frame, byte for byte: an `AUTH` challenge among the answer.
+    Text(String),
     /// `EOSE` for the subscription the `REQ` opened.
     Eose,
     /// `CLOSED` for the subscription the `REQ` opened, with this text: the
@@ -78,9 +80,10 @@ struct Script {
     refusals: Mutex<Vec<Refused>>,
     verdict: Mutex<Option<Judged>>,
     published: Mutex<Vec<Event>>,
-    serve_kept: std::sync::atomic::AtomicBool,
+    serve_kept: AtomicBool,
     offers: AtomicUsize,
     connections: AtomicUsize,
+    accepts_auth: AtomicBool,
 }
 
 /// The relay. It stops when dropped.
@@ -170,6 +173,13 @@ impl ScriptedRelay {
             .verdict
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(Box::new(verdict));
+    }
+
+    /// Answers every NIP-42 `AUTH` frame `OK true` from here on; until then an
+    /// `AUTH` goes unanswered. The challenge is whatever a test's
+    /// [`Verdict::Frames`] sent: nothing about the answer is checked.
+    pub fn accept_auth(&self) {
+        self.script.accepts_auth.store(true, Ordering::SeqCst);
     }
 
     /// Answers every `REQ` no scripted answer matches from what the relay
@@ -279,6 +289,14 @@ impl Script {
                 }
                 replies
             }
+            [verb, auth] if verb == "AUTH" => {
+                if !self.accepts_auth.load(Ordering::SeqCst) {
+                    return Some(Vec::new());
+                }
+                vec![Reply::Text(
+                    serde_json::json!(["OK", auth["id"], true, ""]).to_string(),
+                )]
+            }
             [verb, sub, filters @ ..] if verb == "REQ" => {
                 let filters: Vec<Filter> = filters
                     .iter()
@@ -303,6 +321,7 @@ impl Script {
                                 Frame::Raw(event) => {
                                     Reply::Text(format!(r#"["EVENT",{sub},{event}]"#))
                                 }
+                                Frame::Text(text) => Reply::Text(text.clone()),
                                 Frame::Eose => Reply::Text(eose()),
                                 Frame::Closed(text) => Reply::Text(
                                     serde_json::json!(["CLOSED", sub, text]).to_string(),

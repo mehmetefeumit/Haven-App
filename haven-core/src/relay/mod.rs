@@ -8,7 +8,11 @@
 //! - **WSS only**: Plaintext ws:// connections are rejected
 //! - **Direct connections**: Uses nostr-sdk Client for relay communication
 //! - **Verified events**: every relay event's id and signature are checked
-//!   before anything acts on it (`verified`), on the one client constructor
+//!   before anything acts on it (`verified`), the one file that builds clients
+//! - **Anonymous unless the owner said otherwise**: only `verified`'s
+//!   `identity_client` answers a NIP-42 challenge — for the account's own inbox
+//!   reads and `auth-required:` retries — with a signer that signs that answer
+//!   and nothing else (`nip42`)
 //!
 //! # Architecture
 //!
@@ -33,10 +37,12 @@ pub mod dial_witness;
 pub mod discovery;
 mod error;
 pub mod fanout;
+pub mod identity;
 pub mod live_sync;
 pub mod maintenance;
 mod manager;
 pub mod negentropy;
+pub mod nip42;
 pub mod publishers;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod recording_front;
@@ -64,7 +70,7 @@ pub use error::{InvalidUrlReason, RelayError, RelayResult};
 pub use manager::NegProbe;
 pub use manager::{
     allow_ws_loopback_for_test, ws_loopback_allowed_for_test, FanoutTransport, MemberLookup,
-    Nip65Relays, RelayManager, SendAck, OFFER_ACK_TIMEOUT,
+    Nip65Relays, RelayManager, SendAck, AUTH_RETRY_MS, OFFER_ACK_TIMEOUT, OWN_INBOX_READ_CAP,
 };
 pub(crate) use manager::{foreign_relay_dialable, retain_dialable_foreign_relays};
 pub use publishers::{
@@ -72,7 +78,7 @@ pub use publishers::{
     build_unpublish_event, dedup_relay_targets, superseding_created_at, PublisherError,
     PublisherResult,
 };
-pub use types::{PublishResult, RelayConnectionStatus, RelayFetchOutcome, RelayStatus};
+pub use types::{InboxRead, PublishResult, RelayConnectionStatus, RelayFetchOutcome, RelayStatus};
 pub use url_norm::{canonicalize, normalize_relay_url};
 
 use crate::log_alias::{self, LogAliasClass, LogHandle};

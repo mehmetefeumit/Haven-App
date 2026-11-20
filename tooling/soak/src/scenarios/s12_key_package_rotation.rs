@@ -692,10 +692,11 @@ async fn acknowledged<T: TimelineSink, L: LogDrain>(
     staged: &Event,
 ) -> Result<(), RigError> {
     witnessed(world, owner, staged).await?;
-    let promoted = world
-        .device(owner)?
+    let device = world.device(owner)?;
+    let acked_at = device.policy_now(WallNow::now())?.secs();
+    let promoted = device
         .session()?
-        .promote_key_package(&staged.id)
+        .promote_key_package(&staged.id, acked_at)
         .await
         .map_err(|_| RigError::Core(Step::MintKeyPackage))?;
     if promoted {

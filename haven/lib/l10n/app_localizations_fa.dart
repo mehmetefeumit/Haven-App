@@ -514,6 +514,27 @@ class AppLocalizationsFa extends AppLocalizations {
   }
 
   @override
+  String get relaySettingsInboxRefused =>
+      'این رله اجازه نداد Haven دعوت‌هایت را بخواند. آن را حذف کن یا رلهٔ دیگری اضافه کن.';
+
+  @override
+  String get relaySettingsInboxRefusedTooltip =>
+      'اجازهٔ خواندن دعوت‌ها را به Haven نداد';
+
+  @override
+  String relaySettingsInboxRefusedSemantics(String url) {
+    return 'هشدار: $url اجازه نداد Haven دعوت‌هایت را بخواند';
+  }
+
+  @override
+  String get relaySettingsInboxAllRefusedTitle =>
+      'هیچ‌کدام از رله‌های صندوق ورودی‌ات اجازه نداد Haven دعوت‌هایت را بخواند';
+
+  @override
+  String get relaySettingsInboxAllRefusedMessage =>
+      'تا وقتی یکی از رله‌های صندوق ورودی‌ات اجازه ندهد Haven دعوت‌هایت را بخواند، دعوت‌هایی که برایت فرستاده می‌شوند به دستت نمی‌رسند. پیش‌فرض‌ها را بازگردان یا رلهٔ دیگری اضافه کن.';
+
+  @override
   String get locationSettingsTitle => 'موقعیت مکانی';
 
   @override
@@ -1505,6 +1526,50 @@ class AppLocalizationsFa extends AppLocalizations {
   String get invitationsLoadError => 'نتوانستیم دعوت‌ها را بارگذاری کنیم';
 
   @override
+  String invitationsNoticeRefused(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other:
+          '$countString رلهٔ صندوق ورودی اجازه ندادند Haven دعوت‌هایت را بخواند، پس دعوتی که فقط به این رله‌ها فرستاده شود به دستت نمی‌رسد. در تنظیمات رله‌ها، آن‌ها را حذف کن یا رلهٔ دیگری اضافه کن.',
+      one:
+          'یک رلهٔ صندوق ورودی اجازه نداد Haven دعوت‌هایت را بخواند، پس دعوتی که فقط به همین رله فرستاده شود به دستت نمی‌رسد. در تنظیمات رله‌ها، آن را حذف کن یا رلهٔ دیگری اضافه کن.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String invitationsNoticeNotSaved(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other:
+          '$countString دعوت رسید، اما ذخیره کردنشان روی این دستگاه ممکن نشد.',
+      one: 'یک دعوت رسید، اما ذخیره کردنش روی این دستگاه ممکن نشد.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get invitationsNoticeOffline =>
+      'Haven نتوانست به رله‌های صندوق ورودی‌ات دسترسی پیدا کند، پس دعوت‌های تازه هنوز نمی‌توانند نمایش داده شوند.';
+
+  @override
+  String get invitationsNoticeIncomplete =>
+      'Haven نتوانست بررسی همهٔ رله‌های صندوق ورودی‌ات را تمام کند، پس ممکن است برخی دعوت‌ها هنوز نمایش داده نشوند.';
+
+  @override
+  String get invitationsNoticeOpenRelaySettings => 'تنظیمات رله‌ها';
+
+  @override
   String get invitationsEmptyTitle => 'دعوتی وجود ندارد';
 
   @override
@@ -1528,7 +1593,7 @@ class AppLocalizationsFa extends AppLocalizations {
   }
 
   @override
-  String refreshRingSemanticAllOk(int total) {
+  String refreshRingSemanticInboxAll(int total) {
     final intl.NumberFormat totalNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
@@ -1536,17 +1601,18 @@ class AppLocalizationsFa extends AppLocalizations {
     String _temp0 = intl.Intl.pluralLogic(
       total,
       locale: localeName,
-      other: 'همهٔ $totalString رله پاسخ دادند',
-      one: 'رله پاسخ داد',
+      other: 'دعوت‌ها روی همهٔ $totalString رله بررسی شدند',
+      one: 'دعوت‌ها روی رله بررسی شدند',
     );
     return '$_temp0';
   }
 
   @override
-  String get refreshRingSemanticAllError => 'هیچ رله‌ای پاسخ نداد';
+  String get refreshRingSemanticInboxNone =>
+      'بررسی دعوت‌ها روی هیچ رله‌ای ممکن نشد';
 
   @override
-  String refreshRingSemanticPartial(int ok, int total) {
+  String refreshRingSemanticInboxPartial(int ok, int total) {
     final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -1555,17 +1621,18 @@ class AppLocalizationsFa extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return '$okString از $totalString رله پاسخ دادند';
+    return 'دعوت‌ها روی $okString از $totalString رله بررسی شدند';
   }
 
   @override
   String get refreshRingAnnouncementChecking => 'در حال بررسی رله‌ها';
 
   @override
-  String get refreshRingAnnouncementAllOk => 'همهٔ رله‌ها پاسخ دادند';
+  String get refreshRingAnnouncementInboxAll =>
+      'دعوت‌ها روی همهٔ رله‌ها بررسی شدند';
 
   @override
-  String refreshRingAnnouncementPartial(int ok, int total) {
+  String refreshRingAnnouncementInboxPartial(int ok, int total) {
     final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -1574,12 +1641,12 @@ class AppLocalizationsFa extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return '$okString از $totalString رله پاسخ دادند';
+    return 'دعوت‌ها روی $okString از $totalString رله بررسی شدند';
   }
 
   @override
-  String get refreshRingAnnouncementAllError =>
-      'به هیچ رله‌ای نمی‌توان دسترسی یافت';
+  String get refreshRingAnnouncementInboxNone =>
+      'بررسی دعوت‌ها روی هیچ رله‌ای ممکن نشد';
 
   @override
   String get refreshRingAnnouncementNoInbox => 'صندوق ورودی پیکربندی نشده است';

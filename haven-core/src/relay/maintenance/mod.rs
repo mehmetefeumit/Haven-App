@@ -26,8 +26,9 @@
 //! * [`own_board`] — the own-relay board: per relay and per kind, what each
 //!   own relay and lookup relay serves of the user's `KeyPackage` and relay
 //!   lists as the two maintenance passes judged it, and what became of what
-//!   they sent it, read by the relay settings page as a network-free
-//!   snapshot.
+//!   they sent it, and how each own inbox relay answered a read of the
+//!   account's gift wraps, read by the relay settings page as a
+//!   network-free snapshot.
 
 pub mod key_package;
 pub mod kp_lifetime;
@@ -49,8 +50,8 @@ pub use key_package::{
 };
 pub use own_board::{
     names_configured_list, probe_verdict, serves_tracked_package, Coalesced, OfferMode, Offered,
-    OwnBoardSnapshot, OwnCell, OwnHold, OwnKind, OwnKindSnapshot, OwnPass, OwnRelayBoard,
-    OwnRelayCell, Probed,
+    OwnBoardSnapshot, OwnCell, OwnHold, OwnInboxReadCell, OwnKind, OwnKindSnapshot, OwnPass,
+    OwnRelayBoard, OwnRelayCell, Probed,
 };
 pub use relay_list::{
     decide_relay_list, list_relay_healthy, own_list_confirmed, RelayListAction,

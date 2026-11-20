@@ -328,7 +328,17 @@
 #     every `automatic_authentication(` is `automatic_authentication(false)`:
 #     with a signer the pool answers a relay's NIP-42 challenge, binding the
 #     identity key to group traffic on that socket, and MDK's relay client
-#     signs an unsigned non-445 event it is handed. A text scan: it does not
+#     signs an unsigned non-445 event it is handed. The one exception
+#     (owner-directed 2026-11-16) is `verified.rs`'s second constructor,
+#     `identity_client`: the same policy, one signer — its `Arc<Nip42Signer>`
+#     parameter, which signs a kind-22242 answer and nothing else — and one
+#     `automatic_authentication(true)`, while `verified_client` stays signer-
+#     less. Check 12 holds who may reach it: `identity_client` and the
+#     per-call identity helpers are named only in the files listed for them, a
+#     kind-22242 event only in the signer (and tests), the signer is built
+#     only in `CircleManager`, the per-call relay keeps the publish options for
+#     one direction, and the profile module and the discovery plane never
+#     touch any of it. A text scan: it does not
 #     read `tests/`, and does not see a construction it cannot spell (a
 #     `Default` the compiler infers).
 #
@@ -685,7 +695,16 @@
 #     runners; this static half is what stops a hatch being added quietly. It
 #     also rejects any static `skip:` there, because the ABSENCE of one is the
 #     premise that lets a lane read a non-zero `~N` column as a lost proof —
-#     asserted here rather than argued in prose.
+#     asserted here rather than argued in prose. The same step reconciles
+#     tooling/e2e/expected_drive_markers.txt, the end markers a lane requires
+#     of every scenario it registers, and holds every runner that drives a
+#     marked target to the runtime check.
+#
+#   Flag-guarded test bodies          scripts/ci/check_no_flag_guarded_test_bodies.sh
+#     Enforcing, plus a fixture --self-test: no test body under
+#     haven/integration_test begins with `if (!flag) return;` — on every build
+#     where the flag is off such a test does nothing and is reported PASSED.
+#     A build-specific scenario is registered only on its build instead.
 #
 #   Fresh-install broadcast barrier   tooling/e2e/ci/app-install-lib.sh
 #     A fresh install's PACKAGE_ADDED can relaunch MainActivity under
@@ -1293,7 +1312,7 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_engine_client_options.sh
 
-      # Fixtures for both directions of all ELEVEN checks, driven through the same
+      # Fixtures for both directions of all TWELVE checks, driven through the same
       # `run_all_checks` list the enforcing run above uses — so a check unwired
       # from the production path is unwired from these fixtures too and its
       # fixtures go red, instead of certifying a check that no longer runs.
@@ -1314,7 +1333,7 @@ jobs:
       # policy removed, swapped or halved to `verify_signature()`, given a field,
       # a log line or a reason, replaced by a second `admit_policy` or an
       # assignment, or undone by a gossip store given by call or by field; a
-      # second construction in the constructor's own file, above its tests or
+      # third construction in the constructors' own file, above its tests or
       # below them; a client built in another file in each spelling (wrapped
       # across lines, fully qualified, a `RelayPool`, a `Relay`, behind an
       # alias); a `.database()` read; and the witness marker missing, in a
@@ -1331,7 +1350,18 @@ jobs:
       # field too — while a comment naming the call, a `designer(` and a
       # comparison of two such fields still pass; and a relay client built to
       # authenticate, or switched to it after the build, while a second
-      # `automatic_authentication(false)` passes. One fixture is structural rather
+      # `automatic_authentication(false)` passes; the authenticating
+      # constructor given `Keys`, another or a second signer, no policy, a
+      # gossip store, no authentication, a look-alike `Nip42Signer`, or gone,
+      # and the anonymous one given a signer or switched on; and (check 12)
+      # the constructor named in the FFI crate or the profile module, a
+      # helper named in the live session or passed by name from the FFI
+      # crate, a kind-22242 event built in product code
+      # or the soak rig, a second `Nip42Signer::new`, the signer named in
+      # discovery or profile code, and the per-call relay reconnecting,
+      # keeping READ for a write, or registered without its options — while a
+      # test module's `Kind::Authentication`, a comment and a longer number
+      # still pass. One fixture is structural rather
       # than a tree mutation: every `check_*` function must be invoked by
       # `run_all_checks`, so a check written and wired nowhere cannot look
       # like coverage.
@@ -2071,6 +2101,16 @@ jobs:
       - name: Integration-test skip hatches are declared
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/drive-log-lib.sh --check-manifest
+
+      # A body that begins `if (!flag) return;` passes, having done nothing, on
+      # every build where the flag is off — e2e_combined.dart carried eight.
+      # The fixtures cover the M11 wrappers and keep helper early returns and a
+      # wrapper's own registration gate out of it.
+      - name: No integration-test body returns on a flag
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: |
+          bash scripts/ci/check_no_flag_guarded_test_bodies.sh --self-test
+          bash scripts/ci/check_no_flag_guarded_test_bodies.sh
 
       # Guards the B1 lane's publish-count PARSER. Its critical fixture is the
       # `Published to 0/1` line — P0-1's own signature, which a substring grep

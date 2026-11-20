@@ -522,6 +522,27 @@ class AppLocalizationsDe extends AppLocalizations {
   }
 
   @override
+  String get relaySettingsInboxRefused =>
+      'Dieses Relay hat Haven deine Einladungen nicht lesen lassen. Entferne es oder füge ein weiteres Relay hinzu.';
+
+  @override
+  String get relaySettingsInboxRefusedTooltip =>
+      'Hat Haven die Einladungen nicht lesen lassen';
+
+  @override
+  String relaySettingsInboxRefusedSemantics(String url) {
+    return 'Warnung: $url hat Haven deine Einladungen nicht lesen lassen';
+  }
+
+  @override
+  String get relaySettingsInboxAllRefusedTitle =>
+      'Keines deiner Posteingangs-Relays hat Haven deine Einladungen lesen lassen';
+
+  @override
+  String get relaySettingsInboxAllRefusedMessage =>
+      'An dich gesendete Einladungen erreichen dich erst, wenn eines deiner Posteingangs-Relays Haven sie lesen lässt. Stelle die Standardwerte wieder her oder füge ein weiteres Relay hinzu.';
+
+  @override
   String get locationSettingsTitle => 'Standort';
 
   @override
@@ -1523,6 +1544,51 @@ class AppLocalizationsDe extends AppLocalizations {
   String get invitationsLoadError => 'Einladungen konnten nicht geladen werden';
 
   @override
+  String invitationsNoticeRefused(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other:
+          '$countString Posteingangs-Relays haben Haven deine Einladungen nicht lesen lassen, daher erreicht dich eine Einladung, die nur dorthin gesendet wurde, nicht. Entferne sie in den Relay-Einstellungen oder füge ein weiteres Relay hinzu.',
+      one:
+          '1 Posteingangs-Relay hat Haven deine Einladungen nicht lesen lassen, daher erreicht dich eine Einladung, die nur dorthin gesendet wurde, nicht. Entferne es in den Relay-Einstellungen oder füge ein weiteres Relay hinzu.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String invitationsNoticeNotSaved(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other:
+          '$countString Einladungen sind eingegangen, konnten aber nicht auf diesem Gerät gespeichert werden.',
+      one:
+          'Eine Einladung ist eingegangen, konnte aber nicht auf diesem Gerät gespeichert werden.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get invitationsNoticeOffline =>
+      'Haven konnte deine Posteingangs-Relays nicht erreichen, daher können neue Einladungen noch nicht angezeigt werden.';
+
+  @override
+  String get invitationsNoticeIncomplete =>
+      'Haven konnte nicht alle deine Posteingangs-Relays vollständig prüfen, daher werden einige Einladungen möglicherweise noch nicht angezeigt.';
+
+  @override
+  String get invitationsNoticeOpenRelaySettings => 'Relay-Einstellungen';
+
+  @override
   String get invitationsEmptyTitle => 'Keine Einladungen';
 
   @override
@@ -1552,7 +1618,7 @@ class AppLocalizationsDe extends AppLocalizations {
   }
 
   @override
-  String refreshRingSemanticAllOk(int total) {
+  String refreshRingSemanticInboxAll(int total) {
     final intl.NumberFormat totalNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
@@ -1560,17 +1626,18 @@ class AppLocalizationsDe extends AppLocalizations {
     String _temp0 = intl.Intl.pluralLogic(
       total,
       locale: localeName,
-      other: 'Alle $totalString Relays haben geantwortet',
-      one: 'Das Relay hat geantwortet',
+      other: 'Einladungen auf allen $totalString Relays geprüft',
+      one: 'Einladungen auf dem Relay geprüft',
     );
     return '$_temp0';
   }
 
   @override
-  String get refreshRingSemanticAllError => 'Keine Relays haben geantwortet';
+  String get refreshRingSemanticInboxNone =>
+      'Einladungen konnten auf keinem Relay geprüft werden';
 
   @override
-  String refreshRingSemanticPartial(int ok, int total) {
+  String refreshRingSemanticInboxPartial(int ok, int total) {
     final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -1579,17 +1646,18 @@ class AppLocalizationsDe extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return '$okString von $totalString Relays haben geantwortet';
+    return 'Einladungen auf $okString von $totalString Relays geprüft';
   }
 
   @override
   String get refreshRingAnnouncementChecking => 'Relays werden geprüft';
 
   @override
-  String get refreshRingAnnouncementAllOk => 'Alle Relays haben geantwortet';
+  String get refreshRingAnnouncementInboxAll =>
+      'Einladungen auf allen Relays geprüft';
 
   @override
-  String refreshRingAnnouncementPartial(int ok, int total) {
+  String refreshRingAnnouncementInboxPartial(int ok, int total) {
     final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -1598,11 +1666,12 @@ class AppLocalizationsDe extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return '$okString von $totalString Relays haben geantwortet';
+    return 'Einladungen auf $okString von $totalString Relays geprüft';
   }
 
   @override
-  String get refreshRingAnnouncementAllError => 'Keine Relays erreichbar';
+  String get refreshRingAnnouncementInboxNone =>
+      'Einladungen konnten auf keinem Relay geprüft werden';
 
   @override
   String get refreshRingAnnouncementNoInbox => 'Kein Posteingang konfiguriert';

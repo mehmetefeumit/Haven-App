@@ -269,6 +269,7 @@ fn relay_answer(relay_url: &str) -> haven_core::relay::RelayFetchOutcome {
         relay_url: relay_url.to_owned(),
         responded: true,
         drained: true,
+        refused: false,
         events: Vec::new(),
     }
 }

@@ -6,9 +6,9 @@
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `acknowledged_by`, `answer_standing`, `answer`, `answer`, `answer`, `answer`, `build_relay_list_event_for`, `build_relay_list_unpublish_for`, `commit_event_to_json`, `convert_location_result`, `count`, `current_cache`, `current_picture_hash`, `delete_circles_db_files`, `delete_db_files`, `delete_mls_session_db_files`, `delete_tile_db_files`, `ensure_own_identity`, `fetch_my_profile_at`, `foreground_claim`, `from_cached`, `from_report`, `from_state`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hex_to_npub`, `judge_key_packages`, `key_package_pass`, `keys_from_secret_bytes`, `leave_intent_stands`, `lifecycle_in`, `live_event_to_ffi`, `live_lifecycle_of`, `live_session_core`, `logscan_plant_token`, `lookup_relays`, `maintain_relay_list_category`, `maintenance_now_secs`, `mark_kp_slot_retirement_done`, `max_log_level`, `member_key_packages`, `mint_key_package`, `new`, `no_network`, `now_ms`, `now_secs`, `own_cached_view`, `own_profile_to_retract`, `own_relays_seeding_once`, `platform_init_keyring`, `profile_now_secs`, `profile_picture_delay`, `profile_stamp_lists`, `profile_view`, `pubkey_of`, `publish_and_promote`, `publishing`, `redact_directory_err`, `redact_profile_err`, `refusal_of`, `reinstall_after_timed_out_stop`, `relay_list_pass`, `relay_list_targets`, `relay_list_wire_kind`, `remove_circles_db_key`, `remove_file_strict`, `remove_keyring_entry`, `remove_keyring_key`, `remove_mls_session_db_key`, `remove_tiles_db_key`, `retain_own_events`, `retire_malformed_kp_slot`, `retract_kp_slots`, `run_blocking`, `start_session_as`, `sync_reason_to_ffi`, `tile_err_to_string`, `unknown`, `usable_profile_pool`
+// These functions are ignored because they are not marked as `pub`: `acknowledged_by`, `answer_standing`, `answer`, `answer`, `answer`, `answer`, `ask_own_inbox_reads`, `build_relay_list_event_for`, `build_relay_list_unpublish_for`, `commit_event_to_json`, `convert_location_result`, `count`, `current_cache`, `current_picture_hash`, `delete_circles_db_files`, `delete_db_files`, `delete_mls_session_db_files`, `delete_tile_db_files`, `ensure_own_identity`, `failed`, `fetch_my_profile_at`, `foreground_claim`, `from_cached`, `from_report`, `from_state`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hex_to_npub`, `judge_key_packages`, `key_package_pass`, `keys_from_secret_bytes`, `leave_intent_stands`, `lifecycle_in`, `live_event_to_ffi`, `live_lifecycle_of`, `live_session_core`, `logscan_plant_token`, `lookup_relays`, `maintain_relay_list_category`, `maintenance_now_secs`, `mark_kp_slot_retirement_done`, `max_log_level`, `member_key_packages`, `mint_key_package`, `new`, `no_network`, `now_ms`, `now_secs`, `of`, `own_cached_view`, `own_profile_to_retract`, `own_relays_seeding_once`, `platform_init_keyring`, `profile_now_secs`, `profile_picture_delay`, `profile_stamp_lists`, `profile_view`, `pubkey_of`, `publish_and_promote`, `publishing`, `redact_directory_err`, `redact_profile_err`, `refusal_of`, `reinstall_after_timed_out_stop`, `relay_list_pass`, `relay_list_targets`, `relay_list_wire_kind`, `remove_circles_db_key`, `remove_file_strict`, `remove_keyring_entry`, `remove_keyring_key`, `remove_mls_session_db_key`, `remove_tiles_db_key`, `retain_own_events`, `retire_malformed_kp_slot`, `retract_kp_slots`, `run_blocking`, `serialized_event`, `since_timestamp`, `start_session_as`, `sync_reason_to_ffi`, `tile_err_to_string`, `unknown`, `usable_profile_pool`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Driving`, `InMemoryStorage`, `KpMintPlan`, `KpRetirementInputs`, `KpRetirementTick`, `ProfileStampLists`, `StagedPublish`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`, `default`
 
 /// Returns the per-process log handle for `value`, e.g. `circle#a91f3c`.
@@ -357,6 +357,13 @@ Future<DecryptedLocationFfi> parseEngineLocation({
 String foldForSearch({required String query}) =>
     RustLib.instance.api.crateApiFoldForSearch(query: query);
 
+/// How far back, in seconds, a read of the user's inbox asks for gift wraps
+/// (`haven_core::relay::cursor::INBOX_GIFTWRAP_LOOKBACK_SECS`): at least
+/// NIP-59's two days of backdating plus the 72-hour hold on an unanswered
+/// invitation, so one held before a restart is read back after it.
+PlatformInt64 inboxGiftWrapLookbackSecs() =>
+    RustLib.instance.api.crateApiInboxGiftWrapLookbackSecs();
+
 /// Returns the canonical default relay list shared by Rust and Dart.
 ///
 /// Single source of truth for [`haven_core::circle::default_relays`].
@@ -524,19 +531,22 @@ void allowWsLoopbackForTest() =>
 void allowPrivateBlossomForTest() =>
     RustLib.instance.api.crateApiAllowPrivateBlossomForTest();
 
-/// Overrides the Blossom upload server for hermetic public-profile E2E tests.
+/// Overrides the Blossom upload servers for hermetic public-profile E2E tests.
 ///
 /// Forwards to [`haven_core::profile::set_blossom_server_for_test`] (debug
-/// builds) or returns an error in release builds. The own-profile sync reads
-/// the effective server via `haven_core::profile::blossom_server`, so
+/// builds) or returns an error in release builds. `url` is one base URL or a
+/// comma-separated, ordered list of them
+/// (`"http://10.0.2.2:3000,http://10.0.2.2:3002"`), tried in order as the
+/// production list is, and it REPLACES that whole list: the own-profile sync
+/// reads the effective servers via `haven_core::profile::blossom_servers`, so
 /// installing this override before the first upload points A's picture at the
-/// hermetic Blossom instead of the production default. Intended to be called
-/// once from a scenario's `setUpAll` with the `HAVEN_E2E_BLOSSOM_URL`
+/// hermetic Blossom and never at a production server. Intended to be called
+/// once from a scenario's `setUpAll` with the `HAVEN_E2E_BLOSSOM_URLS`
 /// dart-define value.
 ///
 /// # Errors
 ///
-/// * Returns an error if `url` is empty.
+/// * Returns an error if an entry is empty or is not a URL with a host.
 /// * Returns an error if the override has already been installed in this
 ///   process (`OnceLock` install-once semantics).
 /// * In release builds this function is unreachable; the sibling stub always
@@ -1245,15 +1255,16 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   ///
   /// # Returns
   ///
-  /// * `Ok(Some(invitation))` — a new pending invitation the caller must
-  ///   accept or decline.
-  /// * `Ok(None)` — the gift wrap has already been processed on a prior
-  ///   poll cycle and should be silently skipped. This is the expected
-  ///   outcome for the inbox lookback (96 h, wider than NIP-59's 2-day
-  ///   backdating) repeatedly surfacing the same wrapper events.
-  /// * `Err(msg)` — a real failure (malformed event, MDK error, etc.).
-  ///   The message is already sanitized via `redact_hex_sequences`.
-  Future<InvitationFfi?> processGiftWrappedInvitation({
+  /// A [`GiftWrapIntakeFfi`]: the new pending invitation the caller must
+  /// accept or decline, or a typed failure, or — both `None` — a wrap
+  /// already processed on a prior poll, to be skipped silently (the inbox
+  /// lookback, wider than NIP-59's 2-day backdating, surfaces the same
+  /// wrappers again and again).
+  ///
+  /// # Errors
+  ///
+  /// Only for bad secret bytes, or a failure no typed outcome names.
+  Future<GiftWrapIntakeFfi> processGiftWrappedInvitation({
     required List<int> identitySecretBytes,
     required String giftWrapEventJson,
   });
@@ -1806,21 +1817,26 @@ abstract class LiveSyncFfi implements RustOpaqueInterface {
   /// Streams decrypted live events to Dart for the lifetime of the session.
   ///
   /// Returns `Err` immediately if no session is active (a cold-start race, not
-  /// a hung stream). The loop ends when the Dart side closes the sink
-  /// (`sink.add` returns `Err`) OR the bus closes on `stop_session` (the last
-  /// `Arc<LiveSyncCore>` drops → `RecvError::Closed`); a lag is skipped, never
-  /// fatal (the cursor + catch-up replay anything dropped).
+  /// a hung stream). The first stream of a session starts at its construction,
+  /// so nothing the session's first REQs replayed before Dart attached is
+  /// lost. The loop ends when the Dart side closes the sink (`sink.add`
+  /// returns `Err`) OR the bus closes on `stop_session` (the last
+  /// `Arc<LiveSyncCore>` drops); a lag is never fatal
+  /// ([`haven_core::relay::live_sync::LiveEvents::recv`]).
   ///
   /// # Errors
   ///
   /// Returns an error if there is no active session or the lock is poisoned.
   Stream<FfiRelayEvent> liveEvents();
 
-  /// Builds a handle over `circle`'s MLS state for `own_pubkey_hex`.
+  /// Builds a handle over `circle`'s MLS state for `own_pubkey_hex`, which
+  /// must be the identity `circle` was opened with: the session's inbox
+  /// socket reads that key's gift wraps, authenticated as it.
   ///
   /// # Errors
   ///
-  /// Returns an error if `own_pubkey_hex` is not a valid Nostr public key.
+  /// Returns an error if `own_pubkey_hex` is not a valid Nostr public key,
+  /// or not `circle`'s identity.
   static Future<LiveSyncFfi> newInstance({
     required CircleManagerFfi circle,
     required String ownPubkeyHex,
@@ -1907,6 +1923,21 @@ abstract class LiveSyncFfi implements RustOpaqueInterface {
   /// Returns an error if there is no active session or the lock is poisoned,
   /// so a caller can never read "no session" as "no standing REQ".
   Future<int> poolSubscriptionCount();
+
+  /// Re-dials every live socket after the default network changed.
+  ///
+  /// The re-anchor above keeps a socket the pool still reads as
+  /// `Connected`, and one the old network carried reads so until a ping
+  /// goes unanswered; this pauses the session, then opens it again.
+  ///
+  /// `foreground` is the claim [`Self::resume_after_background`] takes,
+  /// and on `false` the call is refused in the same way.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if there is no active session, the lock is poisoned,
+  /// the caller did not claim the foreground, or the open fails.
+  Future<void> reconnectAfterNetworkChange({required bool foreground});
 
   /// Re-anchors the session after a background period / reconnect.
   ///
@@ -2236,49 +2267,61 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
   /// way.
   Future<void> disconnectRelay({required String url});
 
-  /// Fetches gift-wrapped events (kind 1059) addressed to a recipient.
+  /// Fetches the gift wraps (kind 1059) addressed to `circle`'s own
+  /// identity, merged across `relays`.
   ///
-  /// Queries the given relays for NIP-59 gift wrap events tagged with the
-  /// recipient's public key. An optional `since` timestamp restricts results
-  /// to events created after that point.
+  /// Each relay is read on a connection of its own that answers the relay's
+  /// NIP-42 challenge as that identity
+  /// (`RelayManager::read_own_inbox_per_relay`), so a relay serving gift
+  /// wraps only to their authenticated recipient is read too. An optional
+  /// `since` timestamp restricts results to events created after that point.
   ///
   /// # Arguments
   ///
-  /// * `recipient_pubkey` - The recipient's public key (hex or npub format)
+  /// * `circle` - The circle manager whose identity is the recipient
   /// * `relays` - Relay URLs to query
   /// * `since` - Optional Unix timestamp (seconds); only events after this time are returned
   ///
   /// # Returns
   ///
-  /// A list of gift-wrap events serialized as JSON strings.
+  /// The gift-wrap events every relay sent, each once, serialized as JSON
+  /// strings. A relay that is not reached or refuses the read adds nothing.
+  ///
+  /// # Errors
+  ///
+  /// A negative `since`, or an event that does not serialize.
   Future<List<String>> fetchGiftWraps({
-    required String recipientPubkey,
+    required CircleManagerFfi circle,
     required List<String> relays,
     PlatformInt64? since,
   });
 
-  /// Fetches gift-wrapped events (kind 1059) per relay, reporting which
-  /// relays answered.
+  /// Fetches the gift wraps (kind 1059) addressed to `circle`'s own
+  /// identity from each relay, reporting how each relay answered.
   ///
   /// Like [`fetch_gift_wraps`](Self::fetch_gift_wraps), but instead of one
-  /// merged list it queries each relay independently and returns a per-relay
-  /// outcome: whether the relay answered (`responded`) and the events it
-  /// returned. This lets the caller show an accurate "N of M inboxes
-  /// answered" tally. A relay that answers with zero events is
-  /// `responded == true` with an empty `events` list — distinct from an
-  /// unreachable relay (`responded == false`).
+  /// merged list it returns a per-relay outcome: how the relay answered the
+  /// read ([`InboxReadFfi`]) and the events it returned. Only `Served` says
+  /// the relay sent everything it holds. A relay that refuses the read until
+  /// the reader authenticates is answered and asked again; it is `Refused`
+  /// only when it refuses that read too, or the answer to its challenge,
+  /// never mistaken for an empty inbox.
   ///
   /// # Arguments
   ///
-  /// * `recipient_pubkey` - The recipient's public key (hex or npub format)
+  /// * `circle` - The circle manager whose identity is the recipient
   /// * `relays` - Relay URLs to query, each independently
   /// * `since` - Optional Unix timestamp (seconds); only events after this time
   ///
   /// # Returns
   ///
   /// One [`RelayGiftWrapFetchFfi`] per relay, in input order.
+  ///
+  /// # Errors
+  ///
+  /// A negative `since`, or an event that does not serialize.
   Future<List<RelayGiftWrapFetchFfi>> fetchGiftWrapsPerRelay({
-    required String recipientPubkey,
+    required CircleManagerFfi circle,
     required List<String> relays,
     PlatformInt64? since,
   });
@@ -2463,6 +2506,14 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
   /// and sends each relay at most one offer of each event, settled by that
   /// relay's own `OK`. It runs under the account's one maintenance lock, and
   /// a request made while a pass of its kind waits for that lock joins it.
+  /// Beside the inbox list's pass, a pass asked for in the `foreground` asks
+  /// each own inbox relay for this account's gift wraps and writes how each
+  /// answered onto the board, which the relay settings page warns from when
+  /// one refuses. `foreground` is the caller's claim: `true` ONLY when the
+  /// app's lifecycle reads `resumed` at the call, so no background burst
+  /// opens those identity connections (P4); without it the board keeps the
+  /// last answers. A foreground request joining a pass that has not begun
+  /// still gets its read.
   ///
   /// Returns a presence-only [`RelayListMaintenanceOutcomeFfi`].
   ///
@@ -2471,6 +2522,7 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
   Future<RelayListMaintenanceOutcomeFfi> maintainRelayList({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,
+    required bool foreground,
   });
 
   /// Creates a new relay manager.
@@ -3652,6 +3704,61 @@ enum ForceReleaseOutcomeFfi {
   stopTimedOut,
 }
 
+/// Why a gift wrap gave no invitation.
+enum GiftWrapIntakeFailureFfi {
+  /// It is not an invitation this device can open. Never shown: a shared
+  /// NIP-17 inbox also carries other clients' messages, and anyone who
+  /// knows the npub can send a wrap that names this account's public
+  /// KeyPackage and carries nothing.
+  unusable,
+
+  /// It opened, but holding the invitation could not be recorded on this
+  /// device, so it was not held.
+  storeFailed,
+}
+
+/// What [`CircleManagerFfi::process_gift_wrapped_invitation`] did with one
+/// gift wrap. At most one of the two is `Some`; neither means the wrap was
+/// already processed.
+class GiftWrapIntakeFfi {
+  /// The new pending invitation.
+  final InvitationFfi? invitation;
+
+  /// Why no invitation came of it, when one should be told apart.
+  final GiftWrapIntakeFailureFfi? failure;
+
+  const GiftWrapIntakeFfi({this.invitation, this.failure});
+
+  @override
+  int get hashCode => invitation.hashCode ^ failure.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is GiftWrapIntakeFfi &&
+          runtimeType == other.runtimeType &&
+          invitation == other.invitation &&
+          failure == other.failure;
+}
+
+/// How one relay answered a read of the user's own inbox (kind 1059)
+/// (`haven_core::relay::InboxRead`).
+enum InboxReadFfi {
+  /// It ended the read with `EOSE`: what it holds for this account, it sent.
+  served,
+
+  /// It refused the read: after this device answered its NIP-42 challenge,
+  /// or refused that answer, or asked for one and sent no challenge. An
+  /// invitation stored there is not read from it.
+  refused,
+
+  /// It was reached but did not finish its answer.
+  incomplete,
+
+  /// It could not be reached.
+  unreached,
+}
+
 /// What [`RelayManagerFfi::ingest_driven`] did with one event.
 class IngestOutcomeFfi {
   /// Whether a cursor may pass it.
@@ -4372,6 +4479,29 @@ enum MemberLookupVerdictFfi {
   lookupIncomplete,
 }
 
+/// How one own inbox relay answered the relay-list pass's read of this
+/// account's gift wraps (`haven_core::relay::maintenance::OwnInboxReadCell`).
+class OwnInboxReadFfi {
+  /// The inbox list entry, verbatim.
+  final String relayUrl;
+
+  /// How it answered.
+  final InboxReadFfi read;
+
+  const OwnInboxReadFfi({required this.relayUrl, required this.read});
+
+  @override
+  int get hashCode => relayUrl.hashCode ^ read.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is OwnInboxReadFfi &&
+          runtimeType == other.runtimeType &&
+          relayUrl == other.relayUrl &&
+          read == other.read;
+}
+
 /// One kind of the own-relay board: kind 30443, 10002 or 10050.
 class OwnKindBoardFfi {
   /// Why nothing of this kind is published now; `cells` is then empty.
@@ -4450,12 +4580,19 @@ class OwnRelayBoardFfi {
   /// Kind 10050, on the inbox list and the lookup relays.
   final OwnKindBoardFfi inboxRelayList;
 
+  /// How each own inbox relay answered the last read of this account's gift
+  /// wraps, in the list's order: a relay that refuses it keeps every
+  /// invitation sent there out of this device's reach. Empty before a
+  /// relay-list pass has read, and after an inbox list edit.
+  final List<OwnInboxReadFfi> inboxReads;
+
   const OwnRelayBoardFfi({
     required this.running,
     required this.lookupRelays,
     required this.keyPackage,
     required this.relayList,
     required this.inboxRelayList,
+    required this.inboxReads,
   });
 
   @override
@@ -4464,7 +4601,8 @@ class OwnRelayBoardFfi {
       lookupRelays.hashCode ^
       keyPackage.hashCode ^
       relayList.hashCode ^
-      inboxRelayList.hashCode;
+      inboxRelayList.hashCode ^
+      inboxReads.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -4475,7 +4613,8 @@ class OwnRelayBoardFfi {
           lookupRelays == other.lookupRelays &&
           keyPackage == other.keyPackage &&
           relayList == other.relayList &&
-          inboxRelayList == other.inboxRelayList;
+          inboxRelayList == other.inboxRelayList &&
+          inboxReads == other.inboxReads;
 }
 
 /// One relay's cell of one kind on the own-relay board.
@@ -5219,29 +5358,27 @@ class RelayConnectionStatusFfi {
 
 /// Per-relay outcome of a gift-wrap fetch (FFI-friendly).
 ///
-/// `responded` is true when the relay completed the WebSocket handshake (it
-/// answered), even if it returned no events. A relay that answered with zero
-/// events is `responded == true` with an empty `events` list — distinct from
-/// an unreachable relay (`responded == false`). `events` holds the gift-wrap
-/// event JSON strings fetched from this relay.
+/// Only [`InboxReadFfi::Served`] means the relay sent everything it holds for
+/// this account; `events` holds the gift-wrap event JSON strings that arrived,
+/// whatever `read` says.
 class RelayGiftWrapFetchFfi {
   /// The relay URL that was queried.
   final String relayUrl;
 
-  /// Whether the relay answered (completed the WebSocket handshake).
-  final bool responded;
+  /// How the relay answered the read.
+  final InboxReadFfi read;
 
   /// Gift-wrap event JSON strings fetched from this relay.
   final List<String> events;
 
   const RelayGiftWrapFetchFfi({
     required this.relayUrl,
-    required this.responded,
+    required this.read,
     required this.events,
   });
 
   @override
-  int get hashCode => relayUrl.hashCode ^ responded.hashCode ^ events.hashCode;
+  int get hashCode => relayUrl.hashCode ^ read.hashCode ^ events.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -5249,7 +5386,7 @@ class RelayGiftWrapFetchFfi {
       other is RelayGiftWrapFetchFfi &&
           runtimeType == other.runtimeType &&
           relayUrl == other.relayUrl &&
-          responded == other.responded &&
+          read == other.read &&
           events == other.events;
 }
 

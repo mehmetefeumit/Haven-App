@@ -297,7 +297,7 @@ journal_wellformed() {
         elif ($o.wire_seq | type) != "number" then "missing/invalid wire_seq"
         elif ($o.wire_seq != ($o.wire_seq | floor)) or ($o.wire_seq < 0) then "wire_seq not a non-negative integer"
         elif ($o.conn_id | type) != "string" then "missing/invalid conn_id"
-        elif ($o | has("frame")) and ($o.dir != "c2r" and $o.dir != "r2c") then "traffic line with missing/invalid dir"
+        elif ($o | has("frame")) and ((["c2r","r2c","c2p","p2c","r2p"] | index($o.dir)) == null) then "traffic line with missing/invalid dir"
         elif ($o | has("frame") | not) and (($o.type // "") | test("^conn_(open|error)$") | not) then "neither a traffic line (no frame key) nor a recognised lifecycle record"
         else empty end
       | "line \(input_line_number): \(.)"
@@ -366,6 +366,11 @@ normalize() {
   local f="$1" boundary="$2"
   jq -c --argjson b "${boundary}" '
     select(.wire_seq <= $b)
+    # A GATED route (haven-wire-proxy `gate-read=`): what the gate wrote the
+    # client itself (`p2c`) and the events it withheld from it (`r2p`) are
+    # neither sent by Haven nor received by it. A REQ Haven sent that the gate
+    # refused (`c2p`) is still a filter Haven asked for, and C5.2 judges it.
+    | select(.dir != "p2c" and .dir != "r2p")
     | . as $line
     | (($line.relay_url // "") | ascii_downcase) as $up
     | (($line.listen // "")    | ascii_downcase) as $lst
@@ -579,7 +584,7 @@ evaluate() {
       ] as $rows
 
     | [ $rows[] | select(.t == "event") ] as $events
-    | [ $rows[] | select(.t == "req" and .dir == "c2r") ] as $reqs
+    | [ $rows[] | select(.t == "req" and (.dir == "c2r" or .dir == "c2p")) ] as $reqs
 
     # De-duplicate by BODY (see `bodyKey`): one event is legitimately published
     # to N relays and echoed to M subscribers, so every count in this journal
@@ -1961,6 +1966,29 @@ self_test() {
   local healthy="${tmp}/healthy.ndjson"
   write_healthy "${healthy}"
   expect_rc 0 "healthy two-circle journal passes" --journal "${healthy}" "${base[@]}" || fail=1
+
+  # A GATED ROUTE. The gate's challenge, refusal and OK and the gift wrap it
+  # withheld are not traffic of Haven's, and Haven's answer to the challenge is
+  # no group traffic, so they leave a clean journal clean; the REQ it refused
+  # is still a filter Haven asked for, so C5.2 judges that one.
+  local gated="${tmp}/gated.ndjson"
+  write_healthy "${gated}"
+  jline c2p c1 "[\"REQ\",\"sub-in\",{\"kinds\":[1059],\"#p\":[\"${PK_A}\"]}]"
+  jline p2c c1 '["AUTH","challenge-c1"]'
+  jline p2c c1 '["CLOSED","sub-in","ERROR: auth-required: requested filter requires authentication"]'
+  jline r2p c1 "[\"EVENT\",\"sub-mix\",$(ev 1059 "eW" "${PK_EPH1}" "[[\"p\",\"${PK_A}\"],[\"p\",\"${PK_B}\"]]")]"
+  jline c2p c1 "[\"AUTH\",$(ev 22242 "eAUTH" "${PK_A}" '[["challenge","challenge-c1"],["relay","ws://10.0.2.2:7790"]]')]"
+  jline p2c c1 '["OK","eAUTH",true,""]'
+  emit_sentinel c0
+  expect_rc 0 "a gated route's refusal and withheld event leave a clean journal clean" \
+    --journal "${gated}" "${base[@]}" || fail=1
+  local gated_pp="${tmp}/gated-pp.ndjson"
+  write_healthy "${gated_pp}"
+  jline c2p c1 "[\"REQ\",\"sub-in\",{\"kinds\":[1059],\"#p\":[\"${PK_A}\",\"${PK_B}\"]}]"
+  emit_sentinel c0
+  expect_msg '`#p` values in ONE filter' \
+    "a REQ the gate refused is still judged by C5.2" \
+    --journal "${gated_pp}" "${base[@]}" || fail=1
 
   # THE MULTISET TRAP, with a journal of its own rather than a second run of
   # the positive control. e09 is re-sent and re-echoed until this journal's
@@ -3411,7 +3439,7 @@ self_test() {
   # At 114-against-124 that room was ten cases, which is most of the C5.8
   # section. An exact pin means retiring a case is a two-line diff that has to
   # say why, which is the reviewable act the slack was quietly avoiding.
-  readonly MIN_CASES=217
+  readonly MIN_CASES=219
   if (( CASES_RUN != MIN_CASES )); then
     echo "SELF-TEST FAIL: ${CASES_RUN} fixture(s) ran; exactly ${MIN_CASES} expected." >&2
     echo "  A case was added or removed without moving MIN_CASES — the self-test" >&2

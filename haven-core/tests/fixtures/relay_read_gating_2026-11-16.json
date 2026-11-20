@@ -1,0 +1,56 @@
+{
+  "probed_on": "2026-11-16",
+  "method": "Read-only. One WebSocket per filter, from a client that never answers NIP-42 AUTH, as Haven's anonymous clients never do (Security Rule 16). Each REQ names a freshly generated random pubkey (#p for kinds 1059 and 4, authors for kinds 30443, 10002 and 10050), so no event of any real account was asked for and nothing was published. A filter's result is 'served' when the relay ended it with EOSE, 'gated' when it answered AUTH and then CLOSED. Software and version are the relay's NIP-11 document.",
+  "kinds_probed": [1059, 4, 30443, 10002, 10050],
+  "relays": [
+    {
+      "url": "wss://relay.damus.io",
+      "software": "git+https://github.com/hoytech/strfry.git",
+      "version": "1.1.0-158-gb705403ddf49",
+      "kinds": {
+        "1059": "gated",
+        "4": "gated",
+        "30443": "served",
+        "10002": "served",
+        "10050": "served"
+      },
+      "closed_message": "ERROR: auth-required: requested filter requires authentication"
+    },
+    {
+      "url": "wss://relay.primal.net",
+      "software": "git+https://github.com/hoytech/strfry.git",
+      "version": "1.1.3",
+      "kinds": {
+        "1059": "served",
+        "4": "served",
+        "30443": "served",
+        "10002": "served",
+        "10050": "served"
+      }
+    },
+    {
+      "url": "wss://nos.lol",
+      "software": "git+https://github.com/hoytech/strfry.git",
+      "version": "1.1.3-1-gab7f394",
+      "kinds": {
+        "1059": "served",
+        "4": "served",
+        "30443": "served",
+        "10002": "served",
+        "10050": "served"
+      }
+    },
+    {
+      "url": "wss://relay.ditto.pub",
+      "software": "https://gitworkshop.dev/soapbox.pub/ditto-relay",
+      "version": "2.5.1",
+      "kinds": {
+        "1059": "served",
+        "4": "served",
+        "30443": "served",
+        "10002": "served",
+        "10050": "served"
+      }
+    }
+  ]
+}

@@ -11,38 +11,46 @@ import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/rust/api.dart' as rust;
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/utils/log_alias.dart';
 
 /// Provider for the list of pending invitations.
 ///
 /// Fetches invitations from [CircleService] and makes them available
-/// reactively throughout the app.
+/// reactively throughout the app. A failed read is an error, never an empty
+/// list: "no invitations" would be a claim the read did not make.
 final pendingInvitationsProvider = FutureProvider<List<Invitation>>((
   ref,
 ) async {
   final circleService = ref.read(circleServiceProvider);
   try {
     return await circleService.getPendingInvitations();
-  } on CircleServiceException catch (e) {
-    debugPrint('CircleService error: ${e.runtimeType}');
-    return [];
   } on Object catch (e) {
     // FFI can throw Error instead of Exception; catch all throwables.
     debugPrint('Failed to load invitations: ${e.runtimeType}');
-    return [];
+    throw const CircleServiceException('Failed to load invitations');
   }
 });
 
-/// NIP-59 gift wraps have `created_at` randomized up to 2 days in the past,
-/// and a Welcome's exact bytes are re-sent for up to a day after its
-/// hand-over: 96 h covers both, with room for clock skew. The same window as
-/// the engine's inbox REQ (`INBOX_RESUBSCRIBE_LOOKBACK_SECS`).
+/// [inboxGiftWrapLookback] when the Rust bridge is not loaded (unit tests).
+/// Mirrors `INBOX_GIFTWRAP_LOOKBACK_SECS`, held equal by a test.
+const fallbackInboxGiftWrapLookback = Duration(days: 7);
+
+/// How far back a read of the user's inbox asks for gift wraps — the
+/// engine's own inbox lookback (`INBOX_GIFTWRAP_LOOKBACK_SECS`): NIP-59's two
+/// days of backdating plus the 72-hour hold on an unanswered invitation.
 ///
-/// This poll's own REQ floor, and it is derived from the wall clock alone —
-/// never from the persisted `inbox_1059` cursor, and never from anything a
-/// fetched wrap carries. See [invitationPollerProvider].
-const _giftWrapLookback = Duration(hours: 96);
+/// The poll's and the manual refresh's REQ floor is derived from the wall
+/// clock alone — never from the persisted `inbox_1059` cursor, and never from
+/// anything a fetched wrap carries. See [invitationPollerProvider].
+Duration get inboxGiftWrapLookback {
+  try {
+    return Duration(seconds: rust.inboxGiftWrapLookbackSecs());
+  } on Object catch (_) {
+    return fallbackInboxGiftWrapLookback;
+  }
+}
 
 /// Clock the gift-wrap REQ floor is taken from, by the poller and by the
 /// manual refresh. Injectable so the floor can be checked at an exact instant.
@@ -69,7 +77,7 @@ final invitationClockProvider = Provider<DateTime Function()>(
 /// the newest handled gift wrap's outer `created_at` — a field chosen by
 /// whoever built the wrap, on an event that anyone who knows this user's
 /// published npub can mint (see `CircleService`). Its own REQ floor is the
-/// fixed [_giftWrapLookback] below, which never reads that cursor either, so
+/// fixed [inboxGiftWrapLookback], which never reads that cursor either, so
 /// this path is cursor-free end to end. The one consumer of `inbox_1059` is the
 /// live-sync engine's inbox REQ, which anchors it in Rust on that REQ's own
 /// local open time.
@@ -101,11 +109,10 @@ final invitationPollerProvider = FutureProvider<int>((ref) async {
     // so we must always look back beyond that window. Re-fetching old
     // gift wraps is harmless — process_invitation guards against duplicates.
     final since = ref.read(invitationClockProvider)().subtract(
-      _giftWrapLookback,
+      inboxGiftWrapLookback,
     );
 
     final giftWraps = await relayService.fetchGiftWraps(
-      recipientPubkey: identity.pubkeyHex,
       relays: pollRelays,
       since: since,
     );
@@ -136,13 +143,14 @@ final invitationPollerProvider = FutureProvider<int>((ref) async {
                   identitySecretBytes: secretBytes,
                   giftWrapEventJson: eventJson,
                 );
-            // `null` → already-processed gift wrap (handled by Rust dedup).
-            // Silent no-op for the count, but still a handled wrap.
+            // `null` → already processed, or no invitation this device can
+            // open. Silent no-op for the count.
             return invitation != null;
           } on CircleServiceException catch (e) {
-            // Real failure from the service layer (malformed event, MDK
-            // error, storage failure). The underlying Rust error has already
-            // been logged with sanitized detail by `nostr_circle_service.dart`.
+            // Real failure from the service layer (storage failure, MDK
+            // error). The page's own refresh tells the user about a wrap that
+            // was not saved; a background poll only skips it, unmarked, so
+            // the next fetch asks again.
             debugPrint(
               '[InvitationPoller] skipped gift-wrap: ${e.runtimeType}',
             );

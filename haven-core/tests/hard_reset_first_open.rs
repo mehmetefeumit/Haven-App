@@ -163,6 +163,34 @@ async fn the_migrated_build_never_opens_a_pre_migration_store() {
     );
 }
 
+/// The production open hands out a NIP-42 signer under the identity it was
+/// opened with, and that signer signs the answer to a challenge and nothing
+/// else.
+#[tokio::test]
+async fn the_production_open_holds_a_nip42_signer_for_its_own_identity() {
+    let _keyring = KEYRING.lock().await;
+    install_fake_keyring();
+    let dir = TempDir::new().expect("temp dir");
+    let keys = Keys::generate();
+    let manager = CircleManager::new(dir.path(), &keys, Some(CIRCLES_KEY_HEX)).expect("open");
+    let signer = manager.nip42_signer();
+
+    assert_eq!(signer.public_key(), keys.public_key());
+    let relay = nostr::RelayUrl::parse("wss://relay.example.com").expect("a relay url");
+    let answer = nostr::EventBuilder::auth("challenge", relay)
+        .sign(&*signer)
+        .await
+        .expect("the answer signs");
+    assert!(answer.verify().is_ok() && answer.pubkey == keys.public_key());
+    assert!(
+        nostr::EventBuilder::text_note("not an answer")
+            .sign(&*signer)
+            .await
+            .is_err(),
+        "the identity's NIP-42 signer signed something else"
+    );
+}
+
 #[tokio::test]
 async fn a_fresh_install_owes_no_reset_notice() {
     let _keyring = KEYRING.lock().await;

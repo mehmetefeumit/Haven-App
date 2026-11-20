@@ -12,6 +12,8 @@
 #   5. a peer publishes                          (something to receive)
 #   6. that peer's NEW coordinates surface       (THE HEADLINE)
 #   7. a location publish is acked afterwards    (the OTHER pool woke)
+#   8. the network change RE-DIALLED the engine   (its own logcat line, then
+#                                                  step 6 within 30 s of it)
 #
 # Step 7 is a separate pool, not a formality: the engine's client keeps
 # `RelayOptions::default()`, while the PUBLISH pool sends no keepalive, never

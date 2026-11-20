@@ -174,6 +174,9 @@ pub struct SimDevice {
     /// address map built for this device.
     aliases: Arc<AliasBook>,
     ledger: DeviceLedger,
+    /// The raw gift wraps its engine handed up as Welcomes, not yet taken: the
+    /// app processes the one the bus carries, and so does an arm.
+    welcome_wraps: Vec<String>,
     /// Every [`DeviceOp::label`] this device took, in the order it took them:
     /// what `coverage.log` reads, so a triple names an operation that really
     /// happened rather than one a schedule or an arm meant to apply.
@@ -236,6 +239,7 @@ impl SimDevice {
             stored_key_package,
             aliases: AliasBook::new(Vec::new()),
             ledger: DeviceLedger::default(),
+            welcome_wraps: Vec::new(),
             applied_ops: Vec::new(),
         })
     }
@@ -423,7 +427,12 @@ impl SimDevice {
     /// reaches a fanout call exactly as it reaches every other publish.
     #[must_use]
     pub fn fanout_transport(&self) -> RelayMappedFanout<FanoutTransport> {
-        RelayMappedFanout::new(self.relays.fanout_transport(), self.endpoint_route())
+        let transport = self.relays.fanout_transport();
+        let transport = match &self.circle {
+            Some(circle) => transport.authenticating(circle.nip42_signer()),
+            None => transport,
+        };
+        RelayMappedFanout::new(transport, self.endpoint_route())
     }
 
     /// Each stored (canonical) relay address mapped to this device's own
@@ -457,7 +466,6 @@ impl SimDevice {
         // through, which the engine would close at every pause.
         let core = LiveSyncCore::new_local_with_relay_map_for_test(
             manager,
-            self.keys.public_key(),
             Arc::new(RelayManager::new()),
             endpoint_map(self.routes.clone(), Arc::clone(&self.aliases)),
         );
@@ -625,7 +633,10 @@ impl SimDevice {
                             }
                         }
                         LiveSyncEvent::GroupUpdate { .. } => self.ledger.group_updates += 1,
-                        LiveSyncEvent::Welcome { .. } => self.ledger.welcomes += 1,
+                        LiveSyncEvent::Welcome { gift_wrap_json } => {
+                            self.ledger.welcomes += 1;
+                            self.welcome_wraps.push(gift_wrap_json);
+                        }
                         LiveSyncEvent::GroupUnrecoverable { .. } => self.ledger.unrecoverable += 1,
                         // The bridge hands a clock verdict to the app as a status.
                         LiveSyncEvent::Status { .. } | LiveSyncEvent::ClockRejected { .. } => {
@@ -645,6 +656,38 @@ impl SimDevice {
     #[must_use]
     pub const fn ledger(&self) -> &DeviceLedger {
         &self.ledger
+    }
+
+    /// Takes every gift wrap the bus has carried as a Welcome since the last
+    /// take, oldest first.
+    pub fn take_welcome_wraps(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.welcome_wraps)
+    }
+
+    /// Gives the device a new inbox list — `own` the endpoints its engine
+    /// subscribes on, `stored` the canonical addresses an inviter learns — and
+    /// restarts its engine over the same circles, so the inbox REQs it opens
+    /// are new ones.
+    ///
+    /// # Errors
+    ///
+    /// [`RigError::SessionNotLive`] if no engine runs, [`RigError::StopTimedOut`]
+    /// if the old one does not stop, or as [`Self::start_engine`].
+    pub async fn reopen_inbox(
+        &mut self,
+        own: Vec<String>,
+        stored: Vec<String>,
+    ) -> Result<(), RigError> {
+        let core = self.take_engine().ok_or(RigError::SessionNotLive)?;
+        let stopped = core.stop().await;
+        drop(core);
+        if stopped == haven_core::relay::live_sync::StopOutcome::TimedOut {
+            return Err(RigError::StopTimedOut);
+        }
+        self.inbox_relays = own;
+        self.stored_inbox = stored;
+        let specs = std::mem::take(&mut self.specs);
+        self.start_engine(specs).await
     }
 
     /// Takes the engine out for a restart. The caller must DROP the returned

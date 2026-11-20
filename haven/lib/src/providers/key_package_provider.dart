@@ -20,6 +20,7 @@ import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/own_reachability_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/services/mls_session_handover.dart' show appIsResumed;
 import 'package:haven/src/services/relay_service.dart';
 
 /// Publishes the user's relay lists (kind 10002 NIP-65, then kind 10050 inbox)
@@ -66,7 +67,10 @@ final keyPackagePublisherProvider =
       // Relay lists first, in the order the Marmot transport binding gives
       // (`transports/nostr.md`): the kind 10002 says where the KeyPackage
       // goes, and the 10050 is up before anyone can send a Welcome.
-      final relayListResult = await maintenanceService.maintainRelayList();
+      // The gift-wrap read is asked only in front of the user (P4).
+      final relayListResult = await maintenanceService.maintainRelayList(
+        foreground: appIsResumed(),
+      );
       debugPrint(
         '[KeyPackage] relay-list tick: '
         'inbox=${relayListResult.inbox.action.name}, '

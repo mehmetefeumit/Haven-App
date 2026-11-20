@@ -97,9 +97,9 @@
 #      (DocumentsUI, the GET_CONTENT alias, the Play services picker; API
 #      33+), Haven showed its photo-failure SnackBar or stayed in front
 #      instead of opening uCrop, Haven's own "isn't responding" dialog held
-#      the picker's focus, uCrop never returned, the photo save was
-#      refused or did not show within APPLY_SECS, or was gone after a cold
-#      restart
+#      the picker's focus or held focus when a screen's window closed, uCrop
+#      never returned, the photo save was refused or did not show within
+#      APPLY_SECS, or was gone after a cold restart
 #   2  usage or harness: a missing input; a picker screen the selectors do
 #      not know (its resource ids are printed) or an activity the picker
 #      rules do not know (its component is printed); background sharing would not
@@ -111,7 +111,8 @@
 #      would not go offline, gave no answer while the gallery was seeded, or
 #      never attached its shared storage, or another process's "isn't
 #      responding" or "keeps stopping" dialog held the picker's or uCrop's
-#      focus — nothing about the app is known
+#      focus, or held focus when one of Haven's screens' windows closed —
+#      nothing about the app is known
 #   4  the upgrade source is unusable: the previous release itself failed
 #      before the candidate was installed (yank it in
 #      scripts/ci/launch_gate_yanked_releases.txt)
@@ -159,7 +160,9 @@ readonly CRASH_SUMMARY="${OUT_DIR}/crash-summary.log"
 readonly LOGSCAN_REPORT="${OUT_DIR%/*}/launch-gate-logscan.ndjson"
 
 # Bounds. The LAUNCH_GATE_* overrides exist for the self-test, whose stub device
-# answers instantly; the workflow sets none of them.
+# answers instantly; the workflow sets none of them. Every bound is read on the
+# clock `date +%s` answers, never SECONDS: the self-test's stub `date` counts
+# the stub device's calls, so no fixture's verdict depends on machine speed.
 readonly BOOT_SECS="${LAUNCH_GATE_BOOT_SECS:-60}"        # adb and boot_completed after the action's boot
 readonly OFFLINE_SECS="${LAUNCH_GATE_OFFLINE_SECS:-30}"  # airplane mode and no default network
 readonly LAUNCH_SECS="${LAUNCH_GATE_LAUNCH_SECS:-60}"    # `am start -W` to a drawn activity
@@ -331,14 +334,14 @@ alive() {
 clear_logs() { dev logcat -b all -c >/dev/null 2>&1 || true; }
 
 launch_app() {
-  local out rc=0 deadline
+  local out rc=0 start spent
   STATE='launch'
   out="$(timeout "${LAUNCH_SECS}" adb -s "${DEVICE}" shell am start -W -n "${ACTIVITY}" 2>&1 | tr -d '\r')" || rc=$?
   if ! grep -qx 'Status: ok' <<<"${out}"; then
     verdict '' "am start -W did not report 'Status: ok' within ${LAUNCH_SECS} s (rc ${rc})"
   fi
-  deadline=$(( SECONDS + PROCESS_SECS ))
-  while (( SECONDS < deadline )); do
+  start="$(date +%s)"
+  while spent=$(( $(date +%s) - start )); (( spent < PROCESS_SECS )); do
     if APP_PID="$(pid_now)"; then
       if [[ -z "${APP_PID}" ]]; then
         verdict 1 "am start -W reported ok but no ${PKG} process is running"
@@ -351,10 +354,10 @@ launch_app() {
 }
 
 stop_app() {
-  local deadline now
+  local start spent now
   dev shell am force-stop "${PKG}" >/dev/null 2>&1 || true
-  deadline=$(( SECONDS + PROCESS_SECS ))
-  while (( SECONDS < deadline )); do
+  start="$(date +%s)"
+  while spent=$(( $(date +%s) - start )); (( spent < PROCESS_SECS )); do
     if now="$(pid_now)" && [[ -z "${now}" ]]; then
       APP_PID=''
       return 0
@@ -448,7 +451,7 @@ declare -A TAPPED=()
 # window_open <secs> — a fresh launch's tap state, and its first window.
 window_open() {
   TAP_KEY=''; TAP_DIGEST=''; PREV_DIGEST=''; NAME_UNREAD=0; TAPPED=()
-  STALL=$(( SECONDS + $1 ))
+  STALL=$(( $(date +%s) + $1 ))
 }
 
 # act <name-file> <key>... — after an observation of our window: wait out a
@@ -472,9 +475,9 @@ act() {
         continue
       fi
       mv "${name_file}.read" "${name_file}"
-      STALL=$(( SECONDS + FINISH_SECS ))
+      STALL=$(( $(date +%s) + FINISH_SECS ))
     else
-      STALL=$(( SECONDS + SCREEN_SECS ))
+      STALL=$(( $(date +%s) + SCREEN_SECS ))
     fi
     tap "${key}"
     TAP_KEY="${key}"
@@ -486,9 +489,22 @@ act() {
 }
 
 # stalled <foreign-package> — the verdict when a window closes without progress.
+# <foreign-package> is only the last good dump's root, and the system's error
+# dialogs are rooted in package `android` whoever stopped responding, so input
+# focus decides whose window it is: Haven's own error dialog is Haven failing,
+# another process's is the device's, and Haven's own activity holding focus
+# means the foreign root was not what stayed in front.
 stalled() {
   if [[ -n "$1" ]]; then
-    verdict 1 "$1 held the foreground at state ${STATE} until the deadline"
+    pp_focused "${DEVICE}" "${PRIV}"
+    case "${PP_FOCUSED}" in
+      window:not-responding-ours|window:app-error-ours)
+        verdict 1 "input focus was $(_pp_focus_words "${PP_FOCUSED}") at state ${STATE} when its window closed: Haven failed" ;;
+      window:not-responding-*|window:app-error-*)
+        verdict 3 "input focus was $(_pp_focus_words "${PP_FOCUSED}") at state ${STATE} when its window closed: the device is struggling, which says nothing about Haven; re-run" ;;
+      "${PKG}/"*) ;;
+      *) verdict 1 "$1 held the foreground at state ${STATE} until the deadline (input focus $(_pp_focus_words "${PP_FOCUSED}"))" ;;
+    esac
   fi
   if [[ -n "${TAP_KEY}" ]]; then
     verdict 1 "did not progress: the screen did not change in the window after ${TAP_KEY} was tapped"
@@ -500,13 +516,14 @@ stalled() {
 
 # journey <arb> <name-file> — sets TERMINAL to SETUP_HELD or MAP.
 journey() {
-  local arb="$1" name_file="$2" deadline key foreign=''
-  deadline=$(( SECONDS + JOURNEY_SECS ))
+  local arb="$1" name_file="$2" start spent now key foreign=''
+  start="$(date +%s)"
   window_open "${SCREEN_SECS}"
   STATE='first screen'
-  while (( SECONDS < deadline )); do
+  while spent=$(( $(date +%s) - start )); (( spent < JOURNEY_SECS )); do
     alive
-    if (( SECONDS >= STALL )); then
+    now="$(date +%s)"
+    if (( now >= STALL )); then
       break
     fi
     observe "${arb}" "${name_file}.read" || continue
@@ -541,13 +558,14 @@ journey() {
 # disclosure covers (a user who declined it is asked again, modally) is
 # declined the way the journey declines it.
 expect_reopened() {
-  local arb="$1" name_file="$2" deadline key name_seen=0
+  local arb="$1" name_file="$2" start spent now key name_seen=0
   STATE="reopen (${TERMINAL})"
-  deadline=$(( SECONDS + REOPEN_SECS ))
+  start="$(date +%s)"
   window_open "${SCREEN_SECS}"
-  while (( SECONDS < deadline )); do
+  while spent=$(( $(date +%s) - start )); (( spent < REOPEN_SECS )); do
     alive
-    if (( SECONDS >= STALL )); then
+    now="$(date +%s)"
+    if (( now >= STALL )); then
       break
     fi
     observe "${arb}" "${name_file}.after" || continue
@@ -595,10 +613,10 @@ expect_reopened() {
 # check_no_crash then reads the crash and events buffers, so a crash or an ANR
 # moments after MapShell's or the setup screen's first frame is still caught.
 settle_watch() {
-  local arb="$1" deadline
+  local arb="$1" start spent
   STATE="${STATE}, settling"
-  deadline=$(( SECONDS + SETTLE_SECS ))
-  while (( SECONDS < deadline )); do
+  start="$(date +%s)"
+  while spent=$(( $(date +%s) - start )); (( spent < SETTLE_SECS )); do
     alive
     observe "${arb}" || true
   done
@@ -636,7 +654,7 @@ photo_summary() {
 # photo_round <arb> <onboarding|identity> — from a settled screen of ours on
 # which the tap target was just observed, to the photo shown, or a verdict.
 photo_round() {
-  local arb="$1" surface="$2" target shown index rc=0 deadline key
+  local arb="$1" surface="$2" target shown index rc=0 start spent key
   if [[ "${surface}" == onboarding ]]; then
     target="${KEY_ADD_PHOTO}"; shown="${KEY_CHANGE_PHOTO}"; index=0
   else
@@ -654,8 +672,8 @@ photo_round() {
     *) verdict 1 "photo round (${surface}): ${PP_MSG}" ;;
   esac
   STATE="photo round (${surface}), back from uCrop"
-  deadline=$(( SECONDS + APPLY_SECS ))
-  while (( SECONDS < deadline )); do
+  start="$(date +%s)"
+  while spent=$(( $(date +%s) - start )); (( spent < APPLY_SECS )); do
     alive
     observe "${arb}" || continue
     [[ "${OBS_FG}" == "${PKG}" ]] || continue
@@ -678,14 +696,15 @@ photo_round() {
 # onboarding_photo <arb> — from a fresh launch to the create screen, settled,
 # then the onboarding photo round; the journey takes it from there.
 onboarding_photo() {
-  local arb="$1" deadline key foreign=''
+  local arb="$1" start spent now key foreign=''
   OBS_KEYSET="${ALL_KEYS},${PHOTO_KEYS}"
-  deadline=$(( SECONDS + CREATE_SECS ))
+  start="$(date +%s)"
   window_open "${SCREEN_SECS}"
   STATE='first screen (before the onboarding photo)'
-  while (( SECONDS < deadline )); do
+  while spent=$(( $(date +%s) - start )); (( spent < CREATE_SECS )); do
     alive
-    if (( SECONDS >= STALL )); then
+    now="$(date +%s)"
+    if (( now >= STALL )); then
       break
     fi
     observe "${arb}" || continue
@@ -725,15 +744,16 @@ grant_read_back() {
 # enable_background_sharing <arb> — Settings > Location > the toggle > Agree >
 # back, as a user turns it on; done when Settings says it is on.
 enable_background_sharing() {
-  local arb="$1" deadline agreed=0 snack=0 back_digest=''
+  local arb="$1" start spent now agreed=0 snack=0 back_digest=''
   local -a keys
   OBS_KEYSET="${ALL_KEYS},${PHOTO_KEYS},${PHOTO_OPTIONAL_KEYS}"
   STATE='enabling background sharing (Settings)'
-  deadline=$(( SECONDS + SETTINGS_SECS ))
+  start="$(date +%s)"
   window_open "${SCREEN_SECS}"
-  while (( SECONDS < deadline )); do
+  while spent=$(( $(date +%s) - start )); (( spent < SETTINGS_SECS )); do
     alive
-    if (( SECONDS >= STALL )); then
+    now="$(date +%s)"
+    if (( now >= STALL )); then
       break
     fi
     observe "${arb}" || continue
@@ -751,7 +771,7 @@ enable_background_sharing() {
       back_digest="${OBS_DIGEST}"
       TAP_KEY=BACK
       TAP_DIGEST="${OBS_DIGEST}"
-      STALL=$(( SECONDS + SCREEN_SECS ))
+      STALL=$(( $(date +%s) + SCREEN_SECS ))
       continue
     fi
     keys=("${KEY_AGREE}")
@@ -769,13 +789,14 @@ enable_background_sharing() {
 
 # identity_page <arb> <purpose> — from Settings to the Identity page, settled.
 identity_page() {
-  local arb="$1" purpose="$2" deadline
+  local arb="$1" purpose="$2" start spent now
   STATE="to Settings > Identity (${purpose})"
-  deadline=$(( SECONDS + IDENTITY_SECS ))
+  start="$(date +%s)"
   window_open "${SCREEN_SECS}"
-  while (( SECONDS < deadline )); do
+  while spent=$(( $(date +%s) - start )); (( spent < IDENTITY_SECS )); do
     alive
-    if (( SECONDS >= STALL )); then
+    now="$(date +%s)"
+    if (( now >= STALL )); then
       break
     fi
     observe "${arb}" || continue
@@ -795,11 +816,11 @@ identity_page() {
 # expect_photo_kept <arb> — after a cold restart reopened the Identity page:
 # the photo saved before it is still shown.
 expect_photo_kept() {
-  local arb="$1" deadline
+  local arb="$1" start spent
   OBS_KEYSET="${ALL_KEYS},${PHOTO_KEYS}"
   STATE='photo after a cold restart'
-  deadline=$(( SECONDS + SCREEN_SECS ))
-  while (( SECONDS < deadline )); do
+  start="$(date +%s)"
+  while spent=$(( $(date +%s) - start )); (( spent < SCREEN_SECS )); do
     alive
     observe "${arb}" || continue
     [[ "${OBS_FG}" == "${PKG}" ]] || continue
@@ -918,12 +939,12 @@ leg_upgrade() {
 # Preconditions: a booted en-US device, offline, with error dialogs hidden.
 # ---------------------------------------------------------------------------
 preconditions() {
-  local boot_deadline offline_deadline boot locale air net
+  local start spent boot locale air net
   if ! timeout "${BOOT_SECS}" adb -s "${DEVICE}" wait-for-device; then
     verdict 3 "${DEVICE} did not come online within ${BOOT_SECS} s"
   fi
-  boot_deadline=$(( SECONDS + BOOT_SECS ))
-  while (( SECONDS < boot_deadline )); do
+  start="$(date +%s)"
+  while spent=$(( $(date +%s) - start )); (( spent < BOOT_SECS )); do
     boot="$(timeout "${ADB_SECS}" adb -s "${DEVICE}" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)"
     [[ "${boot}" == 1 ]] && break
   done
@@ -941,8 +962,8 @@ preconditions() {
   # "Active default network: none" is ConnectivityService.dump()'s line when
   # no network is the default (AOSP android-14); read from source, so a guest
   # that prints anything else is refused here, by name, rather than trusted.
-  offline_deadline=$(( SECONDS + OFFLINE_SECS ))
-  while (( SECONDS < offline_deadline )); do
+  start="$(date +%s)"
+  while spent=$(( $(date +%s) - start )); (( spent < OFFLINE_SECS )); do
     air="$(timeout "${ADB_SECS}" adb -s "${DEVICE}" shell settings get global airplane_mode_on 2>/dev/null | tr -d '\r' || true)"
     net="$(timeout "${ADB_SECS}" adb -s "${DEVICE}" shell "dumpsys connectivity | grep -m1 'Active default network:'" 2>/dev/null | tr -d '\r' || true)"
     if [[ "${air}" == 1 && "${net}" =~ Active\ default\ network:\ none$ ]]; then
@@ -1037,11 +1058,12 @@ finish() {
 # XML, so the real ui-dump.py reads them. Each APK is a text file naming the
 # flow it plays and its versionCode. Scenarios are environment knobs on the
 # stub. Logs go through the real logscan-gate.sh and scan-logs.sh with the
-# shared fake scanner. Deadlines are shrunk through the LAUNCH_GATE_*_SECS
-# overrides only for scenarios that must run one out; every other verdict
-# comes from what the stub shows, not from time.
+# shared fake scanner. Time is the stub's too: a stub `date` answers `+%s`
+# with a clock each adb call advances by STUB_TICK (default 1), so every
+# deadline is a count of device calls and every verdict comes from what the
+# stub shows, never from how fast this machine runs it.
 # ---------------------------------------------------------------------------
-readonly SELF_TEST_FIXTURES=112
+readonly SELF_TEST_FIXTURES=124
 readonly ST_NAME='Quiet Wanderer Fixture'
 # What a picker thumbnail's description says in the stub: a date, which no
 # transcript or summary may carry.
@@ -1053,6 +1075,7 @@ _st_write_stub() { # <dir>
 # The launch gate's stub device. State lives in files under ${STUB}.
 S="${STUB}"
 printf '%s\n' "$*" >> "${S}/calls"
+echo $(( $(cat "${S}/clock") + ${STUB_TICK:-1} )) > "${S}/clock"
 [[ "${1:-}" == -s ]] && shift 2
 if [[ -f "${S}/offline" ]]; then echo "error: device offline" >&2; exit 1; fi
 PKG=com.oblivioustech.haven
@@ -1110,11 +1133,15 @@ focus_of() { # <advance: 1 on a dumpsys read>
   component_of "${scr}"
 }
 # STUB_FOCUS_WINDOW=<title>: a window that is no activity's (an error dialog)
-# holds the focus the picker or uCrop does not.
+# holds the focus the picker or uCrop does not. STUB_FOREIGN_FOCUS=<name>: the
+# focused window's name while STUB_FOREIGN roots the dump (unset: Haven's own
+# activity keeps the focus, the foreign root notwithstanding).
 focus_dump() {
   local f; f="$(focus_of 1)"
   echo 'Input Dispatcher State:'
-  if [[ "${f}" == none && -n "${STUB_FOCUS_WINDOW:-}" ]]; then printf "  FocusedWindows:\n    displayId=0, name='5a1 %s'\n" "${STUB_FOCUS_WINDOW}"
+  if [[ -n "${STUB_FOREIGN:-}" && -n "${STUB_FOREIGN_FOCUS:-}" && "$(get screen)" == "${STUB_FOREIGN_ON:-create}" ]]; then
+    printf "  FocusedWindows:\n    displayId=0, name='5a1 %s'\n" "${STUB_FOREIGN_FOCUS}"
+  elif [[ "${f}" == none && -n "${STUB_FOCUS_WINDOW:-}" ]]; then printf "  FocusedWindows:\n    displayId=0, name='5a1 %s'\n" "${STUB_FOCUS_WINDOW}"
   elif [[ "${f}" == none ]]; then echo '  FocusedWindows: <none>'
   else printf "  FocusedWindows:\n    displayId=0, name='4f2e1c0 %s'\n" "${f}"; fi
 }
@@ -1200,8 +1227,8 @@ screen_xml() { # <screen> [<outgoing screen still in the tree>]
   local scr="$1" body
   body="${2:+$(body_of "$2")}$(body_of "${scr}")"
   printf "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><hierarchy rotation=\"0\">"
-  if [[ -n "${STUB_FOREIGN:-}" && "${scr}" == create ]]; then
-    node android.widget.FrameLayout '' '' '[0,0][1080,2400]' com.android.permissioncontroller
+  if [[ -n "${STUB_FOREIGN:-}" && "${scr}" == "${STUB_FOREIGN_ON:-create}" ]]; then
+    node android.widget.FrameLayout '' '' '[0,0][1080,2400]' "${STUB_FOREIGN}"
   elif [[ "${scr}" == picker ]]; then
     printf '<node index="0" text="" resource-id="" class="android.widget.FrameLayout" package="%s" content-desc="" bounds="[0,0][1080,2400]">%s</node>' "$(picker_pkg)" "${body}"
   else
@@ -1457,6 +1484,13 @@ esac
 exit 0
 STUB
   chmod +x "$1/adb"
+  cat > "$1/date" <<'STUB'
+#!/usr/bin/env bash
+# The stub device's clock: the runner reads time only as `date +%s`.
+[[ "$*" == +%s ]] || { echo "stub date: unexpected arguments: $*" >&2; exit 9; }
+cat "${STUB}/clock"
+STUB
+  chmod +x "$1/date"
 }
 
 self_test() {
@@ -1502,15 +1536,16 @@ print(json.dumps({k[0]: "Get Started", k[1]: "Create My Identity", k[2]: "Not no
     rm -rf "${tmp}/stub" "${tmp}/cand" "${tmp}/prev" "${tmp}/out" "${tmp}/priv" "${tmp}/seal.argv"
     mkdir -p "${tmp}/stub/data" "${tmp}/priv"
     : > "${tmp}/stub/crash.log"; : > "${tmp}/stub/events.log"; echo 4000 > "${tmp}/stub/pidseq"
+    echo 0 > "${tmp}/stub/clock"
     _mkdir "${tmp}/cand" candidate 4022 "${cf}" "${ARB_CAND:-${arb_now}}"
     _mkdir "${tmp}/prev" v0.1.13 4020 "${pf}" "${ARB_PREV:-${arb_old}}"
     rc=0
     out="$(env PATH="${tmp}/bin:${PATH}" STUB="${tmp}/stub" STUB_NAME="${ST_NAME}" TMPDIR="${tmp}/priv" \
       LAUNCH_GATE_OUT="${tmp}/out/summary" \
       HAVEN_LOGSCAN=true HAVEN_LOGSCAN_BIN="${LOGSCAN_FAKE_BIN}" FAKE_SEAL_ARGV="${tmp}/seal.argv" \
-      GITHUB_RUN_ID="launch-gate-self-test-$$-${ran}" GITHUB_RUN_ATTEMPT=1 LAUNCH_GATE_SCREEN_SECS=3 LAUNCH_GATE_FINISH_SECS=3 \
-      LAUNCH_GATE_OFFLINE_SECS=2 LAUNCH_GATE_PROCESS_SECS=2 LAUNCH_GATE_SETTLE_SECS=1 LAUNCH_GATE_APPLY_SECS=3 \
-      PHOTO_STORAGE_SECS=2 PHOTO_MEDIA_SECS=2 PHOTO_PICKER_SECS=3 PHOTO_UCROP_SECS=3 PHOTO_RETURN_SECS=3 "$@" \
+      GITHUB_RUN_ID="launch-gate-self-test-$$-${ran}" GITHUB_RUN_ATTEMPT=1 LAUNCH_GATE_SCREEN_SECS=20 LAUNCH_GATE_FINISH_SECS=30 \
+      LAUNCH_GATE_OFFLINE_SECS=4 LAUNCH_GATE_PROCESS_SECS=4 LAUNCH_GATE_SETTLE_SECS=6 LAUNCH_GATE_APPLY_SECS=24 \
+      PHOTO_STORAGE_SECS=10 PHOTO_MEDIA_SECS=12 PHOTO_PICKER_SECS=40 PHOTO_UCROP_SECS=36 PHOTO_RETURN_SECS=32 "$@" \
       bash "${BASH_SOURCE[0]}" "${tmp}/cand" "${tmp}/prev" 2>&1)" || rc=$?
     if (( rc == want_rc )); then
       printf '  PASS %s\n' "${label}"
@@ -1554,6 +1589,11 @@ print(json.dumps({k[0]: "Get Started", k[1]: "Create My Identity", k[2]: "Not no
     if grep -qF -- "$2" <<<"${out}"; then printf '  PASS %s\n' "$1"; else
       printf '  FAIL %s: transcript lacks "%s"\n%s\n' "$1" "$2" "${out}" >&2; fails=1; fi
   }
+  _lacks() { # <label> <fixed-string> — the last transcript never says it
+    ran=$(( ran + 1 ))
+    if ! grep -qF -- "$2" <<<"${out}"; then printf '  PASS %s\n' "$1"; else
+      printf '  FAIL %s: transcript says "%s"\n%s\n' "$1" "$2" "${out}" >&2; fails=1; fi
+  }
 
   echo "run-launch-gate-android.sh --self-test"
   # (1) The current product: fresh SETUP_HELD with the name restored; the
@@ -1578,20 +1618,20 @@ print(json.dumps({k[0]: "Get Started", k[1]: "Create My Identity", k[2]: "Not no
      && grep -qF -- "-s emulator-5554 push " "${tmp}/stub/calls"; then
     echo "  PASS the fixtures are pushed and the battery exemption is asked for before the MapShell round"
   else echo "  FAIL the fixtures or the battery exemption never reached the device" >&2; fails=1; fi
-  # (4) Each tap's outgoing screen stays in the tree for two dumps (alone,
+  # (6) Each tap's outgoing screen stays in the tree for two dumps (alone,
   #     then beside the new one): a label still visible mid-transition is
   #     neither "did not progress" nor tapped again.
   _scenario "a tapped label still on screen during a transition is not a stall" 0 setup-held map STUB_TRANSITION=1
   _taps "…and is never tapped twice: still 21 taps"
-  # (6) The Identity page whose card is still loading for three dumps: its
+  # (8) The Identity page whose card is still loading for three dumps: its
   #     title reads like the Settings entry, and is never tapped.
   _scenario "an Identity page still loading is waited on, its title never tapped" 0 setup-held map STUB_IDENTITY_LOADING=3
   _taps "…still 21 taps"
-  # (8) The scanner is told the generated name, so it proves it absent.
+  # (10) The scanner is told the generated name, so it proves it absent.
   ran=$(( ran + 1 ))
   if grep -qxF -- "display_name=${ST_NAME}" "${tmp}/seal.argv"; then echo "  PASS the generated name is declared to the log-privacy gate"; else
     echo "  FAIL the generated name was not declared to the seal" >&2; fails=1; fi
-  # (9) The v0.1.14 crash: product, the crash summary names the missing
+  # (11) The v0.1.14 crash: product, the crash summary names the missing
   #     constructor, the native frame is reduced and the install path gone.
   _scenario "a candidate that crashes at start is a product failure" 1 crash-at-start map
   _has "…and the ::error:: line names the missing constructor" "WorkDatabase_Impl.<init>"
@@ -1602,7 +1642,7 @@ print(json.dumps({k[0]: "Get Started", k[1]: "Create My Identity", k[2]: "Not no
   ran=$(( ran + 1 ))
   if grep -Eq 'r8-map-id-[0-9a-f]' <<<"${out}"; then echo "  FAIL R8's map id reached the transcript" >&2; fails=1
   else echo "  PASS R8's map id is removed from Java frames"; fi
-  # (14) The crash summary is echoed only after the log-privacy gate.
+  # (16) The crash summary is echoed only after the log-privacy gate.
   ran=$(( ran + 1 ))
   local gate_at echo_at
   gate_at="$(grep -n '^scan-logs: ' <<<"${out}" | head -n 1 | cut -d: -f1)"
@@ -1612,25 +1652,25 @@ print(json.dumps({k[0]: "Get Started", k[1]: "Create My Identity", k[2]: "Not no
   else
     echo "  FAIL the crash summary is echoed only after the log-privacy gate (gate line ${gate_at:-none}, echo line ${echo_at:-none})" >&2; fails=1
   fi
-  # (15) A gate that finds a leak: nothing is echoed and the run is red.
+  # (17) A gate that finds a leak: nothing is echoed and the run is red.
   _scenario "a summary the gate refuses is never echoed" 1 crash-at-start map FAKE_SCAN_RC=1
   ran=$(( ran + 1 ))
   if grep -q -- '--- crash summary ---\|^launch-gate-android verdict' <<<"${out}"; then
     echo "  FAIL a refused summary was echoed" >&2; fails=1
   else echo "  PASS …and neither summary reaches the transcript"; fi
-  # (17) The previous release crashing is the upgrade source, not the candidate.
+  # (19) The previous release crashing is the upgrade source, not the candidate.
   _scenario "a previous release that crashes is rc 4 (upgrade source unusable)" 4 setup-held crash-at-start
-  # (18) A process replaced mid-journey.
+  # (20) A process replaced mid-journey.
   _scenario "a pid change mid-journey is a product failure" 1 setup-held map STUB_PID_FLIP=1
-  # (19) A pid read adb cannot answer is polled past, never read as a death.
+  # (21) A pid read adb cannot answer is polled past, never read as a death.
   _scenario "an unanswered pid read is not a death" 0 setup-held map STUB_PIDOF_FLAKY=1
-  # (20) An ANR in the events buffer.
+  # (22) An ANR in the events buffer.
   _scenario "an am_anr for the package is a product failure" 1 setup-held map STUB_ANR=1
   _has "…reported as a crash" "the app crashed"
-  # (22) Onboarding forgotten across the restart.
+  # (24) Onboarding forgotten across the restart.
   _scenario "the intro after a cold restart is a product failure" 1 setup-held map STUB_FORGET_INTRO=1
   _has "…named as lost onboarding state" "showed the intro again"
-  # (24) The saved name not restored.
+  # (26) The saved name not restored.
   _scenario "a display name that is not restored is a product failure" 1 setup-held map STUB_NAME_LOST=1
   _has "…named as such" "did not show the display name the first launch saved"
   # An upgrade that keeps the onboarding flag and loses the identity: the map
@@ -1643,22 +1683,44 @@ print(json.dumps({k[0]: "Get Started", k[1]: "Create My Identity", k[2]: "Not no
   # A crash the upgrade's own install provokes is not cleared away.
   _scenario "a crash during the in-place install is a product failure" 1 setup-held map STUB_CRASH_ON_REPLACE=1
   _has "…blamed on the candidate, not the upgrade source" "verdict: product (rc 1)"
-  # (32) The upgrade not taking.
+  # (34) The upgrade not taking.
   _scenario "a versionCode unchanged by the upgrade is a product failure" 1 setup-held map STUB_VC_UNCHANGED=1
-  # (33) The device going away.
+  # (35) The device going away.
   _scenario "a device that goes offline is infrastructure" 3 setup-held map STUB_OFFLINE_AT_LAUNCH=1
-  # (34) Another app holding the screen.
-  _scenario "a foreign window until the deadline is a product failure naming it" 1 setup-held map STUB_FOREIGN=1
-  _has "…naming the package" "com.android.permissioncontroller held the foreground"
-  # (36) A debug log plant in a release build.
+  # (36) Another app holding the screen.
+  _scenario "a foreign window until the deadline is a product failure naming it" 1 setup-held map \
+    STUB_FOREIGN=com.android.permissioncontroller \
+    STUB_FOREIGN_FOCUS=com.android.permissioncontroller/com.android.permissioncontroller.permission.ui.GrantPermissionsActivity
+  _has "…naming the package and what held input focus" "com.android.permissioncontroller held the foreground at state after onboardingWelcomeCta until the deadline (input focus on com.android.permissioncontroller/"
+  # An error dialog is rooted in package `android` whoever stopped responding
+  # (CI run 44698826899, API 35: `android` over the first screen for the whole
+  # window, Haven alive, no crash or ANR of Haven's): input focus says whose.
+  _scenario "another process's \"isn't responding\" dialog over Haven's first screen is infrastructure" 3 setup-held map \
+    STUB_FOREIGN=android STUB_FOREIGN_ON=intro "STUB_FOREIGN_FOCUS=Application Not Responding: com.android.systemui"
+  _has "…named as such" "input focus was on System UI's \"isn't responding\" dialog at state first screen (before the onboarding photo) when its window closed"
+  _scenario "Haven's own \"isn't responding\" dialog over its first screen is a product failure" 1 setup-held map \
+    STUB_FOREIGN=android STUB_FOREIGN_ON=intro "STUB_FOREIGN_FOCUS=Application Not Responding: com.oblivioustech.haven"
+  _has "…named as such" "input focus was on Haven's \"isn't responding\" dialog at state first screen (before the onboarding photo) when its window closed: Haven failed"
+  _scenario "a system window that is no error dialog over Haven's first screen is a product failure naming it" 1 setup-held map \
+    STUB_FOREIGN=android STUB_FOREIGN_ON=intro STUB_FOREIGN_FOCUS=android
+  _has "…with the focus in fixed words" "android held the foreground at state first screen (before the onboarding photo) until the deadline (input focus on a window that is no activity's)"
+  _scenario "a foreign root while Haven's own activity holds input focus is Haven's own stall" 1 setup-held map \
+    STUB_FOREIGN=android STUB_FOREIGN_ON=intro
+  _has "…named as Haven's screen not settling" "the create screen did not settle with photoHeaderAddPhotoSemantics on it"
+  _lacks "…never as the foreign root holding the foreground" "held the foreground"
+  # (38) A debug log plant in a release build.
   _scenario "a debug log plant is a product failure" 1 setup-held map STUB_PLANTS=2
-  # (37) A tap that does not take effect.
+  # (39) A tap that does not take effect.
   _scenario "a CTA still on screen after its tap is 'did not progress'" 1 setup-held map STUB_CTA_STUCK=1
   _has "…the screen unchanged for the whole window after the tap" "did not progress: the screen did not change in the window after onboardingWelcomeCta was tapped"
-  # (39) The device not in the state the gate needs.
+  # (41) The device not in the state the gate needs.
   _scenario "a device that is not en-US is infrastructure" 3 setup-held map STUB_LOCALE=fr-FR
   _scenario "a device that will not go offline is infrastructure" 3 setup-held map STUB_AIRPLANE_STUCK=1
-  # (41) A name field the gate cannot read is never tapped past.
+  # (43) Deadlines run on the injected clock, not this machine's: a device
+  #      whose every call outlasts a screen's window stalls at the first one.
+  _scenario "a device slower than a screen's window is a stall at the first screen" 1 setup-held map STUB_TICK=100
+  _has "…on the stub's clock, before any observation" "state first screen (before the onboarding photo); the create screen did not settle with photoHeaderAddPhotoSemantics on it, so the onboarding photo round could not start; last observation: no observation yet"
+  # (45) A name field the gate cannot read is never tapped past.
   _scenario "a create screen without a readable name field is a product failure" 1 setup-held map STUB_EDIT_CLASS=android.view.View
   _has "…named as such" "never showed exactly one non-empty name field"
   # --- The photo rounds. ---
@@ -1692,7 +1754,7 @@ print(json.dumps({k[0]: "Get Started", k[1]: "Create My Identity", k[2]: "Not no
   _scenario "DocumentsUI below API 33 is the picker that API has, and passes" 0 setup-held map STUB_PICKER_COMPONENT=documentsui STUB_API=32
   _has "…by its own selector" "picker=documentsui-rid"
   _scenario "a photo that does not show within APPLY_SECS is a product failure" 1 setup-held map STUB_APPLY_DUMPS=999
-  _has "…named with its bound" "the photo did not show within 3 s of Haven's return from uCrop"
+  _has "…named with its bound" "the photo did not show within 24 s of Haven's return from uCrop"
   _scenario "a photo gone after the cold restart is a product failure" 1 setup-held map STUB_PHOTO_LOST=1
   _has "…named as such" "the photo saved at MapShell was gone after a cold restart"
   _scenario "uCrop that never hands Haven back is a product failure" 1 setup-held map STUB_UCROP_NEVER=1
@@ -1710,17 +1772,17 @@ print(json.dumps({k[0]: "Get Started", k[1]: "Create My Identity", k[2]: "Not no
   _scenario "Haven resumed between the picker and uCrop is the trip going on, not a failure" 0 setup-held map STUB_PICK_BOUNCE=3
   _has "…and both rounds apply" "photo: onboarding=ok map=ok picker=photopicker-rid ucrop=rid"
   _scenario "a pick after which Haven stays in front without uCrop is a product failure at the bound" 1 setup-held map STUB_PICK_SILENT=1
-  _has "…named as such" "photo round (onboarding): the crop editor did not open within 3 s of the pick: Haven came back from the picker and stayed in front"
+  _has "…named as such" "photo round (onboarding): the crop editor did not open within 36 s of the pick: Haven came back from the picker and stayed in front"
   _has "…with what the activity manager recorded: the picker came and went, uCrop never started" "events=[+PhotoPickerActivity -PhotoPickerActivity(app-request)]"
   _scenario "uCrop closing itself under Haven's photo-failure SnackBar is a product failure, named at once" 1 setup-held map STUB_UCROP_ERROR=1
   _has "…named by the SnackBar Haven showed" "Haven showed its photo-failure message (avatarPickerUpdateError) instead of the crop editor"
   _has "…and the trace shows uCrop opened and closed between two reads" "events=[+PhotoPickerActivity -PhotoPickerActivity(app-request) +UCropActivity -UCropActivity(app-request)]"
   _scenario "Haven's \"isn't responding\" dialog over the picker is a product failure" 1 setup-held map STUB_NEVER_FOCUSED=picker "STUB_FOCUS_WINDOW=Application Not Responding: com.oblivioustech.haven"
-  _has "…named as such" "input focus was on Haven's \"isn't responding\" dialog over the picker for 3 s: Haven failed while the picker was open"
+  _has "…named as such" "input focus was on Haven's \"isn't responding\" dialog over the picker for 40 s: Haven failed while the picker was open"
   _scenario "System UI's \"isn't responding\" dialog over the picker is infrastructure" 3 setup-held map STUB_NEVER_FOCUSED=picker "STUB_FOCUS_WINDOW=Application Not Responding: com.android.systemui"
-  _has "…named as such" "input focus was on System UI's \"isn't responding\" dialog over the picker for 3 s"
+  _has "…named as such" "input focus was on System UI's \"isn't responding\" dialog over the picker for 40 s"
   _scenario "a picker whose window never takes focus gets no input and is a harness failure" 2 setup-held map STUB_NEVER_FOCUSED=picker
-  _has "…named as such" "the system picker was resumed but its window never took input focus within 3 s (focus on no window), so no input was sent to it"
+  _has "…named as such" "the system picker was resumed but its window never took input focus within 40 s (focus on no window), so no input was sent to it"
   _scenario "uCrop, Haven's own, never taking focus is a product failure" 1 setup-held map STUB_NEVER_FOCUSED=ucrop
   _has "…named as such" "uCrop, Haven's own activity, was resumed but its window never took input focus"
   ARB_PREV="${arb_now}" _scenario "a run in which no leg reached MapShell is rc 2" 2 setup-held setup-held
@@ -1732,11 +1794,11 @@ print(json.dumps({k[0]: "Get Started", k[1]: "Create My Identity", k[2]: "Not no
     STUB_API=35 STUB_STORAGE_LATE=3 STUB_PENDING_READS=2
   _has "…and the gallery is seeded on API 35" "gallery seeded (API 35)"
   _scenario "shared storage that never attaches is infrastructure" 3 setup-held map STUB_STORAGE_NEVER=1
-  _has "…named as such" "the media store had no shared storage attached within 2 s"
+  _has "…named as such" "the media store had no shared storage attached within 10 s"
   _scenario "a media-store query adb never answers is infrastructure" 3 setup-held map STUB_MEDIA_SILENT=1
-  _has "…named as such" "adb gave no answer to the media-store query within 2 s"
+  _has "…named as such" "adb gave no answer to the media-store query within 10 s"
   _scenario "a media-store query the device refuses is a harness failure" 2 setup-held map STUB_MEDIA_REFUSED=1
-  _has "…named as such" "the media store refused the gallery query for 2 s though adb answered"
+  _has "…named as such" "the media store refused the gallery query for 10 s though adb answered"
   _scenario "a push the device refuses, its storage attached, is a harness failure" 2 setup-held map STUB_PUSH_REFUSED=1
   _has "…named as such" "the device refused a gallery fixture's push into /sdcard/Pictures"
   _scenario "a media store that answers but never lists the fixtures is a harness failure" 2 setup-held map STUB_MEDIA_NEVER=1
@@ -1751,10 +1813,19 @@ print(json.dumps({k[0]: "Get Started", k[1]: "Create My Identity", k[2]: "Not no
     _scenario "a candidate ARB without a photo label is a usage error" 2 setup-held map
   _scenario "the create screen reporting a photo it could not save is a product failure" 1 setup-held map STUB_ONB_NOT_SAVED=1
   _has "…naming the key" "the app showed onboardingPhotoNotSaved"
-  # (43) An error state names its key; a required key missing is usage.
+  # (113) An error state names its key; a required key missing is usage.
   _scenario "a display-name error on screen is a product failure naming it" 1 name-error map
   ARB_CAND="$(python3 -I -c 'import json,sys; d=json.loads(sys.argv[1]); d.pop("commonSettings"); print(json.dumps(d))' "${arb_now}")" \
     _scenario "an ARB without a required key is a usage error" 2 setup-held map
+
+  # Every window must read the clock the stub `date` counts, the photo trip's
+  # in photo-picker-lib.sh included; a single loop put back on bash's SECONDS
+  # races the wall clock again, and the slow-device fixture above only covers
+  # the first screen's window.
+  ran=$(( ran + 1 ))
+  if grep -nE '^[^#]*(\$\{?SECONDS|\(\(\s*SECONDS|SECONDS\s*[-+*/<>=])' "${BASH_SOURCE[0]}" "${SCRIPT_DIR}/photo-picker-lib.sh" >&2; then
+    echo "  FAIL a window reads bash's SECONDS instead of date +%s" >&2; fails=1
+  else echo "  PASS every window reads date +%s, never SECONDS"; fi
 
   if (( ran != SELF_TEST_FIXTURES )); then
     echo "SELF-TEST FAIL: ran ${ran} fixture(s), expected ${SELF_TEST_FIXTURES}" >&2

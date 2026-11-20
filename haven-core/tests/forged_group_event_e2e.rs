@@ -434,7 +434,6 @@ async fn live_locations(
     relay.answer(asks_for_kind(Kind::Custom(445)), answer);
     let engine = LiveSyncCore::new_local(
         Arc::clone(&fx.alice),
-        fx.alice_keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     let mut bus = engine.bus().subscribe();
@@ -547,7 +546,6 @@ async fn the_live_inbox_plane_delivers_only_the_genuine_gift_wrap() {
 
     let engine = LiveSyncCore::new_local(
         Arc::clone(&manager),
-        keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     let mut bus = engine.bus().subscribe();

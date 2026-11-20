@@ -645,25 +645,47 @@ class RelayRejection {
   final String reason;
 }
 
+/// How one relay answered a read of the user's own inbox (kind 1059).
+enum InboxRead {
+  /// It ended the read with `EOSE`: what it holds for this account, it sent.
+  served,
+
+  /// It refused the read: an invitation stored there is not read from it.
+  refused,
+
+  /// It was reached but did not finish its answer.
+  incomplete,
+
+  /// It could not be reached.
+  unreached,
+}
+
+/// The [InboxRead] an FFI verdict names.
+InboxRead inboxReadOf(InboxReadFfi read) => switch (read) {
+  InboxReadFfi.served => InboxRead.served,
+  InboxReadFfi.refused => InboxRead.refused,
+  InboxReadFfi.incomplete => InboxRead.incomplete,
+  InboxReadFfi.unreached => InboxRead.unreached,
+};
+
 /// Per-relay result of a gift-wrap fetch.
 ///
-/// Distinguishes a relay that answered ([responded] is `true`, even with
-/// zero [events]) from one that could not be reached ([responded] is
-/// `false`). The WebSocket handshake is the "answered" signal.
+/// Only [InboxRead.served] says the relay sent everything it holds for this
+/// account; [events] are the wraps that arrived, whatever [read] says.
 @immutable
 class RelayGiftWrapFetch {
   /// Creates a [RelayGiftWrapFetch].
   const RelayGiftWrapFetch({
     required this.relayUrl,
-    required this.responded,
+    required this.read,
     required this.events,
   });
 
   /// The relay URL that was queried.
   final String relayUrl;
 
-  /// Whether the relay answered (completed the WebSocket handshake).
-  final bool responded;
+  /// How the relay answered the read.
+  final InboxRead read;
 
   /// Gift-wrap event JSON strings fetched from this relay.
   final List<String> events;
@@ -721,35 +743,35 @@ abstract class RelayService {
     required List<String> relays,
   });
 
-  /// Fetches gift-wrapped events (kind 1059) for a recipient.
+  /// Fetches the gift-wrapped events (kind 1059) addressed to this account.
   ///
-  /// Queries relays for NIP-59 gift wrap events addressed to the given
-  /// public key. Use [since] to restrict results to events after a timestamp.
+  /// Queries relays for NIP-59 gift wrap events addressed to the identity of
+  /// the circle manager, answering a relay's NIP-42 challenge as that
+  /// identity, so a relay serving gift wraps only to their recipient is read
+  /// too. Use [since] to restrict results to events after a timestamp.
   ///
   /// Returns a list of gift-wrap event JSON strings.
   ///
   /// Throws [RelayServiceException] if fetching fails.
   Future<List<String>> fetchGiftWraps({
-    required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
   });
 
-  /// Fetches gift wraps from each relay independently, reporting which
-  /// relays answered.
+  /// Fetches gift wraps from each relay independently, reporting how each
+  /// relay answered the read.
   ///
   /// Unlike [fetchGiftWraps] (one merged list with no per-relay
   /// attribution), this queries each relay on its own and returns a
-  /// per-relay outcome, so callers can show an accurate answered/unanswered
-  /// tally. A relay that answers with zero events is reported with
-  /// [RelayGiftWrapFetch.responded] `== true` and an empty event list —
-  /// distinct from an unreachable relay (`responded == false`).
+  /// per-relay outcome, so callers can show an accurate tally. A relay that
+  /// served the read with zero events is [InboxRead.served] with an empty
+  /// event list — distinct from one that refused it (even after this account
+  /// answered its NIP-42 challenge), did not finish or could not be reached.
   ///
   /// Throws [RelayServiceException] only if the call fails entirely (e.g.
-  /// URL validation). Per-relay failures are reported as `responded ==
-  /// false`, never thrown.
+  /// URL validation). Per-relay failures are reported in
+  /// [RelayGiftWrapFetch.read], never thrown.
   Future<List<RelayGiftWrapFetch>> fetchGiftWrapsPerRelay({
-    required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
   });
@@ -837,11 +859,19 @@ abstract class RelayService {
   /// 10050. `circle` is the circle-manager FFI handle; the secret bytes are
   /// consumed by the FFI and zeroized Rust-side.
   ///
+  /// [foreground] is the caller's claim that the app's lifecycle reads
+  /// `resumed`: pass `appIsResumed()` and nothing looser, and `false` from a
+  /// background burst. Only with it does the pass also ask each own inbox
+  /// relay for this account's gift wraps, on identity connections of its
+  /// own, for the Relays page's refusal warning; without it the board keeps
+  /// the last answers.
+  ///
   /// Best-effort — returns [RelayListMaintenanceResult.failed] on failure
   /// rather than throwing.
   Future<RelayListMaintenanceResult> maintainRelayList({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,
+    required bool foreground,
   });
 
   /// Runs an M8 subscription-health maintenance tick (engine-coupled).

@@ -1019,18 +1019,12 @@ class NostrCircleService implements CircleService {
   }) async {
     final manager = await _ensureInitialized();
 
+    final GiftWrapIntakeFfi intake;
     try {
-      final ffiInvitation = await manager.processGiftWrappedInvitation(
+      intake = await manager.processGiftWrappedInvitation(
         identitySecretBytes: identitySecretBytes,
         giftWrapEventJson: giftWrapEventJson,
       );
-      // `null` signals the Rust side detected a duplicate gift wrap (the
-      // wrapper event ID is already in `processed_gift_wraps`). Propagate
-      // as `null` so the poller can silently skip it.
-      if (ffiInvitation == null) {
-        return null;
-      }
-      return _convertInvitation(ffiInvitation);
     } on Object catch (e) {
       // Log only the runtime type — CircleError variants (NotFound,
       // ContactNotFound, etc.) can embed pubkeys or group IDs in their
@@ -1040,6 +1034,20 @@ class NostrCircleService implements CircleService {
         'Failed to process gift-wrapped invitation',
       );
     }
+    switch (intake.failure) {
+      case GiftWrapIntakeFailureFfi.unusable:
+        // Silent: anyone who knows the npub can send one.
+        debugPrint('[Circle] Gift wrap skipped: not an invitation');
+        return null;
+      case GiftWrapIntakeFailureFfi.storeFailed:
+        debugPrint('[Circle] Invitation not saved');
+        throw const InvitationNotSavedException();
+      case null:
+        break;
+    }
+    // Neither an invitation nor a failure: the wrap was already processed.
+    final ffiInvitation = intake.invitation;
+    return ffiInvitation == null ? null : _convertInvitation(ffiInvitation);
   }
 
   @override

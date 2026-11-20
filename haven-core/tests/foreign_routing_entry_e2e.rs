@@ -262,7 +262,6 @@ async fn engine_starts_for_every_circle(device: &Member, circles: usize) -> bool
     );
     let engine = LiveSyncCore::new_local(
         Arc::clone(&device.circle),
-        device.keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     let started = engine.start(&specs, &[]).await.is_ok();
@@ -1607,7 +1606,6 @@ async fn a_routing_id_two_rows_name_is_listed_once_at_both_rows_relays() {
         .collect();
     let engine = LiveSyncCore::new_local(
         Arc::clone(&device.circle),
-        device.keys.public_key(),
         Arc::new(haven_core::relay::RelayManager::new()),
     );
     engine.start(&specs, &[]).await.expect("the engine starts");

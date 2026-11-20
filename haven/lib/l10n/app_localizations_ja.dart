@@ -497,6 +497,26 @@ class AppLocalizationsJa extends AppLocalizations {
   }
 
   @override
+  String get relaySettingsInboxRefused =>
+      'このリレーは、あなた宛ての招待の読み取りを Haven に許可しませんでした。このリレーを削除するか、別のリレーを追加してください。';
+
+  @override
+  String get relaySettingsInboxRefusedTooltip => '招待の読み取りを許可しませんでした';
+
+  @override
+  String relaySettingsInboxRefusedSemantics(String url) {
+    return '警告: $url は、あなた宛ての招待の読み取りを Haven に許可しませんでした';
+  }
+
+  @override
+  String get relaySettingsInboxAllRefusedTitle =>
+      '受信トレイのリレーはどれも、あなた宛ての招待の読み取りを Haven に許可しませんでした';
+
+  @override
+  String get relaySettingsInboxAllRefusedMessage =>
+      '受信トレイのリレーのいずれかが招待の読み取りを Haven に許可するまで、あなた宛ての招待は届きません。デフォルトに戻すか、別のリレーを追加してください。';
+
+  @override
   String get locationSettingsTitle => '位置情報';
 
   @override
@@ -1450,6 +1470,48 @@ class AppLocalizationsJa extends AppLocalizations {
   String get invitationsLoadError => '招待を読み込めませんでした';
 
   @override
+  String invitationsNoticeRefused(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other:
+          '受信トレイのリレー$countString件が、あなた宛ての招待の読み取りを Haven に許可しませんでした。それらのリレーにだけ送られた招待は、あなたに届きません。リレー設定で、それらのリレーを削除するか、別のリレーを追加してください。',
+      one:
+          '受信トレイのリレー1件が、あなた宛ての招待の読み取りを Haven に許可しませんでした。そのリレーにだけ送られた招待は、あなたに届きません。リレー設定で、そのリレーを削除するか、別のリレーを追加してください。',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String invitationsNoticeNotSaved(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '招待が$countString件届きましたが、この端末に保存できませんでした。',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get invitationsNoticeOffline =>
+      'Haven は受信トレイのリレーに接続できなかったため、新しい招待はまだ表示できません。';
+
+  @override
+  String get invitationsNoticeIncomplete =>
+      'Haven は受信トレイのリレーをすべて確認し終えられなかったため、まだ表示されていない招待があるかもしれません。';
+
+  @override
+  String get invitationsNoticeOpenRelaySettings => 'リレー設定';
+
+  @override
   String get invitationsEmptyTitle => '招待はありません';
 
   @override
@@ -1476,7 +1538,7 @@ class AppLocalizationsJa extends AppLocalizations {
   }
 
   @override
-  String refreshRingSemanticAllOk(int total) {
+  String refreshRingSemanticInboxAll(int total) {
     final intl.NumberFormat totalNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
@@ -1484,16 +1546,17 @@ class AppLocalizationsJa extends AppLocalizations {
     String _temp0 = intl.Intl.pluralLogic(
       total,
       locale: localeName,
-      other: 'すべての $totalString 件のリレーが応答しました',
+      other: 'すべての $totalString 件のリレーで招待を確認しました',
+      one: 'リレーで招待を確認しました',
     );
     return '$_temp0';
   }
 
   @override
-  String get refreshRingSemanticAllError => '応答したリレーはありません';
+  String get refreshRingSemanticInboxNone => 'どのリレーでも招待を確認できませんでした';
 
   @override
-  String refreshRingSemanticPartial(int ok, int total) {
+  String refreshRingSemanticInboxPartial(int ok, int total) {
     final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -1502,17 +1565,17 @@ class AppLocalizationsJa extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return '$totalString 件中 $okString 件のリレーが応答しました';
+    return '$totalString 件中 $okString 件のリレーで招待を確認しました';
   }
 
   @override
   String get refreshRingAnnouncementChecking => 'リレーを確認しています';
 
   @override
-  String get refreshRingAnnouncementAllOk => 'すべてのリレーが応答しました';
+  String get refreshRingAnnouncementInboxAll => 'すべてのリレーで招待を確認しました';
 
   @override
-  String refreshRingAnnouncementPartial(int ok, int total) {
+  String refreshRingAnnouncementInboxPartial(int ok, int total) {
     final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -1521,11 +1584,11 @@ class AppLocalizationsJa extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return '$totalString 件中 $okString 件のリレーが応答しました';
+    return '$totalString 件中 $okString 件のリレーで招待を確認しました';
   }
 
   @override
-  String get refreshRingAnnouncementAllError => 'どのリレーにも接続できませんでした';
+  String get refreshRingAnnouncementInboxNone => 'どのリレーでも招待を確認できませんでした';
 
   @override
   String get refreshRingAnnouncementNoInbox => '受信トレイが未設定です';

@@ -219,7 +219,6 @@ void main() {
             relayManager: bobRelayManager,
             invitee: bobCircle,
             inviteeSecretBytes: bobSecret,
-            inviteePubkeyHex: bobPubkeyHex,
             relays: const <String>[_testRelayUrl],
             scenario: 'ghost',
           );

@@ -505,11 +505,7 @@ impl Device {
     }
 
     fn engine(&self) -> LiveSyncCore {
-        LiveSyncCore::new_local(
-            Arc::clone(&self.circle),
-            self.keys.public_key(),
-            Arc::new(RelayManager::new()),
-        )
+        LiveSyncCore::new_local(Arc::clone(&self.circle), Arc::new(RelayManager::new()))
     }
 }
 
@@ -1234,9 +1230,9 @@ async fn lifecycle_then_plants(watch: &DialWatch, needles: &mut Vec<String>) {
     // truth is the shared seed alone. Today the product follows the lists —
     // the recorded product finding "Welcome/lookup steering" (PLAN_v2 §4
     // finding 1; owner decision OQ-1: no product change in this work): the
-    // key-package lookup asks the profile relay, and the Welcome goes to the
-    // first relay of the list, the location relay, whose acknowledgement ends
-    // its delivery. When the drop rule lands, this set becomes empty: the
+    // key-package lookup asks the profile relay, and the Welcome goes to every
+    // relay of the list at once — the location relay and the profile relay
+    // among them. When the drop rule lands, this set becomes empty: the
     // lookup falls to discovery and the Welcome goes to the seed inbox alone.
     let step = w.next();
     let dave = Device::new();
@@ -1279,6 +1275,12 @@ async fn lifecycle_then_plants(watch: &DialWatch, needles: &mut Vec<String>) {
             ),
             (
                 R::LocA as u32,
+                Verb::Event,
+                Some(Row::Ev1059),
+                Class::CrossedEvent,
+            ),
+            (
+                R::P0 as u32,
                 Verb::Event,
                 Some(Row::Ev1059),
                 Class::CrossedEvent,

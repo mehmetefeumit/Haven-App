@@ -61,6 +61,7 @@ class MockRelayService implements RelayService {
   Future<RelayListMaintenanceResult> maintainRelayList({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,
+    required bool foreground,
   }) async => relayListsCurrent;
 
   @override
@@ -107,8 +108,9 @@ class MockRelayService implements RelayService {
 
   /// Optional handler for [fetchGiftWrapsPerRelay].
   ///
-  /// When null, every relay is reported as responded with no events. Set
-  /// this to simulate unreachable relays or per-relay gift-wrap payloads.
+  /// When null, every relay is reported as served with no events. Set this
+  /// to simulate refused, unfinished or unreachable reads, or per-relay
+  /// gift-wrap payloads.
   Future<List<RelayGiftWrapFetch>> Function(List<String> relays)?
   fetchGiftWrapsPerRelayHandler;
 
@@ -226,7 +228,6 @@ class MockRelayService implements RelayService {
 
   @override
   Future<List<String>> fetchGiftWraps({
-    required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
   }) async {
@@ -236,7 +237,6 @@ class MockRelayService implements RelayService {
 
   @override
   Future<List<RelayGiftWrapFetch>> fetchGiftWrapsPerRelay({
-    required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
   }) async {
@@ -246,7 +246,11 @@ class MockRelayService implements RelayService {
     if (handler != null) return handler(relays);
     return [
       for (final r in relays)
-        RelayGiftWrapFetch(relayUrl: r, responded: true, events: const []),
+        RelayGiftWrapFetch(
+          relayUrl: r,
+          read: InboxRead.served,
+          events: const [],
+        ),
     ];
   }
 

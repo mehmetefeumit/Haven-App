@@ -102,7 +102,9 @@ readonly PP_FIXTURE_A='haven-gate-a.png'
 readonly PP_FIXTURE_B='haven-gate-b.png'
 readonly PP_MEDIA_DIR='/sdcard/Pictures'
 # The bounds. PHOTO_* overrides exist for the self-tests, whose stub device
-# answers at once; no workflow sets them.
+# answers at once; no workflow sets them. Time is read only as `date +%s`,
+# never SECONDS: the launch gate's self-test answers it with its stub device's
+# clock, so no window there depends on how fast the host runs.
 readonly PP_STORAGE_SECS="${PHOTO_STORAGE_SECS:-60}"  # the shared storage attached by the media store
 readonly PP_MEDIA_SECS="${PHOTO_MEDIA_SECS:-60}"    # both photos listed by the media store
 readonly PP_PICKER_SECS="${PHOTO_PICKER_SECS:-60}"  # tap -> picker resumed; picker -> focused, thumbnail tapped (or BACK sent)
@@ -145,15 +147,15 @@ PP_FIND_XY=()
 # answers for the storage: until it has attached the volume, MediaProvider
 # refuses the query ("Volume external_primary not found").
 pp_seed_gallery() {
-  local device="$1" dir="$2" attach_by list_by seen=''
+  local device="$1" dir="$2" start spent seen=''
   PP_MSG=''
   if ! python3 -I "${_PP_LIB_DIR}/make-avatar-fixture.py" --variant a --out "${dir}/${PP_FIXTURE_A}" \
      || ! python3 -I "${_PP_LIB_DIR}/make-avatar-fixture.py" --variant b --out "${dir}/${PP_FIXTURE_B}"; then
     PP_MSG='the host could not write the gallery fixtures'
     return 2
   fi
-  attach_by=$(( SECONDS + PP_STORAGE_SECS ))
-  while (( SECONDS < attach_by )); do
+  start="$(date +%s)"
+  while spent=$(( $(date +%s) - start )); (( spent < PP_STORAGE_SECS )); do
     _pp_media_read "${device}" "${dir}"
     [[ "${_PP_MEDIA}" == silent ]] || seen="${_PP_MEDIA}"
     [[ "${_PP_MEDIA}" != listed ]] || break
@@ -169,8 +171,8 @@ pp_seed_gallery() {
   # A row a push creates is IS_PENDING, which the query hides, until
   # MediaProvider handles the file's FUSE release, sent after close returns.
   seen=''
-  list_by=$(( SECONDS + PP_MEDIA_SECS ))
-  while (( SECONDS < list_by )); do
+  start="$(date +%s)"
+  while spent=$(( $(date +%s) - start )); (( spent < PP_MEDIA_SECS )); do
     _pp_media_read "${device}" "${dir}"
     [[ "${_PP_MEDIA}" == silent ]] || seen="${_PP_MEDIA}"
     if grep -qF "_display_name=${PP_FIXTURE_A}" <<<"${_PP_LISTED}" && grep -qF "_display_name=${PP_FIXTURE_B}" <<<"${_PP_LISTED}"; then
@@ -345,9 +347,9 @@ _pp_is_picker() { # <component> <api>
 # broken Photo Picker promise; an activity nobody here knows is named for the
 # harness to learn.
 _pp_await_picker() { # <device> <dir> <api>
-  local device="$1" dir="$2" api="$3" deadline answered=0
-  deadline=$(( SECONDS + PP_PICKER_SECS ))
-  while (( SECONDS < deadline )); do
+  local device="$1" dir="$2" api="$3" start spent answered=0
+  start="$(date +%s)"
+  while spent=$(( $(date +%s) - start )); (( spent < PP_PICKER_SECS )); do
     pp_hook_alive || return 4
     pp_resumed "${device}" "${dir}"
     [[ -n "${PP_RESUMED}" ]] || continue
@@ -372,7 +374,7 @@ _pp_await_picker() { # <device> <dir> <api>
 # Focus does not leave a resumed picker unless another window takes it, and
 # the tap is judged by its effect (phase 3), so it is not read again.
 _pp_pick_thumbnail() { # <device> <dir> <index> <api>
-  local device="$1" dir="$2" index="$3" api="$4" deadline prev='' n regex="${PP_PICKER_PKG_RE}" focused=0 last='' start="${SECONDS}"
+  local device="$1" dir="$2" index="$3" api="$4" start spent prev='' n regex="${PP_PICKER_PKG_RE}" focused=0 last=''
   local -a specs=("${PP_THUMB_RID}") names=(photopicker-rid)
   if (( api < 33 )); then
     specs+=("${PP_DOCUMENTSUI_THUMB_RID}"); names+=(documentsui-rid)
@@ -380,14 +382,14 @@ _pp_pick_thumbnail() { # <device> <dir> <index> <api>
   fi
   # The Compose picker of newer module builds labels each item by what it is.
   specs+=('desc-prefix:Photo'); names+=(photopicker-desc)
-  deadline=$(( SECONDS + PP_PICKER_SECS ))
-  while (( SECONDS < deadline )); do
+  start="$(date +%s)"
+  while spent=$(( $(date +%s) - start )); (( spent < PP_PICKER_SECS )); do
     pp_hook_alive || return 4
     if (( ! focused )); then
       pp_focused "${device}" "${dir}"
       last="${PP_FOCUSED:-${last}}"
       _pp_is_picker "${PP_FOCUSED}" "${api}" || continue
-      focused=1; PP_FOCUS_WAIT=$(( SECONDS - start ))
+      focused=1; PP_FOCUS_WAIT=$(( $(date +%s) - start ))
       continue
     fi
     pp_find "${device}" "${dir}" "${regex}" "${specs[@]}" || continue
@@ -399,7 +401,7 @@ _pp_pick_thumbnail() { # <device> <dir> <index> <api>
       return 2
     fi
     PP_PICKER="${names[$(( PP_FIND_SEL - 1 ))]}"
-    PP_TAP_AT="${SECONDS}"
+    PP_TAP_AT="$(date +%s)"
     _pp_tap "${device}" "${PP_FIND_XY[${index}]}"
     return 0
   done
@@ -436,14 +438,14 @@ _pp_unfocused_picker() {
 # and TabContainerFragment.show). Where the sheet is in its slide does not
 # matter to a key, so no dump is read.
 _pp_cancel() { # <device> <dir> <api>
-  local device="$1" dir="$2" api="$3" deadline last='' start="${SECONDS}"
-  deadline=$(( SECONDS + PP_PICKER_SECS ))
-  while (( SECONDS < deadline )); do
+  local device="$1" dir="$2" api="$3" start spent last=''
+  start="$(date +%s)"
+  while spent=$(( $(date +%s) - start )); (( spent < PP_PICKER_SECS )); do
     pp_hook_alive || return 4
     pp_focused "${device}" "${dir}"
     last="${PP_FOCUSED:-${last}}"
     _pp_is_picker "${PP_FOCUSED}" "${api}" || continue
-    PP_FOCUS_WAIT=$(( SECONDS - start ))
+    PP_FOCUS_WAIT=$(( $(date +%s) - start ))
     adb -s "${device}" shell input keyevent 4 >/dev/null 2>&1
     return 0
   done
@@ -455,9 +457,9 @@ _pp_cancel() { # <device> <dir> <api>
 # still holding the focus it held when the BACK was sent, ignored that BACK:
 # the system's, which nothing in Haven decides.
 _pp_await_cancelled() { # <device> <dir> <api>
-  local device="$1" dir="$2" api="$3" deadline front=''
-  deadline=$(( SECONDS + PP_RETURN_SECS ))
-  while (( SECONDS < deadline )); do
+  local device="$1" dir="$2" api="$3" start spent front=''
+  start="$(date +%s)"
+  while spent=$(( $(date +%s) - start )); (( spent < PP_RETURN_SECS )); do
     pp_hook_alive || return 4
     pp_resumed "${device}" "${dir}"
     [[ "${PP_RESUMED}" != "${PP_MAIN}" ]] || return 0
@@ -485,9 +487,9 @@ _pp_await_cancelled() { # <device> <dir> <api>
 # in front is the hand-over from the picker to uCrop (see "between" above),
 # so it ends the wait only through pp_hook_home or at the bound.
 _pp_await_ucrop() { # <device> <dir> <api>
-  local device="$1" dir="$2" api="$3" deadline confirmed=0 front=''
-  deadline=$(( SECONDS + PP_UCROP_SECS ))
-  while (( SECONDS < deadline )); do
+  local device="$1" dir="$2" api="$3" start spent confirmed=0 front=''
+  start="$(date +%s)"
+  while spent=$(( $(date +%s) - start )); (( spent < PP_UCROP_SECS )); do
     pp_hook_alive || return 4
     pp_resumed "${device}" "${dir}"
     [[ -z "${PP_RESUMED}" ]] || front="${PP_RESUMED}"
@@ -522,9 +524,9 @@ _pp_await_ucrop() { # <device> <dir> <api>
 # one bounded read per pass. (A picker's confirm tap in phase 3 needs no
 # read of its own: it goes to the picker window phase 2 saw focused.)
 _pp_crop() { # <device> <dir>
-  local device="$1" dir="$2" deadline prev='' focused=0 last=''
-  deadline=$(( SECONDS + PP_UCROP_SECS ))
-  while (( SECONDS < deadline )); do
+  local device="$1" dir="$2" start spent prev='' focused=0 last=''
+  start="$(date +%s)"
+  while spent=$(( $(date +%s) - start )); (( spent < PP_UCROP_SECS )); do
     pp_hook_alive || return 4
     if (( ! focused )); then
       pp_focused "${device}" "${dir}"
@@ -559,9 +561,9 @@ _pp_crop() { # <device> <dir>
 
 # Phase 5 of a pick: MainActivity resumed again after uCrop, Haven's own.
 _pp_await_main() { # <device> <dir> <what>
-  local device="$1" dir="$2" what="$3" deadline
-  deadline=$(( SECONDS + PP_RETURN_SECS ))
-  while (( SECONDS < deadline )); do
+  local device="$1" dir="$2" what="$3" start spent
+  start="$(date +%s)"
+  while spent=$(( $(date +%s) - start )); (( spent < PP_RETURN_SECS )); do
     pp_hook_alive || return 4
     pp_resumed "${device}" "${dir}"
     [[ "${PP_RESUMED}" != "${PP_MAIN}" ]] || return 0
@@ -581,7 +583,7 @@ _pp_trace() {
   now="$(head -n 1 "${dir}/pp-events.txt")"
   if [[ "${now}" =~ ^[0-9]+$ ]]; then
     out="$(python3 -I "${_PP_LIB_DIR}/ui-dump.py" trace --events "${dir}/pp-events.txt" --package "${PP_PKG}" \
-      --since "$(( now - (SECONDS - _PP_ROUND_AT) - PP_TRACE_LOOKBACK_SECS ))" 2>/dev/null || true)"
+      --since "$(( now - ($(date +%s) - _PP_ROUND_AT) - PP_TRACE_LOOKBACK_SECS ))" 2>/dev/null || true)"
     [[ "${out}" != 'trace '* ]] || PP_TRACE="${out#trace }"
   fi
   rm -f "${dir}/pp-events.txt"
@@ -591,7 +593,7 @@ _pp_trace() {
 pp_round() {
   local device="$1" dir="$2" rc=0
   PP_MSG=''; PP_PICKER='-'; PP_UCROP='-'; PP_DWELL=-1; PP_FOCUS_WAIT=-1; PP_TRACE='-'
-  _PP_ROUND_AT="${SECONDS}"
+  _PP_ROUND_AT="$(date +%s)"
   _pp_round "$@" || rc=$?
   if (( rc != 0 && rc != 4 )); then _pp_trace "${device}" "${dir}"; fi
   return "${rc}"
@@ -611,6 +613,6 @@ _pp_round() {
   _pp_await_main "${device}" "${dir}" "uCrop" || rc=$?
   if (( rc == 1 )); then PP_MSG="uCrop did not return a result: ${PP_MSG}"; fi
   (( rc == 0 )) || return "${rc}"
-  PP_DWELL=$(( SECONDS - PP_TAP_AT ))
+  PP_DWELL=$(( $(date +%s) - PP_TAP_AT ))
   return 0
 }

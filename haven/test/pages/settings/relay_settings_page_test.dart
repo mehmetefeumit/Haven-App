@@ -3,7 +3,8 @@
 /// Cover section presence, edit affordances, the explanation panels, the
 /// per-item status symbols that follow the maintenance passes, the
 /// announcements, the page-open pass, input that lands while something
-/// moves, accessibility, and (for the local-only Profile category) the
+/// moves, accessibility, an inbox relay that refuses the read of the
+/// account's invitations, and (for the local-only Profile category) the
 /// advisory contamination warning and underflow banner.
 library;
 
@@ -1010,6 +1011,225 @@ void main() {
         expect(find.text('Profile lookups paused'), findsOneWidget);
       },
     );
+  });
+
+  group('RelaySettingsPage — an inbox relay that refuses the read', () {
+    const gated = 'wss://gated.example.com';
+    const open = 'wss://open.example.com';
+    const refusedLine =
+        "This relay didn't let Haven read your invitations. Remove it, or "
+        'add another relay.';
+    const allRefusedTitle =
+        'None of your inbox relays let Haven read your invitations';
+    const tooltip = "Didn't let Haven read invitations";
+
+    /// Every item current on [inbox], with each relay's gift-wrap read.
+    OwnRelayBoard boardReading(Map<String, InboxRead> reads) {
+      const checked = OwnKindBoard(checkedSecsAgo: 0);
+      return OwnRelayBoard(
+        keyPackage: checked,
+        relayList: checked,
+        inboxRelayList: OwnKindBoard(
+          checkedSecsAgo: 0,
+          cells: [
+            for (final url in reads.keys)
+              OwnRelayCell(relayUrl: url, status: OwnRelayStatus.current),
+          ],
+        ),
+        inboxReads: [
+          for (final MapEntry(key: url, value: read) in reads.entries)
+            OwnInboxRead(relayUrl: url, read: read),
+        ],
+      );
+    }
+
+    MockRelayPreferencesService twoInbox() => MockRelayPreferencesService(
+      initialRelays: const {
+        RelayCategory.inbox: [gated, open],
+        RelayCategory.keyPackage: [gated],
+        RelayCategory.profile: ['wss://profile.example.com'],
+      },
+    );
+
+    Finder labelledButtons() => find.byWidgetPredicate(
+      (w) =>
+          w is OutlinedButton ||
+          w is TextButton ||
+          w is FilledButton ||
+          w is ElevatedButton,
+    );
+
+    /// The page over [board], every pass the publisher runs counted in
+    /// [runs] and leaving [after] on the board, as the Rust pass does.
+    Widget pageOver(
+      MockRelayPreferencesService mock,
+      FakeBoardSource board, {
+      List<int>? runs,
+      OwnRelayBoard? after,
+    }) => buildApp(
+      mock: mock,
+      board: board,
+      extra: [
+        keyPackagePublisherProvider.overrideWith((ref) async {
+          runs?.add(runs.length);
+          if (after != null) board.board = after;
+          return const KeyPackageMaintenanceFailed(
+            KeyPackageFailureKind.tickErrored,
+          );
+        }),
+      ],
+    );
+
+    testWidgets('a refused row says so in words, with an icon whose label '
+        'names the relay, in the Inbox section only — and offers no action '
+        'of its own', (tester) async {
+      tallSurface(tester);
+      final semantics = tester.ensureSemantics();
+      await tester.pumpWidget(
+        pageOver(
+          twoInbox(),
+          FakeBoardSource(
+            board: boardReading({
+              gated: InboxRead.refused,
+              open: InboxRead.served,
+            }),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(textIn('inbox', refusedLine), findsOneWidget);
+      expect(
+        textIn('keyPackage', refusedLine),
+        findsNothing,
+        reason: 'the KeyPackage row of the same relay carries no warning',
+      );
+      expect(
+        find.bySemanticsLabel(
+          "Warning: gated.example.com didn't let Haven read your invitations",
+        ),
+        findsOneWidget,
+      );
+      expect(find.byTooltip(tooltip), findsOneWidget);
+      final row = tester.getSemantics(textIn('inbox', 'gated.example.com'));
+      expect(row.label, contains(refusedLine));
+      expect(
+        labelledButtons(),
+        findsNWidgets(6),
+        reason:
+            'three Add relay and three Restore defaults: no republish, '
+            'which cannot change whether a relay lets Haven read',
+      );
+      expect(find.text(allRefusedTitle), findsNothing);
+      semantics.dispose();
+    });
+
+    testWidgets('a served, unfinished or unreached read, or none yet, raises '
+        'no warning', (tester) async {
+      tallSurface(tester);
+      for (final read in [
+        InboxRead.served,
+        InboxRead.incomplete,
+        InboxRead.unreached,
+        null,
+      ]) {
+        await tester.pumpWidget(
+          pageOver(
+            twoInbox(),
+            FakeBoardSource(
+              board: read == null
+                  ? boardAll(KindPresence.current)
+                  : boardReading({gated: read, open: read}),
+            ),
+          ),
+          duration: Duration.zero,
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.text(refusedLine), findsNothing, reason: '$read');
+        expect(find.byTooltip(tooltip), findsNothing, reason: '$read');
+        expect(find.text(allRefusedTitle), findsNothing, reason: '$read');
+        await tester.pumpWidget(const SizedBox());
+      }
+    });
+
+    testWidgets('removing the refused relay takes its warning with it and '
+        'runs the pass that asks the rest again', (tester) async {
+      tallSurface(tester);
+      final runs = <int>[];
+      final board = FakeBoardSource(
+        board: boardReading({gated: InboxRead.refused, open: InboxRead.served}),
+      );
+      await tester.pumpWidget(
+        pageOver(
+          twoInbox(),
+          board,
+          runs: runs,
+          after: boardReading({open: InboxRead.served}),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text(refusedLine), findsOneWidget);
+      final before = runs.length;
+
+      await tester.tap(
+        find.descendant(
+          of: find.byKey(WidgetKeys.relaySettingsSection('inbox')),
+          matching: find.byTooltip('Remove gated.example.com'),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pumpAndSettle();
+
+      expect(runs.length, before + 1, reason: 'asked again');
+      expect(find.text(refusedLine), findsNothing);
+      expect(find.byTooltip(tooltip), findsNothing);
+      expect(textIn('inbox', 'open.example.com'), findsOneWidget);
+    });
+
+    testWidgets('every inbox relay refusing shows a banner whose Restore '
+        'defaults resets the list after confirmation, then asks again', (
+      tester,
+    ) async {
+      tallSurface(tester);
+      final mock = twoInbox();
+      final runs = <int>[];
+      final board = FakeBoardSource(
+        board: boardReading({
+          gated: InboxRead.refused,
+          open: InboxRead.refused,
+        }),
+      );
+      await tester.pumpWidget(
+        pageOver(
+          mock,
+          board,
+          runs: runs,
+          after: boardReading({
+            'wss://default-a': InboxRead.served,
+            'wss://default-b': InboxRead.served,
+            'wss://default-c': InboxRead.served,
+          }),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text(allRefusedTitle), findsOneWidget);
+      expect(find.text(refusedLine), findsNWidgets(2));
+      final before = runs.length;
+
+      // The banner's button sits right under it, above the section's own.
+      await tester.tap(textIn('inbox', 'Restore defaults').first);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Restore'));
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pumpAndSettle();
+
+      expect(mock.log, contains('wipe:inbox'));
+      expect(runs.length, before + 1, reason: 'asked again');
+      expect(find.text(allRefusedTitle), findsNothing);
+      expect(find.text(refusedLine), findsNothing);
+    });
   });
 
   // While the Android MLS handoff holds, every manager open fails closed, and

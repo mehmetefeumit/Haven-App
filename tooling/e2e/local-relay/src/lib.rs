@@ -56,6 +56,7 @@
 pub mod config;
 pub mod fault;
 pub mod frame;
+pub mod gate;
 pub mod journal;
 pub mod loopback;
 pub mod needles;
@@ -101,6 +102,6 @@ pub const ENV_JOURNAL: &str = "HAVEN_WIRE_JOURNAL";
 pub const ENV_MLS_GROUP_ID_FILE: &str = "HAVEN_WIRE_MLS_GROUP_ID_FILE";
 
 /// Environment variable naming a multi-relay routing table
-/// (`<listen>=<upstream>,...`). Wins over [`ENV_LISTEN_PORT`] /
+/// (`<listen>=<upstream>[;gate-read=<kinds>],...`). Wins over [`ENV_LISTEN_PORT`] /
 /// [`ENV_UPSTREAM`] when set.
 pub const ENV_ROUTES: &str = "HAVEN_WIRE_PROXY_ROUTES";

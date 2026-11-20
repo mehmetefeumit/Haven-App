@@ -1928,6 +1928,75 @@ async fn a_dropped_class_is_withheld_from_one_devices_endpoint_and_carried_to_th
     );
 }
 
+/// Waits until `device`'s own endpoint has withheld `event_id` under a
+/// dropped class: the drop's own record, which an absence of a delivery is not.
+async fn dropped_reached(plane: &SimRelay, device: DeviceTag, event_id: &EventId) -> bool {
+    let ledger = plane.ledger().clone();
+    let event_id = *event_id;
+    reaching(WIRE_BOUND, 1, move || {
+        usize::from(ledger.dropped_at(device, &event_id))
+    })
+    .await
+        == 1
+}
+
+/// S02's partition arms the application class and then the handshake class on
+/// one endpoint. The second joins the first, and only the heal lifts them: a
+/// replacement would lift the application drop while one of its frames could
+/// still be queued for the socket, and that frame would cross after the
+/// partition was declared (CI run 44516525405).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_second_dropped_class_joins_the_first_until_the_heal() {
+    let (alice, bob) = (DeviceTag::new(0), DeviceTag::new(1));
+    let mut plane = provisioned_plane(&[alice, bob]).await;
+    let _alices = client_on(&plane, alice, 0).await;
+    let bobs = client_on(&plane, bob, 1).await;
+    for class in [DropClass::Application, DropClass::Handshake] {
+        plane
+            .apply_for(alice, Fault::DropClass(class))
+            .await
+            .expect("the fault applies");
+    }
+
+    let location = an_application_445();
+    let commit = a_commit_445();
+    publish_on(&bobs, plane.url_for(bob), &location).await;
+    publish_on(&bobs, plane.url_for(bob), &commit).await;
+    assert!(
+        dropped_reached(&plane, alice, &location.id).await
+            && dropped_reached(&plane, alice, &commit.id).await,
+        "the partitioned endpoint withholds both classes: the second fault lifted the first"
+    );
+    assert!(
+        !plane.ledger().delivered_to(alice, &location.id)
+            && !plane.ledger().delivered_to(alice, &commit.id),
+        "a withheld frame is never also a delivery"
+    );
+    assert!(
+        marker_reached(&plane, bob, &commit.id).await
+            && plane.ledger().delivered_to(bob, &location.id),
+        "the other device's endpoint carries both, untouched"
+    );
+
+    plane
+        .apply_for(alice, Fault::Heal)
+        .await
+        .expect("the heal applies");
+    let healed_location = an_application_445();
+    let healed_commit = a_commit_445();
+    publish_on(&bobs, plane.url_for(bob), &healed_location).await;
+    publish_on(&bobs, plane.url_for(bob), &healed_commit).await;
+    assert!(
+        marker_reached(&plane, alice, &healed_location.id).await
+            && marker_reached(&plane, alice, &healed_commit.id).await,
+        "the heal lifts every class the endpoint was dropping"
+    );
+    assert!(
+        plane.faults_applied() == 2,
+        "two classes are two faults, and the heal is neither"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn healing_one_devices_endpoint_restores_it_and_leaves_the_others_partition_standing() {
     let (alice, bob) = (DeviceTag::new(0), DeviceTag::new(1));
@@ -2223,9 +2292,9 @@ async fn a_heal_restores_the_pass_through_whatever_was_wrong() {
         Fault::RefuseOversize {
             max_bytes: ByteCap::new(1),
         },
-        // A class is a partition of the canonical endpoint too; the last one
-        // armed is what a heal must undo, and the page below carries one
-        // event of each class to prove it.
+        // A class is a partition of the canonical endpoint too; both stay
+        // armed until the heal, which must undo them together, and the page
+        // below carries one event of each class to prove it.
         Fault::DropClass(DropClass::Application),
         Fault::DropClass(DropClass::Handshake),
         // Each would leave its own mark below: a clamp of one cuts the page to
@@ -3652,5 +3721,74 @@ async fn a_relay_refusing_negentropy_forwards_nothing_and_answers_unknown_cmd() 
     assert!(
         ledger.neg_total(NegFrame::Open) == 1,
         "the healed opening is counted"
+    );
+}
+
+/// `AuthGatedReads` answers as strfry's default `restrictedReadKinds` answers a
+/// reader that has not authenticated, as the product's anonymous read has not:
+/// a gift wrap is taken, a read of gift wraps alone is refused with strfry's
+/// own words and typed `refused` by the product's anonymous read, and a read
+/// that also names another kind is served with the gift wrap withheld.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_gated_plane_takes_a_gift_wrap_and_serves_it_to_no_unauthenticated_reader() {
+    install_process_globals().expect("the ws:// loopback opt-in");
+    let mut plane = plane().await;
+    plane
+        .apply(Fault::AuthGatedReads)
+        .await
+        .expect("the fault applies");
+    let client = connected_client(&plane).await;
+    let wrap = EventBuilder::new(Kind::GiftWrap, "c2VhbGVk")
+        .tag(Tag::public_key(Keys::generate().public_key()))
+        .sign_with_keys(&Keys::generate())
+        .expect("a gift wrap signs");
+    let note = an_event("beside the gift wrap");
+    for event in [&wrap, &note] {
+        publish(&client, &plane, event).await;
+        assert!(
+            acked_within(&plane, &event.id, WIRE_BOUND).await,
+            "a gated plane takes every write"
+        );
+    }
+
+    let reader = haven_core::relay::RelayManager::new();
+    let url = vec![plane.url().to_owned()];
+    let gated = reader
+        .fetch_events_per_relay(Filter::new().kind(Kind::GiftWrap), &url)
+        .await
+        .expect("the read runs");
+    let ledger = plane.ledger().clone();
+    assert!(
+        gated.len() == 1 && gated[0].refused && !gated[0].drained && gated[0].events.is_empty(),
+        "a read of gift wraps alone is typed refused, and serves nothing"
+    );
+    assert!(
+        ledger.gated_refusals(None) == 1,
+        "the gate's firing is ledgered against the endpoint it answered on"
+    );
+    assert!(
+        ledger.closed_messages().contains(
+            &"ERROR: auth-required: requested filter requires authentication".to_string()
+        ),
+        "the refusal is strfry's text"
+    );
+
+    let mixed = reader
+        .fetch_events_per_relay(Filter::new().kinds([Kind::GiftWrap, Kind::TextNote]), &url)
+        .await
+        .expect("the read runs");
+    reader.shutdown().await;
+    assert!(
+        mixed.len() == 1 && !mixed[0].refused && mixed[0].drained,
+        "a read naming another kind is served to its end"
+    );
+    let served: Vec<EventId> = mixed[0].events.iter().map(|event| event.id).collect();
+    assert!(
+        served == vec![note.id],
+        "the note is served and the gift wrap withheld"
+    );
+    assert!(
+        ledger.gated_refusals(None) == 1,
+        "only the read of gift wraps alone was refused"
     );
 }

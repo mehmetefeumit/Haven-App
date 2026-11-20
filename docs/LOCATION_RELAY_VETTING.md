@@ -36,10 +36,19 @@ kind-445 older than 30 days.
 
 ### Why the probe checks what it checks
 
-* **L1 — a signer-less `#h` read.** Haven's receive planes hold no signer and
-  never answer a NIP-42 challenge (Security Rule 16). A relay that challenges on
-  read is not degraded for a circle, it is inert — and inert silently: the
-  members' fixes simply never arrive.
+* **L1 — a signer-less `#h` read.** No client that carries a circle's `#h`
+  REQ holds a signer or answers a NIP-42 challenge (Security Rule 16, owner
+  decision D1a). A relay that challenges on read is not degraded for a
+  circle, it is inert — and inert silently: the members' fixes simply never
+  arrive.
+* **Criterion (c) on write.** A relay that answers a kind-445 `auth-required:`
+  is sent the same event once more on a connection authenticated as the sender's
+  identity (owner decision D1c, Security Rule 13). It would then take the
+  write, but it would learn which identity sends into that circle's routing id,
+  when, and from which address — the linkage every other Haven-chosen relay is
+  denied — and each send would cost a second connection. So the pool admits no
+  such relay: the resend exists for circles another client made and relays a
+  user named, never as a reason to accept a gated relay here.
 * **L2 — a location-shaped kind-445 from a fresh key.** Every location goes out
   under a key generated for that one event (Security Rule 2), so a relay that
   refuses unknown authors refuses every Haven send. The read-back is the point:

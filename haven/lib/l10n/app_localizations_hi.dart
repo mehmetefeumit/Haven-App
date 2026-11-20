@@ -515,6 +515,27 @@ class AppLocalizationsHi extends AppLocalizations {
   }
 
   @override
+  String get relaySettingsInboxRefused =>
+      'इस रिले ने Haven को आपके निमंत्रण पढ़ने नहीं दिया। इसे हटाएँ, या कोई दूसरा रिले जोड़ें।';
+
+  @override
+  String get relaySettingsInboxRefusedTooltip =>
+      'Haven को निमंत्रण पढ़ने नहीं दिया';
+
+  @override
+  String relaySettingsInboxRefusedSemantics(String url) {
+    return 'चेतावनी: $url ने Haven को आपके निमंत्रण पढ़ने नहीं दिया';
+  }
+
+  @override
+  String get relaySettingsInboxAllRefusedTitle =>
+      'आपके किसी भी इनबॉक्स रिले ने Haven को निमंत्रण पढ़ने नहीं दिया';
+
+  @override
+  String get relaySettingsInboxAllRefusedMessage =>
+      'आपको भेजे गए निमंत्रण तब तक आप तक नहीं पहुँचेंगे, जब तक आपका कोई इनबॉक्स रिले Haven को उन्हें पढ़ने न दे। डिफ़ॉल्ट बहाल करें, या कोई दूसरा रिले जोड़ें।';
+
+  @override
   String get locationSettingsTitle => 'स्थान';
 
   @override
@@ -1506,6 +1527,50 @@ class AppLocalizationsHi extends AppLocalizations {
   String get invitationsLoadError => 'निमंत्रण लोड नहीं हो सके';
 
   @override
+  String invitationsNoticeRefused(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other:
+          '$countString इनबॉक्स रिले ने Haven को आपके निमंत्रण पढ़ने नहीं दिया, इसलिए जो निमंत्रण सिर्फ़ उन्हीं पर भेजा गया हो, वह आप तक नहीं पहुँचेगा। रिले सेटिंग्स में जाकर उन्हें हटाएँ या कोई दूसरा रिले जोड़ें।',
+      one:
+          'एक इनबॉक्स रिले ने Haven को आपके निमंत्रण पढ़ने नहीं दिया, इसलिए जो निमंत्रण सिर्फ़ उसी पर भेजा गया हो, वह आप तक नहीं पहुँचेगा। रिले सेटिंग्स में जाकर उसे हटाएँ या कोई दूसरा रिले जोड़ें।',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String invitationsNoticeNotSaved(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other:
+          '$countString निमंत्रण आए, लेकिन उन्हें इस डिवाइस पर सहेजा नहीं जा सका।',
+      one: 'एक निमंत्रण आया, लेकिन उसे इस डिवाइस पर सहेजा नहीं जा सका।',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get invitationsNoticeOffline =>
+      'Haven आपके इनबॉक्स रिले तक नहीं पहुँच सका, इसलिए नए निमंत्रण अभी दिखाई नहीं दे सकते।';
+
+  @override
+  String get invitationsNoticeIncomplete =>
+      'Haven आपके सभी इनबॉक्स रिले की जाँच पूरी नहीं कर सका, इसलिए हो सकता है कि कुछ निमंत्रण अभी न दिखें।';
+
+  @override
+  String get invitationsNoticeOpenRelaySettings => 'रिले सेटिंग्स';
+
+  @override
   String get invitationsEmptyTitle => 'कोई निमंत्रण नहीं';
 
   @override
@@ -1535,7 +1600,7 @@ class AppLocalizationsHi extends AppLocalizations {
   }
 
   @override
-  String refreshRingSemanticAllOk(int total) {
+  String refreshRingSemanticInboxAll(int total) {
     final intl.NumberFormat totalNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
@@ -1543,17 +1608,18 @@ class AppLocalizationsHi extends AppLocalizations {
     String _temp0 = intl.Intl.pluralLogic(
       total,
       locale: localeName,
-      other: 'सभी $totalString रिले ने जवाब दिया',
-      one: 'रिले ने जवाब दिया',
+      other: 'सभी $totalString रिले पर निमंत्रण जाँचे गए',
+      one: 'रिले पर निमंत्रण जाँचे गए',
     );
     return '$_temp0';
   }
 
   @override
-  String get refreshRingSemanticAllError => 'किसी भी रिले ने जवाब नहीं दिया';
+  String get refreshRingSemanticInboxNone =>
+      'किसी भी रिले पर निमंत्रण जाँचे नहीं जा सके';
 
   @override
-  String refreshRingSemanticPartial(int ok, int total) {
+  String refreshRingSemanticInboxPartial(int ok, int total) {
     final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -1562,17 +1628,17 @@ class AppLocalizationsHi extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return '$totalString में से $okString रिले ने जवाब दिया';
+    return '$totalString में से $okString रिले पर निमंत्रण जाँचे गए';
   }
 
   @override
   String get refreshRingAnnouncementChecking => 'रिले जाँचे जा रहे हैं';
 
   @override
-  String get refreshRingAnnouncementAllOk => 'सभी रिले ने जवाब दिया';
+  String get refreshRingAnnouncementInboxAll => 'सभी रिले पर निमंत्रण जाँचे गए';
 
   @override
-  String refreshRingAnnouncementPartial(int ok, int total) {
+  String refreshRingAnnouncementInboxPartial(int ok, int total) {
     final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -1581,12 +1647,12 @@ class AppLocalizationsHi extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return '$totalString में से $okString रिले ने जवाब दिया';
+    return '$totalString में से $okString रिले पर निमंत्रण जाँचे गए';
   }
 
   @override
-  String get refreshRingAnnouncementAllError =>
-      'किसी भी रिले तक नहीं पहुँचा जा सका';
+  String get refreshRingAnnouncementInboxNone =>
+      'किसी भी रिले पर निमंत्रण जाँचे नहीं जा सके';
 
   @override
   String get refreshRingAnnouncementNoInbox => 'कोई इनबॉक्स कॉन्फ़िगर नहीं है';

@@ -21,7 +21,8 @@ use std::path::PathBuf;
 use serde_json::Value;
 
 use super::frame::{Event, Frame};
-use super::judge::{judge, Class, Finding, Judgement, Observed};
+use super::judge::{judge_answered, AuthDemand, Class, Finding, Judgement, Observed};
+
 use super::policy::{export_json, overlap_rule, OverlapRule, Plane, Role, Row, Verb};
 use super::table::{explicit_port, List, PlaneTable, RelayIx, RelayMatch};
 use crate::frame::SENTINEL_VERB;
@@ -47,8 +48,8 @@ const USAGE: &str = "usage: haven-wire-planes --journal <path> --sentinel <token
 [--declare-overlap <role>:<role>]...\n       haven-wire-planes --export <path>\n\
 roles: inbox, keypackage, discovery, profile, location";
 
-const BANNER: &str = "wire-planes: CLEAN - C8.1-C8.8 hold: every EVENT (C8.1), REQ (C8.2) and \
-NEG-OPEN (C8.3) on a listen whose roles admit it, every routing on the location plane (C8.4), \
+const BANNER: &str = "wire-planes: CLEAN - C8.1-C8.8 hold: every EVENT (C8.1), REQ and AUTH \
+(C8.2) and NEG-OPEN (C8.3) on a listen whose roles admit it, every routing on the location plane (C8.4), \
 every circle declared (C8.5), every binding grounded (C8.6), every declared role witnessed \
 (C8.7), every listen declared (C8.8)";
 
@@ -198,9 +199,12 @@ fn parse_line(text: &str, seq: usize) -> Option<Line> {
     }
     match object.get("type")?.as_str()? {
         TYPE_FRAME => {
+            // `c2p` is a frame the client sent that a gated route refused in
+            // the relay's place: still the client's, so judged. `p2c` (the
+            // gate's own answer) and `r2p` (an event it withheld) are not.
             let c2r = match object.get("dir")?.as_str()? {
-                "c2r" => true,
-                "r2c" => false,
+                "c2r" | "c2p" => true,
+                "r2c" | "p2c" | "r2p" => false,
                 _ => return None,
             };
             Some(Line {
@@ -573,6 +577,8 @@ fn build_table<'a>(
 #[derive(Default)]
 struct Collected {
     judged: Vec<Judged>,
+    /// Each relay's `OK false auth-required:` for an event id, and when.
+    demands: Vec<(RelayIx, u64, String)>,
     client_frames: usize,
     undeclared: usize,
     unresolvable: usize,
@@ -601,6 +607,9 @@ fn collect(snapshot: &[Line], harness: &HashSet<String>, port_ix: &Ports<'_>) ->
             .and_then(|listen| listen.parse::<SocketAddr>().ok())
             .and_then(|addr| port_ix.get(&addr.port()).filter(|(_, l)| l.addr == addr));
         if !line.c2r {
+            if let (Some((relay, _)), Some(id)) = (declared, auth_demand(&line.frame)) {
+                out.demands.push((*relay, seq as u64, id));
+            }
             if let Some((_, listen)) = declared {
                 for event in events_of(line) {
                     for role in &listen.roles {
@@ -633,6 +642,20 @@ fn collect(snapshot: &[Line], harness: &HashSet<String>, port_ix: &Ports<'_>) ->
         });
     }
     out
+}
+
+/// The event id of a relay's `["OK", <id>, false, "auth-required: …"]`, read
+/// by its machine-readable prefix alone: what licenses one authenticated
+/// resend of that event to that relay (owner decisions D1b, D1c).
+fn auth_demand(frame: &Value) -> Option<String> {
+    match frame.as_array()?.as_slice() {
+        [verb, id, Value::Bool(false), message]
+            if verb == "OK" && message.as_str()?.starts_with("auth-required:") =>
+        {
+            Some(id.as_str()?.to_owned())
+        }
+        _ => None,
+    }
 }
 
 /// One report line's grouping: rule, violation or not, class, row, frame
@@ -750,7 +773,16 @@ fn judge_journal(args: &Args, report: &mut Report<'_>) -> Result<(), Failure> {
             "the snapshot holds no client frame outside the harness; nothing was judged",
         ));
     }
-    let judgement = judge(
+    let demands: Vec<AuthDemand<'_>> = collected
+        .demands
+        .iter()
+        .map(|(relay, at, id)| AuthDemand {
+            relay: *relay,
+            at: *at,
+            id,
+        })
+        .collect();
+    let judgement = judge_answered(
         &table,
         collected.judged.iter().map(|j| Observed {
             relay: j.relay,
@@ -759,6 +791,7 @@ fn judge_journal(args: &Args, report: &mut Report<'_>) -> Result<(), Failure> {
             at: j.at,
             frame: &j.frame,
         }),
+        &demands,
     )
     .map_err(|_| {
         (

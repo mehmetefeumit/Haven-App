@@ -148,6 +148,23 @@ class SyntheticUser {
       // peer's NIP-65 relay list must include the hermetic relay FIRST —
       // mirrors the production relay-preferences seeding an onboarding
       // identity goes through before its first KeyPackage publish.
+      //
+      // On a gated lane the gated relay heads both lists first, as the
+      // default-relay override puts it at the head of the app's: inviters
+      // then deliver to it, and only a read that answers its challenge, or a
+      // Welcome that also reached the next relay, is served (see
+      // [acceptInvitationViaRelay]).
+      if (gatedInboxConfigured) {
+        for (final type in <RelayTypeFfi>[
+          RelayTypeFfi.nip65,
+          RelayTypeFfi.inbox,
+        ]) {
+          await user.circleManager.addUserRelay(
+            url: gatedInboxRelayUrl,
+            relayType: type,
+          );
+        }
+      }
       await user.circleManager.addUserRelay(
         url: relay.url,
         relayType: RelayTypeFfi.nip65,
@@ -229,6 +246,8 @@ class SyntheticUser {
         final lists = await relayManager.maintainRelayList(
           circle: user.circleManager,
           identitySecretBytes: secret,
+          // A peer with no Relays page has no refusal to warn of.
+          foreground: false,
         );
         final inbox = lists.inbox;
         final inboxServed = inbox.action == RelayListActionFfi.republished ||
@@ -334,18 +353,27 @@ class SyntheticUser {
   // Phase A — accept gift-wrapped invitation (Welcome → MDK state)
   // ===========================================================================
 
-  /// Waits on [relay] for the kind-1059 gift-wrap addressed to this
-  /// peer, decrypts it through `CircleManagerFfi.processGiftWrappedInvitation`,
-  /// then applies the wrapped Welcome via `acceptInvitation`. Returns
-  /// the resulting [CircleWithMembersFfi].
+  /// Receives this peer's invitation the way the app does and applies it:
+  /// the product's per-relay inbox fetch over this peer's STORED inbox list,
+  /// `CircleManagerFfi.processGiftWrappedInvitation`, then `acceptInvitation`.
+  /// Returns the resulting [CircleWithMembersFfi].
   ///
-  /// Mirrors the production InvitationPoller + accept_invitation
-  /// orchestration without the UI: same FFI calls, same epoch advance,
-  /// same persistence side-effects. The only thing skipped is the
-  /// InvitationsPage rebuild.
+  /// [relay] is a synchronisation barrier only: the read waits until [relay]
+  /// holds a gift wrap addressed to this peer, so the one fetch after it is
+  /// deterministic. The Welcome itself is never taken from [relay] — reading
+  /// the raw store would pass a regression in which the Welcome sits only on
+  /// a relay the invitee cannot read, which is exactly what this helper
+  /// exists to catch.
   ///
-  /// Throws on timeout, on a gift-wrap that fails to decrypt, or on a
-  /// Welcome that fails to apply.
+  /// On a gated lane ([gatedInboxConfigured]) it also proves the gate was
+  /// exercised and passed (A5, owner-directed 2026-11-16): the gated relay
+  /// heads this peer's inbox list, every relay of that list served the read —
+  /// the gated one only after this peer's read answered its NIP-42 challenge
+  /// — each served the very Welcome this peer joined through, and the gated
+  /// relay's own store holds it.
+  ///
+  /// Throws on timeout, on no fetched gift wrap yielding an applicable
+  /// Welcome, or on a gated lane where any of that does not hold.
   Future<CircleWithMembersFfi> acceptInvitationViaRelay({
     required TestRelay relay,
     Duration timeout = const Duration(seconds: 90),
@@ -354,53 +382,125 @@ class SyntheticUser {
       '[SyntheticUser:$role] waiting for gift-wrap addressed to '
       '${_pkHandle(pubkeyHex)}',
     );
-    // Wait for the first gift-wrap addressed to us.
-    final first = await relay.firstWhere(
+    await relay.firstWhere(
       filter: <String, dynamic>{
         'kinds': <int>[1059],
         '#p': <String>[pubkeyHex],
-        'limit': 50,
+        'limit': 1,
       },
       timeout: timeout,
     );
 
-    // Fast path: apply the first gift-wrap. With a unique invitee pubkey this
-    // is the only `#p` match and applies on the first try (identical to the
-    // historical behaviour). The fallback below only matters when a `#p`
-    // matches MORE than one gift-wrap — e.g. a pubkey reused across subtests
-    // on a shared, not-yet-wiped relay, where NIP-59's randomized `created_at`
-    // makes delivery order nondeterministic and `firstWhere` could surface a
-    // STALE Welcome whose single-use KeyPackage is absent from this fresh
-    // keystore. Trying each candidate until one applies closes that race
-    // structurally rather than relying on the unique-pubkey convention.
-    final firstResult = await _tryApplyGiftWrap(first);
-    if (firstResult != null) return firstResult;
+    final inbox = await user.circleManager.listUserRelays(
+      relayType: RelayTypeFfi.inbox,
+    );
+    final fetched = await _readInbox(inbox);
 
-    debugPrint(
-      '[SyntheticUser:$role] first gift-wrap did not apply (likely stale); '
-      'scanning for other gift-wraps addressed to us',
-    );
-    final others = await relay.collectN(
-      count: 50,
-      filter: <String, dynamic>{
-        'kinds': <int>[1059],
-        '#p': <String>[pubkeyHex],
-        'limit': 50,
-      },
-      timeout: const Duration(seconds: 5),
-    );
-    for (final gw in others) {
-      if (gw.id == first.id) continue;
-      final result = await _tryApplyGiftWrap(gw);
-      if (result != null) return result;
+    // Every wrap any relay sent, de-duplicated by id, tried until one applies:
+    // with a pubkey reused on a store that is not wiped between tests, a STALE
+    // Welcome (its single-use KeyPackage absent from this fresh keystore) can
+    // be among them, and NIP-59's randomized `created_at` gives no order.
+    final wraps = <String, String>{};
+    for (final fetch in fetched) {
+      for (final eventJson in fetch.events) {
+        final id = (jsonDecode(eventJson) as Map<String, dynamic>)['id'];
+        if (id is String) wraps.putIfAbsent(id, () => eventJson);
+      }
+    }
+    for (final MapEntry(key: id, value: eventJson) in wraps.entries) {
+      final joined = await _tryApplyGiftWrap(id, eventJson);
+      if (joined == null) continue;
+      if (gatedInboxConfigured) {
+        _assertEveryInboxRelayServed(inbox, fetched, id);
+        await _assertGatedStoreHolds(id);
+      }
+      return joined;
     }
     throw StateError(
-      '[SyntheticUser:$role] no gift-wrap addressed to '
-      '${_pkHandle(pubkeyHex)} yielded an applicable Welcome',
+      '[SyntheticUser:$role] no gift-wrap the product read from '
+      '${magnitudeBucket(inbox.length)} inbox relay(s) yielded an applicable '
+      'Welcome (${magnitudeBucket(wraps.length)} fetched)',
     );
   }
 
-  /// Decrypts [giftWrap] and applies its Welcome, returning the joined circle.
+  /// One product read of [inbox], as the Invitations page makes it.
+  Future<List<RelayGiftWrapFetchFfi>> _readInbox(List<String> inbox) async {
+    final lookback = inboxGiftWrapLookbackSecs();
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final relayManager = await RelayManagerFfi.newInstance();
+    try {
+      return await relayManager.fetchGiftWrapsPerRelay(
+        circle: user.circleManager,
+        relays: inbox,
+        since: now - lookback,
+      );
+    } finally {
+      await relayManager.shutdown();
+    }
+  }
+
+  /// The read's half of the vacuity guard: the gated relay heads [inbox],
+  /// and each relay of [inbox] was read once, [InboxReadFfi.served], with the
+  /// Welcome [id] among what it served. The gated relay serves a gift wrap
+  /// only to a read that answered its challenge, so its copy proves the
+  /// product's inbox read authenticated; the plain relay's proves the Welcome
+  /// reached every inbox relay, not only the first.
+  void _assertEveryInboxRelayServed(
+    List<String> inbox,
+    List<RelayGiftWrapFetchFfi> fetched,
+    String id,
+  ) {
+    String canon(String url) =>
+        url.toLowerCase().replaceAll(RegExp(r'/+$'), '');
+    if (inbox.isEmpty || canon(inbox.first) != canon(gatedInboxRelayUrl)) {
+      throw StateError(
+        '[SyntheticUser:$role] the gated relay does not head the stored inbox '
+        'list, so this read cannot prove the gate was passed.',
+      );
+    }
+    for (final url in inbox) {
+      final reads = fetched.where((f) => canon(f.relayUrl) == canon(url));
+      final servedIt = reads.length == 1 &&
+          reads.single.read == InboxReadFfi.served &&
+          reads.single.events.any(
+            (json) => (jsonDecode(json) as Map<String, dynamic>)['id'] == id,
+          );
+      if (!servedIt) {
+        final which = canon(url) == canon(gatedInboxRelayUrl)
+            ? 'the gated inbox relay'
+            : 'an ungated inbox relay';
+        throw StateError(
+          '[SyntheticUser:$role] $which was not read once, served, with '
+          'Welcome ${_eventHandle(id)} among what it sent.',
+        );
+      }
+    }
+  }
+
+  /// The store's half: the gated route's own store holds the Welcome [id],
+  /// read past the gate, so what the gated relay served came from the store
+  /// it fronts and no other.
+  Future<void> _assertGatedStoreHolds(String id) async {
+    final store = await connectProbeRelay(gatedStoreProbeUrl);
+    try {
+      await store.firstWhere(
+        filter: <String, dynamic>{
+          'ids': <String>[id],
+        },
+        timeout: const Duration(seconds: 15),
+      );
+    } on TimeoutException {
+      throw StateError(
+        '[SyntheticUser:$role] the gated store does not hold Welcome '
+        '${_eventHandle(id)}: the gate was never exercised.',
+      );
+    } finally {
+      await store.dispose();
+    }
+  }
+
+  /// Decrypts [giftWrapJson] and applies its Welcome, returning the joined
+  /// circle.
   ///
   /// Returns `null` (rather than throwing) when this particular gift-wrap is
   /// not applicable — malformed, already accepted, or its single-use
@@ -408,19 +508,19 @@ class SyntheticUser {
   /// can fall through to the next candidate. Re-fetches and zeroes the
   /// identity secret per attempt (Security Rule #9: minimize exposure).
   Future<CircleWithMembersFfi?> _tryApplyGiftWrap(
-    TestRelayEvent giftWrap,
+    String id,
+    String giftWrapJson,
   ) async {
-    final giftWrapJson = jsonEncode(giftWrap.raw);
     final secret = await user.getSecretBytes();
     InvitationFfi? invitation;
     try {
-      invitation = await user.circleManager.processGiftWrappedInvitation(
+      invitation = (await user.circleManager.processGiftWrappedInvitation(
         identitySecretBytes: secret,
         giftWrapEventJson: giftWrapJson,
-      );
+      )).invitation;
     } on Object catch (e) {
       debugPrint(
-        '[SyntheticUser:$role] gift-wrap ${_eventHandle(giftWrap.id)} '
+        '[SyntheticUser:$role] gift-wrap ${_eventHandle(id)} '
         'did not process (${e.runtimeType}); trying another',
       );
     } finally {
