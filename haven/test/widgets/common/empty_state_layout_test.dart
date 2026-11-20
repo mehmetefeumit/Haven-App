@@ -95,7 +95,7 @@ void main() {
         tester,
         const HavenEmptyState(
           title: 'Add circle members',
-          message: 'Search by ID or scan their QR code to add members.',
+          message: 'Search by public key or scan their QR code to add members.',
           icon: Icons.person_add,
         ),
         bottomInset: _keyboardInset,
@@ -111,7 +111,7 @@ void main() {
         tester,
         const HavenEmptyState(
           title: 'Add circle members',
-          message: 'Search by ID or scan their QR code to add members.',
+          message: 'Search by public key or scan their QR code to add members.',
           icon: Icons.person_add,
         ),
         bottomInset: _keyboardInset,
@@ -129,7 +129,7 @@ void main() {
         tester,
         const HavenEmptyState(
           title: 'Add circle members',
-          message: 'Search by ID or scan their QR code to add members.',
+          message: 'Search by public key or scan their QR code to add members.',
           icon: Icons.person_add,
         ),
         bottomInset: _keyboardInset,
@@ -178,7 +178,7 @@ void main() {
         tester,
         const HavenEmptyState(
           title: 'Add circle members',
-          message: 'Search by ID or scan their QR code to add members.',
+          message: 'Search by public key or scan their QR code to add members.',
           icon: Icons.person_add,
         ),
       );
@@ -191,7 +191,7 @@ void main() {
       final slot = tester.getRect(find.byType(HavenEmptyState));
       final icon = tester.getRect(find.byIcon(Icons.person_add));
       final message = tester.getRect(
-        find.text('Search by ID or scan their QR code to add members.'),
+        find.text('Search by public key or scan their QR code to add members.'),
       );
       final contentMid = (icon.top + message.bottom) / 2;
 

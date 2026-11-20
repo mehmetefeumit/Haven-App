@@ -2,6 +2,7 @@
 ///
 /// Verifies that:
 /// - Collapsed state shows placeholder or selected circle name
+/// - The trigger keeps one height with or without a selection
 /// - Tapping trigger opens/closes the dropdown
 /// - Selecting a circle updates the provider and closes the dropdown
 /// - Tapping a selected circle deselects it
@@ -21,6 +22,7 @@ import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/circles/create_circle_page.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/widgets/circles/circle_selector.dart';
 
 import '../../mocks/mock_circle_service.dart';
@@ -101,6 +103,85 @@ void main() {
 
       expect(find.text('Family'), findsOneWidget);
       expect(find.text('Select a circle'), findsNothing);
+    });
+
+    group('trigger row height', () {
+      // The trigger's InkWell is the press highlight the user sees; it must
+      // not jump in height when a selection replaces the placeholder.
+      Future<Size> triggerSize(
+        WidgetTester tester, {
+        required Circle? selected,
+        required double scale,
+        required TextDirection direction,
+      }) async {
+        final circle =
+            selected ?? TestCircleFactory.createCircle(displayName: 'Family');
+        await tester.pumpWidget(
+          ProviderScope(
+            key: UniqueKey(),
+            overrides: [
+              circleServiceProvider.overrideWithValue(
+                MockCircleService(circles: [circle]),
+              ),
+              selectedCircleProvider.overrideWith((ref) => selected),
+            ],
+            child: MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              builder: (context, child) => MediaQuery(
+                data: MediaQuery.of(
+                  context,
+                ).copyWith(textScaler: TextScaler.linear(scale)),
+                child: Directionality(textDirection: direction, child: child!),
+              ),
+              home: const Scaffold(body: CircleSelector()),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        return tester.getSize(
+          find.ancestor(
+            of: find.byIcon(LucideIcons.chevronDown),
+            matching: find.byType(InkWell),
+          ),
+        );
+      }
+
+      for (final scale in [1.0, 2.0]) {
+        for (final direction in TextDirection.values) {
+          testWidgets('is the same with and without a selection '
+              '(text scale $scale, ${direction.name})', (tester) async {
+            // Narrow enough that a wrapping label at 2x would show.
+            tester.view.physicalSize = const Size(320, 640);
+            tester.view.devicePixelRatio = 1;
+            addTearDown(tester.view.reset);
+
+            final placeholder = await triggerSize(
+              tester,
+              selected: null,
+              scale: scale,
+              direction: direction,
+            );
+            final selected = await triggerSize(
+              tester,
+              selected: TestCircleFactory.createCircle(displayName: 'Family'),
+              scale: scale,
+              direction: direction,
+            );
+
+            expect(placeholder.height, selected.height);
+            expect(placeholder.height, greaterThanOrEqualTo(48));
+            // The collapsed sheet sizes itself from this derivation.
+            expect(
+              CircleSelector.triggerHeight(
+                tester.element(find.byType(CircleSelector)),
+              ),
+              selected.height,
+            );
+          });
+        }
+      }
     });
 
     testWidgets('tapping trigger opens dropdown and shows circle list', (
@@ -518,8 +599,9 @@ void main() {
       'emoji-prefixed circle name shows emoji grapheme in avatar, not "?"',
       (tester) async {
         // '🎉 Party' — '🎉' is a surrogate pair; [0] gives a lone surrogate.
-        final testCircle =
-            TestCircleFactory.createCircle(displayName: '🎉 Party');
+        final testCircle = TestCircleFactory.createCircle(
+          displayName: '🎉 Party',
+        );
         final mockService = MockCircleService(circles: [testCircle]);
 
         await tester.pumpWidget(
@@ -573,8 +655,7 @@ void main() {
     testWidgets(
       'Cyrillic circle name shows uppercased first Cyrillic letter in avatar',
       (tester) async {
-        final testCircle =
-            TestCircleFactory.createCircle(displayName: 'Семья');
+        final testCircle = TestCircleFactory.createCircle(displayName: 'Семья');
         final mockService = MockCircleService(circles: [testCircle]);
 
         await tester.pumpWidget(

@@ -22,8 +22,8 @@ import 'package:haven/src/services/member_directory_service.dart';
 /// The three refusals are deliberately separate. "Already in this circle" is
 /// literally true of the user themselves, and was the only thing the shipped
 /// code could say about their own key — which is why a user who pasted their
-/// own ID was told something true, unhelpful, and indistinguishable from the
-/// ordinary case.
+/// own public key was told something true, unhelpful, and indistinguishable
+/// from the ordinary case.
 enum MemberPickState {
   /// Can be added.
   selectable,

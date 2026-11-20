@@ -1,16 +1,15 @@
 /// Map-style selection page.
 ///
-/// Lets the user pick the basemap style and shows two live, theme-aware
-/// previews of the current choice — one zoomed into a city, one into nature —
-/// so the difference between styles is visible at a glance. "Minimal" follows
-/// the app's light/dark theme; the other styles render the same way in both.
+/// Lets the user pick the basemap style and shows two previews of the current
+/// choice — one zoomed into a city, one into nature — so the difference between
+/// styles is visible at a glance. "Minimal" follows the app's light/dark theme;
+/// the other styles look the same in both.
 ///
-/// Every style's previews for both scenes are kept mounted (via [IndexedStack])
-/// while the page is open, so all tiles load on entry and switching styles
-/// repaints an already-loaded map instead of refetching — switching is instant.
-/// Leaving the page disposes the previews, freeing the tile memory immediately
-/// (tighter than waiting for an app-background event, and it never touches the
-/// tile cache shared with the real map).
+/// The previews are images bundled with the app, one per style and scene
+/// (rendered by `scripts/generate_map_style_previews.sh`), so opening the page
+/// makes no network request and costs no tile credits. Every image the radio
+/// list can switch to is decoded when the page opens, so a tap repaints from
+/// the image cache in the same frame.
 ///
 /// Copy is deliberately cartographic, never privacy vocabulary: changing the
 /// map's appearance does not change who can see the user's location, so the
@@ -18,51 +17,42 @@
 /// icons that would imply otherwise.
 library;
 
-import 'package:flutter/foundation.dart';
+import 'dart:async';
+
 import 'package:flutter/material.dart';
-import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/constants/tiles.dart';
 import 'package:haven/src/providers/map_style_provider.dart';
-import 'package:haven/src/providers/tile_cache_provider.dart';
-import 'package:haven/src/providers/tile_http_client_provider.dart';
 import 'package:haven/src/widgets/map/map_attribution.dart';
-import 'package:latlong2/latlong.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Centre of the city preview: the canal ring of Amsterdam, Netherlands.
+/// A fixed scene every style is previewed over.
 ///
-/// A dense, water-laced city core. Zoomed in this close, "Detailed" fills with
-/// place and shop labels, tram lines, and building footprints that "Minimal"
-/// deliberately leaves out — so the difference is obvious at a glance.
-const LatLng _kCityPreviewCenter = LatLng(52.3676, 4.8895);
+/// Each scene's centre and zoom, and why they were chosen, are defined once, in
+/// `scripts/generate_map_style_previews.sh`, which renders the bundled images.
+enum MapStylePreviewScene {
+  /// A dense city core: street, place and shop labels set the styles apart.
+  city,
 
-/// City preview zoom: close enough that "Detailed" renders legible street
-/// names, place labels, and shop POIs which "Minimal" omits — at a lower zoom
-/// the labels are too sparse to tell the styles apart.
-const double _kCityPreviewZoom = 17;
+  /// Lake, forest, trails and peaks: terrain and paths set the styles apart.
+  nature,
+}
 
-/// Centre of the nature preview: Lake Louise, Banff National Park, Canada.
+/// Bundled preview image of [config] over [scene].
 ///
-/// A glacial lake ringed by forest, hiking trails, and named peaks (Mount
-/// Victoria, Fairview). Zoomed in this close, "Detailed" and "Outdoors" show
-/// the water, woodland, paths, and summits that "Minimal" renders as a calm
-/// empty canvas. Deliberately a different country from the city preview.
-///
-/// The longitude sits ~half a preview-width east of the lake's eastern tip
-/// (which is near -116.2200) so the frame leans onto the wooded shoreline,
-/// Chateau grounds, and trailheads rather than centring on open water — more
-/// land, and more trail labels, in view.
-const LatLng _kNaturePreviewCenter = LatLng(51.4163, -116.2157);
+/// Named by [TileProviderConfig.id], so every config
+/// [MapStyleSelection.resolve] can return has exactly one image per scene and
+/// there is no second style-to-image mapping to drift.
+String mapStylePreviewAsset(
+  TileProviderConfig config,
+  MapStylePreviewScene scene,
+) => 'assets/map_style_previews/${config.id}_${scene.name}.webp';
 
-/// Nature preview zoom: close enough that "Outdoors" resolves individual
-/// named trails, the shoreline, and labelled peaks — at a lower zoom the trail
-/// network blurs together and reads no differently from "Minimal".
-const double _kNaturePreviewZoom = 16;
-
-/// Height of each preview box.
-const double _kPreviewHeight = 180;
+/// Height of each preview box. The generator renders the images at this
+/// logical height so the map's labels appear at their native size.
+@visibleForTesting
+const double kMapStylePreviewHeight = 180;
 
 /// User-visible metadata for a single map-style choice.
 ///
@@ -133,23 +123,68 @@ String mapStyleLabel(AppLocalizations l10n, MapStyleSelection selection) {
   return _options.first.title(l10n);
 }
 
-/// Page presenting the map-style options as a radio group with a live preview.
-class MapStyleSettingsPage extends ConsumerWidget {
+/// The selections the page's radio list offers, in display order.
+@visibleForTesting
+List<MapStyleSelection> get selectableMapStyles => [
+  for (final option in _options) option.selection,
+];
+
+String _sceneLabel(AppLocalizations l10n, MapStylePreviewScene scene) =>
+    switch (scene) {
+      MapStylePreviewScene.city => l10n.mapStylePreviewCity,
+      MapStylePreviewScene.nature => l10n.mapStylePreviewNature,
+    };
+
+/// The decode-sized provider for one preview. The page and its precache build
+/// it the same way, so both resolve to the same image-cache key.
+ImageProvider _previewImage(
+  BuildContext context,
+  TileProviderConfig config,
+  MapStylePreviewScene scene,
+) => ResizeImage.resizeIfNeeded(
+  null,
+  (kMapStylePreviewHeight * MediaQuery.devicePixelRatioOf(context)).round(),
+  AssetImage(mapStylePreviewAsset(config, scene)),
+);
+
+/// Page presenting the map-style options as a radio group with a preview.
+class MapStyleSettingsPage extends ConsumerStatefulWidget {
   /// Creates the map-style settings page.
   const MapStyleSettingsPage({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<MapStyleSettingsPage> createState() =>
+      _MapStyleSettingsPageState();
+}
+
+class _MapStyleSettingsPageState extends ConsumerState<MapStyleSettingsPage> {
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Without this, the first tap on each style paints an empty box for the
+    // frames its asset takes to decode.
+    final brightness = Theme.of(context).brightness;
+    for (final option in _options) {
+      for (final scene in MapStylePreviewScene.values) {
+        final config = option.selection.resolve(brightness);
+        unawaited(
+          precacheImage(_previewImage(context, config, scene), context),
+        );
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
     final selected = ref.watch(mapStyleControllerProvider);
-    final textTheme = Theme.of(context).textTheme;
-    final colorScheme = Theme.of(context).colorScheme;
-
-    // Index of the selected style within [_options]; drives which mounted
-    // preview each IndexedStack paints. Falls back to the first option for a
-    // pinned selection not exposed as a row (mirrors [mapStyleLabel]).
-    final selectedIndex = _options.indexWhere((o) => o.selection == selected);
-    final previewIndex = selectedIndex < 0 ? 0 : selectedIndex;
+    final theme = Theme.of(context);
+    final textTheme = theme.textTheme;
+    final colorScheme = theme.colorScheme;
+    // Resolved exactly as the real map resolves it, so a pinned selection the
+    // list does not offer still previews what the map shows.
+    final config = selected.resolve(theme.brightness);
+    final styleLabel = mapStyleLabel(l10n, selected);
 
     return Scaffold(
       appBar: AppBar(title: Text(l10n.mapStyleTitle)),
@@ -187,34 +222,31 @@ class MapStyleSettingsPage extends ConsumerWidget {
                       ),
                     ),
                   ),
-                  const SizedBox(height: 12),
-                  Text(
-                    l10n.mapStylePreviewCity,
-                    style: textTheme.labelMedium?.copyWith(
-                      color: colorScheme.onSurfaceVariant,
+                  for (final scene in MapStylePreviewScene.values) ...[
+                    SizedBox(
+                      height: scene == MapStylePreviewScene.values.first
+                          ? 12
+                          : 20,
                     ),
-                  ),
-                  const SizedBox(height: 6),
-                  _PreviewStack(
-                    index: previewIndex,
-                    center: _kCityPreviewCenter,
-                    zoom: _kCityPreviewZoom,
-                    label: l10n.mapStylePreviewCity,
-                  ),
-                  const SizedBox(height: 20),
-                  Text(
-                    l10n.mapStylePreviewNature,
-                    style: textTheme.labelMedium?.copyWith(
-                      color: colorScheme.onSurfaceVariant,
+                    Text(
+                      _sceneLabel(l10n, scene),
+                      style: textTheme.labelMedium?.copyWith(
+                        color: colorScheme.onSurfaceVariant,
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 6),
-                  _PreviewStack(
-                    index: previewIndex,
-                    center: _kNaturePreviewCenter,
-                    zoom: _kNaturePreviewZoom,
-                    label: l10n.mapStylePreviewNature,
-                  ),
+                    const SizedBox(height: 6),
+                    _MapStylePreview(
+                      image: _previewImage(context, config, scene),
+                      semanticLabel: l10n.mapStylePreviewSemantics(
+                        _sceneLabel(l10n, scene),
+                        styleLabel,
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 4),
+                  // The images are produced from OpenStreetMap data in
+                  // Stadia's styles, so they carry the real map's credits.
+                  StaticMapAttribution(config: config),
                 ],
               ),
             ),
@@ -225,187 +257,30 @@ class MapStyleSettingsPage extends ConsumerWidget {
   }
 }
 
-/// A vertical [IndexedStack] of one [_MapStylePreview] per style for a single
-/// scene ([center]/[zoom]/[label]).
-///
-/// All styles are built and laid out (so flutter_map loads and caches each
-/// style's tiles as soon as the page opens), but only [index] is painted.
-/// Switching the selected style just changes which already-loaded child paints,
-/// so there is no refetch and no flicker. The maps dispose when the page is
-/// left, freeing the tile memory.
-class _PreviewStack extends StatelessWidget {
-  const _PreviewStack({
-    required this.index,
-    required this.center,
-    required this.zoom,
-    required this.label,
-  });
+/// One bordered, rounded preview box showing [image].
+class _MapStylePreview extends StatelessWidget {
+  const _MapStylePreview({required this.image, required this.semanticLabel});
 
-  final int index;
-  final LatLng center;
-  final double zoom;
-  final String label;
+  final ImageProvider image;
+  final String semanticLabel;
 
   @override
   Widget build(BuildContext context) {
-    return IndexedStack(
-      index: index,
-      children: [
-        for (final option in _options)
-          _MapStylePreview(
-            selection: option.selection,
-            center: center,
-            zoom: zoom,
-            label: label,
-          ),
-      ],
-    );
-  }
-}
-
-/// A live, non-interactive preview of how the map looks for [selection] over a
-/// fixed scene ([center]/[zoom], named by [label] e.g. "City"/"Nature").
-///
-/// Renders a small fixed-camera [FlutterMap] using the same certificate-pinned
-/// HTTP client, cache, and attribution as the real map, resolved against the
-/// current theme brightness so "Minimal" previews light or dark accordingly.
-/// When no Stadia API key is configured (debug/test builds) it shows a neutral
-/// placeholder instead of broken tiles — and never touches the network.
-class _MapStylePreview extends ConsumerWidget {
-  const _MapStylePreview({
-    required this.selection,
-    required this.center,
-    required this.zoom,
-    required this.label,
-  });
-
-  final MapStyleSelection selection;
-
-  /// Camera centre of this preview scene.
-  final LatLng center;
-
-  /// Camera zoom of this preview scene.
-  final double zoom;
-
-  /// Short scene name ("City"/"Nature") used in the accessibility label and to
-  /// key the two scenes' previews apart.
-  final String label;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final colorScheme = Theme.of(context).colorScheme;
-    final config = selection.resolve(Theme.of(context).brightness);
-
     // One Container so the border decoration paints BEFORE the clip — a
     // ClipRRect wrapping a bordered child would shave off the stroke's outer
-    // half at the corners. Per-branch Semantics live in the two builders below
-    // (the live map is an image; the placeholder is not).
+    // half at the corners.
     return Container(
-      height: _kPreviewHeight,
+      height: kMapStylePreviewHeight,
       width: double.infinity,
       clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: colorScheme.outlineVariant),
+        border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
       ),
-      child: config.apiKeyConfigured
-          ? _buildLiveMap(context, ref, config)
-          : _buildPlaceholder(context),
-    );
-  }
-
-  Widget _buildLiveMap(
-    BuildContext context,
-    WidgetRef ref,
-    TileProviderConfig config,
-  ) {
-    final l10n = AppLocalizations.of(context);
-    // Long-lived, certificate-pinned client shared with the real map. Read only
-    // on this (key-configured) path so debug/test builds never construct or hit
-    // the network through the preview.
-    final tileHttpClient = ref.watch(tileHttpClientProvider);
-
-    return Semantics(
-      image: true,
-      label: l10n.mapStylePreviewSemantics(
-        label,
-        mapStyleLabel(l10n, selection),
-      ),
-      child: FlutterMap(
-        // Key by scene + style so a theme flip (Minimal light↔dark changes
-        // config.id) rebuilds with the right tiles, and the two scenes keep
-        // distinct keys via [label].
-        key: ValueKey('map_preview_${label}_${config.id}'),
-        options: MapOptions(
-          initialCenter: center,
-          initialZoom: zoom,
-          // A static showcase: no panning, zooming, or rotation.
-          interactionOptions: const InteractionOptions(
-            flags: InteractiveFlag.none,
-          ),
-        ),
-        children: [
-          TileLayer(
-            urlTemplate: config.urlTemplate,
-            additionalOptions: config.additionalOptions,
-            userAgentPackageName: config.userAgentPackageName,
-            maxNativeZoom: config.maxNativeZoom,
-            retinaMode: RetinaMode.isHighDensity(context),
-            tileProvider: NetworkTileProvider(
-              httpClient: tileHttpClient,
-              headers: <String, String>{
-                if (config.userAgentHeader != null)
-                  'User-Agent': config.userAgentHeader!,
-              },
-              // !kDebugMode is `false` in debug/test (matches the default) but
-              // genuinely suppresses transient 403/404/429 tile errors in
-              // release, so the redundancy check is a false positive here.
-              // ignore: avoid_redundant_argument_values
-              silenceExceptions: !kDebugMode,
-              // Use the encrypted SQLCipher tile cache. Initialised at startup
-              // in main.dart; falls back to live-only fetching if init failed.
-              cachingProvider: ref.watch(tileCachingProviderProvider),
-            ),
-            // Never log the tile URL (it carries the api_key) — only the type.
-            errorTileCallback: (tile, error, stackTrace) =>
-                debugPrint('Preview tile load error: ${error.runtimeType}'),
-            evictErrorTileStrategy: EvictErrorTileStrategy.notVisible,
-          ),
-          // Same mandatory Stadia/OSM attribution + ODbL link as the real map.
-          MapAttribution(config: config),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildPlaceholder(BuildContext context) {
-    final l10n = AppLocalizations.of(context);
-    final colorScheme = Theme.of(context).colorScheme;
-    final textTheme = Theme.of(context).textTheme;
-    // Not an image and not a real preview, so it must NOT inherit the live
-    // branch's image/"Map preview: <style>" semantics. Collapse the inner icon
-    // + caption into one neutral announcement.
-    return Semantics(
-      container: true,
-      excludeSemantics: true,
-      label: l10n.mapStylePreviewUnavailableSemantics,
-      child: ColoredBox(
-        color: colorScheme.surfaceContainerHighest,
-        child: Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(LucideIcons.map, color: colorScheme.onSurfaceVariant),
-              const SizedBox(height: 8),
-              Text(
-                l10n.mapStylePreviewUnavailableLabel,
-                style: textTheme.bodySmall?.copyWith(
-                  color: colorScheme.onSurfaceVariant,
-                ),
-              ),
-            ],
-          ),
-        ),
+      child: Image(
+        image: image,
+        fit: BoxFit.cover,
+        semanticLabel: semanticLabel,
       ),
     );
   }

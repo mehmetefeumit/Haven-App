@@ -166,7 +166,7 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get onboardingImportInvalid =>
-      'Это не похоже на действительный ключ для восстановления. Проверьте и попробуйте снова.';
+      'Это не похоже на действительный секретный ключ. Проверьте и попробуйте снова.';
 
   @override
   String get onboardingImportError =>
@@ -680,14 +680,6 @@ class AppLocalizationsRu extends AppLocalizations {
   }
 
   @override
-  String get mapStylePreviewUnavailableSemantics =>
-      'Предпросмотр карты недоступен в этой сборке';
-
-  @override
-  String get mapStylePreviewUnavailableLabel =>
-      'Живой предпросмотр доступен в релизных сборках';
-
-  @override
   String get aboutTitle => 'О приложении';
 
   @override
@@ -810,22 +802,23 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get createCircleEmptyMessage =>
-      'Найдите по ID или отсканируйте QR-код, чтобы добавить участников.';
+      'Найдите по публичному ключу или отсканируйте QR-код, чтобы добавить участников.';
 
   @override
   String get createCircleNoValidMembers =>
       'Нет подходящих участников для приглашения';
 
   @override
-  String get createCircleNoIdInQr => 'В QR-коде не найден действительный ID';
+  String get createCircleNoIdInQr =>
+      'В QR-коде не найден действительный публичный ключ';
 
   @override
   String get memberLookupNotFound =>
-      'Аккаунт Haven с этим ID пока не найден. Если этот человек только что настроил Haven, попробуйте снова через минуту.';
+      'Аккаунт Haven с этим публичным ключом пока не найден. Если этот человек только что настроил Haven, попробуйте снова через минуту.';
 
   @override
   String get memberLookupIncomplete =>
-      'Не удалось завершить поиск по этому ID. Проверьте соединение и попробуйте снова.';
+      'Не удалось завершить поиск по этому публичному ключу. Проверьте соединение и попробуйте снова.';
 
   @override
   String get createCircleSomethingWentWrong => 'Что-то пошло не так';
@@ -1153,7 +1146,7 @@ class AppLocalizationsRu extends AppLocalizations {
       'Haven сейчас не может пригласить этого человека. Попросите его открыть Haven, а затем повторите попытку.';
 
   @override
-  String get memberSearchHint => 'Введите ID участника...';
+  String get memberSearchHint => 'Введите публичный ключ...';
 
   @override
   String get memberSearchPasteTooltip => 'Вставить из буфера обмена';
@@ -1166,10 +1159,10 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get memberSearchHelper =>
-      'Попросите у контактов их QR-код или ID в Haven';
+      'Попросите у контактов их публичный ключ или QR-код';
 
   @override
-  String get memberSearchNoValidId => 'Действительный ID Haven не найден';
+  String get memberSearchNoValidId => 'Действительный публичный ключ не найден';
 
   @override
   String get memberSearchAlreadyAdded => 'Участник уже добавлен';
@@ -1200,7 +1193,7 @@ class AppLocalizationsRu extends AppLocalizations {
   }
 
   @override
-  String get memberPickerReasonSelf => 'Это ваш собственный ID';
+  String get memberPickerReasonSelf => 'Это ваш собственный публичный ключ';
 
   @override
   String get memberPickerReadPublicKey => 'Озвучить публичный ключ';
@@ -1219,10 +1212,6 @@ class AppLocalizationsRu extends AppLocalizations {
   String memberPickerCollisionCircleLabel(String circleName) {
     return 'В круге «$circleName»';
   }
-
-  @override
-  String get memberPickerStrangerLookupNote =>
-      'Haven запросил опубликованный профиль этого человека у реле — не более чем у двух. Каждое реле, к которому Haven обратился, видит, что это устройство только что спросило об этом ключе, но в запросе нет криптографической подписи, поэтому он не связан с вашей личностью в Haven. Если в профиле указано фото, Haven скачивает это фото с сервера, выбранного этим человеком, а этот сервер может перенаправить запрос на другой сервер. Каждый из них видит IP-адрес этого устройства.';
 
   @override
   String get memberPickerStrangerLookingUp => 'Ищем опубликованный профиль…';
@@ -1254,7 +1243,7 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String invitationCardInvitedBySemantics(String inviter) {
-    return 'Приглашает криптографический идентификатор $inviter';
+    return 'Приглашение от публичного ключа $inviter';
   }
 
   @override
@@ -1758,30 +1747,6 @@ class AppLocalizationsRu extends AppLocalizations {
   String get qrCodeYourPublicKeyLabel => 'Ваш публичный ключ';
 
   @override
-  String get reachabilityChecking => 'Готовимся к получению приглашений…';
-
-  @override
-  String get reachabilityReady => 'Вас можно пригласить';
-
-  @override
-  String get reachabilityCantCheck =>
-      'Сейчас не удаётся проверить, могут ли другие вас пригласить';
-
-  @override
-  String get reachabilityNotReady => 'Другие пока не могут вас пригласить';
-
-  @override
-  String get reachabilityNoRelays =>
-      'Другие не смогут вас пригласить, пока вы не добавите реле';
-
-  @override
-  String get reachabilityOpenRelaySettings => 'Настройки реле';
-
-  @override
-  String get reachabilityAwaitingReset =>
-      'Другие смогут вас пригласить, когда вы ответите на уведомление о сбросе настроек реле';
-
-  @override
   String get qrCodeWhatIsThisTitle => 'Что это?';
 
   @override
@@ -1869,7 +1834,7 @@ class AppLocalizationsRu extends AppLocalizations {
   String get npubQrScanLabel => 'Отсканируйте, чтобы добавить меня';
 
   @override
-  String get npubQrSemanticsLabel => 'QR-код вашей публичной личности';
+  String get npubQrSemanticsLabel => 'QR-код вашего публичного ключа';
 
   @override
   String get photoHeaderRemoveTitle => 'Удалить фото профиля?';

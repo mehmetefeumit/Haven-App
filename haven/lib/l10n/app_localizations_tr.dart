@@ -166,7 +166,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get onboardingImportInvalid =>
-      'Bu geçerli bir yedek anahtara benzemiyor. Lütfen kontrol edip tekrar deneyin.';
+      'Bu geçerli bir gizli anahtara benzemiyor. Lütfen kontrol edip tekrar deneyin.';
 
   @override
   String get onboardingImportError =>
@@ -674,14 +674,6 @@ class AppLocalizationsTr extends AppLocalizations {
   }
 
   @override
-  String get mapStylePreviewUnavailableSemantics =>
-      'Harita önizlemesi bu sürümde kullanılamaz';
-
-  @override
-  String get mapStylePreviewUnavailableLabel =>
-      'Anlık önizleme yayın sürümlerinde görünür';
-
-  @override
   String get aboutTitle => 'Hakkında';
 
   @override
@@ -801,21 +793,22 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get createCircleEmptyMessage =>
-      'Üye eklemek için kimliğe göre arayın ya da QR kodlarını tarayın.';
+      'Üye eklemek için açık anahtarla arayın ya da QR kodlarını tarayın.';
 
   @override
   String get createCircleNoValidMembers => 'Davet edilecek geçerli üye yok';
 
   @override
-  String get createCircleNoIdInQr => 'QR kodunda geçerli bir kimlik bulunamadı';
+  String get createCircleNoIdInQr =>
+      'QR kodunda geçerli bir açık anahtar bulunamadı';
 
   @override
   String get memberLookupNotFound =>
-      'Bu kimliğe ait bir Haven hesabı henüz bulunamadı. Bu kişi Haven\'ı az önce kurduysa bir dakika sonra tekrar deneyin.';
+      'Bu açık anahtara ait bir Haven hesabı henüz bulunamadı. Bu kişi Haven\'ı az önce kurduysa bir dakika sonra tekrar deneyin.';
 
   @override
   String get memberLookupIncomplete =>
-      'Bu kimliğin denetimi tamamlanamadı. Bağlantınızı kontrol edip tekrar deneyin.';
+      'Bu açık anahtarın denetimi tamamlanamadı. Bağlantınızı kontrol edip tekrar deneyin.';
 
   @override
   String get createCircleSomethingWentWrong => 'Bir sorun oluştu';
@@ -1122,7 +1115,7 @@ class AppLocalizationsTr extends AppLocalizations {
       'Haven şu anda bu kişiyi davet edemiyor. Haven\'ı açmasını isteyin, ardından tekrar deneyin.';
 
   @override
-  String get memberSearchHint => 'Üye kimliğini girin...';
+  String get memberSearchHint => 'Açık anahtarı girin...';
 
   @override
   String get memberSearchPasteTooltip => 'Panodan yapıştır';
@@ -1135,10 +1128,10 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get memberSearchHelper =>
-      'Kişilerinizden Haven QR kodunu ya da kimliğini isteyin';
+      'Kişilerinizden açık anahtarlarını ya da QR kodlarını isteyin';
 
   @override
-  String get memberSearchNoValidId => 'Geçerli bir Haven kimliği bulunamadı';
+  String get memberSearchNoValidId => 'Geçerli bir açık anahtar bulunamadı';
 
   @override
   String get memberSearchAlreadyAdded => 'Üye zaten eklendi';
@@ -1169,7 +1162,7 @@ class AppLocalizationsTr extends AppLocalizations {
   }
 
   @override
-  String get memberPickerReasonSelf => 'Bu sizin kendi kimliğiniz';
+  String get memberPickerReasonSelf => 'Bu sizin kendi açık anahtarınız';
 
   @override
   String get memberPickerReadPublicKey => 'Açık anahtarı sesli oku';
@@ -1189,10 +1182,6 @@ class AppLocalizationsTr extends AppLocalizations {
   String memberPickerCollisionCircleLabel(String circleName) {
     return 'Çevre: $circleName';
   }
-
-  @override
-  String get memberPickerStrangerLookupNote =>
-      'Haven, bu kişinin yayımlanmış profilini bir aktarıcıya — en fazla ikisine — sordu. Sorulan her aktarıcı, bu cihazın az önce bu anahtarı sorduğunu görür; ama istek imza taşımadığı için Haven kimliğinize bağlı değildir. Profilde fotoğraf varsa Haven fotoğrafı bu kişinin seçtiği sunucudan indirir; o sunucu da indirmeyi başka bir sunucuya yönlendirebilir. Bu sunucuların her biri, bu cihazın ağ adresini (IP adresini) görür.';
 
   @override
   String get memberPickerStrangerLookingUp => 'Yayımlanmış profil aranıyor…';
@@ -1224,7 +1213,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String invitationCardInvitedBySemantics(String inviter) {
-    return 'Kriptografik tanımlayıcı $inviter tarafından davet edildi';
+    return 'Açık anahtar $inviter tarafından davet edildi';
   }
 
   @override
@@ -1722,31 +1711,6 @@ class AppLocalizationsTr extends AppLocalizations {
   String get qrCodeYourPublicKeyLabel => 'Açık anahtarınız';
 
   @override
-  String get reachabilityChecking =>
-      'Davet alabilmeniz için hazırlık yapılıyor…';
-
-  @override
-  String get reachabilityReady => 'Davet edilmeye hazırsınız';
-
-  @override
-  String get reachabilityCantCheck =>
-      'Başkalarının sizi davet edip edemeyeceği şu anda denetlenemiyor';
-
-  @override
-  String get reachabilityNotReady => 'Başkaları sizi henüz davet edemiyor';
-
-  @override
-  String get reachabilityNoRelays =>
-      'Bir aktarıcı ekleyene kadar başkaları sizi davet edemez';
-
-  @override
-  String get reachabilityOpenRelaySettings => 'Aktarıcı ayarları';
-
-  @override
-  String get reachabilityAwaitingReset =>
-      'Aktarıcı ayarları bilgilendirmesini geçtiğinizde başkaları sizi davet edebilecek';
-
-  @override
   String get qrCodeWhatIsThisTitle => 'Bu nedir?';
 
   @override
@@ -1834,7 +1798,7 @@ class AppLocalizationsTr extends AppLocalizations {
   String get npubQrScanLabel => 'Beni eklemek için tarayın';
 
   @override
-  String get npubQrSemanticsLabel => 'Açık kimliğiniz için QR kodu';
+  String get npubQrSemanticsLabel => 'Açık anahtarınız için QR kodu';
 
   @override
   String get photoHeaderRemoveTitle => 'Profil fotoğrafı kaldırılsın mı?';

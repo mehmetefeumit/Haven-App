@@ -1,4 +1,4 @@
-/// QR code scanner page for reading member IDs.
+/// QR code scanner page for reading a person's public key (npub).
 library;
 
 import 'package:flutter/material.dart';
@@ -8,10 +8,9 @@ import 'package:haven/src/utils/npub_validator.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
-/// QR code scanner for reading member IDs.
+/// QR code scanner for reading a person's public key (npub).
 ///
-/// Scans QR codes and extracts member ID values.
-/// Returns the scanned ID via [Navigator.pop].
+/// Returns the scanned npub via [Navigator.pop].
 class QrScannerPage extends StatefulWidget {
   /// Creates a [QrScannerPage].
   const QrScannerPage({super.key});

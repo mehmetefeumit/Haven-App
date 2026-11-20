@@ -164,7 +164,7 @@ class AppLocalizationsHi extends AppLocalizations {
 
   @override
   String get onboardingImportInvalid =>
-      'यह एक मान्य बैकअप कुंजी नहीं लगती। कृपया जाँचें और फिर कोशिश करें।';
+      'यह एक मान्य गुप्त कुंजी नहीं लगती। कृपया जाँचें और फिर कोशिश करें।';
 
   @override
   String get onboardingImportError =>
@@ -670,14 +670,6 @@ class AppLocalizationsHi extends AppLocalizations {
   }
 
   @override
-  String get mapStylePreviewUnavailableSemantics =>
-      'इस बिल्ड में मानचित्र पूर्वावलोकन उपलब्ध नहीं है';
-
-  @override
-  String get mapStylePreviewUnavailableLabel =>
-      'लाइव पूर्वावलोकन रिलीज़ बिल्ड में दिखता है';
-
-  @override
   String get aboutTitle => 'परिचय';
 
   @override
@@ -797,22 +789,23 @@ class AppLocalizationsHi extends AppLocalizations {
 
   @override
   String get createCircleEmptyMessage =>
-      'सदस्य जोड़ने के लिए ID से खोजें या उनका QR कोड स्कैन करें।';
+      'सदस्य जोड़ने के लिए सार्वजनिक कुंजी से खोजें या उनका QR कोड स्कैन करें।';
 
   @override
   String get createCircleNoValidMembers =>
       'आमंत्रित करने के लिए कोई मान्य सदस्य नहीं';
 
   @override
-  String get createCircleNoIdInQr => 'QR कोड में कोई मान्य ID नहीं मिली';
+  String get createCircleNoIdInQr =>
+      'QR कोड में कोई मान्य सार्वजनिक कुंजी नहीं मिली';
 
   @override
   String get memberLookupNotFound =>
-      'इस ID के लिए अभी तक कोई Haven खाता नहीं मिला। अगर उन्होंने अभी-अभी Haven सेट अप किया है, तो एक मिनट बाद फिर कोशिश करें।';
+      'इस सार्वजनिक कुंजी के लिए अभी तक कोई Haven खाता नहीं मिला। अगर उन्होंने अभी-अभी Haven सेट अप किया है, तो एक मिनट बाद फिर कोशिश करें।';
 
   @override
   String get memberLookupIncomplete =>
-      'इस ID की जाँच पूरी नहीं हो सकी। अपना कनेक्शन जाँचें और फिर कोशिश करें।';
+      'इस सार्वजनिक कुंजी की जाँच पूरी नहीं हो सकी। अपना कनेक्शन जाँचें और फिर कोशिश करें।';
 
   @override
   String get createCircleSomethingWentWrong => 'कुछ गड़बड़ हो गई';
@@ -1120,7 +1113,7 @@ class AppLocalizationsHi extends AppLocalizations {
       'Haven अभी उन्हें आमंत्रित नहीं कर सकता। उनसे Haven खोलने के लिए कहें, उसके बाद फिर कोशिश करें।';
 
   @override
-  String get memberSearchHint => 'सदस्य ID दर्ज करें...';
+  String get memberSearchHint => 'सार्वजनिक कुंजी दर्ज करें...';
 
   @override
   String get memberSearchPasteTooltip => 'क्लिपबोर्ड से पेस्ट करें';
@@ -1132,10 +1125,11 @@ class AppLocalizationsHi extends AppLocalizations {
   String get memberSearchScanTooltip => 'QR कोड स्कैन करें';
 
   @override
-  String get memberSearchHelper => 'संपर्कों से उनका Haven QR कोड या ID माँगें';
+  String get memberSearchHelper =>
+      'संपर्कों से उनकी सार्वजनिक कुंजी या QR कोड माँगें';
 
   @override
-  String get memberSearchNoValidId => 'कोई मान्य Haven ID नहीं मिली';
+  String get memberSearchNoValidId => 'कोई मान्य सार्वजनिक कुंजी नहीं मिली';
 
   @override
   String get memberSearchAlreadyAdded => 'सदस्य पहले से जोड़ा गया है';
@@ -1167,7 +1161,7 @@ class AppLocalizationsHi extends AppLocalizations {
   }
 
   @override
-  String get memberPickerReasonSelf => 'यह आपकी अपनी ID है';
+  String get memberPickerReasonSelf => 'यह आपकी अपनी सार्वजनिक कुंजी है';
 
   @override
   String get memberPickerReadPublicKey => 'सार्वजनिक कुंजी पढ़कर सुनाएँ';
@@ -1186,10 +1180,6 @@ class AppLocalizationsHi extends AppLocalizations {
   String memberPickerCollisionCircleLabel(String circleName) {
     return 'सर्कल: $circleName';
   }
-
-  @override
-  String get memberPickerStrangerLookupNote =>
-      'Haven ने इस व्यक्ति की प्रकाशित प्रोफ़ाइल एक रिले से माँगी — ज़्यादा से ज़्यादा दो रिले से। जिस भी रिले से पूछा गया, उसे दिखता है कि इस डिवाइस ने अभी-अभी इस कुंजी के बारे में पूछा है। लेकिन इस अनुरोध पर कोई डिजिटल हस्ताक्षर नहीं होता, इसलिए यह आपकी Haven पहचान से नहीं जुड़ता। अगर प्रोफ़ाइल में फ़ोटो है, तो Haven वह फ़ोटो उस सर्वर से डाउनलोड करता है जिसे इस व्यक्ति ने चुना है, और हो सकता है कि वह सर्वर डाउनलोड को किसी दूसरे सर्वर की ओर मोड़ दे। इनमें से हर सर्वर को इस डिवाइस का नेटवर्क (IP) पता दिखता है।';
 
   @override
   String get memberPickerStrangerLookingUp =>
@@ -1222,7 +1212,7 @@ class AppLocalizationsHi extends AppLocalizations {
 
   @override
   String invitationCardInvitedBySemantics(String inviter) {
-    return 'क्रिप्टोग्राफ़िक पहचानकर्ता $inviter द्वारा आमंत्रित';
+    return 'सार्वजनिक कुंजी $inviter द्वारा आमंत्रित';
   }
 
   @override
@@ -1721,30 +1711,6 @@ class AppLocalizationsHi extends AppLocalizations {
   String get qrCodeYourPublicKeyLabel => 'आपकी सार्वजनिक कुंजी';
 
   @override
-  String get reachabilityChecking => 'निमंत्रण पाने की तैयारी हो रही है…';
-
-  @override
-  String get reachabilityReady => 'निमंत्रण पाने के लिए तैयार';
-
-  @override
-  String get reachabilityCantCheck =>
-      'अभी जाँच नहीं हो पा रही कि दूसरे लोग आपको आमंत्रित कर सकते हैं या नहीं';
-
-  @override
-  String get reachabilityNotReady => 'दूसरे लोग अभी आपको आमंत्रित नहीं कर सकते';
-
-  @override
-  String get reachabilityNoRelays =>
-      'कोई रिले जोड़ने के बाद ही दूसरे लोग आपको आमंत्रित कर पाएँगे';
-
-  @override
-  String get reachabilityOpenRelaySettings => 'रिले सेटिंग्स';
-
-  @override
-  String get reachabilityAwaitingReset =>
-      'रिले सेटिंग्स वाली सूचना से आगे बढ़ने के बाद दूसरे लोग आपको आमंत्रित कर पाएँगे';
-
-  @override
   String get qrCodeWhatIsThisTitle => 'यह क्या है?';
 
   @override
@@ -1832,7 +1798,7 @@ class AppLocalizationsHi extends AppLocalizations {
   String get npubQrScanLabel => 'मुझे जोड़ने के लिए स्कैन करें';
 
   @override
-  String get npubQrSemanticsLabel => 'आपकी सार्वजनिक पहचान का QR कोड';
+  String get npubQrSemanticsLabel => 'आपकी सार्वजनिक कुंजी का QR कोड';
 
   @override
   String get photoHeaderRemoveTitle => 'प्रोफ़ाइल फ़ोटो हटाएँ?';

@@ -763,11 +763,13 @@ fn rule13_a_burst_never_pauses_with_a_pending_publish_outstanding() {
 
     let pause = pause_body(&session);
 
-    let resume =
-        fn_body(&session, "async fn resume_burst").expect("session.rs must define resume_burst");
+    let resume = with_pause_locked(
+        &session,
+        fn_body(&session, "async fn resume_burst").expect("session.rs must define resume_burst"),
+    );
     for (name, body) in [
         ("pause_subscriptions", pause.as_str()),
-        ("resume_burst", resume),
+        ("resume_burst", resume.as_str()),
     ] {
         let gauge = body
             .find("wait_publishes_drained")
@@ -4437,14 +4439,22 @@ fn every_wake_a_drive_runs_in_is_cut_at_the_burst_end() {
 /// The pause's whole body in the order it runs: `pause_subscriptions`, with
 /// the body of the `pause_locked` it delegates to spliced in where it calls it.
 fn pause_body(session: &str) -> String {
-    let wrapper = fn_body(session, "pub async fn pause_subscriptions(")
-        .expect("session.rs must define pause_subscriptions");
-    let Some(call) = wrapper.find("self.pause_locked(") else {
-        return wrapper.to_owned();
+    with_pause_locked(
+        session,
+        fn_body(session, "pub async fn pause_subscriptions(")
+            .expect("session.rs must define pause_subscriptions"),
+    )
+}
+
+/// `body` in the order it runs: the body of `pause_locked` spliced in where
+/// it calls it.
+fn with_pause_locked(session: &str, body: &str) -> String {
+    let Some(call) = body.find("self.pause_locked(") else {
+        return body.to_owned();
     };
     let locked = fn_body(session, "async fn pause_locked(")
-        .expect("pause_subscriptions delegates to a pause_locked session.rs must define");
-    format!("{}{locked}{}", &wrapper[..call], &wrapper[call..])
+        .expect("a caller delegates to a pause_locked session.rs must define");
+    format!("{}{locked}{}", &body[..call], &body[call..])
 }
 
 /// The body of `fn <name>` in `src`, brace-balanced, or `None`.

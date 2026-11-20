@@ -14,7 +14,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/services/relay_service.dart';
 
-/// What the readiness row and onboarding show.
+/// What onboarding's "Finishing setup…" wait reads.
 enum OwnReachability {
   /// No verdict yet, or a Retry is running.
   checking,

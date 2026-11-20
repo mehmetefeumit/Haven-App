@@ -78,7 +78,16 @@ instead. See `haven/DEVELOPMENT.md` → "Build APK".
 scripts/build_release.sh apk         # per-ABI release APKs (--split-per-abi) — the release artifacts
 scripts/build_release.sh appbundle   # Android App Bundle .aab (not used by the release pipeline)
 scripts/build_release.sh ios         # iOS release (no codesign)
+scripts/build_release.sh ipa         # iOS signed App Store IPA for TestFlight (BUILD_NUMBER required)
+scripts/build_release.sh version     # print the version arguments a build would use; builds nothing
 ```
+
+**Version:** `BUILD_NAME` (the release tag without its `v`, set by
+`release-build.yml`) is compiled into the app in full as
+`--dart-define=HAVEN_VERSION` (About page), and passed without its
+`-prerelease`/`+build` suffix as the native `--build-name`. Unset, both come
+from `pubspec.yaml`'s `version:`. Anything that is not a version is refused;
+`ci/check_release_version_stamp.sh` holds this.
 
 **Key source (first match wins):**
 - `haven/dart_defines/secrets.json` (gitignored; local dev), or
@@ -87,6 +96,13 @@ scripts/build_release.sh ios         # iOS release (no codesign)
 
 Refuses to build if the key is missing/empty/placeholder. Emits debug symbols to
 `haven/build/symbols/` (gitignored) — keep them to de-obfuscate crash reports.
+
+### `generate_map_style_previews.sh`
+
+Renders the Map style page's bundled preview images from Stadia's cacheable
+Static Maps endpoint with the same key. Billed per request, and storing the
+images depends on a paid Stadia plan: see `haven/DEVELOPMENT.md` → "Map-style
+previews" for the licensing, the exact command and the add-a-style checklist.
 
 ### `ci/check_no_committed_secrets.sh`
 

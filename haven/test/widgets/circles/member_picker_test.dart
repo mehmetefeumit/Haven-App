@@ -2077,11 +2077,9 @@ void main() {
         .where((c) => c.method == 'resolveTypedStrangerProfile')
         .length;
 
-    /// The typed row's one semantics label: the only one carrying the
-    /// lookup disclosure.
-    String rowLabel(WidgetTester tester) => _announcedLabels(tester)
-        .where((l) => l.contains(_l10n(tester).memberPickerStrangerLookupNote))
-        .single;
+    /// The typed row's one semantics label, which begins with [head].
+    String rowLabel(WidgetTester tester, String head) =>
+        _announcedLabels(tester).where((l) => l.startsWith(head)).single;
 
     testWidgets(
       'O1. a resolved npub shows the name over the trimmed key, and its '
@@ -2111,9 +2109,18 @@ void main() {
           'Distant Cousin',
           reason: 'the name, not the key, is the title',
         );
+        // Owner-directed 2026-11-16: no lookup note under the found person.
         expect(
-          find.descendant(of: row, matching: find.text(_short(_strangerNpub))),
-          findsOneWidget,
+          tester
+              .widgetList<Text>(
+                find.descendant(
+                  of: find.byWidget(tester.widget<ListTile>(row).subtitle!),
+                  matching: find.byType(Text),
+                ),
+              )
+              .map((t) => t.data),
+          [_short(_strangerNpub)],
+          reason: 'the trimmed key, and nothing more, beneath the name',
         );
         expect(downloads(profileService), [
           [_strangerHex],
@@ -2293,7 +2300,7 @@ void main() {
 
     testWidgets(
       'O9. looking up, found and not found are shown and spoken three '
-      'different ways, the disclosure last in each label',
+      'different ways, each label ending where its row does',
       (tester) async {
         final handle = tester.ensureSemantics();
         final gate = Completer<void>();
@@ -2307,25 +2314,24 @@ void main() {
           profileService: profileService,
         );
         final l10n = _l10n(tester);
-        final note = l10n.memberPickerStrangerLookupNote;
         final spokenKey = _isolated(chunkNpubForSpeech(_short(_strangerNpub)));
 
         await _type(tester, _strangerNpub);
-        final looking = rowLabel(tester);
+        final looking = rowLabel(tester, spokenKey);
         expect(find.text(l10n.memberPickerStrangerLookingUp), findsOneWidget);
         expect(
           looking,
-          [spokenKey, l10n.memberPickerStrangerLookingUp, note].join(', '),
+          [spokenKey, l10n.memberPickerStrangerLookingUp].join(', '),
         );
 
         gate.complete();
         await tester.pumpAndSettle();
-        final notFound = rowLabel(tester);
+        final notFound = rowLabel(tester, spokenKey);
         expect(find.text(l10n.memberPickerStrangerNotFound), findsOneWidget);
         expect(find.text(l10n.memberPickerStrangerLookingUp), findsNothing);
         expect(
           notFound,
-          [spokenKey, l10n.memberPickerStrangerNotFound, note].join(', '),
+          [spokenKey, l10n.memberPickerStrangerNotFound].join(', '),
         );
 
         // Found: a fresh lookup for the same key once the first is dropped.
@@ -2334,8 +2340,8 @@ void main() {
         profileService.strangerProfiles[_strangerNpub] = cousin;
         await _type(tester, _strangerNpub);
         await tester.pumpAndSettle();
-        final found = rowLabel(tester);
-        expect(found, [_isolated('Distant Cousin'), note].join(', '));
+        final found = rowLabel(tester, _isolated('Distant Cousin'));
+        expect(found, _isolated('Distant Cousin'));
         expect(find.text(l10n.memberPickerStrangerNotFound), findsNothing);
 
         expect({looking, notFound, found}, hasLength(3));

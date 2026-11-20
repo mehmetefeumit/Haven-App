@@ -117,7 +117,14 @@ scripts/build_release.sh apk         # -> build/app/outputs/flutter-apk/app-{arm
 scripts/build_release.sh appbundle   # -> build/app/outputs/bundle/release/app-release.aab
 scripts/build_release.sh ios         # iOS release (no codesign)
 scripts/build_release.sh ipa         # iOS signed App Store IPA for TestFlight (see below)
+scripts/build_release.sh version     # print the version arguments a build would use; builds nothing
 ```
+
+The version the app shows (About page, licence page) is compiled in by the
+wrapper as `--dart-define=HAVEN_VERSION`: the release tag's version in full
+(`BUILD_NAME`, see "Cutting a release"), or `pubspec.yaml`'s `version:` without
+its `+build` part when no tag is given. A build that bypasses the wrapper
+(`flutter run`, `flutter test`) shows `dev`.
 
 Why a wrapper and not a plain `flutter build`? `--dart-define`/`--obfuscate` are
 consumed by the `flutter` CLI *before* Gradle/Xcode run, and Flutter exposes no
@@ -137,6 +144,142 @@ run: `flutter run --dart-define-from-file=dart_defines/secrets.json` (from `have
 Output: `build/app/outputs/flutter-apk/app-debug.apk` (debug) /
 `app-{arm64-v8a,armeabi-v7a,x86_64}-release.apk` (release, per-ABI splits — see
 "Cutting a release" below).
+
+### Map-style previews
+
+Settings → Map style shows each style over two fixed scenes, City (Amsterdam's
+canal ring, zoom 17) and Nature (Lake Louise, zoom 16), from WebP images
+bundled in `haven/assets/map_style_previews/`, so opening the page makes no
+network request and costs no tile credits. `scripts/generate_map_style_previews.sh`
+renders them from Stadia's cacheable Static Maps endpoint; the committed set was
+generated on 2026-11-19.
+
+- **One image per catalog config per scene**, named
+  `<TileProviderConfig.id>_<scene>.webp` (`<scene>` is a `MapStylePreviewScene`
+  value). The page derives the name from the config, so there is no mapping to
+  maintain. A config the page offers no row for still needs its pair: Minimal
+  shows `stadia_alidade_smooth_dark` in a dark theme, and a persisted selection
+  may pin any catalog config.
+- **960×360 px** (480×180 map pixels @2x; 180 dp is the preview box height, so
+  labels appear at their native size), lossy WebP. The script checks the size.
+- **No credit in the image.** The script requests `manual_attribution=true`,
+  which drops Stadia's burned-in credit (the page's `BoxFit.cover` crop cut it
+  mid-word on phones). Stadia's terms still require the credit, so the page's
+  `StaticMapAttribution` (the config's `attribution` list and the ODbL link) is
+  the **only** attribution: never remove or hide it while previews are shown.
+
+#### Licensing — re-check before every run
+
+Last reviewed 2026-11-19, against Stadia's Terms of Service effective
+2026-11-09:
+
+- **Raw map tiles may never be bundled or bulk-downloaded.** The terms allow
+  only device-local caching within the HTTP cache headers (at most 7 days) and
+  a per-device offline cache of at most 100 MB. Never build previews from tile
+  URLs.
+- **Images from the cacheable static maps endpoint may be stored and
+  redistributed while Haven holds an active paid Stadia subscription** (ToS
+  addendum; Stadia's FAQ words it as a paid plan at generation time — the ToS
+  governs). Images from the standard static maps endpoint may not be stored.
+- So: regenerate only with `https://tiles.stadiamaps.com/static_cacheable`, on a
+  paid plan. If the paid subscription ends, the next release must ship without
+  the bundled images — and so without these previews, which the page and
+  `map_style_preview_assets_test.dart` require.
+- Every request is billed. The script always renders the whole set: one request
+  per style per scene (8 today).
+
+Before each run, re-read the [terms](https://stadiamaps.com/terms-of-service/)
+and update the review date above.
+
+#### Tools and key
+
+`curl` plus libwebp's `cwebp` and `webpinfo`:
+
+- Fedora: `sudo dnf install libwebp-tools`
+- Debian/Ubuntu: `sudo apt install webp`
+- macOS: `brew install webp`
+
+Key: `haven/dart_defines/secrets.json` (see "Build APK"), else
+`$STADIA_API_KEY`. The script never prints the key or a URL that carries it.
+
+#### Checklist: regenerate the previews
+
+1. Re-check the licensing above.
+2. From the repo root:
+
+   ```bash
+   STATIC_MAPS_ENDPOINT=https://tiles.stadiamaps.com/static_cacheable scripts/generate_map_style_previews.sh
+   ```
+
+   The endpoint has no default and must be a `https://tiles.stadiamaps.com/`
+   URL. The committed set is replaced only once every image has rendered at the
+   expected size; an image over 150 KB is reported, not refused.
+3. Compare one image per scene with the live map at the same centre and zoom
+   (`SCENES` in the script): City should show legible street names and POIs,
+   Nature the trails. Check that no image carries Stadia's credit line in its
+   bottom-right corner. If one does, `manual_attribution=true` was ignored:
+   find out why in Stadia's static maps docs before committing.
+4. `cd haven && flutter test test/pages/settings/`.
+   `map_style_preview_assets_test.dart` fails if a preview the page can show is
+   missing or mis-sized, if the directory holds a file the page cannot show, or
+   if the script's `STYLES`, `SCENES` or height drift from the app.
+5. Commit the changed `.webp` files.
+
+To move a scene, edit its line in `SCENES` (keep its rationale comment true) and
+regenerate. A new scene also needs a `MapStylePreviewScene` value, its
+`_sceneLabel` arm and a translated label (step 5 below).
+
+#### Checklist: add, remove or rename a map style
+
+1. **Check the style fits.** It must be a Stadia raster style on
+   `tiles.stadiamaps.com` that the plan covers and the cacheable endpoint
+   renders under the same slug (the script requests `<endpoint>/<id without
+   stadia_>`). TLS pinning (`lib/src/network/pinned_tile_client.dart`), the tile
+   cache and the catalog's privacy note all assume that host. Its config's
+   `attribution` must name every credit the style requires, because it is the
+   only attribution the map and the previews show: a style that is not
+   OpenMapTiles-based needs its own list, never `_stadiaBaseAttribution` (a
+   Stamen style also needs © Stamen Design; satellite imagery its own credit).
+2. **`lib/src/constants/tiles.dart`**: add a `kStyleId…` constant
+   (`stadia_<slug>`), its `TileProviderConfig` (URL template with `{r}` and
+   `?api_key={api_key}`, `attribution`, `maxNativeZoom`, `requiresApiKey: true`)
+   and append it to `kTileStyleCatalog` (`stadiaAlidadeSmooth` stays first: it
+   is the default). Add the slug to the catalog's privacy note. Ids are
+   persisted: an id that leaves the catalog resets everyone who chose it to
+   Minimal (`_decode` in `lib/src/providers/map_style_provider.dart`), so a
+   rename is a removal plus an addition.
+3. **`lib/src/services/tile_key.dart`**: add the slug to `_kKnownStyles`. A
+   style missing there is never stored in the encrypted tile cache;
+   `test/services/tile_key_test.dart` fails until it is added.
+4. **`lib/src/pages/settings/map_style_settings_page.dart`**: add an `_options`
+   entry (`MapStyleSelection.style(kStyleId…)`, a Lucide icon) and its
+   title/subtitle resolvers. Copy and icons stay cartographic, never privacy
+   vocabulary (the page header says why). `MapStyleSelection.resolve` needs no
+   change for a fixed style; it knows only Minimal's light/dark pair
+   (`stadiaAlidadeSmooth` / `stadiaAlidadeSmoothDark`), so a style with its own
+   dark twin needs a new selection kind there, two configs and four images.
+5. **l10n**: add `mapStyle<Name>Title` and `mapStyle<Name>Subtitle`, each with
+   an `@` description, to `lib/l10n/app_en.arb`; translate them into all 12
+   other ARB files, one AI agent per language, each checked by a separate
+   reviewer agent (CLAUDE.md, "Localization"); then run `flutter gen-l10n`
+   (warning-free) and `bash scripts/ci/check_l10n_parity.sh`, and commit the
+   regenerated `app_localizations*.dart`.
+6. **`scripts/generate_map_style_previews.sh`**: add the id to `STYLES`, in
+   catalog order.
+7. **Regenerate** (checklist above) and commit the new pair.
+8. **Tests**: update `test/constants/tiles_test.dart` (the catalog's ordered id
+   list; the shared-invariants list) and `test/pages/settings/map_style_settings_page_test.dart`
+   (row count, titles and subtitles, `mapStyleLabel`, tap-to-preview).
+   `map_style_preview_assets_test.dart`, `test/providers/map_style_provider_test.dart`
+   and the catalog test in `test/services/tile_key_test.dart` follow the catalog
+   on their own.
+9. Run `flutter analyze`, `flutter test test/constants/ test/pages/settings/
+   test/providers/ test/services/tile_key_test.dart` and
+   `bash scripts/ci/check_tile_provider.sh`.
+
+To remove a style, undo steps 2–6 and 8: delete its two images (the assets test
+fails on a stray file), its `STYLES` entry, its slug in `_kKnownStyles` and its
+keys in all 13 ARB files. Removing one makes no Stadia request.
 
 ### Install APK Manually
 
@@ -163,7 +306,8 @@ never tags or commits. Pushing `vX.Y.Z` (or `vX.Y.Z-beta.N` for a pre-release) t
    release-signed, never debug-signed.
 3. Builds the **per-ABI release APKs** (`app-arm64-v8a-release.apk`,
    `…-armeabi-v7a-…`, `…-x86_64-…`). Marketing version comes from the tag
-   (`vX.Y.Z → X.Y.Z`); the base versionCode is the CI run number.
+   (`vX.Y.Z → X.Y.Z`); the base versionCode is the CI run number. The app's
+   About page shows the tag's version in full (`v1.2.3-beta.1 → 1.2.3-beta.1`).
 4. Creates a **GitHub Release** for the tag and attaches the per-ABI APKs +
    `.sha256` sidecars. Tags containing `-` are flagged pre-release and not marked
    "Latest".
@@ -298,17 +442,20 @@ run number (unique + monotonic, CFBundleVersion / Android versionCode). You neve
 edit `pubspec.yaml` for a release, and nothing is pushed to `main`.
 
 ```bash
-git tag -a v1.2.3 -m "Haven 1.2.3"   # tag must be vMAJOR.MINOR.PATCH (digits only)
+git tag -a v1.2.3 -m "Haven 1.2.3"   # vMAJOR.MINOR.PATCH, optional -prerelease
 git push origin v1.2.3               # -> Release Build workflow -> Android + iOS/TestFlight
 ```
 
-The tag must be numeric `vX.Y.Z` (the wrapper rejects anything else, since Apple
-requires a numeric short-version string). To re-build the same version (e.g. after
+The tag must be `vX.Y.Z`, optionally with a `-prerelease` / `+build` suffix
+(`v1.2.3-beta.1`); the wrapper refuses anything else. Apple requires a numeric
+short-version string, so the native stamp drops the suffix (`1.2.3`), while the
+app's About page shows it in full (`1.2.3-beta.1`). To re-build the same version (e.g. after
 a fix to the pipeline), push a new build number by deleting and re-pushing the tag,
 or just bump to the next patch — TestFlight accepts repeated versions as long as
 the build number differs, which it always does (it's the run number).
 A manual **Run workflow** (workflow_dispatch) on Release Build has no tag, so it
-falls back to `pubspec.yaml`'s `version:` — handy for a throwaway signed test build.
+falls back to `pubspec.yaml`'s `version:` (the About page too) — handy for a
+throwaway signed test build.
 
 **Export compliance:** the first build lands in App Store Connect as *Missing
 Compliance*. Answer the encryption question there (Haven ships its own

@@ -60,6 +60,8 @@ void main() {
 
     testWidgets('shows empty state when no circles exist', (tester) async {
       final mockService = MockCircleService(circles: []);
+      final sheetController = DraggableScrollableController();
+      addTearDown(sheetController.dispose);
 
       await tester.pumpWidget(
         ProviderScope(
@@ -69,12 +71,22 @@ void main() {
             supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: Stack(
-                children: [CirclesBottomSheet(onExpansionChanged: (_) {})],
+                children: [
+                  CirclesBottomSheet(
+                    onExpansionChanged: (_) {},
+                    controller: sheetController,
+                  ),
+                ],
               ),
             ),
           ),
         ),
       );
+      await tester.pumpAndSettle();
+
+      // The collapsed peek holds only the handle and the selector; the
+      // content below needs the sheet open.
+      sheetController.jumpTo(0.5);
       await tester.pumpAndSettle();
 
       expect(find.text('No Circles Yet'), findsOneWidget);
@@ -114,6 +126,8 @@ void main() {
         TestCircleFactory.createCircle(displayName: 'Family'),
       ];
       final mockService = MockCircleService(circles: testCircles);
+      final sheetController = DraggableScrollableController();
+      addTearDown(sheetController.dispose);
 
       await tester.pumpWidget(
         ProviderScope(
@@ -123,12 +137,22 @@ void main() {
             supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: Stack(
-                children: [CirclesBottomSheet(onExpansionChanged: (_) {})],
+                children: [
+                  CirclesBottomSheet(
+                    onExpansionChanged: (_) {},
+                    controller: sheetController,
+                  ),
+                ],
               ),
             ),
           ),
         ),
       );
+      await tester.pumpAndSettle();
+
+      // The collapsed peek holds only the handle and the selector; the
+      // content below needs the sheet open.
+      sheetController.jumpTo(0.5);
       await tester.pumpAndSettle();
 
       expect(find.text('Select a circle to view members'), findsOneWidget);
@@ -296,6 +320,8 @@ void main() {
         shouldThrowOnGetCircles: true,
         errorMessage: 'Storage error',
       );
+      final sheetController = DraggableScrollableController();
+      addTearDown(sheetController.dispose);
 
       await tester.pumpWidget(
         ProviderScope(
@@ -305,12 +331,22 @@ void main() {
             supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: Stack(
-                children: [CirclesBottomSheet(onExpansionChanged: (_) {})],
+                children: [
+                  CirclesBottomSheet(
+                    onExpansionChanged: (_) {},
+                    controller: sheetController,
+                  ),
+                ],
               ),
             ),
           ),
         ),
       );
+      await tester.pumpAndSettle();
+
+      // The collapsed peek holds only the handle and the selector; the
+      // content below needs the sheet open.
+      sheetController.jumpTo(0.5);
       await tester.pumpAndSettle();
 
       // With graceful degradation, should show empty state
@@ -862,6 +898,225 @@ void main() {
     test('a flick beyond the top/bottom detent clamps to it', () {
       expect(selectSnapTargetForTesting(expanded, -atFlick), expanded);
       expect(selectSnapTargetForTesting(collapsed, atFlick), collapsed);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // The collapsed sheet must hold the whole header — drag handle and the
+  // selector's trigger — however short the screen and large the text: the
+  // 12 % floor alone is 72 dp on a 600 dp screen, less than the header needs.
+  // ---------------------------------------------------------------------------
+  group('collapsed sheet fits its header', () {
+    Finder trigger() => find.ancestor(
+      of: find.byIcon(LucideIcons.chevronDown),
+      matching: find.byType(InkWell),
+    );
+
+    Future<void> pumpSheet(
+      WidgetTester tester, {
+      required Circle? selected,
+      required double scale,
+      DraggableScrollableController? controller,
+      ValueChanged<double>? onExpansionChanged,
+    }) async {
+      final circle = TestCircleFactory.createCircle(displayName: 'Family');
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            circleServiceProvider.overrideWithValue(
+              MockCircleService(circles: [circle]),
+            ),
+            selectedCircleProvider.overrideWith((ref) => selected),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(
+                context,
+              ).copyWith(textScaler: TextScaler.linear(scale)),
+              child: child!,
+            ),
+            home: Scaffold(
+              body: Stack(
+                children: [
+                  CirclesBottomSheet(
+                    onExpansionChanged: onExpansionChanged ?? (_) {},
+                    controller: controller,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    void setScreen(WidgetTester tester, Size size) {
+      tester.view.physicalSize = size;
+      tester.view.devicePixelRatio = 1;
+    }
+
+    for (final scale in [1.0, 2.0]) {
+      for (final withSelection in [false, true]) {
+        testWidgets('shows the whole trigger at rest on a 320x600 screen '
+            '(text scale $scale, '
+            '${withSelection ? 'a circle selected' : 'no selection'})', (
+          tester,
+        ) async {
+          setScreen(tester, const Size(320, 600));
+          addTearDown(tester.view.reset);
+
+          await pumpSheet(
+            tester,
+            selected: withSelection
+                ? TestCircleFactory.createCircle(displayName: 'Family')
+                : null,
+            scale: scale,
+          );
+
+          expect(tester.takeException(), isNull);
+          expect(tester.getRect(trigger()).bottom, lessThanOrEqualTo(600));
+        });
+      }
+    }
+
+    testWidgets(
+      'a collapsed sheet follows its snap down when the screen grows',
+      (tester) async {
+        setScreen(tester, const Size(320, 400));
+        addTearDown(tester.view.reset);
+        final controller = DraggableScrollableController();
+        addTearDown(controller.dispose);
+        var expansion = -1.0;
+
+        await pumpSheet(
+          tester,
+          selected: null,
+          scale: 1,
+          controller: controller,
+          onExpansionChanged: (value) => expansion = value,
+        );
+        // Moved and collapsed again, so the sheet no longer sits at its
+        // initial size, which the framework would re-apply by itself.
+        controller.jumpTo(kCirclesBottomSheetMaxSizeForTesting);
+        await tester.pumpAndSettle();
+        controller.jumpTo(0);
+        await tester.pumpAndSettle();
+        final shortScreenSnap = controller.size;
+        expect(shortScreenSnap, greaterThan(kSnapSizesForTesting.first));
+
+        setScreen(tester, const Size(320, 800));
+        await tester.pumpAndSettle();
+
+        expect(controller.size, kSnapSizesForTesting.first);
+        expect(expansion, 0);
+      },
+    );
+
+    testWidgets(
+      'a sheet nudged within the no-snap band still follows its snap down',
+      (tester) async {
+        setScreen(tester, const Size(320, 400));
+        addTearDown(tester.view.reset);
+        final controller = DraggableScrollableController();
+        addTearDown(controller.dispose);
+        var expansion = -1.0;
+
+        await pumpSheet(
+          tester,
+          selected: null,
+          scale: 1,
+          controller: controller,
+          onExpansionChanged: (value) => expansion = value,
+        );
+        controller.jumpTo(0);
+        await tester.pumpAndSettle();
+        // Where a drag released short of the snap threshold leaves it: too
+        // little movement to snap, so it rests just above the detent.
+        controller.jumpTo(controller.size + 0.004);
+        await tester.pumpAndSettle();
+        expect(expansion, 0);
+
+        setScreen(tester, const Size(320, 800));
+        await tester.pumpAndSettle();
+
+        expect(controller.size, kSnapSizesForTesting.first);
+        expect(expansion, 0);
+      },
+    );
+
+    testWidgets(
+      'a finger on the collapsed sheet keeps it through a resize, and its '
+      'drag takes effect',
+      (tester) async {
+        setScreen(tester, const Size(320, 400));
+        addTearDown(tester.view.reset);
+        final controller = DraggableScrollableController();
+        addTearDown(controller.dispose);
+
+        await pumpSheet(
+          tester,
+          selected: null,
+          scale: 1,
+          controller: controller,
+        );
+        controller.jumpTo(0);
+        await tester.pumpAndSettle();
+        final heldSize = controller.size;
+
+        final gesture = await tester.startGesture(tester.getCenter(trigger()));
+        setScreen(tester, const Size(320, 800));
+        await tester.pump();
+        await tester.pump();
+
+        expect(controller.size, heldSize);
+
+        for (var i = 0; i < 20; i++) {
+          await gesture.moveBy(const Offset(0, -10));
+          await tester.pump(const Duration(milliseconds: 16));
+        }
+        expect(controller.size, greaterThan(heldSize));
+        // Held still before lifting: a slow release snaps to the nearest
+        // detent rather than flinging.
+        await tester.pump(const Duration(milliseconds: 300));
+        await gesture.up();
+        await tester.pumpAndSettle();
+
+        expect(kSnapSizesForTesting, contains(controller.size));
+        expect(controller.size, greaterThan(heldSize));
+      },
+    );
+
+    test('a raised collapsed snap replaces the detents below it', () {
+      const collapsed = 0.35;
+      // Slow release just above the 0.30 peek: it is gone, so the nearest
+      // detent is the raised snap.
+      expect(
+        selectSnapTargetForTesting(0.31, 0, collapsedSize: collapsed),
+        collapsed,
+      );
+      // A flick down from the mid detent skips straight to it.
+      expect(
+        selectSnapTargetForTesting(
+          0.55,
+          kFlickVelocityForTesting,
+          collapsedSize: collapsed,
+        ),
+        collapsed,
+      );
+      // A hard fling down lands on it, not on the 12 % floor.
+      expect(
+        selectSnapTargetForTesting(
+          0.85,
+          kBallisticVelocityForTesting,
+          collapsedSize: collapsed,
+        ),
+        collapsed,
+      );
+      // Resting on it reads as fully collapsed, so no dim covers the map.
+      expect(sheetExpansionForSize(collapsed, collapsedSize: collapsed), 0);
     });
   });
 }

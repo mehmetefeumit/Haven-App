@@ -30,6 +30,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
+import 'package:haven/src/constants/app_version.dart';
 import 'package:haven/src/pages/settings/about_page.dart';
 
 import '../helpers/localized_app_harness.dart';
@@ -42,7 +43,7 @@ bool _allowedUnwrapped(String s) {
   if (t.isEmpty) return true;
   // No lowercase ASCII letters → not prose (icons, symbols, digits, bullets).
   if (!RegExp(r'[a-z]{3,}').hasMatch(t)) return true;
-  const allow = {'Haven', 'Version 0.1.0'};
+  const allow = {'Haven', 'Version $havenVersion'};
   return allow.contains(t);
 }
 

@@ -143,6 +143,11 @@ flutter:
     # Haven app mark shown in onboarding and the About page. Also the single
     # source for the generated launcher/store icons (flutter_launcher_icons).
     - assets/icon/icon.png
+    # Map-style page previews (one WebP per style and scene), rendered by
+    # scripts/generate_map_style_previews.sh so the page makes no network
+    # request. Licensing and the add-a-style checklist: haven/DEVELOPMENT.md
+    # → Map-style previews.
+    - assets/map_style_previews/
 
   fonts:
     - family: Inter

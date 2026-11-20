@@ -165,7 +165,7 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get onboardingImportInvalid =>
-      'این به یک کلید پشتیبان معتبر شبیه نیست. لطفاً بررسی کن و دوباره تلاش کن.';
+      'این به یک کلید خصوصی معتبر شبیه نیست. لطفاً بررسی کن و دوباره تلاش کن.';
 
   @override
   String get onboardingImportError =>
@@ -671,14 +671,6 @@ class AppLocalizationsFa extends AppLocalizations {
   }
 
   @override
-  String get mapStylePreviewUnavailableSemantics =>
-      'پیش‌نمایش نقشه در این نسخه در دسترس نیست';
-
-  @override
-  String get mapStylePreviewUnavailableLabel =>
-      'پیش‌نمایش زنده در نسخه‌های انتشار نمایش داده می‌شود';
-
-  @override
   String get aboutTitle => 'درباره';
 
   @override
@@ -799,21 +791,21 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get createCircleEmptyMessage =>
-      'برای افزودن اعضا، با شناسه جست‌وجو کن یا کد QR آن‌ها را اسکن کن.';
+      'برای افزودن اعضا، با کلید عمومی جست‌وجو کن یا کد QR آن‌ها را اسکن کن.';
 
   @override
   String get createCircleNoValidMembers => 'عضو معتبری برای دعوت وجود ندارد';
 
   @override
-  String get createCircleNoIdInQr => 'شناسهٔ معتبری در کد QR یافت نشد';
+  String get createCircleNoIdInQr => 'کلید عمومی معتبری در کد QR یافت نشد';
 
   @override
   String get memberLookupNotFound =>
-      'هنوز حسابی در Haven برای این شناسه پیدا نشد. اگر این فرد تازه Haven را راه‌اندازی کرده، یک دقیقهٔ دیگر دوباره تلاش کن.';
+      'هنوز حسابی در Haven برای این کلید عمومی پیدا نشد. اگر این فرد تازه Haven را راه‌اندازی کرده، یک دقیقهٔ دیگر دوباره تلاش کن.';
 
   @override
   String get memberLookupIncomplete =>
-      'نتوانستیم جست‌وجوی این شناسه را کامل کنیم. اتصالت را بررسی کن و دوباره تلاش کن.';
+      'نتوانستیم جست‌وجوی این کلید عمومی را کامل کنیم. اتصالت را بررسی کن و دوباره تلاش کن.';
 
   @override
   String get createCircleSomethingWentWrong => 'مشکلی پیش آمد';
@@ -1121,7 +1113,7 @@ class AppLocalizationsFa extends AppLocalizations {
       'Haven فعلاً نمی‌تواند این فرد را دعوت کند. از او بخواه Haven را باز کند، بعد دوباره تلاش کن.';
 
   @override
-  String get memberSearchHint => 'شناسهٔ عضو را وارد کن...';
+  String get memberSearchHint => 'کلید عمومی را وارد کن...';
 
   @override
   String get memberSearchPasteTooltip => 'جای‌گذاری از کلیپ‌بورد';
@@ -1134,10 +1126,10 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get memberSearchHelper =>
-      'از مخاطبانت کد QR یا شناسهٔ Haven آن‌ها را بخواه';
+      'از مخاطبانت کلید عمومی یا کد QR آن‌ها را بخواه';
 
   @override
-  String get memberSearchNoValidId => 'شناسهٔ معتبر Haven یافت نشد';
+  String get memberSearchNoValidId => 'کلید عمومی معتبری یافت نشد';
 
   @override
   String get memberSearchAlreadyAdded => 'این عضو از قبل افزوده شده است';
@@ -1168,7 +1160,7 @@ class AppLocalizationsFa extends AppLocalizations {
   }
 
   @override
-  String get memberPickerReasonSelf => 'این شناسهٔ خودت است';
+  String get memberPickerReasonSelf => 'این کلید عمومی خودت است';
 
   @override
   String get memberPickerReadPublicKey => 'خواندن کلید عمومی با صدای بلند';
@@ -1187,10 +1179,6 @@ class AppLocalizationsFa extends AppLocalizations {
   String memberPickerCollisionCircleLabel(String circleName) {
     return 'حلقه: $circleName';
   }
-
-  @override
-  String get memberPickerStrangerLookupNote =>
-      'Haven نمایهٔ منتشرشدهٔ این شخص را حداکثر از دو رله خواست. هر رله‌ای که Haven از آن پرسید می‌تواند ببیند که این دستگاه همین حالا دربارهٔ این کلید پرسیده است. اما این درخواست هیچ امضای دیجیتالی ندارد، پس به هویتت در Haven گره نمی‌خورد. اگر این نمایه عکس داشته باشد، Haven آن را از سروری دانلود می‌کند که خودِ این شخص انتخاب کرده است، و ممکن است آن سرور دانلود را به سرور دیگری هدایت کند. هر کدام از این سرورها می‌تواند آدرس IP این دستگاه را ببیند.';
 
   @override
   String get memberPickerStrangerLookingUp =>
@@ -1223,7 +1211,7 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String invitationCardInvitedBySemantics(String inviter) {
-    return 'دعوت‌کننده: شناسهٔ رمزنگاری $inviter';
+    return 'دعوت‌کننده: کلید عمومی $inviter';
   }
 
   @override
@@ -1714,30 +1702,6 @@ class AppLocalizationsFa extends AppLocalizations {
   String get qrCodeYourPublicKeyLabel => 'کلید عمومی تو';
 
   @override
-  String get reachabilityChecking => 'در حال آماده شدن برای دریافت دعوت‌ها…';
-
-  @override
-  String get reachabilityReady => 'آمادهٔ دریافت دعوت';
-
-  @override
-  String get reachabilityCantCheck =>
-      'فعلاً نمی‌شود بررسی کرد که دیگران می‌توانند دعوتت کنند یا نه';
-
-  @override
-  String get reachabilityNotReady => 'دیگران هنوز نمی‌توانند دعوتت کنند';
-
-  @override
-  String get reachabilityNoRelays =>
-      'تا وقتی رله‌ای اضافه نکنی، دیگران نمی‌توانند دعوتت کنند';
-
-  @override
-  String get reachabilityOpenRelaySettings => 'تنظیمات رله‌ها';
-
-  @override
-  String get reachabilityAwaitingReset =>
-      'وقتی از اطلاعیهٔ تنظیمات رله‌ها بگذری و ادامه دهی، دیگران می‌توانند دعوتت کنند';
-
-  @override
   String get qrCodeWhatIsThisTitle => 'این چیست؟';
 
   @override
@@ -1824,7 +1788,7 @@ class AppLocalizationsFa extends AppLocalizations {
   String get npubQrScanLabel => 'برای افزودن من اسکن کن';
 
   @override
-  String get npubQrSemanticsLabel => 'کد QR هویت عمومی تو';
+  String get npubQrSemanticsLabel => 'کد QR کلید عمومی تو';
 
   @override
   String get photoHeaderRemoveTitle => 'عکس نمایه حذف شود؟';

@@ -5,6 +5,7 @@
 library;
 
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/gestures.dart' show VelocityTracker;
@@ -40,7 +41,8 @@ import 'package:haven/src/widgets/map/sharing_health_banner.dart';
 import 'package:latlong2/latlong.dart' show LatLng;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Minimum snap point (collapsed state).
+/// Minimum snap point (collapsed state) on a screen tall enough for the
+/// header; see [collapsedSheetSize].
 const double _kMinChildSize = 0.12;
 
 /// Low "peek+" snap point. A deliberate resting place between the
@@ -81,11 +83,28 @@ const List<double> _kSnapSizes = [
 @visibleForTesting
 const List<double> kSnapSizesForTesting = _kSnapSizes;
 
+/// The collapsed snap as a fraction of the screen, which the sheet fills in
+/// `MapShell`: [_kMinChildSize], raised where that is too short for the drag
+/// handle and the circle selector's trigger at the current text scale, so the
+/// resting sheet never clips them. `MapShell` collapses to it and `MapPage`
+/// keeps the map clear of it.
+double collapsedSheetSize(BuildContext context) {
+  final header = _DragHandle.height + CircleSelector.triggerHeight(context);
+  return math.max(_kMinChildSize, header / MediaQuery.sizeOf(context).height);
+}
+
+/// The snap points above a collapsed snap of [minSize].
+List<double> _snapSizesFor(double minSize) => [
+  minSize,
+  for (final size in _kSnapSizes)
+    if (size > minSize) size,
+];
+
 /// Raw expansions within this fraction of the collapsed snap are reported
 /// as exactly 0 so the map dim overlay is fully torn down at rest.
 ///
 /// `MapShell`'s programmatic collapse early-returns within 0.01 *size* of
-/// [_kMinChildSize], so the sheet can settle a hair above the collapsed
+/// [collapsedSheetSize], so the sheet can settle a hair above the collapsed
 /// snap. The resulting sub-perceptual expansion would
 /// otherwise keep an invisible — but pointer-absorbing — scrim over the map,
 /// freezing it until the next sheet interaction. 0.02 covers that worst-case
@@ -97,13 +116,17 @@ const double _kCollapsedExpansionEpsilon = 0.02;
 
 /// Normalizes a raw [DraggableScrollableController.size] to the `[0, 1]`
 /// expansion that drives the map dim overlay, snapping residuals within
-/// [_kCollapsedExpansionEpsilon] of the collapsed snap to exactly 0.
+/// [_kCollapsedExpansionEpsilon] of the collapsed snap ([collapsedSize]) to
+/// exactly 0.
 ///
 /// Extracted and `@visibleForTesting` so the snap can be unit-tested without
 /// reproducing the gesture/animation physics that can strand the residual.
 @visibleForTesting
-double sheetExpansionForSize(double size) {
-  final raw = (size - _kMinChildSize) / (_kMaxChildSize - _kMinChildSize);
+double sheetExpansionForSize(
+  double size, {
+  double collapsedSize = _kMinChildSize,
+}) {
+  final raw = (size - collapsedSize) / (_kMaxChildSize - collapsedSize);
   if (raw < _kCollapsedExpansionEpsilon) return 0;
   return raw.clamp(0.0, 1.0);
 }
@@ -150,13 +173,21 @@ const Duration _kSnapDebounce = Duration(milliseconds: 250);
 /// reproducing the gesture/animation pipeline. Production code calls the
 /// private static directly. Mirrors [sheetExpansionForSize].
 @visibleForTesting
-double selectSnapTargetForTesting(double current, double pxPerSecondY) =>
-    CirclesBottomSheetState._selectSnapTarget(current, pxPerSecondY);
+double selectSnapTargetForTesting(
+  double current,
+  double pxPerSecondY, {
+  double collapsedSize = _kMinChildSize,
+}) => CirclesBottomSheetState._selectSnapTarget(
+  current,
+  pxPerSecondY,
+  collapsedSize,
+);
 
 /// A draggable bottom sheet displaying circles and their members.
 ///
 /// The sheet has four snap points:
-/// - Collapsed (12%): Shows drag handle and circle selector chips
+/// - Collapsed (12%, more on a short screen or at a large text scale): Shows
+///   drag handle and circle selector
 /// - Peek (30%): Selector plus the top of the member list
 /// - Half (55%): Selector and member preview
 /// - Expanded (85%): Full member list with actions
@@ -236,11 +267,41 @@ class CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet> {
   /// pointer-down knows to interrupt it.
   bool _snapInFlight = false;
 
+  /// The collapsed snap for this screen and text scale
+  /// ([collapsedSheetSize]).
+  double _collapsedSize = _kMinChildSize;
+
   @override
   void initState() {
     super.initState();
     _controller = widget.controller ?? DraggableScrollableController();
     _controller.addListener(_onSheetChanged);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final collapsed = collapsedSheetSize(context);
+    if (collapsed == _collapsedSize) return;
+    // The dim's own "collapsed" test: an unsnapped nudge rests within it.
+    final wasCollapsed =
+        _controller.isAttached &&
+        sheetExpansionForSize(
+              _controller.size,
+              collapsedSize: _collapsedSize,
+            ) ==
+            0;
+    _collapsedSize = collapsed;
+    // A raised snap clamps the sheet up by itself; a lowered one would leave
+    // it resting above the new snap, under a dim the user never asked for.
+    // A finger on the sheet keeps it: its release snaps to the new detents.
+    if (wasCollapsed) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _controller.isAttached && _activePointer == null) {
+          _controller.jumpTo(_collapsedSize);
+        }
+      });
+    }
   }
 
   @override
@@ -264,7 +325,7 @@ class CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet> {
     final size = _controller.size;
 
     // Close dropdown when sheet collapses near minimum
-    if (size <= _kMinChildSize + 0.02) {
+    if (size <= _collapsedSize + 0.02) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
           ref.read(circleDropdownOpenProvider.notifier).state = false;
@@ -277,7 +338,10 @@ class CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet> {
     // removed at rest (see [sheetExpansionForSize]). Without this, the
     // drag-release spring can strand a sub-perceptual positive expansion
     // that keeps an invisible but pointer-absorbing scrim over the map.
-    final expansion = sheetExpansionForSize(size);
+    final expansion = sheetExpansionForSize(
+      size,
+      collapsedSize: _collapsedSize,
+    );
     widget.onExpansionChanged(expansion);
   }
 
@@ -340,7 +404,7 @@ class CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet> {
   Future<void> _runSnap(double pixelsPerSecondY) async {
     if (!_controller.isAttached) return;
     final size = _controller.size;
-    final target = _selectSnapTarget(size, pixelsPerSecondY);
+    final target = _selectSnapTarget(size, pixelsPerSecondY, _collapsedSize);
     // Already at (or imperceptibly close to) the target snap — nothing to
     // animate, and skipping avoids a spurious arrival announcement.
     if ((target - size).abs() < 0.001) return;
@@ -404,7 +468,7 @@ class CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet> {
     _lastSnapAt = now;
     final l10n = AppLocalizations.of(context);
     final String message;
-    if (target <= _kMinChildSize + 0.001) {
+    if (target <= _collapsedSize + 0.001) {
       message = l10n.circlesPanelCollapsedAnnouncement;
     } else if (target >= _kMaxChildSize - 0.001) {
       message = l10n.circlesPanelExpandedAnnouncement;
@@ -431,30 +495,35 @@ class CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet> {
   /// - flick (≥ flick threshold): next snap in direction of motion.
   /// - hard fling (≥ [_kBallisticVelocityPxPerSec]): extreme in
   ///   direction of motion, skipping intermediates.
-  static double _selectSnapTarget(double current, double pxPerSecondY) {
+  static double _selectSnapTarget(
+    double current,
+    double pxPerSecondY,
+    double collapsedSize,
+  ) {
     final speed = pxPerSecondY.abs();
     // Positive dy = downward = closing; negative = upward = opening.
     final goingUp = pxPerSecondY < 0;
+    final snapSizes = _snapSizesFor(collapsedSize);
 
     if (speed >= _kBallisticVelocityPxPerSec) {
-      return goingUp ? _kMaxChildSize : _kMinChildSize;
+      return goingUp ? _kMaxChildSize : collapsedSize;
     }
 
     if (speed >= _kFlickVelocityPxPerSec) {
       if (goingUp) {
-        return _kSnapSizes.firstWhere(
+        return snapSizes.firstWhere(
           (s) => s > current + 0.001,
           orElse: () => _kMaxChildSize,
         );
       }
-      return _kSnapSizes.lastWhere(
+      return snapSizes.lastWhere(
         (s) => s < current - 0.001,
-        orElse: () => _kMinChildSize,
+        orElse: () => collapsedSize,
       );
     }
 
     // Slow release: snap to geometrically nearest.
-    return _kSnapSizes.reduce(
+    return snapSizes.reduce(
       (a, b) => (a - current).abs() < (b - current).abs() ? a : b,
     );
   }
@@ -492,8 +561,8 @@ class CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet> {
       // programmatic collapse).
       child: DraggableScrollableSheet(
         controller: _controller,
-        initialChildSize: _kMinChildSize,
-        minChildSize: _kMinChildSize,
+        initialChildSize: _collapsedSize,
+        minChildSize: _collapsedSize,
         maxChildSize: _kMaxChildSize,
         builder: (context, scrollController) {
           return Container(
@@ -870,6 +939,9 @@ class _SheetContent extends ConsumerWidget {
 class _DragHandle extends StatelessWidget {
   const _DragHandle();
 
+  static const double _barHeight = 4;
+  static const double height = _barHeight + 2 * HavenSpacing.sm;
+
   @override
   Widget build(BuildContext context) {
     return Center(
@@ -877,7 +949,7 @@ class _DragHandle extends StatelessWidget {
         padding: const EdgeInsets.symmetric(vertical: HavenSpacing.sm),
         child: Container(
           width: 32,
-          height: 4,
+          height: _barHeight,
           decoration: BoxDecoration(
             color: Theme.of(
               context,
