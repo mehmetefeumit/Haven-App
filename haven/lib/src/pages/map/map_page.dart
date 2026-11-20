@@ -175,11 +175,6 @@ class _MapPageState extends ConsumerState<MapPage>
   static const _defaultLocation = LatLng(51.5074, -0.1278); // London
   static const _defaultZoom = 15.0;
 
-  /// Fraction of the viewport height occupied by the collapsed bottom sheet.
-  /// Shared by the map-controls offset and the off-screen indicator bottom
-  /// inset so the two cannot silently desync.
-  static const _collapsedSheetFraction = 0.12;
-
   // The controller's lifetime is owned by [mapControllerProvider] so the
   // circles bottom sheet can call `move` from outside this widget. Keep a
   // locally-cached reference to avoid a provider lookup inside the build
@@ -642,7 +637,7 @@ class _MapPageState extends ConsumerState<MapPage>
 
     // Calculate bottom offset for map controls (above collapsed sheet)
     final screenHeight = MediaQuery.of(context).size.height;
-    final sheetCollapsedHeight = screenHeight * _collapsedSheetFraction;
+    final sheetCollapsedHeight = screenHeight * collapsedSheetSize(context);
 
     return Stack(
       children: [
@@ -750,7 +745,7 @@ class _MapPageState extends ConsumerState<MapPage>
     // Logical pixels occluded by the collapsed bottom sheet, reserved so
     // droplets and the optical centre stay above it.
     final bottomInset =
-        MediaQuery.of(context).size.height * _collapsedSheetFraction;
+        MediaQuery.of(context).size.height * collapsedSheetSize(context);
 
     return FlutterMap(
       mapController: _mapController,
@@ -767,8 +762,8 @@ class _MapPageState extends ConsumerState<MapPage>
         // in integration tests, the in-flight TLS connect leaks a
         // cancelled-connection SocketException at teardown — so render a
         // neutral surface and never touch the network.
-        // Mirrors the map-style-settings preview guard and the prefetch guard
-        // in tile_prefetch_service.dart. Users with a real key are unaffected.
+        // Mirrors the prefetch guard in tile_prefetch_service.dart. Users
+        // with a real key are unaffected.
         if (tileConfig.apiKeyConfigured)
           TileLayer(
             urlTemplate: tileConfig.urlTemplate,

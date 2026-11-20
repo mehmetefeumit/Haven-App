@@ -166,7 +166,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get onboardingImportInvalid =>
-      'Das sieht nicht nach einem gültigen Sicherungsschlüssel aus. Bitte prüfe ihn und versuche es erneut.';
+      'Das sieht nicht nach einem gültigen geheimen Schlüssel aus. Bitte prüfe ihn und versuche es erneut.';
 
   @override
   String get onboardingImportError =>
@@ -700,14 +700,6 @@ class AppLocalizationsDe extends AppLocalizations {
   }
 
   @override
-  String get mapStylePreviewUnavailableSemantics =>
-      'Kartenvorschau in diesem Build nicht verfügbar';
-
-  @override
-  String get mapStylePreviewUnavailableLabel =>
-      'Die Live-Vorschau erscheint in Release-Builds';
-
-  @override
   String get aboutTitle => 'Über';
 
   @override
@@ -829,22 +821,23 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get createCircleEmptyMessage =>
-      'Suche per ID oder scanne den QR-Code, um Mitglieder hinzuzufügen.';
+      'Suche nach öffentlichem Schlüssel oder scanne den QR-Code, um Mitglieder hinzuzufügen.';
 
   @override
   String get createCircleNoValidMembers =>
       'Keine gültigen Mitglieder zum Einladen';
 
   @override
-  String get createCircleNoIdInQr => 'Keine gültige ID im QR-Code gefunden';
+  String get createCircleNoIdInQr =>
+      'Kein gültiger öffentlicher Schlüssel im QR-Code gefunden';
 
   @override
   String get memberLookupNotFound =>
-      'Für diese ID wurde noch kein Haven-Konto gefunden. Falls die Person Haven gerade erst eingerichtet hat, versuche es in einer Minute erneut.';
+      'Für diesen öffentlichen Schlüssel wurde noch kein Haven-Konto gefunden. Falls die Person Haven gerade erst eingerichtet hat, versuche es in einer Minute erneut.';
 
   @override
   String get memberLookupIncomplete =>
-      'Die Überprüfung dieser ID konnte nicht abgeschlossen werden. Prüfe deine Verbindung und versuche es erneut.';
+      'Die Überprüfung dieses öffentlichen Schlüssels konnte nicht abgeschlossen werden. Prüfe deine Verbindung und versuche es erneut.';
 
   @override
   String get createCircleSomethingWentWrong => 'Etwas ist schiefgelaufen';
@@ -1154,7 +1147,7 @@ class AppLocalizationsDe extends AppLocalizations {
       'Haven kann diese Person gerade nicht einladen. Bitte sie, Haven zu öffnen, und versuche es dann erneut.';
 
   @override
-  String get memberSearchHint => 'Mitglieds-ID eingeben …';
+  String get memberSearchHint => 'Öffentlichen Schlüssel eingeben …';
 
   @override
   String get memberSearchPasteTooltip => 'Aus Zwischenablage einfügen';
@@ -1167,10 +1160,11 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get memberSearchHelper =>
-      'Bitte deine Kontakte um ihren Haven-QR-Code oder ihre ID';
+      'Bitte deine Kontakte um ihren öffentlichen Schlüssel oder QR-Code';
 
   @override
-  String get memberSearchNoValidId => 'Keine gültige Haven-ID gefunden';
+  String get memberSearchNoValidId =>
+      'Kein gültiger öffentlicher Schlüssel gefunden';
 
   @override
   String get memberSearchAlreadyAdded => 'Mitglied bereits hinzugefügt';
@@ -1202,7 +1196,8 @@ class AppLocalizationsDe extends AppLocalizations {
   }
 
   @override
-  String get memberPickerReasonSelf => 'Das ist deine eigene ID';
+  String get memberPickerReasonSelf =>
+      'Das ist dein eigener öffentlicher Schlüssel';
 
   @override
   String get memberPickerReadPublicKey => 'Öffentlichen Schlüssel vorlesen';
@@ -1221,10 +1216,6 @@ class AppLocalizationsDe extends AppLocalizations {
   String memberPickerCollisionCircleLabel(String circleName) {
     return 'Kreis: $circleName';
   }
-
-  @override
-  String get memberPickerStrangerLookupNote =>
-      'Haven hat ein Relay – höchstens zwei – nach dem veröffentlichten Profil dieser Person gefragt. Jedes gefragte Relay kann sehen, dass dieses Gerät gerade eben nach diesem Schlüssel gefragt hat. Die Anfrage trägt aber keine kryptografische Signatur und ist deshalb nicht mit deiner Haven-Identität verknüpft. Wenn das Profil ein Foto hat, lädt Haven dieses Foto von dem Server herunter, den diese Person gewählt hat. Dieser Server leitet den Download möglicherweise an einen anderen Server weiter. Jeder dieser Server kann die IP-Adresse dieses Geräts sehen.';
 
   @override
   String get memberPickerStrangerLookingUp =>
@@ -1258,7 +1249,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String invitationCardInvitedBySemantics(String inviter) {
-    return 'Eingeladen von kryptografischer Kennung $inviter';
+    return 'Eingeladen vom öffentlichen Schlüssel $inviter';
   }
 
   @override
@@ -1810,31 +1801,6 @@ class AppLocalizationsDe extends AppLocalizations {
   String get qrCodeYourPublicKeyLabel => 'Dein öffentlicher Schlüssel';
 
   @override
-  String get reachabilityChecking =>
-      'Empfang von Einladungen wird vorbereitet …';
-
-  @override
-  String get reachabilityReady => 'Bereit, eingeladen zu werden';
-
-  @override
-  String get reachabilityCantCheck =>
-      'Gerade lässt sich nicht prüfen, ob andere dich einladen können';
-
-  @override
-  String get reachabilityNotReady => 'Andere können dich noch nicht einladen';
-
-  @override
-  String get reachabilityNoRelays =>
-      'Andere können dich erst einladen, wenn du ein Relay hinzufügst';
-
-  @override
-  String get reachabilityOpenRelaySettings => 'Relay-Einstellungen';
-
-  @override
-  String get reachabilityAwaitingReset =>
-      'Andere können dich einladen, sobald du nach dem Hinweis zu den Relay-Einstellungen fortfährst';
-
-  @override
   String get qrCodeWhatIsThisTitle => 'Was ist das?';
 
   @override
@@ -1925,7 +1891,8 @@ class AppLocalizationsDe extends AppLocalizations {
   String get npubQrScanLabel => 'Scannen, um mich hinzuzufügen';
 
   @override
-  String get npubQrSemanticsLabel => 'QR-Code für deine öffentliche Identität';
+  String get npubQrSemanticsLabel =>
+      'QR-Code für deinen öffentlichen Schlüssel';
 
   @override
   String get photoHeaderRemoveTitle => 'Profilfoto entfernen?';

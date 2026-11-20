@@ -8,6 +8,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/src/constants/app_version.dart';
 import 'package:haven/src/pages/settings/about_page.dart';
 import 'package:haven/src/widgets/common/haven_logo.dart';
 
@@ -23,7 +24,23 @@ void main() {
     expect(find.text('Haven'), findsOneWidget);
     // Guard the surrounding page plumbing so a hero change can't silently
     // drop the footer.
-    expect(find.text('Version 0.1.0'), findsOneWidget);
+    expect(find.text('Version $havenVersion'), findsOneWidget);
+  });
+
+  test('a build without the release wrapper reports dev, not a version', () {
+    // `flutter test` passes no HAVEN_VERSION; only scripts/build_release.sh
+    // does, from the release tag.
+    expect(havenVersion, 'dev');
+  });
+
+  testWidgets('the licenses page shows the same build version', (tester) async {
+    await pumpLocalized(tester, const AboutPage());
+
+    await tester.tap(find.text('Open-source licenses'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(LicensePage), findsOneWidget);
+    expect(find.text(havenVersion), findsOneWidget);
   });
 
   testWidgets('keeps the legal and attribution actions', (tester) async {

@@ -521,7 +521,6 @@ class PendingMemberTile extends StatelessWidget {
     required this.status,
     this.pubkeyHex,
     this.name,
-    this.lookedUp = false,
     this.errorMessage,
     this.onRemove,
     this.onRetry,
@@ -542,10 +541,6 @@ class PendingMemberTile extends StatelessWidget {
   /// case the npub carries the row.
   final String? name;
 
-  /// Whether relays were asked who this is: the row then carries the same
-  /// disclosure note as the member picker's typed-npub row.
-  final bool lookedUp;
-
   /// Error message if validation failed.
   final String? errorMessage;
 
@@ -563,7 +558,6 @@ class PendingMemberTile extends StatelessWidget {
     final shortNpub = NpubValidator.shortenForDisplay(npub);
     final name = this.name;
     final (statusText, statusColor) = _status(l10n, colorScheme);
-    final lookupNote = lookedUp ? l10n.memberPickerStrangerLookupNote : null;
 
     // Same rule as every npub Haven shows: no maxLines and no overflow,
     // because clipping the tail drops the bech32 checksum, and forced LTR.
@@ -580,9 +574,6 @@ class PendingMemberTile extends StatelessWidget {
         label: [
           bidiIsolate(name ?? chunkNpubForSpeech(shortNpub)),
           statusText,
-          // In the label, not a hint, as on the typed row: hints can be
-          // switched off, and it is a privacy disclosure.
-          ?lookupNote,
         ].join(', '),
         customSemanticsActions: name == null
             ? null
@@ -614,13 +605,6 @@ class PendingMemberTile extends StatelessWidget {
                 context,
               ).textTheme.bodySmall?.copyWith(color: statusColor),
             ),
-            if (lookupNote != null)
-              Text(
-                lookupNote,
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: colorScheme.onSurfaceVariant,
-                ),
-              ),
           ],
         ),
       ),

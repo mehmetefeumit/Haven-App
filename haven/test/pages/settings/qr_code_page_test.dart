@@ -15,7 +15,8 @@ import 'package:haven/src/pages/settings/qr_code_page.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/widgets/identity/npub_qr_code.dart';
-import 'package:haven/src/widgets/identity/reachability_status_row.dart';
+
+import '../../helpers/no_readiness_row.dart';
 
 const _testNpub = 'npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqspcd5tr';
 
@@ -30,6 +31,7 @@ Widget _build({
   Identity? identity,
   bool loading = false,
   bool error = false,
+  List<Override> overrides = const [],
 }) {
   return ProviderScope(
     overrides: [
@@ -38,6 +40,7 @@ Widget _build({
         if (error) return Future<Identity?>.error(Exception('boom'));
         return Future<Identity?>.value(identity);
       }),
+      ...overrides,
     ],
     child: const MaterialApp(
       localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -73,17 +76,13 @@ void main() {
       expect(find.byType(NpubQrCode), findsOneWidget);
     });
 
-    testWidgets('says whether others can invite you, above the code', (
-      tester,
-    ) async {
-      // Scanning the code is only useful once this says ready.
-      await tester.pumpWidget(_build(identity: _fakeIdentity));
-      await tester.pumpAndSettle();
-      expect(find.byType(ReachabilityStatusRow), findsOneWidget);
-      expect(
-        tester.getTopLeft(find.byType(ReachabilityStatusRow)).dy,
-        lessThan(tester.getTopLeft(find.byType(NpubQrCode)).dy),
+    testWidgets('shows no readiness row, Retry or Relay settings link in any '
+        'readiness state', (tester) async {
+      await expectNoReadinessRow(
+        tester,
+        (overrides) => _build(identity: _fakeIdentity, overrides: overrides),
       );
+      expect(find.byType(NpubQrCode), findsOneWidget);
     });
 
     testWidgets('shows the npub as selectable text', (tester) async {

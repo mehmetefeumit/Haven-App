@@ -92,11 +92,7 @@ void main() {
 
       final held = await _hold(container, _aliceNpub);
 
-      expect(held.read(), (
-        pubkeyHex: _aliceHex,
-        name: 'Alice Aardvark',
-        lookedUp: false,
-      ));
+      expect(held.read(), (pubkeyHex: _aliceHex, name: 'Alice Aardvark'));
       expect(_calls(profiles, 'resolveTypedStrangerProfile'), 0);
       expect(_calls(profiles, 'downloadMemberPictures'), 0);
     });
@@ -120,11 +116,7 @@ void main() {
       );
       await container.pump();
 
-      expect(held.read(), (
-        pubkeyHex: _strangerHex,
-        name: 'Distant Cousin',
-        lookedUp: true,
-      ));
+      expect(held.read(), (pubkeyHex: _strangerHex, name: 'Distant Cousin'));
       expect(_calls(profiles, 'resolveTypedStrangerProfile'), 1);
       expect(
         profiles.methodCalls
@@ -173,17 +165,13 @@ void main() {
         strangerProfileResolveProvider(_strangerNpub).future,
       );
       await container.pump();
-      expect(held.read(), (
-        pubkeyHex: _strangerHex,
-        name: null,
-        lookedUp: true,
-      ));
+      expect(held.read(), (pubkeyHex: _strangerHex, name: null));
 
       profiles.strangerProfiles.clear();
       final other = await _hold(container, _aliceNpub);
       await container.read(strangerProfileResolveProvider(_aliceNpub).future);
       await container.pump();
-      expect(other.read(), (pubkeyHex: null, name: null, lookedUp: true));
+      expect(other.read(), isNull);
       expect(
         profiles.methodCalls
             .where((c) => c.method == 'downloadMemberPictures')
@@ -249,11 +237,7 @@ void main() {
       await container.read(memberDirectoryProvider.future);
       await container.pump();
 
-      expect(held.read(), (
-        pubkeyHex: _aliceHex,
-        name: 'Alice Aardvark',
-        lookedUp: false,
-      ));
+      expect(held.read(), (pubkeyHex: _aliceHex, name: 'Alice Aardvark'));
       expect(_calls(profiles, 'resolveTypedStrangerProfile'), 0);
     });
 
@@ -282,68 +266,16 @@ void main() {
         expect(held.read(), (
           pubkeyHex: _strangerHex,
           name: 'Distant Cousin',
-          lookedUp: true,
         ), reason: 'a refresh keeps the previous answer on screen');
         directory.loadGate!.complete();
         await container.read(memberDirectoryProvider.future);
         await container.pump();
 
-        expect(held.read(), (
-          pubkeyHex: _strangerHex,
-          name: 'Distant Cousin',
-          lookedUp: true,
-        ));
+        expect(held.read(), (pubkeyHex: _strangerHex, name: 'Distant Cousin'));
         expect(_calls(profiles, 'resolveTypedStrangerProfile'), 1);
         expect(_calls(profiles, 'downloadMemberPictures'), 1);
       },
     );
-    test('a stranger is marked looked up from the moment relays are asked, '
-        'whether or not a profile resolves', () async {
-      final gate = Completer<void>();
-      final profiles = MockProfileService()
-        ..resolveTypedStrangerProfileGate = gate;
-      final container = _container(
-        directory: MockMemberDirectoryService(directory: _aliceDirectory()),
-        profiles: profiles,
-      );
-
-      final held = await _hold(container, _strangerNpub);
-      expect(_calls(profiles, 'resolveTypedStrangerProfile'), 1);
-      expect(held.read(), (pubkeyHex: null, name: null, lookedUp: true));
-
-      gate.complete();
-      await container.read(
-        strangerProfileResolveProvider(_strangerNpub).future,
-      );
-      await container.pump();
-      expect(held.read(), (
-        pubkeyHex: null,
-        name: null,
-        lookedUp: true,
-      ), reason: 'a lookup that found nothing still asked the relays');
-    });
-
-    test('a co-member, and a stranger behind a degraded directory, are not '
-        'marked looked up', () async {
-      final profiles = MockProfileService();
-      final named = _container(
-        directory: MockMemberDirectoryService(directory: _aliceDirectory()),
-        profiles: profiles,
-      );
-      final degraded = _container(
-        directory: MockMemberDirectoryService(
-          directory: MemberDirectory.readFailed,
-        ),
-        profiles: profiles,
-      );
-
-      final coMember = await _hold(named, _aliceNpub);
-      final stranger = await _hold(degraded, _strangerNpub);
-
-      expect(coMember.read()?.lookedUp, isFalse);
-      expect(stranger.read()?.lookedUp ?? false, isFalse);
-      expect(_calls(profiles, 'resolveTypedStrangerProfile'), 0);
-    });
   });
 
   group('strangerProfileResolveProvider', () {

@@ -873,7 +873,7 @@ void main() {
         // Group keeps its descriptive label but exposes no long-press action.
         expect(
           semantics.properties.label,
-          equals('QR code for your public identity'),
+          equals('QR code for your public key'),
         );
         expect(semantics.properties.onLongPress, isNull);
 

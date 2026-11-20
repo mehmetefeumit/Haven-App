@@ -2421,7 +2421,7 @@ impl LiveSyncCore {
     /// Returns [`LiveSyncError`] if a re-subscription fails.
     async fn resume_burst(
         &self,
-        _lifecycle: &TokioMutexGuard<'_, ()>,
+        lifecycle: &TokioMutexGuard<'_, ()>,
         kind: BurstKind,
         inbox_every: u32,
         ends: Option<BurstEnd>,
@@ -2565,42 +2565,18 @@ impl LiveSyncCore {
                 // already run: without this the engine sits with live sockets,
                 // zero or partial REQs and open gates until the next tick — the
                 // exact between-tick presence P4 promises does not happen. Put
-                // it back where the pause left it, Rule 13 first (a bucket that
-                // did subscribe may have started a drive's publish before a
-                // later one failed).
+                // it back by the pause itself, which also says `Paused` over
+                // the `Connected` this open's sockets reported: the REQs the
+                // buckets that did subscribe issued are answered until their
+                // CLOSE lands, and only the pause's drain marker stops the
+                // worker redeeming those answers before their coverage and
+                // caught-up marks are forgotten — forgotten first, a relay's
+                // `EOSE` would mark its circle caught up in a paused session.
                 Err(err) => {
-                    self.repause();
-                    // Sweep the registrations the buckets that DID subscribe
-                    // left behind, in the pause's own order. A registration
-                    // outliving the radio is not inert: the pool's `resubscribe`
-                    // re-sends it the instant any relay reconnects, so a leftover
-                    // one turns a stranded connection task from a bare socket
-                    // into a standing REQ mid-gap.
-                    if bounded(RELAY_LIFECYCLE_OP_TIMEOUT, self.unsubscribe_both())
-                        .await
-                        .is_err()
-                    {
-                        log::warn!(
-                            "[live_sync] failed burst open: unsubscribe_all timed out; \
-                             proceeding to cut the radio"
-                        );
+                    if self.pause_locked(lifecycle).await.is_err() {
+                        // A stop overtook the open; its teardown cuts the radio.
+                        self.repause();
                     }
-                    self.processor.wait_publishes_drained().await;
-                    self.terminate_all_relays().await;
-                    self.close_drive_pool().await;
-                    self.radio_off.store(true, Ordering::Release);
-                    // And SAY so, in the same place a deliberate pause does.
-                    // This open lowered `radio_off` before `connect()`, so the
-                    // monitor has already reported `Connecting`/`Connected` for
-                    // the sockets just cut; leaving that as the last status
-                    // would have a consumer judge a session subscribed to
-                    // nothing by its publish acks, which succeed on a separate
-                    // pool. One `Paused`, exactly as `pause_subscriptions`
-                    // emits it — the state this arm leaves is the state it
-                    // reports.
-                    self.bus.send(LiveSyncEvent::Status {
-                        reason: SyncStatusReason::Paused,
-                    });
                     return Err(err);
                 }
             }
@@ -3178,12 +3154,13 @@ impl LiveSyncCore {
     /// [`Self::terminate_all_relays`] re-asserts until the pool proves quiet,
     /// and only after it returns does the radio-off watch arm.
     ///
-    /// **(e) `repair.clear()`, and every REQ's coverage forgotten.** Every REQ
-    /// is re-issued under a fresh generation by the next open, so a repair
-    /// firing after it would replace a live REQ and reset its generation
-    /// mid-burst; and the repair task releases without the lifecycle lock, so
-    /// what a closed REQ still owed would mark its circle caught up while a
-    /// resume connects, before that circle's own REQ is out.
+    /// **(e) `repair.clear()`, and every REQ's coverage and caught-up mark
+    /// forgotten.** Every REQ is re-issued under a fresh generation by the
+    /// next open, so a repair firing after it would replace a live REQ and
+    /// reset its generation mid-burst; and the repair task releases without
+    /// the lifecycle lock, so what a closed REQ still owed would mark its
+    /// circle caught up while a resume connects, before that circle's own REQ
+    /// is out.
     ///
     /// # Errors
     ///
@@ -3200,7 +3177,6 @@ impl LiveSyncCore {
             return Err(LiveSyncError::NoSession);
         }
         self.paused.store(true, Ordering::Release);
-        self.processor.drop_caught_up_marks();
         // The foreground, or the burst, this session was in ends here: what
         // the drain in (b) still ingests is taken in as a burst's is, with no
         // commit made; no drive begins, and the one under way takes no
@@ -3325,8 +3301,11 @@ impl LiveSyncCore {
         // (e) The next burst re-issues every REQ under a fresh generation,
         //     and the repair task, which releases without the lifecycle lock,
         //     must find nothing the closed REQs owed while a resume connects.
+        //     The caught-up marks go last: an `EOSE` drained in (b) marks its
+        //     circle, and past the marker no `EOSE` finds a REQ to mark one.
         self.repair.clear();
         self.processor.clear_eose_coverage();
+        self.processor.drop_caught_up_marks();
 
         self.bus.send(LiveSyncEvent::Status {
             reason: SyncStatusReason::Paused,
@@ -8800,8 +8779,78 @@ mod tests {
         let _ = core.stop().await;
     }
 
+    /// A pause forgets every caught-up mark, the one an `EOSE` makes while the
+    /// pause drains what was queued ahead of its marker included: the plane
+    /// that made it no longer hears.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn no_circle_is_caught_up_once_a_pause_returns() {
+        let hex = "b8".repeat(32);
+        let (core, _relay, _dir, url) = started_core_with(&[&hex]).await;
+        let group_id =
+            <crate::nostr::mls::types::GroupId as crate::nostr::mls::types::GroupIdExt>::from_slice(
+                &[0xb8; 32],
+            );
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            core.circle.session().until_caught_up_for_test(&group_id),
+        )
+        .await
+        .expect("premise: the relay's EOSE marks its circle caught up");
+        let sub_id = core
+            .active
+            .read()
+            .await
+            .as_ref()
+            .and_then(|active| active.group_subs.first().map(|sub| sub.sub_id.clone()))
+            .expect("the circle's REQ is modelled");
+
+        // The worker takes the stored replay at an `EOSE`, so with it held an
+        // `EOSE` queued now is redeemed only once the pause is under way, and
+        // still ahead of the pause's marker.
+        let stored = core.processor.stored.lock().await;
+        let intake = core
+            .intake
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .expect("a started session holds the intake sender");
+        intake
+            .send(RawSignal::EndOfStoredEvents {
+                relay_url: RelayUrl::parse(&url).expect("the relay's url parses"),
+                subscription_id: sub_id,
+                pool: PlaneKind::Group,
+            })
+            .await
+            .expect("the EOSE is queued");
+        drop(intake);
+        let pause = tokio::spawn({
+            let core = Arc::clone(&core);
+            async move { core.pause_subscriptions().await }
+        });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while core.processor.lifecycle() != Lifecycle::Background {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the pause ends the session's lifecycle");
+        drop(stored);
+        pause
+            .await
+            .expect("the pause task joins")
+            .expect("the pause succeeds");
+
+        assert!(
+            !core.circle.session().caught_up_for_test(&group_id),
+            "a circle was left caught up by a pause",
+        );
+        let _ = core.stop().await;
+    }
+
     /// An open that fails puts the pause back, and with it what its partial
-    /// issue left owed: nothing is released after it.
+    /// issue left owed: nothing is released after it — not even by the `EOSE`
+    /// a relay answered its REQ with before the CLOSE landed, which the pool
+    /// can hand on after the open has failed.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn nothing_a_failed_open_left_owed_is_released_after_it() {
         let _ = crate::relay::allow_ws_loopback_for_test();
@@ -8841,6 +8890,50 @@ mod tests {
         core.resume_after_background(Claim::Foreground)
             .await
             .expect_err("premise: the second circle's relay refuses, so the open fails");
+        // The first relay's answer to the open's REQ, delivered behind the
+        // failed open every time, then a drain marker, which the worker acks
+        // once it has taken in everything queued ahead of it.
+        let sub_id = core
+            .active
+            .read()
+            .await
+            .as_ref()
+            .and_then(|active| {
+                active
+                    .group_subs
+                    .iter()
+                    .find(|sub| sub.group_ids_hex.contains(&"5e".repeat(32)))
+                    .map(|sub| sub.sub_id.clone())
+            })
+            .expect("the first circle's REQ is modelled");
+        let intake = core
+            .intake
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .expect("a started session holds the intake sender");
+        intake
+            .send(RawSignal::EndOfStoredEvents {
+                relay_url: RelayUrl::parse(&url).expect("the relay's url parses"),
+                subscription_id: sub_id,
+                pool: PlaneKind::Group,
+            })
+            .await
+            .expect("the answer is queued");
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        intake
+            .send(RawSignal::Pause {
+                registrations: core.router.read().await.registrations(),
+                ack: ack_tx,
+            })
+            .await
+            .expect("the marker is queued");
+        tokio::time::timeout(Duration::from_secs(10), ack_rx)
+            .await
+            .expect("the worker must resolve the marker")
+            .expect("the worker must not drop the ack");
+        // A sender held here would keep the worker from ending at the stop.
+        drop(intake);
 
         core.pass_the_eose_wait_for_test();
         release_silent_relays(&core.active, &core.circle, &core.processor).await;

@@ -170,7 +170,7 @@ class _MemberSearchFieldState extends State<MemberSearchField> {
         const SizedBox(height: HavenSpacing.xs),
         // One line, always present, carrying either the refusal or the
         // guidance. `memberSearchHelper` is the only place the app says
-        // where an identifier comes from, so an error borrows this line and
+        // where a public key comes from, so an error borrows this line and
         // then gives it back.
         Padding(
           padding: const EdgeInsetsDirectional.only(start: HavenSpacing.base),

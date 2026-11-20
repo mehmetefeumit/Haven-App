@@ -10,6 +10,7 @@
 library;
 
 import 'package:flutter/foundation.dart';
+import 'package:haven/src/constants/app_version.dart';
 
 // ---------------------------------------------------------------------------
 // PLACEHOLDERS — replace before any public release.
@@ -258,6 +259,8 @@ const TileProviderConfig stadiaOutdoors = TileProviderConfig(
 /// Nostr/relay correlation and the choice is stored only on-device, so the
 /// exposure is negligible — but keep new styles on the same host so this stays
 /// the only added signal.
+///
+/// Adding a style? See haven/DEVELOPMENT.md → Map-style previews.
 const List<TileProviderConfig> kTileStyleCatalog = [
   stadiaAlidadeSmooth,
   stadiaAlidadeSmoothDark,
@@ -284,7 +287,7 @@ const TileProviderConfig osmRawDevFallback = TileProviderConfig(
   maxNativeZoom: 19,
   userAgentPackageName: 'com.oblivioustech.haven',
   userAgentHeader:
-      'Haven/0.1.0 (+$kHavenWebsiteUrl; contact: $kHavenContactEmail) '
+      'Haven/$havenVersion (+$kHavenWebsiteUrl; contact: $kHavenContactEmail) '
       'flutter_map',
 );
 

@@ -157,7 +157,7 @@ void main() {
             .focusNode!
             .hasFocus,
         isTrue,
-        reason: 'the next ID can be typed without re-tapping the field',
+        reason: 'the next key can be typed without re-tapping the field',
       );
     });
 
@@ -229,9 +229,8 @@ void main() {
       expect(find.text(_l10n(tester).memberSearchNoValidId), findsOneWidget);
     });
 
-    testWidgets('the user entering their own ID is told so, and not staged', (
-      tester,
-    ) async {
+    testWidgets('the user entering their own public key is told so, and not '
+        'staged', (tester) async {
       // The shipped defect this fixes: create-circle had no identity read at
       // all, so this npub was staged and validated against the user's own
       // KeyPackage.
@@ -347,9 +346,8 @@ void main() {
       expect(tester.getRect(find.byKey(WidgetKeys.memberSearchInput)), before);
     });
 
-    testWidgets('the "where an ID comes from" line comes back after an error', (
-      tester,
-    ) async {
+    testWidgets('the "where a public key comes from" line comes back after an '
+        'error', (tester) async {
       await _pumpField(tester);
       final l10n = _l10n(tester);
 
@@ -371,8 +369,20 @@ void main() {
         find.text(l10n.memberSearchHelper),
         findsOneWidget,
         reason:
-            'it is the only place the app says where an ID comes from, so it '
-            'may be replaced by an error but never lost',
+            'it is the only place the app says where a public key comes '
+            'from, so it may be replaced by an error but never lost',
+      );
+    });
+  });
+
+  group('MemberSearchField — asks in Nostr terms', () {
+    testWidgets('the hint and the helper ask for a public key', (tester) async {
+      await _pumpField(tester);
+
+      expect(_field(tester).decoration!.hintText, 'Enter public key...');
+      expect(
+        find.text('Ask contacts for their public key or QR code'),
+        findsOneWidget,
       );
     });
   });

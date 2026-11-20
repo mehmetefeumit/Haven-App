@@ -1135,8 +1135,8 @@ only the CTA pinned. Already proven at 2x German with the keyboard by four
 existing tests.
 
 **[R] Do not delete `memberSearchHelper`.** It is not a duplicate of
-`createCircleEmptyMessage` — it is the only place the app says *where an ID comes
-from*.
+`createCircleEmptyMessage` — it is the only place the app says *where a public key
+comes from*.
 
 ### 9.2 Layout stability while typing
 
@@ -1318,11 +1318,10 @@ fetched."* What ships:
   (`stagedMemberIdentityProvider`): a co-member is answered from the local
   directory with **no** request; anyone else gets the same single lookup (the
   typed row's, reused when it is still in flight) and the same picture
-  download. The naming step's confirmation chips show the same name. **A
-  staged row whose person was looked up shows the typed row's disclosure note**
-  beneath it and in its spoken label, found or not; a co-member named from the
-  directory shows none. (Resolved, owner-directed 2026-11-12: this replaced an
-  implementation-time choice to show no note on a staged row.)
+  download. The naming step's confirmation chips show the same name. Neither
+  the typed row nor a staged row carries a disclosure note (owner-directed
+  2026-11-16: the `memberPickerStrangerLookupNote` that both showed, set
+  2026-11-12, was deleted; the lookup itself is unchanged).
 
 **The trade-off, plainly.** Typing, pasting or scanning someone's key — even
 without adding them — now makes this device download their photo from a server
@@ -1330,8 +1329,10 @@ without adding them — now makes this device download their photo from a server
 moment of the lookup (not the Haven identity: the GET carries no key and no
 signature). Because the person controls the URL, they can make it unique to
 the one key they handed out and use it as a **tracking pixel**: a hit on it
-tells them that key was just typed, from that address. `memberPickerStrangerLookupNote`
-discloses the download on the typed row and on a looked-up staged row. The relay half: two relays at most —
+tells them that key was just typed, from that address. The app no longer says so
+on screen: `memberPickerStrangerLookupNote`, which disclosed the download on the
+typed row and on a looked-up staged row, was deleted at the owner's direction on
+2026-11-16. The relay half: two relays at most —
 the two that key's assignment allows. A key typed again after a relay
 answered without a profile is asked of the other one.
 
@@ -1421,8 +1422,9 @@ break:
 3. **"The list … is never sent anywhere" is scoped to the LIST and must stay
    scoped.** It must never widen into "nothing about these people leaves the
    phone", which is false: inviting fetches a KeyPackage from a relay, and typing
-   an unknown key asks a relay to resolve it — disclosed where it happens, by
-   `memberPickerStrangerLookupNote`.
+   an unknown key asks a relay to resolve it (no longer disclosed where it
+   happens: `memberPickerStrangerLookupNote` was deleted, owner-directed
+   2026-11-16).
 4. **"up to three days" is `DIRECTORY_RETENTION_DAYS = 3`.** "Up to" is required
    and must survive translation — retention is measured from the START of the
    last day a circle was shared, so the window is at most three days and usually

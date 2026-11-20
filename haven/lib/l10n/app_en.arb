@@ -189,9 +189,9 @@
   "@onboardingImportLoading": {
     "description": "Loading label shown while an existing key is being imported."
   },
-  "onboardingImportInvalid": "That doesn’t look like a valid backup key. Please check and try again.",
+  "onboardingImportInvalid": "That doesn’t look like a valid secret key. Please check and try again.",
   "@onboardingImportInvalid": {
-    "description": "Validation error shown when the import input does not look like a valid backup key."
+    "description": "Validation error shown when the import input does not look like a valid secret key (nsec). Use the same term for 'secret key' as onboardingImportBody."
   },
   "onboardingImportError": "We couldn’t import that key. Please check and try again.",
   "@onboardingImportError": {
@@ -795,7 +795,7 @@
   },
   "mapStylePreviewHeader": "Preview",
   "@mapStylePreviewHeader": {
-    "description": "Section header above the live map-style previews."
+    "description": "Section header above the bundled map-style preview images."
   },
   "mapStylePreviewCity": "City",
   "@mapStylePreviewCity": {
@@ -807,19 +807,11 @@
   },
   "mapStylePreviewSemantics": "Map preview ({scene}): {style}",
   "@mapStylePreviewSemantics": {
-    "description": "Accessibility label for a live map preview image, naming the scene (City/Nature) and the style.",
+    "description": "Accessibility label for a bundled map preview image, naming the scene (City/Nature) and the style.",
     "placeholders": {
       "scene": { "type": "String" },
       "style": { "type": "String" }
     }
-  },
-  "mapStylePreviewUnavailableSemantics": "Map preview unavailable in this build",
-  "@mapStylePreviewUnavailableSemantics": {
-    "description": "Accessibility label for the placeholder shown when no map API key is configured (debug/test builds)."
-  },
-  "mapStylePreviewUnavailableLabel": "Live preview appears in release builds",
-  "@mapStylePreviewUnavailableLabel": {
-    "description": "Caption inside the placeholder shown when no map API key is configured (debug/test builds)."
   },
 
   "aboutTitle": "About",
@@ -954,25 +946,25 @@
   "@createCircleEmptyTitle": {
     "description": "Title of the empty state on the add-members step before any member is chosen."
   },
-  "createCircleEmptyMessage": "Search by ID or scan their QR code to add members.",
+  "createCircleEmptyMessage": "Search by public key or scan their QR code to add members.",
   "@createCircleEmptyMessage": {
-    "description": "Message of the empty state on the add-members step explaining how to add members."
+    "description": "Message of the empty state on the add-members step explaining how to add members. 'Public key' is the person's Nostr public key (npub): use this locale's established term for it, the same one as qrCodeYourPublicKeyLabel."
   },
   "createCircleNoValidMembers": "No valid members to invite",
   "@createCircleNoValidMembers": {
     "description": "Error shown when the user tries to continue with no valid members selected."
   },
-  "createCircleNoIdInQr": "No valid ID found in QR code",
+  "createCircleNoIdInQr": "No valid public key found in QR code",
   "@createCircleNoIdInQr": {
-    "description": "Snackbar shown when a scanned QR code contains no recognizable member ID."
+    "description": "Snackbar shown when a scanned QR code contains no recognizable public key (npub). Use the same term for 'public key' as qrCodeYourPublicKeyLabel."
   },
-  "memberLookupNotFound": "No Haven account found for this ID yet. If they just set up Haven, try again in a minute.",
+  "memberLookupNotFound": "No Haven account found for this public key yet. If they just set up Haven, try again in a minute.",
   "@memberLookupNotFound": {
-    "description": "Member validation message when every relay that was asked answered and none holds an invitation key for the entered ID. Shown next to a Retry button. Deliberately not certain ('yet'): someone who set up Haven moments ago may not be findable for a minute, so the second sentence invites trying again. Must not say the person does not exist or blame anyone. 'Haven' is intentionally English (brand name). 'ID' is the person's public ID the user typed or scanned."
+    "description": "Member validation message when every relay that was asked answered and none holds an invitation key for the entered public key. Shown next to a Retry button. Deliberately not certain ('yet'): someone who set up Haven moments ago may not be findable for a minute, so the second sentence invites trying again. Must not say the person does not exist or blame anyone. 'Haven' is intentionally English (brand name). 'Public key' is the person's Nostr public key (npub) the user typed or scanned — use the same term as qrCodeYourPublicKeyLabel."
   },
-  "memberLookupIncomplete": "Couldn't finish checking this ID. Check your connection and try again.",
+  "memberLookupIncomplete": "Couldn't finish checking this public key. Check your connection and try again.",
   "@memberLookupIncomplete": {
-    "description": "Member validation message when the lookup could not finish (a relay did not answer, or the network failed), so it is unknown whether the person has a Haven account. Shown next to a Retry button. Must not suggest the person has no account. 'ID' is the person's public ID the user typed or scanned."
+    "description": "Member validation message when the lookup could not finish (a relay did not answer, or the network failed), so it is unknown whether the person has a Haven account. Shown next to a Retry button. Must not suggest the person has no account. 'Public key' is the person's Nostr public key (npub) the user typed or scanned — use the same term as qrCodeYourPublicKeyLabel."
   },
   "createCircleSomethingWentWrong": "Something went wrong",
   "@createCircleSomethingWentWrong": {
@@ -1086,7 +1078,7 @@
   },
   "addMemberAlreadyInCircle": "Already in this circle",
   "@addMemberAlreadyInCircle": {
-    "description": "Member validation error shown when the entered ID is already a member of this circle."
+    "description": "Member validation error shown when the entered public key is already a member of this circle."
   },
   "addMemberSendInvitation": "{count, plural, =1{Send invitation} other{Send invitations}}",
   "@addMemberSendInvitation": {
@@ -1286,33 +1278,33 @@
     "description": "Shown beside a person the user is trying to invite when the invitation key they published is one Haven cannot use (for example incomplete or malformed). Opening Haven on their phone publishes a new one. Different from pendingMemberNeedsUpdate, which is for someone still on an older Haven."
   },
 
-  "memberSearchHint": "Enter member ID...",
+  "memberSearchHint": "Enter public key...",
   "@memberSearchHint": {
-    "description": "Hint inside the member-search text field where a member ID is entered."
+    "description": "Hint inside the member-search text field where a person's public key (npub) is entered. Use the same term for 'public key' as qrCodeYourPublicKeyLabel."
   },
   "memberSearchPasteTooltip": "Paste from clipboard",
   "@memberSearchPasteTooltip": {
-    "description": "Tooltip on the button that pastes a member ID from the clipboard."
+    "description": "Tooltip on the button that pastes a public key from the clipboard."
   },
   "memberSearchAddTooltip": "Add member",
   "@memberSearchAddTooltip": {
-    "description": "Tooltip on the button that adds the entered member ID."
+    "description": "Tooltip on the button that adds the entered public key."
   },
   "memberSearchScanTooltip": "Scan QR Code",
   "@memberSearchScanTooltip": {
     "description": "Tooltip on the button that opens the QR scanner to add a member."
   },
-  "memberSearchHelper": "Ask contacts for their Haven QR code or ID",
+  "memberSearchHelper": "Ask contacts for their public key or QR code",
   "@memberSearchHelper": {
-    "description": "Helper text under the member-search field. 'Haven' is intentionally English (brand name)."
+    "description": "Helper text under the member-search field: the one place the add-members screen says what to ask a person for. 'Public key' is the person's Nostr public key (npub) — use the same term as qrCodeYourPublicKeyLabel."
   },
-  "memberSearchNoValidId": "No valid Haven ID found",
+  "memberSearchNoValidId": "No valid public key found",
   "@memberSearchNoValidId": {
-    "description": "Inline error shown when the entered text is not a recognizable Haven ID. 'Haven' is intentionally English (brand name)."
+    "description": "Inline error shown when the entered text is not a recognizable public key (npub). Use the same term for 'public key' as qrCodeYourPublicKeyLabel."
   },
   "memberSearchAlreadyAdded": "Member already added",
   "@memberSearchAlreadyAdded": {
-    "description": "Inline error shown when the entered member ID is already in the selected list."
+    "description": "Inline error shown when the entered public key is already in the selected list."
   },
   "memberPickerSectionRoster": "Members of your circles",
   "@memberPickerSectionRoster": {
@@ -1324,7 +1316,7 @@
   },
   "memberPickerNoMatches": "No matches in your circles",
   "@memberPickerNoMatches": {
-    "description": "Shown, and announced once, when what was typed matches nobody in the user's circles. The person can still be invited by pasting their full ID, so this must not read as a dead end."
+    "description": "Shown, and announced once, when what was typed matches nobody in the user's circles. The person can still be invited by pasting their full public key, so this must not read as a dead end."
   },
   "memberPickerLoading": "Loading people from your circles",
   "@memberPickerLoading": {
@@ -1332,7 +1324,7 @@
   },
   "memberPickerDirectoryUnavailable": "Couldn't load who's in your circles right now",
   "@memberPickerDirectoryUnavailable": {
-    "description": "Shown in place of the picker's list when the on-device directory of co-members could not be read at all (a storage or lookup fault) — distinct from memberPickerNoMatches, which means the read SUCCEEDED and simply matched nobody, and distinct from the silent empty state on a fresh install, which means the read succeeded and truthfully found no co-members yet. This string must never be read as either of those: it says the answer is unknown, not that it is empty or negative. The person can still be invited by pasting or scanning their full ID, so this must not read as a dead end, and must not display any raw error text (Security Rule 8 — never surface exception detail to the UI)."
+    "description": "Shown in place of the picker's list when the on-device directory of co-members could not be read at all (a storage or lookup fault) — distinct from memberPickerNoMatches, which means the read SUCCEEDED and simply matched nobody, and distinct from the silent empty state on a fresh install, which means the read succeeded and truthfully found no co-members yet. This string must never be read as either of those: it says the answer is unknown, not that it is empty or negative. The person can still be invited by pasting or scanning their full public key, so this must not read as a dead end, and must not display any raw error text (Security Rule 8 — never surface exception detail to the UI)."
   },
   "memberPickerMatchesAnnouncement": "Matches: {count}",
   "@memberPickerMatchesAnnouncement": {
@@ -1341,9 +1333,9 @@
       "count": { "type": "int", "format": "decimalPattern" }
     }
   },
-  "memberPickerReasonSelf": "This is your own ID",
+  "memberPickerReasonSelf": "This is your own public key",
   "@memberPickerReasonSelf": {
-    "description": "Why someone cannot be added: the entered ID, or the row, is the user's own identity. Shown under the search field when the user enters their own ID, and as the reason on a disabled picker row. Must stay distinct from 'Already in this circle' \u2014 being unable to invite yourself is a different fact from already being a member."
+    "description": "Why someone cannot be added: the entered public key, or the row, is the user's own. Shown under the search field when the user enters their own public key, and as the reason on a disabled picker row. Must stay distinct from 'Already in this circle' — being unable to invite yourself is a different fact from already being a member. Use the same term for 'public key' as qrCodeYourPublicKeyLabel."
   },
   "memberPickerReadPublicKey": "Read public key aloud",
   "@memberPickerReadPublicKey": {
@@ -1369,13 +1361,9 @@
     }
   },
 
-  "memberPickerStrangerLookupNote": "Haven asked a relay — two at most — for this person's published profile. A relay it asked can see that this device asked about this key just now, but the request carries no signature, so it isn't tied to your Haven identity. If the profile has a photo, Haven downloads it from the server this person chose, which may send it on to another server. Each of them can see this device's network address.",
-  "@memberPickerStrangerLookupNote": {
-    "description": "Shown on the ONE row that appears when the user types or pastes a complete, valid npub for someone not already in the local directory (plan §10 D2), and also under a staged row (added by the paste button, Done, a QR scan or a tap on that row) whose person was looked up the same way. Appears whether or not anything resolves. Discloses exactly four things and no more: (1) Haven asked a public relay for the person's published profile — never more than two relays (it never pads with decoys; they are the two relays the existing per-author relay assignment allows, PROFILE_MAX_RELAY_RANK). Do NOT say or imply WHEN the second one is asked, e.g. 'only if the first did not answer': it is also asked when the key is entered again after the first answered without a profile; (2) a relay that was asked can see THIS DEVICE asked about THAT KEY at THAT MOMENT — do not soften this into 'may be able to see' or omit it, it is a real, unavoidable disclosure; (3) the request is NOT tied to the user's Haven identity, because it carries no cryptographic signature and therefore cannot answer a relay's NIP-42 AUTH challenge — translate 'signature' in the cryptographic sense, not a handwritten or email signature; (4) ONLY IF the published profile names a photo, Haven downloads that photo from the server the PERSON chose (not a server Haven or the user chose); that server may redirect the download to another server (Blossom servers such as Primal's hand the file out from a separate media host, and Haven follows up to three such redirects), and each server the download reaches can see this device's network address — translate 'network address' as the device's internet (IP) address, not a street or email address, and keep 'may': not every server redirects. Do NOT use a word meaning 'anonymous' or 'anonymously' anywhere in this string — it overclaims: the network address and timing of the requests are still visible, which is exactly what points (2) and (4) disclose. Do not add or imply a duration, a retry count, or which relay or server was asked. 'This person' is deliberately not a pronoun: do not introduce a gendered pronoun for them."
-  },
   "memberPickerStrangerLookingUp": "Looking up published profile…",
   "@memberPickerStrangerLookingUp": {
-    "description": "Shown, and spoken by a screen reader as part of the row's label, on the typed-npub row of the invite picker while the lookup of that person's published profile is still in flight. Also announced once on its own when the row appears with the lookup still running, so it must read as a complete status. A short status, not a sentence about relays — the disclosure is memberPickerStrangerLookupNote, shown beneath it. Ends with an ellipsis character to mark an activity in progress."
+    "description": "Shown, and spoken by a screen reader as part of the row's label, on the typed-npub row of the invite picker while the lookup of that person's published profile is still in flight. Also announced once on its own when the row appears with the lookup still running, so it must read as a complete status. A short status, not a sentence about relays. Ends with an ellipsis character to mark an activity in progress."
   },
   "memberPickerStrangerNotFound": "No published name found",
   "@memberPickerStrangerNotFound": {
@@ -1408,9 +1396,9 @@
       "inviter": { "type": "String" }
     }
   },
-  "invitationCardInvitedBySemantics": "Invited by cryptographic identifier {inviter}",
+  "invitationCardInvitedBySemantics": "Invited by public key {inviter}",
   "@invitationCardInvitedBySemantics": {
-    "description": "Accessibility label for the inviter row of an invitation card. {inviter} is the inviter's shortened npub.",
+    "description": "Accessibility label for the inviter row of an invitation card. {inviter} is the inviter's shortened npub; the label says what that string is — their public key — rather than reading it out as a name. Use the same term for 'public key' as qrCodeYourPublicKeyLabel.",
     "placeholders": {
       "inviter": { "type": "String" }
     }
@@ -1998,34 +1986,6 @@
   "@qrCodeYourPublicKeyLabel": {
     "description": "Field label above the selectable npub on the Public Key QR page."
   },
-  "reachabilityChecking": "Getting ready to receive invitations…",
-  "@reachabilityChecking": {
-    "description": "Status line above the user's QR code (and on the Identity page) while Haven has not yet confirmed that others can invite the user, or while a Retry runs. Announced to screen readers when it appears. Plain language: no 'relay' or 'KeyPackage'."
-  },
-  "reachabilityReady": "Ready to be invited",
-  "@reachabilityReady": {
-    "description": "Status line above the user's QR code (and on the Identity page) once Haven has confirmed others can find the user and invite them to a circle. Shown with a check icon. Plain language: no 'relay' or 'KeyPackage'."
-  },
-  "reachabilityCantCheck": "Can't check right now whether others can invite you",
-  "@reachabilityCantCheck": {
-    "description": "Neutral status line above the user's QR code (and on the Identity page) when Haven could not reach the network to check. Shown next to a Retry button. Must NOT say the user cannot be invited — nothing is known, and the phone may simply be offline. Plain language: no 'relay' or 'KeyPackage'."
-  },
-  "reachabilityNotReady": "Others can't invite you yet",
-  "@reachabilityNotReady": {
-    "description": "Status line above the user's QR code (and on the Identity page) when Haven reached the network and confirmed that others cannot find the user to invite them yet. Shown with a warning icon and a Retry button. Plain language: no 'relay' or 'KeyPackage'; must not blame the user."
-  },
-  "reachabilityNoRelays": "Others can't invite you until you add a relay",
-  "@reachabilityNoRelays": {
-    "description": "Status line above the user's QR code (and on the Identity page) when the user has removed every relay of a kind Haven needs, so nothing can be published for others to find. Followed by a link to Relay settings (reachabilityOpenRelaySettings). 'relay' is a Nostr term of art — keep this locale's established rendering."
-  },
-  "reachabilityOpenRelaySettings": "Relay settings",
-  "@reachabilityOpenRelaySettings": {
-    "description": "Link under the 'add a relay' status line above the user's QR code; opens the Relay settings page. Use the same name as the Relay settings page title in this locale."
-  },
-  "reachabilityAwaitingReset": "Others can invite you once you continue past the relay settings notice",
-  "@reachabilityAwaitingReset": {
-    "description": "Status line above the user's QR code (and on the Identity page) while the one-time notice that this update reset the relay settings is still unanswered: Haven publishes nothing others need to invite the user until the user presses Continue on that notice or comes back from Relay settings. No Retry is offered here because it would do nothing."
-  },
   "qrCodeWhatIsThisTitle": "What is this?",
   "@qrCodeWhatIsThisTitle": {
     "description": "Heading of the plain-language explainer on the Public Key QR page."
@@ -2136,9 +2096,9 @@
   "@npubQrScanLabel": {
     "description": "Label shown beneath the QR code inviting others to scan it to add the user."
   },
-  "npubQrSemanticsLabel": "QR code for your public identity",
+  "npubQrSemanticsLabel": "QR code for your public key",
   "@npubQrSemanticsLabel": {
-    "description": "Accessibility label for the npub QR code group."
+    "description": "Accessibility label for the npub QR code group. Use the same term for 'public key' as qrCodeYourPublicKeyLabel."
   },
 
   "photoHeaderRemoveTitle": "Remove profile photo?",

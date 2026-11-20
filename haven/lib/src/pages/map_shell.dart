@@ -3176,15 +3176,16 @@ class _MapShellState extends ConsumerState<MapShell>
   }
 
   // Sheet snap points mirrored from `circles/circles_bottom_sheet.dart`
-  // (the subset this shell drives: the collapsed min, the low "peek" rest
-  // point used after tap-to-focus, and the max — which with the min gives
-  // `_animateSheetDuration` a stable range to divide by).
+  // (the subset this shell drives: the low "peek" rest point used after
+  // tap-to-focus, and the min and max, which give `_animateSheetDuration` a
+  // stable range to divide by). It collapses to `collapsedSheetSize`, which
+  // is the min unless the screen is too short for the sheet's header.
   static const double _kMinSheetSize = 0.12;
   static const double _kPeekSheetSize = 0.30;
   static const double _kMaxSheetSize = 0.85;
 
   Future<void> _collapseSheet() async {
-    await _animateSheetTo(_kMinSheetSize);
+    await _animateSheetTo(collapsedSheetSize(context));
   }
 
   /// Partially collapses the sheet to the low "peek" snap so most of the

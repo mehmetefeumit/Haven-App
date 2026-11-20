@@ -70,8 +70,7 @@ strangerProfileResolveProvider = FutureProvider.autoDispose
 /// whose `pictureBytes` is null — never for an unresolved or abandoned npub.
 ///
 /// The picture is an HTTPS GET to a server the person chose, which learns
-/// this device's network address and when it asked; the disclosure note on
-/// the typed-npub row and on a looked-up staged row says so.
+/// this device's network address and when it asked.
 final AutoDisposeFutureProviderFamily<void, String> strangerPictureProvider =
     FutureProvider.autoDispose.family<void, String>((ref, pubkeyHex) async {
       // One in-flight download per pubkey, however often the row is rebuilt.
@@ -89,16 +88,11 @@ final AutoDisposeFutureProviderFamily<void, String> strangerPictureProvider =
     });
 
 /// Who a staged npub belongs to, as far as can be said: a hex pubkey for
-/// the avatar and the name to show, each `null` while none resolved, and
-/// whether relays were asked about them, which the row must then disclose.
-typedef StagedMemberIdentity = ({
-  String? pubkeyHex,
-  String? name,
-  bool lookedUp,
-});
+/// the avatar and the name to show, `null` while none resolved.
+typedef StagedMemberIdentity = ({String? pubkeyHex, String? name});
 
 /// The identity shown on a staged-member row, keyed by npub, or `null` while
-/// nothing is known, no relay was asked and the row shows the npub alone.
+/// nothing is known and the row shows the npub alone.
 ///
 /// Keyed by the npub, never by how it was staged (suggestion tap, typed-row
 /// tap, paste button, Done/Enter, QR), so every path shows the same person.
@@ -112,11 +106,9 @@ typedef StagedMemberIdentity = ({
 ///
 /// A plain synchronous provider so every dependency is re-watched in the
 /// same build: a directory refresh keeps the previous value and never drops
-/// the resolve it holds, so it cannot ask again. `lookedUp` is set here, by
-/// the branch that asks, so the row's disclosure (the typed-npub row's, owner
-/// direction 2026-11-12) cannot drift from the lookup it discloses. The host
-/// page holds one subscription per staged npub, so a row scrolled out of a
-/// lazy list does not re-ask on the way back.
+/// the resolve it holds, so it cannot ask again. The host page holds one
+/// subscription per staged npub, so a row scrolled out of a lazy list does
+/// not re-ask on the way back.
 final AutoDisposeProviderFamily<StagedMemberIdentity?, String>
 stagedMemberIdentityProvider = Provider.autoDispose
     .family<StagedMemberIdentity?, String>((ref, npub) {
@@ -124,18 +116,14 @@ stagedMemberIdentityProvider = Provider.autoDispose
       if (directory == null) return null;
       for (final entry in directory.entries) {
         if (entry.npub == npub) {
-          return (
-            pubkeyHex: entry.pubkeyHex,
-            name: entry.displayName,
-            lookedUp: false,
-          );
+          return (pubkeyHex: entry.pubkeyHex, name: entry.displayName);
         }
       }
       if (directory.degraded || !publicProfilesEnabled) return null;
       final profile = ref
           .watch(strangerProfileResolveProvider(npub))
           .valueOrNull;
-      if (profile == null) return (pubkeyHex: null, name: null, lookedUp: true);
+      if (profile == null) return null;
       if (profile.pictureBytes == null) {
         ref.watch(strangerPictureProvider(profile.pubkeyHex));
       }
@@ -143,9 +131,5 @@ stagedMemberIdentityProvider = Provider.autoDispose
         npubFallback: '',
         profile: profile,
       );
-      return (
-        pubkeyHex: profile.pubkeyHex,
-        name: name.isEmpty ? null : name,
-        lookedUp: true,
-      );
+      return (pubkeyHex: profile.pubkeyHex, name: name.isEmpty ? null : name);
     });

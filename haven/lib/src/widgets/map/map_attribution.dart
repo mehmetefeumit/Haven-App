@@ -1,4 +1,5 @@
-/// On-map attribution overlay for the active tile provider.
+/// Map attribution for the active tile provider: the on-map overlay and its
+/// static twin for map images.
 library;
 
 import 'package:flutter/material.dart';
@@ -6,6 +7,21 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/constants/tiles.dart';
 import 'package:url_launcher/url_launcher.dart';
+
+/// The ODbL disclosure's label. A credit line alone is not sufficient under
+/// the OSMF Attribution Guidelines; the licence must be named too.
+const String _kOdblLabel = 'Open Database License';
+
+Future<void> _openAttributionLink(String url) async {
+  final uri = Uri.tryParse(url);
+  if (uri == null) return;
+  try {
+    await launchUrl(uri, mode: LaunchMode.externalApplication);
+  } on Object catch (e) {
+    // Never surface raw errors; only the type goes to the debug log.
+    debugPrint('Attribution link launch failed: ${e.runtimeType}');
+  }
+}
 
 /// Persistent, expandable attribution shown in the map's bottom-right corner.
 ///
@@ -22,17 +38,6 @@ class MapAttribution extends StatelessWidget {
 
   /// The active tile provider whose credits are displayed.
   final TileProviderConfig config;
-
-  Future<void> _open(String url) async {
-    final uri = Uri.tryParse(url);
-    if (uri == null) return;
-    try {
-      await launchUrl(uri, mode: LaunchMode.externalApplication);
-    } on Object catch (e) {
-      // Never surface raw errors; only the type goes to the debug log.
-      debugPrint('Attribution link launch failed: ${e.runtimeType}');
-    }
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -75,14 +80,46 @@ class MapAttribution extends StatelessWidget {
         for (final source in config.attribution)
           TextSourceAttribution(
             source.text,
-            onTap: () => _open(source.url),
+            onTap: () => _openAttributionLink(source.url),
           ),
-        // Explicit ODbL disclosure — a credit line alone is not sufficient
-        // under the OSMF Attribution Guidelines.
         TextSourceAttribution(
-          'Open Database License',
+          _kOdblLabel,
           prependCopyright: false,
-          onTap: () => _open(kOsmCopyrightUrl),
+          onTap: () => _openAttributionLink(kOsmCopyrightUrl),
+        ),
+      ],
+    );
+  }
+}
+
+/// The same credits and licence link as [MapAttribution], as a row of links
+/// under a static map image, which has no [FlutterMap] for the overlay to
+/// attach to.
+class StaticMapAttribution extends StatelessWidget {
+  /// Creates the attribution links for an image rendered from [config].
+  const StaticMapAttribution({required this.config, super.key});
+
+  /// The tile provider whose style and data the image shows.
+  final TileProviderConfig config;
+
+  @override
+  Widget build(BuildContext context) {
+    final style = TextButton.styleFrom(
+      textStyle: Theme.of(context).textTheme.labelSmall,
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+    );
+    return Wrap(
+      children: [
+        for (final source in config.attribution)
+          TextButton(
+            style: style,
+            onPressed: () => _openAttributionLink(source.url),
+            child: Text('© ${source.text}'),
+          ),
+        TextButton(
+          style: style,
+          onPressed: () => _openAttributionLink(kOsmCopyrightUrl),
+          child: const Text(_kOdblLabel),
         ),
       ],
     );
