@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:clock/clock.dart';
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/services/network_change_reconnector.dart';
@@ -49,11 +50,13 @@ void main() {
   /// its call and finishes when [gate] completes, or at once.
   NetworkChangeReconnector build({
     Duration floor = Duration.zero,
+    Stopwatch Function() stopwatch = Stopwatch.new,
     Completer<void> Function()? gate,
     Exception? throwing,
   }) => NetworkChangeReconnector(
     source: source,
     floor: floor,
+    stopwatch: stopwatch,
     isResumed: () => resumed,
     reconnect: () async {
       calls++;
@@ -148,6 +151,30 @@ void main() {
         async.elapse(kNetworkChangeSettle - const Duration(seconds: 1));
         expect(calls, 2);
       });
+    });
+  });
+
+  test('a re-dial is due while it settles, while it is owed and while it '
+      'runs, and not after it or a stop', () {
+    fakeAsync((async) {
+      final gate = Completer<void>();
+      final reconnector = build(gate: () => gate)..start();
+      expect(reconnector.redialDue, isFalse);
+      source.change();
+      expect(reconnector.redialDue, isTrue, reason: 'settling');
+      resumed = false;
+      async.elapse(kNetworkChangeSettle);
+      expect(reconnector.redialDue, isTrue, reason: 'owed');
+      resumed = true;
+      reconnector.onResumed();
+      expect(calls, 1);
+      expect(reconnector.redialDue, isTrue, reason: 'running');
+      gate.complete();
+      async.flushMicrotasks();
+      expect(reconnector.redialDue, isFalse);
+      source.change();
+      reconnector.stop();
+      expect(reconnector.redialDue, isFalse, reason: 'a pause forgets it');
     });
   });
 
@@ -258,11 +285,19 @@ void main() {
     });
   });
 
+  /// A monotonic stopwatch on fake_async's elapsed time, whatever the zone's
+  /// wall clock reads.
+  Stopwatch Function() monotonic(FakeAsync async) =>
+      () => Clock(() => DateTime(2000).add(async.elapsed)).stopwatch();
+
   group('the iOS floor', () {
     test('a second change 10 s after the first re-dials 30 s after the first '
         're-dial, not before, and the latest change is the one handled', () {
       fakeAsync((async) {
-        build(floor: kIosNetworkReconnectFloor).start();
+        build(
+          floor: kIosNetworkReconnectFloor,
+          stopwatch: monotonic(async),
+        ).start();
         source.change();
         async.elapse(kNetworkChangeSettle);
         expect(calls, 1);
@@ -284,6 +319,28 @@ void main() {
       });
     });
 
+    test('setting the wall clock back does not stretch it', () {
+      fakeAsync((async) {
+        var wall = DateTime(2026, 11, 20, 12);
+        withClock(Clock(() => wall.add(async.elapsed)), () {
+          build(
+            floor: kIosNetworkReconnectFloor,
+            stopwatch: monotonic(async),
+          ).start();
+          source.change();
+          async.elapse(kNetworkChangeSettle);
+          expect(calls, 1);
+          final firstRedial = async.elapsed;
+
+          wall = wall.subtract(const Duration(hours: 1));
+          async.elapse(const Duration(seconds: 10));
+          source.change();
+          async.elapse(firstRedial + kIosNetworkReconnectFloor - async.elapsed);
+          expect(calls, 2, reason: 'the floor is 30 s of elapsed time');
+        });
+      });
+    });
+
     test('is 30 s, and Android has none', () {
       fakeAsync((async) {
         expect(kIosNetworkReconnectFloor, const Duration(seconds: 30));
@@ -298,7 +355,10 @@ void main() {
 
     test('an owed change waits out the floor at the resume', () {
       fakeAsync((async) {
-        final reconnector = build(floor: kIosNetworkReconnectFloor)..start();
+        final reconnector = build(
+          floor: kIosNetworkReconnectFloor,
+          stopwatch: monotonic(async),
+        )..start();
         source.change();
         async.elapse(kNetworkChangeSettle);
         resumed = false;

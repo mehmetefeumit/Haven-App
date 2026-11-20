@@ -973,7 +973,8 @@ void main() {
       expect(
         [
           for (final use in uses.found)
-            if (use.$2 != 'stop()') '${use.$1}: ${use.$2}',
+            if (!const {'stop()', 'redialDue (tear-off)'}.contains(use.$2))
+              '${use.$1}: ${use.$2}',
         ],
         ['initState: startAtMount()', '_onResumed: onResumed()'],
         reason: 'armed anywhere else it can listen, and re-dial, in a '
@@ -987,6 +988,33 @@ void main() {
         _bodyOf(source, '_onResumed').toSource(),
         contains('if (liveSyncEnabled) _networkReconnector.onResumed();'),
         reason: 'the flag-off build holds no standing socket to re-dial',
+      );
+      final resume = _bodyOf(source, '_onResumed').toSource();
+      expect(
+        resume.indexOf('_networkReconnector.onResumed();'),
+        allOf(
+          isNonNegative,
+          lessThan(resume.indexOf('redialDue: _networkReconnector.redialDue')),
+        ),
+        reason: 'the resume re-anchor reads whether a re-dial is due after an '
+            'owed change has been started, and skips a live engine on it '
+            '(MapShell.liveReanchorDue)',
+      );
+      expect(
+        resume.replaceAll(RegExp(r'\s+'), ' '),
+        contains(
+          '(engine.isPaused || burstInFlight != null || '
+          'MapShell.liveReanchorDue(redialDue: _networkReconnector.redialDue, '
+          'throttlePassed: MapShell.shouldReanchorOnResume(',
+        ),
+        reason: 'a due re-dial stands in for the throttled re-anchor of a '
+            'live engine, and for nothing else',
+      );
+      expect(
+        _bodyOf(source, '_reconnectAfterNetworkChange').toSource(),
+        contains('MapShell.redialBehindStamp('),
+        reason: 'the re-dial writes its re-anchor stamp, and withdraws it on '
+            'failure, only through the tested helper',
       );
       final built = source.indexOf('NetworkChangeReconnector(');
       expect(

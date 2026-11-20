@@ -336,15 +336,21 @@ has_unconditional() { # <needle>; code text on stdin
 }
 
 # is_network_change_source <file.dart> — 0 when the file's ONE native listen is
-# the fieldless `haven.app/network_change` channel (network_change_source.dart)
-# and it names nothing of the position stream: one `EventChannel(`, naming that
-# channel, one `receiveBroadcastStream(`, and no `ios_location_stream`. A
-# position listen added beside it fails one of the three and is counted.
+# on the fieldless `haven.app/network_change` channel
+# (network_change_source.dart) and it names nothing of the position stream: one
+# `EventChannel(`, naming that channel and bound to a name; one
+# `receiveBroadcastStream(`, whose receiver is that name; and no
+# `ios_location_stream`. A position listen — added beside it, or put in its
+# place on another channel (an imported one constructs nothing here) — fails
+# one of them and is counted.
 is_network_change_source() {
-  local f="$1"
-  [[ "$(grep -cF 'EventChannel(' "$f" || true)" == "1" ]] &&
-    grep -qF "EventChannel('haven.app/network_change')" "$f" &&
+  local f="$1" name
+  [[ "$(grep -cF 'EventChannel(' "$f" || true)" == "1" ]] || return 1
+  name="$(grep -oE "[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[[:space:]]*(const[[:space:]]+)?EventChannel\('haven\.app/network_change'\)" "$f" |
+    head -n 1 | grep -oE '^[A-Za-z_][A-Za-z0-9_]*' || true)"
+  [[ -n "$name" ]] &&
     [[ "$(grep -cF 'receiveBroadcastStream(' "$f" || true)" == "1" ]] &&
+    grep -qE "(^|[^A-Za-z0-9_.])${name}[[:space:]]*\.[[:space:]]*receiveBroadcastStream\(" "$f" &&
     ! grep -qF 'ios_location_stream' "$f"
 }
 
@@ -2503,7 +2509,7 @@ fi
 # hide under the slack.
 # ---------------------------------------------------------------------------
 self_test() {
-  local -r SELF_TEST_FIXTURES=245
+  local -r SELF_TEST_FIXTURES=246
   local tmp fails=0 checked=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -2650,6 +2656,14 @@ self_test() {
     'ios_location_source.dart' "${boundary_source}" \
     'network_change_source.dart' "${net_source}
 Stream<Object?> raw() => MethodChannelIosLocationSource.eventChannel.receiveBroadcastStream();"
+  # The network channel declared, and the one listen on another receiver — an
+  # imported position channel — in its place: counted.
+  _boundary_files 'boundary: the network channel declared, another channel listened to' 1 \
+    'ios_location_source.dart' "${boundary_source}" \
+    'network_change_source.dart' "class PlatformNetworkChangeSource {
+  static const EventChannel channel = EventChannel('haven.app/network_change');
+  Stream<Object?> changes() => MethodChannelIosLocationSource.eventChannel.receiveBroadcastStream();
+}"
 
   # --- check_ios_stream_route -----------------------------------------------
   #

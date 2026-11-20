@@ -100,8 +100,10 @@ abstract class SubscriptionService {
   /// what is not.
   ///
   /// Refused by the engine unless the app is resumed at the moment of the
-  /// call (`appIsResumed`). Does nothing without a session, and never throws.
-  Future<void> reconnectAfterNetworkChange();
+  /// call (`appIsResumed`). Answers whether the session was re-dialled: false
+  /// without a session, and for a re-dial that failed, which leaves it
+  /// paused. Never throws.
+  Future<bool> reconnectAfterNetworkChange();
 
   /// Tells a running session that the app's lifecycle reads `resumed`, when
   /// — and only when — it does (`appIsResumed`).

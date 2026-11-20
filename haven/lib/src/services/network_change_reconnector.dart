@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:clock/clock.dart';
 import 'package:flutter/foundation.dart';
 import 'package:haven/src/services/mls_session_handover.dart';
 import 'package:haven/src/services/network_change_source.dart';
@@ -40,30 +39,41 @@ class NetworkChangeReconnector {
   /// Creates a reconnector over [source] that calls [reconnect].
   ///
   /// [floor] is the least time between two re-dials; the latest change is
-  /// still handled once it has elapsed.
+  /// still handled once it has elapsed. It is measured on [stopwatch], a
+  /// monotonic clock by default: measured on the wall clock, setting the
+  /// device clock back by an hour would hold every re-dial for that hour.
   NetworkChangeReconnector({
     required NetworkChangeSource source,
     required Future<void> Function() reconnect,
     Duration floor = Duration.zero,
     Duration settle = kNetworkChangeSettle,
     bool Function() isResumed = appIsResumed,
+    Stopwatch Function() stopwatch = Stopwatch.new,
   }) : _source = source,
        _reconnect = reconnect,
        _floor = floor,
        _settle = settle,
-       _isResumed = isResumed;
+       _isResumed = isResumed,
+       _stopwatch = stopwatch;
 
   final NetworkChangeSource _source;
   final Future<void> Function() _reconnect;
   final Duration _floor;
   final Duration _settle;
   final bool Function() _isResumed;
+  final Stopwatch Function() _stopwatch;
 
   StreamSubscription<void>? _changes;
   Timer? _timer;
   bool _owed = false;
   bool _inFlight = false;
-  DateTime? _lastRunAt;
+  Stopwatch? _sinceLastRun;
+
+  /// Whether a re-dial is settling, owed to the next resume, or running.
+  ///
+  /// It re-anchors every REQ, so a resume that finds one due has its own
+  /// re-anchor of a live engine already covered (`MapShell`).
+  bool get redialDue => _changes != null && (_owed || _inFlight);
 
   /// Listens for changes, unless already listening: listening again would
   /// re-take the native baseline and lose a change that is owed.
@@ -113,9 +123,9 @@ class NetworkChangeReconnector {
   }
 
   Duration _floorLeft() {
-    final last = _lastRunAt;
-    if (last == null) return Duration.zero;
-    final left = _floor - clock.now().difference(last);
+    final since = _sinceLastRun;
+    if (since == null) return Duration.zero;
+    final left = _floor - since.elapsed;
     return left.isNegative ? Duration.zero : left;
   }
 
@@ -128,7 +138,7 @@ class NetworkChangeReconnector {
   Future<void> _run() async {
     _owed = false;
     _inFlight = true;
-    _lastRunAt = clock.now();
+    _sinceLastRun = _stopwatch()..start();
     debugPrint('[NetworkChange] the default network changed: re-dialling');
     try {
       await _reconnect();

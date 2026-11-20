@@ -161,7 +161,7 @@ class _RecordingEngine implements SubscriptionService {
   Future<void> resumeAfterBackground() async => throw UnimplementedError();
 
   @override
-  Future<void> reconnectAfterNetworkChange() async =>
+  Future<bool> reconnectAfterNetworkChange() async =>
       throw UnimplementedError();
 
   @override
@@ -213,7 +213,7 @@ class _ResumeEngine implements SubscriptionService {
   }
 
   @override
-  Future<void> reconnectAfterNetworkChange() async =>
+  Future<bool> reconnectAfterNetworkChange() async =>
       throw UnimplementedError();
 
   @override
@@ -315,7 +315,7 @@ class _BurstEngine implements SubscriptionService {
   Future<void> resumeAfterBackground() async => throw UnimplementedError();
 
   @override
-  Future<void> reconnectAfterNetworkChange() async =>
+  Future<bool> reconnectAfterNetworkChange() async =>
       throw UnimplementedError();
 
   @override

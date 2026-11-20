@@ -37,7 +37,7 @@ class _RecordingSubscriptionService implements SubscriptionService {
   }
 
   @override
-  Future<void> reconnectAfterNetworkChange() async =>
+  Future<bool> reconnectAfterNetworkChange() async =>
       throw UnimplementedError('no network change reaches this test');
 
   @override

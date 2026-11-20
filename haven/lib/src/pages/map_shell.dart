@@ -679,6 +679,35 @@ class MapShell extends ConsumerStatefulWidget {
       lastReanchorAt == null ||
       now.difference(lastReanchorAt) > kLocationPublishOverlapGuard;
 
+  /// Whether a resume re-anchors a LIVE engine: once
+  /// [shouldReanchorOnResume]'s throttle has passed, unless a network re-dial
+  /// is due ([redialDue]: settling, owed, or running). The re-dial re-opens
+  /// every REQ on fresh sockets, and a re-anchor ahead of it would re-issue
+  /// them, the 96 h inbox replay included, on the sockets it is about to
+  /// replace. A paused engine and a burst still in flight are re-anchored
+  /// whatever this says (`_onResumed`).
+  @visibleForTesting
+  static bool liveReanchorDue({
+    required bool redialDue,
+    required bool throttlePassed,
+  }) => throttlePassed && !redialDue;
+
+  /// Runs a network re-dial behind the re-anchor stamp: written first, so a
+  /// heal or a resume behind it does not re-anchor inside the throttle, and
+  /// withdrawn when the re-dial fails — which leaves the session paused, and
+  /// a stamp left standing would hold the heal's re-anchor off it for the
+  /// throttle's whole 60 s. A stamp a later re-anchor wrote is kept.
+  @visibleForTesting
+  static Future<void> redialBehindStamp({
+    required Future<bool> Function() redial,
+    required DateTime at,
+    required DateTime? Function() stamped,
+    required void Function(DateTime?) stamp,
+  }) async {
+    stamp(at);
+    if (!await redial() && stamped() == at) stamp(null);
+  }
+
   /// Tears the burst plane down when background sharing is switched OFF while
   /// the app is paused (C4), leaving NO socket behind — unconditionally.
   ///
@@ -2103,6 +2132,15 @@ class _MapShellState extends ConsumerState<MapShell>
     retryFailedRelayLoads(ref);
   }
 
+  /// The network re-dial [_networkReconnector] runs, behind the re-anchor
+  /// stamp ([MapShell.redialBehindStamp]).
+  Future<void> _reconnectAfterNetworkChange() => MapShell.redialBehindStamp(
+    redial: ref.read(subscriptionServiceProvider).reconnectAfterNetworkChange,
+    at: DateTime.now(),
+    stamped: () => _lastReanchorAt,
+    stamp: (at) => _lastReanchorAt = at,
+  );
+
   /// Restarts the live-sync engine if it stopped while a session is still
   /// wanted.
   ///
@@ -2141,13 +2179,6 @@ class _MapShellState extends ConsumerState<MapShell>
   /// toward its back-off — a relay set that is unreachable would otherwise be
   /// swept on every tick indefinitely — and counts nothing for a heal that
   /// stood down.
-  Future<void> _reconnectAfterNetworkChange() {
-    // A re-dial re-anchors every REQ: stamped first, so a heal or a resume
-    // behind it does not run a second one inside the throttle.
-    _lastReanchorAt = DateTime.now();
-    return ref.read(subscriptionServiceProvider).reconnectAfterNetworkChange();
-  }
-
   Future<LiveSyncHealOutcome> _healLiveSyncIfStopped() async {
     if (!liveSyncEnabled) return LiveSyncHealOutcome.stoodDown;
     final resubscriber = await _ensureLiveSyncInstalled();
@@ -3073,8 +3104,9 @@ class _MapShellState extends ConsumerState<MapShell>
     // repair behind it.
     //
     // A network change the app was told of while `inactive` is re-dialled
-    // first: that re-dial stamps `_lastReanchorAt`, so a live engine is not
-    // re-anchored a second time behind it.
+    // first, and one still settling is waited for: either way the re-dial
+    // re-opens every REQ, so a live engine is not re-anchored beside it
+    // ([MapShell.liveReanchorDue]).
     if (liveSyncEnabled) _networkReconnector.onResumed();
     final engine = ref.read(subscriptionServiceProvider);
     final burstInFlight = _burstCoordinator?.runningBurst;
@@ -3082,9 +3114,12 @@ class _MapShellState extends ConsumerState<MapShell>
     if (liveSyncEnabled &&
         (engine.isPaused ||
             burstInFlight != null ||
-            MapShell.shouldReanchorOnResume(
-              lastReanchorAt: _lastReanchorAt,
-              now: resumeAt,
+            MapShell.liveReanchorDue(
+              redialDue: _networkReconnector.redialDue,
+              throttlePassed: MapShell.shouldReanchorOnResume(
+                lastReanchorAt: _lastReanchorAt,
+                now: resumeAt,
+              ),
             ))) {
       _lastReanchorAt = resumeAt;
       unawaited(

@@ -1322,8 +1322,9 @@ void main() {
       await service.start(groups: const [], inboxRelays: const []);
       await service.resumeAfterBackground();
       await service.claimForeground();
-      await service.reconnectAfterNetworkChange();
+      final redialled = await service.reconnectAfterNetworkChange();
       expect(engine.resumeCalls, 1, reason: 'the re-anchor reached the engine');
+      expect(redialled, isTrue, reason: 'the fake engine never refuses');
       // Back to a state that schedules frames before the stream is torn down.
       binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
       await service.stop();
@@ -1400,7 +1401,11 @@ void main() {
         engineFactory: () async => engine,
       );
       await service.claimForeground();
-      await service.reconnectAfterNetworkChange();
+      expect(
+        await service.reconnectAfterNetworkChange(),
+        isFalse,
+        reason: 'nothing was re-dialled',
+      );
       expect(engine.foregroundClaims, isEmpty);
       expect(engine.networkChangeClaims, isEmpty);
     });
@@ -1417,7 +1422,11 @@ void main() {
       await service.start(groups: const [], inboxRelays: const []);
       addTearDown(service.stop);
 
-      await service.reconnectAfterNetworkChange();
+      expect(
+        await service.reconnectAfterNetworkChange(),
+        isFalse,
+        reason: 'a failed re-dial is told apart, so its stamp is withdrawn',
+      );
 
       expect(engine.networkChangeClaims, [true]);
       logs

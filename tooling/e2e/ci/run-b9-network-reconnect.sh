@@ -136,7 +136,8 @@
 #                                       engine's own `[live_sync] the network
 #                                       changed` line after the restore cue,
 #                                       and the peer event decrypted within
-#                                       30 s of it (b9_redial_verdict)
+#                                       30 s of the last such line before it
+#                                       (b9_redial_verdict)
 #
 # Step 11 is read off the logcat, not the drive: it is the Rust re-dial's own
 # line (`LiveSyncCore::reconnect_after_network_change`), timed on the one
@@ -145,10 +146,10 @@
 # it 3 s later (`NetworkChangeReconnector`); before that, recovery waited on
 # the pool's 55 s ping or the 90-150 s heal. A receive that came back with no
 # re-dial line — through the heal or the pool — is a FINDING: the paths above
-# all exist, and only the line says which one ran. A run whose engine was
-# torn down during the outage (ENGINE_DURING_OUTAGE running=false) has no
-# session to re-dial, and its re-dial claim is left unproven rather than
-# failed: the heal restarting a dead engine is the correct path for it.
+# all exist, and only the line says which one ran. The engine is expected to
+# survive the outage — nothing on a network loss stops the session of an app
+# in front — so ENGINE_DURING_OUTAGE running=false is a finding too: with no
+# session there is nothing to re-dial, and the proof would be vacuous.
 #
 # Step 10 is about the other pool. The two now differ deliberately: the
 # ENGINE's client keeps `RelayOptions::default()` (ping on, reconnect on,
@@ -345,14 +346,22 @@ b9_marker_path() {
 
 # b9_redial_verdict <logcat> — whether the network change re-dialled.
 #
-# Echoes `ms=<N>` (the peer event surfaced N ms after the first re-dial line
-# that follows the restore cue; 0 when it surfaced first), `absent` (no re-dial
+# Echoes `ms=<N>` (the peer event surfaced N ms after the LAST re-dial line
+# that follows the restore cue and precedes the surfacing), `early` (every
+# re-dial line after the cue came after the surfacing), `absent` (no re-dial
 # line after the cue), `unresumed` (no RECEIVE_RESUMED), or `untimed` (a line
 # without a logcat `HH:MM:SS.mmm`). The surfacing instant is the restore
 # line's time plus RECEIVE_RESUMED's `ms=`: the drive starts that clock as it
 # prints the restore, and prints RECEIVE_RESUMED only once the backlog verdict
-# is in too, so that line's own time is not when the peer event arrived. One
-# device clock throughout; a midnight between the two lines is unwrapped.
+# is in too, so that line's own time is not when the peer event arrived.
+#
+# The last line, not the first: the line is printed once the re-dial holds
+# the lifecycle lock, so a re-dial the airplane-mode toggle itself set off
+# (cellular briefly the default as Wi-Fi went) can log after the cue, behind
+# a pause still draining, and fail on no network; timing from it would
+# charge the real re-dial's latency with its wait. A re-dial after the
+# surfacing cannot have brought it. One device clock throughout; each time is
+# taken relative to the restore line, so a midnight between is unwrapped.
 b9_redial_verdict() {
   local logfile="${1:-}" resumed_ms
   [[ -f "${logfile}" ]] || { echo absent; return 0; }
@@ -365,15 +374,22 @@ b9_redial_verdict() {
       return ((substr(t, 1, 2) * 60 + substr(t, 4, 2)) * 60 + substr(t, 7, 2)) * 1000 + substr(t, 10, 3)
     }
     index($0, up) { cued = 1; next }
-    cued && !seen && index($0, redial) { seen = 1; line_at = at($0) }
+    cued && index($0, redial) { lines[n++] = at($0) }
     index($0, restored) { restored_at = at($0); have_restored = 1 }
     END {
-      if (!seen) { print "absent"; exit }
+      if (n == 0) { print "absent"; exit }
       if (rms == "") { print "unresumed"; exit }
-      if (line_at < 0 || !have_restored || restored_at < 0) { print "untimed"; exit }
-      d = restored_at + rms - line_at
-      if (d < -43200000) d += 86400000
-      print "ms=" (d < 0 ? 0 : d)
+      if (!have_restored || restored_at < 0) { print "untimed"; exit }
+      best = ""
+      for (k = 0; k < n; k++) {
+        if (lines[k] < 0) { print "untimed"; exit }
+        rel = lines[k] - restored_at
+        if (rel < -43200000) rel += 86400000
+        if (rel > 43200000) rel -= 86400000
+        if (rel <= rms + 0 && (best == "" || rel > best)) best = rel
+      }
+      if (best == "") { print "early"; exit }
+      print "ms=" (rms - best)
     }' "${logfile}" 2>/dev/null || echo untimed
 }
 
@@ -682,17 +698,26 @@ returned, with \
 $(b9_marker_number "${log}" "${MARK_RESUMED}" 'republishes') re-publish(es)."
   fi
 
-  # (8b) THE RE-DIAL — the network change itself brought receive back. Only
-  #     for an engine that survived the outage: one torn down has no session
-  #     to re-dial, and the heal that restarts it is the right path.
+  # (8b) THE RE-DIAL — the network change itself brought receive back.
+  #
+  #     It presumes a session to re-dial, and a foreground outage leaves one:
+  #     the engine reads not running only once stopped (`stop_session`) or
+  #     its ingest worker died (`LiveSyncCore::is_running`), and nothing on a
+  #     network loss does either — the event stream ends only at a stop
+  #     (`LiveSyncFfi::live_events`), and this app stays resumed throughout,
+  #     so no pause stops it. An engine down at the end of the outage is
+  #     therefore a FINDING, never a quiet pass: read as "unproven", it would
+  #     make this proof vacuous on every run where it happened.
   local redial engine_survived
   redial="$(b9_redial_verdict "${log}")"
   engine_survived="$(b9_marker_flag "${log}" "${MARK_ENGINE_OUTAGE}" 'running')"
   if [[ "${engine_survived}" != "true" ]]; then
-    b9_note "the re-dial claim is UNPROVEN on this run: the live-sync engine \
-was not running at the end of the outage (${MARK_ENGINE_OUTAGE} \
-running=${engine_survived:-<unread>}), so the network change had no session to \
-re-dial and recovery went through the self-heal."
+    b9_finding "the live-sync engine was NOT running at the end of a \
+foreground outage (${MARK_ENGINE_OUTAGE} running=${engine_survived:-<unread>}). \
+Nothing on a network loss stops the session of an app in front, so something \
+else did — and with no session the network change had nothing to re-dial, \
+which leaves the re-dial proof (${MARK_REDIAL}) VACUOUS on this run. Find \
+what stopped the engine."
   else
     case "${redial}" in
       ms=*)
@@ -706,6 +731,11 @@ ${redial#ms=}ms after it."
 past the ${REDIAL_BUDGET_MS}ms budget: the re-dial did not bring receive \
 back, and something slower did."
         fi
+        ;;
+      early)
+        b9_note "the re-dial claim is UNPROVEN on this run: the peer event \
+surfaced before any '${MARK_REDIAL}' line, so the pool's own reconnect got \
+there first and the re-dial followed it."
         ;;
       absent)
         b9_finding "THE NETWORK CHANGE DID NOT RE-DIAL. No \
@@ -828,10 +858,10 @@ publish pool survives an outage."
       b9_note "the live-sync engine SURVIVED the outage — recovery went \
 through the relay pool's reconnect/resubscribe, not MapShell's self-heal."
     else
-      b9_note "the live-sync engine was torn down during the outage \
-(NostrSubscriptionService._onStreamClosed), so recovery required MapShell's \
-90-150s self-heal (LiveSyncResubscriber.ensureRunning) — the slow path, and \
-the one this lane exists to prove."
+      b9_note "the live-sync engine was torn down during the outage, so \
+recovery required MapShell's 90-150s self-heal \
+(LiveSyncResubscriber.ensureRunning) — the slow path. Step 8b reports this as \
+a finding: nothing on a network loss stops a foreground session."
     fi
   fi
   if [[ -n "${engine_recovered}" ]]; then
@@ -1355,12 +1385,10 @@ prescan=0 postscan=1}"
   # (30) THE HONEST NON-PROOF. A recovery slower than the 228 s kind-445 TTL
   #      is correct behaviour on both sides, so it must NOT fail the lane —
   #      and it must not be reachable without served=true, which (33) pins.
-  #      The slow path is the torn-down engine's, which has no re-dial.
-  _fixture_full "${tmp}/bexp.log" \
-    "I/flutter ( 40): ${MARK_RESUMED} ms=280400 republishes=6" \
+  #      What is pinned is that the REASON is no finding; the receive here
+  #      came back on the re-dial, so step 8b passes beside it.
+  _fixture_full "${tmp}/bexp.log" "" \
     "I/flutter ( 40): ${MARK_BACKLOG_MISSED} reason=expired"
-  sed -i -e 's/ENGINE_DURING_OUTAGE running=true/ENGINE_DURING_OUTAGE running=false/' \
-    -e '/the network changed/d' "${tmp}/bexp.log"
   rc=0; b9_run_oracle "${tmp}/bexp.log" "${tmp}/host.log" >/dev/null || rc=1
   _case "an expired backlog event does NOT fail the lane" 0 "${rc}"
 
@@ -1526,16 +1554,38 @@ prescan=0 postscan=1}"
   rc=0; b9_run_oracle "${tmp}/edge.log" "${tmp}/host.log" >/dev/null || rc=1
   _case "a receive one millisecond past the budget fails" 1 "${rc}"
 
-  # (45) A torn-down engine has no session to re-dial: no line, and the run
-  #      is not failed for it, but the claim is reported unproven.
+  # (45) An engine down at the end of a foreground outage is a FINDING:
+  #      nothing on a network loss stops it, and read as "unproven" it would
+  #      leave the re-dial proof vacuous on every such run.
   _fixture_full "${tmp}/deadengine.log"
   sed -i -e 's/ENGINE_DURING_OUTAGE running=true/ENGINE_DURING_OUTAGE running=false/' \
     -e '/the network changed/d' "${tmp}/deadengine.log"
+  rc=0; b9_run_oracle "${tmp}/deadengine.log" "${tmp}/host.log" >/dev/null || rc=1
+  _case "an engine down after a foreground outage fails the lane" 1 "${rc}"
+  if (( rc == 1 )) && [[ "${B9_FINDINGS[*]}" != *"re-dial proof"*"VACUOUS"* ]]; then
+    printf '  \033[1;31mFAIL\033[0m a stopped engine is not named as making the proof vacuous\n' >&2
+    fails=1
+  fi
+
+  # (45b) A re-dial the toggle itself set off, logging after the cue behind a
+  #       draining pause, is not what the latency is timed from: the last
+  #       re-dial before the surfacing is.
+  _fixture_full "${tmp}/staleredial.log"
+  sed -i "/the network changed/i 11-20 12:01:30.000    40    52 I haven_core::relay::live_sync::session: ${MARK_REDIAL}: re-dialling every live socket" \
+    "${tmp}/staleredial.log"
+  _eq_case "the last re-dial before the surfacing is timed" "ms=9430" \
+    "$(b9_redial_verdict "${tmp}/staleredial.log")"
+
+  # (45c) A re-dial after the surfacing did not bring it: unproven, noted.
+  _fixture_full "${tmp}/lateline.log"
+  sed -i 's/12:01:35\.000/12:01:50.000/' "${tmp}/lateline.log"
+  _eq_case "a re-dial only after the surfacing is early" "early" \
+    "$(b9_redial_verdict "${tmp}/lateline.log")"
   rc=0
-  redial_notes="$(b9_run_oracle "${tmp}/deadengine.log" "${tmp}/host.log")" || rc=1
-  _case "a torn-down engine with no re-dial does not fail the lane" 0 "${rc}"
+  redial_notes="$(b9_run_oracle "${tmp}/lateline.log" "${tmp}/host.log")" || rc=1
+  _case "a re-dial after the surfacing does not fail the lane" 0 "${rc}"
   if [[ "${redial_notes}" != *"re-dial claim is UNPROVEN"* ]]; then
-    printf '  \033[1;31mFAIL\033[0m an unprovable re-dial is not reported unproven\n' >&2
+    printf '  \033[1;31mFAIL\033[0m an early receive is not reported as leaving the re-dial unproven\n' >&2
     fails=1
   fi
 

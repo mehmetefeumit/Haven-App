@@ -141,7 +141,7 @@ class _RecordingEngine implements SubscriptionService {
   Future<void> resumeAfterBackground() async {}
 
   @override
-  Future<void> reconnectAfterNetworkChange() async {}
+  Future<bool> reconnectAfterNetworkChange() async => false;
 
   /// Whether the engine was running when each foreground claim was made, in
   /// call order. A claim made ahead of the start it was queued behind would
