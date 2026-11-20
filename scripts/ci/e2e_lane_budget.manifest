@@ -90,6 +90,9 @@ round-return-cancel pp_round/_pp_round#1/_pp_await_cancelled#1/pp_resumed#1/time
 # no other wait is booked in.
 round-cancel pp_round/_pp_round#1/_pp_cancel#1/pp_focused#1/timeout:PP_ADB_SECS#1 within round-picker a cancel round skips the thumbnail, uCrop and crop windows, each larger than this one
 round-cancel-verdict pp_round/_pp_round#1/_pp_await_cancelled#1/pp_focused#1/timeout:PP_ADB_SECS#1 within round-picker the one read after a cancel's return window, in a round that skips the thumbnail, uCrop and crop windows
+# The input-focus read a caller makes on its own (the launch gate's stall
+# verdict): one bounded `dumpsys input`.
+focus pp_focused/timeout:PP_ADB_SECS#1 charge PP_ADB_SECS
 # The fixtures out of the media store and off the disk: two bounded adb calls.
 clear-query pp_clear_gallery/timeout:PP_ADB_SECS#1 charge PP_ADB_SECS
 clear-files pp_clear_gallery/timeout:PP_ADB_SECS#2 charge PP_ADB_SECS
@@ -420,6 +423,10 @@ stop */stop_app#1/pid_now#1/timeout:ADB_SECS#1 charge PROCESS_SECS + ADB_SECS
 settle-watch */settle_watch#*/observe#1/timeout:DUMP_SECS#1 charge SETTLE_SECS + DUMP_SECS + ADB_SECS
 settle-alive */settle_watch#*/alive#1/pid_now#1/timeout:ADB_SECS#1 within settle-watch each pass's pid read is in the watch's charge
 crash-read */crash_evidence#1/timeout:ADB_SECS#* charge ADB_SECS
+# A stall's input-focus read: every caller of stalled gives a verdict right
+# after it, and a verdict ends the run, so a run makes one such read at most.
+stall-focus main#1/leg_fresh#1/onboarding_photo#1/stalled#1/lib:pp_focused#1 charge @
+stall-focus-once */stalled#1/lib:pp_focused#1 excluded every caller of stalled gives a verdict right after it and a verdict ends the run, so the one read stall-focus charges is the only one a run makes
 device-state main#1/finish#1/timeout:ADB_SECS#1 charge ADB_SECS
 # The photo rounds: two (the onboarding one and the MapShell one), each the
 # system trip (photo-picker-lib.sh) then the wall-clock window for the photo to

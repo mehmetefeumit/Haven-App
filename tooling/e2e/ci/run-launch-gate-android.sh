@@ -97,9 +97,9 @@
 #      (DocumentsUI, the GET_CONTENT alias, the Play services picker; API
 #      33+), Haven showed its photo-failure SnackBar or stayed in front
 #      instead of opening uCrop, Haven's own "isn't responding" dialog held
-#      the picker's focus, uCrop never returned, the photo save was
-#      refused or did not show within APPLY_SECS, or was gone after a cold
-#      restart
+#      the picker's focus or held focus when a screen's window closed, uCrop
+#      never returned, the photo save was refused or did not show within
+#      APPLY_SECS, or was gone after a cold restart
 #   2  usage or harness: a missing input; a picker screen the selectors do
 #      not know (its resource ids are printed) or an activity the picker
 #      rules do not know (its component is printed); background sharing would not
@@ -111,7 +111,8 @@
 #      would not go offline, gave no answer while the gallery was seeded, or
 #      never attached its shared storage, or another process's "isn't
 #      responding" or "keeps stopping" dialog held the picker's or uCrop's
-#      focus — nothing about the app is known
+#      focus, or held focus when one of Haven's screens' windows closed —
+#      nothing about the app is known
 #   4  the upgrade source is unusable: the previous release itself failed
 #      before the candidate was installed (yank it in
 #      scripts/ci/launch_gate_yanked_releases.txt)
@@ -488,9 +489,22 @@ act() {
 }
 
 # stalled <foreign-package> — the verdict when a window closes without progress.
+# <foreign-package> is only the last good dump's root, and the system's error
+# dialogs are rooted in package `android` whoever stopped responding, so input
+# focus decides whose window it is: Haven's own error dialog is Haven failing,
+# another process's is the device's, and Haven's own activity holding focus
+# means the foreign root was not what stayed in front.
 stalled() {
   if [[ -n "$1" ]]; then
-    verdict 1 "$1 held the foreground at state ${STATE} until the deadline"
+    pp_focused "${DEVICE}" "${PRIV}"
+    case "${PP_FOCUSED}" in
+      window:not-responding-ours|window:app-error-ours)
+        verdict 1 "input focus was $(_pp_focus_words "${PP_FOCUSED}") at state ${STATE} when its window closed: Haven failed" ;;
+      window:not-responding-*|window:app-error-*)
+        verdict 3 "input focus was $(_pp_focus_words "${PP_FOCUSED}") at state ${STATE} when its window closed: the device is struggling, which says nothing about Haven; re-run" ;;
+      "${PKG}/"*) ;;
+      *) verdict 1 "$1 held the foreground at state ${STATE} until the deadline (input focus $(_pp_focus_words "${PP_FOCUSED}"))" ;;
+    esac
   fi
   if [[ -n "${TAP_KEY}" ]]; then
     verdict 1 "did not progress: the screen did not change in the window after ${TAP_KEY} was tapped"
@@ -1049,7 +1063,7 @@ finish() {
 # deadline is a count of device calls and every verdict comes from what the
 # stub shows, never from how fast this machine runs it.
 # ---------------------------------------------------------------------------
-readonly SELF_TEST_FIXTURES=115
+readonly SELF_TEST_FIXTURES=124
 readonly ST_NAME='Quiet Wanderer Fixture'
 # What a picker thumbnail's description says in the stub: a date, which no
 # transcript or summary may carry.
@@ -1119,11 +1133,15 @@ focus_of() { # <advance: 1 on a dumpsys read>
   component_of "${scr}"
 }
 # STUB_FOCUS_WINDOW=<title>: a window that is no activity's (an error dialog)
-# holds the focus the picker or uCrop does not.
+# holds the focus the picker or uCrop does not. STUB_FOREIGN_FOCUS=<name>: the
+# focused window's name while STUB_FOREIGN roots the dump (unset: Haven's own
+# activity keeps the focus, the foreign root notwithstanding).
 focus_dump() {
   local f; f="$(focus_of 1)"
   echo 'Input Dispatcher State:'
-  if [[ "${f}" == none && -n "${STUB_FOCUS_WINDOW:-}" ]]; then printf "  FocusedWindows:\n    displayId=0, name='5a1 %s'\n" "${STUB_FOCUS_WINDOW}"
+  if [[ -n "${STUB_FOREIGN:-}" && -n "${STUB_FOREIGN_FOCUS:-}" && "$(get screen)" == "${STUB_FOREIGN_ON:-create}" ]]; then
+    printf "  FocusedWindows:\n    displayId=0, name='5a1 %s'\n" "${STUB_FOREIGN_FOCUS}"
+  elif [[ "${f}" == none && -n "${STUB_FOCUS_WINDOW:-}" ]]; then printf "  FocusedWindows:\n    displayId=0, name='5a1 %s'\n" "${STUB_FOCUS_WINDOW}"
   elif [[ "${f}" == none ]]; then echo '  FocusedWindows: <none>'
   else printf "  FocusedWindows:\n    displayId=0, name='4f2e1c0 %s'\n" "${f}"; fi
 }
@@ -1209,8 +1227,8 @@ screen_xml() { # <screen> [<outgoing screen still in the tree>]
   local scr="$1" body
   body="${2:+$(body_of "$2")}$(body_of "${scr}")"
   printf "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><hierarchy rotation=\"0\">"
-  if [[ -n "${STUB_FOREIGN:-}" && "${scr}" == create ]]; then
-    node android.widget.FrameLayout '' '' '[0,0][1080,2400]' com.android.permissioncontroller
+  if [[ -n "${STUB_FOREIGN:-}" && "${scr}" == "${STUB_FOREIGN_ON:-create}" ]]; then
+    node android.widget.FrameLayout '' '' '[0,0][1080,2400]' "${STUB_FOREIGN}"
   elif [[ "${scr}" == picker ]]; then
     printf '<node index="0" text="" resource-id="" class="android.widget.FrameLayout" package="%s" content-desc="" bounds="[0,0][1080,2400]">%s</node>' "$(picker_pkg)" "${body}"
   else
@@ -1571,6 +1589,11 @@ print(json.dumps({k[0]: "Get Started", k[1]: "Create My Identity", k[2]: "Not no
     if grep -qF -- "$2" <<<"${out}"; then printf '  PASS %s\n' "$1"; else
       printf '  FAIL %s: transcript lacks "%s"\n%s\n' "$1" "$2" "${out}" >&2; fails=1; fi
   }
+  _lacks() { # <label> <fixed-string> — the last transcript never says it
+    ran=$(( ran + 1 ))
+    if ! grep -qF -- "$2" <<<"${out}"; then printf '  PASS %s\n' "$1"; else
+      printf '  FAIL %s: transcript says "%s"\n%s\n' "$1" "$2" "${out}" >&2; fails=1; fi
+  }
 
   echo "run-launch-gate-android.sh --self-test"
   # (1) The current product: fresh SETUP_HELD with the name restored; the
@@ -1665,8 +1688,26 @@ print(json.dumps({k[0]: "Get Started", k[1]: "Create My Identity", k[2]: "Not no
   # (35) The device going away.
   _scenario "a device that goes offline is infrastructure" 3 setup-held map STUB_OFFLINE_AT_LAUNCH=1
   # (36) Another app holding the screen.
-  _scenario "a foreign window until the deadline is a product failure naming it" 1 setup-held map STUB_FOREIGN=1
-  _has "…naming the package" "com.android.permissioncontroller held the foreground"
+  _scenario "a foreign window until the deadline is a product failure naming it" 1 setup-held map \
+    STUB_FOREIGN=com.android.permissioncontroller \
+    STUB_FOREIGN_FOCUS=com.android.permissioncontroller/com.android.permissioncontroller.permission.ui.GrantPermissionsActivity
+  _has "…naming the package and what held input focus" "com.android.permissioncontroller held the foreground at state after onboardingWelcomeCta until the deadline (input focus on com.android.permissioncontroller/"
+  # An error dialog is rooted in package `android` whoever stopped responding
+  # (CI run 44698826899, API 35: `android` over the first screen for the whole
+  # window, Haven alive, no crash or ANR of Haven's): input focus says whose.
+  _scenario "another process's \"isn't responding\" dialog over Haven's first screen is infrastructure" 3 setup-held map \
+    STUB_FOREIGN=android STUB_FOREIGN_ON=intro "STUB_FOREIGN_FOCUS=Application Not Responding: com.android.systemui"
+  _has "…named as such" "input focus was on System UI's \"isn't responding\" dialog at state first screen (before the onboarding photo) when its window closed"
+  _scenario "Haven's own \"isn't responding\" dialog over its first screen is a product failure" 1 setup-held map \
+    STUB_FOREIGN=android STUB_FOREIGN_ON=intro "STUB_FOREIGN_FOCUS=Application Not Responding: com.oblivioustech.haven"
+  _has "…named as such" "input focus was on Haven's \"isn't responding\" dialog at state first screen (before the onboarding photo) when its window closed: Haven failed"
+  _scenario "a system window that is no error dialog over Haven's first screen is a product failure naming it" 1 setup-held map \
+    STUB_FOREIGN=android STUB_FOREIGN_ON=intro STUB_FOREIGN_FOCUS=android
+  _has "…with the focus in fixed words" "android held the foreground at state first screen (before the onboarding photo) until the deadline (input focus on a window that is no activity's)"
+  _scenario "a foreign root while Haven's own activity holds input focus is Haven's own stall" 1 setup-held map \
+    STUB_FOREIGN=android STUB_FOREIGN_ON=intro
+  _has "…named as Haven's screen not settling" "the create screen did not settle with photoHeaderAddPhotoSemantics on it"
+  _lacks "…never as the foreign root holding the foreground" "held the foreground"
   # (38) A debug log plant in a release build.
   _scenario "a debug log plant is a product failure" 1 setup-held map STUB_PLANTS=2
   # (39) A tap that does not take effect.
