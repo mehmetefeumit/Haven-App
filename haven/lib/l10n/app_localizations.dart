@@ -2322,7 +2322,7 @@ abstract class AppLocalizations {
   /// **'Haven couldn\'t finish checking all your inbox relays, so some invitations may not show up yet.'**
   String get invitationsNoticeIncomplete;
 
-  /// Button under an Invitations notice that opens the relay settings page, where the user can remove an inbox relay or add another. Same words as the relay settings page's own name in this locale's navigation.
+  /// Button under an Invitations notice that opens the relay settings page, where the user can remove an inbox relay or add another. Same words as storageResetOpenRelaySettings, the other button that opens that page.
   ///
   /// In en, this message translates to:
   /// **'Relay settings'**

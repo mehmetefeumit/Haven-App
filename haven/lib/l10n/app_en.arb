@@ -1772,7 +1772,7 @@
   },
   "invitationsNoticeOpenRelaySettings": "Relay settings",
   "@invitationsNoticeOpenRelaySettings": {
-    "description": "Button under an Invitations notice that opens the relay settings page, where the user can remove an inbox relay or add another. Same words as the relay settings page's own name in this locale's navigation."
+    "description": "Button under an Invitations notice that opens the relay settings page, where the user can remove an inbox relay or add another. Same words as storageResetOpenRelaySettings, the other button that opens that page."
   },
   "invitationsEmptyTitle": "No Invitations",
   "@invitationsEmptyTitle": {
