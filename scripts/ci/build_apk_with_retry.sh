@@ -269,8 +269,9 @@ readonly RC_BROKEN=2
 #              one lower-case wording, the cause discarded, so no other
 #              alternative here can see it. Retried like "Could not resolve all
 #              files": the same honest ambiguity, told in `infra_error`. A
-#              Portal 404 Gradle caches as a miss, so that shape fails again in
-#              a second and costs the budget almost nothing.
+#              real absence (a typo'd version) fails every attempt the same
+#              way, so it still ends red, after a pause and a Gradle start-up
+#              per retry: one or two retries inside the 180 s budget.
 #   UNMEASURED "Read timed out", "Connection reset", "Connection timed out",
 #              "Could not HEAD", "Could not download", and the 408/5xx codes:
 #              never seen in this repo's logs. They are Gradle's own transient
