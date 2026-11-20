@@ -714,10 +714,6 @@ pub struct EngineProcessor {
     /// its signal when that turn ends (tests only).
     #[cfg(any(test, feature = "test-utils"))]
     entry_pass_turn: (AtomicBool, Notify),
-    /// Whether a test holds the live plane's passes after their dial, how
-    /// many it has held, and its signal for each (tests only).
-    #[cfg(any(test, feature = "test-utils"))]
-    pass_hold: (watch::Sender<bool>, AtomicUsize, Notify),
     /// Proposals staged in the foreground that no record could be written
     /// for, each awaiting its one publish by the next drive.
     unrecorded: Mutex<Vec<Event>>,
@@ -814,8 +810,6 @@ impl EngineProcessor {
             negentropy_steps: (AtomicUsize::new(0), AtomicUsize::new(0)),
             #[cfg(any(test, feature = "test-utils"))]
             entry_pass_turn: (AtomicBool::new(false), Notify::new()),
-            #[cfg(any(test, feature = "test-utils"))]
-            pass_hold: (watch::channel(false).0, AtomicUsize::new(0), Notify::new()),
             unrecorded: Mutex::new(Vec::new()),
             drive_retry_after_ms: Mutex::new(None),
             drive_due_at_ms: Mutex::new(None),
@@ -1825,29 +1819,6 @@ impl EngineProcessor {
         (self.lifecycle.changes() == began && self.still_serves(serves)).then_some(counted)
     }
 
-    /// Resolves once a live pass has run out its wall-clock `bound`. A pass
-    /// a test holds ([`SessionsPart::hold_passes_after_their_dial`]) has it
-    /// counted from the release: a starved test thread cannot run it out
-    /// before the step the test is making lands.
-    pub(super) async fn pass_bound_run_out(&self, bound: Duration) {
-        #[cfg(any(test, feature = "test-utils"))]
-        let _ = self.pass_hold.0.subscribe().wait_for(|held| !*held).await;
-        tokio::time::sleep(bound).await;
-    }
-
-    /// Parks a pass that has dialled while a test holds the passes; tests
-    /// only.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub(super) async fn wait_out_pass_hold(&self) {
-        let mut held = self.pass_hold.0.subscribe();
-        if !*held.borrow_and_update() {
-            return;
-        }
-        self.pass_hold.1.fetch_add(1, Ordering::SeqCst);
-        self.pass_hold.2.notify_waiters();
-        let _ = held.wait_for(|held| !*held).await;
-    }
-
     /// The drive task began waiting for a foreground entry's replay
     /// (`step` 0) or ran or gave up its pass (`step` 1); tests only.
     #[cfg(any(test, feature = "test-utils"))]
@@ -2672,42 +2643,6 @@ impl SessionsPart<'_> {
                 return ended();
             }
         }
-    }
-
-    /// Holds every live pass begun from now just after its dial, before
-    /// any session opens, its bound not running, until
-    /// [`Self::release_held_passes`].
-    pub fn hold_passes_after_their_dial(&self) {
-        self.0.pass_hold.0.send_replace(true);
-    }
-
-    /// Ends [`Self::hold_passes_after_their_dial`].
-    pub fn release_held_passes(&self) {
-        self.0.pass_hold.0.send_replace(false);
-    }
-
-    /// Waits, at most `bound`, until a pass is held after its dial, and
-    /// answers whether one came to be.
-    pub async fn a_pass_is_held(&self, bound: Duration) -> bool {
-        let hold = &self.0.pass_hold;
-        let deadline = Instant::now() + bound;
-        loop {
-            let notified = hold.2.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if hold.1.load(Ordering::SeqCst) > 0 {
-                return true;
-            }
-            if tokio::time::timeout_at(deadline, notified).await.is_err() {
-                return hold.1.load(Ordering::SeqCst) > 0;
-            }
-        }
-    }
-
-    /// The wall-clock bound a live pass runs under.
-    #[must_use]
-    pub const fn live_pass_bound(&self) -> Duration {
-        super::session::LIVE_PASS_BOUND
     }
 
     /// As the tail of a session's start.

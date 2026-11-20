@@ -4977,7 +4977,7 @@ async fn reconcile_live(
     // both change it.
     let began = processor.stretch();
     let _pass = processor.pass_under_way();
-    let bound = LIVE_PASS_BOUND;
+    let bound = crate::relay::manager::CONNECTION_TIMEOUT + negentropy::NEG_ROUTE_WAIT;
     let Some(left) = processor.wake_left() else {
         return;
     };
@@ -5007,18 +5007,8 @@ async fn reconcile_live(
         serves,
         ends: Instant::now() + bound,
     };
-    tokio::select! {
-        biased;
-        () = negentropy::run_pass(pool, session, &routes, &sink) => {}
-        () = processor.pass_bound_run_out(bound) => {}
-    }
+    let _ = tokio::time::timeout(bound, negentropy::run_pass(pool, session, &routes, &sink)).await;
 }
-
-/// The wall-clock bound of a live pass: one connection and one session's
-/// wait ([`reconcile_live`]).
-pub(super) const LIVE_PASS_BOUND: Duration = Duration::from_secs(
-    crate::relay::manager::CONNECTION_TIMEOUT.as_secs() + negentropy::NEG_ROUTE_WAIT.as_secs(),
-);
 
 /// One drive of the stored records ([`EngineProcessor::drive_due`]), said
 /// once when it outlives its wake.

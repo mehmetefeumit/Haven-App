@@ -538,6 +538,17 @@ ndk_verified() {
   return 0
 }
 
+# Flutter's included Gradle build resolves its build classpath through the
+# Plugin Portal alone; this init script gives it the Central-mirror fallback
+# (its header has the incident). init.d, because Flutter passes Gradle no `-I`
+# of ours.
+install_central_fallback() {
+  local dir="${GRADLE_USER_HOME:-${HOME}/.gradle}/init.d"
+  mkdir -p "${dir}"
+  cp "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/maven-central-fallback.init.gradle.kts" \
+    "${dir}/haven-maven-central-fallback.init.gradle.kts"
+}
+
 # provision_ndk <flutter-root> <sdk-root> <app build.gradle.kts>
 provision_ndk() {
   local flutter_root="$1" sdk="$2" app="$3" ver dir sdkmanager attempt=1 rc started elapsed spent backoff out
@@ -1279,8 +1290,9 @@ Caused by: java.net.SocketTimeoutException: Read timed out" \
   done
 
   # (p8) End to end on CI, as a SUBPROCESS against the REAL app build file:
-  #      the script provisions before it builds, and an NDK that cannot be
-  #      provisioned stops it with rc ${RC_NDK_FAILED} before Gradle is ever
+  #      the script installs the Maven Central fallback init script and
+  #      provisions before it builds, and an NDK that cannot be provisioned
+  #      stops it with rc ${RC_NDK_FAILED} before Gradle is ever
   #      run. Reading the real file is also the live check that the app still
   #      takes flutter.ndkVersion, the one source ndk_required_version reads.
   ran=$(( ran + 1 ))
@@ -1288,32 +1300,40 @@ Caused by: java.net.SocketTimeoutException: Read timed out" \
   bin="${tmp}/p8-ok-bin"; write_fake_flutter "${bin}" ok
   rc=0
   out="$(PATH="${bin}:${PATH}" GITHUB_ACTIONS=true FLUTTER_ROOT="${fr}" ANDROID_HOME="${sdk}" \
-         HAVEN_BUILD_RETRY_STATE="${tmp}/p8-ok.budget" \
+         GRADLE_USER_HOME="${tmp}/p8-ok-guh" HAVEN_BUILD_RETRY_STATE="${tmp}/p8-ok.budget" \
          bash "${BASH_SOURCE[0]}" android-x64 --dart-define=HAVEN_LIVE_SYNC=false 2>&1)" || rc=$?
   if (( rc != 0 )) || [[ "$(sdk_invocations "${sdk}")" != "1" ]] || [[ "$(fake_invocations "${bin}")" != "1" ]]; then
     _fail p8 "on CI the script must provision the NDK and then build; got rc=${rc}, $(sdk_invocations "${sdk}") sdkmanager call(s), $(fake_invocations "${bin}") build(s): ${out}"
+  fi
+  if ! cmp -s "$(dirname "${BASH_SOURCE[0]}")/maven-central-fallback.init.gradle.kts" \
+       "${tmp}/p8-ok-guh/init.d/haven-maven-central-fallback.init.gradle.kts"; then
+    _fail p8 "on CI the script must install the Maven Central fallback init script into GRADLE_USER_HOME/init.d before Gradle runs"
   fi
   sdk="${tmp}/p8-bad"; write_fake_sdkmanager "${sdk}" nothing
   bin="${tmp}/p8-bad-bin"; write_fake_flutter "${bin}" ok
   rc=0
   out="$(PATH="${bin}:${PATH}" GITHUB_ACTIONS=true FLUTTER_ROOT="${fr}" ANDROID_HOME="${sdk}" \
-         HAVEN_BUILD_MAX_ATTEMPTS=1 HAVEN_BUILD_RETRY_STATE="${tmp}/p8-bad.budget" \
+         GRADLE_USER_HOME="${tmp}/p8-bad-guh" HAVEN_BUILD_MAX_ATTEMPTS=1 HAVEN_BUILD_RETRY_STATE="${tmp}/p8-bad.budget" \
          bash "${BASH_SOURCE[0]}" android-x64 --dart-define=HAVEN_LIVE_SYNC=false 2>&1)" || rc=$?
   if (( rc != RC_NDK_FAILED )) || [[ "$(fake_invocations "${bin}")" != "0" ]]; then
     _fail p8 "on CI an NDK that cannot be provisioned must stop the script with rc ${RC_NDK_FAILED} before any build; got rc=${rc}, $(fake_invocations "${bin}") build(s): ${out}"
   fi
 
-  # (p9) Off CI the script leaves the SDK alone — a developer's SDK is theirs —
-  #      and builds, even with the NDK absent and an sdkmanager to hand.
+  # (p9) Off CI the script leaves the SDK and GRADLE_USER_HOME alone — a
+  #      developer's are theirs — and builds, even with the NDK absent and an
+  #      sdkmanager to hand.
   ran=$(( ran + 1 ))
   sdk="${tmp}/p9"; write_fake_sdkmanager "${sdk}" ok
   bin="${tmp}/p9-bin"; write_fake_flutter "${bin}" ok
   rc=0
   out="$(PATH="${bin}:${PATH}" GITHUB_ACTIONS= FLUTTER_ROOT="${fr}" ANDROID_HOME="${sdk}" \
-         HAVEN_BUILD_RETRY_STATE="${tmp}/p9.budget" \
+         GRADLE_USER_HOME="${tmp}/p9-guh" HAVEN_BUILD_RETRY_STATE="${tmp}/p9.budget" \
          bash "${BASH_SOURCE[0]}" android-x64 --dart-define=HAVEN_LIVE_SYNC=false 2>&1)" || rc=$?
   if (( rc != 0 )) || [[ "$(sdk_invocations "${sdk}")" != "0" ]] || [[ "$(fake_invocations "${bin}")" != "1" ]]; then
     _fail p9 "off CI the script must build without touching the SDK; got rc=${rc}, $(sdk_invocations "${sdk}") sdkmanager call(s), $(fake_invocations "${bin}") build(s)"
+  fi
+  if [[ -e "${tmp}/p9-guh/init.d" ]]; then
+    _fail p9 "off CI the script must leave the developer's GRADLE_USER_HOME alone; it wrote an init.d"
   fi
 
   # (h) Structural: one backoff per pause, and the header's worst case is the
@@ -1336,7 +1356,7 @@ Caused by: java.net.SocketTimeoutException: Read timed out" \
     echo "${SCRIPT_NAME}: SELF-TEST FAILED — ran ${ran} fixture(s), expected exactly ${SELF_TEST_FIXTURES}; a fixture was added or removed without moving the pin" >&2
     return 1
   fi
-  echo "${SCRIPT_NAME}: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: a transient 429 is ridden out on the second attempt after exactly one ladder pause, and so is the wrapper's 504 fetching the Gradle distribution, and the fake proves it refuses both a non-build argv and a build missing the flags this script adds; a compile error and a disk exhaustion each fail once with their own exit code, their original output and the right verdict; a persistent 429 stops at exactly ${MAX_ATTEMPTS} attempts with one ::error:: saying INFRASTRUCTURE and that no test ran, the Gradle error still shown; a budget spent by an earlier build in the step starts no further attempt, and a retried build charges the shared budget while a clean one charges nothing; an attempt long enough that repeating it would not fit the budget is never started, while a short one under the same injected clock still is; every retriable signature is load-bearing on its own, this repo's real wrapped 403 is retried while a bare status line decides nothing, the wrapper's distribution download is retried on a 5xx but not on a 404, a checksum mismatch or another URL, and a capacity signature beats a resolution one; the annotation names a rate limit only where a 429 says so, names a failed distribution download with its status, names the missing-coordinate shape as the ambiguity it is without reprinting the coordinate, and otherwise admits the cause is not knowable; a spent budget left by another run is not read; the script itself issues the build argv the lanes depend on; on CI the NDK Flutter asks for is installed in one call when missing, left alone when present and complete and reinstalled when its package.xml is missing, a truncated install is graded failed despite its manifest, its download cache cleared and the charged retry installs it, another revision is replaced, a yes-machine sdkmanager fails closed at ${MAX_ATTEMPTS} calls with one INFRASTRUCTURE annotation, a hung one is killed at the attempt bound and not repeated past the budget, and every input this script owns fails as broken before any call; end to end the script provisions before it builds against the real app build file, stops before Gradle when the NDK cannot be had, and off CI never touches the SDK; one backoff per pause, and the ladder fits the budget)."
+  echo "${SCRIPT_NAME}: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: a transient 429 is ridden out on the second attempt after exactly one ladder pause, and so is the wrapper's 504 fetching the Gradle distribution, and the fake proves it refuses both a non-build argv and a build missing the flags this script adds; a compile error and a disk exhaustion each fail once with their own exit code, their original output and the right verdict; a persistent 429 stops at exactly ${MAX_ATTEMPTS} attempts with one ::error:: saying INFRASTRUCTURE and that no test ran, the Gradle error still shown; a budget spent by an earlier build in the step starts no further attempt, and a retried build charges the shared budget while a clean one charges nothing; an attempt long enough that repeating it would not fit the budget is never started, while a short one under the same injected clock still is; every retriable signature is load-bearing on its own, this repo's real wrapped 403 is retried while a bare status line decides nothing, the wrapper's distribution download is retried on a 5xx but not on a 404, a checksum mismatch or another URL, and a capacity signature beats a resolution one; the annotation names a rate limit only where a 429 says so, names a failed distribution download with its status, names the missing-coordinate shape as the ambiguity it is without reprinting the coordinate, and otherwise admits the cause is not knowable; a spent budget left by another run is not read; the script itself issues the build argv the lanes depend on; on CI the NDK Flutter asks for is installed in one call when missing, left alone when present and complete and reinstalled when its package.xml is missing, a truncated install is graded failed despite its manifest, its download cache cleared and the charged retry installs it, another revision is replaced, a yes-machine sdkmanager fails closed at ${MAX_ATTEMPTS} calls with one INFRASTRUCTURE annotation, a hung one is killed at the attempt bound and not repeated past the budget, and every input this script owns fails as broken before any call; end to end the script installs the Maven Central fallback init script and provisions before it builds against the real app build file, stops before Gradle when the NDK cannot be had, and off CI never touches the SDK or GRADLE_USER_HOME; one backoff per pause, and the ladder fits the budget)."
   return 0
 }
 
@@ -1355,6 +1375,7 @@ readonly TARGET_PLATFORM="$1"
 shift
 
 if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+  install_central_fallback
   ndk_rc=0
   provision_ndk "${FLUTTER_ROOT:-}" "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}" \
     "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/haven/android/app/build.gradle.kts" || ndk_rc=$?

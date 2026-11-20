@@ -52,6 +52,7 @@ import 'package:haven/src/services/profile_service.dart';
 import 'package:haven/src/services/publish_stagger.dart';
 import 'package:haven/src/services/relay_service.dart';
 import 'package:haven/src/services/subscription_service.dart';
+import 'package:haven/src/services/system_activity_excursions.dart';
 
 /// Provides the identity service singleton.
 ///
@@ -294,7 +295,25 @@ final profileServiceProvider = Provider<ProfileService>((ref) {
       }
       return circleService.getCircleManagerFfi();
     },
+    // On timeout the save is still tried: a resumed app's open lapses the
+    // handoff itself, and one that is not resumed fails closed.
+    untilSessionOwned: () async {
+      final circleService = ref.read(circleServiceProvider);
+      if (circleService is NostrCircleService) {
+        await circleService.untilHandoffEnded(timeout: kHandoffEndWait);
+      }
+    },
   );
+});
+
+/// Haven's own system-activity trips (photo picker, crop editor), whose pauses
+/// hold the MLS session handoff for a bounded grace.
+final systemActivityExcursionsProvider = Provider<SystemActivityExcursions>((
+  ref,
+) {
+  final excursions = SystemActivityExcursions();
+  ref.onDispose(() => excursions.endGrace(HandoffGraceEnd.disposed));
+  return excursions;
 });
 
 /// Provides the member-directory service singleton.

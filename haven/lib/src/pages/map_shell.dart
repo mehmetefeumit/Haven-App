@@ -50,11 +50,12 @@ import 'package:haven/src/services/identity_service.dart' show Identity;
 import 'package:haven/src/services/live_sync_resubscriber.dart';
 import 'package:haven/src/services/location_service.dart';
 import 'package:haven/src/services/mls_session_handover.dart'
-    show appIsResumed;
+    show appIsResumed, kHandoffEndWait;
 import 'package:haven/src/services/nostr_circle_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/services/relay_service.dart' show CatchupResult;
 import 'package:haven/src/services/subscription_service.dart';
+import 'package:haven/src/services/system_activity_excursions.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/geo_distance.dart';
 import 'package:haven/src/utils/profile_refresh_trigger.dart';
@@ -545,6 +546,21 @@ class MapShell extends ConsumerStatefulWidget {
   /// visible app whose resume has already run, with nothing left to undo it.
   /// A second pause does all of this itself, once.
   ///
+  /// [grace] is the hold a pause during Haven's own photo picker or crop
+  /// editor owes (`SystemActivityExcursions.graceForPause`): their result is
+  /// saved while Dart still reads `inactive`, and a session handed over by
+  /// then refuses that save. It is awaited BEFORE the ownership writes,
+  /// because the stamp write is what tells the service to take over, and a
+  /// service told that while this isolate still holds the guard probes a live
+  /// owner and backs off. A resume inside it supersedes the pause, so nothing
+  /// is handed over at all.
+  ///
+  /// [untilSaved] is that save, awaited (bounded by [kHandoffEndWait]) after
+  /// the last other await, so the check and the release run in one
+  /// synchronous step: a save that started before it finishes on the manager
+  /// it opened, and one that starts after it sees the handoff and waits for
+  /// the resume to end it.
+  ///
   /// Never throws: the framework dispatches the pause without awaiting it,
   /// and the service's own reclaim is the fallback.
   ///
@@ -557,13 +573,23 @@ class MapShell extends ConsumerStatefulWidget {
     required bool Function() releaseSession,
     required void Function({required bool handedOff}) announce,
     required bool Function() superseded,
+    Future<void>? grace,
+    Future<void> Function()? untilSaved,
   }) async {
+    if (grace != null) {
+      await grace;
+      if (superseded()) return;
+    }
     for (final write in ownershipWrites) {
       await _handoffWrite(write);
       if (superseded()) return;
     }
     final stopOutcome = await engineStop;
     if (superseded()) return;
+    if (untilSaved != null) {
+      await untilSaved().timeout(kHandoffEndWait, onTimeout: () {});
+      if (superseded()) return;
+    }
     var handedOff = false;
     if (stopOutcome != LiveSyncStopOutcome.stillHolding) {
       try {
@@ -1269,9 +1295,14 @@ class _MapShellState extends ConsumerState<MapShell>
   /// mounted [_shutdownPublishPool].
   NostrRelayService? _publishPool;
 
+  /// Haven's own picker and crop-editor trips, captured in [initState] so the
+  /// detach branch and [dispose] reach them without `ref`.
+  late final SystemActivityExcursions _excursions;
+
   @override
   void initState() {
     super.initState();
+    _excursions = ref.read(systemActivityExcursionsProvider);
     WidgetsBinding.instance.addObserver(this);
     _startTimers(atMount: true);
     // Register the foreground-task channel from the widget layer as well as
@@ -1970,12 +2001,15 @@ class _MapShellState extends ConsumerState<MapShell>
     required List<Future<void> Function()> ownershipWrites,
     required bool Function() superseded,
     required void Function({required bool handedOff}) announce,
+    required Future<void>? grace,
   }) => MapShell.handOffMlsSession(
     engineStop: engineStop,
     ownershipWrites: ownershipWrites,
     releaseSession: () => _releaseMlsSessionForHandoff(circleService),
     announce: announce,
     superseded: superseded,
+    grace: grace,
+    untilSaved: () => _excursions.saved,
   );
 
   /// Gives this isolate's MLS session away, and answers whether it is now the
@@ -2229,9 +2263,16 @@ class _MapShellState extends ConsumerState<MapShell>
       unawaited(_onPaused());
     } else if (state == AppLifecycleState.resumed) {
       _lifecycleTurn++;
+      // After the turn moved: the pause the grace releases is superseded.
+      _excursions.endGrace(HandoffGraceEnd.resumed);
       _setForegroundActive(true);
       unawaited(_onResumed());
     } else if (state == AppLifecycleState.detached) {
+      // Lets a pause the grace is holding go on to hand the session over. It
+      // cannot promise that here: Haven's engine is destroyed right after
+      // `detached`, so the platform writes the hand-off awaits may never
+      // answer.
+      _excursions.endGrace(HandoffGraceEnd.detached);
       _setForegroundActive(false);
       unawaited(_onDetached());
     }
@@ -2452,6 +2493,7 @@ class _MapShellState extends ConsumerState<MapShell>
     _evolutionTimer?.cancel();
 
     if (bgEnabled && Platform.isAndroid) {
+      debugPrint('[MapShell] pause: background handoff branch');
       // Android: hand off publishing to the already-running foreground
       // service. The service was started from `initState` via
       // `backgroundServiceLifecycleProvider` (see CLAUDE.md /
@@ -2487,6 +2529,9 @@ class _MapShellState extends ConsumerState<MapShell>
         circleService: circleService,
         // Never null here: only the iOS sharing-on pause keeps its engine.
         engineStop: engineStop!,
+        // A photo picker or crop result is saved while Dart still reads
+        // `inactive`; see [MapShell.handOffMlsSession].
+        grace: _excursions.graceForPause(),
         ownershipWrites: [
           if (lastPublish != null)
             () => BackgroundLocationManager.writeLastPublishTime(lastPublish),
@@ -3200,6 +3245,8 @@ class _MapShellState extends ConsumerState<MapShell>
     _pruneTimer?.cancel();
     _evolutionTimer?.cancel();
     _healBackstop.stop();
+    // A pause's hand-off can outlive this State; no resume will end its grace.
+    _excursions.endGrace(HandoffGraceEnd.disposed);
     _foregroundHeartbeatTimer?.cancel();
     _coldStartProfileRefreshTimer?.cancel();
     _stopMotionTrigger();

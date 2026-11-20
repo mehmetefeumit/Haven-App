@@ -23,10 +23,15 @@ import 'package:flutter/semantics.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
+import 'package:haven/src/pages/map_shell.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/nostr_circle_service.dart';
 import 'package:haven/src/services/profile_service.dart';
+import 'package:haven/src/services/subscription_service.dart';
+import 'package:haven/src/services/system_activity_excursions.dart';
 import 'package:haven/src/widgets/identity/identity_photo_header.dart';
 import 'package:image_cropper_platform_interface/image_cropper_platform_interface.dart';
 import 'package:image_picker_platform_interface/image_picker_platform_interface.dart';
@@ -34,19 +39,24 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 
 import '../../helpers/accessibility_announcements.dart';
+import '../../helpers/log_capture.dart';
 import '../../mocks/mock_profile_service.dart';
+import '../../mocks/mock_relay_service.dart';
 
 /// A fake [ImagePickerPlatform] that returns a canned [XFile] (or throws)
 /// without touching any platform channel, so the pick glue is testable.
 class _FakeImagePicker extends ImagePickerPlatform
     with MockPlatformInterfaceMixin {
-  _FakeImagePicker({this.result, this.throwError = false});
+  _FakeImagePicker({this.result, this.throwError = false, this.error});
 
   /// The file the picker hands back (null models a user cancellation).
   final XFile? result;
 
   /// When true, [getImageFromSource] throws to model a picker failure.
   final bool throwError;
+
+  /// What it throws, when set: lets a log test plant an identifier in it.
+  final Exception? error;
 
   int callCount = 0;
   ImageSource? lastSource;
@@ -60,7 +70,7 @@ class _FakeImagePicker extends ImagePickerPlatform
     callCount++;
     lastSource = source;
     lastRequestFullMetadata = options.requestFullMetadata;
-    if (throwError) throw Exception('picker failure');
+    if (throwError) throw error ?? Exception('picker failure');
     return result;
   }
 }
@@ -69,13 +79,25 @@ class _FakeImagePicker extends ImagePickerPlatform
 /// throws) without launching the native crop UI.
 class _FakeImageCropper extends ImageCropperPlatform
     with MockPlatformInterfaceMixin {
-  _FakeImageCropper({this.result, this.throwError = false});
+  _FakeImageCropper({
+    this.result,
+    this.throwError = false,
+    this.error,
+    this.onCrop,
+  });
 
   /// The cropped file the editor returns (null models a user cancellation).
   final CroppedFile? result;
 
   /// When true, [cropImage] throws to model an editor failure.
   final bool throwError;
+
+  /// What it throws, when set: lets a log test plant an identifier in it.
+  final Exception? error;
+
+  /// Runs while the editor is "on screen": what the platform does to Haven
+  /// meanwhile.
+  final void Function()? onCrop;
 
   int callCount = 0;
   CropAspectRatio? lastAspectRatio;
@@ -94,7 +116,8 @@ class _FakeImageCropper extends ImageCropperPlatform
     callCount++;
     lastSourcePath = sourcePath;
     lastAspectRatio = aspectRatio;
-    if (throwError) throw Exception('cropper failure');
+    onCrop?.call();
+    if (throwError) throw error ?? Exception('cropper failure');
     return result;
   }
 }
@@ -178,6 +201,57 @@ Future<void> _tapEditPhoto(WidgetTester tester) async {
   await tester.pump(); // final render of the resulting SnackBar / state
 }
 
+/// The circle manager behind the REAL profile service in the handoff group:
+/// records the save and whether the session was released under it.
+class _RecordingCircleManager implements CircleManagerFfi {
+  final List<List<int>> saved = [];
+  int syncReads = 0;
+  bool disposed = false;
+
+  @override
+  Future<ProfilePictureRefFfi> saveMyProfilePictureLocal({
+    required List<int> raw,
+  }) async {
+    saved.add(raw);
+    return ProfilePictureRefFfi(
+      pubkeyHex: _fakeIdentity.pubkeyHex,
+      sha256Hex: 'aa',
+    );
+  }
+
+  @override
+  Future<ProfileMetadataFfi?> getCachedProfile({
+    required String pubkeyHex,
+  }) async => null;
+
+  @override
+  Future<Uint8List?> getProfilePicture({required String pubkeyHex}) async =>
+      null;
+
+  /// The publish's first read; failing it ends the pass without a timer.
+  @override
+  Future<ProfilePendingStateFfi> profilePendingState() async {
+    syncReads++;
+    throw StateError('no relays in this test');
+  }
+
+  @override
+  void dispose() => disposed = true;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      throw UnimplementedError('unexpected: ${invocation.memberName}');
+}
+
+class _IdentityOnlyService implements IdentityService {
+  @override
+  Future<Identity?> getIdentity() async => _fakeIdentity;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      throw UnimplementedError('unexpected: ${invocation.memberName}');
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -216,8 +290,9 @@ void main() {
 
         await _tapEditPhoto(tester);
 
-        // The picker did not request full EXIF/location metadata, and the
-        // editor was opened on the picked file, locked to a 1:1 square.
+        // The picker was asked for no extra metadata (no iOS photo-library
+        // permission), and the editor was opened on the picked file, locked
+        // to a 1:1 square.
         expect(picker.lastRequestFullMetadata, isFalse);
         expect(cropper.callCount, 1);
         expect(cropper.lastSourcePath, pickedFile.path);
@@ -565,7 +640,8 @@ void main() {
       expect(source.contains('openAppSettings'), isFalse);
     });
 
-    test('still drops EXIF/location metadata at the pick boundary', () {
+    test('still asks the picker for no extra metadata (no iOS photo-library '
+        'permission)', () {
       expect(readSource().contains('requestFullMetadata: false'), isTrue);
     });
 
@@ -651,4 +727,199 @@ void main() {
       },
     );
   });
+
+  group('each failure stage leaves one identifier-free debug line', () {
+    // Rule 15: the type only. Identifiers are planted where a careless line
+    // would pick them up — the thrown error's own text, and the file path.
+    const npub =
+        'npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqp9k8z0';
+
+    Future<LogCapture> runFlow(
+      WidgetTester tester, {
+      required MockProfileService svc,
+    }) async {
+      await _pumpHeader(tester, svc);
+      // Restored inside the body: testWidgets checks that debugPrint is back
+      // before addTearDown callbacks run.
+      final log = LogCapture();
+      try {
+        await _tapEditPhoto(tester);
+      } finally {
+        log.restore();
+      }
+      return log;
+    }
+
+    testWidgets('the picker', (tester) async {
+      final secret = Directory.systemTemp.path;
+      ImagePickerPlatform.instance = _FakeImagePicker(
+        throwError: true,
+        error: Exception('$npub $secret'),
+      );
+      final log = await runFlow(tester, svc: MockProfileService());
+      log
+        ..assertContains('[Avatar] pick failed: _Exception')
+        ..assertNoNeedles([npub, secret]);
+    });
+
+    testWidgets('the crop editor', (tester) async {
+      final picked = _writeTempFile('picked');
+      ImagePickerPlatform.instance = _FakeImagePicker(
+        result: XFile(picked.path),
+      );
+      ImageCropperPlatform.instance = _FakeImageCropper(
+        throwError: true,
+        error: Exception('$npub ${picked.path}'),
+      );
+      final log = await runFlow(tester, svc: MockProfileService());
+      log
+        ..assertContains('[Avatar] crop failed: _Exception')
+        ..assertNoNeedles([npub, picked.path]);
+    });
+
+    testWidgets('reading the cropped file', (tester) async {
+      final picked = _writeTempFile('picked');
+      // A path that does not exist: the read throws a FileSystemException
+      // whose own text carries it.
+      final missing = '${picked.parent.path}/$npub.jpg';
+      ImagePickerPlatform.instance = _FakeImagePicker(
+        result: XFile(picked.path),
+      );
+      ImageCropperPlatform.instance = _FakeImageCropper(
+        result: CroppedFile(missing),
+      );
+      final log = await runFlow(tester, svc: MockProfileService());
+      log
+        ..assertContains('[Avatar] read failed: PathNotFoundException')
+        ..assertNoNeedles([npub, missing, picked.path]);
+    });
+
+    testWidgets('the save', (tester) async {
+      final picked = _writeTempFile('picked');
+      final cropped = _writeTempFile('cropped');
+      ImagePickerPlatform.instance = _FakeImagePicker(
+        result: XFile(picked.path),
+      );
+      ImageCropperPlatform.instance = _FakeImageCropper(
+        result: CroppedFile(cropped.path),
+      );
+      final svc = MockProfileService()
+        ..setOwnAvatarError = StateError('$npub ${cropped.path}');
+      final log = await runFlow(tester, svc: svc);
+      log
+        ..assertContains('[Avatar] save failed: StateError')
+        ..assertNoNeedles([npub, cropped.path, picked.path]);
+    });
+  });
+
+  group(
+    'a crop that returns while the Android session is being handed off',
+    () {
+      // Background sharing on: the crop editor pauses Haven, the pause starts
+      // handing the MLS session to the foreground service, and the result
+      // arrives before the window has focus, so Dart reads `inactive`. The
+      // pause is run here exactly as `_onPaused` wires it (MapShell cannot be
+      // pumped; the wiring itself is source-pinned in
+      // `map_shell_detached_release_test.dart`).
+      testWidgets('the chosen photo is saved and published while the app is '
+          'still inactive, without the user picking again, and nothing is '
+          'handed over', (tester) async {
+        final picked = _writeTempFile('picked');
+        final cropped = _writeTempFile('cropped');
+        final manager = _RecordingCircleManager();
+        final circle = NostrCircleService.withInjectedManager(
+          relayService: MockRelayService(),
+          injectedManager: manager,
+        );
+        final binding = tester.binding;
+        addTearDown(
+          () =>
+              binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed),
+        );
+        late SystemActivityExcursions excursions;
+        var turn = 0;
+
+        ImagePickerPlatform.instance = _FakeImagePicker(
+          result: XFile(picked.path),
+        );
+        ImageCropperPlatform.instance = _FakeImageCropper(
+          result: CroppedFile(cropped.path),
+          onCrop: () {
+            binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+            final pausedTurn = ++turn;
+            unawaited(
+              MapShell.handOffMlsSession(
+                engineStop: Future.value(LiveSyncStopOutcome.stopped),
+                ownershipWrites: const [],
+                releaseSession: () {
+                  circle.releaseForHandoff();
+                  return true;
+                },
+                announce: ({required handedOff}) {},
+                superseded: () => turn != pausedTurn,
+                grace: excursions.graceForPause(),
+                untilSaved: () => excursions.saved,
+              ),
+            );
+            // onActivityResult runs before the window regains focus.
+            binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+          },
+        );
+
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              identityProvider.overrideWith((_) async => _fakeIdentity),
+              displayNameProvider.overrideWith((_) async => 'Alice'),
+              identityServiceProvider.overrideWithValue(_IdentityOnlyService()),
+              circleServiceProvider.overrideWithValue(circle),
+            ],
+            child: const MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              home: Scaffold(body: IdentityPhotoHeader()),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        excursions = ProviderScope.containerOf(
+          tester.element(find.byType(IdentityPhotoHeader)),
+        ).read(systemActivityExcursionsProvider);
+        final announcements = captureAccessibilityAnnouncementsWithPriority(
+          tester,
+        );
+
+        await _tapEditPhoto(tester);
+
+        expect(
+          binding.lifecycleState,
+          AppLifecycleState.inactive,
+          reason: 'anti-vacuity: all of this happened before the resume',
+        );
+        expect(manager.saved, [_bytes], reason: 'the photo was saved');
+        expect(manager.syncReads, greaterThan(0), reason: 'and published');
+        expect(manager.disposed, isFalse, reason: 'on the session it opened');
+        expect(find.byType(SnackBar), findsNothing);
+        expect(announcements.map((a) => a.message), [
+          AppLocalizations.of(
+            tester.element(find.byType(IdentityPhotoHeader)),
+          ).avatarPickerPhotoUpdatedAnnouncement,
+        ]);
+
+        await tester.runAsync(() async {
+          binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+          turn++;
+          excursions.endGrace(HandoffGraceEnd.resumed);
+          await pumpEventQueue();
+        });
+        expect(
+          manager.disposed,
+          isFalse,
+          reason:
+              'the user came back inside the grace: nothing was handed '
+              'over, so no service takeover and no stop/restart',
+        );
+      });
+    },
+  );
 }

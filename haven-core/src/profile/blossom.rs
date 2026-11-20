@@ -6,8 +6,11 @@
 //!   (the sealed type whose only constructors run, or replay, the avatar
 //!   pipeline's EXIF/GPS strip + re-encode) → hand-rolled BUD-02 `PUT /upload`
 //!   carrying a BUD-11 kind-24242 authorization signed by the identity key
-//!   (60 s expiry) → verify the returned descriptor's `sha256` equals the
-//!   staged content hash. The PUT is
+//!   (10 min expiry) and an `X-SHA-256` header → verify the returned
+//!   descriptor: its `sha256` and its URL's content address equal the staged
+//!   hash, its `size` (when given) the body's, and its URL is HTTPS on the
+//!   server's own site. The servers are tried in order, the next only after
+//!   the previous one failed to hand back such a descriptor. The PUT is
 //!   hand-rolled (not delegated to `nostr-blossom`) because that crate's
 //!   `upload_blob` accepts only HTTP 200 and rejects the `201 Created` a
 //!   spec-compliant server returns for a *new* blob (BUD-02); Haven accepts any
@@ -25,28 +28,35 @@
 //!   for loopback/emulator hosts in **debug** builds (release rejects all
 //!   `http://`).
 //! * **Connect-time IP filtering that gates the ACTUAL connected address.**
-//!   Name-based checks are insufficient (DNS rebinding), so the shared
-//!   download [`reqwest::Client`] installs a custom
-//!   [`reqwest::dns::Resolve`] ([`SsrfGuardResolver`]): reqwest connects to
-//!   exactly the addresses the resolver returns and never re-resolves for a
-//!   request (redirects are disabled), so filtering inside the resolver gates
-//!   the real socket target — closing the rebinding window. A pre-flight
-//!   resolution ([`preflight_ssrf_check`]) additionally yields a clean
-//!   [`ProfileError::InsecureUrl`] before any connection is attempted. Both
-//!   share [`is_forbidden_addr`], which rejects loopback, RFC-1918, link-local
-//!   (`169.254/16`, `fe80::/10`), ULA (`fc00::/7`), CGNAT (`100.64/10`),
-//!   unspecified, multicast, broadcast, documentation (`2001:db8::/32`) and
-//!   reserved ranges. Every IPv4-in-IPv6 embedding is unwrapped and re-checked
-//!   as IPv4 — IPv4-mapped (`::ffff:0:0/96`), IPv4-compatible (`::/96`) and
-//!   NAT64 (`64:ff9b::/96`) — so an embedded private target cannot bypass it.
-//! * **Redirects disabled** (`redirect::Policy::none()`), no cookies (the
-//!   `cookies` feature is not enabled), generic UA.
+//!   Name-based checks are insufficient (DNS rebinding), so each request's
+//!   [`reqwest::Client`] installs a custom [`reqwest::dns::Resolve`]
+//!   ([`SsrfGuardResolver`]): reqwest connects to exactly the addresses the
+//!   resolver returns, at every connect of the request, so filtering inside
+//!   the resolver gates the real socket target — closing the rebinding window.
+//!   A pre-flight resolution ([`preflight_ssrf_check`]) additionally yields a
+//!   clean [`ProfileError::InsecureUrl`] before any connection is attempted.
+//!   Both share [`is_forbidden_addr`], which rejects loopback, RFC-1918,
+//!   link-local (`169.254/16`, `fe80::/10`), ULA (`fc00::/7`), CGNAT
+//!   (`100.64/10`), unspecified, multicast, broadcast, documentation
+//!   (`2001:db8::/32`) and reserved ranges. Every IPv4-in-IPv6 embedding is
+//!   unwrapped and re-checked as IPv4 — IPv4-mapped (`::ffff:0:0/96`),
+//!   IPv4-compatible (`::/96`) and NAT64 (`64:ff9b::/96`) — so an embedded
+//!   private target cannot bypass it.
+//! * **Bounded redirects.** An upload follows none. A download of a
+//!   content-addressed URL (a trailing 64-hex segment) follows at most
+//!   [`BLOSSOM_MAX_REDIRECTS`] — BUD-01 lets a server redirect a blob, and
+//!   Primal always does — each scheme-checked, an IP-literal target vetted here
+//!   (the connector never asks the resolver about a literal) and a hostname
+//!   vetted by the resolver at its own connect, with no `Referer`. Any other
+//!   download follows none. No cookies (the `cookies` feature is not enabled),
+//!   generic UA.
 //! * **Size cap enforced twice**: a `Content-Length` precheck AND a streamed
 //!   byte counter ([`PROFILE_PICTURE_MAX_DOWNLOAD_BYTES`]) that catches a body
 //!   overrunning a lying/absent length.
-//! * **Integrity + decode-bomb re-validation**: `sha256(raw) ==` the URL's
-//!   trailing 64-hex commitment (when present), then
-//!   [`process_inbound_avatar`] re-decodes/re-encodes the bytes.
+//! * **Integrity + decode-bomb re-validation**: `sha256(raw) ==` the
+//!   REQUESTED URL's trailing 64-hex commitment (when present), however many
+//!   redirects led to the bytes, then [`process_inbound_avatar`]
+//!   re-decodes/re-encodes them.
 //!
 //! The release-profile loopback/private rejection is `cfg`-gated and NOT
 //! exercised by the default debug test run (stated, not claimed): the debug
@@ -64,7 +74,8 @@ use nostr::{
 use sha2::{Digest, Sha256};
 
 use super::config::{
-    AVATAR_MIME, BLOSSOM_AUTH_EXPIRY_SECS, BLOSSOM_TIMEOUT, PROFILE_PICTURE_MAX_DOWNLOAD_BYTES,
+    BlossomAuthEncoding, UploadServer, AVATAR_MIME, BLOSSOM_AUTH_EXPIRY_SECS,
+    BLOSSOM_MAX_REDIRECTS, BLOSSOM_TIMEOUT, PROFILE_PICTURE_MAX_DOWNLOAD_BYTES,
 };
 use super::error::{ProfileError, Result};
 use super::types::ProfilePicture;
@@ -242,11 +253,12 @@ const fn test_exempt_ip(_ip: IpAddr) -> bool {
 
 /// The custom reqwest resolver that filters resolved socket addresses.
 ///
-/// reqwest connects to exactly the addresses this resolver returns and does
-/// not re-resolve within a request (redirects are disabled), so filtering here
-/// gates the actual connected address and defeats DNS rebinding. Resolution
-/// fails closed: if any resolved address is forbidden, the whole resolution is
-/// rejected.
+/// reqwest connects to exactly the addresses this resolver returns, at every
+/// connect a request makes (a followed redirect's included), so filtering
+/// here gates the actual connected address and defeats DNS rebinding. An IP
+/// literal never reaches it, which is why [`redirect_refusal`] vets one.
+/// Resolution fails closed: if any resolved address is forbidden, the whole
+/// resolution is rejected.
 struct SsrfGuardResolver;
 
 impl reqwest::dns::Resolve for SsrfGuardResolver {
@@ -276,11 +288,16 @@ impl reqwest::dns::Resolve for SsrfGuardResolver {
     }
 }
 
-/// How a request's client is built (redirects disabled, SSRF-filtered
-/// resolver, generic UA, bounded timeouts, no cookies, no idle connection).
-fn client_builder() -> reqwest::ClientBuilder {
+/// How a request's client is built (SSRF-filtered resolver, generic UA,
+/// bounded timeouts, no cookies, no idle connection, no `Referer`), following
+/// redirects as `redirect` says.
+///
+/// No `Referer`: a followed redirect would otherwise tell its target which
+/// picture URL — and so which host — sent the viewer there.
+fn client_builder(redirect: reqwest::redirect::Policy) -> reqwest::ClientBuilder {
     let builder = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
+        .redirect(redirect)
+        .referer(false)
         .user_agent("Haven")
         .connect_timeout(BLOSSOM_TIMEOUT)
         .timeout(BLOSSOM_TIMEOUT)
@@ -298,8 +315,80 @@ fn client_builder() -> reqwest::ClientBuilder {
 /// logout would present the previous identity's ticket to the same host,
 /// which could link the two. The cost is one full handshake per request;
 /// avatars are cached and uploads are rare.
-fn download_client() -> Result<reqwest::Client> {
-    client_builder().build().map_err(ProfileError::http)
+///
+/// An upload follows no redirect: one would carry the identity-signed token
+/// and the body to a host nobody chose (and a `302` may replay the `PUT` as a
+/// `GET`), so a `3xx` is that server's failure.
+fn upload_client() -> Result<reqwest::Client> {
+    client_builder(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(ProfileError::http)
+}
+
+/// The client of one picture download (see [`upload_client`] for why one per
+/// request). It follows redirects only for a content-addressed URL, whose
+/// bytes the final hash check binds wherever they come from.
+fn download_client(content_addressed: bool) -> Result<reqwest::Client> {
+    let redirect = if content_addressed {
+        reqwest::redirect::Policy::custom(|attempt| {
+            match redirect_refusal(attempt.url(), attempt.previous().len()) {
+                None => attempt.follow(),
+                Some(refused) => attempt.error(refused),
+            }
+        })
+    } else {
+        reqwest::redirect::Policy::none()
+    };
+    client_builder(redirect).build().map_err(ProfileError::http)
+}
+
+/// Why a picture download's redirect is not followed. Fieldless, so neither
+/// rendering can carry the refused target (Security Rule 15).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+enum RedirectRefused {
+    /// More than [`BLOSSOM_MAX_REDIRECTS`] redirects.
+    #[error("too many redirects")]
+    Hops,
+    /// The target is not HTTPS (outside the debug loopback allowance).
+    #[error("redirect to an insecure scheme")]
+    Scheme,
+    /// The target is an IP literal the anti-SSRF filter forbids.
+    #[error("redirect to a forbidden address")]
+    Address,
+}
+
+/// Whether the `hop`-th redirect of a download, to `next`, is refused.
+///
+/// The target need not carry the requested sha256. BUD-01 obliges a server to
+/// redirect only to one that does, but Primal's `GET /<sha256>` may answer
+/// with any stored copy of the bytes, some of them key-addressed; integrity
+/// is the final body's hash against the REQUESTED URL's address, which a hop
+/// cannot change. A hostname is left to [`SsrfGuardResolver`] at its connect.
+fn redirect_refusal(next: &url::Url, hop: usize) -> Option<RedirectRefused> {
+    if hop > BLOSSOM_MAX_REDIRECTS {
+        return Some(RedirectRefused::Hops);
+    }
+    if require_https(next).is_err() {
+        return Some(RedirectRefused::Scheme);
+    }
+    let literal = match next.host() {
+        Some(url::Host::Ipv4(v4)) => IpAddr::V4(v4),
+        Some(url::Host::Ipv6(v6)) => IpAddr::V6(v6),
+        _ => return None,
+    };
+    (!addr_permitted(literal)).then_some(RedirectRefused::Address)
+}
+
+/// The error a download's failed `send` maps to: a refused redirect by its
+/// kind, wherever reqwest nested it, anything else as transport.
+fn send_error(e: &reqwest::Error) -> ProfileError {
+    let refused = std::iter::successors(std::error::Error::source(e), |s| s.source())
+        .find_map(|s| s.downcast_ref::<RedirectRefused>().copied());
+    match refused {
+        Some(RedirectRefused::Hops) => ProfileError::http("redirect limit"),
+        Some(RedirectRefused::Scheme | RedirectRefused::Address) => ProfileError::InsecureUrl,
+        None => ProfileError::http(e),
+    }
 }
 
 // ===========================================================================
@@ -311,33 +400,36 @@ const BLOSSOM_AUTH_KIND: u16 = 24242;
 
 /// A BUD-02 blob descriptor as returned by `PUT /upload` / `GET /list`.
 ///
-/// Only `url` and `sha256` are load-bearing for Haven (they are re-verified
-/// against our own content hash). `size` / `type` / `uploaded` are part of the
-/// spec response but unused here, so they are ignored by the deserializer. Both
-/// required fields being non-`Option` means a malformed or `sha256`-less body
-/// fails to parse and is surfaced as an error (never a silent accept).
+/// `url`, `sha256` and `size` are re-verified against our own bytes; `type` /
+/// `uploaded` are ignored by the deserializer. The two required fields being
+/// non-`Option` means a malformed or `sha256`-less body fails to parse and is
+/// surfaced as an error (never a silent accept).
 #[derive(serde::Deserialize)]
 struct BlobDescriptor {
     /// The public URL at which the blob can be fetched.
     url: String,
     /// Lowercase hex sha256 the server computed over the stored bytes.
     sha256: String,
+    /// The stored size in bytes, when the server reports it.
+    size: Option<u64>,
 }
 
 /// Builds the `Authorization: Nostr <base64>` header value carrying a signed
 /// BUD-11 kind-24242 upload authorization for the blob whose sha256 hex is
-/// `sha256_hex`.
+/// `sha256_hex`, base64-encoded as `encoding` says.
 ///
-/// The event carries `["t","upload"]`, `["expiration", now + 60 s]` and
+/// The event carries `["t","upload"]`, `["expiration", now + 10 min]` and
 /// `["x", <sha256_hex>]`, a short human-readable `content`, and `created_at =
-/// now`, signed by the identity `keys`. The JSON is encoded with **standard**
-/// (padded) base64 — the encoding the reference `nostr-blossom` crate and the
-/// deployed servers (hzrd149's blossom-server, primal) actually accept.
+/// now`, signed by the identity `keys`.
 ///
 /// # Errors
 ///
 /// [`ProfileError::Build`] if event signing fails.
-fn build_upload_auth_header(keys: &Keys, sha256_hex: &str) -> Result<String> {
+fn build_upload_auth_header(
+    keys: &Keys,
+    sha256_hex: &str,
+    encoding: BlossomAuthEncoding,
+) -> Result<String> {
     let expiration = Timestamp::now() + std::time::Duration::from_secs(BLOSSOM_AUTH_EXPIRY_SECS);
     let x_tag = Tag::custom(
         TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::X)),
@@ -350,18 +442,35 @@ fn build_upload_auth_header(keys: &Keys, sha256_hex: &str) -> Result<String> {
     .tags([Tag::hashtag("upload"), Tag::expiration(expiration), x_tag])
     .sign_with_keys(keys)
     .map_err(ProfileError::build)?;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(event.as_json());
-    Ok(format!("Nostr {encoded}"))
+    Ok(format!(
+        "Nostr {}",
+        encode_token(encoding, &event.as_json())
+    ))
 }
 
-/// Uploads an already-sanitized profile picture to `server` and returns the
-/// resolved [`ProfilePicture`].
+/// `json` base64-encoded as `encoding` says.
+fn encode_token(encoding: BlossomAuthEncoding, json: &str) -> String {
+    match encoding {
+        BlossomAuthEncoding::PaddedStandard => {
+            base64::engine::general_purpose::STANDARD.encode(json)
+        }
+        BlossomAuthEncoding::UrlSafeUnpadded => {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json)
+        }
+    }
+}
+
+/// Uploads an already-sanitized profile picture to the first of `servers`
+/// that takes it, and returns the resolved [`ProfilePicture`].
 ///
-/// Pipeline: [`require_https`] → hand-rolled BUD-02 `PUT /upload`
-/// (identity-signed BUD-11 kind-24242 auth, 60 s expiry) over the shared
-/// SSRF-guarded client under [`BLOSSOM_TIMEOUT`] → re-check the returned
-/// descriptor URL is HTTPS → assert the descriptor's `sha256` equals the staged
-/// content hash.
+/// Each server in turn: [`require_https`] → hand-rolled BUD-02 `PUT /upload`
+/// (a fresh identity-signed BUD-11 kind-24242 auth in that server's encoding,
+/// `X-SHA-256`) under [`BLOSSOM_TIMEOUT`] → verify the descriptor. The next
+/// server is tried after ANY failure to obtain a verified descriptor — a
+/// non-2xx (a redirect included), a timeout, a transport error, a descriptor
+/// that does not verify — so a server that timed out may hold the bytes too:
+/// the photo can end up on more than one server. The same bytes, and so the
+/// same content address, go to every server.
 ///
 /// Sanitization is not performed here and is not optional: [`StagedPicture`]
 /// can only be built from the avatar pipeline's output (or from bytes it
@@ -370,47 +479,64 @@ fn build_upload_auth_header(keys: &Keys, sha256_hex: &str) -> Result<String> {
 /// always commits to exactly what is uploaded. Nothing here re-encodes, so the
 /// staged hash is the blob's Blossom content address.
 ///
-/// The upload is hand-rolled rather than delegated to `nostr-blossom` because
-/// that crate's `upload_blob` accepts only HTTP 200 and rejects the `201
-/// Created` a spec-compliant server returns for a *new* blob (BUD-02). Any 2xx
-/// is accepted here; any other status is an error.
-///
 /// # Errors
 ///
-/// * [`ProfileError::InsecureUrl`] if `server` (or the returned descriptor URL)
-///   is not HTTPS.
-/// * [`ProfileError::Timeout`] / [`ProfileError::Blossom`] on upload failure.
-/// * [`ProfileError::HashMismatch`] if the server's descriptor hash disagrees.
+/// The last server's failure: [`ProfileError::InsecureUrl`] (a non-HTTPS
+/// server, or a descriptor URL off HTTPS or off the server's site),
+/// [`ProfileError::HashMismatch`] (a descriptor whose hash or URL address
+/// disagrees), [`ProfileError::Timeout`] / [`ProfileError::Blossom`] /
+/// [`ProfileError::Http`]. [`ProfileError::Build`] at once if signing fails,
+/// which no other server would change; [`ProfileError::NoRelays`] for an empty
+/// list.
 pub async fn upload_profile_picture(
     keys: &Keys,
-    server: &url::Url,
+    servers: &[UploadServer],
     staged: StagedPicture,
 ) -> Result<ProfilePicture> {
-    require_https(server)?;
-    // The shared client re-filters at connect time (anti-SSRF, redirects off,
-    // bounded timeouts) — the same hardened seam the download path uses.
-    upload_with_client(&download_client()?, keys, server, staged).await
+    let client = upload_client()?;
+    let mut failure = ProfileError::NoRelays;
+    for server in servers {
+        match upload_once(&client, keys, server, &staged).await {
+            Ok(url) => {
+                let sha256_hex = hex::encode(staged.sha256());
+                let (canonical, thumbnail) = staged.into_render_bytes();
+                return Ok(ProfilePicture {
+                    url,
+                    sha256_hex,
+                    canonical,
+                    thumbnail,
+                });
+            }
+            Err(e @ ProfileError::Build(_)) => return Err(e),
+            Err(e) => {
+                // Which server is not said: the list is public, so its
+                // position names a host (Security Rule 15).
+                log::debug!("[profile] picture upload: a server failed ({})", e.code());
+                failure = e;
+            }
+        }
+    }
+    Err(failure)
 }
 
-/// The transport core shared by the public upload and its tests: builds the
-/// BUD-11 auth, `PUT`s the canonical bytes to `<server>/upload`, and validates
-/// the returned BUD-02 descriptor. Assumes `server` has been scheme-vetted by
-/// the caller. Splitting the client out lets the tests drive it with a plain
-/// (non-SSRF) client against a loopback mock, mirroring `download_with_client`.
+/// One `PUT /upload` to `server`, returning the verified descriptor URL.
 ///
 /// # Errors
 ///
-/// As [`upload_profile_picture`].
-async fn upload_with_client(
+/// As [`upload_profile_picture`], for this one server.
+async fn upload_once(
     client: &reqwest::Client,
     keys: &Keys,
-    server: &url::Url,
-    staged: StagedPicture,
-) -> Result<ProfilePicture> {
+    server: &UploadServer,
+    staged: &StagedPicture,
+) -> Result<String> {
+    require_https(&server.base)?;
     let expected_hex = hex::encode(staged.sha256());
-    let upload_url = server.join("upload").map_err(|_| ProfileError::BadUrl)?;
-    let auth_header = build_upload_auth_header(keys, &expected_hex)?;
-    let (canonical, thumbnail) = staged.into_render_bytes();
+    let upload_url = server
+        .base
+        .join("upload")
+        .map_err(|_| ProfileError::BadUrl)?;
+    let auth_header = build_upload_auth_header(keys, &expected_hex, server.auth)?;
 
     let response = tokio::time::timeout(
         BLOSSOM_TIMEOUT,
@@ -418,7 +544,8 @@ async fn upload_with_client(
             .put(upload_url)
             .header(reqwest::header::AUTHORIZATION, auth_header)
             .header(reqwest::header::CONTENT_TYPE, AVATAR_MIME)
-            .body(canonical.to_vec())
+            .header("X-SHA-256", &expected_hex)
+            .body(staged.canonical().to_vec())
             .send(),
     )
     .await
@@ -426,9 +553,14 @@ async fn upload_with_client(
     .map_err(ProfileError::http)?;
 
     // BUD-02: `201 Created` for a new blob, `200 OK` for an already-present one;
-    // accept any 2xx, reject everything else.
+    // accept any 2xx, reject everything else. The class alone is logged: the
+    // `X-Reason` and the body are server-authored.
     let status = response.status();
     if !status.is_success() {
+        log::debug!(
+            "[profile] picture upload: status {}xx",
+            status.as_u16() / 100
+        );
         return Err(ProfileError::blossom(format!("upload status {status}")));
     }
 
@@ -436,20 +568,35 @@ async fn upload_with_client(
     let descriptor: BlobDescriptor =
         serde_json::from_slice(&body).map_err(ProfileError::blossom)?;
 
-    // The URL the server hands back is where members will fetch — it must be
-    // HTTPS too (a server could return an http:// or private URL).
+    // The URL the server hands back is where members will fetch, so it must be
+    // HTTPS too, and must carry our hash: a peer checks a download's bytes
+    // only against the address its URL carries.
     let descriptor_url = url::Url::parse(&descriptor.url).map_err(|_| ProfileError::BadUrl)?;
     require_https(&descriptor_url)?;
-
-    if !descriptor.sha256.eq_ignore_ascii_case(&expected_hex) {
+    if !descriptor.sha256.eq_ignore_ascii_case(&expected_hex)
+        || extract_sha256_from_url(&descriptor_url).as_deref() != Some(expected_hex.as_str())
+    {
         return Err(ProfileError::HashMismatch);
     }
+    if descriptor
+        .size
+        .is_some_and(|size| usize::try_from(size).ok() != Some(staged.canonical().len()))
+    {
+        return Err(ProfileError::blossom("descriptor size"));
+    }
+    if !on_site(&descriptor_url, &server.site) {
+        return Err(ProfileError::InsecureUrl);
+    }
+    Ok(descriptor.url)
+}
 
-    Ok(ProfilePicture {
-        url: descriptor.url,
-        sha256_hex: expected_hex,
-        canonical,
-        thumbnail,
+/// Whether `url`'s host is `site` or a subdomain of it.
+fn on_site(url: &url::Url, site: &str) -> bool {
+    url.host_str().is_some_and(|host| {
+        host == site
+            || host
+                .strip_suffix(site)
+                .is_some_and(|label| label.ends_with('.'))
     })
 }
 
@@ -463,19 +610,27 @@ async fn upload_with_client(
 /// # Errors
 ///
 /// * [`ProfileError::BadUrl`] if `url` does not parse.
-/// * [`ProfileError::InsecureUrl`] if the URL is not HTTPS or resolves to a
-///   forbidden (loopback/private/…) address.
+/// * [`ProfileError::InsecureUrl`] if the URL, or a redirect's target, is not
+///   HTTPS or is (or resolves to) a forbidden (loopback/private/…) address.
 /// * [`ProfileError::TooLarge`] on a `Content-Length` or streamed-size overrun.
 /// * [`ProfileError::HashMismatch`] if the bytes disagree with the URL hash.
 /// * [`ProfileError::Http`] / [`ProfileError::Timeout`] on transport failure.
 /// * [`ProfileError::Image`] if the bytes fail decode-bomb re-validation.
 pub async fn download_profile_picture(url: &str) -> Result<ProfilePicture> {
-    let parsed = url::Url::parse(url).map_err(|_| ProfileError::BadUrl)?;
-    require_https(&parsed)?;
-    // Pre-flight resolution + filter: fail fast with a clean InsecureUrl.
-    preflight_ssrf_check(&parsed).await?;
-    // The shared client's resolver re-filters at connect time (anti-rebinding).
-    download_with_client(&download_client()?, &parsed).await
+    let result = async {
+        let parsed = url::Url::parse(url).map_err(|_| ProfileError::BadUrl)?;
+        require_https(&parsed)?;
+        // Pre-flight resolution + filter: fail fast with a clean InsecureUrl.
+        preflight_ssrf_check(&parsed).await?;
+        // The client's resolver re-filters at connect time (anti-rebinding).
+        let client = download_client(extract_sha256_from_url(&parsed).is_some())?;
+        download_with_client(&client, &parsed).await
+    }
+    .await;
+    if let Err(e) = &result {
+        log::debug!("[profile] picture download failed ({})", e.code());
+    }
+    result
 }
 
 /// Resolves `url`'s host and rejects if any resolved address is forbidden.
@@ -507,7 +662,8 @@ async fn preflight_ssrf_check(url: &url::Url) -> Result<()> {
 
 /// The transport core shared by the public download and its tests: issues the
 /// GET, enforces the size caps and hash/decode re-validation. Assumes `url`
-/// has already been scheme- and SSRF-vetted by the caller.
+/// has already been scheme- and SSRF-vetted by the caller. The hash is checked
+/// against `url`, the one requested, wherever a redirect fetched the bytes.
 ///
 /// # Errors
 ///
@@ -517,10 +673,15 @@ async fn download_with_client(client: &reqwest::Client, url: &url::Url) -> Resul
     let response = tokio::time::timeout(BLOSSOM_TIMEOUT, client.get(url.clone()).send())
         .await
         .map_err(|_| ProfileError::Timeout)?
-        .map_err(ProfileError::http)?;
+        .map_err(|e| send_error(&e))?;
 
-    if !response.status().is_success() {
-        return Err(ProfileError::http(format!("status {}", response.status())));
+    let status = response.status();
+    if !status.is_success() {
+        log::debug!(
+            "[profile] picture download: status {}xx",
+            status.as_u16() / 100
+        );
+        return Err(ProfileError::http(format!("status {status}")));
     }
 
     // Content-Length precheck: reject a header claiming more than the cap.
@@ -730,7 +891,7 @@ mod tests {
             }
         });
         for _ in 0..2 {
-            let body = download_client()
+            let body = upload_client()
                 .expect("the client builds")
                 .get(format!("https://{address}/"))
                 .send()
@@ -785,7 +946,9 @@ mod tests {
                 });
             }
         });
-        let client = client_builder().build().expect("the client builds");
+        let client = client_builder(reqwest::redirect::Policy::none())
+            .build()
+            .expect("the client builds");
         for _ in 0..2 {
             let body = client
                 .get(format!("http://{address}/"))
@@ -965,9 +1128,11 @@ mod tests {
 
     #[test]
     fn download_client_builds() {
-        // Exercises the shared client construction (with the SSRF resolver)
+        // Exercises every client construction (with the SSRF resolver)
         // without any network I/O.
-        assert!(download_client().is_ok());
+        assert!(upload_client().is_ok());
+        assert!(download_client(true).is_ok());
+        assert!(download_client(false).is_ok());
     }
 
     // ---- full download path: SSRF pre-flight reject ------------------------
@@ -1004,11 +1169,59 @@ mod tests {
 
     // ---- upload (mockito) --------------------------------------------------
     //
-    // These drive the transport core `upload_with_client` with a plain
-    // (non-SSRF) client so the loopback mock is reachable, mirroring the
-    // download-core tests. The public `upload_profile_picture` wraps this with
-    // `require_https` + the shared SSRF-guarded client (exercised by the
-    // non-https reject test below and the `#[ignore]`d live round-trip).
+    // These drive the public `upload_profile_picture` against loopback mocks:
+    // a mock's `http://127.0.0.1` base passes `require_https` in debug, and an
+    // IP literal never reaches the SSRF resolver.
+
+    /// A mock as an upload server whose site is its own host.
+    fn at(server: &mockito::ServerGuard, auth: BlossomAuthEncoding) -> UploadServer {
+        let base = url::Url::parse(&server.url()).expect("mock url");
+        UploadServer {
+            site: base.host_str().expect("mock host").to_string(),
+            base,
+            auth,
+        }
+    }
+
+    fn primal_like(server: &mockito::ServerGuard) -> UploadServer {
+        at(server, BlossomAuthEncoding::PaddedStandard)
+    }
+
+    /// A loopback base that refuses every connection.
+    fn dead_server() -> UploadServer {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("address").port();
+        drop(listener);
+        let base = url::Url::parse(&format!("http://127.0.0.1:{port}")).expect("url");
+        UploadServer {
+            base,
+            site: "127.0.0.1".to_string(),
+            auth: BlossomAuthEncoding::PaddedStandard,
+        }
+    }
+
+    /// Answers `PUT /upload` with `status` and, for a 2xx, the descriptor of
+    /// `processed`'s bytes at this server, `hits` times.
+    async fn answering(
+        server: &mut mockito::ServerGuard,
+        processed: &crate::avatar::image::ProcessedAvatar,
+        status: usize,
+        hits: usize,
+    ) -> mockito::Mock {
+        let sha_hex = hex::encode(processed.content_hash);
+        let body = descriptor_json(&server.url(), &sha_hex, processed.canonical.len());
+        server
+            .mock("PUT", "/upload")
+            .with_status(status)
+            .with_body(if (200..300).contains(&status) {
+                body
+            } else {
+                String::new()
+            })
+            .expect(hits)
+            .create_async()
+            .await
+    }
 
     /// Runs the upload happy path against a mock returning `status`, asserting
     /// the fully-resolved [`ProfilePicture`]. Parameterized so both the BUD-02
@@ -1016,23 +1229,13 @@ mod tests {
     /// proven to succeed — the core of the 200-only foot-gun fix.
     async fn upload_happy_path_with_status(status: usize) {
         let mut server = mockito::Server::new_async().await;
-        let raw = tiny_jpeg();
-        let processed = process_own_avatar(&raw).expect("pipeline");
+        let processed = process_own_avatar(&tiny_jpeg()).expect("pipeline");
         let sha_hex = hex::encode(processed.content_hash);
-        let body = descriptor_json(&server.url(), &sha_hex, processed.canonical.len());
-        let _m = server
-            .mock("PUT", "/upload")
-            .with_status(status)
-            .with_body(body)
-            .create_async()
-            .await;
+        let _m = answering(&mut server, &processed, status, 1).await;
 
-        let keys = Keys::generate();
-        let server_url = url::Url::parse(&server.url()).unwrap();
-        let pic = upload_with_client(
-            &no_redirect_client(),
-            &keys,
-            &server_url,
+        let pic = upload_profile_picture(
+            &Keys::generate(),
+            &[primal_like(&server)],
             StagedPicture::from_processed(&processed),
         )
         .await
@@ -1066,23 +1269,11 @@ mod tests {
         // Sanity: the sanitized-bytes hash differs from the raw-input hash.
         let raw_hash = hex::encode(Sha256::digest(&raw));
         assert_ne!(sha_hex, raw_hash, "canonical hash must not equal raw hash");
-        let _m = server
-            .mock("PUT", "/upload")
-            .with_status(201)
-            .with_body(descriptor_json(
-                &server.url(),
-                &sha_hex,
-                processed.canonical.len(),
-            ))
-            .create_async()
-            .await;
+        let _m = answering(&mut server, &processed, 201, 1).await;
 
-        let keys = Keys::generate();
-        let server_url = url::Url::parse(&server.url()).unwrap();
-        let pic = upload_with_client(
-            &no_redirect_client(),
-            &keys,
-            &server_url,
+        let pic = upload_profile_picture(
+            &Keys::generate(),
+            &[primal_like(&server)],
             StagedPicture::from_processed(&processed),
         )
         .await
@@ -1093,29 +1284,47 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn upload_sends_the_exact_staged_bytes() {
-        // The upload re-encodes NOTHING. That is what makes the cached content
-        // hash equal the blob's Blossom address: the hash in the BUD-11
-        // authorization, the hash the descriptor is checked against, and the
-        // hash of what the local cache holds are all the same number because
-        // they all commit to these exact bytes. Re-encoding here (however
-        // faithfully) would break that identity silently — the server would
-        // store a blob at a different address than the one we authorized.
+    /// What a mock received for one `PUT /upload`.
+    struct SentUpload {
+        header: std::collections::HashMap<String, String>,
+        body: Vec<u8>,
+    }
+
+    impl SentUpload {
+        fn header(&self, name: &str) -> Option<&str> {
+            self.header.get(name).map(String::as_str)
+        }
+
+        /// The `Nostr <base64>` token, base64 still encoded.
+        fn token(&self) -> &str {
+            self.header("authorization")
+                .and_then(|h| h.strip_prefix("Nostr "))
+                .expect("header uses the `Nostr <base64>` scheme")
+        }
+    }
+
+    /// The request one upload to a server sending its token in `auth` made.
+    async fn captured_upload(
+        auth: BlossomAuthEncoding,
+    ) -> (Keys, crate::avatar::image::ProcessedAvatar, SentUpload) {
         let mut server = mockito::Server::new_async().await;
         let processed = process_own_avatar(&tiny_jpeg()).expect("pipeline");
-        let sha_hex = hex::encode(processed.content_hash);
-        let expected_body = processed.canonical.to_vec();
-
-        let captured: Arc<std::sync::Mutex<Option<Vec<u8>>>> =
+        let captured: Arc<std::sync::Mutex<Option<SentUpload>>> =
             Arc::new(std::sync::Mutex::new(None));
         let cap = Arc::clone(&captured);
+        let sha_hex = hex::encode(processed.content_hash);
         let _m = server
             .mock("PUT", "/upload")
             .match_request(move |req| {
-                if let Ok(body) = req.body() {
-                    *cap.lock().unwrap() = Some(body.clone());
-                }
+                let header = ["authorization", "x-sha-256", "content-length"]
+                    .into_iter()
+                    .filter_map(|name| {
+                        let value = req.header(name).first()?.to_str().ok()?.to_string();
+                        Some((name.to_string(), value))
+                    })
+                    .collect();
+                let body = req.body().cloned().unwrap_or_default();
+                *cap.lock().unwrap() = Some(SentUpload { header, body });
                 true
             })
             .with_status(201)
@@ -1126,91 +1335,27 @@ mod tests {
             ))
             .create_async()
             .await;
-
         let keys = Keys::generate();
-        let server_url = url::Url::parse(&server.url()).unwrap();
-        let pic = upload_with_client(
-            &no_redirect_client(),
+        upload_profile_picture(
             &keys,
-            &server_url,
+            &[at(&server, auth)],
             StagedPicture::from_processed(&processed),
         )
         .await
         .expect("upload");
-
         let sent = captured
             .lock()
             .unwrap()
-            .clone()
-            .expect("the mock must have seen a request body");
-        assert_eq!(
-            sent, expected_body,
-            "the PUT body must be the staged canonical bytes, byte for byte",
-        );
-        assert_eq!(
-            hex::encode(Sha256::digest(&sent)),
-            sha_hex,
-            "so the address the server stores the blob at is the staged hash",
-        );
-        assert_eq!(&*pic.canonical, &expected_body[..]);
+            .take()
+            .expect("the mock saw the request");
+        (keys, processed, sent)
     }
 
-    #[tokio::test]
-    async fn upload_auth_header_is_standard_base64_24242_event() {
-        let mut server = mockito::Server::new_async().await;
-        let raw = tiny_jpeg();
-        let processed = process_own_avatar(&raw).expect("pipeline");
-        let sha_hex = hex::encode(processed.content_hash);
-
-        let captured: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
-        let cap = Arc::clone(&captured);
-        let _m = server
-            .mock("PUT", "/upload")
-            .match_request(move |req| {
-                if let Some(h) = req.header("authorization").first() {
-                    if let Ok(s) = h.to_str() {
-                        *cap.lock().unwrap() = Some(s.to_string());
-                    }
-                }
-                true
-            })
-            .with_status(201)
-            .with_body(descriptor_json(
-                &server.url(),
-                &sha_hex,
-                processed.canonical.len(),
-            ))
-            .create_async()
-            .await;
-
-        let keys = Keys::generate();
-        let server_url = url::Url::parse(&server.url()).unwrap();
-        upload_with_client(
-            &no_redirect_client(),
-            &keys,
-            &server_url,
-            StagedPicture::from_processed(&processed),
-        )
-        .await
-        .expect("upload");
-
-        let header = captured
-            .lock()
-            .unwrap()
-            .clone()
-            .expect("authorization header captured");
-        let b64 = header
-            .strip_prefix("Nostr ")
-            .expect("header uses the `Nostr <base64>` scheme");
-        // The hand-rolled header MUST use STANDARD (padded) base64 — the
-        // encoding the reference crate + deployed servers accept. Decoding with
-        // the STANDARD engine proves it (a url-safe/no-pad payload would fail).
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(b64)
-            .expect("auth header is standard padded base64");
+    /// Asserts `decoded` is a verifying kind-24242 upload authorization by
+    /// `keys` for `sha_hex`, expiring ten minutes after it was signed.
+    fn assert_upload_auth(decoded: &[u8], keys: &Keys, sha_hex: &str) {
         let event: nostr::Event =
-            serde_json::from_slice(&decoded).expect("auth payload is a nostr event");
-
+            serde_json::from_slice(decoded).expect("auth payload is a nostr event");
         assert_eq!(event.kind.as_u16(), 24242, "auth event kind is 24242");
         assert_eq!(
             event.pubkey,
@@ -1218,113 +1363,244 @@ mod tests {
             "auth event signed by identity key"
         );
         assert!(event.verify().is_ok(), "auth event signature verifies");
-
         let now = nostr::Timestamp::now().as_secs();
         assert!(
             event.created_at.as_secs() <= now + 1,
             "created_at is in the past"
         );
-
-        let mut saw_t_upload = false;
-        let mut saw_x = false;
-        let mut expiration_future = false;
-        for tag in event.tags.iter() {
-            let s = tag.as_slice();
-            if s.len() >= 2 && s[0] == "t" && s[1] == "upload" {
-                saw_t_upload = true;
-            }
-            if s.len() >= 2 && s[0] == "x" && s[1] == sha_hex {
-                saw_x = true;
-            }
-            if s.len() >= 2 && s[0] == "expiration" {
-                if let Ok(exp) = s[1].parse::<u64>() {
-                    expiration_future = exp > now;
-                }
-            }
-        }
-        assert!(saw_t_upload, "auth carries t=upload: {:?}", event.tags);
-        assert!(
-            saw_x,
-            "auth carries x = sanitized-bytes hash: {:?}",
-            event.tags
+        let tag = |name: &str| {
+            event
+                .tags
+                .iter()
+                .map(nostr::Tag::as_slice)
+                .find(|s| s.len() >= 2 && s[0] == name)
+                .map(|s| s[1].clone())
+        };
+        assert_eq!(tag("t").as_deref(), Some("upload"), "{:?}", event.tags);
+        assert_eq!(
+            tag("x").as_deref(),
+            Some(sha_hex),
+            "auth carries x = sanitized-bytes hash"
         );
-        assert!(
-            expiration_future,
-            "expiration is in the future: {:?}",
-            event.tags
+        let expiration: u64 = tag("expiration")
+            .expect("an expiration tag")
+            .parse()
+            .expect("a number");
+        assert_eq!(
+            expiration - event.created_at.as_secs(),
+            BLOSSOM_AUTH_EXPIRY_SECS,
+            "the token tolerates ten minutes of clock skew",
+        );
+        assert_eq!(BLOSSOM_AUTH_EXPIRY_SECS, 600);
+    }
+
+    #[tokio::test]
+    async fn upload_sends_the_exact_staged_bytes_its_hash_header_and_length() {
+        // The upload re-encodes NOTHING. That is what makes the cached content
+        // hash equal the blob's Blossom address: the hash in the BUD-11
+        // authorization, the hash the descriptor is checked against, and the
+        // hash of what the local cache holds are all the same number because
+        // they all commit to these exact bytes. Re-encoding here (however
+        // faithfully) would break that identity silently — the server would
+        // store a blob at a different address than the one we authorized.
+        let (_keys, processed, request) =
+            captured_upload(BlossomAuthEncoding::PaddedStandard).await;
+        let sent = request.body.clone();
+        assert_eq!(
+            sent,
+            processed.canonical.to_vec(),
+            "the PUT body must be the staged canonical bytes, byte for byte",
+        );
+        let sha_hex = hex::encode(processed.content_hash);
+        assert_eq!(
+            hex::encode(Sha256::digest(&sent)),
+            sha_hex,
+            "so the address the server stores the blob at is the staged hash",
+        );
+        assert_eq!(
+            request.header("x-sha-256"),
+            Some(sha_hex.as_str()),
+            "BUD-11 ties the token's `x` to this header on PUT /upload",
+        );
+        assert_eq!(
+            request.header("content-length"),
+            Some(sent.len().to_string().as_str()),
+            "a streamed body would drop the length some servers require",
         );
     }
 
     #[tokio::test]
-    async fn upload_500_maps_to_error_not_panic() {
+    async fn upload_auth_header_is_standard_base64_24242_event() {
+        // Primal's server decodes padded STANDARD base64 only.
+        let (keys, processed, request) = captured_upload(BlossomAuthEncoding::PaddedStandard).await;
+        let b64 = request.token();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .expect("auth header is standard padded base64");
+        assert!(
+            base64::engine::general_purpose::STANDARD.encode(&decoded) == b64,
+            "the token is exactly the padded standard encoding of its event",
+        );
+        assert_upload_auth(&decoded, &keys, &hex::encode(processed.content_hash));
+    }
+
+    #[tokio::test]
+    async fn upload_auth_header_for_an_unpadded_server_is_base64url() {
+        let (keys, processed, request) =
+            captured_upload(BlossomAuthEncoding::UrlSafeUnpadded).await;
+        let b64 = request.token();
+        let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(b64)
+            .expect("auth header is unpadded base64url");
+        assert!(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&decoded) == b64,
+            "the token is exactly the unpadded base64url encoding of its event",
+        );
+        assert_upload_auth(&decoded, &keys, &hex::encode(processed.content_hash));
+    }
+
+    #[test]
+    fn each_encoding_is_the_one_its_server_decodes() {
+        // An input that needs padding and maps onto both alphabet-specific
+        // characters, which a token's own JSON may happen not to.
+        assert_eq!(
+            encode_token(BlossomAuthEncoding::PaddedStandard, ">>>?"),
+            "Pj4+Pw=="
+        );
+        assert_eq!(
+            encode_token(BlossomAuthEncoding::UrlSafeUnpadded, ">>>?"),
+            "Pj4-Pw"
+        );
+        assert_eq!(
+            encode_token(BlossomAuthEncoding::PaddedStandard, "??"),
+            "Pz8="
+        );
+        assert_eq!(
+            encode_token(BlossomAuthEncoding::UrlSafeUnpadded, "??"),
+            "Pz8"
+        );
+        assert_eq!(
+            encode_token(BlossomAuthEncoding::UrlSafeUnpadded, "\u{ff}?"),
+            "w78_"
+        );
+    }
+
+    /// Uploads `tiny_jpeg` to a mock answering one `PUT /upload` with
+    /// `status` and `body`, and returns the error.
+    async fn upload_answered(
+        status: usize,
+        body: impl FnOnce(&str, &str, usize) -> String,
+    ) -> ProfileError {
         let mut server = mockito::Server::new_async().await;
+        let processed = process_own_avatar(&tiny_jpeg()).expect("pipeline");
+        let sha_hex = hex::encode(processed.content_hash);
         let _m = server
             .mock("PUT", "/upload")
-            .with_status(500)
-            .with_body("boom")
+            .with_status(status)
+            .with_body(body(&server.url(), &sha_hex, processed.canonical.len()))
             .create_async()
             .await;
-        let keys = Keys::generate();
-        let server_url = url::Url::parse(&server.url()).unwrap();
-        let processed = process_own_avatar(&tiny_jpeg()).expect("pipeline");
-        let err = upload_with_client(
-            &no_redirect_client(),
-            &keys,
-            &server_url,
+        upload_profile_picture(
+            &Keys::generate(),
+            &[primal_like(&server)],
             StagedPicture::from_processed(&processed),
         )
         .await
-        .expect_err("500 is an error");
+        .expect_err("the upload must be refused")
+    }
+
+    #[tokio::test]
+    async fn upload_500_maps_to_error_not_panic() {
+        let err = upload_answered(500, |_, _, _| "boom".to_string()).await;
         assert!(matches!(err, ProfileError::Blossom(_)), "got {err:?}");
     }
 
     #[tokio::test]
     async fn upload_4xx_maps_to_error_not_panic() {
         // A 4xx (e.g. 401 auth rejected) is non-2xx → error, never a panic.
-        let mut server = mockito::Server::new_async().await;
-        let _m = server
-            .mock("PUT", "/upload")
-            .with_status(401)
-            .with_body("unauthorized")
-            .create_async()
-            .await;
-        let keys = Keys::generate();
-        let server_url = url::Url::parse(&server.url()).unwrap();
-        let processed = process_own_avatar(&tiny_jpeg()).expect("pipeline");
-        let err = upload_with_client(
-            &no_redirect_client(),
-            &keys,
-            &server_url,
-            StagedPicture::from_processed(&processed),
-        )
-        .await
-        .expect_err("4xx is an error");
+        let err = upload_answered(401, |_, _, _| "unauthorized".to_string()).await;
         assert!(matches!(err, ProfileError::Blossom(_)), "got {err:?}");
     }
 
     #[tokio::test]
     async fn upload_descriptor_hash_mismatch_rejected() {
-        let mut server = mockito::Server::new_async().await;
         // Server echoes a DIFFERENT sha than the uploaded bytes → HashMismatch.
-        let bad_sha = "0".repeat(64);
+        let err = upload_answered(201, |base, _, size| {
+            descriptor_json(base, &"0".repeat(64), size)
+        })
+        .await;
+        assert!(matches!(err, ProfileError::HashMismatch), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn upload_rejects_a_descriptor_url_without_our_hash() {
+        // A peer checks a download only against the address its URL carries:
+        // a URL with none would publish a picture nobody's download verifies.
+        let err = upload_answered(201, |base, sha, size| {
+            format!(r#"{{"url":"{base}/avatar.jpg","sha256":"{sha}","size":{size}}}"#)
+        })
+        .await;
+        assert!(matches!(err, ProfileError::HashMismatch), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn upload_rejects_a_descriptor_whose_size_disagrees() {
+        let err =
+            upload_answered(201, |base, sha, size| descriptor_json(base, sha, size + 1)).await;
+        assert!(matches!(err, ProfileError::Blossom(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn upload_rejects_a_descriptor_on_another_site() {
+        let err = upload_answered(201, |_, sha, size| {
+            descriptor_json("https://elsewhere.example", sha, size)
+        })
+        .await;
+        assert!(matches!(err, ProfileError::InsecureUrl), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn upload_accepts_a_descriptor_on_a_subdomain_of_its_site() {
+        // Primal uploads on blossom.primal.net and may name media.primal.net.
+        let mut server = mockito::Server::new_async().await;
+        let processed = process_own_avatar(&tiny_jpeg()).expect("pipeline");
+        let sha_hex = hex::encode(processed.content_hash);
         let _m = server
             .mock("PUT", "/upload")
             .with_status(201)
-            .with_body(descriptor_json(&server.url(), &bad_sha, 123))
+            .with_body(descriptor_json(
+                "https://media.example.net/uploads",
+                &sha_hex,
+                processed.canonical.len(),
+            ))
             .create_async()
             .await;
-        let keys = Keys::generate();
-        let server_url = url::Url::parse(&server.url()).unwrap();
-        let processed = process_own_avatar(&tiny_jpeg()).expect("pipeline");
-        let err = upload_with_client(
-            &no_redirect_client(),
-            &keys,
-            &server_url,
+        let server = UploadServer {
+            site: "example.net".to_string(),
+            ..primal_like(&server)
+        };
+        let pic = upload_profile_picture(
+            &Keys::generate(),
+            &[server],
             StagedPicture::from_processed(&processed),
         )
         .await
-        .expect_err("mismatched sha is rejected");
-        assert!(matches!(err, ProfileError::HashMismatch), "got {err:?}");
+        .expect("a subdomain of the server's site is its own");
+        assert_eq!(
+            pic.url,
+            format!("https://media.example.net/uploads/{sha_hex}")
+        );
+    }
+
+    #[test]
+    fn a_descriptor_host_is_on_site_only_as_the_site_or_a_subdomain() {
+        let on = |url: &str| on_site(&url::Url::parse(url).unwrap(), "example.net");
+        assert!(on("https://example.net/x"));
+        assert!(on("https://media.example.net/x"));
+        assert!(on("https://a.b.example.net/x"));
+        assert!(!on("https://evilexample.net/x"));
+        assert!(!on("https://example.net.evil.test/x"));
+        assert!(!on("https://net/x"));
     }
 
     #[tokio::test]
@@ -1333,24 +1609,7 @@ mod tests {
         // object missing the required `sha256` — must be a Blossom error, never
         // a silent accept or a panic.
         for body in ["not a json body", r#"{"url":"http://x/y","size":3}"#] {
-            let mut server = mockito::Server::new_async().await;
-            let _m = server
-                .mock("PUT", "/upload")
-                .with_status(201)
-                .with_body(body)
-                .create_async()
-                .await;
-            let keys = Keys::generate();
-            let server_url = url::Url::parse(&server.url()).unwrap();
-            let processed = process_own_avatar(&tiny_jpeg()).expect("pipeline");
-            let err = upload_with_client(
-                &no_redirect_client(),
-                &keys,
-                &server_url,
-                StagedPicture::from_processed(&processed),
-            )
-            .await
-            .expect_err("malformed descriptor rejected");
+            let err = upload_answered(201, |_, _, _| body.to_string()).await;
             assert!(
                 matches!(err, ProfileError::Blossom(_)),
                 "body {body:?} → {err:?}"
@@ -1360,14 +1619,214 @@ mod tests {
 
     #[tokio::test]
     async fn upload_rejects_non_https_server() {
-        // A public http:// server (not loopback) is rejected before any I/O by
-        // the public wrapper's `require_https` gate.
-        let keys = Keys::generate();
-        let server_url = url::Url::parse("http://blossom.example").unwrap();
-        let err = upload_profile_picture(&keys, &server_url, staged(&tiny_jpeg()))
+        // A public http:// server (not loopback) is rejected before any I/O.
+        let server = UploadServer {
+            base: url::Url::parse("http://blossom.example").unwrap(),
+            site: "blossom.example".to_string(),
+            auth: BlossomAuthEncoding::PaddedStandard,
+        };
+        let err = upload_profile_picture(&Keys::generate(), &[server], staged(&tiny_jpeg()))
             .await
             .expect_err("http server rejected");
         assert!(matches!(err, ProfileError::InsecureUrl), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn upload_does_not_follow_a_redirect() {
+        // A redirect would carry the identity-signed token and the body to a
+        // host nobody chose; it is that server's failure, and the next one is
+        // asked.
+        let processed = process_own_avatar(&tiny_jpeg()).expect("pipeline");
+        let mut target = mockito::Server::new_async().await;
+        let never = target
+            .mock("PUT", "/upload")
+            .with_status(201)
+            .expect(0)
+            .create_async()
+            .await;
+        let mut redirecting = mockito::Server::new_async().await;
+        let _r = redirecting
+            .mock("PUT", "/upload")
+            .with_status(307)
+            .with_header("location", &format!("{}/upload", target.url()))
+            .create_async()
+            .await;
+        let mut next = mockito::Server::new_async().await;
+        let took = answering(&mut next, &processed, 201, 1).await;
+
+        let pic = upload_profile_picture(
+            &Keys::generate(),
+            &[primal_like(&redirecting), primal_like(&next)],
+            StagedPicture::from_processed(&processed),
+        )
+        .await
+        .expect("the next server takes it");
+        assert!(pic.url.starts_with(&next.url()));
+        never.assert_async().await;
+        took.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn upload_falls_back_to_the_next_server_only_after_a_failure() {
+        let processed = process_own_avatar(&tiny_jpeg()).expect("pipeline");
+
+        let mut first = mockito::Server::new_async().await;
+        let mut second = mockito::Server::new_async().await;
+        let refused = answering(&mut first, &processed, 500, 1).await;
+        let took = answering(&mut second, &processed, 201, 1).await;
+        let pic = upload_profile_picture(
+            &Keys::generate(),
+            &[primal_like(&first), primal_like(&second)],
+            StagedPicture::from_processed(&processed),
+        )
+        .await
+        .expect("the second server takes it");
+        assert!(pic.url.starts_with(&second.url()), "{}", pic.url);
+        refused.assert_async().await;
+        took.assert_async().await;
+
+        let mut first = mockito::Server::new_async().await;
+        let mut second = mockito::Server::new_async().await;
+        let took = answering(&mut first, &processed, 201, 1).await;
+        let unasked = answering(&mut second, &processed, 201, 0).await;
+        let pic = upload_profile_picture(
+            &Keys::generate(),
+            &[primal_like(&first), primal_like(&second)],
+            StagedPicture::from_processed(&processed),
+        )
+        .await
+        .expect("the first server takes it");
+        assert!(pic.url.starts_with(&first.url()), "{}", pic.url);
+        took.assert_async().await;
+        unasked.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn upload_falls_back_after_a_descriptor_that_does_not_match() {
+        let processed = process_own_avatar(&tiny_jpeg()).expect("pipeline");
+        let mut first = mockito::Server::new_async().await;
+        let lying = first
+            .mock("PUT", "/upload")
+            .with_status(200)
+            .with_body(descriptor_json(&first.url(), &"0".repeat(64), 1))
+            .expect(1)
+            .create_async()
+            .await;
+        let mut second = mockito::Server::new_async().await;
+        let took = answering(&mut second, &processed, 201, 1).await;
+        let pic = upload_profile_picture(
+            &Keys::generate(),
+            &[primal_like(&first), primal_like(&second)],
+            StagedPicture::from_processed(&processed),
+        )
+        .await
+        .expect("the second server takes it");
+        assert!(pic.url.starts_with(&second.url()), "{}", pic.url);
+        lying.assert_async().await;
+        took.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn upload_falls_back_when_a_server_refuses_the_connection() {
+        let processed = process_own_avatar(&tiny_jpeg()).expect("pipeline");
+        let mut second = mockito::Server::new_async().await;
+        let took = answering(&mut second, &processed, 201, 1).await;
+        let pic = upload_profile_picture(
+            &Keys::generate(),
+            &[dead_server(), primal_like(&second)],
+            StagedPicture::from_processed(&processed),
+        )
+        .await
+        .expect("the second server takes it");
+        assert!(pic.url.starts_with(&second.url()), "{}", pic.url);
+        took.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn upload_reports_the_last_failure_when_every_server_fails() {
+        let processed = process_own_avatar(&tiny_jpeg()).expect("pipeline");
+        let mut refusing = mockito::Server::new_async().await;
+        let refused = answering(&mut refusing, &processed, 401, 2).await;
+
+        let err = upload_profile_picture(
+            &Keys::generate(),
+            &[dead_server(), primal_like(&refusing)],
+            StagedPicture::from_processed(&processed),
+        )
+        .await
+        .expect_err("no server took it");
+        assert!(matches!(err, ProfileError::Blossom(_)), "got {err:?}");
+
+        let err = upload_profile_picture(
+            &Keys::generate(),
+            &[primal_like(&refusing), dead_server()],
+            StagedPicture::from_processed(&processed),
+        )
+        .await
+        .expect_err("no server took it");
+        assert!(matches!(err, ProfileError::Http(_)), "got {err:?}");
+        refused.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_upload_logs_its_kind_and_status_class_but_no_identifier() {
+        let processed = process_own_avatar(&tiny_jpeg()).expect("pipeline");
+        let sha_hex = hex::encode(processed.content_hash);
+        let keys = Keys::generate();
+        let pubkey_hex = keys.public_key().to_hex();
+        let npub = nostr::ToBech32::to_bech32(&keys.public_key()).expect("npub");
+        let reason = format!("blocked {npub} {sha_hex} see blossom-reason.example");
+        let mut refusing = mockito::Server::new_async().await;
+        let _m = refusing
+            .mock("PUT", "/upload")
+            .with_status(401)
+            .with_header("x-reason", &reason)
+            .with_body(&reason)
+            .create_async()
+            .await;
+        let dead = dead_server();
+        let dead_url = dead.base.to_string();
+        let servers = [primal_like(&refusing), dead];
+
+        let lines = crate::test_log::capture_log_lines(async {
+            upload_profile_picture(&keys, &servers, StagedPicture::from_processed(&processed))
+                .await
+                .expect_err("no server took it");
+        })
+        .await;
+
+        // Exactly these lines, in this order: no server position, no digit
+        // but the status class.
+        assert_eq!(
+            lines,
+            [
+                "[profile] picture upload: status 4xx",
+                "[profile] picture upload: a server failed (blossom)",
+                "[profile] picture upload: a server failed (http)",
+            ],
+        );
+        let refusing_url = refusing.url();
+        let port = refusing_url.rsplit(':').next().expect("a port").to_string();
+        for line in &lines {
+            for needle in [
+                sha_hex.as_str(),
+                &sha_hex[..8],
+                pubkey_hex.as_str(),
+                &pubkey_hex[..8],
+                npub.as_str(),
+                refusing_url.as_str(),
+                dead_url.as_str(),
+                "127.0.0.1",
+                port.as_str(),
+                "blossom-reason",
+                "blocked",
+            ] {
+                assert!(
+                    !line.contains(needle),
+                    "a log line named `{needle}`: {line}"
+                );
+            }
+        }
     }
 
     // ---- download core (mockito, via download_with_client) -----------------
@@ -1502,23 +1961,155 @@ mod tests {
         assert!(matches!(err, ProfileError::Http(_)), "got {err:?}");
     }
 
+    #[test]
+    fn redirect_refusal_table() {
+        let sha = "e".repeat(64);
+        let refusal =
+            |next: &str, hop: usize| redirect_refusal(&url::Url::parse(next).unwrap(), hop);
+        // A target need not carry the requested address: the final body's hash
+        // against the requested URL is the integrity check.
+        assert_eq!(refusal(&format!("https://cdn.example/{sha}.jpg"), 1), None);
+        assert_eq!(
+            refusal("https://cdn.example/cache/key-addressed.jpg", 1),
+            None
+        );
+        assert_eq!(refusal("https://8.8.8.8/x", 1), None);
+        assert_eq!(
+            refusal("https://cdn.example/x", BLOSSOM_MAX_REDIRECTS),
+            None
+        );
+        assert_eq!(
+            refusal("https://cdn.example/x", BLOSSOM_MAX_REDIRECTS + 1),
+            Some(RedirectRefused::Hops)
+        );
+        for insecure in [
+            "http://cdn.example/x",
+            "ftp://cdn.example/x",
+            "http://8.8.8.8/x",
+        ] {
+            assert_eq!(
+                refusal(insecure, 1),
+                Some(RedirectRefused::Scheme),
+                "{insecure}"
+            );
+        }
+        // The connector dials a literal without asking the resolver, so the
+        // policy is the only filter a literal meets. `2130706433` is
+        // 127.0.0.1 in decimal; the URL parser normalizes it to a literal.
+        for private in [
+            "https://10.0.0.5/x",
+            "https://127.0.0.1/x",
+            "https://[::1]/x",
+            "https://[::ffff:192.168.0.1]/x",
+            "https://[64:ff9b::a00:5]/x",
+            "https://2130706433/x",
+            "https://0x7f.1/x",
+        ] {
+            assert_eq!(
+                refusal(private, 1),
+                Some(RedirectRefused::Address),
+                "{private}"
+            );
+        }
+    }
+
     #[tokio::test]
-    async fn download_refuses_redirect() {
-        // With redirects disabled the 302 is surfaced as a non-success status,
-        // never followed to the Location target.
-        let mut server = mockito::Server::new_async().await;
-        let _m = server
-            .mock("GET", "/blob")
-            .with_status(302)
-            .with_header("location", "https://evil.example/x")
+    async fn download_does_not_dial_a_redirect_to_a_private_address_literal() {
+        let bytes = tiny_jpeg();
+        let sha_hex = hex::encode(Sha256::digest(&bytes));
+        let mut target = mockito::Server::new_async().await;
+        let never = target
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_body(bytes)
+            .expect(0)
             .create_async()
             .await;
-        let client = no_redirect_client();
-        let url = url::Url::parse(&format!("{}/blob", server.url())).unwrap();
-        let err = download_with_client(&client, &url)
+        let mut origin = mockito::Server::new_async().await;
+        let _r = origin
+            .mock("GET", format!("/{sha_hex}").as_str())
+            .with_status(302)
+            .with_header("location", &format!("{}/{sha_hex}", target.url()))
+            .create_async()
+            .await;
+        let url = url::Url::parse(&format!("{}/{sha_hex}", origin.url())).unwrap();
+        let err = download_with_client(&download_client(true).unwrap(), &url)
+            .await
+            .expect_err("a loopback literal is never dialled");
+        assert!(matches!(err, ProfileError::InsecureUrl), "got {err:?}");
+        never.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn download_does_not_dial_a_redirect_to_a_hostname_resolving_to_a_private_address() {
+        // A hostname passes the redirect policy; the client's resolver is the
+        // only filter it meets. `localhost` is allowed plain http in a debug
+        // build and resolves to loopback, which this binary never exempts
+        // (only the ignored live test installs the opt-in, after its env var).
+        let bytes = tiny_jpeg();
+        let sha_hex = hex::encode(Sha256::digest(&bytes));
+        let mut target = mockito::Server::new_async().await;
+        let never = target
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_body(bytes)
+            .expect(0)
+            .create_async()
+            .await;
+        let port = target.socket_address().port();
+        let mut origin = mockito::Server::new_async().await;
+        let _r = origin
+            .mock("GET", format!("/{sha_hex}").as_str())
+            .with_status(302)
+            .with_header("location", &format!("http://localhost:{port}/{sha_hex}"))
+            .create_async()
+            .await;
+        let url = url::Url::parse(&format!("{}/{sha_hex}", origin.url())).unwrap();
+        let err = download_with_client(&download_client(true).unwrap(), &url)
+            .await
+            .expect_err("a hostname resolving to loopback is never dialled");
+        assert!(matches!(err, ProfileError::Http(_)), "got {err:?}");
+        never.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn download_of_an_unaddressed_url_follows_no_redirect() {
+        // Without a content address nothing binds the bytes a redirect would
+        // fetch, so the 302 is a non-success status — not even judged by the
+        // redirect policy, which would answer InsecureUrl for this target.
+        let mut target = mockito::Server::new_async().await;
+        let never = target
+            .mock("GET", mockito::Matcher::Any)
+            .expect(0)
+            .create_async()
+            .await;
+        let mut origin = mockito::Server::new_async().await;
+        let _r = origin
+            .mock("GET", "/blob")
+            .with_status(302)
+            .with_header("location", &format!("{}/blob", target.url()))
+            .create_async()
+            .await;
+        let url = url::Url::parse(&format!("{}/blob", origin.url())).unwrap();
+        let err = download_with_client(&download_client(false).unwrap(), &url)
             .await
             .expect_err("redirect not followed");
         assert!(matches!(err, ProfileError::Http(_)), "got {err:?}");
+        never.assert_async().await;
+    }
+
+    #[test]
+    fn a_refused_redirect_renders_no_target() {
+        for refused in [
+            RedirectRefused::Hops,
+            RedirectRefused::Scheme,
+            RedirectRefused::Address,
+        ] {
+            let rendered = format!("{refused} {refused:?}");
+            for needle in ["://", "127.0.0.1", "example"] {
+                assert!(!rendered.contains(needle), "{rendered}");
+            }
+        }
     }
 
     // ---- url sha extraction ------------------------------------------------
@@ -1563,10 +2154,15 @@ mod tests {
         let _ = allow_private_blossom_for_test();
 
         let keys = Keys::generate();
-        let server_url = url::Url::parse(&base).expect("valid base url");
+        let base = url::Url::parse(&base).expect("valid base url");
+        let server = UploadServer {
+            site: base.host_str().expect("a host").to_string(),
+            base,
+            auth: BlossomAuthEncoding::PaddedStandard,
+        };
         let jpeg = tiny_jpeg();
 
-        let pic = upload_profile_picture(&keys, &server_url, staged(&jpeg))
+        let pic = upload_profile_picture(&keys, &[server], staged(&jpeg))
             .await
             .expect("live upload succeeds (server returns 201 for a new blob)");
         assert_eq!(pic.sha256_hex.len(), 64, "sha256 hex present");

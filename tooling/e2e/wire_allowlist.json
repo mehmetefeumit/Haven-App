@@ -272,7 +272,7 @@
     "450": "Account identity proof. Signed into MLS leaf extension 0xF2F1 and, per CLAUDE.md, never published. Confirmed against haven-core/src/nostr/mls/signer.rs:117.",
     "10051": "SEE _disagreements — this is the one place this file departs from the backlog text.",
     "10063": "Blossom server list. Constructed nowhere (v2 deferral); appears only in docs.",
-    "24242": "Blossom authorization. Base64'd into an HTTP Authorization header (haven-core/src/profile/blossom.rs:343-352) and NEVER published to a relay. A 24242 in this journal would be a serious leak, and the old forbid-list could not see it."
+    "24242": "Blossom authorization. Base64'd into an HTTP Authorization header (haven-core/src/profile/blossom.rs:417-449) and NEVER published to a relay. A 24242 in this journal would be a serious leak, and the old forbid-list could not see it."
   },
 
   "_disagreements": {

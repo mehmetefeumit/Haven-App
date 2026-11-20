@@ -99,9 +99,9 @@ class TestUser {
   /// `setDefaultRelaysForTest` — that is deliberate and must not be guarded
   /// away.
   ///
-  /// This is also the ONLY place the kind-0 (profile-plane) override and the
-  /// location-pool override may be installed — enforced by
-  /// `scripts/ci/check_profile_override_single_site.sh`. A scenario that
+  /// This is also the ONLY place the kind-0 (profile-plane) override, the
+  /// location-pool override and the two Blossom overrides may be installed —
+  /// enforced by `scripts/ci/check_profile_override_single_site.sh`. A scenario that
   /// needs its own profile pool passes it as [profileRelays] rather than
   /// calling `setProfileRelaysForTest` itself; two install sites race on the
   /// same `OnceLock` and the loser throws (CI run 30753193231). The location
@@ -112,9 +112,15 @@ class TestUser {
   ///
   /// ## Privacy guard
   ///
-  /// Every URL in [relays], [profileRelays], [discoveryRelays] and
-  /// [locationRelayUrl] must resolve to a loopback / emulator-host address.
-  /// Public relays are rejected to prevent a misconfigured
+  /// [blossomServers] — the ordered upload servers for scenarios that
+  /// exercise a profile picture: installed as the debug-only list that
+  /// REPLACES the production one (so no upload can reach a public server),
+  /// with the private-address download opt-in beside it. Omit it and neither
+  /// is installed.
+  ///
+  /// Every URL in [relays], [profileRelays], [discoveryRelays],
+  /// [blossomServers] and [locationRelayUrl] must resolve to a loopback /
+  /// emulator-host address. Public relays are rejected to prevent a misconfigured
   /// `--dart-define=HAVEN_E2E_RELAY=wss://relay.damus.io` from publishing
   /// test seed pubkeys to a public relay. Override the guard by passing
   /// `allowPublicRelay: true`, only with explicit user authorization and
@@ -135,7 +141,11 @@ class TestUser {
     List<String>? profileRelays,
     List<String> harnessOnlyRelays = const <String>[],
     List<String>? discoveryRelays,
+    List<String>? blossomServers,
   }) async {
+    if (blossomServers != null && blossomServers.isEmpty) {
+      throw StateError('blossomServers, when given, must name a server.');
+    }
     if (!allowPublicRelay) {
       // Every plane, not just the circle plane: the location pool is where a
       // UI-created circle's traffic goes. `profileRelays` is installed
@@ -152,6 +162,7 @@ class TestUser {
         ...relays,
         ...?profileRelays,
         ...?discoveryRelays,
+        ...?blossomServers,
         locationRelayUrl,
         ...harnessOnlyRelays,
       ];
@@ -272,6 +283,14 @@ class TestUser {
         'bootstrap did not install and cannot read back.',
       );
     }
+    // The Blossom overrides, both install-once: the upload list (a comma list
+    // that replaces the production servers whole) and the download path's
+    // private-address opt-in, without which a picture on the emulator host
+    // could not be fetched back.
+    if (blossomServers != null) {
+      allowPrivateBlossomForTest();
+      setBlossomServerForTest(url: blossomServers.join(','));
+    }
     // Defense in depth: confirm the override actually propagated. A silent
     // failure here would leave the suite hitting production relays.
     final effective = defaultRelays();
@@ -286,8 +305,9 @@ class TestUser {
       // (which handle is missing) for no privacy the workflow file itself
       // does not already disclose.
       // harness-log-ok: lane-constant relay count (1-2) from the workflow env
-      final expectedHandles =
-          relays.map((r) => logAliasHandle(LogAliasClass.relay, r)).toList();
+      final expectedHandles = relays
+          .map((r) => logAliasHandle(LogAliasClass.relay, r))
+          .toList();
       final gotHandles = effective
           .map((r) => logAliasHandle(LogAliasClass.relay, r))
           .toList();
@@ -333,9 +353,7 @@ class TestUser {
       // log-scan-ok: byte length, a fixed-size check, never the seed
       throw ArgumentError('seed must be exactly 32 bytes (got ${seed.length})');
     }
-    final dataDir = await Directory.systemTemp.createTemp(
-      'haven_e2e_${role}_',
-    );
+    final dataDir = await Directory.systemTemp.createTemp('haven_e2e_${role}_');
     final identity = await NostrIdentityManager.newInstance();
     final publicIdentity = await identity.loadFromBytes(secretBytes: seed);
     // Dark Matter (DM-4): `CircleManagerFfi.newInstance` hard-requires the
@@ -395,10 +413,7 @@ class TestUser {
     }
     final identity = await NostrIdentityManager.newInstance();
     final publicIdentity = await identity.loadFromBytes(secretBytes: seed);
-    return (
-      pubkeyHex: publicIdentity.pubkeyHex,
-      npub: publicIdentity.npub,
-    );
+    return (pubkeyHex: publicIdentity.pubkeyHex, npub: publicIdentity.npub);
   }
 
   /// Writes [seed] into `flutter_secure_storage` and flips all onboarding

@@ -130,8 +130,10 @@ save — see *Public Nostr Profiles* below), three additional exposures apply:
   point it at a host they operate and harvest co-members' IPs on every fetch.
   Haven bounds this with connect-time anti-SSRF IP filtering (loopback /
   RFC-1918 / link-local / ULA / multicast / unspecified rejected after DNS
-  resolution, redirects disabled), but a legitimate-looking public host still
-  sees viewer IPs — irreducible for public hosting; use a VPN.
+  resolution, and at every redirect hop), but a legitimate-looking public host
+  still sees viewer IPs — irreducible for public hosting; use a VPN. A
+  content-addressed picture URL may redirect (BUD-01; Primal always does),
+  and each of its at most three hops sees the viewer's IP too.
 - **Roster-association leak on fetch.** A relay serving profile fetches sees
   which pubkeys a client asks about. Haven asks the curated profile pool
   (`profile::relay_pool`) — never a circle's relays, never the discovery plane —
@@ -3110,10 +3112,11 @@ genuine event with the same id is admitted normally afterwards.
   slow upload cannot come back already due.
 - **A publish some pool relay never serves is re-sent, byte for byte, to that
   relay alone, with no cap.** This holds for a saved edit, a photo removal
-  and a deletion's blank alike. A complete event at least one relay
-  acknowledged is kept, with the relays known to serve it, as the one owed
-  event (`profile_publish_debt`; every later save, removal, deletion or
-  redirect deletes it, and it is verified on load). A retry offers that same
+  and a deletion's blank alike. The newest event of the saved version at
+  least one relay acknowledged — a complete one, or a text-only one while the
+  staged photo has never been uploaded — is kept, with the relays known to
+  serve it, as the one owed event (`profile_publish_debt`; every later save,
+  removal, deletion or redirect deletes it, and it is verified on load). A retry offers that same
   event only to the relays that do not yet serve it; the relay's `OK` is not
   read as coverage — nostr-rs-relay and khatru answer `OK true` to an older
   replaceable, strfry `OK false` with a prefix no NIP names — so each relay
@@ -3138,11 +3141,14 @@ genuine event with the same id is admitted normally afterwards.
   that relay's readers). What remains: in the pass that signs the event a
   relay's `OK` counts as covered without a read-back, so a relay that held a
   newer copy and did not answer that pass's read is believed covered until
-  the next edit; a pass no relay acknowledged records nothing and signs
-  fresh next time; and while Blossom is down each rung signs a text-only
-  event for a pending name or removal, with the picture left staged. No
-  screen reports any of this: the Identity page renders the local row, the
-  same in every publish state.
+  the next edit; and a pass no relay acknowledged records nothing and signs
+  fresh next time. While every Blossom server refuses the photo, the
+  text-only event that carried a pending name or removal stays the owed one:
+  each rung uploads first and, on failure, only re-sends that event to a
+  relay that lacks it — a new kind-0 is signed once the photo is up, and its
+  full coverage, not the text-only event's, clears the outbox. No screen
+  reports any of this: the Identity page renders the local row, the same in
+  every publish state.
 - **A pool relay the profile was never sent to is sent it, byte for byte,
   though nothing is saved.** "Every usable pool relay serves it" is a
   statement about the pool as it was, and the pool changes: a release swaps
@@ -3495,8 +3501,9 @@ identity's first publish or fetch opens a pool of its own whatever the old one
 carried. The cost is one fresh connection for the next identity. Profile
 publishes build a manager of their own per call, and the live session's
 fanout drives use a pool of their own, closed with the session. Each upload
-and download of a profile picture builds a Blossom client of its own and drops
-it with the request: no connection outlives the request, and no TLS session —
+of a profile picture (all the servers one call tries) and each download builds
+a Blossom client of its own and drops it with the call: no connection outlives
+its request, and no TLS session —
 rustls keeps resumption tickets in its client config, one per client — so
 nothing one identity's request opened, not even a ticket, is presented by the
 next identity's (`no_connection_outlives_its_request`,
@@ -3593,7 +3600,11 @@ instants (P4)" below); with
 background sharing off the pause STOPS it, as Android's does. On **Android** it
 holds none while backgrounded, in either toggle state: with
 background sharing **ON** pausing the app stops the engine before handing the
-MLS session to the foreground service (`MapShell._handOffMlsSession`), and the
+MLS session to the foreground service (`MapShell._handOffMlsSession`; a pause
+caused by Haven's own photo picker or crop editor stops the engine at once but
+holds the session for up to 20 s first, publishing and receiving nothing, and
+hands nothing over if the user is back inside that time — see the fourth
+realized-gap term under "The no-gap invariant"), and the
 service isolate never opens an engine socket of its own; with background sharing
 **OFF** the pause path stops it through `MapShell._stopLiveSyncBounded()`
 without releasing the Rule-14 guard, since no isolate reclaims the session in
@@ -5147,7 +5158,7 @@ from two circles up. That is the residual this entry still carries; the
 (`haven/lib/src/services/publish_stagger.dart`), and the refusal, per entry
 point, in `haven/test/services/nostr_circle_service_roster_bound_test.dart`.
 
-Three **realized**-gap terms sit outside the scheduled bound above, and are
+Four **realized**-gap terms sit outside the scheduled bound above, and are
 stated where they arise rather than folded in here. Two are **head** terms that
 do not scale with the roster: the Android foreground service publishes on a
 platform delivery that arrives a TTFF late (worst case 248 s on API 23–30, swept
@@ -5171,8 +5182,23 @@ is priced at `kBurstPublishBudget` (10 s), so at the largest burst a bounded
 roster can produce the realized span reaches ≈90 s (foreground shape) or ≈120 s
 (background) — ≈100 s and ≈130 s at the cap one circle further — against a
 **scheduled** 30 s spread. It lands twice: once in a deferred circle's realized
-gap, and once in Cost 2's duration-shaped circle-count estimator. All three are
-documented on `haven/lib/src/constants/location.dart`.
+gap, and once in Cost 2's duration-shaped circle-count estimator. The **fourth**
+is a third head term, on Android and on one path only (added 2026-11-16): a
+pause caused by Haven's own photo picker or crop editor holds the MLS session
+for up to `kSystemActivityHandoffGrace` = 20 s, an owner-chosen bound counted
+from the trip's first pause, before the foreground service is told to take
+over, so their result can be saved (`haven/lib/src/services/system_activity_excursions.dart`).
+Nothing publishes meanwhile, so the gap that spans such a pause grows by up to
+20 s — until the resume publishes, or, for a user who leaves Haven from inside
+the picker or editor, until the service takes over: `198 + 20 = 218 s` on the
+scheduled worst case before the service's own fix head, which then has 10 s of
+the 30 s margin left, so any head over 10 s crosses the retention. A task
+removal (a Recents swipe) inside the grace costs more: Haven's
+Flutter engine is destroyed right after `detached`, so the hand-off never
+reaches the write that tells the service to take over, and the service does so
+only once the foreground stamp goes stale and its watchdog next looks, 72 to
+about 216 s after the pause.
+All four are documented on `haven/lib/src/constants/location.dart`.
 
 The 60 s figure is the constant's own derivation (`168 + 2 × 30`), and it is pinned
 in **both** directions by `narrowing_the_retention_would_strand_a_returning
@@ -5291,8 +5317,10 @@ threat model is honest:
   `scripts/ci/check_engine_client_options.sh`. On **Android** the engine is
   STOPPED at the pause, in BOTH toggle states, since the P1 power phase: with
   background sharing **ON** pausing the app stops the engine before the MLS
-  session is handed to the foreground service (`MapShell._handOffMlsSession`)
-  and the service isolate never opens one; with background sharing **OFF** the
+  session is handed to the foreground service (`MapShell._handOffMlsSession`;
+  after up to 20 s when Haven's own photo picker or crop editor caused the
+  pause, the engine still stopped at once) and the service isolate never opens
+  one; with background sharing **OFF** the
   pause path stops it through `MapShell._stopLiveSyncBounded()`, which
   deliberately does not release the Rule-14 guard because no isolate reclaims
   it, and the resume heal restarts the engine. So a backgrounded Android device
@@ -5937,8 +5965,12 @@ UI.
 **What becomes public.** A kind-0 metadata event (`name`,
 `display_name`, `picture`) under the user's Nostr **identity** pubkey on public
 relays, and the profile photo as an **unencrypted, content-addressed blob** on
-a Blossom server (default `https://blossom.primal.net`; the operator sees the
-uploader's pubkey and IP). Anyone — not just circle members — can read both,
+a Blossom server: `blossom.primal.net`, or — only after it fails to hand back a
+verified descriptor — `blossom.divine.video`, then `blossom.ditto.pub`
+(`BLOSSOM_SERVERS`; the evidence each was chosen on, and what is not yet
+verified live, is in `docs/BLOSSOM_SERVER_VETTING.md`). The server that takes
+the photo sees the uploader's pubkey and IP; a server that timed out may have
+stored it as well, so more than one operator can hold it. Anyone — not just circle members — can read both,
 and the pubkey ↔ name/photo binding is **effectively permanent** (see the
 permanence caveat below). Member profiles are resolved from relays by pubkey
 (the MLS leaf's `BasicCredential.identity` IS the member's Nostr pubkey), and
@@ -5953,15 +5985,29 @@ the FFI, and `Image.network` stays banned.
   thumbnails. Critical for a location app — a camera selfie can embed home
   coordinates. (White Noise uploads the raw file; Haven does not.)
 - **HTTPS-only Blossom.** No plaintext `http://` surface (loopback exempt in
-  debug/e2e builds only); `DEFAULT_BLOSSOM_SERVER` must be `https://`.
-  CI-enforced.
+  debug/e2e builds only); every `BLOSSOM_SERVERS` base must be an `https://`
+  literal and have a row in `docs/BLOSSOM_SERVER_VETTING.md`. CI-enforced. An
+  upload follows no redirect (one would carry the signed token and the body to
+  a host nobody chose), and its descriptor must carry the uploaded bytes' hash
+  — as `sha256` and in its URL — and size, at an `https://` URL on the
+  server's own site, or the next server is asked; the same sanitized bytes go
+  to every server. The kind-24242 token expires ten minutes after signing (a
+  server refuses one past its expiry, so this is the clock skew an upload
+  tolerates; its `x` tag confines a replay to re-uploading this one public
+  blob), and the `PUT` carries `X-SHA-256`.
 - **Anti-SSRF connect-time IP filtering on download.** A member's kind-0
   `picture` URL is attacker-controlled. The downloader resolves the host and
   rejects loopback / RFC-1918 / link-local (169.254/16, fe80::/10) / ULA
   (fc00::/7) / unspecified / multicast socket addresses (name-based checks are
-  insufficient: DNS rebinding), disables redirects, prechecks Content-Length
-  with a streamed size cap, verifies `sha256(raw) == URL hash`, and
-  re-validates through the decode-bomb-defended image pipeline.
+  insufficient: DNS rebinding), follows a redirect only for a
+  content-addressed URL — at most three, each target scheme-checked, an
+  IP-literal target vetted against the same filter before it is dialled (the
+  connector never asks the resolver about a literal) and a hostname target by
+  the resolver at its own connect, with no `Referer` — prechecks
+  Content-Length with a streamed size cap, verifies `sha256(raw)` against the
+  REQUESTED URL's hash however many hops led to the bytes (BUD-01's
+  same-hash rule for a redirect target is a server duty Haven does not rely
+  on), and re-validates through the decode-bomb-defended image pipeline.
 - **Identity-key-only signing.** kind-0 and kind-24242 (Blossom auth) are
   signed by the Nostr identity key — never the MLS signing key, never anything
   exporter-secret-derived. Enforced three ways: API shape (no MLS handle is
@@ -5988,8 +6034,8 @@ the FFI, and `Image.network` stays banned.
   relays, indexers, and archives retain revisions. Once published, the
   pubkey ↔ name/photo association cannot be reliably clawed back.
 - **Viewer-IP leak to the picture host.** Viewing other members' photos
-  contacts their chosen host (see *Network Threat Model*), including the
-  attacker-chosen-host variant. Bounded by the anti-SSRF filter; not
+  contacts their chosen host, and each host a content-addressed URL redirects
+  to (see *Network Threat Model*), including the attacker-chosen-host variant. Bounded by the anti-SSRF filter; not
   eliminated for legitimate public hosts. VPN recommended.
 - **Roster-association leak.** Profile fetches reveal to each assigned pool
   relay which pubkeys a client is interested in (see *Network Threat Model*).
@@ -6005,9 +6051,10 @@ the FFI, and `Image.network` stays banned.
   and the FFI's own doc comment on `delete_my_public_profile` records the blob
   DELETE as deferred. The uploaded image therefore survives profile deletion
   indefinitely, as does any copy already fetched. The user-facing copy has
-  always said so, and still does — `photoHeaderRemoveBody` ("the image file
-  stays on the server that hosts it") and `identityAdvancedDeleteBody` ("your
-  photo on the image host that stores it"); a third carrier,
+  always said so, and still does — `photoHeaderRemoveBody` ("The image file
+  stays on any server it was uploaded to") and `identityAdvancedDeleteBody`
+  ("your photo on any image host it was uploaded to"), reworded on 2026-11-16
+  from a single host once an upload could fall back to another server; a third carrier,
   `privacyPublicProfileRemovalIsNotDeletion`, was cited here until 2026-09-09
   and no longer exists, because the owner removed the Privacy page and every
   `privacy*` key with it on 2026-08-29 (`docs/privacy/README.md` — such a key

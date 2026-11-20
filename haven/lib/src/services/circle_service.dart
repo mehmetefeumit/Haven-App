@@ -32,6 +32,17 @@ class CircleServiceException implements Exception {
   String toString() => 'CircleServiceException: $message';
 }
 
+/// Thrown while the MLS session is handed off to the Android foreground
+/// service: this isolate opens it again only once the app is back in front.
+///
+/// Its own type so a log line can tell this refusal from a keyring failure or
+/// a wipe without reading an error string.
+class SessionHandedOffException extends CircleServiceException {
+  /// Creates a [SessionHandedOffException].
+  const SessionHandedOffException()
+    : super('MLS session handed off to the background service');
+}
+
 /// Thrown when creating a circle or accepting an invitation would push the
 /// account past `kMaxCirclesPerAccount` (`publish_stagger.dart`).
 ///

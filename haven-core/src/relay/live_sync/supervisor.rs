@@ -1201,11 +1201,6 @@ impl crate::relay::negentropy::NegSink for LiveSink<'_> {
     fn stands(&self) -> bool {
         self.processor.still_serves(self.serves)
     }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    async fn dialled(&self) {
-        self.processor.wait_out_pass_hold().await;
-    }
 }
 
 /// Ingests one group event routed under `nostr_group_id`.

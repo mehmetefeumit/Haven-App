@@ -59,6 +59,13 @@ jobs:
         if: always()
         run: cargo audit --file ../tooling/e2e/local-relay/Cargo.lock
 
+      # The Primal-mimicking Blossom server the public-profile lane uploads to
+      # and downloads from: never shipped, but it verifies signatures with k256
+      # and parses untrusted JSON, so its resolved crates are audited too.
+      - name: Run cargo audit (haven-local-blossom — the hermetic Blossom server)
+        if: always()
+        run: cargo audit --file ../tooling/e2e/local-blossom/Cargo.lock
+
       # The soak rig has its own lockfile because it is its own cargo project
       # (an empty `[workspace]`, so no future root workspace can absorb it and
       # drop its custom profile). It never ships, but it links haven-core with

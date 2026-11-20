@@ -20,6 +20,16 @@
 > keeps its own gate. A partially acknowledged publish re-sends the identical
 > signed event only to the relays that do not yet serve it. Design of record:
 > `docs/PROFILE_LOCAL_FIRST_SYNC.md`.
+>
+> **Superseded detail (2026-11-16, Blossom):** the "redirects disabled" /
+> "redirect refused" download below no longer holds — Primal redirects every
+> `GET /<sha256>`, so a download of a content-addressed URL follows at most three
+> redirects, each re-checked, and verifies the bytes against the requested
+> address. An upload tries `BLOSSOM_SERVERS` in order (`DEFAULT_BLOSSOM_SERVER` is
+> gone), its token expires after 10 minutes rather than 60 s, and `name` follows
+> a rename when it mirrored the display name. Current record:
+> `haven-core/SECURITY.md` (*Public Nostr Profiles*) and
+> `docs/BLOSSOM_SERVER_VETTING.md`.
 
 Haven migrates from MLS-encrypted in-group profile sharing (display names piggybacked in
 location JSON, avatars as padded kind-445 chunk messages) to standard public Nostr

@@ -153,6 +153,16 @@ unset STADIA_API_KEY || true
 log "running no-committed-secrets guard..."
 bash "${GUARD}"
 
+# --- 3b. CI: Flutter's included Gradle build gets the Maven Central fallback
+#         (why: scripts/ci/maven-central-fallback.init.gradle.kts). Same
+#         install as scripts/ci/build_apk_with_retry.sh. ---------------------
+if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+  init_d="${GRADLE_USER_HOME:-${HOME}/.gradle}/init.d"
+  mkdir -p "${init_d}"
+  cp "${REPO_ROOT}/scripts/ci/maven-central-fallback.init.gradle.kts" \
+    "${init_d}/haven-maven-central-fallback.init.gradle.kts"
+fi
+
 # --- 4. Build (release-gated: HAVEN_RELEASE_WRAPPER tells the native gate
 #        this is the sanctioned path) ---------------------------------------
 export HAVEN_RELEASE_WRAPPER=1

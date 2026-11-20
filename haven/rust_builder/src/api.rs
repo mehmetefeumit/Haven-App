@@ -6922,19 +6922,22 @@ pub fn allow_private_blossom_for_test() -> Result<(), String> {
     Err("allow_private_blossom_for_test is disabled in release builds".to_string())
 }
 
-/// Overrides the Blossom upload server for hermetic public-profile E2E tests.
+/// Overrides the Blossom upload servers for hermetic public-profile E2E tests.
 ///
 /// Forwards to [`haven_core::profile::set_blossom_server_for_test`] (debug
-/// builds) or returns an error in release builds. The own-profile sync reads
-/// the effective server via `haven_core::profile::blossom_server`, so
+/// builds) or returns an error in release builds. `url` is one base URL or a
+/// comma-separated, ordered list of them
+/// (`"http://10.0.2.2:3000,http://10.0.2.2:3002"`), tried in order as the
+/// production list is, and it REPLACES that whole list: the own-profile sync
+/// reads the effective servers via `haven_core::profile::blossom_servers`, so
 /// installing this override before the first upload points A's picture at the
-/// hermetic Blossom instead of the production default. Intended to be called
-/// once from a scenario's `setUpAll` with the `HAVEN_E2E_BLOSSOM_URL`
+/// hermetic Blossom and never at a production server. Intended to be called
+/// once from a scenario's `setUpAll` with the `HAVEN_E2E_BLOSSOM_URLS`
 /// dart-define value.
 ///
 /// # Errors
 ///
-/// * Returns an error if `url` is empty.
+/// * Returns an error if an entry is empty or is not a URL with a host.
 /// * Returns an error if the override has already been installed in this
 ///   process (`OnceLock` install-once semantics).
 /// * In release builds this function is unreachable; the sibling stub always
@@ -6942,12 +6945,12 @@ pub fn allow_private_blossom_for_test() -> Result<(), String> {
 #[cfg(debug_assertions)]
 #[frb(sync)]
 pub fn set_blossom_server_for_test(url: String) -> Result<(), String> {
-    haven_core::profile::set_blossom_server_for_test(url)
+    haven_core::profile::set_blossom_server_for_test(&url)
 }
 
 /// Release-build stub for [`set_blossom_server_for_test`]. Gated at the FFI
 /// wrapper itself so a release binary can never redirect Blossom uploads away
-/// from the hard-coded HTTPS default.
+/// from the hard-coded HTTPS servers.
 ///
 /// # Errors
 ///

@@ -24,8 +24,9 @@
 #      construction is Rust-only per plan D2, so even profile Dart files must
 #      not build kind-0) — is scanned as the complement and must be clean.
 #   5. HTTPS-only Blossom: no plaintext `http://` literal in profile code
-#      paths (loopback exempt — debug/e2e builds only), and the
-#      DEFAULT_BLOSSOM_SERVER constant must be an `https://` URL.
+#      paths (loopback exempt — debug/e2e builds only), and EVERY base of the
+#      BLOSSOM_SERVERS upload list must be a quoted `https://` literal (an
+#      entry naming a constant instead is refused, so no server is unseen).
 #   6. Retraction no-op gate structurally bound at the PUBLISH SITE.
 #      Publishing a public profile is UNCONDITIONAL (public-by-default,
 #      owner-directed 2026-07-16, matching White Noise): there is no consent
@@ -51,12 +52,13 @@
 #      (stage_own_picture_removal, confined to its definition, the manager
 #      pass-through and that fn) and names no footprint, relay client, secret,
 #      sync lock or relay read — so the outbox pass publishes it under the gate.
-#   7+ further structural checks; the last one (15) confines the sanitized-upload
-#      types (ProcessedAvatar / StagedPicture) — their construction to
+#   7+ further structural checks; 15 confines the sanitized-upload types
+#      (ProcessedAvatar / StagedPicture) — their construction to
 #      haven-core/src/avatar, the cache constructor and the staging entry point
 #      to their named callers — and requires the FFI photo save to run
 #      process_own_avatar in its own body, so nothing reaches a public Blossom
-#      upload without the EXIF/GPS-stripping re-encode.
+#      upload without the EXIF/GPS-stripping re-encode; 16 holds every Blossom
+#      upload server to a row of docs/BLOSSOM_SERVER_VETTING.md.
 #
 # This is a pure grep/awk gate (no Flutter/Rust toolchain) so it runs fast and
 # independently of the build/test lanes. It replaced
@@ -177,6 +179,46 @@ extract_list_entries() {
     }
     /\];/ { exit }
   ' "${file}"
+}
+
+# Check 5(b): emits one violation per `base:` of the BLOSSOM_SERVERS list in $1
+# that is not a quoted `https://` literal, or one line if the list has no base
+# at all; empty = OK. A base naming a constant is refused rather than resolved:
+# a server this scan cannot read is one the vetting check cannot see either.
+blossom_server_violations() {
+  awk '
+    /pub const BLOSSOM_SERVERS/ { inlist = 1 }
+    !inlist { next }
+    /^[[:space:]]*\/\// { next }
+    /base:/ {
+      value = $0
+      sub(/.*base:[[:space:]]*/, "", value)
+      bases++
+      if (value !~ /^"https:\/\/[^"]+"/)
+        printf "%d: BLOSSOM_SERVERS base is not a quoted https:// literal: %s\n", NR, value
+    }
+    /^\];/ { exit }
+    END { if (!bases) print "no BLOSSOM_SERVERS base found — the check would pass vacuously" }
+  ' "$1"
+}
+
+# Check 16: emits one violation per BLOSSOM_SERVERS base in $1 without a row in
+# the vetting record $2, or for a record with no '**Status:' line; empty = OK.
+blossom_vetting_violations() {
+  local servers="$1" doc="$2" bases base
+  bases="$(awk '
+    /pub const BLOSSOM_SERVERS/ { inlist = 1 }
+    !inlist { next }
+    /^[[:space:]]*\/\// { next }
+    /base:[[:space:]]*"/ { v = $0; sub(/.*base:[[:space:]]*"/, "", v); sub(/".*/, "", v); print v }
+    /^\];/ { exit }
+  ' "${servers}")"
+  [[ -n "${bases}" ]] || { echo "no BLOSSOM_SERVERS base found — the check would pass vacuously"; return; }
+  grep -qE '^\*\*Status:' "${doc}" || echo "the Blossom vetting record has no '**Status:' line"
+  while IFS= read -r base; do
+    grep -qF "| \`${base}\` |" "${doc}" \
+      || echo "Blossom server ${base} has no row in the vetting record"
+  done <<< "${bases}"
 }
 
 # Check 9's and 9b's ban: randomness a relay observer could predict. The
@@ -772,7 +814,38 @@ if [[ "${1:-}" == "--self-test" ]]; then
     '| `wss://b.example` | pass | pass | pass | pass | pass | fill in | AS2 |'
   st_expect_red 'an empty terminator' VETTED "${st_row_a}" \
     '| `wss://b.example` | pass | pass | pass | pass | pass | op-b |  |'
-  log "self-test OK: checks 9b, 12b and 14b refuse every planted violation and pass the clean fixtures"
+  # Checks 5(b) and 16: a clean list and record pass; an http:// base, a base
+  # naming a constant, a scheme-less base and a list with no base fail 5(b); a
+  # server without a row, and a record without a Status line, fail 16.
+  st_servers() { # <base lines...>
+    { printf '%s\n' 'pub const BLOSSOM_SERVERS: &[BlossomServer] = &['
+      for b in "$@"; do printf '%s\n' '    BlossomServer {' "        base: ${b}," '        site: "a.example",' '    },'; done
+      printf '%s\n' '    // base: "http://commented.example",' '];' 'const LATER: &str = "http://after.example";'
+    } > "${st_tmp}/config.rs"
+  }
+  st_servers '"https://a.example"' '"https://b.example"'
+  [[ -z "$(blossom_server_violations "${st_tmp}/config.rs")" ]] \
+    || fail "self-test: check 5(b) refuses a clean list: $(blossom_server_violations "${st_tmp}/config.rs")"
+  printf '%s\n' '**Status: source evidence only; live probe not run**' '' '| server | evidence |' '|---|---|' \
+    '| `https://a.example` | its source |' '| `https://b.example` | its source |' > "${st_tmp}/blossom_vetting.md"
+  [[ -z "$(blossom_vetting_violations "${st_tmp}/config.rs" "${st_tmp}/blossom_vetting.md")" ]] \
+    || fail "self-test: check 16 refuses a recorded list"
+  for bad in '"http://b.example"' 'DEFAULT_BLOSSOM_SERVER' '"b.example"'; do
+    st_servers '"https://a.example"' "${bad}"
+    [[ -n "$(blossom_server_violations "${st_tmp}/config.rs")" ]] \
+      || fail "self-test: check 5(b) lets a BLOSSOM_SERVERS base through: ${bad}"
+  done
+  printf '%s\n' 'pub const BLOSSOM_SERVERS: &[BlossomServer] = &[' '];' > "${st_tmp}/config.rs"
+  [[ -n "$(blossom_server_violations "${st_tmp}/config.rs")" ]] \
+    || fail "self-test: check 5(b) passes vacuously over a list with no base"
+  st_servers '"https://a.example"' '"https://c.example"'
+  [[ -n "$(blossom_vetting_violations "${st_tmp}/config.rs" "${st_tmp}/blossom_vetting.md")" ]] \
+    || fail "self-test: check 16 passes a server with no row"
+  st_servers '"https://a.example"' '"https://b.example"'
+  sed -i '1d' "${st_tmp}/blossom_vetting.md"
+  [[ -n "$(blossom_vetting_violations "${st_tmp}/config.rs" "${st_tmp}/blossom_vetting.md")" ]] \
+    || fail "self-test: check 16 passes a record with no Status line"
+  log "self-test OK: checks 5(b), 9b, 12b, 14b and 16 refuse every planted violation and pass the clean fixtures"
 
   # Checks 6, 6b and 6c over planted fixtures. Each fixture is the shape the
   # rule exists for; every one must fail, and the clean one must pass all
@@ -1193,9 +1266,10 @@ fi
 #     first (strip-tests): unit tests must be able to assert require_https
 #     REJECTS a non-loopback http:// URL, and reference the Android emulator
 #     loopback alias, without weakening the production HTTPS-only guarantee.
-# (b) The DEFAULT_BLOSSOM_SERVER constant must be assigned an https:// URL.
-#     Required to exist once any *blossom* file exists in the module;
-#     validated whenever present.
+# (b) Every `base:` of the BLOSSOM_SERVERS upload list (profile/config.rs)
+#     must be a quoted https:// literal, and the list must have one: a base
+#     written as a constant's name is refused, so no server escapes this
+#     check or Check 16.
 # ---------------------------------------------------------------------------
 log "Scanning profile code paths for plaintext http:// URLs (loopback exempt) ..."
 scan_profile_paths \
@@ -1205,24 +1279,13 @@ scan_profile_paths \
   'http://(127\.0\.0\.1|localhost|\[::1\])[^"'"'"'[:space:]]*' \
   strip-tests
 
-log "Checking DEFAULT_BLOSSOM_SERVER is https:// ..."
-mapfile -t blossom_files < <(find "${CORE_PROFILE_DIR}" -type f -name '*blossom*.rs' | sort)
-# Bind the extraction to the ASSIGNMENT (`DEFAULT_BLOSSOM_SERVER ... =`), not a
-# mere reference: a reference line can carry an unrelated quoted string (e.g. a
-# loopback debug literal) that would poison the value. Take the first quoted
-# string AFTER the `=`, allowing a 2-line rustfmt wrap.
-assign_block="$(cat "${core_profile_files[@]}" | grep -vE '^[[:space:]]*//' \
-  | grep -A2 -E 'DEFAULT_BLOSSOM_SERVER[^=]*=' | head -n3 || true)"
-default_server="$(printf '%s\n' "${assign_block}" | sed -E '1s/^[^=]*=//' \
-  | grep -oE '"[^"]+"' | head -n1 | tr -d '"' || true)"
-if [[ -n "${default_server}" ]]; then
-  if [[ "${default_server}" != https://* ]]; then
-    fail "DEFAULT_BLOSSOM_SERVER is '${default_server}' — it must start with https:// (plan D5: HTTPS-only Blossom)"
-  fi
-elif (( ${#blossom_files[@]} > 0 )); then
-  fail "a *blossom* file exists in haven-core/src/profile but no DEFAULT_BLOSSOM_SERVER string assignment was found — the https:// default (plan D5) must be defined in the profile module"
-else
-  log "  (no *blossom* file in the module yet — DEFAULT_BLOSSOM_SERVER check deferred)"
+log "Checking every BLOSSOM_SERVERS base is an https:// literal ..."
+BLOSSOM_CONFIG_FILE="${CORE_PROFILE_DIR}/config.rs"
+[[ -f "${BLOSSOM_CONFIG_FILE}" ]] || { echo "ERROR: ${BLOSSOM_CONFIG_FILE} not found" >&2; exit 2; }
+blossom_bad="$(blossom_server_violations "${BLOSSOM_CONFIG_FILE}")"
+if [[ -n "${blossom_bad}" ]]; then
+  printf '%s\n' "${blossom_bad}" | sed "s#^#${BLOSSOM_CONFIG_FILE}:#" >&2
+  fail "every BLOSSOM_SERVERS base must be a quoted https:// literal (plan D5: HTTPS-only Blossom) — a base naming a constant is one this guard and the vetting check cannot read"
 fi
 
 # ---------------------------------------------------------------------------
@@ -1852,6 +1915,26 @@ if [[ -n "${location_unvetted}" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Check 16: every Blossom upload server has a vetting row.
+#
+# A picture upload falls back down BLOSSOM_SERVERS, and no hermetic lane sees
+# how those third-party servers behave (every lane overrides the list), so the
+# RECORD and the CONSTANT are held together, as for Checks 14 and 14b: every
+# base needs a row in docs/BLOSSOM_SERVER_VETTING.md naming its evidence, and
+# the record needs a Status line. A probe of the production servers writes to
+# them, so CI never runs it; the record states honestly whether a maintainer
+# has, and this check does not demand that one has.
+# ---------------------------------------------------------------------------
+log "Checking every Blossom upload server against its vetting record ..."
+BLOSSOM_VETTING_DOC="${REPO_ROOT}/docs/BLOSSOM_SERVER_VETTING.md"
+[[ -f "${BLOSSOM_VETTING_DOC}" ]] || { echo "ERROR: ${BLOSSOM_VETTING_DOC} not found" >&2; exit 2; }
+blossom_unvetted="$(blossom_vetting_violations "${BLOSSOM_CONFIG_FILE}" "${BLOSSOM_VETTING_DOC}")"
+if [[ -n "${blossom_unvetted}" ]]; then
+  printf '%s\n' "${blossom_unvetted}" >&2
+  fail "a Blossom upload server is not recorded in docs/BLOSSOM_SERVER_VETTING.md — add its row and evidence before shipping it"
+fi
+
+# ---------------------------------------------------------------------------
 # Check 15: EVERYTHING UPLOADED WENT THROUGH THE SANITIZER.
 #
 # A public profile picture leaves the device as raw bytes to a third-party
@@ -1997,4 +2080,4 @@ if ! grep -A6 -E 'pub[[:space:]]+fn[[:space:]]+stage_own_profile_picture[[:space
   exit 2
 fi
 
-log "OK: public-profile privacy boundaries hold — no Image.network, no circle/group tokens, import boundary intact (incl. no discovery plane), kind-0 confined to the profile module, HTTPS-only Blossom, retraction no-op gate bound at every retraction call site, union-only kind-0 fetch entry points, one author per kind-0 REQ, CSPRNG-only randomness (the location pool's included), no profile-plane NIP-65, every named plane-separation test present, no lib-test install of the profile- or location-pool override, the Dart fallback relay lists still mirror their Rust constants, every profile-pool relay ships with a recorded pass/pass vetting row (retirees stay out), every location-pool relay ships with a recorded L1-L4 pass row, operator and terminator (no operator twice), every uploadable picture is constructed by the sanitizer alone, the cache constructor and the staging entry point stay confined to their named callers, the outbox pass and the FFI deletion initiate their footprint in their own body and read their no-op gate under the sync lock, every footprint in the outbox file sits inside an allowlisted body, and the FFI photo removal is a local edit that only stages the clear."
+log "OK: public-profile privacy boundaries hold — no Image.network, no circle/group tokens, import boundary intact (incl. no discovery plane), kind-0 confined to the profile module, HTTPS-only Blossom (every upload server an https:// literal), retraction no-op gate bound at every retraction call site, union-only kind-0 fetch entry points, one author per kind-0 REQ, CSPRNG-only randomness (the location pool's included), no profile-plane NIP-65, every named plane-separation test present, no lib-test install of the profile- or location-pool override, the Dart fallback relay lists still mirror their Rust constants, every profile-pool relay ships with a recorded pass/pass vetting row (retirees stay out), every location-pool relay ships with a recorded L1-L4 pass row, operator and terminator (no operator twice), every Blossom upload server has a vetting row, every uploadable picture is constructed by the sanitizer alone, the cache constructor and the staging entry point stay confined to their named callers, the outbox pass and the FFI deletion initiate their footprint in their own body and read their no-op gate under the sync lock, every footprint in the outbox file sits inside an allowlisted body, and the FFI photo removal is a local edit that only stages the clear."

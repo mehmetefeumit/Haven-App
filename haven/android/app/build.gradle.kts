@@ -85,6 +85,15 @@ dependencies {
     // even though it's a dev dependency, causing release builds to fail.
     // compileOnly makes the class available at compile time without shipping it.
     compileOnly(project(":integration_test"))
+    // uCrop 2.2.11 (image_cropper's crop editor, from JitPack) publishes a POM
+    // with no dependencies, so the classes its activity loads reach the APK
+    // only through other plugins' graphs; one dropping them is a crash when
+    // the editor opens. Declared at the versions uCrop 2.2.11 is built
+    // against. Not okhttp: uCrop needs it only for remote URIs, Haven hands it
+    // a local file, and a second network stack is a privacy surface.
+    implementation("androidx.appcompat:appcompat:1.7.1")
+    implementation("androidx.transition:transition:1.6.0")
+    implementation("androidx.exifinterface:exifinterface:1.4.1")
 }
 
 kotlin {

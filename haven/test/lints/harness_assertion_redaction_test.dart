@@ -380,6 +380,151 @@ class _InterpolationFinder extends RecursiveAstVisitor<void> {
   }
 }
 
+// ===========================================================================
+// expect() operands
+// ===========================================================================
+//
+// A failing `expect` renders its `actual` and its matcher into the drive log
+// (`Expected:` / `Actual:` / `Which:`) — so an operand that IS an identifier
+// (an event-id set, a picture URL, a pubkey) prints it the moment the
+// assertion fails, whatever the `reason:` says. CI run 44485571814 shipped a
+// failing `expect(ids.toSet(), hasLength(n))` whose `Actual:` line carried
+// three event ids; the log-privacy gate withheld the whole drive log, failure
+// included. An operand passes when it reduces the value to something Rule 15
+// allows before the matcher sees it: a comparison, a `.length`/`.isEmpty`, a
+// boolean query (`x.contains(y)`, `listEquals(a, b)`), or a log-alias wrapper.
+
+/// Identifier shapes an `expect` operand's source is matched against.
+final RegExp _operandVocabulary = RegExp(
+  r'pubkey|Pubkey|npub|Npub|Hex\b|groupId|GroupId|eventId|EventId|\.id\b|'
+  r'\bids\b|Ids\b|\burls?\b|Urls?\b|sha256|Sha256|\bhash\b|Hash\b|'
+  "'picture'",
+);
+
+/// Properties that reduce any receiver to a count or a boolean.
+const Set<String> _reducingProperties = {
+  'length',
+  'isEmpty',
+  'isNotEmpty',
+  'runtimeType',
+};
+
+/// Methods called ON a value that answer a boolean about it.
+const Set<String> _booleanQueryMethods = {
+  'contains',
+  'containsKey',
+  'containsValue',
+  'any',
+  'every',
+  'startsWith',
+  'endsWith',
+  'hasMatch',
+};
+
+/// A predicate's name (`isAdmin`, `hasPicture`, `_is64LowerHex`): its result
+/// is a boolean, whatever it was asked about.
+bool _isPredicateName(String name) =>
+    RegExp('^_?(is|has)[A-Z0-9]').hasMatch(name);
+
+/// Top-level functions whose result is a boolean or a Rule-15 rendering.
+const Set<String> _reducingFunctions = {
+  'listEquals',
+  'setEquals',
+  'mapEquals',
+  ..._exemptWrapperNames,
+};
+
+/// Every `expect`/`expectLater` operand (the actual and the matcher) whose
+/// failure rendering could carry an identifier, outside a
+/// `// harness-log-ok: <reason>` line.
+List<HarnessLogFinding> findExpectOperandFindings(
+  String source, {
+  String path = '<memory>',
+}) {
+  final result = parseString(content: source, throwIfDiagnostics: false);
+  final visitor = _OperandVisitor(source, result.lineInfo, path);
+  result.unit.accept(visitor);
+  return visitor.findings;
+}
+
+class _OperandVisitor extends RecursiveAstVisitor<void> {
+  _OperandVisitor(this._source, this._lineInfo, this._path);
+
+  final String _source;
+  final LineInfo _lineInfo;
+  final String _path;
+  final List<HarnessLogFinding> findings = [];
+
+  @override
+  void visitMethodInvocation(MethodInvocation node) {
+    final name = node.methodName.name;
+    if (node.target == null && (name == 'expect' || name == 'expectLater')) {
+      final operands = node.argumentList.arguments
+          .where((a) => a is! NamedExpression)
+          .take(2);
+      for (final operand in operands) {
+        if (_renders(operand)) _flag(operand);
+      }
+    }
+    super.visitMethodInvocation(node);
+  }
+
+  /// Whether [e]'s failure rendering could carry an identifier.
+  bool _renders(Expression e) {
+    if (!_operandVocabulary.hasMatch(_source.substring(e.offset, e.end))) {
+      return false;
+    }
+    return switch (e) {
+      ParenthesizedExpression(:final expression) => _renders(expression),
+      BinaryExpression() || PrefixExpression() || IsExpression() => false,
+      PropertyAccess(:final propertyName) => !_reduces(propertyName.name),
+      PrefixedIdentifier(:final identifier) => !_reduces(identifier.name),
+      MethodInvocation(:final target, :final methodName, :final argumentList)
+          when target == null =>
+        !_reducingFunctions.contains(methodName.name) &&
+            // A private one only: `isNot(`/`isIn(` are matchers.
+            !(methodName.name.startsWith('_') &&
+                _isPredicateName(methodName.name)) &&
+            argumentList.arguments.any(
+              (a) => _renders(a is NamedExpression ? a.expression : a),
+            ),
+      MethodInvocation(:final methodName) => !_booleanQueryMethods.contains(
+        methodName.name,
+      ),
+      _ => true,
+    };
+  }
+
+  static bool _reduces(String property) =>
+      _reducingProperties.contains(property) || _isPredicateName(property);
+
+  void _flag(Expression operand) {
+    final line = _lineInfo.getLocation(operand.offset).lineNumber;
+    final lines = _source.split('\n');
+    bool marked(int oneBased) =>
+        oneBased >= 1 &&
+        oneBased <= lines.length &&
+        RegExp(
+          r'//\s*harness-log-ok:\s*(\S.*)$',
+        ).hasMatch(lines[oneBased - 1]);
+    if (marked(line) ||
+        (line >= 2 &&
+            lines[line - 2].trimLeft().startsWith('//') &&
+            marked(line - 1))) {
+      return;
+    }
+    findings.add(
+      HarnessLogFinding(
+        path: _path,
+        line: line,
+        snippet: _source
+            .substring(operand.offset, operand.end)
+            .replaceAll(RegExp(r'\s+'), ' '),
+      ),
+    );
+  }
+}
+
 void main() {
   group('detector self-tests — positive fixtures (must flag)', () {
     void expectFlagged(String label, String source) {
@@ -693,6 +838,164 @@ void f() {
             'logAliasHandle/magnitudeBucket/relativeSecs, reduce it to '
             '.runtimeType/.name, or add a // harness-log-ok: <reason> '
             'suppression with a real reason.',
+      );
+    });
+  });
+
+  group('expect operands — detector self-tests', () {
+    void expectOperandFlagged(String label, String source) {
+      test(label, () {
+        expect(
+          findExpectOperandFindings(source),
+          isNotEmpty,
+          reason: 'expected a finding for: $source',
+        );
+      });
+    }
+
+    void expectOperandClean(String label, String source) {
+      test(label, () {
+        expect(
+          findExpectOperandFindings(source),
+          isEmpty,
+          reason: 'unexpected finding(s) in: $source',
+        );
+      });
+    }
+
+    expectOperandFlagged(
+      'an event-id set as the actual (CI run 44485571814)',
+      'void f() { expect(events.map((e) => e.id).toSet(), hasLength(1)); }',
+    );
+    expectOperandFlagged(
+      'a pubkey compared by equals',
+      'void f() { expect(row.pubkeyHex, equals(aliceHex)); }',
+    );
+    expectOperandFlagged(
+      'a pubkey as a bare expected value',
+      'void f() { expect(row.displayName, alicePubkeyHex); }',
+    );
+    expectOperandFlagged(
+      'a pubkey inside isNot(contains(...))',
+      'void f() { expect(json, isNot(contains(alicePubkeyHex))); }',
+    );
+    expectOperandFlagged(
+      "a kind-0's picture URL",
+      "void f() { expect(content['picture'], originalPictureUrl); }",
+    );
+    expectOperandFlagged(
+      'a content hash',
+      'void f() { expect(pictureHash, isNotNull); }',
+    );
+    expectOperandFlagged(
+      'relay URLs in a list literal',
+      'void f() { expect(urls, equals(<String>[defaultStrfryUrl])); }',
+    );
+    expectOperandFlagged(
+      'expectLater operands too',
+      'void f() { expectLater(stream, emits(eventId)); }',
+    );
+    expectOperandFlagged(
+      'a harness-log-ok with no reason does not suppress',
+      'void f() {\n'
+          '  expect(row.pubkeyHex, aliceHex); // harness-log-ok:\n'
+          '}',
+    );
+
+    expectOperandClean(
+      'a comparison reduces both sides to a boolean',
+      'void f() { expect(row.pubkeyHex == aliceHex, isTrue); }',
+    );
+    expectOperandClean(
+      'a length reduces an id set to a count',
+      'void f() { expect(ids.toSet().length, 1); }',
+    );
+    expectOperandClean(
+      'a boolean query on an identifier',
+      'void f() { expect(roster.contains(bob.pubkeyHex), isTrue); }',
+    );
+    expectOperandClean(
+      'listEquals reduces two byte lists',
+      'void f() { expect(listEquals(photoAfter, photoBefore), isTrue); }',
+    );
+    expectOperandClean(
+      'a predicate property or function answers a boolean',
+      'void f() { expect(members.firstWhere((m) => m.pubkey == hex).isAdmin, '
+          'isTrue); expect(_is64LowerHex(nostrGroupIdHex), isTrue); }',
+    );
+    expectOperandClean(
+      'a matcher whose arguments render nothing',
+      'void f() { expect(row.hasPicture, isTrue); }',
+    );
+    expectOperandClean(
+      'a log-alias wrapper',
+      'void f() { expect(logAliasHandle(LogAliasClass.peer, aliceHex), '
+          "isNot('')); }",
+    );
+    expectOperandClean(
+      'a reasoned harness-log-ok on the line',
+      'void f() {\n'
+          '  expect(row.pubkeyHex, aliceHex); // harness-log-ok: fixture key\n'
+          '}',
+    );
+  });
+
+  group('expect operands — the real integration_test/ tree', () {
+    // Files written before this rule, and how many identifier-rendering
+    // operands each still holds. A ratchet: the count must EQUAL the file's
+    // measurement, so a fix lowers it here and nothing can raise it; every
+    // file not listed (every new one) must hold none.
+    // Measured 2026-11-19.
+    const preexisting = <String, int>{
+      'integration_test/b4_ios_real_gps_test.dart': 2,
+      'integration_test/e2e/e2e_combined.dart': 20,
+      'integration_test/e2e/smoke_test.dart': 5,
+      'integration_test/encryption_pipeline_test.dart': 20,
+      'integration_test/ios_bg_publish_test.dart': 1,
+      'integration_test/relay_customization_publish_test.dart': 17,
+      'integration_test/relay_customization_trigger_test.dart': 3,
+      'integration_test/relay_management_status_test.dart': 2,
+      'integration_test/relay_resync_convergence_test.dart': 13,
+      'integration_test/relay_two_plane_privacy_test.dart': 4,
+      'integration_test/welcome_redelivery_test.dart': 9,
+    };
+
+    test('no expect operand renders an identifier beyond the ratchet', () {
+      final dir = Directory('integration_test');
+      expect(dir.existsSync(), isTrue);
+      final perFile = <String, List<HarnessLogFinding>>{};
+      var filesScanned = 0;
+      for (final entity in dir.listSync(recursive: true)) {
+        if (entity is! File || !entity.path.endsWith('.dart')) continue;
+        filesScanned++;
+        final found = findExpectOperandFindings(
+          entity.readAsStringSync(),
+          path: entity.path,
+        );
+        if (found.isNotEmpty) perFile[entity.path] = found;
+      }
+      expect(filesScanned, greaterThanOrEqualTo(41));
+
+      final drift = <String>[];
+      for (final path in {...perFile.keys, ...preexisting.keys}) {
+        final found = perFile[path] ?? const <HarnessLogFinding>[];
+        final allowed = preexisting[path] ?? 0;
+        if (found.length == allowed) continue;
+        drift.add(
+          '  • $path: ${found.length} found, $allowed allowed\n'
+          '${found.map((f) => '      $f').join('\n')}',
+        );
+      }
+      expect(
+        drift,
+        isEmpty,
+        reason:
+            'expect() operand(s) whose failure output could print an '
+            'identifier (Security Rule 15):\n${drift.join('\n')}\n\n'
+            'Reduce the operand before the matcher sees it — compare '
+            '(`a == b`, isTrue), take `.length`/`.isEmpty`, ask a boolean '
+            '(`x.contains(y)`, `listEquals`), or alias it — and lower the '
+            "file's count in `preexisting` to match.",
       );
     });
   });

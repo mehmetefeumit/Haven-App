@@ -124,6 +124,10 @@
 # P0-1 from static analysis into a reproducible red. Do not "fix" it by relaxing
 # an assertion — see CLAUDE.md, Testing Requirements #5.
 #
+# A red during whose drive the Android system process restarted exits 75
+# (`B1-LANE-INFRA`, as in the B6 lane), never 1: the OS died under the app, so
+# no finding is a product one (`system_server_restarted`). Still a red.
+#
 # Usage:
 #   run-b1-fgs-publish.sh <apk> <target.dart>   run the lane (needs emulator-5554)
 #   run-b1-fgs-publish.sh --self-test           hermetic predicate self-test
@@ -159,6 +163,55 @@ location_provider_names() {
 # (Security Rule 15).
 withhold_positions() {
   sed -E 's/(last( mock)? location=).*/\1<withheld>/'
+}
+
+# system_server_restarted <before> <after> — 0 (true) iff the Android system
+# process was RESTARTED between two `read_system_server_identity` reads, each
+# "<pid>|<start count>".
+#
+# CI run 44532048143: the drive delivered the pause, the app's platform thread
+# went silent, and ~95 s later the app logged `DeadSystemException`, its VM
+# service vanished, and a `dumpsys location` read a moment later listed only
+# the `passive` provider — a system_server still booting. The oracle then
+# blamed MapShell ("the handoff never completed") for the OS dying under it.
+#
+# Proof is a new process, never a log line: a changed pid, or a higher
+# `sys.system_server.start_count` (SystemServer.java increments it on every
+# start). `DeadSystemException` alone is NOT proof — the framework also throws
+# it for a FAILED_TRANSACTION on a small parcel, which binder-buffer exhaustion
+# in the APP can cause — and an unreadable read proves nothing either way.
+system_server_restarted() {
+  local before_pid before_count after_pid after_count
+  IFS='|' read -r before_pid before_count <<<"${1:-}"
+  IFS='|' read -r after_pid after_count <<<"${2:-}"
+  [[ "${before_pid}" =~ ^[0-9]+$ ]] || return 1
+  if [[ "${before_count}" =~ ^[0-9]+$ && "${after_count}" =~ ^[0-9]+$ ]] \
+     && (( after_count > before_count )); then
+    return 0
+  fi
+  [[ "${after_pid}" =~ ^[0-9]+$ ]] && (( after_pid != before_pid ))
+}
+
+# read_system_server_identity — "<pid>|<start count>" from the device in one
+# bounded round trip; either field is empty when it cannot be read.
+read_system_server_identity() {
+  # shellcheck disable=SC2016 # expanded by the device's shell, not this one
+  timeout "${SYSTEM_SERVER_READ_SECS}" adb -s "${DEVICE}" shell \
+    'echo "$(pidof system_server)|$(getprop sys.system_server.start_count)"' \
+    2>/dev/null | tr -d '\r' || true
+}
+
+# system_death_markers <file>... — the system-death markers present in the
+# captures, by fixed name only (never the matched line: Security Rule 15).
+# Evidence printed beside an infrastructure verdict, never the verdict itself.
+system_death_markers() {
+  local marker
+  for marker in 'WATCHDOG KILLING SYSTEM PROCESS' 'FATAL EXCEPTION IN SYSTEM PROCESS' \
+                'DeadSystemException'; do
+    if LC_ALL=C grep -aqF -- "${marker}" "$@" 2>/dev/null; then
+      echo "${marker}"
+    fi
+  done
 }
 
 # ---------------------------------------------------------------------------
@@ -2114,6 +2167,65 @@ build_fixture_idle_logcat() {
   } > "${out}"
 }
 
+# The Phase 4 reads `system_server_restarted` compares. Empty until taken, so a
+# failure before the drive can never read as a system death.
+SYSTEM_SERVER_BEFORE=""
+SYSTEM_SERVER_AFTER=""
+
+# Defined above the --self-test dispatch so the self-test runs the real verdict.
+fail() {
+  local rc=1
+  # INFRASTRUCTURE FIRST, and only on proof (`system_server_restarted`): when
+  # the system process restarted during the drive, every finding below is a
+  # consequence of the OS dying under the app, not a product defect. Non-zero
+  # all the same, with the same distinct code as the B6 lane, so it can never
+  # read as a pass and is greppable apart from a product red.
+  if system_server_restarted "${SYSTEM_SERVER_BEFORE}" "${SYSTEM_SERVER_AFTER}"; then
+    rc=75
+    echo "B1-LANE-INFRA: the Android system process (system_server) restarted" \
+         "across the drive, so this run could not observe the product. Re-run" \
+         "the lane; the logcat artifact holds the system's own death record." >&2
+    local markers
+    markers="$(system_death_markers "${LOGCAT_FILE}" "${DRIVE_LOG}" | paste -sd ',' -)"
+    echo "  system-death markers in the captures: ${markers:-none}" >&2
+    echo "  What would have been reported as the finding, kept as EVIDENCE only:" >&2
+    echo "    $*" >&2
+  else
+    echo "B1-LANE-FAIL: $*" >&2
+  fi
+  # A deferred drive failure changes how EVERY later message should be read.
+  # Without this note, a drive that died before arming makes the oracle's step-1
+  # message ("the foreground never handed off … this lane proved nothing") read
+  # as a product defect, which is exactly the kind of claim this lane exists to
+  # make credibly. Attribute it here rather than letting the terminal
+  # drive-failure `fail()` carry it — that one is unreachable once any earlier
+  # oracle step fails.
+  if (( rc == 1 && ${drive_failed:-0} == 1 )); then
+    echo "NOTE: the drive ALSO did not complete cleanly (${drive_reason:-unknown})." \
+         "The finding above may be a CONSEQUENCE of that rather than a product" \
+         "defect — rule the drive failure out first." >&2
+  fi
+  echo "---- [BackgroundTask] lines seen ----" >&2
+  grep -aF '[BackgroundTask]' "${LOGCAT_FILE}" 2>/dev/null | tail -40 >&2 || \
+    echo "(none — the FGS isolate logged nothing at all)" >&2
+  # Which providers the platform has and which are mocked — never the position
+  # (Security Rule 15; the point is synthetic, and still a needle). The AVD
+  # runs a `google_apis` image where geolocator resolves to the FUSED provider,
+  # the one step 8 arms, so after it this should list `fused provider [mock]`.
+  echo "---- emulator location providers ----" >&2
+  adb -s "${DEVICE}" shell dumpsys location 2>/dev/null | location_provider_names >&2 \
+    || echo "(dumpsys location unavailable)" >&2
+  # The last few power samples, for the steps-5/6 findings: which requests and
+  # locks were actually seen is the whole evidence base for those, and reading
+  # the parser's verdict without them is guesswork.
+  echo "---- last power samples ----" >&2
+  # Stdout to stderr FIRST: the reverse order sends both to /dev/null, which is
+  # why run 34488512808 printed nothing here from a 151 KB sample file.
+  tail -30 "${SAMPLE_FILE}" >&2 2>/dev/null || \
+    echo "(no power samples were captured)" >&2
+  exit "${rc}"
+}
+
 # ---------------------------------------------------------------------------
 # --self-test — validate max_published_count against synthetic fixtures WITHOUT
 # a device (mirrors run-single-avd-scenario.sh / scan-logs-for-secrets.sh). CI
@@ -2127,7 +2239,7 @@ run_self_test() {
   # Pinned by EQUALITY, never by a floor: the run used to end with a hard-coded
   # "all N fixtures passed" and no counter, so deleting a case left the message
   # — and the exit code — untouched. Mirrors check_android_location_power.sh.
-  local -r SELF_TEST_FIXTURES=127
+  local -r SELF_TEST_FIXTURES=143
   local tmp fail=0 checked=0 got
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -4135,6 +4247,101 @@ wait ${bound_at:-?}, kill ${kill_at:-?}, wait ${wait_at:-?}, read ${read_at:-?})
     fail=1
   fi
 
+  # (69) system_server_restarted: only a NEW process proves a system death —
+  #      a changed pid or a higher start count — and an unreadable read, on
+  #      either side, proves nothing (CI run 44532048143).
+  local -a ss_cases=(
+    '1;516|1;516|1;the same process is no restart'
+    '0;516|1;1873|1;a changed pid is a restart'
+    '0;516|1;516|2;a higher start count is a restart'
+    '0;516|;1873|;a changed pid with no start count is a restart'
+    '1;516|1;;an unreadable read after the drive proves nothing'
+    '1;516|1;|1;no system_server yet, same start count, proves nothing'
+    '0;516|2;|3;a higher start count is a restart even with no pid to read'
+    '1;;1873|2;no read before the drive proves nothing'
+    '1;|1;1873|2;no pid before the drive proves nothing'
+    '1;516|1;error: device offline;a non-numeric read proves nothing'
+  )
+  local ss_case want before after desc
+  for ss_case in "${ss_cases[@]}"; do
+    IFS=';' read -r want before after desc <<<"${ss_case}"
+    _case
+    got=0
+    system_server_restarted "${before}" "${after}" || got=1
+    if [[ "${got}" != "${want}" ]]; then
+      echo "SELF-TEST FAIL (69): ${desc}: wanted ${want}, got ${got}" >&2
+      fail=1
+    fi
+  done
+
+  # (70) system_death_markers names each marker present, by fixed name, and
+  #      never echoes the line that carried it.
+  printf '%s\n' \
+    'E/EventChannel#flutter.baseflow.com/geolocator_updates_android( 4271): DeadSystemException: The system died; earlier logs will point to the root cause relay#planted' \
+    > "${tmp}/deadsystem.log"
+  printf '%s\n' \
+    '11-19 14:26:18.000   516   540 W Watchdog: *** WATCHDOG KILLING SYSTEM PROCESS: Blocked in handler on foreground thread (android.fg) for 66s' \
+    > "${tmp}/watchdog.log"
+  printf '%s\n' '11-19 14:26:18.000  4271  4271 I flutter : [b1] PAUSE_DELIVERED pid=4271' \
+    > "${tmp}/healthy.log"
+  _case
+  got="$(system_death_markers "${tmp}/healthy.log" "${tmp}/deadsystem.log" "${tmp}/watchdog.log")"
+  if [[ "${got}" != "$(printf '%s\n' 'WATCHDOG KILLING SYSTEM PROCESS' 'DeadSystemException')" ]] \
+     || grep -q 'planted' <<<"${got}"; then
+    echo "SELF-TEST FAIL (70): wanted the two marker names alone, got '${got}'" >&2
+    fail=1
+  fi
+  _case
+  got="$(system_death_markers "${tmp}/healthy.log" "${tmp}/absent.log")"
+  if [[ -n "${got}" ]]; then
+    echo "SELF-TEST FAIL (70b): a healthy capture names no marker, got '${got}'" >&2
+    fail=1
+  fi
+
+  # (71) fail() end to end, on run 44532048143's own drive-log line. With the
+  #      restart proved, the verdict is infrastructure (rc 75) and the finding
+  #      survives as evidence; without it — DeadSystemException or not, and
+  #      whenever the drive never took the first read — it stays a product red.
+  _run_fail() {
+    ( adb() { return 1; }
+      LOGCAT_FILE="${tmp}/healthy.log" DRIVE_LOG="${tmp}/deadsystem.log"
+      SAMPLE_FILE="${tmp}/absent.log" DEVICE="emulator-5554"
+      SYSTEM_SERVER_BEFORE="$1" SYSTEM_SERVER_AFTER="$2" drive_failed=1
+      drive_reason="flutter drive exited 1"
+      fail "the lifecycle pause was delivered but the handoff never completed" ) \
+      > "${tmp}/fail.out" 2>&1
+  }
+  local fail_rc
+  local -a fail_cases=(
+    '75;516|1;1873|2;B1-LANE-INFRA;B1-LANE-FAIL;a proved restart'
+    '1;516|1;516|1;B1-LANE-FAIL;B1-LANE-INFRA;DeadSystemException without a restart'
+    '1;;1873|2;B1-LANE-FAIL;B1-LANE-INFRA;a failure before the first read'
+  )
+  local want_rc want_line not_line
+  for ss_case in "${fail_cases[@]}"; do
+    IFS=';' read -r want_rc before after want_line not_line desc <<<"${ss_case}"
+    _case
+    fail_rc=0
+    _run_fail "${before}" "${after}" || fail_rc=$?
+    if (( fail_rc != want_rc )) || ! grep -q "^${want_line}: " "${tmp}/fail.out" \
+       || grep -q "^${not_line}: " "${tmp}/fail.out" \
+       || ! grep -q 'the handoff never completed' "${tmp}/fail.out"; then
+      echo "SELF-TEST FAIL (71): ${desc}: wanted rc ${want_rc} and ${want_line}" \
+           "with the finding, got rc ${fail_rc}:" >&2
+      sed 's/^/    /' "${tmp}/fail.out" >&2
+      fail=1
+    fi
+  done
+  _case
+  _run_fail '516|1' '1873|2' || true
+  if ! grep -q 'system-death markers in the captures: DeadSystemException$' "${tmp}/fail.out" \
+     || grep -q 'relay#planted' "${tmp}/fail.out"; then
+    echo "SELF-TEST FAIL (71b): the infrastructure verdict must name the" \
+         "markers seen, by name only:" >&2
+    sed 's/^/    /' "${tmp}/fail.out" >&2
+    fail=1
+  fi
+
   # (68) No coordinate reaches the step log: the injected point is never
   #      echoed, and every `dumpsys location` the lane RUNS either prints
   #      through a filter — the provider names, the position-withholding
@@ -4203,6 +4410,13 @@ readonly DRIVE_KILL_AFTER_SECS=30
 # The drive's own wait (`_broadcastBarrierWait`, 150 s) outlasts it, so a
 # barrier that never drains is reported HERE, by name.
 readonly BARRIER_TIMEOUT_SECS=120
+
+# The system_server identity reads (`read_system_server_identity`): each one
+# bounded, and after the drive retried for up to SYSTEM_SERVER_SETTLE_SECS
+# while no system_server is running yet — init restarts zygote at once, so a
+# restarted one has a pid within seconds.
+readonly SYSTEM_SERVER_READ_SECS=5
+readonly SYSTEM_SERVER_SETTLE_SECS=20
 
 # Synthetic coordinates fed to the emulator's GPS: Dam Square, Amsterdam — a
 # well-known public landmark, chosen precisely BECAUSE it is obviously not a
@@ -4366,41 +4580,6 @@ if (( seal_rc != 0 )); then
 fi
 
 trap cleanup EXIT
-
-fail() {
-  echo "B1-LANE-FAIL: $*" >&2
-  # A deferred drive failure changes how EVERY later message should be read.
-  # Without this note, a drive that died before arming makes the oracle's step-1
-  # message ("the foreground never handed off … this lane proved nothing") read
-  # as a product defect, which is exactly the kind of claim this lane exists to
-  # make credibly. Attribute it here rather than letting the terminal
-  # drive-failure `fail()` carry it — that one is unreachable once any earlier
-  # oracle step fails.
-  if (( ${drive_failed:-0} == 1 )); then
-    echo "NOTE: the drive ALSO did not complete cleanly (${drive_reason:-unknown})." \
-         "The finding above may be a CONSEQUENCE of that rather than a product" \
-         "defect — rule the drive failure out first." >&2
-  fi
-  echo "---- [BackgroundTask] lines seen ----" >&2
-  grep -aF '[BackgroundTask]' "${LOGCAT_FILE}" 2>/dev/null | tail -40 >&2 || \
-    echo "(none — the FGS isolate logged nothing at all)" >&2
-  # Which providers the platform has and which are mocked — never the position
-  # (Security Rule 15; the point is synthetic, and still a needle). The AVD
-  # runs a `google_apis` image where geolocator resolves to the FUSED provider,
-  # the one step 8 arms, so after it this should list `fused provider [mock]`.
-  echo "---- emulator location providers ----" >&2
-  adb -s "${DEVICE}" shell dumpsys location 2>/dev/null | location_provider_names >&2 \
-    || echo "(dumpsys location unavailable)" >&2
-  # The last few power samples, for the steps-5/6 findings: which requests and
-  # locks were actually seen is the whole evidence base for those, and reading
-  # the parser's verdict without them is guesswork.
-  echo "---- last power samples ----" >&2
-  # Stdout to stderr FIRST: the reverse order sends both to /dev/null, which is
-  # why run 34488512808 printed nothing here from a 151 KB sample file.
-  tail -30 "${SAMPLE_FILE}" >&2 2>/dev/null || \
-    echo "(no power samples were captured)" >&2
-  exit 1
-}
 
 # ---------------------------------------------------------------------------
 # Phase 0 — hermetic relay + device readiness.
@@ -4683,6 +4862,9 @@ IDLE_PID=$!
 ) &
 BARRIER_PID=$!
 
+# Which system_server runs the drive — what `fail()` compares after it.
+SYSTEM_SERVER_BEFORE="$(read_system_server_identity)"
+
 drc=0
 ( cd "${HAVEN_DIR}" && timeout --kill-after="${DRIVE_KILL_AFTER_SECS}s" "${DRIVE_TIMEOUT}" flutter drive \
     --no-pub \
@@ -4720,6 +4902,16 @@ if [[ -n "${BARRIER_PID}" ]] && kill -0 "${BARRIER_PID}" 2>/dev/null; then
 fi
 BARRIER_PID=""
 rm -f "${sample_part}"
+
+# And which one runs after it. A system_server that died is restarted by init
+# within seconds, but between the two there is none to read, so an empty pid is
+# read again until the settle bound; still empty, `fail()` proves no restart.
+SYSTEM_SERVER_AFTER="$(read_system_server_identity)"
+settle_deadline=$((SECONDS + SYSTEM_SERVER_SETTLE_SECS))
+while [[ ! "${SYSTEM_SERVER_AFTER%%|*}" =~ ^[0-9]+$ ]] && (( SECONDS < settle_deadline )); do
+  sleep 1
+  SYSTEM_SERVER_AFTER="$(read_system_server_identity)"
+done
 # Scan BEFORE echoing. The EXIT trap's scan runs far too late to protect the
 # STEP log, which has no retention control and cannot be redacted after the
 # fact — a wider, more permanent sink than the artifact upload. The gate is

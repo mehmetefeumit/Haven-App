@@ -103,6 +103,10 @@ pub struct NegWire {
     edits: Arc<Mutex<Edits>>,
     closed: Arc<Mutex<Vec<usize>>>,
     opened: Arc<AtomicUsize>,
+    /// Open (`true`) lets a new connection's handshake through; closed holds
+    /// it until reopened.
+    gate: tokio::sync::watch::Sender<bool>,
+    held: Arc<AtomicUsize>,
     accept: tokio::task::JoinHandle<()>,
 }
 
@@ -130,6 +134,9 @@ impl NegWire {
         let closed = Arc::new(Mutex::new(Vec::new()));
         let conns = Arc::new(AtomicUsize::new(0));
         let opened = Arc::clone(&conns);
+        let (gate, gated) = tokio::sync::watch::channel(true);
+        let held = Arc::new(AtomicUsize::new(0));
+        let waiting = Arc::clone(&held);
         let accept = {
             let (frames, policy, closed, edits) = (
                 Arc::clone(&frames),
@@ -140,7 +147,8 @@ impl NegWire {
             tokio::spawn(async move {
                 while let Ok((tcp, _)) = listener.accept().await {
                     let conn = conns.fetch_add(1, Ordering::SeqCst);
-                    tokio::spawn(serve(
+                    let (mut gated, waiting) = (gated.clone(), Arc::clone(&waiting));
+                    let serving = serve(
                         tcp,
                         target.clone(),
                         conn,
@@ -148,7 +156,15 @@ impl NegWire {
                         Arc::clone(&policy),
                         Arc::clone(&closed),
                         Arc::clone(&edits),
-                    ));
+                    );
+                    tokio::spawn(async move {
+                        if !*gated.borrow() {
+                            waiting.fetch_add(1, Ordering::SeqCst);
+                            let _ = gated.wait_for(|open| *open).await;
+                            waiting.fetch_sub(1, Ordering::SeqCst);
+                        }
+                        serving.await;
+                    });
                 }
             })
         };
@@ -159,6 +175,8 @@ impl NegWire {
             edits,
             closed,
             opened,
+            gate,
+            held,
             accept,
         }
     }
@@ -191,6 +209,23 @@ impl NegWire {
     /// Changes what the endpoint does with the next `NEG-OPEN`.
     pub fn set_policy(&self, policy: NegPolicy) {
         *self.policy.lock().unwrap_or_else(PoisonError::into_inner) = policy;
+    }
+
+    /// Holds every connection accepted from here on before its handshake,
+    /// as a relay slow to answer one does; [`Self::release_connections`]
+    /// serves each from there.
+    pub fn hold_new_connections(&self) {
+        self.gate.send_replace(false);
+    }
+
+    /// Ends [`Self::hold_new_connections`]: each held socket is served.
+    pub fn release_connections(&self) {
+        self.gate.send_replace(true);
+    }
+
+    /// How many connections are held before their handshake now.
+    pub fn held(&self) -> usize {
+        self.held.load(Ordering::SeqCst)
     }
 
     /// How many client sockets have been opened here.
