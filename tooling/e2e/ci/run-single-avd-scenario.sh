@@ -647,7 +647,7 @@ eth0	0000000A	00000000	0001	0	0	0	000000FF	0	0	0" 10.0.2.2 'wlan*'; then
   # data go down together and are waited on, data comes back, the settled
   # state is waited on, and not reaching it refuses to drive; data is cycled
   # nowhere else, and the EXIT trap puts the probing setting back.
-  local settle_seq data_cycles cleanup_body
+  local settle_seq data_cycles cleanup_body cleanup_data
   cleanup_body="$(sed -n '/^cleanup() {$/,/^}$/p' "${BASH_SOURCE[0]}")"
   settle_seq="$(awk '
     /^if \(\( cellular == 1 \)\); then$/ { on = 1; next }
@@ -656,19 +656,27 @@ eth0	0000000A	00000000	0001	0	0	0	000000FF	0	0	0" 10.0.2.2 'wlan*'; then
     refuse_next { if (/net_unsettled/) printf "refuse "; refuse_next = 0 }
     /settings put global captive_portal_mode 0 / { printf "mode0 " }
     /svc[[:space:]]+wifi[[:space:]]+disable/ { printf "wifi-off " }
+    /^ *data_off_pending=1$/ { printf "owed " }
     /svc[[:space:]]+data[[:space:]]+disable/ { printf "data-off " }
     /^ *while .*guest_net_is_down/ { printf "wait-down " }
     /svc[[:space:]]+data[[:space:]]+enable/ { printf "data-on " }
+    /^ *data_off_pending=0$/ { printf "paid " }
     /^ *while .*guest_net_settled/ { printf "wait-settled " }
     /^ *if ! guest_net_settled/ { refuse_next = 1 }' <<<"${net_code}")"
   data_cycles="$(grep -cE 'svc[[:space:]]+data[[:space:]]+(en|dis)able' <<<"${net_code}" || true)"
-  if [[ "${settle_seq}" != 'mode0 wifi-off data-off wait-down data-on wait-settled refuse ' ]] \
-     || (( data_cycles != 2 )) \
+  cleanup_data="$(awk '
+    /^  if \(\( data_off_pending == 1 \)\); then$/ { on = 1; next }
+    on && /^  fi$/ { on = 0 }
+    /svc[[:space:]]+data[[:space:]]+(en|dis)able/ { printf "%s ", (on ? "guarded" : "bare") }' \
+    <<<"${cleanup_body}")"
+  if [[ "${settle_seq}" != 'mode0 wifi-off owed data-off wait-down data-on paid wait-settled refuse ' ]] \
+     || (( data_cycles != 3 )) || [[ "${cleanup_data}" != 'guarded ' ]] \
      || ! grep -q 'settings put global captive_portal_mode "${captive_mode_prev}"' <<<"${cleanup_body}"; then
     echo "SELF-TEST FAIL (6m): the cellular branch must settle the network in" \
-         "order and refuse an unsettled one (seq='${settle_seq}'," \
-         "data cycles=${data_cycles}), and cleanup must restore" \
-         "captive_portal_mode" >&2
+         "order, owing mobile data while it holds it down, and refuse an" \
+         "unsettled one (seq='${settle_seq}', data cycles=${data_cycles});" \
+         "cleanup must restore captive_portal_mode and re-enable data only" \
+         "while it is owed (cleanup data='${cleanup_data}')" >&2
     fail=1
   fi
 
@@ -1112,7 +1120,7 @@ eth0	0000000A	00000000	0001	0	0	0	000000FF	0	0	0" 10.0.2.2 'wlan*'; then
     echo "run-single-avd-scenario: SELF-TEST FAILED" >&2
     return 1
   fi
-  echo "run-single-avd-scenario: self-test passed (connect flake caught; clean pass, real post-connect failure, and non-connect failure all correctly NOT retried; app-failure check scoped to the final attempt; the network gate admits a guest whose on-link routes cover the relay, still rejects one with no route to it, and is satisfied by neither loopback, a foreign subnet, a downed interface, nor adb noise; a wlan0-only table is not a route outside Wi-Fi while an eth0 10.0.0.0/8 one is, Wi-Fi is disabled once and only behind that check, and the readiness verdict then ignores Wi-Fi routes; the guest settles only on a lone validated cellular default network, read from Current Networks by the Capabilities token, never on an unvalidated, half-up, lingering, Wi-Fi or shared default nor on adb noise, and is down only with no internet network left; the cellular branch turns probing off, cycles Wi-Fi and data in order and refuses an unsettled network, and cleanup restores probing; the Wi-Fi read-back accepts only a literal 0, never 'null' or adb noise; a connect-flake retry restores the app through install_app and re-grants; the secret-leak gate removes what it flags and nothing else; the log-privacy gate is one call into logscan-gate.sh that seals the host-printed drive floor, within the 9+9 lines of the two gated slices, under both profiles, takes the proxy profile with e2e_combined's floors when the recorder's upstream is exported and the host profile otherwise, honours a stated profile, exempts every endpoint its callers configure without declaring one, hands the logcat and both drive logs to the wrapper, contains on a leak, and the drive log is echoed only after it; a run that dies at an argument guard leaves NEITHER shared capture behind, so no multi-target caller can file the previous target's transcript under this one's name, and the same copy with that removal deleted still inherits it. Phase 2's install barrier is app-install-lib.sh's, and its own --self-test pins it)."
+  echo "run-single-avd-scenario: self-test passed (connect flake caught; clean pass, real post-connect failure, and non-connect failure all correctly NOT retried; app-failure check scoped to the final attempt; the network gate admits a guest whose on-link routes cover the relay, still rejects one with no route to it, and is satisfied by neither loopback, a foreign subnet, a downed interface, nor adb noise; a wlan0-only table is not a route outside Wi-Fi while an eth0 10.0.0.0/8 one is, Wi-Fi is disabled once and only behind that check, and the readiness verdict then ignores Wi-Fi routes; the guest settles only on a lone validated cellular default network, read from Current Networks by the Capabilities token, never on an unvalidated, half-up, lingering, Wi-Fi or shared default nor on adb noise, and is down only with no internet network left; the cellular branch turns probing off, cycles Wi-Fi and data in order and refuses an unsettled network, and cleanup restores probing and re-enables mobile data a run died holding down; the Wi-Fi read-back accepts only a literal 0, never 'null' or adb noise; a connect-flake retry restores the app through install_app and re-grants; the secret-leak gate removes what it flags and nothing else; the log-privacy gate is one call into logscan-gate.sh that seals the host-printed drive floor, within the 9+9 lines of the two gated slices, under both profiles, takes the proxy profile with e2e_combined's floors when the recorder's upstream is exported and the host profile otherwise, honours a stated profile, exempts every endpoint its callers configure without declaring one, hands the logcat and both drive logs to the wrapper, contains on a leak, and the drive log is echoed only after it; a run that dies at an argument guard leaves NEITHER shared capture behind, so no multi-target caller can file the previous target's transcript under this one's name, and the same copy with that removal deleted still inherits it. Phase 2's install barrier is app-install-lib.sh's, and its own --self-test pins it)."
   return 0
 }
 
@@ -1201,9 +1209,15 @@ readonly LOGCAT_PID=$!
 # (empty until then). Put back on exit because every Android lane shares one
 # AVD cache key; the network it already validated keeps its own reading.
 captive_mode_prev=""
+# 1 while the settle holds mobile data down: a run that dies there would leave
+# the next target of a multi-target caller with no route, failing for our cause.
+data_off_pending=0
 cleanup() {
   if kill -0 "${LOGCAT_PID}" 2>/dev/null; then
     kill "${LOGCAT_PID}" 2>/dev/null || true
+  fi
+  if (( data_off_pending == 1 )); then
+    adb -s "${DEVICE}" shell svc data enable >/dev/null 2>&1 || true
   fi
   if [[ "${captive_mode_prev}" =~ ^[0-9]+$ ]]; then
     adb -s "${DEVICE}" shell settings put global captive_portal_mode "${captive_mode_prev}" \
@@ -1501,6 +1515,7 @@ if (( cellular == 1 )); then
     net_unsettled "captive_portal_mode read back '${captive_mode:-<unreadable>}', not 0, so the next network would probe through the egress guard and fail validation."
   fi
   adb -s "${DEVICE}" shell svc wifi disable >/dev/null 2>&1 || true
+  data_off_pending=1
   adb -s "${DEVICE}" shell svc data disable >/dev/null 2>&1 || true
   wifi_waited=0
   wifi_on="$(wifi_state)"
@@ -1517,6 +1532,7 @@ if (( cellular == 1 )); then
   fi
   echo "  Wi-Fi off (wifi_on=0) and no network left after ${wifi_waited}s; re-enabling mobile data..."
   adb -s "${DEVICE}" shell svc data enable >/dev/null 2>&1 || true
+  data_off_pending=0
   settle_waited=0
   net_state="$(guest_net_state)"
   while (( settle_waited < NET_SETTLE_SECS )) && ! guest_net_settled "${net_state}"; do

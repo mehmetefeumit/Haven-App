@@ -969,7 +969,7 @@ jobs:
       #   49m  this step's inner deadline: scripts/ci/check_e2e_lane_budget.sh's
       #        sum over run-photo-ui-scenario.sh, photo-picker-lib.sh and
       #        run-single-avd-scenario.sh with the drive timeout above
-      #        (`--explain` prints it: 2896 s, the 180 s allowance included).
+      #        (`--explain` prints it: 2912 s, the 180 s allowance included).
       #   59m  this step's timeout-minutes = deadline + 1 (kill grace) + 7
       #        (emulator-boot-timeout) + 2 (the action's own setup/teardown).
       - name: Run e2e_profile_ui_photo on the emulator
