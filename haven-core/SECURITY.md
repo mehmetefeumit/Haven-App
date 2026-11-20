@@ -622,7 +622,14 @@ is ever sent on an engine socket (`live_sync_inbox_socket_e2e`).
   the pause's disconnect loop, the stop, the radio-off watch, the burst's
   re-dial, the health probe, the reconnect re-issue — covers the inbox socket's
   pool too, each pool with its own `Monitor`. Between background bursts
-  neither pool holds a subscription or a connected relay.
+  neither pool holds a subscription or a connected relay. A change of the
+  device's default network, reported while the app is in front, re-dials both
+  pools (`LiveSyncCore::reconnect_after_network_change`: the pause, then the
+  foreground open, under one lifecycle acquisition), so the inbox socket
+  answers its relays' challenges again on the new connection; the platform
+  signal carries no detail of the network, and no native code logs it. It
+  never runs in the background: nothing listens for the change while the app
+  is away (owner-directed 2026-11-20).
 - **What is disclosed.** The inbox relays learn the identity key from the
   answer to their challenge: that the account is online, for as long as the
   session holds the socket, and that this connection reads its gift wraps —

@@ -1717,6 +1717,21 @@ for the fast path would report a product defect every time the slow path
 legitimately ran. Which path a run took is recorded, not asserted
 (`[b9] ENGINE_DURING_OUTAGE running=…`), because both are correct outcomes.
 
+**Amended 2026-11-20 (owner decisions N1–N3): a fourth mechanism, the fastest,
+and this one IS asserted.** Leaving airplane mode hands Android a new default
+network, and an app in front re-dials both live-plane pools 3 s later
+(`NetworkChangeReconnector` → `LiveSyncCore::reconnect_after_network_change`,
+CLAUDE.md Architecture "Network changes"). The oracle's step 11 reads the Rust
+re-dial's own line, `[live_sync] the network changed`, after the drive's
+restore cue in the logcat, and requires the peer's location to surface within
+30 s of it (`b9_redial_verdict`, `[b9] NETWORK_REDIALED ms=<N>`). A receive
+that came back with no re-dial line — through (1) or (3) — is a finding,
+because only the line says which path ran; a run whose engine was torn down
+during the outage has no session to re-dial and leaves the claim unproven
+rather than failed. The 330 s budget is unchanged: it still covers (3) for a
+dead engine. No lane changes the iOS simulator's network, so the iOS half is
+DEFERRED to a physical device.
+
 Two dead things surfaced while verifying the premise, neither load-bearing:
 `BACKOFF_MIN_SECS` / `BACKOFF_MAX_SECS`
 (`haven-core/src/relay/live_sync/config.rs`) are documented as the "supervisor

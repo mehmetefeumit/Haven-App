@@ -236,6 +236,29 @@ log_privacy_gate() {
     --report /tmp/logscan-report.ndjson
 }
 
+# default_network_switches <logcat> <from-line> — how many times the guest
+# switched its DEFAULT network in the capture after line <from-line>.
+#
+# DIAGNOSTIC, never a verdict (run-kp-rotation.sh's precedent). A socket the
+# old default network carried keeps reading open until a ping goes unanswered,
+# so a wait that times out right after a switch reads exactly like a product
+# defect; the failure summary prints this count so a red M11 says whether a
+# switch happened under it. Counted from where the drive began: the Wi-Fi
+# disable before it is a switch this script made on purpose. `LC_ALL=C`
+# because logcat is binary-tainted.
+default_network_switches() {
+  local logfile="${1:-}" from="${2:-0}" n
+  if [[ ! -f "${logfile}" ]]; then
+    echo 0
+    return 0
+  fi
+  n="$(LC_ALL=C awk -v from="${from}" '
+    NR > from && index($0, "Switching to new default network") { n++ }
+    END { print n + 0 }
+  ' "${logfile}" 2>/dev/null)" || n=""
+  echo "${n:-0}"
+}
+
 # --self-test — validate is_connect_flake against synthetic drive logs WITHOUT
 # a device/emulator (mirrors scan-logs-for-secrets.sh --self-test). CI gates
 # the predicate through this in a fast, hermetic job so it can never silently
@@ -962,11 +985,32 @@ eth0	0000000A	00000000	0001	0	0	0	000000FF	0	0	0" 10.0.2.2 'wlan*'; then
   stale_case "project guard"   "${kept}"   removed  1 integration_test/x_test.dart
   stale_case "control"         "${gutted}" survives 1 integration_test/x_test.dart
 
+  # (11) default_network_switches — counts only after the drive's first line,
+  #      and reads a missing capture as none.
+  printf '%s\n' \
+    '11-20 12:00:00.000  500  520 D ConnectivityService: Switching to new default network  (100 -> 101)' \
+    'I flutter : drive started' \
+    '11-20 12:03:00.000  500  520 D ConnectivityService: Switching to new default network  (101 -> 102)' \
+    '11-20 12:03:01.000  500  520 D ConnectivityService: Switching to new default network  (102 -> 101)' \
+    > "${tmp}/switches.log"
+  if [[ "$(default_network_switches "${tmp}/switches.log" 1)" != "2" ]]; then
+    echo "SELF-TEST FAIL (11a): the switches after the drive began are not counted as 2" >&2
+    fail=1
+  fi
+  if [[ "$(default_network_switches "${tmp}/switches.log" 0)" != "3" ]]; then
+    echo "SELF-TEST FAIL (11b): from line 0 every switch is not counted" >&2
+    fail=1
+  fi
+  if [[ "$(default_network_switches "${tmp}/absent.log" 0)" != "0" ]]; then
+    echo "SELF-TEST FAIL (11c): a missing capture does not read as no switch" >&2
+    fail=1
+  fi
+
   if (( fail )); then
     echo "run-single-avd-scenario: SELF-TEST FAILED" >&2
     return 1
   fi
-  echo "run-single-avd-scenario: self-test passed (connect flake caught; clean pass, real post-connect failure, and non-connect failure all correctly NOT retried; app-failure check scoped to the final attempt; the network gate admits a guest whose on-link routes cover the relay, still rejects one with no route to it, and is satisfied by neither loopback, a foreign subnet, a downed interface, nor adb noise; a wlan0-only table is not a route outside Wi-Fi while an eth0 10.0.0.0/8 one is, Wi-Fi is disabled once and only behind that check, and the readiness verdict then ignores Wi-Fi routes; the Wi-Fi read-back accepts only a literal 0, never 'null' or adb noise; a connect-flake retry restores the app through install_app and re-grants; the secret-leak gate removes what it flags and nothing else; the log-privacy gate is one call into logscan-gate.sh that seals the host-printed drive floor, within the 9+9 lines of the two gated slices, under both profiles, takes the proxy profile with e2e_combined's floors when the recorder's upstream is exported and the host profile otherwise, honours a stated profile, exempts every endpoint its callers configure without declaring one, hands the logcat and both drive logs to the wrapper, contains on a leak, and the drive log is echoed only after it; a run that dies at an argument guard leaves NEITHER shared capture behind, so no multi-target caller can file the previous target's transcript under this one's name, and the same copy with that removal deleted still inherits it. Phase 2's install barrier is app-install-lib.sh's, and its own --self-test pins it)."
+  echo "run-single-avd-scenario: self-test passed (connect flake caught; clean pass, real post-connect failure, and non-connect failure all correctly NOT retried; app-failure check scoped to the final attempt; the network gate admits a guest whose on-link routes cover the relay, still rejects one with no route to it, and is satisfied by neither loopback, a foreign subnet, a downed interface, nor adb noise; a wlan0-only table is not a route outside Wi-Fi while an eth0 10.0.0.0/8 one is, Wi-Fi is disabled once and only behind that check, and the readiness verdict then ignores Wi-Fi routes; the Wi-Fi read-back accepts only a literal 0, never 'null' or adb noise; a connect-flake retry restores the app through install_app and re-grants; the secret-leak gate removes what it flags and nothing else; the log-privacy gate is one call into logscan-gate.sh that seals the host-printed drive floor, within the 9+9 lines of the two gated slices, under both profiles, takes the proxy profile with e2e_combined's floors when the recorder's upstream is exported and the host profile otherwise, honours a stated profile, exempts every endpoint its callers configure without declaring one, hands the logcat and both drive logs to the wrapper, contains on a leak, and the drive log is echoed only after it; a run that dies at an argument guard leaves NEITHER shared capture behind, so no multi-target caller can file the previous target's transcript under this one's name, and the same copy with that removal deleted still inherits it. the default-network switch count reads only what follows the drive's start. Phase 2's install barrier is app-install-lib.sh's, and its own --self-test pins it)."
   return 0
 }
 
@@ -1584,6 +1628,9 @@ echo "Phase 4/4 — Driving test on ${DEVICE} (timeout ${DRIVE_TIMEOUT}," \
 drive_rc=0
 attempt=1
 : > /tmp/flutter-drive.log
+# Where the drive begins in the logcat, for the failure summary's
+# default-network count (default_network_switches).
+drive_logcat_from="$(wc -l < /tmp/adb-logcat.log 2>/dev/null || echo 0)"
 while (( attempt <= DRIVE_MAX_ATTEMPTS )); do
   attempt_log="/tmp/flutter-drive.attempt${attempt}.log"
   # Sets drive_rc + preconnect_stall (the watchdog kills a never-connecting
@@ -1751,6 +1798,13 @@ if grep -aqF 'Network is unreachable' "${FINAL_ATTEMPT_LOG}" 2>/dev/null; then
   # construct (drive-log-lib.sh's failure_evidence, run-b5's marker dump).
   grep -aF 'Network is unreachable' "${FINAL_ATTEMPT_LOG}" 2>/dev/null \
     | head -3 >&2 || true
+fi
+if (( drive_rc != 0 )) || drive_log_reports_test_failure "${FINAL_ATTEMPT_LOG}"; then
+  echo "NOTE: the guest switched its default network" \
+       "$(default_network_switches /tmp/adb-logcat.log "${drive_logcat_from:-0}")" \
+       "time(s) while the drive ran ('ConnectivityService: Switching to new" \
+       "default network' in the logcat). A wait that timed out right after a" \
+       "switch may have been waiting on a socket the old network carried." >&2
 fi
 if (( drive_rc == 0 )) && drive_log_reports_test_failure "${FINAL_ATTEMPT_LOG}"; then
   echo "ERROR: flutter drive for ${SCENARIO_FILE} exited 0, but the ON-DEVICE" \
