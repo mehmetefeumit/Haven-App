@@ -538,6 +538,7 @@ jobs:
           #   INSTALL_BARRIER_SECS                                 120
           #   WIFI_OFF_TIMEOUT_SECS                                 20
           #   GUEST_NET_TIMEOUT_SECS                               120
+          #   NET_SETTLE_SECS                                       16
           #   2 retried pre-connect stalls, each restoring the app the
           #     failed attempt's teardown uninstalled — a flushed fresh
           #     install — 2 x (300 + 5 + 120 + 5)                   860
@@ -545,16 +546,16 @@ jobs:
           #   the guard's `iptables -w 5` calls wait only on another
           #     xtables-lock holder, and nothing in this job touches
           #     iptables during this step (relays start in earlier steps)   0
-          #                                          = 1904 s / 2864 s
-          #                                          = 31m44s / 47m44s
+          #                                          = 1920 s / 2880 s
+          #                                          = 32m00s / 48m00s
           #   + the unbounded adb, guard and scan work, ~3 min: the figure the
           #     earlier budget carried, kept because the sick device that
           #     reaches the other bounds is the one that slows it (under 30 s
           #     on run 34488512808's healthy single-target lanes)
-          #                                          = 34m44s / 50m44s
-          #   -> 35m / 51m. scripts/ci/check_e2e_lane_budget.sh derives this
-          #   sum from the scripts' own constants on every push (`--explain`
-          #   prints it).
+          #                                          = 35m00s / 51m00s
+          #   -> 35m / 51m, with no headroom left.
+          #   scripts/ci/check_e2e_lane_budget.sh derives this sum from the
+          #   scripts' own constants on every push (`--explain` prints it).
           # This was 2x5 + 12 + 3 = 25 inside 26m, and 2x5 + 28 + 3 = 41 inside
           # 45m: both counted only the watchdog and drive timeouts, leaving out
           # the waits before the drive and the retries' own tails, and the

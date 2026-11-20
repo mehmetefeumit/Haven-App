@@ -526,6 +526,160 @@ eth0	0000000A	00000000	0001	0	0	0	000000FF	0	0	0" 10.0.2.2 'wlan*'; then
     fail=1
   fi
 
+  # (6l) guest_net_summary / guest_net_settled / guest_net_is_down — the state
+  # the drive may start in. Records are in AOSP android-14's
+  # ConnectivityService dump shape; the CI evidence is the unvalidated
+  # cellular network of runs 44564452934 and 44690188907, which telephony
+  # replaced ~258 s into the drive. Capability lists are whole variables, not
+  # `${…/…/&}` edits: bash 5.2 reads `&` in a replacement as the match.
+  local caps_cell='MMS&SUPL&DUN&FOTA&IMS&CBS&INTERNET&NOT_RESTRICTED&TRUSTED&NOT_VPN&VALIDATED&NOT_ROAMING&FOREGROUND&NOT_CONGESTED&NOT_SUSPENDED&NOT_VCN_MANAGED'
+  local caps_unval='MMS&SUPL&DUN&FOTA&IMS&CBS&INTERNET&NOT_RESTRICTED&TRUSTED&NOT_VPN&NOT_ROAMING&FOREGROUND&NOT_CONGESTED&NOT_SUSPENDED&NOT_VCN_MANAGED'
+  local caps_ims='IMS&NOT_RESTRICTED&TRUSTED&NOT_VPN&VALIDATED&NOT_ROAMING&FOREGROUND&NOT_CONGESTED&NOT_SUSPENDED&NOT_VCN_MANAGED'
+  local caps_wifi='NOT_METERED&INTERNET&NOT_RESTRICTED&TRUSTED&NOT_VPN&NOT_ROAMING&FOREGROUND&NOT_CONGESTED&NOT_SUSPENDED&NOT_VCN_MANAGED'
+  # nai <id> <ni> <transports> <capabilities> [<flags>] — one record line.
+  nai() {
+    printf '  NetworkAgentInfo{network{%s}  handle{437197393933}  ni{%s} created=2026-11-19T18:21:22.139Z Score(Policies : IS_VALIDATED ; KeepConnected : 0) %s  lp{{InterfaceName: eth0 LinkAddresses: [ 10.0.2.15/24 ] DnsAddresses: [ /10.0.2.3 ]}}  nc{[ Transports: %s Capabilities: %s LinkUpBandwidth>=2048Kbps SubscriptionIds: {1}]}  factorySerialNumber=3}' \
+      "$1" "$2" "${5:-firstValidated=1s lastValidated=1s}" "$3" "$4"
+  }
+  local reqs='    Requests: REQUEST:3 LISTEN:20 BACKGROUND_REQUEST:0 total:23
+      NetworkRequest [ REQUEST id=1, [ Capabilities: INTERNET&NOT_RESTRICTED&TRUSTED&VALIDATED Uid: 1000] ]
+    Inactivity Timers:'
+  local cell_ni='MOBILE[HSPA] CONNECTED extra: epc.tmobile.com'
+  # net_dump <default-id> <record>... — a dump with those Current Networks,
+  # followed by a section whose validated Wi-Fi record must not be read.
+  net_dump() {
+    local def="$1"; shift
+    printf 'NetworkProviders for:\n  NetworkProviderInfo{name=TelephonyNetworkProvider}\n\n'
+    printf 'Active default network: %s\n\nCurrent Networks:\n' "${def}"
+    printf '%s\n' "$@"
+    printf '\nNetwork Offers:\n%s\n' "$(nai 99 'WIFI CONNECTED extra: ' WIFI 'INTERNET&VALIDATED')"
+  }
+  local s settled_dump half noise
+  settled_dump="$(net_dump 101 "$(nai 101 "${cell_ni}" CELLULAR "${caps_cell}")" "${reqs}")"
+  s="$(guest_net_summary "${settled_dump}")"
+  # (6l-a) THE STATE TO DRIVE IN: one validated cellular network, the default,
+  # read from Current Networks alone.
+  if [[ "${s}" != $'net 101 CELLULAR CONNECTED validated=1 internet=1 lingering=0\ndefault 101' ]] \
+     || ! guest_net_settled "${s}" || guest_net_is_down "${s}"; then
+    echo "SELF-TEST FAIL (6l-a): a lone validated cellular default must read as" \
+         "settled and not down, from Current Networks alone (summary: ${s})" >&2
+    fail=1
+  fi
+  # (6l-b) The summary is what the runner prints: no address, no interface.
+  if grep -qE '10\.0\.2|eth0|tmobile' <<<"${s}"; then
+    echo "SELF-TEST FAIL (6l-b): the summary leaked link properties: ${s}" >&2
+    fail=1
+  fi
+  # (6l-c) THE STATE CI DROVE INTO: connected, cellular, alone — and
+  # unvalidated. Its record still prints IS_VALIDATED and firstValidated=; only
+  # the Capabilities token counts.
+  s="$(guest_net_summary "$(net_dump 101 "$(nai 101 "${cell_ni}" CELLULAR "${caps_unval}")")")"
+  if guest_net_settled "${s}"; then
+    echo "SELF-TEST FAIL (6l-c): an unvalidated cellular network must NOT read" \
+         "as settled — telephony replaces it mid-drive (summary: ${s})" >&2
+    fail=1
+  fi
+  # (6l-d) A second internet network can take the default, and a Wi-Fi
+  # default is the transport the lane removed.
+  s="$(guest_net_summary "$(net_dump 101 "$(nai 101 "${cell_ni}" CELLULAR "${caps_cell}")" \
+         "$(nai 102 'WIFI CONNECTED extra: ' WIFI "${caps_wifi}" '')")")"
+  if guest_net_settled "${s}"; then
+    echo "SELF-TEST FAIL (6l-d): a second internet network must NOT read as" \
+         "settled (summary: ${s})" >&2
+    fail=1
+  fi
+  s="$(guest_net_summary "$(net_dump 102 "$(nai 102 'WIFI CONNECTED extra: ' WIFI "${caps_wifi}&VALIDATED")")")"
+  if guest_net_settled "${s}"; then
+    echo "SELF-TEST FAIL (6l-d2): a Wi-Fi default must NOT read as settled" \
+         "(summary: ${s})" >&2
+    fail=1
+  fi
+  # (6l-e) Half-up and on-the-way-out networks are not settled: CONNECTING,
+  # DISCONNECTED, lingering, or a default with no record of its own.
+  for half in "$(nai 101 'MOBILE[HSPA] CONNECTING extra: epc.tmobile.com' CELLULAR "${caps_cell}")" \
+              "$(nai 101 'MOBILE[HSPA] DISCONNECTED extra: epc.tmobile.com' CELLULAR "${caps_cell}")" \
+              "$(nai 101 "${cell_ni}" CELLULAR "${caps_cell}" 'lingering firstValidated=1s')"; do
+    s="$(guest_net_summary "$(net_dump 101 "${half}")")"
+    if guest_net_settled "${s}"; then
+      echo "SELF-TEST FAIL (6l-e): a network that is not CONNECTED and kept must" \
+           "NOT read as settled (summary: ${s})" >&2
+      fail=1
+    fi
+  done
+  s="$(guest_net_summary "$(net_dump 103 "$(nai 101 "${cell_ni}" CELLULAR "${caps_cell}")")")"
+  if guest_net_settled "${s}"; then
+    echo "SELF-TEST FAIL (6l-e2): a default with no record must NOT read as" \
+         "settled (summary: ${s})" >&2
+    fail=1
+  fi
+  # (6l-f) Down: no default and no internet network — a non-internet one may
+  # stay. A default of none beside a live internet network is not down yet.
+  s="$(guest_net_summary "$(net_dump none "$(nai 100 "${cell_ni}" CELLULAR "${caps_ims}")")")"
+  if ! guest_net_is_down "${s}" || guest_net_settled "${s}"; then
+    echo "SELF-TEST FAIL (6l-f): no default and no internet network must read" \
+         "as down and not settled (summary: ${s})" >&2
+    fail=1
+  fi
+  s="$(guest_net_summary "$(net_dump none "$(nai 100 "${cell_ni}" CELLULAR "${caps_unval}")")")"
+  if guest_net_is_down "${s}"; then
+    echo "SELF-TEST FAIL (6l-f2): a listed internet network must NOT read as" \
+         "down (summary: ${s})" >&2
+    fail=1
+  fi
+  # (6l-g) adb noise and an empty read are neither down nor settled.
+  for noise in '' 'adb: device offline' 'error: closed'; do
+    s="$(guest_net_summary "${noise}")"
+    if guest_net_is_down "${s}" || guest_net_settled "${s}"; then
+      echo "SELF-TEST FAIL (6l-g): '${noise}' must read as neither down nor" \
+           "settled (summary: ${s})" >&2
+      fail=1
+    fi
+  done
+  # (6l-h) adb's CRLF must not defeat the read.
+  if ! guest_net_settled "$(guest_net_summary "${settled_dump//$'\n'/$'\r\n'}")"; then
+    echo "SELF-TEST FAIL (6l-h): a CRLF dump of the settled state must read as" \
+         "settled" >&2
+    fail=1
+  fi
+
+  # (6m) THE SETTLE'S WIRING, through the same lexer as (6k): inside the
+  # cellular branch, probing is turned off before data goes down, Wi-Fi and
+  # data go down together and are waited on, data comes back, the settled
+  # state is waited on, and not reaching it refuses to drive; data is cycled
+  # nowhere else, and the EXIT trap puts the probing setting back.
+  local settle_seq data_cycles cleanup_body cleanup_data
+  cleanup_body="$(sed -n '/^cleanup() {$/,/^}$/p' "${BASH_SOURCE[0]}")"
+  settle_seq="$(awk '
+    /^if \(\( cellular == 1 \)\); then$/ { on = 1; next }
+    on && /^(elif|else|fi)([[:space:];]|$)/ { on = 0 }
+    !on { next }
+    refuse_next { if (/net_unsettled/) printf "refuse "; refuse_next = 0 }
+    /settings put global captive_portal_mode 0 / { printf "mode0 " }
+    /svc[[:space:]]+wifi[[:space:]]+disable/ { printf "wifi-off " }
+    /^ *data_off_pending=1$/ { printf "owed " }
+    /svc[[:space:]]+data[[:space:]]+disable/ { printf "data-off " }
+    /^ *while .*guest_net_is_down/ { printf "wait-down " }
+    /svc[[:space:]]+data[[:space:]]+enable/ { printf "data-on " }
+    /^ *data_off_pending=0$/ { printf "paid " }
+    /^ *while .*guest_net_settled/ { printf "wait-settled " }
+    /^ *if ! guest_net_settled/ { refuse_next = 1 }' <<<"${net_code}")"
+  data_cycles="$(grep -cE 'svc[[:space:]]+data[[:space:]]+(en|dis)able' <<<"${net_code}" || true)"
+  cleanup_data="$(awk '
+    /^  if \(\( data_off_pending == 1 \)\); then$/ { on = 1; next }
+    on && /^  fi$/ { on = 0 }
+    /svc[[:space:]]+data[[:space:]]+(en|dis)able/ { printf "%s ", (on ? "guarded" : "bare") }' \
+    <<<"${cleanup_body}")"
+  if [[ "${settle_seq}" != 'mode0 wifi-off owed data-off wait-down data-on paid wait-settled refuse ' ]] \
+     || (( data_cycles != 3 )) || [[ "${cleanup_data}" != 'guarded ' ]] \
+     || ! grep -q 'settings put global captive_portal_mode "${captive_mode_prev}"' <<<"${cleanup_body}"; then
+    echo "SELF-TEST FAIL (6m): the cellular branch must settle the network in" \
+         "order, owing mobile data while it holds it down, and refuse an" \
+         "unsettled one (seq='${settle_seq}', data cycles=${data_cycles});" \
+         "cleanup must restore captive_portal_mode and re-enable data only" \
+         "while it is owed (cleanup data='${cleanup_data}')" >&2
+    fail=1
+  fi
+
   # ---------------------------------------------------------------
   # (7) wifi_is_off — the read-back on the Wi-Fi disable. `svc wifi disable`
   # exits 0 whether or not it took effect, so this is the only thing that can
@@ -966,7 +1120,7 @@ eth0	0000000A	00000000	0001	0	0	0	000000FF	0	0	0" 10.0.2.2 'wlan*'; then
     echo "run-single-avd-scenario: SELF-TEST FAILED" >&2
     return 1
   fi
-  echo "run-single-avd-scenario: self-test passed (connect flake caught; clean pass, real post-connect failure, and non-connect failure all correctly NOT retried; app-failure check scoped to the final attempt; the network gate admits a guest whose on-link routes cover the relay, still rejects one with no route to it, and is satisfied by neither loopback, a foreign subnet, a downed interface, nor adb noise; a wlan0-only table is not a route outside Wi-Fi while an eth0 10.0.0.0/8 one is, Wi-Fi is disabled once and only behind that check, and the readiness verdict then ignores Wi-Fi routes; the Wi-Fi read-back accepts only a literal 0, never 'null' or adb noise; a connect-flake retry restores the app through install_app and re-grants; the secret-leak gate removes what it flags and nothing else; the log-privacy gate is one call into logscan-gate.sh that seals the host-printed drive floor, within the 9+9 lines of the two gated slices, under both profiles, takes the proxy profile with e2e_combined's floors when the recorder's upstream is exported and the host profile otherwise, honours a stated profile, exempts every endpoint its callers configure without declaring one, hands the logcat and both drive logs to the wrapper, contains on a leak, and the drive log is echoed only after it; a run that dies at an argument guard leaves NEITHER shared capture behind, so no multi-target caller can file the previous target's transcript under this one's name, and the same copy with that removal deleted still inherits it. Phase 2's install barrier is app-install-lib.sh's, and its own --self-test pins it)."
+  echo "run-single-avd-scenario: self-test passed (connect flake caught; clean pass, real post-connect failure, and non-connect failure all correctly NOT retried; app-failure check scoped to the final attempt; the network gate admits a guest whose on-link routes cover the relay, still rejects one with no route to it, and is satisfied by neither loopback, a foreign subnet, a downed interface, nor adb noise; a wlan0-only table is not a route outside Wi-Fi while an eth0 10.0.0.0/8 one is, Wi-Fi is disabled once and only behind that check, and the readiness verdict then ignores Wi-Fi routes; the guest settles only on a lone validated cellular default network, read from Current Networks by the Capabilities token, never on an unvalidated, half-up, lingering, Wi-Fi or shared default nor on adb noise, and is down only with no internet network left; the cellular branch turns probing off, cycles Wi-Fi and data in order and refuses an unsettled network, and cleanup restores probing and re-enables mobile data a run died holding down; the Wi-Fi read-back accepts only a literal 0, never 'null' or adb noise; a connect-flake retry restores the app through install_app and re-grants; the secret-leak gate removes what it flags and nothing else; the log-privacy gate is one call into logscan-gate.sh that seals the host-printed drive floor, within the 9+9 lines of the two gated slices, under both profiles, takes the proxy profile with e2e_combined's floors when the recorder's upstream is exported and the host profile otherwise, honours a stated profile, exempts every endpoint its callers configure without declaring one, hands the logcat and both drive logs to the wrapper, contains on a leak, and the drive log is echoed only after it; a run that dies at an argument guard leaves NEITHER shared capture behind, so no multi-target caller can file the previous target's transcript under this one's name, and the same copy with that removal deleted still inherits it. Phase 2's install barrier is app-install-lib.sh's, and its own --self-test pins it)."
   return 0
 }
 
@@ -1051,9 +1205,25 @@ adb logcat -c
 adb logcat -v threadtime > /tmp/adb-logcat.log &
 readonly LOGCAT_PID=$!
 
+# captive_portal_mode as the guest had it before the network settle changed it
+# (empty until then). Put back on exit because every Android lane shares one
+# AVD cache key; the network it already validated keeps its own reading.
+captive_mode_prev=""
+# 1 while the settle holds mobile data down: a run that dies there would leave
+# the next target of a multi-target caller with no route, failing for our cause.
+data_off_pending=0
 cleanup() {
   if kill -0 "${LOGCAT_PID}" 2>/dev/null; then
     kill "${LOGCAT_PID}" 2>/dev/null || true
+  fi
+  if (( data_off_pending == 1 )); then
+    adb -s "${DEVICE}" shell svc data enable >/dev/null 2>&1 || true
+  fi
+  if [[ "${captive_mode_prev}" =~ ^[0-9]+$ ]]; then
+    adb -s "${DEVICE}" shell settings put global captive_portal_mode "${captive_mode_prev}" \
+      >/dev/null 2>&1 || true
+  elif [[ -n "${captive_mode_prev}" ]]; then
+    adb -s "${DEVICE}" shell settings delete global captive_portal_mode >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT
@@ -1242,14 +1412,28 @@ echo "Phase 3/4 — Permissions ready."
 # covers the relay, and from then on a Wi-Fi route is never readiness. A guest
 # whose cellular never comes up pays the whole wait and keeps Wi-Fi, which is
 # then the one network. The cellular wait is the readiness wait, so the worst
-# case is the same two bounds as before: GUEST_NET_TIMEOUT_SECS, then
-# WIFI_OFF_TIMEOUT_SECS.
+# case is GUEST_NET_TIMEOUT_SECS, then WIFI_OFF_TIMEOUT_SECS and
+# NET_SETTLE_SECS below.
 #
 # READ BACK, NEVER ASSUMED: `svc wifi disable` exits 0 whether or not it took
 # effect, so the state is re-read from `settings get global wifi_on`.
 #
-# WARN-AND-DRIVE, NOT FAIL-CLOSED. All of this is a DIAGNOSTIC: it makes an
-# infrastructure fault legible, it does not make the network work. A readiness
+# AND THE ONE NETWORK MUST STAY. With the egress guard installed the cellular
+# network fails validation, and ~258 s later telephony's data-stall recovery
+# replaces it, killing every socket the drive had open (guest-net-lib.sh,
+# "THE SETTLED GUEST NETWORK"; CI runs 44564452934 and 44690188907, mid-M11).
+# So Wi-Fi goes off together with mobile data, `captive_portal_mode` 0 is set
+# so the next network validates without probing, data comes back, and the
+# drive starts only on a default network that is cellular, CONNECTED, VALIDATED
+# and the only internet network. That is a state the harness establishes, not
+# a heuristic about one, so it FAILS CLOSED: a guest that does not reach it
+# within the bounds is an infrastructure fault named here, before a drive whose
+# sockets would die mid-scenario and read as a product defect. The settle and
+# end-of-drive lines print network ids, transports and flags only.
+#
+# WARN-AND-DRIVE, NOT FAIL-CLOSED — the route-readiness verdict below, and
+# the Wi-Fi decision when cellular never came up. Those are a DIAGNOSTIC: they
+# make an infrastructure fault legible, they do not make the network work. A readiness
 # heuristic that hard-fails can only ever be as correct as its model of the
 # guest's networking — and when that model was wrong (CI run 30964250098) the
 # hard failure turned five healthy lanes red without driving a single test.
@@ -1262,6 +1446,9 @@ echo "Phase 3/4 — Permissions ready."
 # -----------------------------------------------------------------
 readonly GUEST_NET_TIMEOUT_SECS="${GUEST_NET_TIMEOUT_SECS:-120}"
 readonly WIFI_OFF_TIMEOUT_SECS="${WIFI_OFF_TIMEOUT_SECS:-20}"
+# From `svc data enable` to a validated default network. Both observed
+# replacements took 3.05 s from teardown to CONNECTED.
+readonly NET_SETTLE_SECS="${NET_SETTLE_SECS:-16}"
 RELAY_HOST_IP="$(relay_host_ipv4 "${RELAY_URL}")"
 readonly RELAY_HOST_IP
 # 0 = the predicate ran and never saw a covering route; 1 = it ran and did;
@@ -1302,26 +1489,63 @@ wifi_state() {
   adb -s "${DEVICE}" shell settings get global wifi_on 2>/dev/null \
     | tr -d '\r' | head -n 1
 }
+# guest_net_summary of the guest's ConnectivityService state: ids, transports,
+# states and flags, nothing else (see guest-net-lib.sh).
+guest_net_state() {
+  guest_net_summary "$(adb -s "${DEVICE}" shell dumpsys connectivity 2>&1 || true)"
+}
+net_unsettled() {
+  echo "ERROR: $1 An infrastructure fault, not a product defect: refusing to" \
+       "drive on a guest network that telephony will replace mid-drive." >&2
+  echo "---- guest networks (last read) ----" >&2
+  printf '%s\n' "${net_state:-}" >&2
+  exit 1
+}
 if (( cellular == 1 )); then
   route_skip='wlan*'
   echo "A non-Wi-Fi route covers ${RELAY_HOST_IP} after ${net_waited}s;" \
-       "disabling guest Wi-Fi on ${DEVICE} so it is the only network..."
+       "disabling guest Wi-Fi on ${DEVICE} and replacing the cellular network" \
+       "with one that stays..."
+  captive_mode_prev="$(adb -s "${DEVICE}" shell settings get global captive_portal_mode \
+    2>/dev/null | tr -d '\r' | head -n 1 || true)"
+  adb -s "${DEVICE}" shell settings put global captive_portal_mode 0 >/dev/null 2>&1 || true
+  captive_mode="$(adb -s "${DEVICE}" shell settings get global captive_portal_mode \
+    2>/dev/null | tr -d '\r' | head -n 1 || true)"
+  if [[ "${captive_mode}" != 0 ]]; then
+    net_unsettled "captive_portal_mode read back '${captive_mode:-<unreadable>}', not 0, so the next network would probe through the egress guard and fail validation."
+  fi
   adb -s "${DEVICE}" shell svc wifi disable >/dev/null 2>&1 || true
+  data_off_pending=1
+  adb -s "${DEVICE}" shell svc data disable >/dev/null 2>&1 || true
   wifi_waited=0
   wifi_on="$(wifi_state)"
-  while (( wifi_waited < WIFI_OFF_TIMEOUT_SECS )) && ! wifi_is_off "${wifi_on}"; do
+  net_state="$(guest_net_state)"
+  while (( wifi_waited < WIFI_OFF_TIMEOUT_SECS )) \
+        && ! { wifi_is_off "${wifi_on}" && guest_net_is_down "${net_state}"; }; do
     sleep 2
     wifi_waited=$(( wifi_waited + 2 ))
     wifi_on="$(wifi_state)"
+    net_state="$(guest_net_state)"
   done
-  if wifi_is_off "${wifi_on}"; then
-    echo "  Wi-Fi off after ${wifi_waited}s (wifi_on=0); cellular/eth0 is the default network."
-  else
-    echo "WARN: guest Wi-Fi did not report off within ${WIFI_OFF_TIMEOUT_SECS}s" \
-         "(wifi_on=${wifi_on:-<unreadable>}). Driving anyway — that restores the" \
-         "two-network behaviour CI run 31667128290 raced, it does not break" \
-         "anything that worked before." >&2
+  if ! wifi_is_off "${wifi_on}" || ! guest_net_is_down "${net_state}"; then
+    net_unsettled "within ${WIFI_OFF_TIMEOUT_SECS}s of disabling Wi-Fi and mobile data the guest did not reach no-network (wifi_on=${wifi_on:-<unreadable>})."
   fi
+  echo "  Wi-Fi off (wifi_on=0) and no network left after ${wifi_waited}s; re-enabling mobile data..."
+  adb -s "${DEVICE}" shell svc data enable >/dev/null 2>&1 || true
+  data_off_pending=0
+  settle_waited=0
+  net_state="$(guest_net_state)"
+  while (( settle_waited < NET_SETTLE_SECS )) && ! guest_net_settled "${net_state}"; do
+    sleep 2
+    settle_waited=$(( settle_waited + 2 ))
+    net_state="$(guest_net_state)"
+  done
+  if ! guest_net_settled "${net_state}"; then
+    net_unsettled "within ${NET_SETTLE_SECS}s of re-enabling mobile data the default network was not a validated cellular network alone."
+  fi
+  settled_net="$(sed -n 's/^default //p' <<<"${net_state}")"
+  echo "GUEST-NET-SETTLED: the drive starts on default network ${settled_net}" \
+       "(cellular, validated, the only internet network) after ${settle_waited}s."
 elif (( net_ready == 0 )); then
   echo "WARN: no route outside Wi-Fi covered ${RELAY_HOST_IP} within" \
        "${GUEST_NET_TIMEOUT_SECS}s — the emulator's cellular network never came" \
@@ -1424,6 +1648,7 @@ fi
 #                               + INSTALL_BARRIER_SECS + DRIVE_RETRY_SETTLE_SECS)
 #   + DRIVE_TIMEOUT + DRIVE_KILL_AFTER_SECS
 #   + INSTALL_BARRIER_SECS + WIFI_OFF_TIMEOUT_SECS + GUEST_NET_TIMEOUT_SECS
+#   + NET_SETTLE_SECS
 #   + the unbounded adb and scan work
 #
 # A retried attempt is a pre-connect stall: the watchdog's deadline, 5 s for its
@@ -1432,11 +1657,11 @@ fi
 # retried, so the one attempt that can reach DRIVE_TIMEOUT is the last, plus its
 # 30 s `--kill-after`. The install barrier (INSTALL_BARRIER_SECS, app-install-lib.sh)
 # fails the run rather than driving when it reaches its bound, but one that
-# drains just inside it does not. The Wi-Fi and route bounds count their sleeps,
-# so those loops' adb reads join the unbounded work (clear, installed-package
+# drains just inside it does not. The Wi-Fi, route and settle bounds count their
+# sleeps, so those loops' adb reads join the unbounded work (clear, installed-package
 # probe, install, grants, secret scan, and a retry's restore): 15-28 s in run
 # 34488512808's three single-target lanes. At the defaults the bounded terms are
-# DRIVE_TIMEOUT + 1150 s.
+# DRIVE_TIMEOUT + 1166 s.
 #
 # A single-target lane's wrapper must cover this sum plus whatever else it runs
 # inside its deadline, or a run that stalls and then recovers on a full retry
@@ -1662,6 +1887,21 @@ while (( attempt <= DRIVE_MAX_ATTEMPTS )); do
   rm -f "${attempt_log}"
   break
 done
+
+# The settle's own proof in CI: the network the drive ended on, against the
+# one it started on. A diagnostic, never a verdict.
+if [[ -n "${settled_net:-}" ]]; then
+  net_state="$(guest_net_state)"
+  end_net="$(sed -n 's/^default //p' <<<"${net_state}")"
+  if [[ "${end_net}" == "${settled_net}" ]]; then
+    echo "GUEST-NET-END: the drive ended on default network ${end_net}, the one it started on."
+  else
+    echo "GUEST-NET-END: the default network CHANGED during the drive" \
+         "(${settled_net} -> ${end_net:-<unreadable>}); sockets opened before the" \
+         "change died with it — read connection failures below as that first." >&2
+    printf '%s\n' "${net_state}" >&2
+  fi
+fi
 
 if (( preconnect_stall == 1 )); then
   echo "ERROR: flutter drive for ${SCENARIO_FILE} never connected within" \

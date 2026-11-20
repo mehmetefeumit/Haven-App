@@ -416,7 +416,7 @@ jobs:
       # step is their sum: p95 6.5 + ~10 = ~17 min, and the cold-attach shape
       # ~19 + ~10 = ~29 min; 34 holds both.
       # Measure the first green runs and re-derive this from their p95. It is
-      # not a worst case: one invocation's own is 1750 s = 29m10s
+      # not a worst case: one invocation's own is 1766 s = 29m26s
       # (run-single-avd-scenario.sh's sum at the 10m drive and the default
       # 300 s watchdog), already near this deadline, which reaps by design.
       - name: Run relay-management tests on the emulator
