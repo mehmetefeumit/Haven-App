@@ -143,6 +143,8 @@ import 'package:haven/src/pages/map_shell.dart' show MapShell;
 import 'package:haven/src/providers/maintenance_scheduler_provider.dart'
     show MaintenanceSchedulerNotifier, maintenanceSchedulerProvider;
 import 'package:haven/src/providers/onboarding_provider.dart';
+import 'package:haven/src/providers/profile_sync_provider.dart'
+    show OwnProfileSyncController, ownProfileSyncProvider;
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/rust/api.dart'
     show
@@ -749,6 +751,28 @@ class _InertMaintenanceScheduler extends MaintenanceSchedulerNotifier {
   void build() {}
 }
 
+/// Stand-in for [OwnProfileSyncController] that never starts a sync pass.
+///
+/// MapShell's cold-start timer and every resume call `retryIfPending`, which
+/// syncs whenever a save is pending, and Rust's sync lock makes the second of
+/// two passes report `nothingPending` by design
+/// (`two_concurrent_syncs_publish_exactly_one_kind0`). So an app pass landing
+/// between a step's save and its `syncOwnProfile` took the publish the step
+/// asserts on (CI run 44770359116, step 7), and in 2a/4a would put the save
+/// on a relay before the "observed by NO ONE yet" check. With this, every
+/// pass is the scenario's own; the controller's promises are
+/// `profile_sync_provider_test.dart`'s.
+class _ScenarioOwnsProfileSync extends OwnProfileSyncController {
+  @override
+  void build() {}
+
+  @override
+  Future<void> sync() async {}
+
+  @override
+  Future<void> retryIfPending() async {}
+}
+
 /// Runs [cleanup] but never lets it hang past [_teardownTimeout] or throw out
 /// of a `tearDownAll` block.
 Future<void> _boundedTeardown(
@@ -1160,7 +1184,8 @@ void main() {
       try {
         // -------------------------------------------------------------------
         // Pump HavenApp (Alice) → MapShell, with the maintenance scheduler
-        // no-op'd and the geolocator replaced by a deterministic fake.
+        // and the app's own profile-sync passes no-op'd and the geolocator
+        // replaced by a deterministic fake.
         // -------------------------------------------------------------------
         final prefs = await SharedPreferences.getInstance();
         final flags = OnboardingFlags(
@@ -1175,6 +1200,7 @@ void main() {
               maintenanceSchedulerProvider.overrideWith(
                 _InertMaintenanceScheduler.new,
               ),
+              ownProfileSyncProvider.overrideWith(_ScenarioOwnsProfileSync.new),
               onboardingControllerProvider.overrideWith(
                 (ref) => OnboardingController(flags),
               ),
