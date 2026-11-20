@@ -335,6 +335,19 @@ has_unconditional() { # <needle>; code text on stdin
     }'
 }
 
+# is_network_change_source <file.dart> — 0 when the file's ONE native listen is
+# the fieldless `haven.app/network_change` channel (network_change_source.dart)
+# and it names nothing of the position stream: one `EventChannel(`, naming that
+# channel, one `receiveBroadcastStream(`, and no `ios_location_stream`. A
+# position listen added beside it fails one of the three and is counted.
+is_network_change_source() {
+  local f="$1"
+  [[ "$(grep -cF 'EventChannel(' "$f" || true)" == "1" ]] &&
+    grep -qF "EventChannel('haven.app/network_change')" "$f" &&
+    [[ "$(grep -cF 'receiveBroadcastStream(' "$f" || true)" == "1" ]] &&
+    ! grep -qF 'ios_location_stream' "$f"
+}
+
 check_single_plugin_boundary() { # <geolocator_location_service.dart> <lib dir>
   local svc="$1" lib="$2"
   _lf=0
@@ -360,9 +373,12 @@ check_single_plugin_boundary() { # <geolocator_location_service.dart> <lib dir>
 
   # And exactly ONE file under haven/lib may subscribe to the native event
   # channel. A second `receiveBroadcastStream(` is a second native listen by
-  # another name, and it would not be counted above.
-  local subs
-  subs="$(grep -rlE 'receiveBroadcastStream\(' --include='*.dart' "$lib" 2>/dev/null | sort || true)"
+  # another name, and it would not be counted above. The network-change
+  # channel is a different native handler with no position in it, and only it
+  # is set aside (is_network_change_source).
+  local subs f
+  subs="$(grep -rlE 'receiveBroadcastStream\(' --include='*.dart' "$lib" 2>/dev/null | sort |
+    while IFS= read -r f; do is_network_change_source "$f" || printf '%s\n' "$f"; done || true)"
   local nsubs=0
   [[ -n "$subs" ]] && nsubs="$(wc -l <<<"$subs")"
   if [[ "$nsubs" != "1" ]]; then
@@ -2008,28 +2024,40 @@ check_p3_host_wire_oracle() { # <wrapper> <probe> <drive> <constants>
   return "$_lf"
 }
 
-check_pbxproj_stream_handler() { # <project.pbxproj>
-  local pbx="$1"
+check_pbxproj_swift_member() { # <project.pbxproj> <File.swift> <fileRef id> <buildFile id>
+  local pbx="$1" file="$2"
   _lf=0
 
   # A Swift file on disk but absent from the Xcode project compiles NOWHERE and
   # fails SILENTLY: the channel is never registered, every invoke raises
-  # MissingPluginException, and the Dart source treats that as "no native
-  # handler" — i.e. no position stream on iOS, discovered only when peers stop
-  # receiving. The four references are the build file, the file reference, the
-  # group child and the Sources build-phase entry; three of the four leave the
-  # project openable and the file invisible to the compiler.
+  # MissingPluginException (a listen reports it and delivers nothing), and the
+  # Dart source treats that as "no native handler" — i.e. no position stream
+  # on iOS, discovered only when peers stop receiving, or no network-change
+  # re-dial, discovered never. The four references are the build file, the
+  # file reference, the group child and the Sources build-phase entry; three
+  # of the four leave the project openable and the file invisible to the
+  # compiler. Counted in LINES: the build-file line names the file twice.
   local refs
-  refs="$(grep -cF 'HavenLocationStreamHandler.swift' "$pbx" || true)"
+  refs="$(grep -cF "$file" "$pbx" || true)"
   if [[ "$refs" != "4" ]]; then
-    lfail "project.pbxproj references HavenLocationStreamHandler.swift ${refs} time(s), expected 4 (PBXBuildFile, PBXFileReference, the group child, and the Sources build phase) — anything less and the handler is not compiled, which surfaces only as MissingPluginException at runtime and reads as 'no native handler' in Dart"
+    lfail "project.pbxproj references ${file} ${refs} time(s), expected 4 (PBXBuildFile, PBXFileReference, the group child, and the Sources build phase) — anything less and the handler is not compiled, which surfaces only as MissingPluginException at runtime and reads as 'no native handler' in Dart"
   fi
   local id
-  for id in 5E10CA750000000000000001 5E10CA750000000000000002; do
+  for id in "$3" "$4"; do
     grep -qF "$id" "$pbx" ||
-      lfail "project.pbxproj no longer carries the ${id} object id for HavenLocationStreamHandler.swift — the fileRef/buildFile pair is what ties the source file to the Sources phase"
+      lfail "project.pbxproj no longer carries the ${id} object id for ${file} — the fileRef/buildFile pair is what ties the source file to the Sources phase"
   done
   return "$_lf"
+}
+
+check_pbxproj_stream_handler() { # <project.pbxproj>
+  check_pbxproj_swift_member "$1" HavenLocationStreamHandler.swift \
+    5E10CA750000000000000001 5E10CA750000000000000002
+}
+
+check_pbxproj_network_change_handler() { # <project.pbxproj>
+  check_pbxproj_swift_member "$1" HavenNetworkChangeHandler.swift \
+    5E10CA760000000000000001 5E10CA760000000000000002
 }
 
 
@@ -2349,6 +2377,13 @@ fi
 check_pbxproj_stream_handler "$PBXPROJ" || FAILED=1
 
 # ---------------------------------------------------------------------------
+# 14b. HavenNetworkChangeHandler.swift must be IN the Xcode project too, for
+#      the same silent reason: out of it, the `haven.app/network_change` listen
+#      finds no handler, and an iOS network change re-dials nothing.
+# ---------------------------------------------------------------------------
+check_pbxproj_network_change_handler "$PBXPROJ" || FAILED=1
+
+# ---------------------------------------------------------------------------
 # 15. The lane's timeout LADDER, across the two files that own its ends, and
 #     PER LEG since OD4-d — both ends are now expressions with one value per
 #     receive plane, compared in source order, with a count mismatch treated as
@@ -2468,7 +2503,7 @@ fi
 # hide under the slack.
 # ---------------------------------------------------------------------------
 self_test() {
-  local -r SELF_TEST_FIXTURES=240
+  local -r SELF_TEST_FIXTURES=245
   local tmp fails=0 checked=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -2602,6 +2637,19 @@ self_test() {
   # sink error contract, not some other file that happens to subscribe.
   _boundary_files 'boundary: the native subscriber moved to another file' 1 \
     'map_page.dart' "${boundary_source}"
+  # The network-change source listens to a channel of its own, which carries
+  # no position: it is not a second owner. A position listen added to it is.
+  local net_source="class PlatformNetworkChangeSource {
+  static const EventChannel channel = EventChannel('haven.app/network_change');
+  Stream<void> changes() => channel.receiveBroadcastStream().map((_) {});
+}"
+  _boundary_files 'boundary: the network-change channel is not a second position owner' 0 \
+    'ios_location_source.dart' "${boundary_source}" \
+    'network_change_source.dart' "${net_source}"
+  _boundary_files 'boundary: a position listen hidden in the network-change source' 1 \
+    'ios_location_source.dart' "${boundary_source}" \
+    'network_change_source.dart' "${net_source}
+Stream<Object?> raw() => MethodChannelIosLocationSource.eventChannel.receiveBroadcastStream();"
 
   # --- check_ios_stream_route -----------------------------------------------
   #
@@ -5471,6 +5519,25 @@ EOF
 				DEADBEEF00000000000000001 /* HavenLocationStreamHandler.swift */,
 				DEADBEEF00000000000000002 /* HavenLocationStreamHandler.swift in Sources */,'
 
+  # The network-change handler, through the same counter: present passes; the
+  # silent drop of its Sources entry fails; and the stream handler's four lines
+  # do not answer for it.
+  local pbx_net='		5E10CA760000000000000002 /* HavenNetworkChangeHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E10CA760000000000000001 /* HavenNetworkChangeHandler.swift */; };
+		5E10CA760000000000000001 /* HavenNetworkChangeHandler.swift */ = {isa = PBXFileReference; path = HavenNetworkChangeHandler.swift; sourceTree = "<group>"; };
+				5E10CA760000000000000001 /* HavenNetworkChangeHandler.swift */,
+				5E10CA760000000000000002 /* HavenNetworkChangeHandler.swift in Sources */,'
+  _pbxnet() { # <label> <want-rc> <body>
+    local got=0
+    printf '%s\n' "$3" >"${tmp}/project.pbxproj"
+    ( check_pbxproj_network_change_handler "${tmp}/project.pbxproj" ) >/dev/null 2>&1 || got=$?
+    _record "$1" "$2" "${got}"
+  }
+  _pbxnet 'pbxproj: the network-change handler, all four references present' 0 "${pbx_net}"
+  _pbxnet 'pbxproj: the network-change handler, Sources entry dropped' 1 \
+    "$(head -n 3 <<<"${pbx_net}")"
+  _pbxnet 'pbxproj: the network-change handler absent, the stream handler present' 1 \
+    "${pbx_good}"
+
   # --- check_p3_host_wire_oracle --------------------------------------------
   #
   # Every fixture below leaves all four files readable and internally sensible
@@ -5622,4 +5689,4 @@ if [[ "$FAILED" -ne 0 ]]; then
   echo "iOS background publish guard FAILED — see failures above." >&2
   exit 1
 fi
-echo "OK: iOS background publish invariants hold (plist mode, one stream boundary per platform, toggle-keyed iOS route with a background branch that cannot fall through to the one-shot, native owner's session shape + two accuracy tiers + sink-only refusals + transient-error filter + only-Best cache in all three copies, bounded anchor staleness in both the controller and the serving path, fail-closed background-launch provider guard, C4 watcher + its opt-out release issued on every path, burst plane entered only from the running process and native wakes with one receive-only door into Dart, presence-only logs, tier-based session/indicator policy with a session-scoped confirmation and an unconditional disarm, AppDelegate wiring order, unfaked bg-publish drive, background-capable stream established before the drive backgrounds the app, P2c's receive oracle read from the subscription count and never from the paused flag and P2d's from the persisted last-known store, each with its terminal proof printed after the assertion it stands for, relaunch region coupled to SLC, stream handler compiled into the Xcode project, every leg's drive Timeout inside its own per-attempt retry deadline, one poll-path receive cadence across the product and the drive, the poll path's sweep declaring itself a background wake so the C3 consent chokepoint applies, every poll leg held at the when-in-use grant P2d's attribution depends on, and P3's settle window measured by the same numbers from both sides with a host-side wire oracle that outlives the app, two controls it cannot read nothing through — one that the relay answers at all, one that it still serves the kind the window is read for — and a completion-gate excuse of exactly two markers from exactly one source)."
+echo "OK: iOS background publish invariants hold (plist mode, one stream boundary per platform, toggle-keyed iOS route with a background branch that cannot fall through to the one-shot, native owner's session shape + two accuracy tiers + sink-only refusals + transient-error filter + only-Best cache in all three copies, bounded anchor staleness in both the controller and the serving path, fail-closed background-launch provider guard, C4 watcher + its opt-out release issued on every path, burst plane entered only from the running process and native wakes with one receive-only door into Dart, presence-only logs, tier-based session/indicator policy with a session-scoped confirmation and an unconditional disarm, AppDelegate wiring order, unfaked bg-publish drive, background-capable stream established before the drive backgrounds the app, P2c's receive oracle read from the subscription count and never from the paused flag and P2d's from the persisted last-known store, each with its terminal proof printed after the assertion it stands for, relaunch region coupled to SLC, stream and network-change handlers compiled into the Xcode project, every leg's drive Timeout inside its own per-attempt retry deadline, one poll-path receive cadence across the product and the drive, the poll path's sweep declaring itself a background wake so the C3 consent chokepoint applies, every poll leg held at the when-in-use grant P2d's attribution depends on, and P3's settle window measured by the same numbers from both sides with a host-side wire oracle that outlives the app, two controls it cannot read nothing through — one that the relay answers at all, one that it still serves the kind the window is read for — and a completion-gate excuse of exactly two markers from exactly one source)."

@@ -94,6 +94,15 @@ abstract class SubscriptionService {
   /// gone to the background re-opens nothing.
   Future<void> resumeAfterBackground();
 
+  /// Re-dials every socket of the running session after the device's default
+  /// network changed: a socket the old network carried still reads connected
+  /// until a ping goes unanswered, and [resumeAfterBackground] connects only
+  /// what is not.
+  ///
+  /// Refused by the engine unless the app is resumed at the moment of the
+  /// call (`appIsResumed`). Does nothing without a session, and never throws.
+  Future<void> reconnectAfterNetworkChange();
+
   /// Tells a running session that the app's lifecycle reads `resumed`, when
   /// — and only when — it does (`appIsResumed`).
   ///

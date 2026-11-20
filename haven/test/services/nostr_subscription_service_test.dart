@@ -1308,9 +1308,10 @@ void main() {
       expect(binding.lifecycleState, state, reason: 'premise');
     }
 
-    /// Runs one start, one foreground re-anchor and one heal's claim through
-    /// the REAL predicate, and returns what the engine was handed: the claim
-    /// of the re-anchor, and each claim it was asked to take.
+    /// Runs one start, one foreground re-anchor, one heal's claim and one
+    /// network re-dial through the REAL predicate, and returns what the
+    /// engine was handed: the claim of the re-anchor, each claim it was asked
+    /// to take, and the claim of the re-dial.
     Future<List<List<bool>>> claimsMadeIn(AppLifecycleState? state) async {
       enter(state);
       final engine = _FakeEngine();
@@ -1321,11 +1322,16 @@ void main() {
       await service.start(groups: const [], inboxRelays: const []);
       await service.resumeAfterBackground();
       await service.claimForeground();
+      await service.reconnectAfterNetworkChange();
       expect(engine.resumeCalls, 1, reason: 'the re-anchor reached the engine');
       // Back to a state that schedules frames before the stream is torn down.
       binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
       await service.stop();
-      return [engine.resumeClaims, engine.foregroundClaims];
+      return [
+        engine.resumeClaims,
+        engine.foregroundClaims,
+        engine.networkChangeClaims,
+      ];
     }
 
     test('a resumed app claims the foreground at every call site', () async {
@@ -1334,6 +1340,7 @@ void main() {
         // Once by the start itself, the moment it held the engine, and once
         // by the claim the test made.
         [true, true],
+        [true],
       ]);
     });
 
@@ -1351,6 +1358,7 @@ void main() {
           [
             [false],
             <bool>[],
+            [false],
           ],
           reason: 'only `resumed` is the foreground: anything else handed to '
               'the engine as a claim lets a process nobody is looking at '
@@ -1392,7 +1400,29 @@ void main() {
         engineFactory: () async => engine,
       );
       await service.claimForeground();
+      await service.reconnectAfterNetworkChange();
       expect(engine.foregroundClaims, isEmpty);
+      expect(engine.networkChangeClaims, isEmpty);
+    });
+
+    test('a network re-dial the engine refuses never throws and never leaks',
+        () async {
+      enter(AppLifecycleState.resumed);
+      final logs = LogCapture.install();
+      final engine = _FakeEngine(failNetworkChange: true);
+      final service = NostrSubscriptionService(
+        router: _SpyRouter(),
+        engineFactory: () async => engine,
+      );
+      await service.start(groups: const [], inboxRelays: const []);
+      addTearDown(service.stop);
+
+      await service.reconnectAfterNetworkChange();
+
+      expect(engine.networkChangeClaims, [true]);
+      logs
+        ..assertContains('[Subscription] network re-dial failed: _Exception')
+        ..assertNoNeedles(const ['wss://relay.example.invalid']);
     });
 
     group('settling the claim before a change the user asked for', () {

@@ -37,6 +37,10 @@ class _RecordingSubscriptionService implements SubscriptionService {
   }
 
   @override
+  Future<void> reconnectAfterNetworkChange() async =>
+      throw UnimplementedError('no network change reaches this test');
+
+  @override
   dynamic noSuchMethod(Invocation invocation) =>
       throw UnimplementedError(invocation.memberName.toString());
 }

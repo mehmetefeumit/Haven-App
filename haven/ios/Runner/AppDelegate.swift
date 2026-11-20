@@ -60,6 +60,10 @@ private let HAVEN_RUNNER_LOG = OSLog(subsystem: "haven_ios", category: "runner")
   // didFinishLaunching returns.
   private let locationStreamHandler = HavenLocationStreamHandler()
 
+  // Tells Dart the default network changed, so the live-sync engine re-dials
+  // sockets the old network carried. Retained for the app's lifetime: the
+  // event channel holds its stream handler weakly.
+  private let networkChangeHandler = HavenNetworkChangeHandler()
 
   override func application(
     _ application: UIApplication,
@@ -126,6 +130,8 @@ private let HAVEN_RUNNER_LOG = OSLog(subsystem: "haven_ios", category: "runner")
       locationStreamHandler.onAuthorizationChanged = { [weak self] in
         self?.backgroundSessionHandler.arm()
       }
+
+      networkChangeHandler.register(with: messenger)
     }
 
     let result = super.application(application, didFinishLaunchingWithOptions: launchOptions)

@@ -51,6 +51,8 @@ import 'package:haven/src/services/live_sync_resubscriber.dart';
 import 'package:haven/src/services/location_service.dart';
 import 'package:haven/src/services/mls_session_handover.dart'
     show appIsResumed, kHandoffEndWait;
+import 'package:haven/src/services/network_change_reconnector.dart';
+import 'package:haven/src/services/network_change_source.dart';
 import 'package:haven/src/services/nostr_circle_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/services/relay_service.dart' show CatchupResult;
@@ -1163,6 +1165,18 @@ class _MapShellState extends ConsumerState<MapShell>
     heal: _healLiveSyncIfStopped,
   );
 
+  /// Re-dials the engine when the device's default network changes under an
+  /// app in front. Like [_healBackstop] it never listens while the app is
+  /// away: armed at a mount only under the strict read and at every resume,
+  /// stopped at a pause, a detach and dispose. Only when `liveSyncEnabled`:
+  /// the flag-off build holds no standing socket.
+  late final NetworkChangeReconnector _networkReconnector =
+      NetworkChangeReconnector(
+        source: const PlatformNetworkChangeSource(),
+        reconnect: _reconnectAfterNetworkChange,
+        floor: Platform.isIOS ? kIosNetworkReconnectFloor : Duration.zero,
+      );
+
   /// How many pauses and resumes this shell has been dispatched.
   ///
   /// Both handlers await, and the framework waits for neither, so each can
@@ -1305,6 +1319,7 @@ class _MapShellState extends ConsumerState<MapShell>
     _excursions = ref.read(systemActivityExcursionsProvider);
     WidgetsBinding.instance.addObserver(this);
     _startTimers(atMount: true);
+    if (liveSyncEnabled) _networkReconnector.startAtMount();
     // Register the foreground-task channel from the widget layer as well as
     // `main()`. An entrypoint that builds the app itself never runs `main()`,
     // and without the channel every liveness ping vanishes into a null-safe
@@ -2126,6 +2141,13 @@ class _MapShellState extends ConsumerState<MapShell>
   /// toward its back-off — a relay set that is unreachable would otherwise be
   /// swept on every tick indefinitely — and counts nothing for a heal that
   /// stood down.
+  Future<void> _reconnectAfterNetworkChange() {
+    // A re-dial re-anchors every REQ: stamped first, so a heal or a resume
+    // behind it does not run a second one inside the throttle.
+    _lastReanchorAt = DateTime.now();
+    return ref.read(subscriptionServiceProvider).reconnectAfterNetworkChange();
+  }
+
   Future<LiveSyncHealOutcome> _healLiveSyncIfStopped() async {
     if (!liveSyncEnabled) return LiveSyncHealOutcome.stoodDown;
     final resubscriber = await _ensureLiveSyncInstalled();
@@ -2311,6 +2333,7 @@ class _MapShellState extends ConsumerState<MapShell>
     // the stop below with a restart, which is the one thing that could leave a
     // fresh session orphaned instead of releasing the old one.
     _healBackstop.stop();
+    _networkReconnector.stop();
     // The shared bounded stop, not a second one of its own: an unclassified
     // stop here would read a timed-out teardown as a release and leave the
     // Rule-14 guard orphaned — see [_stopLiveSyncBounded].
@@ -2363,8 +2386,10 @@ class _MapShellState extends ConsumerState<MapShell>
     // holding the Rule-14 guard the foreground service is waiting for, which
     // is strictly worse than not healing at all. `_handOffMlsSession` is
     // awaited, so cancelling after it would leave the whole handoff window
-    // exposed.
+    // exposed. The network re-dial likewise: one landing mid-pause would
+    // re-open the session the pause is putting down.
     _healBackstop.stop();
+    _networkReconnector.stop();
     final turn = _lifecycleTurn;
 
     final bgEnabled = ref.read(backgroundSharingProvider);
@@ -3046,6 +3071,11 @@ class _MapShellState extends ConsumerState<MapShell>
     // returns, on an engine the foreground now owns, and no periodic repair
     // sees it — see [MapShell.reanchorOnResume], which is what orders the
     // repair behind it.
+    //
+    // A network change the app was told of while `inactive` is re-dialled
+    // first: that re-dial stamps `_lastReanchorAt`, so a live engine is not
+    // re-anchored a second time behind it.
+    if (liveSyncEnabled) _networkReconnector.onResumed();
     final engine = ref.read(subscriptionServiceProvider);
     final burstInFlight = _burstCoordinator?.runningBurst;
     final resumeAt = DateTime.now();
@@ -3246,6 +3276,7 @@ class _MapShellState extends ConsumerState<MapShell>
     _pruneTimer?.cancel();
     _evolutionTimer?.cancel();
     _healBackstop.stop();
+    _networkReconnector.stop();
     // A pause's hand-off can outlive this State; no resume will end its grace.
     _excursions.endGrace(HandoffGraceEnd.disposed);
     _foregroundHeartbeatTimer?.cancel();

@@ -6,6 +6,12 @@
          permission would silently break all relay sync). -->
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- Default-network callbacks (NetworkChangeStream.kt): the engine
+         re-dials its relays when the device changes network. A normal
+         permission, granted at install. Declared explicitly for the same
+         reason INTERNET is. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
     <!-- Location permissions for accessing device location -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />

@@ -121,6 +121,8 @@ const _claimSites = <String, List<String>>{
   ],
   'lib/src/services/nostr_subscription_service.dart': [
     'resumeAfterBackground(foreground: appIsResumed())',
+    // The network-change re-dial (`NetworkChangeReconnector`).
+    'reconnectAfterNetworkChange(foreground: appIsResumed())',
     'claimForeground(foreground: appIsResumed())',
   ],
 };
