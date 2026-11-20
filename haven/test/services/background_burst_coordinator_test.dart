@@ -181,6 +181,11 @@ class _RecordingEngine implements SubscriptionService {
           'resume: that entry point always carries the inbox REQ');
 
   @override
+  Future<bool> reconnectAfterNetworkChange() async =>
+      throw UnimplementedError('a burst must never re-dial as a foreground '
+          'network change: that entry point always carries the inbox REQ');
+
+  @override
   Future<void> settleForegroundClaim() async => throw UnimplementedError();
 
   @override

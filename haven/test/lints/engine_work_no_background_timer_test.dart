@@ -180,6 +180,9 @@ const _burstPass =
 const _resubscribe =
     'lib/src/services/live_sync_resubscriber.dart#'
     'LiveSyncResubscriber.onCirclesChanged';
+const _networkChange =
+    'lib/src/services/network_change_reconnector.dart#'
+    'NetworkChangeReconnector._arm';
 
 /// The reviewed timer and delay sites in `lib/`, by `path#Member`, with how
 /// many each holds.
@@ -248,6 +251,7 @@ const _allowedSites = <String, int>{
           'LiveSyncResubscriber.onCirclesChanged':
       1,
   'lib/src/services/mls_session_handover.dart#_defaultDelay': 1,
+  _networkChange: 1,
   // A photo-picker pause's handoff grace: armed only while paused inside
   // Haven's own picker or crop editor, once per stretch away, and it ends a
   // hold rather than starting engine work.
@@ -276,7 +280,7 @@ const _allowedSites = <String, int>{
 
 /// The sum of [_allowedSites]: a second pin, so an edit that moves a count
 /// from one site to another is still a visible change of this number.
-const _allowedTotal = 47;
+const _allowedTotal = 48;
 
 /// The sites of [_allowedSites] that reach the MLS or the live-sync engine,
 /// reviewed by hand: the existing wakes. A timer's callback reaches through
@@ -314,6 +318,11 @@ const _engineWakes = <String>{
   _resubscribe,
   // The session handover's wait for the other isolate's release.
   'lib/src/services/mls_session_handover.dart#_defaultDelay',
+  // A NEW wake, decided 2026-11-20 (`docs/POWER_EFFICIENCY_PLAN.md`): the
+  // network-change re-dial's settle and its iOS floor. Armed only by a change
+  // the platform reported while the app was in front, and cancelled at a
+  // pause, so it never runs in the background.
+  _networkChange,
 };
 
 /// Names whose call is engine work: a drive of the fanout records, a leave
@@ -332,6 +341,7 @@ const _engineCalls = {
   'runRefusedRefetch',
   'maintainSubscriptionHealth',
   'resumeAfterBackground',
+  'reconnectAfterNetworkChange',
   'claimForeground',
   'ensureRunning',
   'sealLocation',

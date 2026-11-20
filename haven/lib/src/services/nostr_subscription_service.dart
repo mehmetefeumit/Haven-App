@@ -375,6 +375,19 @@ class NostrSubscriptionService implements SubscriptionService {
   }
 
   @override
+  Future<bool> reconnectAfterNetworkChange() async {
+    final engine = _engine;
+    if (engine == null) return false;
+    try {
+      await engine.reconnectAfterNetworkChange(foreground: appIsResumed());
+      return true;
+    } on Object catch (e) {
+      debugPrint('[Subscription] network re-dial failed: ${e.runtimeType}');
+      return false;
+    }
+  }
+
+  @override
   Future<void> claimForeground() async {
     final engine = _engine;
     // Nothing to claim is nothing to ask: the engine does nothing with a

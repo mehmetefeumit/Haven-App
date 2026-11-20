@@ -57,6 +57,14 @@
 /// A lane budgeted for the fast path would report a product defect every
 /// time the slow path legitimately ran.
 ///
+/// A fourth, the fastest, runs ahead of all three on an engine that survived
+/// the outage: leaving airplane mode hands the device a new default network,
+/// and `MapShell`'s `NetworkChangeReconnector` re-dials both live-plane pools
+/// 3 s later (`LiveSyncCore::reconnect_after_network_change`). This file does
+/// not observe it: the shell reads the engine's own re-dial line out of the
+/// logcat and times the peer's arrival against it (`b9_redial_verdict`,
+/// `[b9] NETWORK_REDIALED`), so nothing here changes for it.
+///
 /// ## The two relay pools are configured DIFFERENTLY, so both are checked
 ///
 /// All three mechanisms above are about the ENGINE's client, which keeps

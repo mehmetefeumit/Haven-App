@@ -948,6 +948,94 @@ void main() {
             'timer that re-establishes a dead session with nobody looking',
       );
     });
+
+    test('the network re-dial never listens while the app is away', () {
+      // What the reconnector does with each call is proved on a fake clock
+      // (`network_change_reconnector_test.dart`); who calls which is pinned
+      // here, every one.
+      for (final handler in const ['_onPaused', '_onDetached', 'dispose']) {
+        expect(
+          _bodyOf(source, handler).toSource(),
+          contains('_networkReconnector.stop();'),
+          reason: '$handler must stop the re-dial',
+        );
+      }
+      final pause = _bodyOf(source, '_onPaused').toSource();
+      expect(
+        pause.indexOf('_networkReconnector.stop();'),
+        allOf(isNonNegative, lessThan(pause.indexOf('await '))),
+        reason: 'stopped in the dispatch itself: a re-dial landing behind '
+            "the pause's first await re-opens the session it is putting down",
+      );
+      final unit = parseString(content: source, throwIfDiagnostics: false).unit;
+      final uses = _UseCollector('_networkReconnector');
+      unit.accept(uses);
+      expect(
+        [
+          for (final use in uses.found)
+            if (!const {'stop()', 'redialDue (tear-off)'}.contains(use.$2))
+              '${use.$1}: ${use.$2}',
+        ],
+        ['initState: startAtMount()', '_onResumed: onResumed()'],
+        reason: 'armed anywhere else it can listen, and re-dial, in a '
+            'process nobody is looking at',
+      );
+      expect(
+        _bodyOf(source, 'initState').toSource(),
+        contains('if (liveSyncEnabled) _networkReconnector.startAtMount();'),
+      );
+      expect(
+        _bodyOf(source, '_onResumed').toSource(),
+        contains('if (liveSyncEnabled) _networkReconnector.onResumed();'),
+        reason: 'the flag-off build holds no standing socket to re-dial',
+      );
+      final resume = _bodyOf(source, '_onResumed').toSource();
+      expect(
+        resume.indexOf('_networkReconnector.onResumed();'),
+        allOf(
+          isNonNegative,
+          lessThan(resume.indexOf('redialDue: _networkReconnector.redialDue')),
+        ),
+        reason: 'the resume re-anchor reads whether a re-dial is due after an '
+            'owed change has been started, and skips a live engine on it '
+            '(MapShell.liveReanchorDue)',
+      );
+      expect(
+        resume.replaceAll(RegExp(r'\s+'), ' '),
+        contains(
+          '(engine.isPaused || burstInFlight != null || '
+          'MapShell.liveReanchorDue(redialDue: _networkReconnector.redialDue, '
+          'throttlePassed: MapShell.shouldReanchorOnResume(',
+        ),
+        reason: 'a due re-dial stands in for the throttled re-anchor of a '
+            'live engine, and for nothing else',
+      );
+      expect(
+        _bodyOf(source, '_reconnectAfterNetworkChange').toSource(),
+        contains('MapShell.redialBehindStamp('),
+        reason: 'the re-dial writes its re-anchor stamp, and withdraws it on '
+            'failure, only through the tested helper',
+      );
+      final built = source.indexOf('NetworkChangeReconnector(');
+      expect(
+        source.substring(built, source.indexOf(');', built)),
+        isNot(contains('isResumed:')),
+        reason: 'the reconnector gates every re-dial and its mount on '
+            '`appIsResumed`, its default: a looser read handed in claims a '
+            'foreground nobody is in',
+      );
+      final reconnector = File(
+        'lib/src/services/network_change_reconnector.dart',
+      ).readAsStringSync();
+      expect(
+        _bodyOf(reconnector, 'startAtMount').toSource(),
+        '{if (_isResumed()) start();}',
+      );
+      expect(
+        reconnector,
+        contains('bool Function() isResumed = appIsResumed,'),
+      );
+    });
   });
 
   test('the re-subscriber holds the only start there is', () {
