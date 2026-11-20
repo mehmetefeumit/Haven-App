@@ -2321,6 +2321,40 @@ impl LiveSyncCore {
             .await
     }
 
+    /// Re-dials both pools after the device's default network changed: the
+    /// pause, then the foreground open, under one lifecycle acquisition.
+    ///
+    /// Not [`Self::resume_after_background`]: a socket the old network
+    /// carried still reads `Connected` to the pool until a ping goes
+    /// unanswered, up to two ping intervals later, and an open connects only
+    /// what is not. Only after a pause may the open rebuild every relay (see
+    /// [`Self::rebuild_stalled_relays`]); a session already paused needs only
+    /// the open. The pause forgets a network return the repair task had not
+    /// acted on, so it is said again once the open has succeeded: a relay a
+    /// stored record could not reach on the old network is called on this
+    /// one at once, at most once a minute (`NETWORK_BACK_FLOOR_MS`).
+    ///
+    /// On [`Claim::Nothing`] it is refused before it touches the session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LiveSyncError::NotForeground`] if the caller claims nothing,
+    /// or another [`LiveSyncError`] if the pause or a re-subscription fails.
+    pub async fn reconnect_after_network_change(&self, claim: Claim) -> LiveSyncResult<()> {
+        let Some(kind) = BurstKind::claimed(claim) else {
+            return Err(LiveSyncError::NotForeground);
+        };
+        let lifecycle = self.lifecycle.lock().await;
+        log::info!("[live_sync] the network changed: re-dialling every live socket");
+        if !self.paused.load(Ordering::Acquire) {
+            self.pause_locked(&lifecycle).await?;
+        }
+        self.resume_burst(&lifecycle, kind, INBOX_BURSTS_PER_REQ, None)
+            .await?;
+        self.repair.note_network_back();
+        Ok(())
+    }
+
     /// Opens ONE background burst: the same re-anchor, plus the two things that
     /// are true only between publish ticks — the inbox REQ is folded onto every
     /// [`INBOX_BURSTS_PER_REQ`]-th burst, and the burst counter that decides it
@@ -10313,6 +10347,68 @@ mod tests {
             .expect("the pause task must not panic")
             .expect("the pause must succeed once the publish resolves");
         assert_eq!(core.pool_subscription_count().await, 0);
+
+        let _ = core.stop().await;
+    }
+
+    /// A network change's pause BLOCKS on the in-flight publish gauge before
+    /// it cuts a socket, as every pause does (Security Rule 13): the change
+    /// re-dials, but never between a commit's SEND and its OK.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_network_change_blocks_on_the_in_flight_publish_gauge() {
+        let _ = crate::relay::allow_ws_loopback_for_test();
+        let relay = nostr_relay_builder::MockRelay::run()
+            .await
+            .expect("mock relay starts");
+        let url = relay.url().await.to_string();
+        let (core, _dir) = build_core();
+        keep_rows(&core, &[0x3d]);
+        let core = Arc::new(core);
+        core.start(
+            &[CircleSpec {
+                group_id_hex: "3d".repeat(32),
+                relays: vec![url.clone()],
+            }],
+            &[],
+        )
+        .await
+        .expect("session starts");
+
+        let gauge = core.processor.hold_publish_for_test();
+        assert_eq!(core.in_flight_publishes(), 1);
+
+        let changing = Arc::clone(&core);
+        let change = tokio::spawn(async move {
+            changing
+                .reconnect_after_network_change(Claim::Foreground)
+                .await
+        });
+
+        // Deterministic: nothing releases the gauge during this window.
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !change.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .is_err(),
+            "a network change must not re-dial while a publish is between SEND and OK: \
+             the relay may already hold that commit while the drive records the attempt \
+             as unanswered (Security Rule 13)"
+        );
+        assert!(
+            core.relay_health().await.connected > 0,
+            "...and it must not have cut a socket either"
+        );
+
+        drop(gauge);
+        change
+            .await
+            .expect("the change task must not panic")
+            .expect("the change must re-open the session once the publish resolves");
+        assert!(!core.is_paused());
+        assert!(core.pool_subscription_count().await > 0);
 
         let _ = core.stop().await;
     }

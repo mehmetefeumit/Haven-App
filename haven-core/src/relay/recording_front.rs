@@ -8,8 +8,10 @@
 //! A gating front ([`RecordingFront::start_gating`]) also plays a relay that
 //! withholds gift wraps from a client that has not authenticated, as strfry's
 //! `restrictedReadKinds` does, and checks the NIP-42 answer a client gives
-//! its challenge before it serves that client. It builds no client and logs
-//! nothing; the
+//! its challenge before it serves that client. A front can also play a
+//! network change ([`RecordingFront::black_hole`]): the connections open at
+//! that moment go silent while a new one is served. It builds no client and
+//! logs nothing; the
 //! frames hold identifiers, so no type here has `Debug` (Security Rule 15).
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -52,6 +54,11 @@ struct Record {
     /// Whether a held challenge may be sent ([`Gate::hold_challenges`]).
     released: AtomicBool,
     release: Notify,
+    /// Connections numbered below this are black-holed
+    /// ([`RecordingFront::black_hole`]).
+    holed_below: AtomicUsize,
+    hole: Notify,
+    swallowed: AtomicUsize,
 }
 
 /// How a gating front plays the relay beyond strfry's defaults
@@ -85,6 +92,23 @@ impl Record {
             .unwrap_or_else(PoisonError::into_inner)
             .push(frame);
         self.grew.notify_waiters();
+    }
+
+    fn is_holed(&self, conn: usize) -> bool {
+        conn < self.holed_below.load(Ordering::SeqCst)
+    }
+
+    /// Resolves once connection `conn` is black-holed.
+    async fn holed(&self, conn: usize) {
+        loop {
+            let hole = self.hole.notified();
+            tokio::pin!(hole);
+            hole.as_mut().enable();
+            if self.is_holed(conn) {
+                return;
+            }
+            hole.await;
+        }
     }
 }
 
@@ -277,6 +301,40 @@ impl RecordingFront {
         }
     }
 
+    /// Plays the network those connections rode going away under them, as
+    /// the device sees it: every connection open now stops handing frames on
+    /// in either direction and stops reading what its client sends, so no
+    /// `PONG` answers a `PING`, while its TCP stays open, with no FIN and no
+    /// RST — a socket the client still reads as connected. Connections
+    /// opened later are served as before.
+    pub fn black_hole(&self) {
+        self.record
+            .holed_below
+            .fetch_max(self.connections(), Ordering::SeqCst);
+        self.record.hole.notify_waiters();
+    }
+
+    /// How many events the relay sent black-holed connections, which none of
+    /// their clients got.
+    #[must_use]
+    pub fn swallowed(&self) -> usize {
+        self.record.swallowed.load(Ordering::SeqCst)
+    }
+
+    /// Resolves once [`Self::swallowed`] reaches `count`, woken by each one.
+    /// Unbounded: the caller bounds it.
+    pub async fn wait_swallowed(&self, count: usize) {
+        loop {
+            let grew = self.record.grew.notified();
+            tokio::pin!(grew);
+            grew.as_mut().enable();
+            if self.swallowed() >= count {
+                return;
+            }
+            grew.await;
+        }
+    }
+
     /// Stops the front; what it recorded stays readable.
     pub fn stop(&mut self) {
         self.stop.take();
@@ -329,6 +387,69 @@ struct Connection {
     play: Gate,
 }
 
+type Socket = tokio_tungstenite::WebSocketStream<TcpStream>;
+
+/// Hands connection `conn`'s client what the relay sends and the front's own
+/// answers, withholding what a gating front withholds from `reader`; once
+/// the connection is black-holed, nothing.
+async fn hand_to_client(
+    (from_relay, answered): (
+        futures::stream::SplitStream<Socket>,
+        futures::channel::mpsc::UnboundedReceiver<Message>,
+    ),
+    mut to_client: futures::stream::SplitSink<Socket, Message>,
+    reader: Arc<Mutex<Option<PublicKey>>>,
+    (gating, conn): (bool, usize),
+    record: Arc<Record>,
+) {
+    // The relay's end ends the client's connection, as it did before the
+    // front's own answers joined the stream.
+    let relayed = from_relay
+        .map(Result::ok)
+        .chain(futures::stream::iter([None]));
+    let mut outgoing = futures::stream::select(answered.map(Some), relayed);
+    while let Some(Some(message)) = outgoing.next().await {
+        let reader = *reader.lock().unwrap_or_else(PoisonError::into_inner);
+        if gating && withheld(&message, reader) {
+            continue;
+        }
+        if record.is_holed(conn) {
+            if message
+                .to_text()
+                .is_ok_and(|text| verb(text).as_deref() == Some("EVENT"))
+            {
+                record.swallowed.fetch_add(1, Ordering::SeqCst);
+                record.grew.notify_waiters();
+            }
+            continue;
+        }
+        if to_client.send(message).await.is_err() {
+            break;
+        }
+    }
+    if record.is_holed(conn) {
+        // Closing would send the client a FIN the lost network never
+        // carries; the socket is held until the front stops.
+        std::future::pending::<()>().await;
+    }
+    let _ = to_client.close().await;
+}
+
+/// Connection `conn`'s next client frame; once it is black-holed, never:
+/// left unread, nothing answers the client's pings, and the caller, pending
+/// here, holds both its sockets open.
+async fn read_unless_holed(
+    record: &Record,
+    conn: usize,
+    from_client: &mut futures::stream::SplitStream<Socket>,
+) -> Option<Result<Message, tokio_tungstenite::tungstenite::Error>> {
+    tokio::select! {
+        biased;
+        () = record.holed(conn) => std::future::pending().await,
+        read = from_client.next() => read,
+    }
+}
+
 async fn serve(tcp: TcpStream, at: Connection, record: Arc<Record>) {
     let Connection {
         upstream,
@@ -352,31 +473,20 @@ async fn serve(tcp: TcpStream, at: Connection, record: Arc<Record>) {
     else {
         return;
     };
-    let (mut to_client, mut from_client) = client.split();
+    let (to_client, mut from_client) = client.split();
     let (mut to_relay, from_relay) = relay.split();
     let (answers, answered) = futures::channel::mpsc::unbounded::<Message>();
     if gating && play.challenge_on_connect {
         let _ = answers.unbounded_send(challenge_to(conn));
     }
-    let relay_to_client = tokio::spawn(async move {
-        // The relay's end ends the client's connection, as it did before the
-        // front's own answers joined the stream.
-        let relayed = from_relay
-            .map(Result::ok)
-            .chain(futures::stream::iter([None]));
-        let mut outgoing = futures::stream::select(answered.map(Some), relayed);
-        while let Some(Some(message)) = outgoing.next().await {
-            let reader = *serving_as.lock().unwrap_or_else(PoisonError::into_inner);
-            if gating && withheld(&message, reader) {
-                continue;
-            }
-            if to_client.send(message).await.is_err() {
-                break;
-            }
-        }
-        let _ = to_client.close().await;
-    });
-    while let Some(Ok(message)) = from_client.next().await {
+    let relay_to_client = tokio::spawn(hand_to_client(
+        (from_relay, answered),
+        to_client,
+        serving_as,
+        (gating, conn),
+        Arc::clone(&record),
+    ));
+    while let Some(Ok(message)) = read_unless_holed(&record, conn, &mut from_client).await {
         match &message {
             Message::Text(text) => {
                 let frame = RecordedFrame {
@@ -765,6 +875,134 @@ mod tests {
         tokio::time::timeout(budget(), front.wait_closed(2))
             .await
             .expect("the raw client's close reaches the front");
+    }
+
+    /// A raw connection to the front that has asked for every text note and
+    /// read the relay's stored ones to their `EOSE`, so its subscription
+    /// stands at the relay.
+    async fn subscribed(front: &RecordingFront, sub: &str) -> (Socket, Vec<serde_json::Value>) {
+        let tcp = TcpStream::connect(front.url().trim_start_matches("ws://"))
+            .await
+            .expect("dial the front");
+        let (mut raw, _) = tokio_tungstenite::client_async(front.url(), tcp)
+            .await
+            .expect("a raw client's handshake");
+        raw.send(Message::text(
+            serde_json::json!(["REQ", sub, {"kinds": [1]}]).to_string(),
+        ))
+        .await
+        .expect("the request is sent");
+        let mut stored = Vec::new();
+        let read = async {
+            while let Some(Ok(Message::Text(text))) = raw.next().await {
+                let answer: serde_json::Value =
+                    serde_json::from_str(text.as_str()).expect("a relay frame is JSON");
+                if answer[0] == "EOSE" {
+                    break;
+                }
+                stored.push(answer);
+            }
+        };
+        tokio::time::timeout(budget(), read)
+            .await
+            .expect("the stored notes are read to their end");
+        (raw, stored)
+    }
+
+    /// A black-holed connection reads as open and hears nothing: the events
+    /// the relay pushed it are swallowed, its ping goes unanswered, what its
+    /// client sends is not read, and no FIN or RST ends it; a connection
+    /// opened after the black hole is served as before, the swallowed event
+    /// and a later one included.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_black_holed_connection_stays_open_and_silent_while_a_new_one_is_served() {
+        let relay = nostr_relay_builder::MockRelay::run()
+            .await
+            .expect("an in-process relay");
+        let relay_url = relay.url().await.to_string();
+        let front = RecordingFront::start(&relay_url);
+        let (mut holed, stored) = subscribed(&front, "old").await;
+        assert!(stored.is_empty(), "premise: the relay holds no note yet");
+
+        front.black_hole();
+        let publisher = verified_client(ClientOptions::default(), None);
+        publisher.add_relay(&relay_url).await.expect("add relay");
+        publisher.connect().await;
+        let note = |content: &str| {
+            EventBuilder::text_note(content)
+                .sign_with_keys(&Keys::generate())
+                .expect("a locally built event signs")
+        };
+        let first = note("into the hole");
+        publisher.send_event(&first).await.expect("stored");
+        tokio::time::timeout(budget(), front.wait_swallowed(1))
+            .await
+            .expect("the relay pushed the old subscription its note");
+        holed
+            .send(Message::Ping(vec![7].into()))
+            .await
+            .expect("the client still writes into a socket it reads as open");
+        holed
+            .send(Message::text(r#"["CLOSE","old"]"#))
+            .await
+            .expect("the client still writes into a socket it reads as open");
+
+        let (mut served, stored) = subscribed(&front, "new").await;
+        assert_eq!(
+            stored
+                .iter()
+                .map(|answer| answer[2]["id"].clone())
+                .collect::<Vec<_>>(),
+            [serde_json::json!(first.id.to_hex())],
+            "a connection opened after the black hole was not served the stored note",
+        );
+        let second = note("over the new connection");
+        publisher.send_event(&second).await.expect("stored");
+        let pushed = tokio::time::timeout(budget(), served.next())
+            .await
+            .expect("the new connection is pushed the later note");
+        let pushed: serde_json::Value = match pushed {
+            Some(Ok(Message::Text(text))) => {
+                serde_json::from_str(text.as_str()).expect("a relay frame is JSON")
+            }
+            _ => panic!("the new connection was not pushed a text frame"),
+        };
+        assert_eq!(
+            (pushed[0].clone(), pushed[2]["id"].clone()),
+            (
+                serde_json::json!("EVENT"),
+                serde_json::json!(second.id.to_hex())
+            ),
+            "the new connection's subscription is not live",
+        );
+        tokio::time::timeout(budget(), front.wait_swallowed(2))
+            .await
+            .expect("the old subscription was pushed the later note too");
+
+        // An absence: whatever reaches the old connection — a note, a pong, a
+        // close or a reset — is read at once, and both swallows came after
+        // the frames it would have been.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), holed.next())
+                .await
+                .is_err(),
+            "a black-holed connection was handed a frame, answered a ping, or ended",
+        );
+        assert_eq!(
+            (front.connections(), front.closed()),
+            (2, 0),
+            "the black-holed connection ended at the front",
+        );
+        assert_eq!(
+            front
+                .frames()
+                .iter()
+                .filter(|frame| frame.conn == 0)
+                .count(),
+            1,
+            "the front read what the black-holed connection's client sent after it",
+        );
+        publisher.shutdown().await;
     }
 
     /// Sends `frame` on a connection of its own and reads the answers until

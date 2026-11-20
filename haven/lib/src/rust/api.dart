@@ -531,19 +531,22 @@ void allowWsLoopbackForTest() =>
 void allowPrivateBlossomForTest() =>
     RustLib.instance.api.crateApiAllowPrivateBlossomForTest();
 
-/// Overrides the Blossom upload server for hermetic public-profile E2E tests.
+/// Overrides the Blossom upload servers for hermetic public-profile E2E tests.
 ///
 /// Forwards to [`haven_core::profile::set_blossom_server_for_test`] (debug
-/// builds) or returns an error in release builds. The own-profile sync reads
-/// the effective server via `haven_core::profile::blossom_server`, so
+/// builds) or returns an error in release builds. `url` is one base URL or a
+/// comma-separated, ordered list of them
+/// (`"http://10.0.2.2:3000,http://10.0.2.2:3002"`), tried in order as the
+/// production list is, and it REPLACES that whole list: the own-profile sync
+/// reads the effective servers via `haven_core::profile::blossom_servers`, so
 /// installing this override before the first upload points A's picture at the
-/// hermetic Blossom instead of the production default. Intended to be called
-/// once from a scenario's `setUpAll` with the `HAVEN_E2E_BLOSSOM_URL`
+/// hermetic Blossom and never at a production server. Intended to be called
+/// once from a scenario's `setUpAll` with the `HAVEN_E2E_BLOSSOM_URLS`
 /// dart-define value.
 ///
 /// # Errors
 ///
-/// * Returns an error if `url` is empty.
+/// * Returns an error if an entry is empty or is not a URL with a host.
 /// * Returns an error if the override has already been installed in this
 ///   process (`OnceLock` install-once semantics).
 /// * In release builds this function is unreachable; the sibling stub always
@@ -1920,6 +1923,21 @@ abstract class LiveSyncFfi implements RustOpaqueInterface {
   /// Returns an error if there is no active session or the lock is poisoned,
   /// so a caller can never read "no session" as "no standing REQ".
   Future<int> poolSubscriptionCount();
+
+  /// Re-dials every live socket after the default network changed.
+  ///
+  /// The re-anchor above keeps a socket the pool still reads as
+  /// `Connected`, and one the old network carried reads so until a ping
+  /// goes unanswered; this pauses the session, then opens it again.
+  ///
+  /// `foreground` is the claim [`Self::resume_after_background`] takes,
+  /// and on `false` the call is refused in the same way.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if there is no active session, the lock is poisoned,
+  /// the caller did not claim the foreground, or the open fails.
+  Future<void> reconnectAfterNetworkChange({required bool foreground});
 
   /// Re-anchors the session after a background period / reconnect.
   ///

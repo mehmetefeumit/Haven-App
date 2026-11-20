@@ -4126,6 +4126,54 @@ async fn a_session_nobody_claimed_makes_no_first_send_however_many_ticks_arrive(
     let _ = core.stop().await;
 }
 
+/// A network change says the network is back once the session has opened
+/// again: a relay a stored record could not reach is called at once, on a
+/// driver clock that has not moved, instead of waiting out its backoff — as
+/// the pool's own loss and return of every relay would. A foreground
+/// re-anchor alone leaves it waiting.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_network_change_calls_a_relay_left_unreachable_at_once() {
+    let (fx, _relay, url) = a_circle_on_a_local_relay().await;
+    let admin = fx.admin();
+    let earlier = Plane::over(&admin.circle);
+    earlier.processor.for_test().set_background_burst(false);
+    feed_leave(&earlier, &fx, 1, 2).await;
+    drop(earlier);
+
+    let scripted = Scripted::new();
+    scripted.transport.answer(&url, [Answer::Unreachable; 3]);
+    let core = scripted
+        .session(admin, &fx.group, &url, Claim::Foreground)
+        .await;
+    assert!(
+        held(|| async {
+            scripted.transport.call_count() == 1 && core.processor().passes_under_way() == 0
+        })
+        .await,
+        "premise: the claim's drive called the relay, which could not be reached",
+    );
+
+    let reads = scripted.read.reads();
+    core.resume_after_background(Claim::Foreground)
+        .await
+        .expect("the re-anchor answers");
+    assert!(scripted.a_drive_ran(&core, reads).await);
+    assert_eq!(
+        scripted.transport.call_count(),
+        1,
+        "control: the relay is not due on the clock as it stands",
+    );
+
+    core.reconnect_after_network_change(Claim::Foreground)
+        .await
+        .expect("the change re-opens the session");
+    assert!(
+        held(|| async { scripted.transport.call_count() == 2 }).await,
+        "a relay left unreachable across the change waited out its backoff",
+    );
+    let _ = core.stop().await;
+}
+
 /// What a launch costs when nothing is due, whatever it claims: the start
 /// asks for one drive, that drive runs, and it takes no relay — so nothing
 /// is called and nothing is dialled — and publishes nothing.

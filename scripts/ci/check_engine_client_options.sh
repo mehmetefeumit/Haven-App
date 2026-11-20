@@ -171,7 +171,7 @@
 #      sleeping AND re-create the C3 silent-drop class on the one pool that has
 #      no keepalive to detect it.
 #   9. `api.rs` is a PURE FORWARDER for the whole burst lifecycle: each of the
-#      eight `LiveSyncFfi` methods named in `FFI_DELEGATIONS` calls
+#      nine `LiveSyncFfi` methods named in `FFI_DELEGATIONS` calls
 #      `core.<same-name>()`, makes exactly ONE call on the core handle, and
 #      contains no `return` but the session gate's `return Err(`. The last rule
 #      is what makes it a reachability check rather than a substring one — a
@@ -603,7 +603,7 @@ check_ffi_add_relay() { # <api.rs>
 # ---------------------------------------------------------------------------
 # 9. The bridge is a PURE FORWARDER for the whole background-burst lifecycle.
 #
-#    Seven `LiveSyncFfi` methods exist only to hand a call to the core method of
+#    Nine `LiveSyncFfi` methods exist only to hand a call to the core method of
 #    the SAME NAME. The core owns the burst state machine; the bridge owns
 #    nothing, and every decision it takes instead of forwarding is invisible —
 #    `rust_builder` has no test that ever constructs a `LiveSyncFfi`, and the
@@ -633,14 +633,14 @@ check_ffi_add_relay() { # <api.rs>
 #    skip past the forwarding with a success.
 #
 #    Rules (a) and (b) read the handle by NAME, so the engine `Arc` must stay
-#    bound as `core` in these eight methods. That is a convention this guard
+#    bound as `core` in these nine methods. That is a convention this guard
 #    imposes and cannot infer — a rename fails rule (a) with "does not forward",
 #    which is the right place to learn about it.
 #
 #    Whitespace is squeezed out before matching, so rustfmt may split or join
 #    the builder chain freely without moving this check either way.
 #
-#    Two of the eight are also each other's most plausible wrong destination, and
+#    Two of the nine are also each other's most plausible wrong destination, and
 #    each direction is silent in its own way. `LiveSyncCore` deliberately splits
 #    `resume_after_background` (the foreground re-anchor — app resume and the
 #    health tick's whole-session repair, which must always carry the inbox REQ)
@@ -660,6 +660,7 @@ check_ffi_add_relay() { # <api.rs>
 # the core method it must reach.
 FFI_DELEGATIONS=(
   'resume_after_background'
+  'reconnect_after_network_change'
   'open_background_burst'
   'wait_backlog_settled'
   'settle_before_pause'
@@ -723,6 +724,8 @@ _delegation_why() { # <name>
   case "$1" in
     resume_after_background)
       printf '%s' "App resume and the subscription-health tick have no whole-session re-anchor left, so an open app stops repairing its own subscriptions." ;;
+    reconnect_after_network_change)
+      printf '%s' "Any other core call keeps every socket the old network carried, which the pool reads as Connected until a ping goes unanswered, so for up to two ping intervals after a network change nothing reaches the open app and nothing it sends leaves." ;;
     open_background_burst)
       printf '%s' "Any other core call skips the burst counter, so the INBOX_BURSTS_PER_REQ fold silently never applies and every burst re-requests the whole bounded inbox lookback." ;;
     wait_backlog_settled)
@@ -1347,7 +1350,7 @@ fi
 # hide under the slack.
 # ---------------------------------------------------------------------------
 self_test() {
-  local -r SELF_TEST_FIXTURES=131
+  local -r SELF_TEST_FIXTURES=132
   local tmp fails=0 checked=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -1705,6 +1708,22 @@ impl LiveSyncFfi {
         }
     }
 
+    /// Re-dials every live socket after the default network changed.
+    pub async fn reconnect_after_network_change(&self) -> Result<(), String> {
+        let core = SESSION
+            .read()
+            .map_err(|_| "session lock poisoned".to_string())?
+            .as_ref()
+            .map(Arc::clone);
+        match core {
+            Some(core) => core
+                .reconnect_after_network_change()
+                .await
+                .map_err(|e| e.to_string()),
+            None => Err("no active live-sync session".to_string()),
+        }
+    }
+
     /// The BACKGROUND entry point. Takes the inbox fold.
     pub async fn open_background_burst(&self) -> Result<(), String> {
         let Some(core) = live_session_core()? else {
@@ -2028,6 +2047,13 @@ RS
   _fixture 'the foreground re-anchor forwarding to the burst fails' 1 \
     '(9) api.rs: resume_after_background() forwards to the BURST' \
     _sed 's|            .resume_after_background()|            .open_background_burst()|' "${api}"
+
+  # 23b. The network change collapsed onto the re-anchor: it compiles, the app
+  #      keeps receiving once the pool's ping notices the dead sockets, and up
+  #      to two ping intervals after every change go silent.
+  _fixture 'the network change forwarding to the re-anchor fails' 1 \
+    '(9) api.rs: reconnect_after_network_change() does not forward' \
+    _sed 's|            .reconnect_after_network_change()|            .resume_after_background()|' "${api}"
 
   # 24. The guarded bypass — the mutation that beat check 9 while it was a
   #     substring test. The required call is still THERE and is now dead code:

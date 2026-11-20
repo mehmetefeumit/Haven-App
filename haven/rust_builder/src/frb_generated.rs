@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -989062048;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -709661386;
 
 // Section: executor
 
@@ -5669,6 +5669,66 @@ fn wire__crate__api__LiveSyncFfi_pool_subscription_count_impl(
                         let output_ok =
                             crate::api::LiveSyncFfi::pool_subscription_count(&*api_that_guard)
                                 .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__LiveSyncFfi_reconnect_after_network_change_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "LiveSyncFfi_reconnect_after_network_change",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_that = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LiveSyncFfi>,
+            >>::sse_decode(&mut deserializer);
+            let api_foreground = <bool>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let mut api_that_guard = None;
+                        let decode_indices_ =
+                            flutter_rust_bridge::for_generated::lockable_compute_decode_order(
+                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                    &api_that, 0, false,
+                                )],
+                            );
+                        for i in decode_indices_ {
+                            match i {
+                                0 => {
+                                    api_that_guard =
+                                        Some(api_that.lockable_decode_async_ref().await)
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        let api_that_guard = api_that_guard.unwrap();
+                        let output_ok = crate::api::LiveSyncFfi::reconnect_after_network_change(
+                            &*api_that_guard,
+                            api_foreground,
+                        )
+                        .await?;
                         Ok(output_ok)
                     })()
                     .await,
@@ -13578,265 +13638,271 @@ fn pde_ffi_dispatcher_primary_impl(
             rust_vec_len,
             data_len,
         ),
-        99 => wire__crate__api__LiveSyncFfi_resume_after_background_impl(
+        99 => wire__crate__api__LiveSyncFfi_reconnect_after_network_change_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        100 => wire__crate__api__LiveSyncFfi_settle_before_pause_impl(
+        100 => wire__crate__api__LiveSyncFfi_resume_after_background_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        101 => wire__crate__api__LiveSyncFfi_start_session_impl(port, ptr, rust_vec_len, data_len),
-        102 => wire__crate__api__LiveSyncFfi_start_session_into_burst_impl(
+        101 => wire__crate__api__LiveSyncFfi_settle_before_pause_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        103 => wire__crate__api__LiveSyncFfi_stop_session_impl(port, ptr, rust_vec_len, data_len),
-        104 => {
+        102 => wire__crate__api__LiveSyncFfi_start_session_impl(port, ptr, rust_vec_len, data_len),
+        103 => wire__crate__api__LiveSyncFfi_start_session_into_burst_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        104 => wire__crate__api__LiveSyncFfi_stop_session_impl(port, ptr, rust_vec_len, data_len),
+        105 => {
             wire__crate__api__LiveSyncFfi_subscribe_circle_impl(port, ptr, rust_vec_len, data_len)
         }
-        105 => {
+        106 => {
             wire__crate__api__LiveSyncFfi_unsubscribe_circle_impl(port, ptr, rust_vec_len, data_len)
         }
-        106 => wire__crate__api__LiveSyncFfi_wait_backlog_settled_impl(
+        107 => wire__crate__api__LiveSyncFfi_wait_backlog_settled_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        107 => {
+        108 => {
             wire__crate__api__LocationEventService_default_impl(port, ptr, rust_vec_len, data_len)
         }
-        117 => wire__crate__api__LocationSettings_new_impl(port, ptr, rust_vec_len, data_len),
-        119 => wire__crate__api__NostrIdentityManager_clear_cache_impl(
+        118 => wire__crate__api__LocationSettings_new_impl(port, ptr, rust_vec_len, data_len),
+        120 => wire__crate__api__NostrIdentityManager_clear_cache_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        120 => wire__crate__api__NostrIdentityManager_create_identity_impl(
+        121 => wire__crate__api__NostrIdentityManager_create_identity_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        121 => {
+        122 => {
             wire__crate__api__NostrIdentityManager_default_impl(port, ptr, rust_vec_len, data_len)
         }
-        122 => wire__crate__api__NostrIdentityManager_delete_identity_impl(
+        123 => wire__crate__api__NostrIdentityManager_delete_identity_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        123 => wire__crate__api__NostrIdentityManager_export_nsec_impl(
+        124 => wire__crate__api__NostrIdentityManager_export_nsec_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        125 => wire__crate__api__NostrIdentityManager_get_secret_bytes_impl(
+        126 => wire__crate__api__NostrIdentityManager_get_secret_bytes_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        127 => wire__crate__api__NostrIdentityManager_import_from_nsec_impl(
+        128 => wire__crate__api__NostrIdentityManager_import_from_nsec_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        128 => wire__crate__api__NostrIdentityManager_load_from_bytes_impl(
+        129 => wire__crate__api__NostrIdentityManager_load_from_bytes_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        129 => wire__crate__api__NostrIdentityManager_new_impl(port, ptr, rust_vec_len, data_len),
-        131 => wire__crate__api__NostrIdentityManager_sign_impl(port, ptr, rust_vec_len, data_len),
-        132 => wire__crate__api__RelayManagerFfi_add_members_driven_impl(
+        130 => wire__crate__api__NostrIdentityManager_new_impl(port, ptr, rust_vec_len, data_len),
+        132 => wire__crate__api__NostrIdentityManager_sign_impl(port, ptr, rust_vec_len, data_len),
+        133 => wire__crate__api__RelayManagerFfi_add_members_driven_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        133 => wire__crate__api__RelayManagerFfi_admin_handoff_driven_impl(
+        134 => wire__crate__api__RelayManagerFfi_admin_handoff_driven_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        134 => wire__crate__api__RelayManagerFfi_circle_recovery_impl(
+        135 => wire__crate__api__RelayManagerFfi_circle_recovery_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        135 => wire__crate__api__RelayManagerFfi_create_circle_driven_impl(
+        136 => wire__crate__api__RelayManagerFfi_create_circle_driven_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        136 => wire__crate__api__RelayManagerFfi_disconnect_relay_impl(
+        137 => wire__crate__api__RelayManagerFfi_disconnect_relay_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        137 => wire__crate__api__RelayManagerFfi_fetch_gift_wraps_impl(
+        138 => wire__crate__api__RelayManagerFfi_fetch_gift_wraps_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        138 => wire__crate__api__RelayManagerFfi_fetch_gift_wraps_per_relay_impl(
+        139 => wire__crate__api__RelayManagerFfi_fetch_gift_wraps_per_relay_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        139 => wire__crate__api__RelayManagerFfi_fetch_group_messages_impl(
+        140 => wire__crate__api__RelayManagerFfi_fetch_group_messages_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        140 => wire__crate__api__RelayManagerFfi_fetch_member_keypackage_impl(
+        141 => wire__crate__api__RelayManagerFfi_fetch_member_keypackage_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        141 => wire__crate__api__RelayManagerFfi_fetch_nip65_relays_impl(
+        142 => wire__crate__api__RelayManagerFfi_fetch_nip65_relays_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        142 => wire__crate__api__RelayManagerFfi_get_relay_status_impl(
+        143 => wire__crate__api__RelayManagerFfi_get_relay_status_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        143 => {
+        144 => {
             wire__crate__api__RelayManagerFfi_ingest_driven_impl(port, ptr, rust_vec_len, data_len)
         }
-        144 => {
+        145 => {
             wire__crate__api__RelayManagerFfi_leave_driven_impl(port, ptr, rust_vec_len, data_len)
         }
-        145 => wire__crate__api__RelayManagerFfi_maintain_key_package_impl(
+        146 => wire__crate__api__RelayManagerFfi_maintain_key_package_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        146 => wire__crate__api__RelayManagerFfi_maintain_relay_list_impl(
+        147 => wire__crate__api__RelayManagerFfi_maintain_relay_list_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        147 => {
+        148 => {
             wire__crate__api__RelayManagerFfi_new_instance_impl(port, ptr, rust_vec_len, data_len)
         }
-        148 => {
+        149 => {
             wire__crate__api__RelayManagerFfi_publish_event_impl(port, ptr, rust_vec_len, data_len)
         }
-        149 => wire__crate__api__RelayManagerFfi_publish_location_driven_impl(
+        150 => wire__crate__api__RelayManagerFfi_publish_location_driven_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        150 => wire__crate__api__RelayManagerFfi_reinvite_driven_impl(
+        151 => wire__crate__api__RelayManagerFfi_reinvite_driven_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        151 => wire__crate__api__RelayManagerFfi_remove_members_driven_impl(
+        152 => wire__crate__api__RelayManagerFfi_remove_members_driven_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        152 => wire__crate__api__RelayManagerFfi_repair_rotation_driven_impl(
+        153 => wire__crate__api__RelayManagerFfi_repair_rotation_driven_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        153 => {
+        154 => {
             wire__crate__api__RelayManagerFfi_resume_driven_impl(port, ptr, rust_vec_len, data_len)
         }
-        154 => wire__crate__api__RelayManagerFfi_resume_leave_driven_impl(
+        155 => wire__crate__api__RelayManagerFfi_resume_leave_driven_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        155 => wire__crate__api__RelayManagerFfi_run_catchup_all_circles_impl(
+        156 => wire__crate__api__RelayManagerFfi_run_catchup_all_circles_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        156 => wire__crate__api__RelayManagerFfi_run_refused_refetch_impl(
+        157 => wire__crate__api__RelayManagerFfi_run_refused_refetch_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        157 => wire__crate__api__RelayManagerFfi_seal_location_driven_impl(
+        158 => wire__crate__api__RelayManagerFfi_seal_location_driven_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        158 => wire__crate__api__RelayManagerFfi_self_demote_driven_impl(
+        159 => wire__crate__api__RelayManagerFfi_self_demote_driven_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        159 => wire__crate__api__RelayManagerFfi_shutdown_impl(port, ptr, rust_vec_len, data_len),
-        160 => wire__crate__api__RelayManagerFfi_update_circle_relays_driven_impl(
+        160 => wire__crate__api__RelayManagerFfi_shutdown_impl(port, ptr, rust_vec_len, data_len),
+        161 => wire__crate__api__RelayManagerFfi_update_circle_relays_driven_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        164 => wire__crate__api__circle_health_ffi_default_impl(port, ptr, rust_vec_len, data_len),
-        165 => {
+        165 => wire__crate__api__circle_health_ffi_default_impl(port, ptr, rust_vec_len, data_len),
+        166 => {
             wire__crate__api__convergence_sweep_ffi_default_impl(port, ptr, rust_vec_len, data_len)
         }
-        169 => wire__crate__api__force_release_live_session_impl(port, ptr, rust_vec_len, data_len),
-        171 => wire__crate__api__init_app_impl(port, ptr, rust_vec_len, data_len),
-        172 => wire__crate__api__init_keyring_store_impl(port, ptr, rust_vec_len, data_len),
-        173 => wire__crate__api__is_session_live_impl(port, ptr, rust_vec_len, data_len),
-        175 => {
+        170 => wire__crate__api__force_release_live_session_impl(port, ptr, rust_vec_len, data_len),
+        172 => wire__crate__api__init_app_impl(port, ptr, rust_vec_len, data_len),
+        173 => wire__crate__api__init_keyring_store_impl(port, ptr, rust_vec_len, data_len),
+        174 => wire__crate__api__is_session_live_impl(port, ptr, rust_vec_len, data_len),
+        176 => {
             wire__crate__api__maintain_subscription_health_impl(port, ptr, rust_vec_len, data_len)
         }
-        176 => wire__crate__api__parse_engine_location_impl(port, ptr, rust_vec_len, data_len),
-        188 => wire__crate__api__tile_cache_evict_impl(port, ptr, rust_vec_len, data_len),
-        189 => wire__crate__api__tile_cache_get_impl(port, ptr, rust_vec_len, data_len),
-        190 => wire__crate__api__tile_cache_init_impl(port, ptr, rust_vec_len, data_len),
-        191 => wire__crate__api__tile_cache_put_impl(port, ptr, rust_vec_len, data_len),
-        192 => wire__crate__api__tile_cache_put_metadata_impl(port, ptr, rust_vec_len, data_len),
-        193 => wire__crate__api__tile_cache_wipe_impl(port, ptr, rust_vec_len, data_len),
-        194 => {
+        177 => wire__crate__api__parse_engine_location_impl(port, ptr, rust_vec_len, data_len),
+        189 => wire__crate__api__tile_cache_evict_impl(port, ptr, rust_vec_len, data_len),
+        190 => wire__crate__api__tile_cache_get_impl(port, ptr, rust_vec_len, data_len),
+        191 => wire__crate__api__tile_cache_init_impl(port, ptr, rust_vec_len, data_len),
+        192 => wire__crate__api__tile_cache_put_impl(port, ptr, rust_vec_len, data_len),
+        193 => wire__crate__api__tile_cache_put_metadata_impl(port, ptr, rust_vec_len, data_len),
+        194 => wire__crate__api__tile_cache_wipe_impl(port, ptr, rust_vec_len, data_len),
+        195 => {
             wire__crate__api__use_in_memory_keyring_for_test_impl(port, ptr, rust_vec_len, data_len)
         }
-        195 => wire__crate__api__wipe_all_mls_state_impl(port, ptr, rust_vec_len, data_len),
+        196 => wire__crate__api__wipe_all_mls_state_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -13875,56 +13941,56 @@ fn pde_ffi_dispatcher_sync_impl(
         90 => wire__crate__api__LiveSyncFfi_is_paused_impl(ptr, rust_vec_len, data_len),
         91 => wire__crate__api__LiveSyncFfi_is_running_impl(ptr, rust_vec_len, data_len),
         92 => wire__crate__api__LiveSyncFfi_lifecycle_impl(ptr, rust_vec_len, data_len),
-        108 => wire__crate__api__LocationEventService_jittered_publish_interval_secs_impl(
+        109 => wire__crate__api__LocationEventService_jittered_publish_interval_secs_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        109 => wire__crate__api__LocationEventService_new_impl(ptr, rust_vec_len, data_len),
-        110 => wire__crate__api__LocationEventService_verify_signature_impl(
+        110 => wire__crate__api__LocationEventService_new_impl(ptr, rust_vec_len, data_len),
+        111 => wire__crate__api__LocationEventService_verify_signature_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        111 => wire__crate__api__LocationMessage_expires_at_impl(ptr, rust_vec_len, data_len),
-        112 => wire__crate__api__LocationMessage_geohash_impl(ptr, rust_vec_len, data_len),
-        113 => wire__crate__api__LocationMessage_is_expired_impl(ptr, rust_vec_len, data_len),
-        114 => wire__crate__api__LocationMessage_latitude_impl(ptr, rust_vec_len, data_len),
-        115 => wire__crate__api__LocationMessage_longitude_impl(ptr, rust_vec_len, data_len),
-        116 => wire__crate__api__LocationMessage_timestamp_impl(ptr, rust_vec_len, data_len),
-        118 => wire__crate__api__LocationSettings_update_interval_minutes_impl(
+        112 => wire__crate__api__LocationMessage_expires_at_impl(ptr, rust_vec_len, data_len),
+        113 => wire__crate__api__LocationMessage_geohash_impl(ptr, rust_vec_len, data_len),
+        114 => wire__crate__api__LocationMessage_is_expired_impl(ptr, rust_vec_len, data_len),
+        115 => wire__crate__api__LocationMessage_latitude_impl(ptr, rust_vec_len, data_len),
+        116 => wire__crate__api__LocationMessage_longitude_impl(ptr, rust_vec_len, data_len),
+        117 => wire__crate__api__LocationMessage_timestamp_impl(ptr, rust_vec_len, data_len),
+        119 => wire__crate__api__LocationSettings_update_interval_minutes_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        124 => {
+        125 => {
             wire__crate__api__NostrIdentityManager_get_identity_impl(ptr, rust_vec_len, data_len)
         }
-        126 => {
+        127 => {
             wire__crate__api__NostrIdentityManager_has_identity_impl(ptr, rust_vec_len, data_len)
         }
-        130 => wire__crate__api__NostrIdentityManager_pubkey_hex_impl(ptr, rust_vec_len, data_len),
-        161 => wire__crate__api__acknowledge_storage_reset_impl(ptr, rust_vec_len, data_len),
-        162 => wire__crate__api__allow_private_blossom_for_test_impl(ptr, rust_vec_len, data_len),
-        163 => wire__crate__api__allow_ws_loopback_for_test_impl(ptr, rust_vec_len, data_len),
-        166 => wire__crate__api__default_relays_impl(ptr, rust_vec_len, data_len),
-        167 => wire__crate__api__discovery_relays_impl(ptr, rust_vec_len, data_len),
-        168 => wire__crate__api__fold_for_search_impl(ptr, rust_vec_len, data_len),
-        170 => wire__crate__api__inbox_gift_wrap_lookback_secs_impl(ptr, rust_vec_len, data_len),
-        174 => wire__crate__api__log_alias_impl(ptr, rust_vec_len, data_len),
-        177 => wire__crate__api__reset_pre_v2_storage_impl(ptr, rust_vec_len, data_len),
-        178 => wire__crate__api__rotate_log_alias_salt_impl(ptr, rust_vec_len, data_len),
-        179 => {
+        131 => wire__crate__api__NostrIdentityManager_pubkey_hex_impl(ptr, rust_vec_len, data_len),
+        162 => wire__crate__api__acknowledge_storage_reset_impl(ptr, rust_vec_len, data_len),
+        163 => wire__crate__api__allow_private_blossom_for_test_impl(ptr, rust_vec_len, data_len),
+        164 => wire__crate__api__allow_ws_loopback_for_test_impl(ptr, rust_vec_len, data_len),
+        167 => wire__crate__api__default_relays_impl(ptr, rust_vec_len, data_len),
+        168 => wire__crate__api__discovery_relays_impl(ptr, rust_vec_len, data_len),
+        169 => wire__crate__api__fold_for_search_impl(ptr, rust_vec_len, data_len),
+        171 => wire__crate__api__inbox_gift_wrap_lookback_secs_impl(ptr, rust_vec_len, data_len),
+        175 => wire__crate__api__log_alias_impl(ptr, rust_vec_len, data_len),
+        178 => wire__crate__api__reset_pre_v2_storage_impl(ptr, rust_vec_len, data_len),
+        179 => wire__crate__api__rotate_log_alias_salt_impl(ptr, rust_vec_len, data_len),
+        180 => {
             wire__crate__api__sealed_location_event_json_for_test_impl(ptr, rust_vec_len, data_len)
         }
-        180 => wire__crate__api__set_blossom_server_for_test_impl(ptr, rust_vec_len, data_len),
-        181 => wire__crate__api__set_default_relays_for_test_impl(ptr, rust_vec_len, data_len),
-        182 => wire__crate__api__set_discovery_relays_for_test_impl(ptr, rust_vec_len, data_len),
-        183 => wire__crate__api__set_location_relays_for_test_impl(ptr, rust_vec_len, data_len),
-        184 => wire__crate__api__set_profile_relays_for_test_impl(ptr, rust_vec_len, data_len),
-        185 => wire__crate__api__storage_reset_notice_owed_impl(ptr, rust_vec_len, data_len),
-        186 => wire__crate__api__storage_reset_prefs_cleared_impl(ptr, rust_vec_len, data_len),
-        187 => wire__crate__api__storage_reset_prefs_owed_impl(ptr, rust_vec_len, data_len),
+        181 => wire__crate__api__set_blossom_server_for_test_impl(ptr, rust_vec_len, data_len),
+        182 => wire__crate__api__set_default_relays_for_test_impl(ptr, rust_vec_len, data_len),
+        183 => wire__crate__api__set_discovery_relays_for_test_impl(ptr, rust_vec_len, data_len),
+        184 => wire__crate__api__set_location_relays_for_test_impl(ptr, rust_vec_len, data_len),
+        185 => wire__crate__api__set_profile_relays_for_test_impl(ptr, rust_vec_len, data_len),
+        186 => wire__crate__api__storage_reset_notice_owed_impl(ptr, rust_vec_len, data_len),
+        187 => wire__crate__api__storage_reset_prefs_cleared_impl(ptr, rust_vec_len, data_len),
+        188 => wire__crate__api__storage_reset_prefs_owed_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }

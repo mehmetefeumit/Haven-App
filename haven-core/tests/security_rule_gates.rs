@@ -2819,12 +2819,15 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
         (
             "{matchclaim{Claim::Foreground=>Some(Self::Foreground),Claim::Nothing=>None,}}"
                 .to_owned(),
-            3,
+            // The re-anchor, the network change, and the health tick's two.
+            4,
             1,
             // The two background opens, a start into a burst entering it, and
             // that start's read of the inbox fold.
             4,
-            5,
+            // The re-anchor, the network change, the two background opens and
+            // the health tick's two.
+            6,
         ),
         "the foreground kind of an open is made without a claim, or an open has a \
          caller this gate does not name",
@@ -2883,6 +2886,26 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
          self.resume_burst(&lifecycle,kind,INBOX_BURSTS_PER_REQ,None).await}",
         "the foreground re-anchor is made for a caller that claimed nothing, or touches \
          the session before it has refused one",
+    );
+    // The network change: refused before the lock for a caller that claims
+    // nothing; then ONE acquisition covers the read of the pause, the pause
+    // a live session needs before its sockets may be rebuilt, and the
+    // foreground open — so nothing slips between them — and the network is
+    // said to be back only once that open has succeeded.
+    assert_eq!(
+        squash(
+            fn_body(&core, "pub async fn reconnect_after_network_change(")
+                .expect("session.rs defines reconnect_after_network_change")
+        ),
+        "{letSome(kind)=BurstKind::claimed(claim)else{returnErr(LiveSyncError::NotForeground);};\
+         letlifecycle=self.lifecycle.lock().await;\
+         log::info!(\"[live_sync]thenetworkchanged:re-diallingeverylivesocket\");\
+         if!self.paused.load(Ordering::Acquire){self.pause_locked(&lifecycle).await?;}\
+         self.resume_burst(&lifecycle,kind,INBOX_BURSTS_PER_REQ,None).await?;\
+         self.repair.note_network_back();Ok(())}",
+        "the network change is made for a caller that claimed nothing, touches the session \
+         before it has refused one, re-dials without a pause, lets go of the lock between \
+         its pause and its open, or says the network is back before the open succeeded",
     );
     assert!(
         health.contains(
@@ -3217,6 +3240,7 @@ fn the_foreground_is_claimed_through_the_bridge_alone() {
         }
         for entry in [
             ".resume_after_background(",
+            ".reconnect_after_network_change(",
             ".maintain_subscription_health(",
             ".claim_foreground(",
         ] {
@@ -3249,6 +3273,10 @@ fn the_foreground_is_claimed_through_the_bridge_alone() {
             (
                 "haven/rust_builder/src/api.rs",
                 ".resume_after_background(foreground_claim(foreground)",
+            ),
+            (
+                "haven/rust_builder/src/api.rs",
+                ".reconnect_after_network_change(foreground_claim(foreground)",
             ),
             (
                 "haven/rust_builder/src/api.rs",
@@ -3305,8 +3333,8 @@ fn the_foreground_is_claimed_through_the_bridge_alone() {
         ),
         (
             "{ifforeground{Claim::Foreground}else{Claim::Nothing}}".to_owned(),
+            5,
             4,
-            3,
             1,
             1,
         ),
@@ -3325,9 +3353,18 @@ fn the_foreground_is_claimed_through_the_bridge_alone() {
         "a session start carries a claim again: it is read seconds before the start acts \
          on it, and a pause in between never reaches the core",
     );
-    // Each of the three, WHOLE: the flag is the entry's own parameter, handed
+    // Each of the four, WHOLE: the flag is the entry's own parameter, handed
     // on once and never assigned on the way.
     for (signature, whole) in [
+        (
+            "pub async fn reconnect_after_network_change(&self, foreground: bool)",
+            "pubasyncfnreconnect_after_network_change(&self,foreground:bool)->Result<(),String>{\
+             letcore=SESSION.read().map_err(|_|\"sessionlockpoisoned\".to_string())?\
+             .as_ref().map(Arc::clone);matchcore{Some(core)=>core\
+             .reconnect_after_network_change(foreground_claim(foreground)).await\
+             .map_err(|e|e.to_string()),None=>Err(\"noactivelive-syncsession\"\
+             .to_string()),}}",
+        ),
         (
             "pub async fn resume_after_background(&self, foreground: bool)",
             "pubasyncfnresume_after_background(&self,foreground:bool)->Result<(),String>{\

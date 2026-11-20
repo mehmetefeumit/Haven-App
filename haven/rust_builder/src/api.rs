@@ -13571,6 +13571,34 @@ impl LiveSyncFfi {
         }
     }
 
+    /// Re-dials every live socket after the default network changed.
+    ///
+    /// The re-anchor above keeps a socket the pool still reads as
+    /// `Connected`, and one the old network carried reads so until a ping
+    /// goes unanswered; this pauses the session, then opens it again.
+    ///
+    /// `foreground` is the claim [`Self::resume_after_background`] takes,
+    /// and on `false` the call is refused in the same way.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if there is no active session, the lock is poisoned,
+    /// the caller did not claim the foreground, or the open fails.
+    pub async fn reconnect_after_network_change(&self, foreground: bool) -> Result<(), String> {
+        let core = SESSION
+            .read()
+            .map_err(|_| "session lock poisoned".to_string())?
+            .as_ref()
+            .map(Arc::clone);
+        match core {
+            Some(core) => core
+                .reconnect_after_network_change(foreground_claim(foreground))
+                .await
+                .map_err(|e| e.to_string()),
+            None => Err("no active live-sync session".to_string()),
+        }
+    }
+
     /// Tells a started session that the app's lifecycle reads `resumed`:
     /// the session is in the foreground from here and is served as one,
     /// once — a removal whose publish an earlier pass left owed is published
