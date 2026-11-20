@@ -5847,6 +5847,7 @@ pub mod scripted {
     }
 
     /// The answer of a publisher that makes no authenticated resend.
+    #[must_use = "a resend answer that is never awaited decides nothing"]
     pub fn not_resent<'a>() -> Pin<Box<dyn Future<Output = AuthSendOutcome> + Send + 'a>> {
         Box::pin(async { AuthSendOutcome::NotSent })
     }
