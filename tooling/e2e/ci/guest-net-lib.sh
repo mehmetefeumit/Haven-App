@@ -136,3 +136,91 @@ guest_can_route_to() {
   done <<<"${table}"
   return 1
 }
+
+# -----------------------------------------------------------------
+# THE SETTLED GUEST NETWORK: one network is not yet a network that stays.
+#
+# The egress guard (setup-network-guard.sh) REJECTs the host's outbound TCP
+# 80/443, and SLIRP carries the guest's traffic through host sockets, so once
+# it is installed (after boot, when cellular has already validated) every
+# NetworkMonitor probe fails and the network drops to unvalidated. Telephony's
+# DataStallRecoveryManager reads a validated mobile network going unvalidated
+# as a data stall and escalates: a data-call refresh at once, then, at the first
+# validation failure 180 s or more later, a CLEANUP that tears the data network
+# down and brings up a new one, which fails validation the same way. Every
+# socket opened on the old network dies with it, silently. NetworkMonitor backs
+# off 2, 4 ... 128 s, so that gate first opens at the ninth failure, +258 s:
+#
+#   run 44564452934  18:17:01.382  [100 CELLULAR] validation failed   (first)
+#                    18:21:19.114  [100 CELLULAR] validation failed   (ninth)
+#                    18:21:19.125  [100 CELLULAR] ... CONNECTED to DISCONNECTED
+#                    18:21:22.182  [101 CELLULAR] ... CONNECTING to CONNECTED
+#   run 44690188907  07:22:56.423 first, 07:27:13.119 ninth, .132 DISCONNECTED,
+#                    07:27:16.185 [102 CELLULAR] CONNECTED
+#
+# So a runner settles the guest before it drives: `captive_portal_mode` 0 makes
+# NetworkMonitor validate without probing, and because each network reads that
+# setting once, when it is created, mobile data is cycled to replace the
+# cellular network. The state to wait for is the one nothing moves the guest
+# out of: the default network is cellular, CONNECTED and VALIDATED, and no other
+# network has the INTERNET capability to take the default from it.
+
+# guest_net_summary <dumpsys-connectivity> — one line per network listed under
+# `Current Networks:`, `net <id> <transports> <state> validated=<0|1>
+# internet=<0|1> lingering=<0|1>`, then `default <id|none|?>` (`?`: no
+# `Active default network:` line was read).
+#
+# Only ids, transport and state names and flags leave this function, never a
+# record's link properties (addresses, DNS servers), so the summary is what a
+# runner prints. VALIDATED counts only as a whole token of the Capabilities
+# list: a record keeps `firstValidated=` once a network has ever validated, and
+# its score's policy is spelled `IS_VALIDATED`. POSIX awk, for the reason
+# guest_can_route_to avoids gawk.
+guest_net_summary() {
+  printf '%s\n' "${1:-}" | LC_ALL=C awk '
+    { sub(/\r$/, "") }
+    /^Active default network: / { def = $4; next }
+    /^Current Networks:/ { insec = 1; next }
+    insec && /^[^ \t]/ { insec = 0 }
+    insec && /^[ \t]*NetworkAgentInfo[{ ]/ {
+      if (!match($0, /network\{[0-9]+\}/)) next
+      id = substr($0, RSTART + 8, RLENGTH - 9)
+      state = "?"
+      if (match($0, /ni\{[^}]*\}/)) {
+        if (split(substr($0, RSTART + 3, RLENGTH - 4), w, " ") >= 2) state = w[2]
+      }
+      tr = "?"; caps = ""
+      if (match($0, /Transports: [A-Z_|]+/)) tr = substr($0, RSTART + 12, RLENGTH - 12)
+      if (match($0, /Capabilities: [A-Z_&]+/)) caps = "&" substr($0, RSTART + 14, RLENGTH - 14) "&"
+      printf "net %s %s %s validated=%d internet=%d lingering=%d\n", id, tr, state,
+        (index(caps, "&VALIDATED&") > 0), (index(caps, "&INTERNET&") > 0),
+        (index($0, " lingering") > 0)
+    }
+    END { print "default " (def == "" ? "?" : def) }'
+}
+
+# guest_net_is_down <summary> — exit 0 iff the guest has no default network and
+# no network that could become one: proof the old network is gone before a new
+# one is asked for.
+guest_net_is_down() {
+  grep -qxF 'default none' <<<"${1:-}" || return 1
+  ! grep -qE '^net .* internet=1 ' <<<"${1:-}"
+}
+
+# guest_net_settled <summary> — exit 0 iff the default network is cellular,
+# CONNECTED, VALIDATED and not lingering, and the only network with the
+# INTERNET capability. Unparsed output, a default on Wi-Fi, an unvalidated or
+# half-up network, or a second internet network is not settled.
+guest_net_settled() {
+  local summary="${1:-}" def line others
+  def="$(sed -n 's/^default \([0-9][0-9]*\)$/\1/p' <<<"${summary}")"
+  [[ -n "${def}" ]] || return 1
+  line="$(grep -E "^net ${def} " <<<"${summary}" || true)"
+  [[ "${line}" =~ ^net\ [0-9]+\ ([A-Z_|]+)\ CONNECTED\ validated=1\ internet=1\ lingering=0$ ]] \
+    || return 1
+  [[ "|${BASH_REMATCH[1]}|" == *'|CELLULAR|'* ]] || return 1
+  # No pipeline: under pipefail an early-exiting `grep -q` turns a match into
+  # SIGPIPE upstream, and the negation would read that as "no other network".
+  others="$(grep -vE "^net ${def} " <<<"${summary}" || true)"
+  ! grep -qE '^net .* internet=1 ' <<<"${others}"
+}

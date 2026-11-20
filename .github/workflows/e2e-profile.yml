@@ -436,16 +436,17 @@ jobs:
       #        probe waits, each a wall-clock loop that can run one 1 s tick
       #        past PROBE_TIMEOUT, with each probe's `nc -w 1` fallback,
       #        2 x (15 + 1 + 1) = 34, INSTALL_BARRIER_SECS 120,
-      #        WIFI_OFF_TIMEOUT_SECS 20, GUEST_NET_TIMEOUT_SECS 120, two retried
+      #        WIFI_OFF_TIMEOUT_SECS 20, GUEST_NET_TIMEOUT_SECS 120,
+      #        NET_SETTLE_SECS 16, two retried
       #        pre-connect stalls, each restoring the app the failed attempt's
       #        teardown uninstalled (a flushed fresh install),
       #        2 x (300 + 5 + 120 + 5) = 860, and the last attempt
       #        720 + 30 kill-after = 750 (the guard's `iptables -w 5` calls wait
       #        only on another xtables-lock holder, and nothing in this job
-      #        touches iptables during this step: 0). That is 1904 s = 31m44s,
+      #        touches iptables during this step: 0). That is 1920 s = 32m00s,
       #        plus ~3 min of unbounded adb, guard and scan work (under 30 s on
       #        run 34488512808, kept at 3 because the sick device that reaches
-      #        the other bounds is the one that slows it) = 34m44s -> 35m.
+      #        the other bounds is the one that slows it) = 35m00s -> 35m.
       #        scripts/ci/check_e2e_lane_budget.sh derives this sum from the
       #        scripts' constants on every push. It was 26m over
       #        2x5 + 12 + 3 = 25, which left out every wait before the drive

@@ -112,7 +112,10 @@ install lib:install_fresh#1 charge @
 logscan log_privacy_gate#1/lib:logscan_gate#1 charge @
 # The route wait runs first: Wi-Fi is disabled only once it finds a cellular route.
 route sleep:2#1 charge GUEST_NET_TIMEOUT_SECS
+# Then Wi-Fi and mobile data go down together, and data comes back as a network
+# that stays validated.
 wifi-off sleep:2#2 charge WIFI_OFF_TIMEOUT_SECS
+net-settle sleep:2#3 charge NET_SETTLE_SECS
 # Only the last attempt can reach DRIVE_TIMEOUT: an attempt is retried after a
 # pre-connect stall the watchdog ended or a connect flake, never after a hang.
 drive drive_with_connect_watchdog#1/spawn_flutter_drive#1/timeout:DRIVE_TIMEOUT#1 charge DRIVE_TIMEOUT + DRIVE_KILL_AFTER_SECS once a retried attempt ends at the connect watchdog, charged below
