@@ -109,7 +109,7 @@
 #      fixtures could not be seeded although the device answered (a push or
 #      query it refused, or a media store that never listed them)
 #   3  infrastructure: the device went away, never booted, is not en-US,
-#      would not go offline, kept an error dialog the boot raised in front
+#      would not go offline, kept a process the boot left in an error state
 #      after CLOSE_SYSTEM_DIALOGS, refused an injected tap or BACK, failed at
 #      adb itself every dump of a window after an action (the gate saw
 #      nothing), gave no answer while the gallery was seeded, or
@@ -247,6 +247,8 @@ UPGRADE_SOURCE=0
 APP_PID=''
 PRIV=''
 API_LEVEL=0
+# Set by error_state.
+ERROR_STATE=''
 # Which keys observe() asks for: ALL_KEYS, plus the photo keys on the
 # candidate's photo and Settings screens.
 OBS_KEYSET="${ALL_KEYS}"
@@ -1025,8 +1027,36 @@ leg_upgrade() {
 
 # ---------------------------------------------------------------------------
 # Preconditions: a booted en-US device, offline, with error dialogs hidden and
-# none the boot raised left holding input focus.
+# no process the boot left in an error state.
 # ---------------------------------------------------------------------------
+
+# error_state — ERROR_STATE: the first process the activity manager holds in an
+# error state, in fixed words (ui-dump.py errors): `none`,
+# `not-responding-<whose>` or `app-error-<whose>`; empty when adb brought back
+# no process list. One bounded adb read, filtered on the device to the lines
+# ui-dump.py reads.
+error_state() {
+  local out
+  ERROR_STATE=''
+  timeout "${ADB_SECS}" adb -s "${DEVICE}" shell \
+    "dumpsys activity processes | grep -E '^ACTIVITY MANAGER RUNNING PROCESSES|^  [*](APP|PERS)[*] UID |mCrashing='" \
+    > "${PRIV}/processes.txt" 2>/dev/null || true
+  out="$(python3 -I "${UI_DUMP}" errors --dumpsys "${PRIV}/processes.txt" --package "${PKG}" 2>/dev/null || true)"
+  rm -f "${PRIV}/processes.txt"
+  [[ "${out}" == 'errors '* && "${out}" != 'errors unknown' ]] || return 0
+  ERROR_STATE="${out#errors }"
+}
+
+# _error_words <state> — an ERROR_STATE value in fixed words, for a message.
+_error_words() {
+  case "$1" in
+    '') echo 'unread (adb brought back no process list)' ;;
+    none) echo 'no process in an error state' ;;
+    not-responding-*) echo "$(_pp_whose "${1#not-responding-}") process held as not responding" ;;
+    *) echo "$(_pp_whose "${1#app-error-}") process held as crashing" ;;
+  esac
+}
+
 preconditions() {
   local start spent boot locale air='' net='' close=0 closes=0
   if ! timeout "${BOOT_SECS}" adb -s "${DEVICE}" wait-for-device; then
@@ -1060,10 +1090,14 @@ preconditions() {
   # CLOSE_SYSTEM_DIALOGS ends it as the setting would have: an "isn't
   # responding" dialog's closeDialog force-closes its app
   # (AppNotRespondingDialog overrides BaseErrorDialog's dismiss with
-  # FORCE_CLOSE, killAppAtUsersRequest). `am broadcast` waits for the ordered
-  # broadcast to finish, which a hung receiver stretches to 60 s, so it is
-  # bounded, and sent in a pass of its own: no pass outlasts the two reads the
-  # budget books past the window.
+  # FORCE_CLOSE, killAppAtUsersRequest). Input focus cannot say no such dialog
+  # is coming: release run 44922735173 (API 35) read focus free of one, and
+  # System UI's held it from the first leg's launch on. The activity manager
+  # marks the process before the dialog is even decided, and until it is
+  # dismissed, so readiness waits for no process so marked. `am broadcast`
+  # waits for the ordered broadcast to finish, which a hung receiver stretches
+  # to 60 s, so it is bounded, and sent in a pass of its own: no pass outlasts
+  # the reads the budget books past the window.
   start="$(date +%s)"
   while spent=$(( $(date +%s) - start )); (( spent < OFFLINE_SECS )); do
     if (( close )); then
@@ -1074,19 +1108,20 @@ preconditions() {
     fi
     air="$(timeout "${ADB_SECS}" adb -s "${DEVICE}" shell settings get global airplane_mode_on 2>/dev/null | tr -d '\r' || true)"
     net="$(timeout "${ADB_SECS}" adb -s "${DEVICE}" shell "dumpsys connectivity | grep -m1 'Active default network:'" 2>/dev/null | tr -d '\r' || true)"
-    pp_focused "${DEVICE}" "${PRIV}"
-    case "${PP_FOCUSED}" in
+    error_state
+    case "${ERROR_STATE}" in
+      none) ;;
       '') continue ;;
-      window:not-responding-*|window:app-error-*) close=1; continue ;;
+      *) close=1; continue ;;
     esac
     if [[ "${air}" == 1 && "${net}" =~ Active\ default\ network:\ none$ ]]; then
-      say "device ready: booted, en-US, airplane mode on, no default network, no error dialog holding input focus"
+      say "device ready: booted, en-US, airplane mode on, no default network, no process in an error state"
       gallery
       return 0
     fi
   done
   if [[ "${air}" == 1 && "${net}" =~ Active\ default\ network:\ none$ ]]; then
-    verdict 3 "no read of input focus within ${OFFLINE_SECS} s showed it free of an error dialog (input focus $(_pp_focus_words "${PP_FOCUSED}")), after ${closes} CLOSE_SYSTEM_DIALOGS broadcast(s)"
+    verdict 3 "no read of the activity manager's processes within ${OFFLINE_SECS} s showed none in an error state (last read: $(_error_words "${ERROR_STATE}")), after ${closes} CLOSE_SYSTEM_DIALOGS broadcast(s)"
   fi
   verdict 3 "the device did not go offline within ${OFFLINE_SECS} s (airplane_mode_on='${air:-}', '${net:-no default-network line}')"
 }
@@ -1181,7 +1216,7 @@ finish() {
 # deadline is a count of device calls and every verdict comes from what the
 # stub shows, never from how fast this machine runs it.
 # ---------------------------------------------------------------------------
-readonly SELF_TEST_FIXTURES=144
+readonly SELF_TEST_FIXTURES=147
 readonly ST_NAME='Quiet Wanderer Fixture'
 # What a picker thumbnail's description says in the stub: a date, which no
 # transcript or summary may carry.
@@ -1199,8 +1234,12 @@ if [[ -f "${S}/offline" ]]; then echo "error: device offline" >&2; exit 1; fi
 PKG=com.oblivioustech.haven
 # STUB_BOOT_DIALOG=<title>: an error dialog the boot raised before the gate set
 # hide_error_dialogs, in front of every screen and holding input focus until
-# CLOSE_SYSTEM_DIALOGS (never, with STUB_BOOT_DIALOG_STUCK).
-if [[ -n "${STUB_BOOT_DIALOG:-}" && ! -f "${S}/boot_dialog_raised" ]]; then touch "${S}/boot_dialog" "${S}/boot_dialog_raised"; fi
+# CLOSE_SYSTEM_DIALOGS (never, with STUB_BOOT_DIALOG_STUCK). The activity
+# manager holds its process in an error state (boot_anr) from the start;
+# STUB_BOOT_DIALOG_SHOWN_AT=<clock>: the window itself is up only from that
+# device call on, and the broadcast closes nothing before.
+if [[ -n "${STUB_BOOT_DIALOG:-}" && ! -f "${S}/boot_dialog_raised" ]]; then touch "${S}/boot_anr" "${S}/boot_dialog_raised"; fi
+if [[ -f "${S}/boot_anr" && ! -f "${S}/boot_dialog" ]] && (( $(cat "${S}/clock") >= ${STUB_BOOT_DIALOG_SHOWN_AT:-0} )); then touch "${S}/boot_dialog"; fi
 get() { cat "${S}/$1" 2>/dev/null || true; }
 # Every change of screen is a new window: its focus starts over (focus_of).
 put() { printf '%s\n' "$2" > "${S}/$1"; [[ "$1" != screen ]] || printf '%s\n' "$(( $(get gen) + 1 ))" > "${S}/gen"; }
@@ -1590,10 +1629,27 @@ case "${cmd}" in
   "settings get global hide_error_dialogs") [[ -f "${S}/hide" ]] && echo 1 || echo 0 ;;
   # STUB_BROADCAST_HANG: a receiver that never finishes, so `am broadcast`
   # never returns; the dialogs were closed on delivery all the same.
-  "am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS") [[ -n "${STUB_BOOT_DIALOG_STUCK:-}" ]] || rm -f "${S}/boot_dialog"
+  "am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS")
+    [[ -n "${STUB_BOOT_DIALOG_STUCK:-}" || ! -f "${S}/boot_dialog" ]] || rm -f "${S}/boot_dialog" "${S}/boot_anr"
     if [[ -n "${STUB_BROADCAST_HANG:-}" ]]; then [[ -p "${S}/never" ]] || mkfifo "${S}/never"; : < "${S}/never"; fi ;;
   "cmd connectivity airplane-mode enable") [[ -n "${STUB_AIRPLANE_STUCK:-}" ]] || touch "${S}/airplane" ;;
   "settings get global airplane_mode_on") [[ -f "${S}/airplane" ]] && echo 1 || echo 0 ;;
+  # The activity manager's processes, filtered as the gate asks: the boot
+  # dialog's process marked not responding (or crashing) while boot_anr holds.
+  "dumpsys activity processes | grep -E '^ACTIVITY MANAGER RUNNING PROCESSES|^  [*](APP|PERS)[*] UID |mCrashing='")
+    echo 'ACTIVITY MANAGER RUNNING PROCESSES (dumpsys activity processes)'
+    echo '  *PERS* UID 1000 ProcessRecord{5e1a 512:system/1000}'
+    echo '  *PERS* UID 10123 ProcessRecord{7c0d 900:com.android.systemui/u0a123}'
+    echo '  *APP* UID 10140 ProcessRecord{9b2f 1100:com.google.android.apps.nexuslauncher/u0a140}'
+    if [[ -f "${S}/boot_anr" ]]; then
+      proc="${STUB_BOOT_DIALOG#*: }"
+      echo "  *APP* UID 10150 ProcessRecord{3f1e 1200:${proc}/u0a150}"
+      d=null; [[ ! -f "${S}/boot_dialog" ]] || d='[com.android.server.am.AppNotRespondingDialog@1f2e]'
+      case "${STUB_BOOT_DIALOG}" in
+        'Application Error: '*) echo "     mCrashing=true ${d/AppNotResponding/AppError} mNotResponding=false null bad=false" ;;
+        *) echo "     mCrashing=false null mNotResponding=true ${d} bad=false" ;;
+      esac
+    fi ;;
   "dumpsys connectivity | grep -m1 'Active default network:'")
     [[ -f "${S}/airplane" ]] && echo "Active default network: none" || echo "Active default network: 100" ;;
   "am start -W -n ${PKG}/.MainActivity")
@@ -1866,8 +1922,18 @@ print(json.dumps({k[0]: "Get Started", k[1]: "Create My Identity", k[2]: "Not no
   else echo "  FAIL CLOSE_SYSTEM_DIALOGS never reached the device after hide_error_dialogs read back 1" >&2; fails=1; fi
   _scenario "an error dialog CLOSE_SYSTEM_DIALOGS does not close is infrastructure, before any leg" 3 setup-held map \
     "STUB_BOOT_DIALOG=Application Not Responding: com.google.android.apps.nexuslauncher" STUB_BOOT_DIALOG_STUCK=1
-  _has "…naming whose dialog held input focus" "no read of input focus within 8 s showed it free of an error dialog (input focus on another app's \"isn't responding\" dialog), after 2 CLOSE_SYSTEM_DIALOGS broadcast(s)"
+  _has "…naming whose process the activity manager still held" "no read of the activity manager's processes within 8 s showed none in an error state (last read: another app's process held as not responding), after 2 CLOSE_SYSTEM_DIALOGS broadcast(s)"
   _has "…and no leg ran under it" "legs passed: none"
+  # Release run 44922735173, API 35: readiness read input focus free of an
+  # error dialog, and System UI's "isn't responding" dialog held it from the
+  # first leg's launch on; the activity manager had marked System UI before.
+  # Here the dialog's window is up only after readiness's first read and after
+  # the first broadcast, which had nothing to close: reading focus, the gate
+  # gives that run's verdict word for word.
+  _scenario "a process the boot left not responding, its dialog not yet holding focus, is waited out before the first leg" 0 setup-held map \
+    "STUB_BOOT_DIALOG=Application Not Responding: com.android.systemui" STUB_BOOT_DIALOG_SHOWN_AT=13 LAUNCH_GATE_OFFLINE_SECS=12
+  _lacks "…never stalling the first leg under it" "when its window closed"
+  _has "…ready only once no process is held in an error state" "device ready: booted, en-US, airplane mode on, no default network, no process in an error state"
   # `am broadcast` waits for the ordered broadcast to finish, and one receiver
   # that never does would hold the gate past every bound it states.
   _scenario "a CLOSE_SYSTEM_DIALOGS broadcast that never finishes is bounded, and the dialog it closed is gone" 0 setup-held map \
