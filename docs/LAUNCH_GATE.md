@@ -112,11 +112,14 @@ reads it when a dialog would be shown, `AppErrors.handleShowAnrUi`). An
 `keyevent 82` timing out on a launcher or System UI still starting — stays in
 front of every screen the legs read: the first leg stalled under one on
 API 35 in CI runs 44698826899 and 44870800362, rc 3 both times. So the
-preconditions then broadcast `CLOSE_SYSTEM_DIALOGS`, which ends such a dialog
-as the setting would have (`BaseErrorDialog.closeDialog`: an ANR dialog
-force-closes its app), and the readiness loop reads input focus
-(`ui-dump.py focused`) until no error dialog holds it, broadcasting again
-while one does; one that outlasts the window is rc 3 before any leg runs.
+readiness loop reads input focus (`ui-dump.py focused`) until no error dialog
+holds it, and while one does broadcasts `CLOSE_SYSTEM_DIALOGS`, which ends
+such a dialog as the setting would have (an "isn't responding" dialog's
+`closeDialog` force-closes its app: `AppNotRespondingDialog` overrides
+`BaseErrorDialog`'s dismiss with `FORCE_CLOSE`, `killAppAtUsersRequest`); one
+that outlasts the window is rc 3 before any leg runs. `am broadcast` waits for
+the ordered broadcast to finish, which one hung receiver stretches to 60 s, so
+the broadcast is bounded like an adb read and sent in a pass of its own.
 
 **Legs:**
 
@@ -213,7 +216,24 @@ is "did not progress", a product failure, named with what held input focus
 then, so a tap that never reached Haven's window can be told from a Haven that
 did not answer it (an error dialog holding it is judged as below; CI run
 44870800362's API-34 "did not progress" after `locationDisclosureAgree`
-predates the naming and left no way to tell). The same label on a different screen
+predates the naming and left no way to tell).
+Every tap and BACK is checked as the device answers it: one the device refuses
+(a non-zero exit, adb offline) never reached Haven, so it is infrastructure,
+and one it takes is the action the window is judged from ("the tap on `<key>`,
+accepted by the device"). From that action to the verdict the gate counts its
+dumps — read, unchanged from the screen the tap was made on, failed by
+`ui-dump.py`'s fixed reason or adb's — and every verdict says whether its
+last observation is fresh (a dump succeeded after the action) or stale (none
+did, so it shows the screen from before; CI job 136755434767's API-34 "did not
+progress" after `locationDisclosureAgree` could not say which). A window in
+which every dump after the action failed at adb itself saw nothing of Haven
+and is infrastructure. One in which adb answered but uiautomator brought back
+no usable dump stays a product stall, worded "no dump of the screen
+succeeded", never "the screen did not change": a Haven whose main thread stops
+answering accessibility queries without an input pending (so without an ANR)
+can fail every dump this way. A frozen Flutter UI thread still serves its last
+semantics tree, so it reads as fresh, unchanged dumps: "the screen did not
+change", product. The same label on a different screen
 is a new screen: v0.1.13 declines the background location disclosure, then the
 foreground one, two dialogs with one "Not now". A reopened map under that
 dialog (an upgraded user who declined it) is declined the same way before
@@ -245,12 +265,15 @@ running). That is why a v0.1.14-shaped candidate's red names
 | 0 | pass | every leg passed | — |
 | 1 | product | the candidate crashed, stalled, lost data, showed the intro after onboarding, kept a debug log plant, or did not replace the previous release; a photo tap opened no picker, or (API 33+) a known wrong picker — DocumentsUI, the GET_CONTENT alias, the Play services picker; Haven showed `avatarPickerUpdateError` or stayed in front instead of opening uCrop; Haven's own "isn't responding" or "keeps stopping" dialog held the picker's focus or held focus when a screen's window closed; uCrop did not return or its window never took input focus; the photo save was refused after the crop (`avatarPickerUpdateError`: root cause A's class), did not show within `APPLY_SECS`, or was gone after a cold restart; background sharing did not turn on with everything granted | fix the app; never re-run to green |
 | 2 | usage or harness | a missing input (directory, ARB key); a picker or uCrop screen no selector knows (the summary lists the resource ids it does have: update the selectors for that system image), a system picker whose window never took input focus, or an activity the picker rules do not know (its component is listed: a newer Photopicker module, say); background sharing held off while Android showed the battery or notification snack the grants were meant to prevent; no leg reached MapShell; the gallery fixtures could not be seeded though the device answered (a push or a media-store query it refused, or a media store that never listed them) | fix the workflow or the selectors; never re-run to green |
-| 3 | infrastructure | the device went away, never booted, is not en-US, would not go offline, kept an error dialog the boot raised holding input focus after `CLOSE_SYSTEM_DIALOGS`, gave no answer while the gallery was seeded or never attached its shared storage, would not take a permission grant or the battery exemption, or showed another process's "isn't responding" or "keeps stopping" dialog over the picker or uCrop, or holding focus when one of Haven's screens' windows closed | re-run the job ("Re-run failed jobs" works: the launch jobs read the candidate hand-off, which is named by the run, not the attempt) |
+| 3 | infrastructure | the device went away, never booted, is not en-US, would not go offline, kept an error dialog the boot raised holding input focus after `CLOSE_SYSTEM_DIALOGS`, refused an injected tap or BACK, failed at adb itself every dump of a window after an action, gave no answer while the gallery was seeded or never attached its shared storage, would not take a permission grant or the battery exemption, or showed another process's "isn't responding" or "keeps stopping" dialog over the picker or uCrop, or holding focus when one of Haven's screens' windows closed | re-run the job ("Re-run failed jobs" works: the launch jobs read the candidate hand-off, which is named by the run, not the attempt) |
 | 4 | upgrade source unusable | the previous release itself failed before the candidate was installed | add it to `scripts/ci/launch_gate_yanked_releases.txt` with the reason |
 
 The step prints one `::error::` line naming the leg, the state reached, the
-last observation (visible label keys, foreground package, EditText count) and
-the class, plus the root cause of a crash. The summary
+last observation (visible label keys, foreground package, EditText count), the
+evidence since the last action (`since the tap on <key>, accepted by the
+device: <n> dump(s) read, all unchanged, <m> failed (<reasons>); the last
+observation is fresh, taken after it` — or `stale: no dump has succeeded
+since`) and the class, plus the root cause of a crash. The summary
 (`launch-gate-summary.log`, with a `photo:` line naming which rounds applied,
 which picker and uCrop selector matched and, after a failed round,
 `events=[...]`: the activities the activity manager created and finished

@@ -410,8 +410,14 @@ photo-once-lib main#1/leg_upgrade#2/photo_at_map#1/*/lib:* excluded the first up
 seed */gallery#1/lib:pp_seed_gallery#1 charge @ once the offline loop calls it on the pass that returns
 device main#1/preconditions#1/timeout:BOOT_SECS#1 charge BOOT_SECS
 boot main#1/preconditions#1/timeout:ADB_SECS#1 charge BOOT_SECS + ADB_SECS
-offline main#1/preconditions#1/timeout:ADB_SECS#2 charge OFFLINE_SECS + ADB_SECS + ADB_SECS
-offline-net main#1/preconditions#1/timeout:ADB_SECS#3 within offline both reads of one pass are in offline's charge
+offline main#1/preconditions#1/timeout:ADB_SECS#3 charge OFFLINE_SECS + ADB_SECS + ADB_SECS
+offline-net main#1/preconditions#1/timeout:ADB_SECS#4 within offline both reads of one pass are in offline's charge
+# CLOSE_SYSTEM_DIALOGS, bounded as one adb read, is a pass of its own: the
+# window books every pass that starts inside it, and the last one, past it, is
+# either that broadcast (ADB_SECS) or the reads offline and offline-focus
+# charge (two ADB_SECS and the focus read), never both. `within` cannot say
+# so: it counts each wait in the loop as if it alone filled the window.
+offline-close main#1/preconditions#1/timeout:ADB_SECS#2 excluded a pass that broadcasts makes no other read, so the last pass past the window is it or the longer one offline and offline-focus charge, never both
 # A pass's third read, the input focus an error dialog the boot raised may
 # hold: offline's window books every pass that starts inside it, so this is
 # the last pass's, past the window.
