@@ -98,7 +98,7 @@ production `main()`.
 
 **Preconditions** (rc 3 when unmet): the device boots, its locale is en-US
 (asserted, never set), airplane mode is on with no default network, system
-error dialogs are hidden and none holds input focus, `ro.build.version.sdk`
+error dialogs are hidden and no process is in an error state, `ro.build.version.sdk`
 reads as a number, and the two
 gallery fixtures (`make-avatar-fixture.py`: 800x600 PNGs, the same bytes every
 run, no metadata chunk) are pushed to `/sdcard/Pictures` and listed by the
@@ -111,15 +111,26 @@ reads it when a dialog would be shown, `AppErrors.handleShowAnrUi`). An
 "isn't responding" dialog the boot raised first — the emulator action's
 `keyevent 82` timing out on a launcher or System UI still starting — stays in
 front of every screen the legs read: the first leg stalled under one on
-API 35 in CI runs 44698826899 and 44870800362, rc 3 both times. So the
-readiness loop reads input focus (`ui-dump.py focused`) until no error dialog
-holds it, and while one does broadcasts `CLOSE_SYSTEM_DIALOGS`, which ends
+API 35 in CI runs 44698826899 and 44870800362, rc 3 both times. Input focus
+cannot say that no such dialog is coming: in release run 44922735173 (API 35)
+readiness read input focus free of an error dialog, and System UI's "isn't
+responding" dialog held it from the first leg's launch to the end of its
+window, rc 3 again. So the readiness loop reads the activity manager's own
+record instead (`dumpsys activity processes`, read by `ui-dump.py errors`),
+which marks a process from the moment its ANR is handled — before the dialog
+is decided, drawn or focused — until the dialog is dismissed or the process
+dies (`ProcessErrorStateRecord.appNotResponding`), and waits until no process
+is so marked. While one is, it broadcasts `CLOSE_SYSTEM_DIALOGS`, which ends
 such a dialog as the setting would have (an "isn't responding" dialog's
 `closeDialog` force-closes its app: `AppNotRespondingDialog` overrides
-`BaseErrorDialog`'s dismiss with `FORCE_CLOSE`, `killAppAtUsersRequest`); one
-that outlasts the window is rc 3 before any leg runs. `am broadcast` waits for
-the ordered broadcast to finish, which one hung receiver stretches to 60 s, so
-the broadcast is bounded like an adb read and sent in a pass of its own.
+`BaseErrorDialog`'s dismiss with `FORCE_CLOSE`, `killAppAtUsersRequest`); a
+process still marked when the window closes is rc 3 before any leg runs. The
+one residual: the setting reaches the activity manager through an asynchronous
+settings observer, so an ANR first handled after readiness still shows a dialog
+if that observer has not run by the time the ANR's traces are dumped.
+`am broadcast` waits for the ordered broadcast to finish, which one hung
+receiver stretches to 60 s, so the broadcast is bounded like an adb read and
+sent in a pass of its own.
 
 **Legs:**
 
@@ -265,7 +276,7 @@ running). That is why a v0.1.14-shaped candidate's red names
 | 0 | pass | every leg passed | — |
 | 1 | product | the candidate crashed, stalled, lost data, showed the intro after onboarding, kept a debug log plant, or did not replace the previous release; a photo tap opened no picker, or (API 33+) a known wrong picker — DocumentsUI, the GET_CONTENT alias, the Play services picker; Haven showed `avatarPickerUpdateError` or stayed in front instead of opening uCrop; Haven's own "isn't responding" or "keeps stopping" dialog held the picker's focus or held focus when a screen's window closed; uCrop did not return or its window never took input focus; the photo save was refused after the crop (`avatarPickerUpdateError`: root cause A's class), did not show within `APPLY_SECS`, or was gone after a cold restart; background sharing did not turn on with everything granted | fix the app; never re-run to green |
 | 2 | usage or harness | a missing input (directory, ARB key); a picker or uCrop screen no selector knows (the summary lists the resource ids it does have: update the selectors for that system image), a system picker whose window never took input focus, or an activity the picker rules do not know (its component is listed: a newer Photopicker module, say); background sharing held off while Android showed the battery or notification snack the grants were meant to prevent; no leg reached MapShell; the gallery fixtures could not be seeded though the device answered (a push or a media-store query it refused, or a media store that never listed them) | fix the workflow or the selectors; never re-run to green |
-| 3 | infrastructure | the device went away, never booted, is not en-US, would not go offline, kept an error dialog the boot raised holding input focus after `CLOSE_SYSTEM_DIALOGS`, refused an injected tap or BACK, failed at adb itself every dump of a window after an action, gave no answer while the gallery was seeded or never attached its shared storage, would not take a permission grant or the battery exemption, or showed another process's "isn't responding" or "keeps stopping" dialog over the picker or uCrop, or holding focus when one of Haven's screens' windows closed | re-run the job ("Re-run failed jobs" works: the launch jobs read the candidate hand-off, which is named by the run, not the attempt) |
+| 3 | infrastructure | the device went away, never booted, is not en-US, would not go offline, kept a process the boot left in an error state (an ANR or a crash being handled, or its dialog up) after `CLOSE_SYSTEM_DIALOGS`, refused an injected tap or BACK, failed at adb itself every dump of a window after an action, gave no answer while the gallery was seeded or never attached its shared storage, would not take a permission grant or the battery exemption, or showed another process's "isn't responding" or "keeps stopping" dialog over the picker or uCrop, or holding focus when one of Haven's screens' windows closed | re-run the job ("Re-run failed jobs" works: the launch jobs read the candidate hand-off, which is named by the run, not the attempt) |
 | 4 | upgrade source unusable | the previous release itself failed before the candidate was installed | add it to `scripts/ci/launch_gate_yanked_releases.txt` with the reason |
 
 The step prints one `::error::` line naming the leg, the state reached, the

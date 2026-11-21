@@ -86,6 +86,20 @@ partly inside the root's.
       from the current state only, never from the copy the dispatcher keeps
       of its state at the last ANR.
 
+  ui-dump.py errors --dumpsys <file> [--package <ours>]
+      Whether the activity manager holds a process in an error state, from
+      `dumpsys activity processes` (its title, its `*APP*`/`*PERS*` process
+      lines and their `mCrashing=` lines suffice): `errors none`, or for the
+      first such process `errors not-responding-<whose>` (an ANR being
+      handled, or its dialog up) or `errors app-error-<whose>` (a crash, or
+      its dialog up), <whose> as for focused, the process never printed. A
+      process is marked while its ANR is handled, before the full trace dump
+      and long before a dialog can hold input focus, and unmarked
+      only when the dialog is dismissed or the process dies
+      (ProcessErrorStateRecord.appNotResponding, .dump; AOSP android14- and
+      android15-release). `errors unknown` and rc 3 when the text lists no
+      process.
+
   ui-dump.py trace --events <file> --since <epoch> --package <ours>
       What the activity manager recorded from <epoch> on, from `logcat -d -b
       events -v epoch`, as one line of fixed words: `trace <token>...` or
@@ -401,6 +415,35 @@ def focused(dumpsys_text, ours=None):
     return None
 
 
+PROCESSES_TITLE = "ACTIVITY MANAGER RUNNING PROCESSES (dumpsys activity processes)"
+PROCESS_RECORD_RE = re.compile(r"^\s*\*(?:APP|PERS)\* UID \d+ ProcessRecord\{[0-9a-f]+ -?\d+:([^/\s}]+)/")
+# ProcessErrorStateRecord.dump: printed only for a process in an error state or
+# marked bad; each dialog list is `null` or `[...]`.
+ERROR_STATE_RE = re.compile(r"^\s*mCrashing=(true|false) (.*) mNotResponding=(true|false) (.*) bad=(?:true|false)\b")
+
+
+def errors(dumpsys_text, ours=None):
+    """'none', 'not-responding-<whose>' or 'app-error-<whose>'; None without a process list."""
+    lines = dumpsys_text.splitlines()
+    if PROCESSES_TITLE not in (line.strip() for line in lines):
+        return None
+    process, listed = None, False
+    for line in lines:
+        record = PROCESS_RECORD_RE.match(line)
+        if record:
+            process, listed = record.group(1), True
+            continue
+        state = ERROR_STATE_RE.match(line)
+        if not state or process is None:
+            continue
+        crashing, crash_dialogs, not_responding, anr_dialogs = state.groups()
+        if not_responding == "true" or anr_dialogs.strip() not in ("null", "[]"):
+            return f"not-responding-{whose(process, ours)}"
+        if crashing == "true" or crash_dialogs.strip() not in ("null", "[]"):
+            return f"app-error-{whose(process, ours)}"
+    return "none" if listed else None
+
+
 # `<epoch>.<ms>  <pid>  <tid> I <tag>: [<fields>]`, the fields comma-separated;
 # every field before the one each reader stops at is a number or a name, so
 # none of them can hold a comma.
@@ -522,6 +565,17 @@ def main(argv, stdout=sys.stdout):
             return 3
         print(f"focused {window}", file=stdout)
         return 0
+    if command == "errors":
+        if "dumpsys" not in opts or not set(opts) <= {"dumpsys", "package"}:
+            raise Usage("errors needs --dumpsys")
+        try:
+            with open(opts["dumpsys"], encoding="utf-8", errors="replace") as handle:
+                text = handle.read()
+        except OSError:
+            text = ""
+        state = errors(text, opts.get("package"))
+        print(f"errors {state or 'unknown'}", file=stdout)
+        return 0 if state else 3
     if command == "trace":
         if set(opts) != {"events", "since", "package"} or not opts["since"].isdigit():
             raise Usage("trace needs --events, --since <epoch seconds> and --package")
@@ -539,7 +593,7 @@ def main(argv, stdout=sys.stdout):
 # Self-test: hermetic dumps in the shape uiautomator writes, run through main()
 # exactly as the runner calls it.
 # ---------------------------------------------------------------------------
-SELF_TEST_CASES = 54
+SELF_TEST_CASES = 58
 PKG = "com.oblivioustech.haven"
 SECRET_NAME = "Quiet Wanderer"
 
@@ -862,6 +916,43 @@ def self_test():
         rc, out = trace_run("".join(ev(1001, "wm_create_activity", f"0,{n},9,{ucrop_component},NULL,NULL,NULL,0") for n in range(30)))
         case("(54) a trace is bounded: past the cap it says how many more",
              rc == 0 and out.split()[-1] == "+6-more" and len(out.split()) == 1 + 24 + 1)
+
+        def errors_run(text):
+            path = os.path.join(tmp, "processes.txt")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(text)
+            captured = io.StringIO()
+            rc = main(["errors", "--dumpsys", path, "--package", PKG], captured)
+            return rc, captured.getvalue().strip()
+
+        def processes(*records):
+            return ("ACTIVITY MANAGER RUNNING PROCESSES (dumpsys activity processes)\n"
+                    "  *PERS* UID 1000 ProcessRecord{5e1a 512:system/1000}\n" + "".join(records))
+
+        def record(process, error=""):
+            kind = "PERS" if process == "com.android.systemui" else "APP"
+            return (f"  *{kind}* UID 10123 ProcessRecord{{7c0d 4242:{process}/u0a123}}\n"
+                    + (f"     mCrashing={error}\n" if error else ""))
+
+        launcher = "com.google.android.apps.nexuslauncher"
+        case("(55) no process in an error state is `errors none`; a bad mark alone is no error",
+             errors_run(processes(record("com.android.systemui"),
+                                  record(launcher, "false null mNotResponding=false null bad=true")))
+             == (0, "errors none"))
+        rc, out = errors_run(processes(record(launcher),
+                                       record("com.android.systemui", "false null mNotResponding=true null bad=false")))
+        case("(56) an ANR being handled, its dialog not up yet, is not-responding-<whose>; no process name printed",
+             (rc, out) == (0, "errors not-responding-systemui") and "com.android" not in out)
+        case("(57) a dialog up is an error whatever the flags say; a crash is app-error-<whose>",
+             errors_run(processes(record(launcher, "false null mNotResponding=false "
+                                                   "[com.android.server.am.AppNotRespondingDialog@1f2e] bad=false")))
+             == (0, "errors not-responding-app")
+             and errors_run(processes(record(f"{PKG}:remote", "true [com.android.server.am.AppErrorDialog@9a] "
+                                                               "mNotResponding=false null bad=false")))
+             == (0, "errors app-error-ours"))
+        case("(58) text listing no process (adb gave nothing, or only the title) is rc 3",
+             errors_run("") == (3, "errors unknown")
+             and errors_run("ACTIVITY MANAGER RUNNING PROCESSES (dumpsys activity processes)\n") == (3, "errors unknown"))
     if ran != SELF_TEST_CASES:
         print(f"SELF-TEST FAIL: ran {ran} cases, expected {SELF_TEST_CASES}", file=sys.stderr)
         failed += 1
