@@ -412,6 +412,10 @@ device main#1/preconditions#1/timeout:BOOT_SECS#1 charge BOOT_SECS
 boot main#1/preconditions#1/timeout:ADB_SECS#1 charge BOOT_SECS + ADB_SECS
 offline main#1/preconditions#1/timeout:ADB_SECS#2 charge OFFLINE_SECS + ADB_SECS + ADB_SECS
 offline-net main#1/preconditions#1/timeout:ADB_SECS#3 within offline both reads of one pass are in offline's charge
+# A pass's third read, the input focus an error dialog the boot raised may
+# hold: offline's window books every pass that starts inside it, so this is
+# the last pass's, past the window.
+offline-focus main#1/preconditions#1/lib:pp_focused#1 charge @ once offline's window books every earlier pass and this is the last pass's focus read
 install */lib:install_fresh#1 charge @
 upgrade-install */lib:install_app#1 charge @
 launch */launch_app#*/timeout:LAUNCH_SECS#1 charge LAUNCH_SECS

@@ -379,7 +379,7 @@ jobs:
       # The legs, under the egress guard (installed inside the script, after the
       # action's own SDK work and boot) and an attributable inner deadline:
       # 104m is scripts/ci/check_e2e_lane_budget.sh's sum over the runner's own
-      # constants and photo-picker-lib.sh's (`--explain` prints it: 6209 s with
+      # constants and photo-picker-lib.sh's (`--explain` prints it: 6229 s with
       # the 180 s allowance; the two photo trips at their bounds are 870 s of
       # it, background sharing and the Identity page 470 s, the second cold
       # reopen 385 s). The step cap is that deadline + 1 (run-with-deadline's
@@ -575,7 +575,7 @@ jobs:
       # The legs, under the egress guard (installed inside the script, after the
       # action's own SDK work and boot) and an attributable inner deadline:
       # 104m is scripts/ci/check_e2e_lane_budget.sh's sum over the runner's own
-      # constants and photo-picker-lib.sh's (`--explain` prints it: 6209 s with
+      # constants and photo-picker-lib.sh's (`--explain` prints it: 6229 s with
       # the 180 s allowance; the two photo trips at their bounds are 870 s of
       # it, background sharing and the Identity page 470 s, the second cold
       # reopen 385 s). The step cap is that deadline + 1 (run-with-deadline's

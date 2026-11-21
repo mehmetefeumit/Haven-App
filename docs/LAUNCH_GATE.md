@@ -98,12 +98,25 @@ production `main()`.
 
 **Preconditions** (rc 3 when unmet): the device boots, its locale is en-US
 (asserted, never set), airplane mode is on with no default network, system
-error dialogs are hidden, `ro.build.version.sdk` reads as a number, and the two
+error dialogs are hidden and none holds input focus, `ro.build.version.sdk`
+reads as a number, and the two
 gallery fixtures (`make-avatar-fixture.py`: 800x600 PNGs, the same bytes every
 run, no metadata chunk) are pushed to `/sdcard/Pictures` and listed by the
 media store within 60 s (`content query`, its WHERE clause sent as one device
 command string; `scan_volume` reports nothing either way, so the query
 decides).
+
+`hide_error_dialogs` stops only the error dialogs shown after it is set (AOSP
+reads it when a dialog would be shown, `AppErrors.handleShowAnrUi`). An
+"isn't responding" dialog the boot raised first — the emulator action's
+`keyevent 82` timing out on a launcher or System UI still starting — stays in
+front of every screen the legs read: the first leg stalled under one on
+API 35 in CI runs 44698826899 and 44870800362, rc 3 both times. So the
+preconditions then broadcast `CLOSE_SYSTEM_DIALOGS`, which ends such a dialog
+as the setting would have (`BaseErrorDialog.closeDialog`: an ANR dialog
+force-closes its app), and the readiness loop reads input focus
+(`ui-dump.py focused`) until no error dialog holds it, broadcasting again
+while one does; one that outlasts the window is rc 3 before any leg runs.
 
 **Legs:**
 
@@ -196,7 +209,11 @@ A tap is judged by the screen, not the label: each dump carries a digest of
 our window's text (never printed). A label is tapped once per screen, only on a
 screen two dumps agree on, and never retried; a tap after which the screen
 stays exactly as it was for the whole window (60 s, 120 s for the create tap)
-is "did not progress", a product failure. The same label on a different screen
+is "did not progress", a product failure, named with what held input focus
+then, so a tap that never reached Haven's window can be told from a Haven that
+did not answer it (an error dialog holding it is judged as below; CI run
+44870800362's API-34 "did not progress" after `locationDisclosureAgree`
+predates the naming and left no way to tell). The same label on a different screen
 is a new screen: v0.1.13 declines the background location disclosure, then the
 foreground one, two dialogs with one "Not now". A reopened map under that
 dialog (an upgraded user who declined it) is declined the same way before
@@ -228,7 +245,7 @@ running). That is why a v0.1.14-shaped candidate's red names
 | 0 | pass | every leg passed | — |
 | 1 | product | the candidate crashed, stalled, lost data, showed the intro after onboarding, kept a debug log plant, or did not replace the previous release; a photo tap opened no picker, or (API 33+) a known wrong picker — DocumentsUI, the GET_CONTENT alias, the Play services picker; Haven showed `avatarPickerUpdateError` or stayed in front instead of opening uCrop; Haven's own "isn't responding" or "keeps stopping" dialog held the picker's focus or held focus when a screen's window closed; uCrop did not return or its window never took input focus; the photo save was refused after the crop (`avatarPickerUpdateError`: root cause A's class), did not show within `APPLY_SECS`, or was gone after a cold restart; background sharing did not turn on with everything granted | fix the app; never re-run to green |
 | 2 | usage or harness | a missing input (directory, ARB key); a picker or uCrop screen no selector knows (the summary lists the resource ids it does have: update the selectors for that system image), a system picker whose window never took input focus, or an activity the picker rules do not know (its component is listed: a newer Photopicker module, say); background sharing held off while Android showed the battery or notification snack the grants were meant to prevent; no leg reached MapShell; the gallery fixtures could not be seeded though the device answered (a push or a media-store query it refused, or a media store that never listed them) | fix the workflow or the selectors; never re-run to green |
-| 3 | infrastructure | the device went away, never booted, is not en-US, would not go offline, gave no answer while the gallery was seeded or never attached its shared storage, would not take a permission grant or the battery exemption, or showed another process's "isn't responding" or "keeps stopping" dialog over the picker or uCrop, or holding focus when one of Haven's screens' windows closed | re-run the job ("Re-run failed jobs" works: the launch jobs read the candidate hand-off, which is named by the run, not the attempt) |
+| 3 | infrastructure | the device went away, never booted, is not en-US, would not go offline, kept an error dialog the boot raised holding input focus after `CLOSE_SYSTEM_DIALOGS`, gave no answer while the gallery was seeded or never attached its shared storage, would not take a permission grant or the battery exemption, or showed another process's "isn't responding" or "keeps stopping" dialog over the picker or uCrop, or holding focus when one of Haven's screens' windows closed | re-run the job ("Re-run failed jobs" works: the launch jobs read the candidate hand-off, which is named by the run, not the attempt) |
 | 4 | upgrade source unusable | the previous release itself failed before the candidate was installed | add it to `scripts/ci/launch_gate_yanked_releases.txt` with the reason |
 
 The step prints one `::error::` line naming the leg, the state reached, the
@@ -329,7 +346,7 @@ waits up to `kHandoffEndWait` (10 s) and the open up to `handoverTimeout`
 `mls_session_handover.dart`. A shorter bound would race a correct build's slow
 path; the no-stall promise inside the grace is the Flutter fake_async tests'.
 `scripts/ci/check_e2e_lane_budget.sh --explain` sums them with the install
-barriers into each emulator step's 104-minute deadline (6209 s with the
+barriers into each emulator step's 104-minute deadline (6229 s with the
 allowance). A healthy run spends a few minutes in the emulator step.
 
 ### Running the pieces locally

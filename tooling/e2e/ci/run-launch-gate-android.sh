@@ -108,7 +108,8 @@
 #      fixtures could not be seeded although the device answered (a push or
 #      query it refused, or a media store that never listed them)
 #   3  infrastructure: the device went away, never booted, is not en-US,
-#      would not go offline, gave no answer while the gallery was seeded, or
+#      would not go offline, kept an error dialog the boot raised in front
+#      after CLOSE_SYSTEM_DIALOGS, gave no answer while the gallery was seeded, or
 #      never attached its shared storage, or another process's "isn't
 #      responding" or "keeps stopping" dialog held the picker's or uCrop's
 #      focus, or held focus when one of Haven's screens' windows closed —
@@ -495,19 +496,22 @@ act() {
 # another process's is the device's, and Haven's own activity holding focus
 # means the foreign root was not what stayed in front.
 stalled() {
-  if [[ -n "$1" ]]; then
+  if [[ -n "$1" || -n "${TAP_KEY}" ]]; then
     pp_focused "${DEVICE}" "${PRIV}"
     case "${PP_FOCUSED}" in
       window:not-responding-ours|window:app-error-ours)
         verdict 1 "input focus was $(_pp_focus_words "${PP_FOCUSED}") at state ${STATE} when its window closed: Haven failed" ;;
       window:not-responding-*|window:app-error-*)
         verdict 3 "input focus was $(_pp_focus_words "${PP_FOCUSED}") at state ${STATE} when its window closed: the device is struggling, which says nothing about Haven; re-run" ;;
-      "${PKG}/"*) ;;
-      *) verdict 1 "$1 held the foreground at state ${STATE} until the deadline (input focus $(_pp_focus_words "${PP_FOCUSED}"))" ;;
     esac
   fi
+  if [[ -n "$1" && "${PP_FOCUSED}" != "${PKG}/"* ]]; then
+    verdict 1 "$1 held the foreground at state ${STATE} until the deadline (input focus $(_pp_focus_words "${PP_FOCUSED}"))"
+  fi
+  # The focus is named so a tap that never reached Haven's window can be told
+  # from a Haven that did not answer it (CI run 44870800362, API 34).
   if [[ -n "${TAP_KEY}" ]]; then
-    verdict 1 "did not progress: the screen did not change in the window after ${TAP_KEY} was tapped"
+    verdict 1 "did not progress: the screen did not change in the window after ${TAP_KEY} was tapped (input focus $(_pp_focus_words "${PP_FOCUSED}"))"
   fi
   if (( NAME_UNREAD )); then
     verdict 1 "the create screen never showed exactly one non-empty name field, so the name it saves could not be checked"
@@ -936,7 +940,8 @@ leg_upgrade() {
 }
 
 # ---------------------------------------------------------------------------
-# Preconditions: a booted en-US device, offline, with error dialogs hidden.
+# Preconditions: a booted en-US device, offline, with error dialogs hidden and
+# none the boot raised left holding input focus.
 # ---------------------------------------------------------------------------
 preconditions() {
   local start spent boot locale air net
@@ -958,6 +963,14 @@ preconditions() {
   if [[ "$(dev shell settings get global hide_error_dialogs 2>/dev/null | tr -d '\r')" != 1 ]]; then
     verdict 3 "hide_error_dialogs did not read back 1"
   fi
+  # The setting stops only the error dialogs shown after it: AOSP asks it when
+  # a dialog would be shown (AppErrors.handleShowAnrUi). One the boot raised
+  # first (the emulator action's keyevent 82 timing out on a launcher or System
+  # UI still starting) stays over every screen the legs read, and the first
+  # leg stalls under it (CI runs 44698826899 and 44870800362, API 35).
+  # CLOSE_SYSTEM_DIALOGS ends it as the setting would have: an "isn't
+  # responding" dialog force-closes its app (BaseErrorDialog.closeDialog).
+  dev shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS >/dev/null 2>&1 || true
   dev shell cmd connectivity airplane-mode enable >/dev/null 2>&1 || true
   # "Active default network: none" is ConnectivityService.dump()'s line when
   # no network is the default (AOSP android-14); read from source, so a guest
@@ -966,12 +979,22 @@ preconditions() {
   while spent=$(( $(date +%s) - start )); (( spent < OFFLINE_SECS )); do
     air="$(timeout "${ADB_SECS}" adb -s "${DEVICE}" shell settings get global airplane_mode_on 2>/dev/null | tr -d '\r' || true)"
     net="$(timeout "${ADB_SECS}" adb -s "${DEVICE}" shell "dumpsys connectivity | grep -m1 'Active default network:'" 2>/dev/null | tr -d '\r' || true)"
+    pp_focused "${DEVICE}" "${PRIV}"
+    case "${PP_FOCUSED}" in
+      '') continue ;;
+      window:not-responding-*|window:app-error-*)
+        dev shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS >/dev/null 2>&1 || true
+        continue ;;
+    esac
     if [[ "${air}" == 1 && "${net}" =~ Active\ default\ network:\ none$ ]]; then
-      say "device ready: booted, en-US, airplane mode on, no default network"
+      say "device ready: booted, en-US, airplane mode on, no default network, no error dialog holding input focus"
       gallery
       return 0
     fi
   done
+  if [[ "${air}" == 1 && "${net}" =~ Active\ default\ network:\ none$ ]]; then
+    verdict 3 "no read of input focus within ${OFFLINE_SECS} s showed it free of an error dialog (input focus $(_pp_focus_words "${PP_FOCUSED}")), after CLOSE_SYSTEM_DIALOGS"
+  fi
   verdict 3 "the device did not go offline within ${OFFLINE_SECS} s (airplane_mode_on='${air:-}', '${net:-no default-network line}')"
 }
 
@@ -1063,7 +1086,7 @@ finish() {
 # deadline is a count of device calls and every verdict comes from what the
 # stub shows, never from how fast this machine runs it.
 # ---------------------------------------------------------------------------
-readonly SELF_TEST_FIXTURES=124
+readonly SELF_TEST_FIXTURES=130
 readonly ST_NAME='Quiet Wanderer Fixture'
 # What a picker thumbnail's description says in the stub: a date, which no
 # transcript or summary may carry.
@@ -1079,6 +1102,10 @@ echo $(( $(cat "${S}/clock") + ${STUB_TICK:-1} )) > "${S}/clock"
 [[ "${1:-}" == -s ]] && shift 2
 if [[ -f "${S}/offline" ]]; then echo "error: device offline" >&2; exit 1; fi
 PKG=com.oblivioustech.haven
+# STUB_BOOT_DIALOG=<title>: an error dialog the boot raised before the gate set
+# hide_error_dialogs, in front of every screen and holding input focus until
+# CLOSE_SYSTEM_DIALOGS (never, with STUB_BOOT_DIALOG_STUCK).
+if [[ -n "${STUB_BOOT_DIALOG:-}" && ! -f "${S}/boot_dialog_raised" ]]; then touch "${S}/boot_dialog" "${S}/boot_dialog_raised"; fi
 get() { cat "${S}/$1" 2>/dev/null || true; }
 # Every change of screen is a new window: its focus starts over (focus_of).
 put() { printf '%s\n' "$2" > "${S}/$1"; [[ "$1" != screen ]] || printf '%s\n' "$(( $(get gen) + 1 ))" > "${S}/gen"; }
@@ -1139,7 +1166,9 @@ focus_of() { # <advance: 1 on a dumpsys read>
 focus_dump() {
   local f; f="$(focus_of 1)"
   echo 'Input Dispatcher State:'
-  if [[ -n "${STUB_FOREIGN:-}" && -n "${STUB_FOREIGN_FOCUS:-}" && "$(get screen)" == "${STUB_FOREIGN_ON:-create}" ]]; then
+  if [[ -f "${S}/boot_dialog" ]]; then
+    printf "  FocusedWindows:\n    displayId=0, name='5a1 %s'\n" "${STUB_BOOT_DIALOG}"
+  elif [[ -n "${STUB_FOREIGN:-}" && -n "${STUB_FOREIGN_FOCUS:-}" && "$(get screen)" == "${STUB_FOREIGN_ON:-create}" ]]; then
     printf "  FocusedWindows:\n    displayId=0, name='5a1 %s'\n" "${STUB_FOREIGN_FOCUS}"
   elif [[ "${f}" == none && -n "${STUB_FOCUS_WINDOW:-}" ]]; then printf "  FocusedWindows:\n    displayId=0, name='5a1 %s'\n" "${STUB_FOCUS_WINDOW}"
   elif [[ "${f}" == none ]]; then echo '  FocusedWindows: <none>'
@@ -1267,6 +1296,11 @@ dump() {
   local n scr
   n=$(( $(get dumps) + 1 )); put dumps "${n}"
   [[ -n "$(get pid)" ]] || return 0
+  if [[ -f "${S}/boot_dialog" ]]; then
+    printf "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><hierarchy rotation=\"0\">%s</hierarchy>" \
+      "$(node android.widget.FrameLayout '' '' '[0,0][1080,2400]' android)"
+    return 0
+  fi
   if (( n == 3 )) && [[ -n "${STUB_PID_FLIP:-}" ]]; then put pid 9999; fi
   scr="$(get screen)"
   if (( n == 1 )); then screen_xml blank; return 0; fi
@@ -1305,6 +1339,7 @@ crop_done() {
 }
 tap() {
   local x="$1" y="$2" scr; scr="$(get screen)"
+  [[ ! -f "${S}/boot_dialog" ]] || return 0
   ! unfocused "tap ${x} ${y}" || return 0
   case "${scr}" in picker|ucrop|location|disclosure) ;; *)
     [[ -z "${STUB_TRANSITION:-}" ]] || { put leaving "${scr}"; put leaving_dumps 0; } ;;
@@ -1451,6 +1486,7 @@ case "${cmd}" in
   "getprop ro.product.locale") echo "${STUB_LOCALE:-en-US}" ;;
   "settings put global hide_error_dialogs 1") touch "${S}/hide" ;;
   "settings get global hide_error_dialogs") [[ -f "${S}/hide" ]] && echo 1 || echo 0 ;;
+  "am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS") [[ -n "${STUB_BOOT_DIALOG_STUCK:-}" ]] || rm -f "${S}/boot_dialog" ;;
   "cmd connectivity airplane-mode enable") [[ -n "${STUB_AIRPLANE_STUCK:-}" ]] || touch "${S}/airplane" ;;
   "settings get global airplane_mode_on") [[ -f "${S}/airplane" ]] && echo 1 || echo 0 ;;
   "dumpsys connectivity | grep -m1 'Active default network:'")
@@ -1708,11 +1744,26 @@ print(json.dumps({k[0]: "Get Started", k[1]: "Create My Identity", k[2]: "Not no
     STUB_FOREIGN=android STUB_FOREIGN_ON=intro
   _has "…named as Haven's screen not settling" "the create screen did not settle with photoHeaderAddPhotoSemantics on it"
   _lacks "…never as the foreign root holding the foreground" "held the foreground"
+  # CI run 44870800362, API 35: an "isn't responding" dialog the boot raised
+  # before hide_error_dialogs was set, over Haven's first screen for the whole
+  # window. The setting does not close it; CLOSE_SYSTEM_DIALOGS does.
+  _scenario "an error dialog the boot left in front is closed before the first leg" 0 setup-held map \
+    "STUB_BOOT_DIALOG=Application Not Responding: com.google.android.apps.nexuslauncher"
+  ran=$(( ran + 1 ))
+  if sed -n '/settings get global hide_error_dialogs/,$p' "${tmp}/stub/calls" \
+      | grep -qxF -- '-s emulator-5554 shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS'; then
+    echo "  PASS …by CLOSE_SYSTEM_DIALOGS, once hide_error_dialogs reads back 1"
+  else echo "  FAIL CLOSE_SYSTEM_DIALOGS never reached the device after hide_error_dialogs read back 1" >&2; fails=1; fi
+  _scenario "an error dialog CLOSE_SYSTEM_DIALOGS does not close is infrastructure, before any leg" 3 setup-held map \
+    "STUB_BOOT_DIALOG=Application Not Responding: com.google.android.apps.nexuslauncher" STUB_BOOT_DIALOG_STUCK=1
+  _has "…naming whose dialog held input focus" "no read of input focus within 4 s showed it free of an error dialog (input focus on another app's \"isn't responding\" dialog), after CLOSE_SYSTEM_DIALOGS"
+  _has "…and no leg ran under it" "legs passed: none"
   # (38) A debug log plant in a release build.
   _scenario "a debug log plant is a product failure" 1 setup-held map STUB_PLANTS=2
   # (39) A tap that does not take effect.
   _scenario "a CTA still on screen after its tap is 'did not progress'" 1 setup-held map STUB_CTA_STUCK=1
   _has "…the screen unchanged for the whole window after the tap" "did not progress: the screen did not change in the window after onboardingWelcomeCta was tapped"
+  _has "…naming what held input focus, so a tap that missed Haven's window is told from a Haven that did not answer" "was tapped (input focus on com.oblivioustech.haven/com.oblivioustech.haven.MainActivity)"
   # (41) The device not in the state the gate needs.
   _scenario "a device that is not en-US is infrastructure" 3 setup-held map STUB_LOCALE=fr-FR
   _scenario "a device that will not go offline is infrastructure" 3 setup-held map STUB_AIRPLANE_STUCK=1
