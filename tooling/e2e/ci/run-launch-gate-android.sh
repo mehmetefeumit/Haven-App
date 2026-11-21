@@ -80,7 +80,8 @@
 # by the screen digest (see the journey below): a label is tapped once per
 # screen, never retried, and a tap after which the screen stays exactly as it
 # was for the whole window is "did not progress", a product failure under the
-# responsiveness pillar.
+# responsiveness pillar. Every verdict says whether its last observation is
+# fresh or stale, counting the dumps since the last tap, BACK or launch.
 #
 # # Verdicts
 #
@@ -108,7 +109,10 @@
 #      fixtures could not be seeded although the device answered (a push or
 #      query it refused, or a media store that never listed them)
 #   3  infrastructure: the device went away, never booted, is not en-US,
-#      would not go offline, gave no answer while the gallery was seeded, or
+#      would not go offline, kept an error dialog the boot raised in front
+#      after CLOSE_SYSTEM_DIALOGS, refused an injected tap or BACK, failed at
+#      adb itself every dump of a window after an action (the gate saw
+#      nothing), gave no answer while the gallery was seeded, or
 #      never attached its shared storage, or another process's "isn't
 #      responding" or "keeps stopping" dialog held the picker's or uCrop's
 #      focus, or held focus when one of Haven's screens' windows closed —
@@ -118,7 +122,9 @@
 #      scripts/ci/launch_gate_yanked_releases.txt)
 #
 # One `::error::` line names the leg, the state reached, the last observation
-# (visible keys, foreground package, EditText count) and the class. The summary
+# (visible keys, foreground package, EditText count), the evidence since the
+# last action (dumps read, unchanged, failed; the observation fresh or stale)
+# and the class. The summary
 # and any crash summary are written under LAUNCH_GATE_OUT and passed through the
 # log-privacy gate BEFORE either is echoed; the workflow uploads nothing else.
 # The display name the app generated is held in a 0700 directory, declared to
@@ -254,6 +260,17 @@ OBS_KEYS=''
 OBS_DIGEST=''
 declare -A OBS_XY=()
 
+# The evidence since the last action (mark_action): what the device was asked
+# to do, and how every dump since went — read, unchanged from the screen the
+# action was made on, or failed, by ui-dump.py's fixed reason or adb's.
+ACTION=''
+ACTION_DIGEST=''
+DUMPS_OK=0
+DUMPS_SAME=0
+DUMPS_FAILED=0
+DUMPS_UNREACHED=0
+declare -A DUMP_FAILS=()
+
 say() { echo "[launch-gate] $*"; }
 
 # verdict <rc> <message> — record the outcome and end the run; the EXIT trap
@@ -280,15 +297,41 @@ pid_now() {
   printf '%s' "${out//$'\r'/}"
 }
 
+# mark_action <words> [<digest>] — the device was asked for something the
+# screen should answer (<digest>: the screen it was asked on); the evidence
+# starts over from it.
+mark_action() {
+  ACTION="$1"; ACTION_DIGEST="${2:-}"
+  DUMPS_OK=0; DUMPS_SAME=0; DUMPS_FAILED=0; DUMPS_UNREACHED=0; DUMP_FAILS=()
+}
+
+# evidence — the dumps since the last action, in fixed words; nothing before
+# the first action.
+evidence() {
+  local why fails='' fresh='stale: no dump has succeeded since' same=''
+  [[ -n "${ACTION}" ]] || return 0
+  while IFS= read -r why; do
+    [[ -z "${why}" ]] || fails+="${fails:+, }${DUMP_FAILS[${why}]} ${why}"
+  done < <(printf '%s\n' "${!DUMP_FAILS[@]}" | sort)
+  (( DUMPS_OK == 0 )) || fresh='fresh, taken after it'
+  if [[ -n "${ACTION_DIGEST}" ]] && (( DUMPS_OK )); then
+    if (( DUMPS_SAME == DUMPS_OK )); then same=', all unchanged'; else same=", ${DUMPS_SAME} unchanged"; fi
+  fi
+  printf 'since %s: %s dump(s) read%s, %s failed%s; the last observation is %s' \
+    "${ACTION}" "${DUMPS_OK}" "${same}" "${DUMPS_FAILED}" "${fails:+ (${fails})}" "${fresh}"
+}
+
 # observe <arb> [<edit-value-file>] — one dump, read by ui-dump.py into OBS_*.
+# A failed one leaves OBS_SUMMARY on the last dump that succeeded, which
+# evidence then calls stale.
 observe() {
-  local arb="$1" edit_out="${2:-}" out rc=0 line w
+  local arb="$1" edit_out="${2:-}" out rc=0 adb_rc=0 line w why
   local -a extra=(--digest-out "${PRIV}/digest")
   OBS_FG=''; OBS_EDITS=0; OBS_KEYS=''; OBS_XY=(); OBS_DIGEST=''
   rm -f "${PRIV}/digest"
   timeout "${DUMP_SECS}" adb -s "${DEVICE}" exec-out \
     "uiautomator dump /sdcard/haven-launch-gate.xml >/dev/null 2>&1 && cat /sdcard/haven-launch-gate.xml; rm -f /sdcard/haven-launch-gate.xml" \
-    > "${PRIV}/dump.xml" 2>/dev/null || true
+    > "${PRIV}/dump.xml" 2>/dev/null || adb_rc=$?
   [[ -z "${edit_out}" ]] || extra+=(--edit-value-out "${edit_out}")
   out="$(python3 -I "${UI_DUMP}" observe --dump "${PRIV}/dump.xml" --package "${PKG}" \
     --arb "${arb}" --keys "${OBS_KEYSET}" "${extra[@]}")" || rc=$?
@@ -296,9 +339,23 @@ observe() {
   if (( rc == 2 )); then
     verdict 2 "ui-dump.py refused its input (see stderr)"
   fi
-  (( rc == 0 )) || return 1
+  if (( rc != 0 )); then
+    # A non-zero adb is the transport failing (exec-out carries no remote
+    # status). An empty dump adb did bring back is uiautomator's, which a
+    # Haven that stops answering accessibility queries causes too.
+    case "${adb_rc}" in
+      0) if [[ "${out}" =~ ^observation\ none\ ([A-Za-z ]+)$ ]]; then why="${BASH_REMATCH[1]}"; else why='ui-dump.py gave no reason'; fi ;;
+      124) why="no dump within ${DUMP_SECS} s" ;;
+      *) why='adb did not reach the device'; DUMPS_UNREACHED=$(( DUMPS_UNREACHED + 1 )) ;;
+    esac
+    DUMPS_FAILED=$(( DUMPS_FAILED + 1 ))
+    DUMP_FAILS["${why}"]=$(( ${DUMP_FAILS[${why}]:-0} + 1 ))
+    return 1
+  fi
   OBS_DIGEST="$(cat "${PRIV}/digest")"
   rm -f "${PRIV}/digest"
+  DUMPS_OK=$(( DUMPS_OK + 1 ))
+  [[ -z "${ACTION_DIGEST}" || "${OBS_DIGEST}" != "${ACTION_DIGEST}" ]] || DUMPS_SAME=$(( DUMPS_SAME + 1 ))
   while IFS= read -r line; do
     read -r -a w <<<"${line}"
     case "${w[0]:-}" in
@@ -312,11 +369,30 @@ observe() {
 
 seen() { [[ " ${OBS_KEYS} " == *" $1 "* ]]; }
 
+# inject <words> <input-args>... — one input on the screen last observed. An
+# input the device refused never reached Haven, so it says nothing about it.
+inject() {
+  local words="$1" rc=0
+  shift
+  dev shell input "$@" >/dev/null 2>&1 || rc=$?
+  if (( rc != 0 )); then
+    verdict 3 "the device refused ${words} (adb rc ${rc}): the input never reached Haven, which says nothing about it; re-run"
+  fi
+  mark_action "${words}, accepted by the device" "${OBS_DIGEST}"
+}
+
 tap() { # tap <key> — at the centre ui-dump.py reported for it
   local x y
   read -r x y <<<"${OBS_XY[$1]}"
-  dev shell input tap "${x}" "${y}" >/dev/null
-  say "${LEG}: tapped ${1}"
+  inject "the tap on $1" tap "${x}" "${y}"
+  say "${LEG}: tapped ${1} (accepted by the device)"
+}
+
+# unseen — before a window's verdict: every dump since the last action failed
+# at adb itself, so the window saw nothing of Haven to judge.
+unseen() {
+  (( DUMPS_OK == 0 && DUMPS_FAILED > 0 && DUMPS_UNREACHED == DUMPS_FAILED )) || return 0
+  verdict 3 "adb reached no dump in the window after ${ACTION}: all ${DUMPS_FAILED} failed at adb itself, so nothing about Haven is known; re-run"
 }
 
 # alive — the process launched for this leg is still the one running.
@@ -346,6 +422,7 @@ launch_app() {
       if [[ -z "${APP_PID}" ]]; then
         verdict 1 "am start -W reported ok but no ${PKG} process is running"
       fi
+      mark_action 'the launch'
       say "${LEG}: launched cold"
       return 0
     fi
@@ -495,19 +572,28 @@ act() {
 # another process's is the device's, and Haven's own activity holding focus
 # means the foreign root was not what stayed in front.
 stalled() {
-  if [[ -n "$1" ]]; then
+  unseen
+  if [[ -n "$1" || -n "${TAP_KEY}" ]]; then
     pp_focused "${DEVICE}" "${PRIV}"
     case "${PP_FOCUSED}" in
       window:not-responding-ours|window:app-error-ours)
         verdict 1 "input focus was $(_pp_focus_words "${PP_FOCUSED}") at state ${STATE} when its window closed: Haven failed" ;;
       window:not-responding-*|window:app-error-*)
         verdict 3 "input focus was $(_pp_focus_words "${PP_FOCUSED}") at state ${STATE} when its window closed: the device is struggling, which says nothing about Haven; re-run" ;;
-      "${PKG}/"*) ;;
-      *) verdict 1 "$1 held the foreground at state ${STATE} until the deadline (input focus $(_pp_focus_words "${PP_FOCUSED}"))" ;;
     esac
   fi
+  if [[ -n "$1" && "${PP_FOCUSED}" != "${PKG}/"* ]]; then
+    verdict 1 "$1 held the foreground at state ${STATE} until the deadline (input focus $(_pp_focus_words "${PP_FOCUSED}"))"
+  fi
+  # The focus is named so a tap that never reached Haven's window can be told
+  # from a Haven that did not answer it (CI run 44870800362, API 34).
+  if [[ -n "${TAP_KEY}" ]] && (( DUMPS_OK )); then
+    verdict 1 "did not progress: the screen did not change in the window after ${TAP_KEY} was tapped (input focus $(_pp_focus_words "${PP_FOCUSED}"))"
+  fi
+  # adb answered and uiautomator brought back nothing usable: a Haven whose
+  # main thread stopped answering accessibility queries can look exactly so.
   if [[ -n "${TAP_KEY}" ]]; then
-    verdict 1 "did not progress: the screen did not change in the window after ${TAP_KEY} was tapped"
+    verdict 1 "did not progress: no dump of the screen succeeded in the window after ${TAP_KEY} was tapped, though adb answered (input focus $(_pp_focus_words "${PP_FOCUSED}"))"
   fi
   if (( NAME_UNREAD )); then
     verdict 1 "the create screen never showed exactly one non-empty name field, so the name it saves could not be checked"
@@ -672,6 +758,7 @@ photo_round() {
     *) verdict 1 "photo round (${surface}): ${PP_MSG}" ;;
   esac
   STATE="photo round (${surface}), back from uCrop"
+  mark_action 'the return from uCrop'
   start="$(date +%s)"
   while spent=$(( $(date +%s) - start )); (( spent < APPLY_SECS )); do
     alive
@@ -690,6 +777,7 @@ photo_round() {
       return 0
     fi
   done
+  unseen
   verdict 1 "photo round (${surface}): the photo did not show within ${APPLY_SECS} s of Haven's return from uCrop"
 }
 
@@ -766,8 +854,8 @@ enable_background_sharing() {
     # The Location page again after Agree: back to Settings, once per screen.
     if (( agreed )) && seen "${KEY_BG_TOGGLE}" && ! seen "${KEY_AGREE}" \
        && [[ "${OBS_DIGEST}" == "${PREV_DIGEST}" && "${OBS_DIGEST}" != "${back_digest}" ]]; then
-      dev shell input keyevent 4 >/dev/null
-      say "${LEG}: pressed back"
+      inject 'the back key' keyevent 4
+      say "${LEG}: pressed back (accepted by the device)"
       back_digest="${OBS_DIGEST}"
       TAP_KEY=BACK
       TAP_DIGEST="${OBS_DIGEST}"
@@ -845,7 +933,7 @@ photo_at_map() {
   dev shell dumpsys deviceidle whitelist "+${PKG}" >/dev/null 2>&1 || true
   [[ "$(dev shell "dumpsys deviceidle whitelist | grep -c ',${PKG},'" 2>/dev/null | tr -d '\r' || true)" =~ ^[1-9][0-9]*$ ]] \
     || verdict 3 "the battery-optimisation exemption did not read back"
-  dev shell input keyevent 4 >/dev/null
+  inject 'the back key' keyevent 4
   enable_background_sharing "${arb}"
   identity_page "${arb}" 'before the photo'
   photo_round "${arb}" identity
@@ -936,10 +1024,11 @@ leg_upgrade() {
 }
 
 # ---------------------------------------------------------------------------
-# Preconditions: a booted en-US device, offline, with error dialogs hidden.
+# Preconditions: a booted en-US device, offline, with error dialogs hidden and
+# none the boot raised left holding input focus.
 # ---------------------------------------------------------------------------
 preconditions() {
-  local start spent boot locale air net
+  local start spent boot locale air='' net='' close=0 closes=0
   if ! timeout "${BOOT_SECS}" adb -s "${DEVICE}" wait-for-device; then
     verdict 3 "${DEVICE} did not come online within ${BOOT_SECS} s"
   fi
@@ -962,16 +1051,43 @@ preconditions() {
   # "Active default network: none" is ConnectivityService.dump()'s line when
   # no network is the default (AOSP android-14); read from source, so a guest
   # that prints anything else is refused here, by name, rather than trusted.
+  #
+  # hide_error_dialogs stops only the error dialogs shown after it: AOSP asks
+  # it when a dialog would be shown (AppErrors.handleShowAnrUi). One the boot
+  # raised first (the emulator action's keyevent 82 timing out on a launcher or
+  # System UI still starting) stays over every screen the legs read, and the
+  # first leg stalls under it (CI runs 44698826899 and 44870800362, API 35).
+  # CLOSE_SYSTEM_DIALOGS ends it as the setting would have: an "isn't
+  # responding" dialog's closeDialog force-closes its app
+  # (AppNotRespondingDialog overrides BaseErrorDialog's dismiss with
+  # FORCE_CLOSE, killAppAtUsersRequest). `am broadcast` waits for the ordered
+  # broadcast to finish, which a hung receiver stretches to 60 s, so it is
+  # bounded, and sent in a pass of its own: no pass outlasts the two reads the
+  # budget books past the window.
   start="$(date +%s)"
   while spent=$(( $(date +%s) - start )); (( spent < OFFLINE_SECS )); do
+    if (( close )); then
+      close=0
+      closes=$(( closes + 1 ))
+      timeout "${ADB_SECS}" adb -s "${DEVICE}" shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS >/dev/null 2>&1 || true
+      continue
+    fi
     air="$(timeout "${ADB_SECS}" adb -s "${DEVICE}" shell settings get global airplane_mode_on 2>/dev/null | tr -d '\r' || true)"
     net="$(timeout "${ADB_SECS}" adb -s "${DEVICE}" shell "dumpsys connectivity | grep -m1 'Active default network:'" 2>/dev/null | tr -d '\r' || true)"
+    pp_focused "${DEVICE}" "${PRIV}"
+    case "${PP_FOCUSED}" in
+      '') continue ;;
+      window:not-responding-*|window:app-error-*) close=1; continue ;;
+    esac
     if [[ "${air}" == 1 && "${net}" =~ Active\ default\ network:\ none$ ]]; then
-      say "device ready: booted, en-US, airplane mode on, no default network"
+      say "device ready: booted, en-US, airplane mode on, no default network, no error dialog holding input focus"
       gallery
       return 0
     fi
   done
+  if [[ "${air}" == 1 && "${net}" =~ Active\ default\ network:\ none$ ]]; then
+    verdict 3 "no read of input focus within ${OFFLINE_SECS} s showed it free of an error dialog (input focus $(_pp_focus_words "${PP_FOCUSED}")), after ${closes} CLOSE_SYSTEM_DIALOGS broadcast(s)"
+  fi
   verdict 3 "the device did not go offline within ${OFFLINE_SECS} s (airplane_mode_on='${air:-}', '${net:-no default-network line}')"
 }
 
@@ -991,7 +1107,7 @@ gallery() {
 # The EXIT trap: classify, write, gate, then — only then — echo.
 # ---------------------------------------------------------------------------
 finish() {
-  local rc=$? cls gate_rc=0 cause=''
+  local rc=$? cls gate_rc=0 cause='' ev
   local -a decls=()
   local f
   if [[ -z "${VERDICT_MSG}" ]]; then
@@ -1018,9 +1134,11 @@ finish() {
     0) cls='pass' ;; 1) cls='product' ;; 2) cls='usage' ;; 3) cls='infrastructure' ;;
     4) cls='upgrade source unusable — yank it in scripts/ci/launch_gate_yanked_releases.txt' ;;
   esac
+  ev="$(evidence)"
   {
     echo "launch-gate-android verdict: ${cls} (rc ${VERDICT_RC})"
     echo "leg: ${LEG}; state: ${STATE}; last observation: ${OBS_SUMMARY}"
+    [[ -z "${ev}" ]] || echo "evidence: ${ev}"
     echo "reason: ${VERDICT_MSG}"
     echo "legs passed: ${LEGS_DONE% }"
     echo "photo: ${PHOTO_SUMMARY}"
@@ -1046,7 +1164,7 @@ finish() {
     cause="$(grep -E 'Caused by:|Exception|Fatal signal' "${CRASH_SUMMARY}" | tail -n 1 || true)"
   fi
   if (( VERDICT_RC != 0 )); then
-    echo "::error::launch-gate-android ${cls}: leg ${LEG}, state ${STATE}; ${VERDICT_MSG}${cause:+; ${cause}}; last observation: ${OBS_SUMMARY}"
+    echo "::error::launch-gate-android ${cls}: leg ${LEG}, state ${STATE}; ${VERDICT_MSG}${cause:+; ${cause}}; last observation: ${OBS_SUMMARY}${ev:+; ${ev}}"
   fi
   exit "${VERDICT_RC}"
 }
@@ -1063,7 +1181,7 @@ finish() {
 # deadline is a count of device calls and every verdict comes from what the
 # stub shows, never from how fast this machine runs it.
 # ---------------------------------------------------------------------------
-readonly SELF_TEST_FIXTURES=124
+readonly SELF_TEST_FIXTURES=144
 readonly ST_NAME='Quiet Wanderer Fixture'
 # What a picker thumbnail's description says in the stub: a date, which no
 # transcript or summary may carry.
@@ -1079,6 +1197,10 @@ echo $(( $(cat "${S}/clock") + ${STUB_TICK:-1} )) > "${S}/clock"
 [[ "${1:-}" == -s ]] && shift 2
 if [[ -f "${S}/offline" ]]; then echo "error: device offline" >&2; exit 1; fi
 PKG=com.oblivioustech.haven
+# STUB_BOOT_DIALOG=<title>: an error dialog the boot raised before the gate set
+# hide_error_dialogs, in front of every screen and holding input focus until
+# CLOSE_SYSTEM_DIALOGS (never, with STUB_BOOT_DIALOG_STUCK).
+if [[ -n "${STUB_BOOT_DIALOG:-}" && ! -f "${S}/boot_dialog_raised" ]]; then touch "${S}/boot_dialog" "${S}/boot_dialog_raised"; fi
 get() { cat "${S}/$1" 2>/dev/null || true; }
 # Every change of screen is a new window: its focus starts over (focus_of).
 put() { printf '%s\n' "$2" > "${S}/$1"; [[ "$1" != screen ]] || printf '%s\n' "$(( $(get gen) + 1 ))" > "${S}/gen"; }
@@ -1139,7 +1261,9 @@ focus_of() { # <advance: 1 on a dumpsys read>
 focus_dump() {
   local f; f="$(focus_of 1)"
   echo 'Input Dispatcher State:'
-  if [[ -n "${STUB_FOREIGN:-}" && -n "${STUB_FOREIGN_FOCUS:-}" && "$(get screen)" == "${STUB_FOREIGN_ON:-create}" ]]; then
+  if [[ -f "${S}/boot_dialog" ]]; then
+    printf "  FocusedWindows:\n    displayId=0, name='5a1 %s'\n" "${STUB_BOOT_DIALOG}"
+  elif [[ -n "${STUB_FOREIGN:-}" && -n "${STUB_FOREIGN_FOCUS:-}" && "$(get screen)" == "${STUB_FOREIGN_ON:-create}" ]]; then
     printf "  FocusedWindows:\n    displayId=0, name='5a1 %s'\n" "${STUB_FOREIGN_FOCUS}"
   elif [[ "${f}" == none && -n "${STUB_FOCUS_WINDOW:-}" ]]; then printf "  FocusedWindows:\n    displayId=0, name='5a1 %s'\n" "${STUB_FOCUS_WINDOW}"
   elif [[ "${f}" == none ]]; then echo '  FocusedWindows: <none>'
@@ -1267,6 +1391,15 @@ dump() {
   local n scr
   n=$(( $(get dumps) + 1 )); put dumps "${n}"
   [[ -n "$(get pid)" ]] || return 0
+  # STUB_DUMP_EMPTY_AFTER_TAP: uiautomator brings back nothing once a tap was
+  # sent, though adb answers — what a Haven no longer answering accessibility
+  # queries gives.
+  [[ -z "${STUB_DUMP_EMPTY_AFTER_TAP:-}" || ! -f "${S}/tapped" ]] || return 0
+  if [[ -f "${S}/boot_dialog" ]]; then
+    printf "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><hierarchy rotation=\"0\">%s</hierarchy>" \
+      "$(node android.widget.FrameLayout '' '' '[0,0][1080,2400]' android)"
+    return 0
+  fi
   if (( n == 3 )) && [[ -n "${STUB_PID_FLIP:-}" ]]; then put pid 9999; fi
   scr="$(get screen)"
   if (( n == 1 )); then screen_xml blank; return 0; fi
@@ -1305,6 +1438,7 @@ crop_done() {
 }
 tap() {
   local x="$1" y="$2" scr; scr="$(get screen)"
+  [[ ! -f "${S}/boot_dialog" ]] || return 0
   ! unfocused "tap ${x} ${y}" || return 0
   case "${scr}" in picker|ucrop|location|disclosure) ;; *)
     [[ -z "${STUB_TRANSITION:-}" ]] || { put leaving "${scr}"; put leaving_dumps 0; } ;;
@@ -1434,7 +1568,10 @@ case "${1:-}" in
       "logcat -d -b crash") cat "${S}/crash.log" ;;
       "logcat -d -b events") cat "${S}/events.log" ;;
     esac; exit 0 ;;
-  exec-out) dump; exit 0 ;;
+  # STUB_EXEC_OUT_DOWN_AFTER_TAP: adb itself fails every dump once a tap was
+  # sent, the shell reads still answering.
+  exec-out) if [[ -n "${STUB_EXEC_OUT_DOWN_AFTER_TAP:-}" && -f "${S}/tapped" ]]; then echo "error: closed" >&2; exit 1; fi
+    dump; exit 0 ;;
   push) media_push "$2" "$3" ;;
   shell) shift ;;
   *) exit 9 ;;
@@ -1451,6 +1588,10 @@ case "${cmd}" in
   "getprop ro.product.locale") echo "${STUB_LOCALE:-en-US}" ;;
   "settings put global hide_error_dialogs 1") touch "${S}/hide" ;;
   "settings get global hide_error_dialogs") [[ -f "${S}/hide" ]] && echo 1 || echo 0 ;;
+  # STUB_BROADCAST_HANG: a receiver that never finishes, so `am broadcast`
+  # never returns; the dialogs were closed on delivery all the same.
+  "am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS") [[ -n "${STUB_BOOT_DIALOG_STUCK:-}" ]] || rm -f "${S}/boot_dialog"
+    if [[ -n "${STUB_BROADCAST_HANG:-}" ]]; then [[ -p "${S}/never" ]] || mkfifo "${S}/never"; : < "${S}/never"; fi ;;
   "cmd connectivity airplane-mode enable") [[ -n "${STUB_AIRPLANE_STUCK:-}" ]] || touch "${S}/airplane" ;;
   "settings get global airplane_mode_on") [[ -f "${S}/airplane" ]] && echo 1 || echo 0 ;;
   "dumpsys connectivity | grep -m1 'Active default network:'")
@@ -1463,7 +1604,10 @@ case "${cmd}" in
     put pidof_reads $(( $(get pidof_reads) + 1 ))
     if [[ -n "${STUB_PIDOF_FLAKY:-}" ]] && (( $(get pidof_reads) % 2 == 1 )); then exit 255; fi
     [[ -n "$(get pid)" ]] || exit 1; get pid ;;
-  "input tap "*) read -r _ _ x y <<<"${cmd}"; tap "${x}" "${y}" ;;
+  # STUB_TAP_REFUSED: `input` fails on the device, saying something no
+  # summary may carry.
+  "input tap "*) if [[ -n "${STUB_TAP_REFUSED:-}" ]]; then echo "java.lang.SecurityException: stub-device-says-${PKG}" >&2; exit 1; fi
+    read -r _ _ x y <<<"${cmd}"; tap "${x}" "${y}"; touch "${S}/tapped" ;;
   "dumpsys package ${PKG} | grep -m1 versionCode=") echo "    versionCode=$(get vc) minSdk=24 targetSdk=35" ;;
   "logcat -d | grep -c logscan-plant-") echo "${STUB_PLANTS:-0}" ;;
   "getprop ro.build.version.sdk") echo "${STUB_API:-34}" ;;
@@ -1540,11 +1684,13 @@ print(json.dumps({k[0]: "Get Started", k[1]: "Create My Identity", k[2]: "Not no
     _mkdir "${tmp}/cand" candidate 4022 "${cf}" "${ARB_CAND:-${arb_now}}"
     _mkdir "${tmp}/prev" v0.1.13 4020 "${pf}" "${ARB_PREV:-${arb_old}}"
     rc=0
-    out="$(env PATH="${tmp}/bin:${PATH}" STUB="${tmp}/stub" STUB_NAME="${ST_NAME}" TMPDIR="${tmp}/priv" \
+    # The bound turns a gate that hangs (a wait it should bound and does not)
+    # into rc 124: every scenario ends in seconds.
+    out="$(timeout 300 env PATH="${tmp}/bin:${PATH}" STUB="${tmp}/stub" STUB_NAME="${ST_NAME}" TMPDIR="${tmp}/priv" \
       LAUNCH_GATE_OUT="${tmp}/out/summary" \
       HAVEN_LOGSCAN=true HAVEN_LOGSCAN_BIN="${LOGSCAN_FAKE_BIN}" FAKE_SEAL_ARGV="${tmp}/seal.argv" \
       GITHUB_RUN_ID="launch-gate-self-test-$$-${ran}" GITHUB_RUN_ATTEMPT=1 LAUNCH_GATE_SCREEN_SECS=20 LAUNCH_GATE_FINISH_SECS=30 \
-      LAUNCH_GATE_OFFLINE_SECS=4 LAUNCH_GATE_PROCESS_SECS=4 LAUNCH_GATE_SETTLE_SECS=6 LAUNCH_GATE_APPLY_SECS=24 \
+      LAUNCH_GATE_OFFLINE_SECS=8 LAUNCH_GATE_PROCESS_SECS=4 LAUNCH_GATE_SETTLE_SECS=6 LAUNCH_GATE_APPLY_SECS=24 \
       PHOTO_STORAGE_SECS=10 PHOTO_MEDIA_SECS=12 PHOTO_PICKER_SECS=40 PHOTO_UCROP_SECS=36 PHOTO_RETURN_SECS=32 "$@" \
       bash "${BASH_SOURCE[0]}" "${tmp}/cand" "${tmp}/prev" 2>&1)" || rc=$?
     if (( rc == want_rc )); then
@@ -1708,11 +1854,49 @@ print(json.dumps({k[0]: "Get Started", k[1]: "Create My Identity", k[2]: "Not no
     STUB_FOREIGN=android STUB_FOREIGN_ON=intro
   _has "…named as Haven's screen not settling" "the create screen did not settle with photoHeaderAddPhotoSemantics on it"
   _lacks "…never as the foreign root holding the foreground" "held the foreground"
+  # CI run 44870800362, API 35: an "isn't responding" dialog the boot raised
+  # before hide_error_dialogs was set, over Haven's first screen for the whole
+  # window. The setting does not close it; CLOSE_SYSTEM_DIALOGS does.
+  _scenario "an error dialog the boot left in front is closed before the first leg" 0 setup-held map \
+    "STUB_BOOT_DIALOG=Application Not Responding: com.google.android.apps.nexuslauncher"
+  ran=$(( ran + 1 ))
+  if sed -n '/settings get global hide_error_dialogs/,$p' "${tmp}/stub/calls" \
+      | grep -qxF -- '-s emulator-5554 shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS'; then
+    echo "  PASS …by CLOSE_SYSTEM_DIALOGS, once hide_error_dialogs reads back 1"
+  else echo "  FAIL CLOSE_SYSTEM_DIALOGS never reached the device after hide_error_dialogs read back 1" >&2; fails=1; fi
+  _scenario "an error dialog CLOSE_SYSTEM_DIALOGS does not close is infrastructure, before any leg" 3 setup-held map \
+    "STUB_BOOT_DIALOG=Application Not Responding: com.google.android.apps.nexuslauncher" STUB_BOOT_DIALOG_STUCK=1
+  _has "…naming whose dialog held input focus" "no read of input focus within 8 s showed it free of an error dialog (input focus on another app's \"isn't responding\" dialog), after 2 CLOSE_SYSTEM_DIALOGS broadcast(s)"
+  _has "…and no leg ran under it" "legs passed: none"
+  # `am broadcast` waits for the ordered broadcast to finish, and one receiver
+  # that never does would hold the gate past every bound it states.
+  _scenario "a CLOSE_SYSTEM_DIALOGS broadcast that never finishes is bounded, and the dialog it closed is gone" 0 setup-held map \
+    "STUB_BOOT_DIALOG=Application Not Responding: com.google.android.apps.nexuslauncher" STUB_BROADCAST_HANG=1
   # (38) A debug log plant in a release build.
   _scenario "a debug log plant is a product failure" 1 setup-held map STUB_PLANTS=2
   # (39) A tap that does not take effect.
   _scenario "a CTA still on screen after its tap is 'did not progress'" 1 setup-held map STUB_CTA_STUCK=1
   _has "…the screen unchanged for the whole window after the tap" "did not progress: the screen did not change in the window after onboardingWelcomeCta was tapped"
+  _has "…naming what held input focus, so a tap that missed Haven's window is told from a Haven that did not answer" "was tapped (input focus on com.oblivioustech.haven/com.oblivioustech.haven.MainActivity)"
+  _has "…the tap accepted by the device" "evidence: since the tap on onboardingWelcomeCta, accepted by the device: "
+  _has "…and judged on dumps taken after it, every one the screen it was made on" " dump(s) read, all unchanged, 0 failed; the last observation is fresh, taken after it"
+  # CI run 136755434767 (API 34): a failed dump left the last observation on a
+  # screen from before the tap, and nothing said so. adb answering with no
+  # dump is also what a Haven no longer answering accessibility queries gives,
+  # so it stays product, but never as "the screen did not change".
+  _scenario "dumps that come back empty after an accepted tap are a stall on stale evidence, still product" 1 setup-held map STUB_DUMP_EMPTY_AFTER_TAP=1
+  _has "…never claiming the screen did not change" "did not progress: no dump of the screen succeeded in the window after onboardingWelcomeCta was tapped, though adb answered"
+  _has "…its last observation, from before the tap, called stale" "last observation: visible [onboardingWelcomeCta], foreground com.oblivioustech.haven, edittexts 0; since the tap on onboardingWelcomeCta, accepted by the device: 0 dump(s) read, "
+  _has "…with ui-dump.py's reason" " the dump is empty); the last observation is stale: no dump has succeeded since"
+  # Every dump after the tap failed at adb itself: the gate saw nothing.
+  _scenario "dumps that all fail at adb after an accepted tap are infrastructure" 3 setup-held map STUB_EXEC_OUT_DOWN_AFTER_TAP=1
+  _has "…named as such" "adb reached no dump in the window after the tap on onboardingWelcomeCta, accepted by the device: all "
+  _has "…the last observation called stale" " adb did not reach the device); the last observation is stale: no dump has succeeded since"
+  # A tap the device refused never reached Haven.
+  _scenario "a tap the device refuses is infrastructure" 3 setup-held map STUB_TAP_REFUSED=1
+  _has "…named as such" "the device refused the tap on onboardingWelcomeCta (adb rc 1): the input never reached Haven"
+  _lacks "…never as Haven not answering it" "did not progress"
+  _lacks "…and what the device said is not echoed" "stub-device-says-"
   # (41) The device not in the state the gate needs.
   _scenario "a device that is not en-US is infrastructure" 3 setup-held map STUB_LOCALE=fr-FR
   _scenario "a device that will not go offline is infrastructure" 3 setup-held map STUB_AIRPLANE_STUCK=1
