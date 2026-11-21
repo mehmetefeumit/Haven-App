@@ -1672,7 +1672,8 @@ async fn a_session_started_into_a_burst_reads_as_one_and_keeps_the_starts_inbox_
         let admin_keys = Keys::generate();
         let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &admin_keys).unwrap());
         let fx = real_circle(&circle, &admin_keys, std::slice::from_ref(&url)).await;
-        let now = i64::try_from(nostr::Timestamp::now().as_secs()).unwrap();
+        let clock = || i64::try_from(nostr::Timestamp::now().as_secs()).unwrap();
+        let now = clock();
         if has_cursor {
             circle
                 .advance_sync_cursor(STREAM_INBOX_1059, now * 1000)
@@ -1686,6 +1687,9 @@ async fn a_session_started_into_a_burst_reads_as_one_and_keeps_the_starts_inbox_
             .start_into_burst(&[fx.spec(&url)], std::slice::from_ref(&url), None)
             .await
             .expect("the session starts into a burst");
+        // The start reads its own clock somewhere in between, and a slow
+        // start crosses a second boundary.
+        let started = clock();
         assert_eq!(
             engine.lifecycle(),
             Some(Lifecycle::Burst),
@@ -1714,13 +1718,17 @@ async fn a_session_started_into_a_burst_reads_as_one_and_keeps_the_starts_inbox_
         let since = inbox_since.expect("the burst asked the relay for the inbox");
         if has_cursor {
             assert!(
-                since >= now - 345_600 - 60 && since > now - 604_800,
-                "with an inbox cursor the start replayed more than the re-anchor's four days",
+                since == now - 345_600,
+                "with an inbox cursor the start did not ask from the re-anchor's four days",
             );
         } else {
             assert!(
-                since <= now - 604_800,
+                since <= started - 604_800,
                 "with no inbox cursor the start skipped the cold-start week",
+            );
+            assert!(
+                since >= now - 604_800,
+                "with no inbox cursor the start replayed more than the cold-start week",
             );
         }
         let _ = engine.stop().await;

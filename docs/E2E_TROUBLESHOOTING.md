@@ -405,7 +405,11 @@ that re-checked.
 
 Note what it cannot decide. `Could not resolve all files for configuration ...`
 is what Gradle prints both for a transient and for a dependency version this
-commit got wrong, so the retry class covers both. The verdict annotation is
+commit got wrong, so the retry class covers both. So is `Plugin [id: …] was
+not found … (could not resolve plugin artifact '…')`: Gradle checks a plugin
+marker through a lenient view and prints that for any failure, a 429 or a
+timeout as much as a real absence (run 44811957518, where twelve sibling lanes
+resolved the same marker). The verdict annotation is
 where that is told honestly, and it has **four wordings** — read which one you
 got before re-running:
 

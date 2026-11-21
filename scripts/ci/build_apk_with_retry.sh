@@ -258,6 +258,20 @@ readonly RC_BROKEN=2
 #              UNMEASURED: github.com redirects to a signed asset URL whose
 #              archive name is a query value (`filename%3Dgradle-…`), so a 5xx
 #              at that hop is matched by its `%3D` form.
+#   MEASURED   run 44811957518 job 136563108866 (e2e_background_catchup,
+#              2026-11-20), cache missed: "Plugin [id: 'org.gradle.kotlin.
+#              kotlin-dsl', version: '6.5.7'] was not found ... (could not
+#              resolve plugin artifact '...:6.5.7')" in 53 s, while twelve
+#              sibling Android lanes of that run resolved the same marker and
+#              the Portal serves it. Gradle's ArtifactRepositoriesPluginResolver
+#              asks for the marker through a LENIENT artifact view and reports
+#              ANY failure — a 429, a 5xx, a timeout, a real absence — in that
+#              one lower-case wording, the cause discarded, so no other
+#              alternative here can see it. Retried like "Could not resolve all
+#              files": the same honest ambiguity, told in `infra_error`. A
+#              real absence (a typo'd version) fails every attempt the same
+#              way, so it still ends red, after a pause and a Gradle start-up
+#              per retry: one or two retries inside the 180 s budget.
 #   UNMEASURED "Read timed out", "Connection reset", "Connection timed out",
 #              "Could not HEAD", "Could not download", and the 408/5xx codes:
 #              never seen in this repo's logs. They are Gradle's own transient
@@ -276,7 +290,7 @@ readonly RC_BROKEN=2
 # halves, because for a while this header claimed the opposite of what the code
 # does.
 readonly WRAPPER_DOWNLOAD_RE='Server returned HTTP response code: (408|429|5[0-9][0-9]) for URL: [^[:space:]]*(/|%3D)gradle-[0-9][0-9.]*-(all|bin)\.zip'
-readonly RETRIABLE_RE="Could not (GET|HEAD|resolve|download|get resource)|Could not parse POM|Error resolving plugin|downloading artifacts from the network|Read timed out|Connection (reset|timed out)|status code (408|429|5[0-9][0-9])|Could not resolve all (artifacts|dependencies|files)|${WRAPPER_DOWNLOAD_RE}"
+readonly RETRIABLE_RE="Could not (GET|HEAD|resolve|download|get resource)|Could not parse POM|Error resolving plugin|could not resolve plugin artifact '|downloading artifacts from the network|Read timed out|Connection (reset|timed out)|status code (408|429|5[0-9][0-9])|Could not resolve all (artifacts|dependencies|files)|${WRAPPER_DOWNLOAD_RE}"
 
 # Signatures that must NEVER be retried: intermittent but REAL. Retrying these
 # converts a capacity problem into a passing build that hides it. Checked FIRST,
@@ -656,6 +670,28 @@ readonly MEASURED_WRAPPER_504_TEXT="Exception in thread \"main\" java.io.IOExcep
 Running Gradle task 'assembleDebug'...                             11.6s
 Gradle task assembleDebug failed with exit code 1"
 
+# The plugin-marker failure, verbatim from CI run 44811957518 job 136563108866:
+# every resolution word in it is lower-case, and the cause is gone.
+readonly MEASURED_PLUGIN_MARKER_TEXT="FAILURE: Build failed with an exception.
+
+* Where:
+Build file '/opt/hostedtoolcache/flutter/stable-3.50.1-x64/flutter/packages/flutter_tools/gradle/build.gradle.kts' line: 7
+
+* What went wrong:
+Plugin [id: 'org.gradle.kotlin.kotlin-dsl', version: '6.5.7'] was not found in any of the following sources:
+
+- Gradle Core Plugins (plugin is not in 'org.gradle' namespace)
+- Included Builds (No included builds contain this plugin)
+- Plugin Repositories (could not resolve plugin artifact 'org.gradle.kotlin.kotlin-dsl:org.gradle.kotlin.kotlin-dsl.gradle.plugin:6.5.7')
+  Searched in the following repositories:
+    MavenRepo
+    maven(https://maven-central.storage-download.googleapis.com/maven2/)
+    Gradle Central Plugin Repository
+
+BUILD FAILED in 53s
+Running Gradle task 'assembleDebug'...                             53.8s
+Gradle task assembleDebug failed with exit code 1"
+
 # A dependency that does not exist. The `Could not find ... / Searched in the
 # following locations:` half is MEASURED (run 35418051379 job 105830389349); the
 # `:app:debugRuntimeClasspath` wrapper and the invented version are
@@ -1011,6 +1047,17 @@ run_self_test() {
   # difference has to be told honestly, which fixture (m) pins.
   _classifies "a coordinate that exists nowhere" retry \
     "${MISSING_COORDINATE_TEXT}"
+  _classifies "the MEASURED plugin marker Gradle reported missing" retry \
+    "${MEASURED_PLUGIN_MARKER_TEXT}"
+  # A plugin request Gradle refuses before asking any repository is this
+  # commit's, and its notFound shares everything with the sample above but the
+  # marker wording.
+  _classifies "a plugin request with no version, refused before any lookup" fail \
+    "Plugin [id: 'com.example.plugin'] was not found in any of the following sources:
+
+- Gradle Core Plugins (plugin is not in 'org.gradle' namespace)
+- Included Builds (No included builds contain this plugin)
+- Plugin Repositories (plugin dependency must include a version number for this source)"
   _classifies "bare 503 status line" retry \
     "> Received status code 503 from server: Service Unavailable"
   _classifies "bare failed GET" retry \
@@ -1121,6 +1168,10 @@ java.io.IOException: No space left on device"
     "> Could not resolve all files for configuration ':app:debugRuntimeClasspath'.
 Caused by: java.net.SocketTimeoutException: Read timed out" \
     "not knowable from here" "429"
+  _annotation "a plugin marker reported missing admits it cannot know" \
+    "${MEASURED_PLUGIN_MARKER_TEXT}" "not knowable from here" "429"
+  _annotation "a plugin marker reported missing is not reprinted by us" \
+    "${MEASURED_PLUGIN_MARKER_TEXT}" "if this commit changed a dependency" "kotlin-dsl"
 
   # (n) The budget state file is per RUN. Its fallback lives under a directory
   #     that survives reboots on a developer machine, so a fixed name would let
@@ -1356,7 +1407,7 @@ Caused by: java.net.SocketTimeoutException: Read timed out" \
     echo "${SCRIPT_NAME}: SELF-TEST FAILED — ran ${ran} fixture(s), expected exactly ${SELF_TEST_FIXTURES}; a fixture was added or removed without moving the pin" >&2
     return 1
   fi
-  echo "${SCRIPT_NAME}: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: a transient 429 is ridden out on the second attempt after exactly one ladder pause, and so is the wrapper's 504 fetching the Gradle distribution, and the fake proves it refuses both a non-build argv and a build missing the flags this script adds; a compile error and a disk exhaustion each fail once with their own exit code, their original output and the right verdict; a persistent 429 stops at exactly ${MAX_ATTEMPTS} attempts with one ::error:: saying INFRASTRUCTURE and that no test ran, the Gradle error still shown; a budget spent by an earlier build in the step starts no further attempt, and a retried build charges the shared budget while a clean one charges nothing; an attempt long enough that repeating it would not fit the budget is never started, while a short one under the same injected clock still is; every retriable signature is load-bearing on its own, this repo's real wrapped 403 is retried while a bare status line decides nothing, the wrapper's distribution download is retried on a 5xx but not on a 404, a checksum mismatch or another URL, and a capacity signature beats a resolution one; the annotation names a rate limit only where a 429 says so, names a failed distribution download with its status, names the missing-coordinate shape as the ambiguity it is without reprinting the coordinate, and otherwise admits the cause is not knowable; a spent budget left by another run is not read; the script itself issues the build argv the lanes depend on; on CI the NDK Flutter asks for is installed in one call when missing, left alone when present and complete and reinstalled when its package.xml is missing, a truncated install is graded failed despite its manifest, its download cache cleared and the charged retry installs it, another revision is replaced, a yes-machine sdkmanager fails closed at ${MAX_ATTEMPTS} calls with one INFRASTRUCTURE annotation, a hung one is killed at the attempt bound and not repeated past the budget, and every input this script owns fails as broken before any call; end to end the script installs the Maven Central fallback init script and provisions before it builds against the real app build file, stops before Gradle when the NDK cannot be had, and off CI never touches the SDK or GRADLE_USER_HOME; one backoff per pause, and the ladder fits the budget)."
+  echo "${SCRIPT_NAME}: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: a transient 429 is ridden out on the second attempt after exactly one ladder pause, and so is the wrapper's 504 fetching the Gradle distribution, and the fake proves it refuses both a non-build argv and a build missing the flags this script adds; a compile error and a disk exhaustion each fail once with their own exit code, their original output and the right verdict; a persistent 429 stops at exactly ${MAX_ATTEMPTS} attempts with one ::error:: saying INFRASTRUCTURE and that no test ran, the Gradle error still shown; a budget spent by an earlier build in the step starts no further attempt, and a retried build charges the shared budget while a clean one charges nothing; an attempt long enough that repeating it would not fit the budget is never started, while a short one under the same injected clock still is; every retriable signature is load-bearing on its own, this repo's real wrapped 403 is retried while a bare status line decides nothing, a plugin marker Gradle reports missing is retried while a version-less plugin request is not, the wrapper's distribution download is retried on a 5xx but not on a 404, a checksum mismatch or another URL, and a capacity signature beats a resolution one; the annotation names a rate limit only where a 429 says so, names a failed distribution download with its status, names the missing-coordinate shape as the ambiguity it is without reprinting the coordinate, and otherwise admits the cause is not knowable; a spent budget left by another run is not read; the script itself issues the build argv the lanes depend on; on CI the NDK Flutter asks for is installed in one call when missing, left alone when present and complete and reinstalled when its package.xml is missing, a truncated install is graded failed despite its manifest, its download cache cleared and the charged retry installs it, another revision is replaced, a yes-machine sdkmanager fails closed at ${MAX_ATTEMPTS} calls with one INFRASTRUCTURE annotation, a hung one is killed at the attempt bound and not repeated past the budget, and every input this script owns fails as broken before any call; end to end the script installs the Maven Central fallback init script and provisions before it builds against the real app build file, stops before Gradle when the NDK cannot be had, and off CI never touches the SDK or GRADLE_USER_HOME; one backoff per pause, and the ladder fits the budget)."
   return 0
 }
 
