@@ -1,5 +1,6 @@
 # Reusable workflow: Dependency audit
-# Checks for known vulnerabilities in Rust dependencies
+# Checks for known vulnerabilities in the Rust and Dart dependencies, and that
+# every vendored package is its latest upstream release.
 #
 # EVERY Rust lockfile is scanned. They are separate crates with separate
 # `Cargo.lock`s, and `rust_builder`'s is the one whose resolution actually ships
@@ -99,6 +100,23 @@ jobs:
   # advisory database sees: third_party/geolocator_android (patched to drop
   # Google Play services) would otherwise stay on the release it was copied
   # from. Red when pub.dev has a newer one, like an advisory above.
+  # haven/pubspec.lock is the Dart resolution the app ships; GitHub's advisory
+  # database is read for every pub advisory and each hosted package's version
+  # is matched against it (the repository's own token, read-only).
+  pub:
+    name: pub advisories (GitHub advisory database)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Check haven/pubspec.lock against every pub advisory
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -I scripts/ci/check_pub_advisories.py haven/pubspec.lock
+
   vendored:
     name: vendored packages are the latest upstream release
     runs-on: ubuntu-latest

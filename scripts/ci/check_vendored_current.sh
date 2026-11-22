@@ -63,7 +63,7 @@ check_latest() {
 }
 
 fetch_pub() {
-  curl -sSf --max-time 30 --retry 3 "https://pub.dev/api/packages/${PKG}"
+  curl -sSf --max-time 30 --retry 3 --retry-all-errors "https://pub.dev/api/packages/${PKG}"
 }
 
 self_test() {

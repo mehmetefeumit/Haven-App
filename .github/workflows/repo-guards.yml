@@ -1568,6 +1568,10 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_no_google_services.sh --static
 
+      - name: Pub advisory check self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: python3 -I scripts/ci/check_pub_advisories.py --self-test
+
       - name: Vendored packages current self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_vendored_current.sh --self-test

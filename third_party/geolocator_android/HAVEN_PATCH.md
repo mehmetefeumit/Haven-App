@@ -3,8 +3,8 @@
 Upstream: pub.dev `geolocator_android` 5.2.1 (MIT, Baseflow), archive
 sha256 `e67583809a1fab5f4a2255902978e2bc095ace9451fde0d9624e54facd0a5c22`.
 `haven/pubspec.yaml` selects this copy through `dependency_overrides`, and
-`scripts/ci/check_vendored_current.sh` fails the weekly dependency audit
-once pub.dev publishes a newer version.
+`scripts/ci/check_vendored_current.sh` fails the dependency audit (every CI
+run, and weekly) once pub.dev publishes a newer version.
 
 ## Why
 
@@ -37,8 +37,10 @@ comes back.
 ## Upgrading
 
 Download the new archive from `https://pub.dev/api/archives/geolocator_android-<version>.tar.gz`,
-record its sha256 here and the version in `scripts/ci/check_vendored_current.sh`,
-unpack it over this directory, and re-apply the four edits above. Upstream's
+record its sha256 and version here (the heading and the line above;
+`check_vendored_current.sh --static` holds the heading to the copy's
+`pubspec.yaml`), unpack it over this directory, and re-apply the four edits
+above. Upstream's
 own changes come with it, so read the upstream changelog first.
 
 ```diff

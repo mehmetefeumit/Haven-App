@@ -65,6 +65,45 @@ updates:
       - dependency-name: "nostr-sdk"
 
   # ---------------------------------------------------------------------------
+  # Rust: every other Cargo root. haven/rust_builder's lockfile is the
+  # resolution that SHIPS inside the app; the tooling crates run on every E2E
+  # and soak lane. cargo-audit (audit.yml) already reads all of them for
+  # advisories; this keeps them patched too. The crates
+  # check_lockfile_universe.sh holds to haven-core's exact source (MDK, OpenMLS,
+  # SQLCipher, nostr) move only with a deliberate MDK bump, as above.
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: "cargo"
+    directories:
+      - "/haven/rust_builder"
+      - "/tooling/soak"
+      - "/tooling/logscan"
+      - "/tooling/e2e/local-relay"
+      - "/tooling/e2e/local-blossom"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 10
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+      semver-minor-days: 14
+      semver-patch-days: 7
+    groups:
+      patch-updates:
+        applies-to: version-updates
+        update-types: ["patch"]
+    ignore:
+      - dependency-name: "rusqlite"
+      - dependency-name: "libsqlite3-sys"
+      - dependency-name: "nostr*"
+      - dependency-name: "openmls*"
+      - dependency-name: "cgka-*"
+      - dependency-name: "storage-sqlite"
+      - dependency-name: "transport-nostr-*"
+
+  # ---------------------------------------------------------------------------
   # Flutter (haven app)
   # ---------------------------------------------------------------------------
   - package-ecosystem: "pub"
