@@ -16,8 +16,8 @@
 #       activity-alias target, service, receiver, provider — has <init>()V.
 #       A component absent from the dex AND declared android:enabled=false is
 #       exempt: the platform never instantiates a disabled component, and a
-#       class R8 could delete is one no code enables (GMS's ModuleDependencies
-#       service is such a manifest-only marker). A present class is checked
+#       class R8 could delete is one no code enables (the GMS ModuleDependencies
+#       service v0.1.13/v0.1.14 shipped was such a manifest-only marker). A present class is checked
 #       whatever its enabled state, since code may enable it at run time.
 #   E2  every `com.google.firebase.components:<class>` meta-data whose value is
 #       com.google.firebase.components.ComponentRegistrar: <class> has <init>()V.

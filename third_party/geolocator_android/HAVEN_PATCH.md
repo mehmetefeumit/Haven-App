@@ -1,9 +1,10 @@
-# geolocator_android 5.0.2, patched for Haven
+# geolocator_android 5.2.1, patched for Haven
 
-Upstream: pub.dev `geolocator_android` 5.0.2 (MIT, Baseflow), archive
-sha256 `179c3cb66dfa674fc9ccbf2be872a02658724d1c067634e2c427cf6df7df901a`
-(the hash `haven/pubspec.lock` pinned before this copy replaced it).
-`haven/pubspec.yaml` selects this copy through `dependency_overrides`.
+Upstream: pub.dev `geolocator_android` 5.2.1 (MIT, Baseflow), archive
+sha256 `e67583809a1fab5f4a2255902978e2bc095ace9451fde0d9624e54facd0a5c22`.
+`haven/pubspec.yaml` selects this copy through `dependency_overrides`, and
+`scripts/ci/check_vendored_current.sh` fails the weekly dependency audit
+once pub.dev publishes a newer version.
 
 ## Why
 
@@ -23,27 +24,28 @@ fused client when Play Services is installed.
   `LocationManagerClient`; `isGooglePlayServicesAvailable` and its imports
   are gone.
 - `android/build.gradle` no longer declares `play-services-location`.
-- `example/` and `test/` are not copied; `publish_to: none` is added.
+- `example/`, `test/` and `android/src/androidTest/` are not copied;
+  `publish_to: none` is added.
 
-Nothing else differs from the upstream archive. Upstream's Dart doc for
-`AndroidSettings.forceLocationManager` still describes the fused fallback; in
-this copy that flag changes nothing, because every client is the
-`LocationManagerClient`.
-`scripts/ci/check_no_google_services.sh` fails if a Play Services, Firebase
-or ML Kit class, manifest entry or dependency comes back.
+Nothing else differs from the upstream archive. Upstream's Dart docs for
+`AndroidSettings.forceLocationManager` and `maxUpdateAge` still describe the
+fused client; in this copy neither changes anything, because every client is
+the `LocationManagerClient`. `scripts/ci/check_no_google_services.sh` fails
+if a Play Services, Firebase or ML Kit class, manifest entry or dependency
+comes back.
 
 ## Upgrading
 
 Download the new archive from `https://pub.dev/api/archives/geolocator_android-<version>.tar.gz`,
-record its sha256 here, unpack it over this directory, delete `example/` and
-`test/`, and re-apply the four edits above. Upstream's own changes come with
-it unreviewed, so read the upstream changelog first.
+record its sha256 here and the version in `scripts/ci/check_vendored_current.sh`,
+unpack it over this directory, and re-apply the four edits above. Upstream's
+own changes come with it, so read the upstream changelog first.
 
 ```diff
 diff -ru upstream/android/build.gradle ./android/build.gradle
 --- upstream/android/build.gradle
 +++ ./android/build.gradle
-@@ -41,7 +41,6 @@
+@@ -42,7 +42,6 @@
  }
  
  dependencies {
@@ -98,4 +100,15 @@ diff -ru upstream/android/src/main/java/com/baseflow/geolocator/location/Geoloca
    }
  
    @Override
+diff -ru upstream/pubspec.yaml ./pubspec.yaml
+--- upstream/pubspec.yaml
++++ ./pubspec.yaml
+@@ -3,6 +3,7 @@
+ repository: https://github.com/baseflow/flutter-geolocator/tree/main/geolocator_android
+ issue_tracker: https://github.com/baseflow/flutter-geolocator/issues?q=is%3Aissue+is%3Aopen
+ version: 5.2.1
++publish_to: none
+ 
+ environment:
+   sdk: ^3.5.0
 ```

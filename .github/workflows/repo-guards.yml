@@ -476,9 +476,16 @@
 #     Haven ships no Google Play services, Firebase or ML Kit code; Zapstore
 #     labels an app "Google services" from exactly those classes. --static
 #     here: no Gradle file names such an artifact, pubspec.lock resolves the
-#     patched third_party/geolocator_android and no plugin known to bundle one.
+#     patched third_party/geolocator_android and no plugin known to bundle one,
+#     and the app manifest removes image_picker's Play Services marker.
 #     Self-test on the same v0.1.13/v0.1.14 dumps, which shipped ML Kit; the
 #     real run is on every APK the Android launch gate tests.
+#
+#   Vendored packages current         scripts/ci/check_vendored_current.sh
+#     A vendored copy (third_party/geolocator_android) is invisible to
+#     Dependabot. --static here: the copy, its HAVEN_PATCH.md and pubspec.lock
+#     name one version. The pub.dev comparison runs in audit.yml (every CI run
+#     and weekly) and fails once upstream publishes a newer release.
 #
 #   iOS archive loads                 scripts/ci/check_ios_app_loadable.sh
 #     The release-only load failures no simulator shows: every dylib the app
@@ -1560,6 +1567,14 @@ jobs:
       - name: No Google services dependency
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_no_google_services.sh --static
+
+      - name: Vendored packages current self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_vendored_current.sh --self-test
+
+      - name: Vendored package versions agree
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_vendored_current.sh --static
 
       - name: Network retry is classified self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}

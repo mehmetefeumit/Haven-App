@@ -94,3 +94,17 @@ jobs:
         if: always()
         working-directory: ${{ github.workspace }}
         run: bash scripts/ci/check_audit_ignores_live.sh
+
+  # A vendored package is a path dependency, which neither Dependabot nor any
+  # advisory database sees: third_party/geolocator_android (patched to drop
+  # Google Play services) would otherwise stay on the release it was copied
+  # from. Red when pub.dev has a newer one, like an advisory above.
+  vendored:
+    name: vendored packages are the latest upstream release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Check every vendored package against pub.dev
+        run: bash scripts/ci/check_vendored_current.sh

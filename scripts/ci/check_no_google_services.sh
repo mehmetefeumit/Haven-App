@@ -20,13 +20,11 @@
 # Guava, Tink, Gson, protobuf, androidx and Material are open-source libraries
 # under com/google that talk to nobody, and are allowed.
 #
-# One manifest entry is allowed: image_picker_android declares the DISABLED
-# service com.google.android.gms.metadata.ModuleDependencies (and its intent
-# action ...metadata.MODULE_DEPENDENCIES), whose class is in no dex. It is a marker asking Play Services, where installed, to install
-# Android's back-ported photo picker on Android 11-12; no Google code ships
-# with it, and Zapstore's corpus has no key it matches (it lists gms
-# sub-packages such as common and location, never gms/metadata). Removing it
-# would leave those phones on the document picker. Its class in the dex fails.
+# No name is exempt: image_picker_android's disabled
+# com.google.android.gms.metadata.ModuleDependencies marker, which asks Play
+# Services to install its back-ported photo picker, is removed in the app
+# manifest (owner-directed 2026-11-22: no Google dependency at all), and
+# --static holds that removal.
 #
 # ## Modes
 #
@@ -59,7 +57,6 @@ readonly FIXTURE_DIR="${SCRIPT_DIR}/fixtures/apk_loadable"
 readonly DENIED_DEX_RE='^L(com/google/android/gms/|com/google/firebase/|com/google/mlkit/|com/google/android/datatransport/|com/google/android/odml/|com/google/android/play/core/)'
 readonly DENIED_NAME_RE='^(com\.google\.android\.gms\.|com\.google\.firebase\.|com\.google\.mlkit\.|com\.google\.android\.datatransport\.|com\.google\.android\.odml\.|com\.google\.android\.play\.core\.)'
 # Maven groups denied in Gradle files, and pub packages that bundle them.
-readonly ALLOWED_NAME_RE='^com\.google\.android\.gms\.metadata\.(ModuleDependencies|MODULE_DEPENDENCIES)$'
 readonly DENIED_GRADLE_RE='com\.google\.(android\.gms|firebase|mlkit|android\.datatransport|android\.odml|android\.play):'
 readonly DENIED_PUB_RE='^  (mobile_scanner|google_mlkit_[a-z_]+|firebase_[a-z_]+|google_mobile_ads|google_maps_flutter[a-z_]*|google_sign_in[a-z_]*|in_app_review|in_app_update):$'
 
@@ -85,7 +82,6 @@ check_dumps() {
   done <<<"${classes}"
   while IFS= read -r n; do
     # A Firebase components key names its class after the colon.
-    [[ "${n}" =~ ${ALLOWED_NAME_RE} ]] && continue
     [[ "${n}" =~ ${DENIED_NAME_RE} || "${n#*:}" =~ ${DENIED_NAME_RE} ]] || continue
     echo "FAIL manifest names ${n}"
     found=1
@@ -156,6 +152,11 @@ check_static() {
   if [[ -n "${hits}" ]]; then
     echo "FAIL the patched geolocator_android has Play Services code again:"; echo "${hits/#"${root}"\//}"; rc=1
   fi
+  # image_picker's Play Services marker is merged in unless the app removes it.
+  if ! tr -s ' \n' ' ' <"${root}/haven/android/app/src/main/AndroidManifest.xml" 2>/dev/null \
+       | grep -q 'android:name="com.google.android.gms.metadata.ModuleDependencies" tools:node="remove"'; then
+    echo "FAIL AndroidManifest.xml no longer removes image_picker's com.google.android.gms.metadata.ModuleDependencies marker"; rc=1
+  fi
   # The scanner that replaced ML Kit must stay wired: unregistered, or out of
   # the Xcode project, it builds fine and every scan reads "camera unavailable".
   if [[ "$(grep -c 'HavenQrScannerHandler\.swift' "${root}/haven/ios/Runner.xcodeproj/project.pbxproj" 2>/dev/null)" != 4 ]]; then
@@ -189,17 +190,17 @@ self_test() {
     r=0; check_dumps "${tmp}/${v}.dex" "${tmp}/${v}.man" >"${tmp}/why" 2>&1 || r=$?
     for want in 'FAIL dex defines Lcom/google/mlkit/vision/barcode/internal/BarcodeRegistrar;' \
                 'FAIL manifest names com.google.mlkit.common.internal.MlKitComponentDiscoveryService' \
-                'FAIL manifest names com.google.firebase.components:com.google.mlkit.vision.barcode.internal.BarcodeRegistrar'; do
+                'FAIL manifest names com.google.firebase.components:com.google.mlkit.vision.barcode.internal.BarcodeRegistrar' \
+                'FAIL manifest names com.google.android.gms.metadata.ModuleDependencies' \
+                'FAIL manifest names com.google.android.gms.metadata.MODULE_DEPENDENCIES'; do
       if grep -qxF "${want}" "${tmp}/why"; then echo "  ok   ${v} names: ${want#FAIL }"; else
         echo "  FAIL ${v} did not report: ${want}"; fails=$((fails + 1)); fi
     done
     # Remove each denied class block's descriptor line and each denied name.
     grep -vE "Class descriptor  : 'L(com/google/(android/gms|firebase|mlkit|android/datatransport|android/odml|android/play/core))/" \
       "${tmp}/${v}.dex" >"${tmp}/${v}.clean.dex"
-    awk '/android:name\(0x[0-9a-f]+\)="(com\.google\.firebase\.components:)?com\.google\.(android\.gms|firebase|mlkit)\./ \
-           && !/(ModuleDependencies|MODULE_DEPENDENCIES)"/ { next } { print }' "${tmp}/${v}.man" >"${tmp}/${v}.clean.man"
-    if grep -q 'ModuleDependencies' "${tmp}/${v}.clean.man" && grep -q 'MODULE_DEPENDENCIES' "${tmp}/${v}.clean.man"; then echo "  ok   ${v} cleaned manifest keeps the allowed photo-picker marker"; else
-      echo "  FAIL ${v} cleaned manifest lost the allowed marker, so its pass proves nothing about the allowance"; fails=$((fails + 1)); fi
+    grep -vE 'android:name\(0x[0-9a-f]+\)="(com\.google\.firebase\.components:)?com\.google\.(android\.gms|firebase|mlkit)\.' \
+      "${tmp}/${v}.man" >"${tmp}/${v}.clean.man"
     expect "${v} with the Google lines removed passes" 0 check_dumps "${tmp}/${v}.clean.dex" "${tmp}/${v}.clean.man"
   done
   printf 'Opened x\n' >"${tmp}/empty.dex"
@@ -208,8 +209,6 @@ self_test() {
   expect "a manifest dump with no manifest is refused" 2 check_dumps "${tmp}/v0.1.14.clean.dex" "${tmp}/empty.man"
   printf "  Class descriptor  : 'Lcom/google/android/gms/common/GoogleApiAvailability;'\n" >"${tmp}/gms.dex"
   expect "a Play Services class fails" 1 check_dumps "${tmp}/gms.dex" "${tmp}/v0.1.14.clean.man"
-  printf "  Class descriptor  : 'Lcom/google/android/gms/metadata/ModuleDependencies;'\n" >"${tmp}/md.dex"
-  expect "the photo-picker marker's class in the dex fails" 1 check_dumps "${tmp}/md.dex" "${tmp}/v0.1.14.clean.man"
   printf "  Class descriptor  : 'Lcom/google/common/util/concurrent/ListenableFuture;'\n  Class descriptor  : 'Lcom/google/crypto/tink/Aead;'\n" >"${tmp}/oss.dex"
   expect "Guava and Tink are allowed" 0 check_dumps "${tmp}/oss.dex" "${tmp}/v0.1.14.clean.man"
 
@@ -242,6 +241,8 @@ self_test() {
     "sed -i '/HavenQrScannerHandler.swift in Sources/d' haven/ios/Runner.xcodeproj/project.pbxproj"
   _mutant "AppDelegate no longer registers the scanner" \
     "sed -i 's/qrScannerHandler.register(with: registrar)/_ = registrar/' haven/ios/Runner/AppDelegate.swift"
+  _mutant "the app manifest keeps image_picker's Play Services marker" \
+    "sed -i 's/android:name=\"com.google.android.gms.metadata.ModuleDependencies\"/android:name=\"com.example.Other\"/' haven/android/app/src/main/AndroidManifest.xml"
   _mutant "MainActivity no longer registers the scanner" \
     "sed -i 's/QrScanner(this).also { it.register(flutterEngine) }/QrScanner(this)/' haven/android/app/src/main/kotlin/com/oblivioustech/haven/MainActivity.kt"
   rm -rf "${tmp}/m"; cp -R "${tmp}/repo" "${tmp}/m"; rm "${tmp}/m/third_party/geolocator_android/HAVEN_PATCH.md"

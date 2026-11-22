@@ -99,6 +99,38 @@ updates:
         update-types: ["version-update:semver-major"]
 
   # ---------------------------------------------------------------------------
+  # Android (haven/android): the libraries the app module declares itself —
+  # CameraX and zxing-cpp for the QR scanner, AppCompat/transition/exif for
+  # uCrop — and the Gradle plugins. Flutter plugins' own Gradle dependencies
+  # move with the plugin's pub release (the "pub" entry above); the vendored
+  # third_party/geolocator_android is held to its latest upstream release by
+  # scripts/ci/check_vendored_current.sh instead.
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: "gradle"
+    directory: "/haven/android"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 10
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+      semver-minor-days: 14
+      semver-patch-days: 7
+    groups:
+      patch-updates:
+        applies-to: version-updates
+        update-types: ["patch"]
+      # The scanner's camera stack moves as one: its artifacts share a version.
+      camerax:
+        applies-to: version-updates
+        patterns:
+          - "androidx.camera:*"
+        update-types: ["minor", "patch"]
+
+  # ---------------------------------------------------------------------------
   # GitHub Actions
   # ---------------------------------------------------------------------------
   - package-ecosystem: "github-actions"

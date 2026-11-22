@@ -61,7 +61,8 @@ instantiated through:
 R8 renames `RoomDatabase`, `ListenableWorker` and `Initializer`, so the checks
 key on names R8 keeps. A manifest component that is both absent from the dex
 and declared `android:enabled=false` is exempt (the platform never
-instantiates a disabled component; GMS's `ModuleDependencies` marker is one).
+instantiates a disabled component; the GMS `ModuleDependencies` marker v0.1.13
+and v0.1.14 shipped was one).
 Each check except E2 must find at least one subject (no Firebase registrar has
 shipped since ML Kit left, so E2 checks any that come back), and E1 must find
 `MainActivity` and `HavenApplication`, or the run is rc 2: a check with nothing to look at is
@@ -96,15 +97,15 @@ The same APKs' dex and manifest may define no class and name no component or
 meta-data under Google Play services (`com.google.android.gms`), Firebase,
 ML Kit, Google's datatransport uploader, ODML or Play Core: those are the
 classes Zapstore's catalog reads to label an app "Google services". Guava,
-Tink and androidx are open-source code under `com/google` and pass. One
-manifest name is allowed: the disabled
-`com.google.android.gms.metadata.ModuleDependencies` marker image_picker
-declares, which ships no class and asks Play services, where installed, to
-install Android's back-ported photo picker. Any finding is rc 1; a dump that
-lists no class or no manifest is rc 2. `repo-guards.yml` runs `--self-test`
-(the v0.1.13/v0.1.14 dumps, which shipped ML Kit, fail) and `--static` (no
-Gradle file names such an artifact, and `geolocator_android` resolves to the
-patched `third_party/geolocator_android`).
+Tink and androidx are open-source code under `com/google` and pass. No name is
+exempt: image_picker's disabled `com.google.android.gms.metadata.ModuleDependencies`
+marker, which asks Play services to install a back-ported photo picker, is
+removed in the app manifest. Any finding is rc 1; a dump that lists no class
+or no manifest is rc 2. `repo-guards.yml` runs `--self-test` (the
+v0.1.13/v0.1.14 dumps, which shipped ML Kit and that marker, fail) and
+`--static` (no Gradle file names such an artifact, `geolocator_android`
+resolves to the patched `third_party/geolocator_android`, the manifest still
+removes the marker, and the QR scanner is still registered on both platforms).
 
 ### 2. The launch — `tooling/e2e/ci/run-launch-gate-android.sh`
 

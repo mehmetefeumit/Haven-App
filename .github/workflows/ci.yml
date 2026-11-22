@@ -79,7 +79,8 @@ jobs:
     name: Coverage
     uses: ./.github/workflows/coverage.yml
 
-  # cargo-audit against the RustSec advisory DB (also runs weekly on its own).
+  # cargo-audit against the RustSec advisory DB, and every vendored package
+  # against its latest upstream release (also runs weekly on its own).
   dependency-audit:
     name: Dependency Audit
     uses: ./.github/workflows/audit.yml
