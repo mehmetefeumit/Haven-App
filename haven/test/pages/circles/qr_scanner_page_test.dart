@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -39,69 +41,88 @@ void main() {
     calls = [];
     access = 'granted';
     launcher = _RecordingLauncher();
-    final messenger =
-        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
-    messenger.setMockMethodCallHandler(channel, (call) async {
-      calls.add(call);
-      return switch (call.method) {
-        'requestAccess' || 'checkAccess' => access,
-        _ => null,
-      };
-    });
-    // The camera view itself is native; the test only needs its creation to
-    // succeed.
-    messenger.setMockMethodCallHandler(
-      SystemChannels.platform_views,
-      (call) async => call.method == 'create' ? 0 : null,
-    );
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+      ..setMockMethodCallHandler(channel, (call) async {
+        calls.add(call);
+        return switch (call.method) {
+          'requestAccess' || 'checkAccess' => access,
+          _ => null,
+        };
+      })
+      // The camera view itself is native; the test only needs its creation
+      // to succeed.
+      ..setMockMethodCallHandler(
+        SystemChannels.platform_views,
+        (call) async => call.method == 'create' ? 0 : null,
+      );
   });
 
   tearDown(() {
-    final messenger =
-        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
-    messenger
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
       ..setMockMethodCallHandler(channel, null)
       ..setMockMethodCallHandler(SystemChannels.platform_views, null);
   });
 
-  /// Sends a native -> Dart scanner event, as the platform would.
+  /// The token the visible scanner gave its camera view.
+  int viewToken(WidgetTester tester) {
+    final view = tester.widget<AndroidView>(find.byType(AndroidView).last);
+    return (view.creationParams! as Map)['token'] as int;
+  }
+
+  /// Sends a native -> Dart scanner event from the view holding [token] (the
+  /// visible scanner's when omitted), as the platform would.
   Future<void> nativeSends(
     WidgetTester tester,
-    String method, [
-    Object? argument,
-  ]) async {
+    String method, {
+    Map<String, Object> fields = const {},
+    int? token,
+  }) async {
+    final args = {'token': token ?? viewToken(tester), ...fields};
     await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
       QrScannerChannel.name,
-      const StandardMethodCodec().encodeMethodCall(
-        MethodCall(method, argument),
-      ),
+      const StandardMethodCodec().encodeMethodCall(MethodCall(method, args)),
       (_) {},
     );
     await tester.pump();
   }
 
-  /// Opens the scanner from a home page and returns what it popped with.
-  Future<List<String?>> openScanner(WidgetTester tester) async {
+  Iterable<Object?> stopsSent() =>
+      calls.where((c) => c.method == 'stop').map((c) => c.arguments);
+
+  /// Pumps an empty home page; [push] then opens a scanner over it and
+  /// records what the scanner popped with in the returned list.
+  Future<(List<String?>, Future<void> Function())> pumpHome(
+    WidgetTester tester,
+  ) async {
     final popped = <String?>[];
+    late BuildContext home;
     await pumpLocalized(
       tester,
       Builder(
-        builder: (context) => TextButton(
-          onPressed: () async {
-            popped.add(
-              await Navigator.push<String>(
-                context,
-                MaterialPageRoute(builder: (_) => const QrScannerPage()),
-              ),
-            );
-          },
-          child: const Text('open'),
-        ),
+        builder: (context) {
+          home = context;
+          return const SizedBox.shrink();
+        },
       ),
       overrides: [locationSettingsLauncherProvider.overrideWithValue(launcher)],
     );
-    await tester.tap(find.text('open'));
-    await tester.pumpAndSettle();
+    Future<void> push() async {
+      unawaited(
+        Navigator.push<String>(
+          home,
+          MaterialPageRoute(builder: (_) => const QrScannerPage()),
+        ).then(popped.add),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    return (popped, push);
+  }
+
+  /// Opens one scanner and returns what it popped with.
+  Future<List<String?>> openScanner(WidgetTester tester) async {
+    final (popped, push) = await pumpHome(tester);
+    await push();
     return popped;
   }
 
@@ -132,8 +153,8 @@ void main() {
     ) async {
       final popped = await openScanner(tester);
 
-      await nativeSends(tester, 'detected', 'nostr:$_npub');
-      await nativeSends(tester, 'detected', _npub);
+      await nativeSends(tester, 'detected', fields: {'text': 'nostr:$_npub'});
+      await nativeSends(tester, 'detected', fields: {'text': _npub});
       await tester.pumpAndSettle();
 
       expect(popped, [_npub]);
@@ -145,12 +166,16 @@ void main() {
     ) async {
       final popped = await openScanner(tester);
 
-      await nativeSends(tester, 'detected', 'https://example.com');
+      await nativeSends(
+        tester,
+        'detected',
+        fields: {'text': 'https://example.com'},
+      );
       await tester.pumpAndSettle();
       expect(popped, isEmpty);
       expect(find.byType(QrScannerPage), findsOneWidget);
 
-      await nativeSends(tester, 'detected', _npub);
+      await nativeSends(tester, 'detected', fields: {'text': _npub});
       await tester.pumpAndSettle();
       expect(popped, [_npub]);
     });
@@ -158,30 +183,42 @@ void main() {
     testWidgets('the torch button asks for the opposite of what the camera '
         'reports, and its icon follows the camera', (tester) async {
       await openScanner(tester);
+      final token = viewToken(tester);
       final toggle = find.byTooltip(l10n(tester).qrScannerToggleFlash);
       expect(find.byIcon(LucideIcons.zapOff), findsOneWidget);
 
       await tester.tap(toggle);
       await tester.pump();
-      expect(calls.last, isMethodCall('setTorch', arguments: true));
+      expect(
+        calls.last,
+        isMethodCall('setTorch', arguments: {'token': token, 'on': true}),
+      );
       // The icon shows what the camera did, not what was asked.
       expect(find.byIcon(LucideIcons.zapOff), findsOneWidget);
 
-      await nativeSends(tester, 'torch', true);
+      await nativeSends(tester, 'torch', fields: {'on': true});
       expect(find.byIcon(LucideIcons.zap), findsOneWidget);
 
       await tester.tap(toggle);
       await tester.pump();
-      expect(calls.last, isMethodCall('setTorch', arguments: false));
+      expect(
+        calls.last,
+        isMethodCall('setTorch', arguments: {'token': token, 'on': false}),
+      );
     });
 
-    testWidgets('the switch button switches the camera', (tester) async {
+    testWidgets('the switch button switches this page’s camera', (
+      tester,
+    ) async {
       await openScanner(tester);
 
       await tester.tap(find.byTooltip(l10n(tester).qrScannerSwitchCamera));
       await tester.pump();
 
-      expect(count('switchCamera'), 1);
+      expect(
+        calls.last,
+        isMethodCall('switchCamera', arguments: {'token': viewToken(tester)}),
+      );
     });
 
     testWidgets('a camera that fails to start shows the unavailable message', (
@@ -199,19 +236,60 @@ void main() {
       expect(find.byTooltip(l10n(tester).qrScannerToggleFlash), findsNothing);
     });
 
-    testWidgets('closing the page releases the camera and stops listening', (
+    testWidgets('closing the page releases its camera and stops listening', (
       tester,
     ) async {
       final popped = await openScanner(tester);
+      final token = viewToken(tester);
 
       await tester.pageBack();
       await tester.pumpAndSettle();
-      expect(count('stop'), 1);
+      expect(stopsSent(), [
+        {'token': token},
+      ]);
 
       // An event after the page is gone reaches nothing.
-      await nativeSends(tester, 'detected', _npub);
+      await nativeSends(
+        tester,
+        'detected',
+        fields: {'text': _npub},
+        token: token,
+      );
       expect(popped, [null]);
     });
+  });
+
+  testWidgets('a scanner opened while the last one is still closing keeps '
+      'its camera and its events', (tester) async {
+    final (popped, push) = await pumpHome(tester);
+    await push();
+    final first = viewToken(tester);
+
+    // The first scan pops its page; the next opens before that page's exit
+    // animation has ended, so the first page is disposed while the second
+    // is already scanning.
+    await nativeSends(tester, 'detected', fields: {'text': _npub});
+    await push();
+    final second = viewToken(tester);
+    expect(second, isNot(first));
+    expect(stopsSent(), [
+      {'token': first},
+    ]);
+
+    // The first page's camera may still report; the second ignores it.
+    await nativeSends(
+      tester,
+      'detected',
+      fields: {'text': _npub},
+      token: first,
+    );
+    expect(popped, [_npub]);
+    expect(find.byType(QrScannerPage), findsOneWidget);
+
+    await nativeSends(tester, 'detected', fields: {'text': _npub});
+    await tester.pumpAndSettle();
+    expect(popped, [_npub, _npub]);
+    expect(find.byType(QrScannerPage), findsNothing);
   });
 
   group('camera access denied', () {
@@ -255,6 +333,20 @@ void main() {
       expect(find.text(l10n(tester).qrScannerCameraDenied), findsOneWidget);
       expect(find.byType(AndroidView), findsNothing);
     });
+  });
+
+  testWidgets('a camera that was busy is tried again on return', (
+    tester,
+  ) async {
+    await openScanner(tester);
+    await nativeSends(tester, 'unavailable');
+    expect(find.byType(AndroidView), findsNothing);
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pumpAndSettle();
+
+    expect(count('checkAccess'), 1);
+    expect(find.byType(AndroidView), findsOneWidget);
   });
 
   testWidgets('a device without a camera says so and offers nothing to tap', (

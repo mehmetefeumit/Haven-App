@@ -20,9 +20,9 @@
 # Guava, Tink, Gson, protobuf, androidx and Material are open-source libraries
 # under com/google that talk to nobody, and are allowed.
 #
-# One manifest name is allowed: image_picker_android declares the DISABLED
-# service com.google.android.gms.metadata.ModuleDependencies, whose class is in
-# no dex. It is a marker asking Play Services, where installed, to install
+# One manifest entry is allowed: image_picker_android declares the DISABLED
+# service com.google.android.gms.metadata.ModuleDependencies (and its intent
+# action ...metadata.MODULE_DEPENDENCIES), whose class is in no dex. It is a marker asking Play Services, where installed, to install
 # Android's back-ported photo picker on Android 11-12; no Google code ships
 # with it, and Zapstore's corpus has no key it matches (it lists gms
 # sub-packages such as common and location, never gms/metadata). Removing it
@@ -59,7 +59,7 @@ readonly FIXTURE_DIR="${SCRIPT_DIR}/fixtures/apk_loadable"
 readonly DENIED_DEX_RE='^L(com/google/android/gms/|com/google/firebase/|com/google/mlkit/|com/google/android/datatransport/|com/google/android/odml/|com/google/android/play/core/)'
 readonly DENIED_NAME_RE='^(com\.google\.android\.gms\.|com\.google\.firebase\.|com\.google\.mlkit\.|com\.google\.android\.datatransport\.|com\.google\.android\.odml\.|com\.google\.android\.play\.core\.)'
 # Maven groups denied in Gradle files, and pub packages that bundle them.
-readonly ALLOWED_NAME='com.google.android.gms.metadata.ModuleDependencies'
+readonly ALLOWED_NAME_RE='^com\.google\.android\.gms\.metadata\.(ModuleDependencies|MODULE_DEPENDENCIES)$'
 readonly DENIED_GRADLE_RE='com\.google\.(android\.gms|firebase|mlkit|android\.datatransport|android\.odml|android\.play):'
 readonly DENIED_PUB_RE='^  (mobile_scanner|google_mlkit_[a-z_]+|firebase_[a-z_]+|google_mobile_ads|google_maps_flutter[a-z_]*|google_sign_in[a-z_]*|in_app_review|in_app_update):$'
 
@@ -85,7 +85,7 @@ check_dumps() {
   done <<<"${classes}"
   while IFS= read -r n; do
     # A Firebase components key names its class after the colon.
-    [[ "${n}" == "${ALLOWED_NAME}" ]] && continue
+    [[ "${n}" =~ ${ALLOWED_NAME_RE} ]] && continue
     [[ "${n}" =~ ${DENIED_NAME_RE} || "${n#*:}" =~ ${DENIED_NAME_RE} ]] || continue
     echo "FAIL manifest names ${n}"
     found=1
@@ -197,8 +197,8 @@ self_test() {
     grep -vE "Class descriptor  : 'L(com/google/(android/gms|firebase|mlkit|android/datatransport|android/odml|android/play/core))/" \
       "${tmp}/${v}.dex" >"${tmp}/${v}.clean.dex"
     awk '/android:name\(0x[0-9a-f]+\)="(com\.google\.firebase\.components:)?com\.google\.(android\.gms|firebase|mlkit)\./ \
-           && !/ModuleDependencies/ { next } { print }' "${tmp}/${v}.man" >"${tmp}/${v}.clean.man"
-    if grep -q 'ModuleDependencies' "${tmp}/${v}.clean.man"; then echo "  ok   ${v} cleaned manifest keeps the allowed photo-picker marker"; else
+           && !/(ModuleDependencies|MODULE_DEPENDENCIES)"/ { next } { print }' "${tmp}/${v}.man" >"${tmp}/${v}.clean.man"
+    if grep -q 'ModuleDependencies' "${tmp}/${v}.clean.man" && grep -q 'MODULE_DEPENDENCIES' "${tmp}/${v}.clean.man"; then echo "  ok   ${v} cleaned manifest keeps the allowed photo-picker marker"; else
       echo "  FAIL ${v} cleaned manifest lost the allowed marker, so its pass proves nothing about the allowance"; fails=$((fails + 1)); fi
     expect "${v} with the Google lines removed passes" 0 check_dumps "${tmp}/${v}.clean.dex" "${tmp}/${v}.clean.man"
   done

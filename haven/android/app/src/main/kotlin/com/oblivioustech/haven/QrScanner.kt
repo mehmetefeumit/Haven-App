@@ -39,9 +39,13 @@ import zxingcpp.BarcodeReader
  *
  * Channel `haven.app/qr_scanner` (Dart, `QrScannerChannel`):
  *   Dart -> native: `requestAccess` / `checkAccess` -> "granted" | "denied" |
- *     "unavailable"; `setTorch(bool)`; `switchCamera`; `stop`.
- *   native -> Dart: `detected(String)`, each distinct text once per view;
- *     `torch(Boolean)`; `unavailable` when no camera could be bound.
+ *     "unavailable"; `setTorch {token, on}`; `switchCamera {token}`;
+ *     `stop {token}`.
+ *   native -> Dart: `detected {token, text}`, each distinct text once per
+ *     view; `torch {token, on}`; `unavailable {token}` when no camera could
+ *     be bound.
+ * The token is the page's, given to the view at creation: a page closing
+ * while the next one scans must not stop, steer or hear the newer camera.
  */
 class QrScanner(private val activity: FlutterActivity) : MethodChannel.MethodCallHandler {
     private var channel: MethodChannel? = null
@@ -64,19 +68,20 @@ class QrScanner(private val activity: FlutterActivity) : MethodChannel.MethodCal
     }
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
+        val target = view?.takeIf { it.token == call.argument<Int>("token") }
         when (call.method) {
             "checkAccess" -> result.success(access())
             "requestAccess" -> requestAccess(result)
             "setTorch" -> {
-                view?.setTorch(call.arguments == true)
+                target?.setTorch(call.argument<Boolean>("on") == true)
                 result.success(null)
             }
             "switchCamera" -> {
-                view?.switchCamera()
+                target?.switchCamera()
                 result.success(null)
             }
             "stop" -> {
-                view?.dispose()
+                target?.dispose()
                 result.success(null)
             }
             else -> result.notImplemented()
@@ -96,7 +101,8 @@ class QrScanner(private val activity: FlutterActivity) : MethodChannel.MethodCal
             result.success(now)
             return
         }
-        // One prompt at a time; a second ask answers as the first will.
+        // A second ask while the prompt is up answers the first "denied";
+        // the page re-checks on its next resume.
         pendingAccess?.success("denied")
         pendingAccess = result
         ActivityCompat.requestPermissions(
@@ -112,14 +118,16 @@ class QrScanner(private val activity: FlutterActivity) : MethodChannel.MethodCal
         return true
     }
 
-    private fun emit(method: String, argument: Any?) {
-        channel?.invokeMethod(method, argument)
+    private fun emit(method: String, arguments: Map<String, Any>) {
+        channel?.invokeMethod(method, arguments)
     }
 
     private inner class Factory : PlatformViewFactory(StandardMessageCodec.INSTANCE) {
         override fun create(context: Context, viewId: Int, args: Any?): PlatformView {
+            // One camera at a time: a newer page's view takes it from the last.
             view?.dispose()
-            return QrScannerView(context, activity, ::emit) { closed ->
+            val token = (args as? Map<*, *>)?.get("token") as? Int ?: -1
+            return QrScannerView(context, activity, token, ::emit) { closed ->
                 if (view === closed) view = null
             }.also { view = it }
         }
@@ -142,7 +150,8 @@ class QrScanner(private val activity: FlutterActivity) : MethodChannel.MethodCal
 class QrScannerView(
     context: Context,
     private val activity: FlutterActivity,
-    private val emit: (String, Any?) -> Unit,
+    val token: Int,
+    private val emit: (String, Map<String, Any>) -> Unit,
     private val onDisposed: (QrScannerView) -> Unit,
 ) : PlatformView {
     private val previewView = PreviewView(context).apply {
@@ -165,7 +174,9 @@ class QrScannerView(
     private var preview: Preview? = null
     private var analysis: ImageAnalysis? = null
     private var torch: LiveData<Int>? = null
-    private val torchObserver = Observer<Int> { emit("torch", it == TorchState.ON) }
+    private val torchObserver = Observer<Int> {
+        emit("torch", mapOf("token" to token, "on" to (it == TorchState.ON)))
+    }
     private var camera: Camera? = null
     private var lens = CameraSelector.LENS_FACING_BACK
     private var lastText: String? = null
@@ -177,7 +188,7 @@ class QrScannerView(
             // The page may have closed before CameraX was ready.
             if (disposed) return@addListener
             provider = runCatching { future.get() }.getOrNull()
-            if (provider == null) emit("unavailable", null) else bind()
+            if (provider == null) emit("unavailable", mapOf("token" to token)) else bind()
         }, ContextCompat.getMainExecutor(context))
     }
 
@@ -239,7 +250,7 @@ class QrScannerView(
             cameras.bindToLifecycle(activity, selector(lens), newPreview, newAnalysis)
         }.getOrNull()
         if (bound == null) {
-            emit("unavailable", null)
+            emit("unavailable", mapOf("token" to token))
             return
         }
         preview = newPreview
@@ -251,7 +262,7 @@ class QrScannerView(
     private fun deliver(text: String) {
         if (disposed || text == lastText) return
         lastText = text
-        emit("detected", text)
+        emit("detected", mapOf("token" to token, "text" to text))
     }
 
     private fun unbind() {

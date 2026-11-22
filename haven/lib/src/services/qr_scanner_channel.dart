@@ -20,11 +20,15 @@ enum QrCameraAccess {
   unavailable,
 }
 
-/// Talks to the native scanner over `haven.app/qr_scanner`.
+/// One scanner page's end of `haven.app/qr_scanner`.
+///
+/// The channel is shared, and a page that closes is disposed only after its
+/// exit animation, by which time the next page may already be scanning. So
+/// every call, every event and the camera view carry this instance's [token],
+/// and neither end ever acts on another page's camera or events.
 class QrScannerChannel {
-  /// Creates the channel; tests pass their own [channel].
-  QrScannerChannel({MethodChannel? channel})
-    : _channel = channel ?? const MethodChannel(name);
+  /// Creates one page's end of the channel, with a token of its own.
+  QrScannerChannel() : token = _nextToken++;
 
   /// The method channel name both platforms register.
   static const String name = 'haven.app/qr_scanner';
@@ -32,7 +36,16 @@ class QrScannerChannel {
   /// The platform view type both platforms register.
   static const String viewType = 'haven.app/qr_scanner_view';
 
-  final MethodChannel _channel;
+  static int _nextToken = 0;
+  static final Map<int, void Function(MethodCall)> _listeners = {};
+
+  static const MethodChannel _channel = MethodChannel(name);
+
+  /// Identifies this page's camera view and events to the native side.
+  final int token;
+
+  /// What the native view factory is created with.
+  Map<String, Object> get creationParams => {'token': token};
 
   /// Camera access, asking the user if the OS still may.
   Future<QrCameraAccess> requestAccess() => _access('requestAccess');
@@ -54,41 +67,51 @@ class QrScannerChannel {
   }
 
   /// Turns the torch on or off; a camera without one ignores it.
-  Future<void> setTorch({required bool on}) => _call('setTorch', on);
+  Future<void> setTorch({required bool on}) =>
+      _call('setTorch', {'token': token, 'on': on});
 
   /// Switches between the rear and front camera, when both exist.
-  Future<void> switchCamera() => _call('switchCamera');
+  Future<void> switchCamera() => _call('switchCamera', {'token': token});
 
-  /// Releases the camera now rather than when the platform view is collected.
-  Future<void> stop() => _call('stop');
+  /// Releases this page's camera now rather than when its view is collected.
+  Future<void> stop() => _call('stop', {'token': token});
 
-  Future<void> _call(String method, [Object? argument]) async {
+  Future<void> _call(String method, Map<String, Object> arguments) async {
     try {
-      await _channel.invokeMethod<void>(method, argument);
+      await _channel.invokeMethod<void>(method, arguments);
     } on Object catch (e) {
       debugPrint('[QrScanner] $method: ${e.runtimeType}');
     }
   }
 
-  /// Receives the scanner's events until [stopListening].
+  /// Receives this page's events until [stopListening].
   void listen({
     required ValueChanged<String> onDetected,
     required ValueChanged<bool> onTorch,
     required VoidCallback onUnavailable,
   }) {
-    _channel.setMethodCallHandler((call) async {
+    _listeners[token] = (call) {
+      final args = call.arguments;
       switch (call.method) {
         case 'detected':
-          final text = call.arguments;
+          final text = args is Map ? args['text'] : null;
           if (text is String) onDetected(text);
         case 'torch':
-          onTorch(call.arguments == true);
+          onTorch(args is Map && args['on'] == true);
         case 'unavailable':
           onUnavailable();
       }
+    };
+    _channel.setMethodCallHandler((call) async {
+      final args = call.arguments;
+      final owner = args is Map ? args['token'] : null;
+      _listeners[owner]?.call(call);
     });
   }
 
-  /// Stops delivering events.
-  void stopListening() => _channel.setMethodCallHandler(null);
+  /// Stops delivering this page's events; another page's keep flowing.
+  void stopListening() {
+    _listeners.remove(token);
+    if (_listeners.isEmpty) _channel.setMethodCallHandler(null);
+  }
 }

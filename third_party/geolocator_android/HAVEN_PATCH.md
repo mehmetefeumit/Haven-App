@@ -36,7 +36,7 @@ or ML Kit class, manifest entry or dependency comes back.
 
 Download the new archive from `https://pub.dev/api/archives/geolocator_android-<version>.tar.gz`,
 record its sha256 here, unpack it over this directory, delete `example/` and
-`test/`, and re-apply the three edits above. Upstream's own changes come with
+`test/`, and re-apply the four edits above. Upstream's own changes come with
 it unreviewed, so read the upstream changelog first.
 
 ```diff

@@ -5,6 +5,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/service_providers.dart';
@@ -17,11 +18,8 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 ///
 /// Returns the scanned npub via [Navigator.pop].
 class QrScannerPage extends ConsumerStatefulWidget {
-  /// Creates a [QrScannerPage]; tests pass their own [scanner].
-  const QrScannerPage({super.key, this.scanner});
-
-  /// The native scanner; the production channel when null.
-  final QrScannerChannel? scanner;
+  /// Creates a [QrScannerPage].
+  const QrScannerPage({super.key});
 
   @override
   ConsumerState<QrScannerPage> createState() => _QrScannerPageState();
@@ -29,7 +27,7 @@ class QrScannerPage extends ConsumerStatefulWidget {
 
 class _QrScannerPageState extends ConsumerState<QrScannerPage>
     with WidgetsBindingObserver {
-  late final QrScannerChannel _scanner = widget.scanner ?? QrScannerChannel();
+  final QrScannerChannel _scanner = QrScannerChannel();
 
   /// Null until the first answer about camera access arrives.
   QrCameraAccess? _access;
@@ -56,9 +54,11 @@ class _QrScannerPageState extends ConsumerState<QrScannerPage>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // Back from Settings with the camera allowed: scan without a second tap.
+    // Back from Settings with the camera allowed, or from whatever held the
+    // camera: scan without a second tap.
     if (state == AppLifecycleState.resumed &&
-        _access == QrCameraAccess.denied) {
+        (_access == QrCameraAccess.denied ||
+            _access == QrCameraAccess.unavailable)) {
       unawaited(_scanner.checkAccess().then(_setAccess));
     }
   }
@@ -172,11 +172,15 @@ class _QrScannerPageState extends ConsumerState<QrScannerPage>
 
   Widget _cameraView() {
     return switch (defaultTargetPlatform) {
-      TargetPlatform.android => const AndroidView(
+      TargetPlatform.android => AndroidView(
         viewType: QrScannerChannel.viewType,
+        creationParams: _scanner.creationParams,
+        creationParamsCodec: const StandardMessageCodec(),
       ),
-      TargetPlatform.iOS => const UiKitView(
+      TargetPlatform.iOS => UiKitView(
         viewType: QrScannerChannel.viewType,
+        creationParams: _scanner.creationParams,
+        creationParamsCodec: const StandardMessageCodec(),
       ),
       _ => const ColoredBox(color: Colors.black),
     };

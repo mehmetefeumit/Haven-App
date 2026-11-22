@@ -11,9 +11,12 @@ import Vision
 ///
 /// Channel `haven.app/qr_scanner` (Dart, `QrScannerChannel`):
 ///   Dart -> native: `requestAccess` / `checkAccess` -> "granted" | "denied" |
-///     "unavailable"; `setTorch(Bool)`; `switchCamera`; `stop`.
-///   native -> Dart: `detected(String)`, each distinct text once per view;
-///     `torch(Bool)`; `unavailable` when no camera could be started.
+///     "unavailable"; `setTorch {token, on}`; `switchCamera {token}`;
+///     `stop {token}`.
+///   native -> Dart: `detected {token, text}`, each distinct text once per view;
+///     `torch {token, on}`; `unavailable {token}` when no camera could start.
+/// The token is the page's, given to the view at creation: a page closing while
+/// the next one scans must not stop, steer or hear the newer camera.
 final class HavenQrScannerHandler: NSObject, FlutterPlatformViewFactory {
   static let channelName = "haven.app/qr_scanner"
   static let viewType = "haven.app/qr_scanner_view"
@@ -34,11 +37,13 @@ final class HavenQrScannerHandler: NSObject, FlutterPlatformViewFactory {
   }
 
   private func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+    let args = call.arguments as? [String: Any]
+    let target = current.flatMap { $0.token == args?["token"] as? Int ? $0 : nil }
     switch call.method {
     case "checkAccess":
       result(Self.access())
     case "requestAccess":
-      guard Self.access() == "denied",
+      guard AVCaptureDevice.default(for: .video) != nil,
             AVCaptureDevice.authorizationStatus(for: .video) == .notDetermined else {
         result(Self.access())
         return
@@ -47,23 +52,35 @@ final class HavenQrScannerHandler: NSObject, FlutterPlatformViewFactory {
         DispatchQueue.main.async { result(Self.access()) }
       }
     case "setTorch":
-      current?.setTorch(call.arguments as? Bool == true)
+      target?.setTorch(args?["on"] as? Bool == true)
       result(nil)
     case "switchCamera":
-      current?.switchCamera()
+      target?.switchCamera()
       result(nil)
     case "stop":
-      current?.stop()
-      current = nil
+      if let target = target {
+        target.stop()
+        current = nil
+      }
       result(nil)
     default:
       result(FlutterMethodNotImplemented)
     }
   }
 
+  /// A restricted camera (device management, Screen Time) is one the user
+  /// cannot allow in Settings, so it reads as unavailable, not denied.
   private static func access() -> String {
     if AVCaptureDevice.default(for: .video) == nil { return "unavailable" }
-    return AVCaptureDevice.authorizationStatus(for: .video) == .authorized ? "granted" : "denied"
+    switch AVCaptureDevice.authorizationStatus(for: .video) {
+    case .authorized: return "granted"
+    case .restricted: return "unavailable"
+    default: return "denied"
+    }
+  }
+
+  func createArgsCodec() -> FlutterMessageCodec & NSObjectProtocol {
+    FlutterStandardMessageCodec.sharedInstance()
   }
 
   func create(
@@ -71,9 +88,11 @@ final class HavenQrScannerHandler: NSObject, FlutterPlatformViewFactory {
     viewIdentifier viewId: Int64,
     arguments args: Any?
   ) -> FlutterPlatformView {
+    // One camera at a time: a newer page's view takes it from the last.
     current?.stop()
-    let view = HavenQrScannerView(frame: frame) { [weak self] method, argument in
-      self?.channel?.invokeMethod(method, arguments: argument)
+    let token = (args as? [String: Any])?["token"] as? Int ?? -1
+    let view = HavenQrScannerView(frame: frame, token: token) { [weak self] method, fields in
+      self?.channel?.invokeMethod(method, arguments: fields)
     }
     current = view
     return view
@@ -92,21 +111,24 @@ private final class HavenQrPreview: UIView {
 /// the view is released, whichever comes first.
 final class HavenQrScannerView: NSObject, FlutterPlatformView,
   AVCaptureVideoDataOutputSampleBufferDelegate {
+  let token: Int
   private let preview: HavenQrPreview
   private let session = AVCaptureSession()
   private let sessionQueue = DispatchQueue(label: "haven.qr.session")
   private let frameQueue = DispatchQueue(label: "haven.qr.frames")
-  private let emit: (String, Any?) -> Void
+  private let send: (String, [String: Any]) -> Void
   // Touched on sessionQueue only.
   private var input: AVCaptureDeviceInput?
   private var position: AVCaptureDevice.Position = .back
+  private var torchObservation: NSKeyValueObservation?
   // Touched on the main queue only.
   private var lastText: String?
   private var stopped = false
 
-  init(frame: CGRect, emit: @escaping (String, Any?) -> Void) {
+  init(frame: CGRect, token: Int, send: @escaping (String, [String: Any]) -> Void) {
+    self.token = token
     preview = HavenQrPreview(frame: frame)
-    self.emit = emit
+    self.send = send
     super.init()
     preview.backgroundColor = .black
     preview.previewLayer.session = session
@@ -128,9 +150,17 @@ final class HavenQrScannerView: NSObject, FlutterPlatformView,
 
   func view() -> UIView { preview }
 
+  /// On the main queue, and never after `stop()`.
+  private func emit(_ method: String, _ fields: [String: Any] = [:]) {
+    DispatchQueue.main.async { [weak self] in
+      guard let self = self, !self.stopped else { return }
+      self.send(method, fields.merging(["token": self.token]) { _, token in token })
+    }
+  }
+
   private func start() {
     guard configure(position) else {
-      DispatchQueue.main.async { [weak self] in self?.emit("unavailable", nil) }
+      emit("unavailable")
       return
     }
     session.startRunning()
@@ -153,6 +183,11 @@ final class HavenQrScannerView: NSObject, FlutterPlatformView,
     session.addInput(newInput)
     input = newInput
     position = device.position
+    // iOS turns the torch off on its own (backgrounding, heat), so the button
+    // follows the device, not the last request.
+    torchObservation = device.observe(\.torchMode, options: [.initial, .new]) { [weak self] device, _ in
+      self?.emit("torch", ["on": device.torchMode == .on])
+    }
     if session.outputs.isEmpty {
       let output = AVCaptureVideoDataOutput()
       output.alwaysDiscardsLateVideoFrames = true
@@ -173,12 +208,10 @@ final class HavenQrScannerView: NSObject, FlutterPlatformView,
 
   func setTorch(_ on: Bool) {
     sessionQueue.async { [weak self] in
-      guard let self = self, let device = self.input?.device, device.hasTorch,
+      guard let device = self?.input?.device, device.hasTorch,
             (try? device.lockForConfiguration()) != nil else { return }
       device.torchMode = on ? .on : .off
       device.unlockForConfiguration()
-      let lit = device.torchMode == .on
-      DispatchQueue.main.async { self.emit("torch", lit) }
     }
   }
 
@@ -186,16 +219,27 @@ final class HavenQrScannerView: NSObject, FlutterPlatformView,
     sessionQueue.async { [weak self] in
       guard let self = self else { return }
       let wanted: AVCaptureDevice.Position = self.position == .back ? .front : .back
-      guard Self.camera(at: wanted) != nil, self.configure(wanted) else { return }
-      // A new camera starts with its torch off.
-      DispatchQueue.main.async { self.emit("torch", false) }
+      guard Self.camera(at: wanted) != nil else { return }
+      _ = self.configure(wanted)
     }
   }
 
+  /// Stops the camera and empties the session, which also lets go of the frame
+  /// delegate (this view) so nothing keeps the view alive.
   func stop() {
     stopped = true
     let session = self.session
-    sessionQueue.async { if session.isRunning { session.stopRunning() } }
+    sessionQueue.async { [weak self] in
+      self?.torchObservation = nil
+      if session.isRunning { session.stopRunning() }
+      session.beginConfiguration()
+      for output in session.outputs {
+        (output as? AVCaptureVideoDataOutput)?.setSampleBufferDelegate(nil, queue: nil)
+        session.removeOutput(output)
+      }
+      for input in session.inputs { session.removeInput(input) }
+      session.commitConfiguration()
+    }
   }
 
   /// A media-services reset stops the session; iOS does not restart it.
@@ -221,7 +265,7 @@ final class HavenQrScannerView: NSObject, FlutterPlatformView,
     DispatchQueue.main.async { [weak self] in
       guard let self = self, !self.stopped, text != self.lastText else { return }
       self.lastText = text
-      self.emit("detected", text)
+      self.send("detected", ["token": self.token, "text": text])
     }
   }
 }
