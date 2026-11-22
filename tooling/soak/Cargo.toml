@@ -61,7 +61,7 @@ zeroize = { version = "1", features = ["zeroize_derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The schedule digest. Same version haven-core and haven-logscan already resolve.
-sha2 = "0.10"
+sha2 = "0.11"
 # The checked-in profile declarations.
 toml = "0.8"
 # The engine's PUBLIC per-group caps, and nothing else from it: S16's
