@@ -354,7 +354,7 @@ dependencies = [
  "openmls_memory_storage",
  "openmls_rust_crypto",
  "openmls_traits",
- "rand 0.8.6",
+ "rand 0.8.8",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -1193,7 +1193,7 @@ dependencies = [
  "openmls_basic_credential",
  "openmls_rust_crypto",
  "proptest",
- "rand 0.8.6",
+ "rand 0.10.1",
  "reqwest",
  "ring",
  "rusqlite",
@@ -2815,9 +2815,9 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rand"
-version = "0.8.6"
+version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ca0ecfa931c29007047d1bc58e623ab12e5590e8c7cc53200d5202b69266d8a"
+checksum = "e058c7de0b26af77780c769414d6257830bb240f3c38477dbc2c16e5f54d6d4c"
 dependencies = [
  "libc",
  "rand_chacha 0.3.1",
@@ -3218,7 +3218,7 @@ version = "0.29.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9465315bc9d4566e1724f0fffcbcc446268cb522e60f9a27bcded6b19c108113"
 dependencies = [
- "rand 0.8.6",
+ "rand 0.8.8",
  "secp256k1-sys",
  "serde",
 ]
@@ -3834,7 +3834,7 @@ dependencies = [
  "chacha20poly1305",
  "hex",
  "nostr",
- "rand 0.8.6",
+ "rand 0.8.8",
  "serde",
  "serde_json",
  "sha2 0.10.9",

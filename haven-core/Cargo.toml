@@ -178,7 +178,7 @@ zeroize = { version = "1.8", features = ["derive"] }
 subtle = "2.5"
 
 # Cryptography
-rand = "0.8"
+rand = "0.10"
 sha2 = "0.10"
 # Keyed PRF for the profile-plane relay assignment (HMAC-SHA256 rendezvous
 # weights, `profile::assignment`). Already present transitively at 0.12.1 via
