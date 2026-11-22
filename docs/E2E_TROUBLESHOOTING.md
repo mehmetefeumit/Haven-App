@@ -1829,8 +1829,8 @@ a UI dump.
 | infrastructure (no rc: the `Build release APKs` step is red) | Gradle: `Could not resolve all artifacts for configuration 'classpath'` / `Could not find …` / `Received status code 429` | dependency resolution failed on this runner's egress before anything compiled | a 429/403/5xx: re-run the job; an in-job retry has never cleared this class (`scripts/ci/build_apk_with_retry.sh` header), a warm Gradle cache removes it. A `Could not find` searched only on `plugins.gradle.org` is the 404 variant the Maven Central fallback init script exists for (failure mode 6): check that this step installed it |
 | upgrade source unusable (4) | any failure while the PREVIOUS release was running | the release users would upgrade from is itself broken | add `<tag> android <reason>` to `scripts/ci/launch_gate_yanked_releases.txt` |
 
-`check_apk_loadable.sh` red without a launch red is the ML Kit shape: a
-registrar created only when a QR scan starts — or `FAIL N1/N2/N3`: a native
+`check_apk_loadable.sh` red without a launch red is the v0.1.14 ML Kit shape: a
+class created by name only when a feature runs (then, a QR scan) — or `FAIL N1/N2/N3`: a native
 library stored compressed, off a 16 KB boundary, or with a segment aligned
 below 16 KB, which devices with 16 KB pages refuse to load (product: packaging
 or NDK flags; the arm64 APK is never launched here). `launch-gate-previous-apk.sh`

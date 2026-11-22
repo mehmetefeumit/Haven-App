@@ -1052,6 +1052,13 @@ class AppLocalizationsUr extends AppLocalizations {
   String get qrScannerScanning => 'اسکین ہو رہا ہے...';
 
   @override
+  String get qrScannerCameraDenied =>
+      'QR کوڈ اسکین کرنے کے لیے Haven کو کیمرے تک رسائی درکار ہے۔ آپ اسے ترتیبات میں اجازت دے سکتے ہیں۔';
+
+  @override
+  String get qrScannerCameraUnavailable => 'کیمرہ اس وقت دستیاب نہیں ہے۔';
+
+  @override
   String get circleMemberNoRecentLocation => 'کوئی حالیہ مقام نہیں';
 
   @override

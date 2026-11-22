@@ -47,6 +47,13 @@
          BackgroundLocationManager.init(). -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
+    <!-- Camera, for the QR scanner only (QrScanner.kt), asked for when the
+         scanner opens. Not required: a device without a camera still installs
+         Haven and adds people by pasting their key. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <!-- The CAMERA permission implies a required rear camera unless this says otherwise. -->
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+
     <!-- android:name is a custom Application (extends android.app.Application,
          which is what Flutter's ${applicationName} placeholder resolves to)
          whose onCreate registers the Android context with the Rust ndk_context

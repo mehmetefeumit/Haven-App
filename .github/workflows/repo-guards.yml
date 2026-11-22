@@ -472,6 +472,14 @@
 #     v0.1.13 (passes) and v0.1.14 (fails); the real run is on every APK the
 #     Android launch gate tests.
 #
+#   No Google services                scripts/ci/check_no_google_services.sh
+#     Haven ships no Google Play services, Firebase or ML Kit code; Zapstore
+#     labels an app "Google services" from exactly those classes. --static
+#     here: no Gradle file names such an artifact, pubspec.lock resolves the
+#     patched third_party/geolocator_android and no plugin known to bundle one.
+#     Self-test on the same v0.1.13/v0.1.14 dumps, which shipped ML Kit; the
+#     real run is on every APK the Android launch gate tests.
+#
 #   iOS archive loads                 scripts/ci/check_ios_app_loadable.sh
 #     The release-only load failures no simulator shows: every dylib the app
 #     links resolves inside the bundle or the OS, and the Rust framework Dart
@@ -1544,6 +1552,14 @@ jobs:
       - name: Release APK loadable self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_apk_loadable.sh --self-test
+
+      - name: No Google services self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_no_google_services.sh --self-test
+
+      - name: No Google services dependency
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_no_google_services.sh --static
 
       - name: Network retry is classified self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}

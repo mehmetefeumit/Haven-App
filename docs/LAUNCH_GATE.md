@@ -53,7 +53,7 @@ instantiated through:
 | Check | Classes | Constructor |
 |---|---|---|
 | E1 | every manifest component: application, appComponentFactory, activity, activity-alias target, service, receiver, provider | `<init>()V` |
-| E2 | every `com.google.firebase.components:<class>` meta-data valued `ComponentRegistrar` (ML Kit) | `<init>()V` |
+| E2 | every `com.google.firebase.components:<class>` meta-data valued `ComponentRegistrar` (ML Kit's, until mobile_scanner left in 2026-11; none ships now, and zero is a pass) | `<init>()V` |
 | E3 | every `androidx.startup` Initializer meta-data | `<init>()V` |
 | E4 | every `X_Impl` whose direct superclass is `X` (Room's own lookup) | `<init>()V` |
 | E5 | every concrete class below `androidx.work.Worker`'s superclass (the R8-renamed `ListenableWorker`) | `<init>(Context, WorkerParameters)V` |
@@ -62,8 +62,9 @@ R8 renames `RoomDatabase`, `ListenableWorker` and `Initializer`, so the checks
 key on names R8 keeps. A manifest component that is both absent from the dex
 and declared `android:enabled=false` is exempt (the platform never
 instantiates a disabled component; GMS's `ModuleDependencies` marker is one).
-Each check must find at least one subject, and E1 must find `MainActivity` and
-`HavenApplication`, or the run is rc 2: a check with nothing to look at is
+Each check except E2 must find at least one subject (no Firebase registrar has
+shipped since ML Kit left, so E2 checks any that come back), and E1 must find
+`MainActivity` and `HavenApplication`, or the run is rc 2: a check with nothing to look at is
 never a pass. Output that does not parse into class blocks is rc 2 too.
 
 On the shipped APKs: v0.1.13 passes (E1 31 components, E2 3, E3 4, E4 1,
@@ -88,6 +89,22 @@ not list, a missing verdict line and a library with no `PT_LOAD` are rc 2. The
 shipped v0.1.13 and v0.1.14 APKs (arm64-v8a and x86_64, build-tools 36.1 and
 37) pass all three; the self-test's fixtures are real `unzip`/`zipalign`/
 `readelf` output of v0.1.13's arm64-v8a libraries.
+
+### 1b. No Google services — `scripts/ci/check_no_google_services.sh`
+
+The same APKs' dex and manifest may define no class and name no component or
+meta-data under Google Play services (`com.google.android.gms`), Firebase,
+ML Kit, Google's datatransport uploader, ODML or Play Core: those are the
+classes Zapstore's catalog reads to label an app "Google services". Guava,
+Tink and androidx are open-source code under `com/google` and pass. One
+manifest name is allowed: the disabled
+`com.google.android.gms.metadata.ModuleDependencies` marker image_picker
+declares, which ships no class and asks Play services, where installed, to
+install Android's back-ported photo picker. Any finding is rc 1; a dump that
+lists no class or no manifest is rc 2. `repo-guards.yml` runs `--self-test`
+(the v0.1.13/v0.1.14 dumps, which shipped ML Kit, fail) and `--static` (no
+Gradle file names such an artifact, and `geolocator_android` resolves to the
+patched `third_party/geolocator_android`).
 
 ### 2. The launch — `tooling/e2e/ci/run-launch-gate-android.sh`
 
@@ -361,8 +378,7 @@ debug logging.
   selectors are updated. That is fail-closed by design.
 - Map tiles (the build carries a placeholder Stadia key) and anything that
   needs a relay.
-- Reflection the five dex checks do not name (for example ML Kit's
-  `backend:` meta-data).
+- Reflection the five dex checks do not name.
 
 ### Bounds
 
@@ -388,6 +404,8 @@ allowance). A healthy run spends a few minutes in the emulator step.
 ```bash
 bash scripts/ci/check_apk_loadable.sh --self-test
 bash scripts/ci/check_apk_loadable.sh path/to/app-*-release.apk   # needs ANDROID_HOME
+bash scripts/ci/check_no_google_services.sh --self-test
+bash scripts/ci/check_no_google_services.sh path/to/app-*-release.apk   # needs ANDROID_HOME
 python3 -I tooling/e2e/ci/ui-dump.py --self-test
 python3 -I tooling/e2e/ci/make-avatar-fixture.py --self-test
 bash tooling/e2e/ci/launch-gate-previous-apk.sh --self-test

@@ -93,8 +93,6 @@ updates:
       # Major upgrades require dedicated migration work — humans, not Dependabot.
       - dependency-name: "flutter_riverpod"
         update-types: ["version-update:semver-major"]
-      - dependency-name: "mobile_scanner"
-        update-types: ["version-update:semver-major"]
       - dependency-name: "very_good_analysis"
         update-types: ["version-update:semver-major"]
       - dependency-name: "latlong2"

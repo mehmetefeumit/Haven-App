@@ -1056,6 +1056,13 @@ class AppLocalizationsTr extends AppLocalizations {
   String get qrScannerScanning => 'Taranıyor...';
 
   @override
+  String get qrScannerCameraDenied =>
+      'Haven\'ın QR kodunu tarayabilmesi için kamera erişimine ihtiyacı var. Ayarlar\'dan izin verebilirsiniz.';
+
+  @override
+  String get qrScannerCameraUnavailable => 'Kamera şu anda kullanılamıyor.';
+
+  @override
   String get circleMemberNoRecentLocation => 'Yakın zamanlı konum yok';
 
   @override

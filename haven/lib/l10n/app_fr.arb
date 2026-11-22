@@ -211,6 +211,8 @@
   "qrScannerSwitchCamera": "Changer de caméra",
   "qrScannerInstruction": "Placez le code QR dans le cadre",
   "qrScannerScanning": "Analyse...",
+  "qrScannerCameraDenied": "Haven a besoin d'accéder à la caméra pour scanner un code QR. Vous pouvez l'autoriser dans les Réglages.",
+  "qrScannerCameraUnavailable": "La caméra n'est pas disponible pour le moment.",
   "circleMemberNoRecentLocation": "Aucune position récente",
   "circleMemberRemoveTooltip": "Retirer du cercle",
   "circleMemberRemoveDialogTitle": "Retirer {name} ?",

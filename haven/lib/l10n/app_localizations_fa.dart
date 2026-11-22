@@ -1053,6 +1053,13 @@ class AppLocalizationsFa extends AppLocalizations {
   String get qrScannerScanning => 'در حال اسکن...';
 
   @override
+  String get qrScannerCameraDenied =>
+      'Haven برای اسکن کد QR به دسترسی به دوربین نیاز دارد. می‌توانی این دسترسی را در تنظیمات بدهی.';
+
+  @override
+  String get qrScannerCameraUnavailable => 'در حال حاضر دوربین در دسترس نیست.';
+
+  @override
   String get circleMemberNoRecentLocation => 'موقعیت اخیری وجود ندارد';
 
   @override

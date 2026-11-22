@@ -64,6 +64,10 @@ private let HAVEN_RUNNER_LOG = OSLog(subsystem: "haven_ios", category: "runner")
   // sockets the old network carried.
   private let networkChangeHandler = HavenNetworkChangeHandler()
 
+  // The QR scanner's channel and camera view (no Google code: AVFoundation +
+  // Vision). Retained so the factory outlives didFinishLaunching.
+  private let qrScannerHandler = HavenQrScannerHandler()
+
   override func application(
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
@@ -98,6 +102,9 @@ private let HAVEN_RUNNER_LOG = OSLog(subsystem: "haven_ios", category: "runner")
     #endif
 
     GeneratedPluginRegistrant.register(with: self)
+    if let registrar = self.registrar(forPlugin: "HavenQrScanner") {
+      qrScannerHandler.register(with: registrar)
+    }
 
     if let controller = window?.rootViewController as? FlutterViewController {
       let messenger = controller.binaryMessenger

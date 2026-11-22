@@ -262,6 +262,8 @@
   "qrScannerSwitchCamera": "カメラの切り替え",
   "qrScannerInstruction": "QRコードを枠の中に合わせてください",
   "qrScannerScanning": "スキャン中...",
+  "qrScannerCameraDenied": "QRコードをスキャンするには、Haven にカメラへのアクセスを許可する必要があります。設定から許可できます。",
+  "qrScannerCameraUnavailable": "現在、カメラを使用できません。",
   "circleMemberNoRecentLocation": "最近の位置情報はありません",
   "circleMemberRemoveTooltip": "サークルから削除",
   "circleMemberRemoveDialogTitle": "{name} をサークルから削除しますか？",

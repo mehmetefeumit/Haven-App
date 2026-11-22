@@ -211,6 +211,8 @@
   "qrScannerSwitchCamera": "क्यामेरा बदल्नुहोस्",
   "qrScannerInstruction": "QR कोडलाई फ्रेमभित्र राख्नुहोस्",
   "qrScannerScanning": "स्क्यान गर्दै...",
+  "qrScannerCameraDenied": "QR कोड स्क्यान गर्न Haven लाई क्यामेरा प्रयोग गर्ने अनुमति चाहिन्छ। तपाईं यसलाई सेटिङमा गएर अनुमति दिन सक्नुहुन्छ।",
+  "qrScannerCameraUnavailable": "क्यामेरा अहिले उपलब्ध छैन।",
   "circleMemberNoRecentLocation": "हालसालैको कुनै स्थान छैन",
   "circleMemberRemoveTooltip": "सर्कलबाट हटाउनुहोस्",
   "circleMemberRemoveDialogTitle": "{name} लाई हटाउने?",

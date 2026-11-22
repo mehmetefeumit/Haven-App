@@ -262,6 +262,8 @@
   "qrScannerSwitchCamera": "Сменить камеру",
   "qrScannerInstruction": "Наведите рамку на QR-код",
   "qrScannerScanning": "Сканирование...",
+  "qrScannerCameraDenied": "Haven нужен доступ к камере, чтобы сканировать QR-код. Его можно разрешить в Настройках.",
+  "qrScannerCameraUnavailable": "Камера сейчас недоступна.",
   "circleMemberNoRecentLocation": "Нет недавнего местоположения",
   "circleMemberRemoveTooltip": "Удалить из круга",
   "circleMemberRemoveDialogTitle": "Удалить участника {name} из круга?",

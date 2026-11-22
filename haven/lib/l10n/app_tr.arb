@@ -211,6 +211,8 @@
   "qrScannerSwitchCamera": "Kamerayı değiştir",
   "qrScannerInstruction": "QR kodunu çerçeve içine yerleştirin",
   "qrScannerScanning": "Taranıyor...",
+  "qrScannerCameraDenied": "Haven'ın QR kodunu tarayabilmesi için kamera erişimine ihtiyacı var. Ayarlar'dan izin verebilirsiniz.",
+  "qrScannerCameraUnavailable": "Kamera şu anda kullanılamıyor.",
   "circleMemberNoRecentLocation": "Yakın zamanlı konum yok",
   "circleMemberRemoveTooltip": "Çevreden çıkar",
   "circleMemberRemoveDialogTitle": "{name} çıkarılsın mı?",

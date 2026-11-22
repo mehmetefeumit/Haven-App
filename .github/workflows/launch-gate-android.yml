@@ -12,7 +12,10 @@
 #   2. reads every APK's dex for the constructors Android and its libraries
 #      instantiate by name (scripts/ci/check_apk_loadable.sh: the v0.1.14
 #      crash and its ML Kit QR break are both visible there), whatever the
-#      launch found.
+#      launch found;
+#   3. reads every APK's dex and manifest for Google Play services, Firebase
+#      and ML Kit (scripts/ci/check_no_google_services.sh), the classes
+#      Zapstore labels an app "Google services" from.
 #
 # Callers:
 #   ci.yml             no inputs: builds the release APKs through the unchanged
@@ -413,13 +416,20 @@ jobs:
         run: bash tooling/e2e/ci/setup-network-guard.sh teardown || true
 
       # After the launch, and whatever it found, so a red candidate is named by
-      # both halves: a stripped constructor the launch could not reach (ML Kit's
-      # registrars only fail when a QR scan starts) and a crash the dex cannot
-      # show. Static, so once, here.
+      # both halves: a stripped constructor the launch could not reach (v0.1.14's
+      # ML Kit registrars only failed when a QR scan started) and a crash the dex
+      # cannot show. Static, so once, here.
       - name: Check every APK keeps its name-instantiated constructors
         if: ${{ !cancelled() && steps.verify.outcome == 'success' }}
         timeout-minutes: 5
         run: bash scripts/ci/check_apk_loadable.sh "${CANDIDATE_APKS}"/app-*-release.apk
+
+      # The bytes that ship carry no Google Play services, Firebase or ML Kit
+      # class or manifest entry.
+      - name: Check every APK ships no Google services
+        if: ${{ !cancelled() && steps.verify.outcome == 'success' }}
+        timeout-minutes: 5
+        run: bash scripts/ci/check_no_google_services.sh "${CANDIDATE_APKS}"/app-*-release.apk
 
       # The startup initializers that ship are a property of the merged
       # manifest, which only the built APK holds.
