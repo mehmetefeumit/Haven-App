@@ -60,7 +60,7 @@ planes = { package = "haven-local-relay", path = "../../tooling/e2e/local-relay"
 libsqlite3-sys = { git = "https://github.com/rusqlite/rusqlite.git", rev = "5ae7fdf83085c595fd54f977b3a56ccacabaf16b" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-apple-native-keyring-store = { version = "0.2", features = ["keychain"] }
+apple-native-keyring-store = { version = "1.0", features = ["keychain"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
 apple-native-keyring-store = { version = "0.2", features = ["protected"] }
