@@ -32,7 +32,7 @@ geohash = "0.13"
 chrono = { version = "0.4", features = ["serde"] }
 
 # Encoding
-base64 = "0.22"
+base64 = "0.23"
 hex = "0.4"
 
 # Logging (forwarded to Flutter via flutter_rust_bridge on mobile)
