@@ -189,7 +189,7 @@ jobs:
         env:
           HAVEN_LAUNCH_GATE_CANDIDATE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
           GH_TOKEN: ${{ github.token }}
-        uses: nick-fields/retry@v3
+        uses: nick-fields/retry@v4
         with:
           timeout_minutes: 55
           max_attempts: 2

@@ -1351,7 +1351,7 @@ jobs:
 
       - name: Run e2e_profile_sharing on the simulator
         timeout-minutes: 65
-        uses: nick-fields/retry@v3
+        uses: nick-fields/retry@v4
         with:
           timeout_minutes: 30
           max_attempts: 2

@@ -196,7 +196,7 @@ jobs:
 
       - name: Run the iOS real-GPS lane
         timeout-minutes: 75
-        uses: nick-fields/retry@v3
+        uses: nick-fields/retry@v4
         with:
           timeout_minutes: 35
           max_attempts: 2
