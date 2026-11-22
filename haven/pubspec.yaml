@@ -33,7 +33,7 @@ dependencies:
   # flutter_map >=8.3.0 — 8.3.0 removed the in-package OSMF unblock workaround,
   # so a correct User-Agent is now load-bearing (see constants/tiles.dart).
   flutter_map: ^8.3.0
-  latlong2: ^0.9.0
+  latlong2: ^0.10.1
   # Direct dep for the certificate-pinned tile HTTP client
   # (lib/src/network/pinned_tile_client.dart). Tracks flutter_map's transitive
   # http; keep the constraint in sync with flutter_map on upgrades.
