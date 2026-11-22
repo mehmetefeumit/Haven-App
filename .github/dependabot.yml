@@ -180,11 +180,10 @@ updates:
       time: "06:00"
       timezone: "Etc/UTC"
     open-pull-requests-limit: 5
+    # Actions take only a flat cooldown: Dependabot rejects the semver-*-days
+    # keys for this ecosystem, and one rejected key stops every update above.
     cooldown:
       default-days: 14
-      semver-major-days: 30
-      semver-minor-days: 14
-      semver-patch-days: 7
     groups:
       actions-patches:
         applies-to: version-updates
