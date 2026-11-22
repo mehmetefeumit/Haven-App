@@ -262,6 +262,8 @@
   "qrScannerSwitchCamera": "تبديل الكاميرا",
   "qrScannerInstruction": "ضع رمز QR داخل الإطار",
   "qrScannerScanning": "جارٍ المسح...",
+  "qrScannerCameraDenied": "يحتاج Haven إلى إذن الوصول إلى الكاميرا لمسح رمز QR. يمكنك السماح بذلك من الإعدادات.",
+  "qrScannerCameraUnavailable": "الكاميرا غير متاحة حاليًا.",
   "circleMemberNoRecentLocation": "لا موقع حديث",
   "circleMemberRemoveTooltip": "إزالة من الدائرة",
   "circleMemberRemoveDialogTitle": "إزالة {name}؟",

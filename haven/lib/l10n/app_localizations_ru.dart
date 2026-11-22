@@ -1088,6 +1088,13 @@ class AppLocalizationsRu extends AppLocalizations {
   String get qrScannerScanning => 'Сканирование...';
 
   @override
+  String get qrScannerCameraDenied =>
+      'Haven нужен доступ к камере, чтобы сканировать QR-код. Его можно разрешить в Настройках.';
+
+  @override
+  String get qrScannerCameraUnavailable => 'Камера сейчас недоступна.';
+
+  @override
   String get circleMemberNoRecentLocation => 'Нет недавнего местоположения';
 
   @override

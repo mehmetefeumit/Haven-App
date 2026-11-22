@@ -47,6 +47,15 @@
          BackgroundLocationManager.init(). -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
+    <!-- Camera, for the QR scanner only (QrScanner.kt), asked for when the
+         scanner opens. Not required: a device without a camera still installs
+         Haven and adds people by pasting their key. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <!-- The CAMERA permission implies a required rear camera with autofocus
+         unless these say otherwise. -->
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+
     <!-- android:name is a custom Application (extends android.app.Application,
          which is what Flutter's ${applicationName} placeholder resolves to)
          whose onCreate registers the Android context with the Rust ndk_context
@@ -136,6 +145,15 @@
             android:name="com.pravera.flutter_foreground_task.service.RestartReceiver"
             android:enabled="false"
             tools:node="replace" />
+        <!-- image_picker declares this disabled marker to ask Google Play
+             services to install its back-ported photo picker. Haven ships no
+             Google services (scripts/ci/check_no_google_services.sh), so it is
+             removed: a phone below Android 13 whose system has no photo
+             picker (and where Play services has not installed one for another
+             app) opens the system document picker instead. -->
+        <service
+            android:name="com.google.android.gms.metadata.ModuleDependencies"
+            tools:node="remove" />
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

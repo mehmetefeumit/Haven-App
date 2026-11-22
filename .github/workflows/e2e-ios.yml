@@ -9,12 +9,12 @@
 #
 # # Why macos-latest (Apple Silicon / arm64) works
 #
-# The QR-scanner plugin `mobile_scanner` is on 7.x, which migrated iOS/macOS
-# from Google MLKit to Apple's Vision framework. Unlike MLKit (which shipped no
-# arm64-simulator slice and forced `EXCLUDED_ARCHS[...]=arm64`, breaking the
-# build on Apple-Silicon simulators), the Vision-based 7.x podspec excludes
-# only the dead `i386` arch, so the app builds and runs on the arm64 simulator
-# that macos-latest provides — the faster, longer-lived runner.
+# Haven's QR scanner is its own (`HavenQrScannerHandler.swift`: AVFoundation +
+# Apple's Vision framework), with no pod. Google MLKit, which an earlier
+# scanner plugin used, shipped no arm64-simulator slice and forced
+# `EXCLUDED_ARCHS[...]=arm64`; nothing in the app excludes arm64 now, so it
+# builds and runs on the arm64 simulator that macos-latest provides — the
+# faster, longer-lived runner.
 #
 # # Why a host-native relay (not the strfry container)
 #

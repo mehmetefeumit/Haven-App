@@ -16,11 +16,13 @@
 #       activity-alias target, service, receiver, provider — has <init>()V.
 #       A component absent from the dex AND declared android:enabled=false is
 #       exempt: the platform never instantiates a disabled component, and a
-#       class R8 could delete is one no code enables (GMS's ModuleDependencies
-#       service is such a manifest-only marker). A present class is checked
+#       class R8 could delete is one no code enables (the GMS ModuleDependencies
+#       service v0.1.13/v0.1.14 shipped was such a manifest-only marker). A present class is checked
 #       whatever its enabled state, since code may enable it at run time.
 #   E2  every `com.google.firebase.components:<class>` meta-data whose value is
 #       com.google.firebase.components.ComponentRegistrar: <class> has <init>()V.
+#       None ships since ML Kit left with mobile_scanner (2026-11), so zero is a
+#       pass, not vacuous; check_no_google_services.sh fails if one comes back.
 #   E3  every meta-data whose value is androidx.startup: the named Initializer
 #       has <init>()V.
 #   E4  every class `X_Impl` whose direct superclass is `X` has <init>()V.
@@ -199,7 +201,6 @@ readonly EVAL_AWK='
       need("E5", d, "(Landroid/content/Context;Landroidx/work/WorkerParameters;)V", "WorkManager instantiates a worker by name")
     }
     if (!main_seen || !app_seen) vacuous("E1 did not find both " pkg ".MainActivity and " pkg ".HavenApplication among the manifest components")
-    if (e2 < 1) vacuous("E2 found no ComponentRegistrar meta-data")
     if (e3 < 1) vacuous("E3 found no androidx.startup meta-data")
     if (e4 < 1) vacuous("E4 found no X_Impl class whose superclass is X")
     if (anchor == "") vacuous("E5 found no androidx.work.Worker, so no ListenableWorker to read workers from")
@@ -496,10 +497,11 @@ self_test() {
   _case "no MainActivity is vacuous" 2 \
     "$(_mut no-main "${tmp}/m13" 's/com\.oblivioustech\.haven\.MainActivity/com.oblivioustech.haven.OtherActivity/g')" "${tmp}/d13" \
     '^VACUOUS E1 did not find both'
-  # (19) No registrar meta-data.
-  _case "no ComponentRegistrar meta-data is vacuous" 2 \
+  # (19) No registrar meta-data: what a release without Firebase components
+  # (every one since ML Kit left) looks like.
+  _case "no ComponentRegistrar meta-data passes with E2 0" 0 \
     "$(_mut no-reg "${tmp}/m13" 's/="com\.google\.firebase\.components\.ComponentRegistrar"/="other"/')" "${tmp}/d13" \
-    '^VACUOUS E2 found no ComponentRegistrar'
+    ', E2 0 registrar\(s\),'
   # (20) No androidx.startup meta-data.
   _case "no androidx.startup meta-data is vacuous" 2 \
     "$(_mut no-init "${tmp}/m13" 's/="androidx\.startup"/="other"/')" "${tmp}/d13" \

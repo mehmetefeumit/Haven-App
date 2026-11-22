@@ -7802,9 +7802,9 @@
     {
       "id": "INV-D-CAMERA-IS-QR-ONLY",
       "title": "The camera is used only by the QR scanner",
-      "statement": "The only camera consumer is qr_scanner_page.dart via mobile_scanner in barcode-detection mode; no still capture, no video recording, no write to disk and no upload path exists. This becomes false if any capture or file-write API is added on that page.",
+      "statement": "The only camera consumer is Haven's own QR scanner behind qr_scanner_page.dart (QrScanner.kt on Android, HavenQrScannerHandler.swift on iOS): frames are decoded in memory and only decoded text reaches Dart; no still capture, no video recording, no write to disk and no upload path exists. This becomes false if any capture or file-write API is added to the page or either native scanner.",
       "status": "ratcheted",
-      "residual": "Nothing fails if a capture-to-disk or upload call is added to the QR page: the only citable proof is that the usage description still exists in Info.plist. The content claim 'No photos or video are taken or stored' has no test and no guard.",
+      "residual": "Nothing fails if a capture-to-disk or upload call is added to the QR page or a native scanner: the only citable proof is that the usage description still exists in Info.plist. The content claim 'No photos or video are taken or stored' has no test and no guard.",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
       "non_arb_claims": [
@@ -7817,7 +7817,7 @@
       "symbols": [
         {
           "file": "haven/lib/src/pages/circles/qr_scanner_page.dart",
-          "symbol": "MobileScanner"
+          "symbol": "QrScannerChannel"
         }
       ],
       "tests": [

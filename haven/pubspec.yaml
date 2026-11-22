@@ -38,11 +38,6 @@ dependencies:
   # (lib/src/network/pinned_tile_client.dart). Tracks flutter_map's transitive
   # http; keep the constraint in sync with flutter_map on upgrades.
   http: ^1.6.0
-  # QR code scanning. 7.x migrates iOS/macOS from Google MLKit to Apple's
-  # Vision framework, which (unlike MLKit) supports the arm64 iOS Simulator —
-  # required for the iOS E2E lane on Apple-Silicon runners and for local
-  # simulator dev on Apple-Silicon Macs.
-  mobile_scanner: ^7.2.0
   # Internationalization
   intl: ^0.20.0
   # Preferences
@@ -127,6 +122,12 @@ dev_dependencies:
   # Lightweight Nostr client used by integration_test/e2e/_lib/test_relay.dart
   # to observe events on the hermetic strfry relay.
   web_socket_channel: ^3.0.0
+
+dependency_overrides:
+  # geolocator's Android implementation without Google Play Services; the
+  # patch and how to upgrade it are in third_party/geolocator_android/HAVEN_PATCH.md.
+  geolocator_android:
+    path: ../third_party/geolocator_android
 
 flutter:
   uses-material-design: true

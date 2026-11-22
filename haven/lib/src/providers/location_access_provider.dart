@@ -44,7 +44,7 @@
 /// `asBroadcastStream(onCancel:)` whose callback nulls `_positionStream` when
 /// the LAST listener cancels — which is exactly what disposing
 /// `locationStreamProvider` does, so an invalidate genuinely yields a fresh
-/// native subscription (verified against `geolocator_android` 5.0.2). That is
+/// native subscription (verified against `geolocator_android` 5.2.1). That is
 /// why [LocationAccessNotifier] invalidates on the recovery edge: it is the one
 /// thing that can bring the live map dot and the motion-triggered publish back
 /// without an app relaunch.

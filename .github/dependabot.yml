@@ -65,6 +65,45 @@ updates:
       - dependency-name: "nostr-sdk"
 
   # ---------------------------------------------------------------------------
+  # Rust: every other Cargo root. haven/rust_builder's lockfile is the
+  # resolution that SHIPS inside the app; the tooling crates run on every E2E
+  # and soak lane. cargo-audit (audit.yml) already reads all of them for
+  # advisories; this keeps them patched too. The crates
+  # check_lockfile_universe.sh holds to haven-core's exact source (MDK, OpenMLS,
+  # SQLCipher, nostr) move only with a deliberate MDK bump, as above.
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: "cargo"
+    directories:
+      - "/haven/rust_builder"
+      - "/tooling/soak"
+      - "/tooling/logscan"
+      - "/tooling/e2e/local-relay"
+      - "/tooling/e2e/local-blossom"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 10
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+      semver-minor-days: 14
+      semver-patch-days: 7
+    groups:
+      patch-updates:
+        applies-to: version-updates
+        update-types: ["patch"]
+    ignore:
+      - dependency-name: "rusqlite"
+      - dependency-name: "libsqlite3-sys"
+      - dependency-name: "nostr*"
+      - dependency-name: "openmls*"
+      - dependency-name: "cgka-*"
+      - dependency-name: "storage-sqlite"
+      - dependency-name: "transport-nostr-*"
+
+  # ---------------------------------------------------------------------------
   # Flutter (haven app)
   # ---------------------------------------------------------------------------
   - package-ecosystem: "pub"
@@ -93,12 +132,42 @@ updates:
       # Major upgrades require dedicated migration work — humans, not Dependabot.
       - dependency-name: "flutter_riverpod"
         update-types: ["version-update:semver-major"]
-      - dependency-name: "mobile_scanner"
-        update-types: ["version-update:semver-major"]
       - dependency-name: "very_good_analysis"
         update-types: ["version-update:semver-major"]
       - dependency-name: "latlong2"
         update-types: ["version-update:semver-major"]
+
+  # ---------------------------------------------------------------------------
+  # Android (haven/android): the libraries the app module declares itself —
+  # CameraX and zxing-cpp for the QR scanner, AppCompat/transition/exif for
+  # uCrop — and the Gradle plugins. Flutter plugins' own Gradle dependencies
+  # move with the plugin's pub release (the "pub" entry above); the vendored
+  # third_party/geolocator_android is held to its latest upstream release by
+  # scripts/ci/check_vendored_current.sh instead.
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: "gradle"
+    directory: "/haven/android"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 10
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+      semver-minor-days: 14
+      semver-patch-days: 7
+    groups:
+      patch-updates:
+        applies-to: version-updates
+        update-types: ["patch"]
+      # The scanner's camera stack moves as one: its artifacts share a version.
+      camerax:
+        applies-to: version-updates
+        patterns:
+          - "androidx.camera:*"
+        update-types: ["minor", "patch"]
 
   # ---------------------------------------------------------------------------
   # GitHub Actions
@@ -111,11 +180,10 @@ updates:
       time: "06:00"
       timezone: "Etc/UTC"
     open-pull-requests-limit: 5
+    # Actions take only a flat cooldown: Dependabot rejects the semver-*-days
+    # keys for this ecosystem, and one rejected key stops every update above.
     cooldown:
       default-days: 14
-      semver-major-days: 30
-      semver-minor-days: 14
-      semver-patch-days: 7
     groups:
       actions-patches:
         applies-to: version-updates

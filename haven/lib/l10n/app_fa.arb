@@ -262,6 +262,8 @@
   "qrScannerSwitchCamera": "تعویض دوربین",
   "qrScannerInstruction": "کد QR را درون کادر قرار بده",
   "qrScannerScanning": "در حال اسکن...",
+  "qrScannerCameraDenied": "Haven برای اسکن کد QR به دسترسی به دوربین نیاز دارد. می‌توانی این دسترسی را در تنظیمات بدهی.",
+  "qrScannerCameraUnavailable": "در حال حاضر دوربین در دسترس نیست.",
   "circleMemberNoRecentLocation": "موقعیت اخیری وجود ندارد",
   "circleMemberRemoveTooltip": "حذف از حلقه",
   "circleMemberRemoveDialogTitle": "{name} حذف شود؟",

@@ -1057,6 +1057,13 @@ class AppLocalizationsNe extends AppLocalizations {
   String get qrScannerScanning => 'स्क्यान गर्दै...';
 
   @override
+  String get qrScannerCameraDenied =>
+      'QR कोड स्क्यान गर्न Haven लाई क्यामेरा प्रयोग गर्ने अनुमति चाहिन्छ। तपाईं यसलाई सेटिङमा गएर अनुमति दिन सक्नुहुन्छ।';
+
+  @override
+  String get qrScannerCameraUnavailable => 'क्यामेरा अहिले उपलब्ध छैन।';
+
+  @override
   String get circleMemberNoRecentLocation => 'हालसालैको कुनै स्थान छैन';
 
   @override

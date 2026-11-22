@@ -1160,6 +1160,14 @@
   "@qrScannerScanning": {
     "description": "Status text shown below the QR scanner instruction while scanning."
   },
+  "qrScannerCameraDenied": "Haven needs camera access to scan a QR code. You can allow it in Settings.",
+  "@qrScannerCameraDenied": {
+    "description": "Shown in place of the camera view on the QR scanner page when the camera permission is not granted. Shown above an 'Open settings' button (commonOpenSettings) that opens Haven's app settings, where the permission can be allowed."
+  },
+  "qrScannerCameraUnavailable": "The camera isn't available right now.",
+  "@qrScannerCameraUnavailable": {
+    "description": "Shown in place of the camera view on the QR scanner page when the device has no camera or the camera could not be started (for example, another app is using it)."
+  },
 
   "circleMemberNoRecentLocation": "No recent location",
   "@circleMemberNoRecentLocation": {

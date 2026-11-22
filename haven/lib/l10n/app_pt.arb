@@ -262,6 +262,8 @@
   "qrScannerSwitchCamera": "Trocar de câmera",
   "qrScannerInstruction": "Posicione o QR code dentro do quadro",
   "qrScannerScanning": "Escaneando...",
+  "qrScannerCameraDenied": "O Haven precisa de acesso à câmera para escanear um QR code. Você pode permitir isso em Configurações.",
+  "qrScannerCameraUnavailable": "A câmera não está disponível no momento.",
   "circleMemberNoRecentLocation": "Sem localização recente",
   "circleMemberRemoveTooltip": "Remover do círculo",
   "circleMemberRemoveDialogTitle": "Remover {name}?",

@@ -12,7 +12,10 @@
 #   2. reads every APK's dex for the constructors Android and its libraries
 #      instantiate by name (scripts/ci/check_apk_loadable.sh: the v0.1.14
 #      crash and its ML Kit QR break are both visible there), whatever the
-#      launch found.
+#      launch found;
+#   3. reads every APK's dex and manifest for Google Play services, Firebase
+#      and ML Kit (scripts/ci/check_no_google_services.sh), the classes
+#      Zapstore labels an app "Google services" from.
 #
 # Callers:
 #   ci.yml             no inputs: builds the release APKs through the unchanged
@@ -278,15 +281,16 @@ jobs:
     # uncapped work (check_e2e_step_timeout_ordering.sh C6):
     #   scanner 10 + candidate download 5 + SDK 11 + AVD cache 10 +
     #   snapshot 15 + emulator 114 + egress report 5 + guard teardown 5 +
-    #   dex check 5 + manifest initializers 5 + scan 5 + upload 5          = 195
-    #   + uncapped 2.5                                                = 197.5 -> 198
+    #   dex check 5 + no Google services 5 + manifest initializers 5 +
+    #   scan 5 + upload 5                                                  = 200
+    #   + uncapped 2.5                                                = 202.5 -> 203
     # The uncapped figure is the one measured on the single job this one was
     # split from (its build half is the candidate job now, so it overstates):
     # release-build's Android job, 2.3 min outside its capped build step (run
     # 43585389047), and the incident repro's emulator job, 0.2 min outside its
     # emulator step (run 43589953220). Re-measure from this job's runs.
     # job-uncapped-minutes: 2.5 (2 runs of the jobs this one joins, worst 43585389047)
-    timeout-minutes: 198
+    timeout-minutes: 203
     env:
       # The runner gates its summaries through the identifier scanner, sealing
       # the display name the app generated (logscan-gate.sh, host profile).
@@ -413,13 +417,20 @@ jobs:
         run: bash tooling/e2e/ci/setup-network-guard.sh teardown || true
 
       # After the launch, and whatever it found, so a red candidate is named by
-      # both halves: a stripped constructor the launch could not reach (ML Kit's
-      # registrars only fail when a QR scan starts) and a crash the dex cannot
-      # show. Static, so once, here.
+      # both halves: a stripped constructor the launch could not reach (v0.1.14's
+      # ML Kit registrars only failed when a QR scan started) and a crash the dex
+      # cannot show. Static, so once, here.
       - name: Check every APK keeps its name-instantiated constructors
         if: ${{ !cancelled() && steps.verify.outcome == 'success' }}
         timeout-minutes: 5
         run: bash scripts/ci/check_apk_loadable.sh "${CANDIDATE_APKS}"/app-*-release.apk
+
+      # The bytes that ship carry no Google Play services, Firebase or ML Kit
+      # class or manifest entry.
+      - name: Check every APK ships no Google services
+        if: ${{ !cancelled() && steps.verify.outcome == 'success' }}
+        timeout-minutes: 5
+        run: bash scripts/ci/check_no_google_services.sh "${CANDIDATE_APKS}"/app-*-release.apk
 
       # The startup initializers that ship are a property of the merged
       # manifest, which only the built APK holds.

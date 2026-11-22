@@ -1077,6 +1077,14 @@ class AppLocalizationsPt extends AppLocalizations {
   String get qrScannerScanning => 'Escaneando...';
 
   @override
+  String get qrScannerCameraDenied =>
+      'O Haven precisa de acesso à câmera para escanear um QR code. Você pode permitir isso em Configurações.';
+
+  @override
+  String get qrScannerCameraUnavailable =>
+      'A câmera não está disponível no momento.';
+
+  @override
   String get circleMemberNoRecentLocation => 'Sem localização recente';
 
   @override

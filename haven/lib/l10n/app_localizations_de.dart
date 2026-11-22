@@ -1067,6 +1067,14 @@ class AppLocalizationsDe extends AppLocalizations {
   String get qrScannerScanning => 'Wird gescannt …';
 
   @override
+  String get qrScannerCameraDenied =>
+      'Haven benötigt Zugriff auf die Kamera, um einen QR-Code zu scannen. Du kannst ihn in den Einstellungen erlauben.';
+
+  @override
+  String get qrScannerCameraUnavailable =>
+      'Die Kamera ist gerade nicht verfügbar.';
+
+  @override
   String get circleMemberNoRecentLocation => 'Kein aktueller Standort';
 
   @override

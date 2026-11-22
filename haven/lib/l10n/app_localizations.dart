@@ -1632,6 +1632,18 @@ abstract class AppLocalizations {
   /// **'Scanning...'**
   String get qrScannerScanning;
 
+  /// Shown in place of the camera view on the QR scanner page when the camera permission is not granted. Shown above an 'Open settings' button (commonOpenSettings) that opens Haven's app settings, where the permission can be allowed.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven needs camera access to scan a QR code. You can allow it in Settings.'**
+  String get qrScannerCameraDenied;
+
+  /// Shown in place of the camera view on the QR scanner page when the device has no camera or the camera could not be started (for example, another app is using it).
+  ///
+  /// In en, this message translates to:
+  /// **'The camera isn\'t available right now.'**
+  String get qrScannerCameraUnavailable;
+
   /// Subtitle shown for an accepted member with no cached location.
   ///
   /// In en, this message translates to:

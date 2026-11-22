@@ -94,6 +94,14 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("androidx.transition:transition:1.6.0")
     implementation("androidx.exifinterface:exifinterface:1.4.1")
+    // The QR scanner (QrScanner.kt): CameraX for the preview and frames, and
+    // zxing-cpp's own Android build to decode them on the device. Replaces
+    // mobile_scanner, whose ML Kit decoder brought Google Play services and
+    // Firebase into the APK (scripts/ci/check_no_google_services.sh).
+    implementation("androidx.camera:camera-camera2:1.6.2")
+    implementation("androidx.camera:camera-lifecycle:1.6.2")
+    implementation("androidx.camera:camera-view:1.6.2")
+    implementation("io.github.zxing-cpp:android:3.1.1")
 }
 
 kotlin {

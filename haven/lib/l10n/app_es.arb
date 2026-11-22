@@ -211,6 +211,8 @@
   "qrScannerSwitchCamera": "Cambiar de cámara",
   "qrScannerInstruction": "Coloca el código QR dentro del marco",
   "qrScannerScanning": "Escaneando...",
+  "qrScannerCameraDenied": "Haven necesita acceso a la cámara para escanear un código QR. Puedes permitirlo en Ajustes.",
+  "qrScannerCameraUnavailable": "La cámara no está disponible en este momento.",
   "circleMemberNoRecentLocation": "Sin ubicación reciente",
   "circleMemberRemoveTooltip": "Quitar del círculo",
   "circleMemberRemoveDialogTitle": "¿Quitar a {name}?",
