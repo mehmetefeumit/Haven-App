@@ -32,7 +32,7 @@ plugins {
     // gradle/gradle-daemon-jvm.properties) by auto-downloading from Adoptium
     // via api.foojay.io. Keeps the build self-contained: developers and CI do
     // not need a matching system JDK pre-installed.
-    id("org.gradle.toolchains.foojay-resolver-convention") version "0.10.0"
+    id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"
 }
 
 include(":app")
