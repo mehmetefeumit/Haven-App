@@ -91,7 +91,7 @@ dependencies {
     // the editor opens. Declared at the versions uCrop 2.2.11 is built
     // against. Not okhttp: uCrop needs it only for remote URIs, Haven hands it
     // a local file, and a second network stack is a privacy surface.
-    implementation("androidx.appcompat:appcompat:1.7.1")
+    implementation("androidx.appcompat:appcompat:1.8.0")
     implementation("androidx.transition:transition:1.6.0")
     implementation("androidx.exifinterface:exifinterface:1.4.1")
     // The QR scanner (QrScanner.kt): CameraX for the preview and frames, and
