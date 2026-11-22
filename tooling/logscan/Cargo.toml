@@ -65,7 +65,7 @@ rand = { version = "0.9", default-features = false, features = ["os_rng"] }
 # runner with no mobile toolchain and must not drag a C library (or haven-core's
 # whole MLS stack) in for one scalar multiplication. `arithmetic` is the only
 # feature needed — no signing, no verification, no ECDH.
-k256 = { version = "0.13", default-features = false, features = ["arithmetic"] }
+k256 = { version = "0.14", default-features = false, features = ["arithmetic"] }
 # Already in the lock through `k256`; taken as a DIRECT dependency so the decoded
 # seed bytes can be `Zeroizing` — a private key must not outlive its use in this
 # process's heap just because it came in on argv.
