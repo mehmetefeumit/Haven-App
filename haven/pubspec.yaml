@@ -118,7 +118,7 @@ dev_dependencies:
   # E2E testing — see docs/E2E_TROUBLESHOOTING.md and tooling/e2e/.
   # patrol_cli is installed globally in CI, not pinned here.
   patrol: ^4.6.0
-  patrol_finders: ^3.4.0
+  patrol_finders: ^3.7.0
   # Lightweight Nostr client used by integration_test/e2e/_lib/test_relay.dart
   # to observe events on the hermetic strfry relay.
   web_socket_channel: ^3.0.0
