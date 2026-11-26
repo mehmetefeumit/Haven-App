@@ -320,6 +320,15 @@ abstract final class WidgetKeys {
   /// settings page.
   static const Key backgroundSharingTile = Key('background_sharing_tile');
 
+  /// Location settings advisory: the accepted background disclosure predates
+  /// sharing that starts again by itself.
+  static const Key locationResumeConsentNote = Key(
+    'location_resume_consent_note',
+  );
+
+  /// Location settings advisory (Android 11+): no "Allow all the time".
+  static const Key locationAllTimeNote = Key('location_all_time_note');
+
   // ---------------------------------------------------------------------------
   // Settings — identity
   // ---------------------------------------------------------------------------

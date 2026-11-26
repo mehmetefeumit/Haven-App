@@ -14,6 +14,7 @@ import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/background_location_provider.dart';
 import 'package:haven/src/providers/location_disclosure_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/services/android_background_location.dart';
 import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/ios_location_auth_service.dart';
 import 'package:haven/src/test_keys.dart';
@@ -68,12 +69,17 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage>
   /// indicator sentence when the resulting service-session diagnostic confirms
   /// that Always — which releases the activity session and, with it, the blue
   /// bar this page would otherwise still be promising.
+  ///
+  /// Android's background-location grant, too: a grant or revoke made in
+  /// system settings does not restart the process, and the all-time advisory
+  /// must clear (or appear) on the way back.
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state != AppLifecycleState.resumed) return;
     ref
       ..invalidate(iosLocationPermissionProvider)
-      ..invalidate(iosIndicatorSentenceProvider);
+      ..invalidate(iosIndicatorSentenceProvider)
+      ..invalidate(backgroundLocationStatusProvider);
   }
 
   /// Shows this page's outcome, replacing only its own previous one: the
@@ -160,10 +166,22 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage>
         ref.invalidate(iosIndicatorSentenceProvider);
         _say(messenger, l10n.locationSettingsDisabledSnack);
       } else {
-        // ENABLE — disclosure gate first, then permission gate.
-        final disclosed = await ref
-            .read(locationDisclosureControllerProvider.notifier)
-            .ensureDisclosed(context, includeBackground: true);
+        // ENABLE — disclosure gate first, then permission gate. On Android 11+
+        // without "Allow all the time" the disclosure carries that step when it
+        // is shown now, so the request below follows ONE dialog.
+        final controller = ref.read(
+          locationDisclosureControllerProvider.notifier,
+        );
+        final allTime = ref.read(androidBackgroundLocationProvider);
+        final allTimeStatus = await allTime.status();
+        final disclosureShownNow = !await controller
+            .backgroundDisclosureCurrent();
+        if (!mounted) return;
+        final disclosed = await controller.ensureDisclosed(
+          context,
+          includeBackground: true,
+          allTimeStep: allTimeStatus.missing ? allTimeStatus : null,
+        );
         if (!mounted) return;
         if (!disclosed) return;
 
@@ -171,6 +189,21 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage>
             .read(backgroundSharingProvider.notifier)
             .setEnabled(enabled: true);
         if (!mounted) return;
+
+        // The background permission needs the foreground one first, so only
+        // after an enable that got it.
+        if (allTimeStatus.missing &&
+            (result is EnsurePermissionsGranted ||
+                result is EnsurePermissionsBatteryOptDenied)) {
+          if (disclosureShownNow) {
+            await requestBackgroundLocation(allTime);
+          } else {
+            await _promptAllTime();
+          }
+          if (!mounted) return;
+          ref.invalidate(backgroundLocationStatusProvider);
+        }
+        ref.invalidate(backgroundDisclosureCurrentProvider);
 
         switch (result) {
           case EnsurePermissionsNotificationDenied():
@@ -214,6 +247,47 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage>
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  /// The Android "Allow all the time" step for a user who already accepted
+  /// the current disclosure: the disclosure with that step, then, on Agree,
+  /// the OS permission page (or Haven's app settings when Android no longer
+  /// shows it). Never changes the sharing toggle.
+  Future<void> _promptAllTime() async {
+    final allTime = ref.read(androidBackgroundLocationProvider);
+    final status = await allTime.status();
+    if (!status.missing || !mounted) return;
+    final agreed = await LocationDisclosureDialog.show(
+      context,
+      includeBackground: true,
+      allTimeStep: status,
+    );
+    if (agreed) await requestBackgroundLocation(allTime);
+    if (!mounted) return;
+    ref.invalidate(backgroundLocationStatusProvider);
+  }
+
+  /// Re-opens the updated background-sharing notice for a user who accepted
+  /// an older one; on Android 11+ without "Allow all the time" it carries that
+  /// step, and Agree goes on to the permission request.
+  Future<void> _reviewResumeNotice() async {
+    final allTime = ref.read(androidBackgroundLocationProvider);
+    final status = await allTime.status();
+    if (!mounted) return;
+    final agreed = await ref
+        .read(locationDisclosureControllerProvider.notifier)
+        .reconfirmBackgroundIfOwed(
+          context,
+          allTimeStep: status.missing ? status : null,
+          force: true,
+        );
+    if ((agreed ?? false) && status.missing) {
+      await requestBackgroundLocation(allTime);
+    }
+    if (!mounted) return;
+    ref
+      ..invalidate(backgroundDisclosureCurrentProvider)
+      ..invalidate(backgroundLocationStatusProvider);
   }
 
   /// Opens Android's battery-optimization screen and re-reads the verdict.
@@ -262,6 +336,20 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage>
     final batteryOptDenied =
         ref.watch(batteryOptimizationDeniedProvider).valueOrNull ?? false;
 
+    // Background sharing is on, but the disclosure the user accepted predates
+    // sharing that starts again by itself, so for them it does not — which
+    // the intro above would otherwise claim. Unknown while loading: no note.
+    final resumeConsentOwed =
+        sharingEnabled &&
+        ref.watch(backgroundDisclosureCurrentProvider).valueOrNull == false;
+
+    // Android 11+ only, and only for a user at the current disclosure: an
+    // older acceptance is asked through the notice above, which carries this
+    // step. Off Android the status is never missing.
+    final allTime = ref.watch(backgroundLocationStatusProvider).valueOrNull;
+    final allTimeMissing =
+        sharingEnabled && !resumeConsentOwed && (allTime?.missing ?? false);
+
     return Scaffold(
       appBar: AppBar(title: Text(l10n.locationSettingsTitle)),
       body: ListView(
@@ -302,6 +390,31 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage>
               message: l10n.locationSettingsIosLimitedNote,
               actionLabel: l10n.commonOpenSettings,
               onAction: geo.Geolocator.openAppSettings,
+            ),
+          ],
+
+          if (resumeConsentOwed) ...[
+            const SizedBox(height: HavenSpacing.base),
+            _ActionableNote(
+              key: WidgetKeys.locationResumeConsentNote,
+              icon: LucideIcons.info,
+              message: l10n.locationSettingsResumeConsentNote,
+              actionLabel: l10n.locationSettingsResumeConsentAction,
+              onAction: _reviewResumeNotice,
+            ),
+          ],
+
+          if (allTimeMissing) ...[
+            const SizedBox(height: HavenSpacing.base),
+            _ActionableNote(
+              key: WidgetKeys.locationAllTimeNote,
+              icon: LucideIcons.mapPinOff,
+              message: l10n.locationSettingsAndroidAllTimeNote(
+                allTime?.optionLabel ??
+                    l10n.locationBackgroundAllTimeOptionFallback,
+              ),
+              actionLabel: l10n.commonOpenSettings,
+              onAction: _promptAllTime,
             ),
           ],
 
@@ -413,6 +526,7 @@ class _ActionableNote extends StatelessWidget {
     required this.message,
     required this.actionLabel,
     required this.onAction,
+    super.key,
   });
 
   final IconData icon;

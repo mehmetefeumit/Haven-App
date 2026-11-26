@@ -589,6 +589,21 @@ class AppLocalizationsEs extends AppLocalizations {
       'El uso compartido sigue funcionando en segundo plano con tu permiso actual, y mientras lo hace, iOS muestra su barra azul de ubicación en la parte superior de la pantalla. Configura la Ubicación de Haven como «Siempre» en Ajustes para que Haven también pueda ponerse al día con las ubicaciones de tus círculos después de que iOS cierre la app. Con «Siempre», iOS puede mostrar su flecha de ubicación en la barra de estado en lugar de esa barra azul. Tu propio uso compartido solo se reanuda cuando vuelves a abrir Haven.';
 
   @override
+  String get locationSettingsResumeConsentNote =>
+      'Background sharing is on, but Haven will not start it again by itself after it is closed or your phone restarts until you agree to the updated background-sharing notice.';
+
+  @override
+  String get locationSettingsResumeConsentAction => 'Review notice';
+
+  @override
+  String locationSettingsAndroidAllTimeNote(String optionLabel) {
+    return 'Haven\'s location permission is not set to “$optionLabel”, so sharing won\'t start again by itself after your phone restarts or Haven updates. Haven will show a notification you can tap to resume.';
+  }
+
+  @override
+  String get locationBackgroundAllTimeOptionFallback => 'Allow all the time';
+
+  @override
   String get locationSettingsAndroidHeader =>
       'Ajustes del sistema para mayor fiabilidad';
 
@@ -650,8 +665,24 @@ class AppLocalizationsEs extends AppLocalizations {
   String get locationDisclosureNotNow => 'Ahora no';
 
   @override
+  String get locationDisclosureUpdateLead =>
+      'Background sharing has changed since you turned it on. If you agree, Haven can start sharing again by itself after it is closed or your phone restarts, as described below. If you choose \'Not now\', background sharing keeps working as before, but it will not start again by itself after Haven is closed or your phone restarts.';
+
+  @override
+  String locationBackgroundAllTimeStep(String optionLabel) {
+    return 'Next, Android opens Haven\'s location permission. Choose “$optionLabel” so sharing starts again by itself after your phone restarts or Haven updates. If you don\'t, sharing still works until then, and afterwards Haven shows a notification you can tap to resume.';
+  }
+
+  @override
   String get fgsNotificationSharing =>
       'Haven está enviando y recibiendo información de ubicación';
+
+  @override
+  String get androidResumeNoticeTitle => 'Location sharing has stopped';
+
+  @override
+  String get androidResumeNoticeBody =>
+      'Tap to open Haven and resume sharing your location with your circles.';
 
   @override
   String get fgsNotificationPaused =>
