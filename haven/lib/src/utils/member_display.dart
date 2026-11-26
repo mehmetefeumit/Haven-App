@@ -4,9 +4,9 @@
 ///
 /// - Other members: their display name (if any) comes from the local Contact
 ///   table, populated when the current user has saved a nickname for them.
-/// - The current user (self): their display name comes from device settings
-///   (`IdentityService.getDisplayName`), not the Contact table — the user
-///   does not usually have a Contact record for themselves.
+/// - The current user (self): their display name is the own profile row's
+///   (`displayNameProvider`), not the Contact table — the user does not
+///   usually have a Contact record for themselves.
 ///
 /// These helpers join those two sources so callers can stay dumb. The helper
 /// lives in `utils/` (not under `widgets/`) so non-widget consumers — for
@@ -19,7 +19,7 @@ import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/profile_service.dart';
 
 /// Returns the effective display name for [member], preferring the current
-/// user's settings display name when [member] is the current user.
+/// user's own name when [member] is the current user.
 ///
 /// Resolution order:
 ///
@@ -27,7 +27,7 @@ import 'package:haven/src/services/profile_service.dart';
 ///    [CircleMember.pubkey], compared case-insensitively), returns
 ///    [currentUserDisplayName] after trimming — but only when the trimmed
 ///    value is non-empty.
-/// 2. Otherwise (or if the current user has no settings display name yet),
+/// 2. Otherwise (or if the current user has no display name yet),
 ///    returns [CircleMember.displayName] (the Contact-table nickname).
 ///
 /// A null return means the caller should fall back to a truncated pubkey.
@@ -77,10 +77,10 @@ bool isSelfMember(CircleMember member, {required String? currentUserPubkey}) {
 ///    function (unlike [resolveMemberDisplayName]) never returns `null`.
 ///
 /// The current user's own row does NOT use this resolver — it keeps its
-/// dedicated [resolveMemberDisplayName] self-branch (reading the local
-/// settings display name), so the member list and the Identity page always
-/// agree on the self name (Flutter review F3). Passing a self member here
-/// would silently skip that agreement, so callers must branch on
+/// dedicated [resolveMemberDisplayName] self-branch (fed the user's own
+/// name, `displayNameProvider`), so the member list and the Identity page
+/// always agree on the self name (Flutter review F3). Passing a self member
+/// here would silently skip that agreement, so callers must branch on
 /// [isSelfMember] before choosing which resolver to call.
 String resolveEffectiveMemberName({
   required String npubFallback,

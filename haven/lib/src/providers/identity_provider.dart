@@ -13,6 +13,7 @@ import 'package:haven/src/providers/live_sync_provider.dart';
 import 'package:haven/src/providers/location_publish_scheduler_provider.dart';
 import 'package:haven/src/providers/maintenance_scheduler_provider.dart';
 import 'package:haven/src/providers/member_profile_refresh_provider.dart';
+import 'package:haven/src/providers/own_profile_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/providers/tile_prefetch_provider.dart';
 import 'package:haven/src/services/background_location_manager.dart';
@@ -47,13 +48,28 @@ final identityProvider = FutureProvider<Identity?>((ref) async {
   return service.getIdentity();
 });
 
-/// Provider for the user's display name.
+/// The user's own display name, as every surface in the app shows it.
 ///
-/// Returns the stored display name, or null if not set.
-/// Invalidate after calling [IdentityService.setDisplayName].
+/// The own profile row's name ([ownProfileProvider]): what a save writes, the
+/// sync publishes and a newer kind-0 from another device replaces. Only while
+/// the row holds no name is the device-local name
+/// ([IdentityService.getDisplayName]) shown — an install from before public
+/// profiles, or one whose storage reset reseeded it. Once the row holds a name
+/// the local one is dropped, so a row cleared later, here or on another
+/// device, never falls back to a stale name.
 final displayNameProvider = FutureProvider<String?>((ref) async {
   final service = ref.watch(identityServiceProvider);
-  return service.getDisplayName();
+  final profile = ref.watch(ownProfileProvider.future);
+  final rowName = ownProfileName(await profile);
+  if (rowName == null) return service.getDisplayName();
+  try {
+    if (await service.getDisplayName() != null) {
+      await service.setDisplayName(null);
+    }
+  } on Object catch (e) {
+    debugPrint('[Identity] local display name not dropped: ${e.runtimeType}');
+  }
+  return rowName;
 });
 
 /// Notifier for identity mutations (create, delete, import).

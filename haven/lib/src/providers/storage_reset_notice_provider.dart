@@ -150,10 +150,10 @@ Future<void> clearCircleScopedPrefsIfResetOwes(
 /// Clears the preferences the reset left naming what it deleted: the pending
 /// leaves, the background publish history — and the user's own display name.
 ///
-/// The name is written here before it is published, and the reset deleted
-/// the record of whether it ever was, so it may be an edit the network never
-/// saw. It is dropped, and [reseedOwnNameIfOwed] takes the name the user's
-/// published profile carries instead.
+/// A name held here may be an edit the network never saw, and the reset
+/// deleted the record of whether it ever was. It is dropped, and
+/// [reseedOwnNameIfOwed] takes the name the user's published profile carries
+/// instead.
 Future<void> clearCircleScopedPrefsAfterReset(SharedPreferences prefs) async {
   await PendingLeaveService(prefs: prefs).clearAll();
   await BackgroundLocationManager.clearPublishHistoryOnIdentityDelete();

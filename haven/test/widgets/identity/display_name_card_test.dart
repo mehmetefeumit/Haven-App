@@ -268,12 +268,17 @@ void main() {
 
     testWidgets('save success: Saving -> Saved, no SnackBar', (tester) async {
       final completer = Completer<void>();
-      final service = _FakeIdentityService(
-        initialDisplayName: 'Alice',
-        setDisplayNameGate: completer.future,
-      );
+      final service = _FakeIdentityService(initialDisplayName: 'Alice');
+      final profileService = MockProfileService()
+        ..updateOwnProfileGate = completer;
 
-      await tester.pumpWidget(buildHarness(service: service));
+      await tester.pumpWidget(
+        buildHarness(
+          service: service,
+          profileService: profileService,
+          resolveIdentity: true,
+        ),
+      );
       await tester.pumpAndSettle();
       final announcements = captureAccessibilityAnnouncements(tester);
 
@@ -334,7 +339,7 @@ void main() {
         findsNothing,
         reason: 'No SnackBar on success — inline indicator carries it',
       );
-      expect(service.setDisplayNameCalls, ['Bob']);
+      expect(_savedNames(profileService), ['Bob']);
       expect(
         announcements,
         contains('Display name saved'),
@@ -345,12 +350,15 @@ void main() {
     testWidgets('save failure flips status to failed and re-enables Save', (
       tester,
     ) async {
-      final service = _FakeIdentityService(
-        initialDisplayName: 'Alice',
-        throwOnSet: true,
-      );
+      final service = _FakeIdentityService(initialDisplayName: 'Alice');
 
-      await tester.pumpWidget(buildHarness(service: service));
+      await tester.pumpWidget(
+        buildHarness(
+          service: service,
+          profileService: MockProfileService()
+            ..shouldThrowOnUpdateOwnProfile = true,
+        ),
+      );
       await tester.pumpAndSettle();
       final announcements = captureAccessibilityAnnouncements(tester);
 
@@ -389,12 +397,15 @@ void main() {
     testWidgets(
       'a local save announces only the outcome, never a progress message',
       (tester) async {
-        for (final throwOnSet in [false, true]) {
-          final service = _FakeIdentityService(
-            initialDisplayName: 'Alice',
-            throwOnSet: throwOnSet,
+        for (final fails in [false, true]) {
+          final service = _FakeIdentityService(initialDisplayName: 'Alice');
+          await tester.pumpWidget(
+            buildHarness(
+              service: service,
+              profileService: MockProfileService()
+                ..shouldThrowOnUpdateOwnProfile = fails,
+            ),
           );
-          await tester.pumpWidget(buildHarness(service: service));
           await tester.pumpAndSettle();
           final announcements =
               captureAccessibilityAnnouncementsWithPriority(tester);
@@ -407,7 +418,7 @@ void main() {
           expect(
             announcements,
             [
-              if (throwOnSet)
+              if (fails)
                 (
                   message: 'Save failed, try again',
                   assertiveness: Assertiveness.assertive,
@@ -420,7 +431,7 @@ void main() {
             ],
             reason: 'one announcement per outcome, none for the '
                 'in-between "saving" state; success is polite, failure '
-                'interrupts (throwOnSet: $throwOnSet)',
+                'interrupts (fails: $fails)',
           );
           await tester.pumpWidget(const SizedBox());
         }
@@ -460,7 +471,7 @@ void main() {
 
   group('DisplayNameCard — saving always publishes (no consent gate)', () {
     testWidgets(
-      'saving calls both the local write-through and updateOwnProfile',
+      'saving writes the own profile row, and no device-local name',
       (tester) async {
         final identityService = _FakeIdentityService(
           initialDisplayName: 'Alice',
@@ -481,13 +492,17 @@ void main() {
         await tester.tap(_findSaveButtonFinder());
         await tester.pumpAndSettle();
 
-        expect(identityService.setDisplayNameCalls, ['Bob']);
         expect(
-          profileService.methodCalls.map((c) => c.method),
-          contains('updateOwnProfile'),
+          _savedNames(profileService),
+          ['Bob'],
           reason:
               'Publishing is unconditional — saving must always stage the '
               'public kind-0 profile for the background sync too.',
+        );
+        expect(
+          identityService.setDisplayNameCalls,
+          everyElement(isNull),
+          reason: 'a name held only on this device is one no relay gets',
         );
       },
     );
@@ -595,11 +610,13 @@ void main() {
               'for the next resume',
         );
         expect(
-          identityService.setDisplayNameCalls,
-          ['Bob'],
+          await ProviderScope.containerOf(
+            tester.element(find.byType(Scaffold)),
+          ).read(displayNameProvider.future),
+          'Bob',
           reason:
-              'the local name follows the saved profile even when the '
-              'card left mid-save, or the two would disagree from then on',
+              'the name every surface shows is the saved one even when the '
+              'card left mid-save',
         );
       },
     );
@@ -800,9 +817,9 @@ void main() {
   // ---------------------------------------------------------------------------
   // One source of truth. The own profile row
   // (`ProfileService.updateOwnProfile`, one SQLCipher transaction that also
-  // queues the publish) is the save; the local display name is its mirror.
-  // Save, leave, come back: the name shown is the one the profile row holds,
-  // whatever reached the mirror.
+  // queues the publish) is the save; a device-local name is shown only while
+  // the row holds none. Save, leave, come back: the name shown is the one the
+  // profile row holds.
   // ---------------------------------------------------------------------------
 
   group('DisplayNameCard — the own profile is the one source of truth', () {
@@ -844,8 +861,8 @@ void main() {
     );
 
     testWidgets(
-      'a save whose local mirror fails after the profile took it is what the '
-      'next visit shows, and it is published',
+      'a save is what the next visit shows, and is published, even when the '
+      'local name it supersedes cannot be dropped',
       (tester) async {
         final profileService = MockProfileService(
           ownProfile: Profile(
@@ -967,8 +984,107 @@ void main() {
       expect(shown, isNot(contains('Alice')));
       expect(find.text('Bob'), findsOneWidget);
     });
+
+    testWidgets('an interrupted clear never brings the old name back: the '
+        'local name is dropped before the row is written', (tester) async {
+      // A row with no name, as an install from before public profiles has:
+      // the name shown is the device-local one.
+      final identityService = _FakeIdentityService(initialDisplayName: 'Alice');
+      final gate = Completer<void>();
+      final profileService = MockProfileService(
+        ownProfile: Profile(pubkeyHex: _testIdentity.pubkeyHex),
+      )..updateOwnProfileGate = gate;
+      await tester.pumpWidget(
+        buildHarness(
+          service: identityService,
+          profileService: profileService,
+          resolveIdentity: true,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Alice'), findsOneWidget);
+
+      await tester.enterText(find.byType(TextField), '');
+      await tester.pump();
+      await tester.tap(_findSaveButtonFinder());
+      await tester.pump();
+
+      // The app is killed here, the row write still in flight.
+      expect(_savedNames(profileService), ['']);
+      expect(
+        await identityService.getDisplayName(),
+        isNull,
+        reason: 'a blank row falls back to the local name, so one left '
+            'behind is the old name back on the next launch',
+      );
+
+      gate.complete();
+      await tester.pumpAndSettle();
+      expect(find.text('Alice'), findsNothing);
+    });
+
+    testWidgets('the row reloading under the name never takes the field from '
+        'someone typing in it', (tester) async {
+      final profileService = MockProfileService(
+        ownProfile: Profile(
+          pubkeyHex: _testIdentity.pubkeyHex,
+          displayName: 'Alice',
+        ),
+      );
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(
+            _FakeIdentityService(),
+          ),
+          identityProvider.overrideWith((_) async => _testIdentity),
+          profileServiceProvider.overrideWithValue(profileService),
+        ],
+      );
+      addTearDown(container.dispose);
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(body: DisplayNameCard()),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.showKeyboard(find.byType(TextField));
+      await tester.enterText(find.byType(TextField), 'Alic');
+      await tester.pump();
+      final field = tester.widget<TextField>(find.byType(TextField));
+
+      // A profile refresh lands mid-typing.
+      container.invalidate(ownProfileProvider);
+      for (var i = 0; i < 10; i++) {
+        await tester.pump();
+        expect(find.byType(LinearProgressIndicator), findsNothing);
+        expect(
+          tester.widget<TextField>(find.byType(TextField)).controller,
+          same(field.controller),
+        );
+      }
+      await tester.pumpAndSettle();
+
+      final editable = tester.state<EditableTextState>(
+        find.byType(EditableText),
+      );
+      expect(editable.widget.focusNode.hasFocus, isTrue);
+      await tester.enterText(find.byType(TextField), 'Alice B');
+      await tester.pump();
+      expect(find.text('Alice B'), findsOneWidget);
+    });
   });
 }
+
+/// Every name the card saved, in order: the own profile row is the save.
+List<Object?> _savedNames(MockProfileService profileService) => [
+  for (final call in profileService.methodCalls)
+    if (call.method == 'updateOwnProfile') call.args['displayName'],
+];
 
 ButtonStyleButton _findSaveButton() {
   return _findSaveButtonFinder().evaluate().single.widget as ButtonStyleButton;
@@ -978,27 +1094,20 @@ Finder _findSaveButtonFinder() =>
     find.byKey(WidgetKeys.displayNameSaveButton);
 
 class _FakeIdentityService implements IdentityService {
-  _FakeIdentityService({
-    this.initialDisplayName,
-    this.throwOnSet = false,
-    this.setDisplayNameGate,
-  });
+  _FakeIdentityService({this.initialDisplayName, this.throwOnSet = false})
+    : _current = initialDisplayName;
 
   final String? initialDisplayName;
   final bool throwOnSet;
-  final Future<void>? setDisplayNameGate;
   final List<String?> setDisplayNameCalls = [];
 
   String? _current;
 
   @override
-  Future<String?> getDisplayName() async => _current ?? initialDisplayName;
+  Future<String?> getDisplayName() async => _current;
 
   @override
   Future<void> setDisplayName(String? name) async {
-    if (setDisplayNameGate != null) {
-      await setDisplayNameGate;
-    }
     if (throwOnSet) {
       throw const IdentityServiceException('boom');
     }

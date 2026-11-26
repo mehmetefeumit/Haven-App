@@ -1539,7 +1539,7 @@ class _MapShellState extends ConsumerState<MapShell>
       fetchPublished: container
           .read(profileServiceProvider)
           .fetchOwnPublishedProfile,
-      currentName: identity.getDisplayName,
+      currentName: () => container.read(displayNameProvider.future),
       setName: identity.setDisplayName,
     );
     if (changed) {

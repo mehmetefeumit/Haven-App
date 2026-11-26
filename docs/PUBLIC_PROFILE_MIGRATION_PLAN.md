@@ -175,7 +175,7 @@ upstream (restructured spec). In-app visibility copy (§6.5), onboarding copy.
 | D9 | HTTP stack | `nostr-blossom = "=0.44.0"` for upload (the crate pins `x`/`expiration` via `BlossomAuthorizationOptions`; auth header is standard-base64-with-padding — see §2). Direct `reqwest = "=0.12.x"` with `default-features = false, features = ["rustls-tls", "stream"]` for the capped streaming download — this **unifies on nostr-blossom's existing reqwest-0.12/ring instance** (no second reqwest major, no `rustls-no-provider`, no provider-install, no aws-lc; Rust review F1). Hand-rolled BUD-02 client demoted to contingency. |
 | D10 | Logout/delete | Local rows wiped with `circles.db` (existing flow). "Delete public profile" action: blank kind-0 republish + NIP-09 deletion (reuses `build_nip09_deletion`) + Blossom DELETE; documented best-effort; no-op without a prior published profile (D1). |
 | D11 | Cutover | Build-time flag `HAVEN_PUBLIC_PROFILES` (default off, `HAVEN_LIVE_SYNC` precedent): new system lands flag-gated while old system keeps working; one final coordinated commit flips the flag and deletes the old system + its tests (coverage gate only ever sees fully-tested end states). |
-| D12 | Name source of truth | Consent OFF: display name stays local-only (SharedPreferences, today's behavior) — visible only to self; others see npub + initials. Consent ON: the **fetched kind-0 value is authoritative** for the Identity page (owner's directive); the local pref becomes a write-through fallback cache. Edits fetch-merge-publish. Multi-device caveat (protocol review): replaceable-event convergence is `created_at`-ordered, so a skewed clock on another device can transiently out-rank a later edit — accepted, one-line note in docs. **Implementation prerequisite (Flutter review F1)**: `DisplayNameCard`'s seed-once guard is relaxed to "reseed whenever `_status == saved`" (refuse to clobber `unsaved`/`saving`/`failed` only), so the slower kind-0 fetch result can land after the initial cache seed. |
+| D12 | Name source of truth | Consent OFF: display name stays local-only (SharedPreferences, today's behavior) — visible only to self; others see npub + initials. Consent ON: the **fetched kind-0 value is authoritative** for the Identity page (owner's directive); the local pref becomes a write-through fallback cache *(superseded 2026-11-26: nothing writes it through any more; it is read only while the own profile row holds no name, and dropped once it holds one — `docs/PROFILE_LOCAL_FIRST_SYNC.md`)*. Edits fetch-merge-publish. Multi-device caveat (protocol review): replaceable-event convergence is `created_at`-ordered, so a skewed clock on another device can transiently out-rank a later edit — accepted, one-line note in docs. **Implementation prerequisite (Flutter review F1)**: `DisplayNameCard`'s seed-once guard is relaxed to "reseed whenever `_status == saved`" (refuse to clobber `unsaved`/`saving`/`failed` only), so the slower kind-0 fetch result can land after the initial cache seed. |
 
 ---
 
@@ -475,8 +475,9 @@ avatar branch), `_ingestAvatar` + its 3 call sites and `onAvatarComplete` plumbi
 **and its `||`-branch consumer in `location_sharing_provider.dart:71-75`** (Flutter
 review F8b), `DecryptedLocation.displayName`, `background_location_task.dart`'s
 display-name read + `encryptLocation` param, `CircleService`'s avatar interface
-sections + `mock_circle_service.dart`'s avatar overrides. `displayNameProvider`/
-`IdentityService` name storage stays (local fallback + consent-OFF path, D12).
+sections + `mock_circle_service.dart`'s avatar overrides. `IdentityService`'s
+local name storage stays, as the fallback `displayNameProvider` reads only while
+the own profile row holds no name (D12, as superseded 2026-11-26).
 
 ### 6.5 l10n
 

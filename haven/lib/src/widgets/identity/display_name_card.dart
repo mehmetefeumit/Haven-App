@@ -24,8 +24,8 @@ import 'package:haven/src/widgets/common/circular_save_button.dart';
 
 /// Card containing the display-name editor.
 ///
-/// Consumes [identityServiceProvider] and [displayNameProvider]; tests can
-/// inject mocks via `ProviderScope` overrides.
+/// Consumes [displayNameProvider], [ownProfileProvider] and the services
+/// that save; tests can inject mocks via `ProviderScope` overrides.
 class DisplayNameCard extends ConsumerStatefulWidget {
   /// Creates a display-name card.
   const DisplayNameCard({super.key});
@@ -107,21 +107,24 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
     final syncController = ref.read(ownProfileSyncProvider.notifier);
     final identityService = ref.read(identityServiceProvider);
     final profileService = ref.read(profileServiceProvider);
+    final container = ProviderScope.containerOf(context, listen: false);
     setState(() => _status = SaveStatus.saving);
     try {
-      // The profile row first: one local SQLCipher transaction that both
-      // holds the edit and queues its publish (unconditional — public by
-      // default, owner-directed 2026-07-16), so it is the save. The local
-      // name only mirrors it: a failure here leaves both untouched, and a
-      // kill between the two leaves the row, which this card shows.
+      // A row with no name falls back to the device-local one, so a clear
+      // drops that first: an interrupted clear never brings the old name back.
+      if (text.isEmpty) await identityService.setDisplayName(null);
+      // One local SQLCipher transaction that both holds the edit and queues
+      // its publish (unconditional — public by default, owner-directed
+      // 2026-07-16), so it is the save; [displayNameProvider] drops the
+      // local name once the row holds one.
       await profileService.updateOwnProfile(displayName: text);
-      // Publish even if the card is gone, since `ref` is unusable then.
+      // Publish, and show the name everywhere, even if the card is gone,
+      // since `ref` is unusable then.
       unawaited(syncController.sync());
-      await identityService.setDisplayName(text.isEmpty ? null : text);
-      if (!mounted) return;
-      ref
+      container
         ..invalidate(displayNameProvider)
         ..invalidate(ownProfileProvider);
+      if (!mounted) return;
       unawaited(
         SemanticsService.sendAnnouncement(
           view,
@@ -169,38 +172,26 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
   /// nothing to clobber.
   bool get _mayReseed => !_loaded || _status == SaveStatus.saved;
 
-  /// Prefers the fetched kind-0 `display_name`, falling back to `name`;
-  /// returns `null` when neither is set (never reseeds with a blank value).
-  static String? _preferredProfileName(Profile? profile) {
-    final displayName = profile?.displayName?.trim();
-    if (displayName != null && displayName.isNotEmpty) return displayName;
-    final name = profile?.name?.trim();
-    if (name != null && name.isNotEmpty) return name;
-    return null;
-  }
-
   /// The name the own profile row holds, once loaded. Not while it reloads:
   /// the value it carries then is the one from before the save that
   /// invalidated it.
   String? _profileName() {
     if (!publicProfilesEnabled) return null;
     final profile = ref.read(ownProfileProvider);
-    return profile.isLoading
-        ? null
-        : _preferredProfileName(profile.valueOrNull);
+    return profile.isLoading ? null : ownProfileName(profile.valueOrNull);
   }
 
-  /// The profile row's name, else the local one: the row is what a save
-  /// writes first and what the sync publishes, so a local name it disagrees
-  /// with is stale.
+  /// The profile row's name, else [displayNameProvider]'s. That provider
+  /// derives from the row too; the row is read here as well because it can
+  /// land before the provider settles.
   String? _shownName() =>
       _profileName() ?? ref.read(displayNameProvider).valueOrNull;
 
   @override
   Widget build(BuildContext context) {
-    // Local (device-only) display name — always the first, fast seed source.
-    // Not while it reloads: `when` would hand over the value from before the
-    // save that invalidated it.
+    // The user's name as every surface shows it. Not while it reloads:
+    // `when` would hand over the value from before the save that
+    // invalidated it.
     ref.listen<AsyncValue<String?>>(displayNameProvider, (_, next) {
       if (!_mayReseed || next.isLoading) return;
       next.when(
@@ -227,7 +218,7 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
     if (publicProfilesEnabled) {
       ref.listen<AsyncValue<Profile?>>(ownProfileProvider, (_, next) {
         if (!_mayReseed || next.isLoading) return;
-        final fetchedName = _preferredProfileName(next.valueOrNull);
+        final fetchedName = ownProfileName(next.valueOrNull);
         if (fetchedName != null) setState(() => _seedSilently(fetchedName));
       });
     }
@@ -238,6 +229,9 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
       child: Padding(
         padding: const EdgeInsets.all(HavenSpacing.base),
         child: displayNameAsync.when(
+          // A profile row reloading under the name must not take the field
+          // away from someone typing in it.
+          skipLoadingOnReload: true,
           loading: () => _buildLoadingBody(context),
           // F2: keep the field usable on a local-read error rather than
           // rendering an uneditable error-only state — the `ref.listen`

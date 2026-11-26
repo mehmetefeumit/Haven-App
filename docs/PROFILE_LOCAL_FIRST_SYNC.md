@@ -228,17 +228,34 @@ neither starts nor queues one. Never from the background isolates.
   mirrored display name clears its mirror. A profile renamed under the earlier
   rule — `name` left at the onboarding pseudonym — reads as a deliberate handle
   and is not healed.
-- **The Identity page shows the own profile row.** `DisplayNameCard` writes
-  the row (`save_my_profile_local`, which also queues the publish) first and
-  the device-local display name after it, as its mirror: a failed save changes
-  neither, and a kill between the two leaves the row, which the card prefers
-  over the local name and the sync publishes. A provider reloading after a
-  save is never read for its pre-save value, so the old name is never shown
-  again, not even for a frame (`display_name_card_test.dart`, "the own profile
-  is the one source of truth"). The page has no refresh action (owner-directed
-  2026-11-26): opening it runs the union profile refresh at the interactive
-  tier, which picks up an edit made on another device and never asks for the
-  own pubkey alone.
+- **The user's own name is the own profile row, everywhere.**
+  `displayNameProvider` — what every self label reads (member tiles, the
+  member sheet, the map sheet's announcement, the Identity page's initials and
+  card) — is the row's `display_name`, else its `name`, through
+  `ownProfileProvider`, so a save and a newer kind-0 from another device (which
+  the profile refresh writes to the row and then invalidates
+  `ownProfileProvider`) reach them all. The device-local SharedPreferences name
+  is read only while the row holds no name (an install from before public
+  profiles, or one a storage reset reseeded) and is dropped once it holds one,
+  so a row cleared later, here or on another device, never falls back to it
+  (`display_name_provider_test.dart`). Nothing else reads that key: the
+  background isolates have no display name at all (`BackgroundIdentityService`
+  refuses), and no location payload carries one.
+- **A save is one row write.** `DisplayNameCard` and onboarding write the row
+  (`save_my_profile_local`, which also queues the publish) and nothing
+  device-local, so a failed save changes nothing and a kill cannot split the
+  name in two. A clear drops the local name first, so an interrupted clear never
+  brings it back. Onboarding's save failing keeps the user on the screen with
+  fixed copy to try again: a name only the device held would never reach a
+  relay (`create_identity_screen_test.dart`). The card and the photo picker
+  invalidate through the container, so a save that finishes after the page has
+  gone still shows everywhere; the publish retries on the persisted ladder, at
+  the next cold start and at every resume. A provider reloading after a save is
+  never read for its pre-save value, and never takes the field from someone
+  typing (`display_name_card_test.dart`, "the own profile is the one source of
+  truth"). The page has no refresh action (owner-directed 2026-11-26): opening
+  it runs the union profile refresh at the interactive tier, which picks up an
+  edit made on another device and never asks for the own pubkey alone.
 - Staging never arms the retraction gate (picture rows with an empty URL do not
   count) and never disarms it (a seen kind-0 with `event_created_at > 0` counts).
 - Everything uploaded went through `process_own_avatar` (private fields on

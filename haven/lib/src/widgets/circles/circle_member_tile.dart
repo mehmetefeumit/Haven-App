@@ -60,9 +60,9 @@ enum MemberRemoveStatus {
 
 /// Displays a circle member with their name and actions.
 ///
-/// When [member] is the current user, the title and avatar use the display
-/// name saved in settings (via `IdentityService.setDisplayName`) rather
-/// than the pubkey hex — see [resolveMemberDisplayName]. Other members'
+/// When [member] is the current user, the title and avatar use the user's
+/// own name ([displayNameProvider], the own profile row) rather than the
+/// pubkey hex — see [resolveMemberDisplayName]. Other members'
 /// names resolve via [resolveEffectiveMemberName] (local nickname → public
 /// kind-0 `display_name` → `name` → npub fallback, plan D6).
 ///
