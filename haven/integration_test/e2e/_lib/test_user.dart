@@ -18,12 +18,11 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/rust/frb_generated.dart';
-import 'package:haven/src/services/nostr_identity_service.dart';
+import 'package:haven/src/services/identity_secure_storage.dart';
 import 'package:haven/src/utils/log_alias.dart'
     show LogAliasClass, logAliasHandle;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -442,14 +441,9 @@ class TestUser {
     }
     // 1. Identity into secure storage. Format mirrors
     //    `NostrIdentityService.createIdentity` (base64-encoded raw bytes
-    //    under key `'haven.nostr.identity'`).
-    const storage = FlutterSecureStorage(
-      iOptions: IOSOptions(
-        accessibility: KeychainAccessibility.first_unlock_this_device,
-      ),
-    );
-    await storage.write(
-      key: identityStorageKeyForTesting,
+    //    under [identityStorageKey], in the production storage options).
+    await identitySecureStorage.write(
+      key: identityStorageKey,
       value: base64Encode(seed),
     );
 
@@ -478,12 +472,7 @@ class TestUser {
   /// Removes the seeded identity + clears onboarding flags. Call from
   /// `tearDownAll` so a re-run of the same test process starts fresh.
   static Future<void> clearPreSeededIdentity() async {
-    const storage = FlutterSecureStorage(
-      iOptions: IOSOptions(
-        accessibility: KeychainAccessibility.first_unlock_this_device,
-      ),
-    );
-    await storage.delete(key: identityStorageKeyForTesting);
+    await identitySecureStorage.delete(key: identityStorageKey);
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(kOnboardingIntroSeenKey);
     await prefs.remove(kOnboardingDisplayNameSetKey);

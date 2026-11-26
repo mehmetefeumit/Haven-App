@@ -8,10 +8,12 @@
 library;
 
 import 'dart:async';
-import 'dart:typed_data';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/pages/onboarding/create_identity_screen.dart';
@@ -21,9 +23,12 @@ import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/providers/storage_reset_notice_provider.dart';
+import 'package:haven/src/rust/api.dart'
+    show NostrIdentityManager, PublicIdentity;
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/location_service.dart';
 import 'package:haven/src/services/maintenance_service.dart';
+import 'package:haven/src/services/nostr_identity_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/widgets/common/storage_reset_notice_dialog.dart';
@@ -53,7 +58,7 @@ void main() {
   setUp(() => SharedPreferences.setMockInitialValues(<String, Object>{}));
 
   List<Override> buildOverrides({
-    required _RecordingIdentityService service,
+    required IdentityService service,
     MockProfileService? profileService,
     _FakeLocationService? locationService,
     _FakeMaintenance? maintenance,
@@ -618,6 +623,530 @@ void main() {
     },
   );
 
+  // ── A stored key secure storage cannot read yet ─────────────────────────
+  //
+  // The screen is reachable with a key stored (an interrupted first run): a
+  // read that fails must not pass for an empty store, or the tap creates a
+  // new key over the stored one and publishes a fresh name over the saved
+  // one.
+
+  const createError =
+      'Something went wrong creating your identity. Please try again.';
+  const unavailable = IdentityStorageUnavailableException();
+
+  Finder cta() => find.byKey(WidgetKeys.createIdentityCta);
+
+  testWidgets(
+    'a stored name replaces the generated one once storage can be read',
+    (tester) async {
+      final service = _RecordingIdentityService(
+        hasIdentityValue: true,
+        existingDisplayName: 'Alice',
+      )..hasIdentityAnswers.add(unavailable);
+
+      await pumpLocalized(
+        tester,
+        const CreateIdentityScreen(),
+        overrides: buildOverrides(service: service),
+        settle: false,
+      );
+      await tester.pump();
+      expect(_namePattern.hasMatch(prefilledName(tester)), isTrue);
+
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pump();
+
+      expect(prefilledName(tester), 'Alice');
+      expect(service.hasIdentityCalls, 2);
+    },
+  );
+
+  testWidgets(
+    'while storage cannot say whether a key is stored, a tap creates, saves '
+    'and publishes nothing, and can be repeated',
+    (tester) async {
+      final service = _RecordingIdentityService(hasIdentityError: unavailable);
+      final profile = MockProfileService();
+      final maintenance = _FakeMaintenance(MockRelayPreferencesService());
+
+      await pumpLocalized(
+        tester,
+        const CreateIdentityScreen(),
+        overrides: buildOverrides(
+          service: service,
+          profileService: profile,
+          maintenance: maintenance,
+        ),
+        settle: false,
+      );
+      await tester.pump();
+
+      await tester.tap(cta());
+      await pumpFrames(tester);
+
+      expect(find.text(createError), findsOneWidget);
+      expect(service.createIdentityCalls, 0);
+      expect(service.setDisplayNameCalls, isEmpty);
+      expect(
+        profile.methodCalls.map((c) => c.method),
+        isNot(anyOf(contains('updateOwnProfile'), contains('syncOwnProfile'))),
+      );
+      expect(maintenance.calls, isEmpty, reason: 'nothing published');
+      expect(await onboardingCompleted(), isFalse);
+      expect(find.text('Create My Identity'), findsOneWidget);
+
+      // Once the snackbar has gone, the same tap is refused the same way.
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.text(createError), findsNothing);
+      await tester.tap(cta());
+      await pumpFrames(tester);
+      expect(find.text(createError), findsOneWidget);
+      expect(service.createIdentityCalls, 0);
+    },
+  );
+
+  testWidgets(
+    'storage readable by the tap: the stored key and stored name are used',
+    (tester) async {
+      final service = _RecordingIdentityService(
+        hasIdentityValue: true,
+        existingDisplayName: 'Alice',
+      )..hasIdentityAnswers.add(unavailable);
+
+      await pumpLocalized(
+        tester,
+        const CreateIdentityScreen(),
+        overrides: buildOverrides(service: service),
+        settle: false,
+      );
+      await tester.pump();
+
+      // Before the first retry.
+      await tester.tap(cta());
+      await pumpFrames(tester);
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+      await pumpFrames(tester);
+
+      expect(service.createIdentityCalls, 0);
+      expect(service.setDisplayNameCalls, ['Alice']);
+      expect(await onboardingCompleted(), isTrue);
+    },
+  );
+
+  testWidgets('an edit made while storage could not be read wins', (
+    tester,
+  ) async {
+    final service = _RecordingIdentityService(
+      hasIdentityValue: true,
+      existingDisplayName: 'Alice',
+    )..hasIdentityAnswers.add(unavailable);
+
+    await pumpLocalized(
+      tester,
+      const CreateIdentityScreen(),
+      overrides: buildOverrides(service: service),
+      settle: false,
+    );
+    await tester.pump();
+    await tester.enterText(find.byType(TextField), 'Wren Willow');
+    await tester.pump(const Duration(seconds: 5));
+    expect(prefilledName(tester), 'Wren Willow');
+    expect(service.hasIdentityCalls, 1, reason: 'the edit ended the retries');
+
+    await tester.tap(cta());
+    await pumpFrames(tester);
+    await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+    await pumpFrames(tester);
+
+    expect(service.setDisplayNameCalls, ['Wren Willow']);
+  });
+
+  testWidgets(
+    'a create refused for unreadable storage saves nothing, and the screen '
+    'goes on trying to read',
+    (tester) async {
+      final service = _RecordingIdentityService(createError: unavailable);
+
+      await pumpLocalized(
+        tester,
+        const CreateIdentityScreen(),
+        overrides: buildOverrides(service: service),
+        settle: false,
+      );
+      await tester.pump();
+      await tester.tap(cta());
+      await pumpFrames(tester);
+
+      expect(find.text(createError), findsOneWidget);
+      expect(service.createIdentityCalls, 1);
+      expect(service.setDisplayNameCalls, isEmpty);
+      expect(await onboardingCompleted(), isFalse);
+      expect(service.hasIdentityCalls, 2);
+
+      await tester.pump(const Duration(seconds: 1));
+      expect(service.hasIdentityCalls, 3, reason: 're-armed by the refusal');
+    },
+  );
+
+  testWidgets('any other failed create re-arms nothing', (tester) async {
+    final service = _RecordingIdentityService(throwOnCreate: true);
+
+    await pumpLocalized(
+      tester,
+      const CreateIdentityScreen(),
+      overrides: buildOverrides(service: service),
+      settle: false,
+    );
+    await tester.pump();
+    await tester.tap(cta());
+    await pumpFrames(tester);
+    await tester.pump(const Duration(seconds: 60));
+
+    expect(find.text(createError), findsOneWidget);
+    expect(service.hasIdentityCalls, 2);
+  });
+
+  testWidgets(
+    'a failed identity check shows fixed copy, logs no identifier, and the '
+    'button works again',
+    (tester) async {
+      final logs = LogCapture();
+      addTearDown(logs.restore);
+      final service = _RecordingIdentityService()
+        ..hasIdentityAnswers.addAll([false, Exception('npub1plantedplanted')]);
+
+      await pumpLocalized(
+        tester,
+        const CreateIdentityScreen(),
+        overrides: buildOverrides(service: service),
+        settle: false,
+      );
+      await tester.pump();
+      await tester.tap(cta());
+      await pumpFrames(tester);
+
+      expect(find.text(createError), findsOneWidget);
+      expect(find.textContaining('planted'), findsNothing);
+      expect(service.createIdentityCalls, 0);
+      expect(find.text('Create My Identity'), findsOneWidget);
+      logs
+        ..assertContains('[Onboarding] identity check failed: _Exception')
+        ..assertNoNeedles(['npub1plantedplanted'])
+        ..restore();
+    },
+  );
+
+  testWidgets(
+    'a restore that throws anything else is logged by type and retried',
+    (tester) async {
+      final logs = LogCapture();
+      addTearDown(logs.restore);
+      final service = _RecordingIdentityService(
+        hasIdentityValue: true,
+        existingDisplayName: 'Alice',
+      )..hasIdentityAnswers.add(Exception('npub1plantedplanted'));
+
+      await pumpLocalized(
+        tester,
+        const CreateIdentityScreen(),
+        overrides: buildOverrides(service: service),
+        settle: false,
+      );
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pump();
+
+      expect(prefilledName(tester), 'Alice');
+      logs
+        ..assertContains('[Onboarding] name restore failed: _Exception')
+        ..assertNoNeedles(['npub1plantedplanted'])
+        ..restore();
+    },
+  );
+
+  testWidgets(
+    'storage that stays unreadable is retried at 1, 2, 4, 8 and 16 s, then '
+    'every 30 s',
+    (tester) async {
+      final service = _RecordingIdentityService(hasIdentityError: unavailable);
+
+      await pumpLocalized(
+        tester,
+        const CreateIdentityScreen(),
+        overrides: buildOverrides(service: service),
+        settle: false,
+      );
+      await tester.pump();
+      expect(service.hasIdentityCalls, 1);
+
+      var now = Duration.zero;
+      Future<int> callsAt(Duration at) async {
+        await tester.pump(at - now);
+        now = at;
+        return service.hasIdentityCalls;
+      }
+
+      const millis = Duration(milliseconds: 1);
+      for (final (seconds, calls) in [
+        (1, 2),
+        (3, 3),
+        (7, 4),
+        (15, 5),
+        (31, 6),
+        (61, 7),
+        (91, 8),
+        (121, 9),
+      ]) {
+        final due = Duration(seconds: seconds);
+        expect(await callsAt(due - millis), calls - 1, reason: 'before $due');
+        expect(await callsAt(due), calls, reason: 'at $due');
+      }
+    },
+  );
+
+  testWidgets('a tap that starts the create path stops the retries', (
+    tester,
+  ) async {
+    final service = _RecordingIdentityService()
+      ..hasIdentityAnswers.add(unavailable);
+
+    await pumpLocalized(
+      tester,
+      const CreateIdentityScreen(
+        restoreRetryDelays: [Duration(milliseconds: 100)],
+      ),
+      overrides: buildOverrides(service: service),
+      settle: false,
+    );
+    await tester.pump();
+    await tester.tap(cta());
+    await pumpFrames(tester);
+    await tester.pump(const Duration(seconds: 5));
+
+    expect(service.createIdentityCalls, 1);
+    expect(service.hasIdentityCalls, 2, reason: 'the restore and the tap');
+  });
+
+  testWidgets('leaving the screen stops the retries', (tester) async {
+    // Restored inside the body: testWidgets checks debugPrint before
+    // addTearDown callbacks run (see log_capture.dart).
+    final logs = LogCapture();
+    addTearDown(logs.restore);
+    final service = _RecordingIdentityService(hasIdentityError: unavailable);
+
+    await pumpLocalized(
+      tester,
+      const CreateIdentityScreen(),
+      overrides: buildOverrides(service: service),
+      settle: false,
+    );
+    await tester.pump();
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump(const Duration(minutes: 5));
+
+    // A retry that outlived the screen would fail on its disposed `ref`,
+    // which the restore swallows and logs: neither may happen.
+    expect(service.hasIdentityCalls, 1);
+    expect(logs.joined, isNot(contains('[Onboarding] name restore failed')));
+    logs.restore();
+  });
+
+  testWidgets(
+    'a tap and the first restore failing on one read step the backoff once',
+    (tester) async {
+      final firstRead = Completer<void>();
+      final service = _RecordingIdentityService(hasIdentityError: unavailable)
+        ..hasIdentityGates.add(firstRead);
+
+      await pumpLocalized(
+        tester,
+        const CreateIdentityScreen(),
+        overrides: buildOverrides(service: service),
+        settle: false,
+      );
+      await tester.pump();
+      // The restore's read is still out; the tap's fails first.
+      await tester.tap(cta());
+      await tester.pump();
+      expect(find.text(createError), findsOneWidget);
+      firstRead.complete();
+      await tester.pump();
+      expect(service.hasIdentityCalls, 2);
+
+      await tester.pump(const Duration(milliseconds: 999));
+      expect(service.hasIdentityCalls, 2);
+      await tester.pump(const Duration(milliseconds: 1));
+      expect(service.hasIdentityCalls, 3, reason: 'the first retry, at 1 s');
+    },
+  );
+
+  testWidgets(
+    'a stored name that cannot be read at the tap is not published over: '
+    'nothing is saved or published, and the next tap uses it',
+    (tester) async {
+      final service = _RecordingIdentityService(
+        hasIdentityValue: true,
+        existingDisplayName: 'Alice',
+      )..hasIdentityAnswers.add(unavailable);
+      service.getDisplayNameErrors.add(Exception('prefs unreadable'));
+      final maintenance = _FakeMaintenance(MockRelayPreferencesService());
+
+      await pumpLocalized(
+        tester,
+        const CreateIdentityScreen(),
+        overrides: buildOverrides(service: service, maintenance: maintenance),
+        settle: false,
+      );
+      await tester.pump();
+      await tester.tap(cta());
+      await pumpFrames(tester);
+
+      expect(find.text(createError), findsOneWidget);
+      expect(service.createIdentityCalls, 0);
+      expect(service.setDisplayNameCalls, isEmpty);
+      expect(maintenance.calls, isEmpty, reason: 'nothing published');
+      expect(await onboardingCompleted(), isFalse);
+
+      // The re-armed retry reads the name; the snackbar goes.
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pump(const Duration(seconds: 1));
+      expect(prefilledName(tester), 'Alice');
+      await tester.tap(cta());
+      await pumpFrames(tester);
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+      await pumpFrames(tester);
+
+      expect(service.setDisplayNameCalls, ['Alice']);
+      expect(await onboardingCompleted(), isTrue);
+    },
+  );
+
+  testWidgets(
+    'a cleared field whose stored-name fallback cannot be read publishes '
+    'nothing, and the button works again',
+    (tester) async {
+      final logs = LogCapture();
+      addTearDown(logs.restore);
+      final service = _RecordingIdentityService(
+        hasIdentityValue: true,
+        existingDisplayName: 'Alice',
+      );
+      final maintenance = _FakeMaintenance(MockRelayPreferencesService());
+
+      await pumpLocalized(
+        tester,
+        const CreateIdentityScreen(),
+        overrides: buildOverrides(service: service, maintenance: maintenance),
+        settle: false,
+      );
+      await tester.pump();
+      await tester.enterText(find.byType(TextField), '');
+      service.getDisplayNameErrors.add(Exception('npub1plantedplanted'));
+      await tester.tap(cta());
+      await pumpFrames(tester);
+
+      expect(find.text(createError), findsOneWidget);
+      expect(service.setDisplayNameCalls, isEmpty);
+      expect(maintenance.calls, isEmpty, reason: 'nothing published');
+      expect(await onboardingCompleted(), isFalse);
+      logs
+        ..assertContains('[Onboarding] stored name read failed: _Exception')
+        ..assertNoNeedles(['npub1plantedplanted'])
+        ..restore();
+
+      // Once the snackbar has gone, the same tap goes through.
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pump(const Duration(seconds: 1));
+      await tester.tap(cta());
+      await pumpFrames(tester);
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+      await pumpFrames(tester);
+
+      expect(service.setDisplayNameCalls, ['Alice']);
+      expect(await onboardingCompleted(), isTrue);
+    },
+  );
+
+  testWidgets(
+    'a name the user typed is saved even when the stored one cannot be read',
+    (tester) async {
+      final service = _RecordingIdentityService(
+        hasIdentityValue: true,
+        existingDisplayName: 'Alice',
+      )..hasIdentityAnswers.add(unavailable);
+      service.getDisplayNameErrors.add(Exception('prefs unreadable'));
+
+      await pumpLocalized(
+        tester,
+        const CreateIdentityScreen(),
+        overrides: buildOverrides(service: service),
+        settle: false,
+      );
+      await tester.pump();
+      await tester.enterText(find.byType(TextField), 'Wren Willow');
+      await tester.tap(cta());
+      await pumpFrames(tester);
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+      await pumpFrames(tester);
+
+      expect(service.setDisplayNameCalls, ['Wren Willow']);
+    },
+  );
+
+  testWidgets(
+    'with the real identity service, an unreadable stored key is never '
+    'replaced',
+    (tester) async {
+      final storage = _ScriptedStorage(
+        stored: _storedKey,
+        readError: PlatformException(code: 'locked', details: -25308),
+      );
+      final manager = _FakeIdentityManager();
+
+      await pumpLocalized(
+        tester,
+        const CreateIdentityScreen(),
+        overrides: buildOverrides(service: _realService(storage, manager)),
+        settle: false,
+      );
+      await tester.pump();
+      await tester.tap(cta());
+      await pumpFrames(tester);
+
+      expect(find.text(createError), findsOneWidget);
+      expect(manager.createCalls, 0);
+      expect(storage.writes, isEmpty);
+      expect(storage.stored, _storedKey);
+    },
+  );
+
+  testWidgets(
+    'with the real identity service, a fresh install creates its key at the '
+    'tap with no storage read more than before',
+    (tester) async {
+      final storage = _ScriptedStorage();
+      final manager = _FakeIdentityManager();
+
+      await pumpLocalized(
+        tester,
+        const CreateIdentityScreen(),
+        overrides: buildOverrides(service: _realService(storage, manager)),
+        settle: false,
+      );
+      await tester.pump();
+      await tester.tap(cta());
+      await pumpFrames(tester);
+
+      expect(find.byKey(WidgetKeys.locationDisclosureAgree), findsOneWidget);
+      expect(manager.createCalls, 1);
+      expect(storage.writes, hasLength(1));
+      // The restore's, the tap's, the identity notifier's first load and the
+      // create's: one each, as before the restore asked hasIdentity.
+      expect(storage.readCalls, 4);
+    },
+  );
+
   // ── The storage-reset notice during onboarding ──────────────────────────
   //
   // The core publishes nothing until the notice is answered, and MapShell,
@@ -1129,14 +1658,34 @@ void main() {
 class _RecordingIdentityService implements IdentityService {
   _RecordingIdentityService({
     this.hasIdentityValue = false,
+    this.hasIdentityError,
     this.existingDisplayName,
     this.throwOnCreate = false,
+    this.createError,
   });
 
   final bool hasIdentityValue;
+
+  /// When set, [hasIdentity] throws it once [hasIdentityAnswers] run out.
+  Exception? hasIdentityError;
   final String? existingDisplayName;
   final bool throwOnCreate;
 
+  /// When set, [createIdentity] throws it.
+  final Exception? createError;
+
+  /// What successive [hasIdentity] calls answer, one each: a `bool` is
+  /// returned, an [Exception] thrown.
+  final List<Object> hasIdentityAnswers = [];
+
+  /// Successive [hasIdentity] calls wait on these, one each, before
+  /// answering.
+  final List<Completer<void>> hasIdentityGates = [];
+
+  /// Errors successive [getDisplayName] calls throw, one each.
+  final List<Exception> getDisplayNameErrors = [];
+
+  int hasIdentityCalls = 0;
   int createIdentityCalls = 0;
   final List<String?> setDisplayNameCalls = [];
 
@@ -1148,7 +1697,18 @@ class _RecordingIdentityService implements IdentityService {
   );
 
   @override
-  Future<bool> hasIdentity() async => hasIdentityValue;
+  Future<bool> hasIdentity() async {
+    hasIdentityCalls++;
+    if (hasIdentityGates.isNotEmpty) await hasIdentityGates.removeAt(0).future;
+    if (hasIdentityAnswers.isNotEmpty) {
+      final answer = hasIdentityAnswers.removeAt(0);
+      if (answer is Exception) throw answer;
+      return answer as bool;
+    }
+    final error = hasIdentityError;
+    if (error != null) throw error;
+    return hasIdentityValue;
+  }
 
   @override
   Future<Identity?> getIdentity() async =>
@@ -1160,11 +1720,16 @@ class _RecordingIdentityService implements IdentityService {
     if (throwOnCreate) {
       throw const IdentityServiceException('boom');
     }
+    final error = createError;
+    if (error != null) throw error;
     return _identity;
   }
 
   @override
-  Future<String?> getDisplayName() async => existingDisplayName;
+  Future<String?> getDisplayName() async {
+    if (getDisplayNameErrors.isNotEmpty) throw getDisplayNameErrors.removeAt(0);
+    return existingDisplayName;
+  }
 
   @override
   Future<void> setDisplayName(String? name) async {
@@ -1303,5 +1868,112 @@ class _ResetCircles extends MockCircleService {
   Future<void> acknowledgeStorageReset() async {
     await super.acknowledgeStorageReset();
     acknowledged = true;
+  }
+}
+
+/// A base64 identity key, as stored.
+final String _storedKey = base64Encode(List.filled(32, 7));
+
+NostrIdentityService _realService(
+  FlutterSecureStorage storage,
+  NostrIdentityManager manager,
+) => NostrIdentityService(
+  storage: storage,
+  wipeTileCache: () async {},
+  keyringInitializer: () async {},
+  managerFactory: () async => manager,
+  isIOS: false,
+);
+
+/// The Rust identity manager, for the real [NostrIdentityService]; members
+/// the screen does not reach throw.
+class _FakeIdentityManager implements NostrIdentityManager {
+  int createCalls = 0;
+  String? _pubkey;
+
+  @override
+  bool hasIdentity() => _pubkey != null;
+
+  @override
+  PublicIdentity? getIdentity() => _pubkey == null
+      ? null
+      : PublicIdentity(pubkeyHex: _pubkey!, npub: 'npub1stub', createdAt: 0);
+
+  @override
+  String pubkeyHex() => _pubkey!;
+
+  @override
+  Future<PublicIdentity> loadFromBytes({required List<int> secretBytes}) async {
+    _pubkey = '11' * 32;
+    return getIdentity()!;
+  }
+
+  @override
+  Future<PublicIdentity> createIdentity() async {
+    createCalls++;
+    _pubkey = '22' * 32;
+    return getIdentity()!;
+  }
+
+  @override
+  Future<Uint8List> getSecretBytes() async =>
+      Uint8List.fromList(List.filled(32, 9));
+
+  @override
+  Future<void> deleteIdentity() async => _pubkey = null;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+/// Secure storage holding [stored]; every read throws [readError] when set.
+class _ScriptedStorage extends FlutterSecureStorage {
+  _ScriptedStorage({this.stored, this.readError});
+
+  String? stored;
+  final Exception? readError;
+  int readCalls = 0;
+  final List<String> writes = [];
+
+  @override
+  Future<String?> read({
+    required String key,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    readCalls++;
+    final error = readError;
+    if (error != null) throw error;
+    return stored;
+  }
+
+  @override
+  Future<bool> containsKey({
+    required String key,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async => stored != null;
+
+  @override
+  Future<void> write({
+    required String key,
+    required String? value,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    writes.add(value!);
+    stored = value;
   }
 }

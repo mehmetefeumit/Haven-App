@@ -1506,9 +1506,11 @@ iOS App-Group branch as still unwritten). On iOS that is `Documents/`, the
 **most-backed-up location the OS offers**, and **`NSURLIsExcludedFromBackupKey`
 appears nowhere in the tree** — not in `haven/ios/Runner/`, not in any Dart or
 Rust path, not in a checked-in plugin. Android is unaffected:
-`allowBackup="false"`, with no `dataExtractionRules` and no
-`fullBackupContent` anywhere (`AndroidManifest.xml:48`). The asymmetry is real
-and one-sided. What travels into the backup is ciphertext whose key is a
+`allowBackup="false"`, and its `dataExtractionRules`
+(`res/xml/data_extraction_rules.xml`, held by
+`scripts/ci/check_android_no_backup.sh`) exclude every domain from cloud
+backup and from device-to-device transfer. The asymmetry is real and
+one-sided. What travels into the backup is ciphertext whose key is a
 Keychain item marked `…ThisDeviceOnly` (deviation `IOS-KEYCHAIN`), so a restore
 onto a **different** device cannot open it; a **same-device** restore can, and
 that is the half that costs something.

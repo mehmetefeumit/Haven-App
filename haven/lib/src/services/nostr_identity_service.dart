@@ -24,30 +24,16 @@ library;
 
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/fresh_secret.dart';
+import 'package:haven/src/services/identity_secure_storage.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-
-/// Storage key for the identity secret bytes.
-///
-/// The constant is exported under [identityStorageKeyForTesting] so the
-/// E2E test harness can pre-seed identities without re-deriving the
-/// literal (which would silently drift if production renamed the key).
-const String _storageKey = 'haven.nostr.identity';
-
-/// Public alias of the identity storage key, intended for test code.
-///
-/// Production callers should use the `_storageKey` private constant.
-/// Tests that pre-populate the secure storage (E2E scenarios) should
-/// import this so a key rename surfaces as a compile error rather than
-/// a silently misrouted write.
-@visibleForTesting
-const String identityStorageKeyForTesting = _storageKey;
 
 /// Prefix of the SharedPreferences key holding the user's display name, one
 /// key per identity pubkey.
@@ -58,10 +44,32 @@ const kDisplayNamePrefPrefix = 'haven.display_name.';
 /// the display name when the identity is deleted.
 const kOwnNameReseedOwedKey = 'haven.storage_reset.own_name_reseed_owed';
 
+/// What one storage read showed about the stored identity key.
+enum _StoredKey {
+  /// The read returned a key, and it loaded.
+  present,
+
+  /// The read returned nothing.
+  absent,
+
+  /// The read failed, or what it returned could not be decoded or loaded: a
+  /// key may be stored.
+  unknown,
+}
+
+/// One [NostrIdentityService._ensureInitialized] attempt's result.
+typedef _Loaded = ({NostrIdentityManager manager, _StoredKey storedKey});
+
 /// Production implementation of [IdentityService].
 ///
 /// Uses the Rust core for cryptographic operations and flutter_secure_storage
 /// for persisting the secret key material.
+///
+/// Haven never overwrites or deletes the stored key on a failed read: while
+/// storage cannot say whether a key is stored, [hasIdentity] throws and
+/// [createIdentity] / [importFromNsec] refuse, each with
+/// [IdentityStorageUnavailableException], and a new key is written only
+/// where `containsKey` finds none.
 class NostrIdentityService implements IdentityService {
   /// Creates a new [NostrIdentityService].
   ///
@@ -70,17 +78,20 @@ class NostrIdentityService implements IdentityService {
   /// tests (it defaults to the real [tileCacheWipe] FFI call), a
   /// [keyringInitializer] override so [deleteIdentity]'s keyring-install step
   /// can be faked in tests (defaults to the real [initKeyringStore] FFI
-  /// call), and a [managerFactory] override so the storage-retry contract can
-  /// be tested without the Rust bridge.
+  /// call), a [managerFactory] override so the storage-retry contract can
+  /// be tested without the Rust bridge, and [isIOS] so the Keychain status a
+  /// failed read logs can be tested off-device.
   NostrIdentityService({
     FlutterSecureStorage? storage,
     Future<void> Function()? wipeTileCache,
     Future<void> Function()? keyringInitializer,
     @visibleForTesting Future<NostrIdentityManager> Function()? managerFactory,
-  }) : _storage = storage ?? _createSecureStorage(),
+    @visibleForTesting bool? isIOS,
+  }) : _storage = storage ?? identitySecureStorage,
        _wipeTileCache = wipeTileCache ?? tileCacheWipe,
        _keyringInitializer = keyringInitializer ?? initKeyringStore,
-       _managerFactory = managerFactory ?? NostrIdentityManager.newInstance;
+       _managerFactory = managerFactory ?? NostrIdentityManager.newInstance,
+       _isIOS = isIOS ?? Platform.isIOS;
 
   final FlutterSecureStorage _storage;
 
@@ -100,54 +111,49 @@ class NostrIdentityService implements IdentityService {
   /// real [NostrIdentityManager.newInstance].
   final Future<NostrIdentityManager> Function() _managerFactory;
 
+  final bool _isIOS;
+
   NostrIdentityManager? _manager;
   bool _initialized = false;
 
   /// Guards [_ensureInitialized] against concurrent callers each starting
   /// their own manager construction / storage read — see that method's doc.
-  Completer<NostrIdentityManager>? _initCompleter;
+  Completer<_Loaded>? _initCompleter;
 
-  /// Creates platform-optimized secure storage.
-  static FlutterSecureStorage _createSecureStorage() {
-    return const FlutterSecureStorage(
-      iOptions: IOSOptions(
-        accessibility: KeychainAccessibility.first_unlock_this_device,
-      ),
-    );
-  }
-
-  /// Ensures the manager is initialized and identity is loaded from storage.
+  /// Ensures the manager is initialized and identity is loaded from storage,
+  /// and answers what this attempt's read showed.
   ///
-  /// **Only a load that actually produced an identity latches.**
+  /// **Only a load that produced a stored identity latches.**
   /// [_initialized] short-circuits every later call, so latching a load that
   /// yielded nothing would strand the whole process in a logged-out state:
   /// `MapShell` would never start the receive plane (no live-sync engine, no
   /// KeyPackage publish), and nothing would re-read storage until the app
-  /// restarted.
+  /// restarted. A key the manager holds that storage did not return (one a
+  /// create is still writing) does not latch either.
   ///
-  /// A secure-storage read is not reliably definitive. An iOS Keychain entry
-  /// written with `first_unlock_this_device` can read back `null` while
-  /// protected data is momentarily unavailable — before first unlock, on a
-  /// cold boot, or when several `FlutterSecureStorage` instances race (the
-  /// observed iOS CI failure: the identity was present, one read returned
-  /// null, and the session never recovered). Treating that as "no identity,
-  /// forever" is the bug; retrying costs one extra read per call while
-  /// genuinely logged out, and the flag latches the moment a key is resident.
+  /// A read that produced no identity is not proof that none is stored: the
+  /// observed iOS CI failure had the identity present and one read produce
+  /// none. The plugin answers `null` for a missing item and for a value that
+  /// is not UTF-8, and throws on any other failure — on iOS any Keychain
+  /// status but success and not-found, e.g. while protected data is
+  /// unavailable. A throw, or a value that does not decode or load, is
+  /// [_StoredKey.unknown]: nothing may write a key while it stands.
   ///
   /// **Concurrent callers share one in-flight attempt.** Several UI paths
   /// (the Identity page alone fires 4-6 on open) call this within the same
   /// microtask window; without [_initCompleter] each would race its own
   /// [_managerFactory] call and its own secure-storage read. The first caller
   /// creates the completer and does the work; every caller that arrives while
-  /// it is set awaits the same [Completer.future] instead of starting a
-  /// second one. The completer is cleared (in `finally`) the moment that
-  /// attempt settles — success, a caught storage error, or a thrown one — so
-  /// the no-latch-on-a-miss contract above is unaffected: the *next*,
-  /// non-concurrent call still starts a fresh attempt and re-reads storage.
-  Future<NostrIdentityManager> _ensureInitialized() async {
+  /// it is set awaits the same [Completer.future] — and so that attempt's
+  /// result — instead of starting a second one. The completer is cleared (in
+  /// `finally`) the moment that attempt settles — success, a caught storage
+  /// error, or a thrown one — so the no-latch-on-a-miss contract above is
+  /// unaffected: the *next*, non-concurrent call still starts a fresh attempt
+  /// and re-reads storage.
+  Future<_Loaded> _ensureInitialized() async {
     final cached = _manager;
     if (cached != null && _initialized) {
-      return cached;
+      return (manager: cached, storedKey: _StoredKey.present);
     }
 
     final inFlight = _initCompleter;
@@ -155,7 +161,7 @@ class NostrIdentityService implements IdentityService {
       return inFlight.future;
     }
 
-    final completer = Completer<NostrIdentityManager>();
+    final completer = Completer<_Loaded>();
     // When nothing raced this call there is no second awaiter, so the error
     // completion below would reach the zone as an UNHANDLED async error even
     // though `rethrow` already delivers it to the real caller. `ignore()`
@@ -171,26 +177,39 @@ class NostrIdentityService implements IdentityService {
       // loaded.
       final manager = _manager ??= await _managerFactory();
 
+      final String? storedBytes;
       try {
-        final storedBytes = await _storage.read(key: _storageKey);
+        storedBytes = await _storage.read(key: identityStorageKey);
         if (storedBytes != null) {
-          await manager.loadFromBytes(secretBytes: base64Decode(storedBytes));
+          final bytes = base64Decode(storedBytes);
+          try {
+            await manager.loadFromBytes(secretBytes: bytes);
+          } finally {
+            bytes.fillRange(0, bytes.length, 0);
+          }
         }
       } on Object catch (e) {
-        // Security Rule 6/8: runtimeType only — never let key material or
-        // internal state reach a log. Leaving `_initialized` false is the
-        // point: a corrupt-or-unreadable read must be retried, not cached.
+        // Security Rule 6/8: runtimeType and an iOS OSStatus only — never let
+        // key material or internal state reach a log. Leaving `_initialized`
+        // false is the point: a corrupt-or-unreadable read must be retried,
+        // not cached.
+        final keychainStatus = _keychainStatus(e);
         debugPrint(
-          'Warning: identity load failed (${e.runtimeType}); '
+          'Warning: identity load failed (${e.runtimeType}$keychainStatus); '
           'retrying on next access',
         );
-        completer.complete(manager);
-        return manager;
+        final loaded = (manager: manager, storedKey: _StoredKey.unknown);
+        completer.complete(loaded);
+        return loaded;
       }
 
-      _initialized = manager.hasIdentity();
-      completer.complete(manager);
-      return manager;
+      _initialized = storedBytes != null && manager.hasIdentity();
+      final loaded = (
+        manager: manager,
+        storedKey: storedBytes == null ? _StoredKey.absent : _StoredKey.present,
+      );
+      completer.complete(loaded);
+      return loaded;
     } on Object catch (e, st) {
       // _managerFactory() itself threw (outside the storage try/catch above):
       // propagate to every waiter, not just this caller.
@@ -199,6 +218,69 @@ class NostrIdentityService implements IdentityService {
     } finally {
       _initCompleter = null;
     }
+  }
+
+  /// The Keychain status of an iOS secure-storage failure, for its log line.
+  ///
+  /// An OSStatus is a platform error code that tells no user apart. Nothing
+  /// else of the exception is logged: its message is free text, and an
+  /// Android `details` is a stack trace.
+  String _keychainStatus(Object error) {
+    if (!_isIOS || error is! PlatformException) return '';
+    final status = error.details;
+    return status is int ? ', Keychain status $status' : '';
+  }
+
+  /// Writes the key [manager] has just created or imported, or takes it out
+  /// of memory again: a key that is not stored must not be used, since
+  /// everything published under it is lost at the next start.
+  ///
+  /// Refuses when storage holds a key or cannot say: the read before this
+  /// returned nothing, but that is not proof (see [_ensureInitialized]), and
+  /// an iOS write over an existing item that fails to update it deletes it.
+  Future<void> _storeNewKey(NostrIdentityManager manager) async {
+    try {
+      final bool occupied;
+      try {
+        occupied = await _storage.containsKey(key: identityStorageKey);
+      } on Object catch (e) {
+        final keychainStatus = _keychainStatus(e);
+        debugPrint(
+          'Warning: identity storage check failed '
+          '(${e.runtimeType}$keychainStatus)',
+        );
+        throw const IdentityStorageUnavailableException();
+      }
+      if (occupied) throw const IdentityStorageUnavailableException();
+      // `withFreshSecret` owns the raw 32-byte buffer and scrubs THAT the
+      // instant the write settles, so it never outlives the call (Security
+      // Rule 9). It does NOT scrub the base64 `String`:
+      // `flutter_secure_storage.write` takes only a `String`, and Dart
+      // strings are immutable with no overwrite API, so that copy survives
+      // until the GC reclaims it. Encoding inside the callback keeps the raw
+      // buffer's life short; the String is an irreducible residual of the
+      // plugin's String-only API, not something this code can wipe.
+      await withFreshSecret(
+        manager.getSecretBytes,
+        (secret) => _storage.write(
+          key: identityStorageKey,
+          value: base64Encode(secret),
+        ),
+      );
+    } on Object {
+      _initialized = false;
+      try {
+        await manager.deleteIdentity();
+      } on Object catch (e) {
+        // Rust's in-memory delete fails only on a poisoned lock; the unstored
+        // key then stays in memory.
+        debugPrint('[Identity] unstored key removal failed: ${e.runtimeType}');
+      }
+      rethrow;
+    }
+    // A key is now resident and stored: latch so `_ensureInitialized` stops
+    // re-reading storage on every access.
+    _initialized = true;
   }
 
   /// Converts a Rust timestamp to DateTime.
@@ -210,13 +292,17 @@ class NostrIdentityService implements IdentityService {
 
   @override
   Future<bool> hasIdentity() async {
-    final manager = await _ensureInitialized();
-    return manager.hasIdentity();
+    final (:manager, :storedKey) = await _ensureInitialized();
+    if (manager.hasIdentity()) return true;
+    if (storedKey == _StoredKey.unknown) {
+      throw const IdentityStorageUnavailableException();
+    }
+    return false;
   }
 
   @override
   Future<Identity?> getIdentity() async {
-    final manager = await _ensureInitialized();
+    final manager = (await _ensureInitialized()).manager;
 
     try {
       final rustIdentity = manager.getIdentity();
@@ -237,35 +323,23 @@ class NostrIdentityService implements IdentityService {
 
   @override
   Future<Identity> createIdentity() async {
-    final manager = await _ensureInitialized();
+    final (:manager, :storedKey) = await _ensureInitialized();
+    if (storedKey == _StoredKey.unknown) {
+      throw const IdentityStorageUnavailableException();
+    }
 
     try {
       // Create identity in Rust
       final rustIdentity = await manager.createIdentity();
-
-      // Persist secret bytes to secure storage. `withFreshSecret` owns the raw
-      // 32-byte buffer and scrubs THAT the instant the write settles, so it
-      // never outlives the call (Security Rule 9). It does NOT scrub the
-      // base64 `String`: `flutter_secure_storage.write` takes only a `String`,
-      // and Dart strings are immutable with no overwrite API, so that copy
-      // survives until the GC reclaims it. Encoding inside the callback keeps
-      // the raw buffer's life short; the String is an irreducible residual of
-      // the plugin's String-only API, not something this code can wipe.
-      await withFreshSecret(
-        manager.getSecretBytes,
-        (secret) =>
-            _storage.write(key: _storageKey, value: base64Encode(secret)),
-      );
-      // A key is now resident: latch so `_ensureInitialized` stops re-reading
-      // storage on every access (it deliberately does not latch a load that
-      // produced nothing — see its doc).
-      _initialized = true;
+      await _storeNewKey(manager);
 
       return Identity(
         pubkeyHex: rustIdentity.pubkeyHex,
         npub: rustIdentity.npub,
         createdAt: _timestampToDateTime(rustIdentity.createdAt),
       );
+    } on IdentityStorageUnavailableException {
+      rethrow;
     } on Exception catch (e) {
       debugPrint('Failed to create identity: ${e.runtimeType}');
       throw const IdentityServiceException('Failed to create identity');
@@ -274,28 +348,23 @@ class NostrIdentityService implements IdentityService {
 
   @override
   Future<Identity> importFromNsec(String nsec) async {
-    final manager = await _ensureInitialized();
+    final (:manager, :storedKey) = await _ensureInitialized();
+    if (storedKey == _StoredKey.unknown) {
+      throw const IdentityStorageUnavailableException();
+    }
 
     try {
       // Import identity in Rust
       final rustIdentity = await manager.importFromNsec(nsec: nsec);
-
-      // Persist secret bytes to secure storage — see `createIdentity` for what
-      // `withFreshSecret` scrubs here, and for the base64 `String` that no
-      // amount of scrubbing can reach.
-      await withFreshSecret(
-        manager.getSecretBytes,
-        (secret) =>
-            _storage.write(key: _storageKey, value: base64Encode(secret)),
-      );
-      // A key is now resident — see `createIdentity` for why this latches.
-      _initialized = true;
+      await _storeNewKey(manager);
 
       return Identity(
         pubkeyHex: rustIdentity.pubkeyHex,
         npub: rustIdentity.npub,
         createdAt: _timestampToDateTime(rustIdentity.createdAt),
       );
+    } on IdentityStorageUnavailableException {
+      rethrow;
     } on Exception catch (_) {
       debugPrint('[Identity] Import failed');
       throw const IdentityServiceException('Failed to import identity');
@@ -304,7 +373,7 @@ class NostrIdentityService implements IdentityService {
 
   @override
   Future<String> exportNsec() async {
-    final manager = await _ensureInitialized();
+    final manager = (await _ensureInitialized()).manager;
 
     try {
       // Awaited INSIDE the try (Security Rule 8): returning the future
@@ -326,7 +395,7 @@ class NostrIdentityService implements IdentityService {
       );
     }
 
-    final manager = await _ensureInitialized();
+    final manager = (await _ensureInitialized()).manager;
 
     try {
       return await manager.sign(messageHash: messageHash.toList());
@@ -338,7 +407,7 @@ class NostrIdentityService implements IdentityService {
 
   @override
   Future<String> getPubkeyHex() async {
-    final manager = await _ensureInitialized();
+    final manager = (await _ensureInitialized()).manager;
 
     try {
       return manager.pubkeyHex();
@@ -350,7 +419,7 @@ class NostrIdentityService implements IdentityService {
 
   @override
   Future<List<int>> getSecretBytes() async {
-    final manager = await _ensureInitialized();
+    final manager = (await _ensureInitialized()).manager;
 
     try {
       return await manager.getSecretBytes();
@@ -369,7 +438,7 @@ class NostrIdentityService implements IdentityService {
 
   @override
   Future<void> deleteIdentity() async {
-    final manager = await _ensureInitialized();
+    final manager = (await _ensureInitialized()).manager;
 
     // Read the pubkey BEFORE the identity is destroyed: the display-name
     // preference is keyed by it, and once the manager is wiped there is no way
@@ -384,9 +453,10 @@ class NostrIdentityService implements IdentityService {
     try {
       // Delete from Rust manager
       await manager.deleteIdentity();
+      _initialized = false;
 
       // Delete from secure storage
-      await _storage.delete(key: _storageKey);
+      await _storage.delete(key: identityStorageKey);
 
       // The display name lives in plain SharedPreferences — app-private, but
       // NOT encrypted, and not covered by the SQLCipher wipe. Left behind it

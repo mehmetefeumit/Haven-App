@@ -8,10 +8,10 @@
 // scheduler and `_startLiveSync()`.
 //
 // Asserts are live in debug and profile builds, and in every integration
-// test. So when one transient secure-storage read returned null (an iOS
-// Keychain entry written with `first_unlock_this_device` can read back null
-// while protected data is briefly unavailable), the assert threw and every
-// statement after it was skipped. The app kept running with NO receive plane
+// test. So when one transient secure-storage read produced no identity (the
+// identity was stored; the service then treated a null read and a failed one
+// alike as "none"), the assert threw and every statement after it was
+// skipped. The app kept running with NO receive plane
 // for the rest of the session, and the e2e scenario failed 20 s later on an
 // unrelated "peer location never surfaced" timeout that pointed nowhere near
 // the real cause.

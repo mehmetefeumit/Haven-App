@@ -80,6 +80,13 @@
 #     The production manifest must keep android.permission.INTERNET — it is
 #     the relay receive path; a release without it ships silently broken.
 #
+#   Android backup and transfer       scripts/ci/check_android_no_backup.sh
+#     Nothing of Haven's may leave the device in a backup or a device-to-device
+#     transfer. On some manufacturers' Android 12+ devices allowBackup="false"
+#     does not stop the transfer for an app targeting API 31+, so the
+#     manifest's dataExtractionRules must exclude every domain from both, and
+#     opt in to no cross-platform transfer.
+#
 #   App-wide FLAG_SECURE              scripts/ci/check_flag_secure_app_wide.sh
 #     Haven blocks screenshots everywhere in the app on Android. FLAG_SECURE is
 #     a WINDOW flag, so the per-Activity `setFlags` this replaced protected
@@ -1077,6 +1084,12 @@ jobs:
       - name: Android INTERNET permission
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_internet_permission.sh
+
+      - name: Android backup and device transfer carry nothing (static + self-test)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: |
+          bash scripts/ci/check_android_no_backup.sh --self-test
+          bash scripts/ci/check_android_no_backup.sh
 
       - name: FLAG_SECURE covers every Activity
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
