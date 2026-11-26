@@ -406,8 +406,8 @@ the coverage run).
   `ref.invalidate` must not hold a disposable ref; Flutter review F5).
   `refreshAll({maxAge})` builds the **union of all circles' member pubkeys plus the
   own pubkey** (§1.7) and hands it to `refreshRoster({maxAge})`, which batches it
-  into one FFI call → invalidate the `memberProfileProvider` family +
-  `ownProfileProvider`. An in-flight guard coalesces overlapping triggers into one
+  into one FFI call → invalidate the `memberProfileProvider` family,
+  `ownProfileProvider` and `displayNameProvider`. An in-flight guard coalesces overlapping triggers into one
   fetch plus a single queued follow-up (strictest pending tier wins), so a circle
   select landing on an anti-entropy tick costs one round trip, not two.
 - Refresh triggers: every transition to the foreground at `profileForegroundMaxAge`
