@@ -16,8 +16,11 @@
 #          as a SYSTEM start, passes the gate and publishes; no notice.
 #   B1     the guest powered off and booted (BOOT_COMPLETED — a phone that
 #          died): the same proof as U2.
-#   B2     "Allow all the time" revoked, the guest restarted: the notice is
-#          posted after the boot, no service runs.
+#   B2     "Allow all the time" revoked — waited onto the permission store, and
+#          read back as revoked after the boot — the guest restarted: the
+#          notice is posted after the boot and no service runs; or, when the
+#          revoke's kill already had its sticky restart refused (notice + stop)
+#          before the reboot, the boot starts no service.
 #   U3     granted again, `install -r`: running and publishing again (K's
 #          starting state).
 #   K      the battery-optimisation exemption granted, the app process killed
@@ -43,6 +46,8 @@
 #                            first fix and the service's start-up, with margin).
 #   RESUME_NOTICE_TIMEOUT    seconds for the resume notice (default 90).
 #   RESUME_BOOT_TIMEOUT      seconds for a restarted guest's boot (default 300).
+#   RESUME_PERSIST_TIMEOUT   seconds for B2's revoke to reach the permission
+#                            store (default 30).
 #
 # Writes /tmp/resume-logs/ (per-leg logcat and the drive log, uploaded), every
 # file of it through the log-privacy gate first.
@@ -74,6 +79,7 @@ readonly NOTICE_TIMEOUT="${RESUME_NOTICE_TIMEOUT:-90}"
 readonly BOOT_TIMEOUT="${RESUME_BOOT_TIMEOUT:-300}"
 readonly SHUTDOWN_TIMEOUT="${RESUME_SHUTDOWN_TIMEOUT:-120}"
 readonly ADB_READ_SECS="${RESUME_ADB_READ_SECS:-20}"
+readonly PERSIST_TIMEOUT="${RESUME_PERSIST_TIMEOUT:-30}"
 readonly GEO_SECS=5
 
 # The service's own markers (background_location_task.dart,
@@ -197,6 +203,25 @@ FIXTURES
     echo "SELF-TEST FAIL (wiring): the restart must boot the AVD with the workflow's own options and no snapshot" >&2
     fail=1
   fi
+  # B2's revoke must survive the power-off: adbd made root before the leg's
+  # capture (its restart would end it), the revoke made only through
+  # revoke_background_persisted, and the grant read again after the boot.
+  body="$(sed -n '/^main() {/,/^}/p' <<<"${real_run}")"
+  local step at prev=0
+  for step in 'become_root || fail ' 'start_logcat "${LOG_DIR}/logcat.b2-revoke.log"' \
+    'revoke_background_persisted' 'reboot_leg B2' 'background_granted && fail "B2: ${BG_PERM} reads granted again after the restart'; do
+    at="$(grep -nF -- "${step}" <<<"${body}" | cut -d: -f1 | head -n 1 || true)"
+    if [[ -z "${at}" ]] || (( at <= prev )); then
+      echo "SELF-TEST FAIL (wiring): B2 must run, in order, root, its capture, the persisted revoke, the reboot and the post-boot grant read; '${step}' is missing or out of order" >&2
+      fail=1
+      break
+    fi
+    prev="${at}"
+  done
+  if grep -qF 'pm revoke' <<<"${body}"; then
+    echo "SELF-TEST FAIL (wiring): main revokes a permission without waiting for the write to reach the store" >&2
+    fail=1
+  fi
   local workflow="${SCRIPT_DIR}/../../../.github/workflows/e2e-android-resume.yml" launched passed
   launched="$(grep -m1 -E '^[[:space:]]+emulator-options: -no-snapshot-save' "${workflow}" | sed -E 's/^[[:space:]]+emulator-options: //')"
   passed="$(grep -m1 -E '^[[:space:]]+RESUME_EMULATOR_OPTIONS: ' "${workflow}" | sed -E 's/^[[:space:]]+RESUME_EMULATOR_OPTIONS: //')"
@@ -208,7 +233,7 @@ FIXTURES
     echo "run-android-resume.sh: self-test FAILED" >&2
     return 1
   fi
-  echo "run-android-resume.sh: self-test passed (a cycle that published nothing is no publish; echo_log_tail withholds a tail the gate refuses; the gate library is sourced, the EXIT trap gates LOG_DIR, every echo of a captured log goes through the gate first, the manifest is sealed before the trap, no adb wait-for-device, and the restart boots the AVD with the workflow's own options)."
+  echo "run-android-resume.sh: self-test passed (a cycle that published nothing is no publish; echo_log_tail withholds a tail the gate refuses; the gate library is sourced, the EXIT trap gates LOG_DIR, every echo of a captured log goes through the gate first, the manifest is sealed before the trap, no adb wait-for-device, the restart boots the AVD with the workflow's own options, and B2's revoke is waited onto the permission store and read back after the boot)."
 }
 
 if [[ "${1:-}" == "--self-test" ]]; then
@@ -333,6 +358,47 @@ background_granted() {
   local out
   out="$(timeout "${ADB_READ_SECS}" adb -s "${DEVICE}" shell dumpsys package "${PKG}" 2>/dev/null || true)"
   grep -qF "${BG_PERM}: granted=true" <<<"${out}"
+}
+
+# adbd as root, for the permission store revoke_background_persisted reads. It
+# restarts adbd, which ends a running logcat capture, so it runs before the
+# leg's capture starts; a cold boot leaves adbd unprivileged again.
+become_root() {
+  timeout "${ADB_READ_SECS}" adb -s "${DEVICE}" root >/dev/null 2>&1 || true
+  local deadline=$(( SECONDS + ADB_READ_SECS )) uid
+  while (( SECONDS < deadline )); do
+    uid="$(timeout "${ADB_READ_SECS}" adb -s "${DEVICE}" shell id -u 2>/dev/null | tr -d '\r' || true)"
+    [[ "${uid}" == 0 ]] && return 0
+    sleep 1
+  done
+  return 1
+}
+
+# Runtime-permission changes reach disk on a DEFERRED write, and a power-off
+# before it lands brings the old grant back at the next boot (run
+# 45810833225's B2 resumed and published after a revoke made seconds before
+# `reboot -p`). So the leg waits, bounded, for the permission store's
+# modification time to move past the one read before the revoke.
+revoke_background_persisted() {
+  local store before now
+  store="$(timeout "${ADB_READ_SECS}" adb -s "${DEVICE}" shell \
+    'ls /data/misc_de/0/apexdata/com.android.permission/runtime-permissions.xml /data/system/users/0/runtime-permissions.xml 2>/dev/null' \
+    | head -n 1 | tr -d '\r' || true)"
+  [[ -n "${store}" ]] || fail "B2: no runtime-permissions store found on the guest."
+  before="$(timeout "${ADB_READ_SECS}" adb -s "${DEVICE}" shell stat -c %Y "${store}" 2>/dev/null | tr -d '\r' || true)"
+  [[ "${before}" =~ ^[0-9]+$ ]] || fail "B2: the runtime-permissions store's modification time is unreadable."
+  # One whole second past the read, so the write the revoke schedules cannot
+  # share `before`'s second and go unseen.
+  sleep 1
+  timeout "${ADB_READ_SECS}" adb -s "${DEVICE}" shell pm revoke "${PKG}" "${BG_PERM}" >/dev/null 2>&1 \
+    || fail "B2: could not revoke ${BG_PERM}."
+  local deadline=$(( SECONDS + PERSIST_TIMEOUT ))
+  while (( SECONDS < deadline )); do
+    now="$(timeout "${ADB_READ_SECS}" adb -s "${DEVICE}" shell stat -c %Y "${store}" 2>/dev/null | tr -d '\r' || true)"
+    [[ "${now}" =~ ^[0-9]+$ ]] && (( now > before )) && return 0
+    sleep 1
+  done
+  fail "B2: the revoke did not reach the runtime-permissions store within ${PERSIST_TIMEOUT}s."
 }
 
 assert_no_crash() {
@@ -494,15 +560,29 @@ main() {
   expect_resumed B1 "${LOG_DIR}/logcat.b1.log"
 
   echo "=== B2: reboot after \"Allow all the time\" is revoked ==="
+  become_root || fail "B2: adbd did not come back as root within ${ADB_READ_SECS}s."
   start_logcat "${LOG_DIR}/logcat.b2-revoke.log"
-  adb -s "${DEVICE}" shell pm revoke "${PKG}" "${BG_PERM}" >/dev/null 2>&1 || fail "B2: could not revoke ${BG_PERM}."
+  revoke_background_persisted
   background_granted && fail "B2: ${BG_PERM} still reads back as granted."
   reboot_leg B2
-  if grep -aqF -- "${MARK_REFUSED}" "${LOG_DIR}/logcat.b2-revoke.log"; then
-    echo "[B2] note: a sticky restart reached the gate before the reboot and was refused (notice + stop)." >&2
-  fi
+  # A grant back after the boot is a precondition the lane failed to set, not
+  # a resume verdict: the rule would rightly start the service.
+  background_granted && fail "B2: ${BG_PERM} reads granted again after the restart; the revoke did not survive it."
   start_logcat "${LOG_DIR}/logcat.b2.log" keep
-  expect_notice B2 "${LOG_DIR}/logcat.b2.log"
+  if grep -aqF -- "${MARK_REFUSED}" "${LOG_DIR}/logcat.b2-revoke.log"; then
+    # The revoke killed the process and its sticky restart was refused before
+    # the reboot: that refusal posted the notice and recorded Haven's stop, so
+    # the boot rightly starts nothing, and there is no second notice to wait for.
+    if wait_for_marker "${LOG_DIR}/logcat.b2.log" "${MARK_SYSTEM_START}" "${NOTICE_TIMEOUT}"; then
+      echo_log_tail "${LOG_DIR}/logcat.b2.log"
+      fail "B2: the boot started the service after a refused sticky restart had recorded Haven's stop."
+    fi
+    service_foreground && fail "B2: a service runs although the resume rule refused it."
+    assert_no_crash B2
+    echo "[B2] PASS: refused before the restart (notice + stop); the boot starts nothing."
+  else
+    expect_notice B2 "${LOG_DIR}/logcat.b2.log"
+  fi
 
   echo "=== U3: update with \"Allow all the time\" again ==="
   adb -s "${DEVICE}" shell pm grant "${PKG}" "${BG_PERM}" >/dev/null 2>&1 || fail "U3: could not grant ${BG_PERM}."

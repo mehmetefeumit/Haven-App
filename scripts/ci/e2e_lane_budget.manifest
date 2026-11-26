@@ -350,13 +350,23 @@ geo */start_geo#1/sleep:GEO_SECS#1 concurrent
 # whole bound, as can one more tick.
 notice-read */wait_for_notice#1/notice_posted#1/timeout:ADB_READ_SECS#1 within notice each read runs inside the notice loop's own window, which charges the last one
 notice */wait_for_notice#1/sleep:2#1 charge NOTICE_TIMEOUT + ADB_READ_SECS + 2
+# B2 after a sticky restart was refused before the reboot: the window in which
+# the boot must NOT start the service.
+marker-absent main#1/wait_for_marker#1/sleep:2#1 charge NOTICE_TIMEOUT + 2
 marker */wait_for_marker#*/sleep:2#1 charge RESUME_TIMEOUT + 2
 publish */wait_for_publish#1/sleep:2#1 charge RESUME_TIMEOUT + 2
 restart-off */restart_guest#1/sleep:2#1 charge SHUTDOWN_TIMEOUT + 2
 boot-read */wait_for_boot#1/timeout:ADB_READ_SECS#1 within boot each read runs inside the boot loop's own window, which charges the last one
 boot */wait_for_boot#1/sleep:2#1 charge BOOT_TIMEOUT + ADB_READ_SECS + 2
+root-read */become_root#1/timeout:ADB_READ_SECS#2 within root each read runs inside the root loop's own window, which charges the last one
+root */become_root#1/sleep:1#1 charge ADB_READ_SECS + ADB_READ_SECS + 1
+persist-read */revoke_background_persisted#1/timeout:ADB_READ_SECS#4 within persist each read runs inside the persist loop's own window, which charges the last one
+persist */revoke_background_persisted#1/sleep:1#2 charge PERSIST_TIMEOUT + ADB_READ_SECS + 1
+# The one second that keeps the revoke's write out of the second read before it.
+persist-gap */revoke_background_persisted#1/sleep:1#1 charge 1
 # One bounded adb read each: the service, the grant, the notice, the crash
-# buffer, the AVD name, the power-off and the process id.
+# buffer, the AVD name, the power-off, the process id, adbd's restart as root,
+# and the permission store's path, its first modification time and the revoke.
 adb-read */timeout:ADB_READ_SECS#* charge ADB_READ_SECS
 
 # ---------------------------------------------------------------------------

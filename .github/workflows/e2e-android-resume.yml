@@ -28,12 +28,12 @@ jobs:
     # The job cap must clear the SUM of the step caps (e2e-android.yml states
     # the rule): Build the runtime log scanner 10 + Restore Gradle dependency
     # cache 2 + Build the resume test APK 30 + Provision the Android SDK 11 +
-    # Create AVD snapshot 15 + the emulator step 99 (derived there) + the
-    # uncapped work below = 170.6 -> 171. That 3.6 is e2e-background-catchup's
+    # Create AVD snapshot 15 + the emulator step 105 (derived there) + the
+    # uncapped work below = 176.6 -> 177. That 3.6 is e2e-background-catchup's
     # measured worst, which runs the same uncapped steps; re-derive it from
     # this lane's own runs once it has them.
     # job-uncapped-minutes: 3.6 (52 runs, worst 34488512808)
-    timeout-minutes: 171
+    timeout-minutes: 177
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
       # Receive path, DECLARED — not inherited. `liveSyncEnabled` defaults to
@@ -237,11 +237,14 @@ jobs:
       # BOUNDS, innermost first: the drive's own timeout and every poll's
       # (run-android-resume.sh's constants); the DEADLINE below, which
       # check_e2e_lane_budget.sh holds to the sum of every wait the runner can
-      # reach; and this step's cap = DEADLINE + 1 (kill grace) + 7
-      # (emulator-boot-timeout) + 2 (the action's own setup and teardown, as
-      # the M7 lane measured).
+      # reach — 5643 s with its 180 s allowance (`--explain`), so 95m (5700 s);
+      # it was 89m until B2 began waiting for its revoke to reach the
+      # permission store (adbd's restart as root, the store's write, the
+      # post-boot grant read and the refused-before-reboot branch: 325 s); and
+      # this step's cap = DEADLINE + 1 (kill grace) + 7 (emulator-boot-timeout)
+      # + 2 (the action's own setup and teardown, as the M7 lane measured).
       - name: Run the resume legs on the emulator
-        timeout-minutes: 99
+        timeout-minutes: 105
         uses: reactivecircus/android-emulator-runner@v2
         env:
           RESUME_EMULATOR_OPTIONS: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
@@ -254,7 +257,7 @@ jobs:
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
           emulator-boot-timeout: 420
-          script: bash tooling/e2e/ci/run-with-deadline.sh 89m "e2e-android-resume legs" -- bash tooling/e2e/ci/run-android-resume.sh /tmp/integration-apks/android_resume_setup_test.apk
+          script: bash tooling/e2e/ci/run-with-deadline.sh 95m "e2e-android-resume legs" -- bash tooling/e2e/ci/run-android-resume.sh /tmp/integration-apks/android_resume_setup_test.apk
 
       # `if: always()` and `.log`, not `.txt`: the scan step below runs on every
       # outcome short of a cancellation and refuses an absent file, and the

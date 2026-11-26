@@ -600,8 +600,9 @@ kill; does NOT enter stopped state; jobs survive).
   *The FGS restart itself is not asserted here*: since 2026-11-26 it is the separate
   `e2e-android-resume.yml` lane (`tooling/e2e/ci/run-android-resume.sh`, legs U1 U2 B1 B2 U3 K: the
   resume notice after an update without "Allow all the time", a SYSTEM start that publishes after an
-  update and after a reboot with it, the notice again after a reboot with it revoked, and a sticky
-  restart after a SIGKILL with the battery-optimisation exemption). **Correction (2026-08-01):** this line
+  update and after a reboot with it, the notice again with it revoked — after the reboot, or before
+  it when the revoke's kill had its sticky restart refused, and then the boot starts nothing — and a
+  sticky restart after a SIGKILL with the battery-optimisation exemption). **Correction (2026-08-01):** this line
   previously said `pm grant` "cannot grant [ACCESS_BACKGROUND_LOCATION] on API 30+". That is false.
   The permission is `hardRestricted` in AOSP, but `adb install` sets
   `INSTALL_ALL_WHITELIST_RESTRICTED_PERMISSIONS` by default (only `--restrict-permissions` clears
