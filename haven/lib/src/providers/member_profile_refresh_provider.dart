@@ -19,12 +19,19 @@
 ///
 /// **Freshness model.** Haven holds no standing kind-0 subscription
 /// (migration plan §1.6/D3), so profile updates arrive only when something
-/// pulls them. Several layers do: cold start, circle select, app resume,
-/// roster change, a foreground anti-entropy timer, and an explicit refresh.
-/// Each states its own staleness tolerance via `maxAge`
+/// pulls them. Several layers do: every transition to the foreground (each
+/// cold start and each resume, at a 1-min tolerance), circle select, roster
+/// change, a foreground anti-entropy timer, and an explicit refresh. Each
+/// states its own staleness tolerance via `maxAge`
 /// (`constants/profile_refresh_tiers.dart`), so a trigger firing moments
 /// after another is a cheap no-op rather than a duplicate relay round trip.
+/// A refresh that met a circle session it could not open — on Android, one
+/// the foreground service still held at a resume — runs once more when the
+/// session next opens, if the app is then in front, at no stricter than the
+/// foreground tolerance.
 library;
+
+import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -37,6 +44,8 @@ import 'package:haven/src/providers/member_profile_provider.dart';
 import 'package:haven/src/providers/own_profile_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/mls_session_handover.dart' show appIsResumed;
+import 'package:haven/src/services/nostr_circle_service.dart';
 import 'package:haven/src/utils/log_alias.dart';
 
 /// Notifier that owns the batched member-profile refresh trigger.
@@ -79,12 +88,17 @@ class MemberProfileRefreshNotifier extends Notifier<void> {
   /// it to be erased.
   bool _disposed = false;
 
+  /// Tolerance of the refresh owed to the next open of the circle session —
+  /// `null` when none is owed. Strictest wins, as for [_queuedMaxAge].
+  Duration? _owedAtOpen;
+
   @override
   void build() {
     _disposed = false;
     _inFlight = false;
     _queuedMaxAge = null;
     _queuedPubkeys.clear();
+    _owedAtOpen = null;
     ref.onDispose(() => _disposed = true);
   }
 
@@ -98,11 +112,20 @@ class MemberProfileRefreshNotifier extends Notifier<void> {
   ///
   /// Own profile rides the same batch instead of a separate forced
   /// `fetch_my_profile`, so a refresh costs one relay round trip, not two.
-  Future<void> refreshAll({required Duration maxAge}) async {
+  Future<void> refreshAll({required Duration maxAge}) =>
+      _refreshAll(maxAge, oweOnEmpty: true);
+
+  Future<void> _refreshAll(Duration maxAge, {required bool oweOnEmpty}) async {
     if (!publicProfilesEnabled) return;
     if (_disposed) return;
 
+    // Taken before the read, so an open that completes while it fails counts.
+    final reopened = _nextSessionOpen();
     final resolved = await _readCircles();
+    // A refused open reads as no circles, and would leave every member out.
+    // The owed run itself never owes again: a user with no circles reads
+    // empty at every open, and would otherwise be owed one at each forever.
+    if (resolved.isEmpty && oweOnEmpty) _owe(reopened, maxAge);
     final pubkeys = <String>{
       for (final circle in resolved)
         for (final member in circle.members) member.pubkey,
@@ -126,7 +149,8 @@ class MemberProfileRefreshNotifier extends Notifier<void> {
   /// handler) must not block the UI on a relay round trip. Best-effort —
   /// failures are logged and swallowed, never rethrown, and never leave the
   /// family un-invalidated on a partial success (an empty result map from
-  /// the service is still a successful call).
+  /// the service is still a successful call). A failed fetch is owed to the
+  /// next session open ([_owe]).
   ///
   /// [maxAge] is the staleness tolerance; pick a tier from
   /// `constants/profile_refresh_tiers.dart`. Concurrent calls coalesce (see
@@ -164,12 +188,16 @@ class MemberProfileRefreshNotifier extends Notifier<void> {
         // Re-check: teardown can land between scheduling and running.
         if (_disposed) return;
         final service = ref.read(profileServiceProvider);
+        final reopened = _nextSessionOpen();
         final List<String> owed;
         try {
           owed = await service.refreshMemberProfiles(
             pubkeyHexes,
             maxAge: maxAge,
           );
+        } on Object {
+          _owe(reopened, maxAge);
+          rethrow;
         } finally {
           // Also on a throw: a partial Rust pass may have written rows.
           _invalidateProfiles();
@@ -205,6 +233,43 @@ class MemberProfileRefreshNotifier extends Notifier<void> {
         }
       }
     });
+  }
+
+  /// The next open of the circle session, or `null` for a circle service that
+  /// opens none.
+  Future<void>? _nextSessionOpen() {
+    final circleService = ref.read(circleServiceProvider);
+    return circleService is NostrCircleService
+        ? circleService.nextSessionOpen
+        : null;
+  }
+
+  /// Runs [refreshAll] once when [reopened] completes, however many refreshes
+  /// owed it meanwhile: on Android a resume's open can lose the session to the
+  /// foreground service, and nothing else would ask again until the next
+  /// trigger. A logout disposes this notifier, which [refreshAll] honours, and
+  /// its wipe means that open never comes.
+  ///
+  /// The run is automatic, so it is never forced (floored at
+  /// [profileForegroundMaxAge], keeping the per-author miss backoff), and an
+  /// open that lands while the app is not in front owes it to the resume,
+  /// which refreshes anyway: profile fetches are foreground-only.
+  void _owe(Future<void>? reopened, Duration maxAge) {
+    if (reopened == null) return;
+    final tier = maxAge < profileForegroundMaxAge
+        ? profileForegroundMaxAge
+        : maxAge;
+    final owed = _owedAtOpen;
+    _owedAtOpen = owed == null || tier < owed ? tier : owed;
+    if (owed != null) return;
+    unawaited(
+      reopened.then((_) {
+        final maxAge = _owedAtOpen;
+        _owedAtOpen = null;
+        if (maxAge == null || !appIsResumed()) return;
+        unawaited(_refreshAll(maxAge, oweOnEmpty: false));
+      }),
+    );
   }
 
   void _invalidateProfiles() {

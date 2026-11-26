@@ -9,6 +9,8 @@
 /// circle (AM-D2-1).
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -22,8 +24,10 @@ import 'package:haven/src/providers/sharing_health_provider.dart';
 import 'package:haven/src/rust/api.dart' show ChangeNoteFfi;
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/profile_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/utils/bidi_isolate.dart';
+import 'package:haven/src/utils/npub_validator.dart';
 import 'package:haven/src/widgets/circles/change_notice_card.dart';
 import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
 
@@ -31,37 +35,48 @@ import '../../helpers/fake_change_notices.dart';
 import '../../helpers/log_capture.dart';
 import '../../helpers/sheet_health_overrides.dart';
 import '../../mocks/mock_circle_service.dart';
+import '../../mocks/mock_profile_service.dart';
 
 const _selfPubkey =
     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const _bobPubkey =
     'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 
-Circle _circle({bool selfIsAdmin = true}) => TestCircleFactory.createCircle(
-  mlsGroupId: const [5, 5, 5],
-  nostrGroupId: const [6, 6, 6],
-  displayName: 'Family',
-  members: [
-    TestCircleFactory.createMember(
-      pubkey: _selfPubkey,
-      displayName: 'Me',
-      isAdmin: selfIsAdmin,
-    ),
-    TestCircleFactory.createMember(pubkey: _bobPubkey, displayName: 'Bob'),
-  ],
-);
+Circle _circle({bool selfIsAdmin = true, String? bobName = 'Bob'}) =>
+    TestCircleFactory.createCircle(
+      mlsGroupId: const [5, 5, 5],
+      nostrGroupId: const [6, 6, 6],
+      displayName: 'Family',
+      members: [
+        TestCircleFactory.createMember(
+          pubkey: _selfPubkey,
+          displayName: 'Me',
+          isAdmin: selfIsAdmin,
+        ),
+        TestCircleFactory.createMember(
+          pubkey: _bobPubkey,
+          displayName: bobName,
+        ),
+      ],
+    );
 
 class _Harness {
   _Harness({
     List<ChangeNoteFfi> notes = const [],
     List<bool> acks = const [true],
     this.selfIsAdmin = true,
+    this.bobName = 'Bob',
+    this.overrides = const [],
   }) : notices = FakeNoticeManager(notes: notes, acks: acks);
 
   final FakeNoticeManager notices;
   final bool selfIsAdmin;
+
+  /// Bob's local petname; `null` leaves his name to his public profile.
+  final String? bobName;
+  final List<Override> overrides;
   late final MockCircleService service = MockCircleService(
-    circles: [_circle(selfIsAdmin: selfIsAdmin)],
+    circles: [_circle(selfIsAdmin: selfIsAdmin, bobName: bobName)],
   );
   late ProviderContainer container;
 
@@ -69,11 +84,12 @@ class _Harness {
     tester.view.physicalSize = const Size(800, 5000);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
-    final circle = _circle(selfIsAdmin: selfIsAdmin);
+    final circle = _circle(selfIsAdmin: selfIsAdmin, bobName: bobName);
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
           ...sheetHealthOverrides(notices: notices),
+          ...overrides,
           circleServiceProvider.overrideWithValue(service),
           selectedCircleProvider.overrideWith((ref) => circle),
           identityProvider.overrideWith(
@@ -356,6 +372,29 @@ void main() {
       handle.dispose();
     });
 
+    testWidgets("names who is still in the circle by their profile's name "
+        'once it lands', (tester) async {
+      final profiles = _PendingMemberProfiles();
+      final h = _Harness(
+        notes: const [ChangeNoteFfi.queuedRemovalDropped],
+        bobName: null,
+        overrides: [profileServiceProvider.overrideWithValue(profiles)],
+      );
+      h.service.unmadeRemoval = const [_bobPubkey];
+      final l10n = await h.open(tester);
+      final label = l10n.changeNoticeStillInCircleLabel;
+      final npub = NpubValidator.shortenForDisplay(kTestNpub);
+      expect(find.text('$label ${bidiIsolate(npub)}'), findsOneWidget);
+
+      profiles.bob.complete(
+        const Profile(pubkeyHex: _bobPubkey, displayName: 'Bobby'),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('$label ${bidiIsolate('Bobby')}'), findsOneWidget);
+      expect(find.text('$label ${bidiIsolate(npub)}'), findsNothing);
+    });
+
     testWidgets('"Keep them" asks first: Cancel is the default and '
         'acknowledges nothing; the confirm, in the error colour, '
         'acknowledges once', (tester) async {
@@ -456,4 +495,15 @@ void main() {
       expect(_card, findsNothing);
     });
   });
+}
+
+/// A profile store whose read of Bob answers only when [bob] completes.
+class _PendingMemberProfiles extends MockProfileService {
+  final Completer<Profile?> bob = Completer<Profile?>();
+
+  @override
+  Future<Profile?> getMemberProfile(
+    String pubkeyHex, {
+    bool forceRefresh = false,
+  }) => pubkeyHex == _bobPubkey ? bob.future : Future.value();
 }

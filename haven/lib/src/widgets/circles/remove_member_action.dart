@@ -15,6 +15,7 @@ import 'package:haven/src/constants/feature_flags.dart';
 import 'package:haven/src/providers/member_profile_provider.dart';
 import 'package:haven/src/providers/member_removal_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/profile_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/utils/member_display.dart';
 import 'package:haven/src/utils/npub_validator.dart';
@@ -144,14 +145,27 @@ Future<void> removeMemberAndReport({
 /// npub is what the row itself is showing, and a confirmation that says
 /// less than the row it came from is a confirmation the user cannot check.
 /// The change card names the people a dropped removal kept the same way.
-String resolveRemovalDisplayName(WidgetRef ref, CircleMember member) {
-  final npubFallback = NpubValidator.shortenForDisplay(member.npub);
-  final profile = publicProfilesEnabled
-      ? ref.read(memberProfileProvider(member.pubkey)).valueOrNull
-      : null;
-  return resolveEffectiveMemberName(
-    localOverride: member.displayName,
-    profile: profile,
-    npubFallback: npubFallback,
-  );
-}
+String resolveRemovalDisplayName(WidgetRef ref, CircleMember member) =>
+    _removalDisplayName(
+      member,
+      publicProfilesEnabled
+          ? ref.read(memberProfileProvider(member.pubkey)).valueOrNull
+          : null,
+    );
+
+/// [resolveRemovalDisplayName] for a `build` method: the caller rebuilds when
+/// the member's profile lands, rather than keeping the npub it first read.
+String watchRemovalDisplayName(WidgetRef ref, CircleMember member) =>
+    _removalDisplayName(
+      member,
+      publicProfilesEnabled
+          ? ref.watch(memberProfileProvider(member.pubkey)).valueOrNull
+          : null,
+    );
+
+String _removalDisplayName(CircleMember member, Profile? profile) =>
+    resolveEffectiveMemberName(
+      localOverride: member.displayName,
+      profile: profile,
+      npubFallback: NpubValidator.shortenForDisplay(member.npub),
+    );
