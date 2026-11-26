@@ -80,7 +80,10 @@ readonly GEO_SECS=5
 # background_resume_gate.dart) and the setup drive's.
 readonly MARK_ARMED='[ResumeSetup] sharing service armed'
 readonly MARK_SYSTEM_START='[BackgroundTask] onStart (starter=TaskStarter.system)'
-readonly MARK_PUBLISHED='[BackgroundTask] Published to'
+# A cycle that published at least once: magnitudeBucket (log_alias.dart) prints
+# 0, 1, 2-4 or 5+, and `Published to 0/1` is a cycle that published NOTHING, so
+# a fixed-string match on the prefix would pass a resume that never sent a fix.
+readonly MARK_PUBLISHED_RE='\[BackgroundTask\] Published to (1|2-4|5\+)/'
 readonly MARK_REFUSED='[BackgroundTask] system start refused'
 # ResumeNotice.kt: its fixed id and channel, as `dumpsys notification` keys it.
 readonly NOTICE_KEY="|${PKG}|4832|"
@@ -99,6 +102,11 @@ echo_log_tail() {
     return 0
   fi
   tail -n "${lines}" "${log}" >&2 || true
+}
+
+# published_in <log> — whether <log> holds a cycle that published at least once.
+published_in() {
+  grep -aqE -- "${MARK_PUBLISHED_RE}" "$1" 2>/dev/null
 }
 
 # --self-test — hermetic: no device, no relay. The wiring, read from this file
@@ -129,6 +137,24 @@ run_self_test() {
     echo "SELF-TEST FAIL (echo_log_tail): a clean gate must print the tail (rc ${rc})" >&2
     fail=1
   fi
+
+  local line want got
+  while IFS='|' read -r want line; do
+    printf '%s\n' "I/flutter: ${line}" > "${tmp}/publish.log"
+    got=0
+    published_in "${tmp}/publish.log" && got=1
+    if [[ "${got}" != "${want}" ]]; then
+      echo "SELF-TEST FAIL (publish marker): '${line}' read as published=${got}, want ${want}" >&2
+      fail=1
+    fi
+  done <<'FIXTURES'
+0|[BackgroundTask] Published to 0/1 due circle(s)
+0|[BackgroundTask] Published to 0/2-4 due circle(s)
+0|[BackgroundTask] Published to
+1|[BackgroundTask] Published to 1/1 due circle(s)
+1|[BackgroundTask] Published to 2-4/5+ due circle(s)
+1|[BackgroundTask] Published to 5+/5+ due circle(s)
+FIXTURES
 
   real_run="$(grep -v '^[[:space:]]*#' "${BASH_SOURCE[0]}" | sed '/^run_self_test() {/,/^}/d')"
   if ! grep -qE '^source .*/logscan-gate\.sh"$' <<<"${real_run}"; then
@@ -182,7 +208,7 @@ run_self_test() {
     echo "run-android-resume.sh: self-test FAILED" >&2
     return 1
   fi
-  echo "run-android-resume.sh: self-test passed (echo_log_tail withholds a tail the gate refuses; the gate library is sourced, the EXIT trap gates LOG_DIR, every echo of a captured log goes through the gate first, the manifest is sealed before the trap, no adb wait-for-device, and the restart boots the AVD with the workflow's own options)."
+  echo "run-android-resume.sh: self-test passed (a cycle that published nothing is no publish; echo_log_tail withholds a tail the gate refuses; the gate library is sourced, the EXIT trap gates LOG_DIR, every echo of a captured log goes through the gate first, the manifest is sealed before the trap, no adb wait-for-device, and the restart boots the AVD with the workflow's own options)."
 }
 
 if [[ "${1:-}" == "--self-test" ]]; then
@@ -272,6 +298,16 @@ wait_for_marker() {
   return 1
 }
 
+wait_for_publish() {
+  local logfile="$1" timeout_s="$2"
+  local deadline=$(( SECONDS + timeout_s ))
+  while (( SECONDS < deadline )); do
+    published_in "${logfile}" && return 0
+    sleep 2
+  done
+  return 1
+}
+
 notice_posted() {
   local out
   out="$(timeout "${ADB_READ_SECS}" adb -s "${DEVICE}" shell dumpsys notification --noredact 2>/dev/null || true)"
@@ -350,7 +386,7 @@ expect_resumed() {
     echo_log_tail "${log}"
     fail "${leg}: no system start of the service within ${RESUME_TIMEOUT}s."
   fi
-  if ! wait_for_marker "${log}" "${MARK_PUBLISHED}" "${RESUME_TIMEOUT}"; then
+  if ! wait_for_publish "${log}" "${RESUME_TIMEOUT}"; then
     echo_log_tail "${log}"
     fail "${leg}: the resumed service did not publish within ${RESUME_TIMEOUT}s."
   fi
@@ -387,11 +423,13 @@ restart_guest() {
   [[ -n "${avd}" && "${avd}" != KO* ]] || fail "the emulator did not name its AVD."
   timeout "${ADB_READ_SECS}" adb -s "${DEVICE}" shell reboot -p >/dev/null 2>&1 || true
   local deadline=$(( SECONDS + SHUTDOWN_TIMEOUT ))
+  # The emulator process itself, as the M7 lane reads it: a helper that merely
+  # carries `-avd` in its argv would hold the wait for its whole budget.
   while (( SECONDS < deadline )); do
-    pgrep -f -- "-avd ${avd}" >/dev/null 2>&1 || break
+    pgrep -f 'qemu-system' >/dev/null 2>&1 || break
     sleep 2
   done
-  pgrep -f -- "-avd ${avd}" >/dev/null 2>&1 \
+  pgrep -f 'qemu-system' >/dev/null 2>&1 \
     && fail "the emulator was still running ${SHUTDOWN_TIMEOUT}s after the guest was powered off."
   # shellcheck disable=SC2086 # the workflow's emulator options, split as the action splits them
   setsid "${emulator}" -port "${port}" -avd "${avd}" ${RESUME_EMULATOR_OPTIONS} -no-snapshot-load \
