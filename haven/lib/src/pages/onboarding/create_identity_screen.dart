@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
+import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/constants/text_input_privacy.dart';
 import 'package:haven/src/pages/onboarding/onboarding_scaffold.dart';
 import 'package:haven/src/pages/settings/relay_settings_page.dart';
@@ -18,6 +19,7 @@ import 'package:haven/src/providers/own_reachability_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/providers/storage_reset_notice_provider.dart';
+import 'package:haven/src/services/android_background_location.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/profile_service.dart';
 import 'package:haven/src/test_keys.dart';
@@ -29,6 +31,7 @@ import 'package:haven/src/widgets/identity/avatar_initials.dart';
 import 'package:haven/src/widgets/identity/avatar_picker.dart';
 import 'package:haven/src/widgets/identity/public_profile_notice.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// Final onboarding screen: creates the Nostr identity and captures a display
 /// name in one action, then enters the map once others can invite the user.
@@ -395,16 +398,44 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
   /// Gated behind the shared prominent-disclosure dialog (Google Play
   /// "disclosure before collection"). Each OS request is best-effort: a denial
   /// is swallowed so it can never block the user from entering the app.
+  ///
+  /// On Android 11+ a disclosure shown here carries the "Allow all the time"
+  /// step, and its request follows the foreground one at once, ahead of the
+  /// notification and battery prompts: Play's disclosure must immediately
+  /// precede the request it explains, and MapShell's consent step must not
+  /// show a new user the same long dialog a second time.
   Future<void> _setUpLocationSharing() async {
-    final disclosed = await ref
-        .read(locationDisclosureControllerProvider.notifier)
-        .ensureDisclosed(context, includeBackground: true);
+    final controller = ref.read(locationDisclosureControllerProvider.notifier);
+    final allTime = ref.read(androidBackgroundLocationProvider);
+    final allTimeStatus = await allTime.status();
+    final stepNow =
+        allTimeStatus.missing &&
+        !await controller.backgroundDisclosureCurrent();
+    if (!mounted) return;
+    final disclosed = await controller.ensureDisclosed(
+      context,
+      includeBackground: true,
+      allTimeStep: stepNow ? allTimeStatus : null,
+    );
     if (!disclosed) return;
 
+    var foregroundGranted = false;
     try {
-      await ref.read(locationServiceProvider).requestPermission();
+      foregroundGranted = await ref
+          .read(locationServiceProvider)
+          .requestPermission();
     } on Object catch (e) {
       debugPrint('Onboarding location permission failed: ${e.runtimeType}');
+    }
+
+    if (stepNow) {
+      try {
+        if (foregroundGranted) await requestBackgroundLocation(allTime);
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setBool(kAndroidBackgroundLocationPromptedKey, true);
+      } on Object catch (e) {
+        debugPrint('Onboarding background location failed: ${e.runtimeType}');
+      }
     }
 
     try {
