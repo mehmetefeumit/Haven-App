@@ -61,7 +61,7 @@ SystemResumeDecision decideSystemResume({
 class ResumeGrants {
   /// Creates a snapshot of the grants.
   const ResumeGrants({
-    required this.foreground,
+    required this.foregroundGranted,
     required this.backgroundRequired,
     required this.backgroundGranted,
   });
@@ -69,13 +69,13 @@ class ResumeGrants {
   /// What a failed read reports: every grant missing, so a broken channel
   /// costs a notice, never a start the user did not allow.
   static const ResumeGrants none = ResumeGrants(
-    foreground: false,
+    foregroundGranted: false,
     backgroundRequired: true,
     backgroundGranted: false,
   );
 
   /// Fine or coarse location is granted.
-  final bool foreground;
+  final bool foregroundGranted;
 
   /// The OS restricts a background-started location service (Android 11+).
   final bool backgroundRequired;
@@ -100,7 +100,7 @@ class BackgroundResumeChannel {
       final map = await _channel.invokeMapMethod<String, Object?>('status');
       if (map == null) return ResumeGrants.none;
       return ResumeGrants(
-        foreground: map['foregroundGranted'] == true,
+        foregroundGranted: map['foregroundGranted'] == true,
         backgroundRequired: map['required'] != false,
         backgroundGranted: map['granted'] == true,
       );
@@ -200,7 +200,7 @@ class SystemStartGate {
       foregroundAccepted: foregroundAccepted,
       backgroundAccepted: backgroundAccepted,
       acceptedVersion: acceptedVersion,
-      locationGranted: grants.foreground,
+      locationGranted: grants.foregroundGranted,
       backgroundRequired: grants.backgroundRequired,
       backgroundGranted: grants.backgroundGranted,
     );
