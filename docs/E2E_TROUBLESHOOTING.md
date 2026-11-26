@@ -1445,7 +1445,12 @@ itself for the empty CMake project Flutter's `forceNdkDownload` points it at —
 and an OFFLINE AGP cannot: `[CXX1300] CMake '3.22.1' was not found in SDK,
 PATH, or by cmake.dir property`. `scripts/build_release.sh` provisions both
 through `build_apk_with_retry.sh --provision-only` when it builds offline (the
-Android launch gate's build mode).
+Android launch gate's build mode). Each `sdkmanager` call that script makes
+runs with `ANDROID_USER_HOME=$HOME/.android`: on a runner that sets
+`XDG_CONFIG_HOME`, sdkmanager (cmdline-tools 20.0) otherwise creates
+`$XDG_CONFIG_HOME/.android`, AGP then signs with
+a debug keystore there, and the launch gate stops at `no debug keystore at
+…/.android/debug.keystore` (CI run 45801715777).
 
 | rc | It means |
 |---|---|

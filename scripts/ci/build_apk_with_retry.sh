@@ -700,7 +700,11 @@ install_sdk_package() {
     out="$(mktemp)"
     started="$(build_now)"
     rc=0
-    timeout -k 10 "$(ndk_attempt_secs)" "${sdkmanager}" "--sdk_root=${sdk}" --install "${pkg}" \
+    # sdkmanager would otherwise CREATE $XDG_CONFIG_HOME/.android (the runner
+    # sets XDG_CONFIG_HOME), and AGP then keeps its debug keystore there, not
+    # in ~/.android where the launch gate re-signs from (CI run 45801715777).
+    ANDROID_USER_HOME="${HOME}/.android" \
+      timeout -k 10 "$(ndk_attempt_secs)" "${sdkmanager}" "--sdk_root=${sdk}" --install "${pkg}" \
       > "${out}" 2>&1 <<<"$(printf 'y\n%.0s' {1..16})" || rc=$?
     elapsed=$(( $(build_now) - started ))
     if "${grader}" "${dir}" "${ver}"; then
@@ -814,7 +818,7 @@ provision_sdk() {
 # ---------------------------------------------------------------------------
 # Self-test: hermetic. A fake `flutter` on PATH, no network, no real waiting.
 # ---------------------------------------------------------------------------
-readonly SELF_TEST_FIXTURES=35
+readonly SELF_TEST_FIXTURES=36
 
 # The verbatim Gradle output of CI run 35622556197 job 106414462454. Fixtures
 # assert against what the runner actually printed, not a paraphrase of it: a
@@ -1020,6 +1024,7 @@ write_fake_sdkmanager() {
 #!/usr/bin/env bash
 set -u
 sdk='${sdk}'; ver='${FAKE_NDK_VERSION}'; mode='${mode}'; cmake_mode='${cmake_mode}'
+printf '%s %s\n' "\${3:-}" "\${ANDROID_USER_HOME:-unset}" >> "\${sdk}/user-home"
 if [[ \$# -eq 3 && "\$1" == "--sdk_root=\${sdk}" && "\$2" == "--install" && "\$3" == "cmake;${CMAKE_VERSION}" ]]; then
   echo x >> "\${sdk}/cmake-invocations"
   if [[ "\${cmake_mode}" == ok ]]; then
@@ -1637,6 +1642,22 @@ Caused by: java.net.SocketTimeoutException: Read timed out" \
     _fail p10 "a CMake that never lands must fail with rc ${RC_SDK_FAILED} after ${MAX_ATTEMPTS} calls and one annotation naming it; got rc=${rc}, $(sdk_invocations "${sdk}" cmake-invocations) call(s): ${out}"
   fi
 
+  # (p13) Every sdkmanager call is told ANDROID_USER_HOME=$HOME/.android, so
+  #       on a runner that sets XDG_CONFIG_HOME it creates no
+  #       $XDG_CONFIG_HOME/.android for AGP to adopt as the debug keystore's
+  #       home (CI run 45801715777: the launch gate found no keystore in
+  #       ~/.android).
+  ran=$(( ran + 1 ))
+  sdk="${tmp}/p13"; write_fake_sdkmanager "${sdk}" ok ok
+  rc=0
+  out="$(export HOME="${tmp}/p13-home" XDG_CONFIG_HOME="${tmp}/p13-home/.config" HAVEN_BUILD_RETRY_STATE="${tmp}/p13.budget"
+         unset ANDROID_USER_HOME
+         provision_ndk "${fr}" "${sdk}" "${app}" && provision_cmake "${sdk}" 2>&1)" || rc=$?
+  if (( rc != 0 )) || [[ "$(cat "${sdk}/user-home" 2>/dev/null)" != "ndk;${FAKE_NDK_VERSION} ${tmp}/p13-home/.android
+cmake;${CMAKE_VERSION} ${tmp}/p13-home/.android" ]]; then
+    _fail p13 "both installs must run sdkmanager with ANDROID_USER_HOME=\$HOME/.android; got rc=${rc}, '$(cat "${sdk}/user-home" 2>/dev/null)': ${out}"
+  fi
+
   # (p11) --provision-only, scripts/build_release.sh's offline path: on CI it
   #       provisions both packages and builds nothing; off CI it touches
   #       nothing; an NDK that cannot be had is its exit code.
@@ -1840,7 +1861,7 @@ java.io.IOException: No space left on device"
     echo "${SCRIPT_NAME}: SELF-TEST FAILED — ran ${ran} fixture(s), expected exactly ${SELF_TEST_FIXTURES}; a fixture was added or removed without moving the pin" >&2
     return 1
   fi
-  echo "${SCRIPT_NAME}: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: a transient 429 is ridden out on the second attempt after exactly one ladder pause, and so is the wrapper's 504 fetching the Gradle distribution, and the fake proves it refuses both a non-build argv and a build missing the flags this script adds; a compile error and a disk exhaustion each fail once with their own exit code, their original output and the right verdict; a persistent 429 stops at exactly ${MAX_ATTEMPTS} attempts with one ::error:: saying INFRASTRUCTURE and that no test ran, the Gradle error still shown; a budget spent by an earlier build in the step starts no further attempt, and a retried build charges the shared budget while a clean one charges nothing; an attempt long enough that repeating it would not fit the budget is never started, while a short one under the same injected clock still is; every retriable signature is load-bearing on its own, this repo's real wrapped 403 is retried while a bare status line decides nothing, a plugin marker Gradle reports missing is retried while a version-less plugin request is not, the wrapper's distribution download is retried on a 5xx but not on a 404, a checksum mismatch or another URL, and a capacity signature beats a resolution one; the annotation names a rate limit only where a 429 says so, names a failed distribution download with its status, names the missing-coordinate shape as the ambiguity it is without reprinting the coordinate, and otherwise admits the cause is not knowable; a spent budget left by another run is not read; the script itself issues the build argv the lanes depend on; on CI the NDK Flutter asks for is installed in one call when missing, left alone when present and complete and reinstalled when its package.xml is missing, a truncated install is graded failed despite its manifest, its download cache cleared and the charged retry installs it, another revision is replaced, a yes-machine sdkmanager fails closed at ${MAX_ATTEMPTS} calls with one INFRASTRUCTURE annotation, a hung one is killed at the attempt bound and not repeated past the budget, and every input this script owns fails as broken before any call; end to end the script installs the Maven Central fallback init script and provisions before it builds against the real app build file, stops before Gradle when the NDK cannot be had, and off CI never touches the SDK or GRADLE_USER_HOME; CMake, which an offline AGP cannot install, is provisioned too — installed when missing, left alone when present, refused when its cmake does not run, failing closed with one annotation naming it — and --provision-only provisions both on CI, builds nothing and touches nothing off CI, and build_release.sh turns its failure into its own rc 4; offline, Gradle's offline wording is a gap and so is every Gradle resolution wording (a missing plugin marker says nothing about offline), while rustup's reset, cargo's curl timeout and curl's failed lookup stay retriable, capacity still wins and a compile error stays one, a gap is tried once and uncharged with one ::error:: naming the coordinate (or marker) as the deps job's and no URL, the offline init script is in init.d for exactly the build and gone after it on a red build as on a green one, absent without HAVEN_GRADLE_OFFLINE, and any value but 1 is refused before a build; --resolve-only runs havenResolveAll and the aapt2 witness from haven/android through the engine with the Central fallback installed, and offline tries a gap once; one backoff per pause, the ladder fits the budget, and more attempts than the ladder repeat its last pause)."
+  echo "${SCRIPT_NAME}: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: a transient 429 is ridden out on the second attempt after exactly one ladder pause, and so is the wrapper's 504 fetching the Gradle distribution, and the fake proves it refuses both a non-build argv and a build missing the flags this script adds; a compile error and a disk exhaustion each fail once with their own exit code, their original output and the right verdict; a persistent 429 stops at exactly ${MAX_ATTEMPTS} attempts with one ::error:: saying INFRASTRUCTURE and that no test ran, the Gradle error still shown; a budget spent by an earlier build in the step starts no further attempt, and a retried build charges the shared budget while a clean one charges nothing; an attempt long enough that repeating it would not fit the budget is never started, while a short one under the same injected clock still is; every retriable signature is load-bearing on its own, this repo's real wrapped 403 is retried while a bare status line decides nothing, a plugin marker Gradle reports missing is retried while a version-less plugin request is not, the wrapper's distribution download is retried on a 5xx but not on a 404, a checksum mismatch or another URL, and a capacity signature beats a resolution one; the annotation names a rate limit only where a 429 says so, names a failed distribution download with its status, names the missing-coordinate shape as the ambiguity it is without reprinting the coordinate, and otherwise admits the cause is not knowable; a spent budget left by another run is not read; the script itself issues the build argv the lanes depend on; on CI the NDK Flutter asks for is installed in one call when missing, left alone when present and complete and reinstalled when its package.xml is missing, a truncated install is graded failed despite its manifest, its download cache cleared and the charged retry installs it, another revision is replaced, a yes-machine sdkmanager fails closed at ${MAX_ATTEMPTS} calls with one INFRASTRUCTURE annotation, a hung one is killed at the attempt bound and not repeated past the budget, and every input this script owns fails as broken before any call; end to end the script installs the Maven Central fallback init script and provisions before it builds against the real app build file, stops before Gradle when the NDK cannot be had, and off CI never touches the SDK or GRADLE_USER_HOME; CMake, which an offline AGP cannot install, is provisioned too — installed when missing, left alone when present, refused when its cmake does not run, failing closed with one annotation naming it — and --provision-only provisions both on CI, builds nothing and touches nothing off CI, and build_release.sh turns its failure into its own rc 4; every sdkmanager call runs with ANDROID_USER_HOME=\$HOME/.android, so none creates the XDG folder AGP would keep its debug keystore in; offline, Gradle's offline wording is a gap and so is every Gradle resolution wording (a missing plugin marker says nothing about offline), while rustup's reset, cargo's curl timeout and curl's failed lookup stay retriable, capacity still wins and a compile error stays one, a gap is tried once and uncharged with one ::error:: naming the coordinate (or marker) as the deps job's and no URL, the offline init script is in init.d for exactly the build and gone after it on a red build as on a green one, absent without HAVEN_GRADLE_OFFLINE, and any value but 1 is refused before a build; --resolve-only runs havenResolveAll and the aapt2 witness from haven/android through the engine with the Central fallback installed, and offline tries a gap once; one backoff per pause, the ladder fits the budget, and more attempts than the ladder repeat its last pause)."
   return 0
 }
 
