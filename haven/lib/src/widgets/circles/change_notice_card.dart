@@ -262,7 +262,7 @@ class _ChangeNoticeCardState extends ConsumerState<ChangeNoticeCard> {
         ...widget.circle.members.where((m) => m.pubkey == hex),
     ];
     final keptNames = [
-      for (final member in keptMembers) resolveRemovalDisplayName(ref, member),
+      for (final member in keptMembers) watchRemovalDisplayName(ref, member),
     ];
     final self = ref.watch(identityProvider).valueOrNull?.pubkeyHex;
     final isAdmin =
