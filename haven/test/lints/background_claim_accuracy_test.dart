@@ -43,8 +43,9 @@
 // platform makes.
 //
 // A second tie lives here too. Two surfaces state the iPhone resume claim —
-// the consent dialog's iOS sentence and the iPhone sentences of the Location
-// settings page's opening paragraph — and they word it differently on purpose,
+// the consent dialog's iOS sentence and `locationSettingsIntroIos`, the iPhone
+// half of the Location settings page's opening paragraph — and they word it
+// differently on purpose,
 // so what is compared is the CLAIM (its conditions), never the bytes.
 @TestOn('vm')
 library;
@@ -201,13 +202,6 @@ String normalizeCopy(String text) => text
 List<String> _sentences(String text) => [
   for (final raw in normalizeCopy(text).split(_sentenceEnd))
     if (raw.trim().isNotEmpty) raw.trim(),
-];
-
-/// The sentences of [intro] about iPhone: each platform sentence starts with
-/// its platform (the ARB description requires it), so this is exact.
-List<String> iPhoneSentences(String intro) => [
-  for (final s in _sentences(intro))
-    if (s.startsWith('on iphone')) s,
 ];
 
 /// Returns every sentence in [text] that names the app being closed without
@@ -762,18 +756,23 @@ void main() {
   });
 
   group('iOS settings copy', () {
-    test('the intro has iPhone sentences to judge (anti-vacuity)', () {
-      expect(iPhoneSentences(en.locationSettingsIntro), hasLength(2));
+    test('the iPhone intro names Haven being closed (anti-vacuity)', () {
+      // A key that never names the closed state would pass every rule here
+      // by saying nothing.
+      expect(
+        _sentences(en.locationSettingsIntroIos).where(_notRunning.hasMatch),
+        isNotEmpty,
+      );
     });
 
     test("the intro's iPhone sentences and the While-Using note break no "
         'rule', () {
-      // The note renders only on iOS under While Using; the intro's iPhone
-      // sentences are the iPhone half of a paragraph both platforms read.
+      // The note renders only on iOS under While Using; an iPhone renders the
+      // common intro followed by the iPhone sentences.
       final offenders = <BackgroundClaimViolation>[
         ...findAllViolations(
-          iPhoneSentences(en.locationSettingsIntro).join('. '),
-          source: 'locationSettingsIntro (iPhone)',
+          '${en.locationSettingsIntro} ${en.locationSettingsIntroIos}',
+          source: 'locationSettingsIntro + locationSettingsIntroIos',
         ),
         ...findUnqualifiedClosedAppClaims(
           en.locationSettingsIosLimitedNote,
@@ -802,7 +801,7 @@ void main() {
   // Both surfaces that state the iPhone resume claim, tied to each other.
   //
   // `locationDisclosureBackgroundIos` is the sentence the user consents to
-  // before the permission prompt; the intro's iPhone sentences are what they
+  // before the permission prompt; `locationSettingsIntroIos` is what they
   // meet later above the toggle. The user who reads both must not be told two
   // different things about what happens after Haven is closed.
   group('the consent dialog and the settings intro state one claim', () {
@@ -832,9 +831,7 @@ void main() {
         'resume claim', () {
       for (final surface in <String, String>{
         'locationDisclosureBackgroundIos': en.locationDisclosureBackgroundIos,
-        'locationSettingsIntro (iPhone)': iPhoneSentences(
-          en.locationSettingsIntro,
-        ).join('. '),
+        'locationSettingsIntroIos': en.locationSettingsIntroIos,
       }.entries) {
         final profile = resumeClaimProfile(surface.value);
         expect(
@@ -851,9 +848,7 @@ void main() {
     test('the consent dialog and the settings intro state the SAME resume '
         'claim', () {
       final consent = resumeClaimProfile(en.locationDisclosureBackgroundIos);
-      final settings = resumeClaimProfile(
-        iPhoneSentences(en.locationSettingsIntro).join('. '),
-      );
+      final settings = resumeClaimProfile(en.locationSettingsIntroIos);
       expect(
         consent,
         equals(settings),

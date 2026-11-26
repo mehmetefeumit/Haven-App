@@ -13,6 +13,7 @@ import 'package:geolocator/geolocator.dart' as geo;
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/background_location_provider.dart';
 import 'package:haven/src/providers/location_disclosure_provider.dart';
+import 'package:haven/src/providers/location_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/android_background_location.dart';
 import 'package:haven/src/services/background_location_manager.dart';
@@ -167,8 +168,12 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage>
         _say(messenger, l10n.locationSettingsDisabledSnack);
       } else {
         // ENABLE — disclosure gate first, then permission gate. On Android 11+
-        // without "Allow all the time" the disclosure carries that step when it
-        // is shown now, so the request below follows ONE dialog.
+        // without "Allow all the time" a disclosure shown now carries that
+        // step, and its request follows Agree at once, ahead of the
+        // notification and battery prompts: Play's disclosure must
+        // immediately precede the request it explains. Android asks for the
+        // background grant only on top of a foreground one, so without that
+        // there is no step and the standing advisory offers it later.
         final controller = ref.read(
           locationDisclosureControllerProvider.notifier,
         );
@@ -176,34 +181,40 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage>
         final allTimeStatus = await allTime.status();
         final disclosureShownNow = !await controller
             .backgroundDisclosureCurrent();
+        final stepNow =
+            allTimeStatus.missing &&
+            allTimeStatus.foregroundGranted &&
+            disclosureShownNow;
         if (!mounted) return;
         final disclosed = await controller.ensureDisclosed(
           context,
           includeBackground: true,
-          allTimeStep: allTimeStatus.missing ? allTimeStatus : null,
+          allTimeStep: stepNow ? allTimeStatus : null,
         );
         if (!mounted) return;
         if (!disclosed) return;
+        if (stepNow) {
+          await requestBackgroundLocation(allTime);
+          if (!mounted) return;
+        }
 
         final result = await ref
             .read(backgroundSharingProvider.notifier)
             .setEnabled(enabled: true);
         if (!mounted) return;
 
-        // The background permission needs the foreground one first, so only
-        // after an enable that got it.
+        // A user already at the current disclosure saw no dialog above, so
+        // the step is its own dialog, once sharing is on.
         if (allTimeStatus.missing &&
+            !disclosureShownNow &&
             (result is EnsurePermissionsGranted ||
                 result is EnsurePermissionsBatteryOptDenied)) {
-          if (disclosureShownNow) {
-            await requestBackgroundLocation(allTime);
-          } else {
-            await _promptAllTime();
-          }
+          await _promptAllTime();
           if (!mounted) return;
-          ref.invalidate(backgroundLocationStatusProvider);
         }
-        ref.invalidate(backgroundDisclosureCurrentProvider);
+        ref
+          ..invalidate(backgroundLocationStatusProvider)
+          ..invalidate(backgroundDisclosureCurrentProvider);
 
         switch (result) {
           case EnsurePermissionsNotificationDenied():
@@ -244,6 +255,20 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage>
       if (mounted) {
         _say(messenger, l10n.locationSettingsErrorSnack);
       }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  /// Runs an advisory's [action] under the page's one [_busy] latch, so a
+  /// second tap before its dialog is up cannot stack another.
+  Future<void> _latched(Future<void> Function() action) async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      await action();
+    } on Object catch (e) {
+      debugPrint('[LocationSettings] ${e.runtimeType}');
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -307,6 +332,9 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage>
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final sharingEnabled = ref.watch(backgroundSharingProvider);
+    final platformIntro = ref.watch(isIOSProvider)
+        ? l10n.locationSettingsIntroIos
+        : l10n.locationSettingsIntroAndroid;
 
     // iOS only. Reports always (not limited) on non-iOS, so neither the note
     // nor the guidance card below can show there.
@@ -355,9 +383,10 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage>
       body: ListView(
         padding: const EdgeInsets.all(HavenSpacing.base),
         children: [
-          // Framing paragraph.
+          // Framing paragraph: the common sentences, then only this
+          // platform's. ONE Text, so a screen reader reads one paragraph.
           Text(
-            l10n.locationSettingsIntro,
+            '${l10n.locationSettingsIntro} $platformIntro',
             style: theme.textTheme.bodyMedium?.copyWith(
               color: scheme.onSurfaceVariant,
             ),
@@ -398,9 +427,11 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage>
             _ActionableNote(
               key: WidgetKeys.locationResumeConsentNote,
               icon: LucideIcons.info,
+              // Information, not a warning: sharing works as before.
+              iconColor: scheme.primary,
               message: l10n.locationSettingsResumeConsentNote,
               actionLabel: l10n.locationSettingsResumeConsentAction,
-              onAction: _reviewResumeNotice,
+              onAction: _busy ? null : () => _latched(_reviewResumeNotice),
             ),
           ],
 
@@ -413,8 +444,8 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage>
                 allTime?.optionLabel ??
                     l10n.locationBackgroundAllTimeOptionFallback,
               ),
-              actionLabel: l10n.commonOpenSettings,
-              onAction: _promptAllTime,
+              actionLabel: l10n.locationSettingsAndroidAllTimeAction,
+              onAction: _busy ? null : () => _latched(_promptAllTime),
             ),
           ],
 
@@ -526,13 +557,17 @@ class _ActionableNote extends StatelessWidget {
     required this.message,
     required this.actionLabel,
     required this.onAction,
+    this.iconColor = HavenSecurityColors.warning,
     super.key,
   });
 
   final IconData icon;
+  final Color iconColor;
   final String message;
   final String actionLabel;
-  final VoidCallback onAction;
+
+  /// Null while the page is busy, which disables the button.
+  final VoidCallback? onAction;
 
   @override
   Widget build(BuildContext context) {
@@ -545,21 +580,14 @@ class _ActionableNote extends StatelessWidget {
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Icon(
-                  icon,
-                  color: HavenSecurityColors.warning,
-                  size: 20,
-                ),
+                Icon(icon, color: iconColor, size: 20),
                 const SizedBox(width: HavenSpacing.md),
                 Expanded(child: Text(message)),
               ],
             ),
             Align(
               alignment: AlignmentDirectional.centerEnd,
-              child: TextButton(
-                onPressed: onAction,
-                child: Text(actionLabel),
-              ),
+              child: TextButton(onPressed: onAction, child: Text(actionLabel)),
             ),
           ],
         ),

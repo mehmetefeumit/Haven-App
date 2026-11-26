@@ -584,7 +584,7 @@ void main() {
     }
 
     const leadFragment = 'Background sharing has changed since you';
-    const stepFragment = 'Next, Android opens';
+    const stepFragment = 'Next, on the screen Android opens';
 
     setUp(() => resumedReads = []);
 

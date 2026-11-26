@@ -85,6 +85,35 @@ void main() {
       expect(status.missing, isTrue);
     });
 
+    test(
+      'reads the foreground grant; absent or mistyped is not held',
+      () async {
+        // Only a held foreground grant lets the disclosure promise the page
+        // Android opens next; anything else must not.
+        for (final (value, held) in <(Object?, bool)>[
+          (true, true),
+          (false, false),
+          (null, false),
+          ('true', false),
+        ]) {
+          answer(
+            (_) => <String, Object?>{
+              'required': true,
+              'granted': false,
+              'foregroundGranted': ?value,
+            },
+          );
+          expect(
+            (await api.status()).foregroundGranted,
+            held,
+            reason: '$value',
+          );
+        }
+        answer((_) => throw PlatformException(code: 'boom'));
+        expect((await api.status()).foregroundGranted, isFalse);
+      },
+    );
+
     test('an empty label is no label', () async {
       answer(
         (_) => <String, Object?>{

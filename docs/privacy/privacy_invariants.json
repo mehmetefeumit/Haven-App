@@ -151,7 +151,7 @@
       "reason": "Button label under locationSettingsResumeConsentNote that re-opens the updated background-sharing notice. A verb phrase naming an action; asserts nothing about behaviour."
     },
     "locationSettingsToggleSubtitle": {
-      "reason": "Toggle subtitle. Correct only by omission: it must describe the background scope without claiming sharing survives the system closing Haven, and is deliberately silent on the Android reboot/swipe-out asymmetry, which locationSettingsIntro states in full.",
+      "reason": "Toggle subtitle. Correct only by omission: it must describe the background scope without claiming sharing survives the system closing Haven, and is deliberately silent on the Android reboot/swipe-out asymmetry, which locationSettingsIntro and its platform sentences (locationSettingsIntroAndroid, locationSettingsIntroIos) state in full, directly above it.",
       "forbidden_additions": [
         "when the app is closed",
         "when Haven is closed",
@@ -509,6 +509,7 @@
       "residual": "What a device does is unproven in CI: no simulator lane can produce a location relaunch (docs/M7_BACKGROUND_SHARING.md §6 items 2-2l, DEFERRED for want of an iPhone), so that iOS relaunches a force-quit app, how long a session started from the background keeps the process executable, and the relaunch's battery cost (ESTIMATED only, docs/POWER_EFFICIENCY_PLAN.md §6.5a) rest on Apple's documentation. No XCTest runs in CI, so the native predicate, the launch window, the radius and the floor are pinned by check_ios_background_publish.sh (checks 4d, 9b, 13b, 20) and check_m7_native_wake_guards.sh as source shapes, not executed. The Dart half is executed host-side.",
       "assertion_arb_keys": [
         "locationDisclosureBackgroundIos",
+        "locationSettingsIntroIos",
         "locationSettingsIosLimitedNote"
       ],
       "disclosure_arb_keys": [
@@ -1171,6 +1172,7 @@
         "fgsNotificationSharing",
         "locationDisclosureBackgroundAndroid",
         "locationSettingsIntro",
+        "locationSettingsIntroAndroid",
         "androidResumeNoticeTitle",
         "androidResumeNoticeBody"
       ],
@@ -1294,7 +1296,7 @@
         },
         {
           "file": "haven/test/pages/settings/location_settings_page_test.dart",
-          "name": "a first enable shows ONE dialog carrying the step, then requests"
+          "name": "a first enable shows ONE dialog carrying the step, then requests before any other prompt"
         }
       ],
       "guards": [
@@ -1312,7 +1314,8 @@
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [
         "locationDisclosureBackgroundAndroid",
-        "locationSettingsIntro"
+        "locationSettingsIntro",
+        "locationSettingsIntroAndroid"
       ],
       "non_arb_claims": [],
       "symbols": [

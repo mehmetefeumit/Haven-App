@@ -350,21 +350,22 @@ void main() {
         'when Haven is in the background and you are not using it. If '
         "location is set to 'Always' and Haven is closed, even by you, Haven "
         'starts sharing again by itself once you have moved a few hundred '
-        'metres (after a restart, only once you have also unlocked your '
-        'phone); iOS decides when, so it is not guaranteed. With '
-        "'While Using the App', sharing stops when Haven is closed until you "
-        'open it again.';
+        'metres and iOS allows it. After a restart, this happens only once '
+        'you have also unlocked your phone. iOS decides when, so it is not '
+        "guaranteed. With 'While Using the App', sharing stops when Haven is "
+        'closed and stays stopped until you open it again.';
     const updateLead =
-        'Background sharing has changed since you turned it on. If you agree, '
-        'Haven can start sharing again by itself after it is closed or your '
-        "phone restarts, as described below. If you choose 'Not now', "
-        'background sharing keeps working as before, but it will not start '
-        'again by itself after Haven is closed or your phone restarts.';
+        'Background sharing has changed since you turned it on. Haven can now '
+        'start sharing again by itself after it has stopped, for example '
+        'after your phone restarts, in the cases described below. If you '
+        "choose 'Not now', background sharing keeps working as before, but "
+        'after it has stopped, it stays stopped until you open Haven.';
     String allTimeStep(String label) =>
-        "Next, Android opens Haven's location permission. Choose “$label” so "
-        'sharing starts again by itself after your phone restarts or Haven '
-        "updates. If you don't, sharing still works until then, and afterwards "
-        'Haven shows a notification you can tap to resume.';
+        "Next, on the screen Android opens, set Haven's location permission "
+        "to '$label' so sharing starts again by itself after your phone "
+        "restarts or Haven updates. If you don't, sharing keeps working until "
+        'your phone restarts or Haven updates, and then Haven shows a '
+        'notification you can tap to resume.';
     const manage =
         'You can turn background sharing off at any time in '
         'Settings → Location.';

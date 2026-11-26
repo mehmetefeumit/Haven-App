@@ -60,7 +60,7 @@
 	     limit; see test/lints/background_claim_accuracy_test.dart, which
 	     states why and enforces it here. -->
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-	<string>Haven shares your location with your trusted circles while it runs in the background. With Always, if Haven is closed it starts sharing again by itself once you have moved a few hundred metres, when iOS allows it. With While Using the App, sharing stops when Haven is closed until you open it again. Your location is always end-to-end encrypted.</string>
+	<string>Haven shares your location with your trusted circles while it runs in the background. With &apos;Always&apos;, if Haven is closed, it starts sharing again by itself once you have moved a few hundred metres and iOS allows it. iOS decides when, so it is not guaranteed. With &apos;While Using the App&apos;, sharing stops when Haven is closed and stays stopped until you open it again. Your location is always end-to-end encrypted.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Haven uses the camera only to scan a QR code when you add someone to a circle. No photos or video are taken or stored.</string>
 	<key>NSPhotoLibraryUsageDescription</key>

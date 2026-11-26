@@ -22,6 +22,7 @@ class BackgroundLocationStatus {
     required this.required,
     required this.granted,
     this.optionLabel,
+    this.foregroundGranted = true,
   });
 
   /// Off Android, and on Android 10 and below: nothing to ask for.
@@ -35,6 +36,7 @@ class BackgroundLocationStatus {
   static const BackgroundLocationStatus failClosed = BackgroundLocationStatus(
     required: true,
     granted: false,
+    foregroundGranted: false,
   );
 
   /// Whether this Android version needs the permission (API 30+).
@@ -45,6 +47,11 @@ class BackgroundLocationStatus {
 
   /// The OS's own localized "Allow all the time" label, when it has one.
   final String? optionLabel;
+
+  /// Whether a foreground location grant is held. Android shows its
+  /// background page only on top of one; without it a request falls through
+  /// to the App info page.
+  final bool foregroundGranted;
 
   /// Whether Haven still has to ask.
   bool get missing => required && !granted;
@@ -92,6 +99,7 @@ class MethodChannelAndroidBackgroundLocation
         required: required,
         granted: granted || !required,
         optionLabel: label is String && label.isNotEmpty ? label : null,
+        foregroundGranted: raw['foregroundGranted'] == true,
       );
     } on PlatformException catch (e) {
       debugPrint('[BackgroundLocation] status failed: ${e.code}');

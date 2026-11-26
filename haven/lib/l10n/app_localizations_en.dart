@@ -559,7 +559,15 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get locationSettingsIntro =>
-      'Haven shares your location with your circles whenever the app is open. Turn this on and your circles keep seeing it while Haven is in the background. Swiping Haven away does not turn this setting off; this switch does. On Android, sharing keeps going when you swipe Haven away. After your phone restarts or Haven updates, it starts again by itself if Haven may use your location all the time (on Android 10, whenever Haven may use your location); otherwise Haven shows a notification you can tap to resume. If Haven is force-stopped, sharing stays stopped until you open it. On iPhone with location set to \'Always\', sharing starts again by itself after Haven is closed, once you have moved a few hundred metres (after a restart, only once you have also unlocked your phone); iOS decides when, so it is not guaranteed. On iPhone with \'While Using the App\', sharing stops when Haven is closed and starts again when you open it.';
+      'Haven shares your location with your circles whenever the app is open. Turn this on and your circles keep seeing it while Haven is in the background. Swiping Haven away does not turn this setting off; only the switch below does.';
+
+  @override
+  String get locationSettingsIntroAndroid =>
+      'Sharing keeps going when you swipe Haven away. After your phone restarts or Haven updates, sharing starts again by itself if Haven may use your location all the time (on Android 10 or older, if Haven may use your location at all). Otherwise, Haven shows a notification you can tap to resume. If Haven is force-stopped, sharing stays stopped until you open it.';
+
+  @override
+  String get locationSettingsIntroIos =>
+      'With location set to \'Always\', sharing starts again by itself after Haven is closed, once you have moved a few hundred metres and iOS allows it. After your phone restarts, this happens only once you have also unlocked it. iOS decides when this happens, so it is not guaranteed. With \'While Using the App\', sharing stops when Haven is closed and starts again when you open it.';
 
   @override
   String get locationSettingsToggleTitle => 'Share in background';
@@ -574,15 +582,18 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get locationSettingsResumeConsentNote =>
-      'Background sharing is on, but Haven will not start it again by itself after it is closed or your phone restarts until you agree to the updated background-sharing notice.';
+      'Background sharing is on. If it stops, for example when your phone restarts, Haven will not start it again by itself until you agree to the updated background-sharing notice.';
 
   @override
   String get locationSettingsResumeConsentAction => 'Review notice';
 
   @override
   String locationSettingsAndroidAllTimeNote(String optionLabel) {
-    return 'Haven\'s location permission is not set to “$optionLabel”, so sharing won\'t start again by itself after your phone restarts or Haven updates. Haven will show a notification you can tap to resume.';
+    return 'Haven\'s location permission is not set to \'$optionLabel\', so sharing will not start again by itself after your phone restarts or Haven updates. Instead, Haven will show a notification you can tap to resume.';
   }
+
+  @override
+  String get locationSettingsAndroidAllTimeAction => 'Change permission';
 
   @override
   String get locationBackgroundAllTimeOptionFallback => 'Allow all the time';
@@ -635,7 +646,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get locationDisclosureBackgroundIos =>
-      'This app uses location data to enable sharing with your circles even when Haven is in the background and you are not using it. If location is set to \'Always\' and Haven is closed, even by you, Haven starts sharing again by itself once you have moved a few hundred metres (after a restart, only once you have also unlocked your phone); iOS decides when, so it is not guaranteed. With \'While Using the App\', sharing stops when Haven is closed until you open it again.';
+      'This app uses location data to enable sharing with your circles even when Haven is in the background and you are not using it. If location is set to \'Always\' and Haven is closed, even by you, Haven starts sharing again by itself once you have moved a few hundred metres and iOS allows it. After a restart, this happens only once you have also unlocked your phone. iOS decides when, so it is not guaranteed. With \'While Using the App\', sharing stops when Haven is closed and stays stopped until you open it again.';
 
   @override
   String get locationDisclosureManage =>
@@ -649,11 +660,11 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get locationDisclosureUpdateLead =>
-      'Background sharing has changed since you turned it on. If you agree, Haven can start sharing again by itself after it is closed or your phone restarts, as described below. If you choose \'Not now\', background sharing keeps working as before, but it will not start again by itself after Haven is closed or your phone restarts.';
+      'Background sharing has changed since you turned it on. Haven can now start sharing again by itself after it has stopped, for example after your phone restarts, in the cases described below. If you choose \'Not now\', background sharing keeps working as before, but after it has stopped, it stays stopped until you open Haven.';
 
   @override
   String locationBackgroundAllTimeStep(String optionLabel) {
-    return 'Next, Android opens Haven\'s location permission. Choose “$optionLabel” so sharing starts again by itself after your phone restarts or Haven updates. If you don\'t, sharing still works until then, and afterwards Haven shows a notification you can tap to resume.';
+    return 'Next, on the screen Android opens, set Haven\'s location permission to \'$optionLabel\' so sharing starts again by itself after your phone restarts or Haven updates. If you don\'t, sharing keeps working until your phone restarts or Haven updates, and then Haven shows a notification you can tap to resume.';
   }
 
   @override
