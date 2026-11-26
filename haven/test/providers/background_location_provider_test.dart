@@ -194,6 +194,68 @@ class _FakeIosBackgroundSessionService implements IosBackgroundSessionService {
 }
 
 // =============================================================================
+// D2 fakes: one running service shared by start and stop, a consent load and
+// an identity read the test releases in the order it chooses
+// =============================================================================
+
+/// A foreground service that is already running, as after a boot start or a
+/// swipe-away: start no-ops while it runs, stop kills it.
+class _FakeFgs {
+  _FakeFgs({required this.running});
+
+  bool running;
+  int startCalls = 0;
+  int stopCalls = 0;
+
+  Future<void> start({
+    required Function callback,
+    required String notificationText,
+  }) async {
+    startCalls++;
+    running = true;
+  }
+
+  Future<void> stop() async {
+    stopCalls++;
+    running = false;
+  }
+}
+
+/// The real notifier, whose consent load completes when the test says.
+class _GatedSharingNotifier extends BackgroundSharingNotifier {
+  _GatedSharingNotifier(Completer<bool> consent)
+    : super(
+        isAndroid: true,
+        isIOS: false,
+        iosLocationAuth: _FakeIosLocationAuth(),
+        iosBackgroundSession: _FakeIosBackgroundSessionService(),
+      ) {
+    // After the real load, which would otherwise overwrite the answer.
+    _consentLoaded = Future.wait([super.loaded, consent.future]).then((done) {
+      if (mounted) state = done[1] as bool;
+    });
+  }
+
+  late final Future<void> _consentLoaded;
+
+  @override
+  Future<void> get loaded => _consentLoaded;
+}
+
+/// An identity read that answers when the test says.
+class _HeldIdentityService extends _FakeIdentityService {
+  _HeldIdentityService(this._release) : super(identity: _loadedIdentity);
+
+  final Completer<void> _release;
+
+  @override
+  Future<Identity?> getIdentity() async {
+    await _release.future;
+    return identity;
+  }
+}
+
+// =============================================================================
 // Shared fixture identity
 // =============================================================================
 
@@ -452,6 +514,9 @@ void main() {
 
         // Reading the lifecycle provider triggers its synchronous body.
         // At this point: isAndroid=true, enabled=true, identity=loaded.
+        // The lifecycle provider acts only once the persisted consent has
+        // loaded (a cold launch must not act on the toggle's initial false).
+        await container.read(backgroundSharingLoadedProvider.future);
         container.read(backgroundServiceLifecycleProvider);
 
         // Allow any unawaited start/stop futures to drain.
@@ -507,6 +572,9 @@ void main() {
         container.read(backgroundSharingProvider.notifier);
         await Future<void>.delayed(Duration.zero);
         await container.read(identityProvider.future);
+        // The lifecycle provider acts only once the persisted consent has
+        // loaded (a cold launch must not act on the toggle's initial false).
+        await container.read(backgroundSharingLoadedProvider.future);
         container.read(backgroundServiceLifecycleProvider);
         await Future<void>.delayed(Duration.zero);
 
@@ -559,6 +627,9 @@ void main() {
         container.read(backgroundSharingProvider.notifier);
         await Future<void>.delayed(Duration.zero);
         await container.read(identityProvider.future);
+        // The lifecycle provider acts only once the persisted consent has
+        // loaded (a cold launch must not act on the toggle's initial false).
+        await container.read(backgroundSharingLoadedProvider.future);
         container.read(backgroundServiceLifecycleProvider);
         await Future<void>.delayed(Duration.zero);
         expect(tracker.startCallCount, equals(1), reason: 'baseline start');
@@ -684,6 +755,9 @@ void main() {
 
         // Sharing is disabled (default false via prefs).
         await container.read(identityProvider.future);
+        // The lifecycle provider acts only once the persisted consent has
+        // loaded (a cold launch must not act on the toggle's initial false).
+        await container.read(backgroundSharingLoadedProvider.future);
         container.read(backgroundServiceLifecycleProvider);
         await Future<void>.delayed(Duration.zero);
 
@@ -728,6 +802,9 @@ void main() {
         addTearDown(container.dispose);
 
         await container.read(identityProvider.future);
+        // The lifecycle provider acts only once the persisted consent has
+        // loaded (a cold launch must not act on the toggle's initial false).
+        await container.read(backgroundSharingLoadedProvider.future);
         container.read(backgroundServiceLifecycleProvider);
         await Future<void>.delayed(Duration.zero);
 
@@ -1595,6 +1672,130 @@ void main() {
         );
       },
     );
+  });
+
+  group('backgroundServiceLifecycleProvider — a cold launch never stops a '
+      'running service (D2)', () {
+    setUp(() => SharedPreferences.setMockInitialValues({}));
+
+    ({ProviderContainer container, _FakeFgs fgs}) launch({
+      required Completer<bool> consent,
+      required IdentityService identity,
+    }) {
+      final fgs = _FakeFgs(running: true);
+      final container = ProviderContainer(
+        overrides: [
+          platformIsAndroidProvider.overrideWithValue(true),
+          identityServiceProvider.overrideWithValue(identity),
+          backgroundSharingProvider.overrideWith(
+            (ref) => _GatedSharingNotifier(consent),
+          ),
+          backgroundServiceFunctionsProvider.overrideWithValue((
+            start: fgs.start,
+            stop: fgs.stop,
+          )),
+        ],
+      );
+      addTearDown(container.dispose);
+      // Listened, as MapShell's build watches it, so it rebuilds on change.
+      container.listen(backgroundServiceLifecycleProvider, (_, _) {});
+      return (container: container, fgs: fgs);
+    }
+
+    test(
+      'identity first, consent second: the service is never stopped',
+      () async {
+        final consent = Completer<bool>();
+        final release = Completer<void>();
+        final l = launch(
+          consent: consent,
+          identity: _HeldIdentityService(release),
+        );
+
+        release.complete();
+        await l.container.read(identityProvider.future);
+        await pumpEventQueue();
+        expect(
+          (l.fgs.startCalls, l.fgs.stopCalls),
+          (0, 0),
+          reason:
+              'before the consent has loaded, the toggle reads its initial '
+              'false: acting on it stops a service a boot or a swipe-away '
+              'left running, and writes the stop the next boot obeys',
+        );
+
+        consent.complete(true);
+        await pumpEventQueue();
+        expect(l.fgs.stopCalls, 0);
+        expect(l.fgs.running, isTrue);
+      },
+    );
+
+    test(
+      'consent first, identity second: the service is never stopped',
+      () async {
+        final consent = Completer<bool>();
+        final release = Completer<void>();
+        final l = launch(
+          consent: consent,
+          identity: _HeldIdentityService(release),
+        );
+
+        consent.complete(true);
+        await pumpEventQueue();
+        release.complete();
+        await l.container.read(identityProvider.future);
+        await pumpEventQueue();
+
+        expect(
+          l.fgs.stopCalls,
+          0,
+          reason:
+              'the build where enabled and identity first both hold must '
+              'not inherit a stop from the build before it',
+        );
+        expect(l.fgs.running, isTrue);
+        expect(l.fgs.startCalls, greaterThanOrEqualTo(1));
+      },
+    );
+
+    test(
+      'an identity reload while sharing is on does not stop the service',
+      () async {
+        final consent = Completer<bool>()..complete(true);
+        final l = launch(
+          consent: consent,
+          identity: _FakeIdentityService(identity: _loadedIdentity),
+        );
+        await l.container.read(identityProvider.future);
+        await pumpEventQueue();
+
+        l.container.invalidate(identityProvider);
+        await l.container.read(identityProvider.future);
+        await pumpEventQueue();
+
+        expect(l.fgs.stopCalls, 0);
+        expect(l.fgs.running, isTrue);
+      },
+    );
+
+    test('a consent that loads false stops the service exactly once', () async {
+      final consent = Completer<bool>();
+      final l = launch(
+        consent: consent,
+        identity: _FakeIdentityService(identity: _loadedIdentity),
+      );
+      await l.container.read(identityProvider.future);
+      await pumpEventQueue();
+      expect(l.fgs.stopCalls, 0, reason: 'nothing acts before the load');
+
+      consent.complete(false);
+      await pumpEventQueue();
+
+      expect(l.fgs.stopCalls, 1);
+      expect(l.fgs.startCalls, 0);
+      expect(l.fgs.running, isFalse);
+    });
   });
 }
 

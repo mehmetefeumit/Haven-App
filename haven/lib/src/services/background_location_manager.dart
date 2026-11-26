@@ -85,6 +85,28 @@ class BackgroundLocationManager {
   /// a genuine difference and repaints rather than being deduped away.
   static String? _lastNotificationText;
 
+  /// The tail of the start/stop queue.
+  ///
+  /// Every start and stop first asks the plugin whether the service is
+  /// running, and the answer only changes a turn after the request lands. Two
+  /// calls in flight together both read the old state: a start issued right
+  /// behind a stop returns "already running" and the stop then kills the
+  /// service. Queued, each call reads the state the previous one left.
+  /// `null` while nothing is queued, so an idle call starts at once.
+  static Future<void>? _tail;
+
+  static Future<void> _serialized(Future<void> Function() op) {
+    final previous = _tail;
+    final run = previous == null ? op() : previous.then((_) => op());
+    late final Future<void> tail;
+    // A failure belongs to its own caller and must not wedge the queue.
+    tail = run.then<void>((_) {}, onError: (Object _) {}).whenComplete(() {
+      if (identical(_tail, tail)) _tail = null;
+    });
+    _tail = tail;
+    return run;
+  }
+
   /// Initializes the foreground task configuration.
   ///
   /// Safe to call multiple times. Should be called early (from `main`
@@ -299,6 +321,13 @@ class BackgroundLocationManager {
   static Future<void> startService({
     required Function callback,
     required String notificationText,
+  }) => _serialized(
+    () => _startService(callback: callback, notificationText: notificationText),
+  );
+
+  static Future<void> _startService({
+    required Function callback,
+    required String notificationText,
   }) async {
     if (!_initialized) {
       // `main()` configures the channel in the user's chosen language long
@@ -380,7 +409,9 @@ class BackgroundLocationManager {
       FlutterForegroundTask.sendDataToTask(signal);
 
   /// Stops the background location sharing service.
-  static Future<void> stopService() async {
+  static Future<void> stopService() => _serialized(_stopService);
+
+  static Future<void> _stopService() async {
     final isRunning = await FlutterForegroundTask.isRunningService;
     if (!isRunning) return;
 

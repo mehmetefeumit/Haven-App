@@ -19,10 +19,15 @@
 /// The staleness threshold is 2 * kBackgroundRepeatInterval = 144 seconds.
 library;
 
+import 'dart:async';
+
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/services/background_location_manager.dart';
+import 'package:haven/src/services/background_location_task.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
@@ -508,6 +513,101 @@ void main() {
             'that rewrote, coalesced or reordered them would silently invert '
             'which isolate owns the platform location request',
       );
+    });
+  });
+
+  group('BackgroundLocationManager — start/stop are serialized (D1)', () {
+    // The plugin's own channel, answered by a model of the real service: a
+    // start or stop takes effect on a LATER event-loop turn, as the service's
+    // onStartCommand does, so `isRunningService` still answers the old state
+    // when the request returns.
+    const channel = MethodChannel('flutter_foreground_task/methods');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    late bool running;
+    late List<String> sent;
+    late bool failNextRunningQuery;
+
+    setUp(() {
+      running = false;
+      sent = [];
+      failNextRunningQuery = false;
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        switch (call.method) {
+          case 'isRunningService':
+            if (failNextRunningQuery) {
+              failNextRunningQuery = false;
+              throw PlatformException(code: 'boom');
+            }
+            return running;
+          case 'startService':
+            sent.add('start');
+            Timer(Duration.zero, () => running = true);
+            return null;
+          case 'stopService':
+            sent.add('stop');
+            Timer(Duration.zero, () => running = false);
+            return null;
+        }
+        return null;
+      });
+    });
+
+    tearDown(() => messenger.setMockMethodCallHandler(channel, null));
+
+    Future<void> start() => BackgroundLocationManager.startService(
+      callback: backgroundCallback,
+      notificationText: 'sharing',
+    );
+
+    test('a start issued right behind a stop leaves the service running', () {
+      fakeAsync((async) {
+        running = true;
+        var done = 0;
+        unawaited(BackgroundLocationManager.stopService().then((_) => done++));
+        unawaited(start().then((_) => done++));
+        async.elapse(const Duration(seconds: 2));
+
+        expect(done, 2);
+        expect(
+          sent,
+          ['stop', 'start'],
+          reason:
+              'the start must wait for the stop to land; run '
+              'concurrently both read "running", the start returns '
+              '"already running" and the stop then kills the service',
+        );
+        expect(running, isTrue);
+      });
+    });
+
+    test('a stop issued right behind a start leaves the service stopped', () {
+      fakeAsync((async) {
+        unawaited(start());
+        unawaited(BackgroundLocationManager.stopService());
+        async.elapse(const Duration(seconds: 2));
+
+        expect(sent, ['start', 'stop']);
+        expect(running, isFalse);
+      });
+    });
+
+    test('a failed operation does not wedge the ones queued behind it', () {
+      fakeAsync((async) {
+        failNextRunningQuery = true;
+        Object? stopError;
+        unawaited(
+          BackgroundLocationManager.stopService().catchError(
+            (Object e) => stopError = e,
+          ),
+        );
+        unawaited(start());
+        async.elapse(const Duration(seconds: 2));
+
+        expect(stopError, isA<PlatformException>());
+        expect(sent, ['start']);
+        expect(running, isTrue);
+      });
     });
   });
 }
