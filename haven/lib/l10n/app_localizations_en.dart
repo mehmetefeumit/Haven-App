@@ -1696,9 +1696,6 @@ class AppLocalizationsEn extends AppLocalizations {
       'Your display name and photo are visible to anyone on the Nostr network, not just members of your circles. Share only what you\'re comfortable making public.';
 
   @override
-  String get identityRefreshProfileTooltip => 'Refresh public profile';
-
-  @override
   String get identityAdvancedExportError =>
       'Failed to export secret key. Please try again.';
 

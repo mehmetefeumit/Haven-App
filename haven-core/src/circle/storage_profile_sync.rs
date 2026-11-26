@@ -1985,6 +1985,42 @@ mod tests {
     }
 
     #[test]
+    fn a_pre_edit_copy_refetched_while_the_edit_is_unpublished_changes_nothing() {
+        // Save, leave, come back before any relay took the edit: every resume
+        // or roster refresh re-reads the copy the relays still serve, which is
+        // the one the edit was made on (or an older one a lagging relay keeps).
+        // Neither may put the old name back.
+        let storage = storage();
+        let copy = |name: &str, at: i64| CachedProfile {
+            pubkey_hex: hex(),
+            metadata: ProfileMetadata::from_metadata(nostr::Metadata::new().display_name(name)),
+            state: ProfileState::Known,
+            event_created_at: at,
+            fetched_at: at,
+        };
+        assert!(storage
+            .upsert_profile_if_newer(&copy("Old Name", 5_000))
+            .unwrap());
+        storage
+            .stage_own_profile_edits(&hex(), &name_edit("New Name"), 6_000)
+            .unwrap();
+
+        for refetched in [copy("Old Name", 5_000), copy("Older Name", 4_000)] {
+            assert!(!storage.upsert_profile_if_newer(&refetched).unwrap());
+            assert_eq!(
+                storage
+                    .get_profile(&hex())
+                    .unwrap()
+                    .unwrap()
+                    .metadata
+                    .display_name(),
+                Some("New Name"),
+            );
+        }
+        assert!(storage.pending_profile_sync(&hex()).unwrap().is_some());
+    }
+
+    #[test]
     fn a_newer_fetched_kind0_is_written_verbatim_for_a_member() {
         // Only the local user has an outbox row; a member's fetched profile must
         // not be reshaped by anything.

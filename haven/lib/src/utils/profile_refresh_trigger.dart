@@ -2,8 +2,9 @@
 /// widget layer (plan §6.2).
 ///
 /// Wired at cold start and app resume (`map_shell.dart`), circle select
-/// (`circle_selector.dart`), invitation accept (`invitation_card.dart`) and
-/// the Identity page's explicit refresh. A roster change seen by live sync
+/// (`circle_selector.dart`), invitation accept (`invitation_card.dart`),
+/// opening the Identity page (`identity_page.dart`) and the Circles page's
+/// explicit refresh. A roster change seen by live sync
 /// (`service_providers.dart`) and the foreground anti-entropy tick
 /// (`maintenance_scheduler_provider.dart`) call
 /// [MemberProfileRefreshNotifier.refreshAll] directly. Kept in `utils/` (not

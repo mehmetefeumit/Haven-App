@@ -1748,9 +1748,6 @@ class AppLocalizationsRu extends AppLocalizations {
       'Ваше отображаемое имя и фото видны любому в сети Nostr, а не только участникам ваших кругов. Делитесь только тем, что готовы сделать публичным.';
 
   @override
-  String get identityRefreshProfileTooltip => 'Обновить публичный профиль';
-
-  @override
   String get identityAdvancedExportError =>
       'Не удалось экспортировать секретный ключ. Пожалуйста, повторите попытку.';
 

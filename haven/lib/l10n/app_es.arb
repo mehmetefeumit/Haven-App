@@ -352,7 +352,6 @@
   "identityAdvancedSubtitle": "Clave pública, clave secreta, eliminar",
   "profileIsPublicNoticeTitle": "Tu perfil es público",
   "profileIsPublicNoticeBody": "Tu nombre visible y tu foto son visibles para cualquiera en la red Nostr, no solo para los miembros de tus círculos. Comparte solo lo que no te importe hacer público.",
-  "identityRefreshProfileTooltip": "Actualizar perfil público",
   "identityAdvancedExportError": "No se pudo exportar la clave secreta. Inténtalo de nuevo.",
   "identityAdvancedDeleteTitle": "¿Eliminar la identidad?",
   "identityAdvancedDeleteBody": "Esto elimina tu identidad y todos los datos de tus círculos de este teléfono. Todo lo que ya se haya publicado con ella se queda donde está: tu nombre y tus claves en los relés que los tengan, y tu foto en los servicios de alojamiento de imágenes a los que se haya subido. Asegúrate de haber respaldado tu clave secreta si quieres poder recuperar esa identidad.",

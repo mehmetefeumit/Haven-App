@@ -1705,9 +1705,6 @@ class AppLocalizationsTr extends AppLocalizations {
       'Görünen adınız ve fotoğrafınız yalnızca çevrelerinizin üyelerine değil, Nostr ağındaki herkese görünür. Yalnızca herkese açık olmasında sakınca görmediğiniz şeyleri paylaşın.';
 
   @override
-  String get identityRefreshProfileTooltip => 'Herkese açık profili yenile';
-
-  @override
   String get identityAdvancedExportError =>
       'Gizli anahtar dışa aktarılamadı. Lütfen tekrar deneyin.';
 

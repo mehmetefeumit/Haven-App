@@ -1743,9 +1743,6 @@ class AppLocalizationsFr extends AppLocalizations {
       'Votre nom d\'affichage et votre photo sont visibles par tous sur le réseau Nostr, pas seulement par les membres de vos cercles. Ne partagez que ce que vous êtes à l\'aise de rendre public.';
 
   @override
-  String get identityRefreshProfileTooltip => 'Actualiser le profil public';
-
-  @override
   String get identityAdvancedExportError =>
       'Échec de l\'exportation de la clé secrète. Veuillez réessayer.';
 

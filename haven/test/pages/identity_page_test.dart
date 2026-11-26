@@ -21,20 +21,23 @@ import 'package:flutter/semantics.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
+import 'package:haven/src/constants/profile_refresh_tiers.dart';
 import 'package:haven/src/pages/identity_page.dart';
 import 'package:haven/src/providers/profile_sync_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/profile_service.dart';
-import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/widgets/identity/display_name_card.dart';
 import 'package:haven/src/widgets/identity/identity_photo_header.dart';
 import 'package:haven/src/widgets/identity/npub_qr_code.dart';
 import 'package:haven/src/widgets/identity/public_profile_notice.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../helpers/accessibility_announcements.dart';
 import '../helpers/no_readiness_row.dart';
+import '../mocks/mock_circle_service.dart';
 import '../mocks/mock_profile_service.dart';
 
 class _FakeIdentityService implements IdentityService {
@@ -107,10 +110,14 @@ void main() {
   group('IdentityPage structure', () {
     Widget build({
       MockProfileService? profileService,
+      List<Circle> circles = const [],
       List<Override> extraOverrides = const [],
     }) => ProviderScope(
       overrides: [
         identityServiceProvider.overrideWithValue(_FakeIdentityService()),
+        circleServiceProvider.overrideWithValue(
+          MockCircleService(circles: circles),
+        ),
         // No profile/avatar set — the header shows initials and hides
         // Remove.
         profileServiceProvider.overrideWithValue(
@@ -181,18 +188,58 @@ void main() {
       expect(find.text('Public Key QR'), findsOneWidget);
     });
 
-    testWidgets('shows the refresh action in the app bar', (tester) async {
+    testWidgets('the app bar carries no refresh action', (tester) async {
       await tester.pumpWidget(build());
       await tester.pumpAndSettle();
 
-      expect(find.byKey(WidgetKeys.identityRefreshButton), findsOneWidget);
+      expect(tester.widget<AppBar>(find.byType(AppBar)).actions, isNull);
+      expect(find.byIcon(LucideIcons.refreshCw), findsNothing);
     });
+
+    testWidgets(
+      'opening the page pulls the union of every circle member and the own '
+      'pubkey at the interactive tier, never an own-pubkey-only fetch',
+      (tester) async {
+        const member =
+            'eeee1234eeee1234eeee1234eeee1234eeee1234eeee1234eeee1234eeee1234';
+        final svc = MockProfileService();
+        await tester.pumpWidget(
+          build(
+            profileService: svc,
+            circles: [
+              TestCircleFactory.createCircle(
+                members: [TestCircleFactory.createMember(pubkey: member)],
+              ),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final fetches = svc.methodCalls
+            .where((c) => c.method == 'refreshMemberProfiles')
+            .toList();
+        expect(fetches, hasLength(1));
+        expect(
+          fetches.single.args['pubkeyHexes'],
+          unorderedEquals(<String>[
+            member,
+            _FakeIdentityService._identity.pubkeyHex,
+          ]),
+        );
+        expect(fetches.single.args['maxAge'], profileInteractiveMaxAge);
+        expect(
+          svc.methodCalls.map((c) => c.method),
+          isNot(contains('fetchOwnPublishedProfile')),
+        );
+      },
+    );
   });
 
   group('IdentityPage — photo header', () {
     Widget build({required MockProfileService profileService}) => ProviderScope(
       overrides: [
         identityServiceProvider.overrideWithValue(_FakeIdentityService()),
+        circleServiceProvider.overrideWithValue(MockCircleService()),
         profileServiceProvider.overrideWithValue(profileService),
       ],
       child: const MaterialApp(
@@ -250,6 +297,7 @@ void main() {
       key: UniqueKey(),
       overrides: [
         identityServiceProvider.overrideWithValue(_FakeIdentityService()),
+        circleServiceProvider.overrideWithValue(MockCircleService()),
         profileServiceProvider.overrideWithValue(profileService),
       ],
       child: const MaterialApp(

@@ -1893,10 +1893,6 @@
   "@profileIsPublicNoticeBody": {
     "description": "Body of the combined public-profile disclosure notice (see profileIsPublicNoticeTitle). Must not imply an opt-in/toggle exists — publishing a saved name/photo is unconditional."
   },
-  "identityRefreshProfileTooltip": "Refresh public profile",
-  "@identityRefreshProfileTooltip": {
-    "description": "Tooltip on the Identity-page AppBar refresh action that forces a network re-fetch of the user's own public profile."
-  },
 
   "identityAdvancedExportError": "Failed to export secret key. Please try again.",
   "@identityAdvancedExportError": {

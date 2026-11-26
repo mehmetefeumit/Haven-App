@@ -1788,9 +1788,6 @@ class AppLocalizationsAr extends AppLocalizations {
       'اسمك المعروض وصورتك مرئيان لأي شخص على شبكة Nostr، لا لأعضاء دوائرك فقط. شارِك فقط ما ترتاح لجعله عامًا.';
 
   @override
-  String get identityRefreshProfileTooltip => 'تحديث الملف الشخصي العام';
-
-  @override
   String get identityAdvancedExportError =>
       'تعذّر تصدير المفتاح السري. يُرجى إعادة المحاولة.';
 

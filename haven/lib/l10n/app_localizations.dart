@@ -2478,12 +2478,6 @@ abstract class AppLocalizations {
   /// **'Your display name and photo are visible to anyone on the Nostr network, not just members of your circles. Share only what you\'re comfortable making public.'**
   String get profileIsPublicNoticeBody;
 
-  /// Tooltip on the Identity-page AppBar refresh action that forces a network re-fetch of the user's own public profile.
-  ///
-  /// In en, this message translates to:
-  /// **'Refresh public profile'**
-  String get identityRefreshProfileTooltip;
-
   /// Snackbar shown on the Advanced identity page when exporting the secret key fails. 'secret key' is the nsec; do not soften this wording.
   ///
   /// In en, this message translates to:
