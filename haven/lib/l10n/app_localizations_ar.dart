@@ -685,6 +685,9 @@ class AppLocalizationsAr extends AppLocalizations {
       'Tap to open Haven and resume sharing your location with your circles.';
 
   @override
+  String get androidResumeNoticeChannelName => 'Sharing reminders';
+
+  @override
   String get fgsNotificationPaused =>
       'تطبيق Haven متوقّف مؤقتًا — افتحه لاستئناف المشاركة';
 

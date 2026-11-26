@@ -776,11 +776,15 @@
   },
   "androidResumeNoticeTitle": "Location sharing has stopped",
   "@androidResumeNoticeTitle": {
-    "description": "Title of the Android notification posted after a reboot or an app update when Haven may not restart background sharing by itself (no 'all the time' location, or the updated background notice not yet accepted). States the state, not blame. Mirrored verbatim into the Android string resources values*/strings.xml (resume_notice_title), which a test holds equal to this entry per locale. No identifiers of any kind."
+    "description": "Title of the Android notification posted after a reboot or an app update when Haven may not restart background sharing by itself (no 'all the time' location, or the updated background notice not yet accepted). States the state, not blame. Mirrored verbatim into the Android string resources values*/strings.xml (android_resume_notice_title), which a test holds equal to this entry per locale. No identifiers of any kind."
   },
   "androidResumeNoticeBody": "Tap to open Haven and resume sharing your location with your circles.",
   "@androidResumeNoticeBody": {
-    "description": "Body of the Android notification titled androidResumeNoticeTitle: the remedy. True as written: the tap opens Haven, and the visible app starts the sharing service. Mirrored verbatim into values*/strings.xml (resume_notice_body), held equal by a test."
+    "description": "Body of the Android notification titled androidResumeNoticeTitle: the remedy. True as written: the tap opens Haven, and the visible app starts the sharing service. Mirrored verbatim into values*/strings.xml (android_resume_notice_body), held equal by a test."
+  },
+  "androidResumeNoticeChannelName": "Sharing reminders",
+  "@androidResumeNoticeChannelName": {
+    "description": "Name of the Android notification channel that carries the one 'tap to resume sharing' notice (androidResumeNoticeTitle). Android shows it only in system Settings > Notifications, where the user can mute the channel; it names the kind of notification, not its content. Mirrored verbatim into values*/strings.xml (android_resume_notice_channel_name), held equal by a test."
   },
 
   "fgsNotificationPaused": "Haven is paused — open the app to resume sharing",

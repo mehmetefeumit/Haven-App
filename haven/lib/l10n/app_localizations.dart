@@ -1158,17 +1158,23 @@ abstract class AppLocalizations {
   /// **'Haven is sending and receiving location information'**
   String get fgsNotificationSharing;
 
-  /// Title of the Android notification posted after a reboot or an app update when Haven may not restart background sharing by itself (no 'all the time' location, or the updated background notice not yet accepted). States the state, not blame. Mirrored verbatim into the Android string resources values*/strings.xml (resume_notice_title), which a test holds equal to this entry per locale. No identifiers of any kind.
+  /// Title of the Android notification posted after a reboot or an app update when Haven may not restart background sharing by itself (no 'all the time' location, or the updated background notice not yet accepted). States the state, not blame. Mirrored verbatim into the Android string resources values*/strings.xml (android_resume_notice_title), which a test holds equal to this entry per locale. No identifiers of any kind.
   ///
   /// In en, this message translates to:
   /// **'Location sharing has stopped'**
   String get androidResumeNoticeTitle;
 
-  /// Body of the Android notification titled androidResumeNoticeTitle: the remedy. True as written: the tap opens Haven, and the visible app starts the sharing service. Mirrored verbatim into values*/strings.xml (resume_notice_body), held equal by a test.
+  /// Body of the Android notification titled androidResumeNoticeTitle: the remedy. True as written: the tap opens Haven, and the visible app starts the sharing service. Mirrored verbatim into values*/strings.xml (android_resume_notice_body), held equal by a test.
   ///
   /// In en, this message translates to:
   /// **'Tap to open Haven and resume sharing your location with your circles.'**
   String get androidResumeNoticeBody;
+
+  /// Name of the Android notification channel that carries the one 'tap to resume sharing' notice (androidResumeNoticeTitle). Android shows it only in system Settings > Notifications, where the user can mute the channel; it names the kind of notification, not its content. Mirrored verbatim into values*/strings.xml (android_resume_notice_channel_name), held equal by a test.
+  ///
+  /// In en, this message translates to:
+  /// **'Sharing reminders'**
+  String get androidResumeNoticeChannelName;
 
   /// Text of the same Android foreground-service notification when Haven could not hand its encrypted-messaging session to the service, so the service can neither send nor receive until the user reopens Haven. 'Haven is paused' describes the APP's STATE: it is NOT an imperative ('pause Haven'), NOT the user's own state, and NOT a claim that the user pressed a pause control — Haven has no pause button. The second clause is the remedy and must stay actionable: reopening the app is what repairs this. Keep the state before the remedy, and keep it to one line — Android collapses this notification to a single line, so a translation that buries the state gets truncated away. A user must be able to tell it apart at a glance from fgsNotificationSharing, which is this same notification when the handover DID work.
   ///
