@@ -35,8 +35,8 @@ private fun status(context: Context): Map<String, Any?> = mapOf(
 
 /**
  * `haven.app/background_location` on the UI engine: `status`, `request` (the
- * background permission alone, owner-directed 2026-11-26, OD-R2) and
- * `openAppSettings`.
+ * background permission alone, owner-directed 2026-11-26, OD-R2),
+ * `openAppSettings`, and `markStopped` (`BootResume.markStopped`).
  *
  * `request` answers whether the OS showed its page. Android gives no direct
  * signal, so the answer is read from `shouldShowRequestPermissionRationale`
@@ -75,6 +75,10 @@ class BackgroundLocation(private val activity: Activity) : MethodChannel.MethodC
                         Uri.fromParts("package", activity.packageName, null),
                     ),
                 )
+                result.success(null)
+            }
+            "markStopped" -> {
+                BootResume.markStopped(activity)
                 result.success(null)
             }
             else -> result.notImplemented()

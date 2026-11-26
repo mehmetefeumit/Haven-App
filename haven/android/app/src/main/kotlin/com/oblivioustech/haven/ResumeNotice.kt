@@ -47,7 +47,9 @@ object ResumeNotice {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(context.applicationInfo.icon)
+            // A status-bar icon is drawn from its alpha alone: the launcher
+            // icon's opaque square would show as a blank blob.
+            .setSmallIcon(R.drawable.ic_launcher_monochrome)
             .setContentTitle(text.getString(R.string.android_resume_notice_title))
             .setContentText(text.getString(R.string.android_resume_notice_body))
             .setStyle(

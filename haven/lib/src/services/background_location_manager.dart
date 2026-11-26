@@ -6,6 +6,7 @@
 library;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/providers/locale_provider.dart'
@@ -413,7 +414,10 @@ class BackgroundLocationManager {
 
   static Future<void> _stopService() async {
     final isRunning = await FlutterForegroundTask.isRunningService;
-    if (!isRunning) return;
+    if (!isRunning) {
+      await _markStopped();
+      return;
+    }
 
     final result = await FlutterForegroundTask.stopService();
 
@@ -425,6 +429,29 @@ class BackgroundLocationManager {
         _lastNotificationText = null;
       case ServiceRequestFailure(:final error):
         debugPrint('[BackgroundManager] Stop failed: ${error.runtimeType}');
+    }
+  }
+
+  /// Haven's own channel on the UI engine (`BackgroundLocation.kt`).
+  static const MethodChannel _statusChannel = MethodChannel(
+    'haven.app/background_location',
+  );
+
+  /// Records natively that Haven stopped the service, when none is running.
+  ///
+  /// The plugin writes that status only when it stops a running service, and
+  /// the boot receiver reads it as "Haven stopped sharing on purpose": a stop
+  /// that found the service already dead (identity deleted after location
+  /// was revoked) would otherwise leave the last start's status, and the
+  /// next boot would post a resume notice to a logged-out user.
+  static Future<void> _markStopped() async {
+    if (defaultTargetPlatform != TargetPlatform.android) return;
+    try {
+      await _statusChannel.invokeMethod<void>('markStopped');
+    } on PlatformException catch (e) {
+      debugPrint('[BackgroundManager] markStopped failed: ${e.code}');
+    } on MissingPluginException {
+      debugPrint('[BackgroundManager] markStopped: no native handler');
     }
   }
 

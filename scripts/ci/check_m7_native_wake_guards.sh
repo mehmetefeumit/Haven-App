@@ -104,7 +104,7 @@
 # red. On an intentional M7-E rollback (plan §7) checks 14a/14f/14g/14h/14i are
 # reverted together with the code they pin; on an intentional live-sync
 # rollback (M11 plan §8) 14b is reverted with the `defaultValue: false` it
-# pins. 14d is rollback-independent. Checks 14c, 14e and 14j-14n pin the
+# pins. 14d is rollback-independent. Checks 14c, 14e and 14j-14o pin the
 # Android boot/update resume (owner-directed 2026-11-26, OD-R2/OD-R3):
 # BootResumeReceiver in place of the plugin's RebootReceiver, the resume rule's
 # preference keys, the notice's fixed text, and the system-start gate ahead of
@@ -1578,7 +1578,7 @@ fi
 
 # ===========================================================================
 # RELEASED-STATE PINS (M7-E + M11 LIVE) — checks 14a-14i, and the Android
-# boot/update resume pins 14j-14n after them. A regression that
+# boot/update resume pins 14j-14o after them. A regression that
 # re-inerts a shipped feature (M7-E background wakes, or M11's live-sync engine)
 # turns these red. See the header for the rollback story.
 # ===========================================================================
@@ -1794,9 +1794,25 @@ else
     fail "14n: onStart's first await is not the system-start gate: ${first_await:-none}"
 fi
 
+# 14o. A stop Haven makes is recorded even when no service runs: the boot
+#      receiver reads the plugin's API_STOP as "Haven stopped sharing", and the
+#      plugin writes it only when it stops a RUNNING service, so a stop of a
+#      service that already died would leave a notice owed to whoever is (or
+#      is no longer) signed in at the next boot.
+mark_kt="$(fn_slice 'fun markStopped(context: Context)' "$BOOT_RESUME_KT")"
+if ! grep -qF 'if (ForegroundService.isRunningServiceState.value) return' <<<"$mark_kt" ||
+  ! grep -qF 'ForegroundServiceStatus.setData(context, ForegroundServiceAction.API_STOP)' <<<"$mark_kt"; then
+  fail "14o: BootResume.markStopped no longer writes API_STOP for a service that is not running (and only then)"
+fi
+code_has '"markStopped" -> {' "$BG_LOCATION_KT" && code_has 'BootResume.markStopped(activity)' "$BG_LOCATION_KT" ||
+  fail "14o: BackgroundLocation.kt no longer answers markStopped with BootResume.markStopped"
+stop_dart="$(fn_slice 'static Future<void> _stopService() async {' "$MGR")"
+grep -A1 -F 'if (!isRunning) {' <<<"$stop_dart" | grep -qF 'await _markStopped();' ||
+  fail "14o: $(basename "$MGR") _stopService no longer records the stop when no service is running"
+
 # ---------------------------------------------------------------------------
 if [[ "$FAILED" -ne 0 ]]; then
   echo "M7 native-wake guard FAILED — see failures above." >&2
   exit 1
 fi
-echo "OK: M7 native-wake structural invariants hold (13 checks + the 9b dependency-surface scan + 9 released-state pins + 5 Android resume pins)."
+echo "OK: M7 native-wake structural invariants hold (13 checks + the 9b dependency-surface scan + 9 released-state pins + 6 Android resume pins)."

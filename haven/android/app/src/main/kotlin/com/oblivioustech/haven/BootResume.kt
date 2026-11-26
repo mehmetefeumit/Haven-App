@@ -56,12 +56,26 @@ object BootResume {
     }
 
     /**
+     * Records the status the plugin's own stop writes, for a service that is
+     * not running. Haven's stop of a service that already died (location
+     * revoked, a refused sticky restart) leaves the last start's status, and
+     * the next boot would then read sharing Haven still wants and post a
+     * notice, to a user who may since have deleted their identity.
+     */
+    fun markStopped(context: Context) {
+        if (ForegroundService.isRunningServiceState.value) return
+        ForegroundServiceStatus.setData(context, ForegroundServiceAction.API_STOP)
+    }
+
+    /**
      * The plugin's own `RebootReceiver` start, so the task sees
      * `TaskStarter.system`. The stored notification text is repainted first:
      * the last one saved may read "Haven is open" or "paused", both false for
      * a service nobody opened.
      */
     private fun start(context: Context) {
+        // An older notice is about a stop this start ends.
+        ResumeNotice.cancel(context)
         try {
             NotificationContent.updateData(
                 context,
