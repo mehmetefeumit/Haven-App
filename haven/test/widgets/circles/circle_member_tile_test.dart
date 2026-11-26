@@ -2335,13 +2335,17 @@ void main() {
       await pumpRow(tester, profiles: profiles);
 
       expect(title(tester), isEmpty);
-      expect(find.text(npub), findsNothing);
+      expect(
+        find.text(npub),
+        findsOneWidget,
+        reason: 'the npub holds its subtitle place, never the title',
+      );
       expect(
         rowLabelled(npub),
         findsOneWidget,
         reason: 'a screen reader still hears who the row is',
       );
-      final pendingHeight = tester.getSize(find.text('')).height;
+      final pendingHeight = tester.getSize(find.byType(ListTile)).height;
 
       profiles.next!.complete(
         const Profile(pubkeyHex: otherPubkey, displayName: 'Bo'),
@@ -2351,9 +2355,9 @@ void main() {
       expect(title(tester), 'Bo');
       expect(rowLabelled('Bo'), findsOneWidget);
       expect(
-        tester.getSize(find.text('Bo')).height,
+        tester.getSize(find.byType(ListTile)).height,
         pendingHeight,
-        reason: 'the pending title holds the name line, so nothing reflows',
+        reason: 'the pending row has the named geometry, so nothing reflows',
       );
       handle.dispose();
     });

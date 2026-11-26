@@ -294,9 +294,10 @@ class CircleMemberTile extends ConsumerWidget {
         // fallback may not: clipping its tail drops the bech32 checksum the
         // 12/6 form exists for, taking an impersonation from ~2^65 back to
         // ~2^35. It wraps instead, and the tile grows to fit. While the name
-        // is pending the title is an empty line in the name's style, so a
-        // member who has one never flashes their npub first; the row's
-        // semantics label still names them by it.
+        // is pending the title is an empty line in the name's style and the
+        // npub sits in the subtitle as it will under the name, so a member
+        // who has one never flashes their npub as the title and the row does
+        // not reflow; the semantics label still names them by it.
         title: Text(
           namePending ? '' : displayedName,
           maxLines: nameStyled ? 1 : null,
@@ -310,7 +311,7 @@ class CircleMemberTile extends ConsumerWidget {
           context,
           l10n,
           colorScheme,
-          effectiveDisplayName,
+          showNpubLine: nameStyled,
         ),
         trailing: trailing ?? _buildTrailing(l10n, displayedName),
         onTap: isInteractive ? onTap : null,
@@ -353,9 +354,9 @@ class CircleMemberTile extends ConsumerWidget {
   Widget? _buildSubtitle(
     BuildContext context,
     AppLocalizations l10n,
-    ColorScheme colorScheme,
-    String? effectiveDisplayName,
-  ) {
+    ColorScheme colorScheme, {
+    required bool showNpubLine,
+  }) {
     if (!hasLocation) {
       return Text(
         l10n.circleMemberNoRecentLocation,
@@ -367,11 +368,13 @@ class CircleMemberTile extends ConsumerWidget {
 
     final staleLine = _lastSeenLabel(l10n);
 
-    // The npub moves to the subtitle once a name occupies the title, and
-    // keeps the same no-ellipsis rule the title applies to it — the roster
-    // is where a user checks who they are sharing live location with, so it
-    // must not clip the six checksum characters the 12/6 form exists for.
-    final npubLine = effectiveDisplayName == null
+    // The npub moves to the subtitle once a name occupies the title — or
+    // holds its place while the name is pending, so the row keeps the named
+    // geometry and nothing below it shifts when the name lands — and keeps
+    // the same no-ellipsis rule the title applies to it: the roster is where
+    // a user checks who they are sharing live location with, so it must not
+    // clip the six checksum characters the 12/6 form exists for.
+    final npubLine = !showNpubLine
         ? null
         : Text(
             NpubValidator.shortenForDisplay(member.npub),
