@@ -260,13 +260,13 @@ class LocationDisclosureController
   /// when it is owed (on Android 11+ without "Allow all the time", carrying
   /// that step), else the Android all-time step when it is owed.
   ///
-  /// [inFront] is re-read before anything is shown. Returns false when the app
-  /// had left the front by then, so the caller owes the step to the next
+  /// [isResumed] is re-read before anything is shown. Returns false when the
+  /// app had left the front by then, so the caller owes the step to the next
   /// resume; true otherwise, whether or not a dialog was due.
   Future<bool> runForegroundConsentStep(
     BuildContext context, {
     required AndroidBackgroundLocation allTime,
-    required bool Function() inFront,
+    required bool Function() isResumed,
   }) async {
     final prefs = await SharedPreferences.getInstance();
     final sharingOn = prefs.getBool(kBackgroundSharingKey) ?? false;
@@ -285,7 +285,7 @@ class LocationDisclosureController
           prefs.getBool(kAndroidBackgroundLocationPromptedKey) ?? false,
     );
     if (step == ForegroundConsentStep.none) return true;
-    if (!context.mounted || !inFront()) return false;
+    if (!context.mounted || !isResumed()) return false;
     switch (step) {
       case ForegroundConsentStep.reconfirm:
         await reconfirmBackgroundIfOwed(context);

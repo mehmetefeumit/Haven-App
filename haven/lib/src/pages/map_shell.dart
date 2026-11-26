@@ -1478,7 +1478,7 @@ class _MapShellState extends ConsumerState<MapShell>
         .runForegroundConsentStep(
           context,
           allTime: ref.read(androidBackgroundLocationProvider),
-          inFront: () => mounted && appIsResumed(),
+          isResumed: () => mounted && appIsResumed(),
         );
     if (mounted) ref.invalidate(backgroundLocationStatusProvider);
     return shown;
@@ -2853,7 +2853,21 @@ class _MapShellState extends ConsumerState<MapShell>
           // flip landing seconds after a publish from re-sending it.
           final armedAt = DateTime.now();
           final armedCircles = _burstEligibleCircles();
-          if (armedCircles.isNotEmpty &&
+          // A location relaunch whose pause read the consent still loading
+          // is owed its session here, by the same path as the pause's.
+          final launch = takeLaunchSession();
+          if (launch != null) {
+            unawaited(
+              receiving.then(
+                (_) => _payLaunchSession(
+                  launch,
+                  coordinator,
+                  turn: turn,
+                  pausedAt: armedAt,
+                ),
+              ),
+            );
+          } else if (armedCircles.isNotEmpty &&
               MapShell.shouldBurstImmediatelyOnPause(
                 lastPublishAt: _lastPublishTime,
                 now: armedAt,

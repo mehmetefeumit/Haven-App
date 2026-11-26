@@ -550,7 +550,7 @@ void main() {
     });
 
     late _FakeAllTime allTime;
-    late List<bool> inFrontAnswers;
+    late List<bool> resumedReads;
 
     Widget host(ValueNotifier<bool?> result) => ProviderScope(
       child: MaterialApp(
@@ -565,8 +565,8 @@ void main() {
                     .runForegroundConsentStep(
                       context,
                       allTime: allTime,
-                      inFront: () {
-                        inFrontAnswers.add(true);
+                      isResumed: () {
+                        resumedReads.add(true);
                         return true;
                       },
                     );
@@ -586,7 +586,7 @@ void main() {
     const leadFragment = 'Background sharing has changed since you';
     const stepFragment = 'Next, Android opens';
 
-    setUp(() => inFrontAnswers = []);
+    setUp(() => resumedReads = []);
 
     testWidgets('Android 11+ with an older acceptance: ONE dialog, carrying '
         'the all-time step; Agree records v2, then requests', (tester) async {
@@ -690,7 +690,7 @@ void main() {
       await step(tester);
       expect(find.byType(AlertDialog), findsNothing);
       expect(result.value, isTrue);
-      expect(inFrontAnswers, isEmpty, reason: 'nothing to show, nothing read');
+      expect(resumedReads, isEmpty, reason: 'nothing to show, nothing read');
     });
 
     testWidgets('an app that left the front shows nothing and owes the step',
@@ -716,7 +716,7 @@ void main() {
                         .runForegroundConsentStep(
                           context,
                           allTime: allTime,
-                          inFront: () => false,
+                          isResumed: () => false,
                         );
                   },
                   child: const Text('Step'),

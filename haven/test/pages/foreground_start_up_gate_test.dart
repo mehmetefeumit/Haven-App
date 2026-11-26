@@ -468,7 +468,9 @@ void main() {
       await mountRelaunch(tester, AppLifecycleState.detached);
       await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
         'flutter/lifecycle',
-        const StringCodec().encodeMessage(AppLifecycleState.inactive.toString()),
+        const StringCodec().encodeMessage(
+          AppLifecycleState.inactive.toString(),
+        ),
         (_) {},
       );
       await tester.pump();

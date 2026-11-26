@@ -241,7 +241,10 @@ void main() {
       final roster = body.indexOf(
         'ref.read(circlesProvider.future).timeout(kConsentArmBound)',
       );
-      expect([loaded, sharing, disclosure, roster], everyElement(isNonNegative));
+      expect(
+        [loaded, sharing, disclosure, roster],
+        everyElement(isNonNegative),
+      );
       expect(loaded, lessThan(sharing));
       expect(sharing, lessThan(disclosure));
       expect(
@@ -262,11 +265,22 @@ void main() {
       expect(take, isNonNegative);
       expect(take, lessThan(install));
       expect(paused, contains('_payLaunchSession(launch, coordinator,'));
+      // The second: the consent watcher's false→true edge, for a pause that
+      // read the consent still loading (the sharing-off branch takes nothing).
+      final edge = paused.indexOf('if (next) {');
+      expect(edge, greaterThan(install));
+      expect(
+        paused.indexOf('final launch = takeLaunchSession();', edge),
+        greaterThan(edge),
+        reason: 'a relaunch whose pause raced the consent load never starts '
+            'its session',
+      );
       expect(
         'takeLaunchSession()'.allMatches(_flat(source)),
-        hasLength(1),
-        reason: 'a second consumer of the launch',
+        hasLength(2),
+        reason: 'a consumer of the launch outside the iOS sharing-on pause',
       );
+      expect('_payLaunchSession('.allMatches(paused), hasLength(2));
     });
 
     test('the session starts only for a launch that may resume, with '
@@ -344,7 +358,7 @@ void main() {
         step.indexOf('await _storageResetNotice;'),
         lessThan(step.indexOf('runForegroundConsentStep(')),
       );
-      expect(step, contains('inFront: () => mounted && appIsResumed()'));
+      expect(step, contains('isResumed: () => mounted && appIsResumed()'));
       expect(step, contains('ref.read(androidBackgroundLocationProvider)'));
     });
   });

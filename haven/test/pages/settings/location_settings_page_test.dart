@@ -2251,7 +2251,11 @@ void main() {
     }
 
     testWidgets("it names Android's own label", (tester) async {
-      await pumpPage(tester, seed: v2SharingOn, allTime: _FakeAllTime.missing());
+      await pumpPage(
+        tester,
+        seed: v2SharingOn,
+        allTime: _FakeAllTime.missing(),
+      );
       expect(
         find.text(
           "Haven's location permission is not set to “Allow all the time”, "
