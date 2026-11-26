@@ -25,6 +25,7 @@ import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/member_profile_refresh_provider.dart';
 import 'package:haven/src/providers/own_profile_provider.dart';
+import 'package:haven/src/providers/profile_sync_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
@@ -822,6 +823,109 @@ void main() {
         expect(find.text('Bob-Public'), findsNothing);
       },
     );
+  });
+
+  group('DisplayNameCard — a newer name the own-profile sync caches', () {
+    late MockProfileService profileService;
+    late ProviderContainer container;
+
+    Future<void> pumpCardAndSelfLabel(WidgetTester tester) async {
+      profileService = MockProfileService(
+        ownProfile: Profile(
+          pubkeyHex: _testIdentity.pubkeyHex,
+          displayName: 'Alice',
+        ),
+      );
+      container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(
+            LocalNameIdentityService(identity: _testIdentity),
+          ),
+          profileServiceProvider.overrideWithValue(profileService),
+        ],
+      );
+      addTearDown(container.dispose);
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(
+              body: Column(
+                children: [
+                  const DisplayNameCard(),
+                  CircleMemberTile(
+                    member: CircleMember(
+                      pubkey: _testIdentity.pubkeyHex,
+                      npub: _testIdentity.npub,
+                      isAdmin: false,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Alice'), findsNWidgets(2));
+    }
+
+    /// A sync pass during which Rust caches the name the user's other device
+    /// published in the own profile row.
+    Future<void> syncCaching(WidgetTester tester, String name) async {
+      final gate = Completer<void>();
+      profileService.syncOwnProfileGate = gate;
+      unawaited(container.read(ownProfileSyncProvider.notifier).sync());
+      await tester.pump();
+      profileService.ownProfile = Profile(
+        pubkeyHex: _testIdentity.pubkeyHex,
+        displayName: name,
+      );
+      gate.complete();
+      await tester.pumpAndSettle();
+    }
+
+    Finder selfLabel(String name) => find.descendant(
+      of: find.byType(CircleMemberTile),
+      matching: find.text(name),
+    );
+
+    testWidgets('shows on the field and on the self label', (tester) async {
+      await pumpCardAndSelfLabel(tester);
+
+      await syncCaching(tester, 'Bob');
+
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        'Bob',
+      );
+      expect(selfLabel('Bob'), findsOneWidget);
+      expect(find.text('Alice'), findsNothing);
+    });
+
+    testWidgets('never takes the field from someone typing in it', (
+      tester,
+    ) async {
+      await pumpCardAndSelfLabel(tester);
+      await tester.enterText(find.byType(TextField), 'Alice Edited');
+      await tester.pump();
+
+      final reads = _rowReads(profileService);
+      await syncCaching(tester, 'Bob');
+
+      expect(
+        _rowReads(profileService),
+        greaterThan(reads),
+        reason: 'anti-vacuity: the sync re-read the name',
+      );
+      expect(selfLabel('Bob'), findsOneWidget);
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        'Alice Edited',
+      );
+    });
   });
 
   // ---------------------------------------------------------------------------

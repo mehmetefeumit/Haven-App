@@ -173,7 +173,9 @@ Future<void> clearCircleScopedPrefsAfterReset(SharedPreferences prefs) async {
 /// A name the user has set since the update ([currentName]) wins over the
 /// published one; while it cannot be read, the reseed stays owed. Nothing is
 /// asked while the build fetches no public profiles ([profilesEnabled]).
-/// Returns whether the name changed.
+/// Returns whether the name shown may have changed: whenever the fetch served
+/// a profile or failed after asking, since it may have cached a newer own
+/// profile row, whether or not the reseed set a name.
 Future<bool> reseedOwnNameIfOwed({
   required SharedPreferences prefs,
   required Future<PublishedOwnProfile> Function() fetchPublished,
@@ -188,10 +190,10 @@ Future<bool> reseedOwnNameIfOwed({
     published = await fetchPublished();
   } on Object catch (e) {
     debugPrint('[Haven] own profile not fetched: ${e.runtimeType}');
-    return false;
+    return true;
   }
   if (!published.answered) return false;
-  var changed = false;
+  final served = published.profile != null;
   // The first two tiers of Rust's `resolve_display_name`: a blank display
   // name falls through to the name. Its two deprecated fallback keys do not
   // cross the FFI, so a profile naming the user only there reseeds nothing.
@@ -205,14 +207,11 @@ Future<bool> reseedOwnNameIfOwed({
   } on Object catch (e) {
     // Unread is not unset: a name set since the update must not be replaced.
     debugPrint('[Haven] own name not read: ${e.runtimeType}');
-    return false;
+    return served;
   }
-  if (current == null && name.isNotEmpty) {
-    await setName(name);
-    changed = true;
-  }
+  if (current == null && name.isNotEmpty) await setName(name);
   await prefs.remove(kOwnNameReseedOwedKey);
-  return changed;
+  return served;
 }
 
 bool _ffiReset(String dataDir) => frb_api.resetPreV2Storage(dataDir: dataDir);

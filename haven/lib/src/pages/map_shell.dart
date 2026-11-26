@@ -1534,7 +1534,7 @@ class _MapShellState extends ConsumerState<MapShell>
   Future<void> _reseedOwnNameAfterReset() async {
     final container = ProviderScope.containerOf(context, listen: false);
     final identity = container.read(identityServiceProvider);
-    final changed = await reseedOwnNameIfOwed(
+    final shownMayChange = await reseedOwnNameIfOwed(
       prefs: await SharedPreferences.getInstance(),
       fetchPublished: container
           .read(profileServiceProvider)
@@ -1542,7 +1542,7 @@ class _MapShellState extends ConsumerState<MapShell>
       currentName: () => container.read(displayNameProvider.future),
       setName: identity.setDisplayName,
     );
-    if (changed) {
+    if (shownMayChange) {
       container
         ..invalidate(displayNameProvider)
         ..invalidate(ownProfileProvider);

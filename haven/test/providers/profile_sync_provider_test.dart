@@ -12,6 +12,9 @@
 ///   a throw that leaves the ladder due arms ONE 30 s fallback per failure
 ///   streak (reset by a completed pass or a resume), only while resumed; one
 ///   that fires while a pass is running is honoured when that pass settles.
+/// - every pass, one that throws included, shows on every surface the newer
+///   kind-0 from another device it may have cached in the own row — but not
+///   one that ends after the notifier is torn down.
 /// - the foreground retry timer: ONE timer, armed to `max(nextRetryInSecs, 1)`
 ///   seconds only when the state is pending and not due AND the app is
 ///   resumed; checked again when it fires and after every pass; never
@@ -33,10 +36,14 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/own_profile_provider.dart';
 import 'package:haven/src/providers/profile_sync_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/profile_service.dart';
 
+import '../mocks/local_name_identity_service.dart';
 import '../mocks/mock_profile_service.dart';
 
 /// Drains pending microtasks so fire-and-forget work settles. Deterministic —
@@ -1002,5 +1009,99 @@ void main() {
         }
       },
     );
+  });
+  group("a pass shows the own row's newer name and profile", () {
+    final identity = Identity(
+      pubkeyHex: 'cd' * 32,
+      npub: 'npub1test',
+      createdAt: DateTime(2025),
+    );
+    Profile row(String name) =>
+        Profile(pubkeyHex: identity.pubkeyHex, displayName: name);
+
+    late MockProfileService svc;
+    late ProviderContainer container;
+
+    setUp(() {
+      svc = MockProfileService(ownProfile: row('Alice'));
+      container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(
+            LocalNameIdentityService(identity: identity),
+          ),
+          profileServiceProvider.overrideWithValue(svc),
+        ],
+      );
+      addTearDown(container.dispose);
+      // Mounted surfaces hold the name and the profile, as the map does.
+      final name = container.listen(displayNameProvider, (_, _) {});
+      final profile = container.listen(ownProfileProvider, (_, _) {});
+      addTearDown(name.close);
+      addTearDown(profile.close);
+    });
+
+    /// Runs one pass during which Rust caches [cached] in the own row — the
+    /// name the user's other device published.
+    Future<void> passCaching(String cached, {bool thenThrow = false}) async {
+      expect(await container.read(displayNameProvider.future), 'Alice');
+      expect(
+        (await container.read(ownProfileProvider.future))?.displayName,
+        'Alice',
+      );
+      final gate = Completer<void>();
+      svc
+        ..syncOwnProfileGate = gate
+        ..shouldThrowOnSyncOwnProfile = thenThrow;
+      final pass = container.read(ownProfileSyncProvider.notifier).sync();
+      await _settle();
+      svc.ownProfile = row(cached);
+      gate.complete();
+      await pass;
+      await _settle();
+    }
+
+    test('a completed pass', () async {
+      await passCaching('Bob');
+
+      expect(await container.read(displayNameProvider.future), 'Bob');
+      expect(
+        (await container.read(ownProfileProvider.future))?.displayName,
+        'Bob',
+      );
+    });
+
+    test('a pass that throws after caching', () async {
+      await passCaching('Bob', thenThrow: true);
+
+      expect(await container.read(displayNameProvider.future), 'Bob');
+      expect(
+        (await container.read(ownProfileProvider.future))?.displayName,
+        'Bob',
+      );
+    });
+
+    test('nothing is re-read for a pass that ends after the notifier is torn '
+        'down', () async {
+      expect(await container.read(displayNameProvider.future), 'Alice');
+      final gate = Completer<void>();
+      svc.syncOwnProfileGate = gate;
+      final pass = container.read(ownProfileSyncProvider.notifier).sync();
+      await _settle();
+      // Logout's identity-scope reset.
+      container.invalidate(ownProfileSyncProvider);
+      final reads = svc.methodCalls
+          .where((c) => c.method == 'getOwnProfileText')
+          .length;
+      svc.ownProfile = row('Bob');
+      gate.complete();
+      await pass;
+      await _settle();
+
+      expect(
+        svc.methodCalls.where((c) => c.method == 'getOwnProfileText').length,
+        reads,
+      );
+      expect(container.read(displayNameProvider).value, 'Alice');
+    });
   });
 }

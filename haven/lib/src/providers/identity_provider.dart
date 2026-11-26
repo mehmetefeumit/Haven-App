@@ -61,8 +61,10 @@ final identityProvider = FutureProvider<Identity?>((ref) async {
 ///
 /// A row that cannot be read is not a row with no name: the name last shown
 /// for this identity stays, else the device-local one; with neither, the
-/// failure is this provider's error. Whatever changes the row's name
-/// invalidates this provider itself: a save, the profile refresh, a reseed.
+/// failure is this provider's error. Whatever may change the row's name
+/// invalidates this provider itself: a save, onboarding, the profile refresh,
+/// each own-profile sync pass (it caches a newer kind-0 it reads) and the
+/// storage-reset reseed's fetch.
 final displayNameProvider = FutureProvider<String?>((ref) async {
   final service = ref.watch(identityServiceProvider);
   final profiles = ref.watch(profileServiceProvider);

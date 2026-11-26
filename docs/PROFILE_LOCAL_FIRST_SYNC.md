@@ -233,15 +233,17 @@ neither starts nor queues one. Never from the background isolates.
   member sheet, the map sheet's announcement, the Identity page's initials and
   card) — is the row's `display_name`, else its `name`, read without the
   picture (`ProfileService.getOwnProfileText`), so holding the name all session
-  never holds the photo; a save, onboarding, the storage-reset reseed and the
-  profile refresh (which writes a newer kind-0 from another device to the row)
-  each invalidate `displayNameProvider`, so they reach them all. The
-  device-local SharedPreferences name is read only while the row holds no name
-  (an install from before public profiles, or one a storage reset reseeded) and
-  is dropped once it holds one, so a row cleared later, here or on another
-  device, never falls back to it. A row that cannot be read (the store is
-  handed to the foreground service) is not a row with no name: the name last
-  shown for that identity stays, else the local one, and nothing is dropped
+  never holds the photo; a save, onboarding, the storage-reset reseed's fetch,
+  the profile refresh and each own-profile sync pass (the last three may write
+  a newer kind-0 from another device to the row; a sync pass invalidates even
+  when it throws, and the reseed whenever its fetch served a profile or failed)
+  each invalidate `displayNameProvider` and `ownProfileProvider`, so they reach
+  them all. The device-local SharedPreferences name is read only while the row
+  holds no name (an install from before public profiles, or one a storage reset
+  reseeded) and is dropped once it holds one, so a row cleared later, here or
+  on another device, never falls back to it. A row that cannot be read (the
+  store is handed to the foreground service) is not a row with no name: the
+  name last shown for that identity stays, else the local one, and nothing is dropped
   (`display_name_provider_test.dart`). Nothing else reads that key: the
   background isolates have no display name at all (`BackgroundIdentityService`
   refuses), and no location payload carries one.
