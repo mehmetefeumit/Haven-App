@@ -1112,7 +1112,8 @@ tier and says which.
 2b. **Relaunch REGION after termination, where SLC is quiet — and a publish lands (amended
    2026-11-26: radius 200 m, OD-R1).** **DEFERRED — no iPhone; STILL AUTHORITATIVE.** Companion to
    item 2, and the only way to exercise it: `HavenSLCHandler` now also monitors one 200 m
-   (`relaunchRegionRadiusMeters`; 500 m until 2026-11-26) `CLCircularRegion`
+   (`relaunchRegionRadiusMeters`, only while `resumeConsented()` holds; otherwise 500 m,
+   `receiveOnlyRegionRadiusMeters`, the radius for everyone until 2026-11-26) `CLCircularRegion`
    centred on the last delivered fix (re-centred on every SLC delivery), because SLC is driven
    by cell-tower transitions and a terminated app in a tower-sparse area can travel a long way
    before the OS calls anything "significant". Same gates as SLC (enable predicate + Always),
@@ -1712,7 +1713,8 @@ nostr_group_id_hex=?` in the `delete_circle` cascade (`storage.rs:824-877`) = wi
   background-capable (`startBackgroundLaunchSession`) and bursts; the native owner refuses every
   background start except that one (`backgroundStartPermitted`: the launch, Always,
   `resumeConsented()`), the wake handlers stay receive-only, and the plugin one-shot stays
-  unreachable. The relaunch region shrinks to 200 m and both wake kinds share a five-minute
+  unreachable. The relaunch region shrinks to 200 m for a user `resumeConsented()` holds for
+  (500 m otherwise, so a receive-only relaunch gains no relay contact) and both wake kinds share a five-minute
   catch-up floor per process. While-Using users get copy that states the limit and points to
   Always; no `CLLocationUpdate.liveUpdates`. *Android (OD-R2):* the plugin `RebootReceiver` and
   `autoRunOnBoot` are removed; `BootResumeReceiver` (BOOT_COMPLETED + MY_PACKAGE_REPLACED) applies

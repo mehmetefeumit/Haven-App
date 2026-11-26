@@ -134,8 +134,9 @@ final class HavenLocationStreamHandler: NSObject, CLLocationManagerDelegate, Flu
   /// by `AppDelegate`.
   var launchedForLocation = false
 
-  /// The background task that keeps a location relaunch executing until its
-  /// first publish, or `.invalid`.
+  /// The background task that keeps a location relaunch executing through
+  /// its first publish, or `.invalid`. It is not ended by that publish: it
+  /// ends at its expiry, at `onCancel` or at the first foreground.
   private var launchWindow: UIBackgroundTaskIdentifier = .invalid
 
   /// A background-capable start is made from the background only in a process
@@ -269,8 +270,9 @@ final class HavenLocationStreamHandler: NSObject, CLLocationManagerDelegate, Flu
   // MARK: - Launch window
 
   /// Holds the process executable over the gap between a location relaunch's
-  /// catch-up sweep and its first publish. Costs nothing extra: the time
-  /// budget is app-wide.
+  /// catch-up sweep and its first publish, and until its expiry, `onCancel`
+  /// or the first foreground ends it. Costs nothing extra: the time budget is
+  /// app-wide.
   func beginLaunchWindow() {
     guard launchWindow == .invalid, backgroundStartPermitted else { return }
     launchWindow = UIApplication.shared.beginBackgroundTask(withName: "haven.launch.share") {

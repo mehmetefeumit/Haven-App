@@ -389,4 +389,35 @@ void main() {
       logs.assertContains('[BackgroundTask] onStart FAILED');
     });
   });
+
+  group('BackgroundLocationTaskHandler.identityStored', () {
+    const storage = MethodChannel(
+      'plugins.it_nomads.com/flutter_secure_storage',
+    );
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    late List<String> methods;
+
+    tearDown(() => messenger.setMockMethodCallHandler(storage, null));
+
+    for (final held in [true, false]) {
+      test('asks only whether the key exists, never for the secret '
+          '(${held ? 'stored' : 'absent'})', () async {
+        // Security Rule 9: a presence check that read the secret would carry
+        // it into this isolate's heap on every system start, a refused one
+        // included.
+        methods = [];
+        messenger.setMockMethodCallHandler(storage, (call) async {
+          methods.add(call.method);
+          return switch (call.method) {
+            'containsKey' => held,
+            _ => throw StateError('the gate read ${call.method}'),
+          };
+        });
+
+        expect(await BackgroundLocationTaskHandler.identityStored(), held);
+        expect(methods, ['containsKey']);
+      });
+    }
+  });
 }

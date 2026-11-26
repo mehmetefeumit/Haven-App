@@ -2244,7 +2244,9 @@ check_appdelegate_relaunch() { # <AppDelegate.swift>
 }
 
 # 13b. The smaller relaunch circle and the catch-up floor that pays for it
-#      (HavenSLCHandler.swift): 200 m, a five-minute floor on the monotonic
+#      (HavenSLCHandler.swift): 200 m only for a user resumeConsented() holds
+#      for and 500 m for everyone else (Rule 10: a receive-only relaunch must
+#      not gain relay contact), a five-minute floor on the monotonic
 #      clock applied after the region re-centres and before the sweep, and a
 #      floor stamped only when Dart answered.
 check_catchup_floor() { # <HavenSLCHandler.swift>
@@ -2253,6 +2255,14 @@ check_catchup_floor() { # <HavenSLCHandler.swift>
   local view; view="$(code_view "$slc")"
   grep -qE 'relaunchRegionRadiusMeters: CLLocationDistance = 200$' <<<"$view" ||
     lfail "the relaunch region is no longer 200 m (OD-R1) — inside Apple's 1-400 m band and paired with the catch-up floor"
+  grep -qE 'receiveOnlyRegionRadiusMeters: CLLocationDistance = 500$' <<<"$view" ||
+    lfail "the receive-only relaunch region is no longer 500 m — a user whose relaunch cannot resume sharing would gain catch-up sweeps (relay contact) they did not agree to (Rule 10)"
+  local refresh; refresh="$(fn_slice 'private func refreshRelaunchRegion(' "$slc")"
+  if ! grep -qE '= HavenBackgroundSessionHandler\.resumeConsented\(\)$' <<<"$refresh" ||
+    ! grep -qE '^ *\? Self\.relaunchRegionRadiusMeters$' <<<"$refresh" ||
+    ! grep -qE '^ *: Self\.receiveOnlyRegionRadiusMeters$' <<<"$refresh"; then
+    lfail "refreshRelaunchRegion no longer picks the 200 m circle only when resumeConsented() holds (else 500 m) — Rule 10"
+  fi
   grep -qF 'catchupFloorNanos: UInt64 = 300 * 1_000_000_000' <<<"$view" ||
     lfail "the catch-up floor is no longer five minutes (SLC's own documented minimum)"
   grep -qF 'CLOCK_MONOTONIC' <<<"$(fn_slice 'private func catchupDue()' "$slc")" ||
@@ -2825,7 +2835,7 @@ fi
 # hide under the slack.
 # ---------------------------------------------------------------------------
 self_test() {
-  local -r SELF_TEST_FIXTURES=290
+  local -r SELF_TEST_FIXTURES=293
   local tmp fails=0 checked=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -6221,8 +6231,17 @@ P3_PROVEN_BY_HOST=1" "${p3_probe}" "${p3_drive}" "${p3_constants}"
 
   # --- check_catchup_floor (13b) ---------------------------------------------
   local cf_body='  private static let relaunchRegionRadiusMeters: CLLocationDistance = 200
+  private static let receiveOnlyRegionRadiusMeters: CLLocationDistance = 500
   private static let catchupFloorNanos: UInt64 = 300 * 1_000_000_000
   private var lastCatchupAt: UInt64?
+
+  private func refreshRelaunchRegion(around location: CLLocation?) {
+    let maxRadius = locationManager.maximumRegionMonitoringDistance
+    let wanted = HavenBackgroundSessionHandler.resumeConsented()
+      ? Self.relaunchRegionRadiusMeters
+      : Self.receiveOnlyRegionRadiusMeters
+    locationManager.startMonitoring(for: region)
+  }
 
   func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
     guard isEnabled() else { return }
@@ -6263,6 +6282,12 @@ P3_PROVEN_BY_HOST=1" "${p3_probe}" "${p3_drive}" "${p3_constants}"
   }
   _floor 'catch-up floor: today'"'"'s tree passes' 0 "${cf_body}"
   _floor 'catch-up floor: the radius back at 500 m' 1 "${cf_body/= 200/= 500}"
+  _floor 'catch-up floor: the receive-only radius shrunk to 200 m' 1 \
+    "${cf_body/receiveOnlyRegionRadiusMeters: CLLocationDistance = 500/receiveOnlyRegionRadiusMeters: CLLocationDistance = 200}"
+  _floor 'catch-up floor: the 200 m circle for every user' 1 \
+    "${cf_body/      : Self.receiveOnlyRegionRadiusMeters/      : Self.relaunchRegionRadiusMeters}"
+  _floor 'catch-up floor: the consent read dropped' 1 \
+    "${cf_body/HavenBackgroundSessionHandler.resumeConsented()/true}"
   _floor 'catch-up floor: a wall clock instead of a monotonic one' 1 \
     "${cf_body//clock_gettime_nsec_np(CLOCK_MONOTONIC)/UInt64(Date().timeIntervalSince1970 * 1e9)}"
   _floor 'catch-up floor: the re-centre throttled behind the floor' 1 \
@@ -6409,4 +6434,4 @@ if [[ "$FAILED" -ne 0 ]]; then
   echo "iOS background publish guard FAILED — see failures above." >&2
   exit 1
 fi
-echo "OK: iOS background publish invariants hold (plist mode, one stream boundary per platform, toggle-keyed iOS route with a background branch that cannot fall through to the one-shot, native owner's session shape + two accuracy tiers + sink-only refusals + transient-error filter + only-Best cache in all three copies, bounded anchor staleness in both the controller and the serving path, fail-closed background-launch provider guard, C4 watcher + its opt-out release issued on every path, burst plane entered only from the running process and native wakes with one receive-only door into Dart, presence-only logs, tier-based session/indicator policy with a session-scoped confirmation and an unconditional disarm, AppDelegate wiring order, unfaked bg-publish drive, background-capable stream established before the drive backgrounds the app, P2c's receive oracle read from the subscription count and never from the paused flag and P2d's from the persisted last-known store, each with its terminal proof printed after the assertion it stands for, relaunch region coupled to SLC at 200 m with a monotonic five-minute catch-up floor stamped only when Dart answered, a background-launch start gate refusing every background start but a location relaunch's under Always and the current disclosure, with one Dart start site and one consent predicate across Swift and Dart, stream and network-change handlers compiled into the Xcode project, every leg's drive Timeout inside its own per-attempt retry deadline, one poll-path receive cadence across the product and the drive, the poll path's sweep declaring itself a background wake so the C3 consent chokepoint applies, every poll leg held at the when-in-use grant P2d's attribution depends on, and P3's settle window measured by the same numbers from both sides with a host-side wire oracle that outlives the app, two controls it cannot read nothing through — one that the relay answers at all, one that it still serves the kind the window is read for — and a completion-gate excuse of exactly two markers from exactly one source)."
+echo "OK: iOS background publish invariants hold (plist mode, one stream boundary per platform, toggle-keyed iOS route with a background branch that cannot fall through to the one-shot, native owner's session shape + two accuracy tiers + sink-only refusals + transient-error filter + only-Best cache in all three copies, bounded anchor staleness in both the controller and the serving path, fail-closed background-launch provider guard, C4 watcher + its opt-out release issued on every path, burst plane entered only from the running process and native wakes with one receive-only door into Dart, presence-only logs, tier-based session/indicator policy with a session-scoped confirmation and an unconditional disarm, AppDelegate wiring order, unfaked bg-publish drive, background-capable stream established before the drive backgrounds the app, P2c's receive oracle read from the subscription count and never from the paused flag and P2d's from the persisted last-known store, each with its terminal proof printed after the assertion it stands for, relaunch region coupled to SLC at 200 m (500 m without the current consent) with a monotonic five-minute catch-up floor stamped only when Dart answered, a background-launch start gate refusing every background start but a location relaunch's under Always and the current disclosure, with one Dart start site and one consent predicate across Swift and Dart, stream and network-change handlers compiled into the Xcode project, every leg's drive Timeout inside its own per-attempt retry deadline, one poll-path receive cadence across the product and the drive, the poll path's sweep declaring itself a background wake so the C3 consent chokepoint applies, every poll leg held at the when-in-use grant P2d's attribution depends on, and P3's settle window measured by the same numbers from both sides with a host-side wire oracle that outlives the app, two controls it cannot read nothing through — one that the relay answers at all, one that it still serves the kind the window is read for — and a completion-gate excuse of exactly two markers from exactly one source)."

@@ -335,7 +335,7 @@ narrowed, not removed — `onListen` now refuses EVERY start from `.background`,
 background-capable start in a process iOS launched for a location event, under Always, for a user who accepted the
 CURRENT background disclosure (`backgroundStartPermitted` = `launchedForLocation && .authorizedAlways &&
 HavenBackgroundSessionHandler.resumeConsented()`), which MapShell's background-launch pause makes through
-`startBackgroundLaunchSession`; (v)'s relaunch region is 200 m with a five-minute per-process catch-up floor
+`startBackgroundLaunchSession`; (v)'s relaunch region is 200 m (500 m without the current consent) with a five-minute per-process catch-up floor
 (`catchupDue`, monotonic); and (vi)'s backgrounded branch may also wait at most `kOneShotLocationTimeout` for that
 session's next Best fix (`_awaitNextBackgroundFix`), still never reaching the plugin one-shot. The evidence boundary:
 CI run 32661622879, which recorded iOS refusing a background start, was a process the user had launched and then
@@ -3838,7 +3838,7 @@ is the ordinary foreground service the rows above already price.
 | Case | What it costs | **ESTIMATED** |
 |---|---|---|
 | One iOS location relaunch that publishes (Always, v2 accepted, sharing on) | the relaunch's own wake already existed for the receive-only sweep (≈ 13 J isolated, E-I6); new inside it: one burst over the relay union, ≈ 3–6 TLS dials ≈ 1.5–3 J (E-I6), and up to ≈ 30 s at the Best tier for the fix (E-I4, ≈ 1.8 %/h) | ≈ 0.003–0.005 % for the burst + ≈ 0.015 % for the fix ≈ **0.02 % per relaunch** (E-P1) |
-| Driving with a relaunched process iOS has suspended again | the 200 m region and SLC wake it more often than the old 500 m region; each re-centres the region (CPU only), and a catch-up sweep runs at most once per 5 min per process (`catchupDue`) | worst case ≤ 12 sweeps/h × ≈ 13 J ≈ 156 J/h ≈ **0.25 %/h** (E-P1) while driving, bounded by the floor; nothing at rest |
+| Driving with a relaunched process iOS has suspended again | the 200 m region (consented users only; 500 m otherwise) and SLC wake it more often than the old 500 m region; each re-centres the region (CPU only), and a catch-up sweep runs at most once per 5 min per process (`catchupDue`) | worst case ≤ 12 sweeps/h × ≈ 13 J ≈ 156 J/h ≈ **0.25 %/h** (E-P1) while driving, bounded by the floor; nothing at rest |
 | A session started from the background that keeps the process executable (M7 §6 item 2j, unobserved) | what ordinary background sharing costs (E-I4 and the burst rows above) | no new row |
 | Android boot or update | one receiver run, no radio; a START is the ordinary service | below the table's rounding |
 

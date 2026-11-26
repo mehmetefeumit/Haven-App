@@ -1822,7 +1822,7 @@ F above; the Android and clock halves are untouched.**
   activity session and the bar like every other tier.
 - **The relaunch region lives inside `HavenSLCHandler`, not a new file** — no hand-built pbxproj
   ids, and the SLC gates (enable predicate + `authorizedAlways`), the `stopSLC` teardown and the
-  receive-only `runCatchup` channel are reused verbatim. One ~500 m (200 m since 2026-11-26, OD-R1)
+  receive-only `runCatchup` channel are reused verbatim. One ~500 m (200 m since 2026-11-26, OD-R1, for a user whose relaunch resumes sharing)
   `CLCircularRegion`, exit-only,
   re-centred on every SLC delivery and on its own exit; `stopMonitoring()` iterates
   `monitoredRegions` so an OS-restored region (after a relaunch, where this class holds no

@@ -506,9 +506,11 @@ class BackgroundLocationTaskHandler extends TaskHandler {
   // ---------------------------------------------------------------------------
   static const String _identityStorageKey = 'haven.nostr.identity';
 
-  /// Presence only: the bytes are not decoded here.
-  static Future<bool> _identityStored() async =>
-      await _secureStorage.read(key: _identityStorageKey) != null;
+  /// Presence only: the secret is never read into this isolate to answer it
+  /// (Security Rule 9), least of all on a start the gate then refuses.
+  @visibleForTesting
+  static Future<bool> identityStored() =>
+      _secureStorage.containsKey(key: _identityStorageKey);
 
   /// Test-only stand-in for the system-start gate's inputs and effects.
   @visibleForTesting
@@ -531,7 +533,7 @@ class BackgroundLocationTaskHandler extends TaskHandler {
     // the stop lands.
     final gate =
         overrideSystemStartGate ??
-        const SystemStartGate(identityStored: _identityStored);
+        const SystemStartGate(identityStored: identityStored);
     if (await gate.check(starter) != null) {
       if (!_shutdownSignal.isCompleted) _shutdownSignal.complete();
       return;
@@ -861,9 +863,7 @@ class BackgroundLocationTaskHandler extends TaskHandler {
           onError: (Object e) {
             // Presence only (Rule 8): the type, never the message, which on
             // this boundary can carry provider and permission detail.
-            debugPrint(
-              '[BackgroundTask] fix stream error: ${e.runtimeType}',
-            );
+            debugPrint('[BackgroundTask] fix stream error: ${e.runtimeType}');
             _registrationSuspect = true;
             _scheduleStreamErrorRearm();
           },
@@ -883,9 +883,7 @@ class BackgroundLocationTaskHandler extends TaskHandler {
         );
     _registeredTarget = target;
     _registeredAt = _clock();
-    debugPrint(
-      '[BackgroundTask] registration armed (${interval.inSeconds}s)',
-    );
+    debugPrint('[BackgroundTask] registration armed (${interval.inSeconds}s)');
   }
 
   /// Runs ONE recovery cycle [streamErrorRearmDelay] after the platform
@@ -1486,8 +1484,10 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       timeout: livenessProbeTimeout,
       channelReady: livenessChannelReady,
     )) {
-      debugPrint('[BackgroundTask] reclaim: declined, main isolate answered '
-          'on retry');
+      debugPrint(
+        '[BackgroundTask] reclaim: declined, main isolate answered '
+        'on retry',
+      );
       return false;
     }
     // A reply for EITHER probe, including one that landed after its own wait
@@ -1525,9 +1525,7 @@ class BackgroundLocationTaskHandler extends TaskHandler {
     try {
       outcome = await _forceReleaseLiveSession();
     } on Object catch (e) {
-      debugPrint(
-        '[BackgroundTask] reclaim: release failed (${e.runtimeType})',
-      );
+      debugPrint('[BackgroundTask] reclaim: release failed (${e.runtimeType})');
       return false;
     }
     debugPrint('[BackgroundTask] reclaim: release outcome=${outcome.name}');
@@ -1855,9 +1853,7 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       // is dropped. Seeded together is not published together — the loop below
       // still holds each circle a CSPRNG gap behind the last, which is what
       // keeps their whole-second `created_at`s distinct.
-      final eligibleKeys = <String>{
-        for (final c in accepted) _bgCircleKey(c),
-      };
+      final eligibleKeys = <String>{for (final c in accepted) _bgCircleKey(c)};
       _dueTracker.pruneToKeys(eligibleKeys);
       for (final key in eligibleKeys) {
         _dueTracker.seedIfAbsent(key, timestamp);
@@ -2134,8 +2130,10 @@ class BackgroundLocationTaskHandler extends TaskHandler {
             // due. This isolate has no Riverpod container: a hold the next
             // foreground does not end surfaces there through the health
             // model, which reads the missing publish-ack stamp and its age.
-            debugPrint('[BackgroundTask] send held by the core — skipping '
-                'this circle');
+            debugPrint(
+              '[BackgroundTask] send held by the core — skipping '
+              'this circle',
+            );
             continue;
           }
 
@@ -2162,8 +2160,10 @@ class BackgroundLocationTaskHandler extends TaskHandler {
                 LocationPublishFfi.clockAhead ||
                 LocationPublishFfi.clockBehind ||
                 LocationPublishFfi.clockUnspecified:
-              debugPrint('[BackgroundTask] publish reached no relay that took '
-                  'it');
+              debugPrint(
+                '[BackgroundTask] publish reached no relay that took '
+                'it',
+              );
               publishFailed = true;
               continue;
             // Not sent: expired, held since the seal, or its record ended;

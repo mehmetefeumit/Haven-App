@@ -3544,7 +3544,8 @@ Since M7-E, Haven schedules OS background wakes so a backgrounded/killed device
 can catch up on missed circle updates without a foreground session. The wake
 triggers differ per platform: **Android** — a WorkManager periodic task, which
 the OS runs at most every ~15 minutes (subject to Doze/battery); **iOS** —
-Significant-Location-Change or 200 m region-exit relaunch (movement-triggered) plus a
+Significant-Location-Change or region-exit relaunch (200 m, or 500 m without the
+current background consent; movement-triggered) plus a
 `BGAppRefreshTask` floor (OS-discretionary timing). No push/FCM/APNs is used —
 that is an intentional privacy choice (a push gateway learning every peer's
 wake timing is strictly more metadata than a relay; the M7 architecture rejects
@@ -3597,9 +3598,12 @@ Each wake **receives first, makes no commit, and is consent-gated**:
 `HavenSLCHandler`, `HavenBGTaskHandler`, `catchup_service.dart` and
 `ios_background_catchup.dart` have no publish call site. What changed is the
 process iOS relaunches into the background for a location event — a
-significant change, or leaving the 200 m relaunch region centred on the last
-fix (`relaunchRegionRadiusMeters`, smaller than the earlier 500 m so a
-terminated Haven needs less movement to come back). `AppDelegate` marks it
+significant change, or leaving the relaunch region centred on the last
+fix (`relaunchRegionRadiusMeters`, 200 m, smaller than the earlier 500 m so a
+terminated Haven needs less movement to come back — but only for a user
+`resumeConsented()` holds for; everyone else keeps 500 m,
+`receiveOnlyRegionRadiusMeters`, because for them a relaunch is receive-only and
+a smaller circle would only add relay contact, Rule 10). `AppDelegate` marks it
 (`HavenLocationStreamHandler.launchedForLocation`, set only from
 `launchOptions[.location]` with the app in `.background`, cleared at the first
 foreground), keeps the BGTask floor scheduled on that launch too, and opens one

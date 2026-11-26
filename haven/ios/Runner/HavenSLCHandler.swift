@@ -53,8 +53,9 @@ private let HAVEN_SLC_LOG = OSLog(subsystem: "haven_ios", category: "slc")
 /// (rural areas, a single-tower town, indoors on Wi-Fi only) a terminated app
 /// can go a long way before the OS decides anything "significant" happened.
 /// Region monitoring is a second, independent relaunch source with the same
-/// termination survival: one ~200 m circular region centred on the last
-/// delivered fix, re-centred on every SLC delivery, so leaving the
+/// termination survival: one circular region (200 m for a user whose relaunch
+/// resumes sharing, 500 m otherwise) centred on the last delivered fix,
+/// re-centred on every SLC delivery, so leaving the
 /// neighbourhood relaunches Haven even when SLC stays quiet. Exit only —
 /// entry would fire immediately on re-arm and buy nothing.
 ///
@@ -95,7 +96,8 @@ private let HAVEN_SLC_LOG = OSLog(subsystem: "haven_ios", category: "slc")
 ///
 /// ## On-device validation required (cannot be asserted in flutter test)
 ///
-///   - SLC wake fires on ~500 m movement; the region on leaving ~200 m.
+///   - SLC wake fires on ~500 m movement; the region on leaving ~200 m
+///     (~500 m without the current consent).
 ///   - Channel call reaches Dart handler (no weak-reference deallocation).
 ///   - Monitoring does NOT start when either flag is false (privacy inert).
 ///   - `stopMonitoring()` via Dart teardown channel actually stops SLC.
@@ -125,13 +127,18 @@ final class HavenSLCHandler: NSObject, CLLocationManagerDelegate {
   /// when `monitoredRegions` is restored by the OS rather than by this class.
   private static let relaunchRegionIdentifier = "haven.relaunch"
 
-  /// Radius of the relaunch region, in metres. Smaller than the OS's ~500 m
-  /// significant-change criterion since a relaunch resumes sharing (OD-R1,
-  /// owner-directed 2026-11-26): it shortens the walk before a terminated
-  /// Haven is back. Inside Apple's "1 to 400 metres work better" band; a
-  /// tighter circle wakes the app on ordinary movement around home, which the
-  /// catch-up floor below absorbs.
+  /// Radius of the relaunch region, in metres, for a user whose relaunch
+  /// resumes sharing (`resumeConsented()`). Smaller than the OS's ~500 m
+  /// significant-change criterion (OD-R1, owner-directed 2026-11-26): it
+  /// shortens the walk before a terminated Haven is back. Inside Apple's
+  /// "1 to 400 metres work better" band; a tighter circle wakes the app on
+  /// ordinary movement around home, which the catch-up floor below absorbs.
   private static let relaunchRegionRadiusMeters: CLLocationDistance = 200
+
+  /// The radius for everyone else, whose relaunch is receive-only: the
+  /// smaller circle would only add catch-up sweeps (relay contact) they did
+  /// not agree to (Rule 10).
+  private static let receiveOnlyRegionRadiusMeters: CLLocationDistance = 500
 
   /// SLC's own documented floor ("should not expect notifications more
   /// frequently than once every five minutes"), applied to both wake kinds'
@@ -294,11 +301,12 @@ final class HavenSLCHandler: NSObject, CLLocationManagerDelegate {
     // unavailable or unauthorized, and a bare `min` would then hand
     // CoreLocation a negative radius.
     let maxRadius = locationManager.maximumRegionMonitoringDistance
+    let wanted = HavenBackgroundSessionHandler.resumeConsented()
+      ? Self.relaunchRegionRadiusMeters
+      : Self.receiveOnlyRegionRadiusMeters
     let region = CLCircularRegion(
       center: fix.coordinate,
-      radius: maxRadius > 0
-        ? min(Self.relaunchRegionRadiusMeters, maxRadius)
-        : Self.relaunchRegionRadiusMeters,
+      radius: maxRadius > 0 ? min(wanted, maxRadius) : wanted,
       identifier: Self.relaunchRegionIdentifier
     )
     // Exit only: an entry trigger fires the instant the region is armed around
