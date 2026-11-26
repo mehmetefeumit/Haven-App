@@ -1,12 +1,14 @@
 /// Shared helper for triggering a batched public-profile refresh from the
 /// widget layer (plan §6.2).
 ///
-/// Wired at cold start and app resume (`map_shell.dart`), circle select
-/// (`circle_selector.dart`), invitation accept (`invitation_card.dart`),
-/// opening the Identity page (`identity_page.dart`) and the Circles page's
-/// explicit refresh. A roster change seen by live sync
-/// (`service_providers.dart`) and the foreground anti-entropy tick
-/// (`maintenance_scheduler_provider.dart`) call
+/// Wired at every transition to the foreground — each cold start and each
+/// resume, at `profileForegroundMaxAge` (`map_shell.dart`) — circle select
+/// (`circle_selector.dart`, `circle_list_tile.dart`), invitation accept
+/// (`invitation_card.dart`), a circle created (`name_circle_page.dart`) or
+/// members invited (`add_member_page.dart`), opening the Identity page
+/// (`identity_page.dart`) and the Circles page's explicit refresh. A roster
+/// change seen by live sync (`service_providers.dart`) and the foreground
+/// anti-entropy tick (`maintenance_scheduler_provider.dart`) call
 /// [MemberProfileRefreshNotifier.refreshAll] directly. Kept in `utils/` (not
 /// a provider) since it is a plain fire-and-forget dispatch over an
 /// already-existing provider — there is no new state to own.

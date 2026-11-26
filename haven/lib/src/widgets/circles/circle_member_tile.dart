@@ -171,6 +171,9 @@ class CircleMemberTile extends ConsumerWidget {
     // was actually resolved, for the mono-font/subtitle decisions below.
     final String displayedName;
     final bool hasRealName;
+    // No read of the member's profile has settled yet. Settled is a value or
+    // an error, never `!isLoading`: a refresh reloads while keeping the value.
+    var namePending = false;
     if (isSelf) {
       final resolved = resolveMemberDisplayName(
         member,
@@ -181,19 +184,25 @@ class CircleMemberTile extends ConsumerWidget {
       displayedName = resolved ?? npubFallback;
     } else {
       final profile = publicProfilesEnabled
-          ? ref.watch(memberProfileProvider(member.pubkey)).valueOrNull
+          ? ref.watch(memberProfileProvider(member.pubkey))
           : null;
       final resolved = resolveEffectiveMemberName(
         localOverride: member.displayName,
-        profile: profile,
+        profile: profile?.valueOrNull,
         npubFallback: npubFallback,
       );
       hasRealName = resolved != npubFallback;
       displayedName = resolved;
+      namePending =
+          !hasRealName &&
+          profile != null &&
+          !profile.hasValue &&
+          !profile.hasError;
     }
     // Only used for the avatar-initials fallback: null when no real name was
     // resolved, matching the pre-migration contract of `_initialFor`.
     final effectiveDisplayName = hasRealName ? displayedName : null;
+    final nameStyled = hasRealName || namePending;
 
     final isInteractive = onTap != null && hasLocation;
 
@@ -284,13 +293,17 @@ class CircleMemberTile extends ConsumerWidget {
         // A resolved name is a convenience label and may ellipsize. The npub
         // fallback may not: clipping its tail drops the bech32 checksum the
         // 12/6 form exists for, taking an impersonation from ~2^65 back to
-        // ~2^35. It wraps instead, and the tile grows to fit.
+        // ~2^35. It wraps instead, and the tile grows to fit. While the name
+        // is pending the title is an empty line in the name's style and the
+        // npub sits in the subtitle as it will under the name, so a member
+        // who has one never flashes their npub as the title and the row does
+        // not reflow; the semantics label still names them by it.
         title: Text(
-          displayedName,
-          maxLines: hasRealName ? 1 : null,
-          overflow: hasRealName ? TextOverflow.ellipsis : null,
-          textDirection: hasRealName ? null : TextDirection.ltr,
-          style: hasRealName
+          namePending ? '' : displayedName,
+          maxLines: nameStyled ? 1 : null,
+          overflow: nameStyled ? TextOverflow.ellipsis : null,
+          textDirection: nameStyled ? null : TextDirection.ltr,
+          style: nameStyled
               ? null
               : HavenTypography.mono.copyWith(fontSize: 14),
         ),
@@ -298,7 +311,7 @@ class CircleMemberTile extends ConsumerWidget {
           context,
           l10n,
           colorScheme,
-          effectiveDisplayName,
+          showNpubLine: nameStyled,
         ),
         trailing: trailing ?? _buildTrailing(l10n, displayedName),
         onTap: isInteractive ? onTap : null,
@@ -341,9 +354,9 @@ class CircleMemberTile extends ConsumerWidget {
   Widget? _buildSubtitle(
     BuildContext context,
     AppLocalizations l10n,
-    ColorScheme colorScheme,
-    String? effectiveDisplayName,
-  ) {
+    ColorScheme colorScheme, {
+    required bool showNpubLine,
+  }) {
     if (!hasLocation) {
       return Text(
         l10n.circleMemberNoRecentLocation,
@@ -355,11 +368,13 @@ class CircleMemberTile extends ConsumerWidget {
 
     final staleLine = _lastSeenLabel(l10n);
 
-    // The npub moves to the subtitle once a name occupies the title, and
-    // keeps the same no-ellipsis rule the title applies to it — the roster
-    // is where a user checks who they are sharing live location with, so it
-    // must not clip the six checksum characters the 12/6 form exists for.
-    final npubLine = effectiveDisplayName == null
+    // The npub moves to the subtitle once a name occupies the title — or
+    // holds its place while the name is pending, so the row keeps the named
+    // geometry and nothing below it shifts when the name lands — and keeps
+    // the same no-ellipsis rule the title applies to it: the roster is where
+    // a user checks who they are sharing live location with, so it must not
+    // clip the six checksum characters the 12/6 form exists for.
+    final npubLine = !showNpubLine
         ? null
         : Text(
             NpubValidator.shortenForDisplay(member.npub),

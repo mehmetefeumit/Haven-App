@@ -1510,15 +1510,14 @@ class _MapShellState extends ConsumerState<MapShell>
         ..read(invitationPollerProvider)
         ..read(evolutionPollerProvider);
     }
-    // Cold-start public-profile refresh. Haven holds no standing kind-0
-    // subscription, so launch is the one moment a rename or new photo is
-    // guaranteed to be picked up before the user looks at the map. Delayed
-    // by a short settle so it never competes with identity load, relay
-    // init, or engine bootstrap for the first frames; TTL-gated, so a
-    // kill-and-relaunch loop still costs at most one fetch per tier window.
+    // Cold-start public-profile refresh — every foreground transition makes
+    // one, and `_onResumed` makes the rest. Delayed by a short settle so it
+    // never competes with identity load, relay init, or engine bootstrap for
+    // the first frames; TTL-gated, so a kill-and-relaunch loop still costs at
+    // most one fetch per tier window.
     _coldStartProfileRefreshTimer = Timer(_coldStartProfileRefreshDelay, () {
       if (!mounted) return;
-      triggerProfileRefresh(ref, maxAge: profileInteractiveMaxAge);
+      triggerProfileRefresh(ref, maxAge: profileForegroundMaxAge);
       // Resume any own-profile publish a prior session left queued — honours
       // the persisted backoff, never dials a relay unconditionally.
       triggerProfileSyncRetry(ref);
@@ -3069,6 +3068,13 @@ class _MapShellState extends ConsumerState<MapShell>
     // re-subscriber is superseded well inside that class's 500 ms debounce.
     _invalidateHandoffWindowPoison();
 
+    // Every resume refreshes member and own profiles (owner-directed
+    // 2026-11-26), so neither the debounce nor the extras window may gate it;
+    // the 1-min tier is what collapses a run of glances. After the handoff
+    // ends, so its open is not refused; one the foreground service still wins
+    // is re-run by the notifier when the session next opens.
+    triggerProfileRefresh(ref, maxAge: profileForegroundMaxAge);
+
     // Re-anchor the engine's subscriptions BEFORE the debounce, deliberately —
     // but on a guard of its own, NOT unthrottled.
     //
@@ -3186,9 +3192,9 @@ class _MapShellState extends ConsumerState<MapShell>
 
     // The one-shot EXTRAS: work a resume repeats "just in case", every piece
     // of which already runs on a periodic timer of its own. Ten shade-pull
-    // glances an hour used to be ten KeyPackage probes, ten profile fetches,
-    // ten prunes and ten tile-cache sweeps — none of which returned anything
-    // the timers were not about to fetch anyway.
+    // glances an hour used to be ten KeyPackage probes, ten prunes and ten
+    // tile-cache sweeps — none of which returned anything the timers were not
+    // about to fetch anyway.
     //
     // The stamp is also the SIGNAL: `MapPage` evicts its tile cache off a
     // listener on this provider rather than off its own resume callback,
@@ -3203,8 +3209,6 @@ class _MapShellState extends ConsumerState<MapShell>
         ..read(lastResumeExtrasAtProvider.notifier).state = resumeAt
         ..invalidate(keyPackagePublisherProvider)
         ..read(keyPackagePublisherProvider);
-      // §6.2: refresh member/own public profiles on app resume.
-      triggerProfileRefresh(ref, maxAge: profileInteractiveMaxAge);
       // A reseed a cold start found no relay for is retried here, not only on
       // the next launch.
       unawaited(_reseedOwnNameAfterReset());

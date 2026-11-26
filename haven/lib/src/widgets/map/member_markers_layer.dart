@@ -61,7 +61,7 @@ class _MarkerEntry {
 /// `memberProfileProvider(pubkey)` (plain-pubkey keyed, D6 — no MLS group ID
 /// component, since the same pubkey resolves to the same public profile
 /// across every circle) and paints it inside the head circle, falling back
-/// to initials while loading or on error. Names are NOT resolved reactively
+/// to initials until a picture is read. Names are NOT resolved reactively
 /// here — every [MemberLocation] already carries its effective display name
 /// (resolved cache-only, no network, in `memberLocationsProvider`'s body —
 /// plan §6.3 Flutter review F4), so the layer itself stays non-reactive
@@ -541,7 +541,7 @@ class _MarkerProps {
 /// Watches `memberProfileProvider(pubkeyHex)`, decodes
 /// `Profile.pictureBytes` into a [ui.Image] via [AvatarImageCache], and
 /// re-renders [MemberMarker] with the decoded image (or initials fallback
-/// while loading / on error / when no picture is known).
+/// until a picture is read, or when none is known).
 ///
 /// Decoding is done exactly once per unique `Profile.pictureHash` —
 /// subsequent rebuilds (e.g. from camera pans) hit the cache immediately.

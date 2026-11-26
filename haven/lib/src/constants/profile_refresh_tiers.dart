@@ -12,19 +12,30 @@
 /// timer that drives it — the same "Dart owns cadence, Rust owns logic" split
 /// the maintenance scheduler already uses.
 ///
-/// Tuning note: each refresh opens fresh sockets to the profile relay pool, so
-/// these are deliberately not aggressive. Shortening them increases how often
-/// Haven contacts those relays; it does **not** widen what is disclosed (the
-/// union of member pubkeys is identical every time, and each pubkey's assigned
-/// relay is fixed for the install).
+/// Tuning note: a refresh with anything due opens fresh sockets to the profile
+/// relay pool (one with nothing due contacts no relay). Shortening a tier
+/// increases how often Haven contacts those relays; it does **not** widen what
+/// is disclosed (the union of member pubkeys is identical every time, and each
+/// pubkey's assigned relay is fixed for the install). Because every foreground
+/// transition refreshes, the profile relays can infer when the user opens
+/// Haven; the owner accepted that on 2026-11-26.
 library;
 
-/// Tolerance for a user-visible, intent-driven refresh: cold start, circle
-/// select, app resume, opening the Identity page, and roster changes.
+/// Tolerance for the refresh every transition to the foreground makes: each
+/// cold start and each resume (owner-directed 2026-11-26).
 ///
-/// Short enough that re-opening the app or switching circles picks up a
-/// rename, long enough that rapid relaunches or circle-flipping collapse into
-/// a single fetch.
+/// Not [profileForceMaxAge]: zero is the forced mode, which also skips the
+/// per-author miss backoff in Rust. A minute is long enough that rapid app
+/// switching asks no relay twice, short enough that every real return to the
+/// app picks up a rename or a new photo.
+const Duration profileForegroundMaxAge = Duration(minutes: 1);
+
+/// Tolerance for a user-visible, intent-driven refresh: circle select, opening
+/// the Identity page, an invitation accepted, a circle created or members
+/// invited, and roster changes.
+///
+/// Short enough that switching circles picks up a rename, long enough that
+/// circle-flipping collapses into a single fetch.
 const Duration profileInteractiveMaxAge = Duration(minutes: 15);
 
 /// Tolerance for the foreground anti-entropy sweep.

@@ -902,8 +902,10 @@ uniform [72,168] s draws is occasional. (a) is the only variant that reaches ~30
 ### D8 — Foreground/lifecycle hygiene (P1; no promise change)
 Self-marker pulse stops after idle / own `RepaintBoundary`; `MapPage` per-fix `setState` throttled to
 visibility; `LocationAccessNotifier` watchdog touches a timestamp instead of cancel+recreate per fix (one armed
-Timer per interval); resume extras (KP/relay-list probes, profile refresh, prunes, tile eviction) behind
-`kResumeExtrasMinInterval = 10 min` (= the KeyPackage maintenance cadence, the shortest of the extras' own
+Timer per interval); resume extras (KP/relay-list probes, ~~profile refresh,~~ prunes, tile eviction) behind
+`kResumeExtrasMinInterval = 10 min` **(AMENDED 2026-11-26, owner-directed: the profile refresh left the extras —
+every cold start and every resume refreshes profiles at `profileForegroundMaxAge` (1 min), ahead of the 30 s debounce;
+`docs/PUBLIC_PROFILE_MIGRATION_PLAN.md` D3)** (= the KeyPackage maintenance cadence, the shortest of the extras' own
 timers, `maintenance_scheduler_provider.dart:101-126`) — the immediate publish on resume, the
 `memberLocationsProvider` invalidation and the 60 s-guarded re-anchor stay unconditional (a promise); the
 `SharingHealthBanner` widget `_rerender` timer armed only while foregrounded (**rule:** the packet starts with a
@@ -1032,7 +1034,8 @@ for R7). **Adopted: a service-level synchronous gate; the provider keeps only wh
   |---|---|
   | `resumeStream()`; `locationAccessProvider.notifier.resume()` + `refresh()` (`:1584`); `markForegroundActive(true)` + `waitUntilIdle()` + `fgsNotificationOpen` + `_lastPublishTime` seed (the Android reclaim block, `:1658-1685`); P2a's resumed signal; `_endMlsSessionHandoff()` (`:1602`); `_healLiveSyncIfStopped()` + `_rearmLiveSyncHealTimer()` (`:1641`); `_startTimers()` (`:1690`, idempotent) | none |
   | immediate publish (`locationPublisherProvider`), `memberLocationsProvider` invalidation, 60 s-guarded re-anchor (bypassed when the engine is `Paused`, P4) | 30 s debounce (`:1644-1651`) |
-  | KP/relay-list probes, `triggerProfileRefresh`, `_runPrune()`, `tileCacheEvict` | 30 s debounce AND `kResumeExtrasMinInterval` (10 min) |
+  | KP/relay-list probes, ~~`triggerProfileRefresh`,~~ `_runPrune()`, `tileCacheEvict` | 30 s debounce AND `kResumeExtrasMinInterval` (10 min) |
+  | `triggerProfileRefresh` at `profileForegroundMaxAge` (1 min) — **AMENDED 2026-11-26, owner-directed**: every resume, after `_endMlsSessionHandoff()` | none (the tier is its throttle) |
 
 ---
 
@@ -1297,7 +1300,8 @@ coalescing (P5), WorkManager registration (unchanged — D3 (i)), any copy chang
   the resume re-derivation. Platform-neutral. Red-test-first rule of D8 applies.
 - **Resume extras throttle:** `MapShell.shouldRunResumeExtras({DateTime? lastAt, required DateTime now}) => lastAt == null || now.difference(lastAt) >= kResumeExtrasMinInterval`
   (10 min) through one `lastResumeExtrasAtProvider`; gates `keyPackagePublisherProvider` invalidate/read
-  (`:1701,:1704`), `triggerProfileRefresh` (`:1706-1710`), `_runPrune()` (`:1731`) and `map_page.dart:228-248`
+  (`:1701,:1704`), ~~`triggerProfileRefresh` (`:1706-1710`),~~ (**AMENDED 2026-11-26**: no longer gated — every resume
+  refreshes profiles at the 1-min foreground tier) `_runPrune()` (`:1731`) and `map_page.dart:228-248`
   `tileCacheEvict` on resume. The immediate publish, `memberLocationsProvider` invalidation and the 60 s-guarded
   re-anchor stay unconditional.
 - **Per-fix hygiene (C12b):** `LocationAccessNotifier` keeps ONE armed timer and touches `_lastFixAt` per fix; on
