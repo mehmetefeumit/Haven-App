@@ -979,22 +979,37 @@ void main() {
       },
     );
 
-    testWidgets('a tap on save while its icon is still swapping takes '
-        'effect', (tester) async {
+    testWidgets('a tap near the rim of save while its icon is still '
+        'swapping takes effect as it lands', (tester) async {
       final svc = MockCircleService();
       await tester.pumpWidget(
         _buildHarness(member: _buildMember(), circleService: svc),
       );
       await tester.pumpAndSettle();
+      final atRest = tester.getRect(find.byKey(WidgetKeys.memberNicknameSave));
 
       await tester.enterText(find.byKey(WidgetKeys.memberNicknameField), 'Bo');
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 100));
-      // Mid-swap: the outgoing and incoming icons are both on screen.
+      // Mid-swap: the outgoing and incoming icons are both on screen, each
+      // part-way through its scale.
       expect(_inSave(find.byIcon(LucideIcons.check)), findsOneWidget);
       expect(_inSave(find.byIcon(LucideIcons.arrowUp)), findsOneWidget);
+      expect(
+        tester
+            .widgetList<ScaleTransition>(_inSave(find.byType(ScaleTransition)))
+            .map((t) => t.scale.value),
+        allOf(hasLength(2), everyElement(allOf(greaterThan(0), lessThan(1)))),
+      );
 
-      await tester.tap(find.byKey(WidgetKeys.memberNicknameSave));
+      // Off-centre, outside the 20dp icon but inside the resting 48dp
+      // circle: a hit area that shrank with the icon still holds the centre.
+      await tester.tapAt(atRest.center + Offset(atRest.width * 3 / 8, 0));
+      expect(
+        svc.methodCalls,
+        contains('setContactDisplayName'),
+        reason: 'the save starts on the tap, not once the swap settles',
+      );
       await tester.pumpAndSettle();
 
       expect(svc.nicknames[_memberPubkey], 'Bo');
