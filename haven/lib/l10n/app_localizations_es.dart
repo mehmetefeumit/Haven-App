@@ -575,15 +575,15 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get locationSettingsIntro =>
-      'Haven comparte tu ubicación con tus círculos siempre que la app está abierta. Activa esto y tus círculos la seguirán viendo mientras Haven está en segundo plano. Si el sistema cierra Haven, tu ubicación deja de compartirse: puede que Haven aún se despierte para recibir las ubicaciones de tus círculos, pero nunca para enviar la tuya. En Android, el envío de tu ubicación continúa aunque deslices Haven fuera del selector de apps, y vuelve a empezar por sí solo tras reiniciar el teléfono. En iPhone, el envío de tu ubicación sigue detenido hasta que abras Haven.';
+      'Haven comparte tu ubicación con tus círculos mientras la app está abierta. Activa esto y tus círculos la seguirán viendo mientras Haven está en segundo plano. Deslizar Haven fuera del selector de apps no desactiva este ajuste; solo lo hace el interruptor de abajo.';
 
   @override
   String get locationSettingsIntroAndroid =>
-      'Sharing keeps going when you swipe Haven away. After your phone restarts or Haven updates, sharing starts again by itself if Haven may use your location all the time (on Android 10 or older, if Haven may use your location at all). Otherwise, Haven shows a notification you can tap to resume. If Haven is force-stopped, sharing stays stopped until you open it.';
+      'El uso compartido continúa aunque deslices Haven fuera del selector de apps. Después de que el teléfono se reinicie o Haven se actualice, el uso compartido vuelve a empezar por sí solo si Haven puede usar tu ubicación todo el tiempo (en Android 10 o versiones anteriores, basta con que pueda usar tu ubicación). De lo contrario, Haven muestra una notificación que puedes tocar para reanudarlo. Si se fuerza la detención de Haven, el uso compartido sigue detenido hasta que lo abras.';
 
   @override
   String get locationSettingsIntroIos =>
-      'With location set to \'Always\', sharing starts again by itself after Haven is closed, once you have moved a few hundred metres and iOS allows it. After your phone restarts, this happens only once you have also unlocked it. iOS decides when this happens, so it is not guaranteed. With \'While Using the App\', sharing stops when Haven is closed and starts again when you open it.';
+      'Con la ubicación en «Siempre», el uso compartido vuelve a empezar por sí solo después de que Haven se cierre, una vez que te hayas movido unos cientos de metros y iOS lo permita. Después de que el teléfono se reinicie, esto solo ocurre cuando también lo hayas desbloqueado. iOS decide cuándo ocurre, así que no está garantizado. Con «Cuando se use la app», el uso compartido se detiene cuando Haven se cierra y vuelve a empezar cuando lo abres.';
 
   @override
   String get locationSettingsToggleTitle => 'Compartir en segundo plano';
@@ -594,25 +594,26 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'El uso compartido sigue funcionando en segundo plano con tu permiso actual, y mientras lo hace, iOS muestra su barra azul de ubicación en la parte superior de la pantalla. Configura la Ubicación de Haven como «Siempre» en Ajustes para que Haven también pueda ponerse al día con las ubicaciones de tus círculos después de que iOS cierre la app. Con «Siempre», iOS puede mostrar su flecha de ubicación en la barra de estado en lugar de esa barra azul. Tu propio uso compartido solo se reanuda cuando vuelves a abrir Haven.';
+      'El uso compartido sigue funcionando en segundo plano con tu permiso actual, y mientras lo hace, iOS muestra su barra azul de ubicación en la parte superior de la pantalla. Si Haven se cierra, el uso compartido se detiene hasta que vuelvas a abrirlo. Elige «Siempre» para Haven en Ajustes para que el uso compartido pueda volver a empezar por sí solo después de que Haven se cierre, una vez que te hayas movido unos cientos de metros y iOS lo permita. Con «Siempre», iOS puede mostrar su flecha de ubicación en la barra de estado en lugar de esa barra.';
 
   @override
   String get locationSettingsResumeConsentNote =>
-      'Background sharing is on. If it stops, for example when your phone restarts, Haven will not start it again by itself until you agree to the updated background-sharing notice.';
+      'El uso compartido en segundo plano está activado. Si se detiene, por ejemplo al reiniciarse el teléfono, Haven no volverá a iniciarlo por sí solo hasta que aceptes el aviso actualizado sobre el uso compartido en segundo plano.';
 
   @override
-  String get locationSettingsResumeConsentAction => 'Review notice';
+  String get locationSettingsResumeConsentAction => 'Revisar aviso';
 
   @override
   String locationSettingsAndroidAllTimeNote(String optionLabel) {
-    return 'Haven\'s location permission is not set to \'$optionLabel\', so sharing will not start again by itself after your phone restarts or Haven updates. Instead, Haven will show a notification you can tap to resume.';
+    return 'El permiso de ubicación de Haven no está configurado como «$optionLabel», así que el uso compartido no volverá a empezar por sí solo después de que el teléfono se reinicie o Haven se actualice. En su lugar, Haven mostrará una notificación que puedes tocar para reanudarlo.';
   }
 
   @override
-  String get locationSettingsAndroidAllTimeAction => 'Change permission';
+  String get locationSettingsAndroidAllTimeAction => 'Cambiar permiso';
 
   @override
-  String get locationBackgroundAllTimeOptionFallback => 'Allow all the time';
+  String get locationBackgroundAllTimeOptionFallback =>
+      'Permitir todo el tiempo';
 
   @override
   String get locationSettingsAndroidHeader =>
@@ -624,7 +625,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get locationSettingsAndroidBattery =>
-      'Para compartir en segundo plano de forma fiable, excluye también Haven de la optimización de batería. Ve a Ajustes → Aplicaciones → Haven → Batería → Permitir siempre.';
+      'Para compartir en segundo plano de forma fiable, excluye también Haven de la optimización de batería. Ve a Ajustes → Aplicaciones → Haven → Batería → Sin restricciones.';
 
   @override
   String get locationSettingsAndroidVendors =>
@@ -663,7 +664,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get locationDisclosureBackgroundIos =>
-      'Esta app usa datos de ubicación para permitir el uso compartido con tus círculos incluso cuando Haven está en segundo plano y no lo estás usando. Si iOS cierra Haven, el uso compartido se detiene hasta que vuelvas a abrirlo: puede que Haven aún se despierte para recibir las ubicaciones de tus círculos, pero nunca para enviar la tuya.';
+      'Esta app usa datos de ubicación para permitir el uso compartido con tus círculos incluso cuando Haven está en segundo plano y no lo estás usando. Si la ubicación está en «Siempre» y Haven se cierra, incluso si lo cierras tú, Haven vuelve a compartir por sí solo una vez que te hayas movido unos cientos de metros y iOS lo permita. Después de un reinicio, esto solo ocurre cuando también hayas desbloqueado el teléfono. iOS decide cuándo, así que no está garantizado. Con «Cuando se use la app», el uso compartido se detiene cuando Haven se cierra y sigue detenido hasta que vuelvas a abrirlo.';
 
   @override
   String get locationDisclosureManage =>
@@ -677,11 +678,11 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get locationDisclosureUpdateLead =>
-      'Background sharing has changed since you turned it on. Haven can now start sharing again by itself after it has stopped, for example after your phone restarts, in the cases described below. If you choose \'Not now\', background sharing keeps working as before, but after it has stopped, it stays stopped until you open Haven.';
+      'Hubo cambios en el uso compartido en segundo plano desde que lo activaste. Ahora Haven puede volver a compartir por sí solo después de que el uso compartido se haya detenido, por ejemplo tras reiniciarse el teléfono, en los casos que se describen a continuación. Si eliges «Ahora no», el uso compartido en segundo plano sigue funcionando como antes, pero una vez que se detenga, seguirá detenido hasta que abras Haven.';
 
   @override
   String locationBackgroundAllTimeStep(String optionLabel) {
-    return 'Next, on the screen Android opens, set Haven\'s location permission to \'$optionLabel\' so sharing starts again by itself after your phone restarts or Haven updates. If you don\'t, sharing keeps working until your phone restarts or Haven updates, and then Haven shows a notification you can tap to resume.';
+    return 'A continuación, en la pantalla que abra Android, configura el permiso de ubicación de Haven como «$optionLabel» para que el uso compartido vuelva a empezar por sí solo después de que el teléfono se reinicie o Haven se actualice. Si no lo haces, el uso compartido seguirá funcionando hasta que el teléfono se reinicie o Haven se actualice, y entonces Haven mostrará una notificación que puedes tocar para reanudarlo.';
   }
 
   @override
@@ -689,14 +690,15 @@ class AppLocalizationsEs extends AppLocalizations {
       'Haven está enviando y recibiendo información de ubicación';
 
   @override
-  String get androidResumeNoticeTitle => 'Location sharing has stopped';
+  String get androidResumeNoticeTitle => 'Uso compartido de ubicación detenido';
 
   @override
   String get androidResumeNoticeBody =>
-      'Tap to open Haven and resume sharing your location with your circles.';
+      'Toca para abrir Haven y reanudar el uso compartido de tu ubicación con tus círculos.';
 
   @override
-  String get androidResumeNoticeChannelName => 'Sharing reminders';
+  String get androidResumeNoticeChannelName =>
+      'Recordatorios de uso compartido';
 
   @override
   String get fgsNotificationPaused =>

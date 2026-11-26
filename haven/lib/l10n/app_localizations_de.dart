@@ -569,15 +569,15 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get locationSettingsIntro =>
-      'Haven teilt deinen Standort mit deinen Kreisen, solange die App geöffnet ist. Schalte das hier ein, und deine Kreise sehen ihn weiter, während Haven im Hintergrund läuft. Beendet das System Haven, wird dein eigener Standort nicht mehr geteilt: Haven kann zwar noch aufwachen, um die Standorte deiner Kreise abzurufen, aber nie, um deinen zu senden. Unter Android läuft das Teilen weiter, wenn du Haven aus dem App-Umschalter wischst, und startet nach einem Neustart des Geräts von allein wieder. Auf dem iPhone bleibt das Teilen gestoppt, bis du Haven öffnest.';
+      'Haven teilt deinen Standort mit deinen Kreisen, solange die App geöffnet ist. Schalte das hier ein, und deine Kreise sehen ihn weiter, während Haven im Hintergrund läuft. Wenn du Haven wegwischst, schaltet das diese Einstellung nicht aus; das geht nur mit dem Schalter unten.';
 
   @override
   String get locationSettingsIntroAndroid =>
-      'Sharing keeps going when you swipe Haven away. After your phone restarts or Haven updates, sharing starts again by itself if Haven may use your location all the time (on Android 10 or older, if Haven may use your location at all). Otherwise, Haven shows a notification you can tap to resume. If Haven is force-stopped, sharing stays stopped until you open it.';
+      'Das Teilen läuft weiter, wenn du Haven wegwischst. Nach einem Neustart deines Telefons oder einem Update von Haven startet das Teilen von selbst wieder, wenn Haven deinen Standort immer verwenden darf (unter Android 10 oder älter, wenn Haven deinen Standort überhaupt verwenden darf). Andernfalls zeigt Haven eine Benachrichtigung, auf die du tippen kannst, um das Teilen fortzusetzen. Wurde Haven mit „Beenden erzwingen“ gestoppt, bleibt das Teilen gestoppt, bis du Haven öffnest.';
 
   @override
   String get locationSettingsIntroIos =>
-      'With location set to \'Always\', sharing starts again by itself after Haven is closed, once you have moved a few hundred metres and iOS allows it. After your phone restarts, this happens only once you have also unlocked it. iOS decides when this happens, so it is not guaranteed. With \'While Using the App\', sharing stops when Haven is closed and starts again when you open it.';
+      'Ist der Standortzugriff auf „Immer“ gesetzt, startet das Teilen von selbst wieder, nachdem Haven geschlossen wurde, sobald du dich ein paar hundert Meter bewegt hast und iOS es zulässt. Nach einem Neustart deines Telefons geschieht das erst, wenn du es auch entsperrt hast. iOS entscheidet, wann das geschieht, daher ist es nicht garantiert. Mit „Beim Verwenden der App“ stoppt das Teilen, wenn Haven geschlossen wird, und startet wieder, wenn du die App öffnest.';
 
   @override
   String get locationSettingsToggleTitle => 'Im Hintergrund teilen';
@@ -588,25 +588,25 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'Das Teilen läuft mit deiner aktuellen Berechtigung auch im Hintergrund weiter, und iOS zeigt dabei oben am Bildschirm seine blaue Standortleiste. Setze in den Einstellungen für Haven den Standortzugriff auf „Immer“, damit Haven auch dann noch die verpassten Standorte deiner Kreise nachholen kann, wenn iOS die App beendet hat. Unter „Immer“ zeigt iOS statt der blauen Standortleiste möglicherweise seinen Standortpfeil in der Statusleiste. Dein eigener Standort wird erst wieder geteilt, wenn du Haven erneut öffnest.';
+      'Das Teilen läuft mit deiner aktuellen Berechtigung auch im Hintergrund weiter, und iOS zeigt dabei oben am Bildschirm seine blaue Standortleiste. Wird Haven geschlossen, stoppt das Teilen, bis du die App wieder öffnest. Wähle in den Einstellungen für Haven „Immer“, damit das Teilen von selbst wieder startet, nachdem Haven geschlossen wurde, sobald du dich ein paar hundert Meter bewegt hast und iOS es zulässt. Unter „Immer“ zeigt iOS statt der blauen Leiste möglicherweise seinen Standortpfeil in der Statusleiste.';
 
   @override
   String get locationSettingsResumeConsentNote =>
-      'Background sharing is on. If it stops, for example when your phone restarts, Haven will not start it again by itself until you agree to the updated background-sharing notice.';
+      'Das Teilen im Hintergrund ist aktiviert. Wenn es stoppt, zum Beispiel bei einem Neustart deines Telefons, startet Haven es erst wieder von selbst, wenn du dem aktualisierten Hinweis zum Teilen im Hintergrund zustimmst.';
 
   @override
-  String get locationSettingsResumeConsentAction => 'Review notice';
+  String get locationSettingsResumeConsentAction => 'Hinweis ansehen';
 
   @override
   String locationSettingsAndroidAllTimeNote(String optionLabel) {
-    return 'Haven\'s location permission is not set to \'$optionLabel\', so sharing will not start again by itself after your phone restarts or Haven updates. Instead, Haven will show a notification you can tap to resume.';
+    return 'Die Standortberechtigung von Haven ist nicht auf „$optionLabel“ gesetzt, daher startet das Teilen nach einem Neustart deines Telefons oder einem Update von Haven nicht von selbst wieder. Stattdessen zeigt Haven eine Benachrichtigung, auf die du tippen kannst, um das Teilen fortzusetzen.';
   }
 
   @override
-  String get locationSettingsAndroidAllTimeAction => 'Change permission';
+  String get locationSettingsAndroidAllTimeAction => 'Berechtigung ändern';
 
   @override
-  String get locationBackgroundAllTimeOptionFallback => 'Allow all the time';
+  String get locationBackgroundAllTimeOptionFallback => 'Immer zulassen';
 
   @override
   String get locationSettingsAndroidHeader =>
@@ -618,7 +618,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get locationSettingsAndroidBattery =>
-      'Für zuverlässiges Teilen im Hintergrund schließe Haven außerdem von der Akkuoptimierung aus. Gehe zu Einstellungen → Apps → Haven → Akku → Immer zulassen.';
+      'Für zuverlässiges Teilen im Hintergrund schließe Haven außerdem von der Akkuoptimierung aus. Gehe zu Einstellungen → Apps → Haven → Akku → Uneingeschränkt.';
 
   @override
   String get locationSettingsAndroidVendors =>
@@ -657,7 +657,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get locationDisclosureBackgroundIos =>
-      'Diese App nutzt Standortdaten, um das Teilen mit deinen Kreisen zu ermöglichen, auch wenn Haven im Hintergrund läuft und du die App gerade nicht benutzt. Beendet iOS Haven, wird dein Standort nicht mehr geteilt, bis du Haven wieder öffnest – Haven kann zwar noch aufwachen, um die Standorte deiner Kreise abzurufen, aber nie, um deinen zu senden.';
+      'Diese App nutzt Standortdaten, um das Teilen mit deinen Kreisen zu ermöglichen, auch wenn Haven im Hintergrund läuft und du die App gerade nicht benutzt. Ist der Standortzugriff auf „Immer“ gesetzt und wird Haven geschlossen, auch durch dich, startet Haven das Teilen von selbst wieder, sobald du dich ein paar hundert Meter bewegt hast und iOS es zulässt. Nach einem Neustart geschieht das erst, wenn du dein Telefon auch entsperrt hast. iOS entscheidet, wann, daher ist es nicht garantiert. Mit „Beim Verwenden der App“ stoppt das Teilen, wenn Haven geschlossen wird, und bleibt gestoppt, bis du die App wieder öffnest.';
 
   @override
   String get locationDisclosureManage =>
@@ -671,11 +671,11 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get locationDisclosureUpdateLead =>
-      'Background sharing has changed since you turned it on. Haven can now start sharing again by itself after it has stopped, for example after your phone restarts, in the cases described below. If you choose \'Not now\', background sharing keeps working as before, but after it has stopped, it stays stopped until you open Haven.';
+      'Das Teilen im Hintergrund hat sich geändert, seit du es eingeschaltet hast. Wurde das Teilen gestoppt, zum Beispiel durch einen Neustart deines Telefons, kann Haven es jetzt in den unten beschriebenen Fällen von selbst wieder starten. Wählst du „Jetzt nicht“, läuft das Teilen im Hintergrund weiter wie bisher; wurde es aber gestoppt, bleibt es gestoppt, bis du Haven öffnest.';
 
   @override
   String locationBackgroundAllTimeStep(String optionLabel) {
-    return 'Next, on the screen Android opens, set Haven\'s location permission to \'$optionLabel\' so sharing starts again by itself after your phone restarts or Haven updates. If you don\'t, sharing keeps working until your phone restarts or Haven updates, and then Haven shows a notification you can tap to resume.';
+    return 'Setze als Nächstes auf dem Bildschirm, den Android öffnet, die Standortberechtigung von Haven auf „$optionLabel“, damit das Teilen nach einem Neustart deines Telefons oder einem Update von Haven von selbst wieder startet. Wenn du das nicht tust, läuft das Teilen weiter, bis dein Telefon neu startet oder Haven aktualisiert wird; danach zeigt Haven eine Benachrichtigung, auf die du tippen kannst, um das Teilen fortzusetzen.';
   }
 
   @override
@@ -683,14 +683,14 @@ class AppLocalizationsDe extends AppLocalizations {
       'Haven sendet und empfängt Standortdaten';
 
   @override
-  String get androidResumeNoticeTitle => 'Location sharing has stopped';
+  String get androidResumeNoticeTitle => 'Standort wird nicht mehr geteilt';
 
   @override
   String get androidResumeNoticeBody =>
-      'Tap to open Haven and resume sharing your location with your circles.';
+      'Tippe, um Haven zu öffnen und deinen Standort wieder mit deinen Kreisen zu teilen.';
 
   @override
-  String get androidResumeNoticeChannelName => 'Sharing reminders';
+  String get androidResumeNoticeChannelName => 'Erinnerungen zum Teilen';
 
   @override
   String get fgsNotificationPaused =>

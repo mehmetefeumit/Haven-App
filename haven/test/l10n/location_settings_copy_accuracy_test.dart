@@ -267,7 +267,9 @@ const _vocabulary = <String, _Vocabulary>{
     indicator: ['مؤشر'],
     always: ['دائم'],
     closesTheApp: ['غلق', 'إغلاق'],
-    metres: ['متر'],
+    // أمتار is the broken plural ("a few hundred metres"); it does not
+    // contain the singular متر as a substring.
+    metres: ['متر', 'أمتار'],
     oldSentence: ['متواصلة', 'مؤشرًا أزرق'],
     oldNote: ['تدارك'],
     backgroundTerm: 'الخلفية',

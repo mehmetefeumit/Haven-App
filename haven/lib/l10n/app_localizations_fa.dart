@@ -561,15 +561,15 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get locationSettingsIntro =>
-      'هر وقت برنامه باز باشد، Haven موقعیت مکانی‌ات را با حلقه‌هایت به اشتراک می‌گذارد. این را روشن کن تا حلقه‌هایت وقتی Haven در پس‌زمینه است هم آن را ببینند. اگر سیستم Haven را ببندد، اشتراک‌گذاری خودت متوقف می‌شود: ممکن است Haven باز هم بیدار شود تا موقعیت حلقه‌هایت را بگیرد، اما هرگز برای فرستادن موقعیت خودت بیدار نمی‌شود. روی Android، اشتراک‌گذاری حتی بعد از کنار زدن Haven از فهرست برنامه‌های باز ادامه پیدا می‌کند و پس از راه‌اندازی دوبارهٔ دستگاه خودبه‌خود از سر گرفته می‌شود. روی iPhone، اشتراک‌گذاری تا وقتی Haven را باز نکنی متوقف می‌ماند.';
+      'هر وقت برنامه باز باشد، Haven موقعیت مکانی‌ات را با حلقه‌هایت به اشتراک می‌گذارد. این را روشن کن تا حلقه‌هایت وقتی Haven در پس‌زمینه است هم آن را ببینند. کنار زدن Haven از فهرست برنامه‌های باز این تنظیم را خاموش نمی‌کند؛ فقط کلید روشن/خاموش زیر این کار را می‌کند.';
 
   @override
   String get locationSettingsIntroAndroid =>
-      'Sharing keeps going when you swipe Haven away. After your phone restarts or Haven updates, sharing starts again by itself if Haven may use your location all the time (on Android 10 or older, if Haven may use your location at all). Otherwise, Haven shows a notification you can tap to resume. If Haven is force-stopped, sharing stays stopped until you open it.';
+      'وقتی Haven را از فهرست برنامه‌های باز کنار می‌زنی، اشتراک‌گذاری ادامه پیدا می‌کند. پس از راه‌اندازی دوبارهٔ گوشی یا به‌روزرسانی Haven، اگر Haven همیشه مجاز به استفاده از موقعیت مکانی‌ات باشد (در اندروید ۱۰ یا قدیمی‌تر، اگر اصلاً مجاز به استفاده از موقعیت مکانی‌ات باشد)، اشتراک‌گذاری خودبه‌خود دوباره شروع می‌شود. در غیر این صورت، Haven اعلانی نشان می‌دهد که می‌توانی روی آن ضربه بزنی تا اشتراک‌گذاری از سر گرفته شود. اگر Haven با «توقف اجباری» بسته شود، اشتراک‌گذاری تا وقتی دوباره بازش کنی متوقف می‌ماند.';
 
   @override
   String get locationSettingsIntroIos =>
-      'With location set to \'Always\', sharing starts again by itself after Haven is closed, once you have moved a few hundred metres and iOS allows it. After your phone restarts, this happens only once you have also unlocked it. iOS decides when this happens, so it is not guaranteed. With \'While Using the App\', sharing stops when Haven is closed and starts again when you open it.';
+      'وقتی دسترسی به موقعیت مکانی روی «همیشه» باشد، اشتراک‌گذاری پس از بسته شدن Haven خودبه‌خود دوباره شروع می‌شود، به شرط آنکه چند صد متر جابه‌جا شده باشی و iOS اجازه بدهد. پس از راه‌اندازی دوبارهٔ گوشی‌ات، این اتفاق فقط وقتی می‌افتد که قفل آن را هم باز کرده باشی. زمانش را iOS تعیین می‌کند، برای همین تضمینی در کار نیست. با «هنگام استفاده از برنامه»، اشتراک‌گذاری با بسته شدن Haven متوقف می‌شود و وقتی دوباره بازش کنی، از سر گرفته می‌شود.';
 
   @override
   String get locationSettingsToggleTitle => 'اشتراک‌گذاری در پس‌زمینه';
@@ -580,25 +580,25 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'اشتراک‌گذاری با همین مجوز فعلی همچنان در پس‌زمینه کار می‌کند و در این مدت iOS نوار آبی موقعیت مکانی را در بالای صفحه نشان می‌دهد. در تنظیمات، موقعیت مکانی Haven را روی «همیشه» بگذار تا Haven بتواند پس از آنکه iOS برنامه را بست هم خودش را با موقعیت حلقه‌هایت به‌روز کند. با «همیشه»، ممکن است iOS به‌جای آن نوار، پیکان موقعیت مکانی را در نوار وضعیت نشان بدهد. وقتی دوباره Haven را باز کنی، اشتراک‌گذاری موقعیت خودت از سر گرفته می‌شود.';
+      'اشتراک‌گذاری با همین مجوز فعلی همچنان در پس‌زمینه کار می‌کند و در این مدت iOS نوار آبی موقعیت مکانی را در بالای صفحه نشان می‌دهد. اگر Haven بسته شود، اشتراک‌گذاری تا وقتی دوباره بازش کنی متوقف می‌ماند. در تنظیمات، موقعیت مکانی Haven را روی «همیشه» بگذار تا اشتراک‌گذاری بتواند پس از بسته شدن Haven خودبه‌خود دوباره شروع شود، به شرط آنکه چند صد متر جابه‌جا شده باشی و iOS اجازه بدهد. با «همیشه»، ممکن است iOS به‌جای آن نوار، پیکان موقعیت مکانی را در نوار وضعیت نشان بدهد.';
 
   @override
   String get locationSettingsResumeConsentNote =>
-      'Background sharing is on. If it stops, for example when your phone restarts, Haven will not start it again by itself until you agree to the updated background-sharing notice.';
+      'اشتراک‌گذاری در پس‌زمینه روشن است. اگر متوقف شود، مثلاً وقتی گوشی‌ات دوباره راه‌اندازی می‌شود، Haven تا وقتی با اطلاعیهٔ به‌روزشده دربارهٔ اشتراک‌گذاری در پس‌زمینه موافقت نکنی، آن را خودبه‌خود دوباره شروع نمی‌کند.';
 
   @override
-  String get locationSettingsResumeConsentAction => 'Review notice';
+  String get locationSettingsResumeConsentAction => 'بررسی اطلاعیه';
 
   @override
   String locationSettingsAndroidAllTimeNote(String optionLabel) {
-    return 'Haven\'s location permission is not set to \'$optionLabel\', so sharing will not start again by itself after your phone restarts or Haven updates. Instead, Haven will show a notification you can tap to resume.';
+    return 'مجوز موقعیت مکانی Haven روی «$optionLabel» نیست، برای همین پس از راه‌اندازی دوبارهٔ گوشی یا به‌روزرسانی Haven، اشتراک‌گذاری خودبه‌خود دوباره شروع نمی‌شود. به‌جای آن، Haven اعلانی نشان می‌دهد که می‌توانی روی آن ضربه بزنی تا اشتراک‌گذاری از سر گرفته شود.';
   }
 
   @override
-  String get locationSettingsAndroidAllTimeAction => 'Change permission';
+  String get locationSettingsAndroidAllTimeAction => 'تغییر مجوز';
 
   @override
-  String get locationBackgroundAllTimeOptionFallback => 'Allow all the time';
+  String get locationBackgroundAllTimeOptionFallback => 'همیشه مجاز';
 
   @override
   String get locationSettingsAndroidHeader =>
@@ -610,7 +610,7 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get locationSettingsAndroidBattery =>
-      'برای اشتراک‌گذاری پس‌زمینهٔ قابل‌اعتماد، Haven را از بهینه‌سازی باتری نیز مستثنا کن. به تنظیمات ← برنامه‌ها ← Haven ← باتری ← مجاز در همهٔ مواقع برو.';
+      'برای اشتراک‌گذاری پس‌زمینهٔ قابل‌اعتماد، Haven را از بهینه‌سازی باتری نیز مستثنا کن. برای این کار به تنظیمات ← برنامه‌ها ← Haven ← باتری برو و «نامحدود» را انتخاب کن.';
 
   @override
   String get locationSettingsAndroidVendors =>
@@ -649,7 +649,7 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get locationDisclosureBackgroundIos =>
-      'این برنامه از داده‌های موقعیت مکانی استفاده می‌کند تا اشتراک‌گذاری با حلقه‌هایت را ممکن کند، حتی وقتی Haven در پس‌زمینه است و تو از آن استفاده نمی‌کنی. اگر iOS برنامهٔ Haven را ببندد، اشتراک‌گذاری خودت تا وقتی دوباره بازش کنی متوقف می‌شود: ممکن است Haven باز هم بیدار شود تا موقعیت حلقه‌هایت را بگیرد، اما هرگز برای فرستادن موقعیت خودت بیدار نمی‌شود.';
+      'این برنامه از داده‌های موقعیت مکانی استفاده می‌کند تا اشتراک‌گذاری با حلقه‌هایت را ممکن کند، حتی وقتی Haven در پس‌زمینه است و تو از آن استفاده نمی‌کنی. اگر دسترسی به موقعیت مکانی روی «همیشه» باشد و Haven بسته شود، حتی به دست خودت، Haven به شرط آنکه چند صد متر جابه‌جا شده باشی و iOS اجازه بدهد، اشتراک‌گذاری را خودبه‌خود دوباره شروع می‌کند. پس از راه‌اندازی دوباره، این اتفاق فقط وقتی می‌افتد که قفل گوشی‌ات را هم باز کرده باشی. زمانش را iOS تعیین می‌کند، برای همین تضمینی در کار نیست. با «هنگام استفاده از برنامه»، اشتراک‌گذاری با بسته شدن Haven متوقف می‌شود و تا وقتی دوباره بازش کنی متوقف می‌ماند.';
 
   @override
   String get locationDisclosureManage =>
@@ -663,11 +663,11 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get locationDisclosureUpdateLead =>
-      'Background sharing has changed since you turned it on. Haven can now start sharing again by itself after it has stopped, for example after your phone restarts, in the cases described below. If you choose \'Not now\', background sharing keeps working as before, but after it has stopped, it stays stopped until you open Haven.';
+      'اشتراک‌گذاری در پس‌زمینه از وقتی آن را روشن کردی تغییر کرده است. حالا Haven می‌تواند در مواردی که پایین‌تر آمده، اشتراک‌گذاری را پس از متوقف شدن خودبه‌خود دوباره شروع کند؛ مثلاً پس از راه‌اندازی دوبارهٔ گوشی‌ات. اگر «الان نه» را انتخاب کنی، اشتراک‌گذاری در پس‌زمینه مثل قبل کار می‌کند، اما وقتی متوقف شد، تا وقتی Haven را باز کنی متوقف می‌ماند.';
 
   @override
   String locationBackgroundAllTimeStep(String optionLabel) {
-    return 'Next, on the screen Android opens, set Haven\'s location permission to \'$optionLabel\' so sharing starts again by itself after your phone restarts or Haven updates. If you don\'t, sharing keeps working until your phone restarts or Haven updates, and then Haven shows a notification you can tap to resume.';
+    return 'در گام بعد، در صفحه‌ای که اندروید باز می‌کند، مجوز موقعیت مکانی Haven را روی «$optionLabel» بگذار تا پس از راه‌اندازی دوبارهٔ گوشی یا به‌روزرسانی Haven، اشتراک‌گذاری خودبه‌خود دوباره شروع شود. اگر این کار را نکنی، اشتراک‌گذاری تا راه‌اندازی دوبارهٔ گوشی یا به‌روزرسانی Haven ادامه پیدا می‌کند و بعد از آن، Haven اعلانی نشان می‌دهد که می‌توانی روی آن ضربه بزنی تا اشتراک‌گذاری از سر گرفته شود.';
   }
 
   @override
@@ -675,14 +675,15 @@ class AppLocalizationsFa extends AppLocalizations {
       'Haven در حال ارسال و دریافت موقعیت مکانی است';
 
   @override
-  String get androidResumeNoticeTitle => 'Location sharing has stopped';
+  String get androidResumeNoticeTitle =>
+      'اشتراک‌گذاری موقعیت مکانی متوقف شده است';
 
   @override
   String get androidResumeNoticeBody =>
-      'Tap to open Haven and resume sharing your location with your circles.';
+      'ضربه بزن تا Haven باز شود و اشتراک‌گذاری موقعیت مکانی‌ات با حلقه‌هایت از سر گرفته شود.';
 
   @override
-  String get androidResumeNoticeChannelName => 'Sharing reminders';
+  String get androidResumeNoticeChannelName => 'یادآوری‌های اشتراک‌گذاری';
 
   @override
   String get fgsNotificationPaused =>

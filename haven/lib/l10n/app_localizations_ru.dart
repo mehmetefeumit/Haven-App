@@ -573,15 +573,15 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get locationSettingsIntro =>
-      'Haven делится вашим местоположением с вашими кругами всё время, пока приложение открыто. Включите этот параметр — и круги будут видеть его и тогда, когда Haven работает в фоне. Если система закроет Haven, отправка вашего местоположения прекратится: Haven по-прежнему может просыпаться, чтобы получить местоположения ваших кругов, но никогда — чтобы отправить ваше. На Android отправка продолжается, даже если смахнуть Haven из списка недавних приложений, и сама собой возобновляется после перезагрузки телефона. На iPhone отправка не возобновится, пока вы не откроете Haven.';
+      'Haven делится вашим местоположением с вашими кругами всё время, пока приложение открыто. Включите этот параметр — и круги будут видеть его и тогда, когда Haven работает в фоне. Если закрыть Haven смахиванием, этот параметр не выключится: выключить его можно только переключателем ниже.';
 
   @override
   String get locationSettingsIntroAndroid =>
-      'Sharing keeps going when you swipe Haven away. After your phone restarts or Haven updates, sharing starts again by itself if Haven may use your location all the time (on Android 10 or older, if Haven may use your location at all). Otherwise, Haven shows a notification you can tap to resume. If Haven is force-stopped, sharing stays stopped until you open it.';
+      'Обмен продолжается, даже если смахнуть Haven из списка недавних приложений. После перезагрузки телефона или обновления Haven обмен возобновится сам, если для Haven выбран доступ к местоположению в любом режиме (на Android 10 и более ранних версиях — если Haven вообще разрешён доступ к местоположению). В противном случае Haven покажет уведомление: нажмите на него, чтобы возобновить обмен. Если Haven остановлен принудительно, обмен не возобновится, пока вы не откроете приложение.';
 
   @override
   String get locationSettingsIntroIos =>
-      'With location set to \'Always\', sharing starts again by itself after Haven is closed, once you have moved a few hundred metres and iOS allows it. After your phone restarts, this happens only once you have also unlocked it. iOS decides when this happens, so it is not guaranteed. With \'While Using the App\', sharing stops when Haven is closed and starts again when you open it.';
+      'Если выбран доступ к геопозиции «Всегда», после закрытия Haven обмен возобновится сам, как только вы переместитесь на несколько сотен метров и iOS это позволит. После перезагрузки телефона для этого нужно ещё и разблокировать его. Когда это произойдёт, решает iOS, поэтому это не гарантируется. Если выбран доступ «При использовании приложения», обмен прекращается после закрытия Haven и возобновляется, когда вы его открываете.';
 
   @override
   String get locationSettingsToggleTitle => 'Делиться в фоне';
@@ -592,25 +592,26 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'Обмен продолжает работать в фоне и при текущем разрешении, и всё это время iOS показывает вверху экрана свою синюю полосу геопозиции. Установите для Haven доступ к геопозиции «Всегда» в Настройках, чтобы он мог получать пропущенные обновления ваших кругов и после того, как iOS закроет приложение. При доступе «Всегда» iOS может показывать в строке состояния свою стрелку геопозиции вместо этой полосы. Ваш собственный обмен возобновится, когда вы снова откроете Haven.';
+      'Обмен продолжает работать в фоне и при текущем разрешении, и всё это время iOS показывает вверху экрана свою синюю полосу геопозиции. Если Haven будет закрыт, обмен остановится до тех пор, пока вы снова его не откроете. Установите для Haven доступ к геопозиции «Всегда» в Настройках, чтобы после закрытия Haven обмен возобновлялся сам, как только вы переместитесь на несколько сотен метров и iOS это позволит. При доступе «Всегда» iOS может показывать в строке состояния свою стрелку геопозиции вместо этой полосы.';
 
   @override
   String get locationSettingsResumeConsentNote =>
-      'Background sharing is on. If it stops, for example when your phone restarts, Haven will not start it again by itself until you agree to the updated background-sharing notice.';
+      'Фоновый обмен включён. Если он остановится, например после перезагрузки телефона, Haven не возобновит его сам, пока вы не согласитесь с обновлённым описанием фонового обмена.';
 
   @override
-  String get locationSettingsResumeConsentAction => 'Review notice';
+  String get locationSettingsResumeConsentAction => 'Открыть описание';
 
   @override
   String locationSettingsAndroidAllTimeNote(String optionLabel) {
-    return 'Haven\'s location permission is not set to \'$optionLabel\', so sharing will not start again by itself after your phone restarts or Haven updates. Instead, Haven will show a notification you can tap to resume.';
+    return 'Для Haven не выбран вариант доступа к местоположению «$optionLabel», поэтому после перезагрузки телефона или обновления Haven обмен не возобновится сам. Вместо этого Haven покажет уведомление: нажмите на него, чтобы возобновить обмен.';
   }
 
   @override
-  String get locationSettingsAndroidAllTimeAction => 'Change permission';
+  String get locationSettingsAndroidAllTimeAction => 'Изменить разрешение';
 
   @override
-  String get locationBackgroundAllTimeOptionFallback => 'Allow all the time';
+  String get locationBackgroundAllTimeOptionFallback =>
+      'Разрешить в любом режиме';
 
   @override
   String get locationSettingsAndroidHeader => 'Настройки ОС для надёжности';
@@ -660,7 +661,7 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get locationDisclosureBackgroundIos =>
-      'Это приложение использует данные о местоположении, чтобы обмен с вашими кругами работал, даже когда Haven находится в фоне и вы им не пользуетесь. Если iOS закроет Haven, обмен прекратится, пока вы не откроете его снова: Haven по-прежнему может просыпаться, чтобы получить местоположения ваших кругов, но никогда — чтобы отправить ваше.';
+      'Это приложение использует данные о местоположении, чтобы обмен с вашими кругами работал, даже когда Haven находится в фоне и вы им не пользуетесь. Если выбран доступ к геопозиции «Всегда» и Haven закрыт (в том числе вами), Haven сам возобновит обмен, как только вы переместитесь на несколько сотен метров и iOS это позволит. После перезагрузки для этого нужно ещё и разблокировать телефон. Когда это произойдёт, решает iOS, поэтому это не гарантируется. Если выбран доступ «При использовании приложения», обмен прекращается после закрытия Haven и не возобновляется, пока вы снова его не откроете.';
 
   @override
   String get locationDisclosureManage =>
@@ -674,11 +675,11 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get locationDisclosureUpdateLead =>
-      'Background sharing has changed since you turned it on. Haven can now start sharing again by itself after it has stopped, for example after your phone restarts, in the cases described below. If you choose \'Not now\', background sharing keeps working as before, but after it has stopped, it stays stopped until you open Haven.';
+      'Фоновый обмен изменился с тех пор, как вы его включили. Теперь Haven может сам возобновить обмен после его остановки — например, после перезагрузки телефона — в случаях, описанных ниже. Если выбрать «Не сейчас», фоновый обмен продолжит работать как прежде, но после остановки не возобновится, пока вы не откроете Haven.';
 
   @override
   String locationBackgroundAllTimeStep(String optionLabel) {
-    return 'Next, on the screen Android opens, set Haven\'s location permission to \'$optionLabel\' so sharing starts again by itself after your phone restarts or Haven updates. If you don\'t, sharing keeps working until your phone restarts or Haven updates, and then Haven shows a notification you can tap to resume.';
+    return 'Далее на экране, который откроет Android, выберите для Haven вариант доступа к местоположению «$optionLabel», чтобы обмен возобновлялся сам после перезагрузки телефона или обновления Haven. Если этого не сделать, обмен будет работать до перезагрузки телефона или обновления Haven, а затем Haven покажет уведомление: нажмите на него, чтобы возобновить обмен.';
   }
 
   @override
@@ -686,14 +687,14 @@ class AppLocalizationsRu extends AppLocalizations {
       'Haven отправляет и получает данные о местоположении';
 
   @override
-  String get androidResumeNoticeTitle => 'Location sharing has stopped';
+  String get androidResumeNoticeTitle => 'Обмен местоположением остановлен';
 
   @override
   String get androidResumeNoticeBody =>
-      'Tap to open Haven and resume sharing your location with your circles.';
+      'Нажмите, чтобы открыть Haven и возобновить обмен местоположением с вашими кругами.';
 
   @override
-  String get androidResumeNoticeChannelName => 'Sharing reminders';
+  String get androidResumeNoticeChannelName => 'Напоминания об обмене';
 
   @override
   String get fgsNotificationPaused =>
