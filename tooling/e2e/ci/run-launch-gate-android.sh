@@ -930,6 +930,9 @@ photo_at_map() {
   grant_read_back android.permission.POST_NOTIFICATIONS
   grant_read_back android.permission.ACCESS_FINE_LOCATION
   grant_read_back android.permission.ACCESS_COARSE_LOCATION
+  # "Allow all the time" held, so the enable shows no all-time step and opens
+  # no OS permission page over Haven, which the loop would wait out (OD-R2).
+  grant_read_back android.permission.ACCESS_BACKGROUND_LOCATION
   # No battery dialog on the enable path (background_location_manager.dart
   # asks only while the app is not exempt).
   dev shell dumpsys deviceidle whitelist "+${PKG}" >/dev/null 2>&1 || true
@@ -1216,7 +1219,7 @@ finish() {
 # deadline is a count of device calls and every verdict comes from what the
 # stub shows, never from how fast this machine runs it.
 # ---------------------------------------------------------------------------
-readonly SELF_TEST_FIXTURES=147
+readonly SELF_TEST_FIXTURES=149
 readonly ST_NAME='Quiet Wanderer Fixture'
 # What a picker thumbnail's description says in the stub: a date, which no
 # transcript or summary may carry.
@@ -1676,6 +1679,8 @@ case "${cmd}" in
   "date +%s && logcat -d -b events -v epoch") echo "${STUB_NOW:-1000}"; cat "${S}/events.log" ;;
   "dumpsys input") focus_dump ;;
   "input keyevent 4") keyevent ;;
+  # STUB_BG_GRANTED: the background-location grant alone does not read back.
+  "dumpsys package ${PKG} | grep -c 'android.permission.ACCESS_BACKGROUND_LOCATION: granted=true'") echo "${STUB_BG_GRANTED:-${STUB_GRANTED:-1}}" ;;
   "dumpsys package ${PKG} | grep -c 'android.permission."*": granted=true'") echo "${STUB_GRANTED:-1}" ;;
   "dumpsys deviceidle whitelist +${PKG}") echo "Added: ${PKG}" ;;
   "dumpsys deviceidle whitelist | grep -c ',${PKG},'") echo 1 ;;
@@ -2059,6 +2064,8 @@ print(json.dumps({k[0]: "Get Started", k[1]: "Create My Identity", k[2]: "Not no
   _has "…named as such" "background sharing did not turn on through Settings > Location"
   _scenario "a permission grant that does not read back is infrastructure" 3 setup-held map STUB_GRANTED=0
   _has "…naming the permission" "pm grant POST_NOTIFICATIONS did not read back as granted"
+  _scenario "background sharing is enabled only over a read-back \"Allow all the time\" grant" 3 setup-held map STUB_BG_GRANTED=0
+  _has "…naming it" "pm grant ACCESS_BACKGROUND_LOCATION did not read back as granted"
   ARB_CAND="$(python3 -I -c 'import json,sys; d=json.loads(sys.argv[1]); d.pop("photoHeaderEditPhoto"); print(json.dumps(d))' "${arb_now}")" \
     _scenario "a candidate ARB without a photo label is a usage error" 2 setup-held map
   _scenario "the create screen reporting a photo it could not save is a product failure" 1 setup-held map STUB_ONB_NOT_SAVED=1

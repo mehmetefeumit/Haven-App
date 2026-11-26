@@ -10,6 +10,12 @@ library;
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/src/constants/location.dart';
+import 'package:haven/src/providers/location_disclosure_provider.dart';
+import 'package:haven/src/services/android_background_location.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../../integration_test/e2e/_lib/location_disclosure_seed.dart';
 
 /// Code with `//` comments removed, so prose naming a key is not a write.
 String _code(String source) => source
@@ -50,6 +56,36 @@ void main() {
           'anti-vacuity: the scan below proves nothing without its one '
           'sanctioned writer',
     );
+  });
+
+  test('a seeded user owes MapShell no consent dialog on Android 11+ without '
+      '"Allow all the time"', () async {
+    // A lane that seeds sharing on and mounts MapShell without granting the
+    // background permission would otherwise find a modal over the map and
+    // tap its barrier instead of the screen it drives.
+    SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true});
+    final prefs = await SharedPreferences.getInstance();
+    await seedLocationDisclosuresAccepted(prefs);
+
+    expect(
+      foregroundConsentStepDue(
+        sharingOn: true,
+        backgroundAccepted:
+            prefs.getBool(kLocationDisclosureBackgroundAcceptedKey) ?? false,
+        acceptedVersion:
+            prefs.getInt(kLocationDisclosureBackgroundVersionKey) ?? 1,
+        promptedVersion:
+            prefs.getInt(kLocationDisclosureBackgroundPromptedVersionKey) ?? 0,
+        allTime: BackgroundLocationStatus.failClosed,
+        allTimePrompted:
+            prefs.getBool(kAndroidBackgroundLocationPromptedKey) ?? false,
+      ),
+      ForegroundConsentStep.none,
+    );
+
+    await clearLocationDisclosures(prefs);
+    expect(prefs.getBool(kAndroidBackgroundLocationPromptedKey), isNull);
+    expect(prefs.getInt(kLocationDisclosureBackgroundVersionKey), isNull);
   });
 
   test('no other integration_test file writes a background-disclosure key', () {
