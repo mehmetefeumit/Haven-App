@@ -231,8 +231,9 @@ class _GatedSharingNotifier extends BackgroundSharingNotifier {
         iosBackgroundSession: _FakeIosBackgroundSessionService(),
       ) {
     // After the real load, which would otherwise overwrite the answer.
-    _consentLoaded = Future.wait([super.loaded, consent.future]).then((done) {
-      if (mounted) state = done[1] as bool;
+    _consentLoaded = super.loaded.then((_) async {
+      final enabled = await consent.future;
+      if (mounted) state = enabled;
     });
   }
 
