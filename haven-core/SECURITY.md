@@ -3642,8 +3642,8 @@ catch-up floor per process — five minutes on the monotonic clock
 Dart not ready and fell back to a BGTask is not counted — while the region
 always re-centres. Only the launch's first pause starts a session: a later
 significant-change or region wake of a relaunched process that iOS has
-suspended again opens no launch window and runs the receive-only sweep, and
-nothing here claims it publishes. What a relay of the user's circles can now
+suspended again opens no launch window, its handler runs the receive-only
+sweep, and nothing here claims whether that wake publishes (M7 §6 item 2j). What a relay of the user's circles can now
 see is this device's kind-445 after Haven was closed, at a time set by the
 user's movement and by iOS rather than by the app being open — the owner's
 decision, disclosed in the consent dialog and the settings intro. Whether iOS
