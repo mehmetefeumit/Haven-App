@@ -203,4 +203,149 @@ void main() {
       }
     });
   });
+
+  // OD-R1 / R-1 / R-2: what MapShell does with a location relaunch. The
+  // orderings are driven through the real binding on the gate itself
+  // (`foreground_start_up_gate_test.dart`); these pin that MapShell answers
+  // its hooks as the gate assumes.
+  group('a location relaunch', () {
+    late String source;
+    setUpAll(
+      () => source = File('lib/src/pages/map_shell.dart').readAsStringSync(),
+    );
+    String method(String name) =>
+        _flat(methodSource(source, className: '_MapShellState', method: name));
+
+    test("MapShell answers launchedForLocation from the location service's "
+        'native read', () {
+      expect(
+        _flat(source),
+        contains(
+          'Future<bool> launchedForLocation() => '
+          '_geolocatorService?.launchedForLocation() ?? Future.value(false);',
+        ),
+      );
+    });
+
+    test('the launch may resume only once the consent has loaded, sharing is '
+        'on and the CURRENT disclosure is accepted; then it waits for the '
+        'roster, bounded', () {
+      final body = method('launchMayResume');
+      final loaded = body.indexOf(
+        'await ref.read(backgroundSharingProvider.notifier).loaded;',
+      );
+      final sharing = body.indexOf('!ref.read(backgroundSharingProvider)');
+      final disclosure = body.indexOf(
+        '!backgroundResumeDisclosureAcceptedIn(prefs)',
+      );
+      final roster = body.indexOf(
+        'ref.read(circlesProvider.future).timeout(kConsentArmBound)',
+      );
+      expect([loaded, sharing, disclosure, roster], everyElement(isNonNegative));
+      expect(loaded, lessThan(sharing));
+      expect(sharing, lessThan(disclosure));
+      expect(
+        disclosure,
+        lessThan(roster),
+        reason: 'a burst over an unread roster waits a scheduler tick',
+      );
+      expect(body, contains('return false;'));
+    });
+
+    test('the iOS sharing-on pause takes the launch before installing its '
+        'coordinator, and hands it to _payLaunchSession', () {
+      final paused = method('_onPaused');
+      final take = paused.indexOf('final launch = takeLaunchSession();');
+      final install = paused.indexOf(
+        'final coordinator = _installBurstCoordinator();',
+      );
+      expect(take, isNonNegative);
+      expect(take, lessThan(install));
+      expect(paused, contains('_payLaunchSession(launch, coordinator,'));
+      expect(
+        'takeLaunchSession()'.allMatches(_flat(source)),
+        hasLength(1),
+        reason: 'a second consumer of the launch',
+      );
+    });
+
+    test('the session starts only for a launch that may resume, with '
+        'sharing on, after the turn check and before the burst', () {
+      final pay = method('_payLaunchSession');
+      final turn = pay.indexOf('turn != _lifecycleTurn) return;');
+      final gate = pay.indexOf(
+        'if (session == LaunchSession.resume && bgEnabled) {',
+      );
+      final start = pay.indexOf('startBackgroundLaunchSession(');
+      final burst = pay.indexOf('_driveBurstNow(coordinator, circles)');
+      expect([turn, gate, start, burst], everyElement(isNonNegative));
+      expect(turn, lessThan(gate));
+      expect(gate, lessThan(start));
+      expect(start, lessThan(burst));
+      expect(
+        pay,
+        contains('session != LaunchSession.receiveOnly'),
+        reason: 'an older acceptance must publish nothing from a relaunch',
+      );
+      expect(
+        'startBackgroundLaunchSession('.allMatches(source),
+        hasLength(1),
+        reason: 'a second start site escapes the current-disclosure gate',
+      );
+    });
+
+    test('the pause and resume branches go through admitPause / noteResume, '
+        'the duplicate pause skipping even the turn', () {
+      final lifecycle = method('didChangeAppLifecycleState');
+      final admit = lifecycle.indexOf('if (!admitPause()) return;');
+      final turn = lifecycle.indexOf('_lifecycleTurn++;');
+      expect(admit, isNonNegative);
+      expect(admit, lessThan(turn));
+      final resumed = lifecycle.indexOf(
+        'state == AppLifecycleState.resumed) {noteResume(); _lifecycleTurn++;',
+      );
+      expect(resumed, isNonNegative);
+    });
+  });
+
+  // R-3: one foreground consent step, behind the storage-reset notice, only
+  // while the app reads `resumed`.
+  group('the foreground consent step', () {
+    late String source;
+    setUpAll(
+      () => source = File('lib/src/pages/map_shell.dart').readAsStringSync(),
+    );
+    String method(String name) =>
+        _flat(methodSource(source, className: '_MapShellState', method: name));
+
+    test("the start-up gates it, the resume pays it, and it is the gate's "
+        'only caller', () {
+      final startUp = method('_runStartupTasks');
+      expect(startUp, contains('unawaited(gateConsentStep());'));
+      expect(
+        startUp.indexOf('_storageResetNotice = showStorageResetNoticeIfOwed('),
+        lessThan(startUp.indexOf('gateConsentStep()')),
+      );
+      expect(
+        method('_onResumed'),
+        contains('unawaited(payOwedConsentStep());'),
+      );
+      expect(
+        'runForegroundConsentStep('.allMatches(source),
+        hasLength(1),
+        reason: 'a consent dialog shown from somewhere not resumed-gated',
+      );
+    });
+
+    test('it waits for the storage-reset notice and re-reads the front '
+        'before showing anything', () {
+      final step = method('foregroundConsentStep');
+      expect(
+        step.indexOf('await _storageResetNotice;'),
+        lessThan(step.indexOf('runForegroundConsentStep(')),
+      );
+      expect(step, contains('inFront: () => mounted && appIsResumed()'));
+      expect(step, contains('ref.read(androidBackgroundLocationProvider)'));
+    });
+  });
 }

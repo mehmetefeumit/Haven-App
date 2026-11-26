@@ -73,6 +73,35 @@ final class HavenBackgroundSessionHandler: NSObject {
   private static let kBgDisclosureKey =
     "flutter.haven.location.disclosure_background_accepted"
 
+  /// UserDefaults key for the accepted FOREGROUND prominent disclosure.
+  private static let kFgDisclosureKey = "flutter.haven.location.disclosure_accepted"
+
+  /// UserDefaults key (int) for the background-disclosure version accepted.
+  private static let kBgDisclosureVersionKey =
+    "flutter.haven.location.disclosure_background_version"
+
+  /// The version whose acceptance lets sharing start again in a process iOS
+  /// launched for a location event. Equal to Dart's
+  /// `kBackgroundDisclosureVersion` (check 20 of
+  /// `check_ios_background_publish.sh`).
+  private static let kBgDisclosureResumeVersion = 2
+
+  /// Whether sharing may start again without the user opening Haven: the
+  /// toggle on, both disclosures accepted, the background one at the current
+  /// version — the same keys Dart's `backgroundResumeDisclosureAccepted`
+  /// reads. Before the first unlock UserDefaults reads `false`/`0`, so this
+  /// fails closed.
+  ///
+  /// Deliberately not `arm()`'s predicate: the keep-alive of a running
+  /// process was disclosed by every version, so an older acceptance keeps it.
+  static func resumeConsented() -> Bool {
+    let defaults = UserDefaults.standard
+    return defaults.bool(forKey: kBgSharingKey)
+      && defaults.bool(forKey: kFgDisclosureKey)
+      && defaults.bool(forKey: kBgDisclosureKey)
+      && defaults.integer(forKey: kBgDisclosureVersionKey) >= kBgDisclosureResumeVersion
+  }
+
   /// Strongly-held `CLBackgroundActivitySession` (iOS 17+). Stored as `Any?`
   /// because stored properties cannot be availability-guarded; every touch is
   /// inside an `#available` block.

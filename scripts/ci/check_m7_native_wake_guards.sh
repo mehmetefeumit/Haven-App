@@ -1535,10 +1535,11 @@ done
 #     coordinate the device produces, must contain NO PUBLISH SITE. Its only
 #     two ways to reach the network are a networking API of its own or a
 #     native→Dart trigger, so both are banned by name: it talks to Dart through
-#     the event sink and its channel replies ONLY. That keeps a background wake
-#     receive-only by construction — unlike the SLC and BGTask handlers, whose
-#     ONE sanctioned trigger (`invokeMethod("runCatchup", arguments: nil)`) is
-#     pinned payload-free by check 12.
+#     the event sink and its channel replies ONLY. The stream handler has no
+#     publish site; a location relaunch publishes only through Dart's burst
+#     plane (OD-R1, 2026-11-26) — and the SLC and BGTask handlers stay
+#     receive-only, their ONE sanctioned trigger (`invokeMethod("runCatchup",
+#     arguments: nil)`) pinned payload-free by check 12.
 # ---------------------------------------------------------------------------
 code_has_e 'private +(lazy +)?(let|var) +bgTaskHandler' "$APPDELEGATE" ||
   fail "AppDelegate does not retain bgTaskHandler as a stored property"
@@ -1658,6 +1659,16 @@ else
     fail "14i: applicationDidEnterBackground does not re-arm SLC (slcHandler.startMonitoring())"
   grep -qF -- 'bgTaskHandler.scheduleNextCatchup()' <<<"$appbg_body" ||
     fail "14i: applicationDidEnterBackground does not re-arm the BGTask (bgTaskHandler.scheduleNextCatchup())"
+fi
+# …and didFinishLaunching schedules it on EVERY launch, a location relaunch
+# included (OD-R1, 2026-11-26): a relaunched process that iOS suspends again
+# keeps the BGTask floor. At the body's own depth, so nothing conditional
+# (the former relaunch/else split above all) encloses it.
+launch_depth="$(fn_slice 'didFinishLaunchingWithOptions' "$APPDELEGATE" | awk "${LITERAL_FREE}"'
+  index($0, "bgTaskHandler.scheduleNextCatchup()") > 0 && !found { print depth; found = 1 }
+  { lfree = literal_free($0); depth += gsub(/[{]/, "&", lfree) - gsub(/[}]/, "&", lfree) }')"
+if [[ "$launch_depth" != "1" ]]; then
+  fail "14i: didFinishLaunching does not schedule the BGTask unconditionally (bgTaskHandler.scheduleNextCatchup() at brace depth ${launch_depth:-none}, want 1) — a location relaunch that iOS suspends again would lose its catch-up floor"
 fi
 
 # ---------------------------------------------------------------------------

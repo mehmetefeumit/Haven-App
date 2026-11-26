@@ -462,7 +462,7 @@ check_ios_stream_route() { # <geolocator_location_service.dart>
       lfail "getCurrentLocation reads _foregroundActive again — the Dart lifecycle flag defaults to foregrounded and is never written on a background LAUNCH, so the backgrounded shortcut would be skipped and a one-shot started from a process that cannot complete it. Read (await _iosSource.status()).backgrounded instead, which fails closed"
     fi
     if [[ -z "$bg_line" ]]; then
-      lfail "getCurrentLocation no longer reads the native session's 'backgrounded' state — the iOS cold-cache shortcut is what keeps a relaunched process receive-only"
+      lfail "getCurrentLocation no longer reads the native session's 'backgrounded' state — the iOS cold-cache shortcut is what keeps the plugin one-shot unreachable from a backgrounded or relaunched process"
     elif [[ -z "$last_line" || -z "$one_shot_line" ]]; then
       lfail "getCurrentLocation lost its last-known read or its one-shot call — the shortcut is an ORDER between the two, so neither may go missing (last-known line ${last_line:-none}, one-shot line ${one_shot_line:-none})"
     elif (( bg_line >= one_shot_line || last_line >= one_shot_line )); then
@@ -473,9 +473,11 @@ check_ios_stream_route() { # <geolocator_location_service.dart>
     # incidental: with both caches empty — the state a post-termination
     # SLC/region/BGTask relaunch is in BY DESIGN, since the native cache does
     # not survive termination — the shortcut found nothing and control simply
-    # continued into the one-shot below, which is the publish input
-    # INV-L-IOS-WAKES-RECEIVE-ONLY says a background-relaunched process cannot
-    # have. So the branch is pinned STRUCTURALLY: it contains the last-known
+    # continued into the one-shot below, a publish input whose manager has no
+    # background capability. A relaunch publishes only a Best fix from Haven's
+    # own session (INV-L-IOS-RELAUNCH-RESUMES-ONLY-UNDER-ALWAYS-AND-CURRENT-
+    # CONSENT; its wait is check 3b). So the branch is pinned STRUCTURALLY: it
+    # contains the last-known
     # read, it does not contain the one-shot, and its final statement is a
     # `throw` — nothing after it, and not nested inside anything, so no path
     # through the branch reaches the code below.
@@ -508,7 +510,7 @@ check_ios_stream_route() { # <geolocator_location_service.dart>
             if (index(rest, "}") > 0) exit 1
             exit 0
           }' <<<"$bg_block"; then
-        lfail "getCurrentLocation's backgrounded branch does not END in a throw — with no cached fix it would FALL THROUGH to the one-shot below, and 'the plugin one-shot is unreachable there' would be a coincidence of what happened to be in memory rather than a rule (INV-L-IOS-WAKES-RECEIVE-ONLY). A throw nested inside an inner block does not count: the last statement of the branch must be the refusal itself"
+        lfail "getCurrentLocation's backgrounded branch does not END in a throw — with no cached fix it would FALL THROUGH to the one-shot below, and 'the plugin one-shot is unreachable there' would be a coincidence of what happened to be in memory rather than a rule (INV-L-IOS-RELAUNCH-RESUMES-ONLY-UNDER-ALWAYS-AND-CURRENT-CONSENT). A throw nested inside an inner block does not count: the last statement of the branch must be the refusal itself"
       fi
     fi
   fi
@@ -1098,10 +1100,10 @@ check_burst_plane_entry() { # <lib dir> <native wake handler>...
   #    naming a Dart symbol — it has no Dart symbols. It reaches Dart through
   #    exactly one door, `invokeMethod`, so THAT is what is pinned: every
   #    invocation these post-termination wake handlers make must be the
-  #    receive-only `runCatchup`. `INV-L-IOS-WAKES-RECEIVE-ONLY` is held on the
-  #    Dart side by check 3 (the backgrounded branch of getCurrentLocation ends
-  #    in a throw, so a relaunched process has no publish input at all); this
-  #    is the complementary shape pin — no wake may open a SECOND route into
+  #    receive-only `runCatchup`. The wake handlers stay receive-only; a
+  #    relaunch publishes only through MapShell's burst plane, behind the gates
+  #    of checks 3b, 4d, 6d and 20 (OD-R1, owner-directed 2026-11-26). This is
+  #    the complementary shape pin — no wake may open a SECOND route into
   #    Dart, whatever that route turns out to do.
   local sw invokes bad
   for sw in "$@"; do
@@ -2067,6 +2069,292 @@ check_pbxproj_network_change_handler() { # <project.pbxproj>
 }
 
 
+# ---------------------------------------------------------------------------
+# OD-R1 (owner-directed 2026-11-26): a process iOS launched into the background
+# for a location event resumes the user's own sharing, under Always and the
+# CURRENT background disclosure only. The checks below pin each gate where it
+# lives; nothing runs Swift in CI and MapShell cannot be pumped, so for the
+# native gates and the shell's start site these are the whole of the proof.
+# Each has hermetic fixtures in --self-test.
+# ---------------------------------------------------------------------------
+
+# Flattens the code view of stdin to one line with single spaces.
+flat_code() { tr '\n' ' ' | tr -s ' '; }
+
+# 3b. The relaunch's publish input (geolocator_location_service.dart): the
+#     backgrounded branch waits for the next fix of the session the relaunch
+#     started — Haven's own native session, Best-only — and for no longer than
+#     the burst's window, and only in a location-launched process; that
+#     session is started background-capable from the toggle alone, with the
+#     dwell re-applied; and an opt-out releases it although it has no outer.
+check_background_fix_wait() { # <geolocator_location_service.dart>
+  local svc="$1"
+  _lf=0
+  local view; view="$(code_view "$svc")"
+
+  local gcl bg_block wait_line throw_line
+  gcl="$(fn_slice 'Future<Position> getCurrentLocation() async {' "$svc")"
+  bg_block="$(brace_block '(await _iosSource.status()).backgrounded' <<<"$gcl")"
+  if [[ -z "$bg_block" ]]; then
+    lfail "getCurrentLocation has no backgrounded branch to read the relaunch wait in"
+  else
+    wait_line="$(code_line_of 'await _awaitNextBackgroundFix\(\)' <<<"$bg_block")"
+    throw_line="$(grep -n 'throw' <<<"$bg_block" | tail -n1 | cut -d: -f1)"
+    if [[ -z "$wait_line" || -z "$throw_line" ]] || (( wait_line >= throw_line )); then
+      lfail "getCurrentLocation's backgrounded branch does not await _awaitNextBackgroundFix() before its final throw (wait line ${wait_line:-none}, throw line ${throw_line:-none}) — a location relaunch would refuse every publish though its own session is about to deliver a Best fix"
+    fi
+  fi
+
+  local wait_body
+  wait_body="$(fn_slice 'Future<Position?> _awaitNextBackgroundFix()' "$svc")"
+  if [[ -z "$wait_body" ]]; then
+    lfail "_awaitNextBackgroundFix not found in $(basename "$svc") — it is the bounded wait for a relaunch's first fix"
+  else
+    grep -qF 'kOneShotLocationTimeout' <<<"$wait_body" ||
+      lfail "_awaitNextBackgroundFix is no longer bounded by kOneShotLocationTimeout — the burst's own window budget; an unbounded wait holds the burst's sockets open for as long as no fix comes"
+    if grep -qE 'getCurrentPosition\(' <<<"$wait_body"; then
+      lfail "_awaitNextBackgroundFix starts the plugin one-shot — its CLLocationManager has no background capability, and the relaunch's publish input must be a Best fix from Haven's own session (INV-L-IOS-RELAUNCH-RESUMES-ONLY-UNDER-ALWAYS-AND-CURRENT-CONSENT)"
+    fi
+    local live_line launch_line timeout_line
+    live_line="$(code_line_of '!_streamBackgroundSharing' <<<"$wait_body")"
+    launch_line="$(code_line_of '\.launchedForLocation' <<<"$wait_body")"
+    timeout_line="$(code_line_of '\.timeout\(' <<<"$wait_body")"
+    if [[ -z "$live_line" || -z "$launch_line" || -z "$timeout_line" ]] ||
+      (( live_line >= launch_line || launch_line >= timeout_line )) ||
+      ! grep -qF '_innerFailed' <<<"$wait_body"; then
+      lfail "_awaitNextBackgroundFix no longer returns at once unless a live, unfailed background session exists (_innerFailed / !_streamBackgroundSharing, line ${live_line:-none}) AND the native session reports a location launch (.launchedForLocation, line ${launch_line:-none}) before it waits (line ${timeout_line:-none}) — an ordinary backgrounded process, or a refused start, would hold every publish for the whole window"
+    fi
+  fi
+
+  # R8b: the stored background intent is only ever the toggle.
+  local bad_intent
+  bad_intent="$(grep -nE '_streamBackgroundSharing *= *[^=]' <<<"$view" |
+    grep -vE '_streamBackgroundSharing *= *backgroundSharingEnabled;|bool _streamBackgroundSharing = false;' || true)"
+  if [[ -n "$bad_intent" ]]; then
+    lfail "_streamBackgroundSharing is assigned something other than backgroundSharingEnabled: ${bad_intent} — it reaches the native allowsBackgroundLocationUpdates unchanged (privacy Rule 10)"
+  fi
+
+  local start_body start_flat listen_line fg_line
+  start_body="$(fn_slice 'void startBackgroundLaunchSession(' "$svc")"
+  if [[ -z "$start_body" ]]; then
+    lfail "startBackgroundLaunchSession not found in $(basename "$svc")"
+  else
+    start_flat="$(flat_code <<<"$start_body")"
+    grep -qF 'if (!_isIOS || !backgroundSharingEnabled) return;' <<<"$start_flat" ||
+      lfail "startBackgroundLaunchSession no longer returns first when off iOS or with background sharing off — a relaunch would start a session the user's toggle does not allow"
+    listen_line="$(code_line_of '_listenInner\(' <<<"$start_body")"
+    fg_line="$(code_line_of '_iosSource\.onForeground\(' <<<"$start_body")"
+    if [[ -z "$listen_line" || -z "$fg_line" ]] || (( listen_line >= fg_line )); then
+      lfail "startBackgroundLaunchSession does not re-apply the lifecycle (_iosSource.onForeground, line ${fg_line:-none}) AFTER the listen (_listenInner, line ${listen_line:-none}) — positions() resets the profile controller, so the session would stay at Best for the whole background window"
+    fi
+  fi
+
+  local suspend_body
+  suspend_body="$(fn_slice 'void suspendStream() {' "$svc")"
+  if [[ -z "$suspend_body" ]]; then
+    lfail "suspendStream not found in $(basename "$svc")"
+  elif grep -qE 'outer *== *null *\|\|' <<<"$suspend_body" ||
+    ! grep -qE 'inner *== *null' <<<"$suspend_body"; then
+    lfail "suspendStream returns early on a missing outer again — a background-launch session has none, and the C4 opt-out reaches it only through here, so withdrawn consent would leave GPS running (privacy Rule 10)"
+  fi
+  return "$_lf"
+}
+
+# 4d. The native start gate (HavenLocationStreamHandler.swift), R-2: EVERY
+#     start is refused while the app is in the background — a foreground-intent
+#     one included — except a background-capable start that passes all three
+#     conjuncts of `backgroundStartPermitted`. The launch window is opened only
+#     behind the same predicate and ends with the stream.
+check_relaunch_start_gate() { # <HavenLocationStreamHandler.swift>
+  local sh="$1"
+  _lf=0
+  local view; view="$(code_view "$sh")"
+
+  local onlisten cond
+  onlisten="$(fn_slice 'func onListen(' "$sh")"
+  cond="$(flat_code <<<"$onlisten" | grep -oE 'if [^{]*applicationState == \.background[^{]*\{' | head -n1)"
+  if [[ "$cond" != 'if UIApplication.shared.applicationState == .background && !(allowsBg && backgroundStartPermitted) {' ]]; then
+    lfail "onListen's background refusal is not exactly 'if UIApplication.shared.applicationState == .background && !(allowsBg && backgroundStartPermitted)' (found: ${cond:-none}) — every start from the background is refused except a background-capable one the relaunch predicate permits. Scoping the refusal to allowsBg lets a foreground-intent session collect from a background launch whose user never accepted the current disclosure (R-2)"
+  fi
+
+  local permitted
+  permitted="$(flat_code <<<"$(fn_slice 'private var backgroundStartPermitted: Bool {' "$sh")")"
+  local expr="${permitted#*\{ }"
+  expr="${expr% \}*}"
+  local conj
+  for conj in 'launchedForLocation' 'manager.authorizationStatus == .authorizedAlways' 'HavenBackgroundSessionHandler.resumeConsented()'; do
+    grep -qF -- "$conj" <<<"$expr" ||
+      lfail "backgroundStartPermitted lost the conjunct '${conj}' — each one closes a case: a user-launched process, a While-Using start iOS refuses, and an older acceptance"
+  done
+  if grep -qF '||' <<<"$expr" || grep -qE '!' <<<"${expr//!=/}" ||
+    [[ "$(grep -o '&&' <<<"$expr" | wc -l)" != "2" ]]; then
+    lfail "backgroundStartPermitted is not exactly three conjuncts joined by && (found: ${expr:-none}) — an || or a negation widens the one exception to the background refusal"
+  fi
+  if grep -qE 'authorizedWhenInUse' <<<"$expr"; then
+    lfail "backgroundStartPermitted admits When-In-Use — iOS never relaunches a While-Using app and refuses its background start"
+  fi
+
+  local n window
+  n="$(grep -cF 'beginBackgroundTask(' <<<"$view" || true)"
+  window="$(fn_slice 'func beginLaunchWindow()' "$sh")"
+  if [[ "$n" != "1" ]] || ! grep -qF 'beginBackgroundTask(' <<<"$window"; then
+    lfail "beginBackgroundTask( must appear exactly once in $(basename "$sh"), inside beginLaunchWindow (found ${n}) — a second task is a keep-alive no predicate gates"
+  elif ! grep -qE 'guard .*backgroundStartPermitted' <<<"$window"; then
+    lfail "beginLaunchWindow no longer guards on backgroundStartPermitted — the launch window would keep a process executable that may not share"
+  fi
+  grep -qF 'endLaunchWindow()' <<<"$(fn_slice 'func onCancel(' "$sh")" ||
+    lfail "onCancel no longer ends the launch window — an opt-out or a stream teardown would leave the background task running to its expiry"
+  grep -qF '"launchedForLocation": launchedForLocation' <<<"$(fn_slice 'private func status()' "$sh")" ||
+    lfail "status() no longer exports launchedForLocation — Dart routes a relaunch from that read alone, so the session would never start"
+  if grep -qE 'launchedForLocation *= *true' <<<"$view"; then
+    lfail "$(basename "$sh") sets launchedForLocation itself — only AppDelegate may, from launchOptions[.location] in .background"
+  fi
+  return "$_lf"
+}
+
+# 9b. AppDelegate's half of the relaunch fact: set only from a location launch
+#     in the background, cleared at the first foreground with the window, and
+#     the BGTask floor scheduled on every launch.
+check_appdelegate_relaunch() { # <AppDelegate.swift>
+  local ad="$1"
+  _lf=0
+  local view launch launch_flat block fg
+  view="$(code_view "$ad")"
+  launch="$(fn_slice 'didFinishLaunchingWithOptions' "$ad")"
+  launch_flat="$(flat_code <<<"$launch")"
+  grep -qF 'let launchedForLocation = launchOptions?[.location] != nil && application.applicationState == .background' <<<"$launch_flat" ||
+    lfail "didFinishLaunching no longer derives launchedForLocation from launchOptions[.location] AND applicationState == .background — anything wider lets the stream handler start a background session in a process the user launched"
+  block="$(brace_block 'if launchedForLocation' <<<"$launch")"
+  if [[ "$(grep -cE 'launchedForLocation *= *true' <<<"$view" || true)" != "1" ]] ||
+    ! grep -qF 'locationStreamHandler.launchedForLocation = true' <<<"$block"; then
+    lfail "locationStreamHandler.launchedForLocation = true must be set exactly once, inside 'if launchedForLocation { … }'"
+  fi
+  grep -qF 'locationStreamHandler.beginLaunchWindow()' <<<"$block" ||
+    lfail "the location-launch branch no longer opens the launch window — iOS can suspend the process between the catch-up sweep and the first publish"
+  # The slice starts mid-signature, after `application(`: the leading `(`
+  # balances the `)` it would otherwise begin with.
+  { echo '('; cat <<<"$launch"; } | fn_body | has_unconditional 'bgTaskHandler.scheduleNextCatchup()' ||
+    lfail "didFinishLaunching schedules the BGTask only conditionally — a location relaunch must keep the catch-up floor too"
+  fg="$(fn_slice 'applicationWillEnterForeground' "$ad")"
+  grep -qF 'locationStreamHandler.launchedForLocation = false' <<<"$fg" ||
+    lfail "applicationWillEnterForeground no longer clears launchedForLocation — a process the user opened would keep permitting background starts after it is backgrounded again (the case CI run 32661622879 recorded iOS refusing)"
+  grep -qF 'locationStreamHandler.endLaunchWindow()' <<<"$fg" ||
+    lfail "applicationWillEnterForeground no longer ends the launch window"
+  return "$_lf"
+}
+
+# 13b. The smaller relaunch circle and the catch-up floor that pays for it
+#      (HavenSLCHandler.swift): 200 m, a five-minute floor on the monotonic
+#      clock applied after the region re-centres and before the sweep, and a
+#      floor stamped only when Dart answered.
+check_catchup_floor() { # <HavenSLCHandler.swift>
+  local slc="$1"
+  _lf=0
+  local view; view="$(code_view "$slc")"
+  grep -qE 'relaunchRegionRadiusMeters: CLLocationDistance = 200$' <<<"$view" ||
+    lfail "the relaunch region is no longer 200 m (OD-R1) — inside Apple's 1-400 m band and paired with the catch-up floor"
+  grep -qF 'catchupFloorNanos: UInt64 = 300 * 1_000_000_000' <<<"$view" ||
+    lfail "the catch-up floor is no longer five minutes (SLC's own documented minimum)"
+  grep -qF 'CLOCK_MONOTONIC' <<<"$(fn_slice 'private func catchupDue()' "$slc")" ||
+    lfail "catchupDue() no longer reads CLOCK_MONOTONIC — a wall clock set back would stretch the floor"
+  local sig body region_line guard_line trig_line
+  for sig in 'didUpdateLocations locations: [CLLocation]) {' 'didExitRegion region: CLRegion) {'; do
+    body="$(fn_slice "$sig" "$slc")"
+    region_line="$(code_line_of 'refreshRelaunchRegion\(' <<<"$body")"
+    guard_line="$(code_line_of 'guard catchupDue\(\) else \{ return \}' <<<"$body")"
+    trig_line="$(code_line_of 'triggerDartCatchup\(\)' <<<"$body")"
+    if [[ -z "$region_line" || -z "$guard_line" || -z "$trig_line" ]] ||
+      (( region_line >= guard_line || guard_line >= trig_line )); then
+      lfail "'${sig}' does not re-centre the region (line ${region_line:-none}), then check the floor (line ${guard_line:-none}), then sweep (line ${trig_line:-none}) — the re-centre must never be throttled, and the sweep always must"
+    fi
+  done
+  local trig not_ready
+  trig="$(fn_slice 'private func triggerDartCatchup()' "$slc")"
+  not_ready="$(brace_block '=== FlutterMethodNotImplemented' <<<"$trig")"
+  if [[ "$(grep -cE 'lastCatchupAt *= *[^=]' <<<"$view" || true)" != "1" ]] ||
+    [[ -z "$not_ready" ]] || grep -qF 'lastCatchupAt' <<<"$not_ready" ||
+    ! grep -qF 'lastCatchupAt = clock_gettime_nsec_np(CLOCK_MONOTONIC)' <<<"$(after_block '=== FlutterMethodNotImplemented' <<<"$trig")"; then
+    lfail "lastCatchupAt must be stamped once, only when Dart answered (after the FlutterMethodNotImplemented branch) — a wake that fell back to a BGTask swept nothing, and stamping it throttles the next real one"
+  fi
+  return "$_lf"
+}
+
+# 6d. The one start site of a relaunch's session (map_shell.dart): taken by the
+#     iOS sharing-on pause before it installs its coordinator, and started only
+#     for a launch that may resume, after the pause's turn check and before the
+#     burst.
+check_background_launch_start() { # <map_shell.dart> <lib dir>
+  local shell="$1" lib="$2"
+  _lf=0
+  local sites f v
+  sites=0
+  while IFS= read -r f; do
+    v="$(code_view "$f")"
+    sites=$(( sites + $(grep -F 'startBackgroundLaunchSession(' <<<"$v" | grep -vcF 'void startBackgroundLaunchSession(' || true) ))
+  done < <(grep -rl --include='*.dart' 'startBackgroundLaunchSession(' "$lib" || true)
+  local pay
+  pay="$(fn_slice 'Future<void> _payLaunchSession(' "$shell")"
+  if [[ "$sites" != "1" ]] || ! grep -qF 'startBackgroundLaunchSession(' <<<"$pay"; then
+    lfail "startBackgroundLaunchSession( must be called exactly once under haven/lib, from MapShell._payLaunchSession (found ${sites} call site(s)) — a second start site escapes the current-disclosure gate"
+  else
+    local turn_line gate_line start_line burst_line
+    turn_line="$(code_line_of 'turn != _lifecycleTurn\) return;' <<<"$pay")"
+    gate_line="$(code_line_of 'if \(session == LaunchSession\.resume && bgEnabled\) \{' <<<"$pay")"
+    start_line="$(code_line_of 'startBackgroundLaunchSession\(' <<<"$pay")"
+    burst_line="$(code_line_of '_driveBurstNow\(' <<<"$pay")"
+    if [[ -z "$turn_line" || -z "$gate_line" || -z "$start_line" || -z "$burst_line" ]] ||
+      (( turn_line >= gate_line || gate_line >= start_line || start_line >= burst_line )); then
+      lfail "_payLaunchSession does not check the turn (line ${turn_line:-none}), then gate on LaunchSession.resume with sharing on (line ${gate_line:-none}), then start the session (line ${start_line:-none}), then burst (line ${burst_line:-none}) — a session started without the current disclosure, or a burst with no session to serve it"
+    fi
+  fi
+  local paused take_line install_line
+  paused="$(fn_slice 'Future<void> _onPaused() async {' "$shell")"
+  take_line="$(code_line_of 'takeLaunchSession\(\)' <<<"$paused")"
+  install_line="$(code_line_of '_installBurstCoordinator\(\)' <<<"$paused")"
+  if [[ -z "$take_line" || -z "$install_line" ]] || (( take_line >= install_line )); then
+    lfail "_onPaused no longer takes the launch (takeLaunchSession, line ${take_line:-none}) before installing its burst coordinator (line ${install_line:-none})"
+  fi
+  return "$_lf"
+}
+
+# 20. The one consent predicate, across the language boundary: Swift's
+#     resumeConsented() reads the same three keys Dart's
+#     backgroundResumeDisclosureAccepted does, plus the toggle, at the same
+#     version (R-4).
+check_disclosure_version_parity() { # <HavenBackgroundSessionHandler.swift> <constants/location.dart>
+  local sh="$1" dart="$2"
+  _lf=0
+  local swift_flat dart_flat body
+  swift_flat="$(code_view "$sh" | flat_code)"
+  dart_flat="$(code_view "$dart" | flat_code)"
+  body="$(flat_code <<<"$(fn_slice 'static func resumeConsented() -> Bool {' "$sh")")"
+  local key
+  for key in kBgSharingKey kFgDisclosureKey kBgDisclosureKey; do
+    grep -qF "defaults.bool(forKey: ${key})" <<<"$body" ||
+      lfail "resumeConsented() no longer reads ${key} — the Swift predicate must be the Dart one (toggle, foreground disclosure, background disclosure, version)"
+  done
+  grep -qF 'defaults.integer(forKey: kBgDisclosureVersionKey) >= kBgDisclosureResumeVersion' <<<"$body" ||
+    lfail "resumeConsented() no longer requires the accepted version to be at least kBgDisclosureResumeVersion — an older acceptance would resume sharing it never consented to"
+  if grep -qF '||' <<<"$body"; then
+    lfail "resumeConsented() joins a conjunct with || — any one of them alone would resume sharing"
+  fi
+  local pair swift_name dart_name swift_val dart_val
+  for pair in kBgSharingKey:kBackgroundSharingKey kFgDisclosureKey:kLocationDisclosureAcceptedKey kBgDisclosureKey:kLocationDisclosureBackgroundAcceptedKey kBgDisclosureVersionKey:kLocationDisclosureBackgroundVersionKey; do
+    swift_name="${pair%%:*}"; dart_name="${pair##*:}"
+    swift_val="$(grep -oE "static let ${swift_name} *= *\"[^\"]+\"" <<<"$swift_flat" | grep -oE '"[^"]+"' | tr -d '"')"
+    dart_val="$(grep -oE "const String ${dart_name} *= *'[^']+'" <<<"$dart_flat" | grep -oE "'[^']+'" | tr -d "'")"
+    if [[ -z "$swift_val" || -z "$dart_val" || "$swift_val" != "flutter.${dart_val}" ]]; then
+      lfail "Swift ${swift_name} (${swift_val:-none}) is not \"flutter.\" + Dart ${dart_name} (${dart_val:-none}) — SharedPreferences stores under that prefix, and a mismatch reads false/0 for every user"
+    fi
+  done
+  swift_val="$(grep -oE 'static let kBgDisclosureResumeVersion *= *[0-9]+' <<<"$swift_flat" | grep -oE '[0-9]+$')"
+  dart_val="$(grep -oE 'const int kBackgroundDisclosureVersion *= *[0-9]+' <<<"$dart_flat" | grep -oE '[0-9]+$')"
+  if [[ -z "$swift_val" || "$swift_val" != "$dart_val" ]]; then
+    lfail "Swift kBgDisclosureResumeVersion (${swift_val:-none}) differs from Dart kBackgroundDisclosureVersion (${dart_val:-none}) — bump both in the same commit"
+  fi
+  return "$_lf"
+}
+
 if [[ "${1:-}" != "--self-test" ]]; then
 # ---------------------------------------------------------------------------
 # 1. Info.plist: UIBackgroundModes must contain `location`. Without it the
@@ -2124,6 +2412,17 @@ check_ios_stream_route "$SERVICE" || FAILED=1
 #     tests in CI, so this check is the whole of the proof.
 # ---------------------------------------------------------------------------
 check_native_stream_handler "$STREAM_HANDLER" || FAILED=1
+
+# ---------------------------------------------------------------------------
+# 4d. The native start gate, R-2 (OD-R1, owner-directed 2026-11-26): every
+#     start from the background is refused except a background-capable one in
+#     a process iOS launched for a location event, under Always, with the
+#     current disclosure accepted; the launch window behind the same
+#     predicate. And 3b, the Dart half: the relaunch's bounded wait for its
+#     own session's next Best fix, the outer-less start, and its release.
+# ---------------------------------------------------------------------------
+check_relaunch_start_gate "$STREAM_HANDLER" || FAILED=1
+check_background_fix_wait "$SERVICE" || FAILED=1
 
 # ---------------------------------------------------------------------------
 # 4b. The Dart half of the native owner: the profile controller's anchor is a
@@ -2184,19 +2483,24 @@ fi
 #     so that a gutted one cannot pass on the strength of its call site.
 check_c4_optout_release "$MAP_SHELL" || FAILED=1
 
+# 6d. A location relaunch's session has ONE start site, MapShell's
+#     _payLaunchSession, reached from the first iOS sharing-on pause and gated
+#     on the current-disclosure read before the burst it serves.
+check_background_launch_start "$MAP_SHELL" "$LIB_DIR" || FAILED=1
+
 # 6c. And the burst plane may be entered from the RUNNING process only.
 #     `BackgroundBurstCoordinator` publishes: it takes a GPS fix and sends a
 #     kind-445 per due circle. iOS's post-termination wakes (SLC, BGTask) are
 #     RECEIVE-ONLY by promise — they run with no UI, often long after the user
 #     last opened the app.
 #
-#     This is a SHAPE pin, and it is not what holds
-#     INV-L-IOS-WAKES-RECEIVE-ONLY. That invariant is held by check 3, which
-#     pins `getCurrentLocation`'s backgrounded branch to a block that ends in a
-#     `throw` with the one-shot unreachable, over a native cache that is empty
-#     after termination by construction: a relaunched process has no publish
-#     input at all, whatever it manages to call. What 6c adds is the second
-#     lock — that the four doors into the burst plane (construct it, implement
+#     This is a SHAPE pin. Since OD-R1 (owner-directed 2026-11-26) a process
+#     iOS relaunched for a location event DOES publish, through the burst plane
+#     MapShell installs at its first pause (6d), from a session the native gate
+#     starts only under Always and the current disclosure (4d, 20), and from a
+#     Best fix only (3, 3b); the wakes themselves still never publish. What 6c
+#     adds is the second lock — that the four doors into the burst plane
+#     (construct it, implement
 #     or subclass its sink, install that sink on the scheduler, open a burst on
 #     the engine) stay in the three files that own them, and that no native
 #     wake grows a second route into Dart.
@@ -2274,6 +2578,9 @@ grep -qF 'backgroundSessionHandler.arm()' <<<"$launch_body" ||
 foreground_body="$(fn_slice 'applicationWillEnterForeground' "$APP_DELEGATE")"
 grep -qF 'backgroundSessionHandler.arm()' <<<"$foreground_body" ||
   fail "AppDelegate applicationWillEnterForeground no longer re-arms the background sessions — it is also where arm()'s DEFERRED invalidate lands, the one an Always confirmation delivered while backgrounded had to leave undone"
+# 9b. The relaunch fact: set from a background location launch only, cleared
+#     at the first foreground, and the BGTask floor kept on a relaunch.
+check_appdelegate_relaunch "$APP_DELEGATE" || FAILED=1
 
 # ---------------------------------------------------------------------------
 # 10. BackgroundSharingNotifier: the Dart side must AWAIT arm() (the awaited
@@ -2354,7 +2661,7 @@ check_bg_publish_drive "$BG_PUBLISH_DRIVE" || FAILED=1
 #
 #     SLC is driven by cell-tower transitions, so a terminated app in a
 #     tower-sparse area can travel a long way before the OS calls anything
-#     "significant"; one ~500 m exit region around the last fix is the second
+#     "significant"; one ~200 m exit region around the last fix is the second
 #     relaunch source. Because it survives termination exactly like SLC does,
 #     an arm that outlives an opt-out is a privacy defect (Rule 10) and an arm
 #     that never happens is a silent loss of coverage — neither is observable
@@ -2367,7 +2674,16 @@ if [[ ! -f "$SLC_HANDLER" ]]; then
   fail "expected file not found: $SLC_HANDLER"
 else
   check_relaunch_region "$SLC_HANDLER" || FAILED=1
+  # 13b. The 200 m circle and the five-minute catch-up floor that bounds its
+  #      relay contact (OD-R1).
+  check_catchup_floor "$SLC_HANDLER" || FAILED=1
 fi
+
+# ---------------------------------------------------------------------------
+# 20. One consent predicate across the language boundary (R-4): the native
+#     relaunch gate reads the keys and the version Dart writes.
+# ---------------------------------------------------------------------------
+check_disclosure_version_parity "$SESSION_HANDLER" "$LOCATION_CONSTANTS" || FAILED=1
 
 # ---------------------------------------------------------------------------
 # 14. HavenLocationStreamHandler.swift must be IN the Xcode project.
@@ -2509,7 +2825,7 @@ fi
 # hide under the slack.
 # ---------------------------------------------------------------------------
 self_test() {
-  local -r SELF_TEST_FIXTURES=246
+  local -r SELF_TEST_FIXTURES=290
   local tmp fails=0 checked=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -5682,6 +5998,396 @@ P3_PROVEN_BY_HOST=1" "${p3_probe}" "${p3_drive}" "${p3_constants}"
     "${p3_wrapper}" "${p3_probe}" "${p3_drive}" \
     'const Duration kPublishMaxInterval = Duration(seconds: 168);'
 
+  # --- check_background_fix_wait (3b) ----------------------------------------
+  local fw_current='  Future<Position> getCurrentLocation() async {
+    final granted = await _ensureAccessOrThrow();
+    if (granted) {
+      if (_isIOS && (await _iosSource.status()).backgrounded) {
+        final lastPosition = await _getLastKnownPosition();
+        if (lastPosition != null) return lastPosition;
+        final next = await _awaitNextBackgroundFix();
+        if (next != null) return next;
+        throw LocationServiceException("unavailable in the background");
+      }
+    }
+    return _convertPosition(await _geolocator.getCurrentPosition());
+  }'
+  local fw_wait='  Future<Position?> _awaitNextBackgroundFix() async {
+    if (_inner == null || _innerFailed || !_streamBackgroundSharing) {
+      return null;
+    }
+    if (!(await _iosSource.status()).launchedForLocation) return null;
+    final waiter = _nextFixWaiter ??= Completer<Position?>();
+    return waiter.future.timeout(kOneShotLocationTimeout, onTimeout: () => null);
+  }'
+  local fw_start='  void startBackgroundLaunchSession({required bool backgroundSharingEnabled}) {
+    if (!_isIOS || !backgroundSharingEnabled) return;
+    final inner = _inner;
+    if (inner != null && !_innerFailed && _streamBackgroundSharing) return;
+    _streamBackgroundSharing = backgroundSharingEnabled;
+    _inner = null;
+    if (inner != null) unawaited(inner.cancel());
+    _listenInner(_outer);
+    _iosSource.onForeground(foregrounded: _foregroundActive);
+  }'
+  local fw_suspend='  void suspendStream() {
+    final outer = _outer;
+    final inner = _inner;
+    if (inner == null || (outer != null && !outer.hasListener)) return;
+    _inner = null;
+    unawaited(inner.cancel());
+  }'
+  _fixwait() { # <label> <want-rc> <getCurrentLocation> <wait> <start> <suspend> [<extra>]
+    local got=0
+    printf 'class GeolocatorLocationService {\n  bool _streamBackgroundSharing = false;\n%s\n%s\n%s\n%s\n%s\n}\n' \
+      "$3" "$4" "$5" "$6" "${7:-}" >"${tmp}/service.dart"
+    ( check_background_fix_wait "${tmp}/service.dart" ) >/dev/null 2>&1 || got=$?
+    _record "$1" "$2" "${got}"
+  }
+  _fixwait 'fix wait: today'"'"'s tree passes' 0 \
+    "${fw_current}" "${fw_wait}" "${fw_start}" "${fw_suspend}"
+  _fixwait 'fix wait: the branch refuses without waiting for the relaunch session' 1 \
+    "${fw_current/        final next = await _awaitNextBackgroundFix();
+        if (next != null) return next;
+/}" "${fw_wait}" "${fw_start}" "${fw_suspend}"
+  _fixwait 'fix wait: the wait is unbounded' 1 \
+    "${fw_current}" "${fw_wait/.timeout(kOneShotLocationTimeout, onTimeout: () => null)/.whenComplete(() {})}" \
+    "${fw_start}" "${fw_suspend}"
+  _fixwait 'fix wait: an ordinary backgrounded process waits too (no launch read)' 1 \
+    "${fw_current}" "${fw_wait/    if (!(await _iosSource.status()).launchedForLocation) return null;
+/}" "${fw_start}" "${fw_suspend}"
+  _fixwait 'fix wait: a refused session is waited on' 1 \
+    "${fw_current}" "${fw_wait/_inner == null || _innerFailed || !_streamBackgroundSharing/_inner == null}" \
+    "${fw_start}" "${fw_suspend}"
+  _fixwait 'fix wait: the wait falls back to the plugin one-shot' 1 \
+    "${fw_current}" "${fw_wait/return waiter.future/await _geolocator.getCurrentPosition();
+    return waiter.future}" "${fw_start}" "${fw_suspend}"
+  _fixwait 'fix wait: the stored intent hardcoded true' 1 \
+    "${fw_current}" "${fw_wait}" \
+    "${fw_start/_streamBackgroundSharing = backgroundSharingEnabled;/_streamBackgroundSharing = true;}" "${fw_suspend}"
+  _fixwait 'fix wait: the start ignores the toggle' 1 \
+    "${fw_current}" "${fw_wait}" \
+    "${fw_start/if (!_isIOS || !backgroundSharingEnabled) return;/if (!_isIOS) return;}" "${fw_suspend}"
+  _fixwait 'fix wait: the dwell is re-applied before the listen resets it' 1 \
+    "${fw_current}" "${fw_wait}" '  void startBackgroundLaunchSession({required bool backgroundSharingEnabled}) {
+    if (!_isIOS || !backgroundSharingEnabled) return;
+    _iosSource.onForeground(foregrounded: _foregroundActive);
+    _streamBackgroundSharing = backgroundSharingEnabled;
+    _listenInner(_outer);
+  }' "${fw_suspend}"
+  _fixwait 'fix wait: suspendStream skips an outer-less session again' 1 \
+    "${fw_current}" "${fw_wait}" "${fw_start}" \
+    "${fw_suspend/if (inner == null || (outer != null \&\& !outer.hasListener)) return;/if (outer == null || inner == null || !outer.hasListener) return;}"
+
+  # --- check_relaunch_start_gate (4d) ----------------------------------------
+  local sg_listen='  func onListen(
+    withArguments arguments: Any?,
+    eventSink events: @escaping FlutterEventSink
+  ) -> FlutterError? {
+    guard sink == nil else { return nil }
+    let args = arguments as? [String: Any] ?? [:]
+    let allowsBg = args["allowsBackgroundLocationUpdates"] as? Bool ?? false
+    if UIApplication.shared.applicationState == .background
+      && !(allowsBg && backgroundStartPermitted) {
+      events(FlutterError(code: "background_start_refused", message: nil, details: nil))
+      events(FlutterEndOfEventStream)
+      return nil
+    }
+    sink = events
+    manager.startUpdatingLocation()
+    return nil
+  }'
+  local sg_permitted='  private var backgroundStartPermitted: Bool {
+    launchedForLocation
+      && manager.authorizationStatus == .authorizedAlways
+      && HavenBackgroundSessionHandler.resumeConsented()
+  }'
+  local sg_window='  func onCancel(withArguments arguments: Any?) -> FlutterError? {
+    manager.stopUpdatingLocation()
+    sink = nil
+    endLaunchWindow()
+    return nil
+  }
+
+  func beginLaunchWindow() {
+    guard launchWindow == .invalid, backgroundStartPermitted else { return }
+    launchWindow = UIApplication.shared.beginBackgroundTask(withName: "haven.launch.share") {
+      self.endLaunchWindow()
+    }
+  }
+
+  func endLaunchWindow() {
+    guard launchWindow != .invalid else { return }
+    UIApplication.shared.endBackgroundTask(launchWindow)
+    launchWindow = .invalid
+  }'
+  local sg_status='  private func status() -> [String: Any] {
+    return [
+      "backgrounded": UIApplication.shared.applicationState == .background,
+      "launchedForLocation": launchedForLocation,
+    ]
+  }'
+  _startgate() { # <label> <want-rc> <onListen> <permitted> <window> <status>
+    local got=0
+    printf 'final class HavenLocationStreamHandler: NSObject {\n  var launchedForLocation = false\n%s\n%s\n%s\n%s\n}\n' \
+      "$3" "$4" "$5" "$6" >"${tmp}/HavenLocationStreamHandler.swift"
+    ( check_relaunch_start_gate "${tmp}/HavenLocationStreamHandler.swift" ) >/dev/null 2>&1 || got=$?
+    _record "$1" "$2" "${got}"
+  }
+  _startgate 'start gate: today'"'"'s tree passes' 0 \
+    "${sg_listen}" "${sg_permitted}" "${sg_window}" "${sg_status}"
+  # R-2's mutant: the refusal scoped to allowsBg again, so a foreground-intent
+  # start from a background launch is let through.
+  _startgate 'start gate: the refusal scoped to background-capable starts' 1 \
+    "${sg_listen/    if UIApplication.shared.applicationState == .background
+      \&\& !(allowsBg \&\& backgroundStartPermitted) \{/    if allowsBg \&\& UIApplication.shared.applicationState == .background
+      \&\& !backgroundStartPermitted \{}" "${sg_permitted}" "${sg_window}" "${sg_status}"
+  _startgate 'start gate: the predicate bypassed' 1 \
+    "${sg_listen/
+      \&\& !(allowsBg \&\& backgroundStartPermitted)/}" "${sg_permitted}" "${sg_window}" "${sg_status}"
+  _startgate 'start gate: a conjunct dropped' 1 \
+    "${sg_listen}" "${sg_permitted/
+      \&\& HavenBackgroundSessionHandler.resumeConsented()/}" "${sg_window}" "${sg_status}"
+  _startgate 'start gate: || introduced' 1 \
+    "${sg_listen}" "${sg_permitted/
+      \&\& manager.authorizationStatus/
+      || manager.authorizationStatus}" "${sg_window}" "${sg_status}"
+  _startgate 'start gate: When-In-Use substituted for Always' 1 \
+    "${sg_listen}" "${sg_permitted/.authorizedAlways/.authorizedWhenInUse}" "${sg_window}" "${sg_status}"
+  _startgate 'start gate: the window opened without the predicate' 1 \
+    "${sg_listen}" "${sg_permitted}" \
+    "${sg_window/guard launchWindow == .invalid, backgroundStartPermitted else/guard launchWindow == .invalid else}" "${sg_status}"
+  _startgate 'start gate: onCancel leaves the window open' 1 \
+    "${sg_listen}" "${sg_permitted}" "${sg_window/    endLaunchWindow()
+    return nil/    return nil}" "${sg_status}"
+  _startgate 'start gate: status no longer exports the launch' 1 \
+    "${sg_listen}" "${sg_permitted}" "${sg_window}" \
+    "${sg_status/      \"launchedForLocation\": launchedForLocation,
+/}"
+  _startgate 'start gate: the handler sets the launch itself' 1 \
+    "${sg_listen}" "${sg_permitted}" "${sg_window}" \
+    "${sg_status}
+  func markLaunched() { launchedForLocation = true }"
+
+  # --- check_appdelegate_relaunch (9b) ---------------------------------------
+  local ad_launch='  override func application(
+    _ application: UIApplication,
+    didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
+  ) -> Bool {
+    if let controller = window?.rootViewController as? FlutterViewController {
+      locationStreamHandler.register(with: controller.binaryMessenger)
+    }
+    let result = super.application(application, didFinishLaunchingWithOptions: launchOptions)
+    let launchedForLocation = launchOptions?[.location] != nil
+      && application.applicationState == .background
+    slcHandler.startMonitoring()
+    bgTaskHandler.scheduleNextCatchup()
+    if launchedForLocation {
+      locationStreamHandler.launchedForLocation = true
+      locationStreamHandler.beginLaunchWindow()
+    }
+    backgroundSessionHandler.arm()
+    return result
+  }'
+  local ad_fg='  override func applicationWillEnterForeground(_ application: UIApplication) {
+    super.applicationWillEnterForeground(application)
+    locationStreamHandler.launchedForLocation = false
+    locationStreamHandler.endLaunchWindow()
+    backgroundSessionHandler.arm()
+  }'
+  _appdel() { # <label> <want-rc> <launch> <foreground>
+    local got=0
+    printf 'class AppDelegate: FlutterAppDelegate {\n%s\n%s\n}\n' "$3" "$4" >"${tmp}/AppDelegate.swift"
+    ( check_appdelegate_relaunch "${tmp}/AppDelegate.swift" ) >/dev/null 2>&1 || got=$?
+    _record "$1" "$2" "${got}"
+  }
+  _appdel 'app delegate: today'"'"'s tree passes' 0 "${ad_launch}" "${ad_fg}"
+  _appdel 'app delegate: the launch fact without the background state' 1 \
+    "${ad_launch/
+      \&\& application.applicationState == .background/}" "${ad_fg}"
+  _appdel 'app delegate: the fact set outside the location-launch branch' 1 \
+    "${ad_launch/    slcHandler.startMonitoring()/    locationStreamHandler.launchedForLocation = true
+    slcHandler.startMonitoring()}" "${ad_fg}"
+  _appdel 'app delegate: the BGTask back inside a launch branch' 1 \
+    "${ad_launch/    bgTaskHandler.scheduleNextCatchup()
+    if launchedForLocation \{/    if launchedForLocation \{
+      bgTaskHandler.scheduleNextCatchup()}" "${ad_fg}"
+  _appdel 'app delegate: the window never opened' 1 \
+    "${ad_launch/      locationStreamHandler.beginLaunchWindow()
+/}" "${ad_fg}"
+  _appdel 'app delegate: the first foreground keeps the launch fact' 1 \
+    "${ad_launch}" "${ad_fg/    locationStreamHandler.launchedForLocation = false
+/}"
+
+  # --- check_catchup_floor (13b) ---------------------------------------------
+  local cf_body='  private static let relaunchRegionRadiusMeters: CLLocationDistance = 200
+  private static let catchupFloorNanos: UInt64 = 300 * 1_000_000_000
+  private var lastCatchupAt: UInt64?
+
+  func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+    guard isEnabled() else { return }
+    refreshRelaunchRegion(around: locations.last)
+    guard catchupDue() else { return }
+    beginCatchupWindow()
+    triggerDartCatchup()
+  }
+
+  func locationManager(_ manager: CLLocationManager, didExitRegion region: CLRegion) {
+    guard isEnabled(), region.identifier == Self.relaunchRegionIdentifier else { return }
+    refreshRelaunchRegion(around: manager.location)
+    guard catchupDue() else { return }
+    beginCatchupWindow()
+    triggerDartCatchup()
+  }
+
+  private func triggerDartCatchup() {
+    channel.invokeMethod("runCatchup", arguments: nil) { result in
+      if (result as? NSObject) === FlutterMethodNotImplemented {
+        self.bgTaskHandler?.scheduleNextCatchup()
+      } else {
+        self.lastCatchupAt = clock_gettime_nsec_np(CLOCK_MONOTONIC)
+      }
+      self.endBackgroundTask()
+    }
+  }
+
+  private func catchupDue() -> Bool {
+    guard let last = lastCatchupAt else { return true }
+    return clock_gettime_nsec_np(CLOCK_MONOTONIC) &- last >= Self.catchupFloorNanos
+  }'
+  _floor() { # <label> <want-rc> <body>
+    local got=0
+    printf 'final class HavenSLCHandler: NSObject {\n%s\n}\n' "$3" >"${tmp}/HavenSLCHandler.swift"
+    ( check_catchup_floor "${tmp}/HavenSLCHandler.swift" ) >/dev/null 2>&1 || got=$?
+    _record "$1" "$2" "${got}"
+  }
+  _floor 'catch-up floor: today'"'"'s tree passes' 0 "${cf_body}"
+  _floor 'catch-up floor: the radius back at 500 m' 1 "${cf_body/= 200/= 500}"
+  _floor 'catch-up floor: a wall clock instead of a monotonic one' 1 \
+    "${cf_body//clock_gettime_nsec_np(CLOCK_MONOTONIC)/UInt64(Date().timeIntervalSince1970 * 1e9)}"
+  _floor 'catch-up floor: the re-centre throttled behind the floor' 1 \
+    "${cf_body/    refreshRelaunchRegion(around: manager.location)
+    guard catchupDue() else \{ return \}/    guard catchupDue() else \{ return \}
+    refreshRelaunchRegion(around: manager.location)}"
+  _floor 'catch-up floor: the SLC wake sweeps unthrottled' 1 \
+    "${cf_body/    refreshRelaunchRegion(around: locations.last)
+    guard catchupDue() else \{ return \}/    refreshRelaunchRegion(around: locations.last)}"
+  _floor 'catch-up floor: stamped although Dart was not ready' 1 \
+    "${cf_body/        self.bgTaskHandler?.scheduleNextCatchup()/        self.bgTaskHandler?.scheduleNextCatchup()
+        self.lastCatchupAt = clock_gettime_nsec_np(CLOCK_MONOTONIC)}"
+
+  # --- check_background_launch_start (6d) ------------------------------------
+  local ls_pay='  Future<void> _payLaunchSession(
+    Future<LaunchSession> launch,
+    BackgroundBurstCoordinator coordinator, {
+    required int turn,
+    required DateTime pausedAt,
+  }) async {
+    final session = await launch;
+    if (!mounted || turn != _lifecycleTurn) return;
+    final bgEnabled = ref.read(backgroundSharingProvider);
+    if (session == LaunchSession.resume && bgEnabled) {
+      _geolocatorService?.startBackgroundLaunchSession(
+        backgroundSharingEnabled: bgEnabled,
+      );
+    }
+    final circles = _burstEligibleCircles();
+    if (session != LaunchSession.receiveOnly && circles.isNotEmpty) {
+      await _driveBurstNow(coordinator, circles);
+    }
+  }'
+  local ls_paused='  Future<void> _onPaused() async {
+    final turn = _lifecycleTurn;
+    if (Platform.isIOS) {
+      final launch = takeLaunchSession();
+      final coordinator = _installBurstCoordinator();
+      if (launch != null) {
+        unawaited(_payLaunchSession(launch, coordinator, turn: turn, pausedAt: DateTime.now()));
+      }
+    }
+  }'
+  _launchstart() { # <label> <want-rc> <pay> <paused> [<extra lib file body>]
+    local got=0
+    mkdir -p "${tmp}/lslib"
+    rm -f "${tmp}/lslib/"*.dart
+    printf 'class _MapShellState {\n%s\n%s\n}\n' "$3" "$4" >"${tmp}/lslib/map_shell.dart"
+    printf 'class GeolocatorLocationService {\n  void startBackgroundLaunchSession({required bool backgroundSharingEnabled}) {}\n}\n%s\n' \
+      "${5:-}" >"${tmp}/lslib/service.dart"
+    ( check_background_launch_start "${tmp}/lslib/map_shell.dart" "${tmp}/lslib" ) >/dev/null 2>&1 || got=$?
+    _record "$1" "$2" "${got}"
+  }
+  _launchstart 'launch start: today'"'"'s tree passes' 0 "${ls_pay}" "${ls_paused}"
+  _launchstart 'launch start: a second start site' 1 "${ls_pay}" "${ls_paused}" \
+    'void elsewhere(GeolocatorLocationService s) {
+  s.startBackgroundLaunchSession(backgroundSharingEnabled: true);
+}'
+  _launchstart 'launch start: started for a launch that may not resume' 1 \
+    "${ls_pay/    if (session == LaunchSession.resume \&\& bgEnabled) \{/    if (bgEnabled) \{}" "${ls_paused}"
+  _launchstart 'launch start: started before the turn check' 1 \
+    "${ls_pay/    final session = await launch;
+    if (!mounted || turn != _lifecycleTurn) return;/    final session = await launch;}" "${ls_paused}"
+  _launchstart 'launch start: the burst before the session' 1 '  Future<void> _payLaunchSession(Future<LaunchSession> launch) async {
+    final session = await launch;
+    if (!mounted || turn != _lifecycleTurn) return;
+    await _driveBurstNow(coordinator, _burstEligibleCircles());
+    if (session == LaunchSession.resume && bgEnabled) {
+      _geolocatorService?.startBackgroundLaunchSession(backgroundSharingEnabled: bgEnabled);
+    }
+  }' "${ls_paused}"
+  _launchstart 'launch start: the pause no longer takes the launch first' 1 "${ls_pay}" \
+    "${ls_paused/      final launch = takeLaunchSession();
+      final coordinator = _installBurstCoordinator();/      final coordinator = _installBurstCoordinator();
+      final launch = takeLaunchSession();}"
+
+  # --- check_disclosure_version_parity (20) ----------------------------------
+  local vp_swift='final class HavenBackgroundSessionHandler: NSObject {
+  private static let kBgSharingKey = "flutter.haven.background_sharing"
+  private static let kBgDisclosureKey =
+    "flutter.haven.location.disclosure_background_accepted"
+  private static let kFgDisclosureKey = "flutter.haven.location.disclosure_accepted"
+  private static let kBgDisclosureVersionKey =
+    "flutter.haven.location.disclosure_background_version"
+  private static let kBgDisclosureResumeVersion = 2
+
+  static func resumeConsented() -> Bool {
+    let defaults = UserDefaults.standard
+    return defaults.bool(forKey: kBgSharingKey)
+      && defaults.bool(forKey: kFgDisclosureKey)
+      && defaults.bool(forKey: kBgDisclosureKey)
+      && defaults.integer(forKey: kBgDisclosureVersionKey) >= kBgDisclosureResumeVersion
+  }
+}'
+  local vp_dart="const String kBackgroundSharingKey = 'haven.background_sharing';
+const String kLocationDisclosureAcceptedKey =
+    'haven.location.disclosure_accepted';
+const String kLocationDisclosureBackgroundAcceptedKey =
+    'haven.location.disclosure_background_accepted';
+const String kLocationDisclosureBackgroundVersionKey =
+    'haven.location.disclosure_background_version';
+const int kBackgroundDisclosureVersion = 2;"
+  _parity() { # <label> <want-rc> <swift> <dart>
+    local got=0
+    printf '%s\n' "$3" >"${tmp}/HavenBackgroundSessionHandler.swift"
+    printf '%s\n' "$4" >"${tmp}/location.dart"
+    ( check_disclosure_version_parity "${tmp}/HavenBackgroundSessionHandler.swift" "${tmp}/location.dart" ) >/dev/null 2>&1 || got=$?
+    _record "$1" "$2" "${got}"
+  }
+  _parity 'version parity: today'"'"'s tree passes' 0 "${vp_swift}" "${vp_dart}"
+  _parity 'version parity: Dart bumped without Swift' 1 \
+    "${vp_swift}" "${vp_dart/kBackgroundDisclosureVersion = 2/kBackgroundDisclosureVersion = 3}"
+  _parity 'version parity: the Swift version key drifts from Dart' 1 \
+    "${vp_swift/disclosure_background_version\"/disclosure_bg_version\"}" "${vp_dart}"
+  _parity 'version parity: the foreground disclosure dropped from the Swift predicate' 1 \
+    "${vp_swift/
+      \&\& defaults.bool(forKey: kFgDisclosureKey)/}" "${vp_dart}"
+  _parity 'version parity: the version check dropped' 1 \
+    "${vp_swift/
+      \&\& defaults.integer(forKey: kBgDisclosureVersionKey) >= kBgDisclosureResumeVersion/}" "${vp_dart}"
+  _parity 'version parity: a conjunct joined by ||' 1 \
+    "${vp_swift/
+      \&\& defaults.bool(forKey: kBgDisclosureKey)/
+      || defaults.bool(forKey: kBgDisclosureKey)}" "${vp_dart}"
+
   if (( checked != SELF_TEST_FIXTURES )); then
     echo "SELF-TEST FAIL: ran ${checked} fixture(s), expected ${SELF_TEST_FIXTURES}" >&2
     fails=1
@@ -5703,4 +6409,4 @@ if [[ "$FAILED" -ne 0 ]]; then
   echo "iOS background publish guard FAILED — see failures above." >&2
   exit 1
 fi
-echo "OK: iOS background publish invariants hold (plist mode, one stream boundary per platform, toggle-keyed iOS route with a background branch that cannot fall through to the one-shot, native owner's session shape + two accuracy tiers + sink-only refusals + transient-error filter + only-Best cache in all three copies, bounded anchor staleness in both the controller and the serving path, fail-closed background-launch provider guard, C4 watcher + its opt-out release issued on every path, burst plane entered only from the running process and native wakes with one receive-only door into Dart, presence-only logs, tier-based session/indicator policy with a session-scoped confirmation and an unconditional disarm, AppDelegate wiring order, unfaked bg-publish drive, background-capable stream established before the drive backgrounds the app, P2c's receive oracle read from the subscription count and never from the paused flag and P2d's from the persisted last-known store, each with its terminal proof printed after the assertion it stands for, relaunch region coupled to SLC, stream and network-change handlers compiled into the Xcode project, every leg's drive Timeout inside its own per-attempt retry deadline, one poll-path receive cadence across the product and the drive, the poll path's sweep declaring itself a background wake so the C3 consent chokepoint applies, every poll leg held at the when-in-use grant P2d's attribution depends on, and P3's settle window measured by the same numbers from both sides with a host-side wire oracle that outlives the app, two controls it cannot read nothing through — one that the relay answers at all, one that it still serves the kind the window is read for — and a completion-gate excuse of exactly two markers from exactly one source)."
+echo "OK: iOS background publish invariants hold (plist mode, one stream boundary per platform, toggle-keyed iOS route with a background branch that cannot fall through to the one-shot, native owner's session shape + two accuracy tiers + sink-only refusals + transient-error filter + only-Best cache in all three copies, bounded anchor staleness in both the controller and the serving path, fail-closed background-launch provider guard, C4 watcher + its opt-out release issued on every path, burst plane entered only from the running process and native wakes with one receive-only door into Dart, presence-only logs, tier-based session/indicator policy with a session-scoped confirmation and an unconditional disarm, AppDelegate wiring order, unfaked bg-publish drive, background-capable stream established before the drive backgrounds the app, P2c's receive oracle read from the subscription count and never from the paused flag and P2d's from the persisted last-known store, each with its terminal proof printed after the assertion it stands for, relaunch region coupled to SLC at 200 m with a monotonic five-minute catch-up floor stamped only when Dart answered, a background-launch start gate refusing every background start but a location relaunch's under Always and the current disclosure, with one Dart start site and one consent predicate across Swift and Dart, stream and network-change handlers compiled into the Xcode project, every leg's drive Timeout inside its own per-attempt retry deadline, one poll-path receive cadence across the product and the drive, the poll path's sweep declaring itself a background wake so the C3 consent chokepoint applies, every poll leg held at the when-in-use grant P2d's attribution depends on, and P3's settle window measured by the same numbers from both sides with a host-side wire oracle that outlives the app, two controls it cannot read nothing through — one that the relay answers at all, one that it still serves the kind the window is read for — and a completion-gate excuse of exactly two markers from exactly one source)."

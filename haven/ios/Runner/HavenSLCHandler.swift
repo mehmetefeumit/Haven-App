@@ -53,7 +53,7 @@ private let HAVEN_SLC_LOG = OSLog(subsystem: "haven_ios", category: "slc")
 /// (rural areas, a single-tower town, indoors on Wi-Fi only) a terminated app
 /// can go a long way before the OS decides anything "significant" happened.
 /// Region monitoring is a second, independent relaunch source with the same
-/// termination survival: one ~500 m circular region centred on the last
+/// termination survival: one ~200 m circular region centred on the last
 /// delivered fix, re-centred on every SLC delivery, so leaving the
 /// neighbourhood relaunches Haven even when SLC stays quiet. Exit only —
 /// entry would fire immediately on re-arm and buy nothing.
@@ -61,9 +61,15 @@ private let HAVEN_SLC_LOG = OSLog(subsystem: "haven_ios", category: "slc")
 /// It is armed and torn down strictly with SLC (same `isEnabled()` predicate,
 /// same Always requirement, released by `stopMonitoring()`), adds no
 /// UserDefaults key, and reaches Dart through the SAME `runCatchup` channel,
-/// so the receive-only guarantee and the consent chokepoint are unchanged. No
-/// coordinate is ever logged (Security Rule 6): the region's centre is passed
-/// to CoreLocation and never to a log line.
+/// so this handler stays receive-only and the consent chokepoint is
+/// unchanged. A relaunch publishes only through Dart's burst plane, never from
+/// here. No coordinate is ever logged (Security Rule 6): the region's centre
+/// is passed to CoreLocation and never to a log line.
+///
+/// Both wakes share one catch-up floor per process (`catchupDue()`): the
+/// smaller circle would otherwise multiply background relay contact while
+/// driving. The region always re-centres; only the sweep is throttled, and
+/// the first wake of a process always sweeps.
 ///
 /// Ceiling, stated honestly: like SLC, this cannot be proven on the Simulator
 /// — see the owner checklist in `docs/M7_BACKGROUND_SHARING.md` §6.
@@ -89,7 +95,7 @@ private let HAVEN_SLC_LOG = OSLog(subsystem: "haven_ios", category: "slc")
 ///
 /// ## On-device validation required (cannot be asserted in flutter test)
 ///
-///   - SLC wake fires on ~500 m movement.
+///   - SLC wake fires on ~500 m movement; the region on leaving ~200 m.
 ///   - Channel call reaches Dart handler (no weak-reference deallocation).
 ///   - Monitoring does NOT start when either flag is false (privacy inert).
 ///   - `stopMonitoring()` via Dart teardown channel actually stops SLC.
@@ -119,12 +125,23 @@ final class HavenSLCHandler: NSObject, CLLocationManagerDelegate {
   /// when `monitoredRegions` is restored by the OS rather than by this class.
   private static let relaunchRegionIdentifier = "haven.relaunch"
 
-  /// Radius of the relaunch region, in metres. Chosen to match the OS's own
-  /// ~500 m significant-change criterion: a smaller circle would wake the app
-  /// on ordinary movement around home, a larger one would take longer than SLC
-  /// to notice a real departure, and either way this is the backstop for the
-  /// case where SLC does not fire at all.
-  private static let relaunchRegionRadiusMeters: CLLocationDistance = 500
+  /// Radius of the relaunch region, in metres. Smaller than the OS's ~500 m
+  /// significant-change criterion since a relaunch resumes sharing (OD-R1,
+  /// owner-directed 2026-11-26): it shortens the walk before a terminated
+  /// Haven is back. Inside Apple's "1 to 400 metres work better" band; a
+  /// tighter circle wakes the app on ordinary movement around home, which the
+  /// catch-up floor below absorbs.
+  private static let relaunchRegionRadiusMeters: CLLocationDistance = 200
+
+  /// SLC's own documented floor ("should not expect notifications more
+  /// frequently than once every five minutes"), applied to both wake kinds'
+  /// Dart catch-up within one process.
+  private static let catchupFloorNanos: UInt64 = 300 * 1_000_000_000
+
+  /// When Dart last answered a catch-up, on the monotonic clock, or nil.
+  /// Only an answered call stamps it: a wake that found Dart not yet ready and
+  /// fell back to a BGTask swept nothing.
+  private var lastCatchupAt: UInt64?
 
   /// Oldest fix the region may be centred on.
   ///
@@ -320,6 +337,7 @@ final class HavenSLCHandler: NSObject, CLLocationManagerDelegate {
     // recoverable from wherever the app was last known to be.
     refreshRelaunchRegion(around: locations.last)
 
+    guard catchupDue() else { return }
     beginCatchupWindow()
     triggerDartCatchup()
   }
@@ -336,6 +354,7 @@ final class HavenSLCHandler: NSObject, CLLocationManagerDelegate {
     // earlier session pinning the new circle where the device no longer is.
     refreshRelaunchRegion(around: manager.location)
 
+    guard catchupDue() else { return }
     beginCatchupWindow()
     triggerDartCatchup()
   }
@@ -373,17 +392,28 @@ final class HavenSLCHandler: NSObject, CLLocationManagerDelegate {
 
     channel.invokeMethod("runCatchup", arguments: nil) { [weak self] result in
       guard let self = self else { return }
-      if let flutterError = result as? FlutterError {
-        // Dart threw — log type only (no message; could contain internal state).
-        debugLog("SLC: Dart catch-up returned error: \(flutterError.code)")
-      } else if (result as? NSObject) === FlutterMethodNotImplemented {
+      if (result as? NSObject) === FlutterMethodNotImplemented {
         // Dart handler not yet registered (cold-launch race). Schedule a
         // BGAppRefreshTask so the wake is not lost.
         debugLog("SLC: Dart handler not ready — scheduling BGTask fallback")
         self.bgTaskHandler?.scheduleNextCatchup()
+      } else {
+        self.lastCatchupAt = clock_gettime_nsec_np(CLOCK_MONOTONIC)
+        if let flutterError = result as? FlutterError {
+          // Dart threw — log type only (no message; could contain internal state).
+          debugLog("SLC: Dart catch-up returned error: \(flutterError.code)")
+        }
       }
       self.endBackgroundTask()
     }
+  }
+
+  /// Whether the floor has passed since Dart last answered a catch-up.
+  /// `CLOCK_MONOTONIC` keeps counting through sleep on Darwin and ignores
+  /// wall-clock changes, so setting the clock back cannot stretch the floor.
+  private func catchupDue() -> Bool {
+    guard let last = lastCatchupAt else { return true }
+    return clock_gettime_nsec_np(CLOCK_MONOTONIC) &- last >= Self.catchupFloorNanos
   }
 
   // MARK: - Background task lifecycle

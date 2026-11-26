@@ -23,18 +23,32 @@ import UIKit
 /// coarser tier would leave that shape and re-create the suspension the 16.4
 /// rule describes, so exactly two accuracy values are ever assigned.
 ///
-/// ## Background starts are refused, not attempted
+/// ## Background starts are refused, with one exception
 ///
 /// iOS rejects a background-capable location start issued while the app is in
-/// the background, and a refused start is indistinguishable from a
-/// running one until peers stop receiving. `onListen` therefore refuses it
-/// itself when `applicationState == .background` — the state test is `==
-/// .background` and never `!= .active`, because Flutter's `resumed` is
-/// delivered from `applicationDidBecomeActive`, so a legitimate foreground
-/// start can land while UIKit still reports `.inactive`. Together with the
-/// Dart cold-cache shortcut (which reads `backgrounded` from `status()` and
-/// fails closed) a process relaunched in the background can only ever receive,
-/// never publish.
+/// the background, and a refused start is indistinguishable from a running
+/// one until peers stop receiving; a foreground-intent start from there is
+/// never Haven's intent at all. `onListen` therefore refuses EVERY start while
+/// `applicationState == .background` — `== .background` and never `!=
+/// .active`, because Flutter's `resumed` is delivered from
+/// `applicationDidBecomeActive`, so a legitimate foreground start can land
+/// while UIKit still reports `.inactive`.
+///
+/// The exception is the owner's (2026-11-26, OD-R1): a background-capable
+/// start in a process iOS launched for a location event, under Always, for a
+/// user who accepted the CURRENT background disclosure
+/// (`backgroundStartPermitted`). Each conjunct closes a case: a process the
+/// user launched and then backgrounded never sets `launchedForLocation` (the
+/// case CI run 32661622879 recorded iOS refusing); iOS never relaunches a
+/// While-Using app, and a While-Using start from the background is the one it
+/// refuses; and an older acceptance did not cover sharing that starts again by
+/// itself. A permitted start iOS rejects anyway stays observable: no fix
+/// arrives, and Dart's bounded wait for one throws.
+///
+/// `beginLaunchWindow` holds a background task over the gap between the
+/// relaunch's catch-up sweep, whose own task ends when Dart replies, and the
+/// first publish. It ends at its expiry, at `onCancel`, and at the first
+/// foreground.
 ///
 /// ## Errors travel through the SINK
 ///
@@ -114,6 +128,24 @@ final class HavenLocationStreamHandler: NSObject, CLLocationManagerDelegate, Flu
   /// The most recent Best-profile fix, served to Dart as the last-known
   /// position while backgrounded. Cleared with the subscription and on demand.
   private var lastBestFix: CLLocation?
+
+  /// Whether iOS launched this process into the background for a location
+  /// event and the user has not brought it to the front since. Written only
+  /// by `AppDelegate`.
+  var launchedForLocation = false
+
+  /// The background task that keeps a location relaunch executing until its
+  /// first publish, or `.invalid`.
+  private var launchWindow: UIBackgroundTaskIdentifier = .invalid
+
+  /// A background-capable start is made from the background only in a process
+  /// iOS launched for a location event, under Always, for a user who accepted
+  /// the CURRENT background disclosure (OD-R1).
+  private var backgroundStartPermitted: Bool {
+    launchedForLocation
+      && manager.authorizationStatus == .authorizedAlways
+      && HavenBackgroundSessionHandler.resumeConsented()
+  }
 
   override init() {
     super.init()
@@ -203,10 +235,11 @@ final class HavenLocationStreamHandler: NSObject, CLLocationManagerDelegate, Flu
     let args = arguments as? [String: Any] ?? [:]
     let allowsBg = args["allowsBackgroundLocationUpdates"] as? Bool ?? false
 
-    if allowsBg && UIApplication.shared.applicationState == .background {
-      // iOS rejects the start itself; refusing it here makes the rejection
-      // observable instead of silent, and keeps a background relaunch
-      // receive-only.
+    if UIApplication.shared.applicationState == .background
+      && !(allowsBg && backgroundStartPermitted) {
+      // iOS rejects a background-capable start itself, and a foreground-intent
+      // one is never wanted here; refusing makes the outcome observable
+      // instead of silent.
       events(FlutterError(code: "background_start_refused", message: nil, details: nil))
       events(FlutterEndOfEventStream)
       return nil
@@ -229,7 +262,27 @@ final class HavenLocationStreamHandler: NSObject, CLLocationManagerDelegate, Flu
     manager.allowsBackgroundLocationUpdates = false
     lastBestFix = nil
     sink = nil
+    endLaunchWindow()
     return nil
+  }
+
+  // MARK: - Launch window
+
+  /// Holds the process executable over the gap between a location relaunch's
+  /// catch-up sweep and its first publish. Costs nothing extra: the time
+  /// budget is app-wide.
+  func beginLaunchWindow() {
+    guard launchWindow == .invalid, backgroundStartPermitted else { return }
+    launchWindow = UIApplication.shared.beginBackgroundTask(withName: "haven.launch.share") {
+      self.endLaunchWindow()
+    }
+  }
+
+  /// Idempotent.
+  func endLaunchWindow() {
+    guard launchWindow != .invalid else { return }
+    UIApplication.shared.endBackgroundTask(launchWindow)
+    launchWindow = .invalid
   }
 
   // MARK: - Profile
@@ -304,6 +357,7 @@ final class HavenLocationStreamHandler: NSObject, CLLocationManagerDelegate, Flu
         : Self.profileHundredMeters,
       "authorization": authorizationString(),
       "backgrounded": UIApplication.shared.applicationState == .background,
+      "launchedForLocation": launchedForLocation,
     ]
   }
 
