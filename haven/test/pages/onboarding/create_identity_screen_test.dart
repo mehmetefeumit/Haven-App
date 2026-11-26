@@ -335,6 +335,39 @@ void main() {
       expect(prefs.getBool(kAndroidBackgroundLocationPromptedKey), isTrue);
     });
 
+    testWidgets('a failed background request logs its type only and still '
+        'enables sharing', (tester) async {
+      // Rule 15: an exception's text may carry anything the platform put in
+      // it; the line names the type alone.
+      const planted = 'npub1plantedplantedplanted wss://planted.example';
+      final allTime = _MissingAllTime()
+        ..onRequest = () async => throw StateError(planted);
+      // Restored inside the body: testWidgets checks debugPrint before
+      // addTearDown callbacks run (see log_capture.dart).
+      final logs = LogCapture();
+      await pumpLocalized(
+        tester,
+        const CreateIdentityScreen(),
+        overrides: buildOverrides(
+          service: _RecordingIdentityService(),
+          allTime: allTime,
+        ),
+        settle: false,
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+      await pumpFrames(tester);
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+      await pumpFrames(tester);
+
+      logs.restore();
+      logs
+        ..assertContains('Onboarding background location failed: StateError')
+        ..assertNoNeedles(['npub1planted', 'planted.example']);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getBool(kBackgroundSharingKey), isTrue);
+    });
+
     testWidgets('a decline asks for nothing and records no step', (
       tester,
     ) async {

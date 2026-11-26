@@ -46,6 +46,8 @@ import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/common/long_message_snack_bar.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../helpers/log_capture.dart';
+
 // =============================================================================
 // Fake disclosure controller
 // =============================================================================
@@ -133,10 +135,18 @@ class _FakeAllTime implements AndroidBackgroundLocation {
   /// channel's round trip, during which the user can tap again.
   Completer<void>? statusGate;
 
+  /// When non-null, the NEXT [status] read throws it once.
+  Object? statusError;
+
   @override
   Future<BackgroundLocationStatus> status() async {
     statusReads++;
     await statusGate?.future;
+    final error = statusError;
+    if (error != null) {
+      statusError = null;
+      throw error;
+    }
     return current;
   }
 
@@ -2550,6 +2560,30 @@ void main() {
       expect(
         find.descendant(of: note(), matching: find.text('Open settings')),
         findsNothing,
+      );
+    });
+
+    testWidgets('a failure under its action logs the type only, and frees the '
+        'page', (tester) async {
+      // Rule 15: an exception's text may carry anything; the line names the
+      // type alone. The latch must not stay set, or every control stays off.
+      const planted = 'npub1plantedplantedplanted wss://planted.example';
+      final allTime = _FakeAllTime.missing();
+      await pumpPage(tester, seed: v2SharingOn, allTime: allTime);
+      allTime.statusError = StateError(planted);
+      final logs = LogCapture();
+      await tapAction(tester);
+      logs.restore();
+      logs
+        ..assertContains('[LocationSettings] StateError')
+        ..assertNoNeedles(['npub1planted', 'planted.example']);
+      expect(
+        tester
+            .widget<SwitchListTile>(
+              find.byKey(WidgetKeys.backgroundSharingTile),
+            )
+            .onChanged,
+        isNotNull,
       );
     });
 
