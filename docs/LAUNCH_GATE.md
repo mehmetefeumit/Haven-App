@@ -428,9 +428,10 @@ Run it with `candidate_release_tag: v0.1.14`: it must be red twice over — the
 launch's crash summary naming `WorkDatabase_Impl`, and the dex check (which
 runs after the launch whatever it found) naming `WorkDatabase_Impl` and the
 three registrars. Run it with no tag (it builds the branch) on a tree with the
-fix: it must be green on every leg. The workflow takes both by hand
-(`workflow_dispatch`), so this needs nothing but the Actions tab. Re-run a red
-job only when its class is infrastructure (rc 3).
+fix: it must be green on every leg. Both are by hand, from the Actions tab:
+"Launch Gate (Android, by hand)" (`launch-gate-android-dispatch.yml`), which
+runs the Android Gradle dependency job a branch build needs and then this
+gate. Re-run a red job only when its class is infrastructure (rc 3).
 
 Not a green proof: `candidate_release_tag: v0.1.13`. Its own fresh leg passes,
 but it must upgrade from v0.1.12, whose onboarding the gate cannot drive

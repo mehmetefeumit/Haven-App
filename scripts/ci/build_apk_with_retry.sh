@@ -22,14 +22,20 @@
 # ZERO 429s (jobs 106414462467 / 106414462539 / 106414462323, 630-743 s each,
 # first attempt). One runner's egress, not a broken build. No test ran.
 #
-# ## Why the CACHE is the fix and this is only the backstop
+# ## Why OFFLINE lanes are the fix and this is only the backstop
 #
 # Read this before raising the attempt count. A cold `~/.gradle/caches` makes a
 # lane fetch hundreds of POMs; a warm one makes Gradle resolve fixed versions
 # from disk and issue no request at all. Removing the requests beats retrying
-# them, which is why every Gradle-building job restores a Gradle dependency
-# cache (`scripts/ci/check_gradle_build_hardened.sh` C1 keeps it that way) and
-# why the budget below is deliberately small.
+# them. The shared cache that was meant to remove them was evicted before
+# nearly every main run, so the lanes resolved cold anyway and a Plugin Portal
+# blip still failed them (CI runs 45142774793, 45012283370). Now one job per
+# run, android-gradle-deps.yml (scripts/ci/gradle_deps.sh), resolves and
+# verifies the whole set, and every lane builds from it with
+# HAVEN_GRADLE_OFFLINE=1 (`scripts/ci/check_gradle_build_hardened.sh` keeps it
+# that way). Offline, nothing is retried: see "Offline" below. What remains
+# for this retry is the deps job's own resolution (`--resolve-only`, with a
+# wider budget of its own) and the online builds nothing hands a set to.
 #
 # Being honest about what this script can do: the MEASURED 429 above persisted
 # ~123 s across six invocations, and the retry window here is ~140 s of waiting.
@@ -40,15 +46,37 @@
 # clean six minutes later, and in 35622556197 five siblings did so
 # concurrently). So this script's real product is not the recovery, it is the
 # VERDICT: it converts an anonymous "exit code 1" from a job that ran no test
-# into a message that says INFRASTRUCTURE. The cache is what removes the class.
+# into a message that says INFRASTRUCTURE. The offline set is what removes the
+# class.
 #
-# What the cache does NOT buy is time. A job's first `assembleDebug` takes
-# 429-638 s with the dependency cache HIT (run 35813757227) and 33-61 s for its
-# later builds; that gap is Gradle configuration, cargokit's Rust cross-compiles
+# What a warm `~/.gradle/caches/modules-2` does NOT buy is time — the old cache
+# did not, and the offline set does not. A job's first `assembleDebug` took
+# 429-638 s with the old cache HIT (run 35813757227) and 33-61 s for its later
+# builds; that gap is Gradle configuration, cargokit's Rust cross-compiles
 # (x86_64 and i686 Android targets) and the Kotlin compile, which live outside
-# `~/.gradle/caches/modules-2`. The cache's whole product is that the classpath
-# resolves from disk and issues no request that can draw the limit — four
-# cached jobs, zero 429s.
+# the module cache. Its whole product is that the classpath resolves from disk
+# and issues no request that can draw the limit — four cached jobs, zero 429s.
+#
+# ## Offline (HAVEN_GRADLE_OFFLINE=1)
+#
+# The lanes set it on their build step. This script then installs
+# scripts/ci/gradle-offline.init.gradle.kts into $GRADLE_USER_HOME/init.d and
+# removes it when it exits, success or not, so no later Gradle call in the job
+# runs offline unasked. Any other value than `1` or empty is refused: a lane
+# that meant offline and typed `true` must not build online in silence.
+#
+# Offline, a GRADLE dependency-resolution failure is never transient: Gradle
+# has no network to recover. It is a GAP in the run's set, classified before
+# the retriable class and never retried — Gradle's "No cached version of
+# <coordinate> available for offline mode", and also Gradle's other resolution
+# wordings (OFFLINE_GAP_RE), because a missing plugin marker offline prints only
+# "could not resolve plugin artifact '<marker>'" (measured, Gradle 9.5.0).
+# Network wordings stay retriable offline: offline Gradle cannot print them, so
+# they come from what the build still fetches — cargokit's rustup target
+# installs, cargo's crate downloads, Flutter's engine artifacts. The verdict
+# names the coordinate as the deps job's gap, taken token by token out of
+# Gradle's two offline wordings and nothing else (no URL, no host), so nothing
+# Rule 15 forbids reaches the annotation: a Maven coordinate names a library.
 #
 # ## Gradle's OWN retry, and why it is not enough (VERIFIED, 8.14 and 9.5.0)
 #
@@ -142,9 +170,11 @@
 #
 #   = B + 180 s  =  B + 3.0 min
 #
-# The NDK's attempts are charged to the same budget by the same rules, so this
-# is the bound with them included; the install that succeeds is part of B. On
-# CI since the ubuntu-26.04 image that install has MEASURED at most ~1 min,
+# The NDK's and CMake's attempts are charged to the same budget by the same
+# rules, so this is the bound with them included; the installs that succeed are
+# part of B, as they were when Flutter and AGP made them inside Gradle (CMake's
+# took 1.2-2.8 s in the three jobs of run 45142774793 read for it). On
+# CI since the ubuntu-26.04 image the NDK install has MEASURED at most ~1 min,
 # which leaves every line of the table below inside its cap (e2e-android and
 # e2e-profile are the tightest: 15.8 + 1 + 3 = 19.8 < 25). What ENFORCES it is only
 # NDK_ATTEMPT_SECS (5 min): a download five times slower than any measured
@@ -173,22 +203,42 @@
 # caps by only 3-6 minutes (check_e2e_step_timeout_ordering.sh C6), so a bigger
 # budget would have to be paid for in every lane's job cap.
 #
+# ## --resolve-only
+#
+# The deps job's resolution, through the same engine: in haven/android (after
+# `flutter build apk --config-only`), `havenResolveAll` from
+# scripts/ci/gradle-resolve-all.init.gradle.kts, plus
+# `:app:compileDebugNavigationResources`, because AGP fetches aapt2 through a
+# detached configuration no enumeration can see and resolves it only when a
+# resource task runs; an offline build without it failed exactly there. That
+# task needs neither the Flutter compile nor cargokit, and every variant uses
+# the same aapt2. Always `--rerun-tasks`: a task Gradle reports UP-TO-DATE
+# resolves nothing, and in the spike the online pass did exactly that, so the
+# offline pass after it was the first to need aapt2 and missed it. No NDK is
+# provisioned. Extra arguments go to Gradle.
+#
 # Usage:
 #   scripts/ci/build_apk_with_retry.sh <flutter-target-platform> [extra flutter args...]
+#   scripts/ci/build_apk_with_retry.sh --resolve-only [extra gradle args...]
+#   scripts/ci/build_apk_with_retry.sh --provision-only   (CI: NDK and CMake)
 #   scripts/ci/build_apk_with_retry.sh --self-test
 #
 # Env:
-#   HAVEN_BUILD_MAX_ATTEMPTS       default 4
+#   HAVEN_BUILD_MAX_ATTEMPTS       default 4; past 4 every pause is the last step
 #   HAVEN_BUILD_RETRY_BUDGET_SECS  default 180
 #   HAVEN_BUILD_RETRY_STATE        budget state file; default under RUNNER_TEMP,
 #                                  named per GITHUB_RUN_ID (per PID off CI)
+#   HAVEN_GRADLE_OFFLINE           `1`: build offline (see "Offline"); empty or
+#                                  unset: online; anything else is refused
 #
 # Exit codes:
 #   0  the APK built (on some attempt)
 #   *  the build's own exit code, unchanged — a retry never rewrites it
-#   2  wrong arguments, the self-test failed, or (CI) the NDK cannot be
-#      provisioned for a reason that is this script's, not the network's
-#   3  (CI) the NDK did not install and verify within the attempts and budget
+#   2  wrong arguments (HAVEN_GRADLE_OFFLINE included), the self-test failed,
+#      or (CI) the NDK cannot be provisioned for a reason that is this
+#      script's, not the network's
+#   3  (CI) the NDK or CMake did not install and verify within the attempts
+#      and budget
 
 set -euo pipefail
 
@@ -196,11 +246,17 @@ readonly SCRIPT_NAME="build_apk_with_retry.sh"
 readonly MAX_ATTEMPTS="${HAVEN_BUILD_MAX_ATTEMPTS:-4}"
 readonly RETRY_BUDGET_SECS="${HAVEN_BUILD_RETRY_BUDGET_SECS:-180}"
 
-# One entry per PAUSE, i.e. exactly MAX_ATTEMPTS-1 of them; fixture (h) pins
-# that. Fixed steps, no jitter: a deterministic schedule is one a worst case can
-# be computed from, and jitter buys nothing when the contended resource is a
-# per-IP rate limiter rather than a thundering herd of our own making.
+# One entry per PAUSE at the default MAX_ATTEMPTS, i.e. exactly MAX_ATTEMPTS-1
+# of them; fixture (h) pins that. A caller that asks for more attempts (the
+# deps job's resolution does, so its wider budget is what ends it) repeats the
+# last pause. Fixed steps, no jitter: a deterministic schedule is one a worst
+# case can be computed from, and jitter buys nothing when the contended
+# resource is a per-IP rate limiter rather than a thundering herd of our own
+# making.
 readonly BACKOFF_SECS=(20 45 75)
+backoff_for() { # <attempt that just failed>
+  printf '%s' "${BACKOFF_SECS[$1 - 1]:-${BACKOFF_SECS[-1]}}"
+}
 
 readonly RC_BROKEN=2
 
@@ -278,6 +334,9 @@ readonly RC_BROKEN=2
 #              class (VERIFIED in 8.14's and 9.5.0's NetworkingIssueVerifier, which retries
 #              408, 429 and every 5xx), kept so the first occurrence is ridden
 #              out rather than discovered.
+#   UNMEASURED "[28] Timeout was reached": libcurl's error 28 as cargo prints it
+#              when a crate download stalls inside cargokit's build. Gradle
+#              never prints it, so an offline build still retries it.
 #
 # 403 has no alternative of its own, and that is NOT the same as 403 being
 # refused. Gradle classifies 401/403 as authentication and never retries them,
@@ -290,7 +349,7 @@ readonly RC_BROKEN=2
 # halves, because for a while this header claimed the opposite of what the code
 # does.
 readonly WRAPPER_DOWNLOAD_RE='Server returned HTTP response code: (408|429|5[0-9][0-9]) for URL: [^[:space:]]*(/|%3D)gradle-[0-9][0-9.]*-(all|bin)\.zip'
-readonly RETRIABLE_RE="Could not (GET|HEAD|resolve|download|get resource)|Could not parse POM|Error resolving plugin|could not resolve plugin artifact '|downloading artifacts from the network|Read timed out|Connection (reset|timed out)|status code (408|429|5[0-9][0-9])|Could not resolve all (artifacts|dependencies|files)|${WRAPPER_DOWNLOAD_RE}"
+readonly RETRIABLE_RE="Could not (GET|HEAD|resolve|download|get resource)|Could not parse POM|Error resolving plugin|could not resolve plugin artifact '|downloading artifacts from the network|Read timed out|Connection (reset|timed out)|status code (408|429|5[0-9][0-9])|Could not resolve all (artifacts|dependencies|files)|\[28\] Timeout was reached|${WRAPPER_DOWNLOAD_RE}"
 
 # Signatures that must NEVER be retried: intermittent but REAL. Retrying these
 # converts a capacity problem into a passing build that hides it. Checked FIRST,
@@ -304,6 +363,16 @@ readonly RETRIABLE_RE="Could not (GET|HEAD|resolve|download|get resource)|Could 
 # These are a never-retry guard placed ahead of the evidence, not observed
 # strings: the whole point is that the FIRST occurrence must not be retried.
 readonly FATAL_RE='No space left on device|Java heap space|OutOfMemoryError|Cannot allocate memory'
+
+# Gradle's own wording for a coordinate an offline build's cache lacks. Checked
+# after FATAL_RE (a full disk still wins) and BEFORE RETRIABLE_RE, whose
+# `Could not resolve` the same output always carries: a gap is never retried.
+readonly OFFLINE_MISS_RE='available for offline mode'
+# Gradle's resolution wordings, which while offline can only mean a gap. A
+# coordinate after "Could not resolve " is what tells Gradle's line from
+# curl's "Could not resolve host: <host>", which offline is still a network
+# failure of something Gradle does not fetch.
+readonly OFFLINE_GAP_RE="Could not resolve [A-Za-z0-9._-]+:[A-Za-z0-9._-]+|Could not resolve all (artifacts|dependencies|files) for configuration|could not resolve plugin artifact '|Error resolving plugin"
 
 log() { printf '[%s] %s\n' "${SCRIPT_NAME}" "$*"; }
 err() { printf '[%s] %s\n' "${SCRIPT_NAME}" "$*" >&2; }
@@ -346,15 +415,37 @@ budget_charge() { # $1 seconds to add
   printf '%s' "$(( now + $1 ))" > "${f}"
 }
 
-# classify <text> -> fatal | retry | fail
+# classify <text> -> fatal | offline | retry | fail
 #
 # The text is passed as a value, never piped in: under `pipefail` a
 # `producer | grep -q` fails OPEN when grep exits early on its first match, and
 # "fails open" here means classifying a capacity failure as retriable.
 classify() {
   if grep -qE "${FATAL_RE}" <<<"$1"; then printf 'fatal'
+  elif grep -qE "${OFFLINE_MISS_RE}" <<<"$1"; then printf 'offline'
+  elif [[ "${HAVEN_GRADLE_OFFLINE:-}" == 1 ]] && grep -qE "${OFFLINE_GAP_RE}" <<<"$1"; then printf 'offline'
   elif grep -qE "${RETRIABLE_RE}" <<<"$1"; then printf 'retry'
   else printf 'fail'; fi
+}
+
+# The coordinates an offline build reported missing, comma-joined, from
+# Gradle's two offline wordings only, each token held to a coordinate's
+# characters.
+offline_coordinates() { # <text>
+  {
+    grep -oE "No cached version of [A-Za-z0-9._:+-]+ available for offline mode" <<<"$1" \
+      | sed -E 's/^No cached version of ([^ ]+) available.*$/\1/' || true
+    grep -oE "could not resolve plugin artifact '[A-Za-z0-9._:+-]+'" <<<"$1" \
+      | sed -E "s/^could not resolve plugin artifact '([^']+)'$/\1/" || true
+  } | LC_ALL=C sort -u | paste -sd, - | sed 's/,/, /g'
+}
+
+offline_error() { # $1 rc, $2 the captured build output
+  local coords
+  coords="$(offline_coordinates "$2")"
+  printf '::error::Gradle built OFFLINE from this run'"'"'s dependency set (android-gradle-deps.yml) and the set lacks %s. That is a gap in what the deps job resolved, not a network failure: no retry can fetch it, so none was made, and no test ran in this job. If this commit changed a dependency, scripts/ci/gradle_deps.sh'"'"'s key should have moved with it; otherwise havenResolveAll (scripts/ci/gradle-resolve-all.init.gradle.kts) is missing the configuration that asked for it. The original Gradle error is above, unaltered.\n' \
+    "${coords:-a coordinate Gradle did not name (see its error above)}" >&2
+  err "build failed offline (rc=$1) on a gap in this run's Gradle dependency set — not retrying."
 }
 
 # The one-line verdict a human scrolling a red job needs. `::error::` puts it in
@@ -373,9 +464,9 @@ infra_error() { # $1 attempts, $2 rc, $3 the captured build output
   local why code
   if grep -qE "${WRAPPER_DOWNLOAD_RE}" <<<"$3"; then
     code="$(grep -oE 'Server returned HTTP response code: [0-9]{3}' <<<"$3" | tail -n 1 | grep -oE '[0-9]{3}$')"
-    why="the Gradle wrapper could not download the Gradle distribution (HTTP ${code} from its host) before Gradle ran. That is INFRASTRUCTURE, not a product failure: the archive is pinned by distributionSha256Sum, so a re-run fetches the same bytes. A recurrence on a lane that restores the dependency cache, which carries ~/.gradle/wrapper, means it is not being restored"
+    why="the Gradle wrapper could not download the Gradle distribution (HTTP ${code} from its host) before Gradle ran. That is INFRASTRUCTURE, not a product failure: the archive is pinned by distributionSha256Sum, so a re-run fetches the same bytes"
   elif grep -q 'status code 429' <<<"$3"; then
-    why="a repository rate-limited this runner (HTTP 429). That is INFRASTRUCTURE, not a product failure — the limit follows the shared runner egress IP, not this commit. A re-run on a different runner is the remedy; a recurrence means the Gradle dependency cache is not being restored"
+    why="a repository rate-limited this runner (HTTP 429). That is INFRASTRUCTURE, not a product failure — the limit follows the shared runner egress IP, not this commit. A re-run on a different runner is the remedy"
   elif grep -q 'Could not find ' <<<"$3" && grep -q 'Searched in the following locations' <<<"$3"; then
     why="Gradle reports a coordinate it could not find in any repository it searched. This repo has seen that shape as a transient, but it is ALSO exactly what a wrong or missing dependency version prints, and no status code says which. Read the Gradle error above FIRST: if this commit changed a dependency, no re-run will fix it"
   else
@@ -424,6 +515,11 @@ build_with_retry() {
       return "${rc}"
     fi
 
+    if [[ "${verdict}" == "offline" ]]; then
+      offline_error "${rc}" "${text}"
+      return "${rc}"
+    fi
+
     if [[ "${verdict}" == "fail" ]]; then
       err "build failed (rc=${rc}) with no dependency-resolution signature — not retrying."
       err "Treated as a genuine build failure; the original output is above, unaltered."
@@ -447,7 +543,7 @@ build_with_retry() {
     # necessarily a fast failure (a runtime-classpath resolution dies at task
     # EXECUTION time, minutes in), so an unprojected retry could double the
     # longest build the step can run.
-    backoff="${BACKOFF_SECS[attempt - 1]}"
+    backoff="$(backoff_for "${attempt}")"
     spent="$(budget_spent)"
     if (( spent + backoff + elapsed > RETRY_BUDGET_SECS )); then
       err "retry budget spent (${spent}s of ${RETRY_BUDGET_SECS}s used by this job;"
@@ -501,7 +597,7 @@ build_with_retry() {
 # function, not the constant, for the same reason build_now is a function.
 readonly NDK_ATTEMPT_SECS=300
 readonly NDK_PROBE_SECS=20
-readonly RC_NDK_FAILED=3
+readonly RC_SDK_FAILED=3
 ndk_attempt_secs() { printf '%s' "${NDK_ATTEMPT_SECS}"; }
 
 # ndk_required_version <flutter-root> <app build.gradle.kts> — the version
@@ -563,9 +659,82 @@ install_central_fallback() {
     "${dir}/haven-maven-central-fallback.init.gradle.kts"
 }
 
+# The offline switch (see "Offline" in the header). The caller removes it
+# through remove_offline in an EXIT trap.
+offline_init_path() {
+  printf '%s' "${GRADLE_USER_HOME:-${HOME}/.gradle}/init.d/haven-gradle-offline.init.gradle.kts"
+}
+
+install_offline() {
+  mkdir -p "$(dirname "$(offline_init_path)")"
+  cp "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/gradle-offline.init.gradle.kts" "$(offline_init_path)"
+}
+
+remove_offline() { rm -f "$(offline_init_path)"; }
+
+# sdk_manager <sdk-root> <label> — the sdkmanager to install with, or rc 2.
+sdk_manager() {
+  local m="$1/cmdline-tools/latest/bin/sdkmanager"
+  if [[ ! -x "${m}" ]]; then
+    m="$(command -v sdkmanager || true)"
+  fi
+  if [[ -z "${m}" || ! -x "${m}" ]]; then
+    printf '::error::no executable sdkmanager under the SDK root or on PATH, so %s cannot be provisioned — this script is broken, not the lane.\n' "$2" >&2
+    return "${RC_BROKEN}"
+  fi
+  printf '%s' "${m}"
+}
+
+# install_sdk_package <sdk-root> <sdkmanager> <package> <dir> <grader> <version> <label>
+#
+# The install loop the NDK header above describes, for any package graded by
+# <grader> <dir> <version>: never by sdkmanager's exit code, a failed copy and
+# sdkmanager's download cache removed before the next attempt, every failed
+# attempt and pause charged to the shared budget under the same projection.
+install_sdk_package() {
+  local sdk="$1" sdkmanager="$2" pkg="$3" dir="$4" grader="$5" ver="$6" label="$7" attempt=1 rc started elapsed spent backoff out
+  # A copy that fails the grading is not an install sdkmanager will redo.
+  rm -rf "${dir}" "${sdk}/.downloadIntermediates" "${sdk}/.temp"
+
+  while :; do
+    out="$(mktemp)"
+    started="$(build_now)"
+    rc=0
+    timeout -k 10 "$(ndk_attempt_secs)" "${sdkmanager}" "--sdk_root=${sdk}" --install "${pkg}" \
+      > "${out}" 2>&1 <<<"$(printf 'y\n%.0s' {1..16})" || rc=$?
+    elapsed=$(( $(build_now) - started ))
+    if "${grader}" "${dir}" "${ver}"; then
+      rm -f "${out}"
+      log "${label} installed and verified on attempt ${attempt}/${MAX_ATTEMPTS} (sdkmanager rc ${rc})."
+      return 0
+    fi
+    err "${label} did not verify on attempt ${attempt}/${MAX_ATTEMPTS} (sdkmanager rc ${rc}); its last lines:"
+    tr '\r' '\n' < "${out}" | awk 'NF' | tail -n 6 | sed 's/^/    | /' >&2
+    rm -f "${out}"
+    rm -rf "${dir}" "${sdk}/.downloadIntermediates" "${sdk}/.temp"
+    budget_charge "${elapsed}"
+    if (( attempt >= MAX_ATTEMPTS )); then
+      break
+    fi
+    backoff="$(backoff_for "${attempt}")"
+    spent="$(budget_spent)"
+    if (( spent + backoff + elapsed > RETRY_BUDGET_SECS )); then
+      err "retry budget spent (${spent}s of ${RETRY_BUDGET_SECS}s used by this job; the next"
+      err "attempt is projected at ${elapsed}s plus a ${backoff}s pause) — not starting another."
+      break
+    fi
+    log "waiting ${backoff}s before ${label} attempt $(( attempt + 1 ))/${MAX_ATTEMPTS}."
+    budget_charge "${backoff}"
+    build_sleep "${backoff}"
+    attempt=$(( attempt + 1 ))
+  done
+  printf '::error::the Android %s that this build needs could not be installed and verified after %s attempt(s). This is INFRASTRUCTURE, not a product failure: no APK was built and no test ran in this job.\n' "${label}" "${attempt}" >&2
+  return "${RC_SDK_FAILED}"
+}
+
 # provision_ndk <flutter-root> <sdk-root> <app build.gradle.kts>
 provision_ndk() {
-  local flutter_root="$1" sdk="$2" app="$3" ver dir sdkmanager attempt=1 rc started elapsed spent backoff out
+  local flutter_root="$1" sdk="$2" app="$3" ver dir sdkmanager
   if [[ -z "${flutter_root}" ]]; then
     printf '::error::FLUTTER_ROOT is not set, so the NDK version Flutter builds with cannot be read — this script is broken, not the lane.\n' >&2
     return "${RC_BROKEN}"
@@ -580,57 +749,72 @@ provision_ndk() {
     log "NDK ${ver} is installed and verified."
     return 0
   fi
-  sdkmanager="${sdk}/cmdline-tools/latest/bin/sdkmanager"
-  if [[ ! -x "${sdkmanager}" ]]; then
-    sdkmanager="$(command -v sdkmanager || true)"
+  sdkmanager="$(sdk_manager "${sdk}" "NDK ${ver}")" || return "${RC_BROKEN}"
+  install_sdk_package "${sdk}" "${sdkmanager}" "ndk;${ver}" "${dir}" ndk_verified "${ver}" "NDK ${ver}"
+}
+
+# ---------------------------------------------------------------------------
+# CMake, installed and verified before the first build (CI only), for the same
+# reason as the NDK and one more. Flutter's forceNdkDownload points AGP at an
+# empty CMake project, and AGP installs the CMake that needs itself, once and
+# unretried (the e2e_android, Debug Builds and launch-gate build jobs of run
+# 45142774793 each printed "Installing CMake 3.22.1") — and OFFLINE not at
+# all: "[CXX1300] CMake '3.22.1' was not found in SDK, PATH, or by cmake.dir
+# property" (measured with Gradle 9.5.0 and AGP 9.3.1 while the offline lanes
+# were introduced; the same build online installed it). 3.22.1 is AGP 9.3.1's
+# default (com.android.build.gradle.internal.cxx.configure.CMakeVersion), which
+# it asks for when, as here, the project names none. An AGP whose default moves
+# fails the offline build naming the version it wanted: move this with it.
+# ---------------------------------------------------------------------------
+readonly CMAKE_VERSION=3.22.1
+
+# cmake_verified <dir> <version> — the grading. Says on stderr why it failed.
+cmake_verified() {
+  local dir="$1" ver="$2"
+  if [[ ! -f "${dir}/source.properties" ]] \
+     || ! grep -qxE "Pkg\.Revision[[:space:]]*=[[:space:]]*${ver//./\\.}[[:space:]]*" "${dir}/source.properties"; then
+    err "  CMake ${ver}: no source.properties naming that revision."
+    return 1
   fi
-  if [[ -z "${sdkmanager}" || ! -x "${sdkmanager}" ]]; then
-    printf '::error::no executable sdkmanager under the SDK root or on PATH, so NDK %s cannot be provisioned — this script is broken, not the lane.\n' "${ver}" >&2
+  if [[ ! -f "${dir}/package.xml" ]]; then
+    err "  CMake ${ver}: no package.xml, which sdkmanager writes last."
+    return 1
+  fi
+  if ! timeout "${NDK_PROBE_SECS}" "${dir}/bin/cmake" --version >/dev/null 2>&1; then
+    err "  CMake ${ver}: its cmake is missing or does not run."
+    return 1
+  fi
+  return 0
+}
+
+# provision_cmake <sdk-root>
+provision_cmake() {
+  local sdk="$1" dir sdkmanager
+  if [[ -z "${sdk}" || ! -d "${sdk}" ]]; then
+    printf '::error::neither ANDROID_HOME nor ANDROID_SDK_ROOT names an SDK directory, so CMake %s cannot be provisioned — this script is broken, not the lane.\n' "${CMAKE_VERSION}" >&2
     return "${RC_BROKEN}"
   fi
-  # A copy that fails the grading is not an install sdkmanager will redo.
-  rm -rf "${dir}" "${sdk}/.downloadIntermediates" "${sdk}/.temp"
+  dir="${sdk}/cmake/${CMAKE_VERSION}"
+  if cmake_verified "${dir}" "${CMAKE_VERSION}" 2>/dev/null; then
+    log "CMake ${CMAKE_VERSION} is installed and verified."
+    return 0
+  fi
+  sdkmanager="$(sdk_manager "${sdk}" "CMake ${CMAKE_VERSION}")" || return "${RC_BROKEN}"
+  install_sdk_package "${sdk}" "${sdkmanager}" "cmake;${CMAKE_VERSION}" "${dir}" cmake_verified "${CMAKE_VERSION}" "CMake ${CMAKE_VERSION}"
+}
 
-  while :; do
-    out="$(mktemp)"
-    started="$(build_now)"
-    rc=0
-    timeout -k 10 "$(ndk_attempt_secs)" "${sdkmanager}" "--sdk_root=${sdk}" --install "ndk;${ver}" \
-      > "${out}" 2>&1 <<<"$(printf 'y\n%.0s' {1..16})" || rc=$?
-    elapsed=$(( $(build_now) - started ))
-    if ndk_verified "${dir}" "${ver}"; then
-      rm -f "${out}"
-      log "NDK ${ver} installed and verified on attempt ${attempt}/${MAX_ATTEMPTS} (sdkmanager rc ${rc})."
-      return 0
-    fi
-    err "NDK ${ver} did not verify on attempt ${attempt}/${MAX_ATTEMPTS} (sdkmanager rc ${rc}); its last lines:"
-    tr '\r' '\n' < "${out}" | awk 'NF' | tail -n 6 | sed 's/^/    | /' >&2
-    rm -f "${out}"
-    rm -rf "${dir}" "${sdk}/.downloadIntermediates" "${sdk}/.temp"
-    budget_charge "${elapsed}"
-    if (( attempt >= MAX_ATTEMPTS )); then
-      break
-    fi
-    backoff="${BACKOFF_SECS[attempt - 1]}"
-    spent="$(budget_spent)"
-    if (( spent + backoff + elapsed > RETRY_BUDGET_SECS )); then
-      err "retry budget spent (${spent}s of ${RETRY_BUDGET_SECS}s used by this job; the next"
-      err "attempt is projected at ${elapsed}s plus a ${backoff}s pause) — not starting another."
-      break
-    fi
-    log "waiting ${backoff}s before NDK attempt $(( attempt + 1 ))/${MAX_ATTEMPTS}."
-    budget_charge "${backoff}"
-    build_sleep "${backoff}"
-    attempt=$(( attempt + 1 ))
-  done
-  printf '::error::the Android NDK %s that Flutter builds with could not be installed and verified after %s attempt(s). This is INFRASTRUCTURE, not a product failure: no APK was built and no test ran in this job.\n' "${ver}" "${attempt}" >&2
-  return "${RC_NDK_FAILED}"
+# provision_sdk — both, NDK first (CI only; see each header).
+provision_sdk() {
+  local sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+  provision_ndk "${FLUTTER_ROOT:-}" "${sdk}" \
+    "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/haven/android/app/build.gradle.kts" || return
+  provision_cmake "${sdk}"
 }
 
 # ---------------------------------------------------------------------------
 # Self-test: hermetic. A fake `flutter` on PATH, no network, no real waiting.
 # ---------------------------------------------------------------------------
-readonly SELF_TEST_FIXTURES=27
+readonly SELF_TEST_FIXTURES=35
 
 # The verbatim Gradle output of CI run 35622556197 job 106414462454. Fixtures
 # assert against what the runner actually printed, not a paraphrase of it: a
@@ -710,6 +894,19 @@ Execution failed for task ':app:checkDebugAarMetadata'.
          project :app
 BUILD FAILED in 4m 12s"
 
+# Gradle 9.5.0 building OFFLINE without AGP's aapt2, verbatim (one of its
+# identical cause lines kept), from the local spike that introduced the offline
+# lanes: the miss that taught `--resolve-only` its aapt2 witness.
+readonly MEASURED_OFFLINE_MISS_TEXT="* What went wrong:
+Execution failed for task ':app:compileDebugNavigationResources' (registered by plugin 'com.android.internal.application').
+> A failure occurred while executing com.android.build.gradle.tasks.CompileNavigationXmlTask\$CompileNavigationResourcesAction
+   > Could not isolate value com.android.build.gradle.tasks.CompileNavigationXmlTask\$CompileNavigationResourcesParams_Decorated@84a8f62 of type CompileNavigationXmlTask.CompileNavigationResourcesParams
+      > Could not resolve all files for configuration ':app:detachedConfiguration1'.
+         > Could not resolve com.android.tools.build:aapt2:9.3.1-15703166.
+           Required by:
+               project ':app'
+            > No cached version of com.android.tools.build:aapt2:9.3.1-15703166 available for offline mode."
+
 # write_fake_flutter <bindir> <mode>
 #
 # The fake models MEASURED behaviour and CARRIES ITS OWN CONTROL: it refuses any
@@ -733,6 +930,10 @@ write_fake_flutter() {
     printf 'fi\n'
     printf 'n=0; [[ -r "%s/n" ]] && n="$(cat "%s/n")"\n' "${bindir}" "${bindir}"
     printf 'n=$(( n + 1 )); printf "%%s" "${n}" > "%s/n"\n' "${bindir}"
+    # What Gradle would find in init.d while this build runs.
+    printf 'f="${GRADLE_USER_HOME:-${HOME}/.gradle}/init.d/haven-gradle-offline.init.gradle.kts"\n'
+    printf 'if [[ -f "${f}" ]]; then cp "${f}" "%s/offline-seen"; echo present >> "%s/offline.log"; else echo absent >> "%s/offline.log"; fi\n' \
+      "${bindir}" "${bindir}" "${bindir}"
     case "${mode}" in
       # Fails once with the MEASURED 429, then succeeds.
       flaky429)
@@ -755,6 +956,11 @@ write_fake_flutter() {
         ;;
       disk)
         printf 'echo "java.io.IOException: No space left on device"\nexit 1\n'
+        ;;
+      # Gradle 9.5.0's offline miss, as the spike that introduced the offline
+      # lanes printed it for AGP's aapt2.
+      offlinemiss)
+        printf 'cat <<%s\n%s\n%s\nexit 1\n' "'GRADLE_EOF'" "${MEASURED_OFFLINE_MISS_TEXT}" "GRADLE_EOF"
         ;;
       ok)
         printf 'echo "Built build/app/outputs/flutter-apk/app-debug.apk"\nexit 0\n'
@@ -801,17 +1007,33 @@ write_fake_flutter_root() {
   } > "${f}"
 }
 
-# write_fake_sdkmanager <sdk-root> <mode>. Like the fake flutter it carries its
-# own control: any argv but the one provision_ndk issues is refused, so a call
-# that drifts reds the fixtures instead of passing against a yes-machine.
+# write_fake_sdkmanager <sdk-root> <ndk mode> [cmake mode]. Like the fake
+# flutter it carries its own control: any argv but the two installs
+# provision_sdk issues is refused, so a call that drifts reds the fixtures
+# instead of passing against a yes-machine. CMake calls are counted apart, so
+# every NDK fixture's count means what it always did.
 write_fake_sdkmanager() {
-  local sdk="$1" mode="$2" bin="$1/cmdline-tools/latest/bin" host
+  local sdk="$1" mode="$2" cmake_mode="${3:-ok}" bin="$1/cmdline-tools/latest/bin" host
   host="$(fake_ndk_host)"
   mkdir -p "${bin}"
   cat > "${bin}/sdkmanager" <<EOF
 #!/usr/bin/env bash
 set -u
-sdk='${sdk}'; ver='${FAKE_NDK_VERSION}'; mode='${mode}'
+sdk='${sdk}'; ver='${FAKE_NDK_VERSION}'; mode='${mode}'; cmake_mode='${cmake_mode}'
+if [[ \$# -eq 3 && "\$1" == "--sdk_root=\${sdk}" && "\$2" == "--install" && "\$3" == "cmake;${CMAKE_VERSION}" ]]; then
+  echo x >> "\${sdk}/cmake-invocations"
+  if [[ "\${cmake_mode}" == ok ]]; then
+    d="\${sdk}/cmake/${CMAKE_VERSION}"
+    mkdir -p "\${d}/bin"
+    printf 'Pkg.Revision = %s\nPkg.Path = cmake;%s\n' '${CMAKE_VERSION}' '${CMAKE_VERSION}' > "\${d}/source.properties"
+    printf '<package/>\n' > "\${d}/package.xml"
+    printf '#!/bin/sh\necho "cmake version ${CMAKE_VERSION} (fake)"\n' > "\${d}/bin/cmake"
+    chmod +x "\${d}/bin/cmake"
+  else
+    echo "Warning: Failed to download package!"
+  fi
+  exit 0
+fi
 if [[ \$# -ne 3 || "\$1" != "--sdk_root=\${sdk}" || "\$2" != "--install" || "\$3" != "ndk;\${ver}" ]]; then
   echo "fake-sdkmanager: refusing argv: \$*" >&2
   exit 64
@@ -856,8 +1078,8 @@ EOF
   chmod +x "${bin}/sdkmanager"
 }
 
-sdk_invocations() { # <sdk-root>
-  if [[ -r "$1/invocations" ]]; then wc -l < "$1/invocations" | tr -d ' '; else printf '0'; fi
+sdk_invocations() { # <sdk-root> [count file]
+  if [[ -r "$1/${2:-invocations}" ]]; then wc -l < "$1/${2:-invocations}" | tr -d ' '; else printf '0'; fi
 }
 
 run_self_test() {
@@ -1283,10 +1505,10 @@ Caused by: java.net.SocketTimeoutException: Read timed out" \
   rc=0
   out="$(export HAVEN_BUILD_RETRY_STATE="${tmp}/p5.budget"; \
          provision_ndk "${fr}" "${sdk}" "${app}" 2>&1)" || rc=$?
-  if (( rc != RC_NDK_FAILED )) || [[ "$(sdk_invocations "${sdk}")" != "${MAX_ATTEMPTS}" ]] \
+  if (( rc != RC_SDK_FAILED )) || [[ "$(sdk_invocations "${sdk}")" != "${MAX_ATTEMPTS}" ]] \
      || [[ "$(grep -c '::error::' <<<"${out}")" != "1" ]] \
      || [[ "${out}" != *"NDK ${FAKE_NDK_VERSION}"*"INFRASTRUCTURE"*"no test ran in this job"* ]]; then
-    _fail p5 "an NDK that never lands must fail with rc ${RC_NDK_FAILED} after ${MAX_ATTEMPTS} calls and one infrastructure annotation; got rc=${rc}, $(sdk_invocations "${sdk}") call(s): ${out}"
+    _fail p5 "an NDK that never lands must fail with rc ${RC_SDK_FAILED} after ${MAX_ATTEMPTS} calls and one infrastructure annotation; got rc=${rc}, $(sdk_invocations "${sdk}") call(s): ${out}"
   fi
 
   # (p6) A HUNG sdkmanager is killed at the attempt bound, and an attempt that
@@ -1303,7 +1525,7 @@ Caused by: java.net.SocketTimeoutException: Read timed out" \
          CLOCK_FILE="${tmp}/p6.clock"; printf '1000\n1150\n' > "${CLOCK_FILE}"
          export HAVEN_BUILD_RETRY_STATE="${tmp}/p6.budget"
          provision_ndk "${fr}" "${sdk}" "${app}" 2>&1)" || rc=$?
-  if (( rc != RC_NDK_FAILED )) || [[ "$(sdk_invocations "${sdk}")" != "1" ]] || (( $(_sleeps) != 0 )) \
+  if (( rc != RC_SDK_FAILED )) || [[ "$(sdk_invocations "${sdk}")" != "1" ]] || (( $(_sleeps) != 0 )) \
      || ! grep -q started "${sdk}/hang" || grep -q finished "${sdk}/hang" \
      || [[ "${out}" != *"projected at 150s"* ]]; then
     _fail p6 "a hung sdkmanager must be killed at the attempt bound and a 150 s attempt not repeated; got rc=${rc}, $(sdk_invocations "${sdk}") call(s), $(_sleeps) pause(s), hang log '$(tr '\n' ' ' < "${sdk}/hang" 2>/dev/null)': ${out}"
@@ -1342,8 +1564,8 @@ Caused by: java.net.SocketTimeoutException: Read timed out" \
 
   # (p8) End to end on CI, as a SUBPROCESS against the REAL app build file:
   #      the script installs the Maven Central fallback init script and
-  #      provisions before it builds, and an NDK that cannot be provisioned
-  #      stops it with rc ${RC_NDK_FAILED} before Gradle is ever
+  #      provisions the NDK and CMake before it builds, and an NDK that cannot
+  #      be provisioned stops it with rc ${RC_SDK_FAILED} before Gradle is ever
   #      run. Reading the real file is also the live check that the app still
   #      takes flutter.ndkVersion, the one source ndk_required_version reads.
   ran=$(( ran + 1 ))
@@ -1353,8 +1575,9 @@ Caused by: java.net.SocketTimeoutException: Read timed out" \
   out="$(PATH="${bin}:${PATH}" GITHUB_ACTIONS=true FLUTTER_ROOT="${fr}" ANDROID_HOME="${sdk}" \
          GRADLE_USER_HOME="${tmp}/p8-ok-guh" HAVEN_BUILD_RETRY_STATE="${tmp}/p8-ok.budget" \
          bash "${BASH_SOURCE[0]}" android-x64 --dart-define=HAVEN_LIVE_SYNC=false 2>&1)" || rc=$?
-  if (( rc != 0 )) || [[ "$(sdk_invocations "${sdk}")" != "1" ]] || [[ "$(fake_invocations "${bin}")" != "1" ]]; then
-    _fail p8 "on CI the script must provision the NDK and then build; got rc=${rc}, $(sdk_invocations "${sdk}") sdkmanager call(s), $(fake_invocations "${bin}") build(s): ${out}"
+  if (( rc != 0 )) || [[ "$(sdk_invocations "${sdk}")" != "1" ]] || [[ "$(sdk_invocations "${sdk}" cmake-invocations)" != "1" ]] \
+     || [[ "$(fake_invocations "${bin}")" != "1" ]]; then
+    _fail p8 "on CI the script must provision the NDK and CMake and then build; got rc=${rc}, $(sdk_invocations "${sdk}") NDK and $(sdk_invocations "${sdk}" cmake-invocations) CMake sdkmanager call(s), $(fake_invocations "${bin}") build(s): ${out}"
   fi
   if ! cmp -s "$(dirname "${BASH_SOURCE[0]}")/maven-central-fallback.init.gradle.kts" \
        "${tmp}/p8-ok-guh/init.d/haven-maven-central-fallback.init.gradle.kts"; then
@@ -1366,8 +1589,8 @@ Caused by: java.net.SocketTimeoutException: Read timed out" \
   out="$(PATH="${bin}:${PATH}" GITHUB_ACTIONS=true FLUTTER_ROOT="${fr}" ANDROID_HOME="${sdk}" \
          GRADLE_USER_HOME="${tmp}/p8-bad-guh" HAVEN_BUILD_MAX_ATTEMPTS=1 HAVEN_BUILD_RETRY_STATE="${tmp}/p8-bad.budget" \
          bash "${BASH_SOURCE[0]}" android-x64 --dart-define=HAVEN_LIVE_SYNC=false 2>&1)" || rc=$?
-  if (( rc != RC_NDK_FAILED )) || [[ "$(fake_invocations "${bin}")" != "0" ]]; then
-    _fail p8 "on CI an NDK that cannot be provisioned must stop the script with rc ${RC_NDK_FAILED} before any build; got rc=${rc}, $(fake_invocations "${bin}") build(s): ${out}"
+  if (( rc != RC_SDK_FAILED )) || [[ "$(fake_invocations "${bin}")" != "0" ]]; then
+    _fail p8 "on CI an NDK that cannot be provisioned must stop the script with rc ${RC_SDK_FAILED} before any build; got rc=${rc}, $(fake_invocations "${bin}") build(s): ${out}"
   fi
 
   # (p9) Off CI the script leaves the SDK and GRADLE_USER_HOME alone — a
@@ -1380,12 +1603,222 @@ Caused by: java.net.SocketTimeoutException: Read timed out" \
   out="$(PATH="${bin}:${PATH}" GITHUB_ACTIONS= FLUTTER_ROOT="${fr}" ANDROID_HOME="${sdk}" \
          GRADLE_USER_HOME="${tmp}/p9-guh" HAVEN_BUILD_RETRY_STATE="${tmp}/p9.budget" \
          bash "${BASH_SOURCE[0]}" android-x64 --dart-define=HAVEN_LIVE_SYNC=false 2>&1)" || rc=$?
-  if (( rc != 0 )) || [[ "$(sdk_invocations "${sdk}")" != "0" ]] || [[ "$(fake_invocations "${bin}")" != "1" ]]; then
-    _fail p9 "off CI the script must build without touching the SDK; got rc=${rc}, $(sdk_invocations "${sdk}") sdkmanager call(s), $(fake_invocations "${bin}") build(s)"
+  if (( rc != 0 )) || [[ "$(sdk_invocations "${sdk}")" != "0" ]] || [[ "$(sdk_invocations "${sdk}" cmake-invocations)" != "0" ]] \
+     || [[ "$(fake_invocations "${bin}")" != "1" ]]; then
+    _fail p9 "off CI the script must build without touching the SDK; got rc=${rc}, $(sdk_invocations "${sdk}") NDK and $(sdk_invocations "${sdk}" cmake-invocations) CMake sdkmanager call(s), $(fake_invocations "${bin}") build(s)"
   fi
   if [[ -e "${tmp}/p9-guh/init.d" ]]; then
     _fail p9 "off CI the script must leave the developer's GRADLE_USER_HOME alone; it wrote an init.d"
   fi
+
+  # (p10) CMake, which an offline AGP cannot install: installed and verified
+  #       in one call when missing, left alone when present, refused as
+  #       installed when its cmake does not run, and failing CLOSED with one
+  #       INFRASTRUCTURE annotation naming it when sdkmanager installs nothing.
+  ran=$(( ran + 1 ))
+  sdk="${tmp}/p10"; write_fake_sdkmanager "${sdk}" ok ok
+  rc=0; out="$(export HAVEN_BUILD_RETRY_STATE="${tmp}/p10.budget"; provision_cmake "${sdk}" 2>&1)" || rc=$?
+  if (( rc != 0 )) || [[ "$(sdk_invocations "${sdk}" cmake-invocations)" != "1" ]] \
+     || ! cmake_verified "${sdk}/cmake/${CMAKE_VERSION}" "${CMAKE_VERSION}" 2>/dev/null; then
+    _fail p10 "a missing CMake must be installed and verified in one call; got rc=${rc}, $(sdk_invocations "${sdk}" cmake-invocations) call(s): ${out}"
+  fi
+  rc=0; out="$(export HAVEN_BUILD_RETRY_STATE="${tmp}/p10.budget"; provision_cmake "${sdk}" 2>&1)" || rc=$?
+  if (( rc != 0 )) || [[ "$(sdk_invocations "${sdk}" cmake-invocations)" != "1" ]]; then
+    _fail p10 "a verified CMake must be left alone; got rc=${rc}, $(sdk_invocations "${sdk}" cmake-invocations) call(s)"
+  fi
+  chmod -x "${sdk}/cmake/${CMAKE_VERSION}/bin/cmake"
+  cmake_verified "${sdk}/cmake/${CMAKE_VERSION}" "${CMAKE_VERSION}" 2>/dev/null \
+    && _fail p10 "a CMake whose cmake does not run must not grade as installed"
+  sdk="${tmp}/p10-bad"; write_fake_sdkmanager "${sdk}" ok nothing
+  rm -f "${tmp}/sleeps"
+  rc=0; out="$(export HAVEN_BUILD_RETRY_STATE="${tmp}/p10-bad.budget"; provision_cmake "${sdk}" 2>&1)" || rc=$?
+  if (( rc != RC_SDK_FAILED )) || [[ "$(sdk_invocations "${sdk}" cmake-invocations)" != "${MAX_ATTEMPTS}" ]] \
+     || [[ "$(grep -c '::error::' <<<"${out}")" != "1" ]] || [[ "${out}" != *"CMake ${CMAKE_VERSION}"*"INFRASTRUCTURE"* ]]; then
+    _fail p10 "a CMake that never lands must fail with rc ${RC_SDK_FAILED} after ${MAX_ATTEMPTS} calls and one annotation naming it; got rc=${rc}, $(sdk_invocations "${sdk}" cmake-invocations) call(s): ${out}"
+  fi
+
+  # (p11) --provision-only, scripts/build_release.sh's offline path: on CI it
+  #       provisions both packages and builds nothing; off CI it touches
+  #       nothing; an NDK that cannot be had is its exit code.
+  ran=$(( ran + 1 ))
+  sdk="${tmp}/p11"; write_fake_sdkmanager "${sdk}" ok ok
+  bin="${tmp}/p11-bin"; write_fake_flutter "${bin}" ok
+  rc=0
+  out="$(PATH="${bin}:${PATH}" GITHUB_ACTIONS=true FLUTTER_ROOT="${fr}" ANDROID_HOME="${sdk}" HAVEN_GRADLE_OFFLINE=1 \
+         GRADLE_USER_HOME="${tmp}/p11-guh" HAVEN_BUILD_RETRY_STATE="${tmp}/p11.budget" \
+         bash "${BASH_SOURCE[0]}" --provision-only 2>&1)" || rc=$?
+  if (( rc != 0 )) || [[ "$(sdk_invocations "${sdk}")" != "1" || "$(sdk_invocations "${sdk}" cmake-invocations)" != "1" ]] \
+     || [[ "$(fake_invocations "${bin}")" != "0" ]] || [[ -e "${tmp}/p11-guh" ]]; then
+    _fail p11 "--provision-only on CI must provision the NDK and CMake, build nothing and leave GRADLE_USER_HOME alone; got rc=${rc}: ${out}"
+  fi
+  sdk="${tmp}/p11-off"; write_fake_sdkmanager "${sdk}" ok ok
+  rc=0
+  (GITHUB_ACTIONS= FLUTTER_ROOT="${fr}" ANDROID_HOME="${sdk}" HAVEN_BUILD_RETRY_STATE="${tmp}/p11.budget" \
+     bash "${BASH_SOURCE[0]}" --provision-only >/dev/null 2>&1) || rc=$?
+  if (( rc != 0 )) || [[ "$(sdk_invocations "${sdk}")" != "0" || "$(sdk_invocations "${sdk}" cmake-invocations)" != "0" ]]; then
+    _fail p11 "--provision-only off CI must touch nothing; got rc=${rc}"
+  fi
+  sdk="${tmp}/p11-bad"; write_fake_sdkmanager "${sdk}" nothing ok
+  rc=0
+  (GITHUB_ACTIONS=true FLUTTER_ROOT="${fr}" ANDROID_HOME="${sdk}" HAVEN_BUILD_MAX_ATTEMPTS=1 HAVEN_BUILD_RETRY_STATE="${tmp}/p11-bad.budget" \
+     bash "${BASH_SOURCE[0]}" --provision-only >/dev/null 2>&1) || rc=$?
+  if (( rc != RC_SDK_FAILED )) || [[ "$(sdk_invocations "${sdk}" cmake-invocations)" != "0" ]]; then
+    _fail p11 "--provision-only must stop with rc ${RC_SDK_FAILED} at an NDK it cannot have, before CMake; got rc=${rc}"
+  fi
+
+  # (p12) scripts/build_release.sh's offline path stops before Flutter when
+  #       provisioning fails, with ITS code 4 — never this script's 2 or 3,
+  #       which there mean "no usable key" and "placeholder key".
+  ran=$(( ran + 1 ))
+  sdk="${tmp}/p12"; write_fake_sdkmanager "${sdk}" nothing ok
+  bin="${tmp}/p12-bin"; write_fake_flutter "${bin}" ok
+  rc=0
+  out="$(PATH="${bin}:${PATH}" GITHUB_ACTIONS=true FLUTTER_ROOT="${fr}" ANDROID_HOME="${sdk}" HAVEN_GRADLE_OFFLINE=1 \
+         STADIA_API_KEY=self-test-not-a-key HAVEN_BUILD_MAX_ATTEMPTS=1 HAVEN_BUILD_RETRY_STATE="${tmp}/p12.budget" \
+         GRADLE_USER_HOME="${tmp}/p12-guh" bash "$(dirname "${BASH_SOURCE[0]}")/../build_release.sh" apk 2>&1)" || rc=$?
+  if (( rc != 4 )) || [[ "$(fake_invocations "${bin}")" != "0" ]] || [[ "${out}" != *"could not be provisioned"* ]]; then
+    _fail p12 "build_release.sh must stop with its own rc 4 before Flutter when the NDK cannot be provisioned; got rc=${rc}, $(fake_invocations "${bin}") build(s): ${out}"
+  fi
+
+  # ---- Offline (HAVEN_GRADLE_OFFLINE=1) and --resolve-only.
+
+  # (q1) The classifier offline: Gradle's offline wording is a gap whether or
+  #      not this script was asked for offline, a missing plugin marker (which
+  #      offline says only "could not resolve plugin artifact") is a gap when it
+  #      was and stays retriable when it was not, and a full disk still wins.
+  ran=$(( ran + 1 ))
+  _classifies_offline() { # <label> <expected> <HAVEN_GRADLE_OFFLINE> <sample>
+    local got; got="$(HAVEN_GRADLE_OFFLINE="$3" classify "$4")"
+    [[ "${got}" == "$2" ]] || _fail q1 "${1}: classified '${got}', expected '${2}'"
+  }
+  _classifies_offline "the MEASURED offline miss, offline" offline 1 "${MEASURED_OFFLINE_MISS_TEXT}"
+  _classifies_offline "the MEASURED offline miss, even when not asked for offline" offline "" "${MEASURED_OFFLINE_MISS_TEXT}"
+  _classifies_offline "a plugin marker missing offline" offline 1 "${MEASURED_PLUGIN_MARKER_TEXT}"
+  _classifies_offline "the same plugin marker online" retry "" "${MEASURED_PLUGIN_MARKER_TEXT}"
+  _classifies_offline "a Gradle resolution failure is a gap offline whatever status it carries" offline 1 "${MEASURED_429_TEXT}"
+  # What offline Gradle cannot print, and the build still fetches: rustup's
+  # target install, cargo's crate download, curl's own failed lookup. Each
+  # stays retriable offline. CONSTRUCTED from rustup's, cargo's and curl's
+  # wordings; no such failure is in this repo's logs.
+  _classifies_offline "rustup's target install reset by its mirror, offline" retry 1 "INFO: Installing Rust target: i686-linux-android
+error: could not download file from 'https://static.rust-lang.org/dist/2026-11-20/rust-std-1.97.1-i686-linux-android.tar.xz' to '/home/runner/.rustup/downloads/x.partial'
+error: error decoding response body: request or response body error: Connection reset by peer (os error 104)"
+  _classifies_offline "cargo's crate download timing out, offline" retry 1 "warning: spurious network error (3 tries remaining): [28] Timeout was reached (Operation timed out after 30001 milliseconds with 0 out of 0 bytes received)
+error: failed to download from \`https://static.crates.io/crates/openssl-src/300.5.4+3.5.4/download\`
+
+Caused by:
+  [28] Timeout was reached (Operation timed out after 30001 milliseconds with 0 out of 0 bytes received)"
+  _classifies_offline "curl's failed lookup is not Gradle's 'Could not resolve', offline" retry 1 "curl: (6) Could not resolve host: static.rust-lang.org"
+  _classifies_offline "Gradle's resolution wording alone is a gap offline" offline 1 "> Could not resolve all files for configuration ':app:debugRuntimeClasspath'.
+   > Could not resolve androidx.core:core:1.17.0."
+  _classifies_offline "capacity WINS over an offline miss" fatal 1 "${MEASURED_OFFLINE_MISS_TEXT}
+java.io.IOException: No space left on device"
+  _classifies_offline "a compile error offline is still a compile error" fail 1 "e: file:///x/Main.kt:8:1 Unresolved reference: foo"
+
+  # (q2) An offline miss through the engine: ONE invocation, no pause, nothing
+  #      charged, its own rc, and one ::error:: naming the coordinate as the
+  #      deps job's gap — and the plugin-marker shape names its marker.
+  ran=$(( ran + 1 ))
+  bin="${tmp}/q2"; write_fake_flutter "${bin}" offlinemiss
+  rm -f "${tmp}/sleeps" "${tmp}/q2.budget"
+  rc=0
+  out="$(export PATH="${bin}:${PATH}" HAVEN_BUILD_RETRY_STATE="${tmp}/q2.budget" HAVEN_GRADLE_OFFLINE=1; \
+         build_with_retry flutter build apk --debug --target-platform android-x64 2>&1)" || rc=$?
+  if (( rc != 1 )) || [[ "$(fake_invocations "${bin}")" != "1" ]] || (( $(_sleeps) != 0 )) || [[ -s "${tmp}/q2.budget" ]] \
+     || [[ "$(grep -c '::error::' <<<"${out}")" != "1" ]] \
+     || [[ "${out}" != *"::error::"*"lacks com.android.tools.build:aapt2:9.3.1-15703166."*"deps job"*"no test ran in this job"* ]]; then
+    _fail q2 "an offline miss must fail once, uncharged, with one ::error:: naming the coordinate as the deps job's gap; got rc=${rc}, $(fake_invocations "${bin}") invocation(s), $(_sleeps) pause(s): ${out}"
+  fi
+  out="$(HAVEN_GRADLE_OFFLINE=1 offline_error 1 "${MEASURED_PLUGIN_MARKER_TEXT}" 2>&1)"
+  [[ "${out}" == *"lacks org.gradle.kotlin.kotlin-dsl:org.gradle.kotlin.kotlin-dsl.gradle.plugin:6.5.7."* ]] \
+    || _fail q2 "a plugin marker missing offline must be named: ${out}"
+  [[ "${out}" != *"https://"* && "${out}" != *"googleapis"* ]] \
+    || _fail q2 "the offline verdict must carry coordinates only, never a URL or host: ${out}"
+
+  # (q3) End to end: with HAVEN_GRADLE_OFFLINE=1 the offline init script, byte
+  #      for byte, is in GRADLE_USER_HOME/init.d while Gradle runs and gone once
+  #      the script exits, on a red build as on a green one; without it, it is
+  #      never there; and any other value is refused before any build.
+  ran=$(( ran + 1 ))
+  local mode guh_q
+  for mode in ok compile; do
+    bin="${tmp}/q3-${mode}"; write_fake_flutter "${bin}" "${mode}"; guh_q="${tmp}/q3-${mode}-guh"
+    rc=0
+    out="$(PATH="${bin}:${PATH}" GITHUB_ACTIONS= HAVEN_GRADLE_OFFLINE=1 GRADLE_USER_HOME="${guh_q}" \
+           HAVEN_BUILD_RETRY_STATE="${tmp}/q3.budget" bash "${BASH_SOURCE[0]}" android-x64 2>&1)" || rc=$?
+    if [[ "$(cat "${bin}/offline.log" 2>/dev/null)" != "present" ]] \
+       || ! cmp -s "${bin}/offline-seen" "$(dirname "${BASH_SOURCE[0]}")/gradle-offline.init.gradle.kts" \
+       || [[ -e "${guh_q}/init.d/haven-gradle-offline.init.gradle.kts" ]]; then
+      _fail q3 "${mode} build: the offline init script must be installed for the build and removed at exit; saw '$(cat "${bin}/offline.log" 2>/dev/null)', left $( [[ -e "${guh_q}/init.d/haven-gradle-offline.init.gradle.kts" ]] && echo present || echo absent ) (rc=${rc})"
+    fi
+  done
+  bin="${tmp}/q3-online"; write_fake_flutter "${bin}" ok
+  rc=0
+  (PATH="${bin}:${PATH}" GITHUB_ACTIONS= GRADLE_USER_HOME="${tmp}/q3-online-guh" HAVEN_GRADLE_OFFLINE= \
+     HAVEN_BUILD_RETRY_STATE="${tmp}/q3.budget" bash "${BASH_SOURCE[0]}" android-x64 >/dev/null 2>&1) || rc=$?
+  if (( rc != 0 )) || [[ "$(cat "${bin}/offline.log" 2>/dev/null)" != "absent" ]]; then
+    _fail q3 "without HAVEN_GRADLE_OFFLINE the build must run online; got rc=${rc}, saw '$(cat "${bin}/offline.log" 2>/dev/null)'"
+  fi
+  bin="${tmp}/q3-true"; write_fake_flutter "${bin}" ok
+  rc=0
+  out="$(PATH="${bin}:${PATH}" GITHUB_ACTIONS= GRADLE_USER_HOME="${tmp}/q3-true-guh" HAVEN_GRADLE_OFFLINE=true \
+         HAVEN_BUILD_RETRY_STATE="${tmp}/q3.budget" bash "${BASH_SOURCE[0]}" android-x64 2>&1)" || rc=$?
+  if (( rc != RC_BROKEN )) || [[ "$(fake_invocations "${bin}")" != "0" ]] || [[ "${out}" != *"must be 1 or empty"* ]]; then
+    _fail q3 "HAVEN_GRADLE_OFFLINE=true must be refused with rc ${RC_BROKEN} before any build; got rc=${rc}, $(fake_invocations "${bin}") build(s)"
+  fi
+
+  # (q4) --resolve-only end to end, in a copy of the tree with a fake gradlew:
+  #      the exact Gradle argv (--rerun-tasks, the resolve-all init script by
+  #      absolute path, havenResolveAll, the aapt2 witness, the caller's extra
+  #      arguments) from haven/android, the Maven Central fallback installed on
+  #      CI, a transient ridden out through the engine, and offline a
+  #      resolution failure is a gap that is tried once.
+  ran=$(( ran + 1 ))
+  local tree="${tmp}/q4-tree" tf
+  mkdir -p "${tree}/scripts/ci" "${tree}/haven/android"
+  for tf in build_apk_with_retry.sh gradle-resolve-all.init.gradle.kts maven-central-fallback.init.gradle.kts gradle-offline.init.gradle.kts; do
+    cp "$(dirname "${BASH_SOURCE[0]}")/${tf}" "${tree}/scripts/ci/${tf}"
+  done
+  _fake_gradlew() { # <mode: flaky|offlinemiss>
+    rm -f "${tree}/haven/android/n" "${tree}/haven/android/argv.log"
+    {
+      printf '#!/usr/bin/env bash\n'
+      printf 'printf "%%s|%%s\\n" "$PWD" "$*" >> "%s/argv.log"\n' "${tree}/haven/android"
+      printf 'n=$(( $(cat "%s/n" 2>/dev/null || echo 0) + 1 )); echo "${n}" > "%s/n"\n' "${tree}/haven/android" "${tree}/haven/android"
+      case "$1" in
+        flaky) printf 'if (( n == 1 )); then cat <<%s\n%s\n%s\nexit 1\nfi\necho "BUILD SUCCESSFUL"\n' "'GRADLE_EOF'" "${MEASURED_PLUGIN_MARKER_TEXT}" "GRADLE_EOF" ;;
+        offlinemiss) printf 'cat <<%s\n%s\n%s\nexit 1\n' "'GRADLE_EOF'" "${MEASURED_PLUGIN_MARKER_TEXT}" "GRADLE_EOF" ;;
+      esac
+    } > "${tree}/haven/android/gradlew"
+    chmod +x "${tree}/haven/android/gradlew"
+  }
+  _fake_gradlew flaky
+  rm -f "${tmp}/sleeps"
+  rc=0
+  out="$(GITHUB_ACTIONS=true GRADLE_USER_HOME="${tmp}/q4-guh" HAVEN_BUILD_RETRY_STATE="${tmp}/q4.budget" HAVEN_GRADLE_OFFLINE= \
+         bash "${tree}/scripts/ci/build_apk_with_retry.sh" --resolve-only --info 2>&1)" || rc=$?
+  local want_argv="${tree}/haven/android|--continue --rerun-tasks -I ${tree}/scripts/ci/gradle-resolve-all.init.gradle.kts havenResolveAll :app:compileDebugNavigationResources --info"
+  if (( rc != 0 )) || [[ "$(cat "${tree}/haven/android/n")" != "2" ]] \
+     || [[ "$(sort -u "${tree}/haven/android/argv.log")" != "${want_argv}" ]] \
+     || ! cmp -s "${tree}/scripts/ci/maven-central-fallback.init.gradle.kts" "${tmp}/q4-guh/init.d/haven-maven-central-fallback.init.gradle.kts"; then
+    _fail q4 "--resolve-only must run '${want_argv}' through the retry engine with the Central fallback installed; got rc=${rc}, argv '$(sort -u "${tree}/haven/android/argv.log" 2>/dev/null)', $(cat "${tree}/haven/android/n" 2>/dev/null) run(s): ${out}"
+  fi
+  _fake_gradlew offlinemiss
+  rc=0
+  out="$(GITHUB_ACTIONS= GRADLE_USER_HOME="${tmp}/q4-off-guh" HAVEN_BUILD_RETRY_STATE="${tmp}/q4-off.budget" HAVEN_GRADLE_OFFLINE=1 \
+         bash "${tree}/scripts/ci/build_apk_with_retry.sh" --resolve-only 2>&1)" || rc=$?
+  if (( rc != 1 )) || [[ "$(cat "${tree}/haven/android/n")" != "1" ]] || [[ "${out}" != *"::error::Gradle built OFFLINE"* ]] \
+     || [[ -e "${tmp}/q4-off-guh/init.d/haven-gradle-offline.init.gradle.kts" ]]; then
+    _fail q4 "an offline --resolve-only that misses a marker must run once, say it is the set's gap and leave no offline init behind; got rc=${rc}, $(cat "${tree}/haven/android/n" 2>/dev/null) run(s): ${out}"
+  fi
+
+  # (h2) Past the ladder every pause is its last step, so a caller that asks
+  #      for more attempts never indexes past it (an unbound variable under
+  #      `set -u`, which would end the run on its fourth failure).
+  ran=$(( ran + 1 ))
+  local pauses="" a
+  for a in 1 2 3 4 5 11; do pauses+="$(backoff_for "${a}") "; done
+  [[ "${pauses}" == "20 45 75 75 75 75 " ]] || _fail h2 "pauses after attempts 1-5 and 11 must be 20 45 75 75 75 75; got '${pauses}'"
 
   # (h) Structural: one backoff per pause, and the header's worst case is the
   #     one the constants actually add up to. Both are claims the prose above
@@ -1407,7 +1840,7 @@ Caused by: java.net.SocketTimeoutException: Read timed out" \
     echo "${SCRIPT_NAME}: SELF-TEST FAILED — ran ${ran} fixture(s), expected exactly ${SELF_TEST_FIXTURES}; a fixture was added or removed without moving the pin" >&2
     return 1
   fi
-  echo "${SCRIPT_NAME}: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: a transient 429 is ridden out on the second attempt after exactly one ladder pause, and so is the wrapper's 504 fetching the Gradle distribution, and the fake proves it refuses both a non-build argv and a build missing the flags this script adds; a compile error and a disk exhaustion each fail once with their own exit code, their original output and the right verdict; a persistent 429 stops at exactly ${MAX_ATTEMPTS} attempts with one ::error:: saying INFRASTRUCTURE and that no test ran, the Gradle error still shown; a budget spent by an earlier build in the step starts no further attempt, and a retried build charges the shared budget while a clean one charges nothing; an attempt long enough that repeating it would not fit the budget is never started, while a short one under the same injected clock still is; every retriable signature is load-bearing on its own, this repo's real wrapped 403 is retried while a bare status line decides nothing, a plugin marker Gradle reports missing is retried while a version-less plugin request is not, the wrapper's distribution download is retried on a 5xx but not on a 404, a checksum mismatch or another URL, and a capacity signature beats a resolution one; the annotation names a rate limit only where a 429 says so, names a failed distribution download with its status, names the missing-coordinate shape as the ambiguity it is without reprinting the coordinate, and otherwise admits the cause is not knowable; a spent budget left by another run is not read; the script itself issues the build argv the lanes depend on; on CI the NDK Flutter asks for is installed in one call when missing, left alone when present and complete and reinstalled when its package.xml is missing, a truncated install is graded failed despite its manifest, its download cache cleared and the charged retry installs it, another revision is replaced, a yes-machine sdkmanager fails closed at ${MAX_ATTEMPTS} calls with one INFRASTRUCTURE annotation, a hung one is killed at the attempt bound and not repeated past the budget, and every input this script owns fails as broken before any call; end to end the script installs the Maven Central fallback init script and provisions before it builds against the real app build file, stops before Gradle when the NDK cannot be had, and off CI never touches the SDK or GRADLE_USER_HOME; one backoff per pause, and the ladder fits the budget)."
+  echo "${SCRIPT_NAME}: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: a transient 429 is ridden out on the second attempt after exactly one ladder pause, and so is the wrapper's 504 fetching the Gradle distribution, and the fake proves it refuses both a non-build argv and a build missing the flags this script adds; a compile error and a disk exhaustion each fail once with their own exit code, their original output and the right verdict; a persistent 429 stops at exactly ${MAX_ATTEMPTS} attempts with one ::error:: saying INFRASTRUCTURE and that no test ran, the Gradle error still shown; a budget spent by an earlier build in the step starts no further attempt, and a retried build charges the shared budget while a clean one charges nothing; an attempt long enough that repeating it would not fit the budget is never started, while a short one under the same injected clock still is; every retriable signature is load-bearing on its own, this repo's real wrapped 403 is retried while a bare status line decides nothing, a plugin marker Gradle reports missing is retried while a version-less plugin request is not, the wrapper's distribution download is retried on a 5xx but not on a 404, a checksum mismatch or another URL, and a capacity signature beats a resolution one; the annotation names a rate limit only where a 429 says so, names a failed distribution download with its status, names the missing-coordinate shape as the ambiguity it is without reprinting the coordinate, and otherwise admits the cause is not knowable; a spent budget left by another run is not read; the script itself issues the build argv the lanes depend on; on CI the NDK Flutter asks for is installed in one call when missing, left alone when present and complete and reinstalled when its package.xml is missing, a truncated install is graded failed despite its manifest, its download cache cleared and the charged retry installs it, another revision is replaced, a yes-machine sdkmanager fails closed at ${MAX_ATTEMPTS} calls with one INFRASTRUCTURE annotation, a hung one is killed at the attempt bound and not repeated past the budget, and every input this script owns fails as broken before any call; end to end the script installs the Maven Central fallback init script and provisions before it builds against the real app build file, stops before Gradle when the NDK cannot be had, and off CI never touches the SDK or GRADLE_USER_HOME; CMake, which an offline AGP cannot install, is provisioned too — installed when missing, left alone when present, refused when its cmake does not run, failing closed with one annotation naming it — and --provision-only provisions both on CI, builds nothing and touches nothing off CI, and build_release.sh turns its failure into its own rc 4; offline, Gradle's offline wording is a gap and so is every Gradle resolution wording (a missing plugin marker says nothing about offline), while rustup's reset, cargo's curl timeout and curl's failed lookup stay retriable, capacity still wins and a compile error stays one, a gap is tried once and uncharged with one ::error:: naming the coordinate (or marker) as the deps job's and no URL, the offline init script is in init.d for exactly the build and gone after it on a red build as on a green one, absent without HAVEN_GRADLE_OFFLINE, and any value but 1 is refused before a build; --resolve-only runs havenResolveAll and the aapt2 witness from haven/android through the engine with the Central fallback installed, and offline tries a gap once; one backoff per pause, the ladder fits the budget, and more attempts than the ladder repeat its last pause)."
   return 0
 }
 
@@ -1418,8 +1851,40 @@ fi
 
 if [[ $# -lt 1 ]]; then
   err "usage: ${SCRIPT_NAME} <flutter-target-platform> [extra flutter args...]"
+  err "       ${SCRIPT_NAME} --resolve-only [extra gradle args...]"
+  err "       ${SCRIPT_NAME} --provision-only"
   err "       ${SCRIPT_NAME} --self-test"
   exit "${RC_BROKEN}"
+fi
+
+# scripts/build_release.sh's offline path: the SDK packages an offline AGP
+# cannot install, and nothing else: no Gradle runs, so it ignores
+# HAVEN_GRADLE_OFFLINE and never touches init.d.
+if [[ "$1" == "--provision-only" && $# -eq 1 ]]; then
+  if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+    provision_sdk
+  fi
+  exit $?
+fi
+
+case "${HAVEN_GRADLE_OFFLINE:-}" in
+  '') ;;
+  1) install_offline; trap remove_offline EXIT ;;
+  *) printf '::error::HAVEN_GRADLE_OFFLINE must be 1 or empty, not "%s" — refusing to guess whether this build may reach the network.\n' "${HAVEN_GRADLE_OFFLINE}" >&2
+     exit "${RC_BROKEN}" ;;
+esac
+
+if [[ "$1" == "--resolve-only" ]]; then
+  shift
+  if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+    install_central_fallback
+  fi
+  resolve_rc=0
+  resolve_init="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/gradle-resolve-all.init.gradle.kts"
+  cd "$(dirname "${resolve_init}")/../../haven/android"
+  build_with_retry ./gradlew --continue --rerun-tasks -I "${resolve_init}" \
+    havenResolveAll :app:compileDebugNavigationResources "$@" || resolve_rc=$?
+  exit "${resolve_rc}"
 fi
 
 readonly TARGET_PLATFORM="$1"
@@ -1427,11 +1892,10 @@ shift
 
 if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
   install_central_fallback
-  ndk_rc=0
-  provision_ndk "${FLUTTER_ROOT:-}" "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}" \
-    "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/haven/android/app/build.gradle.kts" || ndk_rc=$?
-  if (( ndk_rc != 0 )); then
-    exit "${ndk_rc}"
+  sdk_rc=0
+  provision_sdk || sdk_rc=$?
+  if (( sdk_rc != 0 )); then
+    exit "${sdk_rc}"
   fi
 fi
 

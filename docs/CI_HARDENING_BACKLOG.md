@@ -4875,14 +4875,15 @@ right place to prove the flag-off plane redeems within one send.
 
 **What.** `haven/android/gradle/verification-metadata.xml` does not exist, so
 Gradle checks no checksum or signature on anything it resolves. That is why
-`release-build.yml` declares `HAVEN_GRADLE_CACHE-EXEMPT` and builds cold: a
-restored `~/.gradle/caches/modules-2` would be an unverified input to the
-signed artifact. The distribution half is now pinned (`distributionSha256Sum`).
+`release-build.yml` declares `HAVEN_GRADLE_DEPS-EXEMPT` and builds online,
+from no set: the offline lanes' `gradle-deps` artifact (android-gradle-deps.yml)
+would be an unverified input to the signed artifact. The distribution half is
+now pinned (`distributionSha256Sum`).
 
 **How.** `./gradlew --write-verification-metadata sha256 help` from
 `haven/android`, commit the file, and keep it maintained on every dependency
 bump (a stale file fails the build, by design). Then revisit the release
-exemption in `scripts/ci/check_gradle_build_hardened.sh` C5.
+exemption in `scripts/ci/check_gradle_build_hardened.sh` (C5, G6).
 
 **When.** A quiet week; it is a maintenance commitment, not a one-off.
 

@@ -133,15 +133,16 @@ jobs:
     # The job cap must clear the SUM of the step caps: below it, a run whose
     # every step is still inside its own cap can die here, and a job-cap death
     # skips every `if: failure()` step (e2e-android.yml states the rule). So:
-    # Build the runtime log scanner 10 + Build E2E test APK 25 + Provision the
-    # Android SDK 11 (derived in that script) + Create AVD snapshot (on an
-    # AVD-cache miss) 15 + the drive step 45 (derived there) + the most the
+    # Build the runtime log scanner 10 + Fetch 5 and Install 2 this run's Gradle dependencies + Build
+    # E2E test APK 25 + Provision the Android SDK 11 (derived in that script) +
+    # Create AVD snapshot (on an AVD-cache miss) 15 + the drive step 45
+    # (derived there) + the most the
     # work no step cap bounds has taken, 12.9 min over 201 runs of this job and
     # of e2e-android.yml's on both paths (ci.yml and e2e-nightly.yml,
     # 2026-07-29..09-11; 11.1 of it one Setup Flutter stall in e2e-android.yml's
-    # job, run 30792258968), taken as 13 = 119 -> 121.
+    # job, run 30792258968) = 113 + 12.9 = 125.9 -> 126.
     # job-uncapped-minutes: 12.9 (201 runs with e2e-android.yml's, worst 30792258968)
-    timeout-minutes: 121
+    timeout-minutes: 126
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
       # Profile plane. DISJOINT from HAVEN_E2E_RELAY above by construction —
@@ -234,45 +235,35 @@ jobs:
           mkdir -m 0700 -p /tmp/haven-soak/needles
           rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
 
+      # This run's Gradle dependency set, resolved once and proved complete
+      # offline by android-gradle-deps.yml (the job this one `needs:`), so the
+      # build below runs with HAVEN_GRADLE_OFFLINE=1 and never meets the
+      # network: a Plugin Portal blip failed lanes at the build when each
+      # resolved its own (CI runs 45142774793, 45012283370). Before Setup
+      # Flutter, which pins the Flutter version the set was resolved with. Not
+      # `continue-on-error`: a lane without its set cannot build, and says so
+      # here (scripts/ci/check_gradle_build_hardened.sh).
+      - name: Fetch this run's Gradle dependencies
+        timeout-minutes: 5
+        uses: actions/download-artifact@v6
+        with:
+          name: gradle-deps
+          path: ${{ runner.temp }}/gradle-deps
+
+      - name: Install this run's Gradle dependencies
+        timeout-minutes: 2
+        run: bash scripts/ci/gradle_deps.sh unpack "${RUNNER_TEMP}/gradle-deps"
+
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
+          flutter-version: ${{ env.HAVEN_FLUTTER_VERSION }}
           cache: true
 
       - name: Get Flutter dependencies
         working-directory: haven
         run: flutter pub get
-
-      # Gradle resolves the buildscript classpath over the network BEFORE it
-      # compiles anything, so a cold ~/.gradle makes this lane fetch hundreds of
-      # POMs — and hosted runners share egress IPs, so Maven Central rate-limits
-      # a runner nobody here provoked. CI run 35622556197 job 106414462454 lost
-      # a whole lane to HTTP 429 on the classpath, with NO test run, while twelve
-      # sibling Android lanes built the same commit with zero 429s. A warm
-      # dependency cache REMOVES those requests; the classified retry in
-      # scripts/ci/build_apk_with_retry.sh is only the backstop for what is left.
-      #
-      # Restore-only. build-check.yml is the single writer of this key, so a lane
-      # that deletes or half-fills ~/.gradle cannot publish a cache the other
-      # lanes would then restore. The `restore-keys` prefix means a changed
-      # dependency set still starts from the last good cache instead of cold.
-      #
-      # `continue-on-error` because a cache is an optimisation, and a step that
-      # overruns its own `timeout-minutes` FAILS the job: without this, a slow
-      # or unavailable cache service reddens a lane that would otherwise have
-      # built cold and run every test.
-      - name: Restore Gradle dependency cache
-        uses: actions/cache/restore@v4
-        timeout-minutes: 2
-        continue-on-error: true
-        with:
-          path: |
-            ~/.gradle/caches/modules-2
-            ~/.gradle/wrapper
-          key: gradle-deps-${{ runner.os }}-${{ hashFiles('haven/android/**/*.gradle*', 'haven/rust_builder/**/*.gradle*', 'haven/android/gradle/wrapper/gradle-wrapper.properties', 'haven/pubspec.lock') }}
-          restore-keys: |
-            gradle-deps-${{ runner.os }}-
 
       # Build the test APK BEFORE the emulator boots (the OOM rule — the
       # Rust-NDK + Gradle peak must not coincide with a resident emulator +
@@ -291,6 +282,8 @@ jobs:
       - name: Build E2E test APK
         working-directory: haven
         timeout-minutes: 25
+        env:
+          HAVEN_GRADLE_OFFLINE: "1"
         run: |
           ../scripts/ci/build_apk_with_retry.sh android-x64 \
             --target=integration_test/e2e/e2e_profile_sharing.dart \
@@ -676,15 +669,15 @@ jobs:
     runs-on: ubuntu-latest
     # The job cap clears the SUM of the step caps (e2e-android.yml states the
     # rule): Build the runtime log scanner 10 + Build E2E test APK 25 +
-    # Restore Gradle dependency cache 2 + Provision the Android SDK 11 + AVD
+    # Fetch 5 and Install 2 this run's Gradle dependencies + Provision the Android SDK 11 + AVD
     # cache 10 + Create AVD snapshot 15 +
     # the drive step 59 (derived there) + the uncapped work, taken
     # from e2e_profile_android until this job has runs of its own: 12.9 min
     # over 201 runs of that job and e2e-android.yml's (worst 30792258968), plus
     # this job's two blossom starts, under a minute measured locally -> 14
-    # = 146.
+    # = 137 + 14 = 151.
     # job-uncapped-minutes: 14 (201 runs of e2e_profile_android's family, worst 30792258968)
-    timeout-minutes: 146
+    timeout-minutes: 151
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
       # Profile plane. DISJOINT from HAVEN_E2E_RELAY above by construction —
@@ -770,45 +763,35 @@ jobs:
           mkdir -m 0700 -p /tmp/haven-soak/needles
           rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
 
+      # This run's Gradle dependency set, resolved once and proved complete
+      # offline by android-gradle-deps.yml (the job this one `needs:`), so the
+      # build below runs with HAVEN_GRADLE_OFFLINE=1 and never meets the
+      # network: a Plugin Portal blip failed lanes at the build when each
+      # resolved its own (CI runs 45142774793, 45012283370). Before Setup
+      # Flutter, which pins the Flutter version the set was resolved with. Not
+      # `continue-on-error`: a lane without its set cannot build, and says so
+      # here (scripts/ci/check_gradle_build_hardened.sh).
+      - name: Fetch this run's Gradle dependencies
+        timeout-minutes: 5
+        uses: actions/download-artifact@v6
+        with:
+          name: gradle-deps
+          path: ${{ runner.temp }}/gradle-deps
+
+      - name: Install this run's Gradle dependencies
+        timeout-minutes: 2
+        run: bash scripts/ci/gradle_deps.sh unpack "${RUNNER_TEMP}/gradle-deps"
+
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
+          flutter-version: ${{ env.HAVEN_FLUTTER_VERSION }}
           cache: true
 
       - name: Get Flutter dependencies
         working-directory: haven
         run: flutter pub get
-
-      # Gradle resolves the buildscript classpath over the network BEFORE it
-      # compiles anything, so a cold ~/.gradle makes this lane fetch hundreds of
-      # POMs — and hosted runners share egress IPs, so Maven Central rate-limits
-      # a runner nobody here provoked. CI run 35622556197 job 106414462454 lost
-      # a whole lane to HTTP 429 on the classpath, with NO test run, while twelve
-      # sibling Android lanes built the same commit with zero 429s. A warm
-      # dependency cache REMOVES those requests; the classified retry in
-      # scripts/ci/build_apk_with_retry.sh is only the backstop for what is left.
-      #
-      # Restore-only. build-check.yml is the single writer of this key, so a lane
-      # that deletes or half-fills ~/.gradle cannot publish a cache the other
-      # lanes would then restore. The `restore-keys` prefix means a changed
-      # dependency set still starts from the last good cache instead of cold.
-      #
-      # `continue-on-error` because a cache is an optimisation, and a step that
-      # overruns its own `timeout-minutes` FAILS the job: without this, a slow
-      # or unavailable cache service reddens a lane that would otherwise have
-      # built cold and run every test.
-      - name: Restore Gradle dependency cache
-        uses: actions/cache/restore@v4
-        timeout-minutes: 2
-        continue-on-error: true
-        with:
-          path: |
-            ~/.gradle/caches/modules-2
-            ~/.gradle/wrapper
-          key: gradle-deps-${{ runner.os }}-${{ hashFiles('haven/android/**/*.gradle*', 'haven/rust_builder/**/*.gradle*', 'haven/android/gradle/wrapper/gradle-wrapper.properties', 'haven/pubspec.lock') }}
-          restore-keys: |
-            gradle-deps-${{ runner.os }}-
 
       # No HAVEN_E2E_NO_BACKGROUND, which is inert here anyway (only
       # lib/main.dart reads it, and no integration target runs main()): the
@@ -832,6 +815,8 @@ jobs:
       - name: Build E2E test APK
         working-directory: haven
         timeout-minutes: 25
+        env:
+          HAVEN_GRADLE_OFFLINE: "1"
         run: |
           ../scripts/ci/build_apk_with_retry.sh android-x64 \
             --target=integration_test/e2e/e2e_profile_ui_photo.dart \

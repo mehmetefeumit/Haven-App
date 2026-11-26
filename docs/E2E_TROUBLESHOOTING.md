@@ -310,7 +310,129 @@ no external read is possible once `flutter test` removes the app.
 separate CI step. Assert it inside the test (which runs in the app's sandbox), or
 use `flutter drive` (Android) which leaves the app installed.
 
-## Failure mode 6 — Gradle build fails resolving dependencies (transient 403/429)
+## Failure mode 6 — `Android Gradle Dependencies` is red, so every Android lane is skipped
+
+**Symptom.** In ci.yml (or e2e-nightly.yml, e2e-live-sync.yml,
+launch-gate-android-dispatch.yml) the job `Android Gradle Dependencies /
+Resolve and verify offline` is red; every Android lane, `Debug Builds`, the
+Android launch gate and the iOS jobs that share e2e-profile.yml and
+build-check.yml with them are SKIPPED; `verdict` (All jobs passed) is red and
+lists each of them. No test ran anywhere on Android.
+
+**Why it is built this way.** Until 2026-11-26 every Android lane resolved its
+own Gradle classpath over the network at "Build E2E test APK", from an
+`actions/cache` keyed `gradle-deps-Linux-…` that one job (build-check) saved
+AFTER the lanes had started, and that GitHub evicted before nearly every main
+run (the repository's caches are far over the 10 GB limit). So ~17 lanes
+resolved cold on every run, and any Plugin Portal blip failed whichever lane
+drew it: main runs 45142774793 (`e2e_android`) and 45012283370
+(`e2e_profile_android`) died in Flutter's own `flutter_tools` build on
+`Plugin [id: 'org.gradle.kotlin.kotlin-dsl', version: '6.5.7'] was not
+found`, a plugin only the Portal serves (Central and Google's mirror answer
+404, so `scripts/ci/maven-central-fallback.init.gradle.kts` cannot help).
+Now `android-gradle-deps.yml` resolves the run's whole set ONCE, proves it
+complete offline, and hands it to every lane as the `gradle-deps` artifact;
+each lane builds with `HAVEN_GRADLE_OFFLINE=1` and cannot meet the network at
+its Gradle build. The owner's decision: when the set cannot be had, the run is
+RED and a human re-runs it; nothing is skipped into a pass
+(`scripts/ci/check_all_jobs_passed.sh` holds every such workflow to a
+`verdict` job; a skipped job would otherwise pass a required check).
+
+**What the job does** (`scripts/ci/gradle_deps.sh produce`):
+
+1. Computes the set's key from the Flutter framework revision and every input
+   that decides the set (`haven/android/**/*.gradle*`,
+   `haven/rust_builder/**/*.gradle*`, `third_party/**/*.gradle*`,
+   `gradle.properties`, the wrapper, `pubspec.lock`, the three init scripts,
+   `build_apk_with_retry.sh`, `gradle_deps.sh`).
+2. Looks for `gradle-deps-src-<key>`, a set a main run already verified (kept
+   90 days), and takes it only from ci.yml on push or e2e-nightly.yml on
+   schedule, on main, in this repository — never a pull request's, a fork's or
+   another workflow's, since every lane builds from these bytes.
+3. With a source, verifies it OFFLINE; a source that fails is topped up online
+   and the completed set uploaded as a newer source, which wins from then on.
+   With none, resolves online: `build_apk_with_retry.sh --resolve-only`, i.e.
+   `havenResolveAll` (`scripts/ci/gradle-resolve-all.init.gradle.kts`: every
+   resolvable configuration of every project of the composite, Flutter's
+   `flutter_tools` build included, non-leniently) plus
+   `:app:compileDebugNavigationResources`, the one task that makes AGP fetch
+   aapt2, which it does through a detached configuration nothing can
+   enumerate. Its retry budget is 900 s and 12 attempts, not a lane's 180 s
+   and 4.
+4. Verifies the set offline (the same resolution under
+   `gradle-offline.init.gradle.kts`), then runs four canaries with the Gradle
+   the lanes run: an included build asking a remote repository for a
+   coordinate nobody has must answer "No cached version … available for offline
+   mode", and a configuration nobody resolves must fail `havenResolveAll` in a
+   top build, in a build it includes, and in one it includes through
+   `pluginManagement`, as Flutter's `flutter_tools` is.
+5. Packs `~/.gradle/caches/modules-2` and the unpacked wrapper distribution
+   (~2.3 GB, zstd) with the Flutter version, and uploads `gradle-deps` (7 days).
+
+**Read the red step.**
+
+| The job says | It means | Do |
+|---|---|---|
+| `could not be resolved within the deps job's 900s retry budget` | the online resolution failed past its budget (the table of failure mode 6c says what Gradle printed) | re-run the failed jobs; if this commit changed a dependency, read the Gradle error first — no re-run fixes a coordinate that does not exist |
+| `does NOT resolve offline` | the set resolved online but a configuration or task asked for something it lacks offline | a gap in `havenResolveAll`'s reach: read the named coordinate and teach the resolution what asked for it |
+| `the offline canary did not fail as offline` | an included build was not offline under the offline init script: the lanes would not be either | a Gradle change; `gradle-offline.init.gradle.kts` must move with it |
+| `the strictness canary … did not name` | `havenResolveAll` stopped failing on a configuration it cannot resolve, or stopped reaching included builds | a Gradle change; fix the init script, never the canary |
+| an `upload-artifact` failure on `Upload this run's Gradle dependencies` | the artifact service | re-run |
+
+A failed `Keep the verified set for later runs` does not redden the job: the
+run's own set is already uploaded, and the next main run resolves online once.
+
+## Failure mode 6b — an offline build names "a gap in what the deps job resolved"
+
+**Symptom.** An Android lane's build step reds with one annotation:
+`Gradle built OFFLINE from this run's dependency set … and the set lacks
+<coordinate>`, tried once, no retry, no test ran. Above it, Gradle's own
+`No cached version of <coordinate> available for offline mode` (or, for a
+plugin marker, only `could not resolve plugin artifact '<marker>'`: offline
+Gradle reads markers leniently and says nothing about offline).
+
+**What it means.** The deps job proved its set with `havenResolveAll`, and
+this build asked for something that resolution did not reach — a configuration
+created only while a task runs, as AGP's aapt2 was until
+`--resolve-only` learned it (the spike that built this saw exactly
+`No cached version of com.android.tools.build:aapt2:9.3.1-15703166 available
+for offline mode` in `:app:compileDebugNavigationResources`). Offline Gradle
+has no network to recover, so `build_apk_with_retry.sh` never retries a failure
+in Gradle's own resolution wording (`No cached version …`, `Could not resolve
+<coordinate>`, `Could not resolve all … for configuration`, a plugin marker's
+`could not resolve plugin artifact`, `Error resolving plugin`).
+
+Not every network failure in an offline lane is a gap. The build still
+downloads what Gradle does not: cargokit's rustup target installs, cargo's
+crates, Flutter's engine artifacts. Their wordings (`Connection reset by
+peer`, curl's `[28] Timeout was reached` or `Could not resolve host:`, an HTTP
+5xx) are retried as transients by the same ladder as online, and end, if they
+persist, with the online verdict of failure mode 6c — not this one.
+
+**Do.** For the gap annotation above, not a re-run: the same set fails the
+same way. If this commit changed a
+dependency and the key did not move, the key misses an input (add it to
+`gradle_deps.sh`'s `KEYED_PATHSPECS`). Otherwise find what asked for the
+coordinate (the task in Gradle's `Execution failed for task` line) and make the
+deps job resolve it, as `--resolve-only` does for aapt2.
+
+Two neighbours look alike and are not gaps in the set:
+`[CXX1300] CMake '3.22.1' was not found in SDK, PATH, or by cmake.dir property`
+is an SDK package AGP would have installed online and cannot offline;
+`build_apk_with_retry.sh` provisions CMake 3.22.1 and the NDK before every CI
+build (failure mode 15b) — if AGP's default CMake moved, move `CMAKE_VERSION`
+with it. And a Flutter version other than the set's (a lane that lost its
+`flutter-version: ${{ env.HAVEN_FLUTTER_VERSION }}` pin) misses the engine jars
+`io.flutter:*`; `check_gradle_build_hardened.sh` G2 keeps the pin.
+
+## Failure mode 6c — an ONLINE Gradle build fails resolving dependencies (transient 403/429)
+
+Only two CI builds still resolve online: the deps job's own resolution (6
+above) and `release-build.yml`'s, which builds what it signs from no set (its
+`HAVEN_GRADLE_DEPS-EXEMPT` reason: there is no
+`verification-metadata.xml`, so nothing would authenticate a set another job
+put on disk). What follows is what the online resolution prints when a
+repository fails it.
 
 **Symptom.** `BUILD FAILED` during any Gradle build step, BEFORE the emulator
 runs:
@@ -323,40 +445,13 @@ Could not resolve org.jetbrains.kotlin:kotlin-stdlib:2.0.21.
 **Root cause.** Transient infrastructure — Maven Central (`repo.maven.apache.org`)
 / `plugins.gradle.org` rate-limit or hiccup on shared GH-runner IPs and return
 403/429/5xx during dependency resolution. NOT a code error, NOT reproducible
-locally, and it can hit ANY Gradle lane — only the unlucky one fails a given run
-(in run 29054586352, e2e_android + every Android build passed; only e2e_m7 drew
+locally. Before the offline lanes it could hit ANY Gradle lane — only the
+unlucky one failed a given run (in run 29054586352, e2e_android + every Android build passed; only e2e_m7 drew
 the 403; in run 35622556197 one lane drew HTTP 429 six times over 2m47s while
-twelve siblings built the same commit clean). Because it fails at the build
-step, it can mask/pre-empt the runtime phases entirely.
+twelve siblings built the same commit clean). Now it can only hit the deps job
+(red per failure mode 6, every lane skipped) or a release build.
 
-**The fix is the CACHE; the retry is the backstop.** A cold `~/.gradle` makes a
-lane fetch hundreds of POMs before it compiles anything, and every one of them
-is a chance to be rate-limited. The warm build does not make the requests, so
-it cannot draw the limit — the first four cached jobs (run 35813757227) drew
-zero 429s. Do not expect it to make the build FAST: a job's first
-`assembleDebug` still took 429-638 s with the cache hit, against 33-61 s for
-its later builds, because that gap is Gradle configuration (~2 min), cargokit
-cross-compiling the Rust core for the x86_64 and i686 Android targets (~4 min)
-and the Kotlin compile — none of it dependency traffic. Trimming that is a
-separate optimisation (`docs/CI_HARDENING_BACKLOG.md`).
-
-Every Gradle-building job therefore restores a shared, read-only dependency
-cache (`~/.gradle/caches/modules-2` + `~/.gradle/wrapper`) on one canonical key
-before its first build — 13 restore steps today. Exactly ONE job writes that key,
-`build-check.yml`'s `android`, from a successful build only, under the restore
-step's own `cache-primary-key` output; a lane that wipes `~/.gradle` for disk
-headroom (e2e-relay-management) must never be able to publish the hole. Every
-restore is `continue-on-error: true` under a `timeout-minutes`, because an
-optimisation must never redden a lane that would have built cold.
-
-One job is exempt, with its reason on the line above its `runs-on`:
-`release-build.yml`'s `android`, because it signs and ships the artifact and
-nothing would authenticate the dependencies a restored cache put on disk (no
-`verification-metadata.xml`; the Gradle distribution itself is pinned by
-`distributionSha256Sum`).
-`scripts/ci/check_gradle_build_hardened.sh` enforces all of this (C1-C6).
-
-**The 404 variant, which the cache does not fix.** `Error resolving plugin
+**The 404 variant.** `Error resolving plugin
 [id: 'dev.flutter.flutter-plugin-loader' …]` / `Could not find
 org.jetbrains.kotlin:kotlin-stdlib:2.3.20`, with ONLY `https://plugins.gradle.org/m2/…`
 under "Searched in the following locations" (run 44503460373 job 135506633262;
@@ -377,7 +472,13 @@ answers exactly this case.
 
 **The retry.** Every Gradle build a workflow invokes DIRECTLY — the E2E lanes'
 and `build-check.yml`'s — goes through `scripts/ci/build_apk_with_retry.sh`; a
-bare `flutter build apk` in a workflow is a C3 violation. (The exception is
+bare `flutter build apk` in a workflow is a C3 violation. Those builds are
+offline, where no resolution failure is retried (failure mode 6b); what follows
+is the deps job's `--resolve-only`, which runs the same engine with a 900 s
+budget and 12 attempts of its own (every pause past the ladder is 75 s, so the
+budget, not the count, ends a run of quick failures), any build run without
+`HAVEN_GRADLE_OFFLINE`, and an offline build's own network failures (rustup,
+cargo, Flutter's engine artifacts), which offline Gradle cannot print. (The exception is
 `release-build.yml`, which calls `scripts/build_release.sh`, and that script
 runs `flutter build` itself; a transient on a tag is a human re-run, not an
 in-job recovery. Its only retry is the widened in-Gradle window from
@@ -394,8 +495,9 @@ green build), and anything unclassified fails immediately with the build's own
 exit code. The wrapper case is separate because the wrapper runs before Gradle
 and prints Java's wording (`Server returned HTTP response code: 504 for URL:
 …/gradle-8.14-all.zip`, CI run 42392657873), which neither Gradle's own retry
-nor the resolution signatures can see. It appears only when the dependency
-cache, which carries `~/.gradle/wrapper`, was not restored. A 404 there
+nor the resolution signatures can see. It appears only where no set carries
+the distribution: the deps job's first resolution of a key, or a release
+build. A 404 there
 means a misnamed distribution and is not retried, and nor is a checksum
 mismatch, since the archive is pinned by `distributionSha256Sum`. The retry is
 safe because of the wrapper Flutter supplies (Gradle 2.10's jar): it deletes a
@@ -415,13 +517,14 @@ got before re-running:
 
 | The output carried | The annotation says | What to do |
 |---|---|---|
-| the wrapper's `Server returned HTTP response code: 408/429/5xx` for the distribution archive | the Gradle wrapper could not download the Gradle distribution; INFRASTRUCTURE, not a product failure | re-run; a recurrence means the dependency cache (which carries `~/.gradle/wrapper`) is not being restored |
-| `status code 429` | a repository rate-limited this runner; INFRASTRUCTURE, not a product failure | re-run on a different runner; a recurrence means the cache is not being restored |
+| the wrapper's `Server returned HTTP response code: 408/429/5xx` for the distribution archive | the Gradle wrapper could not download the Gradle distribution; INFRASTRUCTURE, not a product failure | re-run |
+| `status code 429` | a repository rate-limited this runner; INFRASTRUCTURE, not a product failure | re-run on a different runner |
 | `Could not find …` + `Searched in the following locations` | Gradle could not find a coordinate in any repository, and that is also what a wrong version prints | read the Gradle error FIRST — if this commit changed a dependency, no re-run will fix it |
 | neither | no HTTP status was reported, so the cause is not knowable from here | usually infrastructure, but check the diff for a dependency change |
 
 The original Gradle output is always printed above the annotation, unaltered;
-the annotation never reprints the coordinate itself.
+the online annotation never reprints the coordinate itself (the offline one of
+6b does, from Gradle's offline wording alone).
 
 ## Failure mode 7 — cold worker panics "android context was not initialized"
 
@@ -1315,7 +1418,7 @@ that differ from what that job's action steps declare. It also fails any
 emulator step whose `emulator-options` lacks `-no-window` (or is absent): the
 step verifies the headless emulator binary, so that is the one a lane must boot.
 
-## Failure mode 15b — "the Android NDK … could not be installed and verified" (infrastructure; no test ran)
+## Failure mode 15b — "the Android NDK (or CMake) … could not be installed and verified" (infrastructure; no test ran)
 
 **Symptom.** Any Android build step — an E2E lane's APK build or `build-check.yml`
 — reds before Gradle starts, with one annotation naming the NDK version, saying
@@ -1335,10 +1438,19 @@ retries the build budget allowed (they share its 180 s with the Gradle retries).
 Re-running is reasonable once; the same red in every Android job at once is an
 SDK-mirror outage.
 
+CMake 3.22.1 is provisioned the same way, after the NDK and under the same
+budget, with its own annotation ("the Android CMake 3.22.1 …"; a rejected
+attempt says `its cmake is missing or does not run`). AGP used to install it
+itself for the empty CMake project Flutter's `forceNdkDownload` points it at —
+and an OFFLINE AGP cannot: `[CXX1300] CMake '3.22.1' was not found in SDK,
+PATH, or by cmake.dir property`. `scripts/build_release.sh` provisions both
+through `build_apk_with_retry.sh --provision-only` when it builds offline (the
+Android launch gate's build mode).
+
 | rc | It means |
 |---|---|
 | 2 | the script is broken, not the lane: no `FLUTTER_ROOT`, no SDK root, no `sdkmanager`, Flutter's `val ndkVersion` line moved, or `haven/android/app/build.gradle.kts` stopped taking `ndkVersion = flutter.ndkVersion` — teach `ndk_required_version` the new source |
-| 3 | with that annotation: the NDK did not install and verify — infrastructure (without it, rc 3 is the build's own) |
+| 3 | with that annotation: the NDK or CMake did not install and verify — infrastructure (without it, rc 3 is the build's own) |
 
 ## Failure mode 16 — `Bad state: no wire-journal sentinel ack within 15s` on a run with no recorder
 

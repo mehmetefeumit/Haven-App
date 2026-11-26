@@ -82,14 +82,15 @@ jobs:
     # cap must clear the SUM of the step caps: below it, a run whose every step
     # is still inside its own cap can die here, and a job-cap death skips every
     # `if: failure()` step (e2e-android.yml states the rule). So: Build
-    # the runtime log scanner 10 + Build KeyPackage-rotation test APK 30 +
+    # the runtime log scanner 10 + Fetch 5 and Install 2 this run's Gradle dependencies + Build
+    # KeyPackage-rotation test APK 30 +
     # Provision the Android SDK 11 (derived in that script) + Create AVD
     # snapshot (on an AVD-cache miss) 15 + the drive step 42 (derived there) +
     # the most the work no step cap bounds has taken, 2.7 min over 31 runs of
     # this job (ci.yml, 2026-07-29..09-10; 1.0 of it the failure diagnostics,
-    # run 31868809387), taken as 3 = 111.
+    # run 31868809387) = 115 + 2.7 = 117.7 -> 118.
     # job-uncapped-minutes: 2.7 (31 runs, worst 31868809387)
-    timeout-minutes: 113
+    timeout-minutes: 118
     env:
       # R1 carries the whole scenario.
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
@@ -163,45 +164,35 @@ jobs:
         timeout-minutes: 10
         run: cargo build --release --manifest-path tooling/logscan/Cargo.toml
 
+      # This run's Gradle dependency set, resolved once and proved complete
+      # offline by android-gradle-deps.yml (the job this one `needs:`), so the
+      # build below runs with HAVEN_GRADLE_OFFLINE=1 and never meets the
+      # network: a Plugin Portal blip failed lanes at the build when each
+      # resolved its own (CI runs 45142774793, 45012283370). Before Setup
+      # Flutter, which pins the Flutter version the set was resolved with. Not
+      # `continue-on-error`: a lane without its set cannot build, and says so
+      # here (scripts/ci/check_gradle_build_hardened.sh).
+      - name: Fetch this run's Gradle dependencies
+        timeout-minutes: 5
+        uses: actions/download-artifact@v6
+        with:
+          name: gradle-deps
+          path: ${{ runner.temp }}/gradle-deps
+
+      - name: Install this run's Gradle dependencies
+        timeout-minutes: 2
+        run: bash scripts/ci/gradle_deps.sh unpack "${RUNNER_TEMP}/gradle-deps"
+
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
+          flutter-version: ${{ env.HAVEN_FLUTTER_VERSION }}
           cache: true
 
       - name: Get Flutter dependencies
         working-directory: haven
         run: flutter pub get
-
-      # Gradle resolves the buildscript classpath over the network BEFORE it
-      # compiles anything, so a cold ~/.gradle makes this lane fetch hundreds of
-      # POMs — and hosted runners share egress IPs, so Maven Central rate-limits
-      # a runner nobody here provoked. CI run 35622556197 job 106414462454 lost
-      # a whole lane to HTTP 429 on the classpath, with NO test run, while twelve
-      # sibling Android lanes built the same commit with zero 429s. A warm
-      # dependency cache REMOVES those requests; the classified retry in
-      # scripts/ci/build_apk_with_retry.sh is only the backstop for what is left.
-      #
-      # Restore-only. build-check.yml is the single writer of this key, so a lane
-      # that deletes or half-fills ~/.gradle cannot publish a cache the other
-      # lanes would then restore. The `restore-keys` prefix means a changed
-      # dependency set still starts from the last good cache instead of cold.
-      #
-      # `continue-on-error` because a cache is an optimisation, and a step that
-      # overruns its own `timeout-minutes` FAILS the job: without this, a slow
-      # or unavailable cache service reddens a lane that would otherwise have
-      # built cold and run every test.
-      - name: Restore Gradle dependency cache
-        uses: actions/cache/restore@v4
-        timeout-minutes: 2
-        continue-on-error: true
-        with:
-          path: |
-            ~/.gradle/caches/modules-2
-            ~/.gradle/wrapper
-          key: gradle-deps-${{ runner.os }}-${{ hashFiles('haven/android/**/*.gradle*', 'haven/rust_builder/**/*.gradle*', 'haven/android/gradle/wrapper/gradle-wrapper.properties', 'haven/pubspec.lock') }}
-          restore-keys: |
-            gradle-deps-${{ runner.os }}-
 
       # Build BEFORE the emulator boots (build-before-boot discipline). The
       # dedicated builder bakes BOTH relay URLs and the receive path; all three
@@ -214,6 +205,8 @@ jobs:
         # system image on a 72 GB runner (CI run 41322563075). The drive
         # installs the copy under /tmp and reads neither, so both go here,
         # inside this step's cap, before the SDK is provisioned.
+        env:
+          HAVEN_GRADLE_OFFLINE: "1"
         run: |
           bash ../tooling/e2e/ci/build-kp-rotation-apk.sh integration_test/kp_rotation_wire_test.dart
           bash ../tooling/e2e/ci/release-apk-build-outputs.sh /tmp/integration-apks

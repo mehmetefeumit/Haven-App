@@ -1058,6 +1058,7 @@ resolve_apk() {
     echo "ERROR: HAVEN_LIVE_SYNC must be exactly 'true' or 'false' (got '${HAVEN_LIVE_SYNC}')." >&2
     exit 2
   fi
+  # HAVEN_GRADLE_DEPS-EXEMPT: a local run's fallback; the CI lane stages the APKs build-integration-apks.sh made offline, so this build never runs there.
   ( cd "${HAVEN_DIR}" && flutter build apk \
       --debug \
       --target-platform android-x64 \

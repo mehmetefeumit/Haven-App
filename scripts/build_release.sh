@@ -51,7 +51,15 @@
 #   2. $STADIA_API_KEY env var                  (CI; written to a chmod-600 temp
 #                                                file so the key never hits argv)
 #
+# Offline (optional env): HAVEN_GRADLE_OFFLINE=1 builds from the local Gradle
+# dependency cache alone, after provisioning on CI the NDK and CMake an offline
+# AGP cannot install (step 3c). The Android launch gate's build mode sets it,
+# over the set android-gradle-deps.yml verified for its run; release-build.yml
+# never does (scripts/ci/check_gradle_build_hardened.sh).
+#
 # Exit codes: 0 ok | 1 bad args | 2 no usable key | 3 key is empty/placeholder
+#             | 4 (HAVEN_GRADLE_OFFLINE=1, CI) the NDK or CMake could not be
+#               provisioned — scripts/ci/build_apk_with_retry.sh's annotation says why
 
 set -euo pipefail
 
@@ -62,6 +70,7 @@ SYMBOLS_DIR="${HAVEN_DIR}/build/symbols"
 GUARD="${REPO_ROOT}/scripts/ci/check_no_committed_secrets.sh"
 PLACEHOLDER='STADIA_API_KEY_PLACEHOLDER'
 TMP_DEFINES=""
+OFFLINE_INIT=""
 
 log()  { printf '\033[1;34m[build_release]\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31m[build_release] FAIL:\033[0m %s\n' "$1" >&2; exit "${2:-1}"; }
@@ -72,6 +81,9 @@ fail() { printf '\033[1;31m[build_release] FAIL:\033[0m %s\n' "$1" >&2; exit "${
 cleanup() {
   if [[ -n "${TMP_DEFINES}" && -f "${TMP_DEFINES}" ]]; then
     rm -f "${TMP_DEFINES}"
+  fi
+  if [[ -n "${OFFLINE_INIT}" ]]; then
+    rm -f "${OFFLINE_INIT}"
   fi
 }
 trap cleanup EXIT
@@ -179,6 +191,25 @@ if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
   cp "${REPO_ROOT}/scripts/ci/maven-central-fallback.init.gradle.kts" \
     "${init_d}/haven-maven-central-fallback.init.gradle.kts"
 fi
+
+# --- 3c. HAVEN_GRADLE_OFFLINE=1 (the Android launch gate's build mode, never
+#         release-build.yml): build from this run's verified dependency set
+#         alone. Same switch as scripts/ci/build_apk_with_retry.sh, removed
+#         by cleanup(); and, first, the NDK and CMake an offline AGP cannot
+#         install for Flutter's forceNdkDownload (provisioned on CI only). ---
+case "${HAVEN_GRADLE_OFFLINE:-}" in
+  '') ;;
+  1)
+    # Its own codes (2, 3) mean "no usable key" and "placeholder key" here.
+    bash "${REPO_ROOT}/scripts/ci/build_apk_with_retry.sh" --provision-only \
+      || fail "the NDK or CMake an offline build needs could not be provisioned (see the annotation above)" 4
+    OFFLINE_INIT="${GRADLE_USER_HOME:-${HOME}/.gradle}/init.d/haven-gradle-offline.init.gradle.kts"
+    mkdir -p "$(dirname "${OFFLINE_INIT}")"
+    cp "${REPO_ROOT}/scripts/ci/gradle-offline.init.gradle.kts" "${OFFLINE_INIT}"
+    log "building OFFLINE from the Gradle dependency cache"
+    ;;
+  *) fail "HAVEN_GRADLE_OFFLINE must be 1 or empty, not '${HAVEN_GRADLE_OFFLINE}'" 1 ;;
+esac
 
 # --- 4. Build (release-gated: HAVEN_RELEASE_WRAPPER tells the native gate
 #        this is the sanctioned path) ---------------------------------------
