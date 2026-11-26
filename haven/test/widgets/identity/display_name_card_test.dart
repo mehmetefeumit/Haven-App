@@ -557,11 +557,14 @@ void main() {
       (tester) async {
         final profileService = MockProfileService()
           ..updateOwnProfileGate = Completer<void>();
+        final identityService = _FakeIdentityService(
+          initialDisplayName: 'Alice',
+        );
         final shown = ValueNotifier<bool>(true);
         addTearDown(shown.dispose);
         await tester.pumpWidget(
           buildHarness(
-            service: _FakeIdentityService(initialDisplayName: 'Alice'),
+            service: identityService,
             profileService: profileService,
             resolveIdentity: true,
             shown: shown,
@@ -590,6 +593,13 @@ void main() {
           1,
           reason: 'the local write succeeded, so the publish must not wait '
               'for the next resume',
+        );
+        expect(
+          identityService.setDisplayNameCalls,
+          ['Bob'],
+          reason:
+              'the local name follows the saved profile even when the '
+              'card left mid-save, or the two would disagree from then on',
         );
       },
     );
@@ -785,6 +795,178 @@ void main() {
         expect(find.text('Bob-Public'), findsNothing);
       },
     );
+  });
+
+  // ---------------------------------------------------------------------------
+  // One source of truth. The own profile row
+  // (`ProfileService.updateOwnProfile`, one SQLCipher transaction that also
+  // queues the publish) is the save; the local display name is its mirror.
+  // Save, leave, come back: the name shown is the one the profile row holds,
+  // whatever reached the mirror.
+  // ---------------------------------------------------------------------------
+
+  group('DisplayNameCard — the own profile is the one source of truth', () {
+    testWidgets(
+      'a save whose profile write fails leaves the local name untouched',
+      (tester) async {
+        final identityService = _FakeIdentityService(
+          initialDisplayName: 'Alice',
+        );
+        final profileService = MockProfileService()
+          ..shouldThrowOnUpdateOwnProfile = true;
+        await tester.pumpWidget(
+          buildHarness(
+            service: identityService,
+            profileService: profileService,
+            resolveIdentity: true,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.enterText(find.byType(TextField), 'Bob');
+        await tester.pump();
+        await tester.tap(_findSaveButtonFinder());
+        await tester.pumpAndSettle();
+
+        expect(
+          profileService.methodCalls.map((c) => c.method),
+          contains('updateOwnProfile'),
+          reason: 'anti-vacuity: the profile write was attempted',
+        );
+        expect(
+          identityService.setDisplayNameCalls,
+          isEmpty,
+          reason:
+              'a name the profile never took must not reach the local '
+              'name either, or the two stores disagree on the next launch',
+        );
+      },
+    );
+
+    testWidgets(
+      'a save whose local mirror fails after the profile took it is what the '
+      'next visit shows, and it is published',
+      (tester) async {
+        final profileService = MockProfileService(
+          ownProfile: Profile(
+            pubkeyHex: _testIdentity.pubkeyHex,
+            displayName: 'Alice',
+          ),
+        );
+        final shown = ValueNotifier<bool>(true);
+        addTearDown(shown.dispose);
+        await tester.pumpWidget(
+          buildHarness(
+            service: _FakeIdentityService(
+              initialDisplayName: 'Alice',
+              throwOnSet: true,
+            ),
+            profileService: profileService,
+            resolveIdentity: true,
+            shown: shown,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.enterText(find.byType(TextField), 'Bob');
+        await tester.pump();
+        await tester.tap(_findSaveButtonFinder());
+        await tester.pumpAndSettle();
+        expect(
+          profileService.syncOwnProfileCalls,
+          1,
+          reason: 'the profile row holds the edit, so it is published',
+        );
+
+        // Leave and come back.
+        shown.value = false;
+        await tester.pumpAndSettle();
+        shown.value = true;
+        await tester.pumpAndSettle();
+
+        expect(find.text('Bob'), findsOneWidget);
+        expect(find.text('Alice'), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'the name the own profile holds wins over a stale local name, even '
+      'when the profile loaded before the card mounted',
+      (tester) async {
+        final profileService = MockProfileService(
+          ownProfile: Profile(
+            pubkeyHex: _testIdentity.pubkeyHex,
+            displayName: 'Bob',
+          ),
+        );
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(
+              _FakeIdentityService(initialDisplayName: 'Alice'),
+            ),
+            identityProvider.overrideWith((_) async => _testIdentity),
+            profileServiceProvider.overrideWithValue(profileService),
+          ],
+        );
+        addTearDown(container.dispose);
+        // Another surface (a member avatar) already holds the own profile.
+        final held = container.listen(ownProfileProvider, (_, _) {});
+        addTearDown(held.close);
+        await container.read(ownProfileProvider.future);
+
+        await tester.pumpWidget(
+          UncontrolledProviderScope(
+            container: container,
+            child: const MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              home: Scaffold(body: DisplayNameCard()),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.text('Bob'), findsOneWidget);
+        expect(find.text('Alice'), findsNothing);
+      },
+    );
+
+    testWidgets('a save never shows the previous name again, not even for a '
+        'frame', (tester) async {
+      final profileService = MockProfileService(
+        ownProfile: Profile(
+          pubkeyHex: _testIdentity.pubkeyHex,
+          displayName: 'Alice',
+        ),
+      );
+      await tester.pumpWidget(
+        buildHarness(
+          service: _FakeIdentityService(initialDisplayName: 'Alice'),
+          profileService: profileService,
+          resolveIdentity: true,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.enterText(find.byType(TextField), 'Bob');
+      await tester.pump();
+      final shown = <String>[];
+      final controller = tester
+          .widget<TextField>(find.byType(TextField))
+          .controller!;
+      void record() => shown.add(controller.text);
+      controller.addListener(record);
+      addTearDown(() => controller.removeListener(record));
+
+      await tester.tap(_findSaveButtonFinder());
+      for (var i = 0; i < 20; i++) {
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+      await tester.pumpAndSettle();
+
+      expect(shown, isNot(contains('Alice')));
+      expect(find.text('Bob'), findsOneWidget);
+    });
   });
 }
 

@@ -20,7 +20,8 @@
 /// **Freshness model.** Haven holds no standing kind-0 subscription
 /// (migration plan §1.6/D3), so profile updates arrive only when something
 /// pulls them. Several layers do: cold start, circle select, app resume,
-/// roster change, a foreground anti-entropy timer, and an explicit refresh.
+/// opening the Identity page, roster change, a foreground anti-entropy timer,
+/// and the Circles page's explicit refresh.
 /// Each states its own staleness tolerance via `maxAge`
 /// (`constants/profile_refresh_tiers.dart`), so a trigger firing moments
 /// after another is a cheap no-op rather than a duplicate relay round trip.

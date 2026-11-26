@@ -20,7 +20,7 @@
 library;
 
 /// Tolerance for a user-visible, intent-driven refresh: cold start, circle
-/// select, app resume, and roster changes.
+/// select, app resume, opening the Identity page, and roster changes.
 ///
 /// Short enough that re-opening the app or switching circles picks up a
 /// rename, long enough that rapid relaunches or circle-flipping collapse into

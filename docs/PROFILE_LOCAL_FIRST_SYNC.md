@@ -228,6 +228,17 @@ neither starts nor queues one. Never from the background isolates.
   mirrored display name clears its mirror. A profile renamed under the earlier
   rule — `name` left at the onboarding pseudonym — reads as a deliberate handle
   and is not healed.
+- **The Identity page shows the own profile row.** `DisplayNameCard` writes
+  the row (`save_my_profile_local`, which also queues the publish) first and
+  the device-local display name after it, as its mirror: a failed save changes
+  neither, and a kill between the two leaves the row, which the card prefers
+  over the local name and the sync publishes. A provider reloading after a
+  save is never read for its pre-save value, so the old name is never shown
+  again, not even for a frame (`display_name_card_test.dart`, "the own profile
+  is the one source of truth"). The page has no refresh action (owner-directed
+  2026-11-26): opening it runs the union profile refresh at the interactive
+  tier, which picks up an edit made on another device and never asks for the
+  own pubkey alone.
 - Staging never arms the retraction gate (picture rows with an empty URL do not
   count) and never disarms it (a seen kind-0 with `event_created_at > 0` counts).
 - Everything uploaded went through `process_own_avatar` (private fields on

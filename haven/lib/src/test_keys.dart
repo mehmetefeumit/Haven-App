@@ -330,10 +330,6 @@ abstract final class WidgetKeys {
   /// (save / spinner / check / retry) without coupling to a text label.
   static const Key displayNameSaveButton = Key('display_name_save_button');
 
-  /// Refresh [IconButton] on the Identity page (forces a network re-fetch of
-  /// the user's own public profile).
-  static const Key identityRefreshButton = Key('identity_refresh_button');
-
   // ---------------------------------------------------------------------------
   // Member detail sheet
   // ---------------------------------------------------------------------------

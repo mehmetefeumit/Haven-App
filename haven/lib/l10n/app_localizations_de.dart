@@ -1723,10 +1723,6 @@ class AppLocalizationsDe extends AppLocalizations {
       'Dein Anzeigename und dein Foto sind für jeden im Nostr-Netzwerk sichtbar, nicht nur für Mitglieder deiner Kreise. Mach nur das öffentlich, womit du dich wohlfühlst.';
 
   @override
-  String get identityRefreshProfileTooltip =>
-      'Öffentliches Profil aktualisieren';
-
-  @override
   String get identityAdvancedExportError =>
       'Der geheime Schlüssel konnte nicht exportiert werden. Bitte versuche es erneut.';
 

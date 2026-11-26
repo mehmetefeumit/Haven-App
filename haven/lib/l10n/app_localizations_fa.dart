@@ -1696,9 +1696,6 @@ class AppLocalizationsFa extends AppLocalizations {
       'نام نمایشی و عکس تو برای هر کسی روی شبکهٔ Nostr دیده می‌شوند، نه فقط اعضای حلقه‌هایت. فقط چیزهایی را به اشتراک بگذار که با عمومی‌شدنشان راحت هستی.';
 
   @override
-  String get identityRefreshProfileTooltip => 'تازه‌سازی نمایهٔ عمومی';
-
-  @override
   String get identityAdvancedExportError =>
       'استخراج کلید خصوصی ناموفق بود. لطفاً دوباره تلاش کن.';
 

@@ -403,7 +403,6 @@
   "identityAdvancedSubtitle": "Chave pública, chave secreta, excluir",
   "profileIsPublicNoticeTitle": "Seu perfil é público",
   "profileIsPublicNoticeBody": "Seu nome de exibição e sua foto ficam visíveis para qualquer pessoa na rede Nostr, não apenas para os membros dos seus círculos. Compartilhe apenas o que você se sentir à vontade para tornar público.",
-  "identityRefreshProfileTooltip": "Atualizar perfil público",
   "identityAdvancedExportError": "Falha ao exportar a chave secreta. Tente de novo.",
   "identityAdvancedDeleteTitle": "Excluir identidade?",
   "identityAdvancedDeleteBody": "Isso exclui sua identidade e todos os dados dos círculos deste telefone. Tudo o que já foi publicado com ela permanece onde está: seu nome e suas chaves nos relays que os têm, e sua foto em qualquer host de imagens para o qual tenha sido enviada. Certifique-se de ter feito o backup da sua chave secreta caso queira recuperar sua identidade.",

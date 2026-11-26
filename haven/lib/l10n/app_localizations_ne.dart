@@ -1708,10 +1708,6 @@ class AppLocalizationsNe extends AppLocalizations {
       'तपाईंको प्रदर्शन नाम र फोटो Nostr सञ्जालमा जो कसैलाई पनि देखिन्छन्, तपाईंका सर्कलका सदस्यलाई मात्र होइन। सार्वजनिक बनाउन तपाईं सहज हुनुहुने कुरा मात्र साझा गर्नुहोस्।';
 
   @override
-  String get identityRefreshProfileTooltip =>
-      'सार्वजनिक प्रोफाइल ताजा गर्नुहोस्';
-
-  @override
   String get identityAdvancedExportError =>
       'गोप्य कुञ्जी निर्यात गर्न सकिएन। कृपया फेरि प्रयास गर्नुहोस्।';
 

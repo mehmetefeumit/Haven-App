@@ -415,9 +415,11 @@ the coverage run).
   `map_shell.dart` `_onResumed()`, roster change (`invitation_card.dart` accept
   path + `onGroupUpdated` in `service_providers.dart`), the foreground-only
   anti-entropy timer (4th timer in `maintenance_scheduler_provider.dart`), and the
-  forced "Refresh circles" action on `circles_page.dart`. The Identity-page refresh
-  icon still forces an own-profile-only fetch (it needs the NIP-65 write-relay
-  merge base). No trigger runs in the background catch-up lane.
+  forced "Refresh circles" action on `circles_page.dart`. Opening the Identity
+  page runs the same union refresh at the interactive tier; its manual refresh
+  icon was removed 2026-11-26 (owner-directed: the page keeps itself current, and
+  an own-pubkey-only REQ would label the local user among the union requests). No
+  trigger runs in the background catch-up lane.
 
 ### 6.3 UI
 

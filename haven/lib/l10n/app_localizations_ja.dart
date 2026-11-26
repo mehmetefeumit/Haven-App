@@ -1636,9 +1636,6 @@ class AppLocalizationsJa extends AppLocalizations {
       'あなたの表示名と写真は、サークルのメンバーだけでなく、Nostr ネットワーク上の誰からも見えます。公開しても差し支えないものだけを共有してください。';
 
   @override
-  String get identityRefreshProfileTooltip => '公開プロフィールを更新';
-
-  @override
   String get identityAdvancedExportError => '秘密鍵を書き出せませんでした。もう一度お試しください。';
 
   @override

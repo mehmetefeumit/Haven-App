@@ -1701,9 +1701,6 @@ class AppLocalizationsUr extends AppLocalizations {
       'آپ کا ظاہری نام اور تصویر Nostr نیٹ ورک پر کسی کو بھی نظر آتے ہیں، صرف آپ کے حلقوں کے ارکان کو نہیں۔ صرف وہی شیئر کریں جسے عوامی کرنے میں آپ راحت محسوس کریں۔';
 
   @override
-  String get identityRefreshProfileTooltip => 'عوامی پروفائل تازہ کریں';
-
-  @override
   String get identityAdvancedExportError =>
       'خفیہ کلید برآمد کرنے میں ناکامی۔ براہِ کرم دوبارہ کوشش کریں۔';
 

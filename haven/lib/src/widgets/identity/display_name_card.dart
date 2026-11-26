@@ -44,9 +44,13 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
   void initState() {
     super.initState();
     _controller.addListener(_onTextChanged);
-    // If the provider already has data when we mount, seed synchronously
-    // so the very first paint shows the user's name (not an empty field).
-    ref.read(displayNameProvider).whenData(_seedSilently);
+    // Seed synchronously from whatever is already loaded, so the very first
+    // paint shows the user's name (not an empty field) — and the profile's
+    // name if it is held already: no listener reports a value that landed
+    // before this card mounted.
+    if (ref.read(displayNameProvider).hasValue || _profileName() != null) {
+      _seedSilently(_shownName());
+    }
   }
 
   @override
@@ -101,27 +105,23 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
     final textDirection = Directionality.of(context);
     final l10n = AppLocalizations.of(context);
     final syncController = ref.read(ownProfileSyncProvider.notifier);
+    final identityService = ref.read(identityServiceProvider);
+    final profileService = ref.read(profileServiceProvider);
     setState(() => _status = SaveStatus.saving);
     try {
-      await ref
-          .read(identityServiceProvider)
-          .setDisplayName(text.isEmpty ? null : text);
-      if (!mounted) return;
-      ref.invalidate(displayNameProvider);
-      // ALWAYS also merge the edit onto the LOCAL public-profile cache —
-      // saving is unconditional (public-by-default, owner-directed
-      // 2026-07-16, matching White Noise), no consent gate. This is now a
-      // fast, local-only write (`ProfileService.updateOwnProfile` no longer
-      // touches a relay); the sync below is what actually
-      // publishes, in the background.
-      await ref
-          .read(profileServiceProvider)
-          .updateOwnProfile(displayName: text);
-      // The local write is done: publish even if the card is gone, since
-      // `ref` is unusable then.
+      // The profile row first: one local SQLCipher transaction that both
+      // holds the edit and queues its publish (unconditional — public by
+      // default, owner-directed 2026-07-16), so it is the save. The local
+      // name only mirrors it: a failure here leaves both untouched, and a
+      // kill between the two leaves the row, which this card shows.
+      await profileService.updateOwnProfile(displayName: text);
+      // Publish even if the card is gone, since `ref` is unusable then.
       unawaited(syncController.sync());
+      await identityService.setDisplayName(text.isEmpty ? null : text);
       if (!mounted) return;
-      ref.invalidate(ownProfileProvider);
+      ref
+        ..invalidate(displayNameProvider)
+        ..invalidate(ownProfileProvider);
       unawaited(
         SemanticsService.sendAnnouncement(
           view,
@@ -179,27 +179,46 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
     return null;
   }
 
+  /// The name the own profile row holds, once loaded. Not while it reloads:
+  /// the value it carries then is the one from before the save that
+  /// invalidated it.
+  String? _profileName() {
+    if (!publicProfilesEnabled) return null;
+    final profile = ref.read(ownProfileProvider);
+    return profile.isLoading
+        ? null
+        : _preferredProfileName(profile.valueOrNull);
+  }
+
+  /// The profile row's name, else the local one: the row is what a save
+  /// writes first and what the sync publishes, so a local name it disagrees
+  /// with is stale.
+  String? _shownName() =>
+      _profileName() ?? ref.read(displayNameProvider).valueOrNull;
+
   @override
   Widget build(BuildContext context) {
     // Local (device-only) display name — always the first, fast seed source.
+    // Not while it reloads: `when` would hand over the value from before the
+    // save that invalidated it.
     ref.listen<AsyncValue<String?>>(displayNameProvider, (_, next) {
-      if (!_mayReseed) return;
+      if (!_mayReseed || next.isLoading) return;
       next.when(
-        data: (value) => setState(() => _seedSilently(value)),
+        data: (_) => setState(() => _seedSilently(_shownName())),
         error: (_, _) {
           // The local read failed (e.g. a SharedPreferences hiccup) — seed an
-          // empty, EDITABLE field rather than blocking the whole card (F2):
-          // once `_loaded` flips true here the loaded body always renders,
-          // never an uneditable error-only state.
-          if (!_loaded) setState(() => _seedSilently(null));
+          // EDITABLE field rather than blocking the whole card (F2): once
+          // `_loaded` flips true here the loaded body always renders, never
+          // an uneditable error-only state.
+          if (!_loaded) setState(() => _seedSilently(_profileName()));
         },
         loading: () {},
       );
     });
 
-    // The fetched public kind-0 profile is authoritative — reseed with it
-    // whenever it lands, honoring the same `_mayReseed` guard so a slower
-    // network fetch never clobbers an edit already in progress. Gated on
+    // The own profile row is authoritative — reseed with it whenever it
+    // lands, honoring the same `_mayReseed` guard so a slower read never
+    // clobbers an edit already in progress. Gated on
     // `publicProfilesEnabled` (the build-time kill switch for the
     // fetch/display machinery, not a user-facing opt-out — see
     // `feature_flags.dart`), not on any consent state — publishing itself is
@@ -207,7 +226,7 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
     // so there is no error branch to handle here.
     if (publicProfilesEnabled) {
       ref.listen<AsyncValue<Profile?>>(ownProfileProvider, (_, next) {
-        if (!_mayReseed) return;
+        if (!_mayReseed || next.isLoading) return;
         final fetchedName = _preferredProfileName(next.valueOrNull);
         if (fetchedName != null) setState(() => _seedSilently(fetchedName));
       });

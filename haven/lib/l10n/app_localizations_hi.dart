@@ -1702,10 +1702,6 @@ class AppLocalizationsHi extends AppLocalizations {
       'आपका प्रदर्शन नाम और फ़ोटो Nostr नेटवर्क पर किसी को भी दिखते हैं, केवल आपके सर्कलों के सदस्यों को ही नहीं। वही साझा करें जिसे सार्वजनिक करने में आप सहज हों।';
 
   @override
-  String get identityRefreshProfileTooltip =>
-      'सार्वजनिक प्रोफ़ाइल रीफ़्रेश करें';
-
-  @override
   String get identityAdvancedExportError =>
       'गुप्त कुंजी निर्यात करने में विफल। कृपया फिर कोशिश करें।';
 
