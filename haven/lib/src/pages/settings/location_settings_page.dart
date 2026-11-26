@@ -10,6 +10,7 @@ import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart' as geo;
+import 'package:haven/src/constants/location.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/background_location_provider.dart';
 import 'package:haven/src/providers/location_disclosure_provider.dart';
@@ -22,6 +23,7 @@ import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/widgets.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// Settings page for location sharing preferences.
 ///
@@ -194,6 +196,7 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage>
         if (!mounted) return;
         if (!disclosed) return;
         if (stepNow) {
+          await _recordAllTimeStepShown();
           await requestBackgroundLocation(allTime);
           if (!mounted) return;
         }
@@ -287,9 +290,17 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage>
       includeBackground: true,
       allTimeStep: status,
     );
+    await _recordAllTimeStepShown();
     if (agreed) await requestBackgroundLocation(allTime);
     if (!mounted) return;
     ref.invalidate(backgroundLocationStatusProvider);
+  }
+
+  /// Records that the all-time step was shown, whatever the answer, so
+  /// MapShell's consent step does not show it again at the next foreground.
+  Future<void> _recordAllTimeStepShown() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(kAndroidBackgroundLocationPromptedKey, true);
   }
 
   /// Re-opens the updated background-sharing notice for a user who accepted
@@ -307,6 +318,7 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage>
           force: true,
         );
     if ((agreed ?? false) && status.missing) {
+      await _recordAllTimeStepShown();
       await requestBackgroundLocation(allTime);
     }
     if (!mounted) return;

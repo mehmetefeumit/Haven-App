@@ -2399,6 +2399,12 @@ void main() {
       await tester.pumpAndSettle();
       expect(allTime.requests, 0);
       expect(note(), findsOneWidget);
+      final prefs = await SharedPreferences.getInstance();
+      expect(
+        prefs.getBool(kAndroidBackgroundLocationPromptedKey),
+        isTrue,
+        reason: 'a decline is never asked again automatically',
+      );
     });
 
     testWidgets('a grant made in system settings clears it on return', (
@@ -2445,6 +2451,12 @@ void main() {
         reason:
             'Play: the request must immediately follow the disclosure '
             "that explains it, and the step's 'Next' must be true",
+      );
+      final prefs = await SharedPreferences.getInstance();
+      expect(
+        prefs.getBool(kAndroidBackgroundLocationPromptedKey),
+        isTrue,
+        reason: "MapShell's consent step would show the step a second time",
       );
       expect(
         find.byType(AlertDialog),
