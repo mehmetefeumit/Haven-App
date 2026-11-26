@@ -3544,7 +3544,7 @@ Since M7-E, Haven schedules OS background wakes so a backgrounded/killed device
 can catch up on missed circle updates without a foreground session. The wake
 triggers differ per platform: **Android** — a WorkManager periodic task, which
 the OS runs at most every ~15 minutes (subject to Doze/battery); **iOS** —
-Significant-Location-Change relaunch (movement-triggered) plus a
+Significant-Location-Change or 200 m region-exit relaunch (movement-triggered) plus a
 `BGAppRefreshTask` floor (OS-discretionary timing). No push/FCM/APNs is used —
 that is an intentional privacy choice (a push gateway learning every peer's
 wake timing is strictly more metadata than a relay; the M7 architecture rejects
@@ -3591,6 +3591,106 @@ Each wake **receives first, makes no commit, and is consent-gated**:
   an unreadable one) declines the wake before any DB open, and the bootstrap
   loads the identity and bails on a missing one *before* opening `circles-v2.db`,
   so a post-logout wake cannot resurrect (or freshly create) a decryptable DB.
+
+**iOS: a location relaunch resumes the user's own sharing (owner-directed
+2026-11-26, OD-R1/OD-R3).** The wake handlers above stay receive-only:
+`HavenSLCHandler`, `HavenBGTaskHandler`, `catchup_service.dart` and
+`ios_background_catchup.dart` have no publish call site. What changed is the
+process iOS relaunches into the background for a location event — a
+significant change, or leaving the 200 m relaunch region centred on the last
+fix (`relaunchRegionRadiusMeters`, smaller than the earlier 500 m so a
+terminated Haven needs less movement to come back). `AppDelegate` marks it
+(`HavenLocationStreamHandler.launchedForLocation`, set only from
+`launchOptions[.location]` with the app in `.background`, cleared at the first
+foreground), keeps the BGTask floor scheduled on that launch too, and opens one
+background task (`haven.launch.share`, `beginLaunchWindow`) that bridges the
+catch-up sweep and the first publish; it ends at its expiry, when the session is
+cancelled, or at the first foreground. MapShell's mount
+(`ForegroundStartUpGate`) then decides what the first pause of that process
+owes, whatever lifecycle state the shell mounted under and whichever way that
+pause arrives: with background sharing on and the **current** background
+disclosure accepted (`MapShell.launchMayResume`: the consent loaded, then
+`backgroundResumeDisclosureAccepted`, then the roster awaited for at most
+`kConsentArmBound`), the pause — taken by the shell itself when iOS dispatches
+none — starts the native session background-capable
+(`GeolocatorLocationService.startBackgroundLaunchSession`, its one start site
+outside the foreground) and bursts at once over the burst plane of "iOS
+background sharing: presence only at publish instants (P4)" below; otherwise it
+starts nothing and the process stays receive-only. The native side refuses the
+start, and every other start from the background, unless
+`backgroundStartPermitted` holds: `launchedForLocation` AND Always
+authorization AND `HavenBackgroundSessionHandler.resumeConsented()` (the
+sharing preference, both disclosure flags, and the accepted version at least
+`kBgDisclosureResumeVersion`, held equal to Dart's `kBackgroundDisclosureVersion`
+by `check_ios_background_publish.sh` check 20). So a While-Using user is never
+resumed (iOS does not relaunch one either), and an acceptance of the older
+disclosure — which told the user a wake never sends — does not cover it: that
+user is shown the updated disclosure once, only at a foreground, and "Not now"
+keeps sharing while Haven runs and never resumes it by itself
+(`INV-L-RESUME-NEEDS-CURRENT-DISCLOSURE`). Before the first unlock after a
+restart, UserDefaults reads empty, so the predicate fails closed. The publish
+input is a Best fix from Haven's own session: the backgrounded branch of
+`getCurrentLocation` serves the cache or the native last Best fix, or — in a
+location-launched process with a live background-capable session — waits at
+most `kOneShotLocationTimeout` for that session's next fix
+(`_awaitNextBackgroundFix`), and otherwise refuses; the plugin one-shot stays
+unreachable from the background. A location seal is an application message,
+not a commit: the burst runs the same receive-before-seal, holds and pause
+teardown as any other, and Rule 13 is untouched. Both wake kinds share one Dart
+catch-up floor per process — five minutes on the monotonic clock
+(`catchupDue`), stamped only by a catch-up Dart answered, so a wake that found
+Dart not ready and fell back to a BGTask is not counted — while the region
+always re-centres. Only the launch's first pause starts a session: a later
+significant-change or region wake of a relaunched process that iOS has
+suspended again opens no launch window and runs the receive-only sweep, and
+nothing here claims it publishes. What a relay of the user's circles can now
+see is this device's kind-445 after Haven was closed, at a time set by the
+user's movement and by iOS rather than by the app being open — the owner's
+decision, disclosed in the consent dialog and the settings intro. Whether iOS
+relaunches an app the user force-quit, how long a session started from the
+background keeps the process executable, and what a relaunch costs in battery
+are device-only and DEFERRED (`docs/M7_BACKGROUND_SHARING.md` §6 items 2–2l;
+the cost is ESTIMATED in `docs/POWER_EFFICIENCY_PLAN.md` §6.5a).
+
+**Android: resume after a reboot or an app update (owner-directed 2026-11-26,
+OD-R2/OD-R3).** Haven's own `BootResumeReceiver` (not exported;
+`BOOT_COMPLETED` and `MY_PACKAGE_REPLACED` only — no `LOCKED_BOOT_COMPLETED`,
+since Haven's keys and databases live in credential-encrypted storage, and no
+unprotected `QUICKBOOT_POWERON`) replaces the plugin's `RebootReceiver`, which
+the manifest removes; `ForegroundTaskOptions` no longer sets `autoRunOnBoot` or
+`autoRunOnMyPackageReplaced`. It reads, in process and sending nothing: the
+sharing preference, the two disclosure flags and the accepted disclosure
+version (`FlutterSharedPreferences`), the plugin's service status, whether a
+Haven activity is started, and the live foreground and background location
+grants; and the in-app language code, only to choose the notice's string
+resources. `decideResume` (`ResumeRule.kt`) does nothing while Haven is
+visible, while the service runs, after Haven stopped it (the plugin status
+reads `API_STOP`: toggle off, identity deleted, a refused system start) or with
+sharing off; starts the service — the plugin's own `REBOOT` start — only when
+the CURRENT background disclosure is accepted, a foreground location grant is
+held and, on Android 11+, "Allow all the time" (`ACCESS_BACKGROUND_LOCATION`)
+is granted (Android 10 needs only the foreground grant); and otherwise posts one
+notification with fixed text from string resources (no name, count, circle or
+time; lock-screen visibility SECRET; one id, so it never stacks) whose tap
+opens Haven, which a start the OS refuses also falls back to. The background
+permission is requested at runtime on Android 11+ only, after the background
+disclosure carrying the "Allow all the time" step (`BackgroundLocation.kt`;
+when Android no longer shows its page, Haven opens its app-details settings
+page instead). The service's isolate re-applies the same rule
+(`SystemStartGate`, `decideSystemResume`) to every start it did not get from
+the UI — boot, update and `START_STICKY` restart — as the first thing its
+`onStart` awaits, before the idle flag, Rust, the keyring or any session, and
+stops without a notice when sharing is off or no identity is stored; so the
+Android 11–13 sticky restart that would run with no location grant posts the
+notice and stops. A started service then runs the same gates as any other
+cycle before collecting a fix. The receiver, the rule and the notice log
+nothing (`check_m7_native_wake_guards.sh` 14l). `RestartReceiver` stays
+disabled. A `START_STICKY` restart after a kill is proven on a device only with
+"Allow all the time" and the battery-optimisation exemption (the
+`e2e-android-resume.yml` lane's leg K); without the exemption Android 12+ may
+refuse it, and on 14+ without the background grant the plugin's start fails
+before any Dart runs, posting no notice. After a force-stop nothing of Haven's
+runs until the user opens it.
 
 Per-wake relay connections here are short-lived (one sweep, then shutdown) —
 this is the **no-foreground-service** background path (OS wakes that receive
@@ -5911,7 +6011,22 @@ Eleven residuals, none of them optional:
     the binding reads when the shell mounts, and where the launch settles.
     Closing them — starting a session only for a `resumed` that is not the
     synthesised one, or routing an iOS background launch with sharing on
-    through the pause branch — waits on an owner decision. Host-side, the
+    through the pause branch — waits on an owner decision, with one exception
+    the owner decided on 2026-11-26 (OD-R1). A process iOS launched for a
+    LOCATION event, with background sharing on and the current background
+    disclosure accepted, takes the pause whatever state it mounted under:
+    `ForegroundStartUpGate` reads the native `launchedForLocation`, then
+    `MapShell.launchMayResume`, and takes the pause once those resolve unless
+    a pause reached the shell first, which is handed the launch instead
+    (`takeLaunchSession`); `admitPause` keeps a `paused` iOS then dispatches
+    on top of it from running a second pause. Everything in this section
+    applies to that process, its first burst included ("Scheduled background
+    wakes (M7)" above). This is closed for location launches only: a location
+    relaunch the current disclosure does not cover takes no pause of its own,
+    and a BGTask launch none either, so both stay in the open cases above.
+    Every mount state and both orderings of a dispatched pause against the
+    launch's reads are driven through the binding
+    (`haven/test/pages/foreground_start_up_gate_test.dart`). Host-side, the
     handlers dispatched back to back are run through `MapShell`'s statics;
     what a shell mounted under `inactive` starts and arms is read from
     source; what one mounted under `paused` does is driven through the binding

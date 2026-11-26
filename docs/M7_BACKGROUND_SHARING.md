@@ -1,8 +1,9 @@
 # M7 — Background Location Sharing (self-owned background catch-up)
 
 **Status:** M7 + M7-E **DONE** (2026-07-05); flags **LIVE on both platforms**
-(`backgroundCatchupEnabled=true`, RebootReceiver `enabled="true"`, `autoRunOnBoot:true`, iOS
-mirror true-by-default). The only remaining item is a one-time physical-iPhone `BGAppRefreshTask`
+(`backgroundCatchupEnabled=true`, iOS mirror true-by-default). Since 2026-11-26 (owner-directed,
+OD-R2) Android's boot/update restart of the sharing service is Haven's own `BootResumeReceiver`
+under the resume rule, not the plugin's `RebootReceiver` + `autoRunOnBoot` (both removed). The only remaining item is a one-time physical-iPhone `BGAppRefreshTask`
 fire (§6 owner checklist — `BGTaskScheduler` cannot fire on the Simulator). Ships behind the
 compile-time `backgroundCatchupEnabled` flag; **`liveSyncEnabled` (the persistent live-sync engine)
 is M11-owned and was still `false` when M7 shipped** — M7 does not flip it. It has defaulted to
@@ -14,8 +15,11 @@ Migration context: `docs/WN_RELAY_EPOCH_SYNC_MIGRATION.md` (M7 ≈ the self-owne
 milestone; the former M3/M6/M8 docs are now appendices in that master plan). Siblings:
 `docs/M11_ROLLOUT.md`, `docs/E2E_TROUBLESHOOTING.md`.
 
-Architecture at a glance: **OS-scheduled-wake, single-process, receive-only. MIP-05 push REJECTED
-on privacy.** The device wakes itself and fetches from the same relays it already uses — zero new
+Architecture at a glance: **OS-scheduled-wake, single-process; every wake handler is receive-only.
+MIP-05 push REJECTED on privacy.** Since 2026-11-26 (owner-directed, OD-R1) a process iOS relaunches
+for a LOCATION event, under Always and the current background disclosure, also resumes the user's own
+sharing — not from a wake handler, but through MapShell's burst plane (`haven-core/SECURITY.md`
+"Scheduled background wakes (M7)"). The device wakes itself and fetches from the same relays it already uses — zero new
 observer, zero new metadata channel. The one hard problem — writer-exclusion — is solved by a
 process-global Rust `WRITER_LOCK` (§B). Nothing runs in the background after the user opts out (§C).
 
@@ -59,10 +63,14 @@ Third parties learn **exactly what foreground operation already reveals** — a 
 pubkey. Strict non-regression at the relay/third-party layer.
 - **Android:** `flutter_foreground_task` FGS (already integrated, `foregroundServiceType="location"`)
   owns the active window; a `WorkManager` ~15-min periodic floor that runs **only when the FGS is
-  dead**; `RebootReceiver` restarts the FGS after reboot when sharing is enabled.
+  dead**; `RebootReceiver` restarts the FGS after reboot when sharing is enabled. *(Superseded
+  2026-11-26, OD-R2: Haven's own `BootResumeReceiver` restarts it after a reboot or an update only
+  under the resume rule — current disclosure, location grants, "Allow all the time" on Android 11+ —
+  and otherwise posts a resume notice.)*
 - **iOS:** No push. Keep `UIBackgroundModes` + existing CLLocationManager retention; add
   Significant-Location-Change (SLC) relaunch + `BGAppRefreshTask` floor for the receive-only path.
-  OS-local; no server sees anything.
+  OS-local; no server sees anything. *(Since 2026-11-26, OD-R1: the wake handlers stay receive-only;
+  a location relaunch under Always with the current disclosure resumes sharing via the burst plane.)*
 
 **Accepted tradeoff:** worst-case latency bounded by the floor (Android ~15 min WorkManager minimum;
 iOS BGTask best-effort minutes–hours; SLC on ~500 m movement). Acceptable for a location app (peers
@@ -524,9 +532,9 @@ xmllint checks:
 |---|-----|
 | 14a | `const bool backgroundCatchupEnabled = true;` in `live_sync_provider.dart` |
 | 14b | `liveSyncEnabled` defaults to `true`: `defaultValue: true` within 3 lines of the `bool.fromEnvironment` declaration (`check_m7_native_wake_guards.sh`, check 14b). At M7-E this pinned `= false`; M11 Phase B flipped the flag and updated the check with it |
-| 14c | RebootReceiver `android:enabled="true"` |
+| 14c | RebootReceiver `android:enabled="true"` — *rewritten 2026-11-26 (OD-R2): the plugin RebootReceiver is `tools:node="remove"` and `.BootResumeReceiver` is `exported="false"` filtering exactly BOOT_COMPLETED and MY_PACKAGE_REPLACED* |
 | 14d | RestartReceiver STILL `android:enabled="false"` AND carries `tools:node="replace"` |
-| 14e | `autoRunOnBoot: true` present in executable code of `background_location_manager.dart` |
+| 14e | `autoRunOnBoot: true` present in executable code of `background_location_manager.dart` — *rewritten 2026-11-26: `autoRunOnBoot` and `autoRunOnMyPackageReplaced` are ABSENT; checks 14j–14n (no `stopWithTask`, the resume rule's keys, the notice's fixed text and silent logging, the plugin version pin, the system-start gate first in `onStart`) were added with it* |
 | 14f | Worker terminates in the chokepoint: `runCatchup(isBackgroundWake: true` in executable worker code (stub gone) |
 | 14g | Pending-wipe gate present: `kPendingMlsWipeKey` read in executable worker code, positioned BEFORE the `runCatchup(` line |
 | 14h | (A8) pin `writeCatchupEnabledMirror()` + `registerIosBackgroundCatchupHandler(` call-sites in executable `main.dart` |
@@ -584,12 +592,16 @@ kill; does NOT enter stopped state; jobs survive).
   `getprop sys.boot_completed`=1 (300 s bound, each read bounded) → `wm dismiss-keyguard` best-effort → restart host
   logcat capture → **bounded poll** for the SystemJobService job listed again (A6: WorkManager reboot
   survival is via its own `RescheduleReceiver` + Room DB, `setPersisted(false)`, NOT persisted
-  JobScheduler jobs — the job may appear seconds-to-tens-of-seconds after boot) → assert RebootReceiver
-  runtime-resolvable for BOOT_COMPLETED (`cmd package query-receivers … | grep RebootReceiver`;
-  fallback `dumpsys package`) — runtime proof of manifest flip #2 AND that the plugin's intent-filter
-  survived the merge → `logcat -c` → force-run → assert `sweep complete` (post-boot cold wake works).
-  *The FGS-restart-on-boot (autoRunOnBoot) assert is NOT in CI* (needs a visible-activity enable flow
-  + `ACCESS_BACKGROUND_LOCATION`) → §5 step 7 local runbook. **Correction (2026-08-01):** this line
+  JobScheduler jobs — the job may appear seconds-to-tens-of-seconds after boot) → assert
+  `BootResumeReceiver` runtime-resolvable for BOOT_COMPLETED **and** MY_PACKAGE_REPLACED
+  (`cmd package query-receivers … -a <action>`; fallback `dumpsys package`) and the plugin's
+  `RebootReceiver` ABSENT from the installed package (`tools:node="remove"`, owner-directed
+  2026-11-26, OD-R2) → `logcat -c` → force-run → assert `sweep complete` (post-boot cold wake works).
+  *The FGS restart itself is not asserted here*: since 2026-11-26 it is the separate
+  `e2e-android-resume.yml` lane (`tooling/e2e/ci/run-android-resume.sh`, legs U1 U2 B1 B2 U3 K: the
+  resume notice after an update without "Allow all the time", a SYSTEM start that publishes after an
+  update and after a reboot with it, the notice again after a reboot with it revoked, and a sticky
+  restart after a SIGKILL with the battery-optimisation exemption). **Correction (2026-08-01):** this line
   previously said `pm grant` "cannot grant [ACCESS_BACKGROUND_LOCATION] on API 30+". That is false.
   The permission is `hardRestricted` in AOSP, but `adb install` sets
   `INSTALL_ALL_WHITELIST_RESTRICTED_PERMISSIONS` by default (only `--restrict-permissions` clears
@@ -846,7 +858,7 @@ until [ "$(adb shell getprop sys.boot_completed | tr -d '\r')" = "1" ]; do sleep
 adb shell wm dismiss-keyguard || true
 adb shell dumpsys jobscheduler | grep com.oblivioustech.haven          # bounded poll (A6)
 adb shell cmd package query-receivers --components -a android.intent.action.BOOT_COMPLETED \
-  | grep RebootReceiver                                                # receiver live
+  | grep BootResumeReceiver                                            # receiver live
 adb logcat -c && adb shell cmd jobscheduler run -f -n androidx.work.systemjobscheduler \
   com.oblivioustech.haven <jobId>
 adb logcat -v time | grep -m1 'sweep complete'                         # post-boot cold wake
@@ -858,15 +870,25 @@ adb logcat -v time | grep -m1 'sweep complete'                         # post-bo
 # 6. Secret scan of everything captured
 bash ../tooling/e2e/ci/scan-logs-for-secrets.sh /tmp/local-m7-logs/
 
-# 7. FGS restart-on-boot (autoRunOnBoot) — LOCAL-ONLY (needs the real enable flow):
-#    install the plain app APK, onboard, Settings→Location→enable background sharing
-#    (grants ACCESS_BACKGROUND_LOCATION via the Settings flow), verify the FGS notification,
-#    `adb reboot`, wait for boot, then:
+# 7. FGS resume after a reboot or an update (BootResumeReceiver, owner-directed 2026-11-26) —
+#    CI runs this as e2e-android-resume.yml; locally: install the plain app APK, onboard,
+#    Settings→Location→enable background sharing. The enable flow shows the background
+#    disclosure with the "Allow all the time" step and then, on Android 11+, requests
+#    ACCESS_BACKGROUND_LOCATION alone over haven.app/background_location (Android opens its
+#    permission page; after repeated denials Haven opens its app-details page instead).
+#    Verify the FGS notification, `adb reboot` (or `adb install -r` for MY_PACKAGE_REPLACED),
+#    wait for boot, then:
 adb shell dumpsys activity services com.oblivioustech.haven | grep -i foreground
-#    EXPECT the flutter_foreground_task service resurrected (RebootReceiver + autoRunOnBoot).
-#    location-type FGS from BOOT_COMPLETED is permitted on API 34/35 only with bg-location granted.
+adb shell dumpsys notification | grep '|com.oblivioustech.haven|4832|'
+#    EXPECT, per ResumeRule.kt decideResume: "Allow all the time" granted (or Android 10 with a
+#    foreground grant) → the service runs and logcat shows
+#    `[BackgroundTask] onStart (starter=TaskStarter.system)`, no notice; not granted, or the
+#    updated background disclosure not accepted → no service, and the resume notice (id 4832,
+#    channel haven_resume_v1) is posted; sharing off or toggled off in Haven → neither.
 
-# 8. `adb root` BOOT_COMPLETED injection (optional faster iteration on google_apis images):
+# 8. `adb root` BOOT_COMPLETED injection (optional faster iteration on google_apis images).
+#    BootResumeReceiver is exported="false", so only a root shell's broadcast reaches it;
+#    prefer `adb install -r` (MY_PACKAGE_REPLACED) or a real reboot:
 adb root && adb shell am broadcast -a android.intent.action.BOOT_COMPLETED \
   -p com.oblivioustech.haven
 ```
@@ -1034,12 +1056,14 @@ tier and says which.
    retired with the plugin path). What varies with the toggle is
    `allowsBackgroundLocationUpdates`; what varies with foreground and motion is
    `desiredAccuracy`, between Best and 100 m.
-   Force-quit (swipe-kill) remains out of scope: no iOS app can continue timer-cadence
-   publishing after termination, and since P3 a relaunched process is receive-only BY
-   CONSTRUCTION on both paths — the native owner refuses a background-capable start from the
-   background, and the cold-cache shortcut reads the native lifecycle, so the plugin one-shot is
-   unreachable too. Only the receive-only SLC/region relaunch path (items 2 and 2b) survives a
-   termination, and only with Always.
+   Force-quit (swipe-kill): no iOS app continues timer-cadence publishing after termination.
+   Since 2026-11-26 (owner-directed, OD-R1) a process iOS RELAUNCHES for a location event —
+   items 2 and 2b, and only under Always — resumes this device's own sharing through the burst
+   plane when background sharing is on and the current (v2) background disclosure is accepted;
+   the native owner refuses every other background start, and the cold-cache shortcut still never
+   reaches the plugin one-shot. Under When-In-Use (this row) nothing is relaunched, so after a
+   force-quit sharing stays stopped until Haven is opened (item 2f). Whether iOS relaunches at all
+   after a user force-quit is item 2c.
 
    0c. **Stuck indicator on teardown (iOS 18 and 26).**
    *Setup:* run this immediately after 0a, and again immediately after 0b.
@@ -1072,13 +1096,23 @@ tier and says which.
    e -l objc -- (void)[[BGTaskScheduler sharedScheduler] _simulateExpirationForTaskWithIdentifier:@"app.haven.catchup"]
    ```
    **Expected:** clean expiration (`setTaskCompleted`), no crash, no watchdog kill.
-2. **SLC relaunch after termination.** With bg-sharing on + Always granted, swipe-kill the app (SLC
-   persists across termination). Move ~500 m+ (or Xcode *Debug → Simulate Location* / a GPX route).
+2. **SLC relaunch after termination — and a publish lands (amended 2026-11-26, OD-R1).**
+   **DEFERRED — no iPhone; STILL AUTHORITATIVE.** With bg-sharing on + Always granted + the v2
+   background disclosure accepted, end the process the way the SYSTEM does — a debug `exit(0)` hook,
+   not a swipe (a user force-quit is item 2c). Move ~500 m+ (or Xcode *Debug → Simulate Location* / a
+   GPX route).
    **Expected:** iOS relaunches Haven in the background with `launchOptions[.location]`; AppDelegate
-   restarts SLC monitoring; the pending event drives a catch-up sweep. Confirm a backgrounded peer
-   update was applied.
-2b. **Relaunch REGION after termination, where SLC is quiet.** Companion to item 2, and the
-   only way to exercise it: `HavenSLCHandler` now also monitors one ~500 m `CLCircularRegion`
+   restarts SLC monitoring, sets `launchedForLocation` and opens the `haven.launch.share` window; the
+   pending event drives a catch-up sweep, and a backgrounded peer update is applied; **and a kind-445
+   from this device lands on the relay within that wake** (MapShell's background-launch pause starts
+   the native session and bursts). Record the iOS build, the commit, the time from trigger to first
+   publish and the process lifetime (Console: the `"Location subscription"` assertion, `Suspending
+   task`), on iOS 17, 18 and 26. Then note whether publishing continues on the 72–168 s cadence or
+   stops when the background task ends — that observation is item 2j.
+2b. **Relaunch REGION after termination, where SLC is quiet — and a publish lands (amended
+   2026-11-26: radius 200 m, OD-R1).** **DEFERRED — no iPhone; STILL AUTHORITATIVE.** Companion to
+   item 2, and the only way to exercise it: `HavenSLCHandler` now also monitors one 200 m
+   (`relaunchRegionRadiusMeters`; 500 m until 2026-11-26) `CLCircularRegion`
    centred on the last delivered fix (re-centred on every SLC delivery), because SLC is driven
    by cell-tower transitions and a terminated app in a tower-sparse area can travel a long way
    before the OS calls anything "significant". Same gates as SLC (enable predicate + Always),
@@ -1086,8 +1120,8 @@ tier and says which.
    `runCatchup` channel. To test: with bg-sharing on + Always granted, swipe-kill the app,
    then use Xcode *Debug → Simulate Location* (or a real drive) to move **out of** the circle
    around where the app was last running. **Expected:** iOS relaunches Haven with
-   `launchOptions[.location]`, `locationManager(_:didExitRegion:)` fires, and a catch-up sweep
-   runs — same observable as item 2. Then verify the teardown: disable background sharing and
+   `launchOptions[.location]`, `locationManager(_:didExitRegion:)` fires, a catch-up sweep
+   runs and a kind-445 from this device lands — same observable as item 2. Then verify the teardown: disable background sharing and
    confirm the region is released (Xcode's *Debug → Location* with the app relaunched shows no
    further wakes; `stopMonitoring()` iterates `monitoredRegions` so an OS-restored region is
    released too).
@@ -1099,11 +1133,65 @@ tier and says which.
    OD4-d, and never a relaunch. Nothing
    in CI asserts that this region ever fires — only that it is armed and torn down with SLC
    (static guard + host tests). Treat item 2b as unverified until it is run here.
+2c. **Force-quit (swipe) then movement (new 2026-11-26).** **DEFERRED — no iPhone; STILL
+   AUTHORITATIVE.** Always, v2 accepted, sharing on; swipe Haven away, then move ≥ 500 m.
+   Best effort: record whether iOS relaunches at all (forum thread 826964 reports never on 26.4.2;
+   Apple's March 2026 statement says significant-change does) and, if it does, whether a publish
+   lands. The copy promises "not guaranteed"; this row decides nothing about the code.
+2d. **Battery dead or reboot (new).** **DEFERRED — no iPhone; STILL AUTHORITATIVE.** Always, v2,
+   sharing on; power the phone off and on. **Expected:** before the first unlock nothing runs (no
+   launch, no publish: `resumeConsented()` reads empty UserDefaults); after the unlock plus movement,
+   a relaunch and a publish.
+2e. **TestFlight or App Store update while backgrounded (new).** **DEFERRED — no iPhone; STILL
+   AUTHORITATIVE.** **Expected:** a relaunch on movement, then a publish. Record any stuck pill
+   (FB24182791; no code mitigation).
+2f. **While Using (new).** **DEFERRED — no iPhone; STILL AUTHORITATIVE.** Kill, then move.
+   **Expected:** no relaunch, no publish; the settings While-Using note is shown.
+2g. **v1-consent cohort (new).** **DEFERRED — no iPhone; STILL AUTHORITATIVE.** Install the
+   pre-2026-11-26 build, enable sharing, update, kill, move. **Expected:** the relaunch receives and
+   **publishes nothing** (no session: `LaunchSession.receiveOnly`, and the native predicate refuses);
+   the next open shows the re-confirm dialog once; after Agree, item 2 passes next time.
+2h. **Low Power Mode, and Background App Refresh off (new).** **DEFERRED — no iPhone; STILL
+   AUTHORITATIVE.** Record whether relaunches happen (an archived Apple document says they are
+   suppressed; UNCONFIRMED).
+2i. **Indicator during a relaunch (new).** **DEFERRED — no iPhone; STILL AUTHORITATIVE.** The pill
+   until the iOS 18 diagnostic confirms Always, then the arrow (OD1); on iOS 17 the pill throughout.
+2j. **Lifetime of a session started from the background (new).** **DEFERRED — no iPhone; STILL
+   AUTHORITATIVE.** Does the process stay executable (`"Location subscription"` held), or suspend
+   when `haven.launch.share` ends? It decides whether "starts sharing again" means continuously or
+   once per wake; the copy ("starts sharing again by itself … not guaranteed") covers both, and no
+   doc claims that a later wake of a suspended relaunched process publishes.
+2k. **`CLServiceSession(.always)` re-taken inside the launch window (new, iOS 18).** **DEFERRED — no
+   iPhone; STILL AUTHORITATIVE.** The diagnostics confirm Always after a relaunch.
+2l. **Catch-up floor (new).** **DEFERRED — no iPhone; STILL AUTHORITATIVE.** Drive for 10 min with
+   the app backgrounded. **Expected:** at most 2–3 `runCatchup` sweeps (debug os_log; `catchupDue`'s
+   five-minute floor), and the region still re-centres, so a relaunch at the next stop works.
+   **Battery:** ESTIMATED only (`docs/POWER_EFFICIENCY_PLAN.md` §6.5a); `docs/POWER_MEASUREMENT.md`
+   gets no row.
 3. **Opt-out + rollback sanity.** Disable background sharing. **Expected:** `stopSLC` +
    `cancelAllBGTasks` fire; repeat steps 1/2 and confirm nothing runs (no wake, no relay contact).
    Re-enable → resumes.
 4. **Locked-device wake.** Lock the phone soon after backgrounding; confirm no crash and a clean no-op
    or successful sweep per the keychain-accessibility note in `haven-core/SECURITY.md`.
+
+**Android rows (new 2026-11-26, OD-R2) — device behaviour no lane reaches.** Each is **DEFERRED —
+no device of that kind in CI; STILL AUTHORITATIVE** and needs a physical Android phone:
+- **A1 — the real permission page.** Enable background sharing on Android 11+: the disclosure
+  carrying the "Allow all the time" step, then Android's own location page for Haven (not a dialog);
+  choose the option, BACK, and the settings all-time advisory clears on return. Deny twice: the next
+  attempt opens Haven's app-details page instead. (Lane leg P was not implemented.)
+- **A2 — Android 11–13 sticky restart without "Allow all the time".** Kill the process; if the
+  system restarts the service, it posts the resume notice and stops (host-tested only; no lane runs
+  API 30–33).
+- **A3 — permission auto-revoke** (unused-app hibernation) interacting with the resume rule:
+  UNVERIFIED.
+- **A4 — OEM killers** (Samsung "Sleeping apps", Xiaomi Autostart): whether `BOOT_COMPLETED`
+  reaches the receiver at all.
+- **A5 — Android 15+ force-stop:** the notice's pending intent is cancelled; nothing runs until the
+  user opens Haven.
+- **Release checklist (Play Console):** the background-location permission declaration and its
+  video are required now that `ACCESS_BACKGROUND_LOCATION` is REQUESTED; the video shows
+  `LocationDisclosureDialog` with the all-time step, then the OS page.
 
 **Already covered — do NOT re-do here:** Android WorkManager wake / isolate bootstrap+decrypt / reboot
 re-arm / consent+pending-wipe no-ops / strfry silence → CI `e2e-background-catchup` lane + the local
@@ -1117,8 +1205,9 @@ A single revert commit flips the four live switches back and removes the two CI 
 assume them, restoring the exact pre-M7-E posture (which shipped green):
 1. `live_sync_provider.dart`: `backgroundCatchupEnabled = false` (re-add the ignore comment if analyze
    wants it).
-2. `AndroidManifest.xml`: RebootReceiver `enabled="false"`.
-3. `background_location_manager.dart`: remove `autoRunOnBoot: true`.
+2. `AndroidManifest.xml`: remove `BootResumeReceiver` (the plugin RebootReceiver is already
+   `tools:node="remove"` since 2026-11-26, and `autoRunOnBoot` is already gone).
+3. `background_location_manager.dart`: nothing (no boot option is set since 2026-11-26).
 4. `check_m7_native_wake_guards.sh`: revert checks 14a/14c/14e/14f/14g/14h/14i (14b/14d — the
    liveSync and RestartReceiver pins — stay; state-independent).
 5. `ci.yml`: remove the `e2e-background-catchup` fan-out entry (the lane's script self-guards on the flag
@@ -1160,8 +1249,10 @@ opt-out remains enforced even on stale builds.
 | NEW pending-wipe gate blocks w/ zero network | unit order tests + Phase C1 |
 | Gate order flag→consent→wipe→fgs→foreground | single order unit test + guard 14g |
 | Job survives reboot (WorkManager persistence) | Phase B dumpsys-after-boot (bounded poll, A6) |
-| RebootReceiver enabled + intent-filter intact at runtime | Phase B query-receivers + guard 14c + check 2 |
-| autoRunOnBoot restarts FGS after boot | runbook step 7 (local, deterministic) |
+| BootResumeReceiver resolvable for BOOT_COMPLETED + MY_PACKAGE_REPLACED, plugin RebootReceiver absent | Phase B query-receivers + guard 14c + `check_apk_resume_wiring.sh` (release APK) |
+| A reboot/update resumes the FGS only under the resume rule, else one notice | `e2e-android-resume.yml` legs U1 U2 B1 B2 U3 + `BootResumeTest.kt` + `background_resume_gate_test.dart` |
+| A sticky restart after a kill passes the same gate | lane leg K (with the background grant + battery exemption only) + gate unit tests |
+| An iOS location relaunch resumes sharing only under Always + v2 consent | host tests + `check_ios_background_publish.sh` 4d/6d/9b/20; device: §6 items 2–2l (DEFERRED) |
 | FGS-vs-worker & authoring-vs-sweep exclusion | Rust tests `write_lock.rs:128` / `manager.rs:9765` + gates 3–4 |
 | iOS mirror true + Swift handlers reachable | D7 sim target + plist assert |
 | iOS BGTask fires on hardware | owner checklist §6 (explicitly out of CI) |
@@ -1613,3 +1704,24 @@ nostr_group_id_hex=?` in the `delete_circle` cascade (`storage.rs:824-877`) = wi
   window across three files, the peer disposed first, the probe's control and range, the excuse's
   single source and exact width), mutation-tested; the probe proves itself on the runner in the
   wrapper's preflight.
+- 2026-11-26 — **owner-directed OD-R1/R2/R3/R4: sharing survives close, reboot and update.**
+  *iOS (OD-R1, OD-R4):* `INV-L-IOS-WAKES-RECEIVE-ONLY` is reversed and replaced by
+  `INV-L-IOS-RELAUNCH-RESUMES-ONLY-UNDER-ALWAYS-AND-CURRENT-CONSENT`. A process iOS relaunches for a
+  location event (`launchedForLocation`) takes MapShell's pause at mount whatever lifecycle state it
+  mounted under, and with sharing on and the v2 disclosure accepted starts the native session
+  background-capable (`startBackgroundLaunchSession`) and bursts; the native owner refuses every
+  background start except that one (`backgroundStartPermitted`: the launch, Always,
+  `resumeConsented()`), the wake handlers stay receive-only, and the plugin one-shot stays
+  unreachable. The relaunch region shrinks to 200 m and both wake kinds share a five-minute
+  catch-up floor per process. While-Using users get copy that states the limit and points to
+  Always; no `CLLocationUpdate.liveUpdates`. *Android (OD-R2):* the plugin `RebootReceiver` and
+  `autoRunOnBoot` are removed; `BootResumeReceiver` (BOOT_COMPLETED + MY_PACKAGE_REPLACED) applies
+  `decideResume`, starting the service or posting one resume notice; every system start of the
+  service passes `SystemStartGate` first; "Allow all the time" is requested after the disclosure on
+  Android 11+; a UI launch no longer stops a running service (the per-build stop removed, the
+  start/stop serialized). New lane `e2e-android-resume.yml`; the Android JVM unit tests run in
+  `build-check.yml`. *Consent (OD-R3):* the background disclosure is versioned
+  (`kBackgroundDisclosureVersion` = 2, `INV-L-RESUME-NEEDS-CURRENT-DISCLOSURE`); a user with an older
+  acceptance sees the updated text once, at a foreground, and "Not now" keeps sharing while Haven
+  runs but never resumes it by itself. §5 runbook steps 7–8 and §6 items 0b, 2 and 2b rewritten;
+  items 2c–2l and the Android rows A1–A5 added, all DEFERRED for want of hardware.

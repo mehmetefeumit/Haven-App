@@ -45,7 +45,9 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <!-- For BootResumeReceiver below, which resumes background sharing after
-         a reboot (or posts the resume notice when it may not). -->
+         a reboot or an app update (or posts the resume notice when it may
+         not); BOOT_COMPLETED needs this permission, MY_PACKAGE_REPLACED does
+         not. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <!-- Camera, for the QR scanner only (QrScanner.kt), asked for when the

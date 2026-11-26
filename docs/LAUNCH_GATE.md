@@ -107,6 +107,22 @@ v0.1.13/v0.1.14 dumps, which shipped ML Kit and that marker, fail) and
 resolves to the patched `third_party/geolocator_android`, the manifest still
 removes the marker, and the QR scanner is still registered on both platforms).
 
+### 1c. Boot/update resume wiring — `scripts/ci/check_apk_resume_wiring.sh`
+
+Added 2026-11-26 (owner-directed, OD-R2). Guard 14c of
+`check_m7_native_wake_guards.sh` holds the SOURCE manifest; what ships is the
+manifest the merger produces, so the same step that reads every release APK's
+merged manifest (`aapt2 dump xmltree`) and resource table
+(`aapt2 dump resources`) checks: R1, `com.oblivioustech.haven.BootResumeReceiver`
+is declared, not exported, and filters exactly `BOOT_COMPLETED` and
+`MY_PACKAGE_REPLACED`; R2, no `flutter_foreground_task` `RebootReceiver`
+survived the merge (`tools:node="remove"`); R3, the four string resources the
+receiver and the resume notice read by name (`fgs_notification_sharing`,
+`android_resume_notice_title`, `…_body`, `…_channel_name`) are in the APK. A
+violation is rc 1; an input that proves nothing is rc 2. `repo-guards.yml` runs
+its `--self-test`. What the receiver then DOES on a device is the
+`e2e-android-resume.yml` lane's.
+
 ### 2. The launch — `tooling/e2e/ci/run-launch-gate-android.sh`
 
 On an api-34 and an api-35 `google_apis` x86_64 emulator (one job each),
@@ -407,6 +423,7 @@ bash scripts/ci/check_apk_loadable.sh --self-test
 bash scripts/ci/check_apk_loadable.sh path/to/app-*-release.apk   # needs ANDROID_HOME
 bash scripts/ci/check_no_google_services.sh --self-test
 bash scripts/ci/check_no_google_services.sh path/to/app-*-release.apk   # needs ANDROID_HOME
+bash scripts/ci/check_apk_resume_wiring.sh --self-test
 python3 -I tooling/e2e/ci/ui-dump.py --self-test
 python3 -I tooling/e2e/ci/make-avatar-fixture.py --self-test
 bash tooling/e2e/ci/launch-gate-previous-apk.sh --self-test
