@@ -337,6 +337,27 @@ boot main#1/phase_b#1/wait_for_boot#1/sleep:2#1 charge BOOT_TIMEOUT + ADB_READ_S
 rearm-marker main#1/phase_b#1/wait_for_marker#1/sleep:2#1 charge JOB_REARM_TIMEOUT + 2
 negative-settle main#1/run_negative_phase#?/sleep:5#1 charge 5
 
+unit tooling/e2e/ci/run-android-resume.sh
+# The log-privacy gate over the drive log, over a logcat before any tail of it,
+# and over the whole evidence directory in the EXIT trap.
+logscan */lib:logscan_gate*#* charge @
+install */lib:install_*#* charge @
+drive */drive_target#1/timeout:DRIVE_TIMEOUT#1 charge DRIVE_TIMEOUT + DRIVE_KILL_AFTER_SECS
+# The GPS feed runs beside a leg's marker waits and is killed when they end.
+geo */start_geo#1/sleep:GEO_SECS#1 concurrent
+# Wall-clock loops (SECONDS < deadline): each read inside one falls inside its
+# window, and the last read can start just before the deadline and run its
+# whole bound, as can one more tick.
+notice-read */wait_for_notice#1/notice_posted#1/timeout:ADB_READ_SECS#1 within notice each read runs inside the notice loop's own window, which charges the last one
+notice */wait_for_notice#1/sleep:2#1 charge NOTICE_TIMEOUT + ADB_READ_SECS + 2
+marker */wait_for_marker#*/sleep:2#1 charge RESUME_TIMEOUT + 2
+restart-off */restart_guest#1/sleep:2#1 charge SHUTDOWN_TIMEOUT + 2
+boot-read */wait_for_boot#1/timeout:ADB_READ_SECS#1 within boot each read runs inside the boot loop's own window, which charges the last one
+boot */wait_for_boot#1/sleep:2#1 charge BOOT_TIMEOUT + ADB_READ_SECS + 2
+# One bounded adb read each: the service, the grant, the notice, the crash
+# buffer, the AVD name, the power-off and the process id.
+adb-read */timeout:ADB_READ_SECS#* charge ADB_READ_SECS
+
 # ---------------------------------------------------------------------------
 # macOS lanes: `nick-fields/retry` bounds each attempt, and `flutter test`
 # builds and runs the suite with no bound of its own, so there is no finite

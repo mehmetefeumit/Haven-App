@@ -218,6 +218,7 @@ declare -A RUNNER_PINS=(
   ['run-integration-tests.sh']='SELF-TEST FAIL (wiring): this runner echoes a captured log itself; only the AVD runner may, after its gate'
   ['run-relay-management.sh']='SELF-TEST FAIL (wiring): this runner echoes a captured log itself; only the AVD runner may, after its gate'
   ['run-m7-background-catchup.sh']='SELF-TEST FAIL (wiring): a captured log is echoed outside echo_log_tail/drive_target, i.e. before any gate'
+  ['run-android-resume.sh']='SELF-TEST FAIL (wiring): a captured log is echoed outside echo_log_tail/drive_target, i.e. before any gate'
   ['run-b1-fgs-publish.sh']='SELF-TEST FAIL (67): the drive log must be echoed exactly once, after the'
   ['run-b3-real-gps.sh']='_case "the drive log is echoed only after the log-privacy gate"'
   ['run-b5-permission-revocation.sh']='_case "the drive log is echoed only after the log-privacy gate"'

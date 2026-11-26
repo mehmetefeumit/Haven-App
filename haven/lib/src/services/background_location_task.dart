@@ -514,6 +514,13 @@ class BackgroundLocationTaskHandler extends TaskHandler {
   @visibleForTesting
   SystemStartGate? overrideSystemStartGate;
 
+  /// Test-only hook run once the bridge is up in this isolate. The resume
+  /// lane's process starts with no debug `ws://` relay opt-in (it has no
+  /// on-disk form), and the bridge cannot be initialised twice, so the opt-in
+  /// can only be installed here.
+  @visibleForTesting
+  void Function()? afterBridgeInitForTest;
+
   @override
   Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
     debugPrint('[BackgroundTask] onStart (starter=$starter)');
@@ -539,6 +546,7 @@ class BackgroundLocationTaskHandler extends TaskHandler {
 
       // 2. Initialize the platform keyring store (idempotent).
       await initKeyringStore();
+      afterBridgeInitForTest?.call();
 
       // 3. Resolve the data directory (same path as foreground isolate).
       final dataDir = await const PathProviderDataDirectory()
