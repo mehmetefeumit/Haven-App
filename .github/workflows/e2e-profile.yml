@@ -216,6 +216,7 @@ jobs:
           # Distinct cache key so this lane doesn't race the other Android e2e
           # jobs on the same cache entry.
           key: e2e-profile-android-x64
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # The runtime log scanner, release-built ONCE, before Flutter and the
       # emulator are resident (same reasoning as the APK build below). Capped
@@ -327,8 +328,8 @@ jobs:
         timeout-minutes: 11
         run: bash tooling/e2e/ci/provision-android-sdk.sh 34 google_apis x86_64
 
-      - name: AVD cache
-        uses: actions/cache@v4
+      - name: Restore AVD cache
+        uses: actions/cache/restore@v4
         id: avd-cache
         with:
           path: |
@@ -655,6 +656,22 @@ jobs:
         if: always()
         run: bash tooling/e2e/ci/stop-local-blossom.sh 3000
 
+      # Saved from main only (a pull request's run reads main's AVD and writes
+      # none, so it cannot evict one), and as actions/cache's own post step
+      # did: from a run that built the AVD on a miss and passed. A lost save is
+      # a cold snapshot next time, never a red lane.
+      - name: Save AVD cache
+        if: ${{ success() && github.ref == 'refs/heads/main' && steps.avd-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          # Shared snapshot key with the other Android e2e lanes (same
+          # api/arch/target/profile), so this lane restores their snapshot.
+          key: avd-api34-x86_64-google_apis-single-v1
+
   # ==========================================================================
   # e2e_profile_android_ui — the Identity-page photo trip through the REAL
   # system Photo Picker and uCrop with background sharing ON, on a debug build
@@ -744,6 +761,7 @@ jobs:
           # Distinct cache key so this lane doesn't race the other Android e2e
           # jobs on the same cache entry.
           key: e2e-profile-android-x64
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # The runtime log scanner, release-built ONCE, before Flutter and the
       # emulator are resident (same reasoning as the APK build below). Capped
@@ -1254,6 +1272,7 @@ jobs:
             tooling/e2e/local-blossom
             tooling/logscan
           key: e2e-profile-ios-sim
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # The runtime log scanner, release-built ONCE, before Flutter and the
       # simulator are resident. The runner seals and scans with it after the

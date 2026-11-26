@@ -90,7 +90,7 @@ jobs:
             haven-core
             tooling/logscan
           key: launch-gate-ios
-          save-if: ${{ github.ref_type != 'tag' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build the runtime log scanner
         timeout-minutes: 10

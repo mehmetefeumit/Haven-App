@@ -14,11 +14,11 @@
 #
 # All E2E lanes run in PARALLEL (each `needs:` only rust, and every Android
 # lane also gradle-deps, the run's offline Gradle dependency set, which runs
-# beside rust; the soak lane only rust-tooling, which writes its cache), so PR
-# wall-clock is bounded by the slowest lane, not the sum. haven-core's suite
-# gates no lane: it runs in rust-suite (stable, uninstrumented) and in
-# coverage (pinned, instrumented). The last job, `verdict`, is red unless
-# every other job succeeded.
+# beside rust; the soak lane only rust-tooling, which writes its cache on main
+# and restores it everywhere), so PR wall-clock is bounded by the slowest lane,
+# not the sum. haven-core's suite gates no lane: it runs in rust-suite (stable,
+# uninstrumented) and in coverage (pinned, instrumented). The last job,
+# `verdict`, is red unless every other job succeeded.
 
 name: CI
 

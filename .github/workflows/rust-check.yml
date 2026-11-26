@@ -81,6 +81,7 @@ jobs:
           workspaces: |
             haven-core
             tooling/logscan
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # `--locked` refuses to resolve if Cargo.lock no longer satisfies the
       # manifests, so the lock the repo guards read (check_mdk_supply_chain.sh,
@@ -198,6 +199,7 @@ jobs:
             haven-core
             tooling/logscan
           key: haven-core-suite
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # As in haven-core: the guarded lock is the built lock.
       - name: Resolve from the committed lockfile
@@ -251,6 +253,7 @@ jobs:
             haven/rust_builder
             tooling/logscan
           key: rust-builder
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # As in haven-core: the guarded lock is the built lock.
       - name: Resolve from the committed lockfile
@@ -341,6 +344,7 @@ jobs:
             tooling/e2e/local-blossom
             tooling/logscan
           key: e2e-tooling
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # As in haven-core: the guarded lock is the built lock.
       - name: Resolve from the committed lockfile
@@ -448,6 +452,7 @@ jobs:
         with:
           workspaces: tooling/logscan
           key: logscan-tooling
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # As in haven-core: the guarded lock is the built lock.
       - name: Resolve from the committed lockfile
@@ -628,6 +633,7 @@ jobs:
           # inside it rather than by a fixed debug/release list, so
           # `target/soak` is pruned like any other.
           shared-key: soak-crate
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # As in haven-core: the guarded lock is the built lock.
       - name: Resolve from the committed lockfile

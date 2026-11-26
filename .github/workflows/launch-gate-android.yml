@@ -130,7 +130,7 @@ jobs:
           workspaces: |
             haven-core
           key: launch-gate-android
-          save-if: ${{ github.ref_type != 'tag' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # The release to upgrade from, and the v0.1.13 baseline unless it IS that
       # release (true until a fixed release ships, v0.1.14 being yanked) or is
@@ -323,7 +323,7 @@ jobs:
           workspaces: |
             tooling/logscan
           key: launch-gate-android-scanner
-          save-if: ${{ github.ref_type != 'tag' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Release-built before the emulator is resident; the runner seals and
       # scans with it, and so does the pre-upload scan below.
@@ -525,7 +525,7 @@ jobs:
           workspaces: |
             tooling/logscan
           key: launch-gate-android-scanner
-          save-if: ${{ github.ref_type != 'tag' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Release-built before the emulator is resident; the runner seals and
       # scans with it, and so does the pre-upload scan below.

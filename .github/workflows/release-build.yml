@@ -166,9 +166,10 @@ jobs:
         with:
           workspaces: haven-core
           key: release-android
-          # A tag-scoped cache can never be restored (a later tag cannot read
-          # it, nor can main), and it evicts main's from the full 10 GB store.
-          save-if: ${{ github.ref_type != 'tag' }}
+          # Only main saves, as at every rust-cache here: a tag-scoped cache
+          # can never be restored (a later tag cannot read it, nor can main),
+          # and it evicts main's from the full 10 GB store.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -409,9 +410,10 @@ jobs:
         with:
           workspaces: haven-core
           key: release-ios
-          # A tag-scoped cache can never be restored (a later tag cannot read
-          # it, nor can main), and it evicts main's from the full 10 GB store.
-          save-if: ${{ github.ref_type != 'tag' }}
+          # Only main saves, as at every rust-cache here: a tag-scoped cache
+          # can never be restored (a later tag cannot read it, nor can main),
+          # and it evicts main's from the full 10 GB store.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2

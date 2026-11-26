@@ -104,6 +104,7 @@ jobs:
         with:
           workspaces: haven-core
           key: android-${{ matrix.arch }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # This run's Gradle dependency set, resolved once and proved complete
       # offline by android-gradle-deps.yml (the job this one `needs:`), so the
@@ -180,6 +181,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: haven-core
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2

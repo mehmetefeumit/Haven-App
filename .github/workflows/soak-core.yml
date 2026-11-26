@@ -121,9 +121,10 @@ jobs:
 
       # ONE `shared-key` with rust-check.yml's soak-tooling job, deliberately:
       # `key:` appends to a JOB-scoped key, which would give this lane its own
-      # cold build of the same crate. soak-tooling runs inside the `rust`
-      # dependency this job needs, so the cache is written before the lane
-      # starts.
+      # cold build of the same crate. soak-tooling runs inside ci.yml's
+      # `rust-tooling`, which this lane needs; on main it writes the cache
+      # before the lane starts, and elsewhere, saving nothing, the lane reads
+      # main's.
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
@@ -131,6 +132,7 @@ jobs:
             tooling/soak
             tooling/logscan
           shared-key: soak-crate
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Built before the first capture exists: an absent scanner is a broken
       # guard (rc 2), never a skipped scan.
@@ -240,6 +242,7 @@ jobs:
             tooling/soak
             tooling/logscan
           shared-key: soak-crate
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build the runtime log scanner
         timeout-minutes: 10
@@ -308,6 +311,7 @@ jobs:
             tooling/soak
             tooling/logscan
           shared-key: soak-crate
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build the runtime log scanner
         timeout-minutes: 10

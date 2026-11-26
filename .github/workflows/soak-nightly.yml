@@ -186,6 +186,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: tooling/logscan
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # C2: the backstop scan needs the scanner, and a scanner that is absent
       # is a refusal, never a skipped scan.

@@ -126,6 +126,7 @@ jobs:
           # Distinct cache key from the other E2E jobs so they don't race on
           # one entry; all build the same x86_64-linux-android target.
           key: e2e-permission-revocation-x64
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # The runtime log scanner, release-built ONCE, before Flutter and the
       # emulator are resident (the same reasoning as the APK build below). The
@@ -211,8 +212,8 @@ jobs:
         timeout-minutes: 11
         run: bash tooling/e2e/ci/provision-android-sdk.sh 34 google_apis x86_64
 
-      - name: AVD cache
-        uses: actions/cache@v4
+      - name: Restore AVD cache
+        uses: actions/cache/restore@v4
         id: avd-cache
         with:
           path: |
@@ -444,3 +445,20 @@ jobs:
       - name: Tear down strfry relay
         if: always()
         run: bash tooling/e2e/ci/stop-strfry.sh
+
+      # Saved from main only (a pull request's run reads main's AVD and writes
+      # none, so it cannot evict one), and as actions/cache's own post step
+      # did: from a run that built the AVD on a miss and passed. A lost save is
+      # a cold snapshot next time, never a red lane.
+      - name: Save AVD cache
+        if: ${{ success() && github.ref == 'refs/heads/main' && steps.avd-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          # Shared with the other Android E2E lanes: the AVD snapshot is
+          # byte-identical (same api/arch/target/profile), so this restores
+          # the snapshot they created instead of rebuilding it.
+          key: avd-api34-x86_64-google_apis-single-v1
