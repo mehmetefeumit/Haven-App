@@ -28,9 +28,9 @@ const double memberAvatarDiameter = 40;
 /// When [publicProfilesEnabled], watches the pubkey's public profile — self
 /// via [ownProfileProvider], others via [memberProfileProvider] — and renders
 /// `Profile.pictureBytes` via [HavenAvatar] when available. Falls back to an
-/// initials [CircleAvatar] when no picture is known, the provider is loading,
-/// or an error occurs. When [publicProfilesEnabled] is off, always renders
-/// the initials fallback (no fetching).
+/// initials [CircleAvatar] when no picture is known or none has been read yet
+/// (a failed re-read keeps the last one). When [publicProfilesEnabled] is
+/// off, always renders the initials fallback (no fetching).
 ///
 /// When [isCurrentUser] is `true`, the thumbnail is sourced from
 /// [ownProfileProvider] (the OWN-profile store) rather than
@@ -103,13 +103,14 @@ class MemberAvatar extends ConsumerWidget {
     // - others: the plain-pubkey-keyed member-profile store (D6 — no
     //   mlsGroupId component; the same pubkey resolves the same profile
     //   across every shared circle).
-    // Both providers are autoDispose — released when the avatar leaves the
-    // tree.
+    // The member store keeps a member's last-known picture for the
+    // identity's session, through remounts and failed re-reads.
     final thumbnailBytes = isCurrentUser
         ? ref.watch(ownProfileProvider).valueOrNull?.pictureBytes
         : ref.watch(memberProfileProvider(pubkey)).valueOrNull?.pictureBytes;
 
-    // On loading or error: show initials (no shimmer — bystander privacy).
+    // While no picture has been read: show initials (no shimmer — bystander
+    // privacy).
     // On data: show HavenAvatar with image bytes when non-null.
     //
     // Wrap the whole initials-or-image decision in a single AnimatedSwitcher
