@@ -74,6 +74,9 @@ class _AvatarFullscreenViewerState extends State<AvatarFullscreenViewer> {
                 child: Image.memory(
                   widget.imageBytes,
                   fit: BoxFit.contain,
+                  // A sharper copy replacing the first bytes must not blank
+                  // the photo while it decodes.
+                  gaplessPlayback: true,
                   errorBuilder: (context, error, stackTrace) =>
                       _buildDecodeError(context),
                 ),
@@ -108,11 +111,26 @@ class _AvatarFullscreenViewerState extends State<AvatarFullscreenViewer> {
 }
 
 /// Opens [AvatarFullscreenViewer] for [imageBytes] as a full-screen route.
-Future<void> showAvatarFullscreen(BuildContext context, Uint8List imageBytes) {
+///
+/// The route opens at once with [imageBytes]; [fullSize]'s bytes replace them
+/// when it completes, unless it yields `null`. Held by the route alone, they
+/// go when it is popped.
+Future<void> showAvatarFullscreen(
+  BuildContext context,
+  Uint8List imageBytes, {
+  Future<Uint8List?>? fullSize,
+}) {
   return Navigator.of(context).push(
     MaterialPageRoute<void>(
       fullscreenDialog: true,
-      builder: (_) => AvatarFullscreenViewer(imageBytes: imageBytes),
+      builder: (_) => fullSize == null
+          ? AvatarFullscreenViewer(imageBytes: imageBytes)
+          : FutureBuilder<Uint8List?>(
+              future: fullSize,
+              builder: (_, snapshot) => AvatarFullscreenViewer(
+                imageBytes: snapshot.data ?? imageBytes,
+              ),
+            ),
     ),
   );
 }

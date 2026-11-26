@@ -7,6 +7,7 @@
 library;
 
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -127,7 +128,10 @@ void main() {
     expect(await shown(), 'Bob');
 
     profiles.ownProfile = _row(displayName: '');
-    container.invalidate(ownProfileProvider);
+    container.read(memberProfileRefreshProvider.notifier).refreshRoster([
+      _identity.pubkeyHex,
+    ]);
+    await _settle();
 
     expect(await shown(), isNull);
   });
@@ -145,6 +149,120 @@ void main() {
     logs
       ..assertContains('[Identity] local display name not dropped')
       ..assertNoNeedles(['Alice Old', 'Bobby New', _identity.pubkeyHex]);
+  });
+
+  group('a row that cannot be read is not a row with no name', () {
+    test(
+      'the name already shown stays, and the failure names no one',
+      () async {
+        final logs = LogCapture.install();
+        build(row: _row(displayName: 'Bobby New'));
+        expect(await shown(), 'Bobby New');
+
+        // The store will not open (the session is handed to the foreground
+        // service) when the profile refresh asks again.
+        profiles.shouldThrowOnGetOwnProfileText = true;
+        container.read(memberProfileRefreshProvider.notifier).refreshRoster([
+          _identity.pubkeyHex,
+        ]);
+        await _settle();
+
+        expect(await shown(), 'Bobby New');
+        expect(container.read(displayNameProvider).hasError, isFalse);
+        logs
+          ..assertContains('[Identity] own profile row not read')
+          ..assertNoNeedles(['Bobby New', _identity.pubkeyHex]);
+      },
+    );
+
+    test('the local name is shown and kept, never dropped', () async {
+      build(
+        localName: 'Alice',
+        row: _row(displayName: 'Bob'),
+      );
+      profiles.shouldThrowOnGetOwnProfileText = true;
+
+      expect(await shown(), 'Alice');
+      expect(identity.localName, 'Alice');
+      expect(identity.setDisplayNameCalls, isEmpty);
+    });
+
+    test('with no name to keep, the read fails rather than claiming none, '
+        'and the next read that works shows the name', () async {
+      build(row: _row(displayName: 'Bob'));
+      profiles.shouldThrowOnGetOwnProfileText = true;
+
+      await expectLater(shown(), throwsA(isA<ProfileServiceException>()));
+
+      profiles.shouldThrowOnGetOwnProfileText = false;
+      container.read(memberProfileRefreshProvider.notifier).refreshRoster([
+        _identity.pubkeyHex,
+      ]);
+      await _settle();
+      expect(await shown(), 'Bob');
+    });
+
+    test("another identity's failed read never shows the previous one's "
+        'name', () async {
+      var current = _identity;
+      final other = Identity(
+        pubkeyHex: 'dd' * 32,
+        npub: 'npub1other',
+        createdAt: DateTime(2025),
+      );
+      profiles = MockProfileService(ownProfile: _row(displayName: 'Bob'));
+      container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(
+            LocalNameIdentityService(identity: _identity),
+          ),
+          identityProvider.overrideWith((_) async => current),
+          profileServiceProvider.overrideWithValue(profiles),
+        ],
+      );
+      addTearDown(container.dispose);
+      final held = container.listen(displayNameProvider, (_, _) {});
+      addTearDown(held.close);
+      expect(await shown(), 'Bob');
+
+      current = other;
+      profiles.shouldThrowOnGetOwnProfileText = true;
+      container.invalidate(identityProvider);
+
+      expect(await shown(), isNull);
+      expect(container.read(displayNameProvider).valueOrNull, isNull);
+    });
+  });
+
+  test('the name is read without the photo, so holding it does not hold the '
+      'photo', () async {
+    build(
+      row: Profile(
+        pubkeyHex: _identity.pubkeyHex,
+        displayName: 'Bob',
+        pictureBytes: Uint8List.fromList(const [0xFF, 0xD8, 0xFF]),
+      ),
+    );
+    // A surface shows the photo, then goes.
+    final photo = container.listen(ownProfileProvider, (_, _) {});
+    expect(
+      (await container.read(ownProfileProvider.future))?.pictureBytes,
+      isNotNull,
+    );
+    photo.close();
+    await _settle();
+
+    expect(await shown(), 'Bob');
+    expect(
+      container.exists(ownProfileProvider),
+      isFalse,
+      reason: 'the photo bytes are released while the name is still held',
+    );
+    expect(
+      profiles.methodCalls.where((c) => c.method == 'getOwnProfile').length,
+      1,
+      reason: 'only the photo surface read the profile with its picture',
+    );
   });
 }
 

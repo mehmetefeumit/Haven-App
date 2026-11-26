@@ -2086,7 +2086,7 @@
   },
   "memberNicknameSheetClear": "Clear nickname",
   "@memberNicknameSheetClear": {
-    "description": "Accessible label/tooltip on the clear (x) icon inside the nickname field in the member detail sheet; tapping it removes the member's local nickname at once, reverting to the profile-derived name."
+    "description": "Accessible label/tooltip on the clear (x) icon inside the nickname field in the member detail sheet; tapping it only empties the field; the nickname is removed when the emptied field is saved with the save button."
   },
   "memberNicknameSheetSavedAnnouncement": "Nickname saved",
   "@memberNicknameSheetSavedAnnouncement": {
@@ -2094,7 +2094,7 @@
   },
   "memberNicknameSheetClearedAnnouncement": "Nickname cleared",
   "@memberNicknameSheetClearedAnnouncement": {
-    "description": "Screen-reader announcement when a member's local nickname override is cleared."
+    "description": "Screen-reader announcement when saving an empty nickname field has removed a member's local nickname override."
   },
   "memberNicknameSheetSavedLabel": "Nickname saved",
   "@memberNicknameSheetSavedLabel": {

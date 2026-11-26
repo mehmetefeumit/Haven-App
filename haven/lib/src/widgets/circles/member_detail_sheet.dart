@@ -56,7 +56,14 @@ Future<void> showMemberDetailSheet(
         top: Radius.circular(HavenSpacing.base),
       ),
     ),
-    builder: (_) => MemberDetailSheet(member: member, isSelf: isSelf),
+    // The sheet is in the navigator's overlay, outside any Scaffold that
+    // would lift it above the keyboard.
+    builder: (sheetContext) => Padding(
+      padding: EdgeInsets.only(
+        bottom: MediaQuery.viewInsetsOf(sheetContext).bottom,
+      ),
+      child: MemberDetailSheet(member: member, isSelf: isSelf),
+    ),
   );
 }
 
@@ -88,6 +95,7 @@ class _MemberDetailSheetState extends ConsumerState<MemberDetailSheet> {
   late String _savedNickname = widget.member.displayName?.trim() ?? '';
   late final _nicknameController = TextEditingController(text: _savedNickname)
     ..addListener(_onNicknameChanged);
+  final _nicknameFocus = FocusNode();
   SaveStatus _status = SaveStatus.saved;
 
   @override
@@ -95,12 +103,17 @@ class _MemberDetailSheetState extends ConsumerState<MemberDetailSheet> {
     _nicknameController
       ..removeListener(_onNicknameChanged)
       ..dispose();
+    _nicknameFocus.dispose();
     super.dispose();
   }
 
   String get _shortNpub => NpubValidator.shortenForDisplay(widget.member.npub);
 
   bool get _isDirty => _nicknameController.text.trim() != _savedNickname;
+
+  VoidCallback? get _save => (_isDirty && _status != SaveStatus.saving)
+      ? () => _setNickname(_nicknameController.text.trim())
+      : null;
 
   void _onNicknameChanged() {
     // Rebuild either way: the clear icon follows the text. A keystroke during
@@ -133,11 +146,14 @@ class _MemberDetailSheetState extends ConsumerState<MemberDetailSheet> {
     );
   }
 
-  Future<void> _clearNickname() async {
+  /// Empties the field only: clearing "Mom" to type "Mum" must not delete
+  /// the saved nickname — saving the empty field does. The field takes focus:
+  /// the next keystroke lands in it, and a screen reader on the clear button,
+  /// which the emptied field no longer shows, has the focused field to move
+  /// to rather than nothing.
+  void _clearNickname() {
     _nicknameController.clear();
-    // Only unsaved text was showing: emptying the field is the whole job.
-    if (_savedNickname.isEmpty) return;
-    await _setNickname('');
+    _nicknameFocus.requestFocus();
   }
 
   Future<void> _setNickname(String nickname) async {
@@ -243,7 +259,9 @@ class _MemberDetailSheetState extends ConsumerState<MemberDetailSheet> {
     }
 
     return SafeArea(
-      child: Padding(
+      // Scrolls when the keyboard and a large text scale leave too little
+      // room; the focused field is scrolled into view.
+      child: SingleChildScrollView(
         padding: const EdgeInsets.fromLTRB(
           HavenSpacing.base,
           HavenSpacing.sm,
@@ -278,6 +296,12 @@ class _MemberDetailSheetState extends ConsumerState<MemberDetailSheet> {
                     ? effectiveName.characters.first.toUpperCase()
                     : null,
                 publicKey: member.pubkey,
+                // The own photo shown is already the full-size one.
+                loadFullSize: widget.isSelf
+                    ? null
+                    : () => ref
+                          .read(profileServiceProvider)
+                          .getMemberPicture(member.pubkey),
               ),
               title: Text(
                 effectiveName,
@@ -305,12 +329,15 @@ class _MemberDetailSheetState extends ConsumerState<MemberDetailSheet> {
                     child: TextField(
                       key: WidgetKeys.memberNicknameField,
                       controller: _nicknameController,
+                      focusNode: _nicknameFocus,
                       maxLength: 64,
                       // A petname is a contact name kept only on this device;
                       // the keyboard learned-word dictionary is outside
                       // Haven's encrypted storage and its logout wipe.
                       enableIMEPersonalizedLearning: false,
                       autofillHints: kNoAutofill,
+                      textInputAction: TextInputAction.done,
+                      onSubmitted: (_) => _save?.call(),
                       buildCounter:
                           (
                             _, {
@@ -329,9 +356,7 @@ class _MemberDetailSheetState extends ConsumerState<MemberDetailSheet> {
                                 key: WidgetKeys.memberNicknameClear,
                                 icon: const Icon(LucideIcons.x, size: 20),
                                 tooltip: l10n.memberNicknameSheetClear,
-                                onPressed: _status == SaveStatus.saving
-                                    ? null
-                                    : _clearNickname,
+                                onPressed: _clearNickname,
                               ),
                       ),
                     ),
@@ -340,9 +365,7 @@ class _MemberDetailSheetState extends ConsumerState<MemberDetailSheet> {
                   CircularSaveButton(
                     buttonKey: WidgetKeys.memberNicknameSave,
                     status: _status,
-                    onPressed: (_isDirty && _status != SaveStatus.saving)
-                        ? () => _setNickname(_nicknameController.text.trim())
-                        : null,
+                    onPressed: _save,
                     savedLabel: _savedNickname.isEmpty
                         ? l10n.memberNicknameSheetNoneLabel
                         : l10n.memberNicknameSheetSavedLabel,
@@ -376,11 +399,16 @@ class _MemberPhoto extends StatelessWidget {
     required this.imageBytes,
     required this.initials,
     required this.publicKey,
+    required this.loadFullSize,
   });
 
   final Uint8List? imageBytes;
   final String? initials;
   final String publicKey;
+
+  /// Reads a sharper copy than [imageBytes] for the full-screen view, or
+  /// `null` when [imageBytes] is already full size.
+  final Future<Uint8List?> Function()? loadFullSize;
 
   @override
   Widget build(BuildContext context) {
@@ -395,7 +423,10 @@ class _MemberPhoto extends StatelessWidget {
     return InkWell(
       key: WidgetKeys.memberDetailPhoto,
       customBorder: const CircleBorder(),
-      onTap: () => showAvatarFullscreen(context, bytes),
+      // The viewer opens on the tap with the thumbnail in hand rather than
+      // waiting on the store; the full-size copy replaces it when read.
+      onTap: () =>
+          showAvatarFullscreen(context, bytes, fullSize: loadFullSize?.call()),
       // Replaces the avatar's own "Avatar for B" label, which the title
       // beside it already says.
       child: Semantics(

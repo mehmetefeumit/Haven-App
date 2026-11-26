@@ -23,20 +23,24 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/member_profile_refresh_provider.dart';
 import 'package:haven/src/providers/own_profile_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/profile_service.dart';
 import 'package:haven/src/test_keys.dart';
+import 'package:haven/src/widgets/circles/circle_member_tile.dart';
 import 'package:haven/src/widgets/common/circular_save_button.dart';
 import 'package:haven/src/widgets/identity/display_name_card.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../helpers/accessibility_announcements.dart';
+import '../../mocks/local_name_identity_service.dart';
 import '../../mocks/mock_profile_service.dart';
 
 /// An identity used by tests that exercise the public-profile publish path,
-/// which requires `ownProfileProvider` to resolve a non-null identity.
+/// which requires the own profile row to be read for a non-null identity.
 final _testIdentity = Identity(
   pubkeyHex:
       'abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234',
@@ -758,7 +762,7 @@ void main() {
           pubkeyHex: _testIdentity.pubkeyHex,
           displayName: 'Bob-Public',
         );
-        container.invalidate(ownProfileProvider);
+        _refreshProfiles(container);
         await tester.pumpAndSettle();
 
         expect(find.text('Bob-Public'), findsOneWidget);
@@ -804,9 +808,15 @@ void main() {
           pubkeyHex: _testIdentity.pubkeyHex,
           displayName: 'Bob-Public',
         );
-        container.invalidate(ownProfileProvider);
+        final reads = _rowReads(profileService);
+        _refreshProfiles(container);
         await tester.pumpAndSettle();
 
+        expect(
+          _rowReads(profileService),
+          greaterThan(reads),
+          reason: 'anti-vacuity: the refresh re-read the name',
+        );
         // The in-progress edit must survive untouched.
         expect(find.text('Alice Edited'), findsOneWidget);
         expect(find.text('Bob-Public'), findsNothing);
@@ -1057,8 +1067,9 @@ void main() {
       await tester.pump();
       final field = tester.widget<TextField>(find.byType(TextField));
 
-      // A profile refresh lands mid-typing.
-      container.invalidate(ownProfileProvider);
+      // A profile refresh lands mid-typing: the name reloads under the field.
+      final reads = _rowReads(profileService);
+      container.invalidate(displayNameProvider);
       for (var i = 0; i < 10; i++) {
         await tester.pump();
         expect(find.byType(LinearProgressIndicator), findsNothing);
@@ -1067,6 +1078,11 @@ void main() {
           same(field.controller),
         );
       }
+      expect(
+        _rowReads(profileService),
+        greaterThan(reads),
+        reason: 'anti-vacuity: the name reloaded during the frames above',
+      );
       await tester.pumpAndSettle();
 
       final editable = tester.state<EditableTextState>(
@@ -1078,7 +1094,151 @@ void main() {
       expect(find.text('Alice B'), findsOneWidget);
     });
   });
+
+  group('DisplayNameCard — Done on the keyboard saves', () {
+    testWidgets('Done saves an edit, as the button does', (tester) async {
+      final profileService = MockProfileService();
+      await tester.pumpWidget(
+        buildHarness(
+          service: _FakeIdentityService(initialDisplayName: 'Alice'),
+          profileService: profileService,
+          resolveIdentity: true,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).textInputAction,
+        TextInputAction.done,
+      );
+
+      await tester.enterText(find.byType(TextField), ' Bob ');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pumpAndSettle();
+
+      expect(_savedNames(profileService), ['Bob']);
+      expect(
+        find.descendant(
+          of: _findSaveButtonFinder(),
+          matching: find.byIcon(LucideIcons.check),
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('Done saves nothing without an edit, and nothing twice while '
+        'a save is in flight', (tester) async {
+      final gate = Completer<void>();
+      final profileService = MockProfileService()..updateOwnProfileGate = gate;
+      await tester.pumpWidget(
+        buildHarness(
+          service: _FakeIdentityService(initialDisplayName: 'Alice'),
+          profileService: profileService,
+          resolveIdentity: true,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.showKeyboard(find.byType(TextField));
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+      expect(_savedNames(profileService), isEmpty);
+
+      await tester.enterText(find.byType(TextField), 'Bob');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+      await tester.enterText(find.byType(TextField), 'Bo');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+      expect(_savedNames(profileService), ['Bob']);
+
+      gate.complete();
+      await tester.pumpAndSettle();
+      expect(_savedNames(profileService), ['Bob']);
+    });
+  });
+
+  group('DisplayNameCard — a row that cannot be read', () {
+    testWidgets('keeps the name on the field and on the self label', (
+      tester,
+    ) async {
+      final profileService = MockProfileService(
+        ownProfile: Profile(
+          pubkeyHex: _testIdentity.pubkeyHex,
+          displayName: 'Bob',
+        ),
+      );
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(
+            LocalNameIdentityService(identity: _testIdentity),
+          ),
+          profileServiceProvider.overrideWithValue(profileService),
+        ],
+      );
+      addTearDown(container.dispose);
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(
+              body: Column(
+                children: [
+                  const DisplayNameCard(),
+                  CircleMemberTile(
+                    member: CircleMember(
+                      pubkey: _testIdentity.pubkeyHex,
+                      npub: _testIdentity.npub,
+                      isAdmin: false,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Bob'), findsNWidgets(2));
+
+      // The store will not open when the profile refresh reads it again.
+      profileService.shouldThrowOnGetOwnProfileText = true;
+      final reads = _rowReads(profileService);
+      _refreshProfiles(container);
+      await tester.pumpAndSettle();
+
+      expect(_rowReads(profileService), greaterThan(reads));
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        'Bob',
+      );
+      expect(find.byType(CircleMemberTile), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byType(CircleMemberTile),
+          matching: find.text('Bob'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.text('Could not load your display name. Try again later.'),
+        findsNothing,
+      );
+    });
+  });
 }
+
+/// What the profile refresh does once Rust has taken a fetched kind-0 into
+/// the own profile row.
+void _refreshProfiles(ProviderContainer container) => container
+    .read(memberProfileRefreshProvider.notifier)
+    .refreshRoster([_testIdentity.pubkeyHex]);
+
+/// How many times the name was read from the own profile row.
+int _rowReads(MockProfileService profileService) => profileService.methodCalls
+    .where((c) => c.method == 'getOwnProfileText')
+    .length;
 
 /// Every name the card saved, in order: the own profile row is the save.
 List<Object?> _savedNames(MockProfileService profileService) => [

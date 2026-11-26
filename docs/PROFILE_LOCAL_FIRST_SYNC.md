@@ -231,13 +231,17 @@ neither starts nor queues one. Never from the background isolates.
 - **The user's own name is the own profile row, everywhere.**
   `displayNameProvider` — what every self label reads (member tiles, the
   member sheet, the map sheet's announcement, the Identity page's initials and
-  card) — is the row's `display_name`, else its `name`, through
-  `ownProfileProvider`, so a save and a newer kind-0 from another device (which
-  the profile refresh writes to the row and then invalidates
-  `ownProfileProvider`) reach them all. The device-local SharedPreferences name
-  is read only while the row holds no name (an install from before public
-  profiles, or one a storage reset reseeded) and is dropped once it holds one,
-  so a row cleared later, here or on another device, never falls back to it
+  card) — is the row's `display_name`, else its `name`, read without the
+  picture (`ProfileService.getOwnProfileText`), so holding the name all session
+  never holds the photo; a save, onboarding, the storage-reset reseed and the
+  profile refresh (which writes a newer kind-0 from another device to the row)
+  each invalidate `displayNameProvider`, so they reach them all. The
+  device-local SharedPreferences name is read only while the row holds no name
+  (an install from before public profiles, or one a storage reset reseeded) and
+  is dropped once it holds one, so a row cleared later, here or on another
+  device, never falls back to it. A row that cannot be read (the store is
+  handed to the foreground service) is not a row with no name: the name last
+  shown for that identity stays, else the local one, and nothing is dropped
   (`display_name_provider_test.dart`). Nothing else reads that key: the
   background isolates have no display name at all (`BackgroundIdentityService`
   refuses), and no location payload carries one.
@@ -254,8 +258,15 @@ neither starts nor queues one. Never from the background isolates.
   never read for its pre-save value, and never takes the field from someone
   typing (`display_name_card_test.dart`, "the own profile is the one source of
   truth"). The page has no refresh action (owner-directed 2026-11-26): opening
-  it runs the union profile refresh at the interactive tier, which picks up an
-  edit made on another device and never asks for the own pubkey alone.
+  it runs the union profile refresh at the interactive tier, never the
+  own-profile fetch (`fetch_my_profile`, which asks every profile-pool relay
+  for the own pubkey alone). The own pubkey rides the union batch like every
+  member's, to its salted-assignment relay, among whatever authors are asked of
+  that relay — which may be it alone, as for any member. The tier tolerates 15
+  minutes: an own profile fetched more recently is served from the row, so an
+  edit another device made in that window shows at the next refresh after it
+  ages (a resume, a circle select, the anti-entropy sweep), not on this open —
+  the cost of not dialling the profile relays at every visit.
 - Staging never arms the retraction gate (picture rows with an empty URL do not
   count) and never disarms it (a seen kind-0 with `event_created_at > 0` counts).
 - Everything uploaded went through `process_own_avatar` (private fields on

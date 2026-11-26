@@ -262,6 +262,39 @@ void main() {
     },
   );
 
+  testWidgets('a name already read as none before the save shows the saved '
+      'one after it', (tester) async {
+    final gate = Completer<void>();
+    final profile = MockProfileService()..updateOwnProfileGate = gate;
+    await pumpLocalized(
+      tester,
+      const CreateIdentityScreen(),
+      overrides: buildOverrides(
+        service: _RecordingIdentityService(),
+        profileService: profile,
+      ),
+      settle: false,
+    );
+    await tester.pump();
+    final name = prefilledName(tester);
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(CreateIdentityScreen)),
+    );
+    final held = container.listen(displayNameProvider, (_, _) {});
+    addTearDown(held.close);
+
+    await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+    await pumpFrames(tester);
+    // The save is in flight and the new identity's name has been read: none.
+    expect(_savedNames(profile), [name]);
+    expect(container.read(displayNameProvider), const AsyncData<String?>(null));
+
+    gate.complete();
+    await pumpFrames(tester);
+
+    expect(container.read(displayNameProvider).valueOrNull, name);
+  });
+
   testWidgets('an edited name is what gets saved and published', (tester) async {
     final profile = MockProfileService();
 

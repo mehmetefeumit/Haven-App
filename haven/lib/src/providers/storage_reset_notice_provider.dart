@@ -171,8 +171,9 @@ Future<void> clearCircleScopedPrefsAfterReset(SharedPreferences prefs) async {
 /// relay serves the profile, or every relay answers that none is published
 /// — the reseed stays owed, and the fetch's own miss backoff spaces the asks.
 /// A name the user has set since the update ([currentName]) wins over the
-/// published one. Nothing is asked while the build fetches no public
-/// profiles ([profilesEnabled]). Returns whether the name changed.
+/// published one; while it cannot be read, the reseed stays owed. Nothing is
+/// asked while the build fetches no public profiles ([profilesEnabled]).
+/// Returns whether the name changed.
 Future<bool> reseedOwnNameIfOwed({
   required SharedPreferences prefs,
   required Future<PublishedOwnProfile> Function() fetchPublished,
@@ -198,7 +199,15 @@ Future<bool> reseedOwnNameIfOwed({
   final name = displayName.isNotEmpty
       ? displayName
       : published.profile?.name?.trim() ?? '';
-  if (await currentName() == null && name.isNotEmpty) {
+  final String? current;
+  try {
+    current = await currentName();
+  } on Object catch (e) {
+    // Unread is not unset: a name set since the update must not be replaced.
+    debugPrint('[Haven] own name not read: ${e.runtimeType}');
+    return false;
+  }
+  if (current == null && name.isNotEmpty) {
     await setName(name);
     changed = true;
   }

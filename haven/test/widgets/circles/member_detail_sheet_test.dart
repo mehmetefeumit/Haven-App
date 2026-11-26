@@ -122,6 +122,49 @@ String? _titleText(WidgetTester tester) {
   return (headerTile.title! as Text).data;
 }
 
+/// Opens the sheet for [member] the way the member list does, through
+/// [showMemberDetailSheet], and taps to open it; the caller pumps.
+Future<void> _openSheet(
+  WidgetTester tester, {
+  required CircleMember member,
+  MockProfileService? profileService,
+  double textScale = 1,
+}) async {
+  await tester.pumpWidget(
+    ProviderScope(
+      overrides: [
+        circleServiceProvider.overrideWithValue(MockCircleService()),
+        profileServiceProvider.overrideWithValue(
+          profileService ?? MockProfileService(),
+        ),
+        identityProvider.overrideWith((_) async => null),
+        displayNameProvider.overrideWith((_) async => null),
+      ],
+      child: MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(
+            context,
+          ).copyWith(textScaler: TextScaler.linear(textScale)),
+          child: child!,
+        ),
+        home: Consumer(
+          builder: (context, ref, _) => Scaffold(
+            body: Center(
+              child: ElevatedButton(
+                onPressed: () => showMemberDetailSheet(context, ref, member),
+                child: const Text('open'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+  await tester.tap(find.text('open'));
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -358,13 +401,13 @@ void main() {
     );
 
     testWidgets(
-      'the clear icon calls setContactDisplayName with null and clears the '
-      'field',
+      'the clear icon only empties the field: retyping replaces the saved '
+      'nickname and nothing is ever deleted',
       (tester) async {
         final svc = MockCircleService();
         await tester.pumpWidget(
           _buildHarness(
-            member: _buildMember(displayName: 'Bobby'),
+            member: _buildMember(displayName: 'Mom'),
             circleService: svc,
           ),
         );
@@ -373,8 +416,6 @@ void main() {
         await tester.tap(find.byKey(WidgetKeys.memberNicknameClear));
         await tester.pumpAndSettle();
 
-        expect(svc.methodCalls, contains('setContactDisplayName'));
-        expect(svc.nicknames[_memberPubkey], isNull);
         expect(
           tester
               .widget<TextField>(find.byKey(WidgetKeys.memberNicknameField))
@@ -382,29 +423,68 @@ void main() {
               ?.text,
           isEmpty,
         );
+        expect(svc.methodCalls, isNot(contains('setContactDisplayName')));
+        expect(_titleText(tester), 'Mom', reason: 'still the saved nickname');
+        expect(_inSave(find.byIcon(LucideIcons.arrowUp)), findsOneWidget);
+
+        // The field kept focus, so typing goes straight into it.
+        tester.testTextInput.enterText('Mum');
+        await tester.pump();
+        await tester.tap(find.byKey(WidgetKeys.memberNicknameSave));
+        await tester.pumpAndSettle();
+
+        expect(
+          svc.methodCalls.where((c) => c == 'setContactDisplayName').length,
+          1,
+        );
+        expect(svc.nicknames[_memberPubkey], 'Mum');
       },
     );
 
     testWidgets(
-      'typing then leaving without saving never calls '
-      'setContactDisplayName (cancel)',
+      'the clear icon leaves the field focused, its semantics node included, '
+      'as the icon goes away',
       (tester) async {
-        final svc = MockCircleService();
+        final handle = tester.ensureSemantics();
         await tester.pumpWidget(
-          _buildHarness(member: _buildMember(), circleService: svc),
+          _buildHarness(member: _buildMember(displayName: 'Mom')),
         );
         await tester.pumpAndSettle();
-
-        await tester.enterText(
-          find.byKey(WidgetKeys.memberNicknameField),
-          'Unsaved Name',
+        final editable = tester.state<EditableTextState>(
+          find.byType(EditableText),
         );
-        await tester.pump();
+        expect(editable.widget.focusNode.hasFocus, isFalse);
 
-        // The user navigates away without tapping save or clear.
-        expect(svc.methodCalls, isNot(contains('setContactDisplayName')));
+        await tester.tap(find.byKey(WidgetKeys.memberNicknameClear));
+        await tester.pumpAndSettle();
+
+        expect(find.byKey(WidgetKeys.memberNicknameClear), findsNothing);
+        expect(editable.widget.focusNode.hasFocus, isTrue);
+        expect(
+          tester.getSemantics(find.byType(EditableText)),
+          isSemantics(isTextField: true, isFocused: true),
+        );
+        handle.dispose();
       },
     );
+
+    testWidgets('typing then leaving without saving never calls '
+        'setContactDisplayName (cancel)', (tester) async {
+      final svc = MockCircleService();
+      await tester.pumpWidget(
+        _buildHarness(member: _buildMember(), circleService: svc),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.enterText(
+        find.byKey(WidgetKeys.memberNicknameField),
+        'Unsaved Name',
+      );
+      await tester.pump();
+
+      // The user navigates away without tapping save or clear.
+      expect(svc.methodCalls, isNot(contains('setContactDisplayName')));
+    });
 
     testWidgets('an empty Save clears the nickname (treated as clear)', (
       tester,
@@ -652,8 +732,8 @@ void main() {
     );
 
     testWidgets(
-      'the clear icon clears and saves at once with the same animation, '
-      'then the title falls back',
+      'the clear icon writes nothing; saving the emptied field removes the '
+      'nickname with the save animation, then the title falls back',
       (tester) async {
         final svc = MockCircleService()
           ..setContactDisplayNameGate = Completer<void>();
@@ -667,14 +747,21 @@ void main() {
         final announcements = captureAccessibilityAnnouncements(tester);
 
         await tester.tap(find.byKey(WidgetKeys.memberNicknameClear));
-        await tester.pump();
+        await tester.pumpAndSettle();
 
-        expect(_inSave(find.byType(CircularProgressIndicator)), findsOneWidget);
+        expect(svc.methodCalls, isNot(contains('setContactDisplayName')));
         expect(
           find.byKey(WidgetKeys.memberNicknameClear),
           findsNothing,
           reason: 'the emptied field has nothing left to clear',
         );
+        expect(_inSave(find.byIcon(LucideIcons.arrowUp)), findsOneWidget);
+        expect(_titleText(tester), 'Bobby');
+        expect(announcements, isEmpty);
+
+        await tester.tap(find.byKey(WidgetKeys.memberNicknameSave));
+        await tester.pump();
+        expect(_inSave(find.byType(CircularProgressIndicator)), findsOneWidget);
 
         svc.setContactDisplayNameGate!.complete();
         await tester.pumpAndSettle();
@@ -688,7 +775,8 @@ void main() {
       },
     );
 
-    testWidgets('a failed clear shows retry, and retry clears', (tester) async {
+    testWidgets('a failed save of the emptied field shows retry, and retry '
+        'clears', (tester) async {
       final svc = MockCircleService()
         ..shouldThrowOnSetContactDisplayName = true;
       await tester.pumpWidget(
@@ -703,6 +791,8 @@ void main() {
       );
 
       await tester.tap(find.byKey(WidgetKeys.memberNicknameClear));
+      await tester.pump();
+      await tester.tap(find.byKey(WidgetKeys.memberNicknameSave));
       await tester.pumpAndSettle();
 
       expect(_inSave(find.byIcon(LucideIcons.rotateCcw)), findsOneWidget);
@@ -822,6 +912,94 @@ void main() {
         expect(tester.takeException(), isNull);
       },
     );
+
+    testWidgets('Done on the keyboard saves an edit', (tester) async {
+      final svc = MockCircleService();
+      await tester.pumpWidget(
+        _buildHarness(member: _buildMember(), circleService: svc),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<TextField>(find.byKey(WidgetKeys.memberNicknameField))
+            .textInputAction,
+        TextInputAction.done,
+      );
+
+      await tester.enterText(
+        find.byKey(WidgetKeys.memberNicknameField),
+        ' Bobby ',
+      );
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pumpAndSettle();
+
+      expect(svc.nicknames[_memberPubkey], 'Bobby');
+      expect(_inSave(find.byIcon(LucideIcons.check)), findsOneWidget);
+    });
+
+    testWidgets(
+      'Done saves nothing without an edit, and nothing twice while a save '
+      'is in flight',
+      (tester) async {
+        final svc = MockCircleService()
+          ..setContactDisplayNameGate = Completer<void>();
+        await tester.pumpWidget(
+          _buildHarness(
+            member: _buildMember(displayName: 'Bobby'),
+            circleService: svc,
+          ),
+        );
+        await tester.pumpAndSettle();
+        int saves() =>
+            svc.methodCalls.where((c) => c == 'setContactDisplayName').length;
+
+        await tester.showKeyboard(find.byKey(WidgetKeys.memberNicknameField));
+        await tester.testTextInput.receiveAction(TextInputAction.done);
+        await tester.pump();
+        expect(saves(), 0, reason: 'the field matches the saved nickname');
+
+        await tester.enterText(
+          find.byKey(WidgetKeys.memberNicknameField),
+          'Bob',
+        );
+        await tester.testTextInput.receiveAction(TextInputAction.done);
+        await tester.pump();
+        await tester.enterText(
+          find.byKey(WidgetKeys.memberNicknameField),
+          'Bo',
+        );
+        await tester.testTextInput.receiveAction(TextInputAction.done);
+        await tester.pump();
+        expect(saves(), 1);
+
+        svc.setContactDisplayNameGate!.complete();
+        await tester.pumpAndSettle();
+        expect(saves(), 1);
+        expect(svc.nicknames[_memberPubkey], 'Bob');
+      },
+    );
+
+    testWidgets('a tap on save while its icon is still swapping takes '
+        'effect', (tester) async {
+      final svc = MockCircleService();
+      await tester.pumpWidget(
+        _buildHarness(member: _buildMember(), circleService: svc),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.enterText(find.byKey(WidgetKeys.memberNicknameField), 'Bo');
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      // Mid-swap: the outgoing and incoming icons are both on screen.
+      expect(_inSave(find.byIcon(LucideIcons.check)), findsOneWidget);
+      expect(_inSave(find.byIcon(LucideIcons.arrowUp)), findsOneWidget);
+
+      await tester.tap(find.byKey(WidgetKeys.memberNicknameSave));
+      await tester.pumpAndSettle();
+
+      expect(svc.nicknames[_memberPubkey], 'Bo');
+      expect(_titleText(tester), 'Bo');
+    });
 
     testWidgets('the save button animates its icon swap', (tester) async {
       await tester.pumpWidget(_buildHarness(member: _buildMember()));
@@ -946,6 +1124,159 @@ void main() {
       expect(find.byType(AvatarFullscreenViewer), findsNothing);
       handle.dispose();
     });
+
+    testWidgets(
+      "the viewer opens at once on the member's thumbnail, then shows the "
+      'full-size copy the device holds, read from the store alone',
+      (tester) async {
+        final full = Uint8List.fromList([0xFF, 0xD8, 0xFF, 0xE1, 0x03]);
+        final profiles = MockProfileService(
+          memberProfiles: {
+            _memberPubkey: Profile(
+              pubkeyHex: _memberPubkey,
+              pictureBytes: photo,
+            ),
+          },
+        )..memberPictureGate = Completer<void>();
+        profiles.memberPictures[_memberPubkey] = full;
+        await tester.pumpWidget(
+          _buildHarness(
+            member: _buildMember(displayName: 'Bob'),
+            profileService: profiles,
+          ),
+        );
+        await tester.pumpAndSettle();
+        final before = profiles.methodCalls.length;
+
+        await tester.tap(find.byKey(WidgetKeys.memberDetailPhoto));
+        await tester.pumpAndSettle();
+
+        // The full-size read has not landed: the thumbnail is on screen.
+        Uint8List shown() => tester
+            .widget<AvatarFullscreenViewer>(
+              find.byType(AvatarFullscreenViewer),
+            )
+            .imageBytes;
+        expect(shown(), same(photo));
+
+        profiles.memberPictureGate!.complete();
+        await tester.pumpAndSettle();
+
+        expect(shown(), same(full));
+        expect(
+          profiles.methodCalls.skip(before).map((c) => c.method),
+          ['getMemberPicture'],
+          reason: 'one local read; nothing that fetches from the network',
+        );
+        expect(
+          profiles.methodCalls.last.args['pubkeyHex'],
+          _memberPubkey,
+        );
+      },
+    );
+
+    testWidgets('with no full-size copy the viewer keeps the thumbnail', (
+      tester,
+    ) async {
+      final profiles = MockProfileService(
+        memberProfiles: {
+          _memberPubkey: Profile(pubkeyHex: _memberPubkey, pictureBytes: photo),
+        },
+      );
+      await tester.pumpWidget(
+        _buildHarness(
+          member: _buildMember(displayName: 'Bob'),
+          profileService: profiles,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(WidgetKeys.memberDetailPhoto));
+      await tester.pumpAndSettle();
+
+      expect(
+        profiles.methodCalls.map((c) => c.method),
+        contains('getMemberPicture'),
+      );
+      expect(
+        tester
+            .widget<AvatarFullscreenViewer>(find.byType(AvatarFullscreenViewer))
+            .imageBytes,
+        same(photo),
+      );
+    });
+
+    testWidgets('a tap on the photo while the sheet is still sliding in opens '
+        'the viewer', (tester) async {
+      await _openSheet(
+        tester,
+        member: _buildMember(displayName: 'Bob'),
+        profileService: MockProfileService(
+          memberProfiles: {
+            _memberPubkey: Profile(
+              pubkeyHex: _memberPubkey,
+              pictureBytes: photo,
+            ),
+          },
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 80));
+      final route = ModalRoute.of(
+        tester.element(find.byType(MemberDetailSheet)),
+      )!;
+      expect(
+        route.animation!.status,
+        AnimationStatus.forward,
+        reason: 'the tap must land mid-slide',
+      );
+
+      await tester.tap(find.byKey(WidgetKeys.memberDetailPhoto));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(AvatarFullscreenViewer), findsOneWidget);
+    });
+  });
+
+  group('MemberDetailSheet — keyboard', () {
+    for (final textScale in [1.0, 2.0]) {
+      testWidgets(
+        'at text scale $textScale on a small phone the keyboard covers '
+        'neither the nickname field nor its save button',
+        (tester) async {
+          const screen = Size(320, 568);
+          const keyboard = 260.0;
+          tester.view
+            ..physicalSize = screen
+            ..devicePixelRatio = 1;
+          addTearDown(tester.view.reset);
+          await _openSheet(
+            tester,
+            member: _buildMember(displayName: 'Bob'),
+            textScale: textScale,
+          );
+          await tester.pumpAndSettle();
+
+          await tester.showKeyboard(find.byKey(WidgetKeys.memberNicknameField));
+          tester.view.viewInsets = const FakeViewPadding(bottom: keyboard);
+          await tester.pumpAndSettle();
+
+          expect(tester.takeException(), isNull);
+          for (final key in [
+            WidgetKeys.memberNicknameField,
+            WidgetKeys.memberNicknameSave,
+          ]) {
+            final rect = tester.getRect(find.byKey(key));
+            expect(rect.top, greaterThanOrEqualTo(0), reason: '$key');
+            expect(
+              rect.bottom,
+              lessThanOrEqualTo(screen.height - keyboard),
+              reason: '$key is above the keyboard',
+            );
+          }
+        },
+      );
+    }
   });
 
   group('MemberDetailSheet — copy public key', () {

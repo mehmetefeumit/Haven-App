@@ -27,6 +27,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/member_profile_provider.dart';
+import 'package:haven/src/providers/member_profile_refresh_provider.dart';
 import 'package:haven/src/providers/own_profile_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
@@ -685,12 +686,14 @@ void main() {
       expect(find.text('Bob'), findsOneWidget);
       expect(find.text('Alice'), findsNothing);
 
-      // What the profile refresh does once Rust took a newer kind-0.
+      // Rust takes the newer kind-0 into the row during the profile refresh.
       profiles.ownProfile = const Profile(
         pubkeyHex: selfPubkey,
         displayName: 'Carol',
       );
-      container.invalidate(ownProfileProvider);
+      container.read(memberProfileRefreshProvider.notifier).refreshRoster([
+        selfPubkey,
+      ]);
       await tester.pumpAndSettle();
 
       expect(find.text('Carol'), findsOneWidget);

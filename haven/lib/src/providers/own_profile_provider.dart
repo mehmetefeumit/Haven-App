@@ -34,9 +34,8 @@ import 'package:haven/src/services/profile_service.dart';
 /// Returns `null` before an identity exists, when no profile has ever been
 /// fetched/published, or on ANY failure (including a genuine
 /// [ProfileServiceException]) — connectivity must never surface as an error
-/// state here (D7). autoDispose releases the cached bytes when unwatched;
-/// [displayNameProvider], which takes the user's name from it, watches it for
-/// as long as anything reads that name.
+/// state here (D7). autoDispose releases the cached bytes once no widget shows
+/// the photo; the user's name is read without them ([displayNameProvider]).
 ///
 /// Callers that mutate the profile (`updateOwnProfile`/`setOwnAvatar`/
 /// `removeOwnAvatar`) must `ref.invalidate(ownProfileProvider)` themselves on

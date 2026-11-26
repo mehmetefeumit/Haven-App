@@ -237,6 +237,31 @@ void main() {
         ..assertNoNeedles([_pubkeyHex, 'wss://relay.secret']);
     });
 
+    test('a current name that cannot be read stays owed, replaces nothing, '
+        'and logs its type alone', () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      await _clearAfterReset(prefs);
+      final logs = LogCapture.install();
+      final identity = _identity();
+
+      expect(
+        await reseedOwnNameIfOwed(
+          prefs: prefs,
+          fetchPublished: () async => _answer(displayName: _published),
+          currentName: () async =>
+              throw StateError('row of $_pubkeyHex unreadable'),
+          setName: identity.setDisplayName,
+        ),
+        isFalse,
+      );
+      expect(prefs.getBool(kOwnNameReseedOwedKey), isTrue);
+      expect(await identity.getDisplayName(), isNull);
+      logs
+        ..assertContains('own name not read: StateError')
+        ..assertNoNeedles([_pubkeyHex, _published]);
+    });
+
     test('a blank display name falls through to the name, as Rust resolves '
         'it', () async {
       SharedPreferences.setMockInitialValues({});

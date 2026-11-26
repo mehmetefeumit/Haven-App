@@ -39,9 +39,11 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
   void initState() {
     super.initState();
     // Opening the page is intent to see the own profile, so it pulls an edit
-    // another device made like the other intent triggers do: the UNION batch,
-    // never an own-pubkey-only REQ, which would label the local user among
-    // every other union request (§1.7).
+    // another device made like the other intent triggers do: through the UNION
+    // batch, where the own pubkey is asked like any member's, never the
+    // own-profile fetch, which asks every profile relay for it alone (§1.7).
+    // At the interactive tier an own profile fetched under 15 minutes ago is
+    // not asked again, so such an edit can wait for the next refresh.
     triggerProfileRefresh(ref, maxAge: profileInteractiveMaxAge);
   }
 

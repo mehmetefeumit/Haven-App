@@ -118,10 +118,10 @@ class MemberProfileRefreshNotifier extends Notifier<void> {
   }
 
   /// Batch-refreshes [pubkeyHexes] in a single relay fetch, then invalidates
-  /// the [memberProfileProvider] family, [ownProfileProvider] and
-  /// [memberDirectoryProvider] so names show without waiting for the picture
-  /// batch that follows, after which the profile providers are invalidated
-  /// again.
+  /// the [memberProfileProvider] family, [ownProfileProvider],
+  /// [displayNameProvider] and [memberDirectoryProvider] so names show
+  /// without waiting for the picture batch that follows, after which the
+  /// profile providers are invalidated again.
   ///
   /// Fire-and-forget: returns immediately: the caller (e.g. a circle-select
   /// handler) must not block the UI on a relay round trip. Best-effort —
@@ -211,7 +211,8 @@ class MemberProfileRefreshNotifier extends Notifier<void> {
   void _invalidateProfiles() {
     ref
       ..invalidate(memberProfileProvider)
-      ..invalidate(ownProfileProvider);
+      ..invalidate(ownProfileProvider)
+      ..invalidate(displayNameProvider);
   }
 
   /// Reads the current circle list, tolerating a not-yet-loaded/failed

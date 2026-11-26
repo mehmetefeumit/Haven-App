@@ -278,7 +278,9 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
         return;
       }
       if (!mounted) return;
-      ref.invalidate(ownProfileProvider);
+      ref
+        ..invalidate(ownProfileProvider)
+        ..invalidate(displayNameProvider);
       // After the name, so a picture-only kind-0 never publishes without
       // it; a photo it loses never blocks onboarding, but is reported.
       final photoSaved = await _saveOnboardingPhoto(

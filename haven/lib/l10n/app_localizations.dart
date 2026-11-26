@@ -2754,7 +2754,7 @@ abstract class AppLocalizations {
   /// **'Save nickname'**
   String get memberNicknameSheetSave;
 
-  /// Accessible label/tooltip on the clear (x) icon inside the nickname field in the member detail sheet; tapping it removes the member's local nickname at once, reverting to the profile-derived name.
+  /// Accessible label/tooltip on the clear (x) icon inside the nickname field in the member detail sheet; tapping it only empties the field; the nickname is removed when the emptied field is saved with the save button.
   ///
   /// In en, this message translates to:
   /// **'Clear nickname'**
@@ -2766,7 +2766,7 @@ abstract class AppLocalizations {
   /// **'Nickname saved'**
   String get memberNicknameSheetSavedAnnouncement;
 
-  /// Screen-reader announcement when a member's local nickname override is cleared.
+  /// Screen-reader announcement when saving an empty nickname field has removed a member's local nickname override.
   ///
   /// In en, this message translates to:
   /// **'Nickname cleared'**
