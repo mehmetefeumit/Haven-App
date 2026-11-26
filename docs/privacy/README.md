@@ -177,6 +177,21 @@ Always-location prompt). Three of them carry a note that a prior flattened
 version was false in the dangerous direction. Each platform gets its own
 invariant.
 
+Since the owner's 2026-11-26 decisions (OD-R1/R2/R3) the two location strings
+among them carry a resume claim that is conditional on each platform, and the
+conditions are the invariants. On iPhone, sharing starts again by itself after
+Haven is closed only under 'Always', after movement, and when iOS relaunches
+Haven — never under 'While Using the App'
+(`INV-L-IOS-RELAUNCH-RESUMES-ONLY-UNDER-ALWAYS-AND-CURRENT-CONSENT`, which
+replaced the deleted `INV-L-IOS-WAKES-RECEIVE-ONLY` under a stated
+`ratchet_override`). On Android, sharing resumes by itself after a restart or
+an update only when Haven may use location all the time (Android 11+; on
+Android 10 whenever it may use location), and otherwise Haven shows one
+notification to tap to resume; force-stopped, it stays stopped until opened
+(`INV-L-ANDROID-REBOOT-RESURRECTS-PUBLISHING`). One cross-platform invariant,
+`INV-L-RESUME-NEEDS-CURRENT-DISCLOSURE`, holds both: no sharing resumes without
+the user opening Haven unless the current background disclosure was accepted.
+
 ## Claims live outside the ARB, and those are the ones that matter most
 
 Workstream F's sharpest finding was that a claim register scoped to the
