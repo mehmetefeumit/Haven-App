@@ -27,7 +27,8 @@
 /// after another is a cheap no-op rather than a duplicate relay round trip.
 /// A refresh that met a circle session it could not open — on Android, one
 /// the foreground service still held at a resume — runs once more when the
-/// session next opens.
+/// session next opens, if the app is then in front, at no stricter than the
+/// foreground tolerance.
 library;
 
 import 'dart:async';
@@ -43,6 +44,7 @@ import 'package:haven/src/providers/member_profile_provider.dart';
 import 'package:haven/src/providers/own_profile_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/mls_session_handover.dart' show appIsResumed;
 import 'package:haven/src/services/nostr_circle_service.dart';
 import 'package:haven/src/utils/log_alias.dart';
 
@@ -110,7 +112,10 @@ class MemberProfileRefreshNotifier extends Notifier<void> {
   ///
   /// Own profile rides the same batch instead of a separate forced
   /// `fetch_my_profile`, so a refresh costs one relay round trip, not two.
-  Future<void> refreshAll({required Duration maxAge}) async {
+  Future<void> refreshAll({required Duration maxAge}) =>
+      _refreshAll(maxAge, oweOnEmpty: true);
+
+  Future<void> _refreshAll(Duration maxAge, {required bool oweOnEmpty}) async {
     if (!publicProfilesEnabled) return;
     if (_disposed) return;
 
@@ -118,7 +123,9 @@ class MemberProfileRefreshNotifier extends Notifier<void> {
     final reopened = _nextSessionOpen();
     final resolved = await _readCircles();
     // A refused open reads as no circles, and would leave every member out.
-    if (resolved.isEmpty) _owe(reopened, maxAge);
+    // The owed run itself never owes again: a user with no circles reads
+    // empty at every open, and would otherwise be owed one at each forever.
+    if (resolved.isEmpty && oweOnEmpty) _owe(reopened, maxAge);
     final pubkeys = <String>{
       for (final circle in resolved)
         for (final member in circle.members) member.pubkey,
@@ -242,16 +249,25 @@ class MemberProfileRefreshNotifier extends Notifier<void> {
   /// foreground service, and nothing else would ask again until the next
   /// trigger. A logout disposes this notifier, which [refreshAll] honours, and
   /// its wipe means that open never comes.
+  ///
+  /// The run is automatic, so it is never forced (floored at
+  /// [profileForegroundMaxAge], keeping the per-author miss backoff), and an
+  /// open that lands while the app is not in front owes it to the resume,
+  /// which refreshes anyway: profile fetches are foreground-only.
   void _owe(Future<void>? reopened, Duration maxAge) {
     if (reopened == null) return;
+    final tier = maxAge < profileForegroundMaxAge
+        ? profileForegroundMaxAge
+        : maxAge;
     final owed = _owedAtOpen;
-    _owedAtOpen = owed == null || maxAge < owed ? maxAge : owed;
+    _owedAtOpen = owed == null || tier < owed ? tier : owed;
     if (owed != null) return;
     unawaited(
       reopened.then((_) {
         final maxAge = _owedAtOpen;
         _owedAtOpen = null;
-        if (maxAge != null) unawaited(refreshAll(maxAge: maxAge));
+        if (maxAge == null || !appIsResumed()) return;
+        unawaited(_refreshAll(maxAge, oweOnEmpty: false));
       }),
     );
   }

@@ -10,6 +10,7 @@
 /// replaces the bridge for the whole isolate.
 library;
 
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/profile_refresh_tiers.dart';
@@ -99,7 +100,12 @@ void main() {
     bridge
       ..guardHeld = false
       ..refusals = 0
+      ..manager.circles = [circle]
       ..manager.fetches.clear();
+    // Profile fetches are foreground-only; most cases run in front.
+    WidgetsBinding.instance.handleAppLifecycleStateChanged(
+      AppLifecycleState.resumed,
+    );
   });
 
   /// The circle service the app builds, foregrounded, with no handover: a
@@ -255,6 +261,62 @@ void main() {
     await pumpEventQueue();
 
     expect(bridge.manager.fetches, hasLength(1));
+  });
+
+  test('a user with no circles is owed at most one run, never forced, '
+      'however many times the session reopens', () async {
+    bridge.manager.circles = [];
+    final service = circleService();
+    final container = containerOver(service);
+
+    // The explicit pull-to-refresh: forced, over the own pubkey alone.
+    await refresh(container, profileForceMaxAge);
+    expect(
+      bridge.manager.fetches.first.maxAgeSecs,
+      0,
+      reason: 'anti-vacuity: the explicit refresh itself is forced',
+    );
+
+    // Every Android resume hands the session over and opens it again.
+    for (var resume = 0; resume < 4; resume++) {
+      service.releaseForHandoff();
+      await service.initialize();
+      await pumpEventQueue();
+    }
+
+    final owed = bridge.manager.fetches.skip(1).toList();
+    expect(
+      owed,
+      hasLength(lessThanOrEqualTo(1)),
+      reason: 'an empty circle list at every open must not re-arm forever',
+    );
+    expect(
+      owed.map((f) => f.maxAgeSecs),
+      everyElement(profileForegroundMaxAge.inSeconds),
+      reason: 'an automatic run never skips the miss backoff',
+    );
+  });
+
+  test('an open that lands while the app is not in front owes the run to '
+      'the resume, and fetches nothing', () async {
+    bridge.guardHeld = true;
+    final service = circleService();
+    final container = containerOver(service);
+
+    await refresh(container, profileForegroundMaxAge);
+    WidgetsBinding.instance.handleAppLifecycleStateChanged(
+      AppLifecycleState.paused,
+    );
+
+    bridge.guardHeld = false;
+    await service.initialize();
+    await pumpEventQueue();
+
+    expect(
+      bridge.manager.fetches,
+      isEmpty,
+      reason: 'a kind-0 fetch from the background',
+    );
   });
 
   test('a logout before the open leaves nothing owed', () async {
