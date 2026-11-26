@@ -98,13 +98,17 @@
 #
 # Checks 1-13 are milestone-independent (true whether the feature is inert or
 # live). Checks 14a-14i pin the RELEASED state so a regression cannot silently
-# RE-INERT a shipped feature (flag flipped back, RebootReceiver re-disabled,
-# autoRunOnBoot dropped, the bootstrap reverted to the stub, an arming call-site
-# deleted, or the persistent live-sync engine turned back off) without turning
-# this gate red. On an intentional M7-E rollback (plan §7) checks
-# 14a/14c/14e/14f/14g/14h/14i are reverted together with the code they pin; on an
-# intentional live-sync rollback (M11 plan §8) 14b is reverted with the
-# `defaultValue: false` it pins. 14d is rollback-independent. `liveSyncEnabled`
+# RE-INERT a shipped feature (flag flipped back, the boot/update receiver
+# removed, the bootstrap reverted to the stub, an arming call-site deleted, or
+# the persistent live-sync engine turned back off) without turning this gate
+# red. On an intentional M7-E rollback (plan §7) checks 14a/14f/14g/14h/14i are
+# reverted together with the code they pin; on an intentional live-sync
+# rollback (M11 plan §8) 14b is reverted with the `defaultValue: false` it
+# pins. 14d is rollback-independent. Checks 14c, 14e and 14j-14n pin the
+# Android boot/update resume (owner-directed 2026-11-26, OD-R2/OD-R3):
+# BootResumeReceiver in place of the plugin's RebootReceiver, the resume rule's
+# preference keys, the notice's fixed text, and the system-start gate ahead of
+# every bit of work in the foreground-service task. `liveSyncEnabled`
 # defaults to `true` since M11 Phase B (the persistent live-sync engine is LIVE
 # in production) and is pinned by 14b — a `bool.fromEnvironment('HAVEN_LIVE_SYNC',
 # defaultValue: true)` const.
@@ -146,6 +150,16 @@ KOTLIN_DIR="${REPO_ROOT}/haven/android/app/src/main/kotlin/com/oblivioustech/hav
 WAKE_LOCK_KT="${KOTLIN_DIR}/PublishWakeLock.kt"
 HAVEN_APP_KT="${KOTLIN_DIR}/HavenApplication.kt"
 WAKE_LOCK_DART="${REPO_ROOT}/haven/lib/src/services/publish_wake_lock.dart"
+BOOT_RESUME_KT="${KOTLIN_DIR}/BootResume.kt"
+RESUME_RULE_KT="${KOTLIN_DIR}/ResumeRule.kt"
+BOOT_RECEIVER_KT="${KOTLIN_DIR}/BootResumeReceiver.kt"
+RESUME_NOTICE_KT="${KOTLIN_DIR}/ResumeNotice.kt"
+BG_LOCATION_KT="${KOTLIN_DIR}/BackgroundLocation.kt"
+RESUME_GATE_DART="${REPO_ROOT}/haven/lib/src/services/background_resume_gate.dart"
+TASK_DART="${REPO_ROOT}/haven/lib/src/services/background_location_task.dart"
+LOCATION_CONSTS="${REPO_ROOT}/haven/lib/src/constants/location.dart"
+LOCALE_PROVIDER="${REPO_ROOT}/haven/lib/src/providers/locale_provider.dart"
+PUBSPEC_LOCK="${REPO_ROOT}/haven/pubspec.lock"
 
 FAILED=0
 fail() {
@@ -1488,7 +1502,8 @@ telemetry_dependency_scan "$REPO_ROOT" || FAILED=1
 # ---------------------------------------------------------------------------
 for f in "$SLC" "$BGT" "$WORKER" "$IOS_DART" "$APPDELEGATE" "$MGR" \
   "$BG_SESSION" "$LOC_AUTH" "$WAKE_LOCK_KT" "$HAVEN_APP_KT" "$WAKE_LOCK_DART" \
-  "$STREAM_HANDLER" "$IOS_SOURCE"; do
+  "$STREAM_HANDLER" "$IOS_SOURCE" "$BOOT_RESUME_KT" "$RESUME_RULE_KT" \
+  "$BOOT_RECEIVER_KT" "$RESUME_NOTICE_KT" "$BG_LOCATION_KT" "$RESUME_GATE_DART"; do
   presence_only_log_scan "$f" || FAILED=1
 done
 
@@ -1562,7 +1577,8 @@ else
 fi
 
 # ===========================================================================
-# RELEASED-STATE PINS (M7-E + M11 LIVE) — checks 14a-14i. A regression that
+# RELEASED-STATE PINS (M7-E + M11 LIVE) — checks 14a-14i, and the Android
+# boot/update resume pins 14j-14n after them. A regression that
 # re-inerts a shipped feature (M7-E background wakes, or M11's live-sync engine)
 # turns these red. See the header for the rollback story.
 # ===========================================================================
@@ -1595,11 +1611,23 @@ grep -qE 'defaultValue: *false' <<<"$live_sync_decl" &&
 code_has_e 'const liveSyncEnabled *= *false' "$LIVE_SYNC" &&
   fail "14b: liveSyncEnabled is a bare '= false' — the M11-shipped live-sync engine was re-inerted"
 
-# 14c. RebootReceiver MUST be enabled="true" (FGS restarts after reboot when
-#      sharing was on). xmllint = XML-comment safe.
-reboot_enabled="$(xmllint --nonet --xpath "string(//receiver[contains(@*[local-name()='name'],'RebootReceiver')]/@*[local-name()='enabled'])" "$MANIFEST" 2>/dev/null)"
-[[ "$reboot_enabled" == "true" ]] ||
-  fail "14c: RebootReceiver android:enabled is '${reboot_enabled:-absent}', must be 'true' (M7-E reboot re-arm)"
+# 14c. The plugin's RebootReceiver is REMOVED from the merged manifest, and
+#      BootResumeReceiver takes its place: not exported (only the system sends
+#      these broadcasts), and filtering exactly BOOT_COMPLETED and
+#      MY_PACKAGE_REPLACED — no unprotected QUICKBOOT_POWERON any app could
+#      send, no LOCKED_BOOT_COMPLETED before the user's storage is unlocked.
+#      The plugin's receiver started on options an OLD build stored, so the
+#      first update shipping a fix could not take part, and it could not see a
+#      permission revoked while Haven was not running. xmllint = comment safe.
+reboot_node="$(xmllint --nonet --xpath "string(//receiver[@*[local-name()='name']='com.pravera.flutter_foreground_task.service.RebootReceiver']/@*[local-name()='node'])" "$MANIFEST" 2>/dev/null)"
+[[ "$reboot_node" == "remove" ]] ||
+  fail "14c: the plugin RebootReceiver is not tools:node=\"remove\" (got '${reboot_node:-absent}') — it would start the service on options an old build stored, outside the resume rule"
+boot_exported="$(xmllint --nonet --xpath "string(//receiver[@*[local-name()='name']='.BootResumeReceiver']/@*[local-name()='exported'])" "$MANIFEST" 2>/dev/null)"
+[[ "$boot_exported" == "false" ]] ||
+  fail "14c: .BootResumeReceiver android:exported is '${boot_exported:-absent}', must be 'false' (only the system sends boot and package-replaced broadcasts)"
+boot_actions="$(xmllint --nonet --xpath "//receiver[@*[local-name()='name']='.BootResumeReceiver']/intent-filter/action/@*[local-name()='name']" "$MANIFEST" 2>/dev/null | grep -oE '"[^"]+"' | tr -d '"' | sort | tr '\n' ' ')"
+[[ "$boot_actions" == "android.intent.action.BOOT_COMPLETED android.intent.action.MY_PACKAGE_REPLACED " ]] ||
+  fail "14c: .BootResumeReceiver must filter exactly BOOT_COMPLETED and MY_PACKAGE_REPLACED (got '${boot_actions:-none}')"
 
 # 14d. RestartReceiver MUST STAY enabled="false" (Haven manages the FGS
 #      lifecycle explicitly; the plugin's ANR/kill auto-restart is suppressed).
@@ -1611,9 +1639,13 @@ restart_node="$(xmllint --nonet --xpath "//receiver[contains(@*[local-name()='na
 grep -q 'replace' <<<"$restart_node" ||
   fail "14d: RestartReceiver lost tools:node=\"replace\" — the plugin's auto-restart-on-ANR/kill behaviour would return"
 
-# 14e. autoRunOnBoot: true present (paired with 14c so the FGS actually restarts).
-code_has_e 'autoRunOnBoot: *true' "$MGR" ||
-  fail "14e: autoRunOnBoot: true is not set in $(basename "$MGR") ForegroundTaskOptions — the FGS will not restart after reboot"
+# 14e. The plugin's boot/update options are ABSENT. They steer only its
+#      RebootReceiver (removed, 14c); back in place they read as a second start
+#      path outside the resume rule.
+for opt in autoRunOnBoot autoRunOnMyPackageReplaced; do
+  code_has "$opt" "$MGR" &&
+    fail "14e: $opt is set in $(basename "$MGR") — BootResumeReceiver owns the boot and update start under the resume rule"
+done
 
 # 14f. The worker runs the REAL bootstrap, not the comment stub. Pin the three
 #      load-bearing bootstrap calls (in executable code) + the receive-only
@@ -1671,9 +1703,100 @@ if [[ "$launch_depth" != "1" ]]; then
   fail "14i: didFinishLaunching does not schedule the BGTask unconditionally (bgTaskHandler.scheduleNextCatchup() at brace depth ${launch_depth:-none}, want 1) — a location relaunch that iOS suspends again would lose its catch-up floor"
 fi
 
+# 14j. No android:stopWithTask anywhere: with it the service would stop when
+#      Haven is swiped away, and the plugin would return START_NOT_STICKY.
+stop_with_task="$(xmllint --nonet --xpath "count(//@*[local-name()='stopWithTask'])" "$MANIFEST" 2>/dev/null)"
+[[ "$stop_with_task" == "0" ]] ||
+  fail "14j: the manifest sets android:stopWithTask — sharing would stop when Haven is swiped away"
+code_has 'stopWithTask' "$MGR" &&
+  fail "14j: $(basename "$MGR") sets stopWithTask — sharing would stop when Haven is swiped away"
+
+# 14k. The Kotlin resume rule reads the SAME preferences the Dart side writes
+#      and the FGS gate reads: each literal in ResumeRule.kt is 'flutter.' plus
+#      its Dart constant, and the version is the Dart version. A drift reads a
+#      key nobody writes, which fails closed into a notice for everyone, or
+#      reads a stale version, which would resume without current consent.
+dart_const() { # <name> <file>: the value of `const <type> <name> = <literal>;`
+  local v; v="$(code_view "$2" | tr '\n' ' ')"
+  grep -oE "const (String|int) $1 *= *('[^']*'|[0-9]+)" <<<"$v" | head -1 | sed -E "s/.*= *//; s/'//g"
+}
+kt_const() { # <name>: the value of `const val <name> = <literal>` in ResumeRule.kt
+  local v; v="$(code_view "$RESUME_RULE_KT")"
+  grep -oE "const val $1 *= *(\"[^\"]*\"|[0-9]+L)" <<<"$v" | head -1 | sed -E 's/.*= *//; s/"//g'
+}
+if [[ ! -f "$RESUME_RULE_KT" ]]; then
+  fail "14k: expected file not found: $RESUME_RULE_KT"
+else
+  while read -r kt dart file; do
+    want="flutter.$(dart_const "$dart" "$file")"
+    got="$(kt_const "$kt")"
+    [[ "$want" != "flutter." && "$got" == "$want" ]] ||
+      fail "14k: ResumeRule.kt $kt is '${got:-absent}', must be '$want' (Dart $dart)"
+  done <<EOF14K
+SHARING kBackgroundSharingKey $LOCATION_CONSTS
+DISCLOSURE_FOREGROUND kLocationDisclosureAcceptedKey $LOCATION_CONSTS
+DISCLOSURE_BACKGROUND kLocationDisclosureBackgroundAcceptedKey $LOCATION_CONSTS
+DISCLOSURE_BACKGROUND_VERSION kLocationDisclosureBackgroundVersionKey $LOCATION_CONSTS
+LOCALE kLocaleKey $LOCALE_PROVIDER
+EOF14K
+  want_version="$(dart_const kBackgroundDisclosureVersion "$LOCATION_CONSTS")L"
+  got_version="$(kt_const BACKGROUND_DISCLOSURE_VERSION)"
+  [[ "$want_version" != "L" && "$got_version" == "$want_version" ]] ||
+    fail "14k: ResumeRule.kt BACKGROUND_DISCLOSURE_VERSION is '${got_version:-absent}', must be '$want_version' (Dart kBackgroundDisclosureVersion)"
+  for key in kBackgroundSharingKey kLocationDisclosureAcceptedKey \
+    kLocationDisclosureBackgroundAcceptedKey kLocationDisclosureBackgroundVersionKey; do
+    code_has "$key" "$RESUME_GATE_DART" ||
+      fail "14k: $(basename "$RESUME_GATE_DART") no longer reads $key — the FGS gate and the boot receiver must apply the same rule"
+  done
+fi
+
+# 14l. The resume path logs nothing (Rule 15) and the notice shows fixed text:
+#      every title/text the builder sets is a R.string resource, never a value
+#      assembled at runtime.
+for f in "$BOOT_RESUME_KT" "$RESUME_RULE_KT" "$BOOT_RECEIVER_KT" "$RESUME_NOTICE_KT" "$BG_LOCATION_KT"; do
+  if [[ ! -f "$f" ]]; then
+    fail "14l: expected file not found: $f"
+    continue
+  fi
+  code_has_e '\bLog\.|println\(|\bprint\(' "$f" &&
+    fail "14l: $(basename "$f") logs — the resume path logs nothing (Rule 15)"
+done
+if [[ -f "$RESUME_NOTICE_KT" ]]; then
+  notice_text="$(code_view "$RESUME_NOTICE_KT" | grep -E 'setContentTitle\(|setContentText\(|bigText\(|NotificationChannel\(' -A2 || true)"
+  for call in setContentTitle setContentText bigText; do
+    line="$(grep -E "$call\(" -A1 <<<"$notice_text" | tr -d '\n')"
+    grep -qE "$call\( *(text\.)?getString\(R\.string\.android_resume_notice_[a-z_]+\)" <<<"$line" ||
+      fail "14l: ResumeNotice.kt $call does not take a R.string.android_resume_notice_* resource directly: ${line:-absent}"
+    grep -qE '\$|" *\+|\+ *"' <<<"$line" &&
+      fail "14l: ResumeNotice.kt $call assembles its text at runtime: $line"
+  done
+fi
+
+# 14m. flutter_foreground_task stays at the version BootResume.kt was written
+#      against. It calls the plugin's ForegroundServiceStatus,
+#      NotificationContent and ForegroundService directly, and depends on its
+#      REBOOT start, its stored-options reload and its START_STICKY mapping, so a
+#      bump re-reads those (as an MDK bump re-reads sdk_client.rs) and moves
+#      this pin in the same commit.
+fft_version="$(awk '/^  flutter_foreground_task:/{f=1} f && /^    version:/{gsub(/"/,"",$2); print $2; exit}' "$PUBSPEC_LOCK")"
+[[ "$fft_version" == "9.2.2" ]] ||
+  fail "14m: flutter_foreground_task resolves to '${fft_version:-absent}', not 9.2.2 — re-read the plugin classes BootResume.kt calls, then move this pin"
+
+# 14n. The system-start gate is the first thing the task's onStart awaits:
+#      a boot, update or sticky start is judged before the idle flag, Rust,
+#      the keyring or the session.
+onstart_body="$(fn_slice 'Future<void> onStart(DateTime timestamp, TaskStarter starter)' "$TASK_DART")"
+if [[ -z "$onstart_body" ]]; then
+  fail "14n: no onStart in $(basename "$TASK_DART")"
+else
+  first_await="$(grep -nE '\bawait\b' <<<"$onstart_body" | head -1)"
+  grep -qF 'await gate.check(starter)' <<<"$first_await" ||
+    fail "14n: onStart's first await is not the system-start gate: ${first_await:-none}"
+fi
+
 # ---------------------------------------------------------------------------
 if [[ "$FAILED" -ne 0 ]]; then
   echo "M7 native-wake guard FAILED — see failures above." >&2
   exit 1
 fi
-echo "OK: M7 native-wake structural invariants hold (13 checks + the 9b dependency-surface scan + 9 M7-E released-state pins)."
+echo "OK: M7 native-wake structural invariants hold (13 checks + the 9b dependency-surface scan + 9 released-state pins + 5 Android resume pins)."

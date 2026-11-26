@@ -59,6 +59,7 @@ import 'package:haven/src/rust/frb_generated.dart';
 import 'package:haven/src/services/background_fix_request.dart';
 import 'package:haven/src/services/background_identity_service.dart';
 import 'package:haven/src/services/background_location_manager.dart';
+import 'package:haven/src/services/background_resume_gate.dart';
 import 'package:haven/src/services/circle_health_service.dart';
 import 'package:haven/src/services/circle_service.dart'
     show Circle, LocationEventKind, LocationEventResult;
@@ -505,9 +506,29 @@ class BackgroundLocationTaskHandler extends TaskHandler {
   // ---------------------------------------------------------------------------
   static const String _identityStorageKey = 'haven.nostr.identity';
 
+  /// Presence only: the bytes are not decoded here.
+  static Future<bool> _identityStored() async =>
+      await _secureStorage.read(key: _identityStorageKey) != null;
+
+  /// Test-only stand-in for the system-start gate's inputs and effects.
+  @visibleForTesting
+  SystemStartGate? overrideSystemStartGate;
+
   @override
   Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
     debugPrint('[BackgroundTask] onStart (starter=$starter)');
+
+    // First, before any work: a start Haven's UI did not make (boot, update,
+    // sticky restart) runs only under the resume rule. A refused one stops
+    // the service, and the shutdown signal keeps every cycle a no-op until
+    // the stop lands.
+    final gate =
+        overrideSystemStartGate ??
+        const SystemStartGate(identityStored: _identityStored);
+    if (await gate.check(starter) != null) {
+      if (!_shutdownSignal.isCompleted) _shutdownSignal.complete();
+      return;
+    }
 
     // Clear the idle flag — the background isolate is now active.
     await _setIdle(false);

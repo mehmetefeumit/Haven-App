@@ -157,12 +157,12 @@ class BackgroundLocationManager {
         eventAction: ForegroundTaskEventAction.repeat(
           kBackgroundRepeatInterval.inMilliseconds,
         ),
-        // M7-E: restart the FGS after a device reboot, paired with the
-        // RebootReceiver enabled in AndroidManifest.xml (guard 14c/14e pin
-        // both). Only resurrects a service that was RUNNING at shutdown —
-        // background sharing toggled off means no service existed, so user
-        // opt-out is preserved across reboots.
-        autoRunOnBoot: true,
+        // `autoRunOnBoot` / `autoRunOnMyPackageReplaced` are deliberately
+        // ABSENT: they steer only the plugin's RebootReceiver, which the
+        // manifest removes. BootResumeReceiver (BootResume.kt) owns the boot
+        // and update start, decided at receive time (owner-directed
+        // 2026-11-26, OD-R2). Guard check 14e and `fgs_resume_policy_test.dart`
+        // pin the absence.
         // `allowWakeLock` is deliberately ABSENT, so the plugin's default
         // (true) stands and its permanent PARTIAL_WAKE_LOCK is held for the
         // whole session. It is the only wake source for the no-fix watchdog
