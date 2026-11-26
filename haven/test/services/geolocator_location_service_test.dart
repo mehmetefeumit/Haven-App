@@ -2127,10 +2127,11 @@ void main() {
         //
         // BOTH caches are empty, which is the state a post-termination
         // relaunch is IN — the native cache does not survive termination and
-        // no stream has run in this process. `INV-L-IOS-WAKES-RECEIVE-ONLY`
-        // says such a process cannot publish; a branch that falls through to
-        // the one-shot when it finds no cached fix made that a coincidence of
-        // what happened to be in memory.
+        // no stream has run in this process. Such a process publishes only a
+        // Best fix from Haven's own session
+        // (`INV-L-IOS-RELAUNCH-RESUMES-ONLY-UNDER-ALWAYS-AND-CURRENT-CONSENT`);
+        // a branch that falls through to the one-shot when it finds no cached
+        // fix made that a coincidence of what happened to be in memory.
         final service = serviceFor()..foregroundActive = true;
         stubAccessGranted();
         fakeIos
@@ -2843,7 +2844,8 @@ void main() {
           // caches are empty by design, so "no last-known fix" is not an edge
           // case — it is the state the relaunched process is in, and the
           // one-shot the fall-through reached is a publish input
-          // INV-L-IOS-WAKES-RECEIVE-ONLY says cannot exist there. It also
+          // INV-L-IOS-RELAUNCH-RESUMES-ONLY-UNDER-ALWAYS-AND-CURRENT-CONSENT
+          // says cannot exist there. It also
           // could never have delivered: its CLLocationManager has no
           // background capability, so the "final attempt" was a 30 s stall
           // ending in the same exception.

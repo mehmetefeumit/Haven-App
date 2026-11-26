@@ -35,6 +35,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'e2e/_lib/circle_creation.dart' show createCircleDelivered;
 import 'e2e/_lib/coordination.dart';
+import 'e2e/_lib/location_disclosure_seed.dart';
 import 'e2e/_lib/resume_ci_fgs.dart' show resumeCiBackgroundCallback;
 import 'e2e/_lib/scenario_harness.dart';
 import 'e2e/_lib/synthetic_user.dart' show SyntheticUser;
@@ -113,16 +114,7 @@ void main() {
       // Sharing on, with the CURRENT background disclosure accepted.
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(kBackgroundSharingKey, true);
-      await prefs.setBool(kLocationDisclosureAcceptedKey, true);
-      await prefs.setBool(kLocationDisclosureBackgroundAcceptedKey, true);
-      await prefs.setInt(
-        kLocationDisclosureBackgroundVersionKey,
-        kBackgroundDisclosureVersion,
-      );
-      await prefs.setInt(
-        kLocationDisclosureBackgroundPromptedVersionKey,
-        kBackgroundDisclosureVersion,
-      );
+      await seedLocationDisclosuresAccepted(prefs);
       await BackgroundLocationManager.markForegroundActive(active: false);
 
       // Started from this visible activity, as the app starts it.
