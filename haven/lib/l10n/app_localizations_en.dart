@@ -1846,16 +1846,32 @@ class AppLocalizationsEn extends AppLocalizations {
   String get memberNicknameSheetLabel => 'Nickname';
 
   @override
-  String get memberNicknameSheetSave => 'Save Nickname';
+  String get memberNicknameSheetSave => 'Save nickname';
 
   @override
-  String get memberNicknameSheetClear => 'Clear Nickname';
+  String get memberNicknameSheetClear => 'Clear nickname';
 
   @override
   String get memberNicknameSheetSavedAnnouncement => 'Nickname saved';
 
   @override
   String get memberNicknameSheetClearedAnnouncement => 'Nickname cleared';
+
+  @override
+  String get memberNicknameSheetSavedLabel => 'Nickname saved';
+
+  @override
+  String get memberNicknameSheetNoneLabel => 'No nickname set';
+
+  @override
+  String get memberNicknameSheetSavingLabel => 'Saving nickname';
+
+  @override
+  String get memberNicknameSheetRetryLabel => 'Nickname not saved. Retry';
+
+  @override
+  String get memberNicknameSheetSaveFailedAnnouncement =>
+      'Nickname not saved, try again';
 
   @override
   String get npubQrScanLabel => 'Scan to add me';

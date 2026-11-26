@@ -1916,6 +1916,23 @@ class AppLocalizationsEs extends AppLocalizations {
   String get memberNicknameSheetClearedAnnouncement => 'Apodo borrado';
 
   @override
+  String get memberNicknameSheetSavedLabel => 'Apodo guardado';
+
+  @override
+  String get memberNicknameSheetNoneLabel => 'Sin apodo';
+
+  @override
+  String get memberNicknameSheetSavingLabel => 'Guardando apodo';
+
+  @override
+  String get memberNicknameSheetRetryLabel =>
+      'No se guardó el apodo. Reintentar';
+
+  @override
+  String get memberNicknameSheetSaveFailedAnnouncement =>
+      'No se guardó el apodo, inténtalo de nuevo';
+
+  @override
   String get npubQrScanLabel => 'Escanéame para añadirme';
 
   @override

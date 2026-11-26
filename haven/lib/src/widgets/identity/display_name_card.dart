@@ -20,23 +20,7 @@ import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/profile_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
-
-/// Possible UI states for the display-name editor.
-@visibleForTesting
-enum DisplayNameStatus {
-  /// The field matches the persisted value.
-  saved,
-
-  /// The field has been edited but not yet saved.
-  unsaved,
-
-  /// A save is in flight.
-  saving,
-
-  /// The most recent save attempt failed.
-  failed,
-}
+import 'package:haven/src/widgets/common/circular_save_button.dart';
 
 /// Card containing the display-name editor.
 ///
@@ -53,7 +37,7 @@ class DisplayNameCard extends ConsumerStatefulWidget {
 class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
   final _controller = TextEditingController();
   String _savedName = '';
-  DisplayNameStatus _status = DisplayNameStatus.saved;
+  SaveStatus _status = SaveStatus.saved;
   bool _loaded = false;
 
   @override
@@ -94,7 +78,7 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
       ..text = trimmed
       ..addListener(_onTextChanged);
     _savedName = trimmed;
-    _status = DisplayNameStatus.saved;
+    _status = SaveStatus.saved;
     _loaded = true;
   }
 
@@ -103,8 +87,8 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
     // While saving or holding a failed state, leave status alone so an
     // in-flight save (or a failure the user has not acknowledged) is not
     // overwritten by an incidental keystroke.
-    if (_status == DisplayNameStatus.saving) return;
-    final next = _isDirty ? DisplayNameStatus.unsaved : DisplayNameStatus.saved;
+    if (_status == SaveStatus.saving) return;
+    final next = _isDirty ? SaveStatus.unsaved : SaveStatus.saved;
     if (next != _status) setState(() => _status = next);
   }
 
@@ -117,7 +101,7 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
     final textDirection = Directionality.of(context);
     final l10n = AppLocalizations.of(context);
     final syncController = ref.read(ownProfileSyncProvider.notifier);
-    setState(() => _status = DisplayNameStatus.saving);
+    setState(() => _status = SaveStatus.saving);
     try {
       await ref
           .read(identityServiceProvider)
@@ -154,8 +138,8 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
         // reseed gate (`_mayReseed`) and let a stale fetched value clobber
         // the newer, not-yet-saved keystrokes.
         _status = _controller.text.trim() == text
-            ? DisplayNameStatus.saved
-            : DisplayNameStatus.unsaved;
+            ? SaveStatus.saved
+            : SaveStatus.unsaved;
       });
     } on Object catch (e) {
       // Detail is logged in debug; surface a generic state to the user.
@@ -170,7 +154,7 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
           assertiveness: Assertiveness.assertive,
         ),
       );
-      setState(() => _status = DisplayNameStatus.failed);
+      setState(() => _status = SaveStatus.failed);
     }
   }
 
@@ -183,7 +167,7 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
   /// discard the (slower) authoritative kind-0 fetch if the fast local
   /// cache seeded first. Relaxed here to keep reseeding whenever there is
   /// nothing to clobber.
-  bool get _mayReseed => !_loaded || _status == DisplayNameStatus.saved;
+  bool get _mayReseed => !_loaded || _status == SaveStatus.saved;
 
   /// Prefers the fetched kind-0 `display_name`, falling back to `name`;
   /// returns `null` when neither is set (never reseeds with a blank value).
@@ -307,11 +291,16 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
               ),
             ),
             const SizedBox(width: HavenSpacing.sm),
-            _CircularSaveButton(
+            CircularSaveButton(
+              buttonKey: WidgetKeys.displayNameSaveButton,
               status: _status,
-              onPressed: (_isDirty && _status != DisplayNameStatus.saving)
+              onPressed: (_isDirty && _status != SaveStatus.saving)
                   ? _save
                   : null,
+              savedLabel: l10n.displayNameCardSavedLabel,
+              saveLabel: l10n.displayNameCardSaveLabel,
+              savingLabel: l10n.displayNameCardSavingLabel,
+              retryLabel: l10n.displayNameCardRetryLabel,
             ),
           ],
         ),
@@ -325,99 +314,6 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
           ),
         ],
       ],
-    );
-  }
-}
-
-/// Compact circular save button to the right of the display-name field.
-///
-/// Encodes the current [DisplayNameStatus] through its icon (a distinct shape
-/// per state, so the signal is never color-only) and carries a per-state
-/// tooltip/accessible label. Kept a [FilledButton] so it inherits the M3 state
-/// layer, focus ring, and disabled treatment, and stays a [ButtonStyleButton].
-/// The spinner is rendered inside the button while a save is in flight.
-class _CircularSaveButton extends StatelessWidget {
-  const _CircularSaveButton({required this.status, required this.onPressed});
-
-  final DisplayNameStatus status;
-  final VoidCallback? onPressed;
-
-  @override
-  Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-    final l10n = AppLocalizations.of(context);
-    final reducedMotion = MediaQuery.disableAnimationsOf(context);
-
-    final (Widget child, String label, Color? background, Color? foreground) =
-        switch (status) {
-          DisplayNameStatus.saved => (
-            const Icon(LucideIcons.check, size: 20),
-            l10n.displayNameCardSavedLabel,
-            null,
-            null,
-          ),
-          DisplayNameStatus.unsaved => (
-            const Icon(LucideIcons.arrowUp, size: 20),
-            l10n.displayNameCardSaveLabel,
-            null,
-            null,
-          ),
-          DisplayNameStatus.saving => (
-            SizedBox(
-              height: 18,
-              width: 18,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                color: colorScheme.onPrimary,
-              ),
-            ),
-            l10n.displayNameCardSavingLabel,
-            null,
-            null,
-          ),
-          DisplayNameStatus.failed => (
-            const Icon(LucideIcons.rotateCcw, size: 20),
-            l10n.displayNameCardRetryLabel,
-            colorScheme.errorContainer,
-            colorScheme.onErrorContainer,
-          ),
-        };
-
-    // Animate the icon/spinner swap unless the user prefers reduced motion.
-    final animatedChild = reducedMotion
-        ? child
-        : AnimatedSwitcher(
-            duration: const Duration(milliseconds: 200),
-            transitionBuilder: (c, animation) =>
-                ScaleTransition(scale: animation, child: c),
-            child: KeyedSubtree(
-              key: ValueKey<DisplayNameStatus>(status),
-              child: child,
-            ),
-          );
-
-    return Tooltip(
-      message: label,
-      child: FilledButton(
-        key: WidgetKeys.displayNameSaveButton,
-        onPressed: onPressed,
-        style: FilledButton.styleFrom(
-          shape: const CircleBorder(),
-          padding: EdgeInsets.zero,
-          minimumSize: const Size(48, 48),
-          fixedSize: const Size(48, 48),
-          backgroundColor: background,
-          foregroundColor: foreground,
-        ),
-        // Give the icon-only button a state-dependent accessible name. There
-        // is no live region in this card; screen readers read this label when
-        // the button is focused, and _save() announces save outcomes.
-        child: Semantics(
-          label: label,
-          excludeSemantics: true,
-          child: animatedChild,
-        ),
-      ),
     );
   }
 }

@@ -1910,6 +1910,23 @@ class AppLocalizationsFr extends AppLocalizations {
   String get memberNicknameSheetClearedAnnouncement => 'Surnom effacé';
 
   @override
+  String get memberNicknameSheetSavedLabel => 'Surnom enregistré';
+
+  @override
+  String get memberNicknameSheetNoneLabel => 'Aucun surnom défini';
+
+  @override
+  String get memberNicknameSheetSavingLabel => 'Enregistrement du surnom';
+
+  @override
+  String get memberNicknameSheetRetryLabel =>
+      'Surnom non enregistré. Réessayer';
+
+  @override
+  String get memberNicknameSheetSaveFailedAnnouncement =>
+      'Surnom non enregistré, réessayez';
+
+  @override
   String get npubQrScanLabel => 'Scannez pour m\'ajouter';
 
   @override

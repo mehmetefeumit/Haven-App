@@ -2,9 +2,14 @@
 /// §6.3 F10).
 ///
 /// Covers nickname save/clear/cancel (always-set `CircleService.
-/// setContactDisplayName`, plan D6), copy-npub, the self-row nickname-editor
-/// hiding, and the sheet's own semantics.
+/// setContactDisplayName`, plan D6) and the save button's state machine,
+/// shared with the display-name card (saved / unsaved / saving / failed),
+/// the title following the saved nickname, viewing the member's photo full
+/// screen, copy-npub, the self-row nickname-editor hiding, and the sheet's
+/// own semantics.
 library;
+
+import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
@@ -12,15 +17,23 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
+import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/profile_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/npub_validator.dart';
 import 'package:haven/src/widgets/circles/member_detail_sheet.dart';
+import 'package:haven/src/widgets/common/circular_save_button.dart';
 import 'package:haven/src/widgets/identity/avatar.dart';
+import 'package:haven/src/widgets/identity/avatar_fullscreen_viewer.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
+
+import '../../helpers/accessibility_announcements.dart';
+import '../../helpers/log_capture.dart';
 
 import '../../mocks/mock_circle_service.dart';
 import '../../mocks/mock_profile_service.dart';
@@ -53,6 +66,7 @@ Widget _buildHarness({
   MockCircleService? circleService,
   MockProfileService? profileService,
   String? selfDisplayName,
+  bool disableAnimations = false,
 }) {
   return ProviderScope(
     overrides: [
@@ -76,11 +90,36 @@ Widget _buildHarness({
     child: MaterialApp(
       localizationsDelegates: AppLocalizations.localizationsDelegates,
       supportedLocales: AppLocalizations.supportedLocales,
+      builder: (context, child) => MediaQuery(
+        data: MediaQuery.of(
+          context,
+        ).copyWith(disableAnimations: disableAnimations),
+        child: child!,
+      ),
       home: Scaffold(
         body: MemberDetailSheet(member: member, isSelf: isSelf),
       ),
     ),
   );
+}
+
+ButtonStyleButton _saveButton(WidgetTester tester) =>
+    tester.widget<ButtonStyleButton>(find.byKey(WidgetKeys.memberNicknameSave));
+
+Finder _inSave(Finder matching) => find.descendant(
+  of: find.byKey(WidgetKeys.memberNicknameSave),
+  matching: matching,
+);
+
+/// The header row's title — the sheet's resolved name for the member.
+String? _titleText(WidgetTester tester) {
+  final headerTile = tester.widget<ListTile>(
+    find.ancestor(
+      of: find.byType(HavenAvatar),
+      matching: find.byType(ListTile),
+    ),
+  );
+  return (headerTile.title! as Text).data;
 }
 
 void main() {
@@ -297,7 +336,7 @@ void main() {
     });
 
     testWidgets(
-      'Save Nickname calls setContactDisplayName with the trimmed text',
+      'the save button calls setContactDisplayName with the trimmed text',
       (tester) async {
         final svc = MockCircleService();
         await tester.pumpWidget(
@@ -319,7 +358,7 @@ void main() {
     );
 
     testWidgets(
-      'Clear Nickname calls setContactDisplayName with null and clears the '
+      'the clear icon calls setContactDisplayName with null and clears the '
       'field',
       (tester) async {
         final svc = MockCircleService();
@@ -362,7 +401,7 @@ void main() {
         );
         await tester.pump();
 
-        // The user navigates away without tapping Save/Clear.
+        // The user navigates away without tapping save or clear.
         expect(svc.methodCalls, isNot(contains('setContactDisplayName')));
       },
     );
@@ -385,6 +424,527 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(svc.nicknames[_memberPubkey], isNull);
+    });
+  });
+
+  group('MemberDetailSheet — nickname save button state', () {
+    testWidgets(
+      'with no nickname it starts saved, disabled, "No nickname set"',
+      (tester) async {
+        await tester.pumpWidget(_buildHarness(member: _buildMember()));
+        await tester.pumpAndSettle();
+
+        expect(
+          find.ancestor(
+            of: find.byKey(WidgetKeys.memberNicknameSave),
+            matching: find.byType(CircularSaveButton),
+          ),
+          findsOneWidget,
+          reason: "the display-name card's button, so the two cannot drift",
+        );
+        expect(_inSave(find.byIcon(LucideIcons.check)), findsOneWidget);
+        expect(_saveButton(tester).onPressed, isNull);
+        expect(find.byTooltip('No nickname set'), findsOneWidget);
+        expect(
+          find.byKey(WidgetKeys.memberNicknameClear),
+          findsNothing,
+          reason: 'an empty field has nothing to clear',
+        );
+      },
+    );
+
+    testWidgets('with a nickname it starts saved, "Nickname saved"', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildHarness(member: _buildMember(displayName: 'Bobby')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(_inSave(find.byIcon(LucideIcons.check)), findsOneWidget);
+      expect(_saveButton(tester).onPressed, isNull);
+      expect(find.byTooltip('Nickname saved'), findsOneWidget);
+    });
+
+    testWidgets('an edit flips it to unsaved; undoing the edit flips it back', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildHarness(member: _buildMember(displayName: 'Bobby')),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.enterText(find.byKey(WidgetKeys.memberNicknameField), 'Bo');
+      await tester.pumpAndSettle();
+      expect(_inSave(find.byIcon(LucideIcons.arrowUp)), findsOneWidget);
+      expect(_inSave(find.byIcon(LucideIcons.check)), findsNothing);
+      expect(_saveButton(tester).onPressed, isNotNull);
+      expect(find.byTooltip('Save nickname'), findsOneWidget);
+
+      await tester.enterText(
+        find.byKey(WidgetKeys.memberNicknameField),
+        ' Bobby ',
+      );
+      await tester.pumpAndSettle();
+      expect(
+        _inSave(find.byIcon(LucideIcons.check)),
+        findsOneWidget,
+        reason: 'a whitespace-only difference is not an edit',
+      );
+      expect(_saveButton(tester).onPressed, isNull);
+    });
+
+    testWidgets(
+      'a save shows the spinner while in flight, then the check, the new '
+      'title and a polite announcement',
+      (tester) async {
+        final svc = MockCircleService()
+          ..setContactDisplayNameGate = Completer<void>();
+        await tester.pumpWidget(
+          _buildHarness(member: _buildMember(), circleService: svc),
+        );
+        await tester.pumpAndSettle();
+        final announcements = captureAccessibilityAnnouncementsWithPriority(
+          tester,
+        );
+
+        await tester.enterText(
+          find.byKey(WidgetKeys.memberNicknameField),
+          'Bobby',
+        );
+        await tester.pump();
+        await tester.tap(find.byKey(WidgetKeys.memberNicknameSave));
+        await tester.pump();
+
+        expect(_inSave(find.byType(CircularProgressIndicator)), findsOneWidget);
+        expect(_saveButton(tester).onPressed, isNull);
+        expect(find.byTooltip('Saving nickname'), findsOneWidget);
+        expect(
+          tester
+              .widget<TextField>(find.byKey(WidgetKeys.memberNicknameField))
+              .enabled,
+          isNot(isFalse),
+          reason: 'the field stays editable during a save',
+        );
+        expect(
+          _titleText(tester),
+          _shortNpub(_memberNpub),
+          reason: 'the title changes only once the save has landed',
+        );
+        expect(announcements, isEmpty, reason: 'no progress announcement');
+
+        svc.setContactDisplayNameGate!.complete();
+        await tester.pumpAndSettle();
+
+        expect(_inSave(find.byIcon(LucideIcons.check)), findsOneWidget);
+        expect(_inSave(find.byType(CircularProgressIndicator)), findsNothing);
+        expect(_saveButton(tester).onPressed, isNull);
+        expect(find.byTooltip('Nickname saved'), findsOneWidget);
+        expect(svc.nicknames[_memberPubkey], 'Bobby');
+        expect(_titleText(tester), 'Bobby');
+        expect(
+          tester.widget<HavenAvatar>(find.byType(HavenAvatar)).initials,
+          'B',
+        );
+        expect(announcements, [
+          (message: 'Nickname saved', assertiveness: Assertiveness.polite),
+        ]);
+      },
+    );
+
+    testWidgets(
+      'a failed save shows retry, announces assertively, keeps the old title '
+      'and logs neither the nickname nor the pubkey',
+      (tester) async {
+        // Restored inside the body: testWidgets checks that debugPrint is
+        // back before tear-down callbacks run.
+        final logs = LogCapture();
+        addTearDown(logs.restore);
+        final svc = MockCircleService()
+          ..shouldThrowOnSetContactDisplayName = true;
+        await tester.pumpWidget(
+          _buildHarness(
+            member: _buildMember(displayName: 'Bob'),
+            circleService: svc,
+          ),
+        );
+        await tester.pumpAndSettle();
+        final announcements = captureAccessibilityAnnouncementsWithPriority(
+          tester,
+        );
+
+        await tester.enterText(
+          find.byKey(WidgetKeys.memberNicknameField),
+          'Quillon Marsh',
+        );
+        await tester.pump();
+        await tester.tap(find.byKey(WidgetKeys.memberNicknameSave));
+        await tester.pumpAndSettle();
+
+        expect(_inSave(find.byIcon(LucideIcons.rotateCcw)), findsOneWidget);
+        expect(_saveButton(tester).onPressed, isNotNull, reason: 'retry');
+        expect(find.byTooltip('Nickname not saved. Retry'), findsOneWidget);
+        expect(announcements, [
+          (
+            message: 'Nickname not saved, try again',
+            assertiveness: Assertiveness.assertive,
+          ),
+        ]);
+        expect(_titleText(tester), 'Bob');
+        expect(
+          find.textContaining('Mock setContactDisplayName error'),
+          findsNothing,
+          reason: 'never a raw error in the UI (Security Rule 8)',
+        );
+        logs
+          ..assertContains('[MemberDetail] setContactDisplayName failed')
+          ..assertNoNeedles([
+            'Quillon Marsh',
+            _memberPubkey,
+            _memberNpub,
+            'Mock setContactDisplayName error',
+          ])
+          ..restore();
+
+        svc.shouldThrowOnSetContactDisplayName = false;
+        await tester.tap(find.byKey(WidgetKeys.memberNicknameSave));
+        await tester.pumpAndSettle();
+        expect(_inSave(find.byIcon(LucideIcons.check)), findsOneWidget);
+        expect(svc.nicknames[_memberPubkey], 'Quillon Marsh');
+      },
+    );
+
+    testWidgets(
+      'a keystroke during the save keeps the spinner; the save then ends '
+      'unsaved because the newer text still needs saving',
+      (tester) async {
+        final svc = MockCircleService()
+          ..setContactDisplayNameGate = Completer<void>();
+        await tester.pumpWidget(
+          _buildHarness(member: _buildMember(), circleService: svc),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.enterText(
+          find.byKey(WidgetKeys.memberNicknameField),
+          'Bobby',
+        );
+        await tester.pump();
+        await tester.tap(find.byKey(WidgetKeys.memberNicknameSave));
+        await tester.pump();
+        await tester.enterText(
+          find.byKey(WidgetKeys.memberNicknameField),
+          'Bobby2',
+        );
+        await tester.pump();
+
+        expect(_inSave(find.byType(CircularProgressIndicator)), findsOneWidget);
+        expect(_saveButton(tester).onPressed, isNull);
+
+        svc.setContactDisplayNameGate!.complete();
+        await tester.pumpAndSettle();
+
+        expect(svc.nicknames[_memberPubkey], 'Bobby');
+        expect(_titleText(tester), 'Bobby');
+        expect(_inSave(find.byIcon(LucideIcons.arrowUp)), findsOneWidget);
+        expect(_saveButton(tester).onPressed, isNotNull);
+      },
+    );
+
+    testWidgets(
+      'the clear icon clears and saves at once with the same animation, '
+      'then the title falls back',
+      (tester) async {
+        final svc = MockCircleService()
+          ..setContactDisplayNameGate = Completer<void>();
+        await tester.pumpWidget(
+          _buildHarness(
+            member: _buildMember(displayName: 'Bobby'),
+            circleService: svc,
+          ),
+        );
+        await tester.pumpAndSettle();
+        final announcements = captureAccessibilityAnnouncements(tester);
+
+        await tester.tap(find.byKey(WidgetKeys.memberNicknameClear));
+        await tester.pump();
+
+        expect(_inSave(find.byType(CircularProgressIndicator)), findsOneWidget);
+        expect(
+          find.byKey(WidgetKeys.memberNicknameClear),
+          findsNothing,
+          reason: 'the emptied field has nothing left to clear',
+        );
+
+        svc.setContactDisplayNameGate!.complete();
+        await tester.pumpAndSettle();
+
+        expect(svc.nicknames.containsKey(_memberPubkey), isTrue);
+        expect(svc.nicknames[_memberPubkey], isNull);
+        expect(_inSave(find.byIcon(LucideIcons.check)), findsOneWidget);
+        expect(find.byTooltip('No nickname set'), findsOneWidget);
+        expect(_titleText(tester), _shortNpub(_memberNpub));
+        expect(announcements, ['Nickname cleared']);
+      },
+    );
+
+    testWidgets('a failed clear shows retry, and retry clears', (tester) async {
+      final svc = MockCircleService()
+        ..shouldThrowOnSetContactDisplayName = true;
+      await tester.pumpWidget(
+        _buildHarness(
+          member: _buildMember(displayName: 'Bobby'),
+          circleService: svc,
+        ),
+      );
+      await tester.pumpAndSettle();
+      final announcements = captureAccessibilityAnnouncementsWithPriority(
+        tester,
+      );
+
+      await tester.tap(find.byKey(WidgetKeys.memberNicknameClear));
+      await tester.pumpAndSettle();
+
+      expect(_inSave(find.byIcon(LucideIcons.rotateCcw)), findsOneWidget);
+      expect(_titleText(tester), 'Bobby');
+      expect(announcements.single.assertiveness, Assertiveness.assertive);
+
+      svc.shouldThrowOnSetContactDisplayName = false;
+      await tester.tap(find.byKey(WidgetKeys.memberNicknameSave));
+      await tester.pumpAndSettle();
+
+      expect(svc.nicknames[_memberPubkey], isNull);
+      expect(svc.nicknames.containsKey(_memberPubkey), isTrue);
+      expect(_titleText(tester), _shortNpub(_memberNpub));
+    });
+
+    testWidgets('clearing text that was never saved writes nothing', (
+      tester,
+    ) async {
+      final svc = MockCircleService();
+      await tester.pumpWidget(
+        _buildHarness(member: _buildMember(), circleService: svc),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.enterText(find.byKey(WidgetKeys.memberNicknameField), 'Bo');
+      await tester.pump();
+      await tester.tap(find.byKey(WidgetKeys.memberNicknameClear));
+      await tester.pumpAndSettle();
+
+      expect(svc.methodCalls, isNot(contains('setContactDisplayName')));
+      expect(_inSave(find.byIcon(LucideIcons.check)), findsOneWidget);
+      expect(_saveButton(tester).onPressed, isNull);
+    });
+
+    testWidgets('a save refreshes the circles list', (tester) async {
+      final svc = MockCircleService();
+      await tester.pumpWidget(
+        _buildHarness(member: _buildMember(), circleService: svc),
+      );
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(MemberDetailSheet)),
+      );
+      final sub = container.listen(circlesProvider, (_, _) {});
+      addTearDown(sub.close);
+      await tester.pumpAndSettle();
+      int reads() =>
+          svc.methodCalls.where((c) => c == 'getVisibleCircles').length;
+      expect(reads(), 1);
+
+      await tester.enterText(
+        find.byKey(WidgetKeys.memberNicknameField),
+        'Bobby',
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(WidgetKeys.memberNicknameSave));
+      await tester.pumpAndSettle();
+
+      expect(reads(), 2);
+    });
+
+    testWidgets(
+      'a save that lands after the sheet is gone still refreshes the circles '
+      'list',
+      (tester) async {
+        final svc = MockCircleService()
+          ..setContactDisplayNameGate = Completer<void>();
+        final shown = ValueNotifier<bool>(true);
+        addTearDown(shown.dispose);
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              circleServiceProvider.overrideWithValue(svc),
+              profileServiceProvider.overrideWithValue(MockProfileService()),
+              identityProvider.overrideWith((_) async => null),
+              displayNameProvider.overrideWith((_) async => null),
+            ],
+            child: MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              home: Scaffold(
+                body: ValueListenableBuilder<bool>(
+                  valueListenable: shown,
+                  builder: (_, on, _) => on
+                      ? MemberDetailSheet(member: _buildMember(), isSelf: false)
+                      : const SizedBox(),
+                ),
+              ),
+            ),
+          ),
+        );
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(Scaffold)),
+        );
+        final sub = container.listen(circlesProvider, (_, _) {});
+        addTearDown(sub.close);
+        await tester.pumpAndSettle();
+
+        await tester.enterText(
+          find.byKey(WidgetKeys.memberNicknameField),
+          'Bobby',
+        );
+        await tester.pump();
+        await tester.tap(find.byKey(WidgetKeys.memberNicknameSave));
+        await tester.pump();
+        shown.value = false;
+        await tester.pump();
+        expect(find.byType(MemberDetailSheet), findsNothing);
+
+        svc.setContactDisplayNameGate!.complete();
+        await tester.pumpAndSettle();
+
+        expect(svc.nicknames[_memberPubkey], 'Bobby');
+        expect(
+          svc.methodCalls.where((c) => c == 'getVisibleCircles').length,
+          2,
+        );
+        expect(tester.takeException(), isNull);
+      },
+    );
+
+    testWidgets('the save button animates its icon swap', (tester) async {
+      await tester.pumpWidget(_buildHarness(member: _buildMember()));
+      await tester.pumpAndSettle();
+
+      await tester.enterText(find.byKey(WidgetKeys.memberNicknameField), 'Bo');
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      expect(_inSave(find.byType(AnimatedSwitcher)), findsOneWidget);
+      expect(_inSave(find.byIcon(LucideIcons.check)), findsOneWidget);
+      expect(_inSave(find.byIcon(LucideIcons.arrowUp)), findsOneWidget);
+    });
+
+    testWidgets('reduced motion swaps the save icon with no animation', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildHarness(member: _buildMember(), disableAnimations: true),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.enterText(find.byKey(WidgetKeys.memberNicknameField), 'Bo');
+      await tester.pump();
+
+      expect(_inSave(find.byType(AnimatedSwitcher)), findsNothing);
+      expect(_inSave(find.byIcon(LucideIcons.check)), findsNothing);
+      expect(_inSave(find.byIcon(LucideIcons.arrowUp)), findsOneWidget);
+    });
+  });
+
+  group('MemberDetailSheet — photo full screen', () {
+    final photo = Uint8List.fromList([0xFF, 0xD8, 0xFF, 0xE0, 0x01, 0x02]);
+
+    testWidgets("tapping a member's photo opens it full screen", (
+      tester,
+    ) async {
+      final handle = tester.ensureSemantics();
+      await tester.pumpWidget(
+        _buildHarness(
+          member: _buildMember(displayName: 'Bob'),
+          profileService: MockProfileService(
+            memberProfiles: {
+              _memberPubkey: Profile(
+                pubkeyHex: _memberPubkey,
+                pictureBytes: photo,
+              ),
+            },
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // The header ListTile merges its row into one node, so the photo's
+      // button role and action ride on it, its label leading.
+      final header = tester.getSemantics(
+        find.byKey(WidgetKeys.memberDetailPhoto),
+      );
+      expect(header, isSemantics(isButton: true, hasTapAction: true));
+      expect(header.label, startsWith('View profile photo'));
+      expect(
+        tester.getSize(find.byKey(WidgetKeys.memberDetailPhoto)),
+        const Size(48, 48),
+      );
+
+      await tester.tap(find.byKey(WidgetKeys.memberDetailPhoto));
+      await tester.pumpAndSettle();
+
+      final viewer = tester.widget<AvatarFullscreenViewer>(
+        find.byType(AvatarFullscreenViewer),
+      );
+      expect(viewer.imageBytes, same(photo));
+      handle.dispose();
+    });
+
+    testWidgets('the self row opens the own profile photo', (tester) async {
+      await tester.pumpWidget(
+        _buildHarness(
+          member: const CircleMember(
+            pubkey: _selfPubkey,
+            npub: _selfNpub,
+            isAdmin: false,
+          ),
+          isSelf: true,
+          selfDisplayName: 'Alice',
+          profileService: MockProfileService(
+            ownProfile: Profile(pubkeyHex: _selfPubkey, pictureBytes: photo),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(WidgetKeys.memberDetailPhoto));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester
+            .widget<AvatarFullscreenViewer>(find.byType(AvatarFullscreenViewer))
+            .imageBytes,
+        same(photo),
+      );
+    });
+
+    testWidgets('without a photo the avatar offers nothing to tap', (
+      tester,
+    ) async {
+      final handle = tester.ensureSemantics();
+      await tester.pumpWidget(
+        _buildHarness(member: _buildMember(displayName: 'Bob')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(WidgetKeys.memberDetailPhoto), findsNothing);
+      expect(
+        tester.getSemantics(find.byType(HavenAvatar)),
+        isSemantics(isButton: false, hasTapAction: false),
+      );
+      expect(find.bySemanticsLabel(RegExp('View profile photo')), findsNothing);
+
+      await tester.tap(find.byType(HavenAvatar));
+      await tester.pumpAndSettle();
+      expect(find.byType(AvatarFullscreenViewer), findsNothing);
+      handle.dispose();
     });
   });
 
@@ -447,18 +1007,33 @@ void main() {
       handle.dispose();
     });
 
-    testWidgets('the nickname save/clear buttons are reachable by key', (
-      tester,
-    ) async {
-      final handle = tester.ensureSemantics();
-      await tester.pumpWidget(_buildHarness(member: _buildMember()));
-      await tester.pumpAndSettle();
+    testWidgets(
+      'the nickname save and clear buttons are labelled 48dp buttons',
+      (tester) async {
+        final handle = tester.ensureSemantics();
+        await tester.pumpWidget(
+          _buildHarness(member: _buildMember(displayName: 'Bobby')),
+        );
+        await tester.pumpAndSettle();
 
-      expect(find.byKey(WidgetKeys.memberNicknameSave), findsOneWidget);
-      expect(find.byKey(WidgetKeys.memberNicknameClear), findsOneWidget);
+        expect(
+          tester.getSemantics(find.byKey(WidgetKeys.memberNicknameSave)),
+          isSemantics(label: 'Nickname saved', isButton: true),
+        );
+        expect(
+          tester.getSemantics(find.byKey(WidgetKeys.memberNicknameClear)),
+          isSemantics(
+            tooltip: 'Clear nickname',
+            isButton: true,
+            hasTapAction: true,
+          ),
+        );
+        await expectLater(tester, meetsGuideline(androidTapTargetGuideline));
+        await expectLater(tester, meetsGuideline(labeledTapTargetGuideline));
 
-      handle.dispose();
-    });
+        handle.dispose();
+      },
+    );
   });
 
   group('showMemberDetailSheet', () {

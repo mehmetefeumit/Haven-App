@@ -1859,6 +1859,23 @@ class AppLocalizationsFa extends AppLocalizations {
   String get memberNicknameSheetClearedAnnouncement => 'نام مستعار پاک شد';
 
   @override
+  String get memberNicknameSheetSavedLabel => 'نام مستعار ذخیره شد';
+
+  @override
+  String get memberNicknameSheetNoneLabel => 'نام مستعاری تنظیم نشده';
+
+  @override
+  String get memberNicknameSheetSavingLabel => 'در حال ذخیرهٔ نام مستعار';
+
+  @override
+  String get memberNicknameSheetRetryLabel =>
+      'نام مستعار ذخیره نشد. تلاش دوباره';
+
+  @override
+  String get memberNicknameSheetSaveFailedAnnouncement =>
+      'نام مستعار ذخیره نشد، دوباره تلاش کن';
+
+  @override
   String get npubQrScanLabel => 'برای افزودن من اسکن کن';
 
   @override

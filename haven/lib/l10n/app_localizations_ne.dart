@@ -1879,6 +1879,23 @@ class AppLocalizationsNe extends AppLocalizations {
   String get memberNicknameSheetClearedAnnouncement => 'उपनाम हटाइयो';
 
   @override
+  String get memberNicknameSheetSavedLabel => 'उपनाम सुरक्षित गरियो';
+
+  @override
+  String get memberNicknameSheetNoneLabel => 'कुनै उपनाम राखिएको छैन';
+
+  @override
+  String get memberNicknameSheetSavingLabel => 'उपनाम सुरक्षित गर्दै';
+
+  @override
+  String get memberNicknameSheetRetryLabel =>
+      'उपनाम सुरक्षित गर्न सकिएन। पुनः प्रयास गर्नुहोस्';
+
+  @override
+  String get memberNicknameSheetSaveFailedAnnouncement =>
+      'उपनाम सुरक्षित गर्न सकिएन, फेरि प्रयास गर्नुहोस्';
+
+  @override
   String get npubQrScanLabel => 'मलाई थप्न स्क्यान गर्नुहोस्';
 
   @override

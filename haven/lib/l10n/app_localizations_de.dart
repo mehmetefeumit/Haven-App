@@ -1896,6 +1896,23 @@ class AppLocalizationsDe extends AppLocalizations {
   String get memberNicknameSheetClearedAnnouncement => 'Spitzname entfernt';
 
   @override
+  String get memberNicknameSheetSavedLabel => 'Spitzname gespeichert';
+
+  @override
+  String get memberNicknameSheetNoneLabel => 'Kein Spitzname festgelegt';
+
+  @override
+  String get memberNicknameSheetSavingLabel => 'Spitzname wird gespeichert';
+
+  @override
+  String get memberNicknameSheetRetryLabel =>
+      'Spitzname nicht gespeichert. Wiederholen';
+
+  @override
+  String get memberNicknameSheetSaveFailedAnnouncement =>
+      'Spitzname nicht gespeichert, versuche es erneut';
+
+  @override
   String get npubQrScanLabel => 'Scannen, um mich hinzuzufügen';
 
   @override

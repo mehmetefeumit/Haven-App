@@ -1868,6 +1868,23 @@ class AppLocalizationsHi extends AppLocalizations {
   String get memberNicknameSheetClearedAnnouncement => 'उपनाम हटाया गया';
 
   @override
+  String get memberNicknameSheetSavedLabel => 'उपनाम सहेजा गया';
+
+  @override
+  String get memberNicknameSheetNoneLabel => 'कोई उपनाम सेट नहीं है';
+
+  @override
+  String get memberNicknameSheetSavingLabel => 'उपनाम सहेजा जा रहा है';
+
+  @override
+  String get memberNicknameSheetRetryLabel =>
+      'उपनाम सहेजा नहीं गया। फिर कोशिश करें';
+
+  @override
+  String get memberNicknameSheetSaveFailedAnnouncement =>
+      'उपनाम सहेजा नहीं गया, फिर कोशिश करें';
+
+  @override
   String get npubQrScanLabel => 'मुझे जोड़ने के लिए स्कैन करें';
 
   @override

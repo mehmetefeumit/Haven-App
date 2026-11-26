@@ -1794,6 +1794,22 @@ class AppLocalizationsJa extends AppLocalizations {
   String get memberNicknameSheetClearedAnnouncement => 'ニックネームを消去しました';
 
   @override
+  String get memberNicknameSheetSavedLabel => 'ニックネームを保存済み';
+
+  @override
+  String get memberNicknameSheetNoneLabel => 'ニックネーム未設定';
+
+  @override
+  String get memberNicknameSheetSavingLabel => 'ニックネームを保存しています';
+
+  @override
+  String get memberNicknameSheetRetryLabel => 'ニックネームを保存できませんでした。再試行';
+
+  @override
+  String get memberNicknameSheetSaveFailedAnnouncement =>
+      'ニックネームを保存できませんでした。もう一度お試しください';
+
+  @override
   String get npubQrScanLabel => 'スキャンして追加';
 
   @override

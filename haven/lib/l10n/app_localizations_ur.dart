@@ -1866,6 +1866,23 @@ class AppLocalizationsUr extends AppLocalizations {
   String get memberNicknameSheetClearedAnnouncement => 'عرفی نام صاف ہو گیا';
 
   @override
+  String get memberNicknameSheetSavedLabel => 'عرفی نام محفوظ ہو گیا';
+
+  @override
+  String get memberNicknameSheetNoneLabel => 'کوئی عرفی نام مقرر نہیں';
+
+  @override
+  String get memberNicknameSheetSavingLabel => 'عرفی نام محفوظ ہو رہا ہے';
+
+  @override
+  String get memberNicknameSheetRetryLabel =>
+      'عرفی نام محفوظ نہیں ہوا۔ دوبارہ کوشش کریں';
+
+  @override
+  String get memberNicknameSheetSaveFailedAnnouncement =>
+      'عرفی نام محفوظ نہیں ہوا، دوبارہ کوشش کریں';
+
+  @override
   String get npubQrScanLabel => 'مجھے شامل کرنے کے لیے اسکین کریں';
 
   @override

@@ -2084,13 +2084,13 @@
   "@memberNicknameSheetLabel": {
     "description": "Persistent label (InputDecoration.labelText) of the nickname text field in the member detail sheet, so the field's purpose is still announced by screen readers once text has been entered and the hint is no longer visible."
   },
-  "memberNicknameSheetSave": "Save Nickname",
+  "memberNicknameSheetSave": "Save nickname",
   "@memberNicknameSheetSave": {
-    "description": "Button in the member detail sheet that saves the entered local nickname for a member."
+    "description": "Accessible label/tooltip on the circular save button beside the nickname field in the member detail sheet, when there are unsaved edits."
   },
-  "memberNicknameSheetClear": "Clear Nickname",
+  "memberNicknameSheetClear": "Clear nickname",
   "@memberNicknameSheetClear": {
-    "description": "Button in the member detail sheet that clears the local nickname override for a member, reverting to the profile-derived name."
+    "description": "Accessible label/tooltip on the clear (x) icon inside the nickname field in the member detail sheet; tapping it removes the member's local nickname at once, reverting to the profile-derived name."
   },
   "memberNicknameSheetSavedAnnouncement": "Nickname saved",
   "@memberNicknameSheetSavedAnnouncement": {
@@ -2099,6 +2099,26 @@
   "memberNicknameSheetClearedAnnouncement": "Nickname cleared",
   "@memberNicknameSheetClearedAnnouncement": {
     "description": "Screen-reader announcement when a member's local nickname override is cleared."
+  },
+  "memberNicknameSheetSavedLabel": "Nickname saved",
+  "@memberNicknameSheetSavedLabel": {
+    "description": "Accessible label/tooltip on the circular save button beside the nickname field when the field matches the member's saved local nickname."
+  },
+  "memberNicknameSheetNoneLabel": "No nickname set",
+  "@memberNicknameSheetNoneLabel": {
+    "description": "Accessible label/tooltip on the circular save button beside the nickname field when the field is empty and the member has no saved local nickname."
+  },
+  "memberNicknameSheetSavingLabel": "Saving nickname",
+  "@memberNicknameSheetSavingLabel": {
+    "description": "Accessible label/tooltip on the circular save button beside the nickname field while the nickname is being saved."
+  },
+  "memberNicknameSheetRetryLabel": "Nickname not saved. Retry",
+  "@memberNicknameSheetRetryLabel": {
+    "description": "Accessible label/tooltip on the circular save button beside the nickname field after saving or clearing the nickname failed; tapping it tries again."
+  },
+  "memberNicknameSheetSaveFailedAnnouncement": "Nickname not saved, try again",
+  "@memberNicknameSheetSaveFailedAnnouncement": {
+    "description": "Assertive screen-reader announcement when saving or clearing a member's local nickname fails."
   },
   "npubQrScanLabel": "Scan to add me",
   "@npubQrScanLabel": {
@@ -2127,7 +2147,7 @@
   },
   "photoHeaderViewPhotoSemantics": "View profile photo",
   "@photoHeaderViewPhotoSemantics": {
-    "description": "Accessibility label for the avatar when a photo is set and tapping it opens the full-screen viewer."
+    "description": "Accessibility label for a tappable profile photo that opens it full screen: the user's own photo on the Identity page, and a circle member's photo in the member detail sheet."
   },
   "photoHeaderAddPhotoSemantics": "Add profile photo",
   "@photoHeaderAddPhotoSemantics": {

@@ -1,4 +1,5 @@
-/// Full-screen viewer for the user's own profile photo.
+/// Full-screen viewer for a profile photo: the user's own (Identity page) or a
+/// circle member's (member detail sheet).
 ///
 /// Renders avatar bytes via [Image.memory] only (never a network URL) so no
 /// avatar data is leaked to relays or CDNs, and writes nothing to disk.

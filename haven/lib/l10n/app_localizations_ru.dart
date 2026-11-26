@@ -1914,6 +1914,23 @@ class AppLocalizationsRu extends AppLocalizations {
   String get memberNicknameSheetClearedAnnouncement => 'Псевдоним убран';
 
   @override
+  String get memberNicknameSheetSavedLabel => 'Псевдоним сохранён';
+
+  @override
+  String get memberNicknameSheetNoneLabel => 'Псевдоним не задан';
+
+  @override
+  String get memberNicknameSheetSavingLabel => 'Сохраняем псевдоним';
+
+  @override
+  String get memberNicknameSheetRetryLabel =>
+      'Псевдоним не сохранён. Повторить';
+
+  @override
+  String get memberNicknameSheetSaveFailedAnnouncement =>
+      'Псевдоним не сохранён, попробуйте снова';
+
+  @override
   String get npubQrScanLabel => 'Отсканируйте, чтобы добавить меня';
 
   @override

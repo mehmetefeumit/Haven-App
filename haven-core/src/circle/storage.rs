@@ -4938,6 +4938,51 @@ mod tests {
         }
     }
 
+    /// A member's petname is promised to stay on the device under the keyring
+    /// key: no byte of it may sit in plaintext in the database or a sidecar.
+    #[test]
+    fn contact_petname_is_encrypted_at_rest() {
+        const PETNAME: &str = "PETNAME_AT_REST_SENTINEL_Quillon_Marsh";
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("circles.db");
+        let scan = |phase: &str| {
+            let mut scanned = 0;
+            for ext in ["", "-wal", "-shm", "-journal"] {
+                let path = std::path::PathBuf::from(format!("{}{ext}", db_path.display()));
+                let Ok(bytes) = std::fs::read(&path) else {
+                    continue;
+                };
+                scanned += 1;
+                assert!(
+                    !bytes
+                        .windows(PETNAME.len())
+                        .any(|w| w == PETNAME.as_bytes()),
+                    "petname in plaintext in '{ext}' ({phase})"
+                );
+            }
+            assert!(scanned > 0, "no database file scanned ({phase})");
+        };
+
+        {
+            let storage = CircleStorage::new(&db_path, Some(&test_hex_key())).unwrap();
+            let mut contact = create_test_contact(7);
+            contact.display_name = Some(PETNAME.to_string());
+            storage.save_contact(&contact).unwrap();
+            assert_eq!(
+                storage
+                    .get_contact(&contact.pubkey)
+                    .unwrap()
+                    .unwrap()
+                    .display_name
+                    .as_deref(),
+                Some(PETNAME),
+                "the petname must round-trip through the cipher"
+            );
+            scan("open");
+        }
+        scan("closed");
+    }
+
     /// Reads a scalar PRAGMA value off a storage instance's connection.
     fn pragma_string(storage: &CircleStorage, pragma: &str) -> String {
         let conn = storage.conn().lock().unwrap();

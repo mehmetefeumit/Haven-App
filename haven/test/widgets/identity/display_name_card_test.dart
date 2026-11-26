@@ -28,6 +28,7 @@ import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/profile_service.dart';
 import 'package:haven/src/test_keys.dart';
+import 'package:haven/src/widgets/common/circular_save_button.dart';
 import 'package:haven/src/widgets/identity/display_name_card.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -120,6 +121,31 @@ void main() {
         reason: 'saved state shows a check icon',
       );
     });
+
+    testWidgets(
+      'the save button is the shared circular button, with display-name '
+      'labels',
+      (tester) async {
+        final service = _FakeIdentityService(initialDisplayName: 'Alice');
+
+        await tester.pumpWidget(buildHarness(service: service));
+        await tester.pumpAndSettle();
+
+        expect(
+          find.ancestor(
+            of: _findSaveButtonFinder(),
+            matching: find.byType(CircularSaveButton),
+          ),
+          findsOneWidget,
+          reason: 'one widget for both save buttons, so they cannot drift',
+        );
+        expect(find.byTooltip('Display name saved'), findsOneWidget);
+
+        await tester.enterText(find.byType(TextField), 'Bob');
+        await tester.pump();
+        expect(find.byTooltip('Save display name'), findsOneWidget);
+      },
+    );
 
     testWidgets(
       'the display-name field has a persistent label, not hint-only '
