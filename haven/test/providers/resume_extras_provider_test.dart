@@ -2,9 +2,10 @@
 /// suppress.
 ///
 /// The promise this pins: repeating a shade-pull glance ten times an hour must
-/// not repeat ten KeyPackage probes, ten profile fetches, ten prunes and ten
-/// tile-cache sweeps — while the work a user can actually SEE (the immediate
-/// publish, the member-location refresh) stays outside the window entirely.
+/// not repeat ten KeyPackage probes, ten prunes and ten tile-cache sweeps —
+/// while the work a user can actually SEE (the immediate publish, the
+/// member-location refresh, the profile refresh) stays outside the window
+/// entirely.
 library;
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';

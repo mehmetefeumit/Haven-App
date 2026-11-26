@@ -246,24 +246,25 @@ const Duration kLocationPublishOverlapGuard = Duration(seconds: 60);
 /// Minimum spacing between two runs of the one-shot resume extras.
 ///
 /// The extras are the resume work that is a REPEAT of something already on a
-/// periodic timer: the KeyPackage/relay-list probes, the public-profile
-/// refresh, the location prune and the tile-cache eviction. Each of them
-/// re-runs on its own schedule anyway, so a shade-pull glance that repeats them
-/// buys no freshness — it buys relay round-trips and disk work. Ten glances an
-/// hour used to be ten of each.
+/// periodic timer: the KeyPackage/relay-list probes, the location prune and
+/// the tile-cache eviction. Each of them re-runs on its own schedule anyway,
+/// so a shade-pull glance that repeats them buys no freshness — it buys relay
+/// round-trips and disk work. Ten glances an hour used to be ten of each.
 ///
 /// Derived, not chosen: 10 minutes is `keyPackageMaintenanceInterval`, the
 /// SHORTEST of the extras' own timers (the relay-list sweep is 30 min, the
-/// health sweep 15 min, the profile anti-entropy sweep 45 min after a 10 min
-/// initial delay, the prune hourly). A window longer than the shortest timer
-/// would let the throttle, rather than the timer, decide that task's cadence;
-/// a shorter one would re-run work whose own schedule has not come round.
+/// health sweep 15 min, the prune hourly). A window longer than the shortest
+/// timer would let the throttle, rather than the timer, decide that task's
+/// cadence; a shorter one would re-run work whose own schedule has not come
+/// round.
 /// Pinned against that constant by `resume_extras_provider_test.dart`.
 ///
 /// What is NOT an extra, and therefore never behind this window: the immediate
 /// resume publish, the `memberLocationsProvider` invalidation (both are
-/// promises the user can see) and the engine re-anchor (which has its own 60 s
-/// guard, [kLocationPublishOverlapGuard], because it is a repair, not a sweep).
+/// promises the user can see), the public-profile refresh every resume makes
+/// (owner-directed 2026-11-26; its own 1-min tier is its throttle) and the
+/// engine re-anchor (which has its own 60 s guard,
+/// [kLocationPublishOverlapGuard], because it is a repair, not a sweep).
 const Duration kResumeExtrasMinInterval = Duration(minutes: 10);
 
 /// Minimum jittered publish interval.

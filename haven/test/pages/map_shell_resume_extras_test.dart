@@ -8,6 +8,11 @@
 /// line between them: the throttle is one `if`, and it is far too easy to widen
 /// it by one statement and quietly stop publishing on resume.
 ///
+/// The member and own profile refresh is a promise too (owner-directed
+/// 2026-11-26): every transition to the foreground makes one, at
+/// `profileForegroundMaxAge`, and neither the resume debounce nor the extras
+/// window may gate it.
+///
 /// ## Why a source guard
 ///
 /// `_MapShellState` and `_onResumed` are private, and per CLAUDE.md `MapShell`
@@ -58,6 +63,95 @@ String blockAt(String source, int open) {
     }
   }
   fail('unbalanced braces from offset $open');
+}
+
+/// The statements of [method] on [className], or `null` if absent.
+List<Statement>? methodStatements(
+  String source, {
+  required String className,
+  required String method,
+}) {
+  final unit = parseString(content: source, throwIfDiagnostics: false).unit;
+  final visitor = _MethodBodyVisitor(className: className, method: method);
+  unit.accept(visitor);
+  final body = visitor.body;
+  return body is BlockFunctionBody ? body.block.statements : null;
+}
+
+/// Every `triggerProfileRefresh(...)` call in [source], as
+/// `<enclosing method>: <the call>`, closures included.
+List<String> profileRefreshCalls(String source) {
+  final unit = parseString(content: source, throwIfDiagnostics: false).unit;
+  final collector = _RefreshCallCollector();
+  unit.accept(collector);
+  return collector.found;
+}
+
+class _RefreshCallCollector extends RecursiveAstVisitor<void> {
+  final List<String> found = [];
+
+  @override
+  void visitMethodInvocation(MethodInvocation node) {
+    if (node.methodName.name == 'triggerProfileRefresh') {
+      found.add(
+        '${node.thisOrAncestorOfType<MethodDeclaration>()?.name.lexeme}: '
+        '${node.toSource()}',
+      );
+    }
+    super.visitMethodInvocation(node);
+  }
+}
+
+/// The index in [statements] of the one top-level statement that is exactly
+/// [call], or -1. Top-level only: a call nested in an `if`, a loop or a
+/// closure is not made on every path.
+int topLevelIndexOf(List<Statement> statements, String call) {
+  for (var i = 0; i < statements.length; i++) {
+    final statement = statements[i];
+    if (statement is ExpressionStatement &&
+        statement.expression.toSource() == call) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/// Whether [statement] is a return taken only when the resume was superseded
+/// or the shell unmounted, the one way a resume may stop before a promise.
+bool isSupersededReturn(AstNode? statement) {
+  if (statement is! IfStatement) return false;
+  final condition = statement.expression.toSource();
+  return statement.thenStatement is ReturnStatement &&
+      statement.elseStatement == null &&
+      condition.contains('turn != _lifecycleTurn') &&
+      condition.contains('!mounted');
+}
+
+/// Every `return` in [statements], nested ones included, that is not the
+/// whole of an [isSupersededReturn]. A closure's own returns do not end the
+/// method and are skipped.
+List<String> earlyExits(List<Statement> statements) {
+  final collector = _ReturnCollector();
+  for (final statement in statements) {
+    statement.accept(collector);
+  }
+  return [
+    for (final exit in collector.found)
+      if (!isSupersededReturn(exit.parent)) exit.toSource(),
+  ];
+}
+
+class _ReturnCollector extends RecursiveAstVisitor<void> {
+  final List<ReturnStatement> found = [];
+
+  @override
+  void visitReturnStatement(ReturnStatement node) {
+    found.add(node);
+    super.visitReturnStatement(node);
+  }
+
+  @override
+  void visitFunctionExpression(FunctionExpression node) {}
 }
 
 class _MethodBodyVisitor extends RecursiveAstVisitor<void> {
@@ -167,11 +261,7 @@ class _MapShellState {
       );
     });
 
-    for (final extra in const [
-      'keyPackagePublisherProvider',
-      'triggerProfileRefresh',
-      '_runPrune',
-    ]) {
+    for (final extra in const ['keyPackagePublisherProvider', '_runPrune']) {
       test('$extra is behind the window', () {
         expect(
           gated,
@@ -201,6 +291,15 @@ class _MapShellState {
       });
     }
 
+    test('the profile refresh is not an extra', () {
+      expect(
+        gated,
+        isNot(contains('triggerProfileRefresh')),
+        reason: 'every resume already refreshes ahead of the debounce; a '
+            'second trigger behind the window is a duplicate',
+      );
+    });
+
     test('the engine re-anchor keeps its own 60 s guard, ahead of the '
         'window', () {
       final reanchorAt = body.indexOf('shouldReanchorOnResume(');
@@ -217,6 +316,110 @@ class _MapShellState {
         lessThan(body.indexOf('if (runExtras) {')),
         reason: 'it also runs ahead of the 30 s resume debounce',
       );
+    });
+  });
+
+  group('profile refresh on every foreground transition', () {
+    const refresh =
+        'triggerProfileRefresh(ref, maxAge: profileForegroundMaxAge)';
+
+    test('the statement helpers see nesting and early returns', () {
+      const source = '''
+class _MapShellState {
+  Future<void> _onResumed() async {
+    if (Platform.isAndroid) {
+      await a();
+      if (!mounted || turn != _lifecycleTurn) return;
+      b(() { return; });
+    }
+    if (x) {
+      triggerProfileRefresh(ref, maxAge: profileForegroundMaxAge);
+    }
+    if (y) {
+      return;
+    }
+    if (!resumeExtrasDue()) return;
+  }
+}
+''';
+      final statements = methodStatements(
+        source,
+        className: '_MapShellState',
+        method: '_onResumed',
+      )!;
+      expect(
+        topLevelIndexOf(statements, refresh),
+        -1,
+        reason: 'a call inside an `if` is not made on every resume',
+      );
+      expect(
+        earlyExits(statements),
+        ['return;', 'return;'],
+        reason: "a superseded return passes, nested or not, and a closure's "
+            "return is not the method's; a nested bare return and the "
+            'debounce are early exits',
+      );
+    });
+
+    late String source;
+    late List<Statement> resume;
+
+    setUpAll(() {
+      source = File('lib/src/pages/map_shell.dart').readAsStringSync();
+      resume = methodStatements(
+        source,
+        className: '_MapShellState',
+        method: '_onResumed',
+      )!;
+    });
+
+    test('every resume refreshes, even one the debounce or the extras window '
+        'throttles', () {
+      final at = topLevelIndexOf(resume, refresh);
+      expect(
+        at,
+        isNonNegative,
+        reason: 'the refresh must be a top-level statement of the resume, at '
+            'the foreground tier, so no branch can skip it',
+      );
+      expect(
+        earlyExits(resume.sublist(0, at)),
+        isEmpty,
+        reason: 'only a superseded resume may stop before the refresh; the '
+            '30 s debounce and the extras window must come after it',
+      );
+      expect(
+        resume.indexWhere(
+          (s) => s.toSource() == 'if (!resumeExtrasDue()) return;',
+        ),
+        greaterThan(at),
+        reason: 'anti-vacuity: the debounce still exists, after the refresh',
+      );
+    });
+
+    test('the resume refreshes after it takes the session back', () {
+      final at = topLevelIndexOf(resume, refresh);
+      for (final step in const [
+        '_endMlsSessionHandoff()',
+        '_invalidateHandoffWindowPoison()',
+      ]) {
+        final stepAt = topLevelIndexOf(resume, step);
+        expect(stepAt, isNonNegative, reason: step);
+        expect(
+          stepAt,
+          lessThan(at),
+          reason: 'while the handoff holds every open of the circle session '
+              'is refused, so a refresh ahead of $step fails on Android',
+        );
+      }
+    });
+
+    test('the cold start and the resume are the only triggers, both at the '
+        'foreground tier', () {
+      expect(profileRefreshCalls(source), [
+        'startUpRelayContact: $refresh',
+        '_onResumed: $refresh',
+      ]);
     });
   });
 }
