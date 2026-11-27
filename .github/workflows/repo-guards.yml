@@ -1017,7 +1017,7 @@ jobs:
     steps:
       - name: Checkout
         id: checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # The XML-comment-safe manifest/plist checks need xmllint, which the
       # Ubuntu 26.04 image no longer ships, and the ARB and privacy-manifest

@@ -188,7 +188,7 @@ jobs:
     steps:
       - name: Checkout
         id: checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # Reclaim runner disk BEFORE the Gradle/Rust build — the multi-GB debug
       # build + NDK strip has run a default runner out of space.
@@ -733,7 +733,7 @@ jobs:
     steps:
       - name: Checkout
         id: checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # Reclaim runner disk BEFORE the Gradle/Rust build — the multi-GB debug
       # build + NDK strip has run a default runner out of space.
@@ -1251,7 +1251,7 @@ jobs:
     steps:
       - name: Checkout
         id: checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable

@@ -94,7 +94,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Require ci.yml's gate jobs to have passed on this commit
         env:
@@ -148,7 +148,7 @@ jobs:
           sudo rm -rf /usr/local/lib/android/sdk/system-images
 
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup Java
         uses: actions/setup-java@v5
@@ -387,7 +387,7 @@ jobs:
         working-directory: haven
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # App Store Connect rejects uploads not built with the iOS 26 SDK (Xcode
       # 26+). The macos-15 runner DEFAULTS to Xcode 16.4 (iOS 18.5 SDK), which is
@@ -530,7 +530,7 @@ jobs:
     steps:
       - name: Checkout
         if: ${{ env.SIGN_WITH != '' }}
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install zsp (pinned + sha256-verified)
         if: ${{ env.SIGN_WITH != '' }}

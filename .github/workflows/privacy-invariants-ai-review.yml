@@ -193,7 +193,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           # Full history: the review needs the merge base to compute the PR's
           # own diff, and the verifier needs the real file contents to re-check

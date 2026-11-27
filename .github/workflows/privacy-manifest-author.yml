@@ -102,7 +102,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           # The gate below runs its ratchet, and this job passes it no
           # `--baseline-ref`, so it takes the script's DEFAULT baseline:
