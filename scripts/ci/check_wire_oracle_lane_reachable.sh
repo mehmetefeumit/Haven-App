@@ -208,6 +208,7 @@ readonly KNOWN_UNWIRED_LANES=(
   'e2e-clock-skew.yml:e2e_clock_skew'
   'e2e-network-reconnect.yml:e2e_network_reconnect'
   'e2e-background-catchup.yml:e2e_background_catchup'
+  'e2e-android-resume.yml:e2e_android_resume'
 
   # Multi-relay lanes without the recorder. Proxying them would pull in the
   # `proxy` logscan profile, whose declaration floors belong to e2e_combined,

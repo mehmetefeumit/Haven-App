@@ -8,6 +8,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
+import 'package:haven/src/services/android_background_location.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/widgets/location/location_disclosure_dialog.dart';
 
@@ -39,6 +40,8 @@ void main() {
     required bool includeBackground,
     required ValueNotifier<bool?> result,
     required bool isIOS,
+    bool reconfirm = false,
+    BackgroundLocationStatus? allTimeStep,
   }) {
     return MaterialApp(
       // The copy lives in the ARB, so the delegates are not optional
@@ -55,6 +58,8 @@ void main() {
                 context,
                 includeBackground: includeBackground,
                 isIOS: isIOS,
+                reconfirm: reconfirm,
+                allTimeStep: allTimeStep,
               );
             },
             child: const Text('Show dialog'),
@@ -228,7 +233,9 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(
-          find.textContaining('If iOS closes Haven, sharing stops'),
+          find.textContaining(
+            "With 'While Using the App', sharing stops when Haven is closed",
+          ),
           findsAtLeastNWidgets(1),
         );
       },
@@ -254,7 +261,7 @@ void main() {
             reason: 'leaked with isIOS=$isIOS',
           );
           expect(
-            find.textContaining('If iOS closes Haven'),
+            find.textContaining("If location is set to 'Always'"),
             findsNothing,
             reason: 'leaked with isIOS=$isIOS',
           );
@@ -340,10 +347,25 @@ void main() {
         'even when the app is closed or not in use.';
     const backgroundIos =
         'This app uses location data to enable sharing with your circles even '
-        'when Haven is in the background and you are not using it. If iOS '
-        'closes Haven, sharing stops until you open it again — Haven may '
-        'still wake up to fetch your circles’ locations, but never to send '
-        'yours.';
+        'when Haven is in the background and you are not using it. If '
+        "location is set to 'Always' and Haven is closed, even by you, Haven "
+        'starts sharing again by itself once you have moved a few hundred '
+        'metres and iOS allows it. After a restart, this happens only once '
+        'you have also unlocked your phone. iOS decides when, so it is not '
+        "guaranteed. With 'While Using the App', sharing stops when Haven is "
+        'closed and stays stopped until you open it again.';
+    const updateLead =
+        'Background sharing has changed since you turned it on. Haven can now '
+        'start sharing again by itself after it has stopped, for example '
+        'after your phone restarts, in the cases described below. If you '
+        "choose 'Not now', background sharing keeps working as before, but "
+        'after it has stopped, it stays stopped until you open Haven.';
+    String allTimeStep(String label) =>
+        "Next, on the screen Android opens, set Haven's location permission "
+        "to '$label' so sharing starts again by itself after your phone "
+        "restarts or Haven updates. If you don't, sharing keeps working until "
+        'your phone restarts or Haven updates, and then Haven shows a '
+        'notification you can tap to resume.';
     const manage =
         'You can turn background sharing off at any time in '
         'Settings → Location.';
@@ -354,6 +376,8 @@ void main() {
       WidgetTester tester, {
       required bool includeBackground,
       required bool isIOS,
+      bool reconfirm = false,
+      BackgroundLocationStatus? allTime,
     }) async {
       final result = ValueNotifier<bool?>(null);
       await tester.pumpWidget(
@@ -361,6 +385,8 @@ void main() {
           includeBackground: includeBackground,
           result: result,
           isIOS: isIOS,
+          reconfirm: reconfirm,
+          allTimeStep: allTime,
         ),
       );
       await tester.tap(find.text('Show dialog'));
@@ -408,6 +434,177 @@ void main() {
           agree,
         ]),
       );
+    });
+
+    // OD-R3: the same consent artefact, re-shown once to a user who accepted
+    // an older background text. The lead says what changed and what "Not now"
+    // keeps; everything below it is the current disclosure, unchanged.
+    for (final isIOS in [false, true]) {
+      testWidgets('re-confirm mode leads with what changed (isIOS: $isIOS), '
+          'then the whole current disclosure', (tester) async {
+        expect(
+          await pumpAndRead(
+            tester,
+            includeBackground: true,
+            isIOS: isIOS,
+            reconfirm: true,
+          ),
+          equals(<String>[
+            title,
+            updateLead,
+            why,
+            how,
+            sharing,
+            if (isIOS) backgroundIos else backgroundAndroid,
+            manage,
+            notNow,
+            agree,
+          ]),
+        );
+      });
+    }
+
+    testWidgets('the update lead is never shown outside re-confirm mode', (
+      tester,
+    ) async {
+      for (final isIOS in [false, true]) {
+        final text = await pumpAndRead(
+          tester,
+          includeBackground: true,
+          isIOS: isIOS,
+        );
+        expect(text, isNot(contains(updateLead)), reason: 'isIOS=$isIOS');
+      }
+    });
+
+    // Play: the disclosure comes immediately before the runtime request, and
+    // names the option the OS page needs in the OS's own words.
+    testWidgets("Android's all-time step follows the Play sentence and quotes "
+        "the OS's label verbatim", (tester) async {
+      expect(
+        await pumpAndRead(
+          tester,
+          includeBackground: true,
+          isIOS: false,
+          allTime: const BackgroundLocationStatus(
+            required: true,
+            granted: false,
+            optionLabel: 'Allow all the time (OS)',
+          ),
+        ),
+        equals(<String>[
+          title,
+          why,
+          how,
+          sharing,
+          backgroundAndroid,
+          allTimeStep('Allow all the time (OS)'),
+          manage,
+          notNow,
+          agree,
+        ]),
+      );
+    });
+
+    testWidgets('with no OS label the step still names the option', (
+      tester,
+    ) async {
+      final text = await pumpAndRead(
+        tester,
+        includeBackground: true,
+        isIOS: false,
+        allTime: BackgroundLocationStatus.failClosed,
+      );
+      expect(text, contains(allTimeStep('Allow all the time')));
+    });
+
+    testWidgets('the all-time step never reaches an iPhone', (tester) async {
+      expect(
+        await pumpAndRead(
+          tester,
+          includeBackground: true,
+          isIOS: true,
+          allTime: const BackgroundLocationStatus(
+            required: true,
+            granted: false,
+            optionLabel: 'Allow all the time',
+          ),
+        ),
+        equals(<String>[
+          title,
+          why,
+          how,
+          sharing,
+          backgroundIos,
+          manage,
+          notNow,
+          agree,
+        ]),
+      );
+    });
+  });
+
+  group('LocationDisclosureDialog (answers)', () {
+    for (final reconfirm in [false, true]) {
+      testWidgets('Agree resolves true and Not now false (reconfirm: '
+          '$reconfirm, with the all-time step)', (tester) async {
+        for (final (key, want) in [
+          (WidgetKeys.locationDisclosureAgree, true),
+          (WidgetKeys.locationDisclosureNotNow, false),
+        ]) {
+          final result = ValueNotifier<bool?>(null);
+          await tester.pumpWidget(
+            buildHost(
+              includeBackground: true,
+              result: result,
+              isIOS: false,
+              reconfirm: reconfirm,
+              allTimeStep: BackgroundLocationStatus.failClosed,
+            ),
+          );
+          await tester.tap(find.text('Show dialog'));
+          await tester.pumpAndSettle();
+          await tester.tap(find.byKey(key));
+          await tester.pumpAndSettle();
+          expect(result.value, want);
+        }
+      });
+    }
+
+    // Responsiveness pillar: a tap that lands while the dialog is still
+    // animating in takes effect; the user never has to repeat it once the
+    // motion settles.
+    testWidgets('Agree tapped during the entrance transition is honoured', (
+      tester,
+    ) async {
+      final result = ValueNotifier<bool?>(null);
+      await tester.pumpWidget(
+        buildHost(
+          includeBackground: true,
+          result: result,
+          isIOS: false,
+          reconfirm: true,
+        ),
+      );
+      await tester.tap(find.text('Show dialog'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 16));
+      final route = ModalRoute.of(
+        tester.element(find.byKey(WidgetKeys.locationDisclosureAgree)),
+      )!;
+      expect(
+        route.animation!.status,
+        AnimationStatus.forward,
+        reason: 'premise: the dialog is still entering',
+      );
+
+      await tester.tap(
+        find.byKey(WidgetKeys.locationDisclosureAgree),
+        warnIfMissed: false,
+      );
+      await tester.pumpAndSettle();
+
+      expect(result.value, isTrue, reason: 'the mid-entrance tap was lost');
     });
   });
 }

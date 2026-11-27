@@ -780,7 +780,7 @@ class BackgroundLocationManager {
         ),
         // allowWakeLock stays absent: the plugin lock is the watchdog's wake
         // source until a replacement is proven.
-        autoRunOnBoot: true,
+        // The boot and update start belong to BootResumeReceiver.
       ),
     );
   }
@@ -906,13 +906,13 @@ XML
   #     to fail would pass every negative fixture below and look perfect.
   _mgr "today's ForegroundTaskOptions passes" 0 ':'
   _mgr 'allowWakeLock: true FAILS' 1 \
-    "sed -i 's/        autoRunOnBoot: true,/        allowWakeLock: true,\n        autoRunOnBoot: true,/' '${MGRF}'"
+    "sed -i 's|        // The boot and update start belong to BootResumeReceiver.|        allowWakeLock: true,\n        // The boot and update start belong to BootResumeReceiver.|' '${MGRF}'"
   _mgr 'allowWakeLock: false FAILS' 1 \
-    "sed -i 's/        autoRunOnBoot: true,/        allowWakeLock: false,\n        autoRunOnBoot: true,/' '${MGRF}'"
+    "sed -i 's|        // The boot and update start belong to BootResumeReceiver.|        allowWakeLock: false,\n        // The boot and update start belong to BootResumeReceiver.|' '${MGRF}'"
   # The WHY comment beside the absence must stay legal, or it gets deleted
   # instead of the code it explains.
   _mgr 'prose naming allowWakeLock passes' 0 \
-    "sed -i 's|        autoRunOnBoot: true,|        // allowWakeLock: false would stop the watchdog.\n        autoRunOnBoot: true,|' '${MGRF}'"
+    "sed -i 's|        // The boot and update start belong to BootResumeReceiver.|        // allowWakeLock: false would stop the watchdog.\n        // The boot and update start belong to BootResumeReceiver.|' '${MGRF}'"
   _mgr 'no ForegroundTaskOptions( call at all FAILS' 1 \
     "sed -i 's/ForegroundTaskOptions(/TaskOptions(/' '${MGRF}'"
   _mgr 'a ForegroundTaskOptions( slice without eventAction FAILS' 1 \

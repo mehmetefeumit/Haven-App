@@ -5,9 +5,11 @@
 /// in foreground-only UI — keeps delivering after the app is backgrounded under
 /// plain When-In-Use, and that is what background sharing runs on
 /// (`geolocator_location_service.dart:641-643`). What "Always" buys is the
-/// receive-only relaunch path: significant-location-change and region
-/// monitoring waking a *terminated* app (`HavenSLCHandler.swift`; the wake
-/// stays receive-only per `INV-L-IOS-WAKES-RECEIVE-ONLY` in
+/// relaunch path: significant-location-change and region monitoring waking a
+/// *terminated* app (`HavenSLCHandler.swift`), which resumes the user's own
+/// sharing after movement when the current background disclosure is accepted
+/// (owner-directed 2026-11-26;
+/// `INV-L-IOS-RELAUNCH-RESUMES-ONLY-UNDER-ALWAYS-AND-CURRENT-CONSENT` in
 /// `docs/privacy/privacy_invariants.json`).
 ///
 /// Haven has to ask for that authorization itself: the `geolocator` plugin can

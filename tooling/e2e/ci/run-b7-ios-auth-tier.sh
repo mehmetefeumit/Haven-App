@@ -25,10 +25,13 @@
 #     `shouldKeepPublishingWhilePaused(backgroundSharingEnabled, isIOS)`; the
 #     CoreLocation tier is never consulted there, and
 #     `geolocator_location_service.dart` documents why.
-#   * What "Always" genuinely buys is the RECEIVE-only relaunch after iOS
-#     terminates the app: `HavenSLCHandler.startMonitoring()` refuses to arm
+#   * What "Always" genuinely buys is the location relaunch after iOS
+#     terminates the app, which resumes sharing after movement (owner-directed
+#     2026-11-26, OD-R1): `HavenSLCHandler.startMonitoring()` refuses to arm
 #     significant-location-change monitoring unless
-#     `authorizationStatus == .authorizedAlways`.
+#     `authorizationStatus == .authorizedAlways`, and the stream handler starts
+#     a session from a relaunch only under Always. No simulator relaunches a
+#     terminated app, so that half is device-only.
 #
 # So the tier does not change WHETHER Haven publishes in the background. It
 # changes what the UI is entitled to CLAIM, and the app's copy already draws

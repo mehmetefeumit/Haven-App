@@ -542,7 +542,15 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get locationSettingsIntro =>
-      'Haven は、アプリを開いている間は常に、あなたの位置情報をサークルに共有します。これをオンにすると、Haven がバックグラウンドにある間もサークルのメンバーは位置情報を見続けられます。システムが Haven を終了させると、あなた自身の共有は停止し、その後も Haven はサークルの位置情報を受け取るために起動することはありますが、あなたの位置情報を送るために起動することはありません。Android では、Haven をスワイプして最近使ったアプリから消しても共有は動き続け、端末を再起動したあとには共有が自動的にまた始まります。iPhone では、あなたが Haven を開くまで共有は停止したままです。';
+      'Haven は、アプリを開いている間、あなたの位置情報をサークルと共有します。これをオンにすると、Haven がバックグラウンドにある間もサークルのメンバーは位置情報を見続けられます。Haven をスワイプして消しても、この設定はオフになりません。オフにできるのは下のスイッチだけです。';
+
+  @override
+  String get locationSettingsIntroAndroid =>
+      'Haven をスワイプして最近使ったアプリの一覧から消しても、共有は続きます。端末の再起動や Haven のアップデートのあと、Haven に位置情報の利用を常に許可している場合（Android 10 以前では、位置情報の利用を許可している場合）は、共有が自動的に再開されます。そうでない場合は Haven が通知を表示し、その通知をタップすると共有を再開できます。Haven が強制停止された場合は、Haven を開くまで共有は停止したままです。';
+
+  @override
+  String get locationSettingsIntroIos =>
+      '位置情報を「常に」に設定している場合、Haven が閉じられたあとも、数百メートル移動して iOS が許可したときに、共有が自動的に再開されます。端末を再起動したあとは、さらにロックを解除してからでないと再開されません。再開のタイミングは iOS が決めるため、必ず再開されるとは限りません。「このAppの使用中のみ許可」の場合は、Haven が閉じられると共有は停止し、Haven を開くと再開されます。';
 
   @override
   String get locationSettingsToggleTitle => 'バックグラウンドで共有';
@@ -552,7 +560,25 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get locationSettingsIosLimitedNote =>
-      '現在の権限のままでも、バックグラウンドでの共有は継続され、その間 iOS は画面上部に青い位置情報バーを表示します。設定で Haven の位置情報を「常に」にすると、iOS がアプリを終了した後も、Haven がサークルの位置情報に追いつけるようになります。ただし「常に」では、iOS はこの位置情報バーの代わりに、ステータスバーに位置情報の矢印を表示することがあります。あなた自身の位置情報の共有は、Haven を開き直したときに再開されます。';
+      '現在の権限のままでも、バックグラウンドでの共有は続き、その間 iOS は画面上部に青い位置情報バーを表示します。Haven が閉じられると、もう一度開くまで共有は停止します。設定で Haven の位置情報を「常に」にすると、Haven が閉じられたあとも、数百メートル移動して iOS が許可したときに、共有が自動的に再開されるようになります。「常に」の場合、iOS はこの位置情報バーの代わりに、ステータスバーに位置情報の矢印を表示することがあります。';
+
+  @override
+  String get locationSettingsResumeConsentNote =>
+      'バックグラウンド共有はオンになっています。端末の再起動などで共有が停止した場合、更新されたバックグラウンド共有のお知らせに同意するまで、Haven が自動的に共有を再開することはありません。';
+
+  @override
+  String get locationSettingsResumeConsentAction => 'お知らせを確認';
+
+  @override
+  String locationSettingsAndroidAllTimeNote(String optionLabel) {
+    return 'Haven の位置情報の権限が「$optionLabel」になっていないため、端末の再起動や Haven のアップデートのあと、共有は自動的には再開されません。その代わりに Haven が通知を表示し、その通知をタップすると共有を再開できます。';
+  }
+
+  @override
+  String get locationSettingsAndroidAllTimeAction => '権限を変更';
+
+  @override
+  String get locationBackgroundAllTimeOptionFallback => '常に許可';
 
   @override
   String get locationSettingsAndroidHeader => '確実に動かすためのOS設定';
@@ -563,7 +589,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get locationSettingsAndroidBattery =>
-      'バックグラウンド共有を確実にするため、Haven をバッテリー最適化の対象からも除外してください。設定 → アプリ → Haven → バッテリー → 常に許可 と進みます。';
+      'バックグラウンド共有を確実にするため、Haven をバッテリー最適化の対象からも除外してください。設定 → アプリ → Haven → バッテリー → 制限なし と進みます。';
 
   @override
   String get locationSettingsAndroidVendors =>
@@ -602,7 +628,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get locationDisclosureBackgroundIos =>
-      'このアプリは、Haven がバックグラウンドにあって使用していないときでも、サークルとの共有を可能にするために位置情報データを使用します。iOS が Haven を終了させると、あなたが開き直すまで共有は停止し、その後も Haven はサークルの位置情報を受け取るために起動することはありますが、あなたの位置情報を送るために起動することはありません。';
+      'このアプリは、Haven がバックグラウンドにあって使用していないときでも、サークルとの共有を可能にするために位置情報データを使用します。位置情報が「常に」に設定されていれば、Haven が閉じられても（あなた自身が閉じた場合でも）、数百メートル移動して iOS が許可したときに、Haven は自動的に共有を再開します。端末を再起動したあとは、さらにロックを解除してからでないと再開されません。再開のタイミングは iOS が決めるため、必ず再開されるとは限りません。「このAppの使用中のみ許可」の場合は、Haven が閉じられると共有は停止し、もう一度開くまで停止したままです。';
 
   @override
   String get locationDisclosureManage => 'バックグラウンド共有は、設定 → 位置情報 からいつでもオフにできます。';
@@ -614,7 +640,26 @@ class AppLocalizationsJa extends AppLocalizations {
   String get locationDisclosureNotNow => '今はしない';
 
   @override
+  String get locationDisclosureUpdateLead =>
+      'バックグラウンド共有をオンにしたあとで、その動作が変更されました。Haven は今後、端末の再起動後など、共有が停止したあとでも、以下に説明する場合には自動的に共有を再開できます。「今はしない」を選んでも、バックグラウンド共有はこれまでどおり動作します。ただし、いったん停止すると、Haven を開くまで停止したままになります。';
+
+  @override
+  String locationBackgroundAllTimeStep(String optionLabel) {
+    return '次に、Android が開く画面で、Haven の位置情報の権限を「$optionLabel」に設定してください。そうすると、端末の再起動や Haven のアップデートのあとに、共有が自動的に再開されます。設定しない場合、共有は端末の再起動や Haven のアップデートまでは続き、その後は Haven が通知を表示します。その通知をタップすると共有を再開できます。';
+  }
+
+  @override
   String get fgsNotificationSharing => 'Haven が位置情報を送受信しています';
+
+  @override
+  String get androidResumeNoticeTitle => '位置情報の共有が停止しました';
+
+  @override
+  String get androidResumeNoticeBody =>
+      'タップして Haven を開き、サークルとの位置情報の共有を再開してください。';
+
+  @override
+  String get androidResumeNoticeChannelName => '共有のリマインダー';
 
   @override
   String get fgsNotificationPaused => 'Haven は一時停止中です。アプリを開くと共有を再開します';

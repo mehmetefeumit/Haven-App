@@ -112,8 +112,9 @@
 #
 #   Background-wake invariants        scripts/ci/check_m7_native_wake_guards.sh
 #     Static correctness invariants of the Android WorkManager + iOS
-#     SLC/BGTask background wakes (DartPluginRegistrant order, RebootReceiver
-#     intent-filter, BGTask identifier parity, teardown-channel separation,
+#     SLC/BGTask background wakes (DartPluginRegistrant order, BootResumeReceiver
+#     in place of the plugin RebootReceiver and its resume-rule keys, BGTask
+#     identifier parity, teardown-channel separation,
 #     iOS-safe registration gate, wake-path intent re-check). The runtime
 #     proofs live in the E2E background catch-up lane; this covers only what
 #     a static check can prove.
@@ -2006,6 +2007,14 @@ jobs:
       - name: E2E harness self-test (background-catchup leak gate)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/run-m7-background-catchup.sh --self-test
+
+      - name: E2E harness self-test (Android resume lane)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/run-android-resume.sh --self-test
+
+      - name: Release-APK resume wiring guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_apk_resume_wiring.sh --self-test
 
       - name: E2E harness self-test (secret-leak scanner)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}

@@ -58,6 +58,7 @@ import 'package:haven/src/rust/frb_generated.dart';
 import 'package:haven/src/services/background_fix_request.dart';
 import 'package:haven/src/services/background_identity_service.dart';
 import 'package:haven/src/services/background_location_manager.dart';
+import 'package:haven/src/services/background_resume_gate.dart';
 import 'package:haven/src/services/circle_health_service.dart';
 import 'package:haven/src/services/circle_service.dart'
     show Circle, LocationEventKind, LocationEventResult;
@@ -493,9 +494,38 @@ class BackgroundLocationTaskHandler extends TaskHandler {
     kLocationUpdateInterval.inSeconds,
   );
 
+  /// Presence only: the secret is never read into this isolate to answer it
+  /// (Security Rule 9), least of all on a start the gate then refuses.
+  @visibleForTesting
+  static Future<bool> identityStored() =>
+      identitySecureStorage.containsKey(key: identityStorageKey);
+
+  /// Test-only stand-in for the system-start gate's inputs and effects.
+  @visibleForTesting
+  SystemStartGate? overrideSystemStartGate;
+
+  /// Test-only hook run once the bridge is up in this isolate. The resume
+  /// lane's process starts with no debug `ws://` relay opt-in (it has no
+  /// on-disk form), and the bridge cannot be initialised twice, so the opt-in
+  /// can only be installed here.
+  @visibleForTesting
+  void Function()? afterBridgeInitForTest;
+
   @override
   Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
     debugPrint('[BackgroundTask] onStart (starter=$starter)');
+
+    // First, before any work: a start Haven's UI did not make (boot, update,
+    // sticky restart) runs only under the resume rule. A refused one stops
+    // the service, and the shutdown signal keeps every cycle a no-op until
+    // the stop lands.
+    final gate =
+        overrideSystemStartGate ??
+        const SystemStartGate(identityStored: identityStored);
+    if (await gate.check(starter) != null) {
+      if (!_shutdownSignal.isCompleted) _shutdownSignal.complete();
+      return;
+    }
 
     // Clear the idle flag — the background isolate is now active.
     await _setIdle(false);
@@ -506,6 +536,7 @@ class BackgroundLocationTaskHandler extends TaskHandler {
 
       // 2. Initialize the platform keyring store (idempotent).
       await initKeyringStore();
+      afterBridgeInitForTest?.call();
 
       // 3. Resolve the data directory (same path as foreground isolate).
       final dataDir = await const PathProviderDataDirectory()
@@ -822,9 +853,7 @@ class BackgroundLocationTaskHandler extends TaskHandler {
           onError: (Object e) {
             // Presence only (Rule 8): the type, never the message, which on
             // this boundary can carry provider and permission detail.
-            debugPrint(
-              '[BackgroundTask] fix stream error: ${e.runtimeType}',
-            );
+            debugPrint('[BackgroundTask] fix stream error: ${e.runtimeType}');
             _registrationSuspect = true;
             _scheduleStreamErrorRearm();
           },
@@ -844,9 +873,7 @@ class BackgroundLocationTaskHandler extends TaskHandler {
         );
     _registeredTarget = target;
     _registeredAt = _clock();
-    debugPrint(
-      '[BackgroundTask] registration armed (${interval.inSeconds}s)',
-    );
+    debugPrint('[BackgroundTask] registration armed (${interval.inSeconds}s)');
   }
 
   /// Runs ONE recovery cycle [streamErrorRearmDelay] after the platform
@@ -1447,8 +1474,10 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       timeout: livenessProbeTimeout,
       channelReady: livenessChannelReady,
     )) {
-      debugPrint('[BackgroundTask] reclaim: declined, main isolate answered '
-          'on retry');
+      debugPrint(
+        '[BackgroundTask] reclaim: declined, main isolate answered '
+        'on retry',
+      );
       return false;
     }
     // A reply for EITHER probe, including one that landed after its own wait
@@ -1486,9 +1515,7 @@ class BackgroundLocationTaskHandler extends TaskHandler {
     try {
       outcome = await _forceReleaseLiveSession();
     } on Object catch (e) {
-      debugPrint(
-        '[BackgroundTask] reclaim: release failed (${e.runtimeType})',
-      );
+      debugPrint('[BackgroundTask] reclaim: release failed (${e.runtimeType})');
       return false;
     }
     debugPrint('[BackgroundTask] reclaim: release outcome=${outcome.name}');
@@ -1816,9 +1843,7 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       // is dropped. Seeded together is not published together — the loop below
       // still holds each circle a CSPRNG gap behind the last, which is what
       // keeps their whole-second `created_at`s distinct.
-      final eligibleKeys = <String>{
-        for (final c in accepted) _bgCircleKey(c),
-      };
+      final eligibleKeys = <String>{for (final c in accepted) _bgCircleKey(c)};
       _dueTracker.pruneToKeys(eligibleKeys);
       for (final key in eligibleKeys) {
         _dueTracker.seedIfAbsent(key, timestamp);
@@ -2095,8 +2120,10 @@ class BackgroundLocationTaskHandler extends TaskHandler {
             // due. This isolate has no Riverpod container: a hold the next
             // foreground does not end surfaces there through the health
             // model, which reads the missing publish-ack stamp and its age.
-            debugPrint('[BackgroundTask] send held by the core — skipping '
-                'this circle');
+            debugPrint(
+              '[BackgroundTask] send held by the core — skipping '
+              'this circle',
+            );
             continue;
           }
 
@@ -2123,8 +2150,10 @@ class BackgroundLocationTaskHandler extends TaskHandler {
                 LocationPublishFfi.clockAhead ||
                 LocationPublishFfi.clockBehind ||
                 LocationPublishFfi.clockUnspecified:
-              debugPrint('[BackgroundTask] publish reached no relay that took '
-                  'it');
+              debugPrint(
+                '[BackgroundTask] publish reached no relay that took '
+                'it',
+              );
               publishFailed = true;
               continue;
             // Not sent: expired, held since the seal, or its record ended;

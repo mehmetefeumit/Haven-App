@@ -17,6 +17,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:haven/l10n/app_localizations.dart';
+import 'package:haven/src/services/android_background_location.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 
@@ -29,10 +30,21 @@ class LocationDisclosureDialog extends StatelessWidget {
   const LocationDisclosureDialog._({
     required this.includeBackground,
     required this.isIOS,
+    required this.reconfirm,
+    required this.allTimeStep,
   });
 
   /// Whether to include the background-collection disclosure sentence.
   final bool includeBackground;
+
+  /// Whether this re-asks a user who accepted an older background disclosure:
+  /// a lead paragraph says what changed and what "Not now" keeps.
+  final bool reconfirm;
+
+  /// When non-null, the Android "Allow all the time" step: the permission
+  /// page about to open, and the option it needs, quoted in the OS's own
+  /// words. Null when no request follows this dialog; never shown on iOS.
+  final BackgroundLocationStatus? allTimeStep;
 
   /// Whether the running platform is iOS, selecting the accurate background
   /// sentence. Read from `Platform.isIOS` in production, not from
@@ -48,6 +60,8 @@ class LocationDisclosureDialog extends StatelessWidget {
   static Future<bool> show(
     BuildContext context, {
     required bool includeBackground,
+    bool reconfirm = false,
+    BackgroundLocationStatus? allTimeStep,
     bool? isIOS,
   }) async {
     final result = await showDialog<bool>(
@@ -56,6 +70,8 @@ class LocationDisclosureDialog extends StatelessWidget {
       builder: (_) => LocationDisclosureDialog._(
         includeBackground: includeBackground,
         isIOS: isIOS ?? Platform.isIOS,
+        reconfirm: reconfirm,
+        allTimeStep: allTimeStep,
       ),
     );
     return result ?? false;
@@ -65,6 +81,7 @@ class LocationDisclosureDialog extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final l10n = AppLocalizations.of(context);
+    final step = isIOS ? null : allTimeStep;
     return PopScope(
       // A back gesture must not count as consent; treat it as "Not now".
       canPop: false,
@@ -78,6 +95,13 @@ class LocationDisclosureDialog extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              if (reconfirm && includeBackground) ...[
+                Text(
+                  l10n.locationDisclosureUpdateLead,
+                  style: theme.textTheme.bodyMedium,
+                ),
+                const SizedBox(height: HavenSpacing.base),
+              ],
               Text(
                 l10n.locationDisclosureWhy,
                 style: theme.textTheme.bodyMedium,
@@ -100,6 +124,16 @@ class LocationDisclosureDialog extends StatelessWidget {
                       : l10n.locationDisclosureBackgroundAndroid,
                   style: theme.textTheme.bodyMedium,
                 ),
+                if (step != null) ...[
+                  const SizedBox(height: HavenSpacing.base),
+                  Text(
+                    l10n.locationBackgroundAllTimeStep(
+                      step.optionLabel ??
+                          l10n.locationBackgroundAllTimeOptionFallback,
+                    ),
+                    style: theme.textTheme.bodyMedium,
+                  ),
+                ],
                 const SizedBox(height: HavenSpacing.base),
                 Text(
                   l10n.locationDisclosureManage,

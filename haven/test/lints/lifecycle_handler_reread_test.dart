@@ -747,11 +747,15 @@ void main() {
       expect(
         dispatch,
         allOf(
+          // A pause on top of one already in effect (a background launch's
+          // own, then iOS's) is dropped whole, the turn included.
           contains(
-            'if (state == AppLifecycleState.paused) {_lifecycleTurn++;',
+            'if (state == AppLifecycleState.paused) {if (!admitPause()) '
+            'return; _lifecycleTurn++;',
           ),
           contains(
-            'else if (state == AppLifecycleState.resumed) {_lifecycleTurn++;',
+            'else if (state == AppLifecycleState.resumed) {noteResume(); '
+            '_lifecycleTurn++;',
           ),
         ),
       );

@@ -24,11 +24,13 @@
 ///     `backgroundSharingEnabled && isIOS`. The CoreLocation tier is not
 ///     consulted anywhere on that path.
 ///
-/// What "Always" actually buys is the RECEIVE-only Significant-Location-Change
-/// relaunch after iOS has terminated the app: `HavenSLCHandler.startMonitoring`
+/// What "Always" actually buys is the location relaunch after iOS has
+/// terminated the app, which resumes sharing after movement (owner-directed
+/// 2026-11-26): `HavenSLCHandler.startMonitoring`
 /// (`haven/ios/Runner/HavenSLCHandler.swift`) refuses to arm unless
-/// `authorizationStatus == .authorizedAlways`, and says so — "the SLC path is
-/// purely additive — foreground sharing still works without it".
+/// `authorizationStatus == .authorizedAlways`, and the stream handler starts a
+/// session from a relaunch only under Always. A simulator cannot relaunch a
+/// terminated app, so that half is device-only.
 ///
 /// So the honest oracle is: **publishing continues across a pause under BOTH
 /// tiers**, and that is correct rather than a defect. What legitimately
@@ -159,6 +161,7 @@ import 'e2e/_lib/circle_creation.dart'
 import 'e2e/_lib/coordination.dart' show waitForKeyPackage;
 import 'e2e/_lib/fake_location_service.dart'
     show FakeLocationService, aliceFakeLatitude, aliceFakeLongitude;
+import 'e2e/_lib/location_disclosure_seed.dart';
 import 'e2e/_lib/pump_helpers.dart' show pumpUntilCondition, pumpUntilFound;
 import 'e2e/_lib/scenario_harness.dart' show ScenarioHarness;
 import 'e2e/_lib/synthetic_user.dart' show SyntheticUser;
@@ -276,15 +279,16 @@ Future<IosAuthStatus> _readNativeTier() =>
 ///   blame the wrong thing.
 /// * [kLocationDisclosureBackgroundAcceptedKey] — without it
 ///   `BackgroundSharingNotifier._load()`'s fail-closed reconcile drops the
-///   toggle back to `false` on the first read.
+///   toggle back to `false` on the first read. At the current version, or
+///   MapShell re-shows the updated disclosure over the settings page this
+///   target asserts on.
 ///
 /// Real prefs, never `setMockInitialValues`: this runs on a device and the
 /// production notifier reads the real store.
 Future<SharedPreferences> _seedPublishPrefs() async {
   final prefs = await SharedPreferences.getInstance();
   await prefs.setBool(kBackgroundSharingKey, true);
-  await prefs.setBool(kLocationDisclosureAcceptedKey, true);
-  await prefs.setBool(kLocationDisclosureBackgroundAcceptedKey, true);
+  await seedLocationDisclosuresAccepted(prefs);
   return prefs;
 }
 
