@@ -165,7 +165,7 @@ jobs:
 
       - name: Run the iOS auth-tier lane (Always, then When In Use)
         timeout-minutes: 95
-        uses: nick-fields/retry@v3
+        uses: nick-fields/retry@v4
         with:
           timeout_minutes: 45
           max_attempts: 2

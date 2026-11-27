@@ -411,7 +411,7 @@ jobs:
           # own probe only: it proves the gated store holds the Welcome the
           # invitee joined through, so the gate was exercised.
           HAVEN_E2E_GATED_STORE_PROBE: ws://localhost:7791
-        uses: nick-fields/retry@v3
+        uses: nick-fields/retry@v4
         with:
           timeout_minutes: ${{ inputs.live_sync && 45 || 30 }}
           max_attempts: 2
@@ -513,7 +513,7 @@ jobs:
           # scenario whose compiled defines every other iOS lane relies on
           # staying byte-identical. Empty means "not instrumented".
           HAVEN_WIRE_SENTINEL: ""
-        uses: nick-fields/retry@v3
+        uses: nick-fields/retry@v4
         with:
           timeout_minutes: 20
           max_attempts: 2
