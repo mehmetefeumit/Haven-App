@@ -433,7 +433,9 @@ jobs:
         run: bash scripts/ci/check_no_google_services.sh "${CANDIDATE_APKS}"/app-*-release.apk
 
       # The startup initializers that ship are a property of the merged
-      # manifest, which only the built APK holds.
+      # manifest, which only the built APK holds — as is the boot/update
+      # resume wiring (BootResumeReceiver in, the plugin RebootReceiver out)
+      # and the string resources the resume path reads by name.
       - name: Check the release manifest's startup initializers
         if: ${{ !cancelled() && steps.verify.outcome == 'success' }}
         timeout-minutes: 5
@@ -446,6 +448,9 @@ jobs:
           for apk in "${CANDIDATE_APKS}"/app-*-release.apk; do
             "${aapt2}" dump xmltree --file AndroidManifest.xml "${apk}" > "${RUNNER_TEMP}/merged-manifest.txt"
             bash scripts/ci/check_ucrop_runtime_deps.sh --merged-manifest "${RUNNER_TEMP}/merged-manifest.txt"
+            bash scripts/ci/check_apk_resume_wiring.sh --merged-manifest "${RUNNER_TEMP}/merged-manifest.txt"
+            "${aapt2}" dump resources "${apk}" > "${RUNNER_TEMP}/resources.txt"
+            bash scripts/ci/check_apk_resume_wiring.sh --resources "${RUNNER_TEMP}/resources.txt"
           done
 
       - name: Scan the launch-gate summaries before upload

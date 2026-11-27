@@ -22,9 +22,18 @@
 //   (b) the ARROW sentence names this locale's arrow term AND its status-bar
 //       term, and neither its "blue" word nor its bar stem; the BAR sentence
 //       and the While-In-Use note name BOTH the bar stem and the colour;
-//   (c) the While-In-Use NOTE names this locale's "Always" term and says the
-//       app is closed — the localized pin on the receive-only limit that
-//       INV-L-IOS-WAKES-RECEIVE-ONLY asserts.
+//   (c) the While-In-Use NOTE names this locale's "Always" term, says the app
+//       is closed and names this locale's unit for metres — what 'Always'
+//       buys since the owner's 2026-11-26 decision (OD-R1) is sharing that
+//       starts again after Haven is closed, ONCE THE USER HAS MOVED — and no
+//       longer carries this locale's words for the retired "catch up on your
+//       circles" clause, which promised a receive-only wake. The localized pin
+//       on INV-L-IOS-RELAUNCH-RESUMES-ONLY-UNDER-ALWAYS-AND-CURRENT-CONSENT.
+//
+// The "closed" and "metres" entries are short stems (a verb root, a unit
+// noun), so a retranslation that words the sentence differently still
+// satisfies them; the retired-clause entries are the exact words of the old
+// translation, so an untouched one is a red test.
 //
 // Two traps this guard was nearly built with, pulling in opposite directions.
 //
@@ -88,7 +97,9 @@ class _Vocabulary {
     required this.indicator,
     required this.always,
     required this.closesTheApp,
+    required this.metres,
     required this.oldSentence,
+    required this.oldNote,
     required this.backgroundTerm,
   });
 
@@ -116,14 +127,23 @@ class _Vocabulary {
   /// This locale's rendering of the "Always" authorization.
   final List<String> always;
 
-  /// This locale's phrase for iOS closing the app.
+  /// This locale's stems for Haven being closed: the verb root, so it
+  /// survives whichever construction a translation picks.
   final List<String> closesTheApp;
+
+  /// This locale's unit for metres — the movement a resumption needs.
+  final List<String> metres;
 
   /// The distinctive words of the OLD, now-false single-sentence card.
   ///
   /// Both halves of the claim it made: the session was called continuous, and
   /// the indicator was called blue. An untranslated key still contains them.
   final List<String> oldSentence;
+
+  /// The distinctive words of the RETIRED While-In-Use note's "catch up on
+  /// your circles after iOS closes the app" clause: a receive-only wake, which
+  /// is no longer all that 'Always' buys. An untranslated note still has them.
+  final List<String> oldNote;
 
   /// This locale's term for sharing in the BACKGROUND, as the toggle title
   /// already spells it. The hub subtitle has to reuse it: two surfaces naming
@@ -142,8 +162,10 @@ const _vocabulary = <String, _Vocabulary>{
     statusBar: ['status bar'],
     indicator: ['indicator'],
     always: ['always'],
-    closesTheApp: ['closes the app'],
+    closesTheApp: ['haven is closed'],
+    metres: ['metres'],
     oldSentence: ['continuous location session', 'blue status-bar indicator'],
+    oldNote: ['catch up on your circles'],
     backgroundTerm: 'background',
   ),
   'de': _Vocabulary(
@@ -154,8 +176,10 @@ const _vocabulary = <String, _Vocabulary>{
     statusBar: ['statusleiste'],
     indicator: ['anzeige'],
     always: ['immer'],
-    closesTheApp: ['die app beendet'],
+    closesTheApp: ['geschlossen', 'beendet'],
+    metres: ['meter'],
     oldSentence: ['durchgehende', 'blaue anzeige'],
+    oldNote: ['nachholen'],
     backgroundTerm: 'Hintergrund',
   ),
   'es': _Vocabulary(
@@ -167,8 +191,10 @@ const _vocabulary = <String, _Vocabulary>{
     statusBar: ['barra de estado'],
     indicator: ['indicador'],
     always: ['siempre'],
-    closesTheApp: ['cierre la app'],
+    closesTheApp: ['cerr', 'cierr'],
+    metres: ['metro'],
     oldSentence: ['ubicación continua', 'indicador azul'],
+    oldNote: ['ponerse al día'],
     backgroundTerm: 'segundo plano',
   ),
   'fr': _Vocabulary(
@@ -178,8 +204,10 @@ const _vocabulary = <String, _Vocabulary>{
     statusBar: ["barre d'état"],
     indicator: ['indicateur'],
     always: ['toujours'],
-    closesTheApp: ["fermé l'application"],
+    closesTheApp: ['ferm'],
+    metres: ['mètre'],
     oldSentence: ['localisation continue', 'indicateur bleu'],
+    oldNote: ['récupérer les positions'],
     backgroundTerm: 'arrière-plan',
   ),
   'pt': _Vocabulary(
@@ -189,8 +217,10 @@ const _vocabulary = <String, _Vocabulary>{
     statusBar: ['barra de status'],
     indicator: ['indicador'],
     always: ['sempre'],
-    closesTheApp: ['fechar o app'],
+    closesTheApp: ['fech'],
+    metres: ['metro'],
     oldSentence: ['localização contínua', 'indicador azul'],
+    oldNote: ['recuperar as localizações'],
     backgroundTerm: 'segundo plano',
   ),
   'ru': _Vocabulary(
@@ -203,8 +233,10 @@ const _vocabulary = <String, _Vocabulary>{
     statusBar: ['строке состояния'],
     indicator: ['индикатор'],
     always: ['всегда'],
-    closesTheApp: ['закроет приложение'],
+    closesTheApp: ['закр'],
+    metres: ['метр'],
     oldSentence: ['непрерывн', 'синий индикатор'],
+    oldNote: ['пропущенные обновления'],
     backgroundTerm: 'фон',
   ),
   'tr': _Vocabulary(
@@ -221,8 +253,10 @@ const _vocabulary = <String, _Vocabulary>{
     statusBar: ['durum çubuğu'],
     indicator: ['gösterge'],
     always: ['her zaman'],
-    closesTheApp: ['uygulamayı kapattıktan sonra'],
+    closesTheApp: ['kapat', 'kapan'],
+    metres: ['metre'],
     oldSentence: ['kesintisiz', 'mavi bir gösterge'],
+    oldNote: ['sonradan yakalayabilir'],
     backgroundTerm: 'arka plan',
   ),
   'ar': _Vocabulary(
@@ -232,8 +266,12 @@ const _vocabulary = <String, _Vocabulary>{
     statusBar: ['شريط الحالة'],
     indicator: ['مؤشر'],
     always: ['دائم'],
-    closesTheApp: ['يُغلق iOS التطبيق'],
+    closesTheApp: ['غلق', 'إغلاق'],
+    // أمتار is the broken plural ("a few hundred metres"); it does not
+    // contain the singular متر as a substring.
+    metres: ['متر', 'أمتار'],
     oldSentence: ['متواصلة', 'مؤشرًا أزرق'],
+    oldNote: ['تدارك'],
     backgroundTerm: 'الخلفية',
   ),
   'fa': _Vocabulary(
@@ -243,8 +281,10 @@ const _vocabulary = <String, _Vocabulary>{
     statusBar: ['نوار وضعیت'],
     indicator: ['نشانگر'],
     always: ['همیشه'],
-    closesTheApp: ['برنامه را بست'],
+    closesTheApp: ['بست'],
+    metres: ['متر'],
     oldSentence: ['پیوسته', 'نشانگر آبی'],
+    oldNote: ['به‌روز کند'],
     backgroundTerm: 'پس‌زمینه',
   ),
   'hi': _Vocabulary(
@@ -254,8 +294,10 @@ const _vocabulary = <String, _Vocabulary>{
     statusBar: ['स्टेटस बार'],
     indicator: ['संकेतक'],
     always: ['हमेशा'],
-    closesTheApp: ['ऐप बंद कर देने के बाद'],
+    closesTheApp: ['बंद'],
+    metres: ['मीटर'],
     oldSentence: ['लगातार', 'नीला संकेतक'],
+    oldNote: ['छूटे हुए स्थान'],
     backgroundTerm: 'बैकग्राउंड',
   ),
   'ja': _Vocabulary(
@@ -268,8 +310,10 @@ const _vocabulary = <String, _Vocabulary>{
     // old sentence's noun use of it.
     indicator: ['表示が出'],
     always: ['常に'],
-    closesTheApp: ['アプリを終了した後'],
+    closesTheApp: ['終了', '閉じ'],
+    metres: ['メートル'],
     oldSentence: ['継続', '青い表示'],
+    oldNote: ['追いつける'],
     backgroundTerm: 'バックグラウンド',
   ),
   'ne': _Vocabulary(
@@ -279,8 +323,10 @@ const _vocabulary = <String, _Vocabulary>{
     statusBar: ['स्थिति-पट्टी'],
     indicator: ['सूचक'],
     always: ['सधैँ'],
-    closesTheApp: ['एप बन्द गरेपछि'],
+    closesTheApp: ['बन्द', 'बंद'],
+    metres: ['मिटर', 'मीटर'],
     oldSentence: ['निरन्तर', 'निलो स्थिति-पट्टी'],
+    oldNote: ['छुटेका स्थान'],
     backgroundTerm: 'पृष्ठभूमि',
   ),
   'ur': _Vocabulary(
@@ -295,8 +341,10 @@ const _vocabulary = <String, _Vocabulary>{
     // option — ہمیشہ appears there only as ordinary prose — so there is no
     // shipped Urdu string to quote.
     always: ['always'],
-    closesTheApp: ['ایپ بند کر دینے کے بعد'],
+    closesTheApp: ['بند'],
+    metres: ['میٹر'],
     oldSentence: ['مسلسل', 'نیلا اشارہ'],
+    oldNote: ['تازہ صورت حال'],
     backgroundTerm: 'پس منظر',
   ),
 };
@@ -345,12 +393,17 @@ void main() {
   test('every vocabulary entry carries the OLD sentence words', () {
     // The clause that catches the realistic regression — an untouched
     // translation under a re-worded English key. An empty list here would make
-    // clause (a) blind to exactly that.
+    // clauses (a) and (c) blind to exactly that.
     for (final entry in _vocabulary.entries) {
       expect(
         entry.value.oldSentence,
         isNotEmpty,
         reason: '${entry.key} could not detect an untranslated card',
+      );
+      expect(
+        entry.value.oldNote,
+        isNotEmpty,
+        reason: '${entry.key} could not detect an untranslated note',
       );
     }
   });
@@ -430,11 +483,14 @@ void main() {
         }
       });
 
-      test('the While-In-Use note keeps the termination claim', () {
-        // The localized pin on `INV-L-IOS-WAKES-RECEIVE-ONLY`: this note is
-        // the one string in every locale that tells the cohort the advice is
-        // for what "Always" buys them, and that it is bounded by iOS closing
-        // the app. Nothing else asserts that claim in the twelve translations.
+      test("the While-In-Use note says what 'Always' resumes and what it "
+          'needs', () {
+        // The localized pin on
+        // `INV-L-IOS-RELAUNCH-RESUMES-ONLY-UNDER-ALWAYS-AND-CURRENT-CONSENT`:
+        // this note is the one string in every locale that tells the
+        // While-Using cohort what "Always" buys them — sharing that starts
+        // again after Haven is closed, once they have moved — and nothing else
+        // asserts that claim in the twelve translations.
         const key = 'locationSettingsIosLimitedNote';
         final value = _cardStrings(l).firstWhere((e) => e.$1 == key).$2;
         expect(
@@ -446,8 +502,20 @@ void main() {
         expect(
           violations(value, vocabulary.closesTheApp),
           isNotEmpty,
-          reason: '$code/$key must keep saying that this is what happens '
-              'AFTER iOS closes Haven — "$value"',
+          reason: '$code/$key must say what happens after Haven is closed — '
+              '"$value"',
+        );
+        expect(
+          violations(value, vocabulary.metres),
+          isNotEmpty,
+          reason: '$code/$key must name the movement a resumption needs, or '
+              'it promises one the user may never get — "$value"',
+        );
+        expect(
+          violations(value, vocabulary.oldNote),
+          isEmpty,
+          reason: '$code/$key still carries the retired receive-only clause: '
+              '"Always" now resumes sharing, not only a catch-up — "$value"',
         );
       });
 
@@ -607,6 +675,27 @@ void main() {
           _vocabulary['tr']!.barPhrase,
         ),
         isEmpty,
+      );
+    });
+
+    test('an untouched translation of the retired note is caught', () {
+      // The English and German notes as they shipped before 2026-11-26.
+      expect(
+        violations(
+          "Choose 'Always' for Haven in Settings so Haven can also catch up on "
+          "your circles' locations after iOS closes the app.",
+          _vocabulary['en']!.oldNote,
+        ),
+        isNotEmpty,
+      );
+      expect(
+        violations(
+          'Setze in den Einstellungen für Haven den Standortzugriff auf '
+          '„Immer“, damit Haven auch dann noch die verpassten Standorte '
+          'deiner Kreise nachholen kann, wenn iOS die App beendet hat.',
+          _vocabulary['de']!.oldNote,
+        ),
+        isNotEmpty,
       );
     });
 

@@ -17,10 +17,12 @@ import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/pages/onboarding/create_identity_screen.dart';
 import 'package:haven/src/pages/onboarding/import_nsec_screen.dart';
 import 'package:haven/src/pages/settings/relay_settings_page.dart';
+import 'package:haven/src/providers/location_disclosure_provider.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/providers/storage_reset_notice_provider.dart';
+import 'package:haven/src/services/android_background_location.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/location_service.dart';
 import 'package:haven/src/services/maintenance_service.dart';
@@ -60,6 +62,7 @@ void main() {
     MockRelayPreferencesService? relayPrefs,
     MockCircleService? circles,
     bool resetNoticeOwed = false,
+    AndroidBackgroundLocation? allTime,
   }) {
     final prefs = relayPrefs ?? MockRelayPreferencesService();
     return [
@@ -82,6 +85,8 @@ void main() {
       maintenanceServiceProvider.overrideWithValue(
         maintenance ?? _FakeMaintenance(prefs),
       ),
+      if (allTime != null)
+        androidBackgroundLocationProvider.overrideWithValue(allTime),
     ];
   }
 
@@ -242,7 +247,155 @@ void main() {
     },
   );
 
-  testWidgets('an edited name is what gets saved and published', (tester) async {
+  group('Android 11+ without "Allow all the time"', () {
+    testWidgets('one disclosure carries the step; Agree asks foreground, then '
+        'background, before sharing is enabled, and MapShell owes nothing', (
+      tester,
+    ) async {
+      final allTime = _MissingAllTime();
+      final location = _FakeLocationService();
+      final order = <String>[];
+      location.onRequest = () => order.add('foreground');
+      allTime.onRequest = () async {
+        final prefs = await SharedPreferences.getInstance();
+        order.add(
+          prefs.getBool(kBackgroundSharingKey) ?? false
+              ? 'background, after enable'
+              : 'background',
+        );
+      };
+
+      await pumpLocalized(
+        tester,
+        const CreateIdentityScreen(),
+        overrides: buildOverrides(
+          service: _RecordingIdentityService(),
+          locationService: location,
+          allTime: allTime,
+        ),
+        settle: false,
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+      await pumpFrames(tester);
+
+      expect(
+        find.textContaining('Next, on the screen Android opens'),
+        findsOneWidget,
+        reason: 'the request below must follow a disclosure that explains it',
+      );
+      expect(allTime.requests, 0, reason: 'a request before the disclosure');
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+      await pumpFrames(tester);
+
+      expect(order, ['foreground', 'background']);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getBool(kBackgroundSharingKey), isTrue);
+      expect(prefs.getBool(kAndroidBackgroundLocationPromptedKey), isTrue);
+      expect(
+        foregroundConsentStepDue(
+          sharingOn: true,
+          backgroundAccepted:
+              prefs.getBool(kLocationDisclosureBackgroundAcceptedKey) ?? false,
+          acceptedVersion:
+              prefs.getInt(kLocationDisclosureBackgroundVersionKey) ?? 1,
+          promptedVersion:
+              prefs.getInt(kLocationDisclosureBackgroundPromptedVersionKey) ??
+              0,
+          allTime: await allTime.status(),
+          allTimePrompted:
+              prefs.getBool(kAndroidBackgroundLocationPromptedKey) ?? false,
+        ),
+        ForegroundConsentStep.none,
+        reason: 'MapShell would show the same long dialog a second time',
+      );
+    });
+
+    testWidgets('a foreground refusal asks nothing more, and the step is not '
+        'asked again', (tester) async {
+      final allTime = _MissingAllTime();
+      await pumpLocalized(
+        tester,
+        const CreateIdentityScreen(),
+        overrides: buildOverrides(
+          service: _RecordingIdentityService(),
+          locationService: _FakeLocationService(grants: false),
+          allTime: allTime,
+        ),
+        settle: false,
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+      await pumpFrames(tester);
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+      await pumpFrames(tester);
+
+      expect(allTime.requests, 0);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getBool(kAndroidBackgroundLocationPromptedKey), isTrue);
+    });
+
+    testWidgets('a failed background request logs its type only and still '
+        'enables sharing', (tester) async {
+      // Rule 15: an exception's text may carry anything the platform put in
+      // it; the line names the type alone.
+      const planted = 'npub1plantedplantedplanted wss://planted.example';
+      final allTime = _MissingAllTime()
+        ..onRequest = () async => throw StateError(planted);
+      // Restored inside the body: testWidgets checks debugPrint before
+      // addTearDown callbacks run (see log_capture.dart).
+      final logs = LogCapture();
+      await pumpLocalized(
+        tester,
+        const CreateIdentityScreen(),
+        overrides: buildOverrides(
+          service: _RecordingIdentityService(),
+          allTime: allTime,
+        ),
+        settle: false,
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+      await pumpFrames(tester);
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+      await pumpFrames(tester);
+
+      logs.restore();
+      logs
+        ..assertContains('Onboarding background location failed: StateError')
+        ..assertNoNeedles(['npub1planted', 'planted.example']);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getBool(kBackgroundSharingKey), isTrue);
+    });
+
+    testWidgets('a decline asks for nothing and records no step', (
+      tester,
+    ) async {
+      final allTime = _MissingAllTime();
+      await pumpLocalized(
+        tester,
+        const CreateIdentityScreen(),
+        overrides: buildOverrides(
+          service: _RecordingIdentityService(),
+          allTime: allTime,
+        ),
+        settle: false,
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+      await pumpFrames(tester);
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureNotNow));
+      await pumpFrames(tester);
+
+      expect(allTime.requests, 0);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getBool(kAndroidBackgroundLocationPromptedKey), isNull);
+    });
+  });
+
+  testWidgets('an edited name is what gets saved and published', (
+    tester,
+  ) async {
     final service = _RecordingIdentityService();
     final profile = MockProfileService();
 
@@ -344,34 +497,33 @@ void main() {
     },
   );
 
-  testWidgets(
-    'resume with an existing chosen name preserves it (no clobber)',
-    (tester) async {
-      final service = _RecordingIdentityService(
-        hasIdentityValue: true,
-        existingDisplayName: 'Alice',
-      );
+  testWidgets('resume with an existing chosen name preserves it (no clobber)', (
+    tester,
+  ) async {
+    final service = _RecordingIdentityService(
+      hasIdentityValue: true,
+      existingDisplayName: 'Alice',
+    );
 
-      await pumpLocalized(
-        tester,
-        const CreateIdentityScreen(),
-        overrides: buildOverrides(service: service),
-        settle: false,
-      );
-      // Let initState's async restore replace the random pre-fill with "Alice".
-      await tester.pump();
-      await tester.pump();
-      expect(prefilledName(tester), 'Alice');
+    await pumpLocalized(
+      tester,
+      const CreateIdentityScreen(),
+      overrides: buildOverrides(service: service),
+      settle: false,
+    );
+    // Let initState's async restore replace the random pre-fill with "Alice".
+    await tester.pump();
+    await tester.pump();
+    expect(prefilledName(tester), 'Alice');
 
-      await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
-      await pumpFrames(tester);
-      await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
-      await pumpFrames(tester);
+    await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+    await pumpFrames(tester);
+    await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+    await pumpFrames(tester);
 
-      // The existing name is saved as-is — not overwritten by a fresh random.
-      expect(service.setDisplayNameCalls, ['Alice']);
-    },
-  );
+    // The existing name is saved as-is — not overwritten by a fresh random.
+    expect(service.setDisplayNameCalls, ['Alice']);
+  });
 
   testWidgets('a create failure surfaces a snackbar and does not complete', (
     tester,
@@ -444,7 +596,8 @@ void main() {
       expect(
         maintenance.seededAtFirstPublish,
         isTrue,
-        reason: 'an unseeded relay list reads as empty: a publish before the '
+        reason:
+            'an unseeded relay list reads as empty: a publish before the '
             'seed does nothing, and the QR code is shown anyway',
       );
       expect(maintenance.calls, ['relayList', 'kp']);
@@ -1198,12 +1351,20 @@ class _RecordingIdentityService implements IdentityService {
 /// Minimal [LocationService] fake. Onboarding only calls [requestPermission];
 /// every other member is unused and asserts if reached.
 class _FakeLocationService implements LocationService {
+  _FakeLocationService({this.grants = true});
+
+  /// What the foreground permission request answers.
+  final bool grants;
   bool requestPermissionCalled = false;
+
+  /// Called on [requestPermission], before it answers.
+  void Function()? onRequest;
 
   @override
   Future<bool> requestPermission() async {
     requestPermissionCalled = true;
-    return true;
+    onRequest?.call();
+    return grants;
   }
 
   @override
@@ -1221,6 +1382,32 @@ class _FakeLocationService implements LocationService {
 
   @override
   Future<bool> isLocationServiceEnabled() => throw UnimplementedError();
+}
+
+/// Android 11+ without "Allow all the time", as the channel reports it.
+class _MissingAllTime implements AndroidBackgroundLocation {
+  int requests = 0;
+
+  /// Awaited on [request], before it answers.
+  Future<void> Function()? onRequest;
+
+  @override
+  Future<BackgroundLocationStatus> status() async =>
+      const BackgroundLocationStatus(
+        required: true,
+        granted: false,
+        optionLabel: 'Allow all the time',
+      );
+
+  @override
+  Future<bool> request() async {
+    requests++;
+    await onRequest?.call();
+    return true;
+  }
+
+  @override
+  Future<void> openAppSettings() async {}
 }
 
 /// A KeyPackage tick an own relay acknowledged: this device's current

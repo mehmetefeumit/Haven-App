@@ -20,6 +20,20 @@ import 'package:flutter/widgets.dart';
 bool pausedAtMount(AppLifecycleState? lifecycle) =>
     lifecycle == AppLifecycleState.paused;
 
+/// What the first pause of a process owes a location relaunch.
+enum LaunchSession {
+  /// Not a location relaunch: the ordinary pause.
+  none,
+
+  /// A location relaunch the current background disclosure does not cover:
+  /// no session is started and nothing is published from it.
+  receiveOnly,
+
+  /// A location relaunch under the current disclosure with sharing on: start
+  /// the background session, then burst.
+  resume,
+}
+
 /// The mount and the start-up of a shell, behind hooks the shell supplies.
 ///
 /// A shell mounted under `paused` stamps no foreground and takes the pause it
@@ -27,6 +41,13 @@ bool pausedAtMount(AppLifecycleState? lifecycle) =>
 /// change has reached it first. Its start-up contacts no relay unless the app
 /// reads `resumed` then, and again after each await of the contact: the
 /// contact is owed to the next resume, which pays it once.
+///
+/// A process iOS launched into the background for a location event takes a
+/// pause even when it mounted under `inactive` or `detached`, where none may
+/// ever be dispatched, and that pause — whichever path delivers it, and
+/// whether it lands before or after the launch's reads resolve — is handed
+/// the [LaunchSession] once ([takeLaunchSession]). The foreground consent step
+/// is shown only while the app reads `resumed`, owed to the first resume.
 mixin ForegroundStartUpGate<T extends StatefulWidget> on State<T> {
   /// The lifecycle the binding reads now.
   @protected
@@ -54,27 +75,137 @@ mixin ForegroundStartUpGate<T extends StatefulWidget> on State<T> {
   @protected
   Future<void> startUpRelayContact();
 
+  /// Whether iOS launched this process into the background for a location
+  /// event (the native session's read).
+  @protected
+  Future<bool> launchedForLocation();
+
+  /// In a location relaunch only: reads what the launch's first pause needs —
+  /// the sharing consent, the current-disclosure predicate and the roster,
+  /// bounded — and answers whether that pause may start sharing.
+  @protected
+  Future<bool> launchMayResume();
+
+  /// The foreground consent step. Answers false when the app left the front
+  /// before anything was shown, which owes it to the next resume.
+  @protected
+  Future<bool> foregroundConsentStep();
+
   bool _relayContactOwed = false;
+  bool _consentStepOwed = false;
+
+  /// The launch's reads, from the mount; completes with what is owed.
+  final Completer<LaunchSession> _launch = Completer<LaunchSession>();
+
+  /// What [_launch] completed with, once it has.
+  LaunchSession? _launchRead;
+
+  /// Whether the [LaunchSession] has been handed to a pause.
+  bool _launchTaken = false;
+
+  /// Whether a pause is in effect: from an admitted pause to the next resume.
+  bool _pauseInEffect = false;
+
+  /// Whether any resume has been dispatched to this shell.
+  bool _resumeSeen = false;
 
   /// From `initState`.
   void gateMount() {
-    if (pausedAtMount(currentLifecycle)) {
-      unawaited(_takePauseMissedAtMount());
-    } else {
-      stampForeground();
-    }
+    final paused = pausedAtMount(currentLifecycle);
+    if (!paused) stampForeground();
+    unawaited(_resolveMount(pausedAtMount: paused));
   }
 
   // Never inside the build that mounts the shell: the pause writes provider
-  // state, and the wait below yields first even when the consent has loaded.
-  Future<void> _takePauseMissedAtMount() async {
-    try {
-      await beforeMissedPause();
-    } on Object catch (_) {
-      // A consent that could not be read is read as off by the pause.
+  // state, and the waits below yield first even when everything has loaded.
+  Future<void> _resolveMount({required bool pausedAtMount}) async {
+    final launch = await _readLaunch();
+    _launchRead = launch;
+    _launch.complete(launch);
+    if (pausedAtMount) {
+      try {
+        await beforeMissedPause();
+      } on Object catch (_) {
+        // A consent that could not be read is read as off by the pause.
+      }
     }
-    if (!mounted || lifecycleTurn != 0) return;
-    takePause();
+    if (!mounted) return;
+    // Only a launch that may resume takes a pause of its own: one the
+    // current disclosure does not cover stays as it was (R-2).
+    if (lifecycleTurn == 0) {
+      if (pausedAtMount || launch == LaunchSession.resume) takePause();
+      return;
+    }
+    // A dispatched change reached the shell first. A pause has been handed the
+    // launch; a resume owns the shell — unless it was the one the binding
+    // synthesizes when a background launch's first message arrives over the
+    // `detached` seed (detached → resumed → inactive). The native flag tells
+    // the two apart: the first foreground clears it.
+    if (launch != LaunchSession.resume || !_awayWithLaunchOwed()) return;
+    if (await _stillLaunched(launch) == LaunchSession.none) return;
+    if (mounted && _awayWithLaunchOwed()) takePause();
+  }
+
+  bool _awayWithLaunchOwed() =>
+      !_launchTaken &&
+      !_pauseInEffect &&
+      currentLifecycle != AppLifecycleState.resumed;
+
+  Future<LaunchSession> _stillLaunched(LaunchSession launch) async {
+    if (launch == LaunchSession.none) return launch;
+    try {
+      return await launchedForLocation() ? launch : LaunchSession.none;
+    } on Object catch (_) {
+      return LaunchSession.none;
+    }
+  }
+
+  Future<LaunchSession> _readLaunch() async {
+    try {
+      if (!await launchedForLocation()) return LaunchSession.none;
+    } on Object catch (_) {
+      // Unreadable is not launched: no relaunch routing at all.
+      return LaunchSession.none;
+    }
+    try {
+      return await launchMayResume()
+          ? LaunchSession.resume
+          : LaunchSession.receiveOnly;
+    } on Object catch (_) {
+      return LaunchSession.receiveOnly;
+    }
+  }
+
+  /// From the pause handler's iOS sharing-on branch: what this pause owes a
+  /// location relaunch, or null when it owes nothing (not a relaunch, or
+  /// already handed to an earlier pause). Pending while the launch's reads
+  /// are, so a pause dispatched before they resolve is handed the outcome
+  /// rather than missing it.
+  ///
+  /// After a resume the native flag is read again: a user who opened the app
+  /// cleared it, and their later pause is an ordinary one.
+  Future<LaunchSession>? takeLaunchSession() {
+    if (_launchTaken) return null;
+    _launchTaken = true;
+    if (_launchRead == LaunchSession.none) return null;
+    return _resumeSeen ? _launch.future.then(_stillLaunched) : _launch.future;
+  }
+
+  /// From the pause handler, first: whether this pause runs at all. A pause
+  /// taken for a background launch leaves the binding at `inactive`, so iOS
+  /// can dispatch a `paused` on top of it; a second run would cancel the
+  /// first pause's burst mid-flight. The binding itself never dispatches
+  /// paused twice in a row, so nothing else is skipped.
+  bool admitPause() {
+    if (_pauseInEffect) return false;
+    _pauseInEffect = true;
+    return true;
+  }
+
+  /// From the resume handler, first.
+  void noteResume() {
+    _pauseInEffect = false;
+    _resumeSeen = true;
   }
 
   /// From the start-up.
@@ -84,6 +215,23 @@ mixin ForegroundStartUpGate<T extends StatefulWidget> on State<T> {
     } else {
       _relayContactOwed = true;
     }
+  }
+
+  /// From the start-up: the consent step now if the app reads `resumed`, else
+  /// owed to the first resume. Never from a background launch.
+  Future<void> gateConsentStep() async {
+    if (currentLifecycle != AppLifecycleState.resumed) {
+      _consentStepOwed = true;
+      return;
+    }
+    if (!await foregroundConsentStep()) _consentStepOwed = true;
+  }
+
+  /// From the resume handler, on every resume.
+  Future<void> payOwedConsentStep() async {
+    if (!_consentStepOwed) return;
+    _consentStepOwed = false;
+    if (!await foregroundConsentStep()) _consentStepOwed = true;
   }
 
   /// From [startUpRelayContact], after each await: whether the app still

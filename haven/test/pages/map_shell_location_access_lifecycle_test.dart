@@ -993,8 +993,28 @@ class _MapShellState {
         reason: 'the rule is CONSULTED, never inverted, and it is asked about '
             "this shell's own last publish and this pause's instant",
       );
+      // The else of the location-relaunch arm, whose own burst follows its
+      // session start (`_payLaunchSession`, pinned in
+      // map_shell_mount_lifecycle_test.dart).
+      final launchArm = drive.thisOrAncestorMatching(
+        (n) =>
+            n is IfStatement &&
+            n.expression.toSource() == 'launch != null' &&
+            n.elseStatement != null,
+      )! as IfStatement;
       expect(
         enclosing[1],
+        'launch != null',
+        reason: 'the ordinary burst runs only when no relaunch owes the pause '
+            'its session',
+      );
+      expect(
+        launchArm.thenStatement.toSource(),
+        isNot(contains('_driveBurstNow(')),
+        reason: 'the ordinary burst moved into the relaunch arm',
+      );
+      expect(
+        enclosing[2],
         startsWith('MapShell.shouldKeepPublishingWhilePaused('),
         reason: 'and it runs only on the branch that installed the sink',
       );

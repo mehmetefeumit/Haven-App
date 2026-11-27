@@ -16,6 +16,7 @@ library;
 
 import 'dart:async';
 
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:geolocator/geolocator.dart' as geo;
@@ -27,6 +28,7 @@ import 'package:mockito/annotations.dart';
 import 'package:mockito/mockito.dart';
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 
+import '../helpers/log_capture.dart';
 import '../mocks/fake_ios_location_source.dart';
 import 'geolocator_location_service_test.mocks.dart';
 
@@ -123,6 +125,7 @@ void main() {
       profile: IosLocationProfile.best,
       authorization: 'authorizedAlways',
       backgrounded: true,
+      launchedForLocation: false,
     );
 
     setUp(() {
@@ -2124,10 +2127,11 @@ void main() {
         //
         // BOTH caches are empty, which is the state a post-termination
         // relaunch is IN — the native cache does not survive termination and
-        // no stream has run in this process. `INV-L-IOS-WAKES-RECEIVE-ONLY`
-        // says such a process cannot publish; a branch that falls through to
-        // the one-shot when it finds no cached fix made that a coincidence of
-        // what happened to be in memory.
+        // no stream has run in this process. Such a process publishes only a
+        // Best fix from Haven's own session
+        // (`INV-L-IOS-RELAUNCH-RESUMES-ONLY-UNDER-ALWAYS-AND-CURRENT-CONSENT`);
+        // a branch that falls through to the one-shot when it finds no cached
+        // fix made that a coincidence of what happened to be in memory.
         final service = serviceFor()..foregroundActive = true;
         stubAccessGranted();
         fakeIos
@@ -2182,6 +2186,289 @@ void main() {
             locationSettings: anyNamed('locationSettings'),
           ),
         ).called(1);
+      });
+
+      // OD-R1: a process iOS launched into the background for a location
+      // event publishes the next Best fix of the session MapShell starts for
+      // it, never a plugin one-shot, and waits for it no longer than the
+      // burst's own window.
+      group('a location relaunch', () {
+        const launchedStatus = IosLocationStreamStatus(
+          running: true,
+          allowsBackgroundLocationUpdates: true,
+          showsBackgroundLocationIndicator: false,
+          profile: IosLocationProfile.best,
+          authorization: 'authorizedAlways',
+          backgrounded: true,
+          launchedForLocation: true,
+        );
+
+        void verifyNoOneShot() => verifyNever(
+          mockGeolocator.getCurrentPosition(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        );
+
+        /// Starts [call] and reports, through the returned getters, whether
+        /// it has settled and how.
+        ({bool Function() settled, Object? Function() error, Position? Function() value})
+        track(Future<Position> call) {
+          var settled = false;
+          Object? error;
+          Position? value;
+          call.then(
+            (p) {
+              settled = true;
+              value = p;
+            },
+            onError: (Object e) {
+              settled = true;
+              error = e;
+            },
+          );
+          return (
+            settled: () => settled,
+            error: () => error,
+            value: () => value,
+          );
+        }
+
+        test('an ordinary backgrounded process refuses AT ONCE, even with a '
+            'live background session', () {
+          fakeAsync((async) {
+            final service = serviceFor()..foregroundActive = false;
+            stubAccessGranted();
+            service
+                .getLocationStream(backgroundSharingEnabled: true)
+                .listen((_) {});
+            fakeIos.statusValue = backgroundedStatus;
+
+            final call = track(service.getCurrentLocation());
+            async.flushMicrotasks();
+
+            expect(call.settled(), isTrue, reason: 'it waited for a fix');
+            expect(call.error(), isA<LocationServiceException>());
+            verifyNoOneShot();
+          });
+        });
+
+        test('waits for its background session\'s next fix and serves that '
+            'fix', () {
+          fakeAsync((async) {
+            final service = serviceFor()..foregroundActive = false;
+            stubAccessGranted();
+            fakeIos.statusValue = launchedStatus;
+            service.startBackgroundLaunchSession(backgroundSharingEnabled: true);
+
+            final call = track(service.getCurrentLocation());
+            async.elapse(const Duration(seconds: 5));
+            expect(call.settled(), isFalse, reason: 'premise: still waiting');
+            fakeIos.session.add(
+              Position(
+                latitude: 47.25,
+                longitude: 8.5,
+                timestamp: DateTime.now(),
+                accuracy: 4,
+              ),
+            );
+            async.flushMicrotasks();
+
+            expect(call.value()?.latitude, 47.25);
+            expect(call.value()?.longitude, 8.5);
+            verifyNoOneShot();
+          });
+        });
+
+        test('refuses once kOneShotLocationTimeout passes with no fix, never '
+            'reaching the one-shot', () {
+          fakeAsync((async) {
+            final service = serviceFor()..foregroundActive = false;
+            stubAccessGranted();
+            fakeIos.statusValue = launchedStatus;
+            service.startBackgroundLaunchSession(backgroundSharingEnabled: true);
+
+            final call = track(service.getCurrentLocation());
+            async.elapse(
+              kOneShotLocationTimeout - const Duration(milliseconds: 100),
+            );
+            expect(call.settled(), isFalse, reason: 'gave up early');
+            async.elapse(const Duration(milliseconds: 100));
+
+            expect(call.error(), isA<LocationServiceException>());
+            verifyNoOneShot();
+          });
+        });
+
+        test('refuses at once when its session was refused natively', () {
+          fakeAsync((async) {
+            final service = serviceFor()..foregroundActive = false;
+            stubAccessGranted();
+            fakeIos.statusValue = launchedStatus;
+            service.startBackgroundLaunchSession(backgroundSharingEnabled: true);
+            fakeIos.session
+              ..addError(PlatformException(code: 'background_start_refused'))
+              ..close();
+            async.flushMicrotasks();
+
+            final call = track(service.getCurrentLocation());
+            async.flushMicrotasks();
+
+            expect(call.settled(), isTrue, reason: 'a refused start hung');
+            expect(call.error(), isA<LocationServiceException>());
+            verifyNoOneShot();
+          });
+        });
+
+        test('a session that fails mid-wait ends the wait at once', () {
+          fakeAsync((async) {
+            final service = serviceFor()..foregroundActive = false;
+            stubAccessGranted();
+            fakeIos.statusValue = launchedStatus;
+            service.startBackgroundLaunchSession(backgroundSharingEnabled: true);
+            final call = track(service.getCurrentLocation());
+            async.elapse(const Duration(seconds: 1));
+
+            fakeIos.session.addError(PlatformException(code: 'denied'));
+            async.flushMicrotasks();
+
+            expect(call.error(), isA<LocationServiceException>());
+          });
+        });
+
+        test('startBackgroundLaunchSession starts the native session '
+            'background-capable with no provider listener, and arms the '
+            'stationary dwell', () async {
+          final service = serviceFor()..foregroundActive = false;
+          stubAccessGranted();
+          fakeIos.foregroundCalls.clear();
+
+          service.startBackgroundLaunchSession(backgroundSharingEnabled: true);
+
+          expect(fakeIos.listenArguments, [true]);
+          expect(
+            fakeIos.foregroundCalls.last,
+            isFalse,
+            reason: 'positions() reset the controller to Best, and the dwell '
+                'was not re-applied: a backgrounded session stranded at Best',
+          );
+          final fix = asPosition(positionAt(DateTime.now()));
+          fakeIos.session.add(fix);
+          await Future<void>.delayed(Duration.zero);
+          fakeIos.statusValue = launchedStatus;
+          expect((await service.getCurrentLocation()).latitude, fix.latitude);
+          verifyNoOneShot();
+        });
+
+        test('startBackgroundLaunchSession does nothing with background '
+            'sharing off, or off iOS', () {
+          serviceFor().startBackgroundLaunchSession(
+            backgroundSharingEnabled: false,
+          );
+          serviceFor(
+            isIOS: false,
+          ).startBackgroundLaunchSession(backgroundSharingEnabled: true);
+          expect(fakeIos.listenArguments, isEmpty);
+        });
+
+        test('startBackgroundLaunchSession replaces a foreground-intent '
+            'session with a background-capable one', () {
+          final service = serviceFor();
+          service.getLocationStream().listen((_) {});
+
+          service.startBackgroundLaunchSession(backgroundSharingEnabled: true);
+
+          expect(fakeIos.listenArguments, [false, true]);
+          expect(fakeIos.cancels, 1);
+        });
+
+        test('startBackgroundLaunchSession leaves a live background-capable '
+            'session alone', () {
+          final service = serviceFor();
+          service
+              .getLocationStream(backgroundSharingEnabled: true)
+              .listen((_) {});
+
+          service.startBackgroundLaunchSession(backgroundSharingEnabled: true);
+
+          expect(fakeIos.listenArguments, [true]);
+          expect(fakeIos.cancels, 0, reason: 'the keep-alive was torn down');
+        });
+
+        test('suspendStream releases a background-launch session that has no '
+            'outer listener (the opt-out watcher)', () {
+          fakeAsync((async) {
+            final service = serviceFor()..foregroundActive = false;
+            stubAccessGranted();
+            fakeIos.statusValue = launchedStatus;
+            service.startBackgroundLaunchSession(backgroundSharingEnabled: true);
+
+            service.suspendStream();
+            expect(fakeIos.cancels, 1, reason: 'withdrawn consent kept GPS on');
+
+            final call = track(service.getCurrentLocation());
+            async.flushMicrotasks();
+            expect(call.error(), isA<LocationServiceException>());
+          });
+        });
+
+        test('an opt-out mid-wait ends the wait at once', () {
+          fakeAsync((async) {
+            final service = serviceFor()..foregroundActive = false;
+            stubAccessGranted();
+            fakeIos.statusValue = launchedStatus;
+            service.startBackgroundLaunchSession(backgroundSharingEnabled: true);
+            final call = track(service.getCurrentLocation());
+            async.elapse(const Duration(seconds: 1));
+
+            service.suspendStream();
+            async.flushMicrotasks();
+
+            expect(call.error(), isA<LocationServiceException>());
+          });
+        });
+
+        test('the next foreground getLocationStream replaces the '
+            'background-launch session', () {
+          final service = serviceFor();
+          service.startBackgroundLaunchSession(backgroundSharingEnabled: true);
+
+          service
+              .getLocationStream(backgroundSharingEnabled: true)
+              .listen((_) {});
+
+          expect(fakeIos.listenArguments, [true, true]);
+          expect(fakeIos.cancels, 1, reason: 'two native sessions at once');
+        });
+
+        test('Rule 15: the no-fix line names no coordinate', () {
+          final logs = LogCapture.install();
+          fakeAsync((async) {
+            final service = serviceFor()..foregroundActive = false;
+            stubAccessGranted();
+            fakeIos
+              ..statusValue = launchedStatus
+              // A distinctive coordinate in hand but too old to serve, so
+              // the wait — and its line — is reached with it present.
+              ..nativeLastBestFix = Position(
+                latitude: 61.234567,
+                longitude: -149.876543,
+                timestamp: DateTime.now().subtract(const Duration(hours: 1)),
+                accuracy: 3,
+              );
+            service.startBackgroundLaunchSession(backgroundSharingEnabled: true);
+            final call = track(service.getCurrentLocation());
+            async.elapse(kOneShotLocationTimeout);
+            expect(call.error(), isA<LocationServiceException>());
+          });
+          logs
+            ..assertContains('[Location] background launch: no fix')
+            ..assertNoNeedles([
+              '61.234567',
+              '-149.876543',
+              '61.23',
+              '149.87',
+            ]);
+        });
       });
     });
 
@@ -2557,7 +2844,8 @@ void main() {
           // caches are empty by design, so "no last-known fix" is not an edge
           // case — it is the state the relaunched process is in, and the
           // one-shot the fall-through reached is a publish input
-          // INV-L-IOS-WAKES-RECEIVE-ONLY says cannot exist there. It also
+          // INV-L-IOS-RELAUNCH-RESUMES-ONLY-UNDER-ALWAYS-AND-CURRENT-CONSENT
+          // says cannot exist there. It also
           // could never have delivered: its CLLocationManager has no
           // background capability, so the "final attempt" was a 30 s stall
           // ending in the same exception.

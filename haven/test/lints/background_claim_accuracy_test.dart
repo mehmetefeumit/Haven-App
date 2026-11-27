@@ -1,37 +1,52 @@
-// Guard for the "sharing survives the app being closed" claim, which has now
-// been shipped and removed FOUR times (three ARB strings in backlog P0-2, then
-// the iOS Info.plist usage description and the Play prominent-disclosure
-// dialog). It is false on iOS: every native background wake path is
-// receive-only — `HavenSLCHandler.swift` calls its own sweep "receive-only",
-// and neither `catchup_service.dart` nor `ios_background_catchup.dart` has a
-// publish call site — so once iOS ends the app, nothing the user shares
-// resumes until they reopen Haven.
+// Guard for what copy may say about sharing after Haven is closed.
 //
-// It is TRUE on Android, and deliberately so: the foreground service is not
-// stopped when the user swipes Haven out of recents (no `android:stopWithTask`
-// in AndroidManifest.xml, which defaults to false), and that service publishes
-// on its own timer. So the guard is not "never mention a closed app" — it is:
+// The unconditional "sharing survives the app being closed" claim has been
+// shipped and removed FOUR times (three ARB strings in backlog P0-2, then the
+// iOS Info.plist usage description and the Play prominent-disclosure dialog).
+// Until 2026-11-26 every iOS wake path was receive-only and the copy said so.
+// The owner then directed (OD-R1, owner-directed 2026-11-26) that a process iOS
+// relaunches for a location event resumes the user's own sharing — but only
+// under 'Always', only after movement (a significant change or leaving a 200 m
+// region), only after the first unlock following a restart, only for a user who
+// accepted the current background disclosure, and only when iOS chooses to
+// relaunch. While Using is never relaunched. The wake handlers themselves
+// (`HavenSLCHandler.swift`, `catchup_service.dart`,
+// `ios_background_catchup.dart`) still have no publish call site; the relaunch
+// publishes through MapShell's
+// burst plane. So "a wake only fetches, never sends" is now FALSE for an
+// 'Always' user, and an unconditional resume claim is false for everybody.
 //
-//   THE RULE: in copy that reaches an iOS user, a sentence may mention the app
-//   not running only if the SAME sentence says what stops. Mentioning the
-//   not-running state and leaving the consequence unstated is the claim.
+// On Android the foreground service is not stopped by a swipe (no
+// `android:stopWithTask`) and publishes on its own timer, so the Play sentence
+// "even when the app is closed" is true there and false on iOS. The guard is
+// therefore not "never mention a closed app"; it is:
+//
+//   THE RULE (v2): in copy that reaches an iOS user, a sentence that names the
+//   app being closed must state the outcome in the SAME sentence — that
+//   sharing stops, or that it starts again only under the whole condition:
+//   'Always', the movement, and that iOS decides (not guaranteed). And copy
+//   that says sharing starts again after Haven is closed must also state the
+//   While-Using limit: under 'While Using the App' it stays stopped until the
+//   user opens Haven.
 //
 // Stated that way it cannot be dodged by changing the verb ("keeps updated" →
 // "stays in sync" → "continues"), which a literal-substring guard would miss.
 //
-// What it deliberately does NOT catch, so nobody over-trusts it: a claim that
-// never names the not-running state at all (e.g. "Haven keeps your circles
-// updated around the clock"), and a self-contradicting sentence that both
-// asserts continuation and states the limit. The widget assertions below cover
-// the realistic regression instead by pinning the promise each platform makes.
+// The receive-only wording is checked separately and is now itself a finding:
+// copy an iOS user reads may no longer say a wake only fetches or never sends.
 //
-// A second tie lives here too. Two surfaces state the same receive-only
-// asymmetry — the consent dialog's iOS sentence and the Location settings
-// page's opening paragraph — and until the consent copy moved into the ARB
-// nothing checked that they still agreed: a doc comment asked for it and only
-// a reader could enforce it. They are different surfaces and word it
-// differently on purpose, so what is compared is the CLAIM (sharing stops, a
-// wake may fetch, it never sends), never the bytes.
+// What it deliberately does NOT catch, so nobody over-trusts it: a claim that
+// never names the closed state at all (e.g. "Haven keeps your circles updated
+// around the clock"), and a self-contradicting sentence that both asserts
+// continuation and states the stop or the condition. The widget assertions
+// below cover the realistic regression instead by pinning the promise each
+// platform makes.
+//
+// A second tie lives here too. Two surfaces state the iPhone resume claim —
+// the consent dialog's iOS sentence and `locationSettingsIntroIos`, the iPhone
+// half of the Location settings page's opening paragraph — and they word it
+// differently on purpose,
+// so what is compared is the CLAIM (its conditions), never the bytes.
 @TestOn('vm')
 library;
 
@@ -43,7 +58,7 @@ import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/widgets/location/location_disclosure_dialog.dart';
 
-/// One sentence that names the app not running without stating what stops.
+/// One sentence that breaks a rule of this file.
 class BackgroundClaimViolation {
   BackgroundClaimViolation({required this.source, required this.sentence});
 
@@ -90,8 +105,9 @@ final RegExp _notRunning = _anyOf([
   'wake.up',
 ]);
 
-/// Phrases stating the limit — what stops, and that it takes reopening.
-final RegExp _statesTheLimit = _anyOf([
+/// Phrases stating the stop — that sharing stops, or does not start again,
+/// until the user opens Haven.
+final RegExp _statesTheStop = _anyOf([
   'stops',
   'stopped',
   'stop sharing',
@@ -100,11 +116,37 @@ final RegExp _statesTheLimit = _anyOf([
   'until you open haven',
   'resumes when you reopen',
   'resumes when you open',
-  'only fetch',
-  'only to fetch',
+  'will not start (it |sharing )?again',
+  'won.t start (it |sharing )?again',
+]);
+
+/// The whole condition under which iOS resumes sharing after Haven is closed.
+/// A sentence that names the closed state without stating the stop must carry
+/// EVERY one of these, or it promises more than iOS delivers.
+final Map<String, RegExp> _resumeCondition = {
+  "names 'Always'": RegExp(r'\balways\b'),
+  'names the movement': RegExp(r'\b(moved|metres|meters)\b'),
+  'says iOS decides': RegExp(r'\b(not guaranteed|ios decides|ios allows)\b'),
+};
+
+/// The While-Using limit: under that authorization sharing stays stopped
+/// until the user opens Haven, because iOS never relaunches it.
+final RegExp _whileUsingLimit = RegExp(
+  r'\bwhile using\b[^.]*\b(stops|until you open|when you open)\b',
+);
+
+/// A claim that sharing starts again by itself after Haven is closed.
+final RegExp _resumeVerb = RegExp(
+  r'\b(starts?|start) (sharing )?again by itself\b',
+);
+
+/// The receive-only wording, true until 2026-11-26 and now false for an
+/// 'Always' user: a relaunch may send.
+final RegExp _receiveOnlyWording = _anyOf([
+  'only (to )?fetch',
   'only receive',
   'receive.only',
-  'never sends? yours',
+  'never (to )?sends? yours',
   'does not send',
   'do not send',
 ]);
@@ -116,31 +158,32 @@ RegExp _anyOf(List<String> phrases) => RegExp('\\b(${phrases.join('|')})');
 /// sentence cannot launder a claim made in an earlier one.
 final RegExp _sentenceEnd = RegExp('[.!?]');
 
-/// The receive-only asymmetry, as four predicates that must hold on EVERY
-/// surface stating it.
+/// The iPhone resume claim, as predicates that must hold on EVERY surface
+/// stating it.
 ///
 /// The consent dialog and the Location settings page word this differently and
 /// legitimately so — one is a Play disclosure shown before a permission prompt,
 /// the other a settings paragraph that also covers Android — so the tie between
-/// them is the CLAIM, never the bytes. Each predicate is written against the
-/// fact, not the phrasing: that the app can be closed by the system, that the
-/// user's own sharing then stops, that a wake may still fetch the circles'
-/// locations, and that it never sends the user's own. Drop any one of them from
-/// either surface and the two stop promising the same thing.
-final Map<String, RegExp> _receiveOnlyClaim = {
-  'names the system closing Haven': _notRunning,
-  'says sharing stops': RegExp(r'\bsharing stops\b'),
-  'says a wake still fetches the circles': RegExp(
-    r'\bwake\w*\b[^.]*\b(fetch|receive)\w*\b',
+/// them is the CLAIM, never the bytes. Each predicate is written against a
+/// fact: Haven can be closed; under 'Always' sharing then starts again by
+/// itself; only after movement; never before the first unlock after a restart;
+/// only when iOS decides; and under While Using it waits for an open. Drop any
+/// one from either surface and the two stop promising the same thing.
+final Map<String, RegExp> _resumeClaim = {
+  'names Haven being closed': _notRunning,
+  'says sharing starts again by itself': _resumeVerb,
+  ..._resumeCondition,
+  'names the first unlock after a restart': RegExp(r'\bunlocked?\b'),
+  'says While Using waits for an open': RegExp(
+    r'\bwhile using\b[^.]*\b(until you open|when you open)\b',
   ),
-  "says a wake never sends the user's own": RegExp(r'\bnever\b[^.]*\bsends?\b'),
 };
 
-/// Which halves of [_receiveOnlyClaim] [text] actually carries.
-Map<String, bool> receiveOnlyClaimProfile(String text) {
+/// Which predicates of [_resumeClaim] [text] actually carries.
+Map<String, bool> resumeClaimProfile(String text) {
   final normalized = normalizeCopy(text);
   return {
-    for (final entry in _receiveOnlyClaim.entries)
+    for (final entry in _resumeClaim.entries)
       entry.key: entry.value.hasMatch(normalized),
   };
 }
@@ -156,17 +199,23 @@ String normalizeCopy(String text) => text
     .replaceAll(RegExp(r'\s+'), ' ')
     .trim();
 
-/// Returns every sentence in [text] that names the app not running without
-/// stating what stops.
+List<String> _sentences(String text) => [
+  for (final raw in normalizeCopy(text).split(_sentenceEnd))
+    if (raw.trim().isNotEmpty) raw.trim(),
+];
+
+/// Returns every sentence in [text] that names the app being closed without
+/// stating the stop or the whole resume condition (THE RULE, first half).
 List<BackgroundClaimViolation> findUnqualifiedClosedAppClaims(
   String text, {
   required String source,
 }) {
   final violations = <BackgroundClaimViolation>[];
-  for (final raw in normalizeCopy(text).split(_sentenceEnd)) {
-    final sentence = raw.trim();
-    if (sentence.isEmpty) continue;
-    if (_notRunning.hasMatch(sentence) && !_statesTheLimit.hasMatch(sentence)) {
+  for (final sentence in _sentences(text)) {
+    final qualified =
+        _statesTheStop.hasMatch(sentence) ||
+        _resumeCondition.values.every((r) => r.hasMatch(sentence));
+    if (_notRunning.hasMatch(sentence) && !qualified) {
       violations.add(
         BackgroundClaimViolation(source: source, sentence: sentence),
       );
@@ -174,6 +223,45 @@ List<BackgroundClaimViolation> findUnqualifiedClosedAppClaims(
   }
   return violations;
 }
+
+/// Returns the resume claims in [text] when [text] nowhere states the
+/// While-Using limit (THE RULE, second half). [text] is one surface: the
+/// limit may sit in another sentence of it, never in another surface. A
+/// sentence saying sharing will NOT start again is a stop, not a claim.
+List<BackgroundClaimViolation> findResumeClaimsWithoutWhileUsingLimit(
+  String text, {
+  required String source,
+}) {
+  if (_whileUsingLimit.hasMatch(normalizeCopy(text))) return const [];
+  return [
+    for (final sentence in _sentences(text))
+      if (_notRunning.hasMatch(sentence) &&
+          _resumeVerb.hasMatch(sentence) &&
+          !_statesTheStop.hasMatch(sentence))
+        BackgroundClaimViolation(source: source, sentence: sentence),
+  ];
+}
+
+/// Returns every sentence in [text] that still says a wake only fetches or
+/// never sends — the receive-only claim the owner retired on 2026-11-26.
+List<BackgroundClaimViolation> findReceiveOnlyWording(
+  String text, {
+  required String source,
+}) => [
+  for (final sentence in _sentences(text))
+    if (_receiveOnlyWording.hasMatch(sentence))
+      BackgroundClaimViolation(source: source, sentence: sentence),
+];
+
+/// Every rule of this file over one iOS surface.
+List<BackgroundClaimViolation> findAllViolations(
+  String text, {
+  required String source,
+}) => [
+  ...findUnqualifiedClosedAppClaims(text, source: source),
+  ...findResumeClaimsWithoutWhileUsingLimit(text, source: source),
+  ...findReceiveOnlyWording(text, source: source),
+];
 
 /// Extracts every `NS*UsageDescription` value from an Info.plist body.
 ///
@@ -186,14 +274,15 @@ Map<String, String> parseUsageDescriptions(String plist) {
   );
   return {
     for (final m in pattern.allMatches(plist))
-      m.group(1)!: m.group(2)!.replaceAll('&apos;', "'").replaceAll(
-        '&amp;',
-        '&',
-      ),
+      m.group(1)!: m
+          .group(2)!
+          .replaceAll('&apos;', "'")
+          .replaceAll('&amp;', '&'),
   };
 }
 
-/// Every string the disclosure dialog actually renders on [isIOS].
+/// Every string the disclosure dialog actually renders on [isIOS], in
+/// re-confirm mode when [reconfirm].
 ///
 /// Dismisses the dialog before returning: pumping a fresh host does NOT pop a
 /// route that is already on the navigator, so a second call in the same test
@@ -203,6 +292,7 @@ Future<List<String>> renderedDisclosureText(
   WidgetTester tester, {
   required bool isIOS,
   required bool includeBackground,
+  bool reconfirm = false,
 }) async {
   await tester.pumpWidget(
     MaterialApp(
@@ -217,6 +307,7 @@ Future<List<String>> renderedDisclosureText(
             onPressed: () => LocationDisclosureDialog.show(
               context,
               includeBackground: includeBackground,
+              reconfirm: reconfirm,
               isIOS: isIOS,
             ),
             child: const Text('Show dialog'),
@@ -236,6 +327,22 @@ Future<List<String>> renderedDisclosureText(
   await tester.pumpAndSettle();
   return rendered;
 }
+
+/// The iOS consent sentence as it shipped before 2026-11-26 — now false for an
+/// 'Always' user, so it must be caught if a revert or an untranslated locale
+/// brings it back.
+const _oldIosConsentSentence =
+    'This app uses location data to enable sharing with your circles even when '
+    'Haven is in the background and you are not using it. If iOS closes Haven, '
+    'sharing stops until you open it again — Haven may still wake up to fetch '
+    'your circles’ locations, but never to send yours.';
+
+/// The Always usage description as it shipped before 2026-11-26.
+const _oldAlwaysDescription =
+    'Haven shares your location with your trusted circles while it runs in the '
+    "background. After iOS closes Haven, it wakes only to fetch your circles' "
+    'locations; your own sharing resumes when you reopen Haven. Your location '
+    'is always end-to-end encrypted.';
 
 void main() {
   // The consent copy lives in the ARB now (`locationDisclosure*`), so the
@@ -294,7 +401,48 @@ void main() {
       );
     });
 
-    test('permits naming the closed state when the limit is stated', () {
+    test('flags an unconditional resume claim', () {
+      const unconditional =
+          'If Haven is closed, sharing starts again by itself.';
+      expect(
+        findUnqualifiedClosedAppClaims(unconditional, source: 'x'),
+        hasLength(1),
+      );
+    });
+
+    test('flags a resume claim that drops any ONE condition', () {
+      // Each variant states two of the three conditions: partial is not
+      // enough, because each one is something iOS really requires.
+      const variants = {
+        "names 'Always'":
+            'If Haven is closed, sharing starts again by itself once you have '
+            'moved a few hundred metres; iOS decides when.',
+        'names the movement':
+            "With 'Always', if Haven is closed, sharing starts again by "
+            'itself; iOS decides when, so it is not guaranteed.',
+        'says iOS decides':
+            "With 'Always', if Haven is closed, sharing starts again by "
+            'itself once you have moved a few hundred metres.',
+      };
+      expect(variants.keys.toSet(), _resumeCondition.keys.toSet());
+      variants.forEach((dropped, sentence) {
+        expect(
+          findUnqualifiedClosedAppClaims(sentence, source: 'x'),
+          hasLength(1),
+          reason: 'a resume claim that no longer $dropped must be caught',
+        );
+      });
+    });
+
+    test('permits a resume claim that states the whole condition', () {
+      const conditional =
+          "With 'Always', if Haven is closed, sharing starts again by itself "
+          'once you have moved a few hundred metres; iOS decides when, so it '
+          'is not guaranteed.';
+      expect(findUnqualifiedClosedAppClaims(conditional, source: 'x'), isEmpty);
+    });
+
+    test('permits naming the closed state when the stop is stated', () {
       const honest =
           'If iOS closes Haven, sharing stops until you open it again.';
       expect(findUnqualifiedClosedAppClaims(honest, source: 'x'), isEmpty);
@@ -320,6 +468,37 @@ void main() {
       expect(v, hasLength(1));
       expect(v.single.sentence, contains('app is closed'));
     });
+
+    test('flags a conditional resume claim that omits the While-Using limit, '
+        'and passes it once the limit is stated', () {
+      const resume =
+          'With Always, if Haven is closed it starts sharing again by itself '
+          'once you have moved a few hundred metres, when iOS allows it.';
+      expect(
+        findResumeClaimsWithoutWhileUsingLimit(resume, source: 'x'),
+        hasLength(1),
+      );
+      expect(
+        findResumeClaimsWithoutWhileUsingLimit(
+          '$resume With While Using the App, sharing stops when Haven is '
+          'closed until you open it again.',
+          source: 'x',
+        ),
+        isEmpty,
+      );
+    });
+
+    test('the old receive-only sentences are now caught', () {
+      // An untranslated or reverted string must go red: since 2026-11-26 a
+      // relaunch under 'Always' may send, so "only fetch, never send" is false.
+      for (final old in [_oldIosConsentSentence, _oldAlwaysDescription]) {
+        expect(
+          findReceiveOnlyWording(old, source: 'x'),
+          isNotEmpty,
+          reason: 'still reads as current copy: "$old"',
+        );
+      }
+    });
   });
 
   group('iOS Info.plist usage descriptions', () {
@@ -330,7 +509,8 @@ void main() {
       expect(
         plist.existsSync(),
         isTrue,
-        reason: 'Expected to run from the haven package root '
+        reason:
+            'Expected to run from the haven package root '
             '(cwd=${Directory.current.path}).',
       );
       descriptions = parseUsageDescriptions(plist.readAsStringSync());
@@ -347,81 +527,114 @@ void main() {
           'NSCameraUsageDescription',
           'NSPhotoLibraryUsageDescription',
         ]),
-        reason: 'Info.plist usage-description parse looks broken: '
+        reason:
+            'Info.plist usage-description parse looks broken: '
             'found ${descriptions.keys.toList()}',
       );
     });
 
-    test('no usage description claims sharing survives iOS closing the app',
-        () {
+    test('no usage description claims sharing resumes after Haven is closed '
+        'without stating its condition', () {
       final offenders = <BackgroundClaimViolation>[];
       descriptions.forEach((key, value) {
-        offenders.addAll(findUnqualifiedClosedAppClaims(value, source: key));
+        offenders.addAll(findAllViolations(value, source: key));
       });
       expect(
         offenders,
         isEmpty,
         reason:
-            'An iOS usage description breaks THE RULE at the top of this file, '
+            'An iOS usage description breaks a rule at the top of this file, '
             'and the user reads this string at the moment they grant the '
             'permission, so an over-claim here buys consent that was not '
             'informed.\nOffenders:\n  ${offenders.join('\n  ')}',
       );
     });
 
-    test('the Always description still justifies Always specifically', () {
-      // Apple requires a purpose string for the authorization being requested.
-      // Fixing the false claim must not flatten it into something generic.
-      final always =
-          descriptions['NSLocationAlwaysAndWhenInUseUsageDescription']!;
+    test('the Always description justifies Always and states the resume '
+        'condition', () {
+      // Apple requires a purpose string for the authorization being requested,
+      // and Always is exactly what buys the relaunch that resumes sharing.
+      final always = normalizeCopy(
+        descriptions['NSLocationAlwaysAndWhenInUseUsageDescription']!,
+      );
       expect(always, contains('circles'));
       expect(
-        normalizeCopy(always),
+        always,
         contains('background'),
-        reason: 'the Always string must still say what background access is '
+        reason:
+            'the Always string must still say what background access is '
             'for, not just what it is not',
       );
       expect(
-        _statesTheLimit.hasMatch(normalizeCopy(always)),
+        _resumeVerb.hasMatch(always),
         isTrue,
-        reason: 'the Always string must state what happens after iOS closes '
-            'Haven, since that is what the user is consenting to',
+        reason:
+            'the Always string must say what Always now buys: sharing '
+            'that starts again by itself after Haven is closed',
+      );
+      for (final condition in _resumeCondition.entries) {
+        expect(
+          condition.value.hasMatch(always),
+          isTrue,
+          reason: 'the Always string ${condition.key} no longer',
+        );
+      }
+      expect(
+        _whileUsingLimit.hasMatch(always),
+        isTrue,
+        reason:
+            'the prompt also offers While Using, so it must say that '
+            'choice does not resume after Haven is closed',
       );
     });
   });
 
   group('prominent-disclosure dialog', () {
-    testWidgets('nothing an iOS user reads claims sharing survives iOS '
-        'closing the app', (tester) async {
+    /// Renders the iOS dialog and returns every sentence breaking a rule.
+    Future<List<BackgroundClaimViolation>> iosDialogViolations(
+      WidgetTester tester, {
+      required bool reconfirm,
+    }) async {
       final rendered = await renderedDisclosureText(
         tester,
         isIOS: true,
         includeBackground: true,
+        reconfirm: reconfirm,
       );
 
       // Anti-vacuity: the dialog must actually have rendered its copy.
       expect(rendered, contains(en.locationDisclosureTitle));
       expect(rendered, contains(en.locationDisclosureBackgroundIos));
-
-      final offenders = <BackgroundClaimViolation>[];
-      for (final text in rendered) {
-        offenders.addAll(
-          findUnqualifiedClosedAppClaims(text, source: 'iOS dialog'),
-        );
-      }
       expect(
-        offenders,
-        isEmpty,
-        reason:
-            'The Play prominent-disclosure dialog is shown on BOTH platforms '
-            '(neither create_identity_screen.dart nor '
-            'location_settings_page.dart gates it on Platform) and is the '
-            "record of the user's consent, so THE RULE at the top of this file "
-            'applies to it on iOS.\nOffenders:\n  ${offenders.join('\n  ')}',
+        rendered.contains(en.locationDisclosureUpdateLead),
+        reconfirm,
+        reason: 'the update lead renders in re-confirm mode only',
       );
+
+      return [
+        for (final text in rendered)
+          ...findAllViolations(text, source: 'iOS dialog'),
+      ];
+    }
+
+    // The Play prominent-disclosure dialog is shown on BOTH platforms and is
+    // the record of the user's consent, so the rules at the top of this file
+    // apply to it on iOS, in both of its modes.
+    testWidgets('nothing an iOS user reads claims sharing resumes after Haven '
+        'is closed without stating its condition', (tester) async {
+      final offenders = await iosDialogViolations(tester, reconfirm: false);
+      expect(offenders, isEmpty, reason: offenders.join('\n'));
     });
 
-    testWidgets('the iOS copy states the limit affirmatively', (tester) async {
+    testWidgets('nothing an iOS user reads in the re-shown dialog claims '
+        'sharing resumes after Haven is closed without stating its '
+        'condition', (tester) async {
+      final offenders = await iosDialogViolations(tester, reconfirm: true);
+      expect(offenders, isEmpty, reason: offenders.join('\n'));
+    });
+
+    testWidgets('the iOS copy states the condition and the While-Using limit '
+        'affirmatively', (tester) async {
       // Absence of a false claim is not the same as disclosing the truth.
       final rendered = await renderedDisclosureText(
         tester,
@@ -429,16 +642,25 @@ void main() {
         includeBackground: true,
       );
       final joined = normalizeCopy(rendered.join(' '));
+      for (final condition in _resumeCondition.entries) {
+        expect(
+          condition.value.hasMatch(joined),
+          isTrue,
+          reason: 'the iOS consent copy ${condition.key} no longer',
+        );
+      }
       expect(
-        _statesTheLimit.hasMatch(joined),
+        _whileUsingLimit.hasMatch(joined),
         isTrue,
-        reason: 'iOS copy must say that sharing stops until the user reopens '
-            'Haven, not merely omit the claim that it does not',
+        reason:
+            'iOS copy must say that under While Using sharing stops '
+            'until the user opens Haven',
       );
     });
 
-    testWidgets('Android keeps all three Play disclosure elements',
-        (tester) async {
+    testWidgets('Android keeps all three Play disclosure elements', (
+      tester,
+    ) async {
       // Android's behaviour is genuinely stronger; correcting iOS must not
       // weaken the Play artefact, which has to name the data, say it is
       // collected in the background, and say what it is for.
@@ -475,16 +697,33 @@ void main() {
         isIOS: false,
         includeBackground: true,
       );
-      expect(
-        ios,
-        isNot(contains(en.locationDisclosureBackgroundAndroid)),
-      );
+      expect(ios, isNot(contains(en.locationDisclosureBackgroundAndroid)));
       expect(android, contains(en.locationDisclosureBackgroundAndroid));
       expect(android, isNot(contains(en.locationDisclosureBackgroundIos)));
     });
 
+    test('the re-confirm lead never says Not now turns sharing off', () {
+      // 'Not now' keeps background sharing exactly as it was; only the
+      // start-again-by-itself is withheld. Saying otherwise would push the
+      // user to agree out of a fear the app created.
+      final turnsOff = RegExp(
+        r'\b(turns? (background sharing |sharing |it )?off|stops|switch(es)? '
+        r'off|is turned off|ends)\b',
+      );
+      expect(
+        turnsOff.hasMatch(
+          normalizeCopy("If you choose 'Not now', background sharing stops."),
+        ),
+        isTrue,
+        reason: 'self-test: the matcher must see the claim it forbids',
+      );
+      final lead = normalizeCopy(en.locationDisclosureUpdateLead);
+      expect(lead, contains('not now'), reason: 'anti-vacuity: names Not now');
+      expect(turnsOff.hasMatch(lead), isFalse, reason: lead);
+    });
+
     testWidgets('third-party policy is attributed, never asserted as '
-        'Haven\u2019s own fact', (tester) async {
+        'Haven’s own fact', (tester) async {
       // Haven cannot observe what Stadia Maps does with a request and nothing
       // re-checks their policy, so the disclosure reports it rather than
       // vouching for it — true whatever Stadia later changes.
@@ -516,60 +755,107 @@ void main() {
     });
   });
 
-  // Both surfaces that state the receive-only limit, tied to each other.
+  group('iOS settings copy', () {
+    test('the iPhone intro names Haven being closed (anti-vacuity)', () {
+      // A key that never names the closed state would pass every rule here
+      // by saying nothing.
+      expect(
+        _sentences(en.locationSettingsIntroIos).where(_notRunning.hasMatch),
+        isNotEmpty,
+      );
+    });
+
+    test("the intro's iPhone sentences and the While-Using note break no "
+        'rule', () {
+      // The note renders only on iOS under While Using; an iPhone renders the
+      // common intro followed by the iPhone sentences.
+      final offenders = <BackgroundClaimViolation>[
+        ...findAllViolations(
+          '${en.locationSettingsIntro} ${en.locationSettingsIntroIos}',
+          source: 'locationSettingsIntro + locationSettingsIntroIos',
+        ),
+        ...findUnqualifiedClosedAppClaims(
+          en.locationSettingsIosLimitedNote,
+          source: 'locationSettingsIosLimitedNote',
+        ),
+        ...findReceiveOnlyWording(
+          en.locationSettingsIosLimitedNote,
+          source: 'locationSettingsIosLimitedNote',
+        ),
+      ];
+      expect(offenders, isEmpty, reason: offenders.join('\n'));
+    });
+
+    test('the While-Using note states the stop for its own reader', () {
+      // Its reader is the While-Using cohort, so the limit is stated as their
+      // own state rather than by naming the authorization.
+      final note = _sentences(en.locationSettingsIosLimitedNote);
+      expect(
+        note.any((s) => _notRunning.hasMatch(s) && _statesTheStop.hasMatch(s)),
+        isTrue,
+        reason: en.locationSettingsIosLimitedNote,
+      );
+    });
+  });
+
+  // Both surfaces that state the iPhone resume claim, tied to each other.
   //
   // `locationDisclosureBackgroundIos` is the sentence the user consents to
-  // before the permission prompt; `locationSettingsIntro` is the paragraph they
-  // meet later above the toggle. The consent string was written by copying the
-  // intro's wording, its doc comment said "the two must not diverge", and
-  // nothing enforced it — the intro has since been reworded twice while the
-  // consent copy sat in a Dart constant. The user who reads both must not be
-  // told two different things about what happens when the system closes Haven.
+  // before the permission prompt; `locationSettingsIntroIos` is what they
+  // meet later above the toggle. The user who reads both must not be told two
+  // different things about what happens after Haven is closed.
   group('the consent dialog and the settings intro state one claim', () {
-    test('the receive-only claim detector notices a half-stated claim', () {
+    test('the resume-claim detector notices a half-stated claim', () {
       // Without this, the equality below would pass on two surfaces that had
-      // BOTH lost the never-send half.
+      // BOTH lost the same condition.
       const halfStated =
-          'This app uses location data to enable sharing with your circles. '
-          'If iOS closes Haven, sharing stops until you open it again.';
-      final profile = receiveOnlyClaimProfile(halfStated);
-      expect(profile['says sharing stops'], isTrue);
-      expect(profile['says a wake still fetches the circles'], isFalse);
-      expect(profile["says a wake never sends the user's own"], isFalse);
+          "With 'Always', if Haven is closed, sharing starts again by itself.";
+      final profile = resumeClaimProfile(halfStated);
+      expect(profile['says sharing starts again by itself'], isTrue);
+      expect(profile['names the movement'], isFalse);
+      expect(profile['says iOS decides'], isFalse);
+      expect(profile['says While Using waits for an open'], isFalse);
+    });
+
+    test('the old receive-only consent sentence fails the resume claim', () {
+      final profile = resumeClaimProfile(_oldIosConsentSentence);
+      expect(
+        profile.values,
+        contains(isFalse),
+        reason: 'a reverted consent sentence must not satisfy the tie',
+      );
+      expect(profile['says sharing starts again by itself'], isFalse);
     });
 
     test('the consent dialog and the settings intro each carry the whole '
-        'receive-only claim', () {
+        'resume claim', () {
       for (final surface in <String, String>{
         'locationDisclosureBackgroundIos': en.locationDisclosureBackgroundIos,
-        'locationSettingsIntro': en.locationSettingsIntro,
+        'locationSettingsIntroIos': en.locationSettingsIntroIos,
       }.entries) {
-        final profile = receiveOnlyClaimProfile(surface.value);
+        final profile = resumeClaimProfile(surface.value);
         expect(
           profile.values,
           everyElement(isTrue),
           reason:
-              '${surface.key} no longer states the receive-only asymmetry in '
-              'full: $profile. Every half is load-bearing — dropping the '
-              'never-send clause turns a wake into something the user may '
-              'reasonably read as continued sharing.',
+              '${surface.key} no longer states the iPhone resume claim in '
+              'full: $profile. Every condition is one iOS really imposes; '
+              'dropping one promises a resumption the user may not get.',
         );
       }
     });
 
-    test('the consent dialog and the settings intro state the SAME '
-        'receive-only claim', () {
-      final consent = receiveOnlyClaimProfile(
-        en.locationDisclosureBackgroundIos,
-      );
-      final settings = receiveOnlyClaimProfile(en.locationSettingsIntro);
+    test('the consent dialog and the settings intro state the SAME resume '
+        'claim', () {
+      final consent = resumeClaimProfile(en.locationDisclosureBackgroundIos);
+      final settings = resumeClaimProfile(en.locationSettingsIntroIos);
       expect(
         consent,
         equals(settings),
         reason:
             'The consent artefact and the settings paragraph disagree about '
-            'what happens when the system closes Haven. Whichever one is now '
-            'weaker, the user has been shown both.',
+            'what happens after Haven is closed. Whichever one is now weaker, '
+            'the user has been shown both.',
       );
     });
   });

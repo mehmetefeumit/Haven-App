@@ -21,6 +21,9 @@
 #      directory, so an event builder added OUTSIDE services/ is still caught.
 #   2. The literal storage key `haven.locale.tag` appears ONLY in
 #      locale_provider.dart (its single source of truth).
+#   3. Natively, the key appears ONLY in ResumeRule.kt: the boot/update resume
+#      notice reads the language code to pick its string resources, in
+#      process, and nothing else (owner-directed 2026-11-26, OD-R2).
 #
 # Adding a new LEGITIMATE, non-network consumer of the locale means adding it to
 # ALLOWED below — deliberate friction so each new reader is reviewed.
@@ -35,6 +38,8 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LIB_DIR="${REPO_ROOT}/haven/lib"
 PROVIDER_FILE="${LIB_DIR}/src/providers/locale_provider.dart"
+KOTLIN_DIR="${REPO_ROOT}/haven/android/app/src/main/kotlin"
+NATIVE_READER="${KOTLIN_DIR}/com/oblivioustech/haven/ResumeRule.kt"
 LOCALE_KEY='haven.locale.tag'
 
 # Files permitted to reference the locale state. Keep this minimal; every entry
@@ -90,5 +95,23 @@ if [[ -n "${key_offenders}" ]]; then
   printf 'locale storage key referenced outside locale_provider.dart:\n%s' "${key_offenders}" >&2
   fail "the locale storage key '${LOCALE_KEY}' must only appear in locale_provider.dart"
 fi
+
+# ---------------------------------------------------------------------------
+# Check 3: one native reader, in process.
+# ---------------------------------------------------------------------------
+log "Verifying the native side reads '${LOCALE_KEY}' in ResumeRule.kt only ..."
+[[ -f "${NATIVE_READER}" ]] || { echo "ERROR: ${NATIVE_READER} not found" >&2; exit 2; }
+native_offenders=""
+while IFS= read -r f; do
+  [[ -z "${f}" ]] && continue
+  [[ "${f}" == "${NATIVE_READER}" ]] && continue
+  native_offenders+="${f}"$'\n'
+done < <(grep -rl -F "${LOCALE_KEY}" "${KOTLIN_DIR}" || true)
+if [[ -n "${native_offenders}" ]]; then
+  printf 'locale storage key read natively outside ResumeRule.kt:\n%s' "${native_offenders}" >&2
+  fail "the locale storage key '${LOCALE_KEY}' may be read natively only by ResumeRule.kt (the resume notice's string resources)"
+fi
+grep -qF "\"flutter.${LOCALE_KEY}\"" "${NATIVE_READER}" ||
+  fail "ResumeRule.kt no longer reads 'flutter.${LOCALE_KEY}' — the resume notice would ignore the in-app language"
 
 log "OK: locale is a local-only preference — no out-of-band state or key access."

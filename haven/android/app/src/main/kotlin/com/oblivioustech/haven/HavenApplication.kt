@@ -10,8 +10,10 @@ import io.crates.keyring.Keyring
 
 /**
  * Process-wide setup that must run before any Activity, Service or worker: the
- * app-wide screenshot block, the [PublishWakeLock] task-lifecycle listener, and
- * the Android context the Rust `ndk_context` crate needs.
+ * app-wide screenshot block, the [UiVisibility] count [BootResumeReceiver]
+ * reads, the [PublishWakeLock] and [BackgroundLocation.ServiceEngine]
+ * task-lifecycle listeners, and the Android context the Rust `ndk_context`
+ * crate needs.
  *
  * The Rust keyring backend
  * (`android_native_keyring_store::Store::from_ndk_context()`) reads this context
@@ -46,6 +48,7 @@ class HavenApplication : Application() {
         }
         super.onCreate()
         registerActivityLifecycleCallbacks(SecureWindowCallbacks)
+        registerActivityLifecycleCallbacks(UiVisibility)
         // The foreground-service task engine is created without an Activity
         // (boot restart, headless wake), and its `onEngineCreate` is the only
         // hook that hands that engine over before the Dart entrypoint runs. A
@@ -53,6 +56,8 @@ class HavenApplication : Application() {
         // the process starts background sharing depends on.
         PublishWakeLock.attach(applicationContext)
         FlutterForegroundTaskPlugin.addTaskLifecycleListener(PublishWakeLock)
+        BackgroundLocation.ServiceEngine.attach(applicationContext)
+        FlutterForegroundTaskPlugin.addTaskLifecycleListener(BackgroundLocation.ServiceEngine)
         try {
             Keyring.initializeNdkContext(applicationContext)
         } catch (t: Throwable) {

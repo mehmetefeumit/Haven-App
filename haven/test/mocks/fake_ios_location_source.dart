@@ -48,6 +48,7 @@ class FakeIosLocationSource implements IosLocationSource {
     profile: IosLocationProfile.best,
     authorization: 'authorizedAlways',
     backgrounded: false,
+    launchedForLocation: false,
   );
 
   /// The live session, for pushing fixes at the service.

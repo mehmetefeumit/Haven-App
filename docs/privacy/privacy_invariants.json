@@ -114,6 +114,9 @@
     }
   ],
   "non_claim_arb_keys": {
+    "androidResumeNoticeChannelName": {
+      "reason": "Name of the Android notification channel that carries the resume notice, shown only in system notification settings. Names a kind of notification; states nothing about what Haven does."
+    },
     "avatarPickerPhotoRemoved": {
       "reason": "Spoken announcement only, no visible string, confirming that the photo was removed from this device and queued for removal from the public profile. It claims nothing about any relay: the removal is a local save the next sync publishes, and what a relay has not yet taken is owed on the retry ladder with no screen reporting it (INV-P-PHOTO-REMOVAL-IS-OWED-TO-EVERY-POOL-RELAY, INV-P-PROFILE-UI-CLAIMS-LOCAL-TRUTH-ONLY). Honest because the confirmation dialog (photoHeaderRemoveBody) precedes it and states that the hosted image survives. On its own it must never read as a deletion promise, nor as removed from every relay.",
       "forbidden_additions": [
@@ -132,6 +135,9 @@
         "is protected"
       ]
     },
+    "locationBackgroundAllTimeOptionFallback": {
+      "reason": "Fallback for the {optionLabel} placeholder of locationBackgroundAllTimeStep and locationSettingsAndroidAllTimeNote: the name of an Android permission option, used only when the OS reports none. A label, not a statement."
+    },
     "locationDisclosureAgree": {
       "reason": "Affirmative button label of the consent dialog. Records consent; asserts nothing about behaviour."
     },
@@ -141,8 +147,11 @@
     "locationDisclosureTitle": {
       "reason": "Dialog heading ('Sharing your location'). Names the subject; every checkable claim lives in the why/how/sharing/background/manage paragraphs below it."
     },
+    "locationSettingsResumeConsentAction": {
+      "reason": "Button label under locationSettingsResumeConsentNote that re-opens the updated background-sharing notice. A verb phrase naming an action; asserts nothing about behaviour."
+    },
     "locationSettingsToggleSubtitle": {
-      "reason": "Toggle subtitle. Correct only by omission: it must describe the background scope without claiming sharing survives the system closing Haven, and is deliberately silent on the Android reboot/swipe-out asymmetry, which locationSettingsIntro states in full.",
+      "reason": "Toggle subtitle. Correct only by omission: it must describe the background scope without claiming sharing survives the system closing Haven, and is deliberately silent on the Android reboot/swipe-out asymmetry, which locationSettingsIntro and its platform sentences (locationSettingsIntroAndroid, locationSettingsIntroIos) state in full, directly above it.",
       "forbidden_additions": [
         "when the app is closed",
         "when Haven is closed",
@@ -451,7 +460,7 @@
     {
       "id": "INV-L-BACKGROUND-DISCLOSURE-GATE",
       "title": "No background cycle collects or publishes location before both disclosures are accepted",
-      "statement": "background_location_task.dart consults backgroundPublishDisclosureAccepted as a refusal branch that precedes getCurrentLocation(), the location seal (sealLocation) and the background stream registration (_ensureRegistration, which is the only site that asks the plugin for a position stream in this isolate), and reads both the foreground and background disclosure keys; moving the gate below the GPS read or below the registration — a platform location request is collection for as long as it lives, not a one-off — or deleting the call site while leaving the declaration, falsifies this.",
+      "statement": "background_location_task.dart consults backgroundPublishDisclosureAccepted as a refusal branch that precedes getCurrentLocation(), the location seal (sealLocation) and the background stream registration (_ensureRegistration, which is the only site that asks the plugin for a position stream in this isolate), and reads both the foreground and background disclosure keys; moving the gate below the GPS read or below the registration — a platform location request is collection for as long as it lives, not a one-off — or deleting the call site while leaving the declaration, falsifies this. This gate is the UI-start floor and is unchanged by the 2026-11-26 versioning: a start the system makes (boot, update, START_STICKY) must ALSO pass SystemStartGate, which requires the CURRENT background disclosure (INV-L-RESUME-NEEDS-CURRENT-DISCLOSURE).",
       "status": "enforced",
       "assertion_arb_keys": [
         "locationDisclosureManage"
@@ -493,12 +502,14 @@
       ]
     },
     {
-      "id": "INV-L-IOS-WAKES-RECEIVE-ONLY",
-      "title": "Every iOS background wake path is receive-only",
-      "statement": "Once iOS terminates Haven, no wake path (SLC relaunch, BGAppRefreshTask, catch-up sweep) contains a publish call site, and a process relaunched INTO the background cannot start one either: the native updates owner refuses a background-capable start while applicationState == .background, and getCurrentLocation's cold-cache shortcut reads that same native lifecycle fail-closed (an unreadable status counts as backgrounded) and then REFUSES rather than continuing: the backgrounded branch serves the native owner's last Best fix or throws, so it never reaches the plugin one-shot, including in the state a post-termination relaunch is actually in — both caches empty — which is where a fall-through would have run it. The user's own sharing does not resume until they reopen the app. Adding a publish to catchup_service.dart, ios_background_catchup.dart or HavenSLCHandler.swift, removing the onListen refusal, keying the shortcut back off the in-process foreground hint, letting the backgrounded branch fall through to (or itself call) the one-shot, or shipping copy that mentions the app not running without saying what stops — each falsifies this.",
+      "id": "INV-L-IOS-RELAUNCH-RESUMES-ONLY-UNDER-ALWAYS-AND-CURRENT-CONSENT",
+      "title": "An iOS location relaunch resumes the user's own sharing only under Always, with sharing on and the current background disclosure accepted; every wake handler stays receive-only",
+      "statement": "Owner-directed 2026-11-26 (OD-R1), replacing INV-L-IOS-WAKES-RECEIVE-ONLY. The wake handlers (catchup_service.dart, ios_background_catchup.dart, HavenSLCHandler.swift, HavenBGTaskHandler.swift) contain no publish call site. A process iOS launched into the background for a location event (a significant-change or region relaunch: AppDelegate sets HavenLocationStreamHandler.launchedForLocation only when launchOptions[.location] is set AND applicationState is .background, and clears it at applicationWillEnterForeground) resumes the user's own sharing only through MapShell's burst plane, and only when all of these hold: (1) authorization is Always — HavenLocationStreamHandler.onListen refuses EVERY start while applicationState == .background except a background-capable one for which backgroundStartPermitted holds, the conjunction launchedForLocation && .authorizedAlways && HavenBackgroundSessionHandler.resumeConsented(), and beginLaunchWindow opens its background task (haven.launch.share) only behind the same predicate; (2) background sharing is on and (3) the CURRENT background disclosure is accepted — natively through resumeConsented (sharing pref, both disclosure bools, version >= kBgDisclosureResumeVersion, equal to Dart's kBackgroundDisclosureVersion), and in Dart through backgroundResumeDisclosureAccepted inside MapShell.launchMayResume, which ForegroundStartUpGate reads before handing the launch's first pause LaunchSession.resume (takeLaunchSession), so _payLaunchSession calls GeolocatorLocationService.startBackgroundLaunchSession only then; a launch the current disclosure does not cover is LaunchSession.receiveOnly: no session, no burst, no publish. The publish input is a Best fix from Haven's own native session only: getCurrentLocation's backgrounded branch serves the cache or the native last-Best fix, or — in a location-launched process with a live background-capable session — waits at most kOneShotLocationTimeout for that session's next fix (_awaitNextBackgroundFix), and otherwise throws; it never reaches the plugin one-shot. While Using is never resumed: iOS does not relaunch it, and a While-Using start from the background is refused. The relaunch region is 200 m (relaunchRegionRadiusMeters) only while resumeConsented() holds and 500 m (receiveOnlyRegionRadiusMeters) otherwise, so a relaunch that cannot resume sharing gains no relay contact (Rule 10), and both wake kinds share one Dart catch-up floor of five minutes per process on the monotonic clock (catchupDue), stamped only by a catch-up Dart answered. Only the launch's first pause starts a session: a later significant-change or region wake of a relaunched process that iOS has suspended again opens no launch window, its handler runs the receive-only sweep, and this invariant claims nothing about whether that wake publishes (docs/M7_BACKGROUND_SHARING.md §6 item 2j). Widening backgroundStartPermitted or resumeConsented, starting the session without the versioned check, adding a publish to a wake handler, letting the backgrounded branch fall through to (or itself call) the one-shot, or shipping iOS copy that names Haven being closed without stating either the stop or the whole condition ('Always', the movement, not guaranteed) and the While-Using limit — each falsifies this.",
       "status": "enforced",
+      "residual": "What a device does is unproven in CI: no simulator lane can produce a location relaunch (docs/M7_BACKGROUND_SHARING.md §6 items 2-2l, DEFERRED for want of an iPhone), so that iOS relaunches a force-quit app, how long a session started from the background keeps the process executable, and the relaunch's battery cost (ESTIMATED only, docs/POWER_EFFICIENCY_PLAN.md §6.5a) rest on Apple's documentation. No XCTest runs in CI, so the native predicate, the launch window, the radius and the floor are pinned by check_ios_background_publish.sh (checks 4d, 9b, 13b, 20) and check_m7_native_wake_guards.sh as source shapes, not executed. The Dart half is executed host-side.",
       "assertion_arb_keys": [
         "locationDisclosureBackgroundIos",
+        "locationSettingsIntroIos",
         "locationSettingsIosLimitedNote"
       ],
       "disclosure_arb_keys": [
@@ -529,22 +540,78 @@
           "symbol": "onListen"
         },
         {
+          "file": "haven/ios/Runner/HavenLocationStreamHandler.swift",
+          "symbol": "backgroundStartPermitted"
+        },
+        {
+          "file": "haven/ios/Runner/HavenLocationStreamHandler.swift",
+          "symbol": "beginLaunchWindow"
+        },
+        {
+          "file": "haven/ios/Runner/AppDelegate.swift",
+          "symbol": "launchedForLocation"
+        },
+        {
+          "file": "haven/ios/Runner/HavenBackgroundSessionHandler.swift",
+          "symbol": "resumeConsented"
+        },
+        {
+          "file": "haven/ios/Runner/HavenSLCHandler.swift",
+          "symbol": "catchupDue"
+        },
+        {
+          "file": "haven/ios/Runner/HavenSLCHandler.swift",
+          "symbol": "relaunchRegionRadiusMeters"
+        },
+        {
           "file": "haven/lib/src/services/geolocator_location_service.dart",
           "symbol": "_iosSource"
+        },
+        {
+          "file": "haven/lib/src/services/geolocator_location_service.dart",
+          "symbol": "startBackgroundLaunchSession"
+        },
+        {
+          "file": "haven/lib/src/services/geolocator_location_service.dart",
+          "symbol": "_awaitNextBackgroundFix"
+        },
+        {
+          "file": "haven/lib/src/pages/foreground_start_up_gate.dart",
+          "symbol": "takeLaunchSession"
+        },
+        {
+          "file": "haven/lib/src/pages/map_shell.dart",
+          "symbol": "launchMayResume"
+        },
+        {
+          "file": "haven/lib/src/pages/map_shell.dart",
+          "symbol": "_payLaunchSession"
         }
       ],
       "tests": [
         {
           "file": "haven/test/lints/background_claim_accuracy_test.dart",
-          "name": "no usage description claims sharing survives iOS closing the app"
+          "name": "the parser actually found the usage descriptions (anti-vacuity)"
         },
         {
           "file": "haven/test/lints/background_claim_accuracy_test.dart",
-          "name": "the Always description still justifies Always specifically"
+          "name": "no usage description claims sharing resumes after Haven is closed without stating its condition"
         },
         {
           "file": "haven/test/lints/background_claim_accuracy_test.dart",
-          "name": "the iOS copy states the limit affirmatively"
+          "name": "the Always description justifies Always and states the resume condition"
+        },
+        {
+          "file": "haven/test/lints/background_claim_accuracy_test.dart",
+          "name": "nothing an iOS user reads claims sharing resumes after Haven is closed without stating its condition"
+        },
+        {
+          "file": "haven/test/lints/background_claim_accuracy_test.dart",
+          "name": "nothing an iOS user reads in the re-shown dialog claims sharing resumes after Haven is closed without stating its condition"
+        },
+        {
+          "file": "haven/test/lints/background_claim_accuracy_test.dart",
+          "name": "the iOS copy states the condition and the While-Using limit affirmatively"
         },
         {
           "file": "haven/test/lints/background_claim_accuracy_test.dart",
@@ -552,11 +619,31 @@
         },
         {
           "file": "haven/test/lints/background_claim_accuracy_test.dart",
-          "name": "the parser actually found the usage descriptions (anti-vacuity)"
+          "name": "the old receive-only sentences are now caught"
+        },
+        {
+          "file": "haven/test/lints/background_claim_accuracy_test.dart",
+          "name": "the intro's iPhone sentences and the While-Using note break no rule"
+        },
+        {
+          "file": "haven/test/lints/background_claim_accuracy_test.dart",
+          "name": "the consent dialog and the settings intro each carry the whole resume claim"
+        },
+        {
+          "file": "haven/test/lints/background_claim_accuracy_test.dart",
+          "name": "the consent dialog and the settings intro state the SAME resume claim"
+        },
+        {
+          "file": "haven/test/l10n/location_settings_copy_accuracy_test.dart",
+          "name": "the While-In-Use note says what 'Always' resumes and what it needs"
         },
         {
           "file": "haven/test/services/ios_location_source_test.dart",
           "name": "a background_start_refused error pushed through the sink surfaces as a stream error"
+        },
+        {
+          "file": "haven/test/services/ios_location_source_test.dart",
+          "name": "status fails closed on a missing key"
         },
         {
           "file": "haven/test/services/geolocator_location_service_test.dart",
@@ -567,21 +654,197 @@
           "name": "backgrounded on iOS with no last-known fix: refuses instead of falling through to the one-shot"
         },
         {
-          "file": "haven/test/l10n/location_settings_copy_accuracy_test.dart",
-          "name": "the While-In-Use note keeps the termination claim"
+          "file": "haven/test/services/geolocator_location_service_test.dart",
+          "name": "an ordinary backgrounded process refuses AT ONCE, even with a live background session"
         },
         {
-          "file": "haven/test/lints/background_claim_accuracy_test.dart",
-          "name": "the consent dialog and the settings intro each carry the whole receive-only claim"
+          "file": "haven/test/services/geolocator_location_service_test.dart",
+          "name": "waits for its background session's next fix and serves that fix"
         },
         {
-          "file": "haven/test/lints/background_claim_accuracy_test.dart",
-          "name": "the consent dialog and the settings intro state the SAME receive-only claim"
+          "file": "haven/test/services/geolocator_location_service_test.dart",
+          "name": "refuses once kOneShotLocationTimeout passes with no fix, never reaching the one-shot"
+        },
+        {
+          "file": "haven/test/services/geolocator_location_service_test.dart",
+          "name": "refuses at once when its session was refused natively"
+        },
+        {
+          "file": "haven/test/services/geolocator_location_service_test.dart",
+          "name": "startBackgroundLaunchSession starts the native session background-capable with no provider listener, and arms the stationary dwell"
+        },
+        {
+          "file": "haven/test/services/geolocator_location_service_test.dart",
+          "name": "startBackgroundLaunchSession does nothing with background sharing off, or off iOS"
+        },
+        {
+          "file": "haven/test/services/geolocator_location_service_test.dart",
+          "name": "suspendStream releases a background-launch session that has no outer listener (the opt-out watcher)"
+        },
+        {
+          "file": "haven/test/services/geolocator_location_service_test.dart",
+          "name": "Rule 15: the no-fix line names no coordinate"
+        },
+        {
+          "file": "haven/test/pages/foreground_start_up_gate_test.dart",
+          "name": "a launch the current disclosure does not cover takes no pause of its own, and a pause iOS dispatches starts nothing"
+        },
+        {
+          "file": "haven/test/pages/foreground_start_up_gate_test.dart",
+          "name": "an unreadable launch flag is no launch"
+        },
+        {
+          "file": "haven/test/pages/foreground_start_up_gate_test.dart",
+          "name": "a user who opened the app first owns it: the native flag is cleared, and their later pause is an ordinary one"
+        },
+        {
+          "file": "haven/test/pages/map_shell_mount_lifecycle_test.dart",
+          "name": "MapShell answers launchedForLocation from the location service's native read"
+        },
+        {
+          "file": "haven/test/pages/map_shell_mount_lifecycle_test.dart",
+          "name": "the launch may resume only once the consent has loaded, sharing is on and the CURRENT disclosure is accepted; then it waits for the roster, bounded"
+        },
+        {
+          "file": "haven/test/pages/map_shell_mount_lifecycle_test.dart",
+          "name": "the session starts only for a launch that may resume, with sharing on, after the turn check and before the burst"
         }
       ],
       "guards": [
         "scripts/ci/check_m7_native_wake_guards.sh",
         "scripts/ci/check_ios_background_publish.sh"
+      ]
+    },
+    {
+      "id": "INV-L-RESUME-NEEDS-CURRENT-DISCLOSURE",
+      "title": "Sharing that resumes without the user opening Haven needs the current background disclosure, on both platforms",
+      "statement": "Owner-directed 2026-11-26 (OD-R3). No publishing that resumes without the user opening Haven — on iOS a location relaunch, on Android a boot, an app update or a system (START_STICKY) restart of the foreground service — happens unless the foreground disclosure, the background disclosure AND the background-disclosure version (kLocationDisclosureBackgroundVersionKey, written last so a torn write reads as the older version) at kBackgroundDisclosureVersion (2) or later are recorded. One predicate in three languages reads the same three keys: Dart backgroundResumeDisclosureAccepted (MapShell.launchMayResume on iOS; decideSystemResume inside SystemStartGate, the first thing the foreground-service task's onStart awaits for a TaskStarter.system start), Swift HavenBackgroundSessionHandler.resumeConsented (behind backgroundStartPermitted), and Kotlin HavenPrefs.resumeDisclosureAccepted (decideResume in BootResumeReceiver's path); guard checks pin the Swift and Kotlin literals and versions to the Dart constants. A user who accepted an older background text keeps sharing while Haven runs (a UI start keeps backgroundPublishDisclosureAccepted), is shown the updated disclosure once in re-confirm mode by MapShell's foreground consent step — only while the app reads resumed, never in a background launch, at most one dialog per foreground — and 'Not now' records only that it was shown: sharing stays on and stays withheld from resuming by itself, which the settings page's standing advisory says, with a button that re-opens the notice. On Android a refusal posts the one resume notice (or, with sharing off or no stored identity, stops silently). Widening any of the three predicates, writing the version before the bools, or starting a resumed session without reading the version — each falsifies this.",
+      "status": "enforced",
+      "residual": "The Kotlin predicate (ResumeRule.kt) is executed by JVM unit tests (haven/android/app/src/test/.../BootResumeTest.kt) that build-check.yml runs through Gradle; the checker cannot cite a Kotlin test, so that half is cited here through guard 14k (its keys and version) and the Android resume lane. The Swift predicate is pinned as source (check 20 and check 4d of check_ios_background_publish.sh), not executed: no XCTest runs in CI.",
+      "assertion_arb_keys": [
+        "locationDisclosureUpdateLead",
+        "locationSettingsResumeConsentNote"
+      ],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#scheduled-background-wakes-m7"
+      ],
+      "symbols": [
+        {
+          "file": "haven/lib/src/providers/location_disclosure_provider.dart",
+          "symbol": "backgroundResumeDisclosureAccepted"
+        },
+        {
+          "file": "haven/lib/src/providers/location_disclosure_provider.dart",
+          "symbol": "reconfirmBackgroundIfOwed"
+        },
+        {
+          "file": "haven/lib/src/constants/location.dart",
+          "symbol": "kBackgroundDisclosureVersion"
+        },
+        {
+          "file": "haven/lib/src/services/background_resume_gate.dart",
+          "symbol": "decideSystemResume"
+        },
+        {
+          "file": "haven/lib/src/services/background_resume_gate.dart",
+          "symbol": "SystemStartGate"
+        },
+        {
+          "file": "haven/lib/src/pages/map_shell.dart",
+          "symbol": "launchMayResume"
+        },
+        {
+          "file": "haven/ios/Runner/HavenBackgroundSessionHandler.swift",
+          "symbol": "resumeConsented"
+        },
+        {
+          "file": "haven/android/app/src/main/kotlin/com/oblivioustech/haven/ResumeRule.kt",
+          "symbol": "resumeDisclosureAccepted"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven/test/providers/location_disclosure_provider_test.dart",
+          "name": "backgroundResumeDisclosureAccepted needs both disclosures at the current version; anything missing is a refusal"
+        },
+        {
+          "file": "haven/test/providers/location_disclosure_provider_test.dart",
+          "name": "accepting the background disclosure records the current version and the prompted version"
+        },
+        {
+          "file": "haven/test/providers/location_disclosure_provider_test.dart",
+          "name": "shows the updated disclosure once to a sharing user with an older acceptance; Not now records only that it was shown"
+        },
+        {
+          "file": "haven/test/providers/location_disclosure_provider_test.dart",
+          "name": "Agree records the current version"
+        },
+        {
+          "file": "haven/test/providers/location_disclosure_provider_test.dart",
+          "name": "force re-asks a user who already chose Not now (the settings advisory)"
+        },
+        {
+          "file": "haven/test/providers/location_disclosure_provider_test.dart",
+          "name": "the re-confirm wins, carrying the all-time step where it is missing; the all-time step alone only at the current version"
+        },
+        {
+          "file": "haven/test/pages/foreground_start_up_gate_test.dart",
+          "name": "a background location launch never runs it"
+        },
+        {
+          "file": "haven/test/pages/foreground_start_up_gate_test.dart",
+          "name": "a launch the current disclosure does not cover takes no pause of its own, and a pause iOS dispatches starts nothing"
+        },
+        {
+          "file": "haven/test/pages/map_shell_mount_lifecycle_test.dart",
+          "name": "the launch may resume only once the consent has loaded, sharing is on and the CURRENT disclosure is accepted; then it waits for the roster, bounded"
+        },
+        {
+          "file": "haven/test/pages/settings/location_settings_page_test.dart",
+          "name": "sharing on with an older acceptance shows it; Review, Agree clears it and records the current version"
+        },
+        {
+          "file": "haven/test/pages/settings/location_settings_page_test.dart",
+          "name": "Not now keeps it, and keeps sharing on"
+        },
+        {
+          "file": "haven/test/widgets/location/location_disclosure_dialog_test.dart",
+          "name": "the update lead is never shown outside re-confirm mode"
+        },
+        {
+          "file": "haven/test/widgets/location/location_disclosure_dialog_test.dart",
+          "name": "Agree tapped during the entrance transition is honoured"
+        },
+        {
+          "file": "haven/test/lints/background_claim_accuracy_test.dart",
+          "name": "the re-confirm lead never says Not now turns sharing off"
+        },
+        {
+          "file": "haven/test/services/background_resume_gate_test.dart",
+          "name": "a version-1 acceptance is not consent to resume"
+        },
+        {
+          "file": "haven/test/services/background_resume_gate_test.dart",
+          "name": "each disclosure flag is required, and a missing one refuses"
+        },
+        {
+          "file": "haven/test/services/background_resume_gate_test.dart",
+          "name": "the first update under version 2: notice, then stop"
+        },
+        {
+          "file": "haven/test/services/background_resume_gate_test.dart",
+          "name": "a refused system start does no work at all"
+        },
+        {
+          "file": "haven/test/lints/fgs_resume_policy_test.dart",
+          "name": "the system-start gate is the first thing onStart awaits"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_ios_background_publish.sh",
+        "scripts/ci/check_m7_native_wake_guards.sh"
       ]
     },
     {
@@ -897,15 +1160,21 @@
     },
     {
       "id": "INV-L-ANDROID-REBOOT-RESURRECTS-PUBLISHING",
-      "title": "On Android a reboot restarts the publishing foreground service with no user action",
-      "statement": "RebootReceiver is android:enabled=\"true\" and ForegroundTaskOptions sets autoRunOnBoot:true, so the location-publishing foreground service comes back by itself after a reboot; and the exception stops there, because RestartReceiver stays android:enabled=\"false\" so an OS/OEM kill is never auto-restarted. Flipping any of those three falsifies the platform-split sentence the copy carries.",
+      "title": "On Android sharing resumes after a reboot, an app update or a system restart only under the resume rule, and a refusal posts one resume notice",
+      "statement": "Owner-directed 2026-11-26 (OD-R2/OD-R3). The plugin's RebootReceiver is removed from the merged manifest (tools:node=\"remove\") and ForegroundTaskOptions carries neither autoRunOnBoot nor autoRunOnMyPackageReplaced; Haven's own BootResumeReceiver (not exported; BOOT_COMPLETED and MY_PACKAGE_REPLACED only) applies decideResume (ResumeRule.kt) at receive time from Haven's preferences, the plugin's service status and the live grants: NOTHING while a Haven activity is started, while the service runs, after Haven stopped it (the plugin status reads API_STOP: toggle off, identity deleted, a refused system start, or never started — Haven's stop writes it through BootResume.markStopped even when the service had already died, check_m7_native_wake_guards.sh 14o) or with sharing off; START — the plugin's REBOOT start, so the task sees TaskStarter.system — only with the current background disclosure accepted (INV-L-RESUME-NEEDS-CURRENT-DISCLOSURE), a foreground location grant and, on Android 11+, ACCESS_BACKGROUND_LOCATION; otherwise NOTIFY: one fixed-text notification (ResumeNotice, id 4832, channel haven_resume_v1) that opens Haven, which a refused start also falls back to. On Android 10 or older a foreground grant suffices. Every system start of the service — boot, update, or a START_STICKY restart after the process is killed — passes SystemStartGate (decideSystemResume, the same rule) as the first thing onStart awaits, before the idle flag, Rust, the keyring or a session: sharing off or no stored identity stops silently; consent or a grant missing posts the notice and stops, which closes the Android 11-13 location-blind sticky restart. The background permission is requested at runtime on Android 11+ only, after the disclosure carrying the all-time step (BackgroundLocation.kt). RestartReceiver stays android:enabled=\"false\". Re-adding the plugin receiver or its options, exporting the receiver, starting without the predicate, or moving the gate below any work — each falsifies the platform-split sentence the copy carries.",
       "status": "enforced",
-      "assertion_arb_keys": [],
+      "assertion_arb_keys": [
+        "locationBackgroundAllTimeStep",
+        "locationSettingsAndroidAllTimeNote"
+      ],
       "disclosure_arb_keys": [
         "fgsChannelDescription",
         "fgsNotificationSharing",
         "locationDisclosureBackgroundAndroid",
-        "locationSettingsIntro"
+        "locationSettingsIntro",
+        "locationSettingsIntroAndroid",
+        "androidResumeNoticeTitle",
+        "androidResumeNoticeBody"
       ],
       "non_arb_claims": [
         {
@@ -920,25 +1189,133 @@
           "symbol": "RebootReceiver"
         },
         {
-          "file": "haven/lib/src/services/background_location_manager.dart",
-          "symbol": "autoRunOnBoot"
+          "file": "haven/android/app/src/main/AndroidManifest.xml",
+          "symbol": "BootResumeReceiver"
+        },
+        {
+          "file": "haven/android/app/src/main/kotlin/com/oblivioustech/haven/ResumeRule.kt",
+          "symbol": "decideResume"
+        },
+        {
+          "file": "haven/android/app/src/main/kotlin/com/oblivioustech/haven/BootResume.kt",
+          "symbol": "BootResume"
+        },
+        {
+          "file": "haven/android/app/src/main/kotlin/com/oblivioustech/haven/ResumeNotice.kt",
+          "symbol": "ResumeNotice"
+        },
+        {
+          "file": "haven/lib/src/services/background_resume_gate.dart",
+          "symbol": "SystemStartGate"
+        },
+        {
+          "file": "haven/lib/src/services/background_resume_gate.dart",
+          "symbol": "decideSystemResume"
+        },
+        {
+          "file": "haven/lib/src/services/android_background_location.dart",
+          "symbol": "requestBackgroundLocation"
         }
       ],
-      "tests": [],
+      "tests": [
+        {
+          "file": "haven/test/services/background_resume_gate_test.dart",
+          "name": "every condition held resumes sharing"
+        },
+        {
+          "file": "haven/test/services/background_resume_gate_test.dart",
+          "name": "sharing off stops without a notice, whatever else holds"
+        },
+        {
+          "file": "haven/test/services/background_resume_gate_test.dart",
+          "name": "no foreground location grant notifies"
+        },
+        {
+          "file": "haven/test/services/background_resume_gate_test.dart",
+          "name": "Android 11+ without \"Allow all the time\" notifies"
+        },
+        {
+          "file": "haven/test/services/background_resume_gate_test.dart",
+          "name": "Android 10 needs no background grant"
+        },
+        {
+          "file": "haven/test/services/background_resume_gate_test.dart",
+          "name": "a start Haven made is never judged here"
+        },
+        {
+          "file": "haven/test/services/background_resume_gate_test.dart",
+          "name": "a system start with every condition held runs"
+        },
+        {
+          "file": "haven/test/services/background_resume_gate_test.dart",
+          "name": "the first update under version 2: notice, then stop"
+        },
+        {
+          "file": "haven/test/services/background_resume_gate_test.dart",
+          "name": "Android 11-13 without \"Allow all the time\" (a blind sticky restart): notice, then stop"
+        },
+        {
+          "file": "haven/test/services/background_resume_gate_test.dart",
+          "name": "no foreground grant: notice, then stop"
+        },
+        {
+          "file": "haven/test/services/background_resume_gate_test.dart",
+          "name": "Android 10 runs on the foreground grant alone"
+        },
+        {
+          "file": "haven/test/services/background_resume_gate_test.dart",
+          "name": "no stored identity: stop without a notice"
+        },
+        {
+          "file": "haven/test/services/background_resume_gate_test.dart",
+          "name": "a channel that fails reads as every grant missing"
+        },
+        {
+          "file": "haven/test/services/background_resume_gate_test.dart",
+          "name": "a refused system start does no work at all"
+        },
+        {
+          "file": "haven/test/services/background_resume_gate_test.dart",
+          "name": "a permitted system start goes on to the bring-up"
+        },
+        {
+          "file": "haven/test/lints/fgs_resume_policy_test.dart",
+          "name": "ForegroundTaskOptions sets no boot or update start option"
+        },
+        {
+          "file": "haven/test/lints/fgs_resume_policy_test.dart",
+          "name": "the system-start gate is the first thing onStart awaits"
+        },
+        {
+          "file": "haven/test/l10n/android_notice_strings_test.dart",
+          "name": "the default resource file exists and holds the notice text"
+        },
+        {
+          "file": "haven/test/providers/location_disclosure_provider_test.dart",
+          "name": "Android 11+ with an older acceptance: ONE dialog, carrying the all-time step; Agree records v2, then requests"
+        },
+        {
+          "file": "haven/test/pages/settings/location_settings_page_test.dart",
+          "name": "a first enable shows ONE dialog carrying the step, then requests before any other prompt"
+        }
+      ],
       "guards": [
-        "scripts/ci/check_m7_native_wake_guards.sh"
-      ]
+        "scripts/ci/check_m7_native_wake_guards.sh",
+        "scripts/ci/check_apk_resume_wiring.sh#workflow=launch-gate-android.yml"
+      ],
+      "residual": "A START_STICKY restart after a kill is proven on a device only with 'Allow all the time' AND the battery-optimisation exemption (leg K of the Android resume lane, e2e-android-resume.yml, whose legs U1/U2/B1/B2/U3 prove the update and reboot decisions on one API level and which this checker cannot cite as a guard because it runs inside the emulator step's script); without the exemption Android 12+ may refuse the restart, and on 14+ without 'Allow all the time' it fails inside the plugin before any Dart runs, so no notice is posted — the copy claims no recovery from a kill. Android 11-13's blind sticky self-stop and API 29's foreground-grant start are host-tested only (the lane runs one API level). The real OS permission page the request reaches is not driven by any lane (DEFERRED). With notifications denied neither the notice nor the service notification shows. After a refused system start the plugin status reads API_STOP, so the next boot posts no second notice. The Kotlin decision is executed by BootResumeTest.kt under Gradle in build-check.yml, which this checker cannot cite as a test."
     },
     {
       "id": "INV-L-ANDROID-SWIPE-OUT-SURVIVES",
       "title": "On Android the publishing service survives the app being swiped out of recents",
-      "statement": "No android:stopWithTask is declared anywhere in the production manifest, so the location foreground service is not torn down when the user swipes Haven out of recents and it keeps publishing on its own timer; adding android:stopWithTask=\"true\" would make the Play prominent-disclosure sentence and the platform-split privacy copy false in the reassuring direction.",
-      "status": "ratcheted",
-      "residual": "Nothing pins the ABSENCE of android:stopWithTask. check_m7_native_wake_guards.sh covers RebootReceiver/RestartReceiver/autoRunOnBoot but not this attribute, and the e2e-fgs-publish (b1) lane exercises a BACKGROUNDED app, not a swiped-out one — its go_cold helper kills the process outright. The claim is true in the tree and unproven by CI.",
+      "statement": "No android:stopWithTask is declared in the production manifest or in ForegroundTaskOptions, so the location foreground service is not torn down when the user swipes Haven out of recents and it keeps publishing on its own timer; adding android:stopWithTask=\"true\" would make the Play prominent-disclosure sentence and the platform-split privacy copy false in the reassuring direction. Owner-directed 2026-11-26: the settings intro now warns in that direction on both platforms (a swipe does not turn background sharing off).",
+      "status": "enforced",
+      "residual": "The ABSENCE of android:stopWithTask is pinned statically (check_m7_native_wake_guards.sh check 14j, over the manifest and ForegroundTaskOptions); no lane removes the task from recents, so that the running service survives a swipe on a device is unproven by CI runtime — the e2e-fgs-publish (b1) lane exercises a BACKGROUNDED app and its go_cold helper kills the process outright, and the Android resume lane's kill leg is a SIGKILL, not a task removal.",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [
         "locationDisclosureBackgroundAndroid",
-        "locationSettingsIntro"
+        "locationSettingsIntro",
+        "locationSettingsIntroAndroid"
       ],
       "non_arb_claims": [],
       "symbols": [
@@ -948,7 +1325,9 @@
         }
       ],
       "tests": [],
-      "guards": []
+      "guards": [
+        "scripts/ci/check_m7_native_wake_guards.sh"
+      ]
     },
     {
       "id": "INV-L-MOTION-TRIGGER-BOUNDED",
@@ -4677,9 +5056,9 @@
     {
       "id": "INV-R-BACKGROUND-PRESENCE-ONLY-AT-PUBLISH",
       "title": "Backgrounded on iOS, presence is revealed only at publish instants",
-      "statement": "While backgrounded on iOS with background sharing ON, from the completion of the pause branch's teardown until the next burst's open, the live-sync engine holds no standing subscription and no socket IT ASKED FOR: pause_subscriptions CLOSEs every REQ, sweeps any that a partial unsubscribe_all left registered (both bounded by RELAY_LIFECYCLE_OP_TIMEOUT and log-and-proceed on expiry), drains what is already downloaded through the Pause marker (note_delivery_gap, never a forget_*, so an un-applied hold-back survives; best-effort — on a dead worker or an unacked marker the router is cleared directly and the undrained backlog is re-downloaded by the next re-anchor), waits UNCAPPED for every in-flight publish (Security Rule 13) — a drive of stored fanout records under way when the pause began counts as one for its whole pass, whether it began in the foreground or in the burst the pause ends: from the moment its lifecycle changes it begins nothing, and what it had decided and not begun is not done — the decision is read again with the engine held — it takes no further relay, for a recorded event or through its publisher, makes no first send, and begins no confirm of a stored acknowledgement — while what the engine was already asked for runs to its end: a confirm under way completes with its fold — a foreground's can record a commit and end the record, and hands over no Welcome once the foreground has ended; a burst's applies an acknowledged commit and settles what was received, and stages, records and hands over nothing — and a publish of something that has no record, already handed to its publisher, runs out that publisher's own retries (three attempts, forty-nine seconds at most). A pass is given two rows' budget, sixty-two seconds from when it began, and one that only finishes begins a relay call only with a whole row's budget — thirty-one seconds — left. So what is waited for is what that pass has out: one call of MDK's relay client, twenty seconds at most, when it was sending a record; the rest of a confirm's fold or of a publisher's retries when the flip found it inside one — and only then terminates every relay through terminate_all_relays (client.disconnect(), re-read and re-asserted over RELAY_TERMINATE_ROUNDS rounds, never client.shutdown()) and closes the session's own drive pool (RelayManager::shutdown, on a pool nothing else publishes through), so that where the termination converges the crate's per-relay connection task and its 55 s pinger exit with it — see exception (iii) for where it does not. Each publish tick runs exactly one bounded burst instead: open_background_burst re-issues every REQ in the Resubscribe phase — each circle at its persisted cursor less GROUP_RESUBSCRIBE_BUFFER_SECS, and the inbox at INBOX_RESUBSCRIBE_LOOKBACK_SECS on every INBOX_BURSTS_PER_REQ-th background burst, never the cold-start window — asks for one drive of the stored fanout records in the finish-only mode, on the session's own drive pool — a relay a pending commit's record was frozen for is called only when a relay may already hold that commit (one acknowledged it, an attempt may have exposed it, or one was begun and never returned), this relay was attempted before, and its schedule says it is due, with the same bytes; a record whose every attempt found its relay unreachable, and a relay never attempted, get no first transmission from a burst —, waits up to BURST_BACKLOG_WAIT_SECS per (relay, subscription) endpoint for EOSE so a peer commit ingested here is APPLIED before the location is encrypted, publishes, folds due KeyPackage/relay-list maintenance onto the warm publish pool, settles (COMMIT_SETTLE_WINDOW_SECS from the last commit activity, capped by BURST_SETTLE_CAP_SECS, which bounds idle follow-on activity only and never an in-flight publish), pauses, drains any commit-critical publish still on the shared publish pool, and shuts that pool. A pause that drives no burst — nothing eligible, or a publish still inside kLocationPublishOverlapGuard — runs that same teardown on its own (closeIdle, on the same chain and under the same in-burst flag, so it can never run beside a burst), which is what makes the gap before the first burst no exception. THREE exception classes and one separate plane, all stated. (i) The teardown STOPS wherever the foreground reclaimed the engine, leaving the publish pool to the next pause's teardown. (ii) An engine start still in flight when the pause runs — a cold launch's, or any return's that the user left again within seconds — does not outlive it. On the branches whose pause STOPS the engine (Android; iOS with background sharing off) that stop is the pause's first act — on Android with background sharing on it is issued ahead of the two platform writes that hand publishing to the foreground service, and each of those is guarded, so a write that is slow or throws costs the service a prompt start and never the stop — and it ends that start: the engine's stop is issued at once on the handle the start has built, so the start fails at its next check instead of running out its connect wait, open-time advance and subscribe ladder; a start whose engine is not built yet starts nothing once it is; a session that came up across the stop is stopped again, never adopted and never claimed for; and a stop that lands while the start is making its claim stops the session that start had adopted, and the start then fails as ended by a stop instead of returning over a stopped engine (NostrSubscriptionService; its tests park a start and issue the stop meanwhile). On this branch the pause's `pauseSubscriptions` WAITS for the start — the engine's pause takes the lock the start holds and can end nothing early — and then pauses the session it produced; such a session was claimed for only if the lifecycle still read `resumed` when the start held its engine. A start issued BEHIND the pause brings no session up where the pause stopped the engine: the app's one `start()` (`LiveSyncResubscriber._fullRestart`) reads `MapShell.liveSyncWanted` immediately before and after it — a heal that had not yet reached `start()`, a full restart between its own stop and its start and a delta that falls back to one all start nothing — and the heal timer is never armed while the app is away: it is cancelled by a pause, by a detach and at dispose; a heal that completes behind that cancel arms nothing; and it is armed only by a `resumed` dispatch and, at a mount, only if the app reads `resumed` at that instant (`LiveSyncHealBackstop`) — a process the operating system relaunched in the background mounts under `detached`, `inactive` or `paused` and arms none there, so none ticks behind a pause. (The `resumed` dispatch the framework synthesises on the way out of its `detached` seed is the one exception, and the statement ends on it.) On THIS branch a start issued behind the pause is not refused — this process is the receiver — and two things follow. The one start made from the background on purpose, where the consent that makes this process the receiver resolves after a pause that had read it off and stopped the engine, is ordered behind that pause's stop however long the stop takes, and the burst, or the idle close, that pauses the session it produces is chained behind the start (`MapShell.healBehindStop`); that edge joins the stop the pause issued and issues none of its own, so on a pause that kept its session a consent that flaps stops nothing and starts nothing. And a heal that reaches `start()` only after the pause's teardown has run — a cold launch backgrounded before its first start was issued — brings up a session that is only started and holds its REQs until the next burst's teardown pauses it, which is for as long as nothing is publish-eligible, when no burst comes. A session that DIES between bursts is not started again by a timer: none is armed there. The next burst finds none on the typed lifecycle, or finds it gone at its open, which answers no session typed (`BurstOpenFfi::NoSession`), and starts one directly into itself (decision 190, `startSessionIntoBurst`) where a live session is wanted, once the consent has loaded, then waits out the backlog and pauses as any burst; one that cannot start it publishes nothing (nothing is sealed before a receive has run) and reports a failed open to the sharing-health model. What remains is two waits. On this branch, until that start has returned, claim included, the engine holds the REQs it issued: a connect wait of up to five seconds, the open-time advance, the subscribe ladder and, where the app was resumed when the start held its engine, a claim, which waits for no relay: what an earlier pass left owed is published by the session's drive task, which a pause ends at the commit in flight. On every branch, a stop asked for before the start has built its engine waits for the engine factory: an identity read and the MLS database's open, which in a foregrounded app can itself wait up to twenty seconds for the Android foreground service to release the session. A start that fails is cleaned up by the start, not by the pause. (iii) The termination is a REPAIR PLUS A WATCH, never a prevention: nostr-relay-pool's own retry loop can re-open a REAL socket over the pause's Terminated and hold it with 55 s pings indefinitely (the race is inside the pinned crate, between two adjacent statements of InnerRelay::disconnect, so the engine cannot make it impossible), and non-convergence after RELAY_TERMINATE_ROUNDS warns with a COUNT only. What is promised instead is that no such socket SURVIVES — run_monitor's radio-off watch cuts every one, including the strand this loop cannot see at all (a Disconnected write that landed BEFORE the pool's Terminated store), and unrequested_connections is how many there were. The publish pool is a separate plane the burst does not own — the motion trigger may re-open it between bursts — and how it closes SPLITS BY PLANE, so no single claim covers all three. On this branch and on the Android foreground service it is closed COLLECTIVELY: RelayManager::shutdown is one client.disconnect() over the whole pool, reached from every burst teardown here (_shutdownPublishPool) and at step 9b of every Android delivery cycle plus onDestroy — so on BOTH background planes a relay carrying exactly one circle in a pass sees connect-at-its-own-publish through disconnect-at-teardown, a tail that grows with the circles published after it and converges over the CSPRNG permutation to the whole pass length. Only in the FOREGROUND is there no collective disconnect: publish_relay_options() is ping(false).reconnect(false).sleep_when_idle(true).idle_timeout(10 s) polled once a minute, so each relay's socket sleeps independently in (60 s, 70 s] after that relay's own last send. Presence is revealed to a circle relay at every burst instant. Since PUB-COALESCE one burst publishes EVERY publish-eligible circle, so for an eligible circle the REQ/CLOSE pair and this device's kind-445 for that circle now coincide on essentially every burst — the fractional mismatch this clause used to disclose is gone for that class. A burst's drive adds one contact of its own: a relay a pending commit was frozen for — the circle's relays as they were when the commit was staged, which after a change of relays may no longer be the circle's — sees a connection from the drive pool and that commit's event again at a burst instant, on the record's schedule (thirty seconds doubling to an hour; from a day after it was staged at most once an hour), until a relay acknowledges it and the burst confirms it. Three things that sentence leaves out. A relay that could not be reached is tried again after five seconds, three times, before its wait starts doubling, and one that answered `rate-limited` from a minute: a burst that lasts long enough can dial a dead relay up to three times, the drive timer running inside a burst. The event is byte-identical each time, so a relay that keeps what it is sent can link the address the device had when it first sent the commit with the one it has now. And a session that has only been started — in a backgrounded process, where a start was issued behind a pause — makes that contact once, at its start, and holds no standing one: it arms no drive timer. A wake adds a second request of its own, for what the engine refused — in the sweep every wake runs, and in the redelivery a burst runs when the engine refuses something during it: the ids of objects it had no room for or let go — the events a hand-back of stranded input could not give it included — are asked for by id, at most two REQs of up to 128 ids to each of the circle's relays a sweep, and past 1024 owed ids the circle's history as a range, a page budget a sweep. The range's ceiling is never lowered: a pass that halts carries a walk down from it — below a full page dated entirely in one second, too, keeping the range owed, since events beyond a relay's page limit that share one second are unreachable by NIP-01 paging — and the walk ends the range only when it has reached the circle's start, every relay answering in full in the pass that reached the start (a relay unreachable during an earlier pass of the walk is covered by the same assumption the cursor makes), with the engine holding something of every event any pass of it brought back, one it recorded and then erred on included — an event the engine had no room for, erred on with no record of its own, or was never asked about is on record nowhere else, so such a walk begins again at the ceiling. An id a sweep could not discharge is asked for again after a minute, doubling to once a day — eleven requests in its first day, one a day after — and nothing but a verdict, or every relay asked answering a request that names it with no event at all, ends it: no count of tries and no count of epochs. An answer that brought some of the ids it was asked for proves nothing about the rest — a relay may clamp a request's limit and send a subset — and those are asked for again by themselves, out of the same two REQs. Ids are asked for from the front of a queue an id rejoins at the back each time it is asked for, so nobody who mints ids keeps theirs ahead of one that was owed first. A new epoch of its circle makes every owed id and the owed range due at once, and the owed ids are then asked for: by the sweep in which the epoch moved, out of that sweep's same two REQs and before its next round of advances for the circle (the first two moves of a sweep; the range at the circle's turn); on the live plane, which holds no REQ of its own to ask with, by a status the app answers with one refetch — the redelivery above — at most once a minute, and which the plane does not wait for, so there a refused event can still be overtaken. When the engine has no room for anything a request brought back, the ids already asked for wait at least as long as the soonest of those just asked, and an id not yet asked for keeps its turn; the range keeps a schedule of its own — a pass that carries its walk down leaves the rest due at once, and one that carries it no further (halted where it began, or come to the bottom with something still owed) doubles the wait before the next — and is asked for when due whatever the ids beside it are waiting for. THE WORST CASE, to each relay of the circle. For ONE owed id: one REQ naming it at each time it is due — eleven on its first day, one a day after — and one more at each new epoch of its circle. For a FULL ledger, 1024 ids and a range: two REQs of 128 ids a sweep and no more, so four sweeps to ask for every id once and, with no new epoch, eight REQs a day once the waits have reached a day; for the range, one pass of at most eight pages of 500 events for each routing id the circle keeps when it is due — every sweep, and every minute on the live plane, while a walk of it is descending; and when a walk reaches the bottom with something still owed (an outsider's events a relay goes on serving and the engine goes on refusing), one such descent a wait, the wait a minute doubling to a day — a descent as long as the circle's history on that relay, which an outsider who keeps the engine's store full can lengthen. A new epoch brings those forward and adds none: the sweep it moves in still sends two REQs of ids and makes one range pass; on the live plane a member who commits as often as they like has a full ledger asked for, and its range walked eight pages further for each routing id the circle keeps, at most once a minute. Somebody outside the circle can fill the ledger and cannot move an epoch. Nothing here opens a connection, holds a REQ open, or adds a request to a wake beyond those. A location record a process died with is deleted by the next drive with no relay contacted: nothing sends a location again. A leave's proposal goes to the relays its record froze when the engine minted it — one proposal per epoch the circle reaches — by any drive that runs anyway, a background one included, on the same per-relay schedule as a commit's record, until enough relays hold it or a day has passed since that proposal was minted; it holds no REQ and arms no timer, and once the leave has ended on this device (the copy found removed, or a day after the first press) nothing of it is sent again. Anyone who knows a circle's routing tag can make it owe such ids, so the schedule, not the count, is what a relay is spared. Four classes still produce a re-anchored #h REQ with no kind-445 for the circle it re-anchored: (a) the burst publishes NOTHING when openBurstPublishWindow returns null (no identity, disclosure not accepted, location permission revoked, one-shot GPS timeout) or consent flips inside the pass — the open precedes the publish unconditionally; (b) a circle in the stored live set that is not publish-eligible is re-anchored on every burst and never published to at all. The two sides are read from different places, and the subscription side is a STORED SNAPSHOT: resume_burst re-anchors active.group_subs, which subscribe_circle and unsubscribe_circle mutate off a circlesProvider emission and the session's own routing follow mutates by itself — at every burst open, at every start, and whenever any plane moves a circle's row. So the subscribed set is every ACCEPTED circle AS OF THE LAST FOREGROUND EMISSION (groupsForCircles), each listed where its row now routes, while the publish target is re-read FRESH at seal time (Publishing::seal_location -> get_circle -> circle.relays, frozen into the location's record) and filterPublishEligibleCircles additionally excludes quarantined and engine-flagged Unrecoverable circles, so this is a permanent mismatch rather than a fractional one; (c) a per-circle send that fails or is DEFERRED by the MLS engine, and the tail of a roster past kMaxCirclesPerBurst (11), which the burst itself defers to the next tick; (d) a circle-set change applied DURING the background window — a circle the user REMOVED while backgrounded is left by the follow its leave wakes, but one dropped from the roster any other way keeps its #h REQ re-anchored until the next foreground emission. A RELAY-SET or routing-id change applied while backgrounded no longer splits the pair: the session follows the row at the burst open, and listens at the relays the circle left for a day, so for that day the old relays see a REQ with no kind-445 of this device's behind it. Coalescing also LENGTHENS the exposure it narrows: the burst holds its connection across the whole staggered publish pass, so the connect-to-disconnect span grows with the number of eligible circles — saturating at the cap — and is a single-relay estimator of that count for every relay in the union resume_burst connects, inbox relays included (PUB-COALESCE). An inbox-only relay sees the same pair on every INBOX_BURSTS_PER_REQ-th burst with no kind-445 to pair it with, which is itself the inference that this pubkey is background-sharing now. The three RELAY-CONTACTING Dart maintenance timers — KeyPackage, relay-list, and the 15-minute subscription-health tick — are foreground-only on this branch EXCEPT BEHIND A SYNTHESISED `resumed`: all five of the scheduler's arming and firing gates read the looser predicate, which differs from the strict one only where no state is set, and on a device one always is (the binding reads the embedder's seed, or the message that replaced it, when it is initialised); but the `resumed` the framework synthesises on the way out of that seed reads `resumed` while it is dispatched, so the resume handler's maintenance re-arm — on iOS inside that dispatch — passes the arming gates, and where the launch settles at `inactive` the KeyPackage and relay-list ticks, gated at arming only, fire and contact their relays (see the paragraph that ends this statement). (suspendForBackground cancels all three at the pause; health is gated again where it fires — and carries, from the strict `resumed` read, the claim without which the core changes no lifecycle, asks for no drive and makes no whole-session re-anchor —, the other two at arming only), because the burst IS the repair, at 72-168 s rather than 15 min. The FOURTH timer is not: the ~45 min public-profile anti-entropy sweep keeps its armed timer, gates at FIRE time (_appIsForegrounded) and RE-ARMS itself on the backgrounded branch, so it is a periodic CPU-only wake between bursts that contacts no relay. The complementary arm: every OTHER pause STOPS the engine rather than pausing it (MapShell.shouldStopLiveSyncOnPause = !(isIOS && backgroundSharingEnabled)), including iOS with background sharing off, and the Android foreground service shuts its own publish pool at the end of every cycle. NOT COVERED, and open: a process the operating system launched in the background — everything above is about a process that was PAUSED. On a device the lifecycle is never unset — both embedders seed it `detached` — but the binding reads it once, when `main()` initialises it, and a message the engine receives before then replaces the seed with no dispatch; a later one is dispatched, every state on the way synthesised (`resumed` first out of `detached`), to the observers registered at that instant, and `main()` awaits its start-up work before `runApp`, so the shell is normally not yet one of them. A shell therefore mounts under whatever the binding already reads, and its handlers run only for changes after the mount. Whatever it mounts under, the mount arms its publish scheduler, motion trigger, ownership heartbeat and hourly prune. Its start-up (MapShell._runStartupTasks) contacts relays only if the app reads `resumed` when it runs: otherwise the pool pre-warm, the KeyPackage publisher, a one-shot location publish to every circle where the location disclosure was accepted, the flag-off pollers and, five seconds later, a public-profile refresh and a retry of any own-profile publish left queued are owed to the first resume — inside the resume's 30 s debounce too — which runs them once, and a pause landing while that contact opens its pool stops the rest of it and owes it again (ForegroundStartUpGate); carrying on the leaves this device asked for is part of that contact and reads the lifecycle again before each circle, so a pause stops it at the next circle (a call already under way runs to its end), and a burst, the Android foreground service or a WorkManager wake carries the rest on, claiming no foreground. What the start-up runs regardless reads a gate of its own: the maintenance timers arm only in front, and the live-sync heal starts a session only where one is wanted. Mounted under `detached`: no session is wanted and no heal timer is armed; the first message after the mount is then dispatched `resumed` first, so the resume handler runs with nobody looking — it opens the location cache, arms the foreground timers and the heal timer, re-arms the maintenance timers, attempts a publish, runs the KeyPackage publisher and a profile refresh, and starts a session, which is not claimed for (the claim is read when the start holds its engine, and the lifecycle no longer reads `resumed` by then) — and pays what the start-up owed. Where that message is `paused` the pause handler runs right behind it, in the same dispatch, and everything above applies — with the residual already stated for this branch: the start can reach the engine after the pause's teardown has run, and the session then stands until the next burst's teardown. Where it is `inactive` no pause runs: the session holds as in the next case, the heal timer ticks beside it, and the KeyPackage and relay-list ticks fire and contact their relays. Mounted under `inactive` (neither the Android nor the iOS embedder sends `hidden`, so no binding rests on it at a mount there): the mount starts a session — unclaimed, staging nothing, arming no drive timer and no heal timer — that holds its group and inbox REQs and their sockets for as long as the process stays there, and the start-up's relay contact waits for the first resume; nothing pauses the session while the process stays there, and its publishes are not bursts; if the app leaves `inactive` for the background, `paused` is dispatched and the pause handler runs then (iOS sends `inactive` from `viewWillAppear` whatever follows). Mounted under `paused`: the shell takes the pause it was never dispatched (`pausedAtMount`) — it stamps no foreground and, once the background-sharing consent has loaded, or 5 s after the iOS session arm began if the platform has not answered it, the consent then still reading off (read earlier, the pause would take the branch of sharing off), runs the pause handler unless a lifecycle change has reached it since — so every branch's pause applies: on Android the heartbeat is cancelled and, with sharing on, the session handed to the foreground service; on iOS with sharing on the burst plane is installed and pauses what the start-up starts, at the next burst's teardown; with sharing off no session is started. The start-up's relay contact is owed to the first resume. THE `inactive` cases are open, on two axes only a device can settle: what the binding reads when the shell mounts, and where the launch settles. Closing them — starting a session only for a `resumed` that is not the synthesised one, or routing an iOS background launch with sharing on through the pause branch — waits on an owner decision. The dispatch order this paragraph rests on is pinned host-side; that the seed is `detached`, and that the engine replaces it until the binding first reads it, are read from the Flutter engine and framework source, not tested. A burst's NIP-77 pass (INV-R-NEG-ADVERTISES-NOTHING) runs on that drive pool before the seal, so every session it opens ends with the pool's close at the pause; e2e-ios-background-publish's P2c reads the drive pool's connected-relay count (LiveSyncFfi::drive_pool_connected_relays, which throws rather than answer for a session without one) and requires zero on its first answer after a burst.",
+      "statement": "While backgrounded on iOS with background sharing ON, from the completion of the pause branch's teardown until the next burst's open, the live-sync engine holds no standing subscription and no socket IT ASKED FOR: pause_subscriptions CLOSEs every REQ, sweeps any that a partial unsubscribe_all left registered (both bounded by RELAY_LIFECYCLE_OP_TIMEOUT and log-and-proceed on expiry), drains what is already downloaded through the Pause marker (note_delivery_gap, never a forget_*, so an un-applied hold-back survives; best-effort — on a dead worker or an unacked marker the router is cleared directly and the undrained backlog is re-downloaded by the next re-anchor), waits UNCAPPED for every in-flight publish (Security Rule 13) — a drive of stored fanout records under way when the pause began counts as one for its whole pass, whether it began in the foreground or in the burst the pause ends: from the moment its lifecycle changes it begins nothing, and what it had decided and not begun is not done — the decision is read again with the engine held — it takes no further relay, for a recorded event or through its publisher, makes no first send, and begins no confirm of a stored acknowledgement — while what the engine was already asked for runs to its end: a confirm under way completes with its fold — a foreground's can record a commit and end the record, and hands over no Welcome once the foreground has ended; a burst's applies an acknowledged commit and settles what was received, and stages, records and hands over nothing — and a publish of something that has no record, already handed to its publisher, runs out that publisher's own retries (three attempts, forty-nine seconds at most). A pass is given two rows' budget, sixty-two seconds from when it began, and one that only finishes begins a relay call only with a whole row's budget — thirty-one seconds — left. So what is waited for is what that pass has out: one call of MDK's relay client, twenty seconds at most, when it was sending a record; the rest of a confirm's fold or of a publisher's retries when the flip found it inside one — and only then terminates every relay through terminate_all_relays (client.disconnect(), re-read and re-asserted over RELAY_TERMINATE_ROUNDS rounds, never client.shutdown()) and closes the session's own drive pool (RelayManager::shutdown, on a pool nothing else publishes through), so that where the termination converges the crate's per-relay connection task and its 55 s pinger exit with it — see exception (iii) for where it does not. Each publish tick runs exactly one bounded burst instead: open_background_burst re-issues every REQ in the Resubscribe phase — each circle at its persisted cursor less GROUP_RESUBSCRIBE_BUFFER_SECS, and the inbox at INBOX_RESUBSCRIBE_LOOKBACK_SECS on every INBOX_BURSTS_PER_REQ-th background burst, never the cold-start window — asks for one drive of the stored fanout records in the finish-only mode, on the session's own drive pool — a relay a pending commit's record was frozen for is called only when a relay may already hold that commit (one acknowledged it, an attempt may have exposed it, or one was begun and never returned), this relay was attempted before, and its schedule says it is due, with the same bytes; a record whose every attempt found its relay unreachable, and a relay never attempted, get no first transmission from a burst —, waits up to BURST_BACKLOG_WAIT_SECS per (relay, subscription) endpoint for EOSE so a peer commit ingested here is APPLIED before the location is encrypted, publishes, folds due KeyPackage/relay-list maintenance onto the warm publish pool, settles (COMMIT_SETTLE_WINDOW_SECS from the last commit activity, capped by BURST_SETTLE_CAP_SECS, which bounds idle follow-on activity only and never an in-flight publish), pauses, drains any commit-critical publish still on the shared publish pool, and shuts that pool. A pause that drives no burst — nothing eligible, or a publish still inside kLocationPublishOverlapGuard — runs that same teardown on its own (closeIdle, on the same chain and under the same in-burst flag, so it can never run beside a burst), which is what makes the gap before the first burst no exception. THREE exception classes and one separate plane, all stated. (i) The teardown STOPS wherever the foreground reclaimed the engine, leaving the publish pool to the next pause's teardown. (ii) An engine start still in flight when the pause runs — a cold launch's, or any return's that the user left again within seconds — does not outlive it. On the branches whose pause STOPS the engine (Android; iOS with background sharing off) that stop is the pause's first act — on Android with background sharing on it is issued ahead of the two platform writes that hand publishing to the foreground service, and each of those is guarded, so a write that is slow or throws costs the service a prompt start and never the stop — and it ends that start: the engine's stop is issued at once on the handle the start has built, so the start fails at its next check instead of running out its connect wait, open-time advance and subscribe ladder; a start whose engine is not built yet starts nothing once it is; a session that came up across the stop is stopped again, never adopted and never claimed for; and a stop that lands while the start is making its claim stops the session that start had adopted, and the start then fails as ended by a stop instead of returning over a stopped engine (NostrSubscriptionService; its tests park a start and issue the stop meanwhile). On this branch the pause's `pauseSubscriptions` WAITS for the start — the engine's pause takes the lock the start holds and can end nothing early — and then pauses the session it produced; such a session was claimed for only if the lifecycle still read `resumed` when the start held its engine. A start issued BEHIND the pause brings no session up where the pause stopped the engine: the app's one `start()` (`LiveSyncResubscriber._fullRestart`) reads `MapShell.liveSyncWanted` immediately before and after it — a heal that had not yet reached `start()`, a full restart between its own stop and its start and a delta that falls back to one all start nothing — and the heal timer is never armed while the app is away: it is cancelled by a pause, by a detach and at dispose; a heal that completes behind that cancel arms nothing; and it is armed only by a `resumed` dispatch and, at a mount, only if the app reads `resumed` at that instant (`LiveSyncHealBackstop`) — a process the operating system relaunched in the background mounts under `detached`, `inactive` or `paused` and arms none there, so none ticks behind a pause. (The `resumed` dispatch the framework synthesises on the way out of its `detached` seed is the one exception, and the statement ends on it.) On THIS branch a start issued behind the pause is not refused — this process is the receiver — and two things follow. The one start made from the background on purpose, where the consent that makes this process the receiver resolves after a pause that had read it off and stopped the engine, is ordered behind that pause's stop however long the stop takes, and the burst, or the idle close, that pauses the session it produces is chained behind the start (`MapShell.healBehindStop`); that edge joins the stop the pause issued and issues none of its own, so on a pause that kept its session a consent that flaps stops nothing and starts nothing. And a heal that reaches `start()` only after the pause's teardown has run — a cold launch backgrounded before its first start was issued — brings up a session that is only started and holds its REQs until the next burst's teardown pauses it, which is for as long as nothing is publish-eligible, when no burst comes. A session that DIES between bursts is not started again by a timer: none is armed there. The next burst finds none on the typed lifecycle, or finds it gone at its open, which answers no session typed (`BurstOpenFfi::NoSession`), and starts one directly into itself (decision 190, `startSessionIntoBurst`) where a live session is wanted, once the consent has loaded, then waits out the backlog and pauses as any burst; one that cannot start it publishes nothing (nothing is sealed before a receive has run) and reports a failed open to the sharing-health model. What remains is two waits. On this branch, until that start has returned, claim included, the engine holds the REQs it issued: a connect wait of up to five seconds, the open-time advance, the subscribe ladder and, where the app was resumed when the start held its engine, a claim, which waits for no relay: what an earlier pass left owed is published by the session's drive task, which a pause ends at the commit in flight. On every branch, a stop asked for before the start has built its engine waits for the engine factory: an identity read and the MLS database's open, which in a foregrounded app can itself wait up to twenty seconds for the Android foreground service to release the session. A start that fails is cleaned up by the start, not by the pause. (iii) The termination is a REPAIR PLUS A WATCH, never a prevention: nostr-relay-pool's own retry loop can re-open a REAL socket over the pause's Terminated and hold it with 55 s pings indefinitely (the race is inside the pinned crate, between two adjacent statements of InnerRelay::disconnect, so the engine cannot make it impossible), and non-convergence after RELAY_TERMINATE_ROUNDS warns with a COUNT only. What is promised instead is that no such socket SURVIVES — run_monitor's radio-off watch cuts every one, including the strand this loop cannot see at all (a Disconnected write that landed BEFORE the pool's Terminated store), and unrequested_connections is how many there were. The publish pool is a separate plane the burst does not own — the motion trigger may re-open it between bursts — and how it closes SPLITS BY PLANE, so no single claim covers all three. On this branch and on the Android foreground service it is closed COLLECTIVELY: RelayManager::shutdown is one client.disconnect() over the whole pool, reached from every burst teardown here (_shutdownPublishPool) and at step 9b of every Android delivery cycle plus onDestroy — so on BOTH background planes a relay carrying exactly one circle in a pass sees connect-at-its-own-publish through disconnect-at-teardown, a tail that grows with the circles published after it and converges over the CSPRNG permutation to the whole pass length. Only in the FOREGROUND is there no collective disconnect: publish_relay_options() is ping(false).reconnect(false).sleep_when_idle(true).idle_timeout(10 s) polled once a minute, so each relay's socket sleeps independently in (60 s, 70 s] after that relay's own last send. Presence is revealed to a circle relay at every burst instant. Since PUB-COALESCE one burst publishes EVERY publish-eligible circle, so for an eligible circle the REQ/CLOSE pair and this device's kind-445 for that circle now coincide on essentially every burst — the fractional mismatch this clause used to disclose is gone for that class. A burst's drive adds one contact of its own: a relay a pending commit was frozen for — the circle's relays as they were when the commit was staged, which after a change of relays may no longer be the circle's — sees a connection from the drive pool and that commit's event again at a burst instant, on the record's schedule (thirty seconds doubling to an hour; from a day after it was staged at most once an hour), until a relay acknowledges it and the burst confirms it. Three things that sentence leaves out. A relay that could not be reached is tried again after five seconds, three times, before its wait starts doubling, and one that answered `rate-limited` from a minute: a burst that lasts long enough can dial a dead relay up to three times, the drive timer running inside a burst. The event is byte-identical each time, so a relay that keeps what it is sent can link the address the device had when it first sent the commit with the one it has now. And a session that has only been started — in a backgrounded process, where a start was issued behind a pause — makes that contact once, at its start, and holds no standing one: it arms no drive timer. A wake adds a second request of its own, for what the engine refused — in the sweep every wake runs, and in the redelivery a burst runs when the engine refuses something during it: the ids of objects it had no room for or let go — the events a hand-back of stranded input could not give it included — are asked for by id, at most two REQs of up to 128 ids to each of the circle's relays a sweep, and past 1024 owed ids the circle's history as a range, a page budget a sweep. The range's ceiling is never lowered: a pass that halts carries a walk down from it — below a full page dated entirely in one second, too, keeping the range owed, since events beyond a relay's page limit that share one second are unreachable by NIP-01 paging — and the walk ends the range only when it has reached the circle's start, every relay answering in full in the pass that reached the start (a relay unreachable during an earlier pass of the walk is covered by the same assumption the cursor makes), with the engine holding something of every event any pass of it brought back, one it recorded and then erred on included — an event the engine had no room for, erred on with no record of its own, or was never asked about is on record nowhere else, so such a walk begins again at the ceiling. An id a sweep could not discharge is asked for again after a minute, doubling to once a day — eleven requests in its first day, one a day after — and nothing but a verdict, or every relay asked answering a request that names it with no event at all, ends it: no count of tries and no count of epochs. An answer that brought some of the ids it was asked for proves nothing about the rest — a relay may clamp a request's limit and send a subset — and those are asked for again by themselves, out of the same two REQs. Ids are asked for from the front of a queue an id rejoins at the back each time it is asked for, so nobody who mints ids keeps theirs ahead of one that was owed first. A new epoch of its circle makes every owed id and the owed range due at once, and the owed ids are then asked for: by the sweep in which the epoch moved, out of that sweep's same two REQs and before its next round of advances for the circle (the first two moves of a sweep; the range at the circle's turn); on the live plane, which holds no REQ of its own to ask with, by a status the app answers with one refetch — the redelivery above — at most once a minute, and which the plane does not wait for, so there a refused event can still be overtaken. When the engine has no room for anything a request brought back, the ids already asked for wait at least as long as the soonest of those just asked, and an id not yet asked for keeps its turn; the range keeps a schedule of its own — a pass that carries its walk down leaves the rest due at once, and one that carries it no further (halted where it began, or come to the bottom with something still owed) doubles the wait before the next — and is asked for when due whatever the ids beside it are waiting for. THE WORST CASE, to each relay of the circle. For ONE owed id: one REQ naming it at each time it is due — eleven on its first day, one a day after — and one more at each new epoch of its circle. For a FULL ledger, 1024 ids and a range: two REQs of 128 ids a sweep and no more, so four sweeps to ask for every id once and, with no new epoch, eight REQs a day once the waits have reached a day; for the range, one pass of at most eight pages of 500 events for each routing id the circle keeps when it is due — every sweep, and every minute on the live plane, while a walk of it is descending; and when a walk reaches the bottom with something still owed (an outsider's events a relay goes on serving and the engine goes on refusing), one such descent a wait, the wait a minute doubling to a day — a descent as long as the circle's history on that relay, which an outsider who keeps the engine's store full can lengthen. A new epoch brings those forward and adds none: the sweep it moves in still sends two REQs of ids and makes one range pass; on the live plane a member who commits as often as they like has a full ledger asked for, and its range walked eight pages further for each routing id the circle keeps, at most once a minute. Somebody outside the circle can fill the ledger and cannot move an epoch. Nothing here opens a connection, holds a REQ open, or adds a request to a wake beyond those. A location record a process died with is deleted by the next drive with no relay contacted: nothing sends a location again. A leave's proposal goes to the relays its record froze when the engine minted it — one proposal per epoch the circle reaches — by any drive that runs anyway, a background one included, on the same per-relay schedule as a commit's record, until enough relays hold it or a day has passed since that proposal was minted; it holds no REQ and arms no timer, and once the leave has ended on this device (the copy found removed, or a day after the first press) nothing of it is sent again. Anyone who knows a circle's routing tag can make it owe such ids, so the schedule, not the count, is what a relay is spared. Four classes still produce a re-anchored #h REQ with no kind-445 for the circle it re-anchored: (a) the burst publishes NOTHING when openBurstPublishWindow returns null (no identity, disclosure not accepted, location permission revoked, one-shot GPS timeout) or consent flips inside the pass — the open precedes the publish unconditionally; (b) a circle in the stored live set that is not publish-eligible is re-anchored on every burst and never published to at all. The two sides are read from different places, and the subscription side is a STORED SNAPSHOT: resume_burst re-anchors active.group_subs, which subscribe_circle and unsubscribe_circle mutate off a circlesProvider emission and the session's own routing follow mutates by itself — at every burst open, at every start, and whenever any plane moves a circle's row. So the subscribed set is every ACCEPTED circle AS OF THE LAST FOREGROUND EMISSION (groupsForCircles), each listed where its row now routes, while the publish target is re-read FRESH at seal time (Publishing::seal_location -> get_circle -> circle.relays, frozen into the location's record) and filterPublishEligibleCircles additionally excludes quarantined and engine-flagged Unrecoverable circles, so this is a permanent mismatch rather than a fractional one; (c) a per-circle send that fails or is DEFERRED by the MLS engine, and the tail of a roster past kMaxCirclesPerBurst (11), which the burst itself defers to the next tick; (d) a circle-set change applied DURING the background window — a circle the user REMOVED while backgrounded is left by the follow its leave wakes, but one dropped from the roster any other way keeps its #h REQ re-anchored until the next foreground emission. A RELAY-SET or routing-id change applied while backgrounded no longer splits the pair: the session follows the row at the burst open, and listens at the relays the circle left for a day, so for that day the old relays see a REQ with no kind-445 of this device's behind it. Coalescing also LENGTHENS the exposure it narrows: the burst holds its connection across the whole staggered publish pass, so the connect-to-disconnect span grows with the number of eligible circles — saturating at the cap — and is a single-relay estimator of that count for every relay in the union resume_burst connects, inbox relays included (PUB-COALESCE). An inbox-only relay sees the same pair on every INBOX_BURSTS_PER_REQ-th burst with no kind-445 to pair it with, which is itself the inference that this pubkey is background-sharing now. The three RELAY-CONTACTING Dart maintenance timers — KeyPackage, relay-list, and the 15-minute subscription-health tick — are foreground-only on this branch EXCEPT BEHIND A SYNTHESISED `resumed`: all five of the scheduler's arming and firing gates read the looser predicate, which differs from the strict one only where no state is set, and on a device one always is (the binding reads the embedder's seed, or the message that replaced it, when it is initialised); but the `resumed` the framework synthesises on the way out of that seed reads `resumed` while it is dispatched, so the resume handler's maintenance re-arm — on iOS inside that dispatch — passes the arming gates, and where the launch settles at `inactive` the KeyPackage and relay-list ticks, gated at arming only, fire and contact their relays (see the paragraph that ends this statement). (suspendForBackground cancels all three at the pause; health is gated again where it fires — and carries, from the strict `resumed` read, the claim without which the core changes no lifecycle, asks for no drive and makes no whole-session re-anchor —, the other two at arming only), because the burst IS the repair, at 72-168 s rather than 15 min. The FOURTH timer is not: the ~45 min public-profile anti-entropy sweep keeps its armed timer, gates at FIRE time (_appIsForegrounded) and RE-ARMS itself on the backgrounded branch, so it is a periodic CPU-only wake between bursts that contacts no relay. The complementary arm: every OTHER pause STOPS the engine rather than pausing it (MapShell.shouldStopLiveSyncOnPause = !(isIOS && backgroundSharingEnabled)), including iOS with background sharing off, and the Android foreground service shuts its own publish pool at the end of every cycle. NOT COVERED, and open: a process the operating system launched in the background — everything above is about a process that was PAUSED. On a device the lifecycle is never unset — both embedders seed it `detached` — but the binding reads it once, when `main()` initialises it, and a message the engine receives before then replaces the seed with no dispatch; a later one is dispatched, every state on the way synthesised (`resumed` first out of `detached`), to the observers registered at that instant, and `main()` awaits its start-up work before `runApp`, so the shell is normally not yet one of them. A shell therefore mounts under whatever the binding already reads, and its handlers run only for changes after the mount. Whatever it mounts under, the mount arms its publish scheduler, motion trigger, ownership heartbeat and hourly prune. Its start-up (MapShell._runStartupTasks) contacts relays only if the app reads `resumed` when it runs: otherwise the pool pre-warm, the KeyPackage publisher, a one-shot location publish to every circle where the location disclosure was accepted, the flag-off pollers and, five seconds later, a public-profile refresh and a retry of any own-profile publish left queued are owed to the first resume — inside the resume's 30 s debounce too — which runs them once, and a pause landing while that contact opens its pool stops the rest of it and owes it again (ForegroundStartUpGate); carrying on the leaves this device asked for is part of that contact and reads the lifecycle again before each circle, so a pause stops it at the next circle (a call already under way runs to its end), and a burst, the Android foreground service or a WorkManager wake carries the rest on, claiming no foreground. What the start-up runs regardless reads a gate of its own: the maintenance timers arm only in front, and the live-sync heal starts a session only where one is wanted. Mounted under `detached`: no session is wanted and no heal timer is armed; the first message after the mount is then dispatched `resumed` first, so the resume handler runs with nobody looking — it opens the location cache, arms the foreground timers and the heal timer, re-arms the maintenance timers, attempts a publish, runs the KeyPackage publisher and a profile refresh, and starts a session, which is not claimed for (the claim is read when the start holds its engine, and the lifecycle no longer reads `resumed` by then) — and pays what the start-up owed. Where that message is `paused` the pause handler runs right behind it, in the same dispatch, and everything above applies — with the residual already stated for this branch: the start can reach the engine after the pause's teardown has run, and the session then stands until the next burst's teardown. Where it is `inactive` no pause runs: the session holds as in the next case, the heal timer ticks beside it, and the KeyPackage and relay-list ticks fire and contact their relays. Mounted under `inactive` (neither the Android nor the iOS embedder sends `hidden`, so no binding rests on it at a mount there): the mount starts a session — unclaimed, staging nothing, arming no drive timer and no heal timer — that holds its group and inbox REQs and their sockets for as long as the process stays there, and the start-up's relay contact waits for the first resume; nothing pauses the session while the process stays there, and its publishes are not bursts; if the app leaves `inactive` for the background, `paused` is dispatched and the pause handler runs then (iOS sends `inactive` from `viewWillAppear` whatever follows). Mounted under `paused`: the shell takes the pause it was never dispatched (`pausedAtMount`) — it stamps no foreground and, once the background-sharing consent has loaded, or 5 s after the iOS session arm began if the platform has not answered it, the consent then still reading off (read earlier, the pause would take the branch of sharing off), runs the pause handler unless a lifecycle change has reached it since — so every branch's pause applies: on Android the heartbeat is cancelled and, with sharing on, the session handed to the foreground service; on iOS with sharing on the burst plane is installed and pauses what the start-up starts, at the next burst's teardown; with sharing off no session is started. The start-up's relay contact is owed to the first resume. THE `inactive` cases are open, on two axes only a device can settle: what the binding reads when the shell mounts, and where the launch settles. Closing them — starting a session only for a `resumed` that is not the synthesised one, or routing an iOS background launch with sharing on through the pause branch — waits on an owner decision, with one exception the owner decided on 2026-11-26 (OD-R1): a process iOS launched into the background for a LOCATION event, with background sharing on and the current background disclosure accepted, takes the pause whatever state it mounted under — ForegroundStartUpGate reads the native launchedForLocation, then MapShell.launchMayResume (the consent, backgroundResumeDisclosureAccepted and the roster bounded by kConsentArmBound), and takes the pause once those resolve unless a pause reached the shell first, which is handed the launch instead (takeLaunchSession); admitPause keeps a `paused` iOS dispatches on top of it from running a second pause — so everything above applies to that process, its first burst included (INV-L-IOS-RELAUNCH-RESUMES-ONLY-UNDER-ALWAYS-AND-CURRENT-CONSENT). A location relaunch the current disclosure does not cover takes no pause of its own, and a BGTask launch none either: both stay in the open cases above. The dispatch order this paragraph rests on is pinned host-side; that the seed is `detached`, and that the engine replaces it until the binding first reads it, are read from the Flutter engine and framework source, not tested. A burst's NIP-77 pass (INV-R-NEG-ADVERTISES-NOTHING) runs on that drive pool before the seal, so every session it opens ends with the pool's close at the pause; e2e-ios-background-publish's P2c reads the drive pool's connected-relay count (LiveSyncFfi::drive_pool_connected_relays, which throws rather than answer for a session without one) and requires zero on its first answer after a burst.",
       "status": "enforced",
-      "residual": "'enforced' is the BEHAVIOUR; parts of the pause ORDER, most of the Dart teardown, and one whole exception rest on less. (1) The five-step pause order is only PARTLY pinned. The Rule-13 link — the in-flight publish gauge before the radio cut — is pinned twice: rule13_a_burst_never_pauses_with_a_pending_publish_outstanding asserts the source order in BOTH pause_subscriptions and resume_burst's failure exit (and that neither cuts through a bare client.disconnect()), and pause_never_disconnects_while_an_auto_commit_awaits_its_ok proves it over a relay withholding a real OK. The drain-before-clear link has two oracles (pause_subscriptions_drains_the_intake_before_it_clears_the_router, a_pause_marker_drains_every_queued_event_before_the_router_is_cleared). Pinned by NOTHING: the placement of the unsubscribe sweep relative to the Pause marker, and of repair.clear() at the end — only their end states are asserted. check_engine_client_options.sh check 8 pins PRESENCE and deliberately not order (docs/POWER_EFFICIENCY_PLAN.md §5.4 says so in as many words); it is additionally fail-open on a terminate_all_relays() call wrapped in `if false`, on RELAY_TERMINATE_ROUNDS = 0, on an aliased shutdown(), and on a bare client.subscribe(...) in the burst-open path, and it opens neither config.rs, cursor.rs nor any Dart file. (2) check_ios_background_publish.sh, cited above, gates only who may ENTER the burst plane (BackgroundBurstCoordinator constructed and installed as the scheduler's tick sink in exactly map_shell.dart; openBackgroundBurst named in exactly the coordinator and the engine API and impl; the native wake handlers invoking only runCatchup), the mid-pause consent-withdrawal release, and presence-only logging. It names none of closeIdle, shouldStopLiveSyncOnPause, pausedRelayOwner or kLocationPublishOverlapGuard, and stays GREEN under mutation when shouldStopLiveSyncOnPause is inverted, when closeIdle's body is emptied or both of its call sites deleted, when the three _handedBack early-returns are deleted, and — verified by mutating the tree — when _closeBurst drops both pauseSubscriptions and shutdownPublishPool. Every Dart clause of this statement therefore rests on the background_burst_coordinator_test.dart cases cited here, not on that guard. (3) The start-in-flight and start-behind-the-pause exceptions are tested at the three seams that decide them. The subscription service: a start parked with a stop issued meanwhile, which must have reached the engine while the start was still out, once; a start that comes up anyway, which must be stopped and never adopted; a pause issued meanwhile, which must have reached the engine once the start resolves; and a start asked in `resumed` and finished in `paused`, which must have handed the engine no claim. The re-subscriber: a restart between its own stop and its start, a heal and a delta, each of which must start nothing while no session is wanted. And map_shell_pause_start_test.dart, which runs what MapShell's pause and resume do with the engine — through the statics MapShell calls, over the real service and the real re-subscriber, against the binding's lifecycle — on each of the four platform × sharing branches. MapShell's own handlers are still not mounted host-side (MapShell needs the Rust bridge), so that each pause branch reaches the static those tests drive, that the re-subscriber is built with MapShell.liveSyncWanted, and that _onPaused and _onResumed stop after every await once a later pause or resume has been dispatched (a count of those two dispatches taken at entry, not a read of the lifecycle), are read from source (lifecycle_handler_reread_test.dart and the map_shell_*_test.dart source scans), not run; the sequences in which a pause is overtaken — a return followed by a lost focus, pause, resume, pause, and a detach, which does not overtake it — are run through the same statics. (4) The exception the statement ends on is covered on the host only as far as the framework goes: what an observer is dispatched when the embedder leaves the `detached` seed, and that a state the binding already holds is dispatched to nobody, are pinned (lifecycle_synthesis_test.dart); what the pause and the resume then do with the engine, dispatched back to back, is run through the statics (map_shell_pause_start_test.dart); and that a mount arms no heal timer under `detached`, `inactive`, `hidden` or `paused` is run on a fake clock. What a shell mounted under `inactive` then starts and arms is read from source, not run (MapShell needs the Rust bridge); what one mounted under `paused` does — the missed pause behind the loaded consent, and the start-up's relay contact owed to the first resume — is driven through the binding (foreground_start_up_gate_test.dart), its wiring in MapShell pinned over the source (map_shell_mount_lifecycle_test.dart), and the pause it then runs is the one the statics above run. No test, host or device, launches the app in the background, and no lane reads what the binding holds when such a launch mounts the shell, or where the launch settles. The lifecycle those reads rest on is the one Flutter's binding reports; nothing here tests that a platform delivers `paused` before it suspends the process.",
+      "residual": "'enforced' is the BEHAVIOUR; parts of the pause ORDER, most of the Dart teardown, and one whole exception rest on less. (1) The five-step pause order is only PARTLY pinned. The Rule-13 link — the in-flight publish gauge before the radio cut — is pinned twice: rule13_a_burst_never_pauses_with_a_pending_publish_outstanding asserts the source order in BOTH pause_subscriptions and resume_burst's failure exit (and that neither cuts through a bare client.disconnect()), and pause_never_disconnects_while_an_auto_commit_awaits_its_ok proves it over a relay withholding a real OK. The drain-before-clear link has two oracles (pause_subscriptions_drains_the_intake_before_it_clears_the_router, a_pause_marker_drains_every_queued_event_before_the_router_is_cleared). Pinned by NOTHING: the placement of the unsubscribe sweep relative to the Pause marker, and of repair.clear() at the end — only their end states are asserted. check_engine_client_options.sh check 8 pins PRESENCE and deliberately not order (docs/POWER_EFFICIENCY_PLAN.md §5.4 says so in as many words); it is additionally fail-open on a terminate_all_relays() call wrapped in `if false`, on RELAY_TERMINATE_ROUNDS = 0, on an aliased shutdown(), and on a bare client.subscribe(...) in the burst-open path, and it opens neither config.rs, cursor.rs nor any Dart file. (2) check_ios_background_publish.sh, cited above, gates only who may ENTER the burst plane (BackgroundBurstCoordinator constructed and installed as the scheduler's tick sink in exactly map_shell.dart; openBackgroundBurst named in exactly the coordinator and the engine API and impl; the native wake handlers invoking only runCatchup), the mid-pause consent-withdrawal release, and presence-only logging. It names none of closeIdle, shouldStopLiveSyncOnPause, pausedRelayOwner or kLocationPublishOverlapGuard, and stays GREEN under mutation when shouldStopLiveSyncOnPause is inverted, when closeIdle's body is emptied or both of its call sites deleted, when the three _handedBack early-returns are deleted, and — verified by mutating the tree — when _closeBurst drops both pauseSubscriptions and shutdownPublishPool. Every Dart clause of this statement therefore rests on the background_burst_coordinator_test.dart cases cited here, not on that guard. (3) The start-in-flight and start-behind-the-pause exceptions are tested at the three seams that decide them. The subscription service: a start parked with a stop issued meanwhile, which must have reached the engine while the start was still out, once; a start that comes up anyway, which must be stopped and never adopted; a pause issued meanwhile, which must have reached the engine once the start resolves; and a start asked in `resumed` and finished in `paused`, which must have handed the engine no claim. The re-subscriber: a restart between its own stop and its start, a heal and a delta, each of which must start nothing while no session is wanted. And map_shell_pause_start_test.dart, which runs what MapShell's pause and resume do with the engine — through the statics MapShell calls, over the real service and the real re-subscriber, against the binding's lifecycle — on each of the four platform × sharing branches. MapShell's own handlers are still not mounted host-side (MapShell needs the Rust bridge), so that each pause branch reaches the static those tests drive, that the re-subscriber is built with MapShell.liveSyncWanted, and that _onPaused and _onResumed stop after every await once a later pause or resume has been dispatched (a count of those two dispatches taken at entry, not a read of the lifecycle), are read from source (lifecycle_handler_reread_test.dart and the map_shell_*_test.dart source scans), not run; the sequences in which a pause is overtaken — a return followed by a lost focus, pause, resume, pause, and a detach, which does not overtake it — are run through the same statics. (4) The exception the statement ends on is covered on the host only as far as the framework goes: what an observer is dispatched when the embedder leaves the `detached` seed, and that a state the binding already holds is dispatched to nobody, are pinned (lifecycle_synthesis_test.dart); what the pause and the resume then do with the engine, dispatched back to back, is run through the statics (map_shell_pause_start_test.dart); and that a mount arms no heal timer under `detached`, `inactive`, `hidden` or `paused` is run on a fake clock. What a shell mounted under `inactive` then starts and arms is read from source, not run (MapShell needs the Rust bridge); what one mounted under `paused` does — the missed pause behind the loaded consent, and the start-up's relay contact owed to the first resume — is driven through the binding (foreground_start_up_gate_test.dart), its wiring in MapShell pinned over the source (map_shell_mount_lifecycle_test.dart), and the pause it then runs is the one the statics above run. The location-relaunch exception is driven through the binding for every mount state and both orderings of a dispatched pause against the launch's reads (foreground_start_up_gate_test.dart), and its MapShell wiring pinned over the source (map_shell_mount_lifecycle_test.dart). No test, host or device, launches the app in the background, and no lane reads what the binding holds when such a launch mounts the shell, or where the launch settles. The lifecycle those reads rest on is the one Flutter's binding reports; nothing here tests that a platform delivers `paused` before it suspends the process.",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
       "non_arb_claims": [],
@@ -5137,6 +5516,26 @@
         {
           "file": "haven-core/tests/negentropy_e2e.rs",
           "name": "every_negentropy_session_of_a_burst_ends_before_the_pause_returns"
+        },
+        {
+          "file": "haven/test/pages/foreground_start_up_gate_test.dart",
+          "name": "a launch the current disclosure does not cover takes no pause of its own, and a pause iOS dispatches starts nothing"
+        },
+        {
+          "file": "haven/test/pages/foreground_start_up_gate_test.dart",
+          "name": "the binding's synthesized resume over the detached seed does not cancel the launch"
+        },
+        {
+          "file": "haven/test/pages/foreground_start_up_gate_test.dart",
+          "name": "a user who opened the app first owns it: the native flag is cleared, and their later pause is an ordinary one"
+        },
+        {
+          "file": "haven/test/pages/map_shell_mount_lifecycle_test.dart",
+          "name": "the iOS sharing-on pause takes the launch before installing its coordinator, and hands it to _payLaunchSession"
+        },
+        {
+          "file": "haven/test/pages/map_shell_mount_lifecycle_test.dart",
+          "name": "the pause and resume branches go through admitPause / noteResume, the duplicate pause skipping even the turn"
         }
       ],
       "guards": [
@@ -8214,5 +8613,11 @@
       ],
       "guards": []
     }
-  ]
+  ],
+  "ratchet_override": {
+    "reason": "Owner-directed 2026-11-26 (OD-R1): an iOS location relaunch under Always, with background sharing on and the current (v2) background disclosure accepted, now resumes the user's own sharing, so 'every iOS wake path is receive-only' is no longer true. It is replaced by INV-L-IOS-RELAUNCH-RESUMES-ONLY-UNDER-ALWAYS-AND-CURRENT-CONSENT, which keeps every wake handler receive-only and the plugin one-shot unreachable and carries the same assertion keys, disclosure and Info.plist claim.",
+    "items": [
+      "INV-L-IOS-WAKES-RECEIVE-ONLY.deleted"
+    ]
+  }
 }

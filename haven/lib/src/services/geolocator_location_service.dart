@@ -438,22 +438,59 @@ class GeolocatorLocationService implements LocationService {
   /// separately when the user has not consented to background sharing).
   ///
   /// A no-op when the current outer has no listener — nothing is being
-  /// delivered to anybody, so there is nothing to release.
+  /// delivered to anybody, so there is nothing to release. A
+  /// background-launch session has no outer at all
+  /// ([startBackgroundLaunchSession]) and IS released: the opt-out watcher
+  /// reaches it only through here.
   void suspendStream() {
     final outer = _outer;
     final inner = _inner;
-    if (outer == null || inner == null || !outer.hasListener) return;
+    if (inner == null || (outer != null && !outer.hasListener)) return;
     _inner = null;
     unawaited(inner.cancel());
+    _answerNextFixWaiter(null);
+  }
+
+  /// Whether iOS launched this process into the background for a location
+  /// event and nobody has opened it since, read from the native session.
+  Future<bool> launchedForLocation() async =>
+      _isIOS && (await _iosSource.status()).launchedForLocation;
+
+  /// Starts the native session background-capable in a process iOS launched
+  /// into the background for a location event, with no provider listening.
+  ///
+  /// The one start site outside [getLocationStream], reached only from
+  /// MapShell's first pause of such a process, behind the current-disclosure
+  /// check: a background launch renders no frames after its first, so the
+  /// provider rebuild that would start a session never runs. The native side
+  /// refuses this start too unless the process was launched for location,
+  /// authorization is Always and the current disclosure is accepted.
+  ///
+  /// A live background-capable session is left alone; a failed one, or a
+  /// foreground-intent one, is replaced. The next foreground
+  /// [getLocationStream] replaces this one in turn.
+  void startBackgroundLaunchSession({required bool backgroundSharingEnabled}) {
+    if (!_isIOS || !backgroundSharingEnabled) return;
+    final inner = _inner;
+    if (inner != null && !_innerFailed && _streamBackgroundSharing) return;
+    _streamBackgroundSharing = backgroundSharingEnabled;
+    _inner = null;
+    if (inner != null) unawaited(inner.cancel());
+    _listenInner(_outer);
+    // `positions()` resets the profile controller, dropping the dwell the
+    // pause already started; without this the session stays at Best for
+    // the whole background window.
+    _iosSource.onForeground(foregrounded: _foregroundActive);
   }
 
   /// Re-establishes the platform position subscription for the current
   /// outer stream, with the settings that outer was created with.
   ///
-  /// The ONLY restart site, and foregrounded by construction (it is called
-  /// from the resume handler): iOS refuses to start a background-capable
-  /// location session from the background, which is what the 2026-08-20
-  /// field failure was.
+  /// The restart site, foregrounded by construction (it is called from the
+  /// resume handler): iOS refuses to start a background-capable location
+  /// session from the background, which is what the 2026-08-20 field failure
+  /// was. The one exception is a location relaunch, which
+  /// [startBackgroundLaunchSession] starts.
   ///
   /// A no-op when the current outer has no listener, and when its
   /// subscription is still alive — the iOS background-sharing branch never
@@ -953,14 +990,14 @@ class GeolocatorLocationService implements LocationService {
 
       // Backgrounded on iOS: the one-shot below cannot deliver (its
       // CLLocationManager never enables background updates) — serve the
-      // native owner's last Best fix, or REFUSE.
+      // native owner's last Best fix, or the next fix of a session started
+      // for a location relaunch, or REFUSE.
       //
-      // The refusal is the point, and it is structural: this branch never
-      // falls through. `INV-L-IOS-WAKES-RECEIVE-ONLY` says a process
-      // relaunched into the background cannot publish, and a fall-through
-      // made that a coincidence rather than a rule — on a post-termination
-      // SLC/region/BGTask relaunch both caches are empty BY DESIGN, so
-      // "no cached fix" was exactly the state that reached the one-shot.
+      // The refusal is structural: this branch never falls through, so the
+      // plugin one-shot is unreachable from the background. A relaunched
+      // process publishes only a Best fix from Haven's own session, which the
+      // native side starts only under Always with the current disclosure
+      // (`INV-L-IOS-RELAUNCH-RESUMES-ONLY-UNDER-ALWAYS-AND-CURRENT-CONSENT`).
       //
       // The lifecycle is read from the NATIVE session, not from
       // [_foregroundActive]: a background-launched process (an SLC/region
@@ -979,6 +1016,8 @@ class GeolocatorLocationService implements LocationService {
           );
         }
         if (lastPosition != null) return lastPosition;
+        final next = await _awaitNextBackgroundFix();
+        if (next != null) return next;
         throw LocationServiceException(
           'Location unavailable while Haven is in the background.',
         );
@@ -1109,8 +1148,9 @@ class GeolocatorLocationService implements LocationService {
   /// iOS, geolocator's on Android — and pipes it into [outer].
   ///
   /// The one routing site, because [resumeStream] has to re-subscribe with the
-  /// same intent the outer was created with.
-  void _listenInner(StreamController<Position> outer) {
+  /// same intent the outer was created with. [outer] is null for a
+  /// background-launch session, which only feeds the cache.
+  void _listenInner(StreamController<Position>? outer) {
     _innerFailed = false;
     final backgroundSharingEnabled = _streamBackgroundSharing;
     final source = _isIOS
@@ -1126,20 +1166,23 @@ class GeolocatorLocationService implements LocationService {
         .listen(
           (position) {
             _lastStreamPosition = position;
-            outer.add(position);
+            outer?.add(position);
+            _answerNextFixWaiter(position);
           },
           onError: (Object error, StackTrace stackTrace) {
             _innerFailed = true;
             _noteAccessLost('position stream error: ${error.runtimeType}');
-            outer.addError(error, stackTrace);
+            outer?.addError(error, stackTrace);
+            _answerNextFixWaiter(null);
           },
           onDone: () {
             _inner = null;
             _noteAccessLost('position stream closed');
+            _answerNextFixWaiter(null);
             // iOS ends its session only when it refused a background start;
             // the next foreground resumeStream() starts a new one. Android's
             // foreground service re-arms on this done.
-            if (!_isIOS) unawaited(outer.close());
+            if (!_isIOS) unawaited(outer?.close());
           },
         );
   }
@@ -1178,6 +1221,41 @@ class GeolocatorLocationService implements LocationService {
       _noteAccessLost('permission read denied');
     }
     return _convertPermissionStatus(permission);
+  }
+
+  /// Pending callers of [_awaitNextBackgroundFix], answered by the session's
+  /// next delivery; null when nobody waits.
+  Completer<Position?>? _nextFixWaiter;
+
+  void _answerNextFixWaiter(Position? fix) {
+    final waiter = _nextFixWaiter;
+    _nextFixWaiter = null;
+    waiter?.complete(fix);
+  }
+
+  /// The next fix of the live background-capable session, in a process iOS
+  /// launched for a location event — at most [kOneShotLocationTimeout] away,
+  /// which is the burst's own window budget. Null at once anywhere else (no
+  /// live background session, or an ordinary backgrounded process), when the
+  /// session fails or ends, and on timeout.
+  ///
+  /// Every fix on that stream is Best by construction: the native side tags a
+  /// fix Best only under the Best tier, and `positions()` forwards nothing
+  /// else.
+  Future<Position?> _awaitNextBackgroundFix() async {
+    if (_inner == null || _innerFailed || !_streamBackgroundSharing) {
+      return null;
+    }
+    if (!(await _iosSource.status()).launchedForLocation) return null;
+    final waiter = _nextFixWaiter ??= Completer<Position?>();
+    return waiter.future.timeout(
+      kOneShotLocationTimeout,
+      onTimeout: () {
+        if (identical(_nextFixWaiter, waiter)) _nextFixWaiter = null;
+        debugPrint('[Location] background launch: no fix within the window');
+        return null;
+      },
+    );
   }
 
   /// The platform's last known position — the native owner's last BEST fix on

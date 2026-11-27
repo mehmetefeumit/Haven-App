@@ -1288,7 +1288,7 @@ void main() {
     // The two maps below carry every key `HavenLocationStreamHandler.status()`
     // emits and nothing else, and between them give each key a value pair no
     // other key shares — so a parse that dropped a key (falling back) or read
-    // a neighbour's key reddens at least one of them. Three of the six flags
+    // a neighbour's key reddens at least one of them. Four of the seven flags
     // share a `false` fallback, which one posture alone cannot separate.
     test('status parses the native map', () async {
       // Confirmed Always, background-capable, foregrounded: no bar asked for.
@@ -1300,6 +1300,7 @@ void main() {
           'profile': 'hundredMeters',
           'authorization': 'authorizedAlways',
           'backgrounded': false,
+          'launchedForLocation': true,
         },
       );
 
@@ -1311,6 +1312,7 @@ void main() {
       expect(status.profile, IosLocationProfile.hundredMeters);
       expect(status.authorization, 'authorizedAlways');
       expect(status.backgrounded, isFalse);
+      expect(status.launchedForLocation, isTrue);
     });
 
     test('status reads every key from its own key', () async {
@@ -1325,6 +1327,7 @@ void main() {
           'profile': 'best',
           'authorization': 'authorizedWhenInUse',
           'backgrounded': false,
+          'launchedForLocation': false,
         },
       );
 
@@ -1336,6 +1339,7 @@ void main() {
       expect(status.profile, IosLocationProfile.best);
       expect(status.authorization, 'authorizedWhenInUse');
       expect(status.backgrounded, isFalse);
+      expect(status.launchedForLocation, isFalse);
     });
 
     test('status fails closed on a missing key', () async {
@@ -1361,6 +1365,12 @@ void main() {
       expect(status.running, isFalse);
       expect(status.allowsBackgroundLocationUpdates, isFalse);
       expect(status.showsBackgroundLocationIndicator, isFalse);
+      expect(
+        status.launchedForLocation,
+        isFalse,
+        reason: 'an unreadable launch must not route a process as a location '
+            'relaunch: no wait for a fix, no session start',
+      );
     });
 
     test('status fails closed on a wrong-typed key', () async {
@@ -1370,12 +1380,14 @@ void main() {
           'backgrounded': 'false',
           'profile': 42,
           'authorization': 42,
+          'launchedForLocation': 'true',
         },
       );
 
       final status = await source.status();
 
       expect(status.backgrounded, isTrue);
+      expect(status.launchedForLocation, isFalse);
       expect(status.profile, IosLocationProfile.best);
       expect(
         status.authorization,
@@ -1392,6 +1404,7 @@ void main() {
 
       expect(status.backgrounded, isTrue);
       expect(status.running, isFalse);
+      expect(status.launchedForLocation, isFalse);
     });
 
     test('status fails closed when no native handler is registered', () async {

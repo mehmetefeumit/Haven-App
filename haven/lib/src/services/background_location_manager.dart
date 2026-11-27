@@ -6,6 +6,7 @@
 library;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/providers/locale_provider.dart'
@@ -85,6 +86,28 @@ class BackgroundLocationManager {
   /// a genuine difference and repaints rather than being deduped away.
   static String? _lastNotificationText;
 
+  /// The tail of the start/stop queue.
+  ///
+  /// Every start and stop first asks the plugin whether the service is
+  /// running, and the answer only changes a turn after the request lands. Two
+  /// calls in flight together both read the old state: a start issued right
+  /// behind a stop returns "already running" and the stop then kills the
+  /// service. Queued, each call reads the state the previous one left.
+  /// `null` while nothing is queued, so an idle call starts at once.
+  static Future<void>? _tail;
+
+  static Future<void> _serialized(Future<void> Function() op) {
+    final previous = _tail;
+    final run = previous == null ? op() : previous.then((_) => op());
+    late final Future<void> tail;
+    // A failure belongs to its own caller and must not wedge the queue.
+    tail = run.then<void>((_) {}, onError: (Object _) {}).whenComplete(() {
+      if (identical(_tail, tail)) _tail = null;
+    });
+    _tail = tail;
+    return run;
+  }
+
   /// Initializes the foreground task configuration.
   ///
   /// Safe to call multiple times. Should be called early (from `main`
@@ -135,12 +158,12 @@ class BackgroundLocationManager {
         eventAction: ForegroundTaskEventAction.repeat(
           kBackgroundRepeatInterval.inMilliseconds,
         ),
-        // M7-E: restart the FGS after a device reboot, paired with the
-        // RebootReceiver enabled in AndroidManifest.xml (guard 14c/14e pin
-        // both). Only resurrects a service that was RUNNING at shutdown —
-        // background sharing toggled off means no service existed, so user
-        // opt-out is preserved across reboots.
-        autoRunOnBoot: true,
+        // `autoRunOnBoot` / `autoRunOnMyPackageReplaced` are deliberately
+        // ABSENT: they steer only the plugin's RebootReceiver, which the
+        // manifest removes. BootResumeReceiver (BootResume.kt) owns the boot
+        // and update start, decided at receive time (owner-directed
+        // 2026-11-26, OD-R2). Guard check 14e and `fgs_resume_policy_test.dart`
+        // pin the absence.
         // `allowWakeLock` is deliberately ABSENT, so the plugin's default
         // (true) stands and its permanent PARTIAL_WAKE_LOCK is held for the
         // whole session. It is the only wake source for the no-fix watchdog
@@ -299,6 +322,13 @@ class BackgroundLocationManager {
   static Future<void> startService({
     required Function callback,
     required String notificationText,
+  }) => _serialized(
+    () => _startService(callback: callback, notificationText: notificationText),
+  );
+
+  static Future<void> _startService({
+    required Function callback,
+    required String notificationText,
   }) async {
     if (!_initialized) {
       // `main()` configures the channel in the user's chosen language long
@@ -380,9 +410,14 @@ class BackgroundLocationManager {
       FlutterForegroundTask.sendDataToTask(signal);
 
   /// Stops the background location sharing service.
-  static Future<void> stopService() async {
+  static Future<void> stopService() => _serialized(_stopService);
+
+  static Future<void> _stopService() async {
     final isRunning = await FlutterForegroundTask.isRunningService;
-    if (!isRunning) return;
+    if (!isRunning) {
+      await _markStopped();
+      return;
+    }
 
     final result = await FlutterForegroundTask.stopService();
 
@@ -394,6 +429,29 @@ class BackgroundLocationManager {
         _lastNotificationText = null;
       case ServiceRequestFailure(:final error):
         debugPrint('[BackgroundManager] Stop failed: ${error.runtimeType}');
+    }
+  }
+
+  /// Haven's own channel on the UI engine (`BackgroundLocation.kt`).
+  static const MethodChannel _statusChannel = MethodChannel(
+    'haven.app/background_location',
+  );
+
+  /// Records natively that Haven stopped the service, when none is running.
+  ///
+  /// The plugin writes that status only when it stops a running service, and
+  /// the boot receiver reads it as "Haven stopped sharing on purpose": a stop
+  /// that found the service already dead (identity deleted after location
+  /// was revoked) would otherwise leave the last start's status, and the
+  /// next boot would post a resume notice to a logged-out user.
+  static Future<void> _markStopped() async {
+    if (defaultTargetPlatform != TargetPlatform.android) return;
+    try {
+      await _statusChannel.invokeMethod<void>('markStopped');
+    } on PlatformException catch (e) {
+      debugPrint('[BackgroundManager] markStopped failed: ${e.code}');
+    } on MissingPluginException {
+      debugPrint('[BackgroundManager] markStopped: no native handler');
     }
   }
 

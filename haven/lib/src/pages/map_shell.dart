@@ -30,6 +30,7 @@ import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/live_sync_provider.dart';
 import 'package:haven/src/providers/locale_provider.dart';
 import 'package:haven/src/providers/location_access_provider.dart';
+import 'package:haven/src/providers/location_disclosure_provider.dart';
 import 'package:haven/src/providers/location_provider.dart';
 import 'package:haven/src/providers/location_publish_scheduler_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
@@ -40,6 +41,7 @@ import 'package:haven/src/providers/resume_extras_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/providers/sharing_health_provider.dart';
 import 'package:haven/src/providers/storage_reset_notice_provider.dart';
+import 'package:haven/src/services/android_background_location.dart';
 import 'package:haven/src/services/background_burst_coordinator.dart';
 import 'package:haven/src/services/background_idle_waiter.dart';
 import 'package:haven/src/services/background_location_manager.dart';
@@ -1443,6 +1445,78 @@ class _MapShellState extends ConsumerState<MapShell>
   @override
   void takePause() => didChangeAppLifecycleState(AppLifecycleState.paused);
 
+  @override
+  Future<bool> launchedForLocation() =>
+      _geolocatorService?.launchedForLocation() ?? Future.value(false);
+
+  // The roster too: a burst over no eligible circle closes idle, and the first
+  // publish would then wait a whole scheduler tick, past the relaunch's wake.
+  @override
+  Future<bool> launchMayResume() async {
+    await ref.read(backgroundSharingProvider.notifier).loaded;
+    if (!mounted || !ref.read(backgroundSharingProvider)) return false;
+    final prefs = await SharedPreferences.getInstance();
+    if (!backgroundResumeDisclosureAcceptedIn(prefs) || !mounted) return false;
+    try {
+      await ref.read(circlesProvider.future).timeout(kConsentArmBound);
+    } on Object catch (_) {
+      // Bounded, never fatal: the pause bursts over whatever has loaded, and
+      // the scheduler's ticks cover the rest.
+    }
+    return true;
+  }
+
+  /// The storage-reset notice, so the consent step never stacks on it.
+  Future<void> _storageResetNotice = Future<void>.value();
+
+  @override
+  Future<bool> foregroundConsentStep() async {
+    await _storageResetNotice;
+    if (!mounted) return true;
+    final shown = await ref
+        .read(locationDisclosureControllerProvider.notifier)
+        .runForegroundConsentStep(
+          context,
+          allTime: ref.read(androidBackgroundLocationProvider),
+          isResumed: () => mounted && appIsResumed(),
+        );
+    if (mounted) ref.invalidate(backgroundLocationStatusProvider);
+    return shown;
+  }
+
+  /// Starts the background session a location relaunch is owed, then bursts
+  /// at once (`_lastPublishTime` is null in a fresh process), or does what
+  /// the ordinary pause would have when the launch owes nothing — after the
+  /// launch's reads, which a pause dispatched early has to wait for.
+  Future<void> _payLaunchSession(
+    Future<LaunchSession> launch,
+    BackgroundBurstCoordinator coordinator, {
+    required int turn,
+    required DateTime pausedAt,
+  }) async {
+    final session = await launch;
+    if (!mounted || turn != _lifecycleTurn) return;
+    final bgEnabled = ref.read(backgroundSharingProvider);
+    if (session == LaunchSession.resume && bgEnabled) {
+      _geolocatorService?.startBackgroundLaunchSession(
+        backgroundSharingEnabled: bgEnabled,
+      );
+    }
+    final circles = _burstEligibleCircles();
+    if (session != LaunchSession.receiveOnly &&
+        bgEnabled &&
+        circles.isNotEmpty &&
+        MapShell.shouldBurstImmediatelyOnPause(
+          lastPublishAt: _lastPublishTime,
+          now: pausedAt,
+        )) {
+      _lastPublishTime = pausedAt;
+      await _driveBurstNow(coordinator, circles);
+    } else {
+      await coordinator.closeIdle();
+    }
+  }
+
   /// Runs the one-shot startup sequence: relay pre-warm, KeyPackage publish,
   /// location publisher, maintenance timers and — under `liveSyncEnabled` —
   /// the receive engine. Requires a resolved identity; see `initState`.
@@ -1461,16 +1535,17 @@ class _MapShellState extends ConsumerState<MapShell>
     // background isolate's) removed pre-migration data. The flag flips back
     // at once so a rebuild never re-shows it this session.
     final navigator = Navigator.of(context);
-    unawaited(
-      showStorageResetNoticeIfOwed(
-        context,
-        ref,
-        openRelaySettings: () => openRelaySettingsForNotice(
-          navigator,
-          (_) => const RelaySettingsPage(),
-        ),
+    _storageResetNotice = showStorageResetNoticeIfOwed(
+      context,
+      ref,
+      openRelaySettings: () => openRelaySettingsForNotice(
+        navigator,
+        (_) => const RelaySettingsPage(),
       ),
     );
+    // The updated background disclosure and Android's all-time step: at most
+    // one dialog, behind the notice, and only while the app is in front.
+    unawaited(gateConsentStep());
     // M8: start the scheduled resilience timers (KeyPackage + relay-list
     // republish-if-missing). Engine-independent — active regardless of
     // `liveSyncEnabled`. Cancelled on dispose + explicitly invalidated in
@@ -2310,10 +2385,14 @@ class _MapShellState extends ConsumerState<MapShell>
     // `detached` IS distinct, and is handled below — it is the only lifecycle
     // signal that says this isolate is going away while it can still act.
     if (state == AppLifecycleState.paused) {
+      // A `paused` on top of a background launch's own pause, whole: even the
+      // turn, which the first pause's re-reads compare against.
+      if (!admitPause()) return;
       _lifecycleTurn++;
       _setForegroundActive(false);
       unawaited(_onPaused());
     } else if (state == AppLifecycleState.resumed) {
+      noteResume();
       _lifecycleTurn++;
       // After the turn moved: the pause the grace releases is superseded.
       _excursions.endGrace(HandoffGraceEnd.resumed);
@@ -2657,6 +2736,9 @@ class _MapShellState extends ConsumerState<MapShell>
         // is not a publish. The burst IS the repair, at 72-168 s rather than
         // 15 min.
         final pausedAt = DateTime.now();
+        // A process iOS launched for a location event is owed its background
+        // session by its first such pause, whichever path delivered it.
+        final launch = takeLaunchSession();
         final coordinator = _installBurstCoordinator();
         // Start closed rather than open, on BOTH arms: without this the engine
         // keeps the foreground's standing REQ, its socket and the crate's 55 s
@@ -2665,7 +2747,16 @@ class _MapShellState extends ConsumerState<MapShell>
         // The stamp rides the burst arm only, for the same reason
         // `_guardedPublish` writes it: that arm publishes every eligible
         // circle, so a motion trigger seconds later would be a duplicate.
-        if (burstCircles.isNotEmpty &&
+        if (launch != null) {
+          unawaited(
+            _payLaunchSession(
+              launch,
+              coordinator,
+              turn: turn,
+              pausedAt: pausedAt,
+            ),
+          );
+        } else if (burstCircles.isNotEmpty &&
             MapShell.shouldBurstImmediatelyOnPause(
               lastPublishAt: _lastPublishTime,
               now: pausedAt,
@@ -2761,7 +2852,21 @@ class _MapShellState extends ConsumerState<MapShell>
           // flip landing seconds after a publish from re-sending it.
           final armedAt = DateTime.now();
           final armedCircles = _burstEligibleCircles();
-          if (armedCircles.isNotEmpty &&
+          // A location relaunch whose pause read the consent still loading
+          // is owed its session here, by the same path as the pause's.
+          final launch = takeLaunchSession();
+          if (launch != null) {
+            unawaited(
+              receiving.then(
+                (_) => _payLaunchSession(
+                  launch,
+                  coordinator,
+                  turn: turn,
+                  pausedAt: armedAt,
+                ),
+              ),
+            );
+          } else if (armedCircles.isNotEmpty &&
               MapShell.shouldBurstImmediatelyOnPause(
                 lastPublishAt: _lastPublishTime,
                 now: armedAt,
@@ -3166,6 +3271,9 @@ class _MapShellState extends ConsumerState<MapShell>
     // before arming it, and both `startScheduling()` and `_startMotionTrigger`
     // are replays of what is already running.
     _startTimers(atMount: false);
+
+    // Owed to the first resume whatever its timing, like the start-up.
+    unawaited(payOwedConsentStep());
 
     // Debounce rapid resume cycles (e.g. notification shade pull on Android).
     // Only the one-shot extras below are debounced — everything above is

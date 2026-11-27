@@ -149,7 +149,7 @@ class IosFix {
 /// notably [backgrounded], which defaults to `true` so an unreadable lifecycle
 /// can never let a background-launched process start the doomed one-shot.
 ///
-/// Mirrors the six keys `HavenLocationStreamHandler.status()` emits, and only
+/// Mirrors the seven keys `HavenLocationStreamHandler.status()` emits, and only
 /// those. The `alwaysConfirmed` predicate is deliberately NOT one of them: it
 /// is owned and exported by `HavenBackgroundSessionHandler` on its own channel
 /// (`IosBackgroundSessionStatus`), which is what the indicator copy selects
@@ -166,6 +166,7 @@ class IosLocationStreamStatus {
     required this.profile,
     required this.authorization,
     required this.backgrounded,
+    required this.launchedForLocation,
   });
 
   /// The reading for a status that could not be obtained at all.
@@ -176,6 +177,7 @@ class IosLocationStreamStatus {
     profile: IosLocationProfile.best,
     authorization: 'unknown',
     backgrounded: true,
+    launchedForLocation: false,
   );
 
   /// Whether `startUpdatingLocation()` is in effect.
@@ -197,6 +199,12 @@ class IosLocationStreamStatus {
 
   /// Whether UIKit reports the app as backgrounded.
   final bool backgrounded;
+
+  /// Whether iOS launched this process into the background for a location
+  /// event (a significant-change or region relaunch), and the user has not
+  /// brought it to the front since. Unreadable reads `false`: no relaunch
+  /// routing, no wait for a fix, no session start.
+  final bool launchedForLocation;
 }
 
 /// Bridge to the native iOS location updates session.
@@ -607,6 +615,10 @@ class MethodChannelIosLocationSource implements IosLocationSource {
         // The one key whose fallback is load-bearing: an unreadable lifecycle
         // must read as backgrounded.
         backgrounded: _boolOr(raw['backgrounded'], fallback: true),
+        launchedForLocation: _boolOr(
+          raw['launchedForLocation'],
+          fallback: false,
+        ),
       );
     } on PlatformException catch (e) {
       debugPrint('[IosLocationSource] status failed: ${e.code}');
