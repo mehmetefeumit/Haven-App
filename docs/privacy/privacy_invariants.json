@@ -8613,11 +8613,5 @@
       ],
       "guards": []
     }
-  ],
-  "ratchet_override": {
-    "reason": "Owner-directed 2026-11-26 (OD-R1): an iOS location relaunch under Always, with background sharing on and the current (v2) background disclosure accepted, now resumes the user's own sharing, so 'every iOS wake path is receive-only' is no longer true. It is replaced by INV-L-IOS-RELAUNCH-RESUMES-ONLY-UNDER-ALWAYS-AND-CURRENT-CONSENT, which keeps every wake handler receive-only and the plugin one-shot unreachable and carries the same assertion keys, disclosure and Info.plist claim.",
-    "items": [
-      "INV-L-IOS-WAKES-RECEIVE-ONLY.deleted"
-    ]
-  }
+  ]
 }
