@@ -20,7 +20,7 @@
 #    first argument to a `prefs.<accessor>(` / `_prefs.<accessor>(` call
 #    ANYWHERE in haven/lib. This is a USAGE test, not a naming convention: it is
 #    what correctly excludes the `flutter_secure_storage` identity-key literal
-#    (three call sites share `'haven.nostr.identity'`, none of them SharedPreferences),
+#    (one shared `identityStorageKey = 'haven.nostr.identity'`, never a SharedPreferences key),
 #    the isolate-to-isolate liveness ping/pong Map keys, and the compile-time
 #    `stadiaApiKey` — all of which happen to be named `*Key` too, so a
 #    naming-only filter would misclassify every one of them.

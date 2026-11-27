@@ -188,6 +188,12 @@ const _networkChange =
 /// many each holds.
 const _allowedSites = <String, int>{
   'lib/src/pages/map/map_page.dart#_MapPageState.build': 1,
+  // Onboarding's retry of the stored-name read while secure storage cannot
+  // be read: on screen only, a storage read and a preference read, never
+  // the engine; it stops at an answer, an edit, a tap's create or disposal.
+  'lib/src/pages/onboarding/create_identity_screen.dart#'
+          '_CreateIdentityScreenState._armRestoreRetry':
+      1,
   '$_shell#LiveSyncHealBackstop._arm': 1,
   '$_shell#_MapShellState._scheduleInvitationPoll': 1,
   '$_shell#_MapShellState._startIosBackgroundReceiveTimer': 1,
@@ -280,7 +286,7 @@ const _allowedSites = <String, int>{
 
 /// The sum of [_allowedSites]: a second pin, so an edit that moves a count
 /// from one site to another is still a visible change of this number.
-const _allowedTotal = 48;
+const _allowedTotal = 49;
 
 /// The sites of [_allowedSites] that reach the MLS or the live-sync engine,
 /// reviewed by hand: the existing wakes. A timer's callback reaches through

@@ -12,7 +12,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/constants/tile_cache_policy.dart';
 import 'package:haven/src/constants/tiles.dart';
@@ -32,6 +31,7 @@ import 'package:haven/src/rust/frb_generated.dart';
 import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/data_directory_provider.dart';
 import 'package:haven/src/services/foreground_liveness_probe.dart';
+import 'package:haven/src/services/identity_secure_storage.dart';
 import 'package:haven/src/services/image_cache_guard.dart';
 import 'package:haven/src/services/ios_background_catchup.dart';
 import 'package:haven/src/services/nostr_circle_service.dart';
@@ -342,29 +342,18 @@ Future<void> main() async {
   }
 }
 
-/// Storage key for the Nostr identity secret bytes.
-///
-/// Duplicated from `NostrIdentityService`'s private storage-key constant
-/// (exported there only as `@visibleForTesting identityStorageKeyForTesting`,
-/// so production code must not import it): the pre-onboarding-era migration
-/// check below reads it BEFORE any Riverpod container exists, through the one
-/// [_probeHasNostrIdentity] probe [main] makes.
-const String _identityStorageKey = 'haven.nostr.identity';
-
 /// Probes secure storage directly for the presence of a saved Nostr
 /// identity, without constructing a full `NostrIdentityService` (there is
 /// no Riverpod container yet at this point in `main()`).
 ///
-/// Best-effort: a storage read failure is treated as "no identity" and
-/// logged generically.
+/// Best-effort: a read that fails is logged generically and answers "no
+/// identity", which routes an install with no onboarding flags to onboarding.
+/// That cannot replace a stored key: the create screen creates nothing while
+/// storage cannot say whether a key is stored, and goes on with the stored
+/// key once it can.
 Future<bool> _probeHasNostrIdentity() async {
-  const storage = FlutterSecureStorage(
-    iOptions: IOSOptions(
-      accessibility: KeychainAccessibility.first_unlock_this_device,
-    ),
-  );
   try {
-    final existing = await storage.read(key: _identityStorageKey);
+    final existing = await identitySecureStorage.read(key: identityStorageKey);
     return existing != null;
   } on Object catch (e) {
     debugPrint(

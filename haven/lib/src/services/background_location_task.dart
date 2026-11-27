@@ -50,7 +50,6 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/providers/location_publish_scheduler_provider.dart'
     show filterPublishEligibleCircles;
@@ -66,6 +65,7 @@ import 'package:haven/src/services/circle_service.dart'
 import 'package:haven/src/services/foreground_liveness_probe.dart';
 import 'package:haven/src/services/fresh_secret.dart';
 import 'package:haven/src/services/geolocator_location_service.dart';
+import 'package:haven/src/services/identity_secure_storage.dart';
 import 'package:haven/src/services/leaver_backstop.dart';
 import 'package:haven/src/services/location_service.dart' show Position;
 import 'package:haven/src/services/location_sharing_service.dart';
@@ -494,23 +494,11 @@ class BackgroundLocationTaskHandler extends TaskHandler {
     kLocationUpdateInterval.inSeconds,
   );
 
-  /// Secure storage for reading identity and preferences.
-  static const FlutterSecureStorage _secureStorage = FlutterSecureStorage(
-    iOptions: IOSOptions(
-      accessibility: KeychainAccessibility.first_unlock_this_device,
-    ),
-  );
-
-  // ---------------------------------------------------------------------------
-  // Storage keys (must match the providers in the foreground isolate).
-  // ---------------------------------------------------------------------------
-  static const String _identityStorageKey = 'haven.nostr.identity';
-
   /// Presence only: the secret is never read into this isolate to answer it
   /// (Security Rule 9), least of all on a start the gate then refuses.
   @visibleForTesting
   static Future<bool> identityStored() =>
-      _secureStorage.containsKey(key: _identityStorageKey);
+      identitySecureStorage.containsKey(key: identityStorageKey);
 
   /// Test-only stand-in for the system-start gate's inputs and effects.
   @visibleForTesting
@@ -561,7 +549,9 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       //    bytes at construction time (it binds the account identity, the
       //    NIP-59 welcome signer, and the account-identity-proof signer).
       _identityManager = await NostrIdentityManager.newInstance();
-      final storedBytes = await _secureStorage.read(key: _identityStorageKey);
+      final storedBytes = await identitySecureStorage.read(
+        key: identityStorageKey,
+      );
       if (storedBytes != null) {
         final bytes = base64Decode(storedBytes);
         try {

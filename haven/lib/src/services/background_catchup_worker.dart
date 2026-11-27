@@ -82,7 +82,6 @@ import 'dart:ui' show DartPluginRegistrant, PlatformDispatcher;
 import 'package:flutter/foundation.dart' show kReleaseMode;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/providers/live_sync_provider.dart';
 import 'package:haven/src/rust/api.dart';
@@ -90,6 +89,7 @@ import 'package:haven/src/rust/frb_generated.dart';
 import 'package:haven/src/services/fresh_secret.dart';
 import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/catchup_service.dart';
+import 'package:haven/src/services/identity_secure_storage.dart';
 import 'package:haven/src/services/leaver_backstop.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/services/pending_mls_wipe_service.dart';
@@ -164,22 +164,6 @@ const String kCatchupWorkerBootstrapOkMarker = '[CatchupWorker] bootstrap ok';
 /// deadline= relayErrors=`) — bucketed counters only, never content.
 const String kCatchupWorkerSweepCompletePrefix =
     '[CatchupWorker] sweep complete:';
-
-// ---------------------------------------------------------------------------
-// Identity access (mirrors background_location_task.dart — the FGS template)
-// ---------------------------------------------------------------------------
-
-/// Secure storage for reading the identity. MUST mirror the FGS template
-/// (`background_location_task.dart`) so a background wake can read the key
-/// under the same iOS accessibility class (harmless on Android).
-const FlutterSecureStorage _secureStorage = FlutterSecureStorage(
-  iOptions: IOSOptions(
-    accessibility: KeychainAccessibility.first_unlock_this_device,
-  ),
-);
-
-/// Storage key of the Nostr identity (must match the foreground providers).
-const String _kIdentityStorageKey = 'haven.nostr.identity';
 
 // ---------------------------------------------------------------------------
 // Testable inner logic
@@ -542,7 +526,7 @@ Future<void> _runCatchupViaWorkerBootstrap() async {
   //    leaves this block.
   String? pubkeyHex;
   final identityManager = await NostrIdentityManager.newInstance();
-  final storedBytes = await _secureStorage.read(key: _kIdentityStorageKey);
+  final storedBytes = await identitySecureStorage.read(key: identityStorageKey);
   if (storedBytes != null) {
     final bytes = base64Decode(storedBytes);
     try {

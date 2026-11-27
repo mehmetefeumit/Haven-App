@@ -24,6 +24,14 @@ class IdentityServiceException implements Exception {
   String toString() => 'IdentityServiceException: $message';
 }
 
+/// Secure storage could not say whether an identity key is stored, so
+/// nothing that could write a key over it ran. A later attempt can succeed.
+class IdentityStorageUnavailableException extends IdentityServiceException {
+  /// Creates an [IdentityStorageUnavailableException].
+  const IdentityStorageUnavailableException()
+    : super('Identity storage is unavailable');
+}
+
 /// Public identity information.
 ///
 /// Contains only public data that can be safely stored and shared.
@@ -74,21 +82,29 @@ class Identity {
 abstract class IdentityService {
   /// Checks if an identity exists.
   ///
-  /// Returns `true` if an identity has been created or imported.
+  /// Returns `true` if an identity has been created or imported, `false` if
+  /// none is loaded and storage holds none. Throws
+  /// [IdentityStorageUnavailableException] when none is loaded and storage
+  /// cannot say whether one is stored.
   Future<bool> hasIdentity();
 
   /// Gets the current identity.
   ///
-  /// Returns `null` if no identity exists.
+  /// Returns `null` if no identity is loaded — including while storage cannot
+  /// be read ([hasIdentity] tells that apart).
   /// Throws [IdentityServiceException] if loading fails.
   Future<Identity?> getIdentity();
 
   /// Creates a new random identity.
   ///
-  /// The identity is automatically persisted to secure storage.
+  /// The identity is automatically persisted to secure storage, and is never
+  /// written over a stored one: a key that cannot be stored is not kept.
   ///
-  /// Throws [IdentityServiceException] if:
-  /// - An identity already exists (call [deleteIdentity] first)
+  /// Throws [IdentityStorageUnavailableException] if storage cannot say
+  /// whether a key is stored, or holds one the read before the write did not
+  /// return; and [IdentityServiceException] if:
+  /// - An identity already exists — a stored key that reads and loads is
+  ///   resident, so this is what it gives (call [deleteIdentity] first)
   /// - Storage operation fails
   Future<Identity> createIdentity();
 
@@ -97,7 +113,8 @@ abstract class IdentityService {
   /// The nsec must be a valid NIP-19 bech32-encoded secret key
   /// starting with "nsec1".
   ///
-  /// Throws [IdentityServiceException] if:
+  /// Throws [IdentityStorageUnavailableException] like [createIdentity], and
+  /// [IdentityServiceException] if:
   /// - An identity already exists
   /// - The nsec is invalid
   /// - Storage operation fails

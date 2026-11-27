@@ -15,6 +15,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/services/background_location_task.dart';
 import 'package:haven/src/services/background_resume_gate.dart';
+import 'package:haven/src/services/identity_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../helpers/log_capture.dart';
@@ -397,6 +398,7 @@ void main() {
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
     late List<String> methods;
+    late List<Object?> arguments;
 
     tearDown(() => messenger.setMockMethodCallHandler(storage, null));
 
@@ -407,8 +409,10 @@ void main() {
         // it into this isolate's heap on every system start, a refused one
         // included.
         methods = [];
+        arguments = [];
         messenger.setMockMethodCallHandler(storage, (call) async {
           methods.add(call.method);
+          arguments.add(call.arguments);
           return switch (call.method) {
             'containsKey' => held,
             _ => throw StateError('the gate read ${call.method}'),
@@ -417,6 +421,13 @@ void main() {
 
         expect(await BackgroundLocationTaskHandler.identityStored(), held);
         expect(methods, ['containsKey']);
+        // Under the shared identity options: a default instance would ask
+        // with Android's resetOnError on, which deletes the store when the
+        // plugin cannot initialise it.
+        expect(arguments.single, {
+          'key': identityStorageKey,
+          'options': identitySecureStorage.aOptions.toMap(),
+        });
       });
     }
   });

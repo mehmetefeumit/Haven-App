@@ -2,6 +2,7 @@
 library;
 
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -46,8 +47,12 @@ import 'package:shared_preferences/shared_preferences.dart';
 ///    created an identity on a prior, interrupted attempt (crash before
 ///    onboarding completed, or a mid-old-flow app upgrade) resumes here; the
 ///    [IdentityService.hasIdentity] check skips re-creation so an existing key
-///    is never overwritten. (The Rust core also fails closed on a duplicate
-///    create, as a backstop.)
+///    is never overwritten. While secure storage cannot say whether a key is
+///    stored — or the stored key's saved name cannot be read and the user has
+///    not typed one — nothing is created, saved or published: the tap shows a
+///    fixed error and the screen keeps trying to read the stored name, so the
+///    next tap resumes with the stored key and name. (The identity service
+///    also refuses to create over a key it cannot rule out, as a backstop.)
 /// 2. Seed default relays — before anything is published, since an unseeded
 ///    relay list reads as empty and a publish to it does nothing.
 /// 3. Start the reachability publish: relay lists (kind 10002, then 10050),
@@ -88,6 +93,7 @@ class CreateIdentityScreen extends ConsumerStatefulWidget {
     super.key,
     this.pickPhoto = pickAndCropAvatar,
     this.finishSetupTimeout = const Duration(seconds: 60),
+    this.restoreRetryDelays = kRestoreRetryDelays,
   });
 
   /// Gallery pick + crop function, injectable for widget tests that cannot
@@ -103,10 +109,27 @@ class CreateIdentityScreen extends ConsumerStatefulWidget {
   @visibleForTesting
   final Duration finishSetupTimeout;
 
+  /// The waits between attempts to read a stored name while secure storage
+  /// cannot be read; the last repeats. Injectable for a test's own schedule.
+  @visibleForTesting
+  final List<Duration> restoreRetryDelays;
+
   @override
   ConsumerState<CreateIdentityScreen> createState() =>
       _CreateIdentityScreenState();
 }
+
+/// Default [CreateIdentityScreen.restoreRetryDelays]: doubling from one
+/// second, then every 30 s — quick when storage comes back on its own (first
+/// unlock), cheap when it does not.
+const kRestoreRetryDelays = [
+  Duration(seconds: 1),
+  Duration(seconds: 2),
+  Duration(seconds: 4),
+  Duration(seconds: 8),
+  Duration(seconds: 16),
+  Duration(seconds: 30),
+];
 
 class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
   final _controller = TextEditingController();
@@ -127,7 +150,16 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
   bool _profileSaved = false;
   bool _userEdited = false;
   bool _selectedOnFirstFocus = false;
+
+  /// The first attempt to restore a stored name; later ones run on
+  /// [_restoreRetry].
   Future<void>? _restoreFuture;
+  Timer? _restoreRetry;
+  int _restoreRetries = 0;
+
+  /// A restore found an identity and read its stored name (or that it had
+  /// none).
+  bool _nameRead = false;
 
   /// The optional profile photo the user picked, held locally until the
   /// identity is created and it can be published (see [_finish]). `null` means
@@ -145,11 +177,14 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
     // that over a fresh random one — but never clobber an in-progress edit.
     // Tracked so `_finish` can await it before resolving the name (a very fast
     // tap must not publish a fresh random name over the restored one).
-    _restoreFuture = _restoreExistingName();
+    _restoreFuture = _restoreExistingName().then((settled) {
+      if (!settled && mounted && !_busy && !_userEdited) _armRestoreRetry();
+    });
   }
 
   @override
   void dispose() {
+    _restoreRetry?.cancel();
     _focusNode
       ..removeListener(_selectAllOnFirstFocus)
       ..dispose();
@@ -157,12 +192,48 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
     super.dispose();
   }
 
-  Future<void> _restoreExistingName() async {
-    final existing = await ref.read(displayNameProvider.future);
-    if (!mounted || _userEdited) return;
-    if (existing != null && existing.trim().isNotEmpty) {
-      _controller.text = existing.trim();
+  /// Puts a name saved on a prior attempt in the field, unless the user has
+  /// edited it. Answers whether storage could say if an identity exists; a
+  /// fresh install has none, and keeps the generated name. Never throws.
+  Future<bool> _restoreExistingName() async {
+    try {
+      final service = ref.read(identityServiceProvider);
+      if (!await service.hasIdentity()) return true;
+      // The stored name is read afresh: a value cached while storage could
+      // not be read, or a failed read, is not it.
+      ref.invalidate(identityProvider);
+      final existing = await ref.read(displayNameProvider.future);
+      _nameRead = true;
+      if (!mounted || _userEdited) return true;
+      if (existing != null && existing.trim().isNotEmpty) {
+        _controller.text = existing.trim();
+      }
+      return true;
+    } on IdentityStorageUnavailableException {
+      return false;
+    } on Object catch (e) {
+      debugPrint('[Onboarding] name restore failed: ${e.runtimeType}');
+      return false;
     }
+  }
+
+  /// Arms the next retry, unless one is already pending: a tap and the
+  /// first restore can fail on one read, and each would otherwise step the
+  /// backoff.
+  void _armRestoreRetry() {
+    if (_restoreRetry?.isActive ?? false) return;
+    final delays = widget.restoreRetryDelays;
+    _restoreRetry = Timer(
+      delays[math.min(_restoreRetries++, delays.length - 1)],
+      _retryRestore,
+    );
+  }
+
+  Future<void> _retryRestore() async {
+    final settled = await _restoreExistingName();
+    // Not while a tap's create path runs.
+    if (settled || !mounted || _busy || _userEdited) return;
+    _armRestoreRetry();
   }
 
   /// Selects the whole field the first time it gains focus, so the user can
@@ -206,25 +277,78 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
       await _startPublish(published);
       if (!mounted) return;
     } else {
+      _restoreRetry?.cancel();
+      void notCreated({required bool storageUnavailable}) {
+        setState(() => _busy = false);
+        messenger.showSnackBar(
+          SnackBar(
+            content: Text(l10n.onboardingCreateIdentityError),
+            backgroundColor: HavenSecurityColors.danger,
+          ),
+        );
+        if (storageUnavailable && !_userEdited) _armRestoreRetry();
+      }
+
       // (1) Create the keypair — only when none exists (idempotent resume).
-      final hasIdentity = await ref.read(identityServiceProvider).hasIdentity();
+      // Storage that cannot say whether one is stored creates nothing.
+      final bool hasIdentity;
+      try {
+        hasIdentity = await ref.read(identityServiceProvider).hasIdentity();
+      } on IdentityStorageUnavailableException {
+        if (mounted) notCreated(storageUnavailable: true);
+        return;
+      } on Object catch (e) {
+        debugPrint('[Onboarding] identity check failed: ${e.runtimeType}');
+        if (mounted) notCreated(storageUnavailable: false);
+        return;
+      }
       if (!mounted) return;
       if (!hasIdentity) {
         await ref.read(identityNotifierProvider.notifier).createIdentity();
         if (!mounted) return;
         // createIdentity() never rethrows (AsyncValue.guard) — inspect the
         // notifier's error state instead of wrapping it in a try/catch.
-        if (ref.read(identityNotifierProvider).hasError) {
-          setState(() => _busy = false);
-          messenger.showSnackBar(
-            SnackBar(
-              content: Text(l10n.onboardingCreateIdentityError),
-              backgroundColor: HavenSecurityColors.danger,
-            ),
+        final created = ref.read(identityNotifierProvider);
+        if (created.hasError) {
+          notCreated(
+            storageUnavailable:
+                created.error is IdentityStorageUnavailableException,
           );
           return;
         }
       }
+
+      // Make sure the existing-name restore has finished before reading the
+      // field, so a very fast tap on a resume can't publish a fresh random
+      // name over the user's previously-saved one.
+      await _restoreFuture;
+      if (!mounted) return;
+      // An identity no restore could read yet (storage came back by this
+      // tap): its stored name, not the generated one. If that name cannot be
+      // read either, nothing is published over it — unless the user typed
+      // their own.
+      if (hasIdentity && !_nameRead) {
+        await _restoreExistingName();
+        if (!mounted) return;
+        if (!_nameRead && !_userEdited) {
+          notCreated(storageUnavailable: true);
+          return;
+        }
+      }
+
+      // Resolve the name: an explicit edit wins; else keep any name already
+      // saved on a prior attempt; else fall back to a freshly generated one.
+      // Never publish an empty name — nor a generated one over a stored name
+      // that could not be read, so a failed read publishes nothing.
+      final String name;
+      try {
+        name = await _resolveName();
+      } on Object catch (e) {
+        debugPrint('[Onboarding] stored name read failed: ${e.runtimeType}');
+        if (mounted) notCreated(storageUnavailable: true);
+        return;
+      }
+      if (!mounted) return;
 
       // (2) Seed default relays BEFORE the publish below: an unseeded list
       // reads as empty, and a publish to it does nothing. Best-effort — the
@@ -242,18 +366,6 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
       // (3) Relay lists (10002, then 10050), then the KeyPackage (30443).
       // Started now so it runs while the profile is saved; awaited in (6).
       await _startPublish(published);
-      if (!mounted) return;
-
-      // Make sure the existing-name restore has finished before reading the
-      // field, so a very fast tap on a resume can't publish a fresh random
-      // name over the user's previously-saved one.
-      await _restoreFuture;
-      if (!mounted) return;
-
-      // Resolve the name: an explicit edit wins; else keep any name already
-      // saved on a prior attempt; else fall back to a freshly generated one.
-      // Never publish an empty name.
-      final name = await _resolveName();
       if (!mounted) return;
 
       // (4)(5) Save the public kind-0 profile locally, then trigger its
@@ -497,7 +609,10 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
                 // Haven's storage and its logout wipe.
                 enableIMEPersonalizedLearning: false,
                 autofillHints: kNoAutofill,
-                onChanged: (_) => _userEdited = true,
+                onChanged: (_) {
+                  _userEdited = true;
+                  _restoreRetry?.cancel();
+                },
                 // The consequential action requires an explicit CTA tap — the
                 // keyboard "done" key only dismisses the keyboard.
                 onSubmitted: (_) => FocusScope.of(context).unfocus(),

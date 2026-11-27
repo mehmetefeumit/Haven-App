@@ -1393,8 +1393,8 @@ class _MapShellState extends ConsumerState<MapShell>
         // location publisher, the maintenance scheduler AND `_startLiveSync()`
         // — so a single transient secure-storage miss left the app with no
         // receive plane for the whole session and no way back. That is exactly
-        // the iOS live-sync CI failure: one null Keychain read, and the engine
-        // never started.
+        // the iOS live-sync CI failure: one Keychain read that produced no
+        // identity, and the engine never started.
         //
         // Report the broken invariant, then re-arm instead of giving up. The
         // identity service no longer latches a load that produced nothing (see
